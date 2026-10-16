@@ -26,6 +26,8 @@ use crate::{
         state::{PSTATE_IL_MASK, PSTATE_SS_MASK, SystemState},
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 
 const SCTLR_M: u64 = 1;
 const SCTLR_EE: u64 = 1 << 25;
@@ -183,7 +185,7 @@ impl M0DataReadLoan<'_> {
         &self,
         execution: &MemoryExecutionLoan,
     ) -> Result<(), M0ControlError> {
-        if !std::ptr::eq(execution, self.outer) {
+        if !core::ptr::eq(execution, self.outer) {
             return Err(M0ControlError::DifferentExecutionLoan);
         }
         execution
@@ -222,10 +224,10 @@ impl TranslationControls {
             return Err("M0 control owner is poisoned");
         }
         let installed = scope.installed_snapshot();
-        if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
+        if !alloc::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
             return Err("M0 controls and physical source have different MemorySystem owners");
         }
-        if !std::sync::Arc::ptr_eq(&self.identity, &installed.identity)
+        if !alloc::sync::Arc::ptr_eq(&self.identity, &installed.identity)
             || self.generation != installed.generation()
             || self.profile.cpu != scope.installed_cpu()
             || self.readbacks != installed.readbacks()
@@ -256,7 +258,7 @@ impl TranslationControls {
             .check_memory_system(&self.memory)
             .map_err(M0ControlError::Domain)?;
         let scope = input.installed_source_scope();
-        if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
+        if !alloc::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
             return Err(M0ControlError::WrongMemorySystem);
         }
         // The real scope checks exact physical-domain/outer membership as well
@@ -356,7 +358,7 @@ impl M0DataWriteLoan<'_> {
             "physical_domain_generation":self.physical_space().domain().generation().map_err(M0ControlError::Domain)?,
             "actual_address_space":self.source.actual_address_space(),
             "actual_pre_pstate":self.source.actual_pstate(),
-            "same_original_outer":std::ptr::eq(execution,self.outer),
+            "same_original_outer":core::ptr::eq(execution,self.outer),
             "readbacks":{"sctlr_el1":self.owner.readbacks.sctlr_el1,
                 "tcr_el1":self.owner.readbacks.tcr_el1,"ttbr0_el1":self.owner.readbacks.ttbr0_el1,
                 "ttbr1_el1":self.owner.readbacks.ttbr1_el1,"mair_el1":self.owner.readbacks.mair_el1}}))
@@ -373,7 +375,7 @@ impl M0DataWriteLoan<'_> {
         execution: &MemoryExecutionLoan,
         writes: &[crate::memory::domain::SourceWriteReceipt],
     ) -> Result<(), M0ControlError> {
-        if !std::ptr::eq(execution, self.outer) {
+        if !core::ptr::eq(execution, self.outer) {
             return Err(M0ControlError::DifferentExecutionLoan);
         }
         execution
@@ -473,7 +475,7 @@ impl TranslationControls {
             .check_memory_system(&self.memory)
             .map_err(M0ControlError::Domain)?;
         let scope = original.installed_source_scope();
-        if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
+        if !alloc::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
             return Err(M0ControlError::WrongMemorySystem);
         }
         let source_pin = scope
@@ -545,7 +547,7 @@ impl M0DataPairReadLoan<'_> {
         &self,
         execution: &MemoryExecutionLoan,
     ) -> Result<(), M0ControlError> {
-        if !std::ptr::eq(execution, self.outer) {
+        if !core::ptr::eq(execution, self.outer) {
             return Err(M0ControlError::DifferentExecutionLoan);
         }
         execution
@@ -594,7 +596,7 @@ impl M0DataPairReadLoan<'_> {
             "source_generation":self.source.source_generation(),"control_generation":self.generation,
             "physical_domain_generation":self.physical_space().domain().generation().map_err(M0ControlError::Domain)?,
             "actual_address_space":self.source.actual_address_space(),"actual_pre_pstate":self.source.actual_pstate(),
-            "same_original_outer":std::ptr::eq(execution,self.outer),"actual_identification_mmfr2_isar3":self.source.observed_identification()?,
+            "same_original_outer":core::ptr::eq(execution,self.outer),"actual_identification_mmfr2_isar3":self.source.observed_identification()?,
             "readbacks":{"sctlr_el1":self.owner.readbacks.sctlr_el1,"tcr_el1":self.owner.readbacks.tcr_el1,
             "ttbr0_el1":self.owner.readbacks.ttbr0_el1,"ttbr1_el1":self.owner.readbacks.ttbr1_el1,"mair_el1":self.owner.readbacks.mair_el1}}),
         )
@@ -621,7 +623,7 @@ impl TranslationControls {
             .check_memory_system(&self.memory)
             .map_err(M0ControlError::Domain)?;
         let scope = original.installed_source_scope();
-        if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
+        if !alloc::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
             return Err(M0ControlError::WrongMemorySystem);
         }
         scope

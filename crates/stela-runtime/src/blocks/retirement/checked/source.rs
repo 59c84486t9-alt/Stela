@@ -276,7 +276,7 @@ impl<'code> BoundSource<'code> {
     pub(super) fn recheck(&self) -> anyhow::Result<()> {
         let actual = Self::new(self.runtime, self.entry.entry())?;
         anyhow::ensure!(
-            std::ptr::eq(actual.block, self.block)
+            core::ptr::eq(actual.block, self.block)
                 && actual.source == self.source
                 && actual.entry.generation() == self.entry.generation()
                 && actual.requirements == self.requirements,

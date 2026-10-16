@@ -2,6 +2,8 @@
 //! Private proposal; registration, type/lifetime review and native gates pending.
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use crate::execution::context::ContextLoan;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 
 use super::super::source::BoundSource;
 use super::callback::{CallbackFailure, ReadCallback};
@@ -52,9 +54,9 @@ pub(crate) struct M0NativeReport {
 struct ContextIdentity {
     version: u32,
     bytes: u32,
-    memory: *mut std::ffi::c_void,
+    memory: *mut core::ffi::c_void,
     scalable: *mut ScalableStateView,
-    system: *mut std::ffi::c_void,
+    system: *mut core::ffi::c_void,
 }
 impl ContextIdentity {
     fn capture(context: &ExecutionContext) -> Self {
@@ -184,7 +186,7 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
                     Err(never) => match never {},
                 }
                 if !context_loan.context().has_supported_header()
-                    || context_loan.context().memory != std::ptr::from_mut(view).cast()
+                    || context_loan.context().memory != core::ptr::from_mut(view).cast()
                     || context_loan.context().scalable != self.context_before.scalable
                     || context_loan.context().system != self.context_before.system
                     || context_loan.context().version != self.context_before.version

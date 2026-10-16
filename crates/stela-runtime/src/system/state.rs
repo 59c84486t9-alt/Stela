@@ -16,9 +16,9 @@ pub mod higher_el;
 #[path = "state/stacks.rs"]
 mod stacks;
 use super::identification_snapshot::Snapshot;
+use alloc::sync::Arc;
 use higher_el::{HigherElState, Initialization as HigherElInitialization};
 use stacks::InactiveStacks;
-use std::sync::Arc;
 
 pub const PSTATE_MODE_MASK: u64 = 0x1f;
 pub const PSTATE_EL_SHIFT: u32 = 2;

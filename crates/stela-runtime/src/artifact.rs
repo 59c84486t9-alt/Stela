@@ -1,12 +1,12 @@
 //! Artifact data and byte/map integrity only; no source Execute or PE grant.
+pub(crate) mod prepare;
+
 extern crate alloc;
 use alloc::{string::String, vec::Vec};
-#[cfg(not(target_os = "none"))]
 use serde::{Deserialize, Serialize};
 use stela_compiler::GuestAddress;
 
-#[cfg_attr(not(target_os = "none"), derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub schema_version: u32,
     pub source_sha256: String,
@@ -16,15 +16,11 @@ pub struct Identity {
     pub target_cpu: String,
     /// Compiler specialization identity; never runtime authority or secret state.
     /// Absent for old profiles, preserving their exact serialized cache key.
-    #[cfg_attr(
-        not(target_os = "none"),
-        serde(default, skip_serializing_if = "Option::is_none")
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_specialization_sha256: Option<String>,
 }
 
-#[cfg_attr(not(target_os = "none"), derive(Serialize, Deserialize))]
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Manifest {
     pub identity: Identity,
     pub native_sha256: String,
@@ -32,7 +28,7 @@ pub struct Manifest {
     pub source_map: Vec<(GuestAddress, usize)>,
     pub verified: bool,
     /// None is legacy absent metadata; Some(empty) is a checked pure body.
-    #[cfg_attr(not(target_os = "none"), serde(default))]
+    #[serde(default)]
     pub memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
 }
 

@@ -1,5 +1,7 @@
 //! Concrete fresh-software EL0 checked-memory/PAC/clock/TSD owner. No blanket
 //! provider, stored Dispatcher, caller callback, second CPU or copied System.
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 mod m0_owner;
 mod resources;
 pub(crate) use m0_owner::M0Owner;

@@ -10,6 +10,8 @@ use crate::{
         translation_controls::{PhysicalFetch, TranslationControls},
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 use core::convert::Infallible;
 use stela_compiler::{GuestState, context::ExecutionContext};
 

@@ -21,6 +21,8 @@ use crate::{
         translation_controls::TranslationControls,
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 use stela_compiler::{GuestAddress, GuestState};
 
 pub(crate) enum RamDsbError {

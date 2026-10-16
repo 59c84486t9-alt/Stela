@@ -2,8 +2,8 @@
 //! This is storage lifecycle, not an architectural CPU reset or migration.
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
 use crate::memory::{backing::MemoryBacking, domain::PublicationFault};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::Ordering;
 
 pub(in crate::memory) struct RegionReload {
     backing: Arc<MemoryBacking>,
@@ -49,7 +49,7 @@ impl core::fmt::Display for RegionResetFailure {
         }
     }
 }
-impl std::error::Error for RegionResetFailure {}
+impl core::error::Error for RegionResetFailure {}
 impl PhysicalAddressSpace {
     pub(crate) fn owns_mutable_instruction_sources(&self) -> bool {
         self.binding.has_mutable_instruction_sources()

@@ -27,8 +27,8 @@ fn serialize_status<S: serde::Serializer>(
     serializer.serialize_u32(*status as u32)
 }
 
-impl std::fmt::Display for MemoryFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for MemoryFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "scalar read failed at {:#x} (PC {:#x}) after {} bytes: {:?}",
@@ -37,7 +37,7 @@ impl std::fmt::Display for MemoryFault {
     }
 }
 
-impl std::error::Error for MemoryFault {}
+impl core::error::Error for MemoryFault {}
 
 /// Borrow the executing thread's memory policy without erasing its owner.
 pub trait MemoryReader {

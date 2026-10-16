@@ -25,7 +25,11 @@ use crate::{
         state::{El1Registers, PSTATE_EL1H, PSTATE_EL1T, SystemState},
     },
 };
-use std::{path::PathBuf, sync::Arc};
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
+#[cfg(feature = "std")]
+use std::path::PathBuf;
 use stela_compiler::{
     GuestAddress, TargetCpu,
     aarch64::scalable::VectorLength,
@@ -68,6 +72,7 @@ pub struct DeclaredPrivilegedConfig {
     pub scalable: Option<DeclaredPrivilegedScalable>,
     pub trap_smc_without_el3: TrapSmcWithoutEl3,
     pub address_space: u64,
+    #[cfg(feature = "std")]
     pub cache_directory: PathBuf,
     pub code: Vec<DeclaredPrivilegedCode>,
     pub debug_producer_count: usize,
@@ -126,6 +131,7 @@ pub fn run_declared_privileged(
         mut scalable,
         trap_smc_without_el3,
         address_space,
+        #[cfg(feature = "std")]
         cache_directory,
         code,
         debug_producer_count,
@@ -219,9 +225,17 @@ pub fn run_declared_privileged(
         TagCheckFaultMode::Ignore,
         false,
     ));
+    #[cfg(feature = "std")]
     let mut runtime = BlockRuntime::new_for_target(
         address_space,
+        #[cfg(feature = "std")]
         cache_directory,
+        BlockProfile::SystemV1,
+        TargetCpu::Baseline,
+    );
+    #[cfg(not(feature = "std"))]
+    let mut runtime = BlockRuntime::new_aot_for_target(
+        address_space,
         BlockProfile::SystemV1,
         TargetCpu::Baseline,
     );

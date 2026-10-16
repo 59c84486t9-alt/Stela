@@ -11,6 +11,8 @@ use crate::{
     blocks::ThreadState,
     memory::{DIRECT_RAM_USER_END, OwnedMemory},
 };
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use stela_compiler::block::SynchronousTrap;
@@ -166,7 +168,7 @@ fn copy_active_configuration(
     }
     for (offset, byte) in policy.active_configuration.to_le_bytes().iter().enumerate() {
         if memory
-            .write(address + offset as u64, std::slice::from_ref(byte))
+            .write(address + offset as u64, core::slice::from_ref(byte))
             .is_err()
         {
             return Some(DARWIN_EFAULT);

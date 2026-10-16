@@ -84,7 +84,7 @@ impl Low128FpContext<'_, '_> {
     /// compares object identity, not copied controls or value equality, and
     /// independently grants no PE, source, memory or retirement authority.
     pub fn check_system(&self, system: &SystemState) -> Result<(), Error> {
-        if std::ptr::eq(self._system, system) {
+        if core::ptr::eq(self._system, system) {
             Ok(())
         } else {
             Err(Error::DifferentSystemState)
@@ -97,7 +97,7 @@ impl Low128FpContext<'_, '_> {
     /// this context's retained owners. The actual entry token must retain this
     /// context and check the same bound bank through the native call.
     pub fn check_guest(&self, guest: &GuestState) -> Result<(), Error> {
-        if std::ptr::eq(self.guest_identity, guest) {
+        if core::ptr::eq(self.guest_identity, guest) {
             Ok(())
         } else {
             Err(Error::DifferentGuestState)

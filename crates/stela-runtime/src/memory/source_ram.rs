@@ -9,7 +9,9 @@ use super::{
     host_page_size,
     storage::NativeStorage,
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
 #[path = "source_ram/region.rs"]
@@ -98,7 +100,10 @@ impl RamExtent {
                 // validated logical range is readable and fits this retained
                 // allocation. The temporary reference cannot escape hashing.
                 let initial = unsafe {
-                    std::slice::from_raw_parts(storage.primary_base().as_ptr().add(leading), *bytes)
+                    core::slice::from_raw_parts(
+                        storage.primary_base().as_ptr().add(leading),
+                        *bytes,
+                    )
                 };
                 stela_core::sha256(initial)
             }
@@ -133,13 +138,13 @@ pub(crate) struct SourceRamSystemConfig {
 pub(crate) enum SourceRamBuildError {
     Declaration(&'static str),
     AllocationLimit,
-    Platform(std::io::Error),
+    Platform(crate::platform::memory::Error),
     Backing(AccessError),
     Domain(MemoryStatus),
     ImmutableSource(&'static str),
 }
-impl std::fmt::Display for SourceRamBuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for SourceRamBuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Declaration(reason) => write!(f, "invalid source RAM declaration: {reason}"),
             Self::AllocationLimit => write!(f, "source RAM allocation budget exceeded"),
@@ -150,7 +155,7 @@ impl std::fmt::Display for SourceRamBuildError {
         }
     }
 }
-impl std::error::Error for SourceRamBuildError {}
+impl core::error::Error for SourceRamBuildError {}
 
 pub(crate) struct InitializedRamLayout {
     pub range: PhysicalRamRange,
@@ -325,13 +330,13 @@ fn materialize_source_ram_impl(
     {
         return Err(E::Declaration("source RAM extent/stripe bound"));
     }
-    if !declaration.target.supported() {
+    if !crate::platform::cpu::admitted(declaration.target) {
         return Err(E::Domain(MemoryStatus::Unsupported));
     }
-    let page =
-        host_page_size().map_err(|error| E::Platform(std::io::Error::other(error.to_string())))?;
+    let page = host_page_size()
+        .map_err(|error| E::Platform(crate::platform::memory::Error::other(error.to_string())))?;
     if page < size_of::<u64>() {
-        return Err(E::Platform(std::io::Error::other(
+        return Err(E::Platform(crate::platform::memory::Error::other(
             "host page size cannot preserve physical RAM eight-byte alignment",
         )));
     }
@@ -346,7 +351,7 @@ fn materialize_source_ram_impl(
         }
         previous = Some(limit);
     }
-    let mut extents: Vec<_> = std::mem::take(&mut declaration.initialized)
+    let mut extents: Vec<_> = core::mem::take(&mut declaration.initialized)
         .into_iter()
         .map(|extent| RamExtent {
             source_pa: extent.source_pa,
@@ -613,7 +618,7 @@ fn materialize_source_ram_impl(
                 // SAFETY: sole factory, same fresh zero backing, validated
                 // readable alias bounds, and no published writer or PE yet.
                 stela_core::sha256(unsafe {
-                    std::slice::from_raw_parts(pointer.as_ptr(), alias.bytes)
+                    core::slice::from_raw_parts(pointer.as_ptr(), alias.bytes)
                 })
             }
         };

@@ -5,6 +5,8 @@
 //! ordering/padding here is our deterministic layout, not an exact kernel dump.
 //! This module neither reads the host environment nor creates a running process.
 use crate::memory::OwnedMemory;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use anyhow::{Context as _, Result, ensure};
 
 mod identity;
@@ -102,7 +104,7 @@ pub fn plan_kernel_args(
                 .enumerate()
                 .map(|(i, s)| (ArgumentStringKind::Environment, i, s.as_slice())),
         )
-        .chain(std::iter::once((
+        .chain(core::iter::once((
             ArgumentStringKind::Apple,
             0,
             executable_path,

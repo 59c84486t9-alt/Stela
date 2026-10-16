@@ -8,7 +8,7 @@ use crate::memory::{
     tag_transfer::{self, Access, AccessKind as TransferAccessKind},
     tags::AllocationTag,
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
 use stela_compiler::{
     GuestState, TargetCpu,
     aarch64::tag_memory::{BulkKind, Operand, StoreKind},

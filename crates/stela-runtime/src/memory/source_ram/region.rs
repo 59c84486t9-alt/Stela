@@ -1,5 +1,6 @@
 //! Declared physical RAM initialization; file extent and mapped extent differ.
 use super::{PhysicalRamRange, SourceRamBuildError, SourceRamPermissions};
+use alloc::{string::String, vec::Vec};
 
 /// Cold allocation initializes the declared region to zero, then loads exactly
 /// this unchanged owned file prefix. Normal warm reset reloads only that prefix.

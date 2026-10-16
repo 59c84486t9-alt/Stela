@@ -6,6 +6,8 @@ use super::{
     privileged_debug::{DebugRecord, PreparedDebug},
     provider::Owner,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 use stela_compiler::GuestAddress;
 
 #[derive(Debug)]

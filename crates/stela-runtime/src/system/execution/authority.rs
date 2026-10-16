@@ -1,5 +1,5 @@
 //! Private source for system::execution::authority. No integration/build claim.
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct PeIdentity(Arc<()>);

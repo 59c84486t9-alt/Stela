@@ -5,9 +5,12 @@
 //! aliases. It is not a complete IPC namespace. Effects return as typed data;
 //! only the process owner may copy to guest memory or complete the actual bank.
 use super::{HOST_SELF_TRAP, REPLY_PORT_TRAP, Request, TASK_SELF_TRAP, THREAD_SELF_TRAP};
+use alloc::rc::Rc;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
+use core::marker::PhantomData;
 use serde::Serialize;
-use std::{marker::PhantomData, rc::Rc};
 
 pub(crate) mod host;
 
@@ -310,7 +313,7 @@ impl HostPorts {
         self.next_guest_name += GUEST_PORT_STRIDE;
         self.acquisitions += 1;
     }
-    fn terminal(&mut self, error: impl std::fmt::Display, effects: Vec<Effect>) -> Outcome {
+    fn terminal(&mut self, error: impl core::fmt::Display, effects: Vec<Effect>) -> Outcome {
         self.failed = true;
         Outcome::Indeterminate {
             error: error.to_string(),

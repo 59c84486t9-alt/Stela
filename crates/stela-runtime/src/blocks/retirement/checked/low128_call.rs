@@ -12,6 +12,8 @@ use crate::{
         state::SystemState,
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 use stela_compiler::{
     GuestAddress, GuestState,
     context::{ExecutionContext, memory::MemoryStatus},
@@ -154,7 +156,7 @@ pub(super) fn call(
                             address: view.fault_address, pc: view.fault_pc, completed_bytes: view.completed_bytes });
                         let carrier = carrier?;
                         anyhow::ensure!(loan.context().has_supported_header()
-                            && loan.context().memory == std::ptr::from_mut(view).cast(),
+                            && loan.context().memory == core::ptr::from_mut(view).cast(),
                             "actual checked context association changed after native call");
                         let status = MemoryStatus::from_code(view.fault_kind)
                             .ok_or_else(|| anyhow::anyhow!("unknown checked status {}", view.fault_kind))?;

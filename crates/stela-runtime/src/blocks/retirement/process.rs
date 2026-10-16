@@ -9,6 +9,8 @@ use crate::{
     memory::OwnedMemory,
     system::{debug::DebugControls, execution::owner::SystemExecutionOwner},
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::ToString, vec::Vec};
 use stela_compiler::GuestAddress;
 
 pub(crate) unsafe fn run_protected_services(

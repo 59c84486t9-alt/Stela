@@ -19,8 +19,8 @@ pub(super) struct PhysicalCodeBinding {
     snapshot: ControlSnapshot,
 }
 
-impl std::fmt::Debug for PhysicalCodeBinding {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for PhysicalCodeBinding {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("PhysicalCodeBinding")
             .field("raw_pc", &self.instruction.raw_pc())

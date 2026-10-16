@@ -7,7 +7,7 @@ use crate::system::{
     identification_snapshot::{Snapshot, Unsupported as IdentificationUnsupported},
     profile::EntryProfile,
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 const ID_FIELD_MASK: u64 = 0xf;
 const EL0_SHIFT: u32 = 0;

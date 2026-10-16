@@ -15,6 +15,8 @@ use crate::{
         state::SystemState,
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 use stela_compiler::{
     GuestState,
     context::ExecutionContext,
@@ -367,8 +369,11 @@ impl PrivilegedOwner<'_> {
                     .ok_or_else(|| anyhow::anyhow!("actual scalable resource lost"))?;
                 anyhow::ensure!(
                     movement.word() == prepared.source.word()
-                        && prepared.record.compiler_source_sha256.as_deref()
-                            == Some(crate::compiler_source_sha256())
+                        && prepared
+                            .record
+                            .compiler_source_sha256
+                            .as_deref()
+                            .is_some_and(|actual| actual == crate::compiler_source_sha256())
                         && prepared.record.native_sha256.as_deref()
                             == Some(stela_core::sha256(movement.code()).as_str()),
                     "actual native capsule association changed"

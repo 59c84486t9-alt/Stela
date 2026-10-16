@@ -16,13 +16,15 @@ use crate::{
     blocks::CodePublicationScope,
     memory::domain::{DataPolicy, MemoryThread},
 };
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter,
     aarch64::{Decoder, Operation, system::exception::Operation as ExceptionOperation},
     block::{BlockProfile, SuccessorKind, analyze_with_profile, system::SystemOperation},
 };
 
-const INSTRUCTION_BYTES: usize = std::mem::size_of::<u32>();
+const INSTRUCTION_BYTES: usize = core::mem::size_of::<u32>();
 const NOP_WORD: u32 = 0xd503_201f;
 const CONDITIONAL_BRANCH_MASK: u32 = 0xff00_0000;
 const CONDITIONAL_BRANCH_CLASS: u32 = 0x5400_0000;

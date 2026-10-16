@@ -6,10 +6,12 @@
 //! executing thread or reclaim executable mappings.
 
 use crate::{Identity, Prepared, prepare_leaf};
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
 use anyhow::{Result, ensure};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use stela_compiler::GuestAddress;
 use stela_core::sha256;
 

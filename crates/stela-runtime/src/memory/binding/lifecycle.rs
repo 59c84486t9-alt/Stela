@@ -1,6 +1,8 @@
 //! Service-yield transactions over the original canonical domain and backings.
 use super::*;
 use crate::memory::{MemoryRegion, ProtectionError, host_protection};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 impl OwnedMemory {
     fn replacement_views(

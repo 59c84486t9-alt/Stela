@@ -74,7 +74,7 @@ pub(super) fn complete(
             Kind::HalfDot => {
                 let right_offset = index.map_or(offset, |index| segment + index * SINGLE_BYTES);
                 let pair = |source: &[u8], start: usize| {
-                    std::array::from_fn::<_, PAIR_ELEMENTS, _>(|element| {
+                    core::array::from_fn::<_, PAIR_ELEMENTS, _>(|element| {
                         half(source, start + element * HALF_BYTES)
                     })
                 };

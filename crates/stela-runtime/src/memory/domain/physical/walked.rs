@@ -11,7 +11,7 @@ impl PhysicalAddressSpace {
         source: &InstalledWalkedSource<'_, '_>,
         raw_pc: u64,
     ) -> Result<BoundPhysicalInstruction, FetchFailure> {
-        if !std::ptr::eq(self, source.physical_space()) {
+        if !core::ptr::eq(self, source.physical_space()) {
             return Err(FetchFailure::Unavailable(
                 "walked fetch uses different physical owner",
             ));

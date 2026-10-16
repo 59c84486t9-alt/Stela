@@ -4,6 +4,8 @@ use crate::{
     darwin::{self, BsdPrototype, BsdReturnType, PendingBsdCall, platform},
     mach, thread,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use stela_compiler::{GuestAddress, GuestState, block::SynchronousTrap};

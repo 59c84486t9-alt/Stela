@@ -3,7 +3,7 @@ use stela_compiler::context::{ExecutionContext, ScalableStateView, memory::Memor
 
 pub(crate) struct ContextLoan<'a> {
     context: &'a mut ExecutionContext,
-    memory: *mut std::ffi::c_void,
+    memory: *mut core::ffi::c_void,
     scalable: *mut ScalableStateView,
 }
 
@@ -21,13 +21,13 @@ impl<'a> ContextLoan<'a> {
         view: &mut ScalableStateView,
     ) -> Self {
         let loan = Self::new(context);
-        loan.context.scalable = std::ptr::from_mut(view);
+        loan.context.scalable = core::ptr::from_mut(view);
         loan
     }
 
     pub(crate) fn memory(context: &'a mut ExecutionContext, view: &mut MemoryContextView) -> Self {
         let loan = Self::new(context);
-        loan.context.memory = std::ptr::from_mut(view).cast();
+        loan.context.memory = core::ptr::from_mut(view).cast();
         loan
     }
 

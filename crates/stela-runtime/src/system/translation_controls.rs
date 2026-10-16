@@ -32,7 +32,7 @@ pub use fields::{
     PolicyProvenance, Presence,
 };
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 use super::{
     access,

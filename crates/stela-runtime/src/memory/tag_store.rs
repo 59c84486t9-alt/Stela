@@ -5,9 +5,14 @@
 //! the execution domain. This module supplies atomic individual tag values.
 
 use super::tags::AllocationTag;
+use crate::platform::sync::RwLock;
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap as HashMap;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU8, Ordering};
+#[cfg(feature = "std")]
 use std::collections::HashMap;
-use std::sync::RwLock;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 pub use super::tags::TAG_GRANULE_BYTES;
 const TAG_CHUNK_GRANULES: usize = 256;
@@ -22,13 +27,13 @@ pub enum TagStoreError {
     AllocationFailed,
 }
 
-impl std::fmt::Display for TagStoreError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for TagStoreError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(formatter, "allocation-tag storage failed: {self:?}")
     }
 }
 
-impl std::error::Error for TagStoreError {}
+impl core::error::Error for TagStoreError {}
 
 /// One tag plane for an existing physical backing, without a separate identity.
 ///
@@ -103,6 +108,7 @@ impl TagStore {
             AtomicU8::new(self.initial_tag.value())
         });
         tags[tag_index].store(tag.value(), Ordering::Relaxed);
+        #[cfg(feature = "std")]
         chunks
             .try_reserve(1)
             .map_err(|_| TagStoreError::AllocationFailed)?;

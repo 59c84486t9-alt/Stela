@@ -1,5 +1,7 @@
 //! Thread-owned scalable register storage; the existing V registers own low Z bits.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 mod context;
 pub mod leaf;
 
@@ -298,9 +300,9 @@ impl ScalableState {
                 }
             }
             _ => (
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
             ),
         };
         let (za, zt0) = match (self.mode.za_enabled(), &mut self.matrices) {
@@ -310,11 +312,11 @@ impl ScalableState {
                     // SAFETY: SME2 storage includes the complete trailing ZT0.
                     unsafe { pointer.add(za_bytes) }
                 } else {
-                    std::ptr::null_mut()
+                    core::ptr::null_mut()
                 };
                 (pointer, zt0)
             }
-            _ => (std::ptr::null_mut(), std::ptr::null_mut()),
+            _ => (core::ptr::null_mut(), core::ptr::null_mut()),
         };
         let mut view = ScalableStateView {
             svl_bytes: self.length.bytes() as u16,
@@ -375,7 +377,7 @@ impl ScalableState {
         Ok(())
     }
 
-    fn predicate_range(&self, register: u8, bytes: usize) -> Result<std::ops::Range<usize>> {
+    fn predicate_range(&self, register: u8, bytes: usize) -> Result<core::ops::Range<usize>> {
         self.check_predicate_bytes(bytes)?;
         ensure!(
             is_predicate_register(register),
@@ -390,7 +392,7 @@ impl ScalableState {
         offset: usize,
         bytes: usize,
         lookup: bool,
-    ) -> Result<std::ops::Range<usize>> {
+    ) -> Result<core::ops::Range<usize>> {
         ensure!(
             self.mode.za_enabled(),
             "matrix register requires ZA enabled"
@@ -416,7 +418,7 @@ struct ZaRowScratchLoan<'a> {
 
 impl Drop for ZaRowScratchLoan<'_> {
     fn drop(&mut self) {
-        self.state.za_scratch = Some(std::mem::take(&mut self.storage));
+        self.state.za_scratch = Some(core::mem::take(&mut self.storage));
     }
 }
 

@@ -5,10 +5,11 @@
 
 use super::tag_store::TagStore;
 use super::tags::AllocationTag;
-use std::hash::{Hash, Hasher};
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use crate::platform::sync::Mutex;
+use alloc::sync::{Arc, Weak};
+use core::hash::{Hash, Hasher};
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // Retaining an identity retains its allocation, preventing address reuse while
 // it can still participate in a reservation, cache key, or comparison.
@@ -25,9 +26,9 @@ impl Identity {
     }
 }
 
-impl std::fmt::Debug for Identity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Pointer::fmt(&Arc::as_ptr(&self.0), f)
+impl core::fmt::Debug for Identity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Pointer::fmt(&Arc::as_ptr(&self.0), f)
     }
 }
 
@@ -40,13 +41,13 @@ impl PartialEq for Identity {
 impl Eq for Identity {}
 
 impl PartialOrd for Identity {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Identity {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.address().cmp(&other.address())
     }
 }
@@ -107,13 +108,13 @@ pub enum AccessError {
     CoherenceDomain,
 }
 
-impl std::fmt::Display for AccessError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AccessError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "guest memory resolution failed: {self:?}")
     }
 }
 
-impl std::error::Error for AccessError {}
+impl core::error::Error for AccessError {}
 
 /// A fixed live native storage extent. Aliases must share this same owner;
 /// private copies and COW replacements require a fresh backing identity.
@@ -131,8 +132,8 @@ pub struct MemoryBacking {
     _lifetime_owner: Arc<dyn Send + Sync>,
 }
 
-impl std::fmt::Debug for MemoryBacking {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for MemoryBacking {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MemoryBacking")
             .field("id", &self.id)
             .field("host_base", &self.host_base)

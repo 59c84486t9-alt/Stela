@@ -683,8 +683,9 @@ fn checked_scalar_late_fault_keeps_raw_fault_location_and_partial_prefix() {
         ],
         TargetCpu::Baseline,
     );
-    let (policy, calls) = checked_policy(&system, true);
+    let (policy, calls) = checked_policy(&system, false);
     let mut thread = domain.thread(policy);
+    thread.post_body_failure_once = true;
     let access = reserve(&mut thread);
     let raw = tagged(GUEST_BASE + 14, TAG);
     assert_eq!(
@@ -696,11 +697,44 @@ fn checked_scalar_late_fault_keeps_raw_fault_location_and_partial_prefix() {
             completed_bytes: 2,
         })
     );
-    assert!(calls.check.get() > 0);
-    // Common finalization settles the genuine Permission fault. Scalar adds no
-    // extra mark clear or cleanup path when outer domain health then fails.
+    assert_eq!(calls.check.get(), 2);
+    // Both readable byte fragments complete before the genuine Permission
+    // fault. Inject health failure only AFTER callback return, so common
+    // finalization still settles that guest fault and preserves its raw prefix.
     assert!(!marked(&mut thread, &access));
     assert_eq!(domain.check_execution(), Err(MemoryStatus::Domain));
+}
+
+#[test]
+fn checked_scalar_mid_transfer_health_failure_stops_before_next_fragment() {
+    let (system, backing, domain) = setup();
+    let (policy, calls) = checked_policy(&system, true);
+    let mut thread = domain.thread(policy);
+    let access = reserve(&mut thread);
+    let before = snapshot(&backing);
+    let raw = tagged(GUEST_BASE + 14, TAG);
+    assert_eq!(
+        thread.read_scalar(raw, 4, 0, GUEST_PC),
+        Err(MemoryFault {
+            status: MemoryStatus::Domain,
+            address: raw + 1,
+            pc: GUEST_PC,
+            completed_bytes: 1,
+        })
+    );
+    // The first reached byte's policy check poisons actual System health. Its
+    // read completes; the next byte's resolve refuses before another check or
+    // native access. No Permission/TagCheck fault was reached, so guest-fault
+    // cleanup must not clear the existing local reservation.
+    assert_eq!(calls.check.get(), 1);
+    assert!(marked(&mut thread, &access));
+    assert_eq!(domain.check_execution(), Err(MemoryStatus::Domain));
+    assert!(domain.execution_loan().is_err());
+    assert_eq!(
+        thread.prepare(MemoryRequirements::default()).err(),
+        Some(MemoryStatus::Domain)
+    );
+    assert_eq!(snapshot(&backing), before);
 }
 
 #[test]

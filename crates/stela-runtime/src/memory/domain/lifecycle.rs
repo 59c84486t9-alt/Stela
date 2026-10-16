@@ -1,5 +1,7 @@
 //! Serialized mapping publication and native-invocation exclusion in one domain.
 use super::*;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 pub(in crate::memory) struct DomainSnapshot {
     pub(super) views: Vec<RegisteredView>,
@@ -44,7 +46,9 @@ impl MemoryExecutionLoan {
 
     /// Borrow the actual machine's order serializer through this retained loan.
     /// This is only lock/lifetime exclusion, not CPU, PA, Thread or PE authority.
-    pub(super) fn device_ram_order(&self) -> Result<std::sync::MutexGuard<'_, ()>, MemoryStatus> {
+    pub(super) fn device_ram_order(
+        &self,
+    ) -> Result<crate::platform::sync::MutexGuard<'_, ()>, MemoryStatus> {
         self.check_domain(&self.domain)?;
         let order = self
             .domain
@@ -280,7 +284,7 @@ impl MemoryServiceLoan {
             // mapping change. Current canonical view pins rights/storage; result
             // is independent staging and no guest references are created.
             unsafe {
-                std::ptr::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     access.host_ptr().as_ptr(),
                     result.as_mut_ptr().add(completed),
                     reached,

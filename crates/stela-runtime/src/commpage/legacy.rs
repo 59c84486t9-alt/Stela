@@ -4,6 +4,8 @@
 //! osfmk/arm/cpu_capabilities.h and osfmk/arm/commpage/commpage.c.
 //! Only explicitly declared fields have ABI meaning; allocation padding does not.
 use crate::memory::{MemoryRegion, PublishedReadOnlyRegion};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use anyhow::{Context, Result};
 use serde::Serialize;
 

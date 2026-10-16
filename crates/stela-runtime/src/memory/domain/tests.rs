@@ -1877,8 +1877,15 @@ fn exclusive_service_stale_second_view_is_rechecked_inside_gate() {
 }
 
 #[test]
-fn exclusive_service_delayed_load_and_retirement_linearize_with_real_gate() {
-    let (_backing, domain, second) = exclusive_joined();
+fn exclusive_service_inflight_load_refuses_retirement_until_original_finalization() {
+    let (backing, domain, second) = exclusive_joined();
+    let monitor = domain
+        .registered_views()
+        .into_iter()
+        .find(|registered| Arc::ptr_eq(&registered.view, &second))
+        .unwrap()
+        .monitor;
+    let generation = domain.generation().unwrap();
     let (mut thread, endpoint, events) = exclusive_bound(&domain);
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let release = Arc::new(std::sync::Barrier::new(2));
@@ -1890,24 +1897,40 @@ fn exclusive_service_delayed_load_and_retirement_linearize_with_real_gate() {
     });
     entered_rx.recv().unwrap();
     let d = domain.clone();
-    let second = second.clone();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let retiring = second.clone();
+    let (refusal_tx, refusal_rx) = std::sync::mpsc::channel();
     let retire = std::thread::spawn(move || {
-        started_tx.send(()).unwrap();
-        d.retire(&second)
+        refusal_tx.send(d.retire(&retiring)).unwrap();
     });
-    started_rx.recv().unwrap();
+    // The actual native loan remains live inside the blocked original callback.
+    // Service admission must refuse before waiting on the callback's monitor gate.
+    let refusal = refusal_rx.recv_timeout(std::time::Duration::from_secs(2));
+    // Always release and join the actual load before asserting, even if a broken
+    // retirement path waited on its monitor gate instead of refusing admission.
     release.wait();
     let (mut thread, mut endpoint, events, result) = load.join().unwrap();
+    retire.join().unwrap();
     assert_eq!(result.0, MemoryStatus::Success);
-    retire.join().unwrap().unwrap();
+    assert_eq!(refusal.unwrap(), Err(MemoryStatus::Domain));
+    assert!(second.is_current());
+    assert!(monitor.is_live());
+    assert_eq!(domain.generation().unwrap(), generation);
+    assert!(!endpoint.is_set());
+    // Original checked finalization released its actual loan. The same domain
+    // may now retire the same view and invalidate the real alias reservation.
+    domain.retire(&second).unwrap();
+    assert!(!second.is_current());
+    assert!(!monitor.is_live());
+    assert_eq!(domain.generation().unwrap(), generation + 1);
     assert!(exclusive_wait(&mut endpoint, &events));
+    assert!(!exclusive_wait(&mut endpoint, &events));
     let mut data = exclusive_data(ExclusiveOperation::Store, ExclusiveShape::Scalar, 1);
     assert_eq!(
         exclusive_invoke(&mut thread, GUEST_BASE + 0x1000, 4, &mut data, flags::WRITE).0,
         MemoryStatus::Success
     );
     assert_eq!(data.status, 1);
+    assert_eq!(snapshot(&backing, 4), [0; 4]);
 }
 
 #[test]
@@ -1990,14 +2013,43 @@ fn exclusive_service_permission_and_raw_payload_fail_before_any_effect() {
 }
 
 #[test]
-fn exclusive_service_terminal_retirement_does_not_report_a_completed_transition() {
-    let (_backing, domain, second) = exclusive_joined();
+fn exclusive_service_poisoned_domain_refuses_retirement_before_mapping_effects() {
+    let (backing, domain, second) = exclusive_joined();
+    let monitor = domain
+        .registered_views()
+        .into_iter()
+        .find(|registered| Arc::ptr_eq(&registered.view, &second))
+        .unwrap()
+        .monitor;
+    let generation = domain.generation().unwrap();
+    let (mut thread, endpoint, _events) = exclusive_bound(&domain);
+    let mut load = exclusive_data(ExclusiveOperation::Load, ExclusiveShape::Scalar, 0);
+    assert_eq!(
+        exclusive_invoke(&mut thread, GUEST_BASE, 4, &mut load, 0).0,
+        MemoryStatus::Success
+    );
+    assert!(!endpoint.is_set());
+    let before = snapshot(&backing, 4);
     domain.system.failed.store(true, Ordering::Release);
     assert_eq!(domain.retire(&second), Err(MemoryStatus::Domain));
-    assert!(!second.is_current());
-    assert_eq!(domain.retire(&second), Err(MemoryStatus::InvalidRequest));
-    // No native rights transition is attempted; the retained backing stays owned.
+    assert!(second.is_current());
+    assert!(monitor.is_live());
+    assert_eq!(domain.state.lock().unwrap().snapshot.generation, generation);
+    assert!(!endpoint.is_set());
+    assert_eq!(domain.retire(&second), Err(MemoryStatus::Domain));
+    // Liveness is diagnostic only: the poisoned actual domain admits neither
+    // native execution nor service mutation, and retains the original storage.
     assert!(domain.check_execution().is_err());
+    assert!(domain.execution_loan().is_err());
+    let mut declined = exclusive_data(ExclusiveOperation::Load, ExclusiveShape::Scalar, 0);
+    let untouched = declined;
+    assert_eq!(
+        exclusive_invoke(&mut thread, GUEST_BASE, 4, &mut declined, 0).0,
+        MemoryStatus::Domain
+    );
+    assert_eq!(declined, untouched);
+    assert_eq!(snapshot(&backing, 4), before);
+    assert!(!endpoint.is_set());
 }
 
 #[test]

@@ -12,10 +12,10 @@ impl TranslationControls {
             return Err("EL1 control owner is poisoned");
         }
         let installed = scope.installed_snapshot();
-        if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
+        if !alloc::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
             return Err("EL1 controls and physical source have different MemorySystem owners");
         }
-        if !std::sync::Arc::ptr_eq(&self.identity, &installed.identity)
+        if !alloc::sync::Arc::ptr_eq(&self.identity, &installed.identity)
             || self.generation != installed.generation()
             || self.profile.cpu != scope.installed_cpu()
             || self.readbacks != installed.readbacks()

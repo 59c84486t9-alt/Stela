@@ -17,8 +17,8 @@
 //! algorithm parameters; substitution uses parallel Boolean polynomials rather
 //! than secret-indexed lookup tables. No constant-time/security audit is claimed.
 use anyhow::Result;
+use core::fmt;
 use serde::Serialize;
-use std::fmt;
 
 pub mod generic;
 pub mod memory;
@@ -162,7 +162,7 @@ impl fmt::Display for AuthenticationError {
     }
 }
 
-impl std::error::Error for AuthenticationError {}
+impl core::error::Error for AuthenticationError {}
 
 impl Context {
     pub fn new(address_space: u64, keys: Keys) -> Self {
@@ -223,7 +223,7 @@ impl Context {
         pointer: u64,
         modifier: u64,
         combined: bool,
-    ) -> std::result::Result<AuthResult, AuthenticationError> {
+    ) -> core::result::Result<AuthResult, AuthenticationError> {
         let words = self.keys.words[key.index()]
             .as_ref()
             .ok_or(AuthenticationError::KeyUnavailable { key })?;
@@ -344,7 +344,7 @@ fn rotate_cell(value: u64, count: u32) -> u64 {
 fn mix(value: u64) -> u64 {
     let mut out = 0;
     for column in 0..4 {
-        let [a, b, c, d] = std::array::from_fn(|row| cell(value, column + row * 4));
+        let [a, b, c, d] = core::array::from_fn(|row| cell(value, column + row * 4));
         let rows = [
             rotate_cell(d, 1) ^ rotate_cell(c, 2) ^ rotate_cell(b, 1),
             rotate_cell(d, 2) ^ rotate_cell(c, 1) ^ rotate_cell(a, 1),

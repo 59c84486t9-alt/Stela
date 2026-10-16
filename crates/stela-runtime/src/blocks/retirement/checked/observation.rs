@@ -1,5 +1,7 @@
 //! Owned retained-process diagnostics. These copies confer no PE authority.
 use crate::{clock, thread};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use stela_compiler::{GuestAddress, GuestState};
 
 /// Produced only from the actual retained owner while a same-domain read-only

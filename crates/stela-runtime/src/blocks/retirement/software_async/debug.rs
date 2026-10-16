@@ -1,6 +1,8 @@
 //! Actual declared-software debug/CTI producers in the existing PE domain.
 //! No second registry, callback, copied pending bank, or external-hardware claim.
 use super::*;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
 
 /// Original sticky registration key. It contains no domain writer; every
 /// injector still requires the same actual domain's exclusive mutable borrow.

@@ -8,7 +8,7 @@ use crate::system::{
     identification_snapshot::{Origin, Snapshot, Unsupported as IdentificationUnsupported},
     state::{PSTATE_SS_MASK, StateError, SystemState},
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
 use stela_compiler::GuestState;
 
 const STATUS_MASK: u32 = 0x3f;

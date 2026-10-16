@@ -22,6 +22,8 @@ use crate::{
         translation_controls::{PhysicalFetch, m0_data::M0ControlError},
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
 use stela_compiler::{
     GuestAddress, GuestState, Lifter,
     aarch64::{Decoder, Register},
@@ -295,7 +297,7 @@ impl M0SourceInput<'_, '_> {
     ) -> anyhow::Result<()> {
         self.validate_source_current()?;
         anyhow::ensure!(
-            std::ptr::eq(scope, self.installed),
+            core::ptr::eq(scope, self.installed),
             "M0 installed scope is not the original input borrow"
         );
         anyhow::ensure!(

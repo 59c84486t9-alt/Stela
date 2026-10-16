@@ -2,7 +2,8 @@
 //! This cache is not an address-access, source, native or retirement authority.
 use crate::memory::domain::{MemoryDomain, MemoryExecutionLoan, physical::PhysicalAddressSpace};
 use crate::memory::stage1::{self, Access, Config, PhysicalMemory, Translation, TranslationError};
-use std::sync::{Arc, Mutex};
+use crate::platform::sync::Mutex;
+use alloc::sync::Arc;
 
 const CACHE_CELLS: usize = 128;
 

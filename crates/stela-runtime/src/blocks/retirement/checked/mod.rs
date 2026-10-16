@@ -1,6 +1,8 @@
 //! Closed checked-memory execution under the retained PE and source owners.
 //! The canonical retirement module alone constructs ConsumerKey/RetainedResources.
 
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 mod darwin_services;
 mod diagnostics;
 mod el1_context;
@@ -207,7 +209,10 @@ impl BlockRuntime {
             };
             let prepared = (|| -> anyhow::Result<()> {
                 crate::execution::platform::ensure_supported()?;
-                anyhow::ensure!(self.target_cpu().supported(), "host target unsupported");
+                anyhow::ensure!(
+                    crate::platform::cpu::admitted(self.target_cpu()),
+                    "host target unsupported"
+                );
                 anyhow::ensure!(
                     pe.backend.supports_profile(self.profile),
                     "checked profile required"

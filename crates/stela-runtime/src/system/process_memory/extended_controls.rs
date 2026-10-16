@@ -14,7 +14,7 @@ use crate::{
     pauth::features::{LinkRegisterPauthCapability, UnsupportedInstructionProfile},
     system::identification_snapshot::{Origin, Unsupported},
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 const FIELD_MASK: u64 = 0xf;
 const MMFR3_SCTLRX_SHIFT: u32 = 4;

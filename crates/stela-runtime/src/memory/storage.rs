@@ -3,9 +3,10 @@
 //! These owners expose raw descriptors only. Retaining storage does not pin its
 //! current host rights, admit concurrent execution, or register memory writers.
 
+use alloc::sync::Arc;
+use core::ptr::NonNull;
+#[cfg(feature = "std")]
 use std::fs::File;
-use std::ptr::NonNull;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageKind {
@@ -17,8 +18,23 @@ pub(super) enum StorageKind {
 /// One complete native mapping with one exclusive unmap obligation.
 #[derive(Debug)]
 pub(super) struct NativeMapping {
+    #[cfg(not(feature = "std"))]
+    _unmounted: core::convert::Infallible,
     base: NonNull<u8>,
     bytes: usize,
+    #[cfg(test)]
+    retirement: Arc<std::sync::OnceLock<MappingRetirement>>,
+}
+
+/// Test observation of THIS allocation's real unmap, never global VA occupancy.
+/// The retained receipt owns no storage/backing/file or native access capability.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappingRetirement {
+    base: usize,
+    bytes: usize,
+    status: i32,
+    os_error: Option<i32>,
 }
 
 impl NativeMapping {
@@ -32,8 +48,14 @@ impl NativeMapping {
     /// external synchronization; all accesses must finish before rights are
     /// revoked, pages remapped, or the last owner released. File mappings retain
     /// their separate source-stability contract. Adoption itself changes no rights.
+    #[cfg(feature = "std")]
     pub(super) unsafe fn adopt(base: NonNull<u8>, bytes: usize) -> Self {
-        Self { base, bytes }
+        Self {
+            base,
+            bytes,
+            #[cfg(test)]
+            retirement: Arc::new(std::sync::OnceLock::new()),
+        }
     }
 }
 
@@ -46,9 +68,38 @@ unsafe impl Send for NativeMapping {}
 unsafe impl Sync for NativeMapping {}
 
 impl Drop for NativeMapping {
+    #[cfg(feature = "std")]
     fn drop(&mut self) {
         // SAFETY: adoption transferred the sole obligation for this exact extent.
-        unsafe { libc::munmap(self.base.as_ptr().cast(), self.bytes) };
+        #[cfg(not(test))]
+        unsafe {
+            libc::munmap(self.base.as_ptr().cast(), self.bytes)
+        };
+        #[cfg(test)]
+        {
+            // SAFETY: same actual owned extent/one unmap obligation as production.
+            let status = unsafe { libc::munmap(self.base.as_ptr().cast(), self.bytes) };
+            let os_error = if status == 0 {
+                None
+            } else {
+                std::io::Error::last_os_error().raw_os_error()
+            };
+            assert!(
+                self.retirement
+                    .set(MappingRetirement {
+                        base: self.base.as_ptr() as usize,
+                        bytes: self.bytes,
+                        status,
+                        os_error,
+                    })
+                    .is_ok(),
+                "mapping retirement recorded twice"
+            );
+        }
+    }
+    #[cfg(not(feature = "std"))]
+    fn drop(&mut self) {
+        match self._unmounted {}
     }
 }
 
@@ -58,12 +109,12 @@ pub(super) enum StorageError {
     AliasesOverlap,
 }
 
-impl std::fmt::Display for StorageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "retained native storage failed: {self:?}")
     }
 }
-impl std::error::Error for StorageError {}
+impl core::error::Error for StorageError {}
 
 /// One physical storage lifetime, optionally retaining its two native aliases.
 /// A canonical `MemoryBacking` retains this owner; this owner must never retain
@@ -71,12 +122,13 @@ impl std::error::Error for StorageError {}
 pub(super) struct NativeStorage {
     primary: NativeMapping,
     publisher: Option<NativeMapping>,
+    #[cfg(feature = "std")]
     _file: Option<File>,
     kind: StorageKind,
 }
 
-impl std::fmt::Debug for NativeStorage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for NativeStorage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("NativeStorage")
             .field("primary", &self.primary_base())
             .field("publisher", &self.publisher_base())
@@ -89,13 +141,14 @@ impl std::fmt::Debug for NativeStorage {
 impl NativeStorage {
     /// Initialize private loader RAM before publishing any backing/view. Final
     /// host permissions never include Execute; guest source fetch uses Read.
+    #[cfg(feature = "std")]
     pub(super) fn initialized_ram(
         initial: &[u8],
         leading: usize,
         bytes: usize,
         readable: bool,
         writable: bool,
-    ) -> std::io::Result<Arc<Self>> {
+    ) -> Result<Arc<Self>, crate::platform::memory::Error> {
         let page =
             super::host_page_size().map_err(|error| std::io::Error::other(error.to_string()))?;
         if initial.is_empty()
@@ -115,7 +168,7 @@ impl NativeStorage {
         // or an alias. No reference into this allocation escapes initialization.
         let raw = unsafe {
             libc::mmap(
-                std::ptr::null_mut(),
+                core::ptr::null_mut(),
                 bytes,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANON,
@@ -137,7 +190,7 @@ impl NativeStorage {
         // SAFETY: validated destination extent, private mapping and independent
         // input bytes; no native access or source binding has been published.
         unsafe {
-            std::ptr::copy_nonoverlapping(
+            core::ptr::copy_nonoverlapping(
                 initial.as_ptr(),
                 base.as_ptr().add(leading),
                 initial.len(),
@@ -156,15 +209,29 @@ impl NativeStorage {
         Ok(Self::anonymous(mapping))
     }
 
+    #[cfg(not(feature = "std"))]
+    pub(super) fn initialized_ram(
+        initial: &[u8],
+        leading: usize,
+        bytes: usize,
+        readable: bool,
+        writable: bool,
+    ) -> Result<Arc<Self>, crate::platform::memory::Error> {
+        let _ = (initial, leading, bytes, readable, writable);
+        Err(crate::platform::memory::Error::Unavailable)
+    }
+
     pub(super) fn anonymous(primary: NativeMapping) -> Arc<Self> {
         Arc::new(Self {
             primary,
             publisher: None,
+            #[cfg(feature = "std")]
             _file: None,
             kind: StorageKind::Anonymous,
         })
     }
 
+    #[cfg(feature = "std")]
     pub(super) fn private_file(primary: NativeMapping, file: File) -> Arc<Self> {
         Arc::new(Self {
             primary,
@@ -183,6 +250,7 @@ impl NativeStorage {
     /// descriptor or mapping can modify/truncate it. Address/length checks alone
     /// cannot establish physical alias identity. The guest alias stays read-only;
     /// publisher mutation obeys the enclosing serialized writer contract.
+    #[cfg(feature = "std")]
     pub(super) unsafe fn published_aliases(
         primary: NativeMapping,
         publisher: NativeMapping,

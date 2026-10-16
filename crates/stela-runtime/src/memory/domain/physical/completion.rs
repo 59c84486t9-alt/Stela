@@ -6,7 +6,7 @@
 
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
 use crate::memory::domain::MemoryExecutionLoan;
-use std::sync::MutexGuard;
+use crate::platform::sync::MutexGuard;
 use stela_compiler::context::memory::MemoryStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +62,7 @@ impl PhysicalRamCompletion<'_> {
             // is coherent RAM; this fence grants no device-bus/MMIO semantics.
             // No nomem/readonly/pure may erase the compiler memory boundary.
             unsafe {
-                std::arch::asm!("mfence", options(nostack, preserves_flags));
+                core::arch::asm!("mfence", options(nostack, preserves_flags));
             }
             self.progress = RamCompletionProgress::Completed;
             Ok(())

@@ -229,18 +229,37 @@ fn split_rights_and_private_file_decline_before_binding() {
     let mut file = tempfile::tempfile().unwrap();
     use std::io::Write;
     file.write_all(&vec![0; page]).unwrap();
-    let mut mapped = unsafe {
-        OwnedMemory::map_files(vec![crate::memory::FileMemoryRegionSpec {
-            guest_address: free_address(page),
-            virtual_bytes: page as u64,
-            file,
-            file_offset: 0,
-            readable: true,
-            writable: true,
-            executable: false,
-        }])
-    }
-    .unwrap();
+    const MAX_MAPPING_ATTEMPTS: usize = 32;
+    // Another parallel fixture can claim a fresh address after free_address
+    // releases it. Acquire the real private file mapping before testing binding.
+    let mut last_mapping_error = None;
+    let mut mapped = (0..MAX_MAPPING_ATTEMPTS)
+        .find_map(|_| {
+            let mapped = unsafe {
+                OwnedMemory::map_files(vec![crate::memory::FileMemoryRegionSpec {
+                    guest_address: free_address(page),
+                    virtual_bytes: page as u64,
+                    file: file.try_clone().unwrap(),
+                    file_offset: 0,
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                }])
+            };
+            match mapped {
+                Ok(memory) => Some(memory),
+                Err(error) => {
+                    last_mapping_error = Some(error);
+                    None
+                }
+            }
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "private file mapping fixture exhausted {MAX_MAPPING_ATTEMPTS} attempts: {}",
+                last_mapping_error.unwrap()
+            )
+        });
     assert_eq!(
         unsafe { mapped.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 5), &mut []) }
             .err()

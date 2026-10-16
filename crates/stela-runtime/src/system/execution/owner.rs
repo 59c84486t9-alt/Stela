@@ -7,6 +7,8 @@ use crate::{
     },
     system::{debug::halted::DebugMachine, state::SystemState},
 };
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
 
 /// Constructor key is private to this actual retained-owner module. Only it can
 /// supply actual resources to the canonical consumer's private-field container.

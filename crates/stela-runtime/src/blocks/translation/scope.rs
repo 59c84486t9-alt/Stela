@@ -19,7 +19,9 @@ use crate::{
         },
     },
 };
-use std::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 pub(super) struct InstalledContext {
     pub(super) snapshot: ControlSnapshot,
@@ -117,7 +119,7 @@ impl ControlCodeScope<'_> {
     }
 
     pub(crate) fn same_physical_owner(&self, physical: &PhysicalAddressSpace) -> bool {
-        std::ptr::eq(self.physical, physical)
+        core::ptr::eq(self.physical, physical)
     }
 
     pub(crate) fn retained_outer(&self) -> Option<&crate::memory::domain::MemoryExecutionLoan> {

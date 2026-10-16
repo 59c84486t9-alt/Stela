@@ -15,7 +15,7 @@ use super::{VECTOR_LIMBS, read_lane, write_lane};
 const PAIR_LANES: u32 = COMPONENTS as u32;
 
 fn pair(vector: &[u64; VECTOR_LIMBS], format: Format, first: u32) -> [u64; COMPONENTS] {
-    std::array::from_fn(|component| read_lane(vector, format.bits(), first + component as u32))
+    core::array::from_fn(|component| read_lane(vector, format.bits(), first + component as u32))
 }
 
 pub(super) fn complete(

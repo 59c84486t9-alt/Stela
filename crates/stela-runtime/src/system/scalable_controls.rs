@@ -4,6 +4,8 @@
 //! length and register contents. Every checked native entry re-evaluates source
 //! requirements while borrowing this owner through the synchronous callback.
 //! This module neither delivers exceptions nor certifies native memory safety.
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 mod features;
 pub mod fp;
 

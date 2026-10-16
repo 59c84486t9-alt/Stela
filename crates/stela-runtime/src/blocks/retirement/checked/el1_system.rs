@@ -1,5 +1,7 @@
 //! System register effects under the original canonical Active and retained PE.
 //! The native carrier finalizes first; staged effects never write PC themselves.
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 mod controls;
 use super::{
     Active, ConsumerKey, OwnedStop, SettledPrefix,

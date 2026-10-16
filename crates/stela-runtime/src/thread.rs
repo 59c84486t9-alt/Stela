@@ -14,9 +14,11 @@ use crate::{
     memory::DIRECT_RAM_USER_END,
     process,
 };
+use alloc::rc::Rc;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 use anyhow::{Result, ensure};
 use serde::Serialize;
-use std::rc::Rc;
 use stela_compiler::block::SynchronousTrap;
 
 pub const PROFILE_ID: &str = "darwin-host-thread-arm-tsd-v1";

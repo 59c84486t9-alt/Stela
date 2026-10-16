@@ -1,6 +1,8 @@
 //! Canonical post-native translation publication and base exception completion.
 //! The runtime's original physical pin survives ending BoundSource; the actual
 //! publisher revalidates that pin and retains its replacement before retirement.
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 mod services;
 use super::{
     Active, ConsumerKey, SettledPrefix,
@@ -353,7 +355,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                         .map(GuestAddress)
                         .map_err(|error| anyhow::anyhow!("actual exception effect: {error:?}"));
                     if let Some(report) = observation {
-                        report.effects = std::mem::take(&mut services.effects);
+                        report.effects = core::mem::take(&mut services.effects);
                         report.exception_result = Some(result);
                     }
                     next?

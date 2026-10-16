@@ -6,6 +6,8 @@ use crate::{
     execution::{context::ContextLoan, floating_environment::HostFloatingEnvironment, platform},
     system::execution::{Dispatcher, EntryBoundary, Failure},
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 use anyhow::{Result, ensure};
 use stela_compiler::{
     GuestAddress, GuestState,
@@ -139,7 +141,7 @@ pub(super) unsafe fn call(
                 let native_return = returned?;
                 ensure!(
                     loan.context().has_supported_header()
-                        && loan.context().memory == std::ptr::from_mut(view).cast(),
+                        && loan.context().memory == core::ptr::from_mut(view).cast(),
                     "actual checked context association changed after native call"
                 );
                 let status = MemoryStatus::from_code(view.fault_kind).ok_or_else(|| {

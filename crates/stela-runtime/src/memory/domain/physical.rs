@@ -41,12 +41,12 @@ pub(crate) enum PhysicalReadPlatformError {
     HostAlignment,
     UnsupportedHost,
 }
-impl std::fmt::Display for PhysicalReadPlatformError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for PhysicalReadPlatformError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "physical RAM platform refusal: {self:?}")
     }
 }
-impl std::error::Error for PhysicalReadPlatformError {}
+impl core::error::Error for PhysicalReadPlatformError {}
 
 pub(crate) struct PhysicalRamReadPin<'loan> {
     physical: &'loan PhysicalAddressSpace,
@@ -139,7 +139,7 @@ impl PhysicalAddressSpace {
     }
 
     fn check_reached(&self, reached: &PhysicalAccess) -> Result<(), PhysicalReadPlatformError> {
-        if !std::iter::once(reached.first())
+        if !core::iter::once(reached.first())
             .chain(reached._remaining.iter())
             .all(|span| span.view().is_current() && self.binding.owns_view(span.view()))
         {

@@ -13,6 +13,8 @@ use crate::{
         state::SystemState,
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{BlockExit, ExitKind},

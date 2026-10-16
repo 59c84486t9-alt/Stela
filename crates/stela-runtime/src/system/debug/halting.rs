@@ -16,6 +16,8 @@ use crate::system::pstate::{
 use crate::system::state::{
     PSTATE_EL_SHIFT, PSTATE_IL_MASK as PSTATE_IL, PSTATE_MODE_MASK, PSTATE_SS_MASK as PSTATE_SS,
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use stela_compiler::aarch64::system::exception::{self, DebugTarget, Operation};
 
 const PSTATE_BTYPE: u64 = 3 << 10;

@@ -412,12 +412,12 @@ fn complete_dot<'scratch>(
         stride,
     );
     let row_indices: [usize; DOT_SOURCE_GROUP_MAX] =
-        std::array::from_fn(|group| base + group * stride);
+        core::array::from_fn(|group| base + group * stride);
     let mut results = ZaResults::stage(scalable, &row_indices[..groups], scratch)?;
     for group in 0..groups {
         for element in 0..length / SINGLE_BYTES {
             let left = if operand.vertical {
-                std::array::from_fn(|term| {
+                core::array::from_fn(|term| {
                     read_lane(
                         &sources.left[term],
                         DOT_HALVES_PER_SINGLE * element + group,
@@ -425,7 +425,7 @@ fn complete_dot<'scratch>(
                     ) as u16
                 })
             } else {
-                std::array::from_fn(|term| {
+                core::array::from_fn(|term| {
                     read_lane(
                         &sources.left[group],
                         DOT_HALVES_PER_SINGLE * element + term,
@@ -434,7 +434,7 @@ fn complete_dot<'scratch>(
                 })
             };
             let selected = sources.selected_element(element);
-            let right = std::array::from_fn(|term| {
+            let right = core::array::from_fn(|term| {
                 read_lane(
                     sources.right(group),
                     DOT_HALVES_PER_SINGLE * selected + term,
@@ -472,7 +472,7 @@ fn complete_long<'scratch>(
     );
     let base = selected - selected % LONG_RESULT_ROWS;
     let row_indices: [usize; DOT_SOURCE_GROUP_MAX * LONG_RESULT_ROWS] =
-        std::array::from_fn(|index| {
+        core::array::from_fn(|index| {
             base + index / LONG_RESULT_ROWS * stride + index % LONG_RESULT_ROWS
         });
     let mut results =
@@ -610,14 +610,14 @@ fn complete_outer<'scratch>(
     for row in 0..dimension {
         if let Some(kind) = dot_kind {
             let input_bytes = operand.input.element_size().bytes();
-            let row_active = std::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
+            let row_active = core::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
                 outer_active(
                     &row_predicate,
                     OUTER_DOT_MEMBERS * row + member,
                     input_bytes,
                 )
             });
-            let mut row_pair = std::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
+            let mut row_pair = core::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
                 if row_active[member] {
                     read_lane(&left, OUTER_DOT_MEMBERS * row + member, input_bytes) as u16
                 } else {
@@ -632,7 +632,7 @@ fn complete_outer<'scratch>(
                 }
             }
             for column in 0..dimension {
-                let column_active = std::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
+                let column_active = core::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
                     outer_active(
                         &column_predicate,
                         OUTER_DOT_MEMBERS * column + member,
@@ -646,7 +646,7 @@ fn complete_outer<'scratch>(
                 // Mask each source independently. Negating masked +0 would
                 // change signed-zero behavior; only active left members above
                 // underwent the architectural subtraction transform.
-                let column_pair = std::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
+                let column_pair = core::array::from_fn::<_, OUTER_DOT_MEMBERS, _>(|member| {
                     if column_active[member] {
                         read_lane(&right, OUTER_DOT_MEMBERS * column + member, input_bytes) as u16
                     } else {

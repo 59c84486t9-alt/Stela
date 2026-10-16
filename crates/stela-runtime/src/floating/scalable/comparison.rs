@@ -1,4 +1,5 @@
 //! Complete one SVE FP comparison with staged vector sources and packed P output.
+
 use anyhow::anyhow;
 use stela_compiler::{
     GuestState,

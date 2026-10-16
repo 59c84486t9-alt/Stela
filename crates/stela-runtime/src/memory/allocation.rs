@@ -3,13 +3,19 @@
 //! Platform adapters normalize guest pages and parse guest flags. This leaf
 //! owns native placement, unpublished initialization and atomic metadata commit.
 
-use super::storage::{NativeMapping, NativeStorage};
+#[cfg(feature = "std")]
+use super::DIRECT_RAM_USER_END;
+#[cfg(feature = "std")]
+use super::storage::NativeMapping;
+use super::storage::NativeStorage;
 use super::{
-    Allocation, DIRECT_RAM_USER_END, MAX_FILE_MEMORY_BYTES, MAX_IMAGE_MEMORY_BYTES, MemoryRegion,
-    OwnedMemory, host_protection,
+    Allocation, MAX_FILE_MEMORY_BYTES, MAX_IMAGE_MEMORY_BYTES, MemoryRegion, OwnedMemory,
+    host_protection,
 };
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use serde::Serialize;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DataPermissions {
@@ -91,13 +97,13 @@ pub enum AllocateDataError {
     },
 }
 
-impl std::fmt::Display for AllocateDataError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AllocateDataError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "guest data allocation failed: {self:?}")
     }
 }
 
-impl std::error::Error for AllocateDataError {}
+impl core::error::Error for AllocateDataError {}
 
 impl OwnedMemory {
     /// Allocate and publish data before returning. A later platform copyout
@@ -264,7 +270,7 @@ enum AllocationServiceLoan<'a> {
     Borrowed(&'a super::domain::MemoryServiceLoan),
 }
 
-impl std::ops::Deref for AllocationServiceLoan<'_> {
+impl core::ops::Deref for AllocationServiceLoan<'_> {
     type Target = super::domain::MemoryServiceLoan;
 
     fn deref(&self) -> &Self::Target {
@@ -275,8 +281,8 @@ impl std::ops::Deref for AllocationServiceLoan<'_> {
     }
 }
 
-impl std::fmt::Debug for PendingDataAllocation<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for PendingDataAllocation<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PendingDataAllocation")
             .field("allocation", &self.allocation)
             .finish_non_exhaustive()
@@ -307,7 +313,7 @@ impl PendingDataAllocation<'_> {
         // SAFETY: this transaction owns fresh RW native storage; the source is
         // independent and no API lends references into the unpublished mapping.
         unsafe {
-            std::ptr::copy_nonoverlapping(
+            core::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
                 (self.allocation.guest_address as usize as *mut u8).add(offset),
                 bytes.len(),
@@ -329,7 +335,7 @@ impl PendingDataAllocation<'_> {
         // SAFETY: the transaction's raw storage is live RW and exclusively owned;
         // snapshot is independent, without any guest-memory Rust references.
         unsafe {
-            std::ptr::copy_nonoverlapping(
+            core::ptr::copy_nonoverlapping(
                 (self.allocation.guest_address as usize as *const u8).add(offset),
                 snapshot.as_mut_ptr(),
                 bytes,
@@ -338,6 +344,7 @@ impl PendingDataAllocation<'_> {
         Ok(snapshot)
     }
 
+    #[cfg(feature = "std")]
     pub fn publish(self) -> Result<DataAllocation, AllocateDataError> {
         self.publish_with(|base, bytes, protection| {
             // SAFETY: the transaction exclusively owns this complete mapping.
@@ -354,6 +361,11 @@ impl PendingDataAllocation<'_> {
                 Err(std::io::Error::last_os_error().raw_os_error())
             }
         })
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn publish(self) -> Result<DataAllocation, AllocateDataError> {
+        Err(AllocateDataError::UnsupportedPlatform)
     }
 
     fn publish_with(
@@ -469,36 +481,50 @@ impl PendingDataAllocation<'_> {
 }
 
 struct NewMapping {
+    #[cfg(not(feature = "std"))]
+    _unmounted: core::convert::Infallible,
     base: u64,
     bytes: u64,
 }
 
 impl NewMapping {
+    #[cfg(feature = "std")]
     fn into_storage(self) -> Arc<NativeStorage> {
         // SAFETY: native placement/trim checked this complete fresh RW extent;
         // initialization is serialized and exposes no Rust guest references.
         let mapping = unsafe {
             NativeMapping::adopt(
-                std::ptr::NonNull::new(self.base as usize as *mut u8)
+                core::ptr::NonNull::new(self.base as usize as *mut u8)
                     .expect("native placement rejects zero"),
                 self.bytes as usize,
             )
         };
         // The single unmap obligation moved into NativeMapping above.
-        std::mem::forget(self);
+        core::mem::forget(self);
         NativeStorage::anonymous(mapping)
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn into_storage(self) -> Arc<NativeStorage> {
+        match self._unmounted {}
     }
 }
 
 impl Drop for NewMapping {
+    #[cfg(feature = "std")]
     fn drop(&mut self) {
         // SAFETY: this exact newly created extent remains exclusively owned.
         unsafe {
             libc::munmap(self.base as usize as *mut libc::c_void, self.bytes as usize);
         }
     }
+    #[cfg(not(feature = "std"))]
+    fn drop(&mut self) {
+        match self._unmounted {}
+    }
 }
 
+#[cfg(feature = "std")]
 fn map_anonymous(
     placement: DataPlacement,
     bytes: u64,
@@ -617,6 +643,17 @@ fn map_anonymous(
         mapping.bytes -= suffix;
     }
     Ok(mapping)
+}
+
+#[cfg(not(feature = "std"))]
+fn map_anonymous(
+    placement: DataPlacement,
+    bytes: u64,
+    alignment: u64,
+    page: u64,
+) -> Result<NewMapping, AllocateDataError> {
+    let _ = (placement, bytes, alignment, page);
+    Err(AllocateDataError::UnsupportedPlatform)
 }
 
 #[cfg(all(

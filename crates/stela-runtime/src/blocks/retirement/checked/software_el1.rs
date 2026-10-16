@@ -31,7 +31,10 @@ use crate::{
         },
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::ToOwned, string::String, string::ToString, vec::Vec};
 use anyhow::{Result, ensure};
+#[cfg(feature = "std")]
 use std::path::PathBuf;
 use stela_compiler::{
     GuestAddress,
@@ -75,6 +78,7 @@ impl SoftwareEl1Profile {
 /// protected here; no caller-owned MemorySystem, mapping or PE is accepted.
 pub struct SoftwareEl1Config {
     pub profile: SoftwareEl1Profile,
+    #[cfg(feature = "std")]
     pub cache_directory: PathBuf,
     pub ram: SourceRamDeclaration,
     pub thread: ThreadState,
@@ -203,7 +207,7 @@ fn declared_profile(platform: Option<&El1PlatformControls>) -> Result<ControlPro
     };
     let mut bytes = [0; 32];
     for (index, pair) in digest.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        let value = std::str::from_utf8(pair)?;
+        let value = core::str::from_utf8(pair)?;
         bytes[index] = u8::from_str_radix(value, 16)?;
     }
     let evidence = EvidenceBinding {
@@ -283,6 +287,7 @@ impl SoftwareEl1Machine {
     ) -> Result<Self> {
         let SoftwareEl1Config {
             profile,
+            #[cfg(feature = "std")]
             cache_directory,
             ram,
             thread,
@@ -316,6 +321,7 @@ impl SoftwareEl1Machine {
         };
         Self::from_materialized(
             profile,
+            #[cfg(feature = "std")]
             cache_directory,
             thread,
             system,
@@ -330,7 +336,7 @@ impl SoftwareEl1Machine {
     // only the genuine fresh source-RAM factory can provide this storage owner.
     fn from_materialized(
         profile: SoftwareEl1Profile,
-        cache_directory: PathBuf,
+        #[cfg(feature = "std")] cache_directory: PathBuf,
         thread: ThreadState,
         system: SystemState,
         translation: RegisterValues,
@@ -437,12 +443,16 @@ impl SoftwareEl1Machine {
                 },
             )
         }?;
+        #[cfg(feature = "std")]
         let runtime = BlockRuntime::new_for_target(
             address_space,
+            #[cfg(feature = "std")]
             cache_directory,
             profile.compiler(),
             target,
         );
+        #[cfg(not(feature = "std"))]
+        let runtime = BlockRuntime::new_aot_for_target(address_space, profile.compiler(), target);
         // SAFETY: all physical/source storage was freshly allocated above and
         // is exclusively owned here. No raw alias, DMA, external writer or PE
         // exists. This transfers the sole Initial publication owner once.
@@ -930,7 +940,7 @@ mod platform_tests {
         // SAFETY: stable fully initialized784-byte native ABI, observation only.
         unsafe {
             std::slice::from_raw_parts(
-                std::ptr::from_ref(state).cast(),
+                core::ptr::from_ref(state).cast(),
                 size_of::<stela_compiler::GuestState>(),
             )
         }

@@ -90,25 +90,25 @@ pub(super) unsafe fn read_part(
         // Both Intel and AMD guarantee these cached Normal-WB reads atomically.
         unsafe {
             match bytes {
-                BYTE_BYTES => std::arch::asm!(
+                BYTE_BYTES => core::arch::asm!(
                     "movzx {value:e}, byte ptr [{pointer}]",
                     value = out(reg) value,
                     pointer = in(reg) pointer,
                     options(nostack, preserves_flags),
                 ),
-                HALFWORD_BYTES => std::arch::asm!(
+                HALFWORD_BYTES => core::arch::asm!(
                     "movzx {value:e}, word ptr [{pointer}]",
                     value = out(reg) value,
                     pointer = in(reg) pointer,
                     options(nostack, preserves_flags),
                 ),
-                WORD_BYTES => std::arch::asm!(
+                WORD_BYTES => core::arch::asm!(
                     "mov {value:e}, dword ptr [{pointer}]",
                     value = out(reg) value,
                     pointer = in(reg) pointer,
                     options(nostack, preserves_flags),
                 ),
-                DOUBLEWORD_BYTES => std::arch::asm!(
+                DOUBLEWORD_BYTES => core::arch::asm!(
                     "mov {value}, qword ptr [{pointer}]",
                     value = out(reg) value,
                     pointer = in(reg) pointer,
@@ -191,7 +191,7 @@ pub(super) unsafe fn exchange_part(
         let old = match bytes {
             BYTE_BYTES => {
                 let mut old = value as u8;
-                std::arch::asm!(
+                core::arch::asm!(
                     "xchg byte ptr [{pointer}], {value}",
                     pointer = in(reg) pointer,
                     value = inout(reg_byte) old,
@@ -201,7 +201,7 @@ pub(super) unsafe fn exchange_part(
             }
             HALFWORD_BYTES => {
                 let mut old = value as u64;
-                std::arch::asm!(
+                core::arch::asm!(
                     "xchg word ptr [{pointer}], {value:x}",
                     pointer = in(reg) pointer,
                     value = inout(reg) old,
@@ -211,7 +211,7 @@ pub(super) unsafe fn exchange_part(
             }
             WORD_BYTES => {
                 let mut old = value as u64;
-                std::arch::asm!(
+                core::arch::asm!(
                     "xchg dword ptr [{pointer}], {value:e}",
                     pointer = in(reg) pointer,
                     value = inout(reg) old,
@@ -221,7 +221,7 @@ pub(super) unsafe fn exchange_part(
             }
             DOUBLEWORD_BYTES => {
                 let mut old = value as u64;
-                std::arch::asm!(
+                core::arch::asm!(
                     "xchg qword ptr [{pointer}], {value}",
                     pointer = in(reg) pointer,
                     value = inout(reg) old,
@@ -248,7 +248,7 @@ unsafe fn read_quadword(pointer: *const u8) -> u128 {
     // Legacy SSE2 MOVDQA needs no OS AVX state; the checked AVX hardware bit
     // establishes this load's atomicity independently of usable AVX arithmetic.
     unsafe {
-        std::arch::asm!(
+        core::arch::asm!(
             "movdqa xmm0, xmmword ptr [{pointer}]",
             "movq {low}, xmm0",
             "psrldq xmm0, {half_bytes}",
@@ -271,7 +271,7 @@ unsafe fn write_quadword(pointer: *mut u8, value: u128) {
     // compare acquires the next expected value; no torn initial read is needed.
     // LLVM reserves RBX, so save and restore it inside the assembly statement.
     unsafe {
-        std::arch::asm!(
+        core::arch::asm!(
             "mov r9, rbx",
             "mov rbx, r8",
             "2:",

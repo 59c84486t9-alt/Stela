@@ -4,7 +4,7 @@
 //! registry port are not replaced by stubs here. No Config, copied translation,
 //! logical-domain address, retirement token or host pointer can mint this loan.
 
-use std::sync::MutexGuard;
+use crate::platform::sync::MutexGuard;
 
 use super::{M0Read64Intent, MetadataFailure};
 use crate::{
@@ -231,7 +231,7 @@ pub(super) unsafe fn read_host_ram8(pointer: *const u8) -> u64 {
     // aligned RAM quantity. The qword MOV uses no wider host snapshot and writes
     // no RAM. Neither fences nor MOV modify flags, MXCSR or undeclared registers.
     unsafe {
-        std::arch::asm!(
+        core::arch::asm!(
             "mfence",
             "mov {value}, qword ptr [{pointer}]",
             "mfence",

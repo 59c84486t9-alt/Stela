@@ -31,10 +31,10 @@ pub enum CompletionError {
     UnsupportedControl(UnsupportedControl),
 }
 
-impl std::fmt::Display for CompletionError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for CompletionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::State(error) => std::fmt::Display::fmt(error, formatter),
+            Self::State(error) => core::fmt::Display::fmt(error, formatter),
             Self::UnsupportedControl(control) => write!(
                 formatter,
                 "numerical exception enables are unsupported: {:#x}",
@@ -44,8 +44,8 @@ impl std::fmt::Display for CompletionError {
     }
 }
 
-impl std::error::Error for CompletionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for CompletionError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::State(error) => Some(error.as_ref()),
             Self::UnsupportedControl(_) => None,

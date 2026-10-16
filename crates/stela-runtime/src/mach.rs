@@ -5,6 +5,8 @@ use crate::{
     blocks::ThreadState,
     darwin::{SYSCALL_SELECTOR_REGISTER, validate_trap_parts},
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use stela_compiler::block::SynchronousTrap;

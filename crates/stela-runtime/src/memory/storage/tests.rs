@@ -165,6 +165,10 @@ fn canonical_backing_retains_both_publication_aliases_and_file() {
     let storage = Arc::clone(&region.storage);
     let guest = storage.primary_base();
     let publisher = storage.publisher_base().unwrap();
+    let bytes = storage.bytes();
+    let primary_retirement = Arc::clone(&storage.primary.retirement);
+    let publisher_retirement = Arc::clone(&storage.publisher.as_ref().unwrap().retirement);
+    let retained_storage = Arc::downgrade(&storage);
     let descriptor = std::os::fd::AsRawFd::as_raw_fd(storage._file.as_ref().unwrap());
     assert_eq!(storage.kind(), StorageKind::PublishedAliases);
     // SAFETY: same private-file aliases retained together; host authority uses
@@ -193,6 +197,8 @@ fn canonical_backing_retains_both_publication_aliases_and_file() {
     .unwrap();
     assert!(Arc::ptr_eq(first.backing(), alias.backing()));
     drop(region);
+    assert!(retained_storage.upgrade().is_some());
+    assert!(primary_retirement.get().is_none() && publisher_retirement.get().is_none());
     assert!(mapped(guest) && mapped(publisher));
     assert_ne!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
     let pointer = backing.host_pointer(0, 1, AccessKind::Write).unwrap();
@@ -200,8 +206,31 @@ fn canonical_backing_retains_both_publication_aliases_and_file() {
     assert_eq!(unsafe { guest.as_ptr().read() }, 0x42);
     drop(first);
     drop(alias);
+    assert!(retained_storage.upgrade().is_some());
+    assert!(primary_retirement.get().is_none() && publisher_retirement.get().is_none());
     drop(backing);
-    assert!(!mapped(guest) && !mapped(publisher));
+    assert!(retained_storage.upgrade().is_none());
+    // Another parallel test may immediately reuse either released address.
+    // Observe THIS owner's actual successful unmaps and their exact extents,
+    // rather than make a process-global post-release occupancy assertion.
+    assert_eq!(
+        primary_retirement.get(),
+        Some(&MappingRetirement {
+            base: guest.as_ptr() as usize,
+            bytes,
+            status: 0,
+            os_error: None,
+        })
+    );
+    assert_eq!(
+        publisher_retirement.get(),
+        Some(&MappingRetirement {
+            base: publisher.as_ptr() as usize,
+            bytes,
+            status: 0,
+            os_error: None,
+        })
+    );
 }
 
 #[test]

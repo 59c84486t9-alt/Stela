@@ -1,4 +1,5 @@
 //! Transactional SME2 floating-point completion for aligned Z-register groups.
+
 use anyhow::anyhow;
 use stela_compiler::{
     GuestState,

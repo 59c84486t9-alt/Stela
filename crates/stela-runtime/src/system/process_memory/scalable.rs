@@ -121,7 +121,7 @@ impl FixedProcessMemoryControls {
         let identification = self
             .identification_snapshot()
             .ok_or(ScalableExecutionError::MissingIdentificationSnapshot { pc })?;
-        if !std::ptr::eq(identification, access.identification_snapshot()) {
+        if !core::ptr::eq(identification, access.identification_snapshot()) {
             return Err(ScalableExecutionError::WrongIdentificationSnapshot { pc });
         }
         // Pin this actual domain before validating its source generation.

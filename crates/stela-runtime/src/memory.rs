@@ -6,6 +6,8 @@
 //! Opt-in binding retains actual storage in one canonical physical domain.
 //! Serialized service loans govern snapshots, publication and mapping changes.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 mod access;
 mod allocation;
 mod binding;
@@ -25,15 +27,20 @@ pub mod tag_store;
 pub mod tag_transfer;
 pub mod tags;
 
+#[cfg(feature = "std")]
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
+use alloc::sync::Arc;
 use anyhow::{Context, Result, bail, ensure};
+use core::marker::PhantomData;
 use serde::Serialize;
-use std::collections::BTreeMap;
+#[cfg(feature = "std")]
 use std::fs::File;
-use std::marker::PhantomData;
+#[cfg(feature = "std")]
 use std::os::fd::AsRawFd;
-use std::rc::Rc;
-use std::sync::Arc;
-use storage::{NativeMapping, NativeStorage};
+#[cfg(feature = "std")]
+use storage::NativeMapping;
+use storage::NativeStorage;
 
 pub use allocation::{
     AllocateDataError, AllocateDataRequest, AllocationOperation, DataAllocation, DataInheritance,
@@ -67,6 +74,7 @@ pub struct MemoryRegionSpec {
 /// from modifying the file; it does not freeze unrelated writes/truncation to
 /// that inode. Source identity, provenance and stability for the entire mapping
 /// lifetime are the caller's responsibility. Truncation can cause native faults.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct FileMemoryRegionSpec {
     pub guest_address: u64,
@@ -78,11 +86,13 @@ pub struct FileMemoryRegionSpec {
     pub executable: bool,
 }
 
+#[cfg(feature = "std")]
 enum InitialMemory {
     Anonymous(Vec<u8>),
     File { file: File, offset: u64 },
 }
 
+#[cfg(feature = "std")]
 struct MappingSpec {
     guest_address: u64,
     virtual_bytes: u64,
@@ -92,6 +102,7 @@ struct MappingSpec {
     initial: InitialMemory,
 }
 
+#[cfg(feature = "std")]
 impl From<MemoryRegionSpec> for MappingSpec {
     fn from(spec: MemoryRegionSpec) -> Self {
         Self {
@@ -105,6 +116,7 @@ impl From<MemoryRegionSpec> for MappingSpec {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<FileMemoryRegionSpec> for MappingSpec {
     fn from(spec: FileMemoryRegionSpec) -> Self {
         Self {
@@ -167,6 +179,8 @@ struct Allocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtectionError {
     InvalidRange,
+    #[cfg(not(feature = "std"))]
+    PlatformUnavailable,
     UnmappedRange,
     MaximumProtection,
     ExecutableRegion,
@@ -179,12 +193,12 @@ pub enum ProtectionError {
         rollback_succeeded: bool,
     },
 }
-impl std::fmt::Display for ProtectionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ProtectionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "guest data protection failed: {self:?}")
     }
 }
-impl std::error::Error for ProtectionError {}
+impl core::error::Error for ProtectionError {}
 
 /// Private, non-shareable mappings with retained native storage lifetimes.
 ///
@@ -203,6 +217,7 @@ pub struct OwnedMemory {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+#[cfg(feature = "std")]
 pub fn host_page_size() -> Result<usize> {
     // SAFETY: sysconf has no pointer arguments or mutable Rust state.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -210,6 +225,11 @@ pub fn host_page_size() -> Result<usize> {
     let page = usize::try_from(page)?;
     ensure!(page.is_power_of_two(), "unsupported host page size");
     Ok(page)
+}
+
+#[cfg(not(feature = "std"))]
+pub fn host_page_size() -> Result<usize> {
+    anyhow::bail!("freestanding physical page allocator is not mounted")
 }
 
 fn page_rounded(bytes: u64, page: u64) -> Result<u64> {
@@ -220,6 +240,7 @@ fn page_rounded(bytes: u64, page: u64) -> Result<u64> {
 }
 
 impl OwnedMemory {
+    #[cfg(feature = "std")]
     pub fn map(specs: Vec<MemoryRegionSpec>) -> Result<Self> {
         Self::map_specs(
             specs.into_iter().map(MappingSpec::from).collect(),
@@ -228,6 +249,13 @@ impl OwnedMemory {
         )
     }
 
+    #[cfg(not(feature = "std"))]
+    pub fn map(specs: Vec<MemoryRegionSpec>) -> Result<Self> {
+        let _ = specs;
+        anyhow::bail!("freestanding guest RAM mappings are not mounted")
+    }
+
+    #[cfg(feature = "std")]
     pub fn map_with_data_limits(
         specs: Vec<MemoryRegionSpec>,
         limits: Vec<DataProtectionLimit>,
@@ -264,6 +292,15 @@ impl OwnedMemory {
         )
     }
 
+    #[cfg(not(feature = "std"))]
+    pub fn map_with_data_limits(
+        specs: Vec<MemoryRegionSpec>,
+        limits: Vec<DataProtectionLimit>,
+    ) -> Result<Self> {
+        let _ = (specs, limits);
+        anyhow::bail!("freestanding guest RAM mappings are not mounted")
+    }
+
     /// Map owned file-backed regions without copying their contents.
     ///
     /// # Safety
@@ -273,6 +310,7 @@ impl OwnedMemory {
     /// private COW writes through this owner do not modify the backing inode.
     /// Retained File handles and pre/post hashes cannot enforce this condition.
     /// Changing a pathname to name another inode does not change the mapped one.
+    #[cfg(feature = "std")]
     pub unsafe fn map_files(specs: Vec<FileMemoryRegionSpec>) -> Result<Self> {
         Self::map_specs(
             specs.into_iter().map(MappingSpec::from).collect(),
@@ -281,6 +319,7 @@ impl OwnedMemory {
         )
     }
 
+    #[cfg(feature = "std")]
     fn map_specs(
         mut specs: Vec<MappingSpec>,
         limit: u64,
@@ -426,7 +465,7 @@ impl OwnedMemory {
             // coherent Normal-WB storage and no escaping guest references.
             let native = unsafe {
                 NativeMapping::adopt(
-                    std::ptr::NonNull::new(mapped.cast()).expect("nonzero exact mapping"),
+                    core::ptr::NonNull::new(mapped.cast()).expect("nonzero exact mapping"),
                     length,
                 )
             };
@@ -464,7 +503,11 @@ impl OwnedMemory {
                 // SAFETY: this exact anonymous allocation is RW, bytes fit,
                 // and the independent source Vec cannot overlap it.
                 unsafe {
-                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.cast::<u8>(), bytes.len());
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        mapped.cast::<u8>(),
+                        bytes.len(),
+                    );
                 }
                 // Anonymous mmap supplies zeros for the virtual tail.
             }
@@ -497,13 +540,14 @@ impl OwnedMemory {
     /// may be protected but remains outside logical byte-access bounds. Source
     /// snapshots require coordinated invalidation and are explicitly declined.
     /// Caller excludes all concurrent translated execution during this operation.
+    #[cfg(feature = "std")]
     pub fn protect_data(
         &mut self,
         address: u64,
         bytes: u64,
         readable: bool,
         writable: bool,
-    ) -> std::result::Result<(), ProtectionError> {
+    ) -> core::result::Result<(), ProtectionError> {
         self.protect_data_with(
             address,
             bytes,
@@ -527,14 +571,26 @@ impl OwnedMemory {
         )
     }
 
+    #[cfg(not(feature = "std"))]
+    pub fn protect_data(
+        &mut self,
+        address: u64,
+        bytes: u64,
+        readable: bool,
+        writable: bool,
+    ) -> core::result::Result<(), ProtectionError> {
+        let _ = (address, bytes, readable, writable);
+        Err(ProtectionError::PlatformUnavailable)
+    }
+
     fn protect_data_with(
         &mut self,
         address: u64,
         bytes: u64,
         readable: bool,
         writable: bool,
-        protect: impl FnMut(u64, u64, i32) -> std::result::Result<(), Option<i32>>,
-    ) -> std::result::Result<(), ProtectionError> {
+        protect: impl FnMut(u64, u64, i32) -> core::result::Result<(), Option<i32>>,
+    ) -> core::result::Result<(), ProtectionError> {
         self.protect_data_with_service(address, bytes, readable, writable, None, protect)
     }
 
@@ -546,8 +602,8 @@ impl OwnedMemory {
         readable: bool,
         writable: bool,
         service: Option<&domain::MemoryServiceLoan>,
-        mut protect: impl FnMut(u64, u64, i32) -> std::result::Result<(), Option<i32>>,
-    ) -> std::result::Result<(), ProtectionError> {
+        mut protect: impl FnMut(u64, u64, i32) -> core::result::Result<(), Option<i32>>,
+    ) -> core::result::Result<(), ProtectionError> {
         use ProtectionError as E;
         if let Some(loan) = service {
             let shared = self.shared.as_ref().ok_or(E::SharedDomainBound)?;
@@ -735,7 +791,7 @@ impl OwnedMemory {
             // destination is independent, and this owner cannot cross threads.
             // Each copy stays within one mmap allocation.
             unsafe {
-                std::ptr::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     start as usize as *const u8,
                     bytes.as_mut_ptr().add(offset),
                     count,
@@ -756,7 +812,7 @@ impl OwnedMemory {
             // callers cannot obtain references into these allocations safely.
             // Each copy stays within one mmap allocation.
             unsafe {
-                std::ptr::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     bytes.as_ptr().add(offset),
                     start as usize as *mut u8,
                     count,
@@ -781,12 +837,18 @@ impl OwnedMemory {
     }
 }
 
+#[cfg(feature = "std")]
 fn host_protection(readable: bool, writable: bool) -> i32 {
     (if readable {
         libc::PROT_READ
     } else {
         libc::PROT_NONE
     }) | (if writable { libc::PROT_WRITE } else { 0 })
+}
+
+#[cfg(not(feature = "std"))]
+fn host_protection(readable: bool, writable: bool) -> i32 {
+    (if readable { 1 } else { 0 }) | (if writable { 2 } else { 0 })
 }
 /// Runtime-published data with a permanently read-only, non-executable guest
 /// view and an unexposed writable alias. Publication and translated accesses
@@ -799,8 +861,8 @@ pub struct PublishedReadOnlyRegion {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
-impl std::fmt::Debug for PublishedReadOnlyRegion {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for PublishedReadOnlyRegion {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("PublishedReadOnlyRegion")
             .field("region", &self.region)
@@ -811,6 +873,7 @@ impl std::fmt::Debug for PublishedReadOnlyRegion {
 impl PublishedReadOnlyRegion {
     /// Create a private unlinked backing object; no external file descriptor,
     /// writable guest address or Rust reference into either mapping escapes.
+    #[cfg(feature = "std")]
     pub fn map(guest_base: u64, initial: &[u8]) -> Result<Self> {
         use std::io::Write;
         ensure!(
@@ -866,14 +929,14 @@ impl PublishedReadOnlyRegion {
         // native accesses remain serialized and no guest references escape.
         let guest_mapping = unsafe {
             NativeMapping::adopt(
-                std::ptr::NonNull::new(guest.cast()).expect("nonzero exact mapping"),
+                core::ptr::NonNull::new(guest.cast()).expect("nonzero exact mapping"),
                 bytes as usize,
             )
         };
         // SAFETY: the kernel chooses a separate new mapping of the owned backing.
         let publisher = unsafe {
             libc::mmap(
-                std::ptr::null_mut(),
+                core::ptr::null_mut(),
                 bytes as usize,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
@@ -886,7 +949,7 @@ impl PublishedReadOnlyRegion {
             // The retained guest-mapping guard rolls back this failed pair.
             return Err(error).context("cannot map runtime publication alias");
         }
-        let Some(publisher_mapping) = std::ptr::NonNull::new(publisher) else {
+        let Some(publisher_mapping) = core::ptr::NonNull::new(publisher) else {
             // SAFETY: release only this newly created null publisher alias;
             // the retained guest guard rolls back the other mapping.
             unsafe { libc::munmap(publisher, bytes as usize) };
@@ -918,6 +981,12 @@ impl PublishedReadOnlyRegion {
         })
     }
 
+    #[cfg(not(feature = "std"))]
+    pub fn map(guest_base: u64, initial: &[u8]) -> Result<Self> {
+        let _ = (guest_base, initial);
+        anyhow::bail!("freestanding publication aliases are not mounted")
+    }
+
     pub fn region(&self) -> &MemoryRegion {
         &self.region
     }
@@ -947,7 +1016,7 @@ impl PublishedReadOnlyRegion {
         // SAFETY: live RO mapping, bounded copy, independent owned destination;
         // publication cannot run concurrently through this non-Send/Sync owner.
         unsafe {
-            std::ptr::copy_nonoverlapping(
+            core::ptr::copy_nonoverlapping(
                 (self.region.guest_address as usize as *const u8).add(offset),
                 result.as_mut_ptr(),
                 bytes,
@@ -975,7 +1044,7 @@ impl PublishedReadOnlyRegion {
         // SAFETY: private live RW alias and fully checked extent. No guest code
         // may execute concurrently, and safe APIs expose no mapping references.
         unsafe {
-            std::ptr::copy_nonoverlapping(
+            core::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
                 self.storage
                     .publisher_base()
@@ -1015,7 +1084,7 @@ mod tests {
         // SAFETY: a temporary ordinary anonymous mapping.
         let pointer = unsafe {
             libc::mmap(
-                std::ptr::null_mut(),
+                core::ptr::null_mut(),
                 size,
                 libc::PROT_NONE,
                 libc::MAP_ANON | libc::MAP_PRIVATE,

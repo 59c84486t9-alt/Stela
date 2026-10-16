@@ -242,7 +242,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                     if order == MemoryOrder::AcquireRcsc {
                         // Conservative checked x86 WB recipe. Inspect/compare
                         // actual emitted fences before optimizing this mapping.
-                        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                     }
                     // SAFETY: exact requested part plus read envelope is live;
                     // no Rust RAM reference exists; actual host caps are checked.

@@ -4,6 +4,8 @@
 //! owner resolves each actually reached atomic part, checks tags and publishes
 //! writes through the shared reservation domain. It does not interpret opcodes.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 #[path = "domain/scalar.rs"]
 mod scalar;
 pub use scalar::{MemoryFault, MemoryReader};
@@ -32,12 +34,14 @@ pub(crate) mod m0_write;
 #[path = "domain/physical.rs"]
 pub(crate) mod physical;
 
+use crate::platform::sync::Mutex;
 use crate::system::events::{EventEndpoint, EventProducer};
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap as HashMap;
+use alloc::sync::{Arc, Weak};
+use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "std")]
 use std::collections::HashMap;
-use std::sync::{
-    Arc, Mutex, Weak,
-    atomic::{AtomicBool, Ordering},
-};
 
 use stela_compiler::{
     TargetCpu,
@@ -279,7 +283,7 @@ impl MemoryDomain {
         target: TargetCpu,
         role: DomainRole,
     ) -> Result<Arc<Self>, MemoryStatus> {
-        if !target.supported() {
+        if !crate::platform::cpu::admitted(target) {
             return Err(MemoryStatus::Unsupported);
         }
         views.sort_unstable_by_key(|(view, _)| view.guest_base());
@@ -731,7 +735,7 @@ impl<P: DataPolicy> MemoryThread<P> {
             version: MEMORY_CONTEXT_VERSION,
             bytes: MEMORY_CONTEXT_BYTES,
             callback: dispatch::<P>,
-            opaque: std::ptr::from_mut(self).cast(),
+            opaque: core::ptr::from_mut(self).cast(),
             fault_kind: MemoryStatus::Success as u32,
             reserved: 0,
             fault_address: 0,
@@ -741,7 +745,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         };
         let result = callback(&mut view);
         #[cfg(test)]
-        if std::mem::take(&mut self.post_body_failure_once) {
+        if core::mem::take(&mut self.post_body_failure_once) {
             self.domain.system.failed.store(true, Ordering::Release);
         }
         let finalization = MemoryStatus::from_code(view.fault_kind)
@@ -814,7 +818,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 let mut bytes = [0_u8; SCA_BYTES];
                 // SAFETY: the invocation contract grants exact private staging.
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
+                    core::ptr::copy_nonoverlapping(
                         request.data.add(part.offset),
                         bytes.as_mut_ptr(),
                         part.bytes,
@@ -891,7 +895,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 let bytes = value.to_le_bytes();
                 // SAFETY: destination is private staging, not architectural RAM.
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
+                    core::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
                         request.data.add(part.offset),
                         part.bytes,
@@ -930,7 +934,7 @@ unsafe extern "C" fn dispatch<P: DataPolicy>(
     }
     // SAFETY: with_view binds this exact monomorphized owner for the invocation.
     let owner = unsafe { &mut *view.opaque.cast::<MemoryThread<P>>() };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = crate::platform::unwind::invoke(core::panic::AssertUnwindSafe(|| {
         // SAFETY: dispatch inherits the valid private staging contract.
         unsafe { owner.transfer(view, request) }
     }));

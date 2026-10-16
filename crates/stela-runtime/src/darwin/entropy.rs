@@ -11,6 +11,8 @@ use super::{
     copyout,
 };
 use crate::{blocks::ThreadState, memory::OwnedMemory};
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::ToOwned, string::ToString};
 use anyhow::{Result, ensure};
 use std::io;
 use stela_compiler::block::SynchronousTrap;

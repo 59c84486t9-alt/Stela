@@ -1,37 +1,64 @@
 //! Persistent AOT storage and serialized native leaf/basic-block execution.
 //! Full application launch, platform ABI and Mach-O linking remain future work.
+#![cfg_attr(not(feature = "std"), no_std)]
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::ToOwned, string::String};
+#[macro_use]
+extern crate alloc;
+#[cfg(all(not(feature = "std"), not(panic = "abort")))]
+compile_error!(
+    "freestanding runtime requires aborting panic; platform must terminate the machine on panic"
+);
 pub mod blocks;
 pub mod clock;
 pub mod commpage;
 pub mod darwin;
+#[cfg(feature = "std")]
 pub mod dispatch;
 pub mod execution;
 mod floating;
 pub mod mach;
 pub mod memory;
 pub mod pauth;
+mod platform;
 pub mod process;
 pub mod scalable;
 pub mod system;
 pub mod thread;
-use anyhow::{Context, Result, ensure};
+#[cfg(feature = "std")]
+use anyhow::ensure;
+use anyhow::{Context, Result};
 use serde::Serialize;
+#[cfg(feature = "std")]
 use std::io::Read;
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "std")]
 use std::sync::OnceLock;
-use stela_compiler::{GuestAddress, NATIVE_ABI, NativeBlock};
-use stela_core::{sha256, write_json};
+use stela_compiler::GuestAddress;
+#[cfg(feature = "std")]
+use stela_compiler::{NATIVE_ABI, NativeBlock};
+use stela_core::sha256;
+#[cfg(feature = "std")]
+use stela_core::write_json;
 
 // The compiler material is immutable for this executable. Reuse its exact
 // digest across preparation and loading without weakening artifact validation.
+#[cfg(feature = "std")]
 fn compiler_source_sha256() -> &'static str {
     static FINGERPRINT: OnceLock<String> = OnceLock::new();
     FINGERPRINT.get_or_init(|| sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()))
 }
 
-const MAX_CACHE_NATIVE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_CACHE_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(not(feature = "std"))]
+fn compiler_source_sha256() -> String {
+    sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes())
+}
 
+#[cfg(feature = "std")]
+use artifact::prepare::{MAX_CACHE_MANIFEST_BYTES, MAX_CACHE_NATIVE_BYTES};
+
+#[cfg(feature = "std")]
 fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
     ensure!(
@@ -67,10 +94,12 @@ fn memory_specialization_sha256(
 pub struct Prepared {
     pub key: String,
     pub cache_hit: bool,
+    #[cfg(feature = "std")]
     pub directory: PathBuf,
     pub manifest: Manifest,
 }
 
+#[cfg(feature = "std")]
 fn validate(
     directory: &Path,
     identity: &Identity,
@@ -82,41 +111,26 @@ fn validate(
         &directory.join("manifest.sha256.json"),
         1024,
     )?)?;
-    ensure!(
-        sha256(&manifest_bytes) == expected,
-        "cached manifest checksum mismatch"
-    );
+    artifact::prepare::validate_manifest_bytes(&manifest_bytes, &expected)?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
     ensure!(
         manifest.identity.memory_specialization_sha256
             == memory_specialization_sha256(profile, manifest.memory_requirements)?,
         "cached memory specialization differs from complete requirements"
     );
-    ensure!(
-        manifest.memory_requirements == memory_requirements,
-        "cached memory requirements differ from freshly decoded source"
-    );
-    ensure!(
-        manifest.identity == *identity,
-        "cached source/compiler/ABI identity mismatch"
-    );
-    ensure!(
-        manifest.native_bytes > 0 && manifest.native_bytes <= MAX_CACHE_NATIVE_BYTES,
-        "invalid cached native code size"
-    );
+    artifact::prepare::validate_preparation_metadata(&manifest, identity, memory_requirements)?;
     let native = bounded_file(&directory.join("native.bin"), MAX_CACHE_NATIVE_BYTES)?;
-    artifact::validate_native_snapshot(&manifest, &native)
+    artifact::prepare::validate_preparation_native(&manifest, &native)
         .context("cached native code checksum mismatch")?;
-    ensure!(
-        !manifest.verified,
-        "cache metadata cannot attest to verification"
-    );
+    artifact::prepare::validate_preparation_claim(&manifest)?;
     Ok(manifest)
 }
 
+#[cfg(feature = "std")]
 pub fn prepare_leaf(source: &[u8], base: GuestAddress, root: &Path) -> Result<Prepared> {
     prepare_leaf_for_target(source, base, root, stela_compiler::TargetCpu::detect())
 }
+#[cfg(feature = "std")]
 pub fn prepare_leaf_for_target(
     source: &[u8],
     base: GuestAddress,
@@ -149,6 +163,7 @@ pub struct PreparedBlock {
 
 /// Decode the consumed prefix to identify it before looking up persistent AOT.
 /// A disk hit avoids code generation; source extent still requires decoding.
+#[cfg(feature = "std")]
 pub fn prepare_block(source: &[u8], base: GuestAddress, root: &Path) -> Result<PreparedBlock> {
     prepare_block_with_profile(
         source,
@@ -160,6 +175,7 @@ pub fn prepare_block(source: &[u8], base: GuestAddress, root: &Path) -> Result<P
 
 /// Profile-tagged shared AOT/JIT preparation. PAC keys stay outside artifacts;
 /// this profile prepares a checked helper boundary rather than authenticating.
+#[cfg(feature = "std")]
 pub fn prepare_block_with_profile(
     source: &[u8],
     base: GuestAddress,
@@ -174,6 +190,7 @@ pub fn prepare_block_with_profile(
         stela_compiler::TargetCpu::detect(),
     )
 }
+#[cfg(feature = "std")]
 pub fn prepare_block_for_target(
     source: &[u8],
     base: GuestAddress,
@@ -187,6 +204,7 @@ pub fn prepare_block_for_target(
 
 /// Ordinary dispatch may select a source-derived resident ABI; explicit service
 /// profiles retain their existing call and recovery contracts.
+#[cfg(feature = "std")]
 pub(crate) fn prepare_runtime_block_for_target(
     source: &[u8],
     base: GuestAddress,
@@ -203,6 +221,7 @@ pub(crate) fn prepare_runtime_block_for_target(
     ))
 }
 
+#[cfg(feature = "std")]
 fn prepare_block_plan(
     source: &[u8],
     base: GuestAddress,
@@ -213,16 +232,7 @@ fn prepare_block_plan(
     let profile = plan.profile();
     let source_bytes = plan.source_bytes();
     let memory_requirements = plan.memory_requirements();
-    let prefix = &source[..source_bytes];
-    let identity = Identity {
-        schema_version: 1,
-        source_sha256: sha256(prefix),
-        compiler_source_sha256: compiler_source_sha256().to_owned(),
-        guest_base: base.0,
-        abi: profile.abi().into(),
-        target_cpu: target.id(),
-        memory_specialization_sha256: memory_specialization_sha256(profile, memory_requirements)?,
-    };
+    let identity = block_plan_identity(source, base, target, &plan)?;
     let prepared = prepare(identity, root, memory_requirements, profile, || {
         plan.compile().map(|b| b.native)
     })?;
@@ -232,6 +242,31 @@ fn prepare_block_plan(
     })
 }
 
+// Descriptive identity from the SAME immutable source plan, shared by hosted
+// preparation and existing-format AOT intake. This mints no execution authority.
+fn block_plan_identity(
+    source: &[u8],
+    base: GuestAddress,
+    target: stela_compiler::TargetCpu,
+    plan: &stela_compiler::block::CompilationPlan,
+) -> Result<Identity> {
+    let profile = plan.profile();
+    let prefix = &source[..plan.source_bytes()];
+    Ok(Identity {
+        schema_version: 1,
+        source_sha256: sha256(prefix),
+        compiler_source_sha256: compiler_source_sha256().to_owned(),
+        guest_base: base.0,
+        abi: profile.abi().into(),
+        target_cpu: target.id(),
+        memory_specialization_sha256: memory_specialization_sha256(
+            profile,
+            plan.memory_requirements(),
+        )?,
+    })
+}
+
+#[cfg(feature = "std")]
 fn prepare(
     identity: Identity,
     root: &Path,

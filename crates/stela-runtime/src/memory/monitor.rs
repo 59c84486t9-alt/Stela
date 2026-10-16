@@ -8,12 +8,19 @@
 //! Native faults need root's actual resumable cleanup boundary; Rust unwinding
 //! fails the whole execution domain and does not stand in for signal recovery.
 
+use crate::platform::sync::{Mutex, MutexGuard};
 use crate::system::events::{EventProducer, MonitorBinding};
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap as HashMap;
+use alloc::sync::{Arc, Weak};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "std")]
 use std::collections::HashMap;
+#[cfg(feature = "std")]
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 const MIN_ERG_BYTES: u64 = 16;
 const MAX_ERG_BYTES: u64 = 2048;
@@ -156,7 +163,7 @@ impl<B> WriteRange<B> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Key {
     backing: usize,
     granule: u64,
@@ -219,7 +226,7 @@ struct FailureBoundary<'a>(&'a AtomicBool);
 
 impl Drop for FailureBoundary<'_> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if crate::platform::unwind::panicking() {
             self.0.store(true, Ordering::Release);
         }
     }
@@ -348,7 +355,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
     }
 
     fn current_is(state: &EventState<B>, epoch: &Arc<Epoch<B>>) -> bool {
-        std::ptr::eq(state.epoch.as_ptr(), Arc::as_ptr(epoch))
+        core::ptr::eq(state.epoch.as_ptr(), Arc::as_ptr(epoch))
     }
 
     fn open_cell(
@@ -423,7 +430,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         let key = Key::new(&mark.epoch.backing, mark.epoch.granule);
         let entries = self.stripes[self.stripe(key)]
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(crate::platform::sync::PoisonError::into_inner);
         if let Some(cell) = cell {
             let mut subscribers = self.event_lock(&mark.epoch.subscribers);
             if open {
@@ -442,7 +449,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         drop(mark);
         let mut entries = self.stripes[self.stripe(key)]
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(crate::platform::sync::PoisonError::into_inner);
         if entries
             .get(&key)
             .is_some_and(|epoch| epoch.strong_count() == 0)
@@ -464,10 +471,16 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         Ok(())
     }
 
+    #[cfg(feature = "std")]
     fn stripe(&self, key: Key) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.stripes.len()
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn stripe(&self, key: Key) -> usize {
+        (key.backing.rotate_left(13) ^ key.granule as usize) % self.stripes.len()
     }
 
     /// Dispatch/helpers, including CLREX, must check execution viability. Clear
@@ -491,7 +504,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
     }
 
     fn owner(&self, thread: &ThreadMonitor<B, M, A>) -> Result<(), MonitorError> {
-        if !std::ptr::eq(self, Arc::as_ptr(&thread.domain)) {
+        if !core::ptr::eq(self, Arc::as_ptr(&thread.domain)) {
             return Err(MonitorError::WrongDomain);
         }
         Ok(())
@@ -514,7 +527,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         drop(reservation);
         let mut entries = self.stripes[self.stripe(key)]
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(crate::platform::sync::PoisonError::into_inner);
         if entries
             .get(&key)
             .is_some_and(|epoch| epoch.strong_count() == 0)
@@ -764,7 +777,7 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         for entries in &_guards {
             for weak in entries.values() {
                 if let Some(epoch) = weak.upgrade() {
-                    self.open_epoch(&epoch, Some(std::ptr::from_ref(mapping) as usize));
+                    self.open_epoch(&epoch, Some(core::ptr::from_ref(mapping) as usize));
                     deferred_epochs.push(epoch);
                 }
             }

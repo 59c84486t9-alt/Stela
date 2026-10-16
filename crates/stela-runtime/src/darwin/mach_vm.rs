@@ -10,6 +10,8 @@ use crate::{
     mach::{Event, HostPorts, PendingCall},
     memory::{DIRECT_RAM_USER_END, OwnedMemory, ProtectionError},
 };
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 use anyhow::{Result, ensure};
 use stela_compiler::block::SynchronousTrap;
 
@@ -140,7 +142,7 @@ fn protect(
     apply(start, end - start, readable, writable)
 }
 
-fn normalized_range(address: u64, size: u64) -> std::result::Result<(u64, u64), i32> {
+fn normalized_range(address: u64, size: u64) -> core::result::Result<(u64, u64), i32> {
     let start = address & !GUEST_PAGE_MASK;
     let raw_end = address.checked_add(size).ok_or(KERN_INVALID_ARGUMENT)?;
     let end = raw_end.wrapping_add(GUEST_PAGE_MASK) & !GUEST_PAGE_MASK;

@@ -148,8 +148,9 @@ unsafe extern "C" fn reached_write(
     }
     // Never unwind through the C ABI. The transaction is a field outside this
     // closure, so catching a producer panic cannot release its Device pin.
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback.dispatch(request)));
+    let result = crate::platform::unwind::invoke(core::panic::AssertUnwindSafe(|| {
+        callback.dispatch(request)
+    }));
     let result = match result {
         Ok(result) => result,
         Err(_) => Err(CallbackFailure::Panicked {

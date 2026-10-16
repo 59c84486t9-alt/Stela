@@ -18,6 +18,8 @@ use crate::{
         DataInheritance, DataPermissions, DataPlacement, OwnedMemory,
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use stela_compiler::block::SynchronousTrap;

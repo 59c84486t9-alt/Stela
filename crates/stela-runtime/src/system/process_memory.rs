@@ -18,7 +18,7 @@ use crate::memory::{
     domain::{DataPolicy, MemoryExecutionLoan, MemoryThread},
     policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode},
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
 use stela_compiler::{
     GuestState,
     block::ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -638,7 +638,7 @@ struct PolicyLoan<'run, P: DataPolicy> {
 
 impl<'run, P: DataPolicy> PolicyLoan<'run, P> {
     fn new(thread: &'run mut MemoryThread<P>, replacement: P) -> Self {
-        let previous = std::mem::replace(thread.policy_mut(), replacement);
+        let previous = core::mem::replace(thread.policy_mut(), replacement);
         Self {
             thread,
             previous: Some(previous),
@@ -649,7 +649,7 @@ impl<'run, P: DataPolicy> PolicyLoan<'run, P> {
 impl<P: DataPolicy> Drop for PolicyLoan<'_, P> {
     fn drop(&mut self) {
         if let Some(previous) = self.previous.take() {
-            let temporary = std::mem::replace(self.thread.policy_mut(), previous);
+            let temporary = core::mem::replace(self.thread.policy_mut(), previous);
             // Restore first, even if a future policy's destructor can unwind.
             drop(temporary);
         }

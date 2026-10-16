@@ -3,6 +3,7 @@
 use super::{
     AccessKind, Arc, MemoryBacking, MemoryStatus, MemorySystem, Ordering, access, monitor,
 };
+use alloc::vec::Vec;
 use stela_compiler::TargetCpu;
 
 const HOST_QUANTITY_BYTES: usize = 8;
@@ -14,8 +15,8 @@ pub struct PublicationFault {
     pub completed: usize,
 }
 
-impl std::fmt::Display for PublicationFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for PublicationFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "host publication failed after {} bytes: {:?}",
@@ -24,7 +25,7 @@ impl std::fmt::Display for PublicationFault {
     }
 }
 
-impl std::error::Error for PublicationFault {}
+impl core::error::Error for PublicationFault {}
 
 impl MemorySystem {
     /// Publish private host bytes to physical backing, invalidating reservations.

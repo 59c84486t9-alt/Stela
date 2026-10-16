@@ -1,7 +1,10 @@
 //! One owned contextual block invocation and explicit numerical completion.
 //! This does not resolve successors, register code regions or persist artifacts.
 
-use std::{marker::PhantomData, rc::Rc};
+use alloc::rc::Rc;
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::String};
+use core::marker::PhantomData;
 
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{
@@ -65,7 +68,10 @@ impl PreparedScalableBlock {
             "context block exceeds the compiler instruction bound"
         );
         platform::ensure_supported()?;
-        ensure!(target.supported(), "host lacks context-block requirements");
+        ensure!(
+            crate::platform::cpu::admitted(target),
+            "host lacks context-block requirements"
+        );
         let compiled =
             stela_compiler::extended::block::compile_for_profile(source, base, profile, target)?;
         ensure!(
@@ -160,7 +166,7 @@ impl PreparedScalableBlock {
             "unsupported execution context"
         );
         ensure!(
-            self.target.supported(),
+            crate::platform::cpu::admitted(self.target),
             "context-block host requirements changed"
         );
         ensure!(

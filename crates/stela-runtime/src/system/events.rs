@@ -5,8 +5,11 @@
 //! the endpoint allocation, independent of host threads and guest processes.
 
 use super::access::{ExceptionLevel, Profile, SecurityState};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use crate::platform::sync::Mutex;
+use alloc::sync::{Arc, Weak};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use stela_compiler::GuestState;
 use stela_compiler::aarch64::system::synchronization::{self, Operation, WaitKind};
 

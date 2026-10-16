@@ -1,6 +1,8 @@
 //! Serialized native block dispatch over immutable guest instruction snapshots.
 //! Guest code bytes are fetched from owned regions; data addresses retain the
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
 pub(crate) mod retirement;
 pub use retirement::checked::software_el1::{
     InitializedRamRegion, OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config,
@@ -15,21 +17,24 @@ pub use retirement::checked::software_privileged::{
     DeclaredPrivilegedScalable, TrapSmcWithoutEl3, run_declared_privileged,
 };
 
+mod aot;
 pub(crate) mod scalable;
+use aot::ArtifactPreparation;
 
-use crate::{
-    Prepared, clock, execution::platform, floating, memory, pauth,
-    prepare_runtime_block_for_target, system, thread,
-};
+#[cfg(feature = "std")]
+use crate::prepare_runtime_block_for_target;
+use crate::{Prepared, clock, execution::platform, floating, memory, pauth, system, thread};
+use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
+use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use anyhow::{Context, Result, ensure};
+use core::marker::PhantomData;
 use serde::Serialize;
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    io::Read,
-    marker::PhantomData,
-    path::PathBuf,
-    rc::Rc,
-};
+#[cfg(feature = "std")]
+use std::io::Read;
+#[cfg(feature = "std")]
+use std::path::PathBuf;
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{
@@ -41,6 +46,7 @@ use stela_compiler::{
         decode_thread_register_instruction, decode_trap,
     },
 };
+#[cfg(feature = "std")]
 use stela_core::sha256;
 
 #[path = "blocks/memory.rs"]
@@ -349,11 +355,11 @@ impl<'a> RuntimeServices<'a> {
 #[derive(Debug)]
 pub struct BlockRuntime {
     /// Opaque membership in this original source/RX cache; no PE permission.
-    identity: std::sync::Arc<()>,
+    identity: alloc::sync::Arc<()>,
     address_space: u64,
     profile: BlockProfile,
     target: stela_compiler::TargetCpu,
-    cache_root: PathBuf,
+    preparation: ArtifactPreparation,
     next_generation: u64,
     regions: BTreeMap<u64, CodeRegion>,
     loaded: BTreeMap<u64, LoadedBlock>,
@@ -414,12 +420,14 @@ pub struct DiscoveryReport {
 }
 
 impl BlockRuntime {
+    #[cfg(feature = "std")]
     pub fn new(address_space: u64, cache_root: PathBuf) -> Self {
         Self::new_with_profile(address_space, cache_root, BlockProfile::Ordinary)
     }
 
     /// Explicit helper profile is part of every persistent translation identity.
     /// Preparing AOT needs no keys; execution receives a separately bound context.
+    #[cfg(feature = "std")]
     pub fn new_with_profile(
         address_space: u64,
         cache_root: PathBuf,
@@ -432,23 +440,19 @@ impl BlockRuntime {
             stela_compiler::TargetCpu::detect(),
         )
     }
+    #[cfg(feature = "std")]
     pub fn new_for_target(
         address_space: u64,
         cache_root: PathBuf,
         profile: BlockProfile,
         target: stela_compiler::TargetCpu,
     ) -> Self {
-        Self {
-            identity: std::sync::Arc::new(()),
+        Self::with_preparation(
             address_space,
             profile,
             target,
-            cache_root,
-            next_generation: 0,
-            regions: BTreeMap::new(),
-            loaded: BTreeMap::new(),
-            _serialized: PhantomData,
-        }
+            ArtifactPreparation::HostedCache(cache_root),
+        )
     }
 
     pub fn target_cpu(&self) -> stela_compiler::TargetCpu {
@@ -531,8 +535,10 @@ impl BlockRuntime {
 
     /// Prepare one known entry into the persistent AOT/JIT cache, without RX
     /// loading or execution. Source bytes/edges share the compiler's parser.
+    #[cfg(feature = "std")]
     pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
         ensure!(pc.0.is_multiple_of(4), "unaligned preparation entry");
+        let cache_root = self.preparation.cache_root(pc)?;
         let (base, region) = self.region(pc).context("unmapped preparation entry")?;
         ensure!(region.end - pc.0 >= 4, "truncated preparation instruction");
         let offset = usize::try_from(pc.0 - base)?;
@@ -540,13 +546,8 @@ impl BlockRuntime {
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
         let analysis = analyze_with_profile(window, pc, self.profile)?;
-        let (prepared, artifact_profile) = prepare_runtime_block_for_target(
-            window,
-            pc,
-            &self.cache_root,
-            self.profile,
-            self.target,
-        )?;
+        let (prepared, artifact_profile) =
+            prepare_runtime_block_for_target(window, pc, cache_root, self.profile, self.target)?;
         ensure!(
             prepared.source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
@@ -577,6 +578,14 @@ impl BlockRuntime {
             analysis,
             prepared: prepared.prepared,
         })
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
+        anyhow::bail!(
+            "AOT block unavailable at {:#x}; runtime compilation is unsupported",
+            pc.0
+        )
     }
 
     /// Follow known static successors only. A call continuation is a candidate,
@@ -695,40 +704,42 @@ impl BlockRuntime {
             outcome.memory_cache_hits += 1;
             return Ok(());
         }
-        let prepared = self.prepare(pc)?;
-        let profile = prepared.artifact_profile;
-        let generation = prepared.generation;
-        let source_bytes = prepared.analysis.source_bytes;
-        let prepared = prepared.prepared;
-        let mut native = Vec::new();
-        std::fs::File::open(prepared.directory.join("native.bin"))?
-            .take((MAX_NATIVE_BYTES + 1) as u64)
-            .read_to_end(&mut native)?;
-        let loaded_artifact = crate::artifact::LoadedArtifact::bind(prepared.manifest, &native)
-            .context("block native snapshot checksum mismatch")?;
-        ensure!(
-            self.target.supported(),
-            "host CPU lacks generated-code requirements {}",
-            self.target.id()
+        #[cfg(not(feature = "std"))]
+        anyhow::bail!(
+            "AOT block unavailable at {:#x}; runtime compilation is unsupported",
+            pc.0
         );
-        let mapping = platform::Mapping::new(&native)?;
-        serialize_instruction_execution()?;
-        if prepared.cache_hit {
-            outcome.disk_cache_hits += 1;
-        } else {
-            outcome.compiled_blocks += 1;
-        }
-        self.loaded.insert(
-            pc.0,
-            LoadedBlock {
+        #[cfg(feature = "std")]
+        {
+            let prepared = self.prepare(pc)?;
+            let profile = prepared.artifact_profile;
+            let generation = prepared.generation;
+            let source_bytes = prepared.analysis.source_bytes;
+            let prepared = prepared.prepared;
+            let mut native = Vec::new();
+            std::fs::File::open(prepared.directory.join("native.bin"))?
+                .take((MAX_NATIVE_BYTES + 1) as u64)
+                .read_to_end(&mut native)?;
+            let loaded_artifact = crate::artifact::LoadedArtifact::bind(prepared.manifest, &native)
+                .context("block native snapshot checksum mismatch")?;
+            let block = LoadedBlock::from_artifact(
+                self.target,
                 profile,
-                region_base: base,
+                base,
                 generation,
                 source_bytes,
-                prepared: loaded_artifact,
-                mapping,
-            },
-        );
+                loaded_artifact,
+                &native,
+            )?;
+            if prepared.cache_hit {
+                outcome.disk_cache_hits += 1;
+            } else {
+                outcome.compiled_blocks += 1;
+            }
+            self.loaded.insert(pc.0, block);
+        }
+
+        #[cfg(feature = "std")]
         Ok(())
     }
 
@@ -1555,11 +1566,11 @@ fn complete_clock(
 fn serialize_instruction_execution() -> Result<()> {
     #[cfg(target_arch = "x86_64")]
     {
-        use std::sync::atomic::{Ordering, compiler_fence};
+        use core::sync::atomic::{Ordering, compiler_fence};
         compiler_fence(Ordering::SeqCst);
         // CPUID is available on the x86-64 baseline. Leaf0 is a genuine
         // serializing instruction; the intrinsic owns its host scratch outputs.
-        let _ = std::arch::x86_64::__cpuid(0);
+        let _ = core::arch::x86_64::__cpuid(0);
         compiler_fence(Ordering::SeqCst);
         Ok(())
     }
@@ -1607,13 +1618,13 @@ enum AuthenticatedLoadError {
     Read(memory::domain::MemoryFault),
 }
 
-impl std::fmt::Display for AuthenticatedLoadError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AuthenticatedLoadError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(formatter, "authenticated load failed: {self:?}")
     }
 }
 
-impl std::error::Error for AuthenticatedLoadError {}
+impl core::error::Error for AuthenticatedLoadError {}
 
 #[cfg(test)]
 fn complete_pauth(
@@ -1762,7 +1773,7 @@ fn complete_pauth_with_memory(
                 load,
                 memory.controls,
                 registers,
-                |key, pointer| -> std::result::Result<u64, pauth::AuthenticationError> {
+                |key, pointer| -> core::result::Result<u64, pauth::AuthenticationError> {
                     let key = match key {
                         stela_compiler::block::pauth_memory::DataKey::A => pauth::Key::Da,
                         stela_compiler::block::pauth_memory::DataKey::B => pauth::Key::Db,
@@ -2235,11 +2246,11 @@ mod clock_dispatch_tests {
     }
     fn initial_thread(flags: u32) -> ThreadState {
         let mut registers = GuestState {
-            x: std::array::from_fn(|i| 0x0123456789abcdefu64.rotate_left(i as u32)),
+            x: core::array::from_fn(|i| 0x0123456789abcdefu64.rotate_left(i as u32)),
             sp: 0x2000,
             nzcv: flags << 28,
             reserved: 0xa5c39e71,
-            v: std::array::from_fn(|i| {
+            v: core::array::from_fn(|i| {
                 [
                     0x123456789abcdef0u64.rotate_left(i as u32),
                     0xfedcba9876543210u64.rotate_right(i as u32),
@@ -2428,11 +2439,11 @@ mod basic_pauth_tests {
         ThreadState {
             pc: BASE,
             registers: GuestState {
-                x: std::array::from_fn(|i| 0x123456789abcdef0u64.rotate_left(i as u32)),
+                x: core::array::from_fn(|i| 0x123456789abcdef0u64.rotate_left(i as u32)),
                 sp: 0x70000010000,
                 nzcv: flags << 28,
                 reserved: 0xc31a7e29,
-                v: std::array::from_fn(|i| {
+                v: core::array::from_fn(|i| {
                     [
                         0x0123456789abcdefu64.rotate_left(i as u32),
                         0xfedcba9876543210u64.rotate_right(i as u32),

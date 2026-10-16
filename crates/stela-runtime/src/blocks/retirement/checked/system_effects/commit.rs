@@ -66,10 +66,10 @@ impl SystemEffectCommitView<'_> {
             outer,
             pe,
         )?;
-        if !std::ptr::eq(self.system, system) {
+        if !core::ptr::eq(self.system, system) {
             return Err(SystemEffectCommitError::ChangedSystemBank);
         }
-        if !std::ptr::eq(self.registers, registers) {
+        if !core::ptr::eq(self.registers, registers) {
             return Err(SystemEffectCommitError::ChangedRegisterBank);
         }
         Ok(())
@@ -88,10 +88,10 @@ fn check_commit_membership(
     if !authority.retiring_attempt(attempt) {
         return Err(SystemEffectCommitError::WrongRetiringAttempt);
     }
-    if !std::ptr::eq(original_boundary, boundary) {
+    if !core::ptr::eq(original_boundary, boundary) {
         return Err(SystemEffectCommitError::ChangedSource);
     }
-    if !std::ptr::eq(original_outer, outer) {
+    if !core::ptr::eq(original_outer, outer) {
         return Err(SystemEffectCommitError::ChangedOuter);
     }
     if !authority.identity().same_pe(pe) {
@@ -129,8 +129,8 @@ impl SystemEffectCommit<'_> {
             boundary: self.boundary,
             outer: self.outer,
             attempt: self.attempt,
-            system: std::ptr::from_ref(&*self.system),
-            registers: std::ptr::from_ref(&*self.registers),
+            system: core::ptr::from_ref(&*self.system),
+            registers: core::ptr::from_ref(&*self.registers),
         };
         prepared.apply_owned(&view, self.system, self.registers)
     }

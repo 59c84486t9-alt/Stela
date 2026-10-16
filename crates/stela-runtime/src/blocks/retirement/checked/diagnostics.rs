@@ -2,7 +2,7 @@
 //! Formatting borrows the original payloads and grants no execution authority.
 
 use super::{NativeObservation, OwnedMemoryFault, OwnedStop, RawMemoryObservation};
-use std::fmt;
+use core::fmt;
 
 impl fmt::Debug for OwnedStop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

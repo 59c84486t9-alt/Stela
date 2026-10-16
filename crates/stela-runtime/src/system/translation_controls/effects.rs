@@ -8,7 +8,7 @@
 use super::{ControlSnapshot, Register};
 use crate::memory::{domain::MemorySystem, stage1};
 use crate::system::state::SystemState;
-use std::sync::Arc;
+use alloc::sync::Arc;
 use stela_compiler::{GuestState, aarch64::system::synchronization::Operation};
 
 /// An actual fetch, not a request to trust a copied virtual byte buffer.

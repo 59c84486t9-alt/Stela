@@ -2,8 +2,9 @@
 //! Mapping, control and compiled-source generations remain separate owners.
 use super::{MemoryStatus, MemorySystem};
 use crate::memory::backing::MemoryBacking;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use crate::platform::sync::{Mutex, MutexGuard};
+use alloc::sync::{Arc, Weak};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub(in crate::memory) struct SourceMutationTracker {
     enabled: AtomicBool,

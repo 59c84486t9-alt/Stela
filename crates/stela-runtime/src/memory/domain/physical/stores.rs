@@ -4,6 +4,7 @@
 //! generic callback, permissive unsafe capability or architectural bank lives here.
 
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
+use crate::platform::sync::MutexGuard;
 use crate::{
     memory::domain::{
         MemoryExecutionLoan, PhysicalAccess, PublicationFault,
@@ -11,7 +12,7 @@ use crate::{
     },
     system::translation_controls::m0_data::{M0ControlError, M0DataWriteLoan},
 };
-use std::sync::MutexGuard;
+use alloc::vec::Vec;
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
 const STORE_BYTES: usize = size_of::<u64>();
@@ -82,8 +83,8 @@ impl M0RamWritePlatformError {
 
 // Keep the actual error and reached prefix in diagnostics, including errors
 // discovered during no-write preparation. No observation grants retry authority.
-impl std::fmt::Debug for M0RamWritePlatformError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for M0RamWritePlatformError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::SourceControl { error, .. } => f
                 .debug_struct("SourceControl")
@@ -174,7 +175,7 @@ fn resolve_write_pin<'loan>(
         .resolve_source_physical(execution, physical_address, STORE_BYTES, AccessKind::Write)
         .map_err(PhysicalReadPlatformError::Domain)?;
     physical.check_reached(&reached)?;
-    if std::iter::once(reached.first())
+    if core::iter::once(reached.first())
         .chain(reached._remaining.iter())
         .any(|span| {
             span.view().permissions().executable

@@ -6,6 +6,8 @@ use super::{
     PendingDataAllocation, ProtectionError, SharedBindingError,
     domain::{DataPolicy, MemoryServiceLoan, MemoryThread},
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use stela_compiler::context::memory::MemoryStatus;
 
 /// Holds the original canonical service guard and the actual mutable resources.
@@ -99,6 +101,7 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
 
     /// Protect only actual owned data, preserving the original transaction's
     /// view retirement, host rollback and quarantine semantics.
+    #[cfg(feature = "std")]
     pub fn protect_data(
         &mut self,
         address: u64,
@@ -131,6 +134,18 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
                 }
             },
         )
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn protect_data(
+        &mut self,
+        address: u64,
+        bytes: u64,
+        readable: bool,
+        writable: bool,
+    ) -> Result<(), ProtectionError> {
+        let _ = (address, bytes, readable, writable);
+        Err(ProtectionError::PlatformUnavailable)
     }
 
     /// Current logical view metadata, carrying no guest references or authority.

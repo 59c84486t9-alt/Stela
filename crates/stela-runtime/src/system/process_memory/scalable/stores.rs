@@ -1,8 +1,13 @@
 //! Frozen Store candidate consumer of the shared qualified process fixture.
 //! This adds tests to the existing runtime test binary, no raw native entry.
 use super::{Fixture, ScalableLeafExit, TargetCpu};
+#[cfg(not(feature = "std"))]
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
-use std::{fs::OpenOptions, io::Write, path::Path, time::Instant};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
+use std::time::Instant;
 
 const RAM_BYTES: usize = 8192;
 const MAX_ITERATIONS: u64 = 1_000_000;
@@ -252,7 +257,7 @@ fn mxcsr() -> u32 {
     let mut value = 0_u32;
     // SAFETY: valid writable u32; reads only caller floating control state.
     unsafe {
-        std::arch::asm!("stmxcsr [{address}]", address = in(reg) &mut value,
+        core::arch::asm!("stmxcsr [{address}]", address = in(reg) &mut value,
                             options(nostack, preserves_flags));
     }
     value
@@ -424,9 +429,9 @@ fn qualified_store_current17() {
                     alternate = Some(make_fixture(case));
                     let other = alternate.as_mut().unwrap();
                     if projection == Some("wrong_snapshot") {
-                        fixture.ids = std::sync::Arc::clone(&other.ids);
+                        fixture.ids = alloc::sync::Arc::clone(&other.ids);
                     } else {
-                        std::mem::swap(&mut fixture.memory, &mut other.memory);
+                        core::mem::swap(&mut fixture.memory, &mut other.memory);
                     }
                 }
                 let exit = fixture.execute();

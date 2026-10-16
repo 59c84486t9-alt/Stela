@@ -4,7 +4,9 @@ use super::{
     AllocationTagPolicy, DataPolicy, MappingAttributes, MemoryThread, MemoryView, SCA_BYTES,
 };
 use crate::memory::{backing::AccessKind, tag_store::TAG_GRANULE_BYTES};
-use std::sync::Arc;
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use stela_compiler::{
     TargetCpu,
     context::memory::{
@@ -117,7 +119,7 @@ impl MemoryProfile {
         if requirements.required_profile & profile_requirements::M0_DEVICE_RAM_READ64 != 0 {
             return Err(MemoryStatus::Unsupported);
         }
-        if !target.supported()
+        if !crate::platform::cpu::admitted(target)
             || requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
                 && !target.supports(TargetCpu::AtomicLoad16)
             || requirements.required_host_caps & host_caps::CX16 != 0
@@ -277,7 +279,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         &mut self,
         validate: impl FnOnce(&Self) -> Result<(), MemoryStatus>,
     ) -> Result<CheckedMemoryEntry<'_, P>, MemoryStatus> {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| validate(self))) {
+        match crate::platform::unwind::invoke(core::panic::AssertUnwindSafe(|| validate(self))) {
             Ok(Ok(())) => Ok(CheckedMemoryEntry::new(self)),
             Ok(Err(status)) => {
                 self.settle_fault(status)?;
@@ -287,7 +289,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 self.domain
                     .system
                     .failed
-                    .store(true, std::sync::atomic::Ordering::Release);
+                    .store(true, core::sync::atomic::Ordering::Release);
                 let _ = self.domain.system.reservations.clear(&mut self.reservation);
                 Err(MemoryStatus::Domain)
             }

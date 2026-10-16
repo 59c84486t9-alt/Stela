@@ -2,7 +2,7 @@
 //! Native storage eligibility is validated separately by the existing domain.
 
 use crate::memory::domain::{DataPolicy, MemoryDomain, MemoryExecutionLoan, MemoryThread};
-use std::sync::Arc;
+use alloc::sync::Arc;
 use stela_compiler::context::memory::MemoryStatus;
 
 /// Opaque source mapping authority. It retains the exact domain generation;
@@ -14,8 +14,8 @@ pub struct SourceNormalWbDomain {
     generation: u64,
 }
 
-impl std::fmt::Debug for SourceNormalWbDomain {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for SourceNormalWbDomain {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("SourceNormalWbDomain")
             .finish_non_exhaustive()

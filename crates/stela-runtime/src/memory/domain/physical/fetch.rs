@@ -10,7 +10,7 @@ use crate::memory::{
     domain::{MemoryExecutionLoan, PhysicalAccess, access},
     stage1,
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 const INSTRUCTION_BYTES: usize = size_of::<u32>();
 const INSTRUCTION_ALIGNMENT_MASK: u64 = INSTRUCTION_BYTES as u64 - 1;
@@ -81,7 +81,7 @@ impl BoundPhysicalInstruction {
     }
 
     pub(crate) fn views(&self) -> impl Iterator<Item = &Arc<MemoryView>> {
-        std::iter::once(self.reached.first().view())
+        core::iter::once(self.reached.first().view())
             .chain(self.reached._remaining.iter().map(|span| span.view()))
     }
 
@@ -184,7 +184,7 @@ impl PhysicalAddressSpace {
         raw_pc: u64,
     ) -> Result<BoundPhysicalInstruction, crate::system::translation_controls::FetchFailure> {
         use crate::system::translation_controls::FetchFailure;
-        if !std::ptr::eq(self, scope.physical_space()) {
+        if !core::ptr::eq(self, scope.physical_space()) {
             return Err(FetchFailure::Unavailable(
                 "M0 fetch uses a different physical owner",
             ));
@@ -221,7 +221,7 @@ impl PhysicalAddressSpace {
         raw_pc: u64,
     ) -> Result<BoundPhysicalInstruction, crate::system::translation_controls::FetchFailure> {
         use crate::system::translation_controls::FetchFailure;
-        if !std::ptr::eq(self, scope.physical_space()) {
+        if !core::ptr::eq(self, scope.physical_space()) {
             return Err(FetchFailure::Unavailable(
                 "branch fetch uses a different physical owner",
             ));

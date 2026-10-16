@@ -3,8 +3,10 @@
 //! Source, generated code and requirements share one immutable identity. This
 //! entry is independent of instruction families and does not interpret RAX as
 //! a block exit or a memory status.
-use std::marker::PhantomData;
-use std::rc::Rc;
+use alloc::rc::Rc;
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::String};
+use core::marker::PhantomData;
 
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{
@@ -101,7 +103,7 @@ impl PreparedScalableLeaf {
         );
         platform::ensure_supported()?;
         ensure!(
-            target.supported(),
+            crate::platform::cpu::admitted(target),
             "host lacks context-leaf CPU requirements"
         );
         let source: Box<[u8]> = source.into();
@@ -187,7 +189,7 @@ impl PreparedScalableLeaf {
             "unsupported execution context"
         );
         ensure!(
-            self.target.supported(),
+            crate::platform::cpu::admitted(self.target),
             "context-leaf host requirements changed"
         );
         ensure!(

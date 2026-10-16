@@ -21,7 +21,9 @@ use crate::{
         state::{PSTATE_EL1H, PSTATE_EL2H, PSTATE_EL3H, PSTATE_IL_MASK, SystemState},
     },
 };
-use std::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+use alloc::sync::Arc;
 use stela_compiler::{
     GuestAddress, GuestState,
     aarch64::system::exception::Operation,
@@ -378,13 +380,13 @@ impl<'pe> PrivilegedOwner<'pe> {
             };
             anyhow::ensure!(
                 request.snapshot.same_snapshot(&self.lower.snapshot)
-                    && std::ptr::eq(request.source_system, system)
-                    && std::ptr::eq(request.source_registers, registers)
+                    && core::ptr::eq(request.source_system, system)
+                    && core::ptr::eq(request.source_registers, registers)
                     && request.source_pc == boundary.instruction().instruction_pc.0
-                    && request.controls.hcr_el2.map(std::ptr::from_ref)
-                        == higher.hcr().map(std::ptr::from_ref)
-                    && request.controls.scr_el3.map(std::ptr::from_ref)
-                        == higher.scr().map(std::ptr::from_ref)
+                    && request.controls.hcr_el2.map(core::ptr::from_ref)
+                        == higher.hcr().map(core::ptr::from_ref)
+                    && request.controls.scr_el3.map(core::ptr::from_ref)
+                        == higher.scr().map(core::ptr::from_ref)
                     && request.target_security == higher.security(request.target_el),
                 "higher-EL intent does not belong to actual source/control/state owners"
             );

@@ -49,4 +49,5 @@ pub(crate) mod checked;
 pub(crate) use checked::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
 mod process;
 mod software_async;
+#[cfg(feature = "std")]
 pub(crate) use process::run_protected_services;

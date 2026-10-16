@@ -8,6 +8,8 @@ use super::{
     BsdCompletion, BsdPrototype, BsdReturnType, BsdServiceEvent, PendingBsdCall, classify_bsd_call,
 };
 use crate::blocks::ThreadState;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 use anyhow::{Result, ensure};
 use stela_compiler::block::SynchronousTrap;
 

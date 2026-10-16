@@ -11,7 +11,7 @@ impl HostFloatingEnvironment {
             // SAFETY: MXCSR is present on every admitted x86-64 host. The valid
             // writable scalar lives for this instruction and no flags change.
             unsafe {
-                std::arch::asm!("stmxcsr [{address}]", address = in(reg) &mut mxcsr, options(nostack, preserves_flags));
+                core::arch::asm!("stmxcsr [{address}]", address = in(reg) &mut mxcsr, options(nostack, preserves_flags));
             }
             Self { mxcsr }
         }
@@ -25,7 +25,7 @@ impl Drop for HostFloatingEnvironment {
         // SAFETY: This exact full value was read from the current caller's
         // hardware MXCSR; reserved bits cannot have been synthesized here.
         unsafe {
-            std::arch::asm!("ldmxcsr [{address}]", address = in(reg) &self.mxcsr, options(nostack, preserves_flags));
+            core::arch::asm!("ldmxcsr [{address}]", address = in(reg) &self.mxcsr, options(nostack, preserves_flags));
         }
     }
 }

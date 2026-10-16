@@ -18,12 +18,15 @@ use crate::{
     commpage::legacy::{self, CLOCK_FIELD_END as FIELD_END, CLOCK_FIELD_START as FIELD_START},
     memory::MemoryRegion,
 };
+use alloc::collections::VecDeque;
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, vec::Vec};
 use anyhow::{Result, bail, ensure};
 use serde::Serialize;
-use std::collections::VecDeque;
 
 #[cfg(test)]
-pub(crate) static TEST_CONTEXT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_CONTEXT_LOCK: crate::platform::sync::Mutex<()> =
+    crate::platform::sync::Mutex::new(());
 
 pub const PROFILE_ID: &str = "stela-continuous-ns-arm-commpage-clock-v1";
 pub const FREQUENCY: u64 = 1_000_000_000;
@@ -315,13 +318,14 @@ mod darwin {
         // SAFETY: The checked fixed Darwin kernel commpage is process-lifetime,
         // readable, and not user writable. These fixed offsets are aligned and
         // within the validated extent. Host code must not dismantle system maps.
-        let signature =
-            unsafe { std::slice::from_raw_parts(HOST_BASE as *const u8, b"commpage 64-bit".len()) };
+        let signature = unsafe {
+            core::slice::from_raw_parts(HOST_BASE as *const u8, b"commpage 64-bit".len())
+        };
         ensure!(
             signature == b"commpage 64-bit",
             "unrecognized host commpage signature"
         );
-        let version = unsafe { std::ptr::read_volatile((HOST_BASE + 0x1e) as *const u16) };
+        let version = unsafe { core::ptr::read_volatile((HOST_BASE + 0x1e) as *const u16) };
         ensure!(version == 14, "unsupported host commpage version {version}");
         let mut timebase = Timebase { numer: 0, denom: 0 };
         // SAFETY: The public API receives its exact initialized C structure.
@@ -338,12 +342,12 @@ mod darwin {
             // commpage. Aligned x86-64 volatile loads observe atomic sleep ticks;
             // the public call and compiler fences preserve the sampling bracket.
             let before =
-                unsafe { std::ptr::read_volatile((HOST_BASE + SLEEP as u64) as *const u64) };
-            std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+                unsafe { core::ptr::read_volatile((HOST_BASE + SLEEP as u64) as *const u64) };
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             let awake = unsafe { mach_absolute_time() };
-            std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             let after =
-                unsafe { std::ptr::read_volatile((HOST_BASE + SLEEP as u64) as *const u64) };
+                unsafe { core::ptr::read_volatile((HOST_BASE + SLEEP as u64) as *const u64) };
             if before == after {
                 let counter = awake
                     .checked_add(before)

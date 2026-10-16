@@ -10,6 +10,8 @@ use crate::system::{
     execution::Boundary,
     fixed_controls::FixedEl1Controls,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString};
 use stela_compiler::{
     GuestAddress,
     aarch64::system::exception::Operation,

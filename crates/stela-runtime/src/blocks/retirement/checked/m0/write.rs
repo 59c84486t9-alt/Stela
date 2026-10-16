@@ -9,6 +9,8 @@ use crate::{
     memory::domain::{m0_write::M0WriteSource, physical::M0RamWritePlatformError},
     system::translation_controls::m0_data::M0ControlError,
 };
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
 use stela_compiler::{GuestAddress, Lifter, aarch64::Decoder, block::ExitKind};
 mod callback;
 mod session;

@@ -9,8 +9,8 @@ use crate::{
         state::{PacmStateFeature, SystemState},
     },
 };
+use alloc::sync::Arc;
 use anyhow::{Context, Result, ensure};
-use std::sync::Arc;
 const MDSCR_SOFTWARE_STEP: u64 = 1;
 const MDSCR_KERNEL_DEBUG_ENABLE: u64 = 1 << 13;
 const MDSCR_MONITOR_DEBUG_ENABLE: u64 = 1 << 15;

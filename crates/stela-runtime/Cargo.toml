@@ -7,11 +7,15 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["std"]
+std = ["anyhow/std", "serde/std", "serde_json/std", "stela-core/hosted", "stela-compiler/std", "dep:tempfile", "dep:libc"]
+
 [dependencies]
-anyhow.workspace = true
+anyhow = { version = "1", default-features = false }
 serde.workspace = true
-serde_json.workspace = true
-tempfile.workspace = true
-libc.workspace = true
-stela-core.workspace = true
-stela-compiler.workspace = true
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+tempfile = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+stela-core = { path = "../stela-core", default-features = false }
+stela-compiler = { path = "../stela-compiler", default-features = false }

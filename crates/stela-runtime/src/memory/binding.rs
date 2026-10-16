@@ -6,7 +6,9 @@ use super::{
     domain::{MappingAttributes, MemoryDomain, MemorySystem, PublicationFault},
     storage::StorageKind,
 };
-use std::sync::Arc;
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
 /// Opaque participation of a whole facade owner, without exposing mutation APIs.
@@ -55,12 +57,12 @@ pub enum SharedBindingError {
     SharedDomainBound,
 }
 
-impl std::fmt::Display for SharedBindingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for SharedBindingError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "shared memory binding failed: {self:?}")
     }
 }
-impl std::error::Error for SharedBindingError {}
+impl core::error::Error for SharedBindingError {}
 
 /// One group/system, retained by its facades and returned immutable snapshot.
 pub(super) struct SharedBinding {
@@ -69,8 +71,8 @@ pub(super) struct SharedBinding {
     pub(super) attributes: MappingAttributes,
 }
 
-impl std::fmt::Debug for SharedBinding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for SharedBinding {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SharedBinding")
             .field("address_space", &self.domain.address_space())
             .finish_non_exhaustive()
@@ -198,7 +200,7 @@ impl OwnedMemory {
         {
             return Err(E::AlreadyBound);
         }
-        if !config.target.supported() {
+        if !crate::platform::cpu::admitted(config.target) {
             return Err(E::Domain(MemoryStatus::Unsupported));
         }
         if owners

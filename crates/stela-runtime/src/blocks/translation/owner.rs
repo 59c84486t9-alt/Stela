@@ -13,8 +13,10 @@ use crate::{
         translation_controls::{ControlProfile, RegisterValues, TranslationControls},
     },
 };
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use anyhow::{Result, ensure};
-use std::sync::Arc;
 use stela_compiler::{
     GuestAddress,
     block::{BlockProfile, CheckedMemoryProfile},

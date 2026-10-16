@@ -6,7 +6,7 @@
 //! whole-quantity translation contract; this module cannot qualify that path.
 //! Guest Device attributes do not turn ordinary host RAM into MMIO.
 
-use std::sync::MutexGuard;
+use crate::platform::sync::MutexGuard;
 
 use super::pair::{M0ReadMember, M0ReadPairIntent};
 use crate::{

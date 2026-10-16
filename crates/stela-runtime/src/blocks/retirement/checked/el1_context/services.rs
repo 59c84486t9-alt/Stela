@@ -14,6 +14,8 @@ use crate::{
         },
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, string::ToString, vec::Vec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {

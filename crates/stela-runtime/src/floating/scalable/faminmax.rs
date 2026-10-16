@@ -1,4 +1,5 @@
 //! Transactional predicated absolute extrema; inactive lanes remain raw bits.
+
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
 use anyhow::anyhow;

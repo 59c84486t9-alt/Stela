@@ -3,6 +3,8 @@
 //! These Rust services are called after native return. They introduce neither a
 //! native callback ABI nor a second architectural register/control bank.
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
 pub(crate) mod authority;
 pub(crate) mod owner;
 

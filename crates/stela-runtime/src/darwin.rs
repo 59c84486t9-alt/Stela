@@ -9,8 +9,11 @@
 //! data protections, cross-architecture failure and Mach/thread services.
 //! Declining a request means leaving its pending state unchanged.
 use crate::blocks::ThreadState;
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
+use core::error::Error;
+use core::fmt;
 use serde::{Serialize, ser::SerializeStruct};
-use std::{error::Error, fmt};
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{SynchronousTrap, TrapKind},
@@ -18,6 +21,7 @@ use stela_compiler::{
 mod copyout;
 pub mod crossarch;
 pub mod csr;
+#[cfg(feature = "std")]
 pub mod entropy;
 pub mod mach_vm;
 pub mod platform;
@@ -404,6 +408,7 @@ pub const GUEST_PAGE_BYTES: u64 = 16 * 1024;
 /// Reference: pinned XNU bsd/kern/kern_mman.c mprotect/mprotect_sanitize and
 /// syscalls.master. W implies R in that source; guest pages are16KiB regardless
 /// of the host's page size. This is not the complete Darwin security/VM policy.
+#[cfg(feature = "std")]
 pub fn service_data_mprotect(
     state: &mut ThreadState,
     trap: &SynchronousTrap,
@@ -515,6 +520,7 @@ pub fn service_data_mprotect(
 /// No raw entry, copied state, producer alias or later constructor may resume
 /// this PE after this call. Unsupported services remain stopped; no legacy
 /// execution fallback is available for this route.
+#[cfg(feature = "std")]
 pub unsafe fn run_services(
     runtime: &mut crate::blocks::BlockRuntime,
     state: &mut ThreadState,
@@ -749,6 +755,7 @@ pub unsafe fn run_services(
 ///
 /// # Safety
 /// The same direct-RAM requirements as `run_services` apply.
+#[cfg(feature = "std")]
 pub unsafe fn run_data_vm(
     runtime: &mut crate::blocks::BlockRuntime,
     state: &mut ThreadState,

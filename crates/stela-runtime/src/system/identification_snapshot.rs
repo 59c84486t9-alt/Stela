@@ -1,9 +1,12 @@
 //! Partial immutable named identification authority shared by MRS and qualifiers.
 //! No control/cache/device state, default CPU, guessed absence or host inference.
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
 mod qualifiers;
 
 use super::identification::{Readback, Readbacks, Register};
-use std::{fmt, sync::Arc};
+use alloc::sync::Arc;
+use core::fmt;
 
 const STATIC_ID_COUNT: usize = 20;
 const STATIC_IDS: [Register; STATIC_ID_COUNT] = [
@@ -121,13 +124,13 @@ impl fmt::Display for Unsupported {
         )
     }
 }
-impl std::error::Error for Unsupported {}
+impl core::error::Error for Unsupported {}
 impl fmt::Display for InitializationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "invalid identification initialization: {self:?}")
     }
 }
-impl std::error::Error for InitializationError {}
+impl core::error::Error for InitializationError {}
 
 fn index(register: Register) -> Option<usize> {
     STATIC_IDS
@@ -208,7 +211,7 @@ impl Snapshot {
         let mut values = [None; STATIC_ID_COUNT];
         for &(register, offset) in fields {
             let end = offset
-                .checked_add(std::mem::size_of::<u64>())
+                .checked_add(core::mem::size_of::<u64>())
                 .filter(|end| *end <= input.len())
                 .ok_or(InitializationError::CaptureBounds {
                     register,
@@ -240,7 +243,7 @@ impl Snapshot {
         &self.provenance
     }
     pub fn same_snapshot(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other)
+        core::ptr::eq(self, other)
     }
 }
 impl Readbacks for Snapshot {

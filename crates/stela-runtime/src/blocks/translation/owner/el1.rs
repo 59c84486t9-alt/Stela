@@ -9,6 +9,8 @@ use crate::{
         translation_controls::{ControlProfile, RegisterValues, TranslationControls},
     },
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use anyhow::{Result, ensure};
 use stela_compiler::{GuestAddress, block::BlockProfile};
 pub(in crate::blocks) struct InstalledEl1Owner {

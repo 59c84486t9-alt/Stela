@@ -6,6 +6,8 @@
 //! Only the declared fields are implemented. Callers of unsafe native execution
 //! must exclude reads of other fields; zero allocation padding has no ABI meaning.
 use crate::memory::{MemoryRegion, MemoryRegionSpec, OwnedMemory};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use anyhow::Result;
 use serde::Serialize;
 
