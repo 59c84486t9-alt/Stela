@@ -28,6 +28,7 @@ pub struct TargetCpu {
     cx8: bool,
     cx16: bool,
     avx2: bool,
+    avx512f: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -55,6 +56,7 @@ impl TargetCpu {
         cx8: false,
         cx16: false,
         avx2: false,
+        avx512f: false,
     };
     pub const Ssse3: Self = Self {
         tier: SseTier::Ssse3,
@@ -89,6 +91,8 @@ impl TargetCpu {
     pub const Cx16: Self = Self::Baseline.with_cx16();
     /// AVX2 integer recipes, including OS-enabled XMM/YMM register state.
     pub const Avx2: Self = Self::Baseline.with_avx2();
+    /// EVEX.512 AVX-512 Foundation, including OS-enabled opmask and ZMM state.
+    pub const Avx512f: Self = Self::Baseline.with_avx512f();
 
     pub const fn with_pclmulqdq(self) -> Self {
         Self {
@@ -132,6 +136,12 @@ impl TargetCpu {
     pub const fn with_avx2(self) -> Self {
         Self { avx2: true, ..self }
     }
+    pub const fn with_avx512f(self) -> Self {
+        Self {
+            avx512f: true,
+            ..self
+        }
+    }
     /// True only when every required feature is present in this target.
     pub fn supports(self, required: Self) -> bool {
         self.tier >= required.tier
@@ -146,6 +156,7 @@ impl TargetCpu {
             && (!required.cx16 || self.cx16)
             && (!required.cx8 || self.cx8)
             && (!required.avx2 || self.avx2)
+            && (!required.avx512f || self.avx512f)
     }
     /// Detect the host's usable CPU features. Freestanding callers supply a
     /// target explicitly.
@@ -171,6 +182,7 @@ impl TargetCpu {
                 atomic_load16: basic.ecx & CPUID_AVX_HARDWARE != 0,
                 // Rust's detector checks CPUID and XSAVE/OSXSAVE/XCR0 state.
                 avx2: std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("avx2"),
+                avx512f: avx512f_usable(),
                 ..Self::for_features_with_vex(
                     std::is_x86_feature_detected!("ssse3"),
                     std::is_x86_feature_detected!("sse4.1"),
@@ -240,6 +252,7 @@ impl TargetCpu {
             (self.cx8, "+cx8"),
             (self.cx16, "+cx16"),
             (self.avx2, "+avx2"),
+            (self.avx512f, "+avx512f"),
         ] {
             if enabled {
                 id.push_str(suffix);
@@ -252,6 +265,55 @@ impl TargetCpu {
     pub fn supported(self) -> bool {
         cfg!(target_arch = "x86_64") && Self::detect().supports(self)
     }
+}
+
+/// AVX-512F with OS-enabled opmask and ZMM state. Rust's detector reads XCR0,
+/// which xnu leaves without that state until a thread first executes EVEX:
+/// xnu enables it on demand and reports usable support in
+/// `hw.optional.avx512f`.
+#[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
+fn avx512f_usable() -> bool {
+    std::is_x86_feature_detected!("avx512f") || darwin_on_demand_avx512f()
+}
+
+#[cfg(all(
+    any(feature = "std", test),
+    target_arch = "x86_64",
+    target_os = "macos"
+))]
+fn darwin_on_demand_avx512f() -> bool {
+    use core::ffi::{c_char, c_int, c_void};
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            old: *mut c_void,
+            old_length: *mut usize,
+            new: *mut c_void,
+            new_length: usize,
+        ) -> c_int;
+    }
+    let mut value: c_int = 0;
+    let mut length = size_of::<c_int>();
+    // SAFETY: a NUL-terminated name and a correctly sized output buffer.
+    let result = unsafe {
+        sysctlbyname(
+            c"hw.optional.avx512f".as_ptr(),
+            (&raw mut value).cast(),
+            &mut length,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    result == 0 && length == size_of::<c_int>() && value == 1
+}
+
+#[cfg(all(
+    any(feature = "std", test),
+    target_arch = "x86_64",
+    not(target_os = "macos")
+))]
+fn darwin_on_demand_avx512f() -> bool {
+    false
 }
 
 // Ordering means feature containment, not an arbitrary rank.
@@ -274,6 +336,7 @@ impl core::str::FromStr for TargetCpu {
         // Strip each optional suffix once, in reverse order. A duplicate,
         // unknown or out-of-order suffix is left behind and fails parsing.
         for (suffix, enabled) in [
+            ("+avx512f", &mut target.avx512f),
             ("+avx2", &mut target.avx2),
             ("+cx16", &mut target.cx16),
             ("+cx8", &mut target.cx8),
@@ -317,7 +380,7 @@ mod tests {
             "x86_64-baseline+ssse3+sse4.1+sse4.2",
         ),
     ];
-    const FEATURES: [TargetCpu; 11] = [
+    const FEATURES: [TargetCpu; 12] = [
         TargetCpu::Pclmulqdq,
         TargetCpu::Fma,
         TargetCpu::F16c,
@@ -329,11 +392,12 @@ mod tests {
         TargetCpu::Cx8,
         TargetCpu::Cx16,
         TargetCpu::Avx2,
+        TargetCpu::Avx512f,
     ];
 
     fn profiles() -> impl Iterator<Item = TargetCpu> {
         TIERS.into_iter().flat_map(|(tier, _, _)| {
-            (0..2048).map(move |bits| TargetCpu {
+            (0..4096).map(move |bits| TargetCpu {
                 pclmulqdq: bits & 1 != 0,
                 fma: bits & 2 != 0,
                 f16c: bits & 4 != 0,
@@ -345,6 +409,7 @@ mod tests {
                 cx8: bits & 256 != 0,
                 cx16: bits & 512 != 0,
                 avx2: bits & 1024 != 0,
+                avx512f: bits & 2048 != 0,
                 ..tier
             })
         })
@@ -386,7 +451,7 @@ mod tests {
             let suffix = id.strip_prefix(canonical).unwrap();
             assert_eq!(format!("{alias}{suffix}").parse::<TargetCpu>(), Ok(target));
         }
-        assert_eq!(ids.len(), 8192);
+        assert_eq!(ids.len(), 16384);
         assert_eq!(
             TargetCpu::Sse42
                 .with_sha()
@@ -431,6 +496,8 @@ mod tests {
             "baseline+cx16+sha",
             "baseline+cx16+cx8",
             "baseline+cx8+atomic-load16",
+            "baseline+avx512f+avx2",
+            "avx512f",
         ] {
             assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
         }
@@ -446,6 +513,7 @@ mod tests {
             "cx16",
             "cx8",
             "avx2",
+            "avx512f",
         ] {
             for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
                 let duplicate = format!("{tier}+{suffix}+{suffix}");
@@ -469,6 +537,7 @@ mod tests {
                 host.cx8,
                 host.cx16,
                 host.avx2,
+                host.avx512f,
             ]) {
                 assert_eq!(host.supports(required), present);
                 assert_eq!(host >= required, present);
@@ -566,6 +635,7 @@ mod tests {
                     TargetCpu::Avx2,
                     std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("avx2"),
                 ),
+                (TargetCpu::Avx512f, avx512f_usable()),
                 (
                     TargetCpu::AtomicLoad16,
                     core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_AVX_HARDWARE != 0,
