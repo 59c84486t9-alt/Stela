@@ -182,7 +182,7 @@ pub extern "C" fn stela_boot_main(address: u32, magic: u32) -> ! {
     if original.len() as u64 > options.region_bytes {
         serial::fatal("original module exceeds declared RAM region");
     }
-    let source_hash = stela_core::sha256(original);
+    let source_hash = stela_runtime::sha256(original);
     serial::arguments(format_args!(
         "SOURCE bytes={} sha256={} options={options:?}\n",
         original.len(),

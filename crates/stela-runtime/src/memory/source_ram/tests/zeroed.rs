@@ -66,12 +66,12 @@ fn explicit_zeroed_ram_preserves_original_code_and_unassigned_capacity_holes() {
     assert!(!layout.initialized[0].zero_initialized);
     assert_eq!(
         layout.initialized[0].source_sha256,
-        stela_core::sha256(&ORIGINAL)
+        crate::sha256(&ORIGINAL)
     );
     assert!(layout.initialized[1].zero_initialized);
     assert_eq!(
         layout.initialized[1].source_sha256,
-        stela_core::sha256(&[0; RAM_BYTES as usize])
+        crate::sha256(&[0; RAM_BYTES as usize])
     );
     let physical = PhysicalAddressSpace::from_materialized(binding).unwrap();
     assert_eq!(

@@ -1553,7 +1553,6 @@ dependencies = [
  "sha1",
  "sha2",
  "stela-compiler",
- "stela-core",
  "stela-loader",
  "stela-runtime",
  "tempfile",
@@ -1571,18 +1570,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stela-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
 name = "stela-loader"
 version = "0.1.0"
 dependencies = [
@@ -1592,7 +1579,6 @@ dependencies = [
  "serde",
  "serde_json",
  "stela-compiler",
- "stela-core",
  "stela-runtime",
  "tempfile",
  "walkdir",
@@ -1615,11 +1601,12 @@ name = "stela-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "stela-compiler",
- "stela-core",
  "tempfile",
 ]
 

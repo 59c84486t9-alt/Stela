@@ -102,7 +102,7 @@ fn explicit_pa_materialization_pins_exact_initialized_bytes_and_alignment() {
     assert_eq!(physical.layout().initialized[0].range.bytes, 29);
     assert_eq!(
         physical.layout().initialized[0].source_sha256,
-        stela_core::sha256(&(0..29).collect::<Vec<u8>>())
+        crate::sha256(&(0..29).collect::<Vec<u8>>())
     );
 }
 

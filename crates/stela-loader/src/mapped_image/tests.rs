@@ -8,7 +8,7 @@ fn raw_kernel_mapping_preserves_unfixed_data_and_delays_read_only_flags() -> Res
         schema_version: 1,
         file_type: 7,
         dylib_identity: None,
-        slice_sha256: stela_core::sha256(&data),
+        slice_sha256: stela_runtime::sha256(&data),
         slice_bytes: 16,
         cpu_type: 0x100000c,
         cpu_subtype: 0x80000002,
@@ -84,7 +84,7 @@ fn raw_kernel_mapping_preserves_unfixed_data_and_delays_read_only_flags() -> Res
             offset: 0,
             bytes: 1,
         },
-        sha256: stela_core::sha256(&data[..1]),
+        sha256: stela_runtime::sha256(&data[..1]),
     });
     assert!(prepare_segments(&data, &legacy, base, &[]).is_err());
     assert!(prepare_raw_segments(&data, &legacy, base).is_ok());

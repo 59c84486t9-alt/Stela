@@ -1,24 +1,8 @@
-//! Build inventories and translation progress (hosted only).
-use crate::sha256;
+//! Build inventories and per-artifact translation progress.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::File, io::Write, path::Path};
-
-/// Write `value` as pretty JSON, replacing `path` atomically. Readers see the
-/// old or the new file; durability across power loss is not promised.
-pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut bytes = serde_json::to_vec_pretty(value)?;
-    bytes.push(b'\n');
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(&bytes)?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
-}
+use std::{collections::BTreeMap, path::Path};
+use stela_runtime::sha256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artifact {
@@ -187,10 +171,6 @@ impl Progress {
             "note": "Evidence is recorded by the operator; this ledger does not prove semantic equivalence. Whole-OS coverage is unknown."
         }))
     }
-}
-
-pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_reader(File::open(path)?).context("read JSON")
 }
 
 #[cfg(test)]

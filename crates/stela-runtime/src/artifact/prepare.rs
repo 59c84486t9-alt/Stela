@@ -23,7 +23,7 @@ pub(crate) fn generate(
     );
     let manifest = Manifest {
         identity,
-        native_sha256: stela_core::sha256(&x86_64_code),
+        native_sha256: crate::sha256(&x86_64_code),
         native_bytes: x86_64_code.len(),
         source_map,
         verified: false,
@@ -40,7 +40,7 @@ pub(crate) fn validate_manifest_bytes(
     if manifest_bytes.len() > MAX_CACHE_MANIFEST_BYTES {
         return Err(ArtifactError("cache file exceeds size limit"));
     }
-    if stela_core::sha256(manifest_bytes) != expected_sha256 {
+    if crate::sha256(manifest_bytes) != expected_sha256 {
         return Err(ArtifactError("cached manifest checksum mismatch"));
     }
     Ok(())

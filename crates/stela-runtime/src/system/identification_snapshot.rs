@@ -175,7 +175,7 @@ impl Snapshot {
                 input.extend(value.to_le_bytes());
             }
         }
-        let input_sha256 = stela_core::sha256(&input);
+        let input_sha256 = crate::sha256(&input);
         Ok(Self {
             values,
             provenance: Provenance {
@@ -219,7 +219,7 @@ impl Snapshot {
                 u64::from_le_bytes(input[offset..end].try_into().expect("checked u64 readback"));
             insert(&mut values, register, value)?;
         }
-        let input_sha256 = stela_core::sha256(&input);
+        let input_sha256 = crate::sha256(&input);
         Ok(Self {
             values,
             provenance: Provenance {

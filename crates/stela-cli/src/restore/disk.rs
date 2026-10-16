@@ -11,7 +11,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
 };
-use stela_core::sha256;
+use stela_runtime::sha256;
 
 const HDIUTIL: &str = "/usr/bin/hdiutil";
 /// Directory of the dyld shared cache inside an OS volume.

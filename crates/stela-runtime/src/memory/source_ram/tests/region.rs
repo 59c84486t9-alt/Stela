@@ -36,7 +36,7 @@ fn region() -> InitializedRamRegion {
             bytes: REGION_BYTES,
         },
         file_prefix: PREFIX.to_vec(),
-        file_sha256: stela_core::sha256(&PREFIX),
+        file_sha256: crate::sha256(&PREFIX),
         permissions: RWX,
     }
 }
@@ -68,10 +68,10 @@ fn full_region_cold_contents_keep_original_file_identity_and_absent_capacity() {
     assert!(physical.read_descriptor(BASE + 64).is_err());
     assert!(physical.read_descriptor(ALIAS).is_err()); // descriptive capacity is absent
     let layout = &physical.layout().initialized[0];
-    assert_eq!(layout.file_prefix, Some((8, stela_core::sha256(&PREFIX))));
+    assert_eq!(layout.file_prefix, Some((8, crate::sha256(&PREFIX))));
     let mut full = vec![0; REGION_BYTES as usize];
     full[..8].copy_from_slice(&PREFIX);
-    assert_eq!(layout.source_sha256, stela_core::sha256(&full));
+    assert_eq!(layout.source_sha256, crate::sha256(&full));
     // SAFETY: intentionally rejected writable backing, no rights are changed.
     assert!(unsafe { ImmutableCodeBacking::adopt(Arc::clone(view.backing())) }.is_err());
 }

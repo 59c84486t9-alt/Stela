@@ -149,7 +149,7 @@ fn traps_report_the_same_record_through_cold_hot_and_disk_aot_paths() -> Result<
             assert_eq!(manifest.source_map.len(), 2);
             assert_eq!(
                 manifest.identity.source_sha256,
-                stela_core::sha256(&words(&program[..2]))
+                stela_runtime::sha256(&words(&program[..2]))
             );
         }
         drop(first);

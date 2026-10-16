@@ -111,7 +111,7 @@ fn full_pauth_keys_and_owned_memory_cli_inputs_are_explicit_and_strict() -> Resu
     let region = serde_json::json!({"guest_address":0,"virtual_bytes":4096,
         "readable":true,"writable":false,
         "initial_file":{"path":"payload.bin","offset":2,"bytes":3,
-            "sha256":stela_core::sha256(&[7,6,5])}});
+            "sha256":stela_runtime::sha256(&[7,6,5])}});
     let parsed: RawMemoryRegionInput = serde_json::from_value(region.clone())?;
     assert_eq!(raw_initial_bytes(&parsed, folder.path())?, [7, 6, 5]);
     for change in [

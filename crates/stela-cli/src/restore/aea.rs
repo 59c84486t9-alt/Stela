@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use stela_core::sha256;
+use stela_runtime::sha256;
 
 const MAX_METADATA: usize = 64 * 1024;
 const MAX_KEY: usize = 64 * 1024;

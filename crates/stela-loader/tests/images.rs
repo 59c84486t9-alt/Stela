@@ -171,7 +171,7 @@ fn quads(bytes: &[u8]) -> Vec<u64> {
 
 fn input(data: Vec<u8>, load_base: u64) -> ImageInput {
     ImageInput {
-        container_sha256: stela_core::sha256(&data),
+        container_sha256: stela_runtime::sha256(&data),
         data,
         slice_offset: 0,
         load_base: Some(load_base),

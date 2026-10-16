@@ -4,14 +4,16 @@ pub mod chained_fixups;
 pub mod dependency_graph;
 pub mod dependency_paths;
 pub mod exports;
+pub mod inventory;
 pub mod linked_images;
 pub mod load_plan;
 pub mod mapped_image;
 mod thread_state;
 use anyhow::{Context, Result, ensure};
+use inventory::{Artifact, Inventory, ScanIssue};
 use object::{Object, ObjectSection};
 use std::{fs::File, io::Read, path::Path};
-use stela_core::{Artifact, Inventory, ScanIssue, sha256};
+use stela_runtime::sha256;
 
 fn slice(data: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
     let start = usize::try_from(offset)?;

@@ -151,8 +151,8 @@ fn malformed_source_maps_fail_even_with_recomputed_manifest_checksum() -> Result
             3 => manifest.source_map[1].1 = manifest.source_map[0].1,
             _ => manifest.source_map[1].1 = manifest.native_bytes,
         }
-        stela_core::write_json(&path, &manifest)?;
-        stela_core::write_json(
+        crate::write_json(&path, &manifest)?;
+        crate::write_json(
             &resolved.prepared().directory.join("manifest.sha256.json"),
             &sha256(&std::fs::read(&path)?),
         )?;

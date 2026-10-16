@@ -164,7 +164,7 @@ fn declared_profile(platform: Option<&El1PlatformControls>) -> Result<ControlPro
             .provenance()
             .input_sha256()
             .to_owned(),
-        None => stela_core::sha256(DECLARATION),
+        None => crate::sha256(DECLARATION),
     };
     let mut bytes = [0; 32];
     for (index, pair) in digest.as_bytes().as_chunks::<2>().0.iter().enumerate() {
@@ -562,7 +562,7 @@ impl SoftwareEl1Machine {
                         let bytes =
                             usize::try_from(range.bytes).map_err(|error| error.to_string())?;
                         loan.snapshot(range.source_pa, bytes)
-                            .map(|bytes| stela_core::sha256(&bytes))
+                            .map(|bytes| crate::sha256(&bytes))
                             .map_err(|error| format!("{error:?}"))
                     }),
                 })

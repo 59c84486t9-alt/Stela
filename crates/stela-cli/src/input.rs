@@ -153,7 +153,7 @@ pub(crate) fn raw_initial_bytes(
         file.seek(SeekFrom::Start(source.offset))?;
         file.read_exact(&mut bytes)?;
         ensure!(
-            stela_core::sha256(&bytes) == source.sha256,
+            stela_runtime::sha256(&bytes) == source.sha256,
             "raw memory file hash differs"
         );
         Ok(bytes)
@@ -226,7 +226,7 @@ pub(crate) fn memory_hashes(
 ) -> Result<Vec<serde_json::Value>> {
     memory.regions().iter().filter(|r| r.readable).map(|r| Ok(serde_json::json!({
         "address":r.guest_address,"bytes":r.virtual_bytes,
-        "sha256":stela_core::sha256(&memory.read_snapshot(r.guest_address, usize::try_from(r.virtual_bytes)?)?),
+        "sha256":stela_runtime::sha256(&memory.read_snapshot(r.guest_address, usize::try_from(r.virtual_bytes)?)?),
     }))).collect()
 }
 

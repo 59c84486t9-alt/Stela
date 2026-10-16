@@ -261,7 +261,7 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
     let mut previous_total = None;
     if part.exists() {
         let previous: Partial =
-            stela_core::read_json(&metadata).context("partial image has no valid metadata")?;
+            stela_runtime::read_json(&metadata).context("partial image has no valid metadata")?;
         ensure!(
             previous.image == *image,
             "partial image belongs to a different catalog entry"
@@ -310,7 +310,7 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
     } else {
         bail!("unexpected download status: {}", response.status());
     }
-    stela_core::write_json(
+    stela_runtime::write_json(
         &metadata,
         &Partial {
             image: image.clone(),
@@ -386,7 +386,7 @@ fn publish(
     };
     // Do not clobber an output created while the download was running.
     std::fs::hard_link(part, output).context("publish completed image")?;
-    stela_core::write_json(&sidecar(output, ".json"), &receipt)?;
+    stela_runtime::write_json(&sidecar(output, ".json"), &receipt)?;
     std::fs::remove_file(part)?;
     std::fs::remove_file(metadata)?;
     Ok(receipt)

@@ -61,7 +61,7 @@ fn fixture() -> (Identity, Manifest, &'static [u8]) {
     let native = b"immutable original native snapshot";
     let manifest = Manifest {
         identity: identity.clone(),
-        native_sha256: stela_core::sha256(native),
+        native_sha256: crate::sha256(native),
         native_bytes: native.len(),
         source_map: vec![(GuestAddress(0x1000), 0)],
         verified: false,
@@ -74,7 +74,7 @@ fn fixture() -> (Identity, Manifest, &'static [u8]) {
 fn shared_validation_accepts_original_descriptive_inputs() {
     let (identity, manifest, native) = fixture();
     let serialized = b"original serialized manifest bytes";
-    validate_manifest_bytes(serialized, &stela_core::sha256(serialized)).unwrap();
+    validate_manifest_bytes(serialized, &crate::sha256(serialized)).unwrap();
     validate_preparation_metadata(&manifest, &identity, manifest.memory_requirements).unwrap();
     validate_preparation_native(&manifest, native).unwrap();
     validate_preparation_claim(&manifest).unwrap();

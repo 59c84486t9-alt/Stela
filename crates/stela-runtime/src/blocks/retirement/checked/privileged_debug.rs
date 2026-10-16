@@ -187,7 +187,7 @@ impl PrivilegedOwner<'_> {
             // ITE clear and first architectural instruction effect.
             let mapping = Mapping::new(prepared.code())?;
             record.compiler_source_sha256 = Some(crate::compiler_source_sha256().to_owned());
-            record.native_sha256 = Some(stela_core::sha256(prepared.code()));
+            record.native_sha256 = Some(crate::sha256(prepared.code()));
             record.word_to_native = Some(*prepared.word_to_native());
             Some(Body::Movement { prepared, mapping })
         };
@@ -366,7 +366,7 @@ impl PrivilegedOwner<'_> {
                             .as_deref()
                             .is_some_and(|actual| actual == crate::compiler_source_sha256())
                         && prepared.record.native_sha256.as_deref()
-                            == Some(stela_core::sha256(movement.code()).as_str()),
+                            == Some(crate::sha256(movement.code()).as_str()),
                     "native capsule association changed"
                 );
                 let context = &mut *scalable.context;

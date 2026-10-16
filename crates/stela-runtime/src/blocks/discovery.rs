@@ -8,6 +8,7 @@ use super::validate::validate_source_map;
 use crate::Prepared;
 #[cfg(feature = "std")]
 use crate::prepare_runtime_block_for_target;
+use crate::sha256;
 use alloc::collections::{BTreeSet, VecDeque};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
@@ -19,7 +20,6 @@ use stela_compiler::{
         BlockAnalysis, BlockProfile, DynamicEdge, MAX_BLOCK_INSTRUCTIONS, analyze_with_profile,
     },
 };
-use stela_core::sha256;
 
 /// Persistent preparation artifact shared by ahead-of-time discovery and JIT.
 /// Preparing it performs no native mapping, invocation or guest memory access.

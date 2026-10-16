@@ -268,8 +268,9 @@ fn source_payload_identity_and_conflicting_tries_are_checked() {
     let (mut data, mut image) = fixture(&trie(&[(b"a", 0, 0x300)]), false);
     image.payloads[0].sha256 = "wrong".into();
     assert!(parse(&data, &image, BASE).is_err());
-    image.payloads[0].sha256 =
-        stela_core::sha256(&data[TRIE_OFFSET..TRIE_OFFSET + image.payloads[0].file.bytes as usize]);
+    image.payloads[0].sha256 = stela_runtime::sha256(
+        &data[TRIE_OFFSET..TRIE_OFFSET + image.payloads[0].file.bytes as usize],
+    );
     let mut duplicate = image.payloads[0].clone();
     duplicate.command = macho::LC_DYLD_INFO_ONLY;
     duplicate.role = "export".into();

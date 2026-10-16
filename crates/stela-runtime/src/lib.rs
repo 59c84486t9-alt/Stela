@@ -17,6 +17,9 @@ pub mod darwin;
 pub mod dispatch;
 pub mod execution;
 mod floating;
+mod hash;
+#[cfg(feature = "std")]
+mod json;
 pub mod mach;
 pub mod memory;
 pub mod pauth;
@@ -33,6 +36,9 @@ pub mod thread;
 #[cfg(feature = "std")]
 use anyhow::ensure;
 use anyhow::{Context, Result};
+pub use hash::sha256;
+#[cfg(feature = "std")]
+pub use json::{read_json, write_json};
 use serde::Serialize;
 #[cfg(feature = "std")]
 use std::io::Read;
@@ -41,9 +47,6 @@ use std::path::{Path, PathBuf};
 use stela_compiler::GuestAddress;
 #[cfg(feature = "std")]
 use stela_compiler::{NATIVE_ABI, NativeBlock};
-use stela_core::sha256;
-#[cfg(feature = "std")]
-use stela_core::write_json;
 
 fn compiler_source_sha256() -> &'static str {
     stela_compiler::SOURCE_SHA256

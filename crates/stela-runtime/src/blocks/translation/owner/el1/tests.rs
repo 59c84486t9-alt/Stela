@@ -37,7 +37,7 @@ fn control_profile() -> ControlProfile {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    assert_eq!(stela_core::sha256(DECLARATION), hex);
+    assert_eq!(crate::sha256(DECLARATION), hex);
     let evidence = EvidenceBinding {
         id: "fresh-stela-walked-fetch-fixture-v1",
         sha256: DECLARATION_SHA,

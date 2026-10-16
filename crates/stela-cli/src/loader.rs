@@ -3,8 +3,9 @@ use crate::{args::*, input::pauth_all_keys_context};
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
-use stela_core::{Progress, Stage, read_json, write_json};
 use stela_loader as macho;
+use stela_loader::inventory::{Progress, Stage};
+use stela_runtime::{read_json, write_json};
 
 #[derive(Subcommand)]
 pub(crate) enum ProgressCommand {
@@ -149,7 +150,7 @@ impl PlanFixups {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "kind":"chained_fixup_plan","container_sha256":stela_core::sha256(&data),
+                "kind":"chained_fixup_plan","container_sha256":stela_runtime::sha256(&data),
                 "slice_offset":slice_offset,"plan":plan,"fixups":fixups,"decoded_fixups":decoded_fixups,
                 "fixups_applied":false,"native_executed":false,"complete_binary_verified":false
             }))?
@@ -170,7 +171,7 @@ impl PlanExecutable {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "kind": "macho_executable_load_plan", "container_sha256": stela_core::sha256(&data),
+                "kind": "macho_executable_load_plan", "container_sha256": stela_runtime::sha256(&data),
                 "slice_offset": offset, "plan": plan
             }))?
         );

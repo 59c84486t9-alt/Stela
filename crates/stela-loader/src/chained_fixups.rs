@@ -507,7 +507,7 @@ fn decode_impl(
     allow_authentication: bool,
 ) -> Result<DecodedFixups> {
     ensure!(
-        image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_core::sha256(data),
+        image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_runtime::sha256(data),
         "chained-fixup image identity differs from load plan"
     );
     let text: Vec<_> = image
@@ -553,7 +553,7 @@ fn decode_impl(
         "chained-fixup payload exceeds planner limit"
     );
     ensure!(
-        source.sha256 == stela_core::sha256(payload),
+        source.sha256 == stela_runtime::sha256(payload),
         "chained-fixup payload differs from load plan"
     );
     ensure!(

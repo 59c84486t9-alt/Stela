@@ -5,7 +5,7 @@ use object::{
 };
 use serde::Serialize;
 use std::{collections::BTreeSet, error::Error, fmt};
-use stela_core::sha256;
+use stela_runtime::sha256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]

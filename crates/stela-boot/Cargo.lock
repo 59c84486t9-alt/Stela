@@ -187,7 +187,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "stela-compiler",
- "stela-core",
  "stela-runtime",
 ]
 
@@ -198,15 +197,6 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "sha2",
- "stela-state",
-]
-
-[[package]]
-name = "stela-core"
-version = "0.1.0"
-dependencies = [
- "hex",
- "sha2",
 ]
 
 [[package]]
@@ -214,15 +204,12 @@ name = "stela-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "stela-compiler",
- "stela-core",
 ]
-
-[[package]]
-name = "stela-state"
-version = "0.1.0"
 
 [[package]]
 name = "syn"

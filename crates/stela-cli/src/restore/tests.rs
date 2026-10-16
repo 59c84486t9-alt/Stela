@@ -60,7 +60,7 @@ fn resumes_and_verifies_image() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let out = dir.path().join("test.ipsw");
     std::fs::write(sidecar(&out, ".part"), b"01234")?;
-    stela_core::write_json(
+    stela_runtime::write_json(
         &sidecar(&out, ".part.json"),
         &Partial {
             image: image.clone(),
@@ -92,7 +92,7 @@ fn completed_partial_is_published_without_another_request() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let out = dir.path().join("test.ipsw");
     std::fs::write(sidecar(&out, ".part"), b"complete")?;
-    stela_core::write_json(
+    stela_runtime::write_json(
         &sidecar(&out, ".part.json"),
         &Partial {
             image: image.clone(),
@@ -119,7 +119,7 @@ fn ignored_range_restarts_and_bad_digest_never_publishes() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let out = dir.path().join("test.ipsw");
         std::fs::write(sidecar(&out, ".part"), b"old")?;
-        stela_core::write_json(
+        stela_runtime::write_json(
             &sidecar(&out, ".part.json"),
             &Partial {
                 image: image.clone(),

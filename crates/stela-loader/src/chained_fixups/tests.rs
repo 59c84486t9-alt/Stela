@@ -24,11 +24,11 @@ fn put64(data: &mut [u8], offset: usize, value: u64) {
     data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 fn refresh(data: &[u8], image: &mut LoadPlan) {
-    image.slice_sha256 = stela_core::sha256(data);
+    image.slice_sha256 = stela_runtime::sha256(data);
     image.slice_bytes = data.len() as u64;
     for payload in &mut image.payloads {
         let start = payload.file.offset as usize;
-        payload.sha256 = stela_core::sha256(&data[start..start + payload.file.bytes as usize]);
+        payload.sha256 = stela_runtime::sha256(&data[start..start + payload.file.bytes as usize]);
     }
 }
 fn raw(format: u16, target: u64, high: u8, next: u64) -> u64 {

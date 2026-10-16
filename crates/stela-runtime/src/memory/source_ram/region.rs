@@ -19,7 +19,7 @@ impl InitializedRamRegion {
                 "file prefix exceeds declared RAM region",
             ));
         }
-        if stela_core::sha256(&self.file_prefix) != self.file_sha256 {
+        if crate::sha256(&self.file_prefix) != self.file_sha256 {
             return Err(SourceRamBuildError::Declaration(
                 "RAM file prefix hash differs",
             ));

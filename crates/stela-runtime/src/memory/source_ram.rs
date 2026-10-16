@@ -85,7 +85,7 @@ impl RamExtent {
 
     fn initial_hash(&self, storage: &NativeStorage, leading: usize) -> String {
         match &self.initial {
-            RamInitial::Bytes(bytes) => stela_core::sha256(bytes),
+            RamInitial::Bytes(bytes) => crate::sha256(bytes),
             RamInitial::Zeroed(bytes)
             | RamInitial::FilePrefix {
                 mapped_bytes: bytes,
@@ -101,7 +101,7 @@ impl RamExtent {
                         *bytes,
                     )
                 };
-                stela_core::sha256(initial)
+                crate::sha256(initial)
             }
         }
     }

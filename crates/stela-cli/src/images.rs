@@ -3,7 +3,7 @@ use crate::restore;
 use anyhow::{Result, ensure};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
-use stela_core::write_json;
+use stela_runtime::write_json;
 
 #[derive(Subcommand)]
 pub(crate) enum ImagesCommand {

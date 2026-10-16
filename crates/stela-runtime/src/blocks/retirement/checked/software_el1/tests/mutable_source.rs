@@ -3,7 +3,7 @@ use super::*;
 use crate::system::state::{El1Registers, PSTATE_EL1H};
 use stela_compiler::{GuestState, TargetCpu};
 fn assert_ram(report: &SoftwareEl1Report, index: usize, bytes: &[u8]) {
-    assert_eq!(report.ram[index].sha256, Ok(stela_core::sha256(bytes)));
+    assert_eq!(report.ram[index].sha256, Ok(crate::sha256(bytes)));
 }
 const BASE: u64 = 0x100000;
 const STP_X0_X3_X1: u32 = 0xa9000c20;
@@ -65,7 +65,7 @@ fn config(cache: PathBuf, words: &[u32], target: u64) -> (SoftwareEl1Config, Ini
                 source_pa: BASE,
                 bytes: 64,
             },
-            file_sha256: stela_core::sha256(&prefix),
+            file_sha256: crate::sha256(&prefix),
             file_prefix: prefix,
             permissions: SourceRamPermissions {
                 readable: true,

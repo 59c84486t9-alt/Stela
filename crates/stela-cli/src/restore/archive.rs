@@ -65,6 +65,6 @@ pub fn extract(image: &Path, name: &str, output: &Path, maximum: u64) -> Result<
     let receipt = serde_json::json!({"schema_version":1,"archive":image.canonicalize()?.display().to_string(),"member":name,"bytes":bytes,"sha256":hex::encode(hash.finalize()),"zip_crc32_checked":true,
         "note":"Extraction and ZIP CRC only; see the archive download receipt for source-image verification. Manifest digests are not inferred or reinterpreted."});
     pending.persist_noclobber(output).map_err(|e| e.error)?;
-    stela_core::write_json(&receipt_path, &receipt)?;
+    stela_runtime::write_json(&receipt_path, &receipt)?;
     Ok(receipt)
 }

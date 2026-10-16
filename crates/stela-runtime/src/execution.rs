@@ -14,6 +14,8 @@ pub(crate) type NativeStorageError = platform::StorageError;
 #[cfg(feature = "std")]
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};
 #[cfg(feature = "std")]
+use crate::sha256;
+#[cfg(feature = "std")]
 use alloc::rc::Rc;
 #[cfg(feature = "std")]
 use anyhow::{Context, Result, ensure};
@@ -23,8 +25,6 @@ use core::marker::PhantomData;
 use std::io::Read;
 #[cfg(feature = "std")]
 use stela_compiler::{GuestState, NATIVE_ABI};
-#[cfg(feature = "std")]
-use stela_core::sha256;
 
 // Bounds a cached artifact so it cannot force an unbounded allocation or
 // mapping.

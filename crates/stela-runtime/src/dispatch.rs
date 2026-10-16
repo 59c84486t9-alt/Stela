@@ -1,6 +1,7 @@
 //! Lazy resolution of registered leaf entry points. Handles must be revalidated
 //! before each execution; invalidation does not interrupt running code.
 
+use crate::sha256;
 use crate::{Identity, Prepared, prepare_leaf};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -9,7 +10,6 @@ use alloc::{string::String, vec::Vec};
 use anyhow::{Result, ensure};
 use std::path::PathBuf;
 use stela_compiler::GuestAddress;
-use stela_core::sha256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchIdentity {
