@@ -163,6 +163,9 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
     // QEMU leaves predicate-inactive elements of an SME tile-slice load
     // unchanged; the architecture zeroes them.
     let tile_slice_load = form.starts_with("ld1") && form.contains("_za_");
+    // QEMU has no Apple AMX, so AMX words are never differential subjects:
+    // `cargo xtask amx-reference` compares the model with the corsix/amx
+    // emulator on QEMU instead, and no Apple hardware oracle exists.
     (sign_of_nan || estimate) && state.fpcr & FPCR_AH != 0 || tile_slice_load
 }
 

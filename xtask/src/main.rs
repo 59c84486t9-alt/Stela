@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod amx;
 mod boot;
 mod check;
 mod differential;
@@ -29,6 +30,8 @@ enum Task {
     Boot(boot::Command),
     /// Compare native translations with the QEMU original, form by form.
     Differential(differential::Differential),
+    /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
+    AmxReference(amx::AmxReference),
     /// Merge the instruction registries into the checklist and the README.
     Progress {
         /// Fail instead of writing when either file is stale.
@@ -42,6 +45,7 @@ fn main() -> ExitCode {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Differential(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check).map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
