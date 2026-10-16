@@ -4,6 +4,8 @@
 //! reads `\EFI\stela\stela.cfg` and the original ARM bytes in
 //! `\EFI\stela\source.bin` from its own volume, leaves boot services,
 //! installs its own page tables and runs the image on `SoftwareEl1Machine`.
+//! A `stela.cfg` that starts with `--system` instead runs the image on the
+//! system-mode engine (`docs/design/system.md#system-mode-execution`).
 #![no_std]
 #![no_main]
 extern crate alloc;
@@ -26,15 +28,21 @@ use uefi::{
     boot::{AllocateType, MemoryType},
 };
 mod console;
+mod engine;
 mod firmware;
+mod handoff;
 mod heap;
+mod la57;
+mod layout;
 mod output;
 mod paging;
 mod payload;
 mod serial;
 mod storage;
+mod system;
+mod tables;
 #[global_allocator]
-static ALLOCATOR: heap::Heap = heap::Heap::new();
+pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new();
 const HEAP_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -138,6 +146,8 @@ impl Options {
 }
 #[uefi::entry]
 fn main() -> Status {
+    // Before any Rust state exists: the system engine runs from this copy.
+    system::take_snapshot();
     serial::initialize();
     output::arguments(format_args!("STELA UEFI MOUNT\n"));
     let heap = uefi::boot::allocate_pages(
@@ -149,7 +159,12 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
-    let (mut handoff, tables) = firmware::take_over().unwrap_or_else(|e| output::fatal(e));
+    let (options, source) = firmware::files().unwrap_or_else(|e| output::fatal(e));
+    if options.starts_with(b"--system") {
+        system::boot(options, source);
+    }
+    let (mut handoff, tables) =
+        firmware::take_over(options, source).unwrap_or_else(|e| output::fatal(e));
     if let Some(screen) = handoff.screen {
         console::install(screen);
         output::arguments(format_args!("STELA UEFI MOUNT\n"));

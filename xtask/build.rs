@@ -1,29 +1,39 @@
-//! Assemble the AArch64 harness into a flat image with the host's clang.
+//! Assemble the AArch64 fixtures into flat images with the host's clang: the
+//! oracle harness and the system-mode test kernel.
 use object::{Object, ObjectSection};
 use std::{env, fs, path::PathBuf, process::Command};
 
-const SOURCE: &str = "src/oracle/harness.S";
 const TARGET: &str = "--target=aarch64-none-elf";
-const ARCHITECTURE: &str = "-march=armv9.4-a+sme2+memtag";
+/// (source, image, architecture)
+const FIXTURES: [(&str, &str, &str); 2] = [
+    (
+        "src/oracle/harness.S",
+        "harness.bin",
+        "-march=armv9.4-a+sme2+memtag",
+    ),
+    ("src/boot/kernel.S", "kernel.bin", "-march=armv8.6-a"),
+];
 
 fn main() {
-    println!("cargo:rerun-if-changed={SOURCE}");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
-    let object_path = out.join("harness.o");
     let clang = env::var_os("CLANG").unwrap_or_else(|| "clang".into());
-    let status = Command::new(&clang)
-        .args([TARGET, ARCHITECTURE, "-c", SOURCE, "-o"])
-        .arg(&object_path)
-        .status()
-        .expect("run clang to assemble the AArch64 harness");
-    assert!(status.success(), "clang failed to assemble {SOURCE}");
-    let data = fs::read(&object_path).expect("read assembled harness");
-    let file = object::File::parse(&*data).expect("parse assembled harness");
-    let text = file.section_by_name(".text").expect("harness .text");
-    assert!(
-        text.relocations().next().is_none(),
-        "the harness must be position-independent"
-    );
-    fs::write(out.join("harness.bin"), text.data().expect("harness bytes"))
-        .expect("write harness image");
+    for (source, image, architecture) in FIXTURES {
+        println!("cargo:rerun-if-changed={source}");
+        let object_path = out.join(image).with_extension("o");
+        let status = Command::new(&clang)
+            .args([TARGET, architecture, "-c", source, "-o"])
+            .arg(&object_path)
+            .status()
+            .expect("run clang to assemble an AArch64 fixture");
+        assert!(status.success(), "clang failed to assemble {source}");
+        let data = fs::read(&object_path).expect("read assembled fixture");
+        let file = object::File::parse(&*data).expect("parse assembled fixture");
+        let text = file.section_by_name(".text").expect("fixture .text");
+        assert!(
+            text.relocations().next().is_none(),
+            "{source} must be position-independent"
+        );
+        fs::write(out.join(image), text.data().expect("fixture bytes"))
+            .expect("write fixture image");
+    }
 }

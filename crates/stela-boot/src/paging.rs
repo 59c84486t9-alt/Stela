@@ -224,6 +224,20 @@ fatal_handler!(fatal_page_fault, "'P'");
 /// Boot services have ended and interrupts are disabled. `tables` maps every
 /// byte the code, stack and data in use touch. Nothing else runs.
 pub unsafe fn activate(tables: Tables) -> Result<(), &'static str> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        take_over()?;
+        asm!("mov cr3, {}", in(reg) tables.root(), options(nostack, preserves_flags));
+    }
+    Ok(())
+}
+
+/// Install the fatal handlers and the controls the runtime requires, still
+/// under the firmware's four-level tables.
+///
+/// # Safety
+/// Boot services have ended and interrupts are disabled; nothing else runs.
+pub unsafe fn take_over() -> Result<(), &'static str> {
     let selector: u16;
     let (mut cr0, mut cr4): (u64, u64);
     let (low, high): (u32, u32);
@@ -256,13 +270,12 @@ pub unsafe fn activate(tables: Tables) -> Result<(), &'static str> {
     cr4 = (cr4 | CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT) & !(CR4_GLOBAL | CR4_PCID);
     let efer = (u64::from(low) | (u64::from(high) << 32)) | EFER_NX_ENABLE;
     // SAFETY: NX is enabled before tables that use it are loaded; clearing
-    // PGE and reloading CR3 flushes every firmware translation.
+    // PGE flushes every global firmware translation.
     unsafe {
         asm!("wrmsr", in("ecx") EFER_MSR, in("eax") efer as u32, in("edx") (efer >> 32) as u32,
             options(nostack, preserves_flags));
         asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
         asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
-        asm!("mov cr3, {}", in(reg) tables.root(), options(nostack, preserves_flags));
     }
     Ok(())
 }

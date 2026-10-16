@@ -73,6 +73,11 @@ impl Framebuffer {
             .then_some(framebuffer)
     }
 
+    /// The same mode reached at another address (the engine's physmap).
+    pub fn relocated(self, base: usize) -> Self {
+        Self { base, ..self }
+    }
+
     fn pixel(&self, color: Color) -> u32 {
         let (red, green, blue) = match color {
             Color::Text => (0xe0, 0xe0, 0xe0),

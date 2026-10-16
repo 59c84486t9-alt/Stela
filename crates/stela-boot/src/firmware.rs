@@ -38,7 +38,7 @@ pub struct Handoff {
     pub storage: Option<crate::storage::Prepared>,
 }
 
-fn pages(count: usize) -> Result<usize, &'static str> {
+pub(crate) fn pages(count: usize) -> Result<usize, &'static str> {
     boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, count)
         .map(|page| page.as_ptr() as usize)
         .map_err(|_| "firmware has no memory for Stela")
@@ -80,7 +80,7 @@ fn configured_volume() -> Option<FileSystem> {
 /// When the firmware names no such volume, as for an image a boot manager
 /// starts from memory, or that volume has no `stela.cfg`, the first volume
 /// with one is used instead.
-fn files() -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+pub(crate) fn files() -> Result<(Vec<u8>, Vec<u8>), &'static str> {
     let own = boot_volume().map(|mut volume| {
         let configured = configured(&mut volume);
         (volume, configured)
@@ -110,14 +110,14 @@ fn files() -> Result<(Vec<u8>, Vec<u8>), &'static str> {
 }
 
 /// Page rights of Stela's own PE image: code RX, constants R, data RW+NX.
-struct Image {
-    start: usize,
-    end: usize,
-    sections: Vec<(usize, usize, u64)>,
+pub(crate) struct Image {
+    pub start: usize,
+    pub end: usize,
+    pub sections: Vec<(usize, usize, u64)>,
 }
 
 impl Image {
-    fn loaded() -> Result<Self, &'static str> {
+    pub(crate) fn loaded() -> Result<Self, &'static str> {
         let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
             .map_err(|_| "no loaded image")?;
         let (base, bytes) = image.info();
@@ -159,7 +159,7 @@ impl Image {
         })
     }
 
-    fn rights(&self, page: usize) -> u64 {
+    pub(crate) fn rights(&self, page: usize) -> u64 {
         self.sections
             .iter()
             .find(|(start, end, _)| (*start..*end).contains(&page))
@@ -168,7 +168,7 @@ impl Image {
 }
 
 /// Write-back RAM the firmware reports, sorted and merged.
-fn ram() -> Result<Vec<(usize, usize)>, &'static str> {
+pub(crate) fn ram() -> Result<Vec<(usize, usize)>, &'static str> {
     let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
     let mut ranges: Vec<(usize, usize)> = map
         .entries()
@@ -254,8 +254,7 @@ fn tables(
 
 /// Collect everything the mount needs, then leave boot services. The
 /// returned tables are not active yet.
-pub fn take_over() -> Result<(Handoff, Tables), &'static str> {
-    let (options, source) = files()?;
+pub fn take_over(options: Vec<u8>, source: Vec<u8>) -> Result<(Handoff, Tables), &'static str> {
     // Install mode stages a payload and stops here; otherwise nothing changes.
     let options = crate::payload::run(options)?;
     let storage = crate::storage::prepare(&options)?;

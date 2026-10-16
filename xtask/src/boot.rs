@@ -53,6 +53,35 @@ const TARGET_SLOT: u8 = 5;
 /// Small slices, so the synthetic members span several.
 const SYNTHETIC_SLICE_BYTES: u64 = 400_000;
 
+/// Stela's system-mode test kernel (`boot/kernel.S`), loaded 16 KiB into the
+/// J473AP DRAM base with 4 GiB of guest DRAM.
+const KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kernel.bin"));
+const KERNEL_OPTIONS: &str =
+    "--system --load 0x800004000 --entry 0x800004000 --ram-bytes 0x100000000";
+/// What the test kernel must leave in X0-X7 when it idles; X1 and X2, its
+/// tasks' SVC counts, need only be nonzero.
+const KERNEL_RESULTS: [(usize, Option<u64>); 8] = [
+    (0, Some(0x5354_454c_4120_4f4b)),
+    (1, None),
+    (2, None),
+    (3, Some(6)),
+    // EL1 data abort: EC 0x25, IL, level 2 translation fault.
+    (4, Some(0x9600_0006)),
+    (5, Some(0xffff_ff80_0400_0000)),
+    // EL1 SVC #0x10 and EL0 SVC #1.
+    (6, Some(0x5600_0010)),
+    (7, Some(0x5600_0001)),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Scenario {
+    /// Four instructions on the bounded MMU-off EL1 diagnostic.
+    Smoke,
+    /// The system-mode engine running Stela's own test kernel: 16 KiB
+    /// granule, high-half kernel, EL1 abort and SVC, timer FIQ, two EL0 tasks.
+    SystemKernel,
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Build `stela.efi`.
@@ -69,9 +98,15 @@ pub struct Run {
     /// The application; defaults to a fresh release build.
     #[arg(long)]
     image: Option<PathBuf>,
-    /// Original ARM bytes; defaults to a four-instruction smoke program.
+    /// Original ARM bytes; defaults to the scenario's image.
     #[arg(long)]
     module: Option<PathBuf>,
+    /// The built-in image and options to run when no module is given.
+    #[arg(long, value_enum, default_value_t = Scenario::Smoke)]
+    scenario: Scenario,
+    /// Guest machine memory for QEMU; defaults to 1G, or 8G for system mode.
+    #[arg(long)]
+    memory: Option<String>,
     /// Fresh directory for the boot volume, serial log and run report.
     #[arg(long)]
     output: PathBuf,
@@ -173,11 +208,15 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     let volume = output.join("volume");
     let source = volume.join("EFI/stela/source.bin");
-    let (bytes, mut options) = match &arguments.module {
-        Some(module) => (fs::read(module)?, arguments.append.unwrap_or_default()),
-        None => (
+    let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
+        (Some(module), _) => (fs::read(module)?, arguments.append.unwrap_or_default()),
+        (None, Scenario::Smoke) => (
             SMOKE.iter().flat_map(|word| word.to_le_bytes()).collect(),
             arguments.append.unwrap_or_else(|| SMOKE_OPTIONS.into()),
+        ),
+        (None, Scenario::SystemKernel) => (
+            KERNEL.to_vec(),
+            arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
         ),
     };
     let disks = match arguments.storage_check {
@@ -226,6 +265,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             install
         }
     };
+    let system = options.starts_with("--system");
     match &arguments.opencore {
         None => {
             fs::create_dir_all(volume.join("EFI/BOOT"))?;
@@ -269,18 +309,25 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // OpenCore's picker needs a keyboard and a display adapter, its HFS+
     // driver uses instructions beyond the qemu64 model, and it halts when a
     // configured log file cannot be written.
+    // System mode needs LA57, which `max` provides.
     let (keyboard, cpu, access) = if picker {
         ("on", "max", "readonly=off,file=fat:rw:")
+    } else if system {
+        ("off", "max", "readonly=on,file=fat:")
     } else {
         ("off", "qemu64", "readonly=on,file=fat:")
     };
+    let memory = arguments
+        .memory
+        .clone()
+        .unwrap_or_else(|| if system { "8G" } else { "1G" }.into());
     command
         .arg("-machine")
         .arg(format!(
             "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042={keyboard},vmport=off"
         ))
         .args(["-accel", "tcg,thread=single", "-cpu", cpu, "-smp", "1"])
-        .args(["-m", "1G", "-nodefaults", "-no-reboot"])
+        .args(["-m", &memory, "-nodefaults", "-no-reboot"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=4"])
         .arg("-drive")
         .arg(format!(
@@ -379,9 +426,22 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             return Err(error);
         }
     };
-    let code = match status {
+    let mut code = match status {
         Some(status) => status.code().map_or(TIMEOUT_EXIT, |code| code as u8),
         None => TIMEOUT_EXIT,
+    };
+    let verification = if arguments.module.is_none() && arguments.scenario == Scenario::SystemKernel
+    {
+        let checked = verify_kernel(&fs::read_to_string(&serial).unwrap_or_default());
+        if checked.is_err() && code == IDLE_EXIT {
+            code = FAILED_EXIT;
+        }
+        Some(checked.map_or_else(
+            |error| json!({ "passed": false, "reason": error }),
+            |()| json!({ "passed": true }),
+        ))
+    } else {
+        None
     };
 
     let outputs: Vec<Value> = ["serial.txt", "stdout.txt", "stderr.txt"]
@@ -401,6 +461,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "source": binding(&source)?,
         "options": options,
         "opencore": arguments.opencore,
+        "scenario": verification,
         "returncode": code,
         "payload": arguments.payload.map(|mode| mode == PayloadMode::Stage),
         "staging": target.exists().then(|| staged(&target)).transpose()?,
@@ -418,6 +479,50 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         return Err(error.context("host storage check failed"));
     }
     Ok(ExitCode::from(code))
+}
+
+/// QEMU's exit status when the engine reports a terminal idle state.
+const IDLE_EXIT: u8 = (0x10 << 1) | 1;
+const FAILED_EXIT: u8 = 1;
+
+/// Check the test kernel's results in the serial log.
+fn verify_kernel(serial: &str) -> Result<(), String> {
+    if !serial.contains("STOP idle") {
+        return Err("the engine did not reach the kernel's final idle state".into());
+    }
+    let mut registers = [0u64; 32];
+    for line in serial.lines() {
+        let Some(rest) = line.strip_prefix('X') else {
+            continue;
+        };
+        let Some((first, values)) = rest.split_once(':') else {
+            continue;
+        };
+        let Ok(first) = first.parse::<usize>() else {
+            continue;
+        };
+        for (offset, value) in values.split_whitespace().enumerate() {
+            let value = u64::from_str_radix(value.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("bad register value {value}"))?;
+            if let Some(slot) = registers.get_mut(first + offset) {
+                *slot = value;
+            }
+        }
+    }
+    for (index, expected) in KERNEL_RESULTS {
+        let actual = registers[index];
+        let good = match expected {
+            Some(value) => actual == value,
+            None => actual != 0,
+        };
+        if !good {
+            return Err(format!(
+                "X{index} = {actual:#x}, expected {}",
+                expected.map_or("nonzero".into(), |value| format!("{value:#x}"))
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A byte range of a host disk image.
