@@ -19,4 +19,7 @@ tempfile = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 sha2 = { version = "0.10", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+# Inflates deflate IPSW members in place, in no_std: no unsafe code, and the
+# same inflater flate2 and the zip crate already use on the host.
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 stela-compiler = { path = "../stela-compiler", default-features = false }
