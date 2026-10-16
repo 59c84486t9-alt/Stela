@@ -1,5 +1,6 @@
 //! Mach-O loading: slice selection, load plans, chained fixups, exports,
 //! dependency discovery and image mappings.
+pub mod apple_device_tree;
 pub mod chained_fixups;
 pub mod dependency_graph;
 pub mod dependency_paths;
