@@ -117,6 +117,30 @@ impl<'a> Node<'a> {
         )
     }
 
+    /// Visit this node and every descendant, depth first.
+    pub fn visit(&self, visitor: &mut dyn FnMut(&Node<'a>)) -> Option<()> {
+        visitor(self);
+        let (_, mut offset) = self.walk_properties()?;
+        for _ in 0..self.children {
+            let child = Self::at(self.data, offset)?;
+            child.visit(visitor)?;
+            offset = child.end()?;
+        }
+        Some(())
+    }
+
+    /// A property as little-endian u32 cells.
+    pub fn cells32(&self, name: &str) -> Option<Vec<u32>> {
+        Some(
+            self.property(name)?
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|cell| u32::from_le_bytes(*cell))
+                .collect(),
+        )
+    }
+
     /// The first 32-bit cell of a property.
     pub fn first_u32(&self, name: &str) -> Option<u32> {
         u32_at(self.property(name)?, 0)

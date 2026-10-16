@@ -212,6 +212,46 @@ impl ConsoleSink for GuestConsole {
 const ARM_IO: u64 = 0x2_0000_0000;
 const J473_UART: (u64, u64, u32) = (0x3520_0000, 0x4000, 739);
 const J473_WDT: (u64, u64, u32) = (0x3d2b_0000, 0x4000, 379);
+/// `aic` `reg` 0x3b0c0000, and NR_IRQ derived from that DeviceTree as below.
+const J473_AIC: (u64, u16) = (0x3b0c_0000, 1152);
+/// The AIC2 event register's offset from the core block: Linux
+/// `arch/arm64/boot/dts/apple/t8112.dtsi` gives the `aic` second `reg` at
+/// 0x3b0c8000, as the AIC2 model documents; the ADT has no
+/// `aic-iack-offset` for this board.
+const AIC_EVENT_OFFSET: u64 = 0x8000;
+
+/// The AIC's guest PA and NR_IRQ: one more than the highest `interrupts`
+/// value of any node whose `interrupt-parent` is the AIC's phandle.
+fn aic_placement(tree: &[u8]) -> Result<(u64, u16), String> {
+    let root = adt::Node::root(tree).ok_or("DeviceTree has no root")?;
+    let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
+    let aic = io.child("aic").ok_or("DeviceTree has no /arm-io/aic")?;
+    let phandle = aic
+        .first_u32("AAPL,phandle")
+        .ok_or("/arm-io/aic has no phandle")?;
+    let (offset, _) = aic
+        .pairs("reg")
+        .and_then(|reg| reg.first().copied())
+        .ok_or("/arm-io/aic has no reg")?;
+    let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
+    let physical = ranges
+        .iter()
+        .find(|(child, _, size)| (*child..child + size).contains(&offset))
+        .map(|(child, parent, _)| parent + (offset - child))
+        .ok_or("/arm-io/aic lies outside /arm-io ranges")?;
+    let mut highest = None;
+    root.visit(&mut |node| {
+        if node.first_u32("interrupt-parent") == Some(phandle)
+            && let Some(cells) = node.cells32("interrupts")
+        {
+            highest = cells.into_iter().chain(highest).max();
+        }
+    })
+    .ok_or("DeviceTree walk failed")?;
+    let highest = highest.ok_or("no node names the AIC as its interrupt parent")?;
+    let count = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
+    Ok((physical, count))
+}
 
 /// A device node's first `reg` range in guest PA and its AIC input, read
 /// from the DeviceTree.
@@ -237,9 +277,9 @@ fn placement(tree: &[u8], name: &str) -> Result<(Range, AicInput), String> {
     Ok((Range { physical, bytes }, AicInput::new(0, irq as u16)))
 }
 
-/// The modeled board devices: the console UART and the watchdog. The AIC is
-/// not placed until the board profile records its NR_IRQ and MAX_IRQ, so an
-/// access to it, or a device wire that would reach it, stops explicitly.
+/// The modeled board devices: the console UART, the watchdog and the AIC2.
+/// `aic-timebase` has no public register description and no model, so its
+/// accesses stop explicitly.
 fn devices(tree: Option<&[u8]>, now: u64) -> Result<AppleDevices, String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| {
         (
@@ -250,9 +290,17 @@ fn devices(tree: Option<&[u8]>, now: u64) -> Result<AppleDevices, String> {
             AicInput::new(0, irq as u16),
         )
     };
-    let (uart, wdt) = match tree {
-        Some(tree) => (placement(tree, "uart0")?, placement(tree, "wdt")?),
-        None => (fixed(J473_UART), fixed(J473_WDT)),
+    let (uart, wdt, aic) = match tree {
+        Some(tree) => (
+            placement(tree, "uart0")?,
+            placement(tree, "wdt")?,
+            aic_placement(tree)?,
+        ),
+        None => (
+            fixed(J473_UART),
+            fixed(J473_WDT),
+            (ARM_IO + J473_AIC.0, J473_AIC.1),
+        ),
     };
     let mut devices = AppleDevices::new(0);
     devices
@@ -261,9 +309,18 @@ fn devices(tree: Option<&[u8]>, now: u64) -> Result<AppleDevices, String> {
     devices
         .add_watchdog(&[wdt.0], Some(wdt.1), now)
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
+    devices.add_aic(aic.0, aic.1, AIC_EVENT_OFFSET)?;
     output::arguments(format_args!(
-        "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic=unplaced\n",
-        uart.0.physical, uart.0.bytes, uart.1.irq, wdt.0.physical, wdt.0.bytes, wdt.1.irq
+        "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
+         aic-timebase=unplaced\n",
+        uart.0.physical,
+        uart.0.bytes,
+        uart.1.irq,
+        wdt.0.physical,
+        wdt.0.bytes,
+        wdt.1.irq,
+        aic.0,
+        aic.1
     ));
     Ok(devices)
 }

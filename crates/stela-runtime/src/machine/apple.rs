@@ -8,7 +8,7 @@ use super::{
     registers::Lines,
 };
 use crate::platform::apple::{
-    aic::Aic2,
+    aic::{Aic2, Aic2Config},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     interrupt::{CpuIndex, InterruptLatch},
     uart::S5lUart,
@@ -100,12 +100,28 @@ impl AppleDevices {
         self.map(device, ranges)
     }
 
-    /// The interrupt controller; device wires on `Wire::Aic` reach it.
-    pub fn add_aic(&mut self, aic: Aic2, physical: u64) -> Result<(), MapError> {
+    /// The AIC2 at `physical`, routing every IRQ to this PE. NR_IRQ is the
+    /// number of inputs the board wires (one more than the highest DeviceTree
+    /// `interrupts` value under the AIC) and MAX_IRQ rounds it up to a whole
+    /// 32-bit mask word; the model reports both in its CAP0/MAXNUMIRQ
+    /// registers (m1n1 `aic.c`, Linux `irq-apple-aic.c`). `event_offset` is the
+    /// event register's distance from the core block.
+    pub fn add_aic(&mut self, physical: u64, nr_irq: u16, event_offset: u64) -> Result<(), String> {
+        let config = Aic2Config {
+            nr_irq,
+            max_irq: nr_irq.div_ceil(32) * 32,
+            event_offset,
+            cpus: 1,
+            default_cpus: 1,
+            target_groups: [None; 4],
+        };
+        let aic = Aic2::new(config).map_err(|error| format!("AIC2 configuration: {error:?}"))?;
         let span = aic.span();
         let device = self.bus.add(Box::new(aic));
         self.aic = Some(device);
-        self.bus.map(device, physical, span, 0)
+        self.bus
+            .map(device, physical, span, 0)
+            .map_err(|error| format!("AIC2 placement: {error:?}"))
     }
 
     /// Forward queued device wires into the AIC and record a reset request.
@@ -251,5 +267,24 @@ mod tests {
         ));
         assert!(!devices.lines(0).irq);
         assert_eq!(devices.take_reset(), None);
+    }
+
+    #[test]
+    fn places_an_aic2_with_derived_counts_and_routes_uart_wires_to_it() {
+        let mut devices = AppleDevices::new(0);
+        devices
+            .add_uart(
+                Console::default(),
+                &[Range {
+                    physical: UART,
+                    bytes: 0x4000,
+                }],
+                Some(AicInput::new(0, 739)),
+            )
+            .unwrap();
+        devices.add_aic(0x2_3b0c_0000, 1152, 0x8000).unwrap();
+        // CAP0 (offset 4) reports NR_IRQ in bits 15:0.
+        assert_eq!(devices.read(0x2_3b0c_0004, 4, 0).unwrap() & 0xffff, 1152);
+        assert!(devices.add_aic(0x2_3b0c_0000, 1152, 0x10).is_err());
     }
 }
