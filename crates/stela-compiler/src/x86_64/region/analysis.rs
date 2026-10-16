@@ -250,6 +250,15 @@ pub fn selected_output_instruction_count(code: &[u8]) -> Option<usize> {
 
 /// Fail-closed boundaries for the same selected output forms, never semantic admission.
 pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
+    output_instruction_ends(code, false)
+}
+
+/// Cost only: flag-bearing pure spans. This cannot change the legacy region gate.
+pub(super) fn allocated_output_instruction_count(code: &[u8]) -> Option<usize> {
+    output_instruction_ends(code, true).map(|ends| ends.len())
+}
+
+fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     const OPERAND_SIZE: u8 = 0x66;
     const REX_FIRST: u8 = 0x40;
     const REX_LAST: u8 = 0x4f;
@@ -266,6 +275,23 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
     const OR: u8 = 0x09;
     const XOR: u8 = 0x31;
     const IMMEDIATE_GROUP: u8 = 0x81;
+    const SHORT_IMMEDIATE_GROUP: u8 = 0x83;
+    const IMUL_IMMEDIATE: u8 = 0x69;
+    const PUSH_FIRST: u8 = 0x50;
+    const POP_LAST: u8 = 0x5f;
+    const PUSH_FLAGS: u8 = 0x9c;
+    const NEAR_JUMP: u8 = 0xe9;
+    const SHORT_JUMP: u8 = 0xeb;
+    const ACCUMULATOR_IMMEDIATES: [u8; 6] = [0x05, 0x2d, 0x25, 0x35, 0x3d, 0xa9];
+    const CONDITION_MOVE_FIRST: u8 = 0x40;
+    const CONDITION_MOVE_LAST: u8 = 0x4f;
+    const CONDITION_JUMP_FIRST: u8 = 0x80;
+    const CONDITION_JUMP_LAST: u8 = 0x8f;
+    const CONDITION_SET_FIRST: u8 = 0x90;
+    const CONDITION_SET_LAST: u8 = 0x9f;
+    const TEST: u8 = 0x85;
+    const TEST_BYTE: u8 = 0x84;
+    const INC_DEC_GROUP: u8 = 0xff;
     const SHIFT_IMMEDIATE_GROUP: u8 = 0xc1;
     const UNARY_GROUP: u8 = 0xf7;
     const NOP: u8 = 0x90;
@@ -273,6 +299,7 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
     const REX_X64_LOW_REGISTERS: u8 = 0x48;
     const LEA: u8 = 0x8d;
     const LEA_RDX_RAX_DISP32: u8 = 0x90;
+    const LEA_RDX_RDX_DISP8: u8 = 0x52;
     const TWO_BYTE_OPCODE: u8 = 0x0f;
     const MOVZX_BYTE: u8 = 0xb6;
     const IMUL: u8 = 0xaf;
@@ -293,7 +320,18 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
         cursor += usize::from(rex.is_some());
         let opcode = *code.get(cursor)?;
         cursor += 1;
-        if (MOV_REG_IMMEDIATE_FIRST..=MOV_REG_IMMEDIATE_LAST).contains(&opcode) {
+        if extended
+            && !word
+            && (PUSH_FIRST..=POP_LAST).contains(&opcode)
+            && rex.is_none_or(|rex| rex == (REX_FIRST | REX_B))
+        {
+            // Borrowed native ABI registers; no memory addressing operand.
+        } else if extended && !word && rex.is_none() && opcode == PUSH_FLAGS {
+        } else if extended && !word && rex.is_none() && matches!(opcode, NEAR_JUMP | SHORT_JUMP) {
+            cursor += if opcode == NEAR_JUMP { 4 } else { 1 };
+        } else if extended && !word && ACCUMULATOR_IMMEDIATES.contains(&opcode) {
+            cursor += 4;
+        } else if (MOV_REG_IMMEDIATE_FIRST..=MOV_REG_IMMEDIATE_LAST).contains(&opcode) {
             cursor += if rex.is_some_and(|rex| rex & REX_W != 0) {
                 8
             } else if word {
@@ -301,17 +339,37 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
             } else {
                 4
             };
-        } else if opcode == LEA && !word && rex == Some(REX_X64_LOW_REGISTERS) {
-            // Exact existing ordinary-memory LEA RDX,[RAX+disp32].
-            if *code.get(cursor)? != LEA_RDX_RAX_DISP32 {
+        } else if opcode == LEA
+            && !word
+            && (rex == Some(REX_X64_LOW_REGISTERS) || (extended && rex.is_none()))
+        {
+            let modrm = *code.get(cursor)?;
+            if modrm == LEA_RDX_RAX_DISP32 && rex == Some(REX_X64_LOW_REGISTERS) {
+                cursor += 5;
+            } else if extended && modrm == LEA_RDX_RDX_DISP8 {
+                // Flag-neutral selector adjustment.
+                cursor += 2;
+            } else {
                 return None;
             }
-            cursor += 5;
         } else if opcode == TWO_BYTE_OPCODE && !word {
             let second = *code.get(cursor)?;
             if second == MOVZX_BYTE && rex.is_none() {
                 // Exact existing LDRB data access MOVZX ECX,byte [RAX].
                 if code.get(cursor..cursor + 2)? != [MOVZX_BYTE, ECX_FROM_RAX_MEMORY] {
+                    return None;
+                }
+                cursor += 2;
+            } else if extended
+                && (CONDITION_JUMP_FIRST..=CONDITION_JUMP_LAST).contains(&second)
+                && rex.is_none()
+            {
+                cursor += 5;
+            } else if extended
+                && ((CONDITION_MOVE_FIRST..=CONDITION_MOVE_LAST).contains(&second)
+                    || (CONDITION_SET_FIRST..=CONDITION_SET_LAST).contains(&second))
+            {
+                if *code.get(cursor + 1)? >> 6 != 3 {
                     return None;
                 }
                 cursor += 2;
@@ -353,10 +411,22 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
                     | OR
                     | XOR
                     | IMMEDIATE_GROUP
+                    | SHORT_IMMEDIATE_GROUP
+                    | IMUL_IMMEDIATE
+                    | TEST
+                    | TEST_BYTE
+                    | INC_DEC_GROUP
                     | SHIFT_IMMEDIATE_GROUP
                     | UNARY_GROUP
             );
-            if !recognized || (word && !matches!(opcode, MOV_RM_IMMEDIATE | MOV_LOAD | MOV_STORE)) {
+            if !recognized
+                || (!extended
+                    && matches!(
+                        opcode,
+                        SHORT_IMMEDIATE_GROUP | IMUL_IMMEDIATE | TEST | TEST_BYTE | INC_DEC_GROUP
+                    ))
+                || (word && !matches!(opcode, MOV_RM_IMMEDIATE | MOV_LOAD | MOV_STORE))
+            {
                 return None;
             }
             let modrm = *code.get(cursor)?;
@@ -365,6 +435,9 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
             let extension = (modrm >> 3) & 7;
             let rm = modrm & 7;
             if mode != 3 {
+                if matches!(opcode, IMUL_IMMEDIATE | TEST | TEST_BYTE | INC_DEC_GROUP) {
+                    return None;
+                }
                 if rm != FRAME_RM || rex.is_some_and(|rex| rex & REX_B != 0) {
                     return None;
                 }
@@ -384,8 +457,22 @@ pub fn selected_output_instruction_ends(code: &[u8]) -> Option<Vec<usize>> {
                     }
                 }
                 MOV_RM_IMMEDIATE => return None,
-                IMMEDIATE_GROUP if matches!(extension, 0 | 5) => cursor += 4,
-                IMMEDIATE_GROUP => return None,
+                IMMEDIATE_GROUP
+                    if matches!(extension, 0 | 5)
+                        || (extended && matches!(extension, 4 | 6 | 7)) =>
+                {
+                    cursor += 4
+                }
+                SHORT_IMMEDIATE_GROUP
+                    if matches!(extension, 0 | 5)
+                        || (extended && matches!(extension, 4 | 6 | 7)) =>
+                {
+                    cursor += 1
+                }
+                IMMEDIATE_GROUP | SHORT_IMMEDIATE_GROUP => return None,
+                IMUL_IMMEDIATE => cursor += 4,
+                INC_DEC_GROUP if extension == 0 => {}
+                INC_DEC_GROUP => return None,
                 SHIFT_IMMEDIATE_GROUP if matches!(extension, 1 | 4 | 5 | 7) => cursor += 1,
                 SHIFT_IMMEDIATE_GROUP => return None,
                 UNARY_GROUP if extension == 2 || (extension == 3 && mode == 3) => {}

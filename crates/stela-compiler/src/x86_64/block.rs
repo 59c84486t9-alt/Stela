@@ -102,6 +102,27 @@ fn emit_selected(
     let mut fixups = vec![];
     let mut cursor = 0;
     while cursor < instructions.len() {
+        // Build the new candidate privately. Rejection leaves both cursor and
+        // output untouched, so the legacy clean-load chunk partition is exact.
+        if optimize_regions
+            && let Ok(Some(region)) = super::region::emit_allocated_prefix(&instructions[cursor..])
+        {
+            let count = region.consumed_instructions;
+            let mut baseline = vec![];
+            let mut candidate_fixups = vec![];
+            for instruction in &instructions[cursor..cursor + count] {
+                super::emit_instruction(&mut baseline, instruction, &mut candidate_fixups, target);
+            }
+            if candidate_fixups.is_empty() && super::region::admits_allocated(&region, &baseline) {
+                let offset = code.len();
+                block
+                    .source_map
+                    .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
+                code.extend(region.code);
+                cursor += count;
+                continue;
+            }
+        }
         if optimize_regions
             && let Ok(region) = super::region::emit_clean_load_prefix(&instructions[cursor..])
             && region.consumed_instructions != 0

@@ -280,7 +280,7 @@ fn ordinary_source_replacement_switches_abis_and_zero_budget_stays_cold() -> Res
 }
 
 #[test]
-fn ordinary_clobbered_host_flags_decline_residency_but_preserve_guest_flags() -> Result<()> {
+fn ordinary_clobbered_host_flags_remain_resident_and_preserve_guest_flags() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let source = [
         TST_W8_ONE,
@@ -306,7 +306,55 @@ fn ordinary_clobbered_host_flags_decline_residency_but_preserve_guest_flags() ->
     assert_eq!(outcome.blocks_executed, 1);
     assert_eq!(
         runtime.loaded_manifest(BASE).unwrap().identity.abi,
-        BlockProfile::Ordinary.abi()
+        BlockProfile::OrdinaryResidentV1.abi()
+    );
+    Ok(())
+}
+
+#[test]
+fn dirty_loop_header_inputs_survive_pressure_before_their_next_write() -> Result<()> {
+    const CARRIED_GPRS: u32 = 10;
+    const SOURCE_REGISTER_SHIFT: u32 = 5;
+    const ADD_W_SELF_ONE: u32 = 0x1100_0400;
+    const ADD_W22_W1_ONE: u32 = 0x1100_0436;
+    const EOR_W23_W22_W22: u32 = 0x4a16_02d7;
+    const MOV_W22_ZERO: u32 = 0x5280_0016;
+    const B_NE_THIRTEEN_WORDS_BACK: u32 = 0x54ff_fe61;
+    const ARM_NEGATIVE: u32 = 1 << 31;
+    const BUDGET: usize = 4;
+    const UPPER_INPUT: u64 = 0xabcd_dcba_0000_0000;
+    let mut source: Vec<_> = (1..CARRIED_GPRS)
+        .map(|register| ADD_W_SELF_ONE | (register << SOURCE_REGISTER_SHIFT) | register)
+        .collect();
+    source.extend([
+        ADD_W22_W1_ONE,
+        EOR_W23_W22_W22,
+        MOV_W22_ZERO,
+        SUBS_W0_ONE,
+        B_NE_THIRTEEN_WORDS_BACK,
+    ]);
+    let cache = tempfile::tempdir()?;
+    let mut runtime = ordinary(cache.path(), &source)?;
+    let mut state = thread(UPPER_INPUT);
+    let mut expected = state.registers.clone();
+    expected.x[0] = u64::from(0u32.wrapping_sub(BUDGET as u32));
+    for register in 1..CARRIED_GPRS as usize {
+        expected.x[register] = u64::from((expected.x[register] as u32).wrapping_add(BUDGET as u32));
+    }
+    expected.x[22] = 0;
+    expected.x[23] = 0;
+    expected.nzcv = ARM_NEGATIVE | ARM_CARRY;
+    // SAFETY: the owned nonfaulting scalar loop has ten carried inputs plus
+    // two outputs. Pressure can evict the counter before its SUBS; every later
+    // iteration must retain the carried value rather than reload cold state.
+    let outcome = unsafe { runtime.run(&mut state, None, BUDGET)? };
+    assert_eq!(state.registers, expected);
+    assert_eq!(state.pc, BASE);
+    assert_eq!(outcome.blocks_executed, BUDGET);
+    assert_eq!(outcome.reason, StopReason::BudgetExhausted);
+    assert_eq!(
+        runtime.loaded_manifest(BASE).unwrap().identity.abi,
+        BlockProfile::OrdinaryResidentV1.abi()
     );
     Ok(())
 }

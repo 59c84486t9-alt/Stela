@@ -20,6 +20,7 @@ pub const SOURCE_FINGERPRINT_MATERIAL: &str = concat!(
     include_str!("x86_64/region/self_loop.rs"),
     include_str!("x86_64/region.rs"),
     include_str!("x86_64/region/analysis.rs"),
+    include_str!("x86_64/region/allocation.rs"),
     include_str!("x86_64/region/constant.rs"),
     include_str!("x86_64/region/encoding.rs"),
     include_str!("x86_64/region/recovery.rs"),

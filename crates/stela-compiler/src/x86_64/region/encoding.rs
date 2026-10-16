@@ -9,12 +9,18 @@ pub enum HostGpr {
     Rax = 0,
     Rcx = 1,
     Rdx = 2,
+    Rbx = 3,
+    Rbp = 5,
     Rsi = 6,
     Rdi = 7,
     R8 = 8,
     R9 = 9,
     R10 = 10,
     R11 = 11,
+    R12 = 12,
+    R13 = 13,
+    R14 = 14,
+    R15 = 15,
 }
 
 impl HostGpr {
@@ -34,6 +40,24 @@ pub const POOL: [HostGpr; 6] = [
     HostGpr::R10,
     HostGpr::R11,
 ];
+/// Borrow only within a nonfaulting span, with exact native ABI restoration.
+pub const CALLEE_POOL: [HostGpr; 6] = [
+    HostGpr::Rbx,
+    HostGpr::Rbp,
+    HostGpr::R12,
+    HostGpr::R13,
+    HostGpr::R14,
+    HostGpr::R15,
+];
+pub const ALLOCATABLE_SLOTS: usize = POOL.len() + CALLEE_POOL.len();
+
+pub fn pool_host(index: usize) -> HostGpr {
+    if index < POOL.len() {
+        POOL[index]
+    } else {
+        CALLEE_POOL[index - POOL.len()]
+    }
+}
 const REX: u8 = 0x40;
 const REX_W: u8 = 8;
 const REX_R: u8 = 4;
@@ -50,6 +74,18 @@ const UNARY_GROUP: u8 = 0xf7;
 const NOP: u8 = 0x90;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
 const IMUL: u8 = 0xaf;
+const IMUL_IMMEDIATE: u8 = 0x69;
+const PUSH_FLAGS: u8 = 0x9c;
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum ImmediateExtension {
+    Add = 0,
+    And = 4,
+    Subtract = 5,
+    Xor = 6,
+    Compare = 7,
+}
 
 pub fn nop(code: &mut Vec<u8>) {
     code.push(NOP);
@@ -75,7 +111,7 @@ pub fn copy(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, width: Wi
 
 fn frame_access(code: &mut Vec<u8>, register: HostGpr, slot: usize, opcode: u8) {
     rex(code, Width::X64, register, FRAME);
-    let offset = (slot * 8) as u32;
+    let offset = (slot * GPR_BYTES) as u32;
     let mode = if offset <= 127 {
         DISP8_MODE
     } else {
@@ -95,6 +131,24 @@ pub fn load(code: &mut Vec<u8>, destination: HostGpr, slot: usize) {
 
 pub fn store(code: &mut Vec<u8>, source: HostGpr, slot: usize) {
     frame_access(code, source, slot, MOV_STORE);
+}
+
+fn nzcv_access(code: &mut Vec<u8>, register: HostGpr, opcode: u8) {
+    const NZCV_OFFSET: u32 = std::mem::offset_of!(crate::GuestState, nzcv) as u32;
+    rex(code, Width::W32, register, FRAME);
+    code.extend([
+        opcode,
+        DISP32_MODE | ((register as u8 & 7) << 3) | FRAME as u8,
+    ]);
+    code.extend(NZCV_OFFSET.to_le_bytes());
+}
+
+pub fn load_nzcv(code: &mut Vec<u8>, destination: HostGpr) {
+    nzcv_access(code, destination, MOV_LOAD);
+}
+
+pub fn store_nzcv(code: &mut Vec<u8>, source: HostGpr) {
+    nzcv_access(code, source, MOV_STORE);
 }
 
 pub fn immediate(code: &mut Vec<u8>, destination: HostGpr, value: u64, width: Width) {
@@ -165,13 +219,73 @@ pub fn arithmetic_immediate(
     value: u32,
     width: Width,
 ) {
+    group_immediate(
+        code,
+        destination,
+        if subtract {
+            ImmediateExtension::Subtract
+        } else {
+            ImmediateExtension::Add
+        },
+        value,
+        width,
+    );
+}
+
+pub fn integer_immediate(
+    code: &mut Vec<u8>,
+    destination: HostGpr,
+    extension: ImmediateExtension,
+    value: u32,
+    width: Width,
+) {
+    if destination == HostGpr::Rax {
+        const ADD_ACCUMULATOR: u8 = 0x05;
+        const SUBTRACT_ACCUMULATOR: u8 = 0x2d;
+        const AND_ACCUMULATOR: u8 = 0x25;
+        const XOR_ACCUMULATOR: u8 = 0x35;
+        const COMPARE_ACCUMULATOR: u8 = 0x3d;
+        rex(code, width, HostGpr::Rax, destination);
+        code.push(match extension {
+            ImmediateExtension::Add => ADD_ACCUMULATOR,
+            ImmediateExtension::Subtract => SUBTRACT_ACCUMULATOR,
+            ImmediateExtension::And => AND_ACCUMULATOR,
+            ImmediateExtension::Xor => XOR_ACCUMULATOR,
+            ImmediateExtension::Compare => COMPARE_ACCUMULATOR,
+        });
+        code.extend(value.to_le_bytes());
+    } else {
+        group_immediate(code, destination, extension, value, width);
+    }
+}
+
+fn group_immediate(
+    code: &mut Vec<u8>,
+    destination: HostGpr,
+    extension: ImmediateExtension,
+    value: u32,
+    width: Width,
+) {
     rex(code, width, HostGpr::Rax, destination);
-    let extension = if subtract { 5 } else { 0 };
     code.extend([
         IMMEDIATE_GROUP,
-        REGISTER_MODE | (extension << 3) | (destination as u8 & 7),
+        REGISTER_MODE | ((extension as u8) << 3) | (destination as u8 & 7),
     ]);
     code.extend(value.to_le_bytes());
+}
+
+pub fn multiply_immediate32(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, value: i32) {
+    rex(code, Width::W32, destination, source);
+    code.extend([
+        IMUL_IMMEDIATE,
+        REGISTER_MODE | ((destination as u8 & 7) << 3) | (source as u8 & 7),
+    ]);
+    code.extend(value.to_le_bytes());
+}
+
+pub fn capture_host_flags(code: &mut Vec<u8>) {
+    code.push(PUSH_FLAGS);
+    pop(code, HostGpr::Rdx);
 }
 
 pub fn shift(code: &mut Vec<u8>, kind: Shift, amount: u8, width: Width) {
@@ -429,11 +543,25 @@ pub fn skip_jump_if_budget_zero(code: &mut Vec<u8>) {
 }
 
 pub fn push_budget_pointer(code: &mut Vec<u8>) {
-    code.push(PUSH_REGISTER | HostGpr::Rsi as u8);
+    push(code, HostGpr::Rsi);
 }
 
 pub fn pop_budget_pointer(code: &mut Vec<u8>) {
-    code.push(POP_REGISTER | HostGpr::Rsi as u8);
+    pop(code, HostGpr::Rsi);
+}
+
+pub fn push(code: &mut Vec<u8>, register: HostGpr) {
+    if register as u8 >= 8 {
+        code.push(REX | REX_B);
+    }
+    code.push(PUSH_REGISTER | (register as u8 & 7));
+}
+
+pub fn pop(code: &mut Vec<u8>, register: HostGpr) {
+    if register as u8 >= 8 {
+        code.push(REX | REX_B);
+    }
+    code.push(POP_REGISTER | (register as u8 & 7));
 }
 
 pub fn load_budget(code: &mut Vec<u8>) {

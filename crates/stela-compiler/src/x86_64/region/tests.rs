@@ -802,3 +802,193 @@ fn paired_load_tier_declines_unselected_shapes() {
         );
     }
 }
+
+fn define_flags(destination: Register, source: Register) -> Operation {
+    Operation::AddSub {
+        width: Width::X64,
+        subtract: true,
+        flags: true,
+        destination,
+        source,
+        immediate: 1,
+    }
+}
+
+fn select_flags(
+    destination: Register,
+    left: Register,
+    right: Register,
+    condition: u8,
+) -> Operation {
+    Operation::ConditionalSelect(crate::aarch64::conditional_select::Operand {
+        width: Width::X64,
+        destination,
+        left,
+        right,
+        condition,
+        otherwise: crate::aarch64::conditional_select::Otherwise::Unchanged,
+    })
+}
+
+#[test]
+fn value_liveness_keeps_final_bank_and_kills_only_overwritten_versions() {
+    use allocation::{LiveRanges, Value, ValueEffects};
+    let x0 = Value::gpr(0).unwrap();
+    let x1 = Value::gpr(1).unwrap();
+    let effects = [
+        ValueEffects::new(
+            Effects {
+                reads: 0,
+                writes: 1,
+            },
+            false,
+            true,
+        ),
+        ValueEffects::new(
+            Effects {
+                reads: 1,
+                writes: 2,
+            },
+            false,
+            false,
+        ),
+        ValueEffects::new(
+            Effects {
+                reads: 0,
+                writes: 1,
+            },
+            false,
+            true,
+        ),
+    ];
+    let live = LiveRanges::compute(&effects);
+    assert!(live.required_after(0, x0));
+    assert!(!live.required_after(1, x0));
+    assert!(!live.required_after(0, Value::NZCV));
+    assert!(live.required_after(1, x1));
+    assert!(live.required_after(2, x0));
+    assert!(live.required_after(2, Value::NZCV));
+    assert_eq!(live.before(0) & (x0.mask() | Value::NZCV.mask()), 0);
+}
+
+#[test]
+fn packed_flags_survive_nonflag_arithmetic_without_frame_roundtrip() {
+    let instructions = [
+        instruction(0, define_flags(Register::Zero, Register::X(0))),
+        instruction(
+            1,
+            select_flags(Register::X(2), Register::X(0), Register::X(1), 0),
+        ),
+        instruction(2, add(Register::X(3), Register::X(1))),
+        instruction(
+            3,
+            select_flags(Register::X(4), Register::X(2), Register::X(3), 12),
+        ),
+    ];
+    let region = emit_allocated_prefix(&instructions).unwrap().unwrap();
+    assert_eq!(region.consumed_instructions, instructions.len());
+    assert_eq!(region.stats.flag_loads, 0);
+    assert_eq!(region.stats.flag_stores, 1);
+    assert_eq!(region.stats.pressure_stores, 0);
+    assert!(
+        region.recovery.is_empty(),
+        "no invented mid-native recovery service"
+    );
+    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
+}
+
+#[test]
+fn dead_native_flag_version_needs_no_capture_before_next_producer() {
+    let instructions = [
+        instruction(0, define_flags(Register::Zero, Register::X(0))),
+        instruction(1, add(Register::X(1), Register::X(0))),
+        instruction(2, define_flags(Register::Zero, Register::X(1))),
+    ];
+    let region = emit_allocated_prefix(&instructions).unwrap().unwrap();
+    assert_eq!(region.stats.flag_loads, 0);
+    assert_eq!(region.stats.flag_stores, 1);
+    assert!(region.stats.dead_versions >= 1);
+}
+
+#[test]
+fn caller_pool_is_still_exact_for_legacy_cost_and_load_chunk() {
+    let instructions = [
+        instruction(0, add(Register::X(2), Register::X(2))),
+        instruction(
+            1,
+            Operation::Memory {
+                transfer: MemoryTransfer::Load {
+                    signed: false,
+                    width: Width::W32,
+                },
+                bytes: 1,
+                data: Register::X(3),
+                base: Register::X(0),
+                displacement: 0,
+                mode: AddressMode::Offset,
+            },
+        ),
+        instruction(2, add(Register::X(2), Register::X(2))),
+    ];
+    assert!(emit_allocated_prefix(&instructions).unwrap().is_none());
+    let legacy = emit_clean_load_prefix(&instructions).unwrap();
+    let target = crate::TargetCpu::Baseline;
+    let fallthrough = GuestAddress(0x100c);
+    let baseline = super::super::block::emit_for_target(&instructions, None, fallthrough, target);
+    let ordinary =
+        super::super::block::emit_ordinary_for_target(&instructions, None, fallthrough, target);
+    let mut baseline_prefix = vec![];
+    let mut fixups = vec![];
+    for instruction in &instructions {
+        super::super::emit_instruction(&mut baseline_prefix, instruction, &mut fixups, target);
+    }
+    assert!(fixups.is_empty());
+    if admits_ordinary(&legacy, &baseline_prefix) {
+        assert!(ordinary.x86_64_code.starts_with(&legacy.code));
+        assert_eq!(
+            &ordinary.source_map[..instructions.len()],
+            &legacy.source_map
+        );
+    } else {
+        assert_eq!(ordinary.x86_64_code, baseline.x86_64_code);
+        assert_eq!(ordinary.source_map, baseline.source_map);
+    }
+    assert_eq!(
+        analysis::selected_output_instruction_count(&[0x9c, 0x5a]),
+        None
+    );
+    assert_eq!(
+        analysis::allocated_output_instruction_count(&[0x9c, 0x5a]),
+        Some(2)
+    );
+}
+
+#[test]
+fn wider_loop_admission_uses_actual_capacity_not_five_participants() {
+    let mut instructions: Vec<_> = (0..7)
+        .map(|index| {
+            instruction(
+                index,
+                add(Register::X(index as u8), Register::X(index as u8)),
+            )
+        })
+        .collect();
+    instructions.push(instruction(7, define_flags(Register::X(0), Register::X(0))));
+    let terminal = (
+        GuestAddress(0x1020),
+        crate::block::Terminator::Branch(Operation::BranchCondition {
+            target: GuestAddress(0x1000),
+            condition: 1,
+        }),
+    );
+    let plan = self_loop::Plan::new(&instructions, Some(&terminal), GuestAddress(0x1024)).unwrap();
+    let native = plan.emit(&instructions).unwrap();
+    assert_eq!(native.source_map.len(), instructions.len() + 1);
+    assert_eq!(native.source_map[0].1, 0);
+    let changed = [instruction(0, Operation::Nop)];
+    let plan = self_loop::Plan::new(&instructions, Some(&terminal), GuestAddress(0x1024)).unwrap();
+    assert!(matches!(
+        plan.emit(&changed),
+        Err(RegionError::ChangedInstructions)
+    ));
+}

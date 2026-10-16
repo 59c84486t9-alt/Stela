@@ -1,9 +1,14 @@
-//! Integer host-flag provenance inside nonfaulting resident loops.
-//! Every admitted exit is still defined by the final complete subtraction.
-use super::{Effects, Emitter, RegionError, analysis, encoding};
+//! Integer flag residency in nonfaulting scalar spans and self-loops.
+//! Native or packed NZCV settles exactly at each canonical exit.
+use super::{
+    Effects, Emitter, RegionError,
+    allocation::{Value, ValueEffects},
+    analysis, encoding,
+};
 use crate::aarch64::{
-    Instruction, Logical, Operation, Register, Width,
+    Instruction, Logical, Operation, Register, Shift, Width,
     conditional_select::{Operand, Otherwise},
+    flags::{NZCV_C, NZCV_N, NZCV_V, NZCV_Z},
 };
 use encoding::{NativeCondition, RESULT, RIGHT};
 
@@ -203,4 +208,300 @@ fn emit_select(emitter: &mut Emitter<'_>, pc: crate::GuestAddress, operand: Oper
         }
     });
     emitter.commit(operand.destination, operand.width);
+}
+
+/// Architectural NZCV survives a host arithmetic clobber in the same allocator
+/// as GPR values. Frame is authoritative only at entry or after actual settlement.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Location {
+    Frame,
+    Native(Carry),
+    Packed,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ValueStep {
+    Ordinary,
+    Define(Carry),
+    Select,
+}
+
+pub(super) fn analyze_value(operation: &Operation) -> Option<(Effects, ValueEffects, ValueStep)> {
+    // A synthetic provenance permits every valid conditional selector. The real
+    // producer/location is selected at emission, never inferred from this token.
+    let mut provenance = Some(Carry::Native);
+    let (gprs, step) = analyze(operation, &mut provenance)?;
+    let (reads_flags, writes_flags, step) = match step {
+        Step::Ordinary => (false, false, ValueStep::Ordinary),
+        Step::Define => (false, true, ValueStep::Define(provenance.unwrap())),
+        Step::Select(_) => {
+            let Operation::ConditionalSelect(operand) = operation else {
+                unreachable!()
+            };
+            (operand.condition < ARM_AL, false, ValueStep::Select)
+        }
+    };
+    Some((
+        gprs,
+        ValueEffects::new(gprs, reads_flags, writes_flags),
+        step,
+    ))
+}
+
+const HOST_CARRY_BIT: u8 = 0;
+const HOST_ZERO_BIT: u8 = 6;
+const HOST_SIGN_BIT: u8 = 7;
+const HOST_OVERFLOW_BIT: u8 = 11;
+const ARM_NEGATIVE_BIT: u8 = NZCV_N.trailing_zeros() as u8;
+const ARM_OVERFLOW_BIT: u8 = NZCV_V.trailing_zeros() as u8;
+const SIGN_ZERO_SHIFT: u8 = ARM_NEGATIVE_BIT - HOST_SIGN_BIT;
+const HOST_NZC_MASK: u32 = (1 << HOST_CARRY_BIT) | (1 << HOST_ZERO_BIT) | (1 << HOST_SIGN_BIT);
+const ARM_NZC_MASK: u32 = NZCV_N | NZCV_Z | NZCV_C;
+const PACK_MULTIPLIER: u32 = NZCV_C | (1 << SIGN_ZERO_SHIFT);
+
+/// Baseline two-scratch capture; no optional LAHF/SAHF capability assumption.
+/// PUSHFQ/POP is real host-stack traffic. RCX (a live value or budget) is intact.
+fn pack_native(code: &mut Vec<u8>, carry: Carry) {
+    use encoding::ImmediateExtension::{And, Xor};
+    encoding::capture_host_flags(code);
+    encoding::copy(code, RESULT, RIGHT, Width::W32);
+    encoding::integer_immediate(code, RESULT, And, HOST_NZC_MASK, Width::W32);
+    encoding::multiply_immediate32(code, RESULT, RESULT, PACK_MULTIPLIER as i32);
+    encoding::integer_immediate(code, RESULT, And, ARM_NZC_MASK, Width::W32);
+    if matches!(carry, Carry::Inverted) {
+        encoding::integer_immediate(code, RESULT, Xor, NZCV_C, Width::W32);
+    }
+    encoding::shift_register(code, RIGHT, Shift::Lsr, HOST_OVERFLOW_BIT, Width::W32);
+    encoding::integer_immediate(code, RIGHT, And, 1, Width::W32);
+    encoding::shift_register(code, RIGHT, Shift::Lsl, ARM_OVERFLOW_BIT, Width::W32);
+    encoding::binary(code, RESULT, RIGHT, encoding::Binary::Or, Width::W32);
+}
+
+impl Emitter<'_> {
+    fn preserve_native_flags(&mut self) {
+        let Location::Native(carry) = self.flag_location else {
+            return;
+        };
+        if !self
+            .allocation
+            .as_ref()
+            .unwrap()
+            .requires_after(self.current, Value::NZCV)
+        {
+            self.flag_location = Location::Frame;
+            self.output.stats.dead_versions += 1;
+            return;
+        }
+        self.emit(|code| pack_native(code, carry));
+        let index = self.allocate_value(Value::NZCV);
+        let host = encoding::pool_host(index);
+        self.emit(|code| encoding::copy(code, host, RESULT, Width::W32));
+        self.resident[index] = Some(super::Resident {
+            guest: Value::NZCV.slot(),
+            dirty: true,
+        });
+        self.flag_location = Location::Packed;
+    }
+
+    pub(super) fn settle_value_flags(&mut self) {
+        if let Location::Native(carry) = self.flag_location {
+            self.emit(|code| pack_native(code, carry));
+            self.emit(|code| encoding::store_nzcv(code, RESULT));
+            self.output.stats.flag_stores += 1;
+            self.flag_location = Location::Frame;
+        }
+    }
+
+    fn packed_flags(&mut self) -> encoding::HostGpr {
+        if let Some(index) = self.value_index(Value::NZCV) {
+            return encoding::pool_host(index);
+        }
+        let index = self.allocate_value(Value::NZCV);
+        let host = encoding::pool_host(index);
+        self.emit(|code| encoding::load_nzcv(code, host));
+        self.output.stats.flag_loads += 1;
+        self.flag_location = Location::Packed;
+        host
+    }
+
+    pub(super) fn value_instruction(
+        &mut self,
+        instruction: &Instruction,
+        step: ValueStep,
+    ) -> Result<(), RegionError> {
+        let source_start = self.output.code.len();
+        match step {
+            ValueStep::Ordinary => {
+                // MOV-immediate/PC and NOP are neutral; all other supported
+                // ordinary recipes conservatively preserve the live flag bank.
+                if !matches!(
+                    instruction.operation,
+                    Operation::Nop
+                        | Operation::PcRelative(_)
+                        | Operation::MoveWide {
+                            kind: crate::aarch64::WideMove::Zero | crate::aarch64::WideMove::Not,
+                            ..
+                        }
+                ) {
+                    self.preserve_native_flags();
+                }
+                let result = self.instruction(instruction);
+                if let Some((_, offset)) = self.output.source_map.last_mut() {
+                    *offset = source_start;
+                }
+                result
+            }
+            ValueStep::Define(carry) => {
+                if let Some(index) = self.value_index(Value::NZCV) {
+                    self.forget_value(index);
+                }
+                self.flag_location = Location::Frame;
+                let mut lowered = instruction.clone();
+                remove_flag_capture(&mut lowered.operation);
+                self.instruction_defining_flags(&lowered)?;
+                self.flag_location = Location::Native(carry);
+                if let Some((_, offset)) = self.output.source_map.last_mut() {
+                    *offset = source_start;
+                }
+                Ok(())
+            }
+            ValueStep::Select => {
+                let Operation::ConditionalSelect(operand) = instruction.operation else {
+                    unreachable!()
+                };
+                self.pinned_hosts = 0;
+                self.coalesced = None;
+                self.output
+                    .source_map
+                    .push((instruction.pc, self.output.code.len()));
+                let selected = if operand.condition >= ARM_AL {
+                    Predicate::Constant(true)
+                } else if let Location::Native(carry) = self.flag_location {
+                    predicate(operand.condition, carry)
+                } else {
+                    let host = self.packed_flags();
+                    self.emit(|code| encoding::copy(code, RESULT, host, Width::W32));
+                    packed_predicate(self, operand.condition)
+                };
+                self.read(operand.left, RESULT);
+                if operand.width == Width::W32 {
+                    self.emit(|code| encoding::copy(code, RESULT, RESULT, Width::W32));
+                }
+                if operand.condition >= ARM_AL {
+                    self.commit(operand.destination, operand.width);
+                    return Ok(());
+                }
+                self.read(operand.right, RIGHT);
+                if operand.width == Width::W32 {
+                    self.emit(|code| encoding::copy(code, RIGHT, RIGHT, Width::W32));
+                }
+                match operand.otherwise {
+                    Otherwise::Unchanged => {}
+                    Otherwise::Increment => self.emit(|code| {
+                        encoding::increment_preserving_flags(code, RIGHT, operand.width)
+                    }),
+                    Otherwise::Invert => self.emit(|code| encoding::invert(code, operand.width)),
+                    Otherwise::Negate => {
+                        self.emit(|code| encoding::invert(code, operand.width));
+                        self.emit(|code| {
+                            encoding::increment_preserving_flags(code, RIGHT, operand.width)
+                        });
+                    }
+                }
+                emit_predicate(self, selected, operand.width);
+                self.commit(operand.destination, operand.width);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn emit_predicate(emitter: &mut Emitter<'_>, selected: Predicate, width: Width) {
+    match selected {
+        Predicate::Constant(true) => {}
+        Predicate::Constant(false) => {
+            emitter.emit(|code| encoding::copy(code, RESULT, RIGHT, width))
+        }
+        Predicate::One(condition) => emitter.emit(|code| {
+            encoding::conditional_copy(code, RESULT, RIGHT, condition.inverse(), width)
+        }),
+        Predicate::All(first, second) => {
+            emitter.emit(|code| {
+                encoding::conditional_copy(code, RESULT, RIGHT, first.inverse(), width)
+            });
+            emitter.emit(|code| {
+                encoding::conditional_copy(code, RESULT, RIGHT, second.inverse(), width)
+            });
+        }
+        Predicate::Any(first, second) => emitter.emit(|code| {
+            let keep_first = encoding::conditional_jump(code, first);
+            let keep_second = encoding::conditional_jump(code, second);
+            encoding::copy(code, RESULT, RIGHT, width);
+            let end = code.len();
+            encoding::patch_relative(code, keep_first, end);
+            encoding::patch_relative(code, keep_second, end);
+        }),
+    }
+}
+
+const ARM_NIBBLE_SHIFT: u8 = ARM_OVERFLOW_BIT;
+const NIBBLE_N: u32 = NZCV_N >> ARM_NIBBLE_SHIFT;
+const NIBBLE_Z: u32 = NZCV_Z >> ARM_NIBBLE_SHIFT;
+const NIBBLE_C: u32 = NZCV_C >> ARM_NIBBLE_SHIFT;
+const NIBBLE_V: u32 = NZCV_V >> ARM_NIBBLE_SHIFT;
+const NIBBLE_N_TO_V_SHIFT: u8 = (NZCV_N.trailing_zeros() - NZCV_V.trailing_zeros()) as u8;
+
+/// Produce a host predicate from the packed bank before loading scratch operands.
+/// The architectural flag value stays packed and is not replaced by this TEST.
+fn packed_predicate(emitter: &mut Emitter<'_>, condition: u8) -> Predicate {
+    use encoding::ImmediateExtension::{And, Compare};
+    emitter.emit(|code| {
+        encoding::shift_register(code, RESULT, Shift::Lsr, ARM_NIBBLE_SHIFT, Width::W32)
+    });
+    let positive = condition & 1 == 0;
+    let (mask, expected) = match condition >> 1 {
+        0 => (NIBBLE_Z, NIBBLE_Z),
+        1 => (NIBBLE_C, NIBBLE_C),
+        2 => (NIBBLE_N, NIBBLE_N),
+        3 => (NIBBLE_V, NIBBLE_V),
+        4 => (NIBBLE_C | NIBBLE_Z, NIBBLE_C),
+        group @ (5 | 6) => {
+            emitter.emit(|code| encoding::copy(code, RIGHT, RESULT, Width::W32));
+            emitter.emit(|code| {
+                encoding::shift_register(code, RIGHT, Shift::Lsr, NIBBLE_N_TO_V_SHIFT, Width::W32)
+            });
+            emitter.emit(|code| {
+                encoding::binary(code, RIGHT, RESULT, encoding::Binary::Xor, Width::W32)
+            });
+            emitter
+                .emit(|code| encoding::integer_immediate(code, RIGHT, And, NIBBLE_V, Width::W32));
+            emitter.emit(|code| {
+                encoding::integer_immediate(
+                    code,
+                    RESULT,
+                    And,
+                    if group == 6 { NIBBLE_Z } else { 0 },
+                    Width::W32,
+                )
+            });
+            emitter.emit(|code| {
+                encoding::binary(code, RESULT, RIGHT, encoding::Binary::Or, Width::W32)
+            });
+            (NIBBLE_Z | NIBBLE_V, 0)
+        }
+        _ => unreachable!("AL/NV handled without reading flags"),
+    };
+    emitter.emit(|code| encoding::integer_immediate(code, RESULT, And, mask, Width::W32));
+    emitter.emit(|code| encoding::integer_immediate(code, RESULT, Compare, expected, Width::W32));
+    Predicate::One(if positive {
+        NativeCondition::Equal
+    } else {
+        NativeCondition::NotEqual
+    })
+}
+
+/// Complete exit capture after all native-resident GPR outputs have been stored.
+pub(super) fn settle_native_exit(code: &mut Vec<u8>, carry: Carry) {
+    pack_native(code, carry);
+    encoding::store_nzcv(code, RESULT);
 }

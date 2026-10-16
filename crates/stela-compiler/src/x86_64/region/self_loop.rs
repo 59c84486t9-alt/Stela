@@ -1,4 +1,4 @@
-//! Fixed resident assignments for bounded, nonfaulting scalar self-loops.
+//! Native value residency for bounded, nonfaulting scalar self-loops.
 //! Every observable exit settles the original bank. No mid-native recovery,
 //! checked-memory or asynchronous-delivery contract is introduced here.
 use super::{
@@ -37,8 +37,62 @@ pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) ->
     native
 }
 
-/// Decoded eligibility and lowering inputs shared by cache identity and emission.
+/// One source-derived plan is shared by cache admission and emission. Existing
+/// qualified five-slot bodies retain their exact recipe; broader shapes use the
+/// common live-value allocator, not a participant-count exception.
 pub(crate) struct Plan {
+    choice: Choice,
+}
+
+enum Choice {
+    Legacy(LegacyPlan),
+    Allocated {
+        instructions: Vec<Instruction>,
+        native: NativeBlock,
+    },
+}
+
+impl Plan {
+    pub(crate) fn new(
+        instructions: &[Instruction],
+        terminal: Option<&(GuestAddress, Terminator)>,
+        fallthrough: GuestAddress,
+    ) -> Option<Self> {
+        if let Some(plan) = LegacyPlan::new(instructions, terminal, fallthrough) {
+            return Some(Self {
+                choice: Choice::Legacy(plan),
+            });
+        }
+        let native = allocated_loop(instructions, terminal, fallthrough)?;
+        Some(Self {
+            choice: Choice::Allocated {
+                instructions: instructions.to_vec(),
+                native,
+            },
+        })
+    }
+
+    pub(crate) fn emit(
+        self,
+        instructions: &[Instruction],
+    ) -> Result<NativeBlock, super::RegionError> {
+        match self.choice {
+            Choice::Legacy(plan) => plan.emit(instructions),
+            Choice::Allocated {
+                instructions: planned,
+                native,
+            } => {
+                if instructions != planned.as_slice() {
+                    return Err(super::RegionError::ChangedInstructions);
+                }
+                Ok(native)
+            }
+        }
+    }
+}
+
+/// Decoded eligibility and lowering inputs shared by cache identity and emission.
+struct LegacyPlan {
     entry: GuestAddress,
     branch_pc: GuestAddress,
     fallthrough: GuestAddress,
@@ -49,7 +103,7 @@ pub(crate) struct Plan {
     last: Instruction,
 }
 
-impl Plan {
+impl LegacyPlan {
     pub(crate) fn new(
         instructions: &[Instruction],
         terminal: Option<&(GuestAddress, Terminator)>,
@@ -180,7 +234,7 @@ impl Plan {
                 liveness: Liveness::compute(&effects),
                 stats: AllocationStats::default(),
             },
-            resident: [None; POOL.len()],
+            resident: [None; encoding::ALLOCATABLE_SLOTS],
             locations: FRAME_LOCATIONS,
             effects: &effects,
             current: 0,
@@ -192,6 +246,10 @@ impl Plan {
             reserved_hosts: HostGpr::Rcx.mask(),
             pinned_hosts: 0,
             persistent: true,
+            allocation: None,
+            flag_location: flags::Location::Frame,
+            coalesced: None,
+            allocating_output: false,
         };
         for (guest, index) in (0..GPR_SLOTS)
             .filter(|&guest| used & (1 << guest) != 0)
@@ -283,5 +341,165 @@ fn settle_exit(
     // Shared complete SUBS flag recipe, including ARM's no-borrow C polarity.
     // It may now clobber RCX: remaining budget and all dirty GPRs are settled.
     super::super::nzcv(code, true);
+    super::super::block::direct_exit(code, next_pc, kind);
+}
+
+fn allocated_loop(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+) -> Option<NativeBlock> {
+    use super::allocation::{self, LiveRanges, Value};
+    let entry = instructions.first()?.pc;
+    if entry.0 & (INSTRUCTION_BYTES - 1) != 0 || instructions.len() > MAX_INSTRUCTIONS {
+        return None;
+    }
+    let (branch_pc, Terminator::Branch(Operation::BranchCondition { target, condition })) =
+        terminal?
+    else {
+        return None;
+    };
+    if *target != entry {
+        return None;
+    }
+    let normal_condition = *encoding::SUBTRACTION_CONDITIONS
+        .get(usize::from(*condition ^ ARM_CONDITION_INVERSE_BIT))?;
+    if !matches!(
+        instructions.last()?.operation,
+        Operation::AddSub {
+            subtract: true,
+            flags: true,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let analyzed: Vec<_> = instructions
+        .iter()
+        .map(|instruction| flags::analyze_value(&instruction.operation))
+        .collect::<Option<_>>()?;
+    for (index, instruction) in instructions.iter().enumerate() {
+        if instruction.pc.0 != entry.0.checked_add((index as u64) * INSTRUCTION_BYTES)? {
+            return None;
+        }
+    }
+    if branch_pc.0
+        != entry
+            .0
+            .checked_add((instructions.len() as u64) * INSTRUCTION_BYTES)?
+        || fallthrough.0 != branch_pc.0.checked_add(INSTRUCTION_BYTES)?
+    {
+        return None;
+    }
+    let values: Vec<_> = analyzed.iter().map(|(_, values, _)| *values).collect();
+    // Initial scope requires a real producer before each loop's flag consumer.
+    // Packed flag phis at the header need a separate admitted edge contract.
+    if LiveRanges::compute(&values).inputs() & Value::NZCV.mask() != 0 {
+        return None;
+    }
+    let gprs: Vec<_> = analyzed.iter().map(|(gprs, _, _)| *gprs).collect();
+    let mut best: Option<((usize, usize, usize), NativeBlock)> = None;
+    for callee_slots in 0..=encoding::CALLEE_POOL.len() {
+        let plan = allocation::Plan::new(values.clone(), callee_slots, true);
+        let mut emitter = allocation::emitter(&gprs, plan, entry);
+        let code = &mut emitter.output.code;
+        encoding::push_budget_pointer(code);
+        encoding::load_budget(code);
+        encoding::skip_jump_if_budget_zero(code);
+        let cold_jump = encoding::near_jump(code);
+        encoding::pop_budget_pointer(code);
+        super::super::block::direct_exit(code, entry, ExitKind::Direct);
+        let cold_entry = code.len();
+        encoding::patch_relative(code, cold_jump, cold_entry);
+        emitter.reserved_hosts = HostGpr::Rcx.mask();
+        emitter.borrow_callees();
+        let header_locations = emitter.preload_loop_inputs();
+        let cold_loads = emitter.output.stats.state_loads;
+        let header = emitter.output.code.len();
+        for (instruction, (_, _, step)) in instructions.iter().zip(&analyzed) {
+            #[cfg(test)]
+            {
+                emitter.pc = instruction.pc;
+            }
+            emitter.value_instruction(instruction, *step).ok()?;
+            emitter.current += 1;
+        }
+        let dirty: Vec<_> = emitter
+            .resident
+            .iter()
+            .enumerate()
+            .filter_map(|(index, resident)| {
+                resident
+                    .filter(|resident| resident.dirty)
+                    .map(|resident| (encoding::pool_host(index), resident.guest))
+            })
+            .collect();
+        // The final complete subtraction always owns the physical host flags.
+        let flags::Location::Native(carry) = emitter.flag_location else {
+            return None;
+        };
+        let code = &mut emitter.output.code;
+        emitter.output.source_map.push((*branch_pc, code.len()));
+        encoding::decrement_budget_preserving_flags(code);
+        let normal_jump = encoding::conditional_jump(code, normal_condition);
+        encoding::skip_jump_if_budget_zero(code);
+        let hot_jump = encoding::near_jump(code);
+        settle_allocated_exit(code, &dirty, callee_slots, carry, entry, ExitKind::Direct);
+        let hot = code.len();
+        encoding::patch_relative(code, hot_jump, hot);
+        emitter.reconcile_loop_inputs(&header_locations);
+        let code = &mut emitter.output.code;
+        let backedge = encoding::near_jump(code);
+        encoding::patch_relative(code, backedge, header);
+        let normal = code.len();
+        encoding::patch_relative(code, normal_jump, normal);
+        settle_allocated_exit(
+            code,
+            &dirty,
+            callee_slots,
+            carry,
+            fallthrough,
+            ExitKind::Fallthrough,
+        );
+        if let Some((_, offset)) = emitter.output.source_map.first_mut() {
+            *offset = 0;
+        }
+        let hot_frame =
+            emitter.output.stats.state_loads - cold_loads + emitter.output.stats.pressure_stores;
+        // Hot pressure is the primary loop cost. Equal pressure uses the smallest
+        // complete body, then the smaller native callee-save footprint.
+        let cost = (hot_frame, emitter.output.code.len(), callee_slots);
+        let native = NativeBlock {
+            x86_64_code: emitter.output.code,
+            source_map: emitter.output.source_map,
+        };
+        if best.as_ref().is_none_or(|(old, _)| cost < *old) {
+            best = Some((cost, native));
+        }
+    }
+    best.map(|(_, native)| native)
+}
+
+fn settle_allocated_exit(
+    code: &mut Vec<u8>,
+    dirty: &[(HostGpr, usize)],
+    callee_slots: usize,
+    carry: flags::Carry,
+    next_pc: GuestAddress,
+    kind: ExitKind,
+) {
+    for &(host, guest) in dirty {
+        debug_assert!(
+            guest < GPR_SLOTS,
+            "final SUBS kills the packed flag version"
+        );
+        encoding::store(code, host, guest);
+    }
+    for host in encoding::CALLEE_POOL.into_iter().take(callee_slots).rev() {
+        encoding::pop(code, host);
+    }
+    encoding::pop_budget_pointer(code);
+    encoding::store_budget(code);
+    flags::settle_native_exit(code, carry);
     super::super::block::direct_exit(code, next_pc, kind);
 }

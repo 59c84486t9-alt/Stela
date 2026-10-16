@@ -2,6 +2,7 @@
 //! The private clean-load tier uses existing nonalias ordinary direct-RAM memory
 //! emission and settles every dirty value before its faultable access.
 //! Research rows do not provide general asynchronous/native-fault delivery.
+mod allocation;
 mod analysis;
 mod self_loop;
 pub(super) use analysis::MAX_INSTRUCTIONS;
@@ -35,6 +36,7 @@ pub enum RegionError {
     NonContiguous,
     AddressOverflow,
     ChangedMemoryEncoding,
+    ChangedInstructions,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -53,6 +55,12 @@ pub struct AllocationStats {
     pub pair_loads: usize,
     pub input_cache_loads: usize,
     pub address_cache_hits: usize,
+    pub flag_loads: usize,
+    pub flag_stores: usize,
+    pub dead_versions: usize,
+    pub coalesced_writes: usize,
+    pub callee_saves: usize,
+    pub callee_restores: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,9 +68,9 @@ pub struct OptimizedRegion {
     pub code: Vec<u8>,
     pub consumed_instructions: usize,
     pub source_map: Vec<(GuestAddress, usize)>,
-    /// One GPR-location snapshot per emitted native instruction for internal
-    /// validation. Tests retain its native interval, guest PC and commit phase;
-    /// production does not expose a host-context recovery service.
+    /// Legacy GPR-location snapshots for internal clean-load validation.
+    /// Live-version spans expose no mid-native reconstruction service; their
+    /// complete architectural state is canonical at every admitted boundary.
     pub recovery: Vec<RecoveryPoint>,
     #[cfg(test)]
     pub exit_pc: Option<GuestAddress>,
@@ -81,7 +89,7 @@ struct Resident {
 
 struct Emitter<'a> {
     output: OptimizedRegion,
-    resident: [Option<Resident>; POOL.len()],
+    resident: [Option<Resident>; encoding::ALLOCATABLE_SLOTS],
     locations: [Location; GPR_SLOTS],
     effects: &'a [Effects],
     current: usize,
@@ -94,6 +102,10 @@ struct Emitter<'a> {
     pinned_hosts: u16,
     /// A fixed loop assignment retains architectural outputs until its side exit.
     persistent: bool,
+    allocation: Option<allocation::Plan>,
+    flag_location: flags::Location,
+    coalesced: Option<usize>,
+    allocating_output: bool,
 }
 
 impl Emitter<'_> {
@@ -102,23 +114,31 @@ impl Emitter<'_> {
         encode(&mut self.output.code);
         let end = self.output.code.len();
         debug_assert!(end > start);
-        self.output.recovery.push(RecoveryPoint {
-            #[cfg(test)]
-            native_start: start,
-            #[cfg(test)]
-            native_end: end,
-            #[cfg(test)]
-            guest_pc: self.pc,
-            #[cfg(test)]
-            retired_instructions: self.current,
-            #[cfg(test)]
-            phase: self.phase,
-            gprs: self.locations,
-        });
+        // Legacy snapshots do not describe dead-version elimination. The new
+        // nonfaulting span promises complete state only at its canonical exits.
+        if self.allocation.is_none() {
+            self.output.recovery.push(RecoveryPoint {
+                #[cfg(test)]
+                native_start: start,
+                #[cfg(test)]
+                native_end: end,
+                #[cfg(test)]
+                guest_pc: self.pc,
+                #[cfg(test)]
+                retired_instructions: self.current,
+                #[cfg(test)]
+                phase: self.phase,
+                gprs: self.locations,
+            });
+        }
         self.output.stats.native_instructions += 1;
     }
 
     fn spill(&mut self, index: usize, at_exit: bool) {
+        if self.allocation.is_some() {
+            self.spill_value(index, at_exit);
+            return;
+        }
         let Some(resident) = self.resident[index] else {
             return;
         };
@@ -136,6 +156,9 @@ impl Emitter<'_> {
     }
 
     fn allocate(&mut self, guest: usize) -> usize {
+        if self.allocation.is_some() {
+            return self.allocate_value(allocation::Value::gpr(guest).unwrap());
+        }
         if let Some(index) = self
             .resident
             .iter()
@@ -173,6 +196,10 @@ impl Emitter<'_> {
     }
 
     fn read(&mut self, register: Register, destination: HostGpr) {
+        if self.allocation.is_some() {
+            self.read_value(register, destination);
+            return;
+        }
         if let Some(guest) = slot(register) {
             if let Some(index) = self
                 .resident
@@ -204,6 +231,9 @@ impl Emitter<'_> {
     }
 
     fn cached(&mut self, register: Register) -> Option<HostGpr> {
+        if self.allocation.is_some() {
+            return self.cached_value(register);
+        }
         let guest = slot(register)?;
         let index = self
             .resident
@@ -215,12 +245,19 @@ impl Emitter<'_> {
     }
 
     fn in_place(&mut self, destination: Register, source: Register) -> Option<HostGpr> {
+        if self.allocation.is_some() {
+            return self.coalesce_value(destination, source);
+        }
         (destination == source)
             .then(|| self.cached(source))
             .flatten()
     }
 
     fn committed_in_place(&mut self, destination: Register) {
+        if self.allocation.is_some() {
+            self.commit_coalesced(destination);
+            return;
+        }
         let guest = slot(destination).unwrap();
         let index = self
             .resident
@@ -232,6 +269,10 @@ impl Emitter<'_> {
     }
 
     fn commit(&mut self, destination: Register, width: Width) {
+        if self.allocation.is_some() {
+            self.commit_value(destination, width);
+            return;
+        }
         // All original operands have been consumed. Result allocation may now
         // evict them according to next use without changing this operation.
         self.pinned_hosts = 0;
@@ -394,7 +435,11 @@ impl Emitter<'_> {
     }
 
     fn instruction(&mut self, instruction: &Instruction) -> Result<(), RegionError> {
-        let constant = self.constants.step(&instruction.operation);
+        let constant = if self.allocation.is_some() {
+            None
+        } else {
+            self.constants.step(&instruction.operation)
+        };
         self.instruction_with_constant(instruction, constant)
     }
 
@@ -410,6 +455,7 @@ impl Emitter<'_> {
         constant: Option<constant::ConstantWrite>,
     ) -> Result<(), RegionError> {
         self.pinned_hosts = 0;
+        self.coalesced = None;
         self.output
             .source_map
             .push((instruction.pc, self.output.code.len()));
@@ -774,6 +820,13 @@ pub fn emit_prefix(instructions: &[Instruction]) -> Result<OptimizedRegion, Regi
     emit_prefix_selected(instructions, false)
 }
 
+/// Transactional nonfaulting GPR/NZCV span candidate.
+pub fn emit_allocated_prefix(
+    instructions: &[Instruction],
+) -> Result<Option<OptimizedRegion>, RegionError> {
+    allocation::prefix(instructions)
+}
+
 /// Ordinary direct-RAM load retention; pure ALU allocation keeps six slots.
 pub fn emit_clean_load_prefix(
     instructions: &[Instruction],
@@ -844,7 +897,7 @@ fn emit_prefix_selected(
             liveness: Liveness::compute(&effects),
             stats: AllocationStats::default(),
         },
-        resident: [None; POOL.len()],
+        resident: [None; encoding::ALLOCATABLE_SLOTS],
         locations: FRAME_LOCATIONS,
         effects: &effects,
         current: 0,
@@ -867,6 +920,10 @@ fn emit_prefix_selected(
         },
         pinned_hosts: 0,
         persistent: false,
+        allocation: None,
+        flag_location: flags::Location::Frame,
+        coalesced: None,
+        allocating_output: false,
     };
     for instruction in instructions.iter().take(consumed) {
         #[cfg(test)]
@@ -898,6 +955,13 @@ mod tests;
 /// Conservative first ordinary-block gate. Actual emitted body bytes and
 /// selected native instruction counts must both improve or preserve cost.
 /// Timing-derived restrictions can narrow this gate; they never widen semantics.
+pub fn admits_allocated(region: &OptimizedRegion, baseline_code: &[u8]) -> bool {
+    region.consumed_instructions >= 2
+        && region.code.len() < baseline_code.len()
+        && analysis::allocated_output_instruction_count(baseline_code)
+            .is_some_and(|count| region.stats.native_instructions <= count)
+}
+
 pub fn admits_ordinary(region: &OptimizedRegion, baseline_code: &[u8]) -> bool {
     region.consumed_instructions >= 2
         && region.code.len() < baseline_code.len()
