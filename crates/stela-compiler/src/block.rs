@@ -942,6 +942,7 @@ fn parse(
             if matches!(instruction.operation, Operation::Literal(_))
                 || el1_platform::Write64Pair::from_instruction(&instruction).is_some()
                 || el1_platform::Read64Pair::from_instruction(&instruction).is_some()
+                || el1_platform::ScalarLoad::from_instruction(&instruction).is_some()
             {
                 if !instructions.is_empty() {
                     source_bytes -= size_of::<u32>();

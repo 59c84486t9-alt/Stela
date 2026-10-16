@@ -364,3 +364,42 @@ fn ram_completion_rejects_another_actual_domain_before_any_fence() {
     let mut prepared = actual.prepare_ram_completion(&outer).unwrap();
     prepared.complete().unwrap();
 }
+
+#[test]
+fn scalar_pins_cover_only_exact_narrow_quantities_at_real_extent_end() {
+    let space = physical();
+    let outer = space.domain().execution_loan().unwrap();
+    for bytes in [1_u8, 2, 4, 8] {
+        let address = 0x1020 - u64::from(bytes);
+        let pin = space.resolve_ram_scalar(&outer, address, bytes).unwrap();
+        assert_eq!(pin.bytes(), usize::from(bytes));
+        assert_eq!(pin.pointer() as usize & (usize::from(bytes) - 1), 0);
+        pin.check_current().unwrap();
+        let (footprint, width) = access::read_footprint(
+            pin.pointer() as usize,
+            usize::from(bytes),
+            TargetCpu::Baseline,
+        )
+        .unwrap();
+        assert_eq!(
+            (footprint, width),
+            (pin.pointer() as usize, usize::from(bytes))
+        );
+        // Resolution and footprint checks issue no target read. The adjacent
+        // uninitialized capacity is not admitted by the backing allocation.
+        assert!(space.resolve_ram_scalar(&outer, 0x1020, bytes).is_err());
+    }
+    assert!(matches!(
+        space.resolve_ram_scalar(&outer, 0x101f, 2),
+        Err(PhysicalReadPlatformError::Alignment)
+    ));
+    assert!(matches!(
+        space.resolve_ram_scalar(&outer, 0x101c, 3),
+        Err(PhysicalReadPlatformError::Domain(
+            MemoryStatus::InvalidRequest
+        ))
+    ));
+    let foreign = physical();
+    let foreign_outer = foreign.domain().execution_loan().unwrap();
+    assert!(space.resolve_ram_scalar(&foreign_outer, 0x101f, 1).is_err());
+}

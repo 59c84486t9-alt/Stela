@@ -1,4 +1,4 @@
-//! One reached request from the exact bound M0 LDR64 native body.
+//! One reached scalar request from the exact bound M0 native body.
 //!
 //! This owns no PE permission. Only the closed native session may lend this
 //! view while the original authority guard owns the prepared RAM transaction.
@@ -6,8 +6,6 @@ use crate::memory::domain::m0_read::{M0RamReadPlatformError, M0RamReadPrepared};
 use stela_compiler::context::memory::{
     MEMORY_CONTEXT_BYTES, MEMORY_CONTEXT_VERSION, MemoryContextView, MemoryRequest, MemoryStatus,
 };
-
-const READ_BYTES: u32 = size_of::<u64>() as u32;
 
 pub(crate) enum CallbackFailure {
     InvalidRequest {
@@ -71,7 +69,7 @@ impl<'call, 'loan, 'owner> ReadCallback<'call, 'loan, 'owner> {
         if self.attempts != 1
             || request.address != intent.raw_address
             || request.pc != intent.source_pc.0
-            || request.bytes != READ_BYTES
+            || request.bytes != u32::from(intent.bytes)
             || request.flags != intent.flags
             || request.data.is_null()
         {
@@ -89,9 +87,9 @@ impl<'call, 'loan, 'owner> ReadCallback<'call, 'loan, 'owner> {
 }
 
 /// # Safety
-/// Native code is the exact validated finite LDR64 body. `view` and `request`
+/// Native code is the exact validated one-word scalar-load body. `view` and `request`
 /// are its live ABI objects; opaque points to this invocation's retained
-/// ReadCallback, and request.data is a writable, private eight-byte staging
+/// ReadCallback, and request.data is writable private source-width staging
 /// quantity disjoint from RAM, architectural state, source and host metadata.
 /// The original PE settlement guard already owns prepared RAM/order/source
 /// resources before entry and retains them through this callback and commit.
@@ -137,12 +135,15 @@ unsafe extern "C" fn reached_read(
         Ok(value) => {
             // SAFETY: exact bound generated code supplies a private valid
             // staging quantity; all descriptor/source checks passed above.
-            unsafe { request.data.cast::<u64>().write_unaligned(value.to_le()) };
+            let bytes = usize::from(callback.prepared.intent().bytes);
+            unsafe {
+                core::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), request.data, bytes)
+            };
             view.record(
                 MemoryStatus::Success,
                 request.address,
                 request.pc,
-                READ_BYTES.into(),
+                u64::from(callback.prepared.intent().bytes),
             );
             MemoryStatus::Success as u32
         }

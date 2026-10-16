@@ -12,7 +12,7 @@ use crate::{
     memory::domain::{
         DataPolicy, MemoryExecutionLoan, MemoryThread,
         m0_read::pair::{M0ReadPairIntent, M0ReadPairSource},
-        m0_read::{M0RamReadPlatformError, M0Read64Intent, M0Read64Source},
+        m0_read::{M0RamReadPlatformError, M0ScalarReadIntent, M0ScalarReadSource},
         m0_write::{M0WriteIntent, M0WriteSource},
         physical::BoundPhysicalInstruction,
     },
@@ -45,7 +45,6 @@ mod session;
 use session::{M0NativeReport, M0SessionFailure, NativeM0Session};
 
 const INSTRUCTION_BYTES: usize = size_of::<u32>();
-const READ_BYTES: u64 = size_of::<u64>() as u64;
 
 mod thread_sealed {
     pub(in crate::blocks::retirement::checked) trait ActualMemoryThread {}
@@ -91,7 +90,7 @@ pub(crate) struct M0SourceInput<'source, 'native> {
 
 #[derive(Clone, Copy)]
 enum M0SourceIntent {
-    Read(M0Read64Intent),
+    Read(M0ScalarReadIntent),
     Write(M0WriteIntent),
     PairRead(M0ReadPairIntent),
 }
@@ -236,7 +235,7 @@ impl M0SourceInput<'_, '_> {
     pub(crate) fn actual_address_space(&self) -> Option<u64> {
         self.thread.actual_address_space()
     }
-    pub(crate) fn read_intent(&self) -> Option<M0Read64Intent> {
+    pub(crate) fn read_intent(&self) -> Option<M0ScalarReadIntent> {
         match self.intent {
             M0SourceIntent::Read(intent) => Some(intent),
             M0SourceIntent::Write(_) | M0SourceIntent::PairRead(_) => None,
@@ -341,15 +340,11 @@ impl M0SourceInput<'_, '_> {
             .map_err(|reason| anyhow::anyhow!("M0 source decode: {reason:?}"))?;
         let requirements = match self.intent {
             M0SourceIntent::Read(_) => {
-                let source = if matches!(
+                let source = M0ScalarReadSource::from_profile(
                     self.bound.runtime.profile(),
-                    stela_compiler::block::BlockProfile::El1M0IntegerV1
-                        | stela_compiler::block::BlockProfile::El1PlatformV1
-                ) {
-                    M0Read64Source::from_el1_integer_source(&instruction, word)
-                } else {
-                    M0Read64Source::from_source(&instruction, word)
-                }
+                    &instruction,
+                    word,
+                )
                 .map_err(|failure| anyhow::anyhow!("M0 read source shape: {failure:?}"))?;
                 source.requirements()
             }
@@ -487,7 +482,7 @@ impl<C, S> PreparedM0Commit<'_, '_, C, S> {
 }
 
 impl<B: provider::Owner> Active<'_, '_, B> {
-    pub(super) fn execute_m0_read64(
+    pub(super) fn execute_m0_scalar_load(
         mut self,
         bound: &BoundSource<'_>,
         accounting: &mut RunOutcome,
@@ -513,16 +508,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         let instruction = Decoder
             .lift(bound.entry.entry(), word)
             .map_err(|reason| anyhow::anyhow!("M0 source decode: {reason:?}"))?;
-        let source = if matches!(
-            bound.runtime.profile(),
-            stela_compiler::block::BlockProfile::El1M0IntegerV1
-                | stela_compiler::block::BlockProfile::El1PlatformV1
-        ) {
-            M0Read64Source::from_el1_integer_source(&instruction, word)
-        } else {
-            M0Read64Source::from_source(&instruction, word)
-        }
-        .map_err(|failure| anyhow::anyhow!("M0 source shape: {failure:?}"))?;
+        let source = M0ScalarReadSource::from_profile(bound.runtime.profile(), &instruction, word)
+            .map_err(|failure| anyhow::anyhow!("M0 source shape: {failure:?}"))?;
         anyhow::ensure!(
             bound.memory_requirements()? == source.requirements(),
             "M0 requirements differ"
@@ -564,7 +551,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             input.validate_source_current()?;
             // Real source/control witness, stable BEFORE the RAM session borrows
             // it. All M0/EE0/current-source qualification precedes target read.
-            let control = match controls.loan_m0_read8(&input) {
+            let control = match controls.loan_m0_scalar_read(&input) {
                 Ok(control) => control,
                 Err(error) => {
                     *observation = Some(M0Observation::SourceControlFailure {
@@ -597,7 +584,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             let report = retained.session.invoke(&mut candidate);
             let exit = report.returned_exit();
             let valid_report = report.invoked
-                && report.completed_bytes == READ_BYTES
+                && report.completed_bytes == u64::from(intent.bytes)
                 && report.callback_failure.is_none()
                 && report.failure.is_none();
             *observation = Some(M0Observation::Native {
@@ -647,9 +634,19 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     Register::Zero => {}
                     _ => anyhow::bail!("M0 destination differs"),
                 }
-                anyhow::ensure!(candidate == permitted, "M0 changed unrelated state");
+                if let Some((base, value)) = intent.writeback {
+                    match base {
+                        Register::X(index) => permitted.x[usize::from(index)] = value,
+                        Register::Sp => permitted.sp = value,
+                        Register::Zero => anyhow::bail!("M0 writeback cannot target ZR"),
+                    }
+                }
+                anyhow::ensure!(
+                    candidate == permitted,
+                    "M0 changed unrelated state or writeback"
+                );
                 // Allocate diagnostics BEFORE infallible state/PC/Ready commit.
-                let prefix = bound.prefix(None, READ_BYTES)?;
+                let prefix = bound.prefix(None, u64::from(intent.bytes))?;
                 prefixes.try_reserve(1)?;
                 Ok((next_pc, exit, prefix))
             })();

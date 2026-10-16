@@ -82,6 +82,42 @@ pub(crate) fn emit(
     Ok(block)
 }
 
+/// One source-derived scalar read using the shared checked scalar staging body.
+pub(crate) fn emit_scalar_load(
+    instruction: &Instruction,
+    load: crate::block::el1_platform::ScalarLoad,
+    target: TargetCpu,
+) -> Result<NativeBlock, CompileError> {
+    if !load.matches_instruction(instruction) {
+        return Err(CompileError("changed M0 scalar load instruction".into()));
+    }
+    let mut block = NativeBlock {
+        x86_64_code: crate::extended::context_wrapper(),
+        source_map: Vec::new(),
+    };
+    block
+        .source_map
+        .push((instruction.pc, block.x86_64_code.len()));
+    x86_64::memory_store::checked_scalar::emit_context(
+        &mut block.x86_64_code,
+        &load.operand(),
+        instruction.pc.0,
+    );
+    let next = instruction
+        .pc
+        .0
+        .checked_add(size_of::<u32>() as u64)
+        .ok_or_else(|| CompileError("M0 scalar load continuation overflow".into()))?;
+    super::emit_terminal(
+        &mut block.x86_64_code,
+        &mut block.source_map,
+        None,
+        GuestAddress(next),
+        target,
+    );
+    Ok(block)
+}
+
 /// Uses the original checked pair emitter and enclosing context ABI. Its M0
 /// variant stages inputs and publishes base writeback only on full callback success.
 pub(crate) fn emit_write_pair(

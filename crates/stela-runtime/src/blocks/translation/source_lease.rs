@@ -10,7 +10,7 @@ use crate::{
     blocks::retirement::M0SourceInput,
     memory::{
         domain::{
-            m0_read::{M0Read64Source, pair::M0ReadPairSource},
+            m0_read::{M0ScalarReadSource, pair::M0ReadPairSource},
             m0_write::M0WriteSource,
             physical::{BoundPhysicalInstruction, ImmutableCodeBacking, PhysicalAddressSpace},
         },
@@ -232,17 +232,9 @@ fn check_data_source_word(
     {
         return Ok(());
     }
-    if matches!(
-        profile,
-        stela_compiler::block::BlockProfile::El1M0IntegerV1
-            | stela_compiler::block::BlockProfile::El1PlatformV1
-    ) {
-        M0Read64Source::from_el1_integer_source(&instruction, word)
-    } else {
-        M0Read64Source::from_source(&instruction, word)
-    }
-    .map(|_| ())
-    .map_err(|_| "installed M0 source is outside the exact LDR64 shape")
+    M0ScalarReadSource::from_profile(profile, &instruction, word)
+        .map(|_| ())
+        .map_err(|_| "installed M0 source is outside the exact LDR64 shape")
 }
 
 #[cfg(test)]

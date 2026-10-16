@@ -31,6 +31,13 @@ pub struct MemoryProfile {
     tag_ineligible: Vec<MappingAttributes>,
 }
 
+// These body identities require their original physical/source/control owners.
+// The generic Normal-WB and tag entrypoints must never adopt their metadata.
+const SEPARATELY_OWNED_M0_PROFILES: u32 = profile_requirements::M0_DEVICE_RAM_READ64
+    | profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR
+    | profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
+    | profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD;
+
 impl MemoryProfile {
     pub(super) fn inspect(views: &[(Arc<MemoryView>, MappingAttributes)]) -> Self {
         let mut profile = Self {
@@ -116,7 +123,7 @@ impl MemoryProfile {
         // The additive staged M0 identity is deliberately not a generic memory
         // permission. A separate canonical source/control/physical/order loan
         // must admit it. Existing EL0 Normal-WB entry keeps its exact meaning.
-        if requirements.required_profile & profile_requirements::M0_DEVICE_RAM_READ64 != 0 {
+        if requirements.required_profile & SEPARATELY_OWNED_M0_PROFILES != 0 {
             return Err(MemoryStatus::Unsupported);
         }
         if !crate::platform::cpu::admitted(target)

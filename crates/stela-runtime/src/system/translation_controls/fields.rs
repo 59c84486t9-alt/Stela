@@ -25,6 +25,9 @@ const fn bits(msb: u32, lsb: u32) -> u64 {
     (u64::MAX >> (63 - msb)) & (u64::MAX << lsb)
 }
 
+// Narrow shared field identity for the original scalar data-control consumer.
+pub(super) const SCTLR_SA_MASK: u64 = sctlr::SA;
+
 mod sctlr {
     use super::bits;
     pub const M: u64 = 1 << 0;

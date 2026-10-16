@@ -2,8 +2,11 @@
 //! These plans describe effects; the actual retained source/CPU owners admit them.
 use super::{ExitKind, ParsedBlock, Terminator, el1_m0, system};
 use crate::{
-    CompileError, GuestAddress, NativeBlock, TargetCpu,
-    aarch64::{AddressMode, Instruction, Operation, Register, Width, literal},
+    CompileError, GuestAddress, Lifter, NativeBlock, TargetCpu,
+    aarch64::{
+        AddressMode, Decoder, Instruction, MemoryTransfer, Operation, Register, Width,
+        register_offset::IndexExtend,
+    },
     context::memory::MemoryRequirements,
 };
 use alloc::vec::Vec;
@@ -12,9 +15,111 @@ use alloc::vec::Vec;
 pub enum Intent {
     Registers,
     LiteralRead64(el1_m0::LiteralRead64),
+    ScalarLoad(ScalarLoad),
     System(system::SystemInstruction),
     Write64Pair(Write64Pair),
     Read64Pair(Read64Pair),
+}
+
+/// Source-derived addressing only. These values confer no memory permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarLoadAddress {
+    Literal {
+        address: u64,
+    },
+    Immediate {
+        base: Register,
+        displacement: i32,
+        mode: AddressMode,
+    },
+    RegisterOffset {
+        base: Register,
+        index: Register,
+        extend: IndexExtend,
+        shift: u8,
+    },
+}
+
+/// Exact canonical scalar load. One shared checked operand supplies analysis,
+/// runtime metadata and emission; a descriptor is never a physical read loan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScalarLoad {
+    source_pc: GuestAddress,
+    operand: crate::x86_64::memory_store::checked_scalar::Operand,
+}
+impl ScalarLoad {
+    pub fn from_instruction(instruction: &Instruction) -> Option<Self> {
+        Some(Self {
+            source_pc: instruction.pc,
+            operand: crate::x86_64::memory_store::checked_scalar::Operand::from_m0_scalar_load(
+                &instruction.operation,
+            )?,
+        })
+    }
+    pub fn source_pc(self) -> GuestAddress {
+        self.source_pc
+    }
+    pub fn bytes(self) -> u8 {
+        self.operand.bytes()
+    }
+    pub fn destination(self) -> Register {
+        self.operand.data()
+    }
+    pub fn result_width(self) -> Width {
+        let MemoryTransfer::Load { width, .. } = self.operand.transfer() else {
+            unreachable!("private canonical load operand")
+        };
+        width
+    }
+    pub fn signed(self) -> bool {
+        let MemoryTransfer::Load { signed, .. } = self.operand.transfer() else {
+            unreachable!("private canonical load operand")
+        };
+        signed
+    }
+    pub fn address(self) -> ScalarLoadAddress {
+        use crate::x86_64::memory_store::checked_scalar::Address;
+        match self.operand.address() {
+            Address::Literal { address } => ScalarLoadAddress::Literal { address },
+            Address::Immediate { displacement, mode } => ScalarLoadAddress::Immediate {
+                base: self.operand.base(),
+                displacement,
+                mode,
+            },
+            Address::RegisterOffset {
+                index,
+                extend,
+                shift,
+            } => ScalarLoadAddress::RegisterOffset {
+                base: self.operand.base(),
+                index,
+                extend,
+                shift,
+            },
+        }
+    }
+    pub fn writeback_base(self) -> Option<Register> {
+        match self.address() {
+            ScalarLoadAddress::Immediate { base, mode, .. } if mode != AddressMode::Offset => {
+                Some(base)
+            }
+            _ => None,
+        }
+    }
+    pub fn requirements(self) -> MemoryRequirements {
+        crate::x86_64::memory_store::checked_scalar::requirements(&self.operand)
+    }
+    pub fn matches_instruction(self, instruction: &Instruction) -> bool {
+        Self::from_instruction(instruction) == Some(self)
+    }
+    pub fn matches_source(self, pc: GuestAddress, word: u32) -> bool {
+        Decoder
+            .lift(pc, word)
+            .is_ok_and(|instruction| self.matches_instruction(&instruction))
+    }
+    pub(crate) fn operand(self) -> crate::x86_64::memory_store::checked_scalar::Operand {
+        self.operand
+    }
 }
 
 /// Canonical pair metadata. This descriptor never grants a writable pointer.
@@ -135,6 +240,11 @@ pub(super) fn validate_operation(operation: &Operation) -> Result<(), CompileErr
     {
         return Ok(());
     }
+    if crate::x86_64::memory_store::checked_scalar::Operand::from_m0_scalar_load(operation)
+        .is_some()
+    {
+        return Ok(());
+    }
     match operation {
         Operation::Bitfield(_)
         | Operation::Branch { .. }
@@ -152,16 +262,7 @@ pub(super) fn validate_operation(operation: &Operation) -> Result<(), CompileErr
         | Operation::LogicalImmediate { .. }
         | Operation::MoveWide { .. }
         | Operation::AddSub { .. }
-        | Operation::Nop
-        | Operation::Literal(literal::Operand {
-            transfer:
-                literal::Transfer::Integer {
-                    width: Width::X64,
-                    signed: false,
-                    ..
-                },
-            ..
-        }) => Ok(()),
+        | Operation::Nop => Ok(()),
         _ => Err(CompileError(
             "operation requires another actual EL1 effect owner".into(),
         )),
@@ -208,7 +309,7 @@ enum Body {
         terminal: Option<(GuestAddress, Terminator)>,
         fallthrough: GuestAddress,
     },
-    Literal(el1_m0::Plan),
+    Scalar(Instruction, ScalarLoad),
     Write(Instruction, Write64Pair),
     Read(Instruction, Read64Pair),
     System(system::SystemInstruction),
@@ -250,12 +351,15 @@ impl Plan {
                 ));
             }
             Body::Read(instruction.clone(), read)
-        } else if parsed
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction.operation, Operation::Literal(_)))
+        } else if let Some(instruction) = parsed.instructions.first()
+            && let Some(load) = ScalarLoad::from_instruction(instruction)
         {
-            Body::Literal(el1_m0::Plan::new(parsed)?)
+            if parsed.instructions.len() != 1 || parsed.terminal.is_some() {
+                return Err(CompileError(
+                    "M0 scalar load requires one separate complete attempt".into(),
+                ));
+            }
+            Body::Scalar(instruction.clone(), load)
         } else {
             Body::Registers {
                 instructions: parsed.instructions.clone(),
@@ -268,12 +372,7 @@ impl Plan {
     pub(super) fn intent(&self) -> Intent {
         match &self.body {
             Body::Registers { .. } => Intent::Registers,
-            Body::Literal(plan) => match plan.intent() {
-                el1_m0::Intent::LiteralRead64(read) => Intent::LiteralRead64(read),
-                el1_m0::Intent::Registers => {
-                    unreachable!("literal body is constructed only from a literal source")
-                }
-            },
+            Body::Scalar(_, load) => Intent::ScalarLoad(*load),
             Body::System(instruction) => Intent::System(*instruction),
             Body::Write(_, write) => Intent::Write64Pair(*write),
             Body::Read(_, read) => Intent::Read64Pair(*read),
@@ -281,7 +380,7 @@ impl Plan {
     }
     pub(super) fn requirements(&self) -> Option<MemoryRequirements> {
         match &self.body {
-            Body::Literal(plan) => plan.requirements(),
+            Body::Scalar(_, load) => Some(load.requirements()),
             Body::Write(_, write) => Some(write.requirements()),
             Body::Read(_, read) => Some(read.requirements()),
             Body::Registers { .. } | Body::System(_) => None,
@@ -289,7 +388,9 @@ impl Plan {
     }
     pub(super) fn emit(self, target: TargetCpu) -> Result<NativeBlock, CompileError> {
         match self.body {
-            Body::Literal(plan) => plan.emit(target),
+            Body::Scalar(instruction, load) => {
+                crate::x86_64::block::el1_m0::emit_scalar_load(&instruction, load, target)
+            }
             Body::Write(instruction, _) => {
                 crate::x86_64::block::el1_m0::emit_write_pair(&instruction, target)
             }
@@ -320,7 +421,7 @@ impl Plan {
 mod tests {
     use super::*;
     use crate::block::{BlockProfile, CompilationPlan};
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
     const BASE: GuestAddress = GuestAddress(0x100000);
     const ADD_X0: u32 = 0x91000000;
     const CMP_X10_X11: u32 = 0xeb0b015f;
@@ -484,7 +585,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("{name}: {error:?}"));
             let actual_lane = match plan.el1_platform_intent().expect(name) {
                 Intent::Registers => 0,
-                Intent::LiteralRead64(_) => 1,
+                Intent::LiteralRead64(_) | Intent::ScalarLoad(_) => 1,
                 Intent::Write64Pair(_) => 2,
                 Intent::System(_) => 3,
                 Intent::Read64Pair(_) => 4,
@@ -516,8 +617,6 @@ mod tests {
             0xa8000440,
             0x29000440,
             0xa94007e0,
-            0x18000040,
-            0x98000040,
             0x1c000040,
             0xd4000002, // HVC remains unsupported.
             0xd69f0bff, // ERETAA: authenticated owner remains unmounted.
@@ -599,5 +698,127 @@ mod tests {
                 | crate::context::memory::flags::TAG_CHECKED
         );
         assert_eq!(store.compile().unwrap().native.source_map.len(), 1);
+    }
+    #[test]
+    fn canonical_scalar_load_family_has_one_staged_attempt_and_exact_source_intent() {
+        use crate::context::memory::{SpAlignmentRequirement, flags, profile_requirements};
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/el1-scalar-loads.S"
+        ));
+        let mut admitted = 0;
+        let mut declined = 0;
+        for row in fixture
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".inst "))
+        {
+            let word = u32::from_str_radix(
+                row.split_whitespace()
+                    .next()
+                    .unwrap()
+                    .trim_start_matches("0x"),
+                16,
+            )
+            .unwrap();
+            let wanted = row.ends_with("; admit");
+            let source = bytes(&[word, 0xd503201f]);
+            let plan = CompilationPlan::new(
+                &source,
+                BASE,
+                BlockProfile::El1PlatformV1,
+                TargetCpu::Baseline,
+            );
+            if !wanted {
+                assert!(plan.is_err(), "unowned {word:08x}");
+                declined += 1;
+                continue;
+            }
+            let plan = plan.unwrap_or_else(|error| panic!("{word:08x}: {error:?}"));
+            let Some(Intent::ScalarLoad(load)) = plan.el1_platform_intent() else {
+                panic!("scalar intent {word:08x}")
+            };
+            assert_eq!(plan.source_bytes(), size_of::<u32>());
+            assert!(load.matches_source(BASE, word));
+            assert!(!load.matches_source(GuestAddress(BASE.0 + 4), word));
+            let requirements = load.requirements();
+            assert_eq!(plan.memory_requirements(), Some(requirements));
+            assert_eq!(
+                requirements.required_profile,
+                profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD
+            );
+            assert_eq!(requirements.required_host_caps, 0);
+            assert_eq!(requirements.required_address_checks, Default::default());
+            assert_eq!(requirements.required_pointer_arithmetic, None);
+            assert_eq!(
+                requirements.required_sp_alignment,
+                SpAlignmentRequirement::Any
+            );
+            let tag_checked = match load.address() {
+                ScalarLoadAddress::Literal { .. } => false,
+                ScalarLoadAddress::Immediate { base, mode, .. } => {
+                    mode != AddressMode::Offset || base != Register::Sp
+                }
+                ScalarLoadAddress::RegisterOffset { .. } => true,
+            };
+            assert_eq!(
+                requirements.required_flags,
+                if tag_checked { flags::TAG_CHECKED } else { 0 }
+            );
+            assert_eq!(
+                plan.compile().unwrap().native.source_map,
+                vec![(BASE, crate::extended::context_wrapper().len())]
+            );
+            let prefix = CompilationPlan::new(
+                &bytes(&[ADD_X0, word, 0xd503201f]),
+                BASE,
+                BlockProfile::El1PlatformV1,
+                TargetCpu::Baseline,
+            )
+            .unwrap();
+            assert_eq!(prefix.source_bytes(), size_of::<u32>());
+            assert_eq!(prefix.el1_platform_intent(), Some(Intent::Registers));
+            assert!(prefix.memory_requirements().is_none());
+            admitted += 1;
+        }
+        assert_eq!(admitted, 181);
+        assert_eq!(declined, 9);
+    }
+
+    #[test]
+    fn scalar_result_metadata_preserves_width_sign_and_literal_address() {
+        for (word, bytes, width, signed) in [
+            (0x39400c20, 1, Width::W32, false),
+            (0x79400c20, 2, Width::W32, false),
+            (0xb9400c20, 4, Width::W32, false),
+            (0xf9400c20, 8, Width::X64, false),
+            (0x39c00c20, 1, Width::W32, true),
+            (0x39800c20, 1, Width::X64, true),
+            (0x79c00c20, 2, Width::W32, true),
+            (0x79800c20, 2, Width::X64, true),
+            (0xb9800c20, 4, Width::X64, true),
+            (0x18000040, 4, Width::W32, false),
+            (0x58000040, 8, Width::X64, false),
+            (0x98000040, 4, Width::X64, true),
+        ] {
+            let instruction = Decoder.lift(BASE, word).unwrap();
+            let load = ScalarLoad::from_instruction(&instruction).unwrap();
+            assert_eq!(
+                (
+                    load.bytes(),
+                    load.result_width(),
+                    load.signed(),
+                    load.destination()
+                ),
+                (bytes, width, signed, Register::X(0))
+            );
+        }
+        let instruction = Decoder.lift(GuestAddress(0x103470), 0x18000a9b).unwrap();
+        let load = ScalarLoad::from_instruction(&instruction).unwrap();
+        assert_eq!(load.destination(), Register::X(27));
+        assert_eq!(
+            load.address(),
+            ScalarLoadAddress::Literal { address: 0x1035c0 }
+        );
+        assert_eq!(load.writeback_base(), None);
     }
 }

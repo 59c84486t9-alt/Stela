@@ -52,8 +52,12 @@ pub(crate) struct PhysicalRamReadPin<'loan> {
     physical: &'loan PhysicalAddressSpace,
     execution: &'loan MemoryExecutionLoan,
     reached: PhysicalAccess,
+    bytes: usize,
 }
 impl PhysicalRamReadPin<'_> {
+    pub(super) fn bytes(&self) -> usize {
+        self.bytes
+    }
     pub(super) fn pointer(&self) -> *const u8 {
         self.reached.first().host_ptr().as_ptr().cast_const()
     }
@@ -148,46 +152,58 @@ impl PhysicalAddressSpace {
         Ok(())
     }
 
+    /// Existing descriptor and legacy read64 clients retain their exact width.
     pub(crate) fn resolve_ram8<'loan>(
         &'loan self,
         execution: &'loan MemoryExecutionLoan,
         physical_address: u64,
     ) -> Result<PhysicalRamReadPin<'loan>, PhysicalReadPlatformError> {
+        self.resolve_ram_scalar(execution, physical_address, DESCRIPTOR_BYTES as u8)
+    }
+    /// Resolve only the exact naturally aligned scalar footprint. The original
+    /// physical factory, source loan and retained outer establish permission;
+    /// an integer width or numeric physical address never grants access.
+    pub(crate) fn resolve_ram_scalar<'loan>(
+        &'loan self,
+        execution: &'loan MemoryExecutionLoan,
+        physical_address: u64,
+        bytes: u8,
+    ) -> Result<PhysicalRamReadPin<'loan>, PhysicalReadPlatformError> {
         self.check_execution_loan(execution)?;
+        if !matches!(bytes, 1 | 2 | 4 | 8) {
+            return Err(PhysicalReadPlatformError::Domain(
+                MemoryStatus::InvalidRequest,
+            ));
+        }
+        let bytes = usize::from(bytes);
         if !cfg!(target_arch = "x86_64") {
             return Err(PhysicalReadPlatformError::UnsupportedHost);
         }
-        if physical_address & DESCRIPTOR_ALIGNMENT_MASK != 0
-            || physical_address
-                .checked_add(DESCRIPTOR_BYTES as u64)
-                .is_none()
+        if physical_address & (bytes as u64 - 1) != 0
+            || physical_address.checked_add(bytes as u64).is_none()
         {
             return Err(PhysicalReadPlatformError::Alignment);
         }
         let reached = self
             .domain
-            .resolve_source_physical(
-                execution,
-                physical_address,
-                DESCRIPTOR_BYTES,
-                AccessKind::Read,
-            )
+            .resolve_source_physical(execution, physical_address, bytes, AccessKind::Read)
             .map_err(PhysicalReadPlatformError::Domain)?;
         self.check_reached(&reached)?;
         let pointer = reached.first().host_ptr().as_ptr();
-        if pointer as usize & (DESCRIPTOR_BYTES - 1) != 0 {
+        if pointer as usize & (bytes - 1) != 0 {
             return Err(PhysicalReadPlatformError::HostAlignment);
         }
-        let (address, bytes) =
-            access::read_footprint(pointer as usize, DESCRIPTOR_BYTES, self.domain.target)
+        let (address, footprint_bytes) =
+            access::read_footprint(pointer as usize, bytes, self.domain.target)
                 .map_err(|_| PhysicalReadPlatformError::UnsupportedHost)?;
-        if address != pointer as usize || bytes != DESCRIPTOR_BYTES {
+        if address != pointer as usize || footprint_bytes != bytes {
             return Err(PhysicalReadPlatformError::UnsupportedHost);
         }
         Ok(PhysicalRamReadPin {
             physical: self,
             execution,
             reached,
+            bytes,
         })
     }
     /// Borrow physical descriptor reads under the actual retained outer loan.

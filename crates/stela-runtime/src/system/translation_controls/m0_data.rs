@@ -13,7 +13,7 @@ use crate::{
         domain::{
             MemoryExecutionLoan,
             m0_read::{
-                M0Read64Intent,
+                M0ScalarReadIntent,
                 pair::{M0ReadMember, M0ReadPairIntent},
             },
             m0_write::{M0WriteIntent, M0WriteMember},
@@ -44,6 +44,10 @@ pub(crate) enum M0ControlError {
     UnsupportedState,
     MmuEnabled,
     BigEndian,
+    StackAlignment {
+        source_pc: u64,
+        original_sp: u64,
+    },
     UnsupportedProfile,
     Configuration(stage1::Unsupported),
     SourceFetch(super::FetchFailure),
@@ -107,6 +111,15 @@ impl TranslationControls {
         source_pc: u64,
         raw_address: u64,
     ) -> Result<stage1::Translation, M0ControlError> {
+        Self::derive_m0_scalar_read(config, physical, source_pc, raw_address, READ_BYTES as u8)
+    }
+    fn derive_m0_scalar_read(
+        config: &stage1::Config,
+        physical: &PhysicalAddressSpace,
+        source_pc: u64,
+        raw_address: u64,
+        bytes: u8,
+    ) -> Result<stage1::Translation, M0ControlError> {
         // Canonical disabled translation applies region/TBI/PAMax address-size
         // priority before the aligned-Device support check. Do not preempt it
         // with a made-up Alignment fault or use TCR.IPS as CPU PAMax.
@@ -120,7 +133,7 @@ impl TranslationControls {
                 source_pc,
                 pan: false,
                 uao: false,
-                aligned: raw_address.is_multiple_of(READ_BYTES),
+                aligned: raw_address.is_multiple_of(u64::from(bytes)),
             },
         )
         .map_err(M0ControlError::Translation)?;
@@ -135,7 +148,7 @@ impl TranslationControls {
             || attributes.guarded_page
             || translation.permissions().is_some()
             || translation.walk().is_some()
-            || translation.contiguous_bytes() < READ_BYTES
+            || translation.contiguous_bytes() < u64::from(bytes)
         {
             return Err(M0ControlError::UnexpectedAttributes);
         }
@@ -175,7 +188,7 @@ pub(crate) struct M0DataReadLoan<'cpu> {
     source: &'cpu dyn InputCurrency,
     outer: &'cpu MemoryExecutionLoan,
     generation: u64,
-    intent: M0Read64Intent,
+    intent: M0ScalarReadIntent,
     translation: stage1::Translation,
 }
 impl M0DataReadLoan<'_> {
@@ -201,7 +214,7 @@ impl M0DataReadLoan<'_> {
         }
         self.source.validate(self.owner)
     }
-    pub(crate) fn intent(&self) -> M0Read64Intent {
+    pub(crate) fn intent(&self) -> M0ScalarReadIntent {
         self.intent
     }
     pub(crate) fn derived_translation(&self) -> &stage1::Translation {
@@ -240,7 +253,7 @@ impl TranslationControls {
         Ok(())
     }
 
-    pub(crate) fn loan_m0_read8<'cpu>(
+    pub(crate) fn loan_m0_scalar_read<'cpu>(
         &'cpu self,
         input: &'cpu M0SourceInput<'_, '_>,
     ) -> Result<M0DataReadLoan<'cpu>, M0ControlError> {
@@ -269,11 +282,26 @@ impl TranslationControls {
             .qualify_source(self, input)
             .map_err(M0ControlError::SourceFetch)?;
         let intent = input.read_intent().ok_or(M0ControlError::WrongSourceKind)?;
-        let translation = Self::derive_m0_read8(
+        if !matches!(intent.bytes, 1 | 2 | 4 | 8) {
+            return Err(M0ControlError::WrongSourceKind);
+        }
+        // Original active SP is checked before any offset-derived data address.
+        // This follows actual effective SCTLR.SA, never a compiler default.
+        if self.profile.consumers(self.readbacks).sctlr_el1 & super::fields::SCTLR_SA_MASK != 0
+            && let Some(original_sp) = intent.stack_pointer
+            && original_sp & 15 != 0
+        {
+            return Err(M0ControlError::StackAlignment {
+                source_pc: intent.source_pc.0,
+                original_sp,
+            });
+        }
+        let translation = Self::derive_m0_scalar_read(
             &config,
             scope.physical_space(),
             intent.source_pc.0,
             intent.raw_address,
+            intent.bytes,
         )?;
         Ok(M0DataReadLoan {
             owner: self,

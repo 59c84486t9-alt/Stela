@@ -10,7 +10,7 @@ use super::callback::{CallbackFailure, ReadCallback};
 use crate::{
     memory::domain::{
         MemoryExecutionLoan,
-        m0_read::{M0RamReadPlatformError, M0RamReadPrepared, prepare_aligned_device_ram8},
+        m0_read::{M0RamReadPlatformError, M0RamReadPrepared, prepare_aligned_device_ram_scalar},
     },
     system::translation_controls::m0_data::M0DataReadLoan,
 };
@@ -19,8 +19,6 @@ use stela_compiler::{
     block::BlockExit,
     context::{ExecutionContext, ScalableStateView, memory::MemoryStatus},
 };
-
-const READ_BYTES: u64 = size_of::<u64>() as u64;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawM0Memory {
@@ -96,7 +94,7 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
         control: &'call M0DataReadLoan<'owner>,
         context: &'call mut ExecutionContext,
     ) -> Result<Self, M0RamReadPlatformError> {
-        let prepared = prepare_aligned_device_ram8(outer, control)?;
+        let prepared = prepare_aligned_device_ram_scalar(outer, control)?;
         let context_before = ContextIdentity::capture(context);
         Ok(Self {
             prepared,
@@ -201,7 +199,7 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
         }
         let attempts = callback.attempts();
         drop(callback);
-        // Actual physical completion, including any eight-byte read preceding a
+        // Actual physical completion, including any source-width read preceding a
         // failed callback/finalizer, takes precedence over raw ABI metadata.
         report.completed_bytes = self.prepared.completed_bytes();
         if !self.context_before.matches(self.context) && report.failure.is_none() {
@@ -210,14 +208,14 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
         let intent = self.prepared.intent();
         let valid_memory = report.memory.is_some_and(|memory| {
             memory.status == MemoryStatus::Success as u32
-                && memory.completed_bytes == READ_BYTES
+                && memory.completed_bytes == u64::from(intent.bytes)
                 && memory.address == intent.raw_address
                 && memory.pc == intent.source_pc.0
         });
         self.valid_return = report.failure.is_none()
             && report.callback_failure.is_none()
             && report.raw_carrier.is_some()
-            && report.completed_bytes == READ_BYTES
+            && report.completed_bytes == u64::from(intent.bytes)
             && valid_memory
             && attempts == 1;
         if !self.valid_return && report.failure.is_none() {

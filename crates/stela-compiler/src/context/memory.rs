@@ -152,12 +152,17 @@ pub mod profile_requirements {
     pub const M0_DEVICE_RAM_WRITE8_OR_PAIR: u32 = 1 << 4;
     /// Same-owner MMU-off Device pair reads with actual no-LSE2 qualification.
     pub const M0_DEVICE_RAM_READ64_PAIR_NO_LSE2: u32 = 1 << 5;
+    /// Source-bound EL1 MMU-off scalar loads of exactly 1/2/4/8 bytes. Actual
+    /// controls, original-SP alignment and physical ordered access remain owned
+    /// by the runtime; no Normal-WB, tag-plane or host-pointer loan is implied.
+    pub const M0_DEVICE_RAM_SCALAR_LOAD: u32 = 1 << 6;
     pub const KNOWN: u32 = NATIVE_ACCESS
         | TAG_GRANULES
         | SCALABLE_TAG_CHECKS
         | M0_DEVICE_RAM_READ64
         | M0_DEVICE_RAM_WRITE8_OR_PAIR
-        | M0_DEVICE_RAM_READ64_PAIR_NO_LSE2;
+        | M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
+        | M0_DEVICE_RAM_SCALAR_LOAD;
 }
 
 /// Explicit runtime outcomes; only Success permits architectural load commits.

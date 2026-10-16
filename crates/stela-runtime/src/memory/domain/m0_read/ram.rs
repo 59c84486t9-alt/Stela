@@ -1,4 +1,4 @@
-//! Exact aligned8B Device-nGnRnE reads from the canonical physical RAM owner.
+//! Exact naturally aligned scalar Device-nGnRnE reads from the canonical physical RAM owner.
 //!
 //! Private, unregistered source. The required scalar M0DataReadLoan and physical
 //! registry port are not replaced by stubs here. No Config, copied translation,
@@ -6,7 +6,7 @@
 
 use crate::platform::sync::MutexGuard;
 
-use super::{M0Read64Intent, MetadataFailure};
+use super::{M0ScalarReadIntent, MetadataFailure};
 use crate::{
     memory::domain::{
         MemoryExecutionLoan,
@@ -16,11 +16,8 @@ use crate::{
 };
 use stela_compiler::context::memory::MemoryStatus;
 
-const READ_BYTES: u64 = size_of::<u64>() as u64;
-const HOST_ALIGNMENT_MASK: usize = size_of::<u64>() - 1;
-
 /// Platform/authority diagnostics, never an Arm TranslationError or an invented
-/// physical external abort. Post-read failures preserve the actual8B completion.
+/// physical external abort. Post-read failures preserve the actual source-width completion.
 pub(crate) enum M0RamReadPlatformError {
     SourceControl {
         error: M0ControlError,
@@ -93,17 +90,17 @@ impl M0RamReadPrepared<'_, '_> {
         self.state = ReadState::Attempted;
         self.validate_current()?;
         let pointer = self.physical.pointer();
-        if pointer as usize & HOST_ALIGNMENT_MASK != 0 {
+        if pointer as usize & (usize::from(self.intent().bytes) - 1) != 0 {
             return Err(M0RamReadPlatformError::HostAlignment);
         }
         #[cfg(target_arch = "x86_64")]
         {
             // SAFETY: actual opaque CPU/physical producers qualified this exact
-            // current eight-byte coherent RAM quantity and supported baseline.
+            // current source-width coherent RAM quantity and supported baseline.
             // The original authority guard owns this session before invocation;
             // all source/outer/pin/order resources stay retained through read,
             // finalization and success or poison settlement.
-            let value = unsafe { read_host_ram8(pointer) };
+            let value = unsafe { read_host_ram_scalar(pointer, self.intent().bytes) };
             // Scalar/enum assignments are infallible; no callback, allocation or
             // fallible validation occurs between the read and this observation.
             self.state = ReadState::Completed;
@@ -116,15 +113,15 @@ impl M0RamReadPrepared<'_, '_> {
         }
     }
 
-    pub(crate) fn intent(&self) -> M0Read64Intent {
+    pub(crate) fn intent(&self) -> M0ScalarReadIntent {
         self.source.intent()
     }
 
-    /// Zero until the sole read returns; eight afterward. Unexpected host faults
+    /// Zero until the sole read returns; source width afterward. Unexpected host faults
     /// remain outside this recipe, not fabricated completed/fault observations.
-    pub(crate) const fn completed_bytes(&self) -> u64 {
+    pub(crate) fn completed_bytes(&self) -> u64 {
         match self.state {
-            ReadState::Completed => READ_BYTES,
+            ReadState::Completed => self.intent().bytes as u64,
             ReadState::Unattempted | ReadState::Attempted => 0,
         }
     }
@@ -137,7 +134,7 @@ impl M0RamReadPrepared<'_, '_> {
 ///   bank, source and the identical `execution` object. Its successful mint has
 ///   already performed canonical translation; `validate_current` reports only
 ///   authority/platform failure, never a new architectural fault.
-/// - `physical_space().resolve_ram8` is a genuine PA-registry operation. It checks
+/// - `physical_space().resolve_ram_scalar` is a genuine PA-registry operation. It checks
 ///   the same actual execution domain/System and returns exact current readable,
 ///   side-effect-free host-RAM spans. Numeric VA/PA equality grants nothing.
 /// - The physical/host producer qualifies the bounded side-effect-free coherent
@@ -150,7 +147,7 @@ impl M0RamReadPrepared<'_, '_> {
 /// read. Immutable instruction-source revalidation remains with the actual source/
 /// fetch owner; that is distinct from this pending target read. This function does not
 /// acquire a second execution/service/snapshot loan or change a reservation.
-pub(crate) fn prepare_aligned_device_ram8<'loan, 'owner>(
+pub(crate) fn prepare_aligned_device_ram_scalar<'loan, 'owner>(
     execution: &'loan MemoryExecutionLoan,
     source: &'loan M0DataReadLoan<'owner>,
 ) -> Result<M0RamReadPrepared<'loan, 'owner>, M0RamReadPlatformError> {
@@ -171,7 +168,11 @@ pub(crate) fn prepare_aligned_device_ram8<'loan, 'owner>(
         .map_err(M0RamReadPlatformError::SourceMetadata)?;
     let physical = source
         .physical_space()
-        .resolve_ram8(execution, source.derived_translation().physical_address())
+        .resolve_ram_scalar(
+            execution,
+            source.derived_translation().physical_address(),
+            source.intent().bytes,
+        )
         .map_err(|error| M0RamReadPlatformError::Physical {
             error,
             completed_bytes: 0,
@@ -194,8 +195,13 @@ pub(crate) fn prepare_aligned_device_ram8<'loan, 'owner>(
             error,
             completed_bytes: 0,
         })?;
+    if physical.bytes() != usize::from(source.intent().bytes) {
+        return Err(M0RamReadPlatformError::SourceMetadata(
+            MetadataFailure::IncompletePhysicalExtent,
+        ));
+    }
     let pointer = physical.pointer();
-    if pointer as usize & HOST_ALIGNMENT_MASK != 0 {
+    if pointer as usize & (usize::from(source.intent().bytes) - 1) != 0 {
         return Err(M0RamReadPlatformError::HostAlignment);
     }
     Ok(M0RamReadPrepared {
@@ -272,4 +278,43 @@ impl core::fmt::Debug for M0RamReadPlatformError {
                 .finish(),
         }
     }
+}
+
+/// Read exactly the source-qualified naturally aligned scalar width. No widened
+/// eight-byte snapshot is used for a narrow architectural access.
+///
+/// # Safety
+/// The original scalar source/control/outer/current physical RAM pin and order
+/// guard must cover exactly `bytes` (1, 2, 4 or 8). The eight-byte recipe retains
+/// its original contract; every narrow recipe has the same barriers and no
+/// observable access beyond the architectural footprint. MMIO is not admitted.
+#[cfg(target_arch = "x86_64")]
+unsafe fn read_host_ram_scalar(pointer: *const u8, bytes: u8) -> u64 {
+    let value: u64;
+    match bytes {
+        1 => unsafe {
+            core::arch::asm!(
+                "mfence", "movzx {value:e}, byte ptr [{pointer}]", "mfence",
+                value = out(reg) value, pointer = in(reg) pointer,
+                options(nostack, preserves_flags),
+            )
+        },
+        2 => unsafe {
+            core::arch::asm!(
+                "mfence", "movzx {value:e}, word ptr [{pointer}]", "mfence",
+                value = out(reg) value, pointer = in(reg) pointer,
+                options(nostack, preserves_flags),
+            )
+        },
+        4 => unsafe {
+            core::arch::asm!(
+                "mfence", "mov {value:e}, dword ptr [{pointer}]", "mfence",
+                value = out(reg) value, pointer = in(reg) pointer,
+                options(nostack, preserves_flags),
+            )
+        },
+        8 => return unsafe { read_host_ram8(pointer) },
+        _ => unreachable!("original source and physical pin qualified scalar width"),
+    }
+    value
 }

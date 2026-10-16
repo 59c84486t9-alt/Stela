@@ -1492,3 +1492,10 @@ mod system_effect_fixture;
 ))]
 #[path = "software_el1/mutable_source_tests.rs"]
 mod mutable_source_tests;
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod scalar_load_tests;

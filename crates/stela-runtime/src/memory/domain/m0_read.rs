@@ -28,7 +28,6 @@ use stela_compiler::{
 
 const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 const READ_BYTES: u8 = size_of::<u64>() as u8;
-const READ_ALIGNMENT_MASK: u64 = READ_BYTES as u64 - 1;
 #[cfg(test)]
 const SCTLR_M: u64 = 1 << 0;
 #[cfg(test)]
@@ -70,7 +69,7 @@ pub(crate) enum SourceFailure {
 
 /// Typed source metadata, not a permission to issue a physical transaction.
 #[derive(Debug)]
-pub(crate) struct M0Read64Source {
+pub(crate) struct M0ScalarReadSource {
     pc: GuestAddress,
     word: u32,
     next_pc: GuestAddress,
@@ -80,11 +79,12 @@ pub(crate) struct M0Read64Source {
 
 #[derive(Debug)]
 enum ReadAddress {
+    Scalar(stela_compiler::block::el1_platform::ScalarLoad),
     Register { base: u8, displacement: i32 },
     Literal(u64),
 }
 
-impl M0Read64Source {
+impl M0ScalarReadSource {
     /// Recheck against the common decoder; the real registered CodeRegion must
     /// separately establish that these bytes/PC belong to this actual source.
     pub(crate) fn from_source(instruction: &Instruction, word: u32) -> Result<Self, SourceFailure> {
@@ -175,12 +175,16 @@ impl M0Read64Source {
     }
 
     pub(crate) fn requirements(&self) -> MemoryRequirements {
+        if let ReadAddress::Scalar(load) = self.address {
+            return load.requirements();
+        }
         MemoryRequirements {
             required_address_checks: Default::default(),
             required_pointer_arithmetic: None,
             required_flags: match self.address {
                 ReadAddress::Register { .. } => flags::TAG_CHECKED,
                 ReadAddress::Literal(_) => 0,
+                ReadAddress::Scalar(_) => unreachable!("scalar requirements returned above"),
             },
             required_host_caps: 0,
             required_profile: profile_requirements::M0_DEVICE_RAM_READ64,
@@ -190,8 +194,11 @@ impl M0Read64Source {
 
     /// Effective AddressAdd behavior requires the canonical profile to exclude
     /// CPA/other unsupported address operations. This computes metadata only.
-    pub(crate) fn intent(&self, registers: &GuestState) -> M0Read64Intent {
-        M0Read64Intent {
+    pub(crate) fn intent(&self, registers: &GuestState) -> M0ScalarReadIntent {
+        if let ReadAddress::Scalar(load) = self.address {
+            return scalar::intent(load, self.word, registers);
+        }
+        M0ScalarReadIntent {
             source_pc: self.pc,
             source_word: self.word,
             next_pc: self.next_pc,
@@ -200,9 +207,13 @@ impl M0Read64Source {
                     registers.x[usize::from(base)].wrapping_add_signed(i64::from(displacement))
                 }
                 ReadAddress::Literal(address) => address,
+                ReadAddress::Scalar(_) => unreachable!("scalar intent returned above"),
             },
             flags: self.requirements().required_flags,
             destination: self.destination,
+            bytes: READ_BYTES,
+            stack_pointer: None,
+            writeback: None,
         }
     }
 }
@@ -210,13 +221,16 @@ impl M0Read64Source {
 /// No references or pointers to RAM or authority. Copying this cannot admit an
 /// access; the actual CPU/source/physical parents requalify every reached use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct M0Read64Intent {
+pub(crate) struct M0ScalarReadIntent {
     pub(crate) source_pc: GuestAddress,
     pub(crate) source_word: u32,
     pub(crate) next_pc: GuestAddress,
     pub(crate) raw_address: u64,
     pub(crate) flags: u32,
     pub(crate) destination: Register,
+    pub(crate) bytes: u8,
+    pub(crate) stack_pointer: Option<u64>,
+    pub(crate) writeback: Option<(Register, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,14 +242,16 @@ pub(crate) enum MetadataFailure {
     IncompletePhysicalExtent,
 }
 
-impl M0Read64Intent {
+impl M0ScalarReadIntent {
     /// Compare metadata returned by canonical current-control translation.
     /// Success grants no current control, physical target, read or commit loan.
     pub(crate) fn check_translation(
         self,
         translation: &stage1::Translation,
     ) -> Result<(), MetadataFailure> {
-        if self.raw_address & READ_ALIGNMENT_MASK != 0 {
+        if !matches!(self.bytes, 1 | 2 | 4 | 8)
+            || self.raw_address & (u64::from(self.bytes) - 1) != 0
+        {
             return Err(MetadataFailure::UnalignedLocationNotAdmitted);
         }
         let access = translation.access();
@@ -263,8 +279,8 @@ impl M0Read64Intent {
         if translation.walk().is_some() || translation.permissions().is_some() {
             return Err(MetadataFailure::FabricatedWalkOrPermissions);
         }
-        if translation.contiguous_bytes() < u64::from(READ_BYTES)
-            || translation.physical_address() & READ_ALIGNMENT_MASK != 0
+        if translation.contiguous_bytes() < u64::from(self.bytes)
+            || translation.physical_address() & (u64::from(self.bytes) - 1) != 0
         {
             return Err(MetadataFailure::IncompletePhysicalExtent);
         }
@@ -279,4 +295,10 @@ mod tests;
 // Private implementation remains unregistered until actual producers close.
 #[path = "m0_read/ram.rs"]
 mod ram;
-pub(crate) use ram::{M0RamReadPlatformError, M0RamReadPrepared, prepare_aligned_device_ram8};
+pub(crate) use ram::{
+    M0RamReadPlatformError, M0RamReadPrepared, prepare_aligned_device_ram_scalar,
+};
+
+// Canonical shared-operand metadata only; no physical/source/PE authority.
+#[path = "m0_read/scalar.rs"]
+mod scalar;

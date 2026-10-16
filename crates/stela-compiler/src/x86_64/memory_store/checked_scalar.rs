@@ -12,7 +12,8 @@ use crate::x86_64::{
 };
 use crate::{
     aarch64::{
-        AddressMode, MemoryTransfer, Operation, Register, Width, register_offset::IndexExtend,
+        AddressMode, MemoryTransfer, Operation, Register, Width, literal,
+        register_offset::IndexExtend,
     },
     block::CheckedMemoryProfile,
     context::memory::{
@@ -35,7 +36,10 @@ const MOV_RAX_RSP: &[u8] = &[0x48, 0x8b, 0x84, 0x24];
 const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Address {
+pub(crate) enum Address {
+    Literal {
+        address: u64,
+    },
     Immediate {
         displacement: i32,
         mode: AddressMode,
@@ -57,6 +61,8 @@ pub(crate) struct Operand {
     /// Retained source distinction. The initial EL0 profile makes this descriptor
     /// privilege equal to ordinary EL0; broader EL/UAO needs its actual CPU owner.
     unprivileged: bool,
+    /// A separately qualified MMU-off staged scalar read, never Normal-WB.
+    m0_scalar_load: bool,
 }
 fn data_register(register: Register) -> bool {
     matches!(register, Register::X(index) if index < 31) || register == Register::Zero
@@ -87,6 +93,7 @@ impl Operand {
                 base,
                 address: Address::Immediate { displacement, mode },
                 unprivileged: false,
+                m0_scalar_load: false,
             },
             Operation::MemoryRegisterOffset(operand) => Self {
                 profile,
@@ -100,6 +107,7 @@ impl Operand {
                     shift: operand.shift,
                 },
                 unprivileged: false,
+                m0_scalar_load: false,
             },
             Operation::MemoryUnprivileged(operand) => Self {
                 profile,
@@ -112,6 +120,7 @@ impl Operand {
                     mode: AddressMode::Offset,
                 },
                 unprivileged: true,
+                m0_scalar_load: false,
             },
             _ => return None,
         };
@@ -173,8 +182,63 @@ impl Operand {
         }
         Some(operand)
     }
+    /// Reuse the canonical checked scalar adapter, with a distinct staged M0
+    /// capability. Literal operands are already lifted by the shared decoder.
+    pub(crate) fn from_m0_scalar_load(operation: &Operation) -> Option<Self> {
+        if let Operation::Literal(operand) = *operation {
+            let literal::Transfer::Integer {
+                destination,
+                width,
+                signed,
+            } = operand.transfer
+            else {
+                return None;
+            };
+            let bytes = match (width, signed) {
+                (Width::W32, false) | (Width::X64, true) => 4,
+                (Width::X64, false) => DOUBLEWORD_BYTES,
+                _ => return None,
+            };
+            return data_register(destination).then_some(Self {
+                profile: CheckedMemoryProfile::SpAlignmentDisabled,
+                transfer: MemoryTransfer::Load { signed, width },
+                bytes,
+                data: destination,
+                base: Register::Zero,
+                address: Address::Literal {
+                    address: operand.address,
+                },
+                unprivileged: false,
+                m0_scalar_load: true,
+            });
+        }
+        let mut operand =
+            Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
+        if operand.unprivileged || !matches!(operand.transfer, MemoryTransfer::Load { .. }) {
+            return None;
+        }
+        operand.m0_scalar_load = true;
+        Some(operand)
+    }
+    pub(crate) fn bytes(self) -> u8 {
+        self.bytes
+    }
+    pub(crate) fn data(self) -> Register {
+        self.data
+    }
+    pub(crate) fn base(self) -> Register {
+        self.base
+    }
+    pub(crate) fn transfer(self) -> MemoryTransfer {
+        self.transfer
+    }
+    pub(crate) fn address(self) -> Address {
+        self.address
+    }
+
     fn tag_checked(&self) -> bool {
         match self.address {
+            Address::Literal { .. } => false,
             Address::RegisterOffset { .. } => true,
             Address::Immediate { mode, .. } => {
                 mode != AddressMode::Offset || self.base != Register::Sp
@@ -187,6 +251,22 @@ impl Operand {
 }
 
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
+    if operand.m0_scalar_load {
+        return MemoryRequirements {
+            required_address_checks: Default::default(),
+            required_pointer_arithmetic: None,
+            required_flags: if operand.tag_checked() {
+                flags::TAG_CHECKED
+            } else {
+                0
+            },
+            required_host_caps: 0,
+            required_profile: profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD,
+            // The actual EL1 owner checks original SP against current SCTLR.SA
+            // before address arithmetic; this body grants no SA0 specialization.
+            required_sp_alignment: SpAlignmentRequirement::Any,
+        };
+    }
     if operand.profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
         // Actual runtime preflight enforces the original eight-byte alignment
         // before the Device transaction. There is no widened snapshot envelope,
@@ -262,6 +342,7 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
         code.extend(DATA_OFFSET.to_le_bytes());
     }
     match operand.address {
+        Address::Literal { address } => crate::x86_64::immediate(code, address),
         Address::Immediate { displacement, mode } => address::immediate_with_checks(
             code,
             operand.base,

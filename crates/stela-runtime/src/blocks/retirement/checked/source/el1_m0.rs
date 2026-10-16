@@ -14,10 +14,11 @@ impl BoundSource<'_> {
                 stela_compiler::block::el1_platform::Intent::LiteralRead64(read) => {
                     Ok(Intent::LiteralRead64(read))
                 }
-                stela_compiler::block::el1_platform::Intent::System(_)
+                stela_compiler::block::el1_platform::Intent::ScalarLoad(_)
+                | stela_compiler::block::el1_platform::Intent::System(_)
                 | stela_compiler::block::el1_platform::Intent::Write64Pair(_)
                 | stela_compiler::block::el1_platform::Intent::Read64Pair(_) => {
-                    anyhow::bail!("System carrier has no M0 read intent")
+                    anyhow::bail!("source has no legacy M0 read intent")
                 }
             };
         }

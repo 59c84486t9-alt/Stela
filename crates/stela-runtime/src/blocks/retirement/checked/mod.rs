@@ -418,7 +418,7 @@ impl BlockRuntime {
             ) || self.profile
                 == BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged)
             {
-                match active.execute_m0_read64(
+                match active.execute_m0_scalar_load(
                     &bound,
                     &mut accounting,
                     &mut last_m0_observation,
