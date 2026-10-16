@@ -355,6 +355,8 @@ fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
         "bundle",
         "--dram-size",
         "0x40000000",
+        "--syscfg",
+        "SrNm=4331",
     ];
     success(&cli(dir.path(), &args));
     let bundle = dir.path().join("bundle");
@@ -385,7 +387,7 @@ fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
         );
     }
     let placeholders = manifest["placeholders"].as_array().unwrap();
-    assert_eq!(placeholders[0]["resolution"], "zero-filled 32 bytes");
+    assert_eq!(placeholders[0]["resolution"], "syscfg/SrNm/0x20: 32 bytes");
     assert!(
         manifest["patches"]
             .as_array()

@@ -16,6 +16,7 @@ use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::trust_cache;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use stela_runtime::sha256;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -27,7 +28,19 @@ const VIRT_BASE_ALIGNMENT: u64 = 32 << 20;
 const BOOT_ARGS_REGION_BYTES: u64 = 0x4000;
 const MEMORY_MAP: &str = "/chosen/memory-map";
 const RESERVED_ENTRY_PREFIX: &str = "MemoryMapReserved-";
+/// iBoot fill-in recipe sources: `macaddr/NAME`, `syscfg/KEY[/LEN]` and
+/// `zeroes/LEN`, tried in order within a comma-separated recipe.
+const MACADDR_RECIPE: &str = "macaddr/";
+const SYSCFG_RECIPE: &str = "syscfg/";
 const ZERO_FILL_RECIPE: &str = "zeroes/";
+const MAC_ADDRESS_BYTES: usize = 6;
+/// Clock properties XNU `pexpert/arm/pe_identify_machine.c` reads from the
+/// running CPU node; absent ones fall back to its defaults.
+const CPU_FREQUENCY_PROPERTIES: [&str; 3] = [
+    "timebase-frequency",
+    "fixed-frequency",
+    "peripheral-frequency",
+];
 const MEMORY_MAP_ENTRY_BYTES: usize = 16;
 const HIBERNATION_KEY_BYTES: usize = 0x30;
 
@@ -82,6 +95,12 @@ pub struct Options {
     pub boot_args: String,
     /// The DeviceTree `/cpus` child marked `running` for the boot CPU.
     pub boot_cpu: String,
+    /// The generic timer rate (`CNTFRQ_EL0`) the machine presents.
+    pub timebase_frequency: u64,
+    /// Board configuration values by syscfg key, such as `SrNm` or `WMac`.
+    pub syscfg: BTreeMap<String, Vec<u8>>,
+    /// MAC addresses by provider name, such as `wifiaddr` or `ethaddr`.
+    pub mac_addresses: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -136,6 +155,8 @@ pub enum PatchSource {
     Entropy,
     /// The kernel command line.
     BootArgs,
+    /// The generic timer rate the machine presents.
+    Timebase,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -371,32 +392,81 @@ fn range_value(base: u64, length: u64) -> Vec<u8> {
     [base.to_le_bytes(), length.to_le_bytes()].concat()
 }
 
-/// Resolve every template placeholder the way iBoot does when no syscfg or
-/// MAC-address provider exists: take a `zeroes/N` alternative, else drop the
-/// property. Each decision is recorded in the manifest.
-fn resolve_placeholders(tree: &mut DeviceTree) -> Result<Vec<PlaceholderDecision>> {
+fn parse_size(text: &str, recipe: &str) -> Result<usize> {
+    let digits = text.trim_start_matches("0x");
+    usize::from_str_radix(digits, 16).with_context(|| format!("bad size {text} in {recipe}"))
+}
+
+/// The value one recipe alternative yields from the supplied board data.
+fn alternative_value(
+    alternative: &str,
+    recipe: &str,
+    options: &Options,
+) -> Result<Option<Vec<u8>>> {
+    if let Some(name) = alternative.strip_prefix(MACADDR_RECIPE) {
+        let Some(value) = options.mac_addresses.get(name) else {
+            return Ok(None);
+        };
+        ensure!(
+            value.len() == MAC_ADDRESS_BYTES,
+            "MAC address {name} must be {MAC_ADDRESS_BYTES} bytes"
+        );
+        return Ok(Some(value.clone()));
+    }
+    if let Some(spec) = alternative.strip_prefix(SYSCFG_RECIPE) {
+        let (key, size) = match spec.split_once('/') {
+            Some((key, size)) => (key, Some(parse_size(size, recipe)?)),
+            None => (spec, None),
+        };
+        let Some(value) = options.syscfg.get(key) else {
+            return Ok(None);
+        };
+        let mut value = value.clone();
+        if let Some(size) = size {
+            ensure!(
+                value.len() <= size,
+                "syscfg {key} is {} bytes; {recipe} allows {size}",
+                value.len()
+            );
+            value.resize(size, 0);
+        }
+        return Ok(Some(value));
+    }
+    if let Some(size) = alternative.strip_prefix(ZERO_FILL_RECIPE) {
+        return Ok(Some(vec![0; parse_size(size, recipe)?]));
+    }
+    bail!("unknown fill-in source {alternative} in {recipe}")
+}
+
+/// Resolve every template placeholder as iBoot does: the first recipe
+/// alternative with a value wins, from the supplied MAC addresses and syscfg
+/// values or a `zeroes/N` fill. A property with no source is removed. Each
+/// decision is recorded in the manifest.
+fn resolve_placeholders(
+    tree: &mut DeviceTree,
+    options: &Options,
+) -> Result<Vec<PlaceholderDecision>> {
     let mut decisions = vec![];
     for placeholder in tree.placeholders() {
-        let zero_fill = placeholder
-            .recipe
-            .split(',')
-            .find_map(|alternative| alternative.strip_prefix(ZERO_FILL_RECIPE))
-            .map(|size| {
-                u64::from_str_radix(size.trim_start_matches("0x"), 16)
-                    .with_context(|| format!("bad zero-fill size in {}", placeholder.recipe))
-            })
-            .transpose()?;
+        let mut chosen = None;
+        for alternative in placeholder.recipe.split(',') {
+            if let Some(value) = alternative_value(alternative, &placeholder.recipe, options)? {
+                chosen = Some((alternative.to_owned(), value));
+                break;
+            }
+        }
         let node = tree
             .node_mut(&placeholder.path)
             .context("placeholder node disappeared")?;
-        let resolution = match zero_fill {
-            Some(size) => {
-                node.set_property(&placeholder.property, vec![0; usize::try_from(size)?])?;
-                format!("zero-filled {size} bytes")
+        let resolution = match chosen {
+            Some((alternative, value)) => {
+                let bytes = value.len();
+                node.set_property(&placeholder.property, value)?;
+                format!("{alternative}: {bytes} bytes")
             }
             None => {
                 node.remove_property(&placeholder.property);
-                "removed: no syscfg or MAC-address provider".into()
+                "removed: no listed source was supplied".into()
             }
         };
         decisions.push(PlaceholderDecision {
@@ -442,7 +512,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     let trust_cache = trust_cache::compose(&[inputs.static_trust_cache.bytes])?;
 
     let mut tree = DeviceTree::parse(inputs.device_tree.bytes)?;
-    let placeholders = resolve_placeholders(&mut tree)?;
+    let placeholders = resolve_placeholders(&mut tree, options)?;
     let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options)?;
 
     // Lay the memory map out with zero values first: its size is fixed by
@@ -630,6 +700,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     let boot_args_pa = boot_args_region.guest_pa;
 
     let mut patches = device_tree_patches(&tree, device_tree_region)?;
+    patches.extend(cpu_frequency_patches(&tree, device_tree_region)?);
     patches.extend(boot_args_patches(boot_args_region, &boot_args_bytes));
 
     let entry_point = |image: &LoadedImage| -> Result<Entry> {
@@ -762,6 +833,20 @@ fn shape_device_tree(
         "{cpu} state field is not eight bytes"
     );
     tree.set_property(&cpu, "state", running)?;
+    // iBoot adds the clock rates at hand-off; every CPU node carries them.
+    for cpu in cpu_nodes(tree)? {
+        for property in CPU_FREQUENCY_PROPERTIES {
+            tree.set_property(
+                &cpu,
+                property,
+                options.timebase_frequency.to_le_bytes().to_vec(),
+            )?;
+        }
+    }
+    unresolved.push(
+        "/cpus fixed-frequency and peripheral-frequency take the timebase rate; Apple's values are unobserved"
+            .into(),
+    );
     for (path, property) in [
         ("/chosen/asmb", "lp-sip0"),
         ("/chosen/manifest-properties", "love"),
@@ -782,6 +867,42 @@ fn shape_device_tree(
             .into(),
     );
     Ok(unresolved)
+}
+
+/// Paths of the `/cpus` children that describe processors.
+fn cpu_nodes(tree: &DeviceTree) -> Result<Vec<String>> {
+    let cpus = tree.node("/cpus").context("DeviceTree has no /cpus")?;
+    Ok(cpus
+        .children
+        .iter()
+        .filter(|cpu| cpu.property("state").is_some())
+        .filter_map(|cpu| cpu.name().map(|name| format!("/cpus/{name}")))
+        .collect())
+}
+
+fn cpu_frequency_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
+    let bytes = tree.serialize();
+    let mut patches = vec![];
+    for cpu in cpu_nodes(tree)? {
+        for property in CPU_FREQUENCY_PROPERTIES {
+            let at = tree.locate(&cpu, property)?;
+            patches.push(Patch {
+                source: PatchSource::Timebase,
+                required: false,
+                region: region.name.clone(),
+                file: region.file.clone(),
+                file_offset: at.value_offset as u64,
+                bytes: at.value_bytes as u64,
+                encoding: Encoding::U64Le,
+                field: format!("{cpu} {property}"),
+                prepared_hex: hex::encode(
+                    &bytes[at.value_offset..at.value_offset + at.value_bytes],
+                ),
+                rule: "CNTFRQ_EL0 the machine presents, in Hz".into(),
+            });
+        }
+    }
+    Ok(patches)
 }
 
 fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
@@ -1046,6 +1167,9 @@ mod tests {
                 b"macaddr/wifiaddr,syscfg/WMac/6\0".to_vec(),
             )
             .unwrap();
+        chosen
+            .set_property("repair-status", b"syscfg/rpcp\0".to_vec())
+            .unwrap();
         for property in &mut chosen.properties[3..] {
             property.placeholder = true;
         }
@@ -1092,6 +1216,9 @@ mod tests {
             load_offset: 0,
             boot_args: "-v".into(),
             boot_cpu: "cpu0".into(),
+            timebase_frequency: 24_000_000,
+            syscfg: BTreeMap::from([("SwBh".to_owned(), vec![7; 4])]),
+            mac_addresses: BTreeMap::from([("wifiaddr".to_owned(), vec![2, 0, 0, 0, 0, 1])]),
         };
         let bundle = prepare(&inputs, &options)?;
         let manifest = &bundle.manifest;
@@ -1137,10 +1264,28 @@ mod tests {
             range_value(region("SPTM-ro").guest_pa, 4 * PAGE)
         );
         assert!(tree.placeholders().is_empty());
-        assert!(tree.property("/chosen", "mac-address-wifi0").is_none());
+        assert_eq!(
+            tree.property("/chosen", "mac-address-wifi0").unwrap().value,
+            vec![2, 0, 0, 0, 0, 1]
+        );
+        let mut behavior = vec![7; 4];
+        behavior.resize(16, 0);
         assert_eq!(
             tree.property("/chosen", "software-behavior").unwrap().value,
-            vec![0; 16]
+            behavior
+        );
+        assert!(tree.property("/chosen", "repair-status").is_none());
+        for property in CPU_FREQUENCY_PROPERTIES {
+            assert_eq!(
+                tree.property("/cpus/cpu0", property).unwrap().as_u64(),
+                Some(24_000_000)
+            );
+        }
+        assert!(
+            manifest
+                .patches
+                .iter()
+                .any(|p| p.field == "/cpus/cpu0 timebase-frequency")
         );
         assert_eq!(
             tree.property("/cpus/cpu0", "state").unwrap().as_str(),

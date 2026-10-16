@@ -47,6 +47,26 @@ pub(crate) struct Prepare {
     /// The `/cpus` node of the boot CPU.
     #[arg(long, default_value = "cpu0")]
     boot_cpu: String,
+    /// The generic timer rate the machine presents, in Hz.
+    #[arg(long, value_parser = parse_address, default_value = "24000000")]
+    timebase_frequency: u64,
+    /// A board configuration value for DeviceTree fill-ins, as KEY=HEX
+    /// (for example SrNm=...); repeat for each key.
+    #[arg(long = "syscfg", value_parser = parse_keyed_bytes)]
+    syscfg: Vec<(String, Vec<u8>)>,
+    /// A MAC address for DeviceTree fill-ins, as NAME=HEX with optional
+    /// colons (for example ethaddr=02:00:00:00:00:01); repeat for each.
+    #[arg(long = "macaddr", value_parser = parse_keyed_bytes)]
+    mac_addresses: Vec<(String, Vec<u8>)>,
+}
+
+fn parse_keyed_bytes(value: &str) -> Result<(String, Vec<u8>), String> {
+    let (key, bytes) = value.split_once('=').ok_or("expected KEY=HEX")?;
+    if key.is_empty() {
+        return Err("empty key".into());
+    }
+    let bytes = hex::decode(bytes.replace(':', "")).map_err(|error| error.to_string())?;
+    Ok((key.to_owned(), bytes))
 }
 
 impl BootCommand {
@@ -182,6 +202,9 @@ impl Prepare {
             load_offset: self.load_offset,
             boot_args: self.boot_args,
             boot_cpu: self.boot_cpu,
+            timebase_frequency: self.timebase_frequency,
+            syscfg: self.syscfg.into_iter().collect(),
+            mac_addresses: self.mac_addresses.into_iter().collect(),
         };
         let bundle = boot_bundle::prepare(&inputs, &options)?;
         std::fs::create_dir_all(&self.output)?;
