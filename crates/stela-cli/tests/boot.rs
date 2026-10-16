@@ -95,14 +95,31 @@ fn device_tree() -> Vec<u8> {
         ],
         &[],
     );
+    let manifest_properties = node(
+        &[
+            property("name", b"manifest-properties\0", false),
+            property("UnusedIntegerProperty0", &[0; 8], false),
+            property("UnusedIntegerProperty1", &[0; 8], false),
+            property("UnusedIntegerProperty2", &[0; 8], false),
+            property("UnusedBooleanProperty0", &[0; 4], false),
+            property("UnusedBooleanProperty1", &[0; 4], false),
+        ],
+        &[],
+    );
     let chosen = node(
         &[
             property("name", b"chosen\0", false),
             property("random-seed", &[0; 0x100], false),
             property("cl4-entropy", &[0; 0xc0], false),
             property("serial-number", b"syscfg/SrNm/0x20,zeroes/0x20\0", true),
+            property("boot-manifest-hash", &[0; 48], false),
+            property("effective-production-status-ap", &[0; 4], false),
+            property("effective-security-mode-ap", &[0; 4], false),
+            property("sepfw-load-at-boot", &[1, 0, 0, 0], false),
+            property("cs-system-policy", b"default\0", false),
+            property("osenvironment", &[0; 32], false),
         ],
-        &[memory_map],
+        &[memory_map, manifest_properties],
     );
     let cpu0 = node(
         &[
@@ -182,6 +199,65 @@ fn im4p(kind: &str, payload: &[u8], compressed: bool) -> Vec<u8> {
     der(0x30, &fields)
 }
 
+/// A private-class DER entry named `name`: `[PRIVATE name] SEQUENCE { IA5 name, inner }`.
+fn private_entry(name: &str, inner: &[u8]) -> Vec<u8> {
+    let mut number = u32::from_be_bytes(name.as_bytes().try_into().unwrap());
+    let mut groups = vec![];
+    while number > 0 {
+        groups.push((number & 0x7f) as u8);
+        number >>= 7;
+    }
+    let mut tag = vec![0xff];
+    for (index, group) in groups.iter().rev().enumerate() {
+        tag.push(if index + 1 < groups.len() {
+            group | 0x80
+        } else {
+            *group
+        });
+    }
+    let body = der(0x30, &[der(0x16, name.as_bytes()), inner.to_vec()].concat());
+    let mut out = tag;
+    out.extend(&der(0, &body)[1..]);
+    out
+}
+
+/// A global boot manifest for the fixture board admitting `krnl` by digest.
+fn boot_manifest(kernel_digest: &[u8]) -> Vec<u8> {
+    let manp = [
+        private_entry("BORD", &der(0x02, &[0x24])),
+        private_entry("CHIP", &der(0x02, &unsigned(0x8112))),
+        private_entry("CPRO", &der(0x01, &[0xff])),
+        private_entry("CSEC", &der(0x01, &[0xff])),
+        private_entry("SDOM", &der(0x02, &[1])),
+    ]
+    .concat();
+    let krnl = private_entry(
+        "krnl",
+        &der(0x31, &private_entry("DGST", &der(0x04, kernel_digest))),
+    );
+    let manb = private_entry(
+        "MANB",
+        &der(
+            0x31,
+            &[private_entry("MANP", &der(0x31, &manp)), krnl].concat(),
+        ),
+    );
+    der(
+        0x30,
+        &[
+            der(0x16, b"IM4M"),
+            der(0x02, &[0]),
+            der(0x31, &manb),
+            der(0x04, &[0xaa; 4]),
+            der(0x30, &[]),
+        ]
+        .concat(),
+    )
+}
+
+const BOOT_MANIFEST_MEMBER: &str =
+    "Firmware/Manifests/restore/macOS Customer/apticket.testmacap.im4m";
+
 fn component(name: &str, path: &str) -> String {
     format!(
         "<key>{name}</key><dict><key>Digest</key><data>AAE=</data><key>Info</key><dict><key>Path</key><string>{path}</string></dict></dict>"
@@ -213,7 +289,7 @@ fn restore_manifest() -> String {
     )
 }
 
-fn write_archive(path: &Path) {
+fn write_archive(path: &Path, kernel_digest: Option<&[u8]>) {
     let kernel = macho(
         MH_FILESET,
         &[
@@ -260,10 +336,11 @@ fn write_archive(path: &Path) {
         ("Firmware/sptm.test.im4p", im4p("sptm", &sptm, false)),
         ("Firmware/txm.test.im4p", im4p("trxm", &txm, false)),
     ];
+    let manifest = kernel_digest.map(|digest| (BOOT_MANIFEST_MEMBER, boot_manifest(digest)));
     let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
     let options =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    for (name, bytes) in members {
+    for (name, bytes) in members.into_iter().chain(manifest) {
         zip.start_file(name, options).unwrap();
         zip.write_all(&bytes).unwrap();
     }
@@ -285,7 +362,7 @@ fn json(path: &Path) -> serde_json::Value {
 #[test]
 fn hashed_manifest_and_im4p_decoding_keep_member_identities() {
     let dir = tempfile::tempdir().unwrap();
-    write_archive(&dir.path().join("fixture.ipsw"));
+    write_archive(&dir.path().join("fixture.ipsw"), None);
     success(&cli(
         dir.path(),
         &[
@@ -343,7 +420,8 @@ fn hashed_manifest_and_im4p_decoding_keep_member_identities() {
 #[test]
 fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
     let dir = tempfile::tempdir().unwrap();
-    write_archive(&dir.path().join("fixture.ipsw"));
+    // The BuildManifest declares every component's digest as 00 01.
+    write_archive(&dir.path().join("fixture.ipsw"), Some(&[0, 1]));
     let args = [
         "boot",
         "prepare",
@@ -395,5 +473,36 @@ fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
             .iter()
             .any(|p| p["field"] == "/chosen random-seed" && p["required"] == true)
     );
+    let security = manifest["security"].as_array().unwrap();
+    let ipsw = std::fs::File::open(dir.path().join("fixture.ipsw")).unwrap();
+    let mut archive = zip::ZipArchive::new(ipsw).unwrap();
+    let mut member = vec![];
+    std::io::Read::read_to_end(
+        &mut archive.by_name(BOOT_MANIFEST_MEMBER).unwrap(),
+        &mut member,
+    )
+    .unwrap();
+    let hash = security
+        .iter()
+        .find(|d| d["property"] == "boot-manifest-hash")
+        .unwrap();
+    assert_eq!(
+        hash["value_hex"],
+        hex::encode(stela_loader::im4m::sha384(&member))
+    );
+    assert!(
+        security
+            .iter()
+            .any(|d| d["property"] == "lp-smb0" && d["value_hex"] == "01000000")
+    );
     assert!(!cli(dir.path(), &args).status.success());
+
+    // A manifest that admits a different kernel is refused.
+    write_archive(&dir.path().join("other.ipsw"), Some(&[9, 9]));
+    let mut other = args;
+    other[3] = "other.ipsw";
+    other[7] = "other-bundle";
+    let refused = cli(dir.path(), &other);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("digest differs"));
 }

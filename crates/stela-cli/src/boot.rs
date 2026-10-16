@@ -4,7 +4,11 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
-use stela_loader::boot_bundle::{self, Input, Inputs, Manifest, Options, Source, Target};
+use stela_loader::boot_bundle::{
+    self, Input, Inputs, Manifest, Options, OverlayProperty, Source, Target,
+};
+use stela_loader::boot_policy::{SecurityMode, SecurityPolicy};
+use stela_loader::im4m;
 
 const MANIFEST_FILE: &str = "bundle.json";
 const KERNEL_LIMIT: u64 = 512 * 1024 * 1024;
@@ -44,6 +48,23 @@ pub(crate) struct Prepare {
     load_offset: u64,
     #[arg(long, default_value = "-v")]
     boot_args: String,
+    /// The boot policy expressed to SPTM, TXM and the kernel.
+    #[arg(long, value_enum, default_value = "reduced")]
+    security: Security,
+    /// System Integrity Protection bits (`lp-sip0`).
+    #[arg(long, value_parser = parse_address, default_value = "0")]
+    sip_bits: u64,
+    /// Override the template's `/chosen sepfw-load-at-boot`.
+    #[arg(long)]
+    sepfw_load_at_boot: Option<bool>,
+    /// Also place the identity's Cryptex1 trust caches in the boot
+    /// `TrustCache` region after the static one.
+    #[arg(long)]
+    cryptex_trust_caches: bool,
+    /// JSON list of DeviceTree values from device models, such as
+    /// `[{"path": "/chosen/lock-regs/amcc", "property": "aperture-count", "u32": 1}]`.
+    #[arg(long)]
+    dt_overlay: Option<PathBuf>,
     /// The `/cpus` node of the boot CPU.
     #[arg(long, default_value = "cpu0")]
     boot_cpu: String,
@@ -93,6 +114,87 @@ struct Written<'a> {
 struct Decoded {
     bytes: Vec<u8>,
     source: Source,
+    /// The BuildManifest digest of the component, as a hex string.
+    declared_digest: Option<String>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Security {
+    Reduced,
+    Permissive,
+}
+
+/// One `--dt-overlay` entry; exactly one value field is present.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OverlayEntry {
+    path: String,
+    property: String,
+    u32: Option<u32>,
+    u64: Option<u64>,
+    hex: Option<String>,
+    string: Option<String>,
+}
+
+fn read_overlay(path: &std::path::Path) -> Result<Vec<OverlayProperty>> {
+    let entries: Vec<OverlayEntry> = stela_runtime::read_json(path)?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            let mut values = [
+                entry.u32.map(|v| v.to_le_bytes().to_vec()),
+                entry.u64.map(|v| v.to_le_bytes().to_vec()),
+                entry.hex.map(hex::decode).transpose()?,
+                entry.string.map(|v| [v.as_bytes(), &[0]].concat()),
+            ]
+            .into_iter()
+            .flatten();
+            let value = values.next().with_context(|| {
+                format!("overlay {} {} has no value", entry.path, entry.property)
+            })?;
+            ensure!(
+                values.next().is_none(),
+                "overlay {} {} has several values",
+                entry.path,
+                entry.property
+            );
+            Ok(OverlayProperty {
+                path: entry.path,
+                property: entry.property,
+                value,
+            })
+        })
+        .collect()
+}
+
+/// The identity's global manifests sit at `Firmware/Manifests/restore/[cryptex1/]VARIANT/apticket.CLASS.im4m`.
+fn manifest_member(cryptex1: bool, variant: &str, device_class: &str) -> String {
+    let scope = if cryptex1 { "cryptex1/" } else { "" };
+    format!("Firmware/Manifests/restore/{scope}{variant}/apticket.{device_class}.im4m")
+}
+
+/// Every boot object the manifest admits must carry the BuildManifest digest.
+fn check_digests(manifest: &im4m::Manifest, decoded: &[&Decoded]) -> Result<()> {
+    for item in decoded {
+        let (Some(object), Some(declared)) = (
+            manifest.object(&item.source.payload_type),
+            &item.declared_digest,
+        ) else {
+            continue;
+        };
+        let digest = object
+            .properties
+            .iter()
+            .find(|p| p.name == "DGST")
+            .with_context(|| format!("manifest {} has no DGST", object.tag))?;
+        ensure!(
+            digest.value == im4m::Value::Data(hex::decode(declared)?),
+            "manifest {} digest differs from the BuildManifest {}",
+            object.tag,
+            item.source.component
+        );
+    }
+    Ok(())
 }
 
 fn parse_id(value: Option<&str>) -> Result<Option<u32>> {
@@ -159,7 +261,11 @@ impl Prepare {
                 decoded_bytes: bytes.len(),
                 decoded_sha256: stela_runtime::sha256(&bytes),
             };
-            Ok(Decoded { bytes, source })
+            Ok(Decoded {
+                bytes,
+                source,
+                declared_digest: entry.declared_digest_hex.clone(),
+            })
         };
         let kernel = component("KernelCache", Some("krnl"), KERNEL_LIMIT)?;
         let sptm = component("Ap,SecurePageTableMonitor", Some("sptm"), COMPONENT_LIMIT)?;
@@ -172,6 +278,68 @@ impl Prepare {
             .any(|i| i.components.contains_key("SEP"))
             .then(|| component("SEP", None, COMPONENT_LIMIT))
             .transpose()?;
+        let global_manifest = |cryptex1: bool| -> Result<Option<Decoded>> {
+            let member = manifest_member(cryptex1, &identity.variant, &identity.device_class);
+            if !restore::archive::has_member(&self.ipsw, &member)? {
+                return Ok(None);
+            }
+            let bytes = restore::archive::read_member(&self.ipsw, &member, COMPONENT_LIMIT)?;
+            let source = Source {
+                component: if cryptex1 {
+                    "Cryptex1 manifest"
+                } else {
+                    "Boot manifest"
+                }
+                .into(),
+                member,
+                container_sha256: stela_runtime::sha256(&bytes),
+                payload_type: "im4m".into(),
+                description: String::new(),
+                decoded_bytes: bytes.len(),
+                decoded_sha256: stela_runtime::sha256(&bytes),
+            };
+            Ok(Some(Decoded {
+                bytes,
+                source,
+                declared_digest: None,
+            }))
+        };
+        let boot_manifest = global_manifest(false)?;
+        let cryptex1_manifest = global_manifest(true)?;
+        let mut cryptex_trust_caches = vec![];
+        if self.cryptex_trust_caches {
+            for name in identity.components.keys() {
+                if name.starts_with("Cryptex1,") && name.ends_with("TrustCache") {
+                    cryptex_trust_caches.push(component(name, None, COMPONENT_LIMIT).and_then(
+                        |raw| {
+                            let (bytes, receipt) =
+                                stela_loader::im4p::decode(&raw.bytes, COMPONENT_LIMIT)?;
+                            Ok(Decoded {
+                                source: Source {
+                                    payload_type: receipt.payload_type,
+                                    description: receipt.description,
+                                    decoded_bytes: bytes.len(),
+                                    decoded_sha256: stela_runtime::sha256(&bytes),
+                                    ..raw.source
+                                },
+                                bytes,
+                                declared_digest: raw.declared_digest,
+                            })
+                        },
+                    )?);
+                }
+            }
+        }
+        if let Some(manifest) = &boot_manifest {
+            check_digests(
+                &im4m::parse(&manifest.bytes)?,
+                &[&kernel, &sptm, &txm, &device_tree, &trust_cache],
+            )?;
+        }
+        if let Some(manifest) = &cryptex1_manifest {
+            let decoded: Vec<_> = cryptex_trust_caches.iter().collect();
+            check_digests(&im4m::parse(&manifest.bytes)?, &decoded)?;
+        }
         fn input(decoded: &Decoded) -> Input<'_> {
             Input {
                 bytes: &decoded.bytes,
@@ -194,6 +362,9 @@ impl Prepare {
             device_tree: input(&device_tree),
             static_trust_cache: input(&trust_cache),
             sep_firmware: sep.as_ref().map(input),
+            boot_manifest: boot_manifest.as_ref().map(input),
+            cryptex1_manifest: cryptex1_manifest.as_ref().map(input),
+            extra_trust_caches: cryptex_trust_caches.iter().map(input).collect(),
         };
         let options = Options {
             dram_base: self.dram_base,
@@ -205,6 +376,20 @@ impl Prepare {
             timebase_frequency: self.timebase_frequency,
             syscfg: self.syscfg.into_iter().collect(),
             mac_addresses: self.mac_addresses.into_iter().collect(),
+            security: SecurityPolicy {
+                mode: match self.security {
+                    Security::Reduced => SecurityMode::Reduced,
+                    Security::Permissive => SecurityMode::Permissive,
+                },
+                sip_bits: self.sip_bits,
+                sepfw_load_at_boot: self.sepfw_load_at_boot,
+            },
+            overlay: self
+                .dt_overlay
+                .as_deref()
+                .map(read_overlay)
+                .transpose()?
+                .unwrap_or_default(),
         };
         let bundle = boot_bundle::prepare(&inputs, &options)?;
         std::fs::create_dir_all(&self.output)?;

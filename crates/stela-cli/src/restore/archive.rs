@@ -45,6 +45,12 @@ fn read_limited(archive: &mut Archive, name: &str, maximum: u64) -> Result<Vec<u
     Ok(bytes)
 }
 
+pub fn has_member(image: &Path, name: &str) -> Result<bool> {
+    Ok(zip::ZipArchive::new(File::open(image)?)?
+        .index_for_name(name)
+        .is_some())
+}
+
 /// Read one member whole, refusing members larger than `maximum`.
 pub fn read_member(image: &Path, name: &str, maximum: u64) -> Result<Vec<u8>> {
     read_limited(

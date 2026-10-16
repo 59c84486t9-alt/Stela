@@ -12,6 +12,8 @@
 //! `docs/design/runtime.md#kernel-boot-bundle`.
 use crate::apple_device_tree::{DeviceTree, Placeholder};
 use crate::boot_args::{self, BootArgs, Video};
+use crate::boot_policy::{self, Decision, SecurityPolicy};
+use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::trust_cache;
 use anyhow::{Context, Result, bail, ensure};
@@ -82,6 +84,26 @@ pub struct Inputs<'a> {
     pub static_trust_cache: Input<'a>,
     /// Copied unchanged: SEP firmware stays an encrypted IM4P.
     pub sep_firmware: Option<Input<'a>>,
+    /// The identity's global (non-personalized) IM4M for the boot objects.
+    pub boot_manifest: Option<Input<'a>>,
+    /// The identity's global Cryptex1 IM4M.
+    pub cryptex1_manifest: Option<Input<'a>>,
+    /// Trust cache modules placed after the static one in `TrustCache`.
+    pub extra_trust_caches: Vec<Input<'a>>,
+}
+
+/// One DeviceTree value supplied from outside the restore image, such as a
+/// device model's register map; nodes along `path` are created as needed.
+#[derive(Debug, Clone, Serialize)]
+pub struct OverlayProperty {
+    pub path: String,
+    pub property: String,
+    #[serde(serialize_with = "hex_bytes")]
+    pub value: Vec<u8>,
+}
+
+fn hex_bytes<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&hex::encode(bytes))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +123,9 @@ pub struct Options {
     pub syscfg: BTreeMap<String, Vec<u8>>,
     /// MAC addresses by provider name, such as `wifiaddr` or `ethaddr`.
     pub mac_addresses: BTreeMap<String, Vec<u8>>,
+    pub security: SecurityPolicy,
+    /// Applied after every other DeviceTree change.
+    pub overlay: Vec<OverlayProperty>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -209,6 +234,8 @@ pub struct Manifest {
     pub top_of_kernel_data: u64,
     pub patches: Vec<Patch>,
     pub placeholders: Vec<PlaceholderDecision>,
+    /// Boot-policy and manifest values written into `/chosen`.
+    pub security: Vec<Decision>,
     pub unresolved: Vec<String>,
 }
 
@@ -509,11 +536,36 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         inputs.txm.bytes,
         TXM_SPLITS,
     )?;
-    let trust_cache = trust_cache::compose(&[inputs.static_trust_cache.bytes])?;
+    let modules: Vec<&[u8]> = std::iter::once(inputs.static_trust_cache.bytes)
+        .chain(inputs.extra_trust_caches.iter().map(|input| input.bytes))
+        .collect();
+    let trust_cache = trust_cache::compose(&modules)?;
+    let boot_manifest = inputs
+        .boot_manifest
+        .as_ref()
+        .map(|input| im4m::parse(input.bytes))
+        .transpose()?;
+    let cryptex1_manifest = inputs
+        .cryptex1_manifest
+        .as_ref()
+        .map(|input| im4m::parse(input.bytes))
+        .transpose()?;
+    for manifest in boot_manifest.iter().chain(&cryptex1_manifest) {
+        check_board(manifest, &inputs.target)?;
+    }
 
     let mut tree = DeviceTree::parse(inputs.device_tree.bytes)?;
     let placeholders = resolve_placeholders(&mut tree, options)?;
     let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options)?;
+    let (security, policy_unresolved) = boot_policy::apply(
+        &mut tree,
+        &options.security,
+        boot_manifest.as_ref(),
+        cryptex1_manifest.as_ref(),
+    )?;
+    unresolved.extend(policy_unresolved);
+    apply_overlay(&mut tree, &options.overlay)?;
+    unresolved.extend(platform_gaps(&tree, inputs));
 
     // Lay the memory map out with zero values first: its size is fixed by
     // the entry count, so the DeviceTree size is known before placement.
@@ -764,9 +816,15 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         source_of(&inputs.device_tree),
         source_of(&inputs.static_trust_cache),
     ];
-    if let Some(sep) = &inputs.sep_firmware {
-        sources.push(source_of(sep));
-    }
+    sources.extend(
+        inputs
+            .sep_firmware
+            .iter()
+            .chain(&inputs.boot_manifest)
+            .chain(&inputs.cryptex1_manifest)
+            .chain(&inputs.extra_trust_caches)
+            .map(source_of),
+    );
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
         target: inputs.target.clone(),
@@ -789,9 +847,64 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         top_of_kernel_data,
         patches,
         placeholders,
+        security,
         unresolved,
     };
     Ok(Bundle { files, manifest })
+}
+
+/// A global manifest must name the selected board.
+fn check_board(manifest: &im4m::Manifest, target: &Target) -> Result<()> {
+    for (name, expected) in [("CHIP", target.chip_id), ("BORD", target.board_id)] {
+        if let (Some(Value::Integer(found)), Some(expected)) = (manifest.property(name), expected) {
+            ensure!(
+                *found == u64::from(expected),
+                "manifest {name} {found:#x} differs from the identity's {expected:#x}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_overlay(tree: &mut DeviceTree, overlay: &[OverlayProperty]) -> Result<()> {
+    for entry in overlay {
+        let mut parent = String::from("/");
+        for component in entry.path.split('/').filter(|c| !c.is_empty()) {
+            tree.ensure_child(&parent, component)?;
+            parent = format!("{}/{component}", parent.trim_end_matches('/'));
+        }
+        tree.set_property(&entry.path, &entry.property, entry.value.clone())?;
+    }
+    Ok(())
+}
+
+/// Bootloader-provided inputs SPTM reads that no restore member supplies.
+fn platform_gaps(tree: &DeviceTree, inputs: &Inputs) -> Vec<String> {
+    let mut gaps = vec![];
+    if tree
+        .property("/chosen/lock-regs/amcc", "aperture-count")
+        .is_none()
+    {
+        gaps.push(
+            "/chosen/lock-regs/amcc: the AMCC CTRR register map (aperture-*, plane-*, cache-status and amcc-ctrr-a..d lock registers) comes from the memory-controller model; supply it with an overlay"
+                .into(),
+        );
+    }
+    if tree
+        .node("/chosen/carveout-memory-map")
+        .is_some_and(|node| node.properties.len() <= 2)
+    {
+        gaps.push("/chosen/carveout-memory-map: empty; the machine declares no carveouts".into());
+    }
+    if inputs.extra_trust_caches.is_empty() {
+        gaps.push(
+            "TrustCache: static module only; Cryptex1 trust caches load later through their manifest"
+                .into(),
+        );
+    }
+    gaps.push("ExclaveOSTrustCache: the identity lists no Ap,ExclaveOS component".into());
+    gaps.push("SEPPatches: iBoot's SEP patch region is not in the restore image".into());
+    gaps
 }
 
 /// Board facts and boot-time slots that iBoot adds to its template tree.
@@ -847,18 +960,8 @@ fn shape_device_tree(
         "/cpus fixed-frequency and peripheral-frequency take the timebase rate; Apple's values are unobserved"
             .into(),
     );
-    for (path, property) in [
-        ("/chosen/asmb", "lp-sip0"),
-        ("/chosen/manifest-properties", "love"),
-    ] {
-        if tree.property(path, property).is_none() {
-            unresolved.push(format!(
-                "{path} {property}: LocalPolicy value iBoot derives from the boot policy; not set"
-            ));
-        }
-    }
     unresolved.push(
-        "/chosen/boot-object-manifests: no personalized IMG4 manifests (apticket, LocalPolicy)"
+        "/chosen/boot-object-manifests: no signed LocalPolicy or personalized manifest objects"
             .into(),
     );
     unresolved.push("preoslog: iBoot log region omitted".into());
@@ -1173,7 +1276,42 @@ mod tests {
         for property in &mut chosen.properties[3..] {
             property.placeholder = true;
         }
+        // Security inputs the template carries, with typed manifest slots.
+        for (name, bytes) in [
+            ("boot-manifest-hash", 48),
+            ("effective-production-status-ap", 4),
+            ("effective-security-mode-ap", 4),
+            ("sepfw-load-at-boot", 4),
+            ("osenvironment", 32),
+        ] {
+            tree.set_property("/chosen", name, vec![0; bytes]).unwrap();
+        }
+        tree.set_property("/chosen", "cs-system-policy", b"default\0".to_vec())
+            .unwrap();
+        tree.ensure_child("/chosen", "manifest-properties").unwrap();
+        for (slot, bytes) in [
+            ("UnusedIntegerProperty0", 8),
+            ("UnusedIntegerProperty1", 8),
+            ("UnusedBooleanProperty0", 4),
+            ("UnusedBooleanProperty1", 4),
+        ] {
+            tree.set_property("/chosen/manifest-properties", slot, vec![0; bytes])
+                .unwrap();
+        }
         tree.serialize()
+    }
+
+    fn boot_manifest() -> Vec<u8> {
+        use crate::im4m::tests::{der, entry, manifest};
+        manifest(
+            &[
+                entry("BORD", &der(&[0x02], &[0x2e])),
+                entry("CPRO", &der(&[0x01], &[0xff])),
+                entry("CSEC", &der(&[0x01], &[0xff])),
+                entry("SDOM", &der(&[0x02], &[1])),
+            ],
+            &[],
+        )
     }
 
     fn trust_cache() -> Vec<u8> {
@@ -1208,6 +1346,9 @@ mod tests {
             device_tree: input(leak(tree), "DeviceTree"),
             static_trust_cache: input(leak(tc), "StaticTrustCache"),
             sep_firmware: None,
+            boot_manifest: Some(input(leak(boot_manifest()), "BootManifest")),
+            cryptex1_manifest: None,
+            extra_trust_caches: vec![],
         };
         let options = Options {
             dram_base: 0x8_0000_0000,
@@ -1219,6 +1360,16 @@ mod tests {
             timebase_frequency: 24_000_000,
             syscfg: BTreeMap::from([("SwBh".to_owned(), vec![7; 4])]),
             mac_addresses: BTreeMap::from([("wifiaddr".to_owned(), vec![2, 0, 0, 0, 0, 1])]),
+            security: SecurityPolicy {
+                mode: boot_policy::SecurityMode::Reduced,
+                sip_bits: 0,
+                sepfw_load_at_boot: None,
+            },
+            overlay: vec![OverlayProperty {
+                path: "/chosen/lock-regs/amcc".into(),
+                property: "aperture-count".into(),
+                value: 1u32.to_le_bytes().to_vec(),
+            }],
         };
         let bundle = prepare(&inputs, &options)?;
         let manifest = &bundle.manifest;
@@ -1328,6 +1479,34 @@ mod tests {
             );
         }
         assert!(manifest.unresolved.iter().any(|u| u.starts_with("SEPFW")));
+        assert!(!manifest.unresolved.iter().any(|u| u.contains("lock-regs")));
+        assert!(manifest.unresolved.iter().any(|u| u.contains("lp-spih")));
+        assert_eq!(
+            tree.property("/chosen/asmb", "lp-smb0").unwrap().as_u32(),
+            Some(1)
+        );
+        assert_eq!(
+            tree.property("/chosen/lock-regs/amcc", "aperture-count")
+                .unwrap()
+                .as_u32(),
+            Some(1)
+        );
+        assert_eq!(
+            tree.property("/chosen/manifest-properties", "BORD")
+                .unwrap()
+                .as_u64(),
+            Some(0x2e)
+        );
+        assert!(
+            manifest
+                .security
+                .iter()
+                .any(|d| d.property == "boot-manifest-hash")
+        );
+        // A manifest for another board is refused.
+        let mut other = Inputs { ..inputs };
+        other.target.board_id = Some(0x24);
+        assert!(prepare(&other, &options).is_err());
         Ok(())
     }
 }

@@ -116,6 +116,21 @@ impl Node {
         Ok(())
     }
 
+    /// Give an existing property a new name and value in place, keeping its
+    /// position; template slots such as `UnusedIntegerProperty0` are filled
+    /// this way.
+    pub fn replace_property(&mut self, old: &str, name: &str, value: Vec<u8>) -> Result<()> {
+        ensure!(
+            old == name || self.property(name).is_none(),
+            "node already has a property {name}"
+        );
+        let slot = self
+            .property_mut(old)
+            .with_context(|| format!("node has no property {old}"))?;
+        *slot = Property::new(name, value)?;
+        Ok(())
+    }
+
     pub fn remove_property(&mut self, name: &str) -> Option<Property> {
         let index = self.properties.iter().position(|p| p.name == name)?;
         Some(self.properties.remove(index))
@@ -495,6 +510,14 @@ mod tests {
             );
         }
         assert!(tree.locate("/chosen", "absent").is_err());
+        let chosen = tree.node_mut("/chosen").unwrap();
+        chosen.replace_property("random-seed", "love", b"26.1\0".to_vec())?;
+        assert_eq!(chosen.properties[1].name(), "love");
+        assert!(
+            chosen
+                .replace_property("love", "dram-size", vec![])
+                .is_err()
+        );
         assert!(tree.set_property("/nowhere", "x", vec![]).is_err());
         Ok(())
     }
