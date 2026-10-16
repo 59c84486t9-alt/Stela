@@ -11,3 +11,4 @@
 pub mod bus;
 pub mod counter;
 pub mod interrupt;
+pub mod uart;
