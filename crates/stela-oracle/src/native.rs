@@ -58,21 +58,21 @@ fn windows() -> Result<&'static Mutex<Windows>> {
         return Ok(windows);
     }
     let windows = Windows {
-        code: map_at(CODE_REGION, CODE_REGION_BYTES)?,
-        data: map_at(DATA_WINDOW, DATA_BYTES)?,
+        code: map_at(CODE_REGION, CODE_REGION_BYTES, libc::PROT_READ)?,
+        data: map_at(DATA_WINDOW, DATA_BYTES, libc::PROT_READ | libc::PROT_WRITE)?,
     };
     Ok(WINDOWS.get_or_init(|| Mutex::new(windows)))
 }
 
-/// Map fresh RW memory at exactly `address`, refusing to replace a mapping.
-fn map_at(address: u64, bytes: usize) -> Result<NonNull<u8>> {
+/// Map fresh zeroed memory at exactly `address`, refusing to replace a mapping.
+fn map_at(address: u64, bytes: usize, protection: libc::c_int) -> Result<NonNull<u8>> {
     // SAFETY: a hinted anonymous mapping never replaces existing memory; the
     // result is checked against the requested address before use.
     let pointer = unsafe {
         libc::mmap(
             address as *mut libc::c_void,
             bytes,
-            libc::PROT_READ | libc::PROT_WRITE,
+            protection,
             libc::MAP_PRIVATE | libc::MAP_ANON,
             -1,
             0,
@@ -85,6 +85,17 @@ fn map_at(address: u64, bytes: usize) -> Result<NonNull<u8>> {
         anyhow::bail!("{address:#x} is already mapped in this process");
     }
     NonNull::new(pointer.cast()).context("null mapping")
+}
+
+/// Change the protection of one page of the code region.
+///
+/// # Safety
+/// `page` must be a page of the code region mapping.
+unsafe fn protect(page: *mut u8, protection: libc::c_int) -> Result<()> {
+    // SAFETY: the caller passes a page of a mapping this process owns.
+    let status = unsafe { libc::mprotect(page.cast(), PAGE_BYTES, protection) };
+    ensure!(status == 0, "cannot protect the code page");
+    Ok(())
 }
 
 /// Executable copy of native code, unmapped on drop.
@@ -230,14 +241,20 @@ impl Translation {
     /// in the windows.
     pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
         let windows = windows()?.lock().expect("native windows lock");
-        // SAFETY: both windows are owned, writable and sized as copied here.
+        // SAFETY: both windows are owned and sized as copied here; the code page
+        // is writable only while its code is installed.
         unsafe {
-            let page = (CODE_PAGE - CODE_REGION) as usize;
-            let code = std::slice::from_raw_parts_mut(windows.code.as_ptr().add(page), PAGE_BYTES);
+            let page = windows
+                .code
+                .as_ptr()
+                .add((CODE_PAGE - CODE_REGION) as usize);
+            protect(page, libc::PROT_READ | libc::PROT_WRITE)?;
+            let code = std::slice::from_raw_parts_mut(page, PAGE_BYTES);
             code.fill(0);
             for (word, bytes) in case.code.iter().zip(code.as_chunks_mut::<4>().0) {
                 bytes.copy_from_slice(&word.to_le_bytes());
             }
+            protect(page, libc::PROT_READ)?;
             std::slice::from_raw_parts_mut(windows.data.as_ptr(), DATA_BYTES)
                 .copy_from_slice(&case.data);
         }
@@ -404,25 +421,27 @@ fn scalable_leaf(
     Ok((thread.registers, result))
 }
 
-/// A memory domain over the data window and the code region, the memory EL0
-/// may access on the oracle, under the harness's controls: 39-bit addresses and
+/// A memory domain over the data window and the read-only code region, the
+/// memory EL0 may access on the oracle, under the harness's controls: 39-bit addresses and
 /// no tag checks. Cases keep SP 16-byte aligned, so either SP alignment policy
 /// the leaf requires behaves as the original.
 fn memory_thread(
     windows: &Windows,
     requirements: MemoryRequirements,
 ) -> Result<MemoryThread<MemoryControls>> {
-    let permissions = AccessPermissions {
+    let permissions = |writable| AccessPermissions {
         readable: true,
-        writable: true,
+        writable,
         executable: false,
     };
     let attributes = MappingAttributes {
         tagged: false,
         shareable: true,
     };
-    let view = |host: NonNull<u8>, guest: u64, bytes: usize| -> Result<_> {
-        // SAFETY: each window is a live private RW mapping for the process lifetime.
+    let view = |host: NonNull<u8>, guest: u64, bytes: usize, writable: bool| -> Result<_> {
+        let permissions = permissions(writable);
+        // SAFETY: each window is a live private mapping for the process lifetime,
+        // writable exactly when its view is.
         let backing = unsafe { MemoryBacking::new(host, bytes, permissions, Arc::new(())) }
             .map_err(|error| anyhow::anyhow!("window backing: {error:?}"))?;
         let view = MemoryView::new(backing, guest, 0, bytes, permissions)
@@ -430,8 +449,8 @@ fn memory_thread(
         Ok((view, attributes))
     };
     let views = vec![
-        view(windows.data, DATA_WINDOW, DATA_BYTES)?,
-        view(windows.code, CODE_REGION, CODE_REGION_BYTES)?,
+        view(windows.data, DATA_WINDOW, DATA_BYTES, true)?,
+        view(windows.code, CODE_REGION, CODE_REGION_BYTES, false)?,
     ];
     let system = MemorySystem::new(RESERVATION_GRANULE, RESERVATION_STRIPES)
         .map_err(|error| anyhow::anyhow!("memory system: {error:?}"))?;

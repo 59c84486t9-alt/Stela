@@ -4,7 +4,7 @@
 //! The reference is QEMU's `max` CPU, restricted to the Apple-like streaming
 //! profile (SME without non-streaming SVE or FA64), in a bare-metal EL0 harness
 //! that single-steps each case from [`CODE_PAGE`]. Code may access only the
-//! [`DATA_WINDOW`] and the code region; both engines see the same guest
+//! [`DATA_WINDOW`] and read the code region; both engines see the same guest
 //! addresses. A case that faults on QEMU is reported but never run natively,
 //! because direct-RAM native code has no fault recovery.
 use anyhow::{Context, Result, ensure};
@@ -17,9 +17,10 @@ use stela_compiler::GuestState;
 
 pub mod native;
 
-/// Guest address of the page that holds each case's code. The zero-filled
-/// [`CODE_REGION_BYTES`] starting at [`CODE_REGION`] surround it, so PC-relative
-/// literals within 1 MiB stay mapped.
+/// Guest address of the page that holds each case's code. The zero-filled,
+/// read-only [`CODE_REGION_BYTES`] starting at [`CODE_REGION`] surround it, so
+/// PC-relative literals within 1 MiB stay mapped and read the same bytes in
+/// every case.
 pub const CODE_PAGE: u64 = 0x2_0020_0000;
 pub const CODE_REGION: u64 = 0x2_0000_0000;
 pub const CODE_REGION_BYTES: usize = 0x40_0000;

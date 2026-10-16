@@ -21,6 +21,8 @@
     .equ CASE_REGION,      0x200000000
     .equ L2_CASE_TABLE,    0x40114000
     .equ CODE_PAGE,        0x200200000
+    // EL1-only writable alias of the code block, for installing each case.
+    .equ CODE_ALIAS,       0x200400000
     .equ DATA_WINDOW,      0x208000000
     .equ DATA_BYTES,       0x4000
     .equ PAGE_BYTES,       0x1000
@@ -97,6 +99,7 @@
     // AF, inner shareable, AttrIndx 0.
     .equ DESC_NORMAL,      (1 << 10) | (3 << 8)
     .equ DESC_EL0_RW,      1 << 6
+    .equ DESC_READ_ONLY,   3 << 6
     .equ DESC_PXN,         1 << 53
     .equ DESC_UXN,         1 << 54
     .equ L2_ENTRIES,       512
@@ -148,14 +151,14 @@ next_case:
     b.eq    finish
 
     // Install the code on a cleared page, then the initial data window.
-    ldr     x2, =CODE_PAGE
+    ldr     x2, =CODE_ALIAS
     mov     x3, #PAGE_BYTES
 3:  stp     xzr, xzr, [x2], #16
     subs    x3, x3, #16
     b.ne    3b
     ldr     x0, [x20, #CASE_WORDS]
     add     x1, x20, #CASE_CODE
-    ldr     x2, =CODE_PAGE
+    ldr     x2, =CODE_ALIAS
 1:  cbz     x0, 2f
     ldr     w3, [x1], #4
     str     w3, [x2], #4
@@ -449,9 +452,10 @@ copy:
     ret
 
     // Identity-map the first GiB of RAM for EL1. EL0 may execute the 2 MiB code
-    // region and read or write the 2 MiB below it, so literal loads reach
-    // +-1 MiB of the code, and may read or write the data window. Everything
-    // else faults at EL0.
+    // region and read it and the 2 MiB below it, so literal loads reach +-1 MiB
+    // of the code, and may read or write the data window. Everything else
+    // faults at EL0. The code region is read-only, so its contents are the same
+    // for every case; the harness writes code through an EL1-only alias.
 build_tables:
     ldr     x0, =L1_TABLE
     ldr     x1, =L2_TABLE | DESC_TABLE
@@ -466,10 +470,12 @@ build_tables:
     subs    x2, x2, #1
     b.ne    1b
     ldr     x0, =L2_CASE_TABLE
-    ldr     x1, =CASE_REGION | DESC_NORMAL | DESC_BLOCK | DESC_EL0_RW | DESC_PXN | DESC_UXN
+    ldr     x1, =CASE_REGION | DESC_NORMAL | DESC_BLOCK | DESC_READ_ONLY | DESC_PXN | DESC_UXN
     str     x1, [x0]
-    ldr     x1, =CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_EL0_RW | DESC_PXN
+    ldr     x1, =CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_READ_ONLY | DESC_PXN
     str     x1, [x0, #((CODE_PAGE - CASE_REGION) / BLOCK_2M) * 8]
+    ldr     x1, =CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_PXN | DESC_UXN
+    str     x1, [x0, #((CODE_ALIAS - CASE_REGION) / BLOCK_2M) * 8]
     ldr     x1, =L3_DATA | DESC_TABLE
     str     x1, [x0, #((DATA_WINDOW - CASE_REGION) / BLOCK_2M) * 8]
     ldr     x0, =L3_DATA
