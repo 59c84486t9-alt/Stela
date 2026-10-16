@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod args;
+mod boot;
 pub mod compile;
 mod dyld_entry;
 pub mod efi;
@@ -70,6 +71,9 @@ pub(crate) enum Command {
     DecryptAea(images::DecryptAea),
     /// Copy selected guest files out of a decrypted disk image.
     ExtractGuestFiles(images::ExtractGuestFiles),
+    /// Prepare the kernel boot bundle that the UEFI mount loads.
+    #[command(subcommand)]
+    Boot(boot::BootCommand),
     /// Add the UEFI mount to an OpenCore EFI folder, or remove it.
     #[command(subcommand)]
     Efi(efi::EfiCommand),
@@ -99,6 +103,7 @@ impl Command {
             Self::FetchAeaKey(command) => command.run(),
             Self::DecryptAea(command) => command.run(),
             Self::ExtractGuestFiles(command) => command.run(),
+            Self::Boot(command) => command.run(),
             Self::Efi(command) => command.run(),
         }
     }

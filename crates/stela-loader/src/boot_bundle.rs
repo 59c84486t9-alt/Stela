@@ -1,0 +1,1188 @@
+//! The kernel boot bundle: Apple's boot images laid out in guest physical
+//! memory, with every value a loader computes already applied, so the UEFI
+//! mount only copies regions and patches a few fixed-size fields.
+//!
+//! The region order, names and auxiliary `/chosen/memory-map` entries follow
+//! Asahi m1n1 `proxyclient/m1n1/hv/__init__.py` `load_macos_sptm` (commit
+//! `c6a89b908ac4bf1f7b495f20531f3ea029148adb`), which boots unchanged SPTM
+//! kernels: the monitors and the kernel collection are split by segment and
+//! placed in the order SPTM requires, and execution starts at SPTM's entry
+//! with x0 holding the `boot_args` address. `boot_args` values follow m1n1
+//! `_write_boot_args`. The format is specified in
+//! `docs/design/runtime.md#kernel-boot-bundle`.
+use crate::apple_device_tree::{DeviceTree, Placeholder};
+use crate::boot_args::{self, BootArgs, Video};
+use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
+use crate::trust_cache;
+use anyhow::{Context, Result, bail, ensure};
+use serde::Serialize;
+use stela_runtime::sha256;
+
+pub const SCHEMA_VERSION: u32 = 1;
+/// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
+/// by `phys_base` modulo 32 MiB.
+const VIRT_BASE: u64 = 0xfffffe0010000000;
+const VIRT_BASE_ALIGNMENT: u64 = 32 << 20;
+/// m1n1 reserves 16 KiB for `boot_args`.
+const BOOT_ARGS_REGION_BYTES: u64 = 0x4000;
+const MEMORY_MAP: &str = "/chosen/memory-map";
+const RESERVED_ENTRY_PREFIX: &str = "MemoryMapReserved-";
+const ZERO_FILL_RECIPE: &str = "zeroes/";
+const MEMORY_MAP_ENTRY_BYTES: usize = 16;
+const HIBERNATION_KEY_BYTES: usize = 0x30;
+
+/// One Apple input, kept with the identity of the restore member it came from.
+#[derive(Debug, Clone, Serialize)]
+pub struct Source {
+    pub component: String,
+    pub member: String,
+    pub container_sha256: String,
+    pub payload_type: String,
+    pub description: String,
+    pub decoded_bytes: usize,
+    pub decoded_sha256: String,
+}
+
+pub struct Input<'a> {
+    pub bytes: &'a [u8],
+    pub source: Source,
+}
+
+/// Board facts taken from the selected restore identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct Target {
+    pub product_type: String,
+    pub device_class: String,
+    pub product_version: String,
+    pub product_build: String,
+    pub variant: String,
+    pub chip_id: Option<u32>,
+    pub board_id: Option<u32>,
+}
+
+pub struct Inputs<'a> {
+    pub target: Target,
+    pub kernel_collection: Input<'a>,
+    pub sptm: Input<'a>,
+    pub txm: Input<'a>,
+    pub device_tree: Input<'a>,
+    pub static_trust_cache: Input<'a>,
+    /// Copied unchanged: SEP firmware stays an encrypted IM4P.
+    pub sep_firmware: Option<Input<'a>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Options {
+    pub dram_base: u64,
+    pub dram_size: u64,
+    /// Lowest physical address handed to the kernel (`boot_args.physBase`).
+    pub phys_base: u64,
+    /// First region's distance above `phys_base`.
+    pub load_offset: u64,
+    pub boot_args: String,
+    /// The DeviceTree `/cpus` child marked `running` for the boot CPU.
+    pub boot_cpu: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct File {
+    pub name: String,
+    pub bytes: usize,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Region {
+    /// The `/chosen/memory-map` entry naming this region.
+    pub name: String,
+    pub file: String,
+    pub file_offset: u64,
+    /// Bytes copied from the file.
+    pub bytes: u64,
+    pub guest_pa: u64,
+    /// Bytes reserved at `guest_pa`; those after `bytes` are zeroed.
+    pub memory_bytes: u64,
+    pub sha256: String,
+    /// Link-time address of the region's first byte, for image regions.
+    pub virtual_address: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Entry {
+    pub image: String,
+    pub virtual_address: u64,
+    pub physical_address: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Image {
+    pub name: String,
+    pub file: String,
+    pub uuid: Option<String>,
+    pub vm_base: u64,
+    pub vm_bytes: u64,
+    pub entry: Entry,
+    pub fileset_entries: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PatchSource {
+    /// Guest RAM size chosen at boot.
+    DramSize,
+    /// The firmware framebuffer the kernel console draws on.
+    Framebuffer,
+    /// Fresh random bytes for every boot.
+    Entropy,
+    /// The kernel command line.
+    BootArgs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Encoding {
+    U64Le,
+    Bytes,
+    /// NUL-terminated within the field; the rest of the field is zero.
+    CString,
+}
+
+/// One fixed-size field the UEFI mount may rewrite before entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct Patch {
+    pub source: PatchSource,
+    pub required: bool,
+    pub region: String,
+    pub file: String,
+    pub file_offset: u64,
+    pub bytes: u64,
+    pub encoding: Encoding,
+    /// The DeviceTree path and property, or the `boot_args` field.
+    pub field: String,
+    pub prepared_hex: String,
+    pub rule: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaceholderDecision {
+    #[serde(flatten)]
+    pub placeholder: Placeholder,
+    pub resolution: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Manifest {
+    pub schema_version: u32,
+    pub target: Target,
+    pub options: Options,
+    pub sources: Vec<Source>,
+    pub files: Vec<File>,
+    pub regions: Vec<Region>,
+    /// Where execution starts: SPTM's entry, at EL2-equivalent privilege.
+    pub entry: Entry,
+    /// x0 on entry: the physical address of `boot_args`.
+    pub entry_x0: u64,
+    pub images: Vec<Image>,
+    pub boot_args: BootArgs,
+    pub device_tree_bytes: usize,
+    pub top_of_kernel_data: u64,
+    pub patches: Vec<Patch>,
+    pub placeholders: Vec<PlaceholderDecision>,
+    pub unresolved: Vec<String>,
+}
+
+pub struct Bundle {
+    /// Output files in manifest order, as `(name, bytes)`.
+    pub files: Vec<(String, Vec<u8>)>,
+    pub manifest: Manifest,
+}
+
+/// Where a split region begins or ends within an image.
+#[derive(Clone, Copy)]
+enum Mark {
+    ImageStart,
+    ImageEnd,
+    SegmentStart(&'static str),
+    SegmentEnd(&'static str),
+}
+
+struct Split {
+    suffix: &'static str,
+    start: Mark,
+    end: Mark,
+}
+
+const fn split(suffix: &'static str, start: Mark, end: Mark) -> Split {
+    Split { suffix, start, end }
+}
+
+use Mark::{ImageEnd, ImageStart, SegmentEnd, SegmentStart};
+
+/// m1n1 `load_macos_sptm` image splits.
+const KERNEL_SPLITS: &[Split] = &[
+    split("ro", ImageStart, SegmentStart("__DATA_SPTM")),
+    split("rs", SegmentStart("__DATA_SPTM"), SegmentEnd("__DATA_SPTM")),
+    split("rx", SegmentStart("__TEXT_EXEC"), SegmentEnd("__TEXT_EXEC")),
+    split(
+        "bx",
+        SegmentStart("__TEXT_BOOT_EXEC"),
+        SegmentEnd("__TEXT_BOOT_EXEC"),
+    ),
+    split("rw", SegmentStart("__PRELINK_INFO"), SegmentEnd("__DATA")),
+    split("le", SegmentStart("__LINKEDIT"), ImageEnd),
+];
+const SPTM_SPLITS: &[Split] = &[
+    split("ro", ImageStart, SegmentStart("__TEXT_EXEC")),
+    split("rx", SegmentStart("__TEXT_EXEC"), SegmentEnd("__TEXT_EXEC")),
+    split("rw", SegmentEnd("__TEXT_EXEC"), SegmentStart("__LINKEDIT")),
+    split("le", SegmentStart("__LINKEDIT"), ImageEnd),
+];
+const TXM_SPLITS: &[Split] = &[
+    split("ro", ImageStart, SegmentStart("__TEXT_EXEC")),
+    split("rx", SegmentStart("__TEXT_EXEC"), SegmentEnd("__TEXT_EXEC")),
+    split(
+        "bx",
+        SegmentStart("__TEXT_BOOT_EXEC"),
+        SegmentEnd("__TEXT_BOOT_EXEC"),
+    ),
+    split(
+        "rw",
+        SegmentEnd("__TEXT_BOOT_EXEC"),
+        SegmentStart("__LINKEDIT"),
+    ),
+    split("le", SegmentStart("__LINKEDIT"), ImageEnd),
+];
+
+/// The physical order SPTM requires (m1n1: "Required by SPTM in this order"),
+/// as `(image, split)` or a standalone region name.
+const REGION_ORDER: &[&str] = &[
+    "TXM-ro",
+    "TXM-rx",
+    "TXM-bx",
+    "TrustCache",
+    "BootKC-rx",
+    "BootKC-bx",
+    "BootKC-ro",
+    "BootKC-rs",
+    "DeviceTree",
+    "SPTM-ro",
+    "SPTM-rx",
+    "SPTM-rw",
+    "SPTM-le",
+    "TXM-rw",
+    "TXM-le",
+    "BootKC-rw",
+    "BootKC-le",
+    "SEPFW",
+    "BootArgs",
+];
+
+const KERNEL_FILE: &str = "kernelcache.img";
+const SPTM_FILE: &str = "sptm.img";
+const TXM_FILE: &str = "txm.img";
+const DEVICE_TREE_FILE: &str = "devicetree.adt";
+const TRUST_CACHE_FILE: &str = "trustcache.bin";
+const SEP_FILE: &str = "sepfw.im4p";
+const BOOT_ARGS_FILE: &str = "bootargs.bin";
+
+struct LoadedImage {
+    name: &'static str,
+    file: &'static str,
+    collection: KernelCollection,
+    memory: Vec<u8>,
+    /// `(region name, image offset range)` in split order.
+    pieces: Vec<(String, std::ops::Range<u64>)>,
+}
+
+fn resolve(collection: &KernelCollection, mark: Mark) -> Result<u64> {
+    let segment = |name: &str| {
+        collection
+            .segment(name)
+            .with_context(|| format!("image has no segment {name}"))
+    };
+    Ok(match mark {
+        ImageStart => 0,
+        ImageEnd => collection.image_bytes(),
+        SegmentStart(name) => segment(name)?.vm_address - collection.vm_base,
+        SegmentEnd(name) => segment(name)?.vm_end() - collection.vm_base,
+    })
+}
+
+impl LoadedImage {
+    fn new(
+        name: &'static str,
+        file: &'static str,
+        collection: KernelCollection,
+        bytes: &[u8],
+        splits: &[Split],
+    ) -> Result<Self> {
+        let memory = collection.memory_image(bytes)?;
+        let mut pieces = vec![];
+        for split in splits {
+            let start = resolve(&collection, split.start)?;
+            let end = resolve(&collection, split.end)?;
+            ensure!(
+                start < end && start.is_multiple_of(PAGE_BYTES) && end.is_multiple_of(PAGE_BYTES),
+                "{name}-{} is not a non-empty page-aligned range",
+                split.suffix
+            );
+            pieces.push((format!("{name}-{}", split.suffix), start..end));
+        }
+        // The pieces must tile the image so that nothing is dropped.
+        let mut sorted: Vec<_> = pieces.iter().map(|(_, r)| r.clone()).collect();
+        sorted.sort_by_key(|r| r.start);
+        let mut cursor = 0;
+        for range in sorted {
+            ensure!(
+                range.start == cursor,
+                "{name} regions leave a gap or overlap at image offset {cursor:#x}"
+            );
+            cursor = range.end;
+        }
+        ensure!(
+            cursor == collection.image_bytes(),
+            "{name} regions do not reach the image end"
+        );
+        Ok(Self {
+            name,
+            file,
+            collection,
+            memory,
+            pieces,
+        })
+    }
+}
+
+/// Pending region content before placement.
+struct Content {
+    name: String,
+    file: String,
+    file_offset: u64,
+    bytes: u64,
+    memory_bytes: u64,
+    virtual_address: Option<u64>,
+}
+
+fn page_round(bytes: u64) -> u64 {
+    bytes.next_multiple_of(PAGE_BYTES)
+}
+
+fn range_value(base: u64, length: u64) -> Vec<u8> {
+    [base.to_le_bytes(), length.to_le_bytes()].concat()
+}
+
+/// Resolve every template placeholder the way iBoot does when no syscfg or
+/// MAC-address provider exists: take a `zeroes/N` alternative, else drop the
+/// property. Each decision is recorded in the manifest.
+fn resolve_placeholders(tree: &mut DeviceTree) -> Result<Vec<PlaceholderDecision>> {
+    let mut decisions = vec![];
+    for placeholder in tree.placeholders() {
+        let zero_fill = placeholder
+            .recipe
+            .split(',')
+            .find_map(|alternative| alternative.strip_prefix(ZERO_FILL_RECIPE))
+            .map(|size| {
+                u64::from_str_radix(size.trim_start_matches("0x"), 16)
+                    .with_context(|| format!("bad zero-fill size in {}", placeholder.recipe))
+            })
+            .transpose()?;
+        let node = tree
+            .node_mut(&placeholder.path)
+            .context("placeholder node disappeared")?;
+        let resolution = match zero_fill {
+            Some(size) => {
+                node.set_property(&placeholder.property, vec![0; usize::try_from(size)?])?;
+                format!("zero-filled {size} bytes")
+            }
+            None => {
+                node.remove_property(&placeholder.property);
+                "removed: no syscfg or MAC-address provider".into()
+            }
+        };
+        decisions.push(PlaceholderDecision {
+            placeholder,
+            resolution,
+        });
+    }
+    Ok(decisions)
+}
+
+fn source_of(input: &Input) -> Source {
+    input.source.clone()
+}
+
+pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
+    ensure!(
+        options.phys_base >= options.dram_base
+            && options.phys_base.is_multiple_of(PAGE_BYTES)
+            && options.load_offset.is_multiple_of(PAGE_BYTES),
+        "phys_base must be a page-aligned address inside DRAM"
+    );
+    let kernel = LoadedImage::new(
+        "BootKC",
+        KERNEL_FILE,
+        KernelCollection::parse(inputs.kernel_collection.bytes)?,
+        inputs.kernel_collection.bytes,
+        KERNEL_SPLITS,
+    )?;
+    let sptm = LoadedImage::new(
+        "SPTM",
+        SPTM_FILE,
+        KernelCollection::parse_executable(inputs.sptm.bytes)?,
+        inputs.sptm.bytes,
+        SPTM_SPLITS,
+    )?;
+    let txm = LoadedImage::new(
+        "TXM",
+        TXM_FILE,
+        KernelCollection::parse_executable(inputs.txm.bytes)?,
+        inputs.txm.bytes,
+        TXM_SPLITS,
+    )?;
+    let trust_cache = trust_cache::compose(&[inputs.static_trust_cache.bytes])?;
+
+    let mut tree = DeviceTree::parse(inputs.device_tree.bytes)?;
+    let placeholders = resolve_placeholders(&mut tree)?;
+    let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options)?;
+
+    // Lay the memory map out with zero values first: its size is fixed by
+    // the entry count, so the DeviceTree size is known before placement.
+    let mut contents = vec![];
+    for name in REGION_ORDER {
+        let content = match *name {
+            "TrustCache" => Content {
+                name: (*name).into(),
+                file: TRUST_CACHE_FILE.into(),
+                file_offset: 0,
+                bytes: trust_cache.len() as u64,
+                memory_bytes: page_round(trust_cache.len() as u64),
+                virtual_address: None,
+            },
+            "DeviceTree" => Content {
+                name: (*name).into(),
+                file: DEVICE_TREE_FILE.into(),
+                file_offset: 0,
+                bytes: 0,
+                memory_bytes: 0,
+                virtual_address: None,
+            },
+            "SEPFW" => match &inputs.sep_firmware {
+                Some(sep) => Content {
+                    name: (*name).into(),
+                    file: SEP_FILE.into(),
+                    file_offset: 0,
+                    bytes: sep.bytes.len() as u64,
+                    memory_bytes: page_round(sep.bytes.len() as u64),
+                    virtual_address: None,
+                },
+                None => {
+                    unresolved.push("SEPFW: no SEP firmware input; the region is absent".into());
+                    continue;
+                }
+            },
+            "BootArgs" => Content {
+                name: (*name).into(),
+                file: BOOT_ARGS_FILE.into(),
+                file_offset: 0,
+                bytes: boot_args::BYTES as u64,
+                memory_bytes: BOOT_ARGS_REGION_BYTES,
+                virtual_address: None,
+            },
+            piece => {
+                let image = [&kernel, &sptm, &txm]
+                    .into_iter()
+                    .find(|image| piece.starts_with(image.name))
+                    .with_context(|| format!("no image provides {piece}"))?;
+                let range = image
+                    .pieces
+                    .iter()
+                    .find(|(n, _)| n == piece)
+                    .map(|(_, r)| r.clone())
+                    .with_context(|| format!("{} has no split {piece}", image.name))?;
+                Content {
+                    name: piece.into(),
+                    file: image.file.into(),
+                    file_offset: range.start,
+                    bytes: range.end - range.start,
+                    memory_bytes: range.end - range.start,
+                    virtual_address: Some(image.collection.vm_base + range.start),
+                }
+            }
+        };
+        contents.push(content);
+    }
+    unresolved.push(
+        "RTBuddySeg: iBoot-provided RTKit buddy segment; content unknown, the region is absent"
+            .into(),
+    );
+
+    let memory_map = tree
+        .node_mut(MEMORY_MAP)
+        .context("DeviceTree has no /chosen/memory-map")?;
+    memory_map
+        .properties
+        .retain(|p| !p.name().starts_with(RESERVED_ENTRY_PREFIX));
+    let extra_entries = [
+        "slide",
+        "TXM-entry",
+        "TXM-virt",
+        "BootKC-entry",
+        "BootKC-virt",
+        "SPTM-rm",
+    ];
+    for name in contents
+        .iter()
+        .map(|c| c.name.as_str())
+        .chain(extra_entries)
+    {
+        memory_map.set_property(name, vec![0; MEMORY_MAP_ENTRY_BYTES])?;
+    }
+    let device_tree_bytes = tree.encoded_bytes() as u64;
+    for content in &mut contents {
+        if content.name == "DeviceTree" {
+            content.bytes = device_tree_bytes;
+            content.memory_bytes = page_round(device_tree_bytes);
+        }
+    }
+
+    // Place every region back to back from the load base.
+    let load_base = options.phys_base + options.load_offset;
+    let mut cursor = load_base;
+    let mut regions = vec![];
+    for content in contents {
+        regions.push(Region {
+            name: content.name,
+            file: content.file,
+            file_offset: content.file_offset,
+            bytes: content.bytes,
+            guest_pa: cursor,
+            memory_bytes: content.memory_bytes,
+            sha256: String::new(),
+            virtual_address: content.virtual_address,
+        });
+        cursor += page_round(content.memory_bytes);
+    }
+    let top_of_kernel_data = cursor;
+    let dram_end = options.dram_base + options.dram_size;
+    ensure!(
+        top_of_kernel_data <= dram_end,
+        "regions end at {top_of_kernel_data:#x}, past DRAM end {dram_end:#x}"
+    );
+    let region = |name: &str| {
+        regions
+            .iter()
+            .find(|r| r.name == name)
+            .with_context(|| format!("no region {name}"))
+    };
+    let memory_map = tree.node_mut(MEMORY_MAP).context("memory-map")?;
+    for region in &regions {
+        memory_map.set_property(
+            &region.name,
+            range_value(region.guest_pa, region.memory_bytes),
+        )?;
+    }
+    let sptm_ro = region("SPTM-ro")?;
+    let sptm_total: u64 = ["SPTM-ro", "SPTM-rx", "SPTM-rw", "SPTM-le"]
+        .iter()
+        .map(|name| region(name).map(|r| r.memory_bytes))
+        .sum::<Result<_>>()?;
+    for (name, value) in [
+        (
+            "slide",
+            range_value(options.phys_base, load_base - options.phys_base),
+        ),
+        ("TXM-entry", range_value(txm.collection.entry_offset(), 0)),
+        ("TXM-virt", range_value(0, 0)),
+        (
+            "BootKC-entry",
+            range_value(kernel.collection.entry_offset(), 0),
+        ),
+        ("BootKC-virt", range_value(0, 0)),
+        ("SPTM-rm", range_value(sptm_ro.guest_pa, sptm_total)),
+    ] {
+        memory_map.set_property(name, value)?;
+    }
+    let device_tree = tree.serialize();
+    ensure!(
+        device_tree.len() as u64 == device_tree_bytes,
+        "DeviceTree size changed after placement"
+    );
+
+    let virt_base = VIRT_BASE + (options.phys_base % VIRT_BASE_ALIGNMENT);
+    let device_tree_region = region("DeviceTree")?;
+    let boot_args_region = region("BootArgs")?;
+    let boot_args = BootArgs {
+        revision: boot_args::REVISION,
+        version: boot_args::VERSION,
+        virt_base,
+        phys_base: options.phys_base,
+        mem_size: dram_end - options.phys_base,
+        top_of_kernel_data,
+        video: Video::default(),
+        machine_type: 0,
+        device_tree: device_tree_region.guest_pa - options.phys_base + virt_base,
+        device_tree_length: u32::try_from(device_tree.len())?,
+        command_line: options.boot_args.clone(),
+        boot_flags: 0,
+        mem_size_actual: options.dram_size,
+    };
+    let boot_args_bytes = boot_args.encode()?.to_vec();
+    let boot_args_pa = boot_args_region.guest_pa;
+
+    let mut patches = device_tree_patches(&tree, device_tree_region)?;
+    patches.extend(boot_args_patches(boot_args_region, &boot_args_bytes));
+
+    let entry_point = |image: &LoadedImage| -> Result<Entry> {
+        let offset = image.collection.entry_offset();
+        let (name, range) = image
+            .pieces
+            .iter()
+            .find(|(_, r)| r.contains(&offset))
+            .context("entry lies outside every region")?;
+        Ok(Entry {
+            image: image.name.into(),
+            virtual_address: image.collection.thread.pc,
+            physical_address: region(name)?.guest_pa + (offset - range.start),
+        })
+    };
+    let images = [&sptm, &txm, &kernel]
+        .into_iter()
+        .map(|image| {
+            Ok(Image {
+                name: image.name.into(),
+                file: image.file.into(),
+                uuid: image.collection.uuid.clone(),
+                vm_base: image.collection.vm_base,
+                vm_bytes: image.collection.image_bytes(),
+                entry: entry_point(image)?,
+                fileset_entries: image.collection.fileset_entries.len(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let entry = images[0].entry.clone();
+
+    let mut files = vec![
+        (KERNEL_FILE.to_owned(), kernel.memory),
+        (SPTM_FILE.to_owned(), sptm.memory),
+        (TXM_FILE.to_owned(), txm.memory),
+        (DEVICE_TREE_FILE.to_owned(), device_tree),
+        (TRUST_CACHE_FILE.to_owned(), trust_cache),
+        (BOOT_ARGS_FILE.to_owned(), boot_args_bytes),
+    ];
+    if let Some(sep) = &inputs.sep_firmware {
+        files.push((SEP_FILE.to_owned(), sep.bytes.to_vec()));
+    }
+    for region in &mut regions {
+        let (_, bytes) = files
+            .iter()
+            .find(|(name, _)| *name == region.file)
+            .with_context(|| format!("no file {}", region.file))?;
+        let start = usize::try_from(region.file_offset)?;
+        let end = start + usize::try_from(region.bytes)?;
+        ensure!(
+            end <= bytes.len(),
+            "region {} exceeds its file",
+            region.name
+        );
+        region.sha256 = sha256(&bytes[start..end]);
+    }
+    let mut sources = vec![
+        source_of(&inputs.kernel_collection),
+        source_of(&inputs.sptm),
+        source_of(&inputs.txm),
+        source_of(&inputs.device_tree),
+        source_of(&inputs.static_trust_cache),
+    ];
+    if let Some(sep) = &inputs.sep_firmware {
+        sources.push(source_of(sep));
+    }
+    let manifest = Manifest {
+        schema_version: SCHEMA_VERSION,
+        target: inputs.target.clone(),
+        options: options.clone(),
+        sources,
+        files: files
+            .iter()
+            .map(|(name, bytes)| File {
+                name: name.clone(),
+                bytes: bytes.len(),
+                sha256: sha256(bytes),
+            })
+            .collect(),
+        regions,
+        entry,
+        entry_x0: boot_args_pa,
+        images,
+        boot_args,
+        device_tree_bytes: device_tree_bytes as usize,
+        top_of_kernel_data,
+        patches,
+        placeholders,
+        unresolved,
+    };
+    Ok(Bundle { files, manifest })
+}
+
+/// Board facts and boot-time slots that iBoot adds to its template tree.
+fn shape_device_tree(
+    tree: &mut DeviceTree,
+    target: &Target,
+    options: &Options,
+) -> Result<Vec<String>> {
+    let mut unresolved = vec![];
+    let chosen = "/chosen";
+    tree.set_property(
+        chosen,
+        "dram-base",
+        options.dram_base.to_le_bytes().to_vec(),
+    )?;
+    tree.set_property(
+        chosen,
+        "dram-size",
+        options.dram_size.to_le_bytes().to_vec(),
+    )?;
+    for (name, value) in [("chip-id", target.chip_id), ("board-id", target.board_id)] {
+        match value {
+            Some(value) => tree.set_property(chosen, name, value.to_le_bytes().to_vec())?,
+            None => unresolved.push(format!("/chosen {name}: absent from the restore identity")),
+        }
+    }
+    // m1n1 load_macos_sptm creates these keys for every boot.
+    tree.ensure_child(chosen, "hibernation")?;
+    for key in ["key-sptm-ctrr", "key-xnu-ctrr"] {
+        tree.set_property("/chosen/hibernation", key, vec![0; HIBERNATION_KEY_BYTES])?;
+    }
+    let cpu = format!("/cpus/{}", options.boot_cpu);
+    let state = tree
+        .property(&cpu, "state")
+        .with_context(|| format!("DeviceTree has no {cpu} state"))?;
+    let running = b"running\0".to_vec();
+    ensure!(
+        state.value.len() == running.len(),
+        "{cpu} state field is not eight bytes"
+    );
+    tree.set_property(&cpu, "state", running)?;
+    for (path, property) in [
+        ("/chosen/asmb", "lp-sip0"),
+        ("/chosen/manifest-properties", "love"),
+    ] {
+        if tree.property(path, property).is_none() {
+            unresolved.push(format!(
+                "{path} {property}: LocalPolicy value iBoot derives from the boot policy; not set"
+            ));
+        }
+    }
+    unresolved.push(
+        "/chosen/boot-object-manifests: no personalized IMG4 manifests (apticket, LocalPolicy)"
+            .into(),
+    );
+    unresolved.push("preoslog: iBoot log region omitted".into());
+    unresolved.push(
+        "unflagged template values iBoot fills (such as / platform-name, /chosen firmware-version) stay as shipped"
+            .into(),
+    );
+    Ok(unresolved)
+}
+
+fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
+    let mut patches = vec![];
+    let slots: &[(&str, &str, PatchSource, bool, Encoding, &str)] = &[
+        (
+            "/chosen",
+            "dram-size",
+            PatchSource::DramSize,
+            false,
+            Encoding::U64Le,
+            "installed guest DRAM bytes",
+        ),
+        (
+            "/chosen",
+            "random-seed",
+            PatchSource::Entropy,
+            true,
+            Encoding::Bytes,
+            "random bytes",
+        ),
+        (
+            "/chosen",
+            "cl4-entropy",
+            PatchSource::Entropy,
+            true,
+            Encoding::Bytes,
+            "random bytes",
+        ),
+        (
+            "/chosen/hibernation",
+            "key-sptm-ctrr",
+            PatchSource::Entropy,
+            true,
+            Encoding::Bytes,
+            "random bytes",
+        ),
+        (
+            "/chosen/hibernation",
+            "key-xnu-ctrr",
+            PatchSource::Entropy,
+            true,
+            Encoding::Bytes,
+            "random bytes",
+        ),
+        (
+            "/vram",
+            "reg",
+            PatchSource::Framebuffer,
+            false,
+            Encoding::Bytes,
+            "u64 framebuffer base, u64 framebuffer bytes",
+        ),
+    ];
+    let bytes = tree.serialize();
+    for &(path, property, source, required, encoding, rule) in slots {
+        let Ok(at) = tree.locate(path, property) else {
+            bail!("DeviceTree has no patch slot {path} {property}");
+        };
+        patches.push(Patch {
+            source,
+            required,
+            region: region.name.clone(),
+            file: region.file.clone(),
+            file_offset: at.value_offset as u64,
+            bytes: at.value_bytes as u64,
+            encoding,
+            field: format!("{path} {property}"),
+            prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + at.value_bytes]),
+            rule: rule.into(),
+        });
+    }
+    Ok(patches)
+}
+
+fn boot_args_patches(region: &Region, bytes: &[u8]) -> Vec<Patch> {
+    use boot_args::offset;
+    let fields: &[(&str, usize, usize, PatchSource, Encoding, &str)] = &[
+        (
+            "memSize",
+            offset::MEM_SIZE,
+            8,
+            PatchSource::DramSize,
+            Encoding::U64Le,
+            "dram-base + guest DRAM bytes - physBase",
+        ),
+        (
+            "memSizeActual",
+            offset::MEM_SIZE_ACTUAL,
+            8,
+            PatchSource::DramSize,
+            Encoding::U64Le,
+            "guest DRAM bytes",
+        ),
+        (
+            "Video.v_baseAddr",
+            offset::VIDEO_BASE,
+            8,
+            PatchSource::Framebuffer,
+            Encoding::U64Le,
+            "framebuffer guest physical address",
+        ),
+        (
+            "Video.v_display",
+            offset::VIDEO_DISPLAY,
+            8,
+            PatchSource::Framebuffer,
+            Encoding::U64Le,
+            "1 for a graphical boot, 0 with -v (m1n1 set_bootargs)",
+        ),
+        (
+            "Video.v_rowBytes",
+            offset::VIDEO_ROW_BYTES,
+            8,
+            PatchSource::Framebuffer,
+            Encoding::U64Le,
+            "bytes per scanline",
+        ),
+        (
+            "Video.v_width",
+            offset::VIDEO_WIDTH,
+            8,
+            PatchSource::Framebuffer,
+            Encoding::U64Le,
+            "pixels",
+        ),
+        (
+            "Video.v_height",
+            offset::VIDEO_HEIGHT,
+            8,
+            PatchSource::Framebuffer,
+            Encoding::U64Le,
+            "pixels",
+        ),
+        (
+            "Video.v_depth",
+            offset::VIDEO_DEPTH,
+            8,
+            PatchSource::Framebuffer,
+            Encoding::U64Le,
+            "bits per pixel in bits 0..8",
+        ),
+        (
+            "CommandLine",
+            offset::COMMAND_LINE,
+            boot_args::BOOT_LINE_LENGTH,
+            PatchSource::BootArgs,
+            Encoding::CString,
+            "kernel boot-args",
+        ),
+    ];
+    fields
+        .iter()
+        .map(|&(field, at, length, source, encoding, rule)| Patch {
+            source,
+            required: false,
+            region: region.name.clone(),
+            file: region.file.clone(),
+            file_offset: at as u64,
+            bytes: length as u64,
+            encoding,
+            field: format!("boot_args.{field}"),
+            prepared_hex: hex::encode(&bytes[at..at + length]),
+            rule: rule.into(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel_collection::tests::{BASE, Builder};
+    use object::macho;
+
+    const PAGE: u64 = PAGE_BYTES;
+
+    fn source(component: &str) -> Source {
+        Source {
+            component: component.into(),
+            member: format!("{component}.im4p"),
+            container_sha256: "0".repeat(64),
+            payload_type: "test".into(),
+            description: "synthetic".into(),
+            decoded_bytes: 0,
+            decoded_sha256: "0".repeat(64),
+        }
+    }
+
+    fn page(fill: u8) -> Vec<u8> {
+        vec![fill; PAGE as usize]
+    }
+
+    fn kernel() -> Vec<u8> {
+        Builder::new(macho::MH_FILESET)
+            .segment("__TEXT", PAGE, &page(0))
+            .segment("__DATA_SPTM", PAGE, &page(1))
+            .segment("__TEXT_EXEC", PAGE, &page(2))
+            .segment("__TEXT_BOOT_EXEC", PAGE, &page(3))
+            .segment("__PRELINK_INFO", PAGE, &page(4))
+            .segment("__DATA", PAGE, &page(5))
+            .segment("__LINKEDIT", PAGE, &page(6))
+            .fileset("com.apple.kernel", BASE)
+            .thread(BASE + 3 * PAGE)
+            .build()
+    }
+
+    fn sptm() -> Vec<u8> {
+        Builder::new(macho::MH_EXECUTE)
+            .segment("__TEXT", PAGE, &page(0))
+            .segment("__TEXT_EXEC", PAGE, &page(7))
+            .segment("__DATA", PAGE, &page(8))
+            .segment("__LINKEDIT", PAGE, &[9; 0x20])
+            .thread(BASE + PAGE + 0x388)
+            .build()
+    }
+
+    fn txm() -> Vec<u8> {
+        Builder::new(macho::MH_EXECUTE)
+            .segment("__TEXT", PAGE, &page(0))
+            .segment("__TEXT_EXEC", PAGE, &page(10))
+            .segment("__TEXT_BOOT_EXEC", PAGE, &page(11))
+            .segment("__DATA", PAGE, &page(12))
+            .segment("__LINKEDIT", PAGE, &[13; 0x20])
+            .thread(BASE + 2 * PAGE)
+            .build()
+    }
+
+    fn device_tree() -> Vec<u8> {
+        let mut tree = DeviceTree {
+            root: crate::apple_device_tree::Node::named("device-tree").unwrap(),
+        };
+        for child in ["chosen", "cpus", "vram"] {
+            tree.ensure_child("/", child).unwrap();
+        }
+        tree.ensure_child("/chosen", "memory-map").unwrap();
+        tree.ensure_child("/cpus", "cpu0").unwrap();
+        tree.set_property("/cpus/cpu0", "state", b"waiting\0".to_vec())
+            .unwrap();
+        tree.set_property("/vram", "reg", vec![0; 16]).unwrap();
+        tree.set_property("/chosen", "random-seed", vec![0; 0x100])
+            .unwrap();
+        tree.set_property("/chosen", "cl4-entropy", vec![0; 0xc0])
+            .unwrap();
+        for index in 0..17 {
+            tree.set_property(
+                "/chosen/memory-map",
+                &format!("MemoryMapReserved-{index}"),
+                vec![0; 16],
+            )
+            .unwrap();
+        }
+        let chosen = tree.node_mut("/chosen").unwrap();
+        chosen
+            .set_property(
+                "software-behavior",
+                b"syscfg/SwBh/0x10,zeroes/0x10\0".to_vec(),
+            )
+            .unwrap();
+        chosen
+            .set_property(
+                "mac-address-wifi0",
+                b"macaddr/wifiaddr,syscfg/WMac/6\0".to_vec(),
+            )
+            .unwrap();
+        for property in &mut chosen.properties[3..] {
+            property.placeholder = true;
+        }
+        tree.serialize()
+    }
+
+    fn trust_cache() -> Vec<u8> {
+        let mut module = 2u32.to_le_bytes().to_vec();
+        module.extend([0; 16]);
+        module.extend(1u32.to_le_bytes());
+        module.extend([0xee; 24]);
+        module
+    }
+
+    #[test]
+    fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
+        let (kernel, sptm, txm, tree, tc) = (kernel(), sptm(), txm(), device_tree(), trust_cache());
+        let input = |bytes: &'static [u8], name: &str| Input {
+            bytes,
+            source: source(name),
+        };
+        let leak = |v: Vec<u8>| -> &'static [u8] { Box::leak(v.into_boxed_slice()) };
+        let inputs = Inputs {
+            target: Target {
+                product_type: "Mac14,3".into(),
+                device_class: "j473ap".into(),
+                product_version: "27.0.1".into(),
+                product_build: "26A434".into(),
+                variant: "Customer Erase Install (IPSW)".into(),
+                chip_id: Some(0x8112),
+                board_id: Some(0x2e),
+            },
+            kernel_collection: input(leak(kernel), "KernelCache"),
+            sptm: input(leak(sptm), "Ap,SecurePageTableMonitor"),
+            txm: input(leak(txm), "Ap,TrustedExecutionMonitor"),
+            device_tree: input(leak(tree), "DeviceTree"),
+            static_trust_cache: input(leak(tc), "StaticTrustCache"),
+            sep_firmware: None,
+        };
+        let options = Options {
+            dram_base: 0x8_0000_0000,
+            dram_size: 0x2_0000_0000,
+            phys_base: 0x8_0000_0000,
+            load_offset: 0,
+            boot_args: "-v".into(),
+            boot_cpu: "cpu0".into(),
+        };
+        let bundle = prepare(&inputs, &options)?;
+        let manifest = &bundle.manifest;
+        let names: Vec<_> = manifest.regions.iter().map(|r| r.name.as_str()).collect();
+        let expected: Vec<_> = REGION_ORDER
+            .iter()
+            .copied()
+            .filter(|n| *n != "SEPFW")
+            .collect();
+        assert_eq!(names, expected);
+        // Regions are page-aligned, ascending and non-overlapping.
+        for pair in manifest.regions.windows(2) {
+            assert!(pair[0].guest_pa + pair[0].memory_bytes <= pair[1].guest_pa);
+            assert_eq!(pair[1].guest_pa % PAGE, 0);
+        }
+        let region = |name: &str| manifest.regions.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(manifest.entry.image, "SPTM");
+        assert_eq!(
+            manifest.entry.physical_address,
+            region("SPTM-rx").guest_pa + 0x388
+        );
+        assert_eq!(manifest.entry_x0, region("BootArgs").guest_pa);
+        let kc = manifest.images.iter().find(|i| i.name == "BootKC").unwrap();
+        assert_eq!(kc.entry.physical_address, region("BootKC-bx").guest_pa);
+        assert_eq!(region("SPTM-le").memory_bytes, PAGE);
+
+        let file = |name: &str| &bundle.files.iter().find(|(n, _)| n == name).unwrap().1;
+        let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
+        let map = tree.node(MEMORY_MAP).unwrap();
+        assert!(
+            map.properties
+                .iter()
+                .all(|p| !p.name().starts_with(RESERVED_ENTRY_PREFIX))
+        );
+        let entry = |name: &str| map.property(name).unwrap().value.clone();
+        assert_eq!(
+            entry("TrustCache"),
+            range_value(region("TrustCache").guest_pa, PAGE)
+        );
+        assert_eq!(entry("BootKC-entry"), range_value(3 * PAGE, 0));
+        assert_eq!(
+            entry("SPTM-rm"),
+            range_value(region("SPTM-ro").guest_pa, 4 * PAGE)
+        );
+        assert!(tree.placeholders().is_empty());
+        assert!(tree.property("/chosen", "mac-address-wifi0").is_none());
+        assert_eq!(
+            tree.property("/chosen", "software-behavior").unwrap().value,
+            vec![0; 16]
+        );
+        assert_eq!(
+            tree.property("/cpus/cpu0", "state").unwrap().as_str(),
+            Some("running")
+        );
+        assert_eq!(
+            tree.property("/chosen", "chip-id").unwrap().as_u32(),
+            Some(0x8112)
+        );
+
+        let args = BootArgs::decode(file(BOOT_ARGS_FILE))?;
+        assert_eq!(
+            args.device_tree,
+            region("DeviceTree").guest_pa - args.phys_base + args.virt_base
+        );
+        assert_eq!(
+            args.device_tree_length as usize,
+            file(DEVICE_TREE_FILE).len()
+        );
+        assert_eq!(args.top_of_kernel_data, region("BootArgs").guest_pa + PAGE);
+        assert_eq!(args.command_line, "-v");
+
+        // Every patch addresses its prepared bytes in its file.
+        for patch in &manifest.patches {
+            let bytes = file(&patch.file);
+            let at = patch.file_offset as usize;
+            assert_eq!(
+                hex::encode(&bytes[at..at + patch.bytes as usize]),
+                patch.prepared_hex,
+                "{}",
+                patch.field
+            );
+        }
+        // Every region hash covers its file bytes.
+        for region in &manifest.regions {
+            let at = region.file_offset as usize;
+            assert_eq!(
+                sha256(&file(&region.file)[at..at + region.bytes as usize]),
+                region.sha256
+            );
+        }
+        assert!(manifest.unresolved.iter().any(|u| u.starts_with("SEPFW")));
+        Ok(())
+    }
+}

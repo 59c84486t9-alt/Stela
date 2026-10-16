@@ -45,6 +45,15 @@ fn read_limited(archive: &mut Archive, name: &str, maximum: u64) -> Result<Vec<u
     Ok(bytes)
 }
 
+/// Read one member whole, refusing members larger than `maximum`.
+pub fn read_member(image: &Path, name: &str, maximum: u64) -> Result<Vec<u8>> {
+    read_limited(
+        &mut zip::ZipArchive::new(File::open(image)?)?,
+        name,
+        maximum,
+    )
+}
+
 fn hash_member(archive: &mut Archive, name: &str) -> Result<MemberDigest> {
     let size = archive.by_name(name)?.size();
     if size <= IM4P_HEADER_LIMIT {

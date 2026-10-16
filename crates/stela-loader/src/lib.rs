@@ -1,7 +1,9 @@
 //! Mach-O loading: slice selection, load plans, chained fixups, exports,
-//! dependency discovery and image mappings.
+//! dependency discovery and image mappings, plus the restore-image formats
+//! the kernel boot hand-off consumes.
 pub mod apple_device_tree;
 pub mod boot_args;
+pub mod boot_bundle;
 pub mod chained_fixups;
 pub mod dependency_graph;
 pub mod dependency_paths;
@@ -13,6 +15,7 @@ pub mod linked_images;
 pub mod load_plan;
 pub mod mapped_image;
 mod thread_state;
+pub mod trust_cache;
 use anyhow::{Context, Result, ensure};
 use inventory::{Artifact, Inventory, ScanIssue};
 use object::{Object, ObjectSection};
