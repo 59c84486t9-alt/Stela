@@ -8,7 +8,7 @@ use core::marker::PhantomData;
 
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{
-    GuestAddress, SOURCE_FINGERPRINT_MATERIAL, TargetCpu,
+    GuestAddress, TargetCpu,
     block::{BlockExit, BlockProfile, ExitKind, MAX_BLOCK_INSTRUCTIONS},
     context::{CONTEXT_BLOCK_ABI, ExecutionContext},
     extended::{CONTEXT_WRAPPER_BYTES, block::ExtendedBlockProfile},
@@ -108,7 +108,7 @@ impl PreparedScalableBlock {
         let identity = ScalableBlockIdentity {
             source_sha256: sha256(&source),
             native_sha256: sha256(&native.x86_64_code),
-            compiler_source_sha256: sha256(SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+            compiler_source_sha256: stela_compiler::SOURCE_SHA256.into(),
             guest_base: base,
             abi: CONTEXT_BLOCK_ABI,
             target_cpu: target.id(),

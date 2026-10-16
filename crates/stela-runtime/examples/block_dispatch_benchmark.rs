@@ -5,7 +5,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use std::{path::Path, time::Instant};
 use stela_compiler::{
-    GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL,
+    GuestAddress, GuestState,
     block::{BLOCK_ABI, ExitKind},
 };
 use stela_core::sha256;
@@ -266,7 +266,7 @@ fn main() -> Result<()> {
         "schema": 1,
         "kind": "native_basic_block_dispatch_benchmark",
         "abi": BLOCK_ABI,
-        "compiler_source_sha256": sha256(SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+        "compiler_source_sha256": stela_compiler::SOURCE_SHA256.to_owned(),
         "runtime_source_sha256": sha256(RUNTIME_SOURCE.as_bytes()),
         "benchmark_source_sha256": sha256(include_str!("block_dispatch_benchmark.rs").as_bytes()),
         "executable_sha256": sha256(&executable),

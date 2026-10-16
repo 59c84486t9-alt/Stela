@@ -38,8 +38,6 @@ use serde::Serialize;
 use std::io::Read;
 #[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "std")]
-use std::sync::OnceLock;
 use stela_compiler::GuestAddress;
 #[cfg(feature = "std")]
 use stela_compiler::{NATIVE_ABI, NativeBlock};
@@ -47,21 +45,8 @@ use stela_core::sha256;
 #[cfg(feature = "std")]
 use stela_core::write_json;
 
-// The compiler material is immutable for this executable. Reuse its exact
-// digest across preparation and loading without weakening artifact validation.
-#[cfg(feature = "std")]
 fn compiler_source_sha256() -> &'static str {
-    static FINGERPRINT: OnceLock<String> = OnceLock::new();
-    FINGERPRINT.get_or_init(|| sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()))
-}
-
-#[cfg(not(feature = "std"))]
-fn compiler_source_sha256() -> String {
-    static FINGERPRINT: platform::sync::Mutex<Option<String>> = platform::sync::Mutex::new(None);
-    let mut fingerprint = FINGERPRINT.lock().unwrap();
-    fingerprint
-        .get_or_insert_with(|| sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()))
-        .clone()
+    stela_compiler::SOURCE_SHA256
 }
 
 #[cfg(feature = "std")]

@@ -426,7 +426,7 @@ pub fn probe(
         "outcome":outcome,"target_instruction":"PACIBSP","target_analysis":target_analysis,
         "target_analysis_profile":"ordinary","selected_profile_target_analysis":selected_profile_target_analysis,
         "fixups_applied":false,"native_executed":true,"complete_binary_verified":false,
-        "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+        "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
         "probe_source_sha256":stela_core::sha256(include_bytes!("dyld_entry.rs")),
         "process_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/process.rs")),
         "unresolved_requirements":["remaining PAC operations and authenticated fixups","dyld self-rebase and shared-cache handoff","initializers, TLS and guest process services","full original application execution"]

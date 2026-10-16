@@ -1109,7 +1109,7 @@ fn run() -> Result<()> {
                     "memory_regions":images.regions(),"guard_segments_not_reserved":images.guards(),"stack":images.stack(),
                     "host_execute":false,"initial_state":initial_state,"state":register_json(&thread.registers),
                     "pc":thread.pc.0,"outcome":outcome,"memory":memory,
-                    "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                    "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
                     "complete_binary_verified":false
                 }))?
             );
@@ -1267,7 +1267,7 @@ fn run() -> Result<()> {
                 "applied_rebases":image.fixups().rebases.len(),
                 "host_execute":false,"stack":image.stack(),"initial_state":initial_state,
                 "state":register_json(&thread.registers),"pc":thread.pc.0,"outcome":outcome,"memory":memory,
-                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
                 "complete_binary_verified":false})
                 )?
             );
@@ -1368,7 +1368,7 @@ fn run() -> Result<()> {
                 "guest_base":guest_base,"abi":profile.abi(),
                 "native_sha256":stela_core::sha256(&compiled.native.x86_64_code),
                 "native_bytes":compiled.native.x86_64_code.len(),"source_map":compiled.native.source_map,
-                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
                 "verified":false});
             if el1_platform || preparation_requirements.is_some() {
                 manifest["memory_requirements"] = serde_json::to_value(preparation_requirements)?;
@@ -1637,7 +1637,7 @@ fn run() -> Result<()> {
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
                 "clock":clock_report,
                 "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
-                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
                 "complete_binary_verified":false}))?
             );
         }
@@ -1813,7 +1813,7 @@ fn run() -> Result<()> {
                 "native_bytes": block.x86_64_code.len(),
                 "source_map": block.source_map,
                 "abi": stela_compiler::NATIVE_ABI,
-                "compiler_source_sha256": stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+                "compiler_source_sha256": stela_compiler::SOURCE_SHA256,
                 "verified": false,
             });
             if let Some(profile) = profile {

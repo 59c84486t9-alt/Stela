@@ -10,7 +10,7 @@ use core::marker::PhantomData;
 
 use anyhow::{Context, Result, ensure};
 use stela_compiler::{
-    GuestAddress, GuestState, SOURCE_FINGERPRINT_MATERIAL, TargetCpu,
+    GuestAddress, GuestState, TargetCpu,
     aarch64::scalable::execution::{
         SCALABLE_EXECUTION_REQUIREMENTS_VERSION, ScalableExecutionRequirements,
     },
@@ -118,7 +118,7 @@ impl PreparedScalableLeaf {
         let identity = ScalableLeafIdentity {
             source_sha256: sha256(&source),
             native_sha256: sha256(&native.x86_64_code),
-            compiler_source_sha256: sha256(SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
+            compiler_source_sha256: stela_compiler::SOURCE_SHA256.into(),
             guest_base: base,
             abi: CONTEXT_LEAF_ABI,
             target_cpu: target.id(),
