@@ -1551,6 +1551,7 @@ dependencies = [
  "clap",
  "hex",
  "hpke",
+ "libc",
  "p256",
  "plist",
  "reqwest",

@@ -139,6 +139,20 @@ fn parse_keyed_bytes(value: &str) -> Result<(String, Vec<u8>), String> {
     Ok((key.to_owned(), bytes))
 }
 
+/// Run `boot prepare` with these arguments, exactly as the command line
+/// parses them, so callers get the same defaults.
+pub(crate) fn prepare(arguments: &[String]) -> Result<()> {
+    #[derive(clap::Parser)]
+    struct Line {
+        #[command(flatten)]
+        prepare: Prepare,
+    }
+    let line = <Line as clap::Parser>::try_parse_from(
+        std::iter::once("prepare".to_owned()).chain(arguments.iter().cloned()),
+    )?;
+    line.prepare.run()
+}
+
 impl BootCommand {
     pub(crate) fn run(self) -> Result<()> {
         match self {

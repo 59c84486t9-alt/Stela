@@ -188,9 +188,13 @@ impl Config {
         let mut xml = Vec::new();
         self.root.to_writer_xml(&mut xml)?;
         xml.push(b'\n');
+        self.restore(&xml)
+    }
+
+    fn restore(&self, bytes: &[u8]) -> Result<()> {
         let parent = self.path.parent().expect("config.plist has a parent");
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(&xml)?;
+        file.write_all(bytes)?;
         file.as_file().sync_all()?;
         file.persist(&self.path).map_err(|error| error.error)?;
         Ok(())
@@ -200,14 +204,6 @@ impl Config {
 /// Install or replace the mount, and return a report of what changed.
 pub fn install(command: &Install) -> Result<serde_json::Value> {
     let esp = &command.esp;
-    let mut config = Config::read(esp)?;
-    let image = fs::read(&command.image)
-        .with_context(|| format!("cannot read {}", command.image.display()))?;
-    ensure!(
-        image.starts_with(b"MZ"),
-        "{} is not a PE image",
-        command.image.display()
-    );
     let source = match &command.source {
         Some(source) => {
             Some(fs::read(source).with_context(|| format!("cannot read {}", source.display()))?)
@@ -215,24 +211,8 @@ pub fn install(command: &Install) -> Result<serde_json::Value> {
         None if esp.join(SOURCE).is_file() => None,
         None => bail!("pass --source: {} has no {SOURCE}", esp.display()),
     };
-
-    let (replaced, first) = config.remove_stela()?;
-    let index = first.unwrap_or(0);
-    config.tools()?.insert(index, entry());
-
-    fs::create_dir_all(esp.join(MOUNT))?;
-    fs::create_dir_all(esp.join(TOOLS))?;
-    // Keep the configuration from before Stela, not a previous install's.
-    if !esp.join(BACKUP).is_file() {
-        fs::write(esp.join(BACKUP), &config.bytes)?;
-    }
-    fs::write(esp.join(TOOLS).join(TOOL), &image)?;
-    if let Some(source) = &source {
-        fs::write(esp.join(SOURCE), source)?;
-    }
-    if let Some(options) = &command.options {
-        fs::write(esp.join(OPTIONS), options)?;
-    }
+    // Check the configuration before writing the payload.
+    Config::read(esp)?;
     // The payload goes before the entry, so OpenCore never lists Stela with
     // a half-written payload.
     let payload = match &command.ipsw {
@@ -248,26 +228,83 @@ pub fn install(command: &Install) -> Result<serde_json::Value> {
         )?),
         None => None,
     };
+    let mut report = add_mount(
+        esp,
+        &command.image,
+        source.as_deref(),
+        command.options.as_deref(),
+    )?;
+    report["payload"] = json!(payload);
+    Ok(report)
+}
+
+/// Copy the tool, the ARM source when given and the options, then add the
+/// entry. `stela setup` uses this without a source: install mode runs none.
+pub(crate) fn add_mount(
+    esp: &Path,
+    image_path: &Path,
+    source: Option<&[u8]>,
+    options: Option<&str>,
+) -> Result<serde_json::Value> {
+    let mut config = Config::read(esp)?;
+    let image =
+        fs::read(image_path).with_context(|| format!("cannot read {}", image_path.display()))?;
+    ensure!(
+        image.starts_with(b"MZ"),
+        "{} is not a PE image",
+        image_path.display()
+    );
+    let (replaced, first) = config.remove_stela()?;
+    let index = first.unwrap_or(0);
+    config.tools()?.insert(index, entry());
+
+    fs::create_dir_all(esp.join(MOUNT))?;
+    fs::create_dir_all(esp.join(TOOLS))?;
+    // Keep the configuration from before Stela, not a previous install's.
+    if !esp.join(BACKUP).is_file() {
+        fs::write(esp.join(BACKUP), &config.bytes)?;
+    }
+    fs::write(esp.join(TOOLS).join(TOOL), &image)?;
+    if let Some(source) = source {
+        fs::write(esp.join(SOURCE), source)?;
+    }
+    if let Some(options) = options {
+        fs::write(esp.join(OPTIONS), options)?;
+    }
     // The entry goes in last, so OpenCore never lists a missing tool.
     config.write()?;
     Ok(json!({
-        "payload": payload,
         "config": config.path,
         "backup": esp.join(BACKUP),
         "entry": index,
         "replaced": replaced,
         "tool": esp.join(TOOLS).join(TOOL),
-        "source": esp.join(SOURCE),
+        "source": esp.join(SOURCE).is_file().then(|| esp.join(SOURCE)),
         "options": esp.join(OPTIONS).is_file().then(|| esp.join(OPTIONS)),
     }))
+}
+
+/// Paths relative to the ESP that `install` writes, for reports.
+pub(crate) const INSTALLED: [&str; 4] = ["EFI/OC/Tools/Stela.efi", OPTIONS, SOURCE, BACKUP];
+
+/// Check that `uninstall` would understand this ESP, without changing it.
+pub(crate) fn check_config(esp: &Path) -> Result<()> {
+    Config::read(esp).map(|_| ())
 }
 
 /// Remove the entry and the files `install` wrote, and return a report.
 pub fn uninstall(esp: &Path) -> Result<serde_json::Value> {
     let mut config = Config::read(esp)?;
     let (removed, _) = config.remove_stela()?;
-    if removed > 0 {
-        config.write()?;
+    // When the entry was the only change, the backup's own bytes go back.
+    let backup = fs::read(esp.join(BACKUP)).ok().filter(|bytes| {
+        Value::from_reader(Cursor::new(bytes)).is_ok_and(|backup| backup == config.root)
+    });
+    match backup {
+        Some(bytes) if bytes != config.bytes => config.restore(&bytes)?,
+        Some(_) => {}
+        None if removed > 0 => config.write()?,
+        None => {}
     }
     let mut files = Vec::new();
     for file in [

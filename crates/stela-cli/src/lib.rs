@@ -13,6 +13,7 @@ mod input;
 mod loader;
 pub mod registry;
 mod restore;
+mod setup;
 
 #[derive(Parser)]
 #[command(
@@ -74,6 +75,8 @@ pub(crate) enum Command {
     /// Prepare the kernel boot bundle that the UEFI mount loads.
     #[command(subcommand)]
     Boot(boot::BootCommand),
+    /// Prepare an OpenCore USB to install macOS 27 with Stela, or undo it.
+    Setup(setup::Setup),
     /// Add the UEFI mount to an OpenCore EFI folder, or remove it.
     #[command(subcommand)]
     Efi(efi::EfiCommand),
@@ -104,6 +107,7 @@ impl Command {
             Self::DecryptAea(command) => command.run(),
             Self::ExtractGuestFiles(command) => command.run(),
             Self::Boot(command) => command.run(),
+            Self::Setup(command) => command.run(),
             Self::Efi(command) => command.run(),
         }
     }
