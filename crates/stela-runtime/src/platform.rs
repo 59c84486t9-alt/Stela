@@ -4,6 +4,8 @@
 pub(crate) mod apple;
 pub(crate) mod cpu;
 pub(crate) mod memory;
+#[cfg(target_arch = "x86_64")]
+pub mod pc;
 pub(crate) mod sync;
 pub(crate) mod unwind;
 

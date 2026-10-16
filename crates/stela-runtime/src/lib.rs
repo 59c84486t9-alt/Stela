@@ -24,6 +24,9 @@ pub mod mach;
 pub mod memory;
 pub mod pauth;
 mod platform;
+/// Host PC storage for the UEFI mount after ExitBootServices.
+#[cfg(target_arch = "x86_64")]
+pub use platform::pc;
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 pub mod freestanding {
     pub use crate::execution::boot_frames::FrameError as BootStorageError;
