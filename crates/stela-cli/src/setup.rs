@@ -52,7 +52,8 @@ pub(crate) struct Setup {
     #[arg(long)]
     download_dir: Option<PathBuf>,
     /// The disk to install on: its serial number, or `guid:` and its GPT
-    /// disk GUID. Run without it to list this computer's disks.
+    /// disk GUID. Run without it to list this computer's disks. Not used
+    /// with `--verify-only`, which writes no disk.
     #[arg(long)]
     target: Option<String>,
     /// A volume of the USB for the payload, when the EFI partition is small.
@@ -65,7 +66,7 @@ pub(crate) struct Setup {
     #[arg(long, value_parser = parse_bytes, default_value = "64G")]
     min_macos_size: u64,
     /// Only verify the payload at boot; never write the target.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "target")]
     verify_only: bool,
     /// The `stela.efi` to install; found beside `stela` or in the build tree
     /// by default.
@@ -181,7 +182,8 @@ struct Plan {
     product_version: String,
     build: String,
     model: String,
-    target: TargetId,
+    /// None in verify-only mode, which writes no disk.
+    target: Option<TargetId>,
     payload_volume: PathBuf,
     layout: PayloadLayout,
     payload_bytes: u64,
@@ -528,14 +530,20 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         command.usb.display()
     );
     let usb_disk = host.volume(&esp)?.disk;
-    let Some(target) = &command.target else {
-        bail!(
-            "Choose the disk to install on with --target.\n{}",
+    let (target, mut notes) = match (&command.target, command.verify_only) {
+        (Some(_), true) => bail!("--verify-only writes no disk, so it takes no --target"),
+        (None, true) => (None, Vec::new()),
+        (None, false) => bail!(
+            "Choose the disk to install on with --target, or pass --verify-only to check \
+             the payload without one.\n{}",
             candidates(host, usb_disk.as_deref())?
-        );
+        ),
+        (Some(target), false) => {
+            let target = parse_target(target)?;
+            let note = check_target(host, &target, usb_disk.as_deref())?;
+            (Some(target), vec![note])
+        }
     };
-    let target = parse_target(target)?;
-    let mut notes = vec![check_target(host, &target, usb_disk.as_deref())?];
     let size = restore::payload::size(&ipsw, &command.model)?;
     if size.aea_members > 0 {
         notes.push(format!(
@@ -574,19 +582,22 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         &size,
         bundle_sizes.iter().map(|(_, bytes)| bytes).sum(),
     )?;
-    let mode = if command.verify_only {
-        "verify"
-    } else {
-        "stage"
+    // Verify mode reads only the payload; the target and storage sizes are
+    // for staging.
+    let options = match &target {
+        None => format!(
+            "--install-mode verify --install-build {}\n",
+            size.product_build
+        ),
+        Some(target) => format!(
+            "--install-mode stage --install-build {} {} --install-cache-bytes {} \
+             --install-min-apple-bytes {}\n",
+            size.product_build,
+            target.option(),
+            command.cache_size,
+            command.min_macos_size
+        ),
     };
-    let options = format!(
-        "--install-mode {mode} --install-build {} {} --install-cache-bytes {} \
-         --install-min-apple-bytes {}\n",
-        size.product_build,
-        target.option(),
-        command.cache_size,
-        command.min_macos_size
-    );
     Ok(Plan {
         esp,
         ipsw,
@@ -631,7 +642,7 @@ fn prepare_bundles(ipsw: &Path, model: &str, directory: &Path) -> Result<Vec<(St
     Ok(sizes)
 }
 
-fn describe(plan: &Plan, verify_only: bool) -> Result<String> {
+fn describe(plan: &Plan) -> Result<String> {
     let mut text = String::new();
     writeln!(
         text,
@@ -669,16 +680,13 @@ fn describe(plan: &Plan, verify_only: bool) -> Result<String> {
         "  stela.cfg      {}",
         plan.esp.join("EFI/stela/stela.cfg").display()
     )?;
-    writeln!(
-        text,
-        "  target         {}{}",
-        plan.target,
-        if verify_only {
-            " (verify only: nothing is written to it)"
-        } else {
-            ""
-        }
-    )?;
+    match &plan.target {
+        Some(target) => writeln!(text, "  target         {target}")?,
+        None => writeln!(
+            text,
+            "  target         none: verify only, no disk is written"
+        )?,
+    }
     for note in &plan.notes {
         writeln!(text, "  note           {note}")?;
     }
@@ -698,7 +706,7 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
         _ => bail!("pass --ipsw IPSW, or --fetch to download macOS 27 from Apple"),
     };
     let plan = plan(environment, &command, ipsw)?;
-    let mut report = describe(&plan, command.verify_only)?;
+    let mut report = describe(&plan)?;
     if command.dry_run {
         report.push_str("Dry run: nothing was changed.\n");
         return Ok(report);
@@ -752,7 +760,10 @@ fn apply(plan: &Plan) -> Result<()> {
         kind: RECORD_KIND.into(),
         build: plan.build.clone(),
         model: plan.model.clone(),
-        target: plan.target.to_string(),
+        target: plan
+            .target
+            .as_ref()
+            .map_or_else(|| "none (verify only)".into(), ToString::to_string),
         esp: plan.esp.clone(),
         payload_volume: plan.payload_volume.clone(),
         payload_directory: plan.payload_directory(),
@@ -1185,6 +1196,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("internal disk"), "{error}");
+    }
+
+    #[test]
+    fn verify_only_needs_no_target_and_names_none_in_stela_cfg() {
+        let f = fixture(64 * GIB, false);
+        let mut verify = command(&f, &f.esp, None);
+        verify.verify_only = true;
+        let report = setup(&environment(&f.host), verify).unwrap();
+        assert!(report.contains("no disk is written"), "{report}");
+        let options = fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
+        assert!(options.starts_with("--install-mode verify --install-build"));
+        assert!(
+            !options.contains("target") && !options.contains("cache"),
+            "{options}"
+        );
+        uninstall(&environment(&f.host), &f.esp, false).unwrap();
+        let mut both = command(&f, &f.esp, Some("EMPTY2"));
+        both.verify_only = true;
+        let error = setup(&environment(&f.host), both).unwrap_err().to_string();
+        assert!(error.contains("takes no --target"), "{error}");
     }
 
     #[test]
