@@ -48,7 +48,7 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct Run {
-    /// Packaged image; defaults to the latest release build.
+    /// Packaged image; defaults to a fresh release build.
     #[arg(long)]
     image: Option<PathBuf>,
     /// Original ARM bytes loaded as the Multiboot module.
@@ -217,9 +217,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         arguments.timeout > 0.0 && arguments.timeout <= MAX_TIMEOUT_SECONDS,
         "timeout must be in (0, {MAX_TIMEOUT_SECONDS}] seconds"
     );
-    let image = arguments
-        .image
-        .unwrap_or_else(|| profile_directory(true).join(IMAGE));
+    let image = match arguments.image {
+        Some(image) => image,
+        None => build(true)?,
+    };
     let output = arguments.output;
     if output.exists() {
         bail!("{} already exists", output.display());
