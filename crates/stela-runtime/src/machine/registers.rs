@@ -147,6 +147,10 @@ pub mod encodings {
         APSTS_EL1 = 3, 6, 15, 12, 4;
         KERNELKEYLO_EL1 = 3, 4, 15, 1, 0;
         KERNELKEYHI_EL1 = 3, 4, 15, 1, 1;
+        // Apple's non-speculative virtual count (XNU `machine_routines.c`
+        // KERNEL_CNTVCTSS_EL0: "S3_4_C15_C10_6 and ACNTVCT_EL0 have identical
+        // encodings"; m1n1 CNTVCT_ALIAS_EL0).
+        CNTVCT_ALIAS_EL0 = 3, 4, 15, 10, 6;
     }
 }
 use encodings::*;
@@ -284,8 +288,10 @@ impl Cpu {
             CNTFRQ_EL0 => allowed(cntkctl & (CNTKCTL_EL0PCTEN | CNTKCTL_EL0VCTEN) != 0),
             CNTPCT_EL0 | CNTPCTSS_EL0 if read_only => Some(Outcome::Undefined),
             CNTPCT_EL0 | CNTPCTSS_EL0 => allowed(cntkctl & CNTKCTL_EL0PCTEN != 0),
-            CNTVCT_EL0 | CNTVCTSS_EL0 if read_only => Some(Outcome::Undefined),
-            CNTVCT_EL0 | CNTVCTSS_EL0 => allowed(cntkctl & CNTKCTL_EL0VCTEN != 0),
+            CNTVCT_EL0 | CNTVCTSS_EL0 | CNTVCT_ALIAS_EL0 if read_only => Some(Outcome::Undefined),
+            CNTVCT_EL0 | CNTVCTSS_EL0 | CNTVCT_ALIAS_EL0 => {
+                allowed(cntkctl & CNTKCTL_EL0VCTEN != 0)
+            }
             CNTP_TVAL_EL0 | CNTP_CTL_EL0 | CNTP_CVAL_EL0 => allowed(cntkctl & CNTKCTL_EL0PTEN != 0),
             CNTV_TVAL_EL0 | CNTV_CTL_EL0 | CNTV_CVAL_EL0 => allowed(cntkctl & CNTKCTL_EL0VTEN != 0),
             _ => Some(Outcome::Undefined),
@@ -334,7 +340,7 @@ impl Cpu {
             TPIDRRO_EL0 => system.tpidrro_el0,
             CNTKCTL_EL1 => system.cntkctl,
             CNTFRQ_EL0 => environment.profile.counter_frequency,
-            CNTPCT_EL0 | CNTVCT_EL0 | CNTPCTSS_EL0 | CNTVCTSS_EL0 => now,
+            CNTPCT_EL0 | CNTVCT_EL0 | CNTPCTSS_EL0 | CNTVCTSS_EL0 | CNTVCT_ALIAS_EL0 => now,
             CNTP_TVAL_EL0 => system.physical_timer.read_value(now),
             CNTP_CTL_EL0 => system.physical_timer.read_control(now),
             CNTP_CVAL_EL0 => system.physical_timer.compare(),
@@ -505,6 +511,9 @@ impl Cpu {
             encoding if impdef::lookup(encoding).is_some() => {
                 let entry = impdef::lookup(encoding).expect("checked");
                 self.system.impdef.write(entry, value);
+            }
+            CNTPCT_EL0 | CNTVCT_EL0 | CNTPCTSS_EL0 | CNTVCTSS_EL0 | CNTVCT_ALIAS_EL0 => {
+                return Outcome::Undefined;
             }
             _ if is_identification(encoding) => return Outcome::Undefined,
             _ => return Outcome::Refused(Refusal::Unimplemented),

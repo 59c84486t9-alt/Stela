@@ -5,8 +5,9 @@
 //! - `Storage`: software saves and restores the register around its own
 //!   changes, so reads must return the last value written. A read before the
 //!   first write refuses, because the reset value is unknown.
-//! - `Tuning`: a core tuning ("chicken bit") register named by m1n1
-//!   `cpu_regs.h`. Software reads it, sets or clears bits and writes it back.
+//! - `Tuning`: a core tuning ("chicken bit") register, named by m1n1
+//!   `cpu_regs.h` or used only in the same boot-time pattern. Software reads
+//!   it, sets or clears bits and writes it back.
 //!   The reset value is unknown and taken as 0 (inference). No bit has an
 //!   effect here.
 //!
@@ -50,7 +51,51 @@ const SPTM_CONTEXT: &str = "SPTM 26A434 saves and restores it with SCTLR_EL1 and
 const SPTM_KEY_WRITES: &str = "SPTM 26A434 writes it once per CPU with a PAC-key-derived \
     value after the architectural PAC keys and reads it nowhere; TXM and the kernel never touch it";
 
+const M1N1_TUNING: &str = "m1n1 cpu_regs.h names it a core tuning (HID) register; SPTM 26A434 \
+    sets or clears bits with read-modify-write at boot";
+
+const SPTM_CORE_TUNING: &str = "no public name; SPTM 26A434 clears one bit with \
+    read-modify-write at boot, selected by MPIDR core type next to its HID writes";
+
 pub const TABLE: &[Entry] = &[
+    entry(
+        4,
+        15,
+        0,
+        1,
+        "S3_4_C15_C0_1 (unnamed)",
+        Class::Tuning,
+        SPTM_CORE_TUNING,
+    ),
+    entry(
+        4,
+        15,
+        0,
+        3,
+        "S3_4_C15_C0_3 (unnamed)",
+        Class::Tuning,
+        SPTM_CORE_TUNING,
+    ),
+    entry(0, 15, 0, 1, "EHID0", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 0, 3, "HID26", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 0, 4, "HID27", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 1, 0, "HID1", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 1, 3, "HID21", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 3, 0, "HID3", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 4, 0, "HID4", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 4, 1, "EHID4", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 5, 0, "HID5", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 7, 0, "HID7", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 9, 0, "HID9", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 9, 1, "EHID9", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 10, 0, "HID10", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 10, 1, "EHID10", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 11, 0, "HID11", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 11, 2, "HID18", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 11, 3, "EHID18", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 14, 0, "HID13", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 15, 0, "HID14", Class::Tuning, M1N1_TUNING),
+    entry(0, 15, 15, 2, "HID16", Class::Tuning, M1N1_TUNING),
     entry(
         4,
         15,
