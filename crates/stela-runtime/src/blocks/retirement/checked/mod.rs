@@ -28,7 +28,7 @@ use crate::{
     memory::domain::MemoryExecutionLoan,
 };
 pub(crate) use entry_controls::ProcessEntryControls;
-pub(crate) use m0::{M0SourceInput, M0WriteSourceInput};
+pub(crate) use m0::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
 pub(crate) use provider::CheckedProcessOwner;
 use source::{BoundSource, ReturnedTerminal};
 use stela_compiler::{
@@ -37,6 +37,12 @@ use stela_compiler::{
 };
 
 pub(crate) struct OwnedRunRequest {
+    #[cfg(all(
+        test,
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub pair_read_fixture: Option<m0::PairReadFixture>,
     pub stop_pc: Option<GuestAddress>,
     pub block_budget: usize,
     #[cfg(all(
@@ -79,6 +85,7 @@ pub(crate) struct OwnedRunOutcome {
     pub last_native_observation: Option<NativeObservation>,
     pub last_m0_observation: Option<m0::M0Observation>,
     pub last_m0_write_observation: Option<m0::M0WriteObservation>,
+    pub last_m0_pair_read_observation: Option<m0::M0PairReadObservation>,
     pub last_el1_register_observation: Option<el1_registers::RegisterObservation>,
     pub last_el1_system_observation: Option<el1_system::SystemObservation>,
     pub last_system_effect_observation: Option<system_effects::SystemEffectObservation>,
@@ -175,6 +182,7 @@ impl BlockRuntime {
         let mut last_native_observation = None;
         let mut last_m0_observation = None;
         let mut last_m0_write_observation = None;
+        let mut last_m0_pair_read_observation = None;
         let mut last_el1_register_observation = None;
         let mut last_el1_system_observation = None;
         let mut last_system_effect_observation = None;
@@ -328,6 +336,46 @@ impl BlockRuntime {
                     Err(error) => break OwnedStop::Indeterminate(error.to_string()),
                 }
             }
+            if self.profile == BlockProfile::El1PlatformV1
+                && matches!(
+                    bound.el1_platform_intent(),
+                    Ok(stela_compiler::block::el1_platform::Intent::Read64Pair(_))
+                )
+            {
+                match active.execute_m0_read64_pair(
+                    &bound,
+                    &mut accounting,
+                    &mut last_m0_pair_read_observation,
+                    &mut settled_prefixes,
+                    #[cfg(all(
+                        test,
+                        target_arch = "x86_64",
+                        any(target_os = "macos", target_os = "linux")
+                    ))]
+                    request.pair_read_fixture.as_ref(),
+                ) {
+                    Ok(m0::M0Step::Committed) => continue,
+                    Ok(m0::M0Step::SourceResourcesBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 pair read original resources unavailable".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::SourceControlBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 pair read source/control qualification blocked".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::PreparationBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 pair read no-effect preparation blocked".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::Indeterminate(detail)) => {
+                        break OwnedStop::Indeterminate(detail);
+                    }
+                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                }
+            }
             if matches!(
                 self.profile,
                 BlockProfile::El1DirectBranchV1
@@ -425,6 +473,7 @@ impl BlockRuntime {
             last_native_observation,
             last_m0_observation,
             last_m0_write_observation,
+            last_m0_pair_read_observation,
             last_el1_register_observation,
             last_el1_system_observation,
             last_system_effect_observation,

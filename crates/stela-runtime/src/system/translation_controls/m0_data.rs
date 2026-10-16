@@ -7,12 +7,15 @@ use super::{PanFeatures, Presence, TranslationControls};
 use crate::{
     blocks::{
         InstalledM0SourceScope,
-        retirement::{M0SourceInput, M0WriteSourceInput},
+        retirement::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput},
     },
     memory::{
         domain::{
             MemoryExecutionLoan,
-            m0_read::M0Read64Intent,
+            m0_read::{
+                M0Read64Intent,
+                pair::{M0ReadMember, M0ReadPairIntent},
+            },
             m0_write::{M0WriteIntent, M0WriteMember},
             physical::PhysicalAddressSpace,
         },
@@ -444,6 +447,153 @@ impl TranslationControls {
             .qualify_source(self, original)
             .map_err(M0ControlError::SourceFetch)?;
         Ok(M0DataWriteLoan {
+            owner: self,
+            source: input,
+            outer,
+            generation: self.generation,
+            intent: input.intent(),
+        })
+    }
+}
+
+impl InputCurrency for M0PairReadSourceInput<'_, '_> {
+    fn validate(&self, owner: &TranslationControls) -> Result<(), M0ControlError> {
+        self.original().validate(owner)?;
+        self.validate_pair_profile()
+            .map_err(|error| M0ControlError::Source(error.to_string()))
+    }
+    fn physical(&self) -> &PhysicalAddressSpace {
+        self.original().physical()
+    }
+}
+trait PairReadCurrency: InputCurrency {
+    #[cfg(test)]
+    fn observed_identification(&self) -> Result<(u64, u64), M0ControlError>;
+    fn actual_system(&self) -> &SystemState;
+    fn actual_pstate(&self) -> u64;
+    #[cfg(test)]
+    fn source_generation(&self) -> u64;
+    #[cfg(test)]
+    fn actual_address_space(&self) -> Option<u64>;
+}
+impl PairReadCurrency for M0PairReadSourceInput<'_, '_> {
+    #[cfg(test)]
+    fn observed_identification(&self) -> Result<(u64, u64), M0ControlError> {
+        self.observed_pair_identification()
+            .map_err(|error| M0ControlError::Source(error.to_string()))
+    }
+    fn actual_system(&self) -> &SystemState {
+        self.original().actual_system()
+    }
+    fn actual_pstate(&self) -> u64 {
+        self.original().actual_pstate()
+    }
+    #[cfg(test)]
+    fn source_generation(&self) -> u64 {
+        self.original().source_generation()
+    }
+    #[cfg(test)]
+    fn actual_address_space(&self) -> Option<u64> {
+        self.original().actual_address_space()
+    }
+}
+/// Same actual source/control/identification/outer. No target is translated or
+/// read at mint. The physical session qualifies each member only when reached.
+pub(crate) struct M0DataPairReadLoan<'cpu> {
+    owner: &'cpu TranslationControls,
+    source: &'cpu dyn PairReadCurrency,
+    outer: &'cpu MemoryExecutionLoan,
+    generation: u64,
+    intent: M0ReadPairIntent,
+}
+impl M0DataPairReadLoan<'_> {
+    pub(crate) fn validate_current(
+        &self,
+        execution: &MemoryExecutionLoan,
+    ) -> Result<(), M0ControlError> {
+        if !std::ptr::eq(execution, self.outer) {
+            return Err(M0ControlError::DifferentExecutionLoan);
+        }
+        execution
+            .check_memory_system(&self.owner.memory)
+            .map_err(M0ControlError::Domain)?;
+        if self.owner.poisoned {
+            return Err(M0ControlError::Poisoned);
+        }
+        if self.owner.generation != self.generation {
+            return Err(M0ControlError::Source(
+                "M0 pair control generation differs".into(),
+            ));
+        }
+        self.source.validate(self.owner)
+    }
+    pub(crate) fn physical_space(&self) -> &PhysicalAddressSpace {
+        self.source.physical()
+    }
+    pub(crate) fn intent(&self) -> M0ReadPairIntent {
+        self.intent
+    }
+    pub(crate) fn qualify_member(
+        &self,
+        execution: &MemoryExecutionLoan,
+        member: M0ReadMember,
+    ) -> Result<stage1::Translation, M0ControlError> {
+        self.validate_current(execution)?;
+        let config = self
+            .owner
+            .current_m0_config(self.source.actual_system(), self.source.actual_pstate())?;
+        TranslationControls::derive_m0_read8(
+            &config,
+            self.physical_space(),
+            self.intent.source_pc.0,
+            self.intent.member(member),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn producer_observation(
+        &self,
+        execution: &MemoryExecutionLoan,
+    ) -> Result<serde_json::Value, M0ControlError> {
+        self.validate_current(execution)?;
+        Ok(
+            serde_json::json!({"source_pc":self.intent.source_pc.0,"source_word":self.intent.source_word,
+            "source_generation":self.source.source_generation(),"control_generation":self.generation,
+            "physical_domain_generation":self.physical_space().domain().generation().map_err(M0ControlError::Domain)?,
+            "actual_address_space":self.source.actual_address_space(),"actual_pre_pstate":self.source.actual_pstate(),
+            "same_original_outer":std::ptr::eq(execution,self.outer),"actual_identification_mmfr2_isar3":self.source.observed_identification()?,
+            "readbacks":{"sctlr_el1":self.owner.readbacks.sctlr_el1,"tcr_el1":self.owner.readbacks.tcr_el1,
+            "ttbr0_el1":self.owner.readbacks.ttbr0_el1,"ttbr1_el1":self.owner.readbacks.ttbr1_el1,"mair_el1":self.owner.readbacks.mair_el1}}),
+        )
+    }
+}
+impl TranslationControls {
+    pub(crate) fn loan_m0_read8_pair<'cpu>(
+        &'cpu self,
+        input: &'cpu M0PairReadSourceInput<'_, '_>,
+    ) -> Result<M0DataPairReadLoan<'cpu>, M0ControlError> {
+        let original = input.original();
+        original
+            .validate_source_current()
+            .map_err(|error| M0ControlError::Source(error.to_string()))?;
+        input
+            .validate_pair_profile()
+            .map_err(|error| M0ControlError::Source(error.to_string()))?;
+        self.current_m0_config(original.actual_system(), original.actual_pstate())?;
+        original
+            .validate_thread_current()
+            .map_err(|error| M0ControlError::Source(error.to_string()))?;
+        let outer = original.outer_execution();
+        outer
+            .check_memory_system(&self.memory)
+            .map_err(M0ControlError::Domain)?;
+        let scope = original.installed_source_scope();
+        if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
+            return Err(M0ControlError::WrongMemorySystem);
+        }
+        scope
+            .qualify_source(self, original)
+            .map_err(M0ControlError::SourceFetch)?;
+        Ok(M0DataPairReadLoan {
             owner: self,
             source: input,
             outer,

@@ -6,6 +6,17 @@
 //! This leaf owns no architectural bank, RAM, callback or monitor and performs
 //! no memory access. It cannot replace PhysicalAddressSpace or read_descriptor.
 
+#[path = "m0_read/pair.rs"]
+pub(crate) mod pair;
+#[path = "m0_read/pair_ram.rs"]
+mod pair_ram;
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(crate) use pair_ram::fixtures as pair_read_fixtures;
+pub(crate) use pair_ram::{
+    M0RamPairReadPlatformError, M0RamPairReadPrepared, M0RamPairReadProgress,
+    prepare_aligned_device_ram8_pair,
+};
+
 use crate::memory::stage1;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter,

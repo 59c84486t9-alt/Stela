@@ -71,6 +71,7 @@ fn exact_platform_source_keeps_effect_free_and_memory_intent_requirements_distin
         (0xd5034fdf, false),
         (0x58000040, true),
         (0xa9000440, true),
+        (0xa9400440, true),
     ] {
         let cache = tempfile::tempdir().unwrap();
         let mut runtime = BlockRuntime::new_with_profile(
@@ -86,7 +87,10 @@ fn exact_platform_source_keeps_effect_free_and_memory_intent_requirements_distin
         let bound = BoundSource::new(&runtime, BASE).unwrap();
         let intent = bound.el1_platform_intent().unwrap();
         assert_eq!(
-            matches!(intent, Intent::LiteralRead64(_) | Intent::Write64Pair(_)),
+            matches!(
+                intent,
+                Intent::LiteralRead64(_) | Intent::Write64Pair(_) | Intent::Read64Pair(_)
+            ),
             memory
         );
         assert_eq!(bound.memory_requirements().is_ok(), memory);

@@ -11,6 +11,7 @@ use crate::{
     blocks::{InstalledM0SourceScope, RunOutcome, ThreadState},
     memory::domain::{
         DataPolicy, MemoryExecutionLoan, MemoryThread,
+        m0_read::pair::{M0ReadPairIntent, M0ReadPairSource},
         m0_read::{M0RamReadPlatformError, M0Read64Intent, M0Read64Source},
         m0_write::{M0WriteIntent, M0WriteSource},
         physical::BoundPhysicalInstruction,
@@ -28,7 +29,15 @@ use stela_compiler::{
 };
 
 mod callback;
+mod pair_read;
 mod write;
+pub(super) use pair_read::M0PairReadObservation;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use pair_read::PairReadFixture;
 pub(super) use write::M0WriteObservation;
 mod session;
 use session::{M0NativeReport, M0SessionFailure, NativeM0Session};
@@ -82,6 +91,7 @@ pub(crate) struct M0SourceInput<'source, 'native> {
 enum M0SourceIntent {
     Read(M0Read64Intent),
     Write(M0WriteIntent),
+    PairRead(M0ReadPairIntent),
 }
 
 /// Same original source/currency input, restricted to an actual write descriptor.
@@ -128,8 +138,84 @@ impl<'source, 'native> M0WriteSourceInput<'source, 'native> {
     pub(crate) fn intent(&self) -> M0WriteIntent {
         match self.original.intent {
             M0SourceIntent::Write(intent) => intent,
-            M0SourceIntent::Read(_) => unreachable!("private write-only constructor"),
+            M0SourceIntent::Read(_) | M0SourceIntent::PairRead(_) => {
+                unreachable!("private write-only constructor")
+            }
         }
+    }
+}
+
+/// Actual pair input; only original Active lends platform identification.
+/// Copying descriptive intent cannot mint this sealed same-PE source loan.
+pub(crate) struct M0PairReadSourceInput<'source, 'native> {
+    original: M0SourceInput<'source, 'native>,
+    platform: &'native super::el1_system::El1PlatformControls,
+}
+impl<'source, 'native> M0PairReadSourceInput<'source, 'native> {
+    // Explicit original resources are split borrows of one retained PE.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::blocks::retirement::checked) fn new(
+        _: &ConsumerKey,
+        bound: &'source BoundSource<'source>,
+        system: &'native SystemState,
+        outer: &'native MemoryExecutionLoan,
+        thread: &'native dyn M0ThreadCurrency,
+        installed: &'native InstalledM0SourceScope<'native>,
+        platform: &'native super::el1_system::El1PlatformControls,
+        actual_registers: &GuestState,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            bound.source.len() == INSTRUCTION_BYTES,
+            "M0 pair source extent differs"
+        );
+        let word = u32::from_le_bytes(bound.source.try_into()?);
+        let instruction = Decoder
+            .lift(bound.entry.entry(), word)
+            .map_err(|error| anyhow::anyhow!("M0 pair canonical decode: {error:?}"))?;
+        let source = M0ReadPairSource::from_source(&instruction, word)
+            .map_err(|error| anyhow::anyhow!("M0 pair canonical shape: {error:?}"))?;
+        let result = Self {
+            original: M0SourceInput {
+                bound,
+                system,
+                outer,
+                thread,
+                installed,
+                intent: M0SourceIntent::PairRead(source.intent(actual_registers)),
+                pstate: system.pstate(actual_registers),
+            },
+            platform,
+        };
+        result.original.validate_source_current()?;
+        result.validate_pair_profile()?;
+        Ok(result)
+    }
+    pub(crate) fn original(&self) -> &M0SourceInput<'source, 'native> {
+        &self.original
+    }
+    pub(crate) fn intent(&self) -> M0ReadPairIntent {
+        match self.original.intent {
+            M0SourceIntent::PairRead(intent) => intent,
+            M0SourceIntent::Read(_) | M0SourceIntent::Write(_) => {
+                unreachable!("private pair-only constructor")
+            }
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn observed_pair_identification(&self) -> anyhow::Result<(u64, u64)> {
+        use crate::system::identification::Register;
+        Ok((
+            self.platform
+                .identification()
+                .read(Register::IdAa64Mmfr2El1)?,
+            self.platform
+                .identification()
+                .read(Register::IdAa64Isar3El1)?,
+        ))
+    }
+    pub(crate) fn validate_pair_profile(&self) -> anyhow::Result<()> {
+        self.platform
+            .check_pair_read_profile(self.original.actual_system())
     }
 }
 
@@ -151,25 +237,28 @@ impl M0SourceInput<'_, '_> {
     pub(crate) fn read_intent(&self) -> Option<M0Read64Intent> {
         match self.intent {
             M0SourceIntent::Read(intent) => Some(intent),
-            M0SourceIntent::Write(_) => None,
+            M0SourceIntent::Write(_) | M0SourceIntent::PairRead(_) => None,
         }
     }
     pub(crate) fn source_pc(&self) -> GuestAddress {
         match self.intent {
             M0SourceIntent::Read(intent) => intent.source_pc,
             M0SourceIntent::Write(intent) => intent.source_pc,
+            M0SourceIntent::PairRead(intent) => intent.source_pc,
         }
     }
     pub(crate) fn source_word(&self) -> u32 {
         match self.intent {
             M0SourceIntent::Read(intent) => intent.source_word,
             M0SourceIntent::Write(intent) => intent.source_word,
+            M0SourceIntent::PairRead(intent) => intent.source_word,
         }
     }
     fn next_pc(&self) -> GuestAddress {
         match self.intent {
             M0SourceIntent::Read(intent) => intent.next_pc,
             M0SourceIntent::Write(intent) => intent.next_pc,
+            M0SourceIntent::PairRead(intent) => intent.next_pc,
         }
     }
     pub(crate) fn installed_source_scope(&self) -> &InstalledM0SourceScope<'_> {
@@ -261,6 +350,16 @@ impl M0SourceInput<'_, '_> {
                 }
                 .map_err(|failure| anyhow::anyhow!("M0 read source shape: {failure:?}"))?;
                 source.requirements()
+            }
+            M0SourceIntent::PairRead(_) => {
+                anyhow::ensure!(
+                    self.bound.runtime.profile()
+                        == stela_compiler::block::BlockProfile::El1PlatformV1,
+                    "M0 pair read requires immutable platform cohort"
+                );
+                M0ReadPairSource::from_source(&instruction, word)
+                    .map_err(|failure| anyhow::anyhow!("M0 pair read source shape: {failure:?}"))?
+                    .requirements()
             }
             M0SourceIntent::Write(_) => {
                 anyhow::ensure!(

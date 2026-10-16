@@ -247,6 +247,12 @@ fn actual_original_firmware_integer_prefix_full_state_and_pc() {
                         target_arch = "x86_64",
                         any(target_os = "macos", target_os = "linux")
                     ))]
+                    pair_read_fixture: None,
+                    #[cfg(all(
+                        test,
+                        target_arch = "x86_64",
+                        any(target_os = "macos", target_os = "linux")
+                    ))]
                     verify_pair_alias_monitor: false,
                     stop_pc: Some(TARGET_PC),
                     block_budget: 5,
@@ -275,6 +281,12 @@ fn actual_original_firmware_integer_prefix_full_state_and_pc() {
                 let retry = runtime.run_owned(
                     owner.loan(),
                     OwnedRunRequest {
+                        #[cfg(all(
+                            test,
+                            target_arch = "x86_64",
+                            any(target_os = "macos", target_os = "linux")
+                        ))]
+                        pair_read_fixture: None,
                         #[cfg(all(
                             test,
                             target_arch = "x86_64",
@@ -326,6 +338,12 @@ fn actual_original_firmware_integer_prefix_full_state_and_pc() {
             let refused = runtime.run_owned(
                 owner.loan(),
                 OwnedRunRequest {
+                    #[cfg(all(
+                        test,
+                        target_arch = "x86_64",
+                        any(target_os = "macos", target_os = "linux")
+                    ))]
+                    pair_read_fixture: None,
                     #[cfg(all(
                         test,
                         target_arch = "x86_64",

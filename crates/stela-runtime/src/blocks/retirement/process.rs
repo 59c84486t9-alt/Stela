@@ -137,6 +137,12 @@ pub(crate) unsafe fn run_protected_services(
                 target_arch = "x86_64",
                 any(target_os = "macos", target_os = "linux")
             ))]
+            pair_read_fixture: None,
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
             verify_pair_alias_monitor: false,
             stop_pc: stop,
             block_budget: budget,

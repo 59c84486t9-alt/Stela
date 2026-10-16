@@ -1,4 +1,4 @@
-//! Genuine installed-context/source lease for the single M0 LDR64 cohort.
+//! Genuine installed-context/source lease for bounded M0 data cohorts.
 //!
 //! Construction accepts only the original private resources created by real
 //! Initial publication over the actual fresh M0 runtime. No Config, copied
@@ -10,7 +10,7 @@ use crate::{
     blocks::retirement::M0SourceInput,
     memory::{
         domain::{
-            m0_read::M0Read64Source,
+            m0_read::{M0Read64Source, pair::M0ReadPairSource},
             m0_write::M0WriteSource,
             physical::{BoundPhysicalInstruction, ImmutableCodeBacking, PhysicalAddressSpace},
         },
@@ -134,28 +134,11 @@ impl<'run> InstalledM0SourceScope<'run> {
         profile::check_immutable_fetch(translation, raw_pc, state)
     }
 
-    /// Separately reviewed exact ordinary LDR64 shape. The old five-register
-    /// and ISB source whitelist remains unchanged and is never bypassed for it.
+    /// Exact canonical read/write source shapes under the installed immutable
+    /// cohort. Shape classification alone grants no data or control authority;
+    /// the separate typed System/ISB source lane retains its own qualifier.
     pub(crate) fn check_source_word(&self, pc: u64, word: u32) -> Result<(), &'static str> {
-        let instruction = Decoder
-            .lift(GuestAddress(pc), word)
-            .map_err(|_| "installed M0 source decode unavailable")?;
-        if self.sources.compiler_profile() == stela_compiler::block::BlockProfile::El1PlatformV1
-            && M0WriteSource::from_source(&instruction, word).is_ok()
-        {
-            return Ok(());
-        }
-        if matches!(
-            self.sources.compiler_profile(),
-            stela_compiler::block::BlockProfile::El1M0IntegerV1
-                | stela_compiler::block::BlockProfile::El1PlatformV1
-        ) {
-            M0Read64Source::from_el1_integer_source(&instruction, word)
-        } else {
-            M0Read64Source::from_source(&instruction, word)
-        }
-        .map(|_| ())
-        .map_err(|_| "installed M0 source is outside the exact LDR64 shape")
+        check_data_source_word(self.sources.compiler_profile(), pc, word)
     }
 
     /// Re-fetch actual original bytes/Execute rights using the original installed
@@ -220,5 +203,73 @@ impl<'run> InstalledM0SourceScope<'run> {
     ) -> Result<(), &'static str> {
         self.qualify_source(owner, input)
             .map_err(|_| "installed M0 source/control/physical currency was lost")
+    }
+}
+
+/// Pure source-shape classification only; the opaque installed scope supplies
+/// the immutable profile. This confers no source/CPU/control/outer/read grant.
+fn check_data_source_word(
+    profile: stela_compiler::block::BlockProfile,
+    pc: u64,
+    word: u32,
+) -> Result<(), &'static str> {
+    let instruction = Decoder
+        .lift(GuestAddress(pc), word)
+        .map_err(|_| "installed M0 source decode unavailable")?;
+    if profile == stela_compiler::block::BlockProfile::El1PlatformV1
+        && (M0WriteSource::from_source(&instruction, word).is_ok()
+            || M0ReadPairSource::from_source(&instruction, word).is_ok())
+    {
+        return Ok(());
+    }
+    if matches!(
+        profile,
+        stela_compiler::block::BlockProfile::El1M0IntegerV1
+            | stela_compiler::block::BlockProfile::El1PlatformV1
+    ) {
+        M0Read64Source::from_el1_integer_source(&instruction, word)
+    } else {
+        M0Read64Source::from_source(&instruction, word)
+    }
+    .map(|_| ())
+    .map_err(|_| "installed M0 source is outside the exact LDR64 shape")
+}
+
+#[cfg(test)]
+mod pair_source_tests {
+    use super::*;
+    use stela_compiler::block::{BlockProfile, CheckedMemoryProfile};
+    const SOURCE_PC: u64 = 0x100000;
+    const LDP_X_OFFSET: u32 = 0xa9400440;
+    const LDP_X_PREINDEX: u32 = 0xa9c10440;
+    const LDP_X_POSTINDEX: u32 = 0xa8c10440;
+    const LDR_X_LITERAL: u32 = 0x58000040;
+    const STP_X_OFFSET: u32 = 0xa9000440;
+
+    #[test]
+    fn actual_installed_data_classifier_keeps_pair_read_in_immutable_platform_cohort() {
+        for word in [LDP_X_OFFSET, LDP_X_PREINDEX, LDP_X_POSTINDEX] {
+            check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, word).unwrap();
+            for profile in [
+                BlockProfile::El1M0IntegerV1,
+                BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged),
+            ] {
+                assert!(check_data_source_word(profile, SOURCE_PC, word).is_err());
+            }
+        }
+        // Preserve the two existing actual Platform memory source shapes.
+        check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, LDR_X_LITERAL).unwrap();
+        check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, STP_X_OFFSET).unwrap();
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn installed_pair_classifier_preserves_canonical_rejected_source_rows() {
+        for (name, word) in crate::memory::domain::m0_read::pair_read_fixtures::rejected_sources() {
+            assert!(
+                check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, word).is_err(),
+                "{name}"
+            );
+        }
     }
 }

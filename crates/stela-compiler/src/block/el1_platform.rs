@@ -13,6 +13,7 @@ pub enum Intent {
     LiteralRead64(el1_m0::LiteralRead64),
     System(system::SystemInstruction),
     Write64Pair(Write64Pair),
+    Read64Pair(Read64Pair),
 }
 
 /// Canonical pair metadata. This descriptor never grants a writable pointer.
@@ -69,8 +70,68 @@ impl Write64Pair {
     }
 }
 
+/// Canonical pair metadata. This descriptor never grants a readable pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Read64Pair {
+    source_pc: GuestAddress,
+    data: [Register; 2],
+    base: Register,
+    displacement: i32,
+    mode: AddressMode,
+}
+impl Read64Pair {
+    pub fn source_pc(self) -> GuestAddress {
+        self.source_pc
+    }
+    pub fn from_instruction(instruction: &Instruction) -> Option<Self> {
+        crate::x86_64::memory_store::checked_pair::Operand::from_m0_read_pair(
+            &instruction.operation,
+        )?;
+        let Operation::MemoryPair {
+            data,
+            base,
+            displacement,
+            mode,
+            ..
+        } = instruction.operation
+        else {
+            unreachable!("validated shared pair operand")
+        };
+        Some(Self {
+            source_pc: instruction.pc,
+            data,
+            base,
+            displacement,
+            mode,
+        })
+    }
+    fn operation(self) -> Operation {
+        Operation::MemoryPair {
+            transfer: crate::aarch64::MemoryTransfer::Load {
+                signed: false,
+                width: Width::X64,
+            },
+            bytes: size_of::<u64>() as u8,
+            data: self.data,
+            base: self.base,
+            displacement: self.displacement,
+            mode: self.mode,
+        }
+    }
+    pub fn requirements(self) -> MemoryRequirements {
+        let operand = crate::x86_64::memory_store::checked_pair::Operand::from_m0_read_pair(
+            &self.operation(),
+        )
+        .expect("private plan retained a canonical pair");
+        crate::x86_64::memory_store::checked_pair::requirements(&operand)
+    }
+}
+
 pub(super) fn validate_operation(operation: &Operation) -> Result<(), CompileError> {
-    if crate::x86_64::memory_store::checked_pair::Operand::from_m0_write_pair(operation).is_some() {
+    if crate::x86_64::memory_store::checked_pair::Operand::from_m0_write_pair(operation).is_some()
+        || crate::x86_64::memory_store::checked_pair::Operand::from_m0_read_pair(operation)
+            .is_some()
+    {
         return Ok(());
     }
     match operation {
@@ -148,6 +209,7 @@ enum Body {
     },
     Literal(el1_m0::Plan),
     Write(Instruction, Write64Pair),
+    Read(Instruction, Read64Pair),
     System(system::SystemInstruction),
 }
 
@@ -178,6 +240,15 @@ impl Plan {
                 ));
             }
             Body::Write(instruction.clone(), write)
+        } else if let Some(instruction) = parsed.instructions.first()
+            && let Some(read) = Read64Pair::from_instruction(instruction)
+        {
+            if parsed.instructions.len() != 1 || parsed.terminal.is_some() {
+                return Err(CompileError(
+                    "M0 pair read requires one separate complete attempt".into(),
+                ));
+            }
+            Body::Read(instruction.clone(), read)
         } else if parsed
             .instructions
             .iter()
@@ -204,12 +275,14 @@ impl Plan {
             },
             Body::System(instruction) => Intent::System(*instruction),
             Body::Write(_, write) => Intent::Write64Pair(*write),
+            Body::Read(_, read) => Intent::Read64Pair(*read),
         }
     }
     pub(super) fn requirements(&self) -> Option<MemoryRequirements> {
         match &self.body {
             Body::Literal(plan) => plan.requirements(),
             Body::Write(_, write) => Some(write.requirements()),
+            Body::Read(_, read) => Some(read.requirements()),
             Body::Registers { .. } | Body::System(_) => None,
         }
     }
@@ -218,6 +291,9 @@ impl Plan {
             Body::Literal(plan) => plan.emit(target),
             Body::Write(instruction, _) => {
                 crate::x86_64::block::el1_m0::emit_write_pair(&instruction, target)
+            }
+            Body::Read(instruction, _) => {
+                crate::x86_64::block::el1_m0::emit_read_pair(&instruction, target)
             }
             Body::Registers {
                 instructions,
@@ -390,6 +466,9 @@ mod tests {
             ("pair_offset", 0xa9000440, 2),
             ("pair_preindex", 0xa9800440, 2),
             ("pair_postindex", 0xa8800440, 2),
+            ("pair_read_offset", 0xa9400440, 4),
+            ("pair_read_preindex", 0xa9c00440, 4),
+            ("pair_read_postindex", 0xa8c00440, 4),
             ("daif", DAIFSET, 3),
             ("vbar_write", MSR_VBAR_X10, 3),
             ("vbar_read", 0xd538c00b, 3),
@@ -406,14 +485,24 @@ mod tests {
                 Intent::LiteralRead64(_) => 1,
                 Intent::Write64Pair(_) => 2,
                 Intent::System(_) => 3,
+                Intent::Read64Pair(_) => 4,
             };
             assert_eq!(actual_lane, lane, "{name}");
             assert_eq!(plan.source_bytes(), size_of::<u32>(), "{name}");
             assert_eq!(
                 plan.memory_requirements().is_some(),
-                lane == 1 || lane == 2,
+                lane == 1 || lane == 2 || lane == 4,
                 "{name}"
             );
+            if lane == 4 {
+                let requirements = plan.memory_requirements().unwrap();
+                assert_eq!(requirements.required_host_caps, 0, "{name}");
+                assert_eq!(
+                    requirements.required_profile,
+                    crate::context::memory::profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2,
+                    "{name}"
+                );
+            }
             let block = plan
                 .compile()
                 .unwrap_or_else(|error| panic!("{name}: {error:?}"));
@@ -424,7 +513,7 @@ mod tests {
             0xa90007e0,
             0xa8000440,
             0x29000440,
-            0xa9400440,
+            0xa94007e0,
             0x18000040,
             0x98000040,
             0x1c000040,

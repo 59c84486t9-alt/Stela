@@ -225,7 +225,9 @@ impl<'code> BoundSource<'code> {
                         requirements.is_none(),
                         "effect-free EL1 platform carrier unexpectedly requires memory"
                     ),
-                    Some(Intent::LiteralRead64(_) | Intent::Write64Pair(_)) => anyhow::ensure!(
+                    Some(
+                        Intent::LiteralRead64(_) | Intent::Write64Pair(_) | Intent::Read64Pair(_),
+                    ) => anyhow::ensure!(
                         requirements.is_some(),
                         "EL1 platform memory intent requirements absent"
                     ),

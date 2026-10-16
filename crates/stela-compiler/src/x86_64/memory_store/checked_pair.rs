@@ -64,6 +64,7 @@ pub(crate) struct Operand {
 enum Profile {
     NormalWb(CheckedMemoryProfile),
     M0DeviceWrite8Pair,
+    M0DeviceRead8PairNoLse2,
 }
 
 impl Operand {
@@ -147,6 +148,40 @@ impl Operand {
         operand.is_valid().then_some(operand)
     }
 
+    /// Separate Device/no-LSE2 scope: two reached scalar reads, no load16 cap.
+    /// Actual identification/control absence must be proved by the real owner.
+    pub(crate) fn from_m0_read_pair(operation: &Operation) -> Option<Self> {
+        let Operation::MemoryPair {
+            transfer:
+                MemoryTransfer::Load {
+                    signed: false,
+                    width: Width::X64,
+                },
+            bytes: DOUBLEWORD_BYTES,
+            data,
+            base: Register::X(base),
+            displacement,
+            mode,
+        } = *operation
+        else {
+            return None;
+        };
+        let operand = Self {
+            profile: Profile::M0DeviceRead8PairNoLse2,
+            transfer: MemoryTransfer::Load {
+                signed: false,
+                width: Width::X64,
+            },
+            bytes: DOUBLEWORD_BYTES,
+            data,
+            base: Register::X(base),
+            displacement,
+            mode,
+            non_temporal: false,
+        };
+        operand.is_valid().then_some(operand)
+    }
+
     fn is_valid(self) -> bool {
         let data_valid = self.data.into_iter().all(|register| {
             matches!(register, Register::X(index) if index < REGISTER_COUNT)
@@ -206,11 +241,18 @@ impl Operand {
 /// Disabled SP checks supply no alignment proof: every X pair requires CX16.
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     let required_flags = operand.flags();
-    if operand.profile == Profile::M0DeviceWrite8Pair {
+    if matches!(
+        operand.profile,
+        Profile::M0DeviceWrite8Pair | Profile::M0DeviceRead8PairNoLse2
+    ) {
         return MemoryRequirements {
             required_flags,
             required_host_caps: 0,
-            required_profile: profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR,
+            required_profile: if operand.profile == Profile::M0DeviceWrite8Pair {
+                profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR
+            } else {
+                profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
+            },
             required_sp_alignment: SpAlignmentRequirement::Any,
             required_address_checks: Default::default(),
             required_pointer_arithmetic: None,
@@ -315,7 +357,7 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
             Profile::NormalWb(profile) => profile.address_checks(false),
             // Actual fixed EL1 software profile declares CPA absent. This
             // branch never supplies checked-process or CPA-enabled admission.
-            Profile::M0DeviceWrite8Pair => {
+            Profile::M0DeviceWrite8Pair | Profile::M0DeviceRead8PairNoLse2 => {
                 crate::context::memory::address::AddressAddChecks::Disabled
             }
         },

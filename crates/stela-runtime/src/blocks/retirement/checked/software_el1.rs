@@ -121,6 +121,12 @@ pub struct SoftwareEl1Report {
     pub native_observation: Option<String>,
     pub memory_observation: Option<String>,
     pub memory_write_observation: Option<String>,
+    pub memory_pair_read_observation: Option<String>,
+    #[cfg(test)]
+    pub(crate) pair_read_producer_observation: Option<serde_json::Value>,
+    #[cfg(test)]
+    pub(crate) pair_read_progress_observation:
+        Option<crate::memory::domain::m0_read::M0RamPairReadProgress>,
     #[cfg(test)]
     pub(crate) write_producer_observation: Option<serde_json::Value>,
     #[cfg(test)]
@@ -143,6 +149,18 @@ enum InstalledSource {
 /// Owns the actual original resources until its one consuming execution scope.
 /// Private fields prevent caller substitution, raw entry or reset/retry.
 pub struct SoftwareEl1Machine {
+    #[cfg(all(
+        test,
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pair_read_fixture: Option<super::m0::PairReadFixture>,
+    #[cfg(all(
+        test,
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    hold_pair_read_order: bool,
     #[cfg(all(test, target_arch = "x86_64"))]
     exception_fixture_canary: Option<u64>,
     #[cfg(all(
@@ -325,7 +343,11 @@ impl SoftwareEl1Machine {
             .collect();
         let observed_ranges = initialized_ram
             .iter()
-            .filter(|extent| extent.permissions.readable)
+            // Native fixtures retain raw execute-only source bytes through the
+            // original quiescent source diagnostic, without guest Read rights.
+            .filter(|extent| {
+                extent.permissions.readable || cfg!(test) && extent.permissions.executable
+            })
             .map(|extent| extent.range)
             .collect();
         let policy = MemoryControls::new(
@@ -424,6 +446,18 @@ impl SoftwareEl1Machine {
         // this NEW software PE; there is no external registration/delivery API.
         let asynchronous = unsafe { SoftwareAsyncDomain::fresh_software_pe() };
         Ok(Self {
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
+            pair_read_fixture: None,
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
+            hold_pair_read_order: false,
             #[cfg(all(test, target_arch = "x86_64"))]
             exception_fixture_canary: None,
             #[cfg(all(
@@ -452,6 +486,18 @@ impl SoftwareEl1Machine {
 
     pub fn run_to_shutdown(self, request: SoftwareEl1Request) -> Result<SoftwareEl1Report> {
         let Self {
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
+            mut pair_read_fixture,
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
+            hold_pair_read_order,
             #[cfg(all(test, target_arch = "x86_64"))]
             exception_fixture_canary,
             #[cfg(all(
@@ -518,6 +564,33 @@ impl SoftwareEl1Machine {
             } else {
                 None
             };
+            // Clone only the SAME original memory-order owner, so holding its
+            // fixture guard does not borrow the exclusively mutable CSE slot.
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
+            let fixture_order_system = if hold_pair_read_order {
+                Some(std::sync::Arc::clone(
+                    sources
+                        .source_scope()
+                        .map_err(anyhow::Error::msg)?
+                        .physical_space()
+                        .memory_system(),
+                ))
+            } else {
+                None
+            };
+            #[cfg(all(
+                test,
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux")
+            ))]
+            let _fixture_order = fixture_order_system
+                .as_ref()
+                .map(|system| system.fixture_hold_device_ram_order())
+                .transpose()?;
             let outcome = {
                 let pending = asynchronous.lease_no_sources().map_err(|error| {
                     anyhow::anyhow!("software EL1 complete producer lease: {error:?}")
@@ -583,6 +656,12 @@ impl SoftwareEl1Machine {
                             target_arch = "x86_64",
                             any(target_os = "macos", target_os = "linux")
                         ))]
+                        pair_read_fixture: pair_read_fixture.take(),
+                        #[cfg(all(
+                            test,
+                            target_arch = "x86_64",
+                            any(target_os = "macos", target_os = "linux")
+                        ))]
                         verify_pair_alias_monitor,
                         stop_pc: request.stop_pc,
                         block_budget: request.block_budget,
@@ -604,6 +683,33 @@ impl SoftwareEl1Machine {
                 .snapshot()
                 .map(|snapshot| snapshot.readbacks())
                 .map_err(|error| format!("{error:?}"));
+            #[cfg(test)]
+            let observations = observed_ranges
+                .iter()
+                .map(|range| {
+                    let snapshot = usize::try_from(range.bytes)
+                        .map_err(|error| error.to_string())
+                        .and_then(|bytes| {
+                            sources
+                                .source_scope()
+                                .map_err(|error| error.to_string())?
+                                .physical_space()
+                                .source_diagnostic_snapshot_quiescent(range.source_pa, bytes)
+                                .map_err(|error| format!("{error:?}"))
+                        });
+                    let sha256 = snapshot
+                        .as_ref()
+                        .map(|bytes| stela_core::sha256(bytes))
+                        .map_err(Clone::clone);
+                    SoftwareEl1RamObservation {
+                        source_pa: range.source_pa,
+                        bytes: range.bytes,
+                        sha256,
+                        captured_bytes: snapshot,
+                    }
+                })
+                .collect();
+            #[cfg(not(test))]
             let observations = match memory.observation_loan() {
                 Ok(loan) => observed_ranges
                     .iter()
@@ -658,12 +764,24 @@ impl SoftwareEl1Machine {
             .last_m0_write_observation
             .as_ref()
             .and_then(|value| value.progress_observation());
+        #[cfg(test)]
+        let pair_read_producer_observation = outcome
+            .last_m0_pair_read_observation
+            .as_ref()
+            .and_then(|value| value.producer_observation())
+            .cloned();
+        #[cfg(test)]
+        let pair_read_progress_observation = outcome
+            .last_m0_pair_read_observation
+            .as_ref()
+            .and_then(|value| value.progress_observation());
         let OwnedRunOutcome {
             stop,
             accounting,
             last_native_observation,
             last_m0_observation,
             last_m0_write_observation,
+            last_m0_pair_read_observation,
             last_el1_register_observation,
             last_el1_system_observation,
             last_system_effect_observation,
@@ -690,6 +808,12 @@ impl SoftwareEl1Machine {
             native_observation: last_native_observation.map(|value| format!("{value:?}")),
             memory_observation: last_m0_observation.map(|value| format!("{value:?}")),
             memory_write_observation: last_m0_write_observation.map(|value| format!("{value:?}")),
+            memory_pair_read_observation: last_m0_pair_read_observation
+                .map(|value| format!("{value:?}")),
+            #[cfg(test)]
+            pair_read_producer_observation,
+            #[cfg(test)]
+            pair_read_progress_observation,
             #[cfg(test)]
             write_producer_observation,
             #[cfg(test)]
@@ -772,7 +896,7 @@ mod platform_tests {
     const CMP_X11_X10: u32 = 0xeb0a017f;
     const B_EQ_NEXT: u32 = 0x54000040;
     const NOP: u32 = 0xd503201f;
-    fn state_bytes(state: &stela_compiler::GuestState) -> &[u8] {
+    pub(super) fn state_bytes(state: &stela_compiler::GuestState) -> &[u8] {
         // SAFETY: stable fully initialized784-byte native ABI, observation only.
         unsafe {
             std::slice::from_raw_parts(
@@ -781,23 +905,32 @@ mod platform_tests {
             )
         }
     }
-    fn capture_machine_before(output: &std::path::Path, machine: &SoftwareEl1Machine) {
+    pub(super) fn capture_machine_before(output: &std::path::Path, machine: &SoftwareEl1Machine) {
         // This is before the consuming run creates its one PE/outer loan.
         // The original memory owner's readonly observation service is retained;
         // it neither constructs an execution loan nor authorizes guest access.
-        let memory = machine.memory.observation_loan().unwrap();
         for range in &machine.observed_ranges {
-            let bytes = memory
-                .snapshot(range.source_pa, usize::try_from(range.bytes).unwrap())
-                .unwrap();
-            std::fs::write(
-                output.join(format!(
-                    "before-ram-{:x}-{}.bin",
-                    range.source_pa, range.bytes
-                )),
-                bytes,
-            )
-            .unwrap();
+            let snapshot = usize::try_from(range.bytes)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| match &machine.installed {
+                    InstalledSource::El1(owner) => owner
+                        .source_diagnostic_snapshot(range.source_pa, bytes)
+                        .map_err(|error| format!("{error:?}")),
+                    InstalledSource::Read64(_) => machine
+                        .memory
+                        .observation_loan()
+                        .map_err(|error| format!("{error:?}"))?
+                        .snapshot(range.source_pa, bytes)
+                        .map_err(|error| format!("{error:?}")),
+                });
+            let path = output.join(format!(
+                "before-ram-{:x}-{}.bin",
+                range.source_pa, range.bytes
+            ));
+            match snapshot {
+                Ok(bytes) => std::fs::write(path, bytes).unwrap(),
+                Err(error) => std::fs::write(path.with_extension("error.txt"), error).unwrap(),
+            }
         }
         std::fs::write(
             output.join("before-state.bin"),
@@ -810,7 +943,7 @@ mod platform_tests {
         )
         .unwrap();
     }
-    fn capture_report_after(output: &std::path::Path, report: &SoftwareEl1Report) {
+    pub(super) fn capture_report_after(output: &std::path::Path, report: &SoftwareEl1Report) {
         // Preserve actual failure observations BEFORE unwrapping or comparing.
         // Unavailable snapshots stay explicit errors; no expected bytes fill them.
         let errors: Vec<_> = report
@@ -827,9 +960,9 @@ mod platform_tests {
             })
             .collect();
         std::fs::write(output.join("actual-report.txt"),format!(
-            "stop={}\npc={:x}\naccounting={:?}\nnative={:?}\nwrite={:?}\nsystem_effect={:?}\ncontrols_before={:?}\ncontrols_after={:?}\nram={:?}\n",
+            "stop={}\npc={:x}\naccounting={:?}\nnative={:?}\nwrite={:?}\npair_read={:?}\nsystem_effect={:?}\ncontrols_before={:?}\ncontrols_after={:?}\nram={:?}\n",
             report.stop,report.thread.pc.0,report.accounting,report.native_observation,
-            report.memory_write_observation,report.system_observation,
+            report.memory_write_observation,report.memory_pair_read_observation,report.system_observation,
             report.translation_before,report.translation,errors)).unwrap();
         std::fs::write(
             output.join("after-state.bin"),
@@ -865,6 +998,21 @@ mod platform_tests {
         std::fs::write(
             output.join("actual-producer.json"),
             serde_json::to_vec_pretty(&report.write_producer_observation).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            output.join("actual-pair-read-progress.txt"),
+            format!("{:?}", report.pair_read_progress_observation),
+        )
+        .unwrap();
+        std::fs::write(
+            output.join("actual-pair-read-producer.json"),
+            serde_json::to_vec_pretty(&report.pair_read_producer_observation).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            output.join("actual-pair-read-observation.txt"),
+            format!("{:?}", report.memory_pair_read_observation),
         )
         .unwrap();
         for range in &report.ram {
@@ -1284,6 +1432,14 @@ mod platform_tests {
 #[cfg(all(test, target_arch = "x86_64"))]
 #[path = "el1_context/fixture.rs"]
 mod exception_fixture;
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "software_el1/pair_read_tests.rs"]
+mod pair_read_tests;
 
 #[cfg(all(test, target_arch = "x86_64"))]
 #[path = "system_effects/fixture.rs"]

@@ -304,6 +304,12 @@ pub fn run_declared_privileged(
                     let outcome = runtime.run_owned(
                         pe.loan(),
                         OwnedRunRequest {
+                            #[cfg(all(
+                                test,
+                                target_arch = "x86_64",
+                                any(target_os = "macos", target_os = "linux")
+                            ))]
+                            pair_read_fixture: None,
                             stop_pc,
                             block_budget,
                             #[cfg(all(

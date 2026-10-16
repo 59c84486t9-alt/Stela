@@ -225,7 +225,7 @@ pub(crate) fn prepare_aligned_device_ram8<'loan, 'owner>(
 /// are outside this recipe and cannot become fabricated Arm translation faults
 /// or physical external aborts. Actual emitted-code inspection remains required.
 #[cfg(target_arch = "x86_64")]
-unsafe fn read_host_ram8(pointer: *const u8) -> u64 {
+pub(super) unsafe fn read_host_ram8(pointer: *const u8) -> u64 {
     let value: u64;
     // SAFETY: caller-owned current pins and the order guard protect this exact
     // aligned RAM quantity. The qword MOV uses no wider host snapshot and writes

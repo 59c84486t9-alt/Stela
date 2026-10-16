@@ -150,11 +150,14 @@ pub mod profile_requirements {
     /// Same-owner MMU-off Device RAM write8/pair. No Normal-WB or host-pointer
     /// authority: each reached aligned8B member needs the real source loan.
     pub const M0_DEVICE_RAM_WRITE8_OR_PAIR: u32 = 1 << 4;
+    /// Same-owner MMU-off Device pair reads with actual no-LSE2 qualification.
+    pub const M0_DEVICE_RAM_READ64_PAIR_NO_LSE2: u32 = 1 << 5;
     pub const KNOWN: u32 = NATIVE_ACCESS
         | TAG_GRANULES
         | SCALABLE_TAG_CHECKS
         | M0_DEVICE_RAM_READ64
-        | M0_DEVICE_RAM_WRITE8_OR_PAIR;
+        | M0_DEVICE_RAM_WRITE8_OR_PAIR
+        | M0_DEVICE_RAM_READ64_PAIR_NO_LSE2;
 }
 
 /// Explicit runtime outcomes; only Success permits architectural load commits.

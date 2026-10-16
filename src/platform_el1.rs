@@ -221,7 +221,7 @@ pub(crate) fn run(
         "declaration_sha256":stela_core::sha256(&bytes),"source_inputs":source_inputs,
         "stop":report.stop,"pc":report.thread.pc.0,"state":super::register_json(&report.thread.registers),
         "system":format!("{:#?}",report.system),"translation":translation,"accounting":report.accounting,
-        "native_observation":report.native_observation,"memory_observation":report.memory_observation,"memory_write_observation":report.memory_write_observation,"register_observation":report.register_observation,"system_observation":report.system_observation,"platform_identification_sha256":report.platform_identification_sha256,
+        "native_observation":report.native_observation,"memory_observation":report.memory_observation,"memory_write_observation":report.memory_write_observation,"memory_pair_read_observation":report.memory_pair_read_observation,"register_observation":report.register_observation,"system_observation":report.system_observation,"platform_identification_sha256":report.platform_identification_sha256,
         "compiler_source_sha256":report.compiler_source_sha256,"ram_after":ram,"declared_capacity":declared_capacity,"initialized_ram":initialized_ram,
         "scope":"Fresh declared software PE and actual owned initialized RAM. Unsupported effects decline explicitly; this does not establish native hardware-state adoption, full OS boot or installer compatibility."
     }))

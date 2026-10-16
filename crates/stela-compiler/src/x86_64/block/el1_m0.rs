@@ -89,7 +89,26 @@ pub(crate) fn emit_write_pair(
 ) -> Result<NativeBlock, CompileError> {
     let operand =
         x86_64::memory_store::checked_pair::Operand::from_m0_write_pair(&instruction.operation)
-            .ok_or_else(|| CompileError("unqualified M0 pair emitter operand".into()))?;
+            .ok_or_else(|| CompileError("unqualified M0 pair-write emitter operand".into()))?;
+    emit_pair(instruction, operand, target)
+}
+
+/// Same staging/request body; actual no-LSE2 owner qualifies read effects.
+pub(crate) fn emit_read_pair(
+    instruction: &Instruction,
+    target: TargetCpu,
+) -> Result<NativeBlock, CompileError> {
+    let operand =
+        x86_64::memory_store::checked_pair::Operand::from_m0_read_pair(&instruction.operation)
+            .ok_or_else(|| CompileError("unqualified M0 pair-read emitter operand".into()))?;
+    emit_pair(instruction, operand, target)
+}
+
+fn emit_pair(
+    instruction: &Instruction,
+    operand: x86_64::memory_store::checked_pair::Operand,
+    target: TargetCpu,
+) -> Result<NativeBlock, CompileError> {
     let mut block = NativeBlock {
         x86_64_code: crate::extended::context_wrapper(),
         source_map: Vec::new(),
