@@ -1,12 +1,13 @@
 // Bare-metal AArch64 oracle harness for QEMU `virt` with `-cpu max`.
 //
 // The host loads this image at HARNESS and a case batch at BATCH, then starts
-// the CPU at EL1. Each case runs at EL0 from the code page until its closing
-// SVC or the first exception; the lower-EL vector records full register state.
-// Results are written to the host file named in the batch header through
-// semihosting, and QEMU exits with the harness status.
+// the CPU at EL1. Each case single-steps a declared number of EL0 instructions
+// from the code page; the lower-EL vector records full register state after
+// the last step or the first other exception. Results are written to the host
+// file named in the batch header through semihosting, and QEMU exits with the
+// harness status.
 //
-// Layout constants are shared with `src/layout.rs`.
+// Layout constants are shared with `lib.rs`.
 
     // QEMU places the device tree in the first MiB of RAM.
     .equ RAM,              0x40000000
@@ -32,6 +33,7 @@
 
     // One case input.
     .equ CASE_WORDS,       0
+    .equ CASE_STEPS,       8
     .equ CASE_CODE,        16
     .equ CASE_STATE,       512
     .equ CASE_DATA,        0x1000
@@ -68,7 +70,10 @@
     .equ SCTLR_VALUE,      0x30d00801 | (1 << 42)
     .equ SPSR_EL0T_MASKED, 0x3c0
     .equ NZCV_MASK,        0xf0000000
-    .equ SVC_0,            0xd4000001
+    .equ SPSR_SS,          1 << 21
+    .equ MDSCR_SS,         1
+    .equ ESR_CLASS_SHIFT,  26
+    .equ ESR_SOFTWARE_STEP, 0x32
     .equ DESC_TABLE,       3
     .equ DESC_BLOCK,       1
     .equ DESC_PAGE,        3
@@ -107,6 +112,9 @@ _start:
     msr     ttbr0_el1, x0
     isb
     msr     gcr_el1, xzr
+    msr     oslar_el1, xzr
+    mov     x0, #MDSCR_SS
+    msr     mdscr_el1, x0
     ldr     x0, =SCTLR_VALUE
     msr     sctlr_el1, x0
     isb
@@ -120,8 +128,7 @@ next_case:
     cmp     x19, x22
     b.eq    finish
 
-    // Install the code followed by SVC #0 on a cleared page, then the initial
-    // data window.
+    // Install the code on a cleared page, then the initial data window.
     ldr     x2, =CODE_PAGE
     mov     x3, #PAGE_BYTES
 3:  stp     xzr, xzr, [x2], #16
@@ -135,9 +142,7 @@ next_case:
     str     w3, [x2], #4
     sub     x0, x0, #1
     b       1b
-2:  ldr     w3, =SVC_0
-    str     w3, [x2]
-    add     x0, x20, #CASE_DATA
+2:  add     x0, x20, #CASE_DATA
     ldr     x1, =DATA_WINDOW
     mov     x2, #DATA_BYTES
     bl      copy
@@ -171,9 +176,12 @@ next_case:
     ldp     q30, q31, [x0], #32
     ldr     x0, [x30, #STATE_SP]
     msr     sp_el0, x0
+    ldr     x0, [x20, #CASE_STEPS]
+    msr     tpidr_el1, x0
     ldr     w0, [x30, #STATE_NZCV]
     and     x0, x0, #NZCV_MASK
     orr     x0, x0, #SPSR_EL0T_MASKED
+    orr     x0, x0, #SPSR_SS
     msr     spsr_el1, x0
     ldr     x0, =CODE_PAGE
     msr     elr_el1, x0
@@ -196,8 +204,24 @@ next_case:
     ldr     x30, [x30, #240]
     eret
 
-    // Lower-EL synchronous exception: SP_EL1 is the case result record.
+    // Lower-EL synchronous exception: SP_EL1 is the case result record and
+    // TPIDR_EL1 counts the steps left. Re-arm the step until the last one.
 lower_sync:
+    str     x0, [sp, #0]
+    mrs     x0, esr_el1
+    lsr     x0, x0, #ESR_CLASS_SHIFT
+    cmp     x0, #ESR_SOFTWARE_STEP
+    b.ne    1f
+    mrs     x0, tpidr_el1
+    subs    x0, x0, #1
+    msr     tpidr_el1, x0
+    b.eq    1f
+    mrs     x0, spsr_el1
+    orr     x0, x0, #SPSR_SS
+    msr     spsr_el1, x0
+    ldr     x0, [sp, #0]
+    eret
+1:  ldr     x0, [sp, #0]
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]

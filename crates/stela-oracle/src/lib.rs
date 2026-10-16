@@ -1,11 +1,12 @@
 //! Differential oracle: run original AArch64 code on QEMU and Stela's native
 //! translation of the same code, from identical state and memory.
 //!
-//! The reference is QEMU's `max` CPU in a bare-metal EL0 harness. Code runs from
-//! [`CODE_PAGE`] and may access only the [`DATA_WINDOW`] and the code region;
-//! both engines see the same guest addresses. A case that faults on QEMU is reported but never run
-//! natively, because direct-RAM native code has no fault recovery.
-use anyhow::{Context, Result, bail, ensure};
+//! The reference is QEMU's `max` CPU in a bare-metal EL0 harness that
+//! single-steps each case from [`CODE_PAGE`]. Code may access only the
+//! [`DATA_WINDOW`] and the code region; both engines see the same guest
+//! addresses. A case that faults on QEMU is reported but never run natively,
+//! because direct-RAM native code has no fault recovery.
+use anyhow::{Context, Result, ensure};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -24,7 +25,7 @@ pub const CODE_REGION_BYTES: usize = 0x40_0000;
 /// Guest address of the only memory EL0 code may read or write.
 pub const DATA_WINDOW: u64 = 0x2_0800_0000;
 pub const DATA_BYTES: usize = 0x4000;
-/// Instructions per case, excluding the closing SVC the harness appends.
+/// Words per case.
 pub const MAX_WORDS: usize = 120;
 /// Cases per QEMU run; bounded by the batch area below the data window.
 pub const MAX_BATCH: usize = 4096;
@@ -40,6 +41,7 @@ const BATCH_NAME_BYTES: usize = 8;
 const BATCH_NAME: usize = 16;
 const BATCH_CASES: usize = 0x1000;
 const CASE_WORDS: usize = 0;
+const CASE_STEPS: usize = 8;
 const CASE_CODE: usize = 16;
 const CASE_STATE: usize = 512;
 const CASE_DATA: usize = 0x1000;
@@ -57,13 +59,14 @@ const RESULT_BYTES: usize = 0x4400;
 
 const NZCV_MASK: u32 = 0xf000_0000;
 const ESR_CLASS_SHIFT: u64 = 26;
-const ESR_CLASS_SVC64: u64 = 0x15;
-const INSTRUCTION_BYTES: u64 = 4;
+const ESR_CLASS_SOFTWARE_STEP: u64 = 0x32;
 
-/// One instruction sequence with its initial guest state and data window.
+/// Code at [`CODE_PAGE`] with its initial guest state and data window. The
+/// first `steps` instructions execute.
 #[derive(Clone)]
 pub struct Case {
     pub code: Vec<u32>,
+    pub steps: usize,
     pub state: GuestState,
     pub data: Box<[u8]>,
 }
@@ -72,11 +75,12 @@ pub struct Case {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub state: GuestState,
+    pub next_pc: u64,
     pub data: Box<[u8]>,
     pub exception: Option<Exception>,
 }
 
-/// An exception taken before the case reached its closing SVC.
+/// An exception other than the final step; `address` is its ELR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exception {
     pub syndrome: u64,
@@ -185,6 +189,7 @@ fn encode(cases: &[Case]) -> Result<Vec<u8>> {
             "data window must be {DATA_BYTES} bytes"
         );
         slot[CASE_WORDS..][..8].copy_from_slice(&(case.code.len() as u64).to_le_bytes());
+        slot[CASE_STEPS..][..8].copy_from_slice(&(case.steps as u64).to_le_bytes());
         for (word, bytes) in case
             .code
             .iter()
@@ -215,16 +220,15 @@ fn decode(case: &Case, record: &[u8]) -> Result<Outcome> {
         *vector = [quad(RESULT_V + index * 16), quad(RESULT_V + index * 16 + 8)];
     }
     let syndrome = quad(RESULT_ESR);
-    let address = quad(RESULT_ELR);
-    let completed = syndrome >> ESR_CLASS_SHIFT == ESR_CLASS_SVC64
-        && address == CODE_PAGE + (case.code.len() as u64 + 1) * INSTRUCTION_BYTES;
-    let exception = (!completed).then(|| Exception {
+    let next_pc = quad(RESULT_ELR);
+    let exception = (syndrome >> ESR_CLASS_SHIFT != ESR_CLASS_SOFTWARE_STEP).then(|| Exception {
         syndrome,
-        address,
+        address: next_pc,
         fault_address: quad(RESULT_FAR),
     });
     Ok(Outcome {
         state,
+        next_pc,
         data: record[RESULT_DATA..][..DATA_BYTES].into(),
         exception,
     })
@@ -237,13 +241,5 @@ fn state_bytes(state: &GuestState) -> &[u8] {
             (state as *const GuestState).cast::<u8>(),
             size_of::<GuestState>(),
         )
-    }
-}
-
-/// Fail unless `outcome` from QEMU completed.
-pub fn completed(outcome: &Outcome) -> Result<()> {
-    match outcome.exception {
-        None => Ok(()),
-        Some(exception) => bail!("original raised {exception:x?}"),
     }
 }

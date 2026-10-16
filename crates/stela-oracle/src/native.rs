@@ -5,9 +5,13 @@ use std::{
     ptr::NonNull,
     sync::{Mutex, OnceLock},
 };
-use stela_compiler::GuestState;
+use stela_compiler::{GuestAddress, GuestState, TargetCpu, block::BlockProfile};
+use stela_runtime::blocks::{BlockRuntime, ThreadState};
 
 const PAGE_BYTES: usize = 0x1000;
+const INSTRUCTION_BYTES: usize = 4;
+const RET: u32 = 0xd65f_03c0;
+const ADDRESS_SPACE: u64 = 1;
 
 /// Host mappings at the guest code region and data window. One process-wide
 /// instance exists; the lock serializes every native case.
@@ -56,7 +60,7 @@ fn map_at(address: u64, bytes: usize) -> Result<NonNull<u8>> {
 }
 
 /// Executable copy of native code, unmapped on drop.
-struct Executable {
+pub struct Executable {
     pointer: NonNull<u8>,
     bytes: usize,
 }
@@ -112,38 +116,106 @@ fn set_mxcsr(value: u32) {
     unsafe { std::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack)) };
 }
 
-/// Run `native`, compiled from `case.code` at [`CODE_PAGE`], against the case.
-///
-/// # Safety
-///
-/// `native` must be Stela's leaf translation of `case.code`, and the original
-/// must have completed on the oracle, so every access stays in the windows.
-pub unsafe fn run(native: &[u8], case: &Case) -> Result<Outcome> {
-    let windows = windows()?.lock().expect("native windows lock");
-    let executable = Executable::new(native)?;
-    let mut state = case.state.clone();
-    // SAFETY: both windows are owned, writable and sized as copied here.
-    unsafe {
-        let page = (CODE_PAGE - CODE_REGION) as usize;
-        let code = std::slice::from_raw_parts_mut(windows.code.as_ptr().add(page), PAGE_BYTES);
-        code.fill(0);
-        for (word, bytes) in case.code.iter().zip(code.as_chunks_mut::<4>().0) {
-            bytes.copy_from_slice(&word.to_le_bytes());
-        }
-        std::slice::from_raw_parts_mut(windows.data.as_ptr(), DATA_BYTES)
-            .copy_from_slice(&case.data);
+/// Stela's native translation of one case's code at [`CODE_PAGE`].
+pub enum Translation {
+    /// A leaf ending in RET X30; execution falls through past the case.
+    Leaf(Executable),
+    /// A production block dispatcher over the case's code, run for one block.
+    Block {
+        runtime: BlockRuntime,
+        _cache: tempfile::TempDir,
+    },
+}
+
+impl Translation {
+    /// Translate `words` and a closing RET as a leaf.
+    pub fn leaf(words: &[u32]) -> Result<Self> {
+        let source: Vec<u8> = words
+            .iter()
+            .chain(&[RET])
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let native = stela_compiler::compile_for_target(&source, GuestAddress(CODE_PAGE), target())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(Self::Leaf(Executable::new(&native.x86_64_code)?))
     }
-    let entry: extern "sysv64" fn(*mut GuestState) =
-        // SAFETY: the mapping holds a leaf that follows the guest-state ABI.
-        unsafe { std::mem::transmute(executable.pointer.as_ptr()) };
-    let saved = mxcsr();
-    entry(&mut state);
-    set_mxcsr(saved);
-    // SAFETY: the data window stays mapped and is no longer written.
-    let data = unsafe { std::slice::from_raw_parts(windows.data.as_ptr(), DATA_BYTES) }.into();
-    Ok(Outcome {
-        state,
-        data,
-        exception: None,
-    })
+
+    /// Translate `words` as ordinary blocks, refusing words Stela declines.
+    pub fn block(words: &[u32]) -> Result<Self> {
+        let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        stela_compiler::block::compile_for_target(
+            &source,
+            GuestAddress(CODE_PAGE),
+            BlockProfile::Ordinary,
+            target(),
+        )
+        .map_err(|error| anyhow::anyhow!(error))?;
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            ADDRESS_SPACE,
+            cache.path().to_owned(),
+            BlockProfile::Ordinary,
+            target(),
+        );
+        runtime.register_code(GuestAddress(CODE_PAGE), source)?;
+        Ok(Self::Block {
+            runtime,
+            _cache: cache,
+        })
+    }
+
+    /// Run the translation against `case`'s state and data window.
+    ///
+    /// # Safety
+    ///
+    /// The original must have completed on the oracle, so every access stays
+    /// in the windows.
+    pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
+        let windows = windows()?.lock().expect("native windows lock");
+        // SAFETY: both windows are owned, writable and sized as copied here.
+        unsafe {
+            let page = (CODE_PAGE - CODE_REGION) as usize;
+            let code = std::slice::from_raw_parts_mut(windows.code.as_ptr().add(page), PAGE_BYTES);
+            code.fill(0);
+            for (word, bytes) in case.code.iter().zip(code.as_chunks_mut::<4>().0) {
+                bytes.copy_from_slice(&word.to_le_bytes());
+            }
+            std::slice::from_raw_parts_mut(windows.data.as_ptr(), DATA_BYTES)
+                .copy_from_slice(&case.data);
+        }
+        let saved = mxcsr();
+        let result = match self {
+            Self::Leaf(executable) => {
+                let mut state = case.state.clone();
+                // SAFETY: the mapping holds a leaf that follows the guest-state ABI.
+                let leaf: extern "sysv64" fn(*mut GuestState) =
+                    unsafe { std::mem::transmute(executable.pointer.as_ptr()) };
+                leaf(&mut state);
+                Ok((state, CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64))
+            }
+            Self::Block { runtime, .. } => {
+                let mut thread = ThreadState {
+                    registers: case.state.clone(),
+                    pc: GuestAddress(CODE_PAGE),
+                };
+                // SAFETY: trusted case code whose accesses stay in the windows.
+                unsafe { runtime.run(&mut thread, None, case.steps) }
+                    .map(|_| (thread.registers, thread.pc.0))
+            }
+        };
+        set_mxcsr(saved);
+        let (state, next_pc) = result?;
+        // SAFETY: the data window stays mapped and is no longer written.
+        let data = unsafe { std::slice::from_raw_parts(windows.data.as_ptr(), DATA_BYTES) }.into();
+        Ok(Outcome {
+            state,
+            next_pc,
+            data,
+            exception: None,
+        })
+    }
+}
+
+fn target() -> TargetCpu {
+    TargetCpu::detect()
 }

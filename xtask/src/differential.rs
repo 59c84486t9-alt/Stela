@@ -1,9 +1,9 @@
-//! Original-versus-native differential over the reviewed leaf instruction forms.
+//! Original-versus-native differential over the reviewed leaf and block forms.
 //!
 //! Each implemented form contributes its registry samples plus random words over
 //! its free encoding bits that Stela accepts. Every word runs from seeded random
-//! states on the QEMU oracle and as Stela's native leaf translation; registers
-//! and the data window must match whenever the original completes.
+//! states as one QEMU step and as Stela's native translation; registers, the
+//! next PC and the data window must match whenever the original completes.
 use crate::tools::root;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -14,10 +14,21 @@ use std::{
     path::PathBuf,
 };
 use stela_compiler::GuestState;
-use stela_oracle::{CODE_PAGE, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome, native};
+use stela_oracle::{Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome, native::Translation};
 
-const REGISTRY: &str = "isa/apple-silicon-reviewed-forms.json";
-const RET: u32 = 0xd65f_03c0;
+#[derive(Clone, Copy)]
+enum Profile {
+    Leaf,
+    Block,
+}
+
+/// Registries compared, with the native profile their forms compile to.
+const REGISTRIES: [(&str, Profile); 2] = [
+    ("isa/apple-silicon-reviewed-forms.json", Profile::Leaf),
+    ("isa/apple-silicon-block-forms.json", Profile::Block),
+];
+/// Every leaf ends in RET, so the leaf RET form needs no case of its own.
+const LEAF_TERMINATOR: &str = "RET_64R_branch_reg";
 /// FPCR controls of the reviewed profile that QEMU also implements: AHP, DN,
 /// FZ, RMode, FZ16 and the AFP bits. QEMU has no FP trap enables.
 const FPCR_MASK: u32 = 0x07c8_0007;
@@ -132,8 +143,11 @@ fn unpredictable_overlap(form: &str, word: u32) -> bool {
 fn oracle_limit(form: &str, state: &GuestState) -> bool {
     // QEMU clears the sign of a NaN for vector FABS and FNEG even when FPCR.AH
     // is set; the architecture leaves it unchanged.
-    (form.starts_with("FABS_asimdmisc") || form.starts_with("FNEG_asimdmisc"))
-        && state.fpcr & FPCR_AH != 0
+    let sign_of_nan = form.starts_with("FABS_asimdmisc") || form.starts_with("FNEG_asimdmisc");
+    // QEMU implements FEAT_RPRES, which refines AH=1 estimates; the Apple
+    // profile declares it absent.
+    let estimate = form.starts_with("FRECPE_") || form.starts_with("FRSQRTE_");
+    (sign_of_nan || estimate) && state.fpcr & FPCR_AH != 0
 }
 
 /// Oracle limits: compare FPCR and FPSR only on bits both engines model.
@@ -149,40 +163,30 @@ fn hex(value: &Value) -> Result<u32> {
     Ok(u32::from_str_radix(text.trim_start_matches("0x"), 16)?)
 }
 
-/// Native leaf translation of `word` at the code page, if Stela accepts it.
-fn translate(word: u32) -> Result<Vec<u8>> {
-    let source: Vec<u8> = [word, RET]
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect();
-    let base = CODE_PAGE.to_string();
-    let arguments = [
-        "stela",
-        "compile-leaf",
-        "s",
-        "--output-dir",
-        "o",
-        "--guest-base",
-        &base,
-    ];
-    Ok(stela_cli::compile::compile(&arguments, &source)?.native)
+/// Stela's translation of `word` alone at the code page, if it accepts it.
+fn translate(word: u32, profile: Profile) -> Result<Translation> {
+    match profile {
+        Profile::Leaf => Translation::leaf(&[word]),
+        Profile::Block => Translation::block(&[word]),
+    }
 }
 
 struct Subject {
     form: String,
     word: u32,
-    native: Vec<u8>,
+    translation: Translation,
 }
 
 impl Differential {
     pub fn run(self) -> Result<()> {
         let mut random = Random(self.seed);
-        let subjects = self.subjects(&mut random)?;
+        let mut subjects = self.subjects(&mut random)?;
         let cases: Vec<Case> = subjects
             .iter()
             .flat_map(|subject| std::iter::repeat_n(subject.word, self.states))
             .map(|word| Case {
                 code: vec![word],
+                steps: 1,
                 state: random.state(),
                 data: (0..DATA_BYTES).map(|_| random.next() as u8).collect(),
             })
@@ -197,40 +201,41 @@ impl Differential {
         let mut mismatches = vec![];
         let mut covered = BTreeSet::new();
         // Original exception classes per form, kept for forms that never complete.
-        let mut uncovered: BTreeMap<&str, BTreeMap<u64, usize>> = BTreeMap::new();
-        let per_case = subjects
-            .iter()
-            .flat_map(|subject| std::iter::repeat_n(subject, self.states));
-        for ((case, original), subject) in cases.iter().zip(&originals).zip(per_case) {
+        let mut uncovered: BTreeMap<String, BTreeMap<u64, usize>> = BTreeMap::new();
+        for (index, (case, original)) in cases.iter().zip(&originals).enumerate() {
+            let subject = &mut subjects[index / self.states];
             if let Some(exception) = original.exception {
                 *uncovered
-                    .entry(&subject.form)
+                    .entry(subject.form.clone())
                     .or_default()
                     .entry(exception.syndrome >> ESR_CLASS_SHIFT)
                     .or_default() += 1;
                 continue;
             }
-            covered.insert(subject.form.as_str());
+            covered.insert(subject.form.clone());
             if oracle_limit(&subject.form, &case.state) {
                 continue;
             }
             // SAFETY: the original completed, so every access stays in the windows.
-            let translated = unsafe { native::run(&subject.native, case)? };
+            let translated = unsafe { subject.translation.run(case)? };
             compared += 1;
             if comparable(&translated) != comparable(original) {
-                mismatches.push((subject, case, original, translated));
+                mismatches.push((
+                    subject.form.clone(),
+                    subject.word,
+                    case,
+                    original,
+                    translated,
+                ));
             }
         }
         uncovered.retain(|form, _| !covered.contains(form));
 
-        for (subject, case, original, translated) in mismatches.iter().take(self.show) {
-            println!("{} {:#010x}:", subject.form, subject.word);
+        for (form, word, case, original, translated) in mismatches.iter().take(self.show) {
+            println!("{form} {word:#010x}:");
             print_difference(case, original, translated);
         }
-        let forms: BTreeSet<_> = mismatches
-            .iter()
-            .map(|(subject, ..)| &subject.form)
-            .collect();
+        let forms: BTreeSet<_> = mismatches.iter().map(|(form, ..)| form).collect();
         for form in &forms {
             println!("mismatch: {form}");
         }
@@ -252,46 +257,49 @@ impl Differential {
     }
 
     fn subjects(&self, random: &mut Random) -> Result<Vec<Subject>> {
-        let registry: Value = serde_json::from_str(&fs::read_to_string(root().join(REGISTRY))?)?;
         let mut subjects = vec![];
-        for form in registry["forms"].as_array().context("forms")? {
-            let id = form["id"].as_str().context("form id")?;
-            if form["status"] == "unsupported"
-                || self
-                    .form
-                    .as_ref()
-                    .is_some_and(|filter| !id.contains(filter.as_str()))
-            {
-                continue;
-            }
-            let mut words = BTreeSet::new();
-            for sample in form["smoke_samples"].as_array().into_iter().flatten() {
-                let word = hex(&sample["word"])?;
-                let native = translate(word).with_context(|| format!("{id} {word:#010x}"))?;
-                words.insert(word);
-                subjects.push(Subject {
-                    form: id.into(),
-                    word,
-                    native,
-                });
-            }
-            let mask = hex(&form["encoding_mask"])?;
-            let value = hex(&form["encoding_value"])?;
-            for _ in 0..self.fields {
-                let found = (0..FIELD_ATTEMPTS).find_map(|_| {
-                    let word = value | (random.next() as u32 & !mask);
-                    if words.contains(&word) || unpredictable_overlap(id, word) {
-                        return None;
-                    }
-                    translate(word).ok().map(|native| (word, native))
-                });
-                if let Some((word, native)) = found {
-                    words.insert(word);
+        for (path, profile) in REGISTRIES {
+            let registry: Value = serde_json::from_str(&fs::read_to_string(root().join(path))?)?;
+            for form in registry["forms"].as_array().context("forms")? {
+                let id = form["id"].as_str().context("form id")?;
+                if form["status"] == "unsupported"
+                    || matches!(profile, Profile::Leaf) && id == LEAF_TERMINATOR
+                    || self
+                        .form
+                        .as_ref()
+                        .is_some_and(|filter| !id.contains(filter.as_str()))
+                {
+                    continue;
+                }
+                let mut add = |word: u32, translation: Translation| {
                     subjects.push(Subject {
                         form: id.into(),
                         word,
-                        native,
+                        translation,
                     });
+                };
+                let mut words = BTreeSet::new();
+                for sample in form["smoke_samples"].as_array().into_iter().flatten() {
+                    let word = hex(&sample["word"])?;
+                    let native =
+                        translate(word, profile).with_context(|| format!("{id} {word:#010x}"))?;
+                    words.insert(word);
+                    add(word, native);
+                }
+                let mask = hex(&form["encoding_mask"])?;
+                let value = hex(&form["encoding_value"])?;
+                for _ in 0..self.fields {
+                    let found = (0..FIELD_ATTEMPTS).find_map(|_| {
+                        let word = value | (random.next() as u32 & !mask);
+                        if words.contains(&word) || unpredictable_overlap(id, word) {
+                            return None;
+                        }
+                        translate(word, profile).ok().map(|native| (word, native))
+                    });
+                    if let Some((word, native)) = found {
+                        words.insert(word);
+                        add(word, native);
+                    }
                 }
             }
         }
@@ -319,6 +327,7 @@ fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
         }
     }
     for (name, x, y) in [
+        ("next pc", original.next_pc, translated.next_pc),
         ("sp", a.sp, b.sp),
         ("nzcv", a.nzcv.into(), b.nzcv.into()),
         (
