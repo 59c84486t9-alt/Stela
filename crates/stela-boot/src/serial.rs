@@ -1,8 +1,5 @@
 //! Allocation-free, lock-free UART output for the boot processor.
-use core::{
-    arch::asm,
-    fmt::{self, Write},
-};
+use core::{arch::asm, fmt};
 const UART: u16 = 0x3f8;
 unsafe fn out(port: u16, value: u8) {
     unsafe {
@@ -42,7 +39,7 @@ fn send(byte: u8) {
     }
 }
 pub struct Serial;
-impl Write for Serial {
+impl fmt::Write for Serial {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         for byte in value.bytes() {
             // QEMU's terminal treats LF and CR independently.
@@ -53,23 +50,4 @@ impl Write for Serial {
         }
         Ok(())
     }
-}
-pub fn arguments(args: fmt::Arguments<'_>) {
-    let _ = Serial.write_fmt(args);
-}
-pub fn terminate(code: u32) -> ! {
-    unsafe {
-        asm!("out dx, eax", in("dx") 0xf4u16, in("eax") code, options(nostack, preserves_flags));
-    }
-    loop {
-        unsafe {
-            asm!("cli", "hlt", options(nostack));
-        }
-    }
-}
-pub fn fatal(message: &str) -> ! {
-    let _ = Serial.write_str("\nSTELA FATAL ");
-    let _ = Serial.write_str(message);
-    let _ = Serial.write_str("\n");
-    terminate(0x11)
 }

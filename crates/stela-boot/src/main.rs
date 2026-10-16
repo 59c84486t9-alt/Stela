@@ -8,7 +8,7 @@
 #![no_main]
 extern crate alloc;
 use alloc::{vec, vec::Vec};
-use core::{arch::asm, fmt::Write, panic::PanicInfo};
+use core::{arch::asm, panic::PanicInfo};
 use stela_compiler::{GuestAddress, GuestState, TargetCpu};
 use stela_runtime::{
     blocks::{
@@ -25,8 +25,10 @@ use uefi::{
     Status,
     boot::{AllocateType, MemoryType},
 };
+mod console;
 mod firmware;
 mod heap;
+mod output;
 mod paging;
 mod serial;
 #[global_allocator]
@@ -135,23 +137,27 @@ impl Options {
 #[uefi::entry]
 fn main() -> Status {
     serial::initialize();
-    serial::arguments(format_args!("STELA UEFI MOUNT\n"));
+    output::arguments(format_args!("STELA UEFI MOUNT\n"));
     let heap = uefi::boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
         HEAP_BYTES / paging::PAGE,
     )
-    .unwrap_or_else(|_| serial::fatal("firmware has no memory for the heap"));
+    .unwrap_or_else(|_| output::fatal("firmware has no memory for the heap"));
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
-    let (mut handoff, tables) = firmware::take_over().unwrap_or_else(|e| serial::fatal(e));
+    let (mut handoff, tables) = firmware::take_over().unwrap_or_else(|e| output::fatal(e));
+    if let Some(screen) = handoff.screen {
+        console::install(screen);
+        output::arguments(format_args!("STELA UEFI MOUNT\n"));
+    }
     // SAFETY: boot services have ended; the new tables map the image, heap,
     // both stacks and every RAM byte in use.
     unsafe {
         asm!("cli", options(nomem, nostack));
         if let Err(error) = paging::activate(tables) {
-            serial::fatal(error);
+            output::fatal(error);
         }
         asm!(
             "mov rsp, {top}",
@@ -167,7 +173,7 @@ fn main() -> Status {
 
 /// Run the mount on Stela's own stack.
 extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
-    serial::arguments(format_args!(
+    output::arguments(format_args!(
         "ACTUAL HEAP bytes={HEAP_BYTES} native={:?} ram={:?}\n",
         handoff.native, handoff.ram
     ));
@@ -177,24 +183,24 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
         match unsafe { stela_runtime::freestanding::install(&handoff.native, &handoff.ram) } {
             Ok(value) => value,
             Err(error) => {
-                serial::arguments(format_args!("mount refusal: {error:?}\n"));
-                serial::fatal("platform qualification failed")
+                output::arguments(format_args!("mount refusal: {error:?}\n"));
+                output::fatal("platform qualification failed")
             }
         };
-    serial::arguments(format_args!("ACTUAL CPU {observed:?}\n"));
+    output::arguments(format_args!("ACTUAL CPU {observed:?}\n"));
     let options = match core::str::from_utf8(&handoff.options)
         .map_err(|_| "stela.cfg is not UTF-8")
         .and_then(Options::parse)
     {
         Ok(v) => v,
-        Err(e) => serial::fatal(e),
+        Err(e) => output::fatal(e),
     };
     let original = &handoff.source[..];
     if original.len() as u64 > options.region_bytes {
-        serial::fatal("original module exceeds declared RAM region");
+        output::fatal("original module exceeds declared RAM region");
     }
     let source_hash = stela_runtime::sha256(original);
-    serial::arguments(format_args!(
+    output::arguments(format_args!(
         "SOURCE bytes={} sha256={} options={options:?}\n",
         original.len(),
         source_hash
@@ -251,8 +257,8 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
         ) {
             Ok(v) => v,
             Err(e) => {
-                serial::arguments(format_args!("system declaration refusal: {e:?}\n"));
-                serial::fatal("invalid initial system")
+                output::arguments(format_args!("system declaration refusal: {e:?}\n"));
+                output::fatal("invalid initial system")
             }
         },
         translation: RegisterValues {
@@ -276,15 +282,15 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
             executable: true,
         },
     };
-    serial::arguments(format_args!(
+    output::arguments(format_args!(
         "INITIAL ARCHITECTURAL THREAD {:?}\nINITIAL SYSTEM {:?}\nINITIAL TRANSLATION {:?}\n",
         config.thread, config.system, config.translation
     ));
     let machine = match SoftwareEl1Machine::new_with_regions(config, zeroed, vec![region]) {
         Ok(v) => v,
         Err(e) => {
-            serial::arguments(format_args!("machine refusal: {e:?}\n"));
-            serial::fatal("original machine construction failed")
+            output::arguments(format_args!("machine refusal: {e:?}\n"));
+            output::fatal("original machine construction failed")
         }
     };
     let result = machine.run_to_shutdown(SoftwareEl1Request {
@@ -294,11 +300,11 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
     let report = match result {
         Ok(v) => v,
         Err(e) => {
-            serial::arguments(format_args!("canonical run failure: {e:?}\n"));
-            serial::fatal("original runtime declined or poisoned")
+            output::arguments(format_args!("canonical run failure: {e:?}\n"));
+            output::fatal("original runtime declined or poisoned")
         }
     };
-    serial::arguments(format_args!(
+    output::arguments(format_args!(
         "RESULT stop={} pc={:#x} x0={:#x} x1={:#x} x2={:#x} compiler={} accounting={:?}\n",
         report.stop,
         report.thread.pc.0,
@@ -308,12 +314,12 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
         report.compiler_source_sha256,
         report.accounting
     ));
-    serial::arguments(format_args!(
+    output::arguments(format_args!(
         "FINAL ARCHITECTURAL THREAD {:?}\nFINAL SYSTEM {:?}\nFINAL TRANSLATION {:?}\nDECLARED CAPACITY {:?}\n",
         report.thread, report.system, report.translation, report.declared_capacity
     ));
     for region in &report.initialized_ram {
-        serial::arguments(format_args!(
+        output::arguments(format_args!(
             "INITIAL RAM range={:?} permissions={:?} sha256={} zero={} prefix={:?}\n",
             region.range,
             region.permissions,
@@ -330,40 +336,40 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
         ("CONTEXT", &report.context_observation),
     ] {
         if let Some(value) = observation {
-            serial::arguments(format_args!("{name} OBSERVATION {value}\n"));
+            output::arguments(format_args!("{name} OBSERVATION {value}\n"));
         }
     }
     for artifact in &report.resident_artifacts {
         match serde_json::to_string(artifact) {
-            Ok(json) => serial::arguments(format_args!("RESIDENT STANDARD MANIFEST {json}\n")),
+            Ok(json) => output::arguments(format_args!("RESIDENT STANDARD MANIFEST {json}\n")),
             Err(e) => {
-                serial::arguments(format_args!("manifest output refusal: {e}\n"));
-                serial::fatal("standard manifest serialization failed")
+                output::arguments(format_args!("manifest output refusal: {e}\n"));
+                output::fatal("standard manifest serialization failed")
             }
         }
     }
     if let Some(value) = &report.register_observation {
-        serial::arguments(format_args!("REGISTER OBSERVATION {value}\n"));
+        output::arguments(format_args!("REGISTER OBSERVATION {value}\n"));
     }
     if let Some(value) = &report.memory_write_observation {
-        serial::arguments(format_args!("WRITE OBSERVATION {value}\n"));
+        output::arguments(format_args!("WRITE OBSERVATION {value}\n"));
     }
     if let Some(value) = &report.memory_pair_read_observation {
-        serial::arguments(format_args!("PAIR OBSERVATION {value}\n"));
+        output::arguments(format_args!("PAIR OBSERVATION {value}\n"));
     }
     for range in &report.ram {
-        serial::arguments(format_args!(
+        output::arguments(format_args!(
             "RAM pa={:#x} bytes={} actual_sha256={:?}\n",
             range.source_pa, range.bytes, range.sha256
         ));
     }
     match stela_runtime::freestanding::verify() {
-        Ok(observed) => serial::arguments(format_args!(
+        Ok(observed) => output::arguments(format_args!(
             "POST SHUTDOWN ACTUAL CPU/STORAGE {observed:?}\n"
         )),
         Err(error) => {
-            serial::arguments(format_args!("post-shutdown storage failure: {error:?}\n"));
-            serial::fatal("storage retirement or controls failed")
+            output::arguments(format_args!("post-shutdown storage failure: {error:?}\n"));
+            output::fatal("storage retirement or controls failed")
         }
     }
     if matches!(report.accounting.reason, StopReason::StopAddress)
@@ -371,22 +377,16 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
         && report.accounting.compiled_blocks > 0
         && !report.resident_artifacts.is_empty()
     {
-        serial::arguments(format_args!(
+        output::arguments(format_args!(
             "STELA NATIVE COMPONENT REACHED REQUESTED STOP; MACOS BOOT/INSTALLATION UNVERIFIED\n"
         ));
-        serial::terminate(0x10)
+        output::terminate(0x10)
     }
-    serial::fatal("requested native component completion was not reached")
+    output::fatal("requested native component completion was not reached")
 }
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     // No allocator, formatting of caller-supplied values, Rust lock, unwind,
     // poison recovery or continuation is allowed on this terminal path.
-    let _ = serial::Serial.write_str("\nSTELA PANIC");
-    if let Some(location) = info.location() {
-        let _ = serial::Serial.write_str(" ");
-        let _ = serial::Serial.write_str(location.file());
-    }
-    let _ = serial::Serial.write_str("\n");
-    serial::terminate(0x11)
+    output::panic(info)
 }

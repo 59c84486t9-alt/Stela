@@ -1,6 +1,7 @@
 //! What Stela takes from the firmware before leaving boot services: its
 //! options and ARM image from the boot volume, RAM for the heap, stack and
-//! frame arenas, and the memory map its page tables cover.
+//! frame arenas, the framebuffer, and the memory map its page tables cover.
+use crate::console::Framebuffer;
 use crate::paging::{LARGE_PAGE, NX, PAGE, PRESENT, Tables, WRITABLE};
 use alloc::vec::Vec;
 use core::ptr::NonNull;
@@ -31,6 +32,8 @@ pub struct Handoff {
     pub stack_top: usize,
     pub native: [BootArena; NATIVE_ARENAS],
     pub ram: [BootArena; RAM_ARENAS],
+    /// The firmware's framebuffer, mapped RW+NX, when it has a usable one.
+    pub screen: Option<Framebuffer>,
 }
 
 fn pages(count: usize) -> Result<usize, &'static str> {
@@ -197,11 +200,22 @@ fn ram() -> Result<Vec<(usize, usize)>, &'static str> {
     Ok(merged)
 }
 
-/// Identity-map RAM RW+NX with 2 MiB pages where it fills a whole chunk and
-/// 4 KiB pages elsewhere. Page zero and the stack guard stay unmapped; the
-/// image gets its section rights, and each arena an empty table.
-fn tables(image: &Image, holes: [usize; 2], arenas: &[BootArena]) -> Result<Tables, &'static str> {
-    let ram = ram()?;
+/// Identity-map RAM and the framebuffer RW+NX with 2 MiB pages where they
+/// fill a whole chunk and 4 KiB pages elsewhere. Page zero and the stack
+/// guard stay unmapped; the image gets its section rights, and each arena an
+/// empty table.
+fn tables(
+    image: &Image,
+    holes: [usize; 2],
+    arenas: &[BootArena],
+    screen: Option<&Framebuffer>,
+) -> Result<Tables, &'static str> {
+    let mut ram = ram()?;
+    if let Some(screen) = screen {
+        let start = screen.base & !(PAGE - 1);
+        ram.push((start, (screen.base + screen.bytes).next_multiple_of(PAGE)));
+        ram.sort_unstable();
+    }
     let covered = |start: usize, end: usize| ram.iter().any(|r| r.0 <= start && end <= r.1);
     let overlaps = |start: usize, end: usize| ram.iter().any(|r| r.0 < end && start < r.1);
     let arena_chunks: Vec<usize> = arenas.iter().map(|a| a.base.as_ptr() as usize).collect();
@@ -244,7 +258,13 @@ pub fn take_over() -> Result<(Handoff, Tables), &'static str> {
     let ram = arenas::<RAM_ARENAS>()?;
     let guard = pages(STACK_PAGES + 1)?;
     let image = Image::loaded()?;
-    let tables = tables(&image, [0, guard], &[&native[..], &ram[..]].concat())?;
+    let screen = Framebuffer::from_firmware();
+    let tables = tables(
+        &image,
+        [0, guard],
+        &[&native[..], &ram[..]].concat(),
+        screen.as_ref(),
+    )?;
     // SAFETY: no protocol or pool allocation outlives this call; the heap,
     // stack, arenas and tables are LOADER_DATA, which Stela keeps.
     let map = unsafe { boot::exit_boot_services(None) };
@@ -256,6 +276,7 @@ pub fn take_over() -> Result<(Handoff, Tables), &'static str> {
             stack_top: guard + (STACK_PAGES + 1) * PAGE,
             native,
             ram,
+            screen,
         },
         tables,
     ))
