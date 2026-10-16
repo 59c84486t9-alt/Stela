@@ -7,10 +7,7 @@ use std::{
     path::Path,
 };
 
-pub fn manifest(
-    image: &Path,
-    model: Option<&str>,
-) -> Result<super::manifest::RestoreManifest> {
+pub fn manifest(image: &Path, model: Option<&str>) -> Result<super::manifest::RestoreManifest> {
     let mut archive = zip::ZipArchive::new(File::open(image)?)?;
     let member = archive.by_name("BuildManifest.plist")?;
     let mut bytes = vec![];

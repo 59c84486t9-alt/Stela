@@ -847,9 +847,7 @@ fn decode_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::macho::load_plan::{
-        Dependency, EntryPoint, FileRange, GuestRange, Payload, SegmentPlan,
-    };
+    use crate::load_plan::{Dependency, EntryPoint, FileRange, GuestRange, Payload, SegmentPlan};
 
     fn pointer(
         raw: u64,

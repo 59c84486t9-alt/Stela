@@ -2,7 +2,6 @@ use super::*;
 use crate::Cli;
 use clap::Parser;
 
-
 #[test]
 fn research_state_json_retains_vector_bits_and_fp_status() -> Result<()> {
     let mut state = stela_compiler::GuestState::default();

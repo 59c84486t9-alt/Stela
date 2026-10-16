@@ -19,12 +19,10 @@ tempfile.workspace = true
 stela-core.workspace = true
 stela-compiler.workspace = true
 stela-runtime.workspace = true
+stela-loader.workspace = true
 plist = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha1 = "0.10"
-object = { version = "0.37", features = ["read"] }
-walkdir = "2"
-lzfse_rust = "0.2"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [lints]

@@ -46,19 +46,19 @@ pub struct MappedImage {
 }
 
 /// Slide ordinary image addresses without truncating a negative delta or overflow.
-pub(crate) fn relocated(address: u64, preferred_base: u64, load_base: u64) -> Result<u64> {
+pub fn relocated(address: u64, preferred_base: u64, load_base: u64) -> Result<u64> {
     u64::try_from(i128::from(address) + i128::from(load_base) - i128::from(preferred_base))
         .context("slid image address overflow")
 }
 
-pub(crate) struct PreparedImage {
+pub struct PreparedImage {
     pub specs: Vec<MemoryRegionSpec>,
     pub code: Vec<(u64, Vec<u8>)>,
     pub unreserved_guards: Vec<UnreservedGuard>,
     pub data_limits: Vec<DataProtectionLimit>,
 }
 
-pub(crate) fn preferred_base(plan: &LoadPlan) -> Result<u64> {
+pub fn preferred_base(plan: &LoadPlan) -> Result<u64> {
     Ok(plan
         .segments
         .iter()
@@ -69,7 +69,7 @@ pub(crate) fn preferred_base(plan: &LoadPlan) -> Result<u64> {
 }
 
 /// Preflight all writes on private copies before allocating any guest memory.
-pub(crate) fn prepare_segments(
+pub fn prepare_segments(
     data: &[u8],
     plan: &LoadPlan,
     load_base: u64,
@@ -80,11 +80,7 @@ pub(crate) fn prepare_segments(
 
 /// Kernel-style original bytes/initprot: original dyld owns relocation and its
 /// later SG_READ_ONLY lockdown. Never mix this route with pre-applied fixups.
-pub(crate) fn prepare_raw_segments(
-    data: &[u8],
-    plan: &LoadPlan,
-    load_base: u64,
-) -> Result<PreparedImage> {
+pub fn prepare_raw_segments(data: &[u8], plan: &LoadPlan, load_base: u64) -> Result<PreparedImage> {
     prepare_segments_inner(data, plan, load_base, &[], false)
 }
 fn prepare_segments_inner(
@@ -223,7 +219,7 @@ fn prepare_segments_inner(
     })
 }
 
-pub(crate) fn add_stack(
+pub fn add_stack(
     specs: &mut Vec<MemoryRegionSpec>,
     stack: Option<StackSpec>,
 ) -> Result<Option<StackMapping>> {

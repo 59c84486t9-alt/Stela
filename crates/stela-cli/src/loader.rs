@@ -1,9 +1,10 @@
 //! Mach-O planning, dependency discovery, inventories and progress ledgers.
-use crate::{args::*, input::pauth_all_keys_context, macho};
+use crate::{args::*, input::pauth_all_keys_context};
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use stela_core::{Progress, Stage, read_json, write_json};
+use stela_loader as macho;
 
 #[derive(Subcommand)]
 pub(crate) enum ProgressCommand {
@@ -188,7 +189,7 @@ impl Inventory {
             !output.exists(),
             "inventory already exists; use a new output path for each scan"
         );
-        let inventory = crate::macho::scan(&root, &build)?;
+        let inventory = stela_loader::scan(&root, &build)?;
         write_json(&output, &inventory)?;
         eprintln!(
             "{} slices, {} scan errors, {} excluded containers; {}",

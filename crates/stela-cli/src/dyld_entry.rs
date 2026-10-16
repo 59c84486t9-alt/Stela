@@ -1,10 +1,10 @@
 //! A bounded original-dyld startup probe, not an application launcher.
 //! Reviewed startup prefixes or the original first continuous-clock call run.
 //! Main/dyld, stack and read-only clock mappings stay owned together.
-use crate::macho::{load_plan, mapped_image};
 use anyhow::{Context, Result, ensure};
 use std::path::{Path, PathBuf};
 use stela_compiler::{GuestAddress, GuestState};
+use stela_loader::{load_plan, mapped_image};
 use stela_runtime::{
     blocks::{BlockRuntime, StopReason, ThreadState},
     memory::OwnedMemory,
@@ -126,10 +126,10 @@ pub fn probe(
     options: Options,
 ) -> Result<serde_json::Value> {
     let dyld_data = std::fs::read(dyld_path)?;
-    let (dyld_offset, dyld_bytes) = crate::macho::select_slice(&dyld_data, dyld_path, None)?;
+    let (dyld_offset, dyld_bytes) = stela_loader::select_slice(&dyld_data, dyld_path, None)?;
     let dyld = load_plan::plan_dynamic_linker(dyld_bytes)?;
     let main_data = std::fs::read(executable)?;
-    let (main_offset, main_bytes) = crate::macho::select_slice(&main_data, executable, None)?;
+    let (main_offset, main_bytes) = stela_loader::select_slice(&main_data, executable, None)?;
     let main = load_plan::plan(main_bytes)?;
     ensure!(
         main.dylinker.as_deref() == Some(dyld.install_name.as_str()),

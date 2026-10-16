@@ -9,7 +9,6 @@ mod execute;
 mod images;
 mod input;
 mod loader;
-mod macho;
 mod restore;
 
 #[derive(Parser)]

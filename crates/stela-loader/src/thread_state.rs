@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn preserves_original_fields_raw_identity_and_process_type_path() -> Result<()> {
         let raw = command();
-        let thread: crate::macho::load_plan::Arm64UnixThread = unix_thread(&raw)?;
+        let thread: crate::load_plan::Arm64UnixThread = unix_thread(&raw)?;
         for index in 0..ARM64_GPR_COUNT {
             assert_eq!(
                 thread.x[index],

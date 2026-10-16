@@ -696,12 +696,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
-name = "lzfse_rust"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5edeac3ec657925dececc672bdd58fa2212291886ddcb3e08aa46924c78340c6"
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1184,8 +1178,6 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
- "lzfse_rust",
- "object",
  "plist",
  "reqwest",
  "serde",
@@ -1194,9 +1186,9 @@ dependencies = [
  "sha2",
  "stela-compiler",
  "stela-core",
+ "stela-loader",
  "stela-runtime",
  "tempfile",
- "walkdir",
  "zip",
 ]
 
@@ -1220,6 +1212,22 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "stela-loader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "object",
+ "serde",
+ "serde_json",
+ "stela-compiler",
+ "stela-core",
+ "stela-runtime",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

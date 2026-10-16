@@ -1,9 +1,10 @@
 //! Bounded native execution of raw code, mapped images and original dyld.
-use crate::{args::*, compile::block_profile, dyld_entry, input::*, macho};
+use crate::{args::*, compile::block_profile, dyld_entry, input::*};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use std::path::PathBuf;
 use stela_core::read_json;
+use stela_loader as macho;
 
 #[derive(Args)]
 pub(crate) struct RunLinkedImages {

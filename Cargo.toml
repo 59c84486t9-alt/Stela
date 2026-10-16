@@ -2,6 +2,7 @@
 members = [
     "crates/stela-cli",
     "crates/stela-core",
+    "crates/stela-loader",
     "crates/stela-compiler",
     "crates/stela-runtime",
     "crates/stela-state",
@@ -30,6 +31,7 @@ stela-state = { path = "crates/stela-state" }
 stela-core = { path = "crates/stela-core" }
 stela-compiler = { path = "crates/stela-compiler" }
 stela-runtime = { path = "crates/stela-runtime" }
+stela-loader = { path = "crates/stela-loader" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

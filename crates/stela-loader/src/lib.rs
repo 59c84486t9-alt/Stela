@@ -1,4 +1,5 @@
-//! Inventory standalone Mach-O slices. Containers are explicitly uncounted.
+//! Apple Mach-O loading: slice selection, load plans, chained fixups, exports,
+//! dependency discovery and owned image mappings for native execution.
 pub mod chained_fixups;
 pub mod dependency_graph;
 pub mod dependency_paths;
