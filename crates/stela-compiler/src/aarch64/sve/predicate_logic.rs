@@ -245,4 +245,113 @@ fn decode_vector_move(word: u32) -> Option<(ElementSize, u8)> {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    mod field {
+        use super::*;
+
+        #[test]
+        fn all_move_slices_and_vector_registers_decode() {
+            for (opcode, element, slices) in [
+                (PMOV_BYTE, ElementSize::Byte, 1),
+                (PMOV_HALF, ElementSize::Halfword, 2),
+                (PMOV_SINGLE, ElementSize::Word, 4),
+                (PMOV_DOUBLE, ElementSize::Doubleword, 8),
+            ] {
+                for part in 0..slices {
+                    for source in 0..=VECTOR_MASK {
+                        let slice_bits = if element == ElementSize::Doubleword {
+                            ((part & 3) << PMOV_IMMEDIATE_SHIFT)
+                                | ((part >> 2) << PMOV_DOUBLE_HIGH_SHIFT)
+                        } else {
+                            part << PMOV_IMMEDIATE_SHIFT
+                        };
+                        assert_eq!(
+                            decode(opcode | slice_bits | (source << SOURCE_SHIFT) | 15),
+                            Some(Ok(Operand {
+                                destination: 15,
+                                kind: Kind::MoveVector {
+                                    element,
+                                    source: source as u8,
+                                    part: part as u8
+                                }
+                            }))
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn all_permutation_element_groups_allow_operand_aliases() {
+            for opcode in [ZIP1, ZIP2, TRN1, TRN2, UZP1, UZP2] {
+                for size in 0..=SIZE_MASK {
+                    for register in 0..=PREDICATE_MASK {
+                        let word = opcode
+                            | (size << SIZE_SHIFT)
+                            | register
+                            | (register << SOURCE_SHIFT)
+                            | (register << RIGHT_SHIFT);
+                        assert!(matches!(decode(word), Some(Ok(Operand {
+                    destination, kind: Kind::Permute { element, left, right, .. }
+                })) if destination == register as u8 && left == destination && right == destination
+                    && element.bytes() == 1 << size));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn booleans_preserve_all_predicate_register_roles_and_flags() {
+        for opcode in [AND, BIC, EOR, NAND, NOR, ORN, ORR] {
+            for flags in [false, true] {
+                for register in 0..=PREDICATE_MASK {
+                    let word = opcode
+                        | if flags { FLAGS_BIT } else { 0 }
+                        | register
+                        | (register << SOURCE_SHIFT)
+                        | (register << RIGHT_SHIFT)
+                        | (register << GOVERNOR_SHIFT);
+                    let operand = decode(word).unwrap().unwrap();
+                    assert_eq!(operand.destination, register as u8);
+                    assert!(
+                        matches!(operand.kind, Kind::Boolean { flags: actual, governor, left, right, .. }
+                    if actual == flags && governor == register as u8 && left == register as u8 && right == register as u8)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn counter_pair_allows_wrapping_destination_and_aliases() {
+        let word =
+            PEXT_PAIR | (3 << SIZE_SHIFT) | (7 << SOURCE_SHIFT) | (1 << PEXT_PART_SHIFT) | 15;
+        assert_eq!(
+            decode(word),
+            Some(Ok(Operand {
+                destination: 15,
+                kind: Kind::ExtractCounter {
+                    element: ElementSize::Doubleword,
+                    source: 15,
+                    part: 1,
+                    pair: true
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn indexed_select_rejects_only_zero_size_encoding() {
+        for encoded in 0u32..32 {
+            let word = PSEL
+                | ((encoded >> 4) << PSEL_IMMEDIATE_HIGH_SHIFT)
+                | (((encoded >> 3) & 1) << PSEL_SIZE_HIGH_SHIFT)
+                | ((encoded & 7) << PSEL_SIZE_LOW_SHIFT);
+            assert_eq!(decode(word).unwrap().is_err(), encoded & 15 == 0);
+        }
+        assert_eq!(decode(0), None);
+    }
+}

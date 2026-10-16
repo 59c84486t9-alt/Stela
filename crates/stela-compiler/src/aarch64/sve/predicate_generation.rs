@@ -160,7 +160,95 @@ mod basic {
     }
 
     #[cfg(test)]
-    mod tests;
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn basic_allocations_include_all_patterns_and_predicate_registers() {
+            for destination in 0..=PREDICATE_MASK {
+                assert_eq!(
+                    decode_basic(PFALSE_CLASS | destination),
+                    Some(Ok(BasicOperand::False {
+                        destination: destination as u8
+                    }))
+                );
+                for size in 0..=SIZE_MASK {
+                    let element = ElementSize::from_bytes(1 << size).unwrap();
+                    for pattern in 0..=PATTERN_MASK {
+                        for (class, set_flags) in [(PTRUE_CLASS, false), (PTRUES_CLASS, true)] {
+                            assert_eq!(
+                                decode_basic(
+                                    class
+                                        | destination
+                                        | size << SIZE_SHIFT
+                                        | pattern << FIRST_SOURCE_SHIFT
+                                ),
+                                Some(Ok(BasicOperand::True {
+                                    destination: destination as u8,
+                                    element,
+                                    pattern: pattern as u8,
+                                    set_flags
+                                }))
+                            );
+                        }
+                    }
+                    for governing in 0..=PREDICATE_MASK {
+                        assert_eq!(
+                            decode_basic(
+                                PNEXT_CLASS
+                                    | destination
+                                    | governing << FIRST_SOURCE_SHIFT
+                                    | size << SIZE_SHIFT
+                            ),
+                            Some(Ok(BasicOperand::Next {
+                                destination: destination as u8,
+                                governing: governing as u8,
+                                element
+                            }))
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn counter_aliases_and_scalar_zero_width_are_explicit() {
+            for destination in 0..=PN_MASK {
+                for size in 0..=SIZE_MASK {
+                    assert_eq!(
+                        decode_basic(PTRUE_PN_CLASS | destination | size << SIZE_SHIFT),
+                        Some(Ok(BasicOperand::TrueCounter {
+                            destination: PN_BASE + destination as u8,
+                            element: ElementSize::from_bytes(1 << size).unwrap()
+                        }))
+                    );
+                }
+            }
+            for (class, equal) in [(CTERMEQ_CLASS, true), (CTERMNE_CLASS, false)] {
+                for first in 0..=SCALAR_REGISTER_MASK {
+                    for second in 0..=SCALAR_REGISTER_MASK {
+                        for (size, width) in [(0, Width::W32), (1, Width::X64)] {
+                            assert_eq!(
+                                decode_basic(
+                                    class
+                                        | first << FIRST_SOURCE_SHIFT
+                                        | second << SECOND_SOURCE_SHIFT
+                                        | size << SIZE_SHIFT
+                                ),
+                                Some(Ok(BasicOperand::ConditionalTerminate {
+                                    first: register(first, false),
+                                    second: register(second, false),
+                                    width,
+                                    equal
+                                }))
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(decode_basic(PFALSE_CLASS ^ (1 << 4)).is_none());
+        }
+    }
 }
 
 mod breaks {
@@ -287,7 +375,48 @@ mod breaks {
     }
 
     #[cfg(test)]
-    mod tests;
+    mod tests {
+        use super::*;
+        #[test]
+        fn all_predicate_fields_and_merge_forms() {
+            for d in 0..16_u32 {
+                for g in 0..16_u32 {
+                    for n in 0..16_u32 {
+                        let fields = d | (g << GUARD_SHIFT) | (n << SOURCE_SHIFT);
+                        for base in [BRKA, BRKB] {
+                            for merge in [0, MERGING_BIT] {
+                                let op = decode(base | fields | merge).unwrap().unwrap();
+                                assert_eq!(
+                                    (op.destination, op.guard, op.source),
+                                    (d as u8, g as u8, n as u8)
+                                );
+                            }
+                        }
+                        for base in [BRKAS, BRKBS, BRKN, BRKNS] {
+                            assert!(decode(base | fields).is_some());
+                            assert!(decode(base | fields | MERGING_BIT).is_none());
+                        }
+                        for m in 0..16_u32 {
+                            for base in [BRKPA, BRKPAS, BRKPB, BRKPBS] {
+                                let op = decode(base | fields | (m << PREVIOUS_SOURCE_SHIFT))
+                                    .unwrap()
+                                    .unwrap();
+                                assert!(
+                                    matches!(op.kind, BreakKind::Previous { source: value, .. } if value == m as u8)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[test]
+        fn nonfamily_fixed_bits_decline() {
+            assert!(decode(BRKA ^ (1 << 9)).is_none());
+            assert!(decode(BRKA ^ (1 << 15)).is_none());
+            assert!(decode(BRKPA ^ (1 << 9)).is_none());
+        }
+    }
 }
 
 mod whiles {
@@ -549,5 +678,97 @@ mod whiles {
     }
 
     #[cfg(test)]
-    mod tests;
+    mod tests {
+        use super::*;
+        #[test]
+        fn all_forms_all_operand_fields_and_aliases() {
+            for form in &FORMS {
+                for size in 0..=ELEMENT_SIZE_MASK {
+                    for first in 0..=SCALAR_REGISTER_MASK {
+                        for limit in 0..=SCALAR_REGISTER_MASK {
+                            let word = form.class
+                                | (size << ELEMENT_SIZE_SHIFT)
+                                | (first << SOURCE_N_SHIFT)
+                                | (limit << SOURCE_M_SHIFT);
+                            let op = decode(word).unwrap().unwrap();
+                            assert_eq!(op.comparison, form.comparison);
+                            assert_eq!(op.first, scalar_register(first));
+                            assert_eq!(op.limit, scalar_register(limit));
+                            for bit in 0..u32::BITS {
+                                if form.mask & (1 << bit) != 0 {
+                                    let changed = word ^ (1 << bit);
+                                    if let Some(Ok(changed_op)) = decode(changed) {
+                                        // A changed class may select another
+                                        // WHILE form.
+                                        assert!(
+                                            FORMS.iter().any(|candidate| changed & candidate.mask
+                                                == candidate.class)
+                                        );
+                                        assert_ne!(changed_op, op);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #[test]
+        fn representation_fields_and_scalar_width_are_distinct() {
+            for form in &FORMS {
+                let op = decode(
+                    form.class
+                        | match form.representation {
+                            Representation::Predicate => PREDICATE_MASK,
+                            Representation::Pair => PAIR_DESTINATION_MASK,
+                            Representation::Counter => COUNTER_DESTINATION_MASK,
+                        },
+                )
+                .unwrap()
+                .unwrap();
+                match form.representation {
+                    Representation::Predicate => {
+                        assert_eq!(op.destination, Destination::Predicate(15));
+                        if !matches!(
+                            op.comparison,
+                            Comparison::ReadWriteDistance | Comparison::WriteReadDistance
+                        ) {
+                            assert_eq!(op.width, Width::W32);
+                            assert_eq!(
+                                decode(form.class | (1 << SCALAR_WIDTH_SHIFT))
+                                    .unwrap()
+                                    .unwrap()
+                                    .width,
+                                Width::X64
+                            );
+                        }
+                    }
+                    Representation::Pair => assert_eq!(op.destination, Destination::Pair(14)),
+                    Representation::Counter => {
+                        assert_eq!(
+                            op.destination,
+                            Destination::Counter {
+                                register: 15,
+                                vectors: 2
+                            }
+                        );
+                        assert_eq!(
+                            decode(form.class | (1 << COUNTER_WIDTH_SHIFT))
+                                .unwrap()
+                                .unwrap()
+                                .destination,
+                            Destination::Counter {
+                                register: 8,
+                                vectors: 4
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        #[test]
+        fn unrelated_instruction_is_declined() {
+            assert_eq!(decode(0xd503201f), None);
+        }
+    }
 }

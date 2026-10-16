@@ -236,4 +236,179 @@ impl EntryProfile {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    mod base_spe {
+        use super::*;
+
+        #[test]
+        fn base_spe_absence_requires_exact_zero_and_preserves_unknown_values() {
+            for version in 0..=ID_FIELD_MASK {
+                let raw = version << DFR0_PMS_VERSION_SHIFT;
+                let result = BaseSpeAbsence::from_id_aa64dfr0_el1(raw);
+                if version == SPE_NOT_IMPLEMENTED {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.unwrap_err().pms_version, version as u8);
+                }
+            }
+            // Unrelated ID fields do not stand in for PMSVer.
+            assert!(
+                BaseSpeAbsence::from_id_aa64dfr0_el1(!(ID_FIELD_MASK << DFR0_PMS_VERSION_SHIFT))
+                    .is_ok()
+            );
+        }
+    }
+    mod pfar {
+        use super::*;
+
+        fn scalable() -> ScalableEntryAbsence {
+            ScalableEntryAbsence::from_id_registers(0, 0).unwrap()
+        }
+
+        #[test]
+        fn pfar_requires_explicit_absence_and_present_or_unreviewed_declines() {
+            let absent = SystemEntryFeatures::declared_absent();
+            assert!(!absent.contains(SystemEntryFeature::Pfar));
+            assert!(EntryProfile::base(absent, scalable()).is_ok());
+            let present_or_unreviewed = absent.with(SystemEntryFeature::Pfar);
+            assert_eq!(
+                EntryProfile::base(present_or_unreviewed, scalable()),
+                Err(EntryProfileError::UnsupportedSystemFeature(
+                    SystemEntryFeature::Pfar
+                ))
+            );
+            // Constructors have no storage argument: absent PFAR storage cannot erase
+            // an authoritative present/unreviewed feature declaration. The Snapshot
+            // owner separately rejects missing PFR1 and every nonzero PFAR field.
+            assert_eq!(SystemEntryFeature::Pfar.name(), "FEAT_PFAR");
+        }
+
+        #[test]
+        fn pfar_append_preserves_all_existing_feature_discriminants_and_masks() {
+            let prior = [
+                SystemEntryFeature::Brbe,
+                SystemEntryFeature::Bti,
+                SystemEntryFeature::Dit,
+                SystemEntryFeature::DoubleFault,
+                SystemEntryFeature::Ebep,
+                SystemEntryFeature::Exs,
+                SystemEntryFeature::Gcs,
+                SystemEntryFeature::Iesb,
+                SystemEntryFeature::Mops,
+                SystemEntryFeature::Mte,
+                SystemEntryFeature::Nmi,
+                SystemEntryFeature::Pan,
+                SystemEntryFeature::PauthLr,
+                SystemEntryFeature::SpeExc,
+                SystemEntryFeature::Ssbs,
+                SystemEntryFeature::TrbeExc,
+                SystemEntryFeature::Uao,
+                SystemEntryFeature::Uinj,
+            ];
+            for (index, feature) in prior.into_iter().enumerate() {
+                assert_eq!(usize::from(feature as u8), index);
+                assert_eq!(feature.mask(), 1 << index);
+                assert!(
+                    !SystemEntryFeatures::declared_absent()
+                        .with(feature)
+                        .contains(SystemEntryFeature::Pfar)
+                );
+            }
+            assert_eq!(usize::from(SystemEntryFeature::Pfar as u8), prior.len());
+            assert_eq!(SystemEntryFeature::Pfar.mask(), 1 << prior.len());
+        }
+    }
+
+    fn no_scalable_state() -> ScalableEntryAbsence {
+        ScalableEntryAbsence::from_id_registers(0, 0).unwrap()
+    }
+
+    #[test]
+    fn base_token_requires_explicit_absence_and_rejects_each_optional_effect() {
+        let absent = SystemEntryFeatures::declared_absent();
+        let profile = EntryProfile::base(absent, no_scalable_state()).unwrap();
+        assert_eq!(profile.features(), absent);
+        for &feature in SYSTEM_ENTRY_FEATURES {
+            assert_eq!(
+                EntryProfile::base(absent.with(feature), no_scalable_state()),
+                Err(EntryProfileError::UnsupportedSystemFeature(feature))
+            );
+        }
+    }
+
+    #[test]
+    fn every_nonzero_scalable_id_value_declines_instead_of_becoming_absent() {
+        for sve in 0..=ID_FIELD_MASK {
+            for sme in 0..=ID_FIELD_MASK {
+                let result = ScalableEntryAbsence::from_id_registers(
+                    sve << PFR0_SVE_SHIFT,
+                    sme << PFR1_SME_SHIFT,
+                );
+                assert_eq!(result.is_ok(), sve == 0 && sme == 0);
+                if sve != 0 {
+                    assert_eq!(
+                        result,
+                        Err(EntryProfileError::UnsupportedScalableState {
+                            feature: "FEAT_SVE",
+                            id_value: sve as u8,
+                        })
+                    );
+                } else if sme != 0 {
+                    assert_eq!(
+                        result,
+                        Err(EntryProfileError::UnsupportedScalableState {
+                            feature: "FEAT_SME",
+                            id_value: sme as u8,
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalable_witness_does_not_claim_other_cpu_features_absent() {
+        let other_pfr0_fields = !(ID_FIELD_MASK << PFR0_SVE_SHIFT);
+        let other_pfr1_fields = !(ID_FIELD_MASK << PFR1_SME_SHIFT);
+        assert_eq!(
+            ScalableEntryAbsence::from_id_registers(other_pfr0_fields, other_pfr1_fields),
+            Ok(no_scalable_state())
+        );
+    }
+
+    #[test]
+    fn tagged_branch_and_debug_controls_must_be_checked_independently() {
+        let profile =
+            EntryProfile::base(SystemEntryFeatures::declared_absent(), no_scalable_state())
+                .unwrap();
+        for tbi in [TCR_TBI0, TCR_TBI1, TCR_TOP_BYTE_IGNORE_MASK] {
+            assert_eq!(
+                profile.check_controls(tbi, 0),
+                Err(EntryProfileError::UnsupportedControl {
+                    register: "TCR_EL1",
+                    value: tbi,
+                })
+            );
+        }
+        for debug in [
+            MDSCR_SOFTWARE_STEP,
+            MDSCR_KERNEL_DEBUG_ENABLE,
+            MDSCR_MONITOR_DEBUG_ENABLE,
+            MDSCR_ACTIVE_DEBUG_MASK,
+        ] {
+            assert_eq!(
+                profile.check_controls(0, debug),
+                Err(EntryProfileError::UnsupportedControl {
+                    register: "MDSCR_EL1",
+                    value: debug,
+                })
+            );
+        }
+        assert_eq!(
+            profile.check_controls(!TCR_TOP_BYTE_IGNORE_MASK, !MDSCR_ACTIVE_DEBUG_MASK),
+            Ok(())
+        );
+    }
+}

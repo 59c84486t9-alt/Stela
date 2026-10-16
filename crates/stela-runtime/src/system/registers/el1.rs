@@ -263,4 +263,261 @@ pub fn commit(effect: Effect, state: &mut SystemState) -> Result<(), CommitError
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::system::state::{PSTATE_EL0T, PSTATE_EL1H};
+
+    mod ordering {
+        use super::*;
+        use crate::system::state::PSTATE_EL1H;
+
+        fn inputs() -> (SystemState, Context) {
+            let state =
+                SystemState::new(PSTATE_EL1H, 0, El1Registers::new(1, 2, 3, 4, 0x8123)).unwrap();
+            let no_traps = FineGrainedTraps {
+                esr: false,
+                far: false,
+                vbar: false,
+            };
+            let context = Context {
+                profile: Profile {
+                    current_el: ExceptionLevel::El1,
+                    security: SecurityState::NonSecure,
+                    el2_enabled: true,
+                    el3_present: true,
+                },
+                aa64: true,
+                gcs: false,
+                fine_grained_traps: true,
+                controls: Some(Controls {
+                    effective_nvx: NV_MEMORY,
+                    hcr_trvm: false,
+                    hcr_tvm: false,
+                    scr_fgt_enabled: true,
+                    read_traps: no_traps,
+                    write_traps: no_traps,
+                    current_exlock_enabled: false,
+                    halted: false,
+                    pstate_exlock: false,
+                }),
+            };
+            (state, context)
+        }
+
+        #[test]
+        fn vm_and_direction_specific_fgt_traps_precede_nested_redirection() {
+            let (state, mut context) = inputs();
+            let read = Request::read(Register::Esr.encoding(), ZERO_REGISTER);
+            let write = Request::write(Register::Esr.encoding(), ZERO_REGISTER, u64::MAX);
+            context.controls.as_mut().unwrap().hcr_trvm = true;
+            assert_eq!(
+                resolve(read, &context, &state),
+                Resolution::Trap(Trap::system_access(ExceptionLevel::El2))
+            );
+            assert_eq!(
+                resolve(write, &context, &state),
+                Resolution::BackendRequired(BackendRequest::NestedMemory {
+                    offset: ESR_NVMEM,
+                    request: write
+                })
+            );
+            context.controls.as_mut().unwrap().hcr_trvm = false;
+            context.controls.as_mut().unwrap().read_traps.esr = true;
+            assert_eq!(
+                resolve(read, &context, &state),
+                Resolution::Trap(Trap::system_access(ExceptionLevel::El2))
+            );
+            context.controls.as_mut().unwrap().scr_fgt_enabled = false;
+            assert_eq!(
+                resolve(read, &context, &state),
+                Resolution::BackendRequired(BackendRequest::NestedMemory {
+                    offset: ESR_NVMEM,
+                    request: read
+                })
+            );
+        }
+
+        #[test]
+        fn vector_read_res0_does_not_authorize_masking_an_unknown_write_policy() {
+            let (state, mut context) = inputs();
+            context.controls.as_mut().unwrap().effective_nvx = 0;
+            assert_eq!(
+                resolve(
+                    Request::read(Register::Vbar.encoding(), 2),
+                    &context,
+                    &state
+                ),
+                Resolution::Read(0x8000)
+            );
+            let write = Request::write(Register::Vbar.encoding(), 2, 0x8123);
+            assert_eq!(
+                resolve(write, &context, &state),
+                Resolution::BackendRequired(BackendRequest::RegisterFields {
+                    register: Register::Vbar,
+                    request: write
+                })
+            );
+        }
+
+        #[test]
+        fn missing_controls_and_profile_mismatch_cannot_return_bank_values() {
+            let (state, mut context) = inputs();
+            let request = Request::read(Register::Far.encoding(), 0);
+            context.controls = None;
+            assert_eq!(
+                resolve(request, &context, &state),
+                Resolution::BackendRequired(BackendRequest::ControlsRequired(request))
+            );
+            context.profile.current_el = ExceptionLevel::El0;
+            assert!(matches!(
+                resolve(request, &context, &state),
+                Resolution::Unsupported(_)
+            ));
+        }
+    }
+    fn state(mode: u64) -> SystemState {
+        SystemState::new(mode, 0x1000, El1Registers::new(1, 2, 3, 4, 0x8000)).unwrap()
+    }
+    fn context(el: ExceptionLevel) -> Context {
+        let traps = FineGrainedTraps {
+            esr: false,
+            far: false,
+            vbar: false,
+        };
+        Context {
+            profile: Profile {
+                current_el: el,
+                security: SecurityState::NonSecure,
+                el2_enabled: false,
+                el3_present: false,
+            },
+            aa64: true,
+            gcs: false,
+            fine_grained_traps: false,
+            controls: Some(Controls {
+                effective_nvx: 0,
+                hcr_trvm: false,
+                hcr_tvm: false,
+                scr_fgt_enabled: false,
+                read_traps: traps,
+                write_traps: traps,
+                current_exlock_enabled: false,
+                halted: false,
+                pstate_exlock: false,
+            }),
+        }
+    }
+    #[test]
+    fn source_el0_undefined_precedes_unavailable_controls_even_for_xzr() {
+        let state = state(PSTATE_EL0T);
+        let mut context = context(ExceptionLevel::El0);
+        context.controls = None;
+        for register in Register::ALL {
+            for request in [
+                Request::read(register.encoding(), ZERO_REGISTER),
+                Request::write(register.encoding(), ZERO_REGISTER, u64::MAX),
+            ] {
+                assert_eq!(resolve(request, &context, &state), Resolution::Undefined);
+            }
+        }
+    }
+    #[test]
+    fn illegal_execution_state_precedes_access_and_blocks_every_direct_effect() {
+        let mut state = state(PSTATE_EL1H | PSTATE_IL_MASK);
+        let before = state.clone();
+        let mut context = context(ExceptionLevel::El0);
+        context.controls = None;
+        for register in Register::ALL {
+            for request in [
+                Request::read(register.encoding(), ZERO_REGISTER),
+                Request::write(register.encoding(), ZERO_REGISTER, u64::MAX),
+            ] {
+                assert_eq!(
+                    resolve(request, &context, &state),
+                    Resolution::Unsupported("illegal execution state requires its exception owner")
+                );
+                assert_eq!(state, before);
+            }
+        }
+        for effect in [Effect::Elr(5), Effect::Far(6), Effect::Vbar(0x9000)] {
+            assert_eq!(
+                commit(effect, &mut state),
+                Err(CommitError::IllegalExecutionState)
+            );
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
+    fn direct_effects_update_only_the_existing_named_register() {
+        for (register, value) in [
+            (Register::Elr, u64::MAX),
+            (Register::Far, 0x5678),
+            (Register::Vbar, 0x9000),
+        ] {
+            let mut state = state(PSTATE_EL1H);
+            let before = state.clone();
+            let request = Request::write(register.encoding(), 2, value);
+            let Resolution::BackendRequired(BackendRequest::State(effect)) =
+                resolve(request, &context(ExceptionLevel::El1), &state)
+            else {
+                panic!("direct effect");
+            };
+            commit(effect, &mut state).unwrap();
+            assert_eq!(register.value(state.el1_registers()), value);
+            for other in Register::ALL {
+                if other != register {
+                    assert_eq!(
+                        other.value(state.el1_registers()),
+                        other.value(before.el1_registers())
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn exlock_precedes_elr_nested_memory_and_traps_in_source_order() {
+        let state = state(PSTATE_EL1H);
+        let mut context = context(ExceptionLevel::El1);
+        context.profile.el2_enabled = true;
+        context.gcs = true;
+        let controls = context.controls.as_mut().unwrap();
+        controls.current_exlock_enabled = true;
+        controls.pstate_exlock = true;
+        let request = Request::write(Register::Elr.encoding(), 0, 1);
+        assert_eq!(
+            resolve(request, &context, &state),
+            Resolution::BackendRequired(BackendRequest::ExlockException(request))
+        );
+        context.controls.as_mut().unwrap().effective_nvx = NV_TRAP;
+        assert_eq!(
+            resolve(request, &context, &state),
+            Resolution::Trap(Trap::system_access(ExceptionLevel::El2))
+        );
+        context.controls.as_mut().unwrap().effective_nvx = NV_MEMORY;
+        assert_eq!(
+            resolve(request, &context, &state),
+            Resolution::BackendRequired(BackendRequest::NestedMemory {
+                offset: ELR_NVMEM,
+                request
+            })
+        );
+    }
+    #[test]
+    fn field_and_forged_effect_requirements_never_silently_mask_writes() {
+        let mut state = state(PSTATE_EL1H);
+        let before = state.clone();
+        for register in [Register::Spsr, Register::Esr] {
+            let request = Request::write(register.encoding(), 0, u64::MAX);
+            assert_eq!(
+                resolve(request, &context(ExceptionLevel::El1), &state),
+                Resolution::BackendRequired(BackendRequest::RegisterFields { register, request })
+            );
+        }
+        assert_eq!(
+            commit(Effect::Vbar(1), &mut state),
+            Err(CommitError::UnalignedVectorBase)
+        );
+        assert_eq!(state, before);
+    }
+}
