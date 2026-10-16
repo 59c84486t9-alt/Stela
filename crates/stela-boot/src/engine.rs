@@ -163,26 +163,30 @@ fn test_profile() -> CpuProfile {
     }
 }
 
-/// The M2 Mac mini (J473AP) profile, running as cpu0. Only values with
-/// evidence are declared; every other identification read refuses.
-fn j473_profile() -> CpuProfile {
+/// The M2 Mac mini (J473AP) profile, running as cpu0. The ID_AA64* and
+/// CTR_EL0 registers advertise what this engine implements, capped at the
+/// M2's features (`machine::identification`); MIDR, MPIDR and DCZID are the
+/// board's own values. Every other identification read refuses.
+fn j473_profile(target: TargetCpu) -> CpuProfile {
+    let mut fixed = stela_runtime::machine::identification::derive(target);
+    fixed.extend([
+        // Apple's DeviceTree gives cpu0 `reg` 0 (cpu4 is 0x100: Aff1 is
+        // the cluster), and MPIDR_EL1 bit 31 is RES1. U and MT are 0 for
+        // a multiprocessor without multithreading (inferred).
+        (MPIDR_EL1, 0x8000_0000),
+        // Implementer 0x61 (Apple), architecture 0xF and part 0x032
+        // (m1n1 `midr.h` MIDR_PART_T8112_BLIZZARD, cpu0's `apple,blizzard`).
+        // Variant and revision are unknown and taken as 0 until a
+        // reference capture supplies them.
+        (MIDR_EL1, 0x611f_0320),
+        // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s`
+        // zeroes with `dc zva` in fixed 64-byte steps.
+        (DCZID_EL0, 4),
+    ]);
     CpuProfile {
-        name: "apple-j473-draft",
+        name: "apple-j473",
         counter_frequency: 24_000_000,
-        fixed: alloc::vec![
-            // Apple's DeviceTree gives cpu0 `reg` 0 (cpu4 is 0x100: Aff1 is
-            // the cluster), and MPIDR_EL1 bit 31 is RES1. U and MT are 0 for
-            // a multiprocessor without multithreading (inferred).
-            (MPIDR_EL1, 0x8000_0000),
-            // Implementer 0x61 (Apple), architecture 0xF and part 0x032
-            // (m1n1 `midr.h` MIDR_PART_T8112_BLIZZARD, cpu0's `apple,blizzard`).
-            // Variant and revision are unknown and taken as 0 until a
-            // reference capture supplies them.
-            (MIDR_EL1, 0x611f_0320),
-            // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s`
-            // zeroes with `dc zva` in fixed 64-byte steps.
-            (DCZID_EL0, 4),
-        ],
+        fixed,
     }
 }
 
@@ -444,7 +448,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             "BUNDLE regions={} patched={} kept={:?} dram_base={:#x}\n",
             loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
         ));
-        (loaded.pc, loaded.x0, j473_profile())
+        (loaded.pc, loaded.x0, j473_profile(target))
     } else {
         // SAFETY: the guest image was left allocated by the loader.
         let source = unsafe {
