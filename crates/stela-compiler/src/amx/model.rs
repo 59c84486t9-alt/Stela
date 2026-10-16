@@ -48,6 +48,9 @@ pub enum AmxError {
     },
     /// `set` and `clr` change enablement and are owned by the runtime.
     Enablement,
+    /// An unallocated operation: hardware raises an undefined instruction
+    /// exception.
+    Undefined,
 }
 
 /// Apply one enabled-state operation.
@@ -99,6 +102,7 @@ pub fn execute(
             Ok(())
         }
         Set | Clear => Err(AmxError::Enablement),
+        Unallocated => Err(AmxError::Undefined),
     }
 }
 

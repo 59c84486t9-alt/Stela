@@ -9,9 +9,11 @@ const SPACE: u32 = 0x0020_1000;
 const OPERATION_SHIFT: u32 = 5;
 const FIELD_MASK: u32 = 0x1f;
 const SET_CLEAR: u32 = 17;
+const FIRST_UNALLOCATED: u32 = 23;
 const INSTRUCTION_BYTES: u64 = 4;
 
-/// The 23 allocated operations; 17 is split by its immediate.
+/// The 23 allocated operations, with 17 split by its immediate, and the
+/// unallocated operations 23..31.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AmxOperation {
@@ -39,6 +41,10 @@ pub enum AmxOperation {
     MatrixInteger,
     MatrixFloat,
     GenerateLookup,
+    /// Operations 23..31. On hardware these words raise an undefined
+    /// instruction exception (EC 0): Asahi Linux observed "faults with unknown
+    /// instruction" for `0x002012e0..` on M1; the M2 behavior is inferred.
+    Unallocated,
 }
 
 impl AmxOperation {
@@ -69,6 +75,8 @@ impl AmxOperation {
             Self::MatrixInteger => (20, None),
             Self::MatrixFloat => (21, None),
             Self::GenerateLookup => (22, None),
+            // The first unallocated operation; a decoded word keeps its own.
+            Self::Unallocated => (FIRST_UNALLOCATED, None),
         }
     }
 
@@ -99,6 +107,7 @@ impl AmxOperation {
             Self::MatrixInteger => "matint",
             Self::MatrixFloat => "matfp",
             Self::GenerateLookup => "genlut",
+            Self::Unallocated => "unallocated",
         }
     }
 
@@ -173,8 +182,9 @@ pub struct AmxInstruction {
     pub next_pc: GuestAddress,
 }
 
-/// `Ok(None)` outside the AMX space. Operations 23..31 and operation-17
-/// immediates other than 0/1 have no researched behavior and are refused.
+/// `Ok(None)` outside the AMX space. Operations 23..31 decode as
+/// [`AmxOperation::Unallocated`]. Operation-17 immediates other than 0/1 have
+/// no researched behavior and are refused.
 pub fn decode(pc: GuestAddress, word: u32) -> Result<Option<AmxInstruction>, CompileError> {
     if word & SPACE_MASK != SPACE {
         return Ok(None);
@@ -203,11 +213,7 @@ pub fn decode(pc: GuestAddress, word: u32) -> Result<Option<AmxInstruction>, Com
                 .expect("allocated AMX operation");
             (operation, AmxOperand::Register(field as u8))
         }
-        _ => {
-            return Err(CompileError(alloc::format!(
-                "AMX operation {operation} is unallocated in the M2 generation"
-            )));
-        }
+        _ => (AmxOperation::Unallocated, AmxOperand::None),
     };
     Ok(Some(AmxInstruction {
         operation,
@@ -259,7 +265,13 @@ mod tests {
     #[test]
     fn unresearched_encodings_are_refused_and_neighbors_are_not_amx() {
         for operation in 23..32u32 {
-            assert!(decode(PC, SPACE | (operation << 5)).is_err());
+            for operand in [0, 31] {
+                let word = SPACE | (operation << 5) | operand;
+                let decoded = decode(PC, word).unwrap().unwrap();
+                assert_eq!(decoded.operation, AmxOperation::Unallocated);
+                assert_eq!(decoded.operand, AmxOperand::None);
+                assert_eq!(decoded.word, word);
+            }
         }
         for immediate in 2..32u32 {
             assert!(decode(PC, SPACE | (SET_CLEAR << 5) | immediate).is_err());

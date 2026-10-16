@@ -40,6 +40,9 @@ pub enum Failure {
     Unsupported { detail: &'static str },
     /// The transfer touches memory outside the direct-RAM user range.
     Memory { address: u64, write: bool },
+    /// An unallocated operation (23..31), which hardware raises as an
+    /// undefined instruction. Hosted execution has no exception delivery.
+    Undefined,
 }
 
 /// How an AMX instruction completed.
@@ -82,6 +85,7 @@ impl Thread {
         kernels: Option<&Kernels>,
     ) -> core::result::Result<Completion, Failure> {
         match (instruction.operation, &mut self.registers) {
+            (AmxOperation::Unallocated, _) => return Err(Failure::Undefined),
             (AmxOperation::Set, None) => {
                 self.registers = Some(Box::new(AmxRegisters::zeroed()));
                 return Ok(Completion::Enabled);
@@ -128,7 +132,9 @@ impl Thread {
                     Failure::Memory { address, write }
                 }
                 AmxError::Unsupported { detail } => Failure::Unsupported { detail },
-                AmxError::Enablement => unreachable!("set and clr are handled above"),
+                AmxError::Enablement | AmxError::Undefined => {
+                    unreachable!("set, clr and unallocated operations are handled above")
+                }
             })
     }
 }
@@ -264,6 +270,12 @@ mod tests {
             assert_eq!(
                 thread.complete(&instruction(Clear, 0), &none, None),
                 Ok(Completion::Disabled)
+            );
+            // Unallocated operations are undefined whether or not AMX is set.
+            let unallocated = decode(GuestAddress(0x1000), 0x0020_12e0).unwrap().unwrap();
+            assert_eq!(
+                thread.complete(&unallocated, &none, None),
+                Err(Failure::Undefined)
             );
         }
         assert!(!thread.enabled());
