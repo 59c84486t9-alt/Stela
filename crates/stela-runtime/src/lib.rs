@@ -288,7 +288,6 @@ fn prepare(
     let pending = tempfile::tempdir_in(&root)?;
     let path = pending.path().join("native.bin");
     std::fs::write(&path, &x86_64_code)?;
-    std::fs::File::open(path)?.sync_all()?;
     write_json(&pending.path().join("manifest.json"), &manifest)?;
     let manifest_hash = sha256(&std::fs::read(pending.path().join("manifest.json"))?);
     write_json(&pending.path().join("manifest.sha256.json"), &manifest_hash)?;

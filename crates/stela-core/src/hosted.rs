@@ -4,6 +4,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path};
 
+/// Write `value` as pretty JSON, replacing `path` atomically. Readers see the
+/// old or the new file; durability across power loss is not promised.
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path
         .parent()
@@ -13,7 +15,6 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer_pretty(&mut tmp, value)?;
     tmp.write_all(b"\n")?;
-    tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }

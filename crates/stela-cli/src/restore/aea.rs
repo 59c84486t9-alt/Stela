@@ -349,7 +349,6 @@ pub fn decrypt(input: &Path, key: &Path, output: &Path) -> Result<serde_json::Va
     std::fs::create_dir_all(parent)?;
     let mut key_file = tempfile::NamedTempFile::new_in(parent)?;
     key_file.write_all(&archive_key)?;
-    key_file.as_file().sync_all()?;
     let status = std::process::Command::new(AEA_TOOL)
         .arg("decrypt")
         .arg("-key")
