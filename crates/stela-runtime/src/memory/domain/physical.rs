@@ -335,7 +335,7 @@ fn platform_error(status: MemoryStatus) -> PhysicalReadError {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-mod source_ram_tests;
+mod tests;
 
 mod fetch;
 pub(crate) use fetch::{BoundPhysicalInstruction, ImmutableCodeBacking};

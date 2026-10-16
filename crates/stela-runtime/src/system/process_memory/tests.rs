@@ -5,6 +5,8 @@ use crate::system::state::El1Registers;
 use std::sync::Arc;
 use stela_compiler::{GuestAddress, TargetCpu};
 
+mod identification;
+
 const ADDRESS_SPACE: u64 = 7;
 const SOURCE_PC: GuestAddress = GuestAddress(0x1000);
 const SOURCE_WORD: u32 = 0xd503_3f5f;

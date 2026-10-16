@@ -275,4 +275,4 @@ pub fn compile_for_profile(
 }
 
 #[cfg(test)]
-mod activation_service_tests;
+mod tests;

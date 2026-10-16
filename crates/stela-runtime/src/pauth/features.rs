@@ -99,4 +99,4 @@ fn check_ids_for(
 }
 
 #[cfg(test)]
-mod lr_tests;
+mod tests;

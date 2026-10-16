@@ -374,4 +374,4 @@ fn poisoned_monitor_declines_before_publication() {
     assert_eq!(snapshot(&backing), [0; STORAGE_BYTES]);
 }
 
-mod binding_reservation_tests;
+mod binding_reservation;

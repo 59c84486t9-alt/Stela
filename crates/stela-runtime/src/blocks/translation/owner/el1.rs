@@ -138,4 +138,4 @@ impl InstalledEl1Owner {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-mod walked_tests;
+mod tests;

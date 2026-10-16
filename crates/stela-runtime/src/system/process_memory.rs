@@ -661,6 +661,3 @@ impl<P: DataPolicy> Drop for PolicyLoan<'_, P> {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod identification_tests;
