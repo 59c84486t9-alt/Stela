@@ -201,7 +201,7 @@ def validate_source_words(source, functions, allowed_mnemonics):
     import a64_checklist
     import json
     result = scalar.validate_source_words(source, functions, set(allowed_mnemonics) | {op['name'] for op in shapes()})
-    facts = a64_checklist.validate(json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes()))
+    facts = a64_checklist.validate(json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes()))
     for function in functions:
         for op in function['operations']:
             if op.get('kind') == 'atomic_litmus_transfer':

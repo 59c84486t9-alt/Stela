@@ -161,6 +161,6 @@ def write(path, catalog):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive', type=Path)
-    parser.add_argument('--output', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
+    parser.add_argument('--output', type=Path, default=ROOT / 'isa/a64-documented-checklist.json')
     args = parser.parse_args()
     write(args.output, extract(args.archive))

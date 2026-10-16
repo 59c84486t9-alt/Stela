@@ -169,7 +169,7 @@ class LeafIndependentDecodingTests(unittest.TestCase):
             self.smoke(forms, changed, {'rows': [self.decoded()]})
 
     def test_cssc_leaf_exception_never_requires_llvm(self):
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         facts = progress.a64_checklist.validate(catalog)
         cssc = [fact for fact in facts.values()
                 if any(feature['feature'] == 'FEAT_CSSC' for feature in fact['features'])]
@@ -187,7 +187,7 @@ class LeafIndependentDecodingTests(unittest.TestCase):
 
 class IsaProgressTests(unittest.TestCase):
     def test_cssc_fixed_encoding_alternative_is_explicit_and_canonical(self):
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         facts = progress.a64_checklist.validate(catalog)
         cssc = [row for row in facts.values()
                 if any(feature['feature'] == 'FEAT_CSSC' for feature in row['features'])]
@@ -202,7 +202,7 @@ class IsaProgressTests(unittest.TestCase):
                 progress.smoke_decoding(decoder, word ^ (1 << 31), row['id'], facts)
 
     def test_fixed_encoding_alternative_does_not_cover_other_families_or_missing_facts(self):
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         facts = progress.a64_checklist.validate(catalog)
         decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
         for identity in ('ABS_32_dp_1src', 'RET_64R_branch_reg'):
@@ -240,7 +240,7 @@ class IsaProgressTests(unittest.TestCase):
             self.assertEqual(progress.previous_checkpoint(path, root), checkpoint)
 
     def test_documented_checklist_uses_complete_pinned_facts_not_observed_subset(self):
-        path = progress.ROOT / 'tests/isa/a64-documented-checklist.json'
+        path = progress.ROOT / 'isa/a64-documented-checklist.json'
         catalog = json.loads(path.read_bytes())
         rows = progress.a64_checklist.validate(catalog)
         self.assertEqual(len(rows), 4332)
@@ -260,7 +260,7 @@ class IsaProgressTests(unittest.TestCase):
                 progress.a64_checklist.validate(changed)
 
     def test_documented_counts_deduplicate_profiles_and_ignore_generated_status_claims(self):
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         form = next(r for r in catalog['forms'] if r['id'] == 'RET_64R_branch_reg')
         row = {**form, 'source_sha256': catalog['source_files_sha256'][form['source_file']],
                'profile': 'one', 'scope': 'bounded reviewed semantics', 'status': 'partial'}
@@ -557,7 +557,7 @@ class BlockProgressTests(unittest.TestCase):
 
     def test_crc_family_requires_its_own_two_profile_and_reserved_evidence(self):
         root = Path(__file__).resolve().parents[1]
-        registry = json.loads((root / 'tests/isa/apple-silicon-reviewed-forms.json').read_text())
+        registry = json.loads((root / 'isa/apple-silicon-reviewed-forms.json').read_text())
         rows = progress.validate_registry(registry)
         crc = [row for row in rows.values() if row['source_file'] in ('crc32.xml', 'crc32c.xml')]
         self.assertEqual(len(crc), 8)
@@ -765,7 +765,7 @@ class ScalableProgressTests(unittest.TestCase):
             'guest_profile': progress.SCALABLE_PROFILE, 'svl_bytes': 32, 'svcr': 1})
 
     def test_four_execution_profiles_still_count_one_canonical_form(self):
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_text())
         form = next(row for row in catalog['forms'] if row['id'] == 'RET_64R_branch_reg')
         row = {**form, 'source_sha256': catalog['source_files_sha256'][form['source_file']],
                'scope': 'bounded reviewed semantics', 'status': 'implemented'}
@@ -780,8 +780,8 @@ class ScalableProgressTests(unittest.TestCase):
         for implementation_only in (False, True):
             with self.subTest(implementation_only=implementation_only), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                (root / 'tests/isa').mkdir(parents=True)
-                (root / 'tests/isa/apple-specific-extensions.json').write_text(json.dumps({
+                (root / 'isa').mkdir(parents=True)
+                (root / 'isa/apple-specific-extensions.json').write_text(json.dumps({
                     'kind': 'apple_specific_extension_ledger', 'inventory_complete': False, 'extensions': []}))
                 (root / 'cli').write_text('mock compiler executable')
                 registries = []
@@ -800,8 +800,8 @@ class ScalableProgressTests(unittest.TestCase):
                 arguments = ['translation-progress.py', '--registry', str(registries[0]),
                     '--block-registry', str(registries[1]), '--service-registry', str(registries[2]),
                     '--scalable-registry', str(registries[3]), '--cli', str(root / 'cli'),
-                    '--checklist', str(source_root / 'tests/isa/a64-documented-checklist.json'),
-                    '--apple-profiles', str(source_root / 'tests/isa/apple-codegen-profiles.json'),
+                    '--checklist', str(source_root / 'isa/a64-documented-checklist.json'),
+                    '--apple-profiles', str(source_root / 'isa/apple-codegen-profiles.json'),
                     '--output', str(root / 'report.json')]
                 if implementation_only:
                     arguments.append('--implementation-only')
@@ -836,7 +836,7 @@ class ScalableProgressTests(unittest.TestCase):
                                  progress.sha256(registries[3]))
 
     def test_actual_independent_length_decode_remains_canonical_and_word_bound(self):
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_text())
         facts = progress.a64_checklist.validate(catalog)
         decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
         word = 0x04615820
@@ -852,7 +852,7 @@ class ScalableProgressTests(unittest.TestCase):
 
     def test_unknown_scalable_encoding_still_requires_independent_decoder(self):
         decoder = type('UnavailableDecoder', (), {'disasm': lambda self, data, address: iter(())})()
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_text())
         facts = progress.a64_checklist.validate(catalog)
         scalable = next(row for row in facts.values() if row['category'] == 'sme')
         with self.assertRaisesRegex(ValueError, 'Independent decoder declined'):
@@ -1304,7 +1304,7 @@ class LLVMDisassemblyGuards(unittest.TestCase):
                 self.assertIsNone(disassembly.FEATURE_NAME.fullmatch(feature))
 
     def fact(self):
-        catalog = json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog = json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         return progress.a64_checklist.validate(catalog)['sdot_z32_zzz_']
 
     def row(self):
@@ -2261,7 +2261,7 @@ class FollowingWordProbeTests(unittest.TestCase):
 
     def registry(self):
         registry = fixtures(); registry['profile'] = ScalableProgressTests().profile()
-        facts = progress.a64_checklist.validate(json.loads((progress.ROOT / 'tests/isa/a64-documented-checklist.json').read_text()))
+        facts = progress.a64_checklist.validate(json.loads((progress.ROOT / 'isa/a64-documented-checklist.json').read_text()))
         fact = facts['movprfx_z_z_']; row = copy.deepcopy(registry['forms'][0])
         row.update({key: fact[key] for key in ('id', 'source_file', 'encoding_mask', 'encoding_value')})
         row.update(profile=progress.SCALABLE_PROFILE, smoke_samples=[{

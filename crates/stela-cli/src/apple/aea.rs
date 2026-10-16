@@ -251,7 +251,6 @@ pub fn fetch_key(input: &Path, output: &Path) -> Result<serde_json::Value> {
         "kind":"public_apple_aea_key_fetch", "schema_version":1, "metadata":metadata,
         "request_url":url.as_str(), "final_url":final_url, "content_type":content_type,
         "key_bytes":body.len(), "key_file_sha256":sha256(&body), "key_body_omitted":true,
-        "tool_source_sha256":sha256(include_bytes!("aea.rs")),
         "cli_executable_sha256":sha256(&std::fs::read(std::env::current_exe()?)?),
         "limits":"Verified HTTPS acquisition of a public FCS recipient key, not archive authentication or decryption. PEM shape only; the native CryptoKit decoder validates the P-256 private key. Key file publishes before its receipt without replacement; an interrupted publication can leave an unreceipted key file."
     });

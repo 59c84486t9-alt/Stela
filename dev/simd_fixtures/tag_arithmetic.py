@@ -211,7 +211,7 @@ def validate_source_words(source, functions, allowed_mnemonics):
     """Exact source/metadata plus pinned facts; retain independent decoder limits."""
     import a64_checklist
     from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-    facts = a64_checklist.validate(json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes()))
+    facts = a64_checklist.validate(json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes()))
     decoder, words, fallbacks, aliases = Cs(CS_ARCH_ARM64, CS_MODE_ARM), [], [], []
     for function in functions:
         words.extend([*function['operations'], {'word': RET, 'kind': 'return'}])

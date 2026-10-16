@@ -976,7 +976,7 @@ class AtomicMemoryFixtureTests(unittest.TestCase):
 class OrdinaryMemoryFixtureTests(unittest.TestCase):
     def test_exact27_pinned_forms_and_independent_decoding(self):
         family = ordinary_memory
-        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         self.assertEqual(len(family.CANONICAL_FORMS), 27)
         self.assertEqual(len(family.CONSTRAINED_LOAD_FORMS), 5)
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
@@ -1021,7 +1021,7 @@ class OrdinaryMemoryFixtureTests(unittest.TestCase):
                         {**op, 'rn': 1}, {**op, 'offset': 1}, {**op, 'name': 'ldr'}):
             with self.assertRaises(AssertionError):
                 validate(changed)
-        catalog = json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog = json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         catalog['forms'][0]['encoding_value'] = '0xffffffff'
         with self.assertRaises(ValueError):
             validate(op, catalog=catalog)
@@ -1203,7 +1203,7 @@ class StructureMemoryFixtureTests(unittest.TestCase):
         self.assertEqual({layout: sum(op['layout'] == layout for op in shapes) for layout in ('multiple', 'lane', 'replicate')},
                          {'multiple': 318, 'lane': 720, 'replicate': 96})
         self.assertEqual(len(structure_memory.CANONICAL_FORMS), 150)
-        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         operations = structure_memory.functions()
         self.assertEqual(len({op['word'] for op in operations}), len(operations))
@@ -1456,7 +1456,7 @@ class AesFixtureTests(unittest.TestCase):
 class Sha12FixtureTests(unittest.TestCase):
     def test_sha12_exact_source_forms_alias_roles_and_bounded_full_state_corpus(self):
         (ops, records) = sha12.corpus()
-        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_text())['forms']}
+        facts = {row['id']: row for row in json.loads((ROOT / 'isa/a64-documented-checklist.json').read_text())['forms']}
         self.assertEqual((len(ops), len(records), len(sha12.CANONICAL_FORMS)), (98, 25088, 10))
         self.assertEqual({op['canonical_id'] for op in ops}, set(sha12.CANONICAL_FORMS))
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
@@ -1500,7 +1500,7 @@ class Sha512FixtureTests(unittest.TestCase):
         self.assertEqual(sum((record['runtime'] for record in records)), 90)
         self.assertEqual(len({operation['word'] for operation in functions}), 157)
         self.assertEqual({operation['canonical_id'] for operation in functions}, set(sha512.CANONICAL_FORMS))
-        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         for operation in functions:
             fact = facts[operation['canonical_id']]
@@ -1595,7 +1595,7 @@ class Sha512FixtureTests(unittest.TestCase):
 class Sha3FixtureTests(unittest.TestCase):
     def test_sha3_inventory_all_immediates_equality_partitions_and_v31_roles(self):
         functions = sha3.functions()
-        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         self.assertEqual(len({operation['word'] for operation in functions}), len(functions))
         self.assertEqual({operation['canonical_id'] for operation in functions}, set(sha3.CANONICAL_FORMS))
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
@@ -1695,7 +1695,7 @@ class I8mmFixtureTests(unittest.TestCase):
         self.assertEqual((len(ops), len({op['word'] for op in ops})), (798, 798))
         layouts = {(op['name'], op['bytes'], op['index']) for op in ops}
         self.assertEqual(len(layouts), 21)
-        facts = {row['id']: row for row in json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         for op in ops:
             fact = facts[op['canonical_id']]
             self.assertEqual(op['word'] & int(fact['encoding_mask'], 0), int(fact['encoding_value'], 0))

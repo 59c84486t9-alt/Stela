@@ -8,14 +8,14 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, to_string as json};
 use std::{collections::BTreeMap, fs};
 
-const CHECKLIST: &str = "tests/isa/a64-documented-checklist.json";
-const APPLE_PROFILES: &str = "tests/isa/apple-codegen-profiles.json";
-const APPLE_EXTENSIONS: &str = "tests/isa/apple-specific-extensions.json";
+const CHECKLIST: &str = "isa/a64-documented-checklist.json";
+const APPLE_PROFILES: &str = "isa/apple-codegen-profiles.json";
+const APPLE_EXTENSIONS: &str = "isa/apple-specific-extensions.json";
 const REGISTRIES: [&str; 4] = [
-    "tests/isa/apple-silicon-reviewed-forms.json",
-    "tests/isa/apple-silicon-block-forms.json",
-    "tests/isa/a64-service-forms.json",
-    "tests/isa/apple-silicon-scalable-forms.json",
+    "isa/apple-silicon-reviewed-forms.json",
+    "isa/apple-silicon-block-forms.json",
+    "isa/a64-service-forms.json",
+    "isa/apple-silicon-scalable-forms.json",
 ];
 const README: &str = "README.md";
 const README_START: &str = "<!-- stela-instruction-progress:start -->";

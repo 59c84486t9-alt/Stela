@@ -93,7 +93,7 @@ def corpus():
 def validate_source_words(source, functions, allowed_mnemonics):
     import a64_checklist
     from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
-    catalog = json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+    catalog = json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())
     facts = a64_checklist.validate(catalog)
     decoder, words = Cs(CS_ARCH_ARM64, CS_MODE_ARM), []
     for function in functions:

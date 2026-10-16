@@ -172,7 +172,7 @@ def validate_source_words(source, functions, allowed_mnemonics, catalog=None):
     import a64_checklist
     from differential import ROOT
     if catalog is None:
-        catalog = json.loads((ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        catalog = json.loads((ROOT / 'isa/a64-documented-checklist.json').read_bytes())
     a64_checklist.validate(catalog)
     facts = {row['id']: row for row in catalog['forms']}
     decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)

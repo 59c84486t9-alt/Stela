@@ -1375,9 +1375,9 @@ def markdown(report):
                 'Canonical encoding forms count once across reviewed execution profiles; aliases are excluded and partial forms earn no credit. '
                 'This candidate inventory includes streaming SVE through SME, without general non-streaming SVE. '
                 'Full hardware membership and Apple-private additions remain open; reviewed-profile instruction coverage does not establish complete CPU, application or macOS compatibility.\n\n'
-                '[Apple profile inventory](tests/isa/apple-codegen-profiles.json) · '
-                '[Arm reference checklist](tests/isa/a64-documented-checklist.json) · '
-                '[Apple extensions](tests/isa/apple-specific-extensions.json) · '
+                '[Apple profile inventory](isa/apple-codegen-profiles.json) · '
+                '[Arm reference checklist](isa/a64-documented-checklist.json) · '
+                '[Apple extensions](isa/apple-specific-extensions.json) · '
                 '[Scope and evidence](docs/development.md#apple-code-generation-candidate-inventory).\n')
     if 'documented_isa' in report:
         row = report['documented_isa']['summary']
@@ -1392,8 +1392,8 @@ def markdown(report):
                 'Each canonical encoding form counts once across reviewed execution profiles; aliases are excluded and partial forms earn no credit. '
                 'The fixed denominator includes optional and privileged A64 extensions, including forms beyond Apple hardware. '
                 'This measures documented ISA implementation, not macOS or application completion.\n\n'
-                '[Complete checklist](tests/isa/a64-documented-checklist.json) · '
-                '[Apple extensions](tests/isa/apple-specific-extensions.json) · '
+                '[Complete checklist](isa/a64-documented-checklist.json) · '
+                '[Apple extensions](isa/apple-specific-extensions.json) · '
                 '[Scope and evidence](docs/development.md#documented-a64-checklist).\n')
     row = report['summary']['reviewed']
     block = report.get('block_profile_evidence')
@@ -1478,15 +1478,15 @@ def previous_checkpoint(path, root=ROOT):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-reviewed-forms.json')
-    parser.add_argument('--block-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-block-forms.json')
-    parser.add_argument('--service-registry', type=Path, default=ROOT / 'tests/isa/a64-service-forms.json')
-    parser.add_argument('--scalable-registry', type=Path, default=ROOT / 'tests/isa/apple-silicon-scalable-forms.json')
-    parser.add_argument('--checklist', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
+    parser.add_argument('--registry', type=Path, default=ROOT / 'isa/apple-silicon-reviewed-forms.json')
+    parser.add_argument('--block-registry', type=Path, default=ROOT / 'isa/apple-silicon-block-forms.json')
+    parser.add_argument('--service-registry', type=Path, default=ROOT / 'isa/a64-service-forms.json')
+    parser.add_argument('--scalable-registry', type=Path, default=ROOT / 'isa/apple-silicon-scalable-forms.json')
+    parser.add_argument('--checklist', type=Path, default=ROOT / 'isa/a64-documented-checklist.json')
     parser.add_argument('--arm-archive', type=Path,
                         default=ROOT / '.stela/isa/ISA_A64_xml_A_profile-2026-06.tar.gz',
                         help='Pinned June 2026 Arm XML archive; required only for preferred-alias LLVM rows')
-    parser.add_argument('--apple-profiles', type=Path, default=ROOT / 'tests/isa/apple-codegen-profiles.json')
+    parser.add_argument('--apple-profiles', type=Path, default=ROOT / 'isa/apple-codegen-profiles.json')
     parser.add_argument('--cli', type=Path, default=ROOT / 'target/debug/stela')
     parser.add_argument('--output', type=Path, default=ROOT / '.stela/progress/apple-silicon.json')
     parser.add_argument('--markdown-output', type=Path)
@@ -1513,7 +1513,7 @@ def main():
     canonical_facts = a64_checklist.validate(catalog)
     apple_profiles_data = args.apple_profiles.read_bytes()
     apple_profiles = json.loads(apple_profiles_data)
-    apple = json.loads((ROOT / 'tests/isa/apple-specific-extensions.json').read_bytes())
+    apple = json.loads((ROOT / 'isa/apple-specific-extensions.json').read_bytes())
     if apple.get('kind') != 'apple_specific_extension_ledger' or apple.get('inventory_complete') is not False:
         raise ValueError('Apple additions need a separate explicitly open inventory')
     if len({r['id'] for r in apple['extensions']}) != len(apple['extensions']) or any(r['status'] not in STATUSES for r in apple['extensions']):

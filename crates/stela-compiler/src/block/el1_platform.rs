@@ -704,7 +704,7 @@ mod tests {
         use crate::context::memory::{SpAlignmentRequirement, flags, profile_requirements};
         let fixture = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/el1-scalar-loads.S"
+            "/tests/fixtures/el1-scalar-loads.S"
         ));
         let mut admitted = 0;
         let mut declined = 0;

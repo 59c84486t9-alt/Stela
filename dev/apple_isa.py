@@ -201,7 +201,7 @@ def generate(catalog, snapshot, archive):
         raise ValueError('Pinned Apple compiler candidate union changed')
     result = {'schema_version': 2, 'kind': 'apple_codegen_candidate_inventory', 'version': VERSION,
         'arm_catalog_facts_sha256': catalog['facts_sha256'],
-        'sources': {'apple_clang_features': {'path': 'tests/isa/apple-clang-features.json',
+        'sources': {'apple_clang_features': {'path': 'isa/apple-clang-features.json',
             'version': SNAPSHOT_VERSION, 'facts_sha256': SNAPSHOT_FACTS_SHA}},
         'compiler': snapshot['tool'], 'target': snapshot['target'],
         'profiles': profiles, 'sve_mode_audit': audit,
@@ -243,11 +243,11 @@ def assess(inventory, assessed_catalog):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--features', type=Path, default=ROOT / 'tests/isa/apple-clang-features.json',
+    parser.add_argument('--features', type=Path, default=ROOT / 'isa/apple-clang-features.json',
                         help='Pinned factual Apple compiler feature snapshot')
     parser.add_argument('--archive', type=Path, default=ROOT / '.stela/isa/ISA_A64_xml_A_profile-2026-06.tar.gz')
-    parser.add_argument('--catalog', type=Path, default=ROOT / 'tests/isa/a64-documented-checklist.json')
-    parser.add_argument('--output', type=Path, default=ROOT / 'tests/isa/apple-codegen-profiles.json')
+    parser.add_argument('--catalog', type=Path, default=ROOT / 'isa/a64-documented-checklist.json')
+    parser.add_argument('--output', type=Path, default=ROOT / 'isa/apple-codegen-profiles.json')
     args = parser.parse_args()
     inventory = generate(json.loads(args.catalog.read_bytes()), json.loads(args.features.read_bytes()), args.archive)
     a64_checklist.write(args.output, inventory)

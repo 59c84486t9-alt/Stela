@@ -1636,7 +1636,6 @@ fn run() -> Result<()> {
                 "data_vm_profile":data_vm_services.then_some(stela_runtime::darwin::DATA_VM_PROFILE),"data_vm_events":service_run.services,
                 "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
                 "clock":clock_report,
-                "pauth_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/pauth.rs")),
                 "compiler_source_sha256":stela_compiler::SOURCE_SHA256,
                 "complete_binary_verified":false}))?
             );

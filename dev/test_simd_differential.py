@@ -18,7 +18,7 @@ suite = importlib.import_module('simd-differential')
 class SimdDifferentialTests(unittest.TestCase):
     def test_complex_encodings_cover_all_forms_widths_rotations_indices_and_aliases(self):
         functions = suite.complex_functions()
-        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         self.assertEqual((len(functions), len({op['word'] for op in functions})), (372, 372))
         self.assertEqual(len({op['canonical_id'] for op in functions}), 3)
         self.assertEqual(len({suite.complex_shape(op) for op in functions}), 13)
@@ -116,7 +116,7 @@ class SimdDifferentialTests(unittest.TestCase):
 
     def test_bfloat16_inventory_covers_all_shapes_indices_and_alias_roles(self):
         functions = suite.bfloat16_functions()
-        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         self.assertEqual((len(functions), len({op['word'] for op in functions})), (202, 202))
         self.assertEqual(len({op['canonical_id'] for op in functions}), 7)
         self.assertEqual(len({suite.bfloat16_shape(op) for op in functions}), 12)
@@ -252,7 +252,7 @@ class SimdDifferentialTests(unittest.TestCase):
             self.assertEqual((initial.fpcr, initial.fpsr), (0, 0))
 
     def test_widening_encodings_cover_every_form_width_layout_and_alias(self):
-        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         functions = suite.widening_functions()
         self.assertEqual((len(functions), len({op['word'] for op in functions})), (496, 496))
         self.assertEqual(len({op['canonical_id'] for op in functions}), 8)
@@ -377,7 +377,7 @@ class SimdDifferentialTests(unittest.TestCase):
                 self.assertEqual(compile_call.call_count, 636)
 
     def test_remaining_binary_encodings_cover_every_form_width_index_and_alias(self):
-        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         functions = suite.binary_remaining_functions()
         self.assertEqual((len(functions), len({op['word'] for op in functions})), (636, 636))
@@ -463,7 +463,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual(suite.numerical_fma_expectation(single, 'x86_64-baseline+fma', estimate), {})
 
     def test_estimate_and_refinement_words_match_all_reviewed_forms(self):
-        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         for functions, words, forms, arrangements in ((suite.estimate_functions(), 92, 12, 23), (suite.refinement_functions(), 96, 8, 16)):
             self.assertEqual((len(functions), len({op['word'] for op in functions})), (words, words))
@@ -630,7 +630,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual((len(functions), len({op['word'] for op in functions})), (32, 32))
         self.assertEqual(len({op['canonical_id'] for op in functions}), 5)
         self.assertEqual(len({suite.numerical_unary_shape(op) for op in functions}), 8)
-        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         for op in functions:
             fact = facts[op['canonical_id']]
@@ -721,7 +721,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual((len(functions), len({op['word'] for op in functions})), (304, 304))
         self.assertEqual(len({op['canonical_id'] for op in functions}), 47)
         self.assertEqual(len({suite.numerical_unary_shape(op) for op in functions}), 76)
-        facts = {row['id']: row for row in json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())['forms']}
+        facts = {row['id']: row for row in json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         for op in functions:
             fact = facts[op['canonical_id']]
@@ -845,7 +845,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual(len({op['word'] for op in functions}), 2590)
         self.assertEqual(len({op['canonical_id'] for op in functions}), 102)
         self.assertEqual(len({suite.comparison_minmax_shape(op) for op in functions}), 174)
-        checklist = json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        checklist = json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         facts = {row['id']: row for row in checklist['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         for operation in functions:
@@ -947,7 +947,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual(len(functions), 1416)
         self.assertEqual(len({op['word'] for op in functions}), len(functions))
         self.assertEqual(len({op['canonical_id'] for op in functions}), 163)
-        checklist = json.loads((suite.ROOT / 'tests/isa/a64-documented-checklist.json').read_bytes())
+        checklist = json.loads((suite.ROOT / 'isa/a64-documented-checklist.json').read_bytes())
         facts = {row['id']: row for row in checklist['forms']}
         decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         for operation in functions:
@@ -1792,7 +1792,7 @@ class SimdDifferentialTests(unittest.TestCase):
         self.assertEqual(observed['v'][0],[int.from_bytes(bytes([1,5,9,13,29,25,21,17]),'little'),0])
 
     def test_registered_register_cohorts_cover_each_form_and_destination(self):
-        registry=json.loads((suite.ROOT/'tests/isa/apple-silicon-reviewed-forms.json').read_text())
+        registry=json.loads((suite.ROOT/'isa/apple-silicon-reviewed-forms.json').read_text())
         for group,generator,count in [('simd_integer',suite.integer_programs,38),
                 ('simd_rearrange',suite.rearrange_programs,27),('simd_shifts',suite.shift_programs,26),
                 ('simd_reductions',suite.reduction_programs,22),('simd_saturating',suite.saturating_programs,22),

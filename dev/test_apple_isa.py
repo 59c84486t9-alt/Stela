@@ -11,7 +11,7 @@ import apple_isa
 class AppleIsaTests(unittest.TestCase):
     def test_official_feature_snapshot_is_strict_and_hash_pinned(self):
         root = Path(__file__).resolve().parents[1]
-        snapshot = json.loads((root / 'tests/isa/apple-clang-features.json').read_bytes())
+        snapshot = json.loads((root / 'isa/apple-clang-features.json').read_bytes())
         self.assertEqual(apple_isa.load_snapshot(snapshot), snapshot)
         self.assertEqual(set(snapshot['profiles']), set(apple_isa.CPUS))
         self.assertEqual(snapshot['tool']['version'], 'Apple clang version 21.0.0 (clang-2100.3.34.2)')
@@ -43,7 +43,7 @@ class AppleIsaTests(unittest.TestCase):
 
     def test_exported_features_are_not_expanded_or_hardware_claims(self):
         root = Path(__file__).resolve().parents[1]
-        snapshot = apple_isa.load_snapshot(json.loads((root / 'tests/isa/apple-clang-features.json').read_bytes()))
+        snapshot = apple_isa.load_snapshot(json.loads((root / 'isa/apple-clang-features.json').read_bytes()))
         enabled = set(snapshot['profiles']['apple-m6']['architectural_features'])
         self.assertIn('FEAT_FP8', enabled)
         for absent in ('FEAT_SVE', 'FEAT_SVE2', 'FEAT_FP8FMA', 'FEAT_FP8DOT2', 'FEAT_FP8DOT4'):
@@ -75,8 +75,8 @@ class AppleIsaTests(unittest.TestCase):
 
     def test_checked_in_inventory_is_pinned_and_explicitly_open(self):
         root = Path(__file__).resolve().parents[1]
-        catalog = json.loads((root / 'tests/isa/a64-documented-checklist.json').read_bytes())
-        inventory = json.loads((root / 'tests/isa/apple-codegen-profiles.json').read_bytes())
+        catalog = json.loads((root / 'isa/a64-documented-checklist.json').read_bytes())
+        inventory = json.loads((root / 'isa/apple-codegen-profiles.json').read_bytes())
         assessed, _ = a64_checklist.assess(catalog, [])
         summaries = apple_isa.assess(inventory, assessed)
         self.assertEqual(summaries['union']['total'], 3231)

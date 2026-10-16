@@ -27,7 +27,7 @@ const GUEST_PIPE: u64 = 0x70000000;
 const PAYLOAD: &[u8] = b"Stela native guest write\n";
 const DARWIN_EBADF: u32 = 9;
 const DARWIN_EFAULT: u32 = 14;
-// Assembled from tests/fixtures/darwin-syscall-arm64.S. B.CC jumps from +8 to +20.
+// Assembled from fixtures/darwin-syscall-arm64.S. B.CC jumps from +8 to +20.
 const WRITE_STUB: [u32; 7] = [
     0xd2800090, // MOV X16, #4
     0xd4001001, // SVC #0x80
