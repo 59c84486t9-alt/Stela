@@ -131,6 +131,8 @@ pub struct Cpu {
     /// runs as a VHE host. The `system` registers belong to this level; the
     /// guarded level beside it is GL1 or GL2.
     pub kernel_el: u8,
+    /// The PE's Apple AMX unit (`machine::amx`).
+    pub amx: super::amx::Unit,
 }
 
 /// What an exception entry needs beyond the vector kind.
@@ -169,6 +171,7 @@ impl Cpu {
                 ..SystemRegisters::default()
             },
             kernel_el: pstate.el.max(1),
+            amx: super::amx::Unit::default(),
         }
     }
 

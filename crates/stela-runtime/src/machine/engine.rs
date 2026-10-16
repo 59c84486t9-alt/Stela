@@ -1,5 +1,7 @@
 //! The dispatch loop: fetch translation, block cache, native execution and
 //! every exit back from native code.
+mod amx;
+
 use super::{
     cpu::{Cpu, Exception, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE},
     exception::{Class, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
@@ -799,6 +801,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.cpu.pc = next_pc;
                 let word = self.word(index, next_pc)?;
                 self.pointer_authentication(word)
+            }
+            Ok(ExitKind::Amx) => {
+                self.cpu.pc = next_pc;
+                let word = self.word(index, next_pc)?;
+                self.amx(word)
             }
             _ => Err(self.unsupported(RequirementKind::Native("unknown block exit kind"))),
         }
@@ -1689,7 +1696,7 @@ mod tests {
     use super::*;
     use crate::machine::exception::Pstate;
 
-    struct FakeHost {
+    pub(super) struct FakeHost {
         ram: Vec<u8>,
         base: u64,
         now: u64,
@@ -1747,9 +1754,9 @@ mod tests {
         }
     }
 
-    const BASE: u64 = 0x8_0000_0000;
+    pub(super) const BASE: u64 = 0x8_0000_0000;
 
-    fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
+    pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
         let mut ram = vec![0u8; 0x10000];
         for (index, word) in words.iter().enumerate() {
             ram[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());

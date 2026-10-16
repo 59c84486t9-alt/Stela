@@ -177,12 +177,13 @@ impl BlockProfile {
         )
     }
 
-    /// AMX state is per guest thread, so only the direct-RAM thread profiles
-    /// carry AMX exits.
+    /// AMX state is per guest thread in the direct-RAM thread profiles and
+    /// per PE in system mode; those profiles carry AMX exits.
     pub const fn supports_amx(self) -> bool {
         matches!(
             self,
-            Self::DarwinArm64ThreadV1
+            Self::SystemModeV1
+                | Self::DarwinArm64ThreadV1
                 | Self::AppleArm64eSoftwarePauthThreadV1
                 | Self::AppleArm64eSoftwarePauthClockThreadV1
         )
@@ -698,6 +699,9 @@ mod tests {
             (0x0020_1420, ExitKind::System),     // genter (Apple GXF)
             (0x0020_1400, ExitKind::System),     // gexit (Apple GXF)
             (0xd503_237f, ExitKind::PointerAuthentication), // pacibsp
+            (0x0020_1220, ExitKind::Amx),        // AMX set
+            (0x0020_1003, ExitKind::Amx),        // AMX ldx x3
+            (0x0020_12e0, ExitKind::Amx),        // AMX operation 23
         ] {
             let source: Vec<u8> = prefix
                 .iter()

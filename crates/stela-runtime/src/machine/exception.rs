@@ -141,6 +141,9 @@ pub enum Class {
     DataAbortSame = 0x25,
     SpAlignment = 0x26,
     Breakpoint = 0x3c,
+    /// Apple's implementation-defined class (XNU "private exception"); its
+    /// ISS selects the cause, as for AMX use while disabled (`machine::amx`).
+    ImplementationDefined = 0x3f,
 }
 
 /// The kind of vector an exception uses.

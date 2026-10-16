@@ -54,6 +54,10 @@ const SPTM_KEY_WRITES: &str = "SPTM 26A434 writes it once per CPU with a PAC-key
 const M1N1_TUNING: &str = "m1n1 cpu_regs.h names it a core tuning (HID) register; SPTM 26A434 \
     sets or clears bits with read-modify-write at boot";
 
+const XNU_AMX_CONTEXT: &str = "26A434 XNU CPU initialization writes MPIDR.Aff0 to it \
+    under one boot configuration (0xfffffe000bd80f44) and reads it nowhere; named AMX_CTX_EL1 \
+    beside AMX_CTL_EL1 (docs/research/amx.md)";
+
 const SPTM_CORE_TUNING: &str = "no public name; SPTM 26A434 clears one bit with \
     read-modify-write at boot, selected by MPIDR core type next to its HID writes";
 
@@ -141,6 +145,7 @@ pub const TABLE: &[Entry] = &[
         Class::Storage,
         SPTM_KEY_WRITES,
     ),
+    entry(4, 15, 5, 0, "AMX_CTX_EL1", Class::Storage, XNU_AMX_CONTEXT),
 ];
 
 pub fn lookup(encoding: Encoding) -> Option<&'static Entry> {

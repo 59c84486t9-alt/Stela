@@ -585,6 +585,9 @@ impl Cpu {
             encoding if self.apple(encoding).is_some() => {
                 return self.apple(encoding).expect("checked").read(self);
             }
+            encoding if super::amx::Unit::owns(encoding) => {
+                return self.amx.read(encoding).expect("checked");
+            }
             encoding if impdef::lookup(encoding).is_some() => {
                 let entry = impdef::lookup(encoding).expect("checked");
                 return match self.system.impdef.read(entry) {
@@ -749,6 +752,9 @@ impl Cpu {
             TPIDR_EL2 => system.tpidr_el2 = value,
             encoding if self.apple(encoding).is_some() => {
                 return self.apple(encoding).expect("checked").write(self, value);
+            }
+            encoding if super::amx::Unit::owns(encoding) => {
+                return self.amx.write(encoding, value).expect("checked");
             }
             encoding if impdef::lookup(encoding).is_some() => {
                 let entry = impdef::lookup(encoding).expect("checked");
