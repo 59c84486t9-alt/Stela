@@ -2,7 +2,8 @@
 use crate::args::*;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use std::path::PathBuf;
+use clap::Parser;
+use std::path::{Path, PathBuf};
 use stela_core::write_json;
 
 mod profile;
@@ -159,9 +160,9 @@ pub(crate) fn cpu_info() -> Result<()> {
 }
 
 impl CompileBlock {
-    pub(crate) fn run(self) -> Result<()> {
+    fn compile(self, source: &[u8]) -> Result<Compiled> {
         let Self {
-            input,
+            input: _,
             cpu_target,
             guest_base,
             guest_profile,
@@ -174,7 +175,7 @@ impl CompileBlock {
             full_a64,
             ebf16,
             rpres,
-            output_dir,
+            output_dir: _,
             software_pauth,
             software_clock,
             thread_registers,
@@ -210,7 +211,6 @@ impl CompileBlock {
         )?;
         let context_profile =
             compile_context_block_profile(scalable, profile, full_a64, ebf16, rpres)?;
-        let source = std::fs::read(&input)?;
         let window = &source[..source
             .len()
             .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
@@ -245,12 +245,6 @@ impl CompileBlock {
                 cpu_target,
             )?
         };
-        ensure!(
-            !output_dir.exists(),
-            "output directory exists; choose a new one"
-        );
-        std::fs::create_dir_all(&output_dir)?;
-        std::fs::write(output_dir.join("native.bin"), &compiled.native.x86_64_code)?;
         let mut manifest = serde_json::json!({"schema_version":1,"kind":"raw_arm64_block_aot","target_cpu":cpu_target.id(),
             "source_bytes":compiled.source_bytes,"source_sha256":stela_core::sha256(&source[..compiled.source_bytes]),
             "guest_base":guest_base,"abi":profile.abi(),
@@ -273,9 +267,16 @@ impl CompileBlock {
             manifest["entry_prefix_bytes"] =
                 serde_json::json!(stela_compiler::extended::CONTEXT_WRAPPER_BYTES);
         }
-        write_json(&output_dir.join("manifest.json"), &manifest)?;
-        println!("{}", serde_json::to_string_pretty(&manifest)?);
-        Ok(())
+        Ok(Compiled {
+            native: compiled.native.x86_64_code,
+            manifest,
+        })
+    }
+
+    pub(crate) fn run(self) -> Result<()> {
+        let source = std::fs::read(&self.input)?;
+        let output = self.output_dir.clone();
+        self.compile(&source)?.write(&output)
     }
 }
 
@@ -298,9 +299,9 @@ impl PrepareLeaf {
 }
 
 impl CompileLeaf {
-    pub(crate) fn run(self) -> Result<()> {
+    fn compile(self, source: &[u8]) -> Result<Compiled> {
         let Self {
-            input,
+            input: _,
             cpu_target,
             guest_base,
             guest_profile,
@@ -310,7 +311,7 @@ impl CompileLeaf {
             max_svl_bytes,
             zt0_enabled,
             fpmr_enabled,
-            output_dir,
+            output_dir: _,
         } = self;
         let profile = compile_scalable_profile(
             guest_profile.as_deref(),
@@ -321,11 +322,10 @@ impl CompileLeaf {
             zt0_enabled,
             fpmr_enabled,
         )?;
-        let source = std::fs::read(&input)?;
         let memory_requirements = profile
             .map(|profile| {
                 stela_compiler::extended::memory_requirements(
-                    &source,
+                    source,
                     stela_compiler::GuestAddress(guest_base),
                     profile,
                     cpu_target,
@@ -334,32 +334,23 @@ impl CompileLeaf {
             .transpose()?;
         let block = if let Some(profile) = profile {
             stela_compiler::extended::compile_for_profile(
-                &source,
+                source,
                 stela_compiler::GuestAddress(guest_base),
                 profile,
                 cpu_target,
             )?
         } else {
             stela_compiler::compile_for_target(
-                &source,
+                source,
                 stela_compiler::GuestAddress(guest_base),
                 cpu_target,
             )?
         };
-        ensure!(
-            !output_dir.exists(),
-            "output directory exists; choose a new one"
-        );
-        if let Some(parent) = output_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::create_dir(&output_dir)?;
-        std::fs::write(output_dir.join("native.bin"), &block.x86_64_code)?;
         let mut manifest = serde_json::json!({
             "schema_version": 1,
             "kind": "raw_arm64_leaf_aot",
             "target_cpu":cpu_target.id(),
-            "source_sha256": stela_core::sha256(&source),
+            "source_sha256": stela_core::sha256(source),
             "guest_base": guest_base,
             "guest_instructions": source.len() / 4,
             "native_sha256": stela_core::sha256(&block.x86_64_code),
@@ -397,9 +388,46 @@ impl CompileLeaf {
                     .then_some(MEMORY_IMPLEMENTATION_PROFILE_ID)
             );
         }
-        write_json(&output_dir.join("manifest.json"), &manifest)?;
-        println!("{}", serde_json::to_string_pretty(&manifest)?);
+        Ok(Compiled {
+            native: block.x86_64_code,
+            manifest,
+        })
+    }
+
+    pub(crate) fn run(self) -> Result<()> {
+        let source = std::fs::read(&self.input)?;
+        let output = self.output_dir.clone();
+        self.compile(&source)?.write(&output)
+    }
+}
+
+/// Native code and its manifest for one compiled source.
+pub struct Compiled {
+    pub native: Vec<u8>,
+    pub manifest: serde_json::Value,
+}
+
+impl Compiled {
+    fn write(&self, output: &Path) -> Result<()> {
+        ensure!(
+            !output.exists(),
+            "output directory exists; choose a new one"
+        );
+        std::fs::create_dir_all(output)?;
+        std::fs::write(output.join("native.bin"), &self.native)?;
+        write_json(&output.join("manifest.json"), &self.manifest)?;
+        println!("{}", serde_json::to_string_pretty(&self.manifest)?);
         Ok(())
+    }
+}
+
+/// Compile `source` as the `compile-leaf` or `compile-block` command line in
+/// `arguments` would, without reading the input or writing outputs.
+pub fn compile(arguments: &[&str], source: &[u8]) -> Result<Compiled> {
+    match crate::Cli::try_parse_from(arguments)?.command {
+        crate::Command::CompileLeaf(command) => command.compile(source),
+        crate::Command::CompileBlock(command) => command.compile(source),
+        _ => anyhow::bail!("expected compile-leaf or compile-block"),
     }
 }
 

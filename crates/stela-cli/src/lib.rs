@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod args;
-mod compile;
+pub mod compile;
 mod dyld_entry;
 mod execute;
 mod images;
