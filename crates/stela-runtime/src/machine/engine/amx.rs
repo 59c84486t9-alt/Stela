@@ -4,7 +4,7 @@
 //! `docs/design/system.md#apple-extensions` and `machine::amx`.
 use super::{Devices, FETCH_PAGE, Host, Machine, RequirementKind, Step};
 use crate::machine::{
-    amx::AmxView,
+    amx,
     cpu::Exception,
     exception::Class,
     mmu::{self, Access, Outcome as Translated},
@@ -154,8 +154,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(error) => return self.refuse_amx(word, &error.0),
         };
         let operation = instruction.operation;
-        // EL1 and EL0 are governed by the EL1 copy while the machine has no EL2.
-        if !self.cpu.amx.enabled(AmxView::El1) {
+        if !self.cpu.amx.enabled(amx::governing(self.cpu.kernel_el)) {
             if operation == AmxOperation::Unallocated {
                 return self.refuse_amx(
                     word,
@@ -232,7 +231,7 @@ mod tests {
     use super::super::tests::{BASE, machine};
     use super::*;
     use crate::machine::{
-        amx::{AMX_CTL_EL1, AMX_STATE_T},
+        amx::{AMX_CTL_EL1, AMX_STATE_T, AmxView},
         exception::syndrome,
     };
 
@@ -315,6 +314,20 @@ mod tests {
         assert!(!machine.cpu.amx.live());
         assert!(machine.amx(CLR).is_err(), "clr without live state");
         assert!(machine.amx(LDX | 3).is_err(), "no live state");
+    }
+
+    #[test]
+    fn a_vhe_host_kernel_is_governed_by_the_el2_copy() {
+        let mut machine = machine(&[]);
+        machine.cpu.kernel_el = 2;
+        *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
+        assert!(machine.amx(SET).is_ok());
+        assert!(!machine.cpu.amx.live(), "the EL1 copy does not enable");
+        machine.cpu.pc = BASE;
+        machine.cpu.state.x[1] = 1 << 63;
+        machine.system_instruction(msr(AMX_CTL_EL1, 1)).unwrap();
+        machine.amx(SET).unwrap();
+        assert!(machine.cpu.amx.live());
     }
 
     #[test]

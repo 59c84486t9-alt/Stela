@@ -586,7 +586,7 @@ impl Cpu {
                 return self.apple(encoding).expect("checked").read(self);
             }
             encoding if super::amx::Unit::owns(encoding) => {
-                return self.amx.read(encoding).expect("checked");
+                return self.amx.read(encoding, self.kernel_el).expect("checked");
             }
             encoding if impdef::lookup(encoding).is_some() => {
                 let entry = impdef::lookup(encoding).expect("checked");
@@ -754,7 +754,10 @@ impl Cpu {
                 return self.apple(encoding).expect("checked").write(self, value);
             }
             encoding if super::amx::Unit::owns(encoding) => {
-                return self.amx.write(encoding, value).expect("checked");
+                return self
+                    .amx
+                    .write(encoding, self.kernel_el, value)
+                    .expect("checked");
             }
             encoding if impdef::lookup(encoding).is_some() => {
                 let entry = impdef::lookup(encoding).expect("checked");

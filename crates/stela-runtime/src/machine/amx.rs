@@ -11,8 +11,9 @@
 //!   `AMX_CTX_EL1` (`0xfffffe000bd80ef4`). The meaning of bits 0..8 is
 //!   unknown; they are kept as written and have no effect here.
 //! - Every `AMX_CTL` copy is reached through [`Unit::control`] with an
-//!   [`AmxView`]; [`view`] alone maps encodings to views, so EL2 with VHE
-//!   changes only that mapping.
+//!   [`AmxView`], and [`route`] alone maps encodings to views by the kernel's
+//!   EL. All three `AMX_CTL` encodings are op1=4, CRn=15, outside the generic
+//!   VHE alias tables, so this module routes them itself.
 //! - Every context-switch use sets or clears only bit 63 with
 //!   read-modify-write, and reads `AMX_STATE_T` after `dsb ish` testing only
 //!   for nonzero (`0xfffffe000bd83694`). Live state reads as 1 here
@@ -40,14 +41,41 @@ pub enum AmxView {
     El2,
 }
 
-/// The view an MRS/MSR encoding reaches at the current EL. Without EL2 only
-/// `AMX_CTL_EL1` maps (to `El1`); `AMX_CTL_EL12` and `AMX_CTL_EL2` stay
-/// refused. With VHE, `AMX_CTL_EL1` at EL2 with E2H reaches `El2`,
-/// `AMX_CTL_EL12` reaches `El1` and `AMX_CTL_EL2` reaches `El2`.
-pub fn view(encoding: Encoding) -> Option<AmxView> {
-    match encoding {
-        AMX_CTL_EL1 => Some(AmxView::El1),
-        _ => None,
+/// Where an `AMX_CTL` encoding goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    View(AmxView),
+    Undefined,
+}
+
+/// The route of an MRS/MSR encoding for a kernel at `kernel_el`, or `None`
+/// for encodings that are not `AMX_CTL`.
+///
+/// - Kernel at EL1 (no EL2): `AMX_CTL_EL1` reaches `El1`; `AMX_CTL_EL2` and
+///   `AMX_CTL_EL12` are UNDEFINED.
+/// - Kernel at EL2 as a VHE host: `AMX_CTL_EL1` and `AMX_CTL_EL2` reach `El2`,
+///   and `AMX_CTL_EL12` reaches `El1`, a stored value because EL1 never runs.
+///   Inference: an EL12 encoding exists only because E2H redirects the EL1
+///   name, as m1n1 `cpu_regs.h` lists for `APCTL`; 26A434 XNU uses the EL12
+///   and EL2 names only in its hypervisor paths (`0xfffffe000bd9ec44`,
+///   `0xfffffe000bda2a8c`).
+pub fn route(encoding: Encoding, kernel_el: u8) -> Option<Route> {
+    Some(match (encoding, kernel_el) {
+        (AMX_CTL_EL1, 1) => Route::View(AmxView::El1),
+        (AMX_CTL_EL2 | AMX_CTL_EL12, 1) => Route::Undefined,
+        (AMX_CTL_EL1 | AMX_CTL_EL2, _) => Route::View(AmxView::El2),
+        (AMX_CTL_EL12, _) => Route::View(AmxView::El1),
+        _ => return None,
+    })
+}
+
+/// The view governing AMX instructions at EL0 and the kernel's EL. With E2H
+/// and TGE, EL0 runs in the EL2&0 regime under the EL2 copy (inference).
+pub fn governing(kernel_el: u8) -> AmxView {
+    if kernel_el == 2 {
+        AmxView::El2
+    } else {
+        AmxView::El1
     }
 }
 
@@ -64,8 +92,8 @@ impl Unit {
         &mut self.controls[view as usize]
     }
 
-    /// Whether the `AMX_CTL` copy governing the current EL admits AMX
-    /// instructions (`El1` for EL1 and EL0 without EL2).
+    /// Whether an `AMX_CTL` copy admits AMX instructions; [`governing`]
+    /// selects the copy.
     pub fn enabled(&self, view: AmxView) -> bool {
         self.controls[view as usize] & AMX_CTL_ENABLE != 0
     }
@@ -75,9 +103,11 @@ impl Unit {
     }
 
     /// MRS of an AMX control register, or `None` for other encodings.
-    pub fn read(&mut self, encoding: Encoding) -> Option<Outcome> {
-        if let Some(view) = view(encoding) {
-            return Some(Outcome::Read(*self.control(view)));
+    pub fn read(&mut self, encoding: Encoding, kernel_el: u8) -> Option<Outcome> {
+        match route(encoding, kernel_el) {
+            Some(Route::View(view)) => return Some(Outcome::Read(*self.control(view))),
+            Some(Route::Undefined) => return Some(Outcome::Undefined),
+            None => {}
         }
         match encoding {
             AMX_STATE_T => Some(Outcome::Read(u64::from(self.live()))),
@@ -87,18 +117,25 @@ impl Unit {
 
     /// Whether `encoding` is an AMX register this unit answers.
     pub fn owns(encoding: Encoding) -> bool {
-        view(encoding).is_some() || encoding == AMX_STATE_T
+        matches!(
+            encoding,
+            AMX_CTL_EL1 | AMX_CTL_EL12 | AMX_CTL_EL2 | AMX_STATE_T
+        )
     }
 
     /// MSR of an AMX control register, or `None` for other encodings.
-    pub fn write(&mut self, encoding: Encoding, value: u64) -> Option<Outcome> {
+    pub fn write(&mut self, encoding: Encoding, kernel_el: u8, value: u64) -> Option<Outcome> {
         let refuse = |reason| Outcome::Refused(Refusal::UnsupportedSetting(reason));
-        if let Some(view) = view(encoding) {
-            if value & !(AMX_CTL_ENABLE | AMX_CTL_INIT_FIELDS) != 0 {
+        match route(encoding, kernel_el) {
+            Some(Route::View(_)) if value & !(AMX_CTL_ENABLE | AMX_CTL_INIT_FIELDS) != 0 => {
                 return Some(refuse("AMX_CTL bit the kernel never writes"));
             }
-            *self.control(view) = value;
-            return Some(Outcome::Written(Changes::default()));
+            Some(Route::View(view)) => {
+                *self.control(view) = value;
+                return Some(Outcome::Written(Changes::default()));
+            }
+            Some(Route::Undefined) => return Some(Outcome::Undefined),
+            None => {}
         }
         match encoding {
             AMX_STATE_T => Some(refuse("AMX_STATE_T write: the kernel only reads it")),
@@ -114,28 +151,52 @@ mod tests {
     #[test]
     fn control_keeps_the_kernel_fields_and_state_reports_liveness() {
         let mut unit = Unit::default();
-        assert!(!unit.enabled(AmxView::El1));
+        assert!(!unit.enabled(governing(1)));
         assert_eq!(
-            unit.write(AMX_CTL_EL1, 0x100 | 3),
+            unit.write(AMX_CTL_EL1, 1, 0x100 | 3),
             Some(Outcome::Written(Changes::default()))
         );
-        assert_eq!(unit.read(AMX_CTL_EL1), Some(Outcome::Read(0x103)));
-        unit.write(AMX_CTL_EL1, AMX_CTL_ENABLE | 0x100);
+        assert_eq!(unit.read(AMX_CTL_EL1, 1), Some(Outcome::Read(0x103)));
+        unit.write(AMX_CTL_EL1, 1, AMX_CTL_ENABLE | 0x100);
         assert!(unit.enabled(AmxView::El1));
         assert!(!unit.enabled(AmxView::El2));
-        assert_eq!(view(AMX_CTL_EL12), None, "no EL2");
-        assert_eq!(view(AMX_CTL_EL2), None, "no EL2");
-        assert_eq!(unit.read(AMX_STATE_T), Some(Outcome::Read(0)));
+        assert_eq!(unit.read(AMX_STATE_T, 1), Some(Outcome::Read(0)));
         unit.registers = Some(Box::new(AmxRegisters::zeroed()));
-        assert_eq!(unit.read(AMX_STATE_T), Some(Outcome::Read(1)));
+        assert_eq!(unit.read(AMX_STATE_T, 1), Some(Outcome::Read(1)));
         assert!(matches!(
-            unit.write(AMX_CTL_EL1, 1 << 62),
+            unit.write(AMX_CTL_EL1, 1, 1 << 62),
             Some(Outcome::Refused(_))
         ));
         assert!(matches!(
-            unit.write(AMX_STATE_T, 0),
+            unit.write(AMX_STATE_T, 1, 0),
             Some(Outcome::Refused(_))
         ));
-        assert_eq!(unit.read(Encoding::new(3, 4, 15, 1, 5)), None);
+        assert_eq!(unit.read(Encoding::new(3, 4, 15, 1, 5), 1), None);
+    }
+
+    #[test]
+    fn control_views_follow_the_kernel_el() {
+        let mut unit = Unit::default();
+        // Without EL2 the EL2 and EL12 names are UNDEFINED.
+        for encoding in [AMX_CTL_EL2, AMX_CTL_EL12] {
+            assert!(Unit::owns(encoding));
+            assert_eq!(unit.read(encoding, 1), Some(Outcome::Undefined));
+            assert_eq!(unit.write(encoding, 1, 0), Some(Outcome::Undefined));
+        }
+        // A VHE host: the EL1 and EL2 names are the EL2 copy, EL12 the EL1 copy.
+        unit.write(AMX_CTL_EL1, 2, AMX_CTL_ENABLE | 0x100);
+        assert_eq!(
+            unit.read(AMX_CTL_EL2, 2),
+            Some(Outcome::Read(AMX_CTL_ENABLE | 0x100))
+        );
+        assert!(unit.enabled(governing(2)) && !unit.enabled(AmxView::El1));
+        unit.write(AMX_CTL_EL12, 2, 0x100);
+        assert_eq!(unit.read(AMX_CTL_EL12, 2), Some(Outcome::Read(0x100)));
+        assert_eq!(*unit.control(AmxView::El1), 0x100);
+        assert_eq!(
+            *unit.control(AmxView::El2),
+            AMX_CTL_ENABLE | 0x100,
+            "unchanged"
+        );
     }
 }
