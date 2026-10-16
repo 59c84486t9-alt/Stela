@@ -269,9 +269,29 @@ impl Owner for M0Owner<'_> {
     }
 
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan> {
-        self.memory
-            .execution_loan()
-            .map_err(|error| anyhow::anyhow!("M0 exclusion: {error:?}"))
+        use crate::memory::domain::ExecutionLoanAttempt;
+        loop {
+            match self
+                .memory
+                .try_execution_loan()
+                .map_err(|error| anyhow::anyhow!("M0 exclusion: {error:?}"))?
+            {
+                ExecutionLoanAttempt::Acquired(loan) => return Ok(loan),
+                // Only a hosted-wait PE shares its domain with a host service,
+                // whose publication is short; wait for it as a wake does.
+                #[cfg(feature = "std")]
+                ExecutionLoanAttempt::ServiceBusy
+                    if self.cohort == InstalledCohort::El1HostedWait =>
+                {
+                    std::thread::park_timeout(
+                        crate::system::events::hosted::HOSTED_MAX_REQUESTED_SLEEP,
+                    );
+                }
+                ExecutionLoanAttempt::ServiceBusy => {
+                    anyhow::bail!("M0 exclusion: a host service holds the domain")
+                }
+            }
+        }
     }
 
     fn prepare_source(
