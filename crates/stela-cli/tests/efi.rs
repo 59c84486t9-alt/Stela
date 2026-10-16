@@ -144,6 +144,11 @@ fn reinstalling_replaces_the_entry_in_place_and_keeps_omitted_files() {
         fs::read(esp.join("EFI/OC/Tools/Stela.efi")).unwrap(),
         b"MZnewer"
     );
+    // The backup is still the configuration from before the first install.
+    assert_eq!(
+        fs::read(esp.join("EFI/stela/config.plist.backup")).unwrap(),
+        fs::read(FIXTURE).unwrap()
+    );
     assert_eq!(
         fs::read_to_string(esp.join("EFI/stela/stela.cfg")).unwrap(),
         "a"

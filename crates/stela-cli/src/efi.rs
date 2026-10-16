@@ -2,8 +2,9 @@
 //!
 //! `install` copies `stela.efi` to `EFI/OC/Tools/Stela.efi`, writes the
 //! mount's `EFI/stela/stela.cfg` and `EFI/stela/source.bin`, and adds one
-//! `Misc.Tools` entry to `EFI/OC/config.plist`. The previous configuration is
-//! kept as `EFI/stela/config.plist.backup`. Every other key keeps its value
+//! `Misc.Tools` entry to `EFI/OC/config.plist`. The configuration from before
+//! the first install is kept as `EFI/stela/config.plist.backup`; a reinstall
+//! leaves that backup alone. Every other key keeps its value
 //! and order; only the XML layout is rewritten. `uninstall` removes the entry
 //! and those files.
 use anyhow::{Context, Result, bail, ensure};
@@ -193,7 +194,10 @@ pub fn install(command: &Install) -> Result<serde_json::Value> {
 
     fs::create_dir_all(esp.join(MOUNT))?;
     fs::create_dir_all(esp.join(TOOLS))?;
-    fs::write(esp.join(BACKUP), &config.bytes)?;
+    // Keep the configuration from before Stela, not a previous install's.
+    if !esp.join(BACKUP).is_file() {
+        fs::write(esp.join(BACKUP), &config.bytes)?;
+    }
     fs::write(esp.join(TOOLS).join(TOOL), &image)?;
     if let Some(source) = &source {
         fs::write(esp.join(SOURCE), source)?;
