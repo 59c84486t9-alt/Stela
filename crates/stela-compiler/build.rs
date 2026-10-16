@@ -5,12 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const INPUTS: &[&str] = &[
-    "Cargo.toml",
-    "src",
-    "../stela-state/Cargo.toml",
-    "../stela-state/src",
-];
+const INPUTS: &[&str] = &["Cargo.toml", "src"];
 
 fn collect(path: &Path, files: &mut Vec<PathBuf>) {
     if path.is_dir() {

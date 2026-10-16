@@ -14,15 +14,16 @@ pub mod aarch64;
 pub mod block;
 pub mod context;
 pub mod extended;
+mod state;
 mod target;
 pub mod x86_64;
 
-pub use stela_state::{GuestState, NATIVE_ABI};
+pub use state::{GuestState, NATIVE_ABI};
 pub use target::TargetCpu;
 
 use serde::{Deserialize, Serialize};
 
-/// SHA-256 of the compiler and guest-state sources; binds cached native code.
+/// SHA-256 of the compiler sources; binds cached native code.
 pub const SOURCE_SHA256: &str = env!("STELA_COMPILER_SOURCE_SHA256");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

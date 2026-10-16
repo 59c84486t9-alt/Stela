@@ -1,5 +1,4 @@
-//! Guest register state shared by hosted and freestanding execution.
-#![no_std]
+//! Guest register state, shared by hosted and freestanding execution.
 
 /// Native code requires the direct ordinary-RAM profile documented in compiler.md.
 pub const NATIVE_ABI: &str = "x86_64-sysv-guest-state-v3-direct-ram";

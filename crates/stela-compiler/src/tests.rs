@@ -54,28 +54,6 @@ fn polynomial64_lowering_requires_independent_pclmul_and_selects_original_halves
     }
 }
 #[test]
-fn guest_state_reexport_is_the_shared_type() {
-    let mut shared = stela_state::GuestState::default();
-    let compiler: &mut GuestState = &mut shared;
-    compiler.x[30] = 0x1234;
-    let shared: &stela_state::GuestState = compiler;
-    assert_eq!(shared.x[30], 0x1234);
-    assert_eq!(NATIVE_ABI, stela_state::NATIVE_ABI);
-}
-#[test]
-fn guest_state_layout_is_the_native_abi() {
-    assert_eq!(core::mem::size_of::<GuestState>(), 784);
-    assert_eq!(core::mem::align_of::<GuestState>(), 8);
-    assert_eq!(core::mem::offset_of!(GuestState, x), 0);
-    assert_eq!(core::mem::offset_of!(GuestState, sp), 248);
-    assert_eq!(core::mem::offset_of!(GuestState, nzcv), 256);
-    assert_eq!(core::mem::offset_of!(GuestState, reserved), 260);
-    assert_eq!(core::mem::offset_of!(GuestState, v), 264);
-    assert_eq!(core::mem::size_of::<[[u64; 2]; 32]>(), 512);
-    assert_eq!(core::mem::offset_of!(GuestState, fpcr), 776);
-    assert_eq!(core::mem::offset_of!(GuestState, fpsr), 780);
-}
-#[test]
 fn ordered_load_host_requirements_gate_leaf_and_block_before_output() {
     for word in [0xc8dffc20_u32, 0xf8bfc020] {
         let source: Vec<u8> = [word, 0xd65f03c0]

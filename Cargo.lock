@@ -1568,7 +1568,6 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "sha2",
- "stela-state",
 ]
 
 [[package]]
@@ -1623,10 +1622,6 @@ dependencies = [
  "stela-core",
  "tempfile",
 ]
-
-[[package]]
-name = "stela-state"
-version = "0.1.0"
 
 [[package]]
 name = "strsim"

@@ -64,7 +64,7 @@
     .equ RESULT_DATA,      0x400
     .equ RESULT_SCALABLE,  0x4400
 
-    // GuestState layout (stela-state).
+    // GuestState layout (stela-compiler state.rs).
     .equ STATE_X,          0
     .equ STATE_SP,         248
     .equ STATE_NZCV,       256
