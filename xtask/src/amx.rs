@@ -7,6 +7,8 @@
 //! random 64-bit operands, with transfer operands reduced to the top byte and
 //! low eight bits plus the buffer address, and 128-byte alignment for
 //! multi-row transfers.
+pub mod kernels;
+
 use crate::tools::{exec, root, wait};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;

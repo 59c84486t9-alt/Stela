@@ -32,6 +32,8 @@ enum Task {
     Differential(differential::Differential),
     /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
     AmxReference(amx::AmxReference),
+    /// Disassemble, size and time the native AMX kernels against the model.
+    AmxKernels(amx::kernels::AmxKernels),
     /// Merge the instruction registries into the checklist and the README.
     Progress {
         /// Fail instead of writing when either file is stale.
@@ -46,6 +48,7 @@ fn main() -> ExitCode {
         Task::Boot(command) => boot::run(command),
         Task::Differential(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check).map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
