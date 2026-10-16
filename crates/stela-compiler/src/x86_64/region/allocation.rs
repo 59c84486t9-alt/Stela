@@ -3,7 +3,7 @@
 //! Every canonical side exit requires the complete architectural bank. A dead
 //! value here is an older version overwritten before that exit; this analysis
 //! never permits discarding a final output or crossing a faultable boundary.
-use super::{Emitter, Resident, analysis::Effects, encoding, flags, recovery::GPR_SLOTS};
+use super::{Emitter, Resident, analysis::Effects, encoding, flags, location::GPR_SLOTS};
 use crate::aarch64::{Register, Width};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -407,23 +407,12 @@ pub(super) fn emitter<'a>(
             code: vec![],
             consumed_instructions: gprs.len(),
             source_map: vec![],
-            recovery: vec![],
-            #[cfg(test)]
-            exit_pc: None,
-            #[cfg(test)]
-            exit_gprs: super::FRAME_LOCATIONS,
-            #[cfg(test)]
-            liveness: super::Liveness::compute(gprs),
             stats: super::AllocationStats::default(),
         },
         resident: [None; encoding::ALLOCATABLE_SLOTS],
         locations: super::FRAME_LOCATIONS,
         effects: gprs,
         current: 0,
-        #[cfg(test)]
-        pc: _entry,
-        #[cfg(test)]
-        phase: super::Phase::BeforeGuestCommit,
         constants: super::constant::ConstantRegisters::default(),
         reserved_hosts: 0,
         pinned_hosts: 0,
@@ -504,10 +493,6 @@ pub(super) fn prefix(
         let mut emitter = emitter(&gprs, plan, entry);
         emitter.borrow_callees();
         for (instruction, (_, _, step)) in instructions.iter().zip(&analyzed) {
-            #[cfg(test)]
-            {
-                emitter.pc = instruction.pc;
-            }
             emitter.value_instruction(instruction, *step)?;
             emitter.current += 1;
         }
@@ -518,10 +503,6 @@ pub(super) fn prefix(
         emitter.restore_callees();
         if let Some((_, offset)) = emitter.output.source_map.first_mut() {
             *offset = 0;
-        }
-        #[cfg(test)]
-        {
-            emitter.output.exit_pc = Some(crate::GuestAddress(exit));
         }
         let Some(count) = super::analysis::allocated_output_instruction_count(&emitter.output.code)
         else {

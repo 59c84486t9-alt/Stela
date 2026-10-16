@@ -13,20 +13,16 @@ pub(super) use self_loop::prefix_with_budget;
 mod constant;
 mod encoding;
 mod flags;
-pub mod recovery;
+pub mod location;
 
 use crate::{
     GuestAddress,
     aarch64::integer_math::Kind as IntegerMath,
     aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register, WideMove, Width},
 };
-#[cfg(test)]
-use analysis::Liveness;
 use analysis::{Effects, next_use, prefix_effects, slot};
 use encoding::{HostGpr, POOL, RESULT, RIGHT};
-#[cfg(test)]
-use recovery::Phase;
-use recovery::{FRAME_LOCATIONS, GPR_SLOTS, Location, RecoveryPoint};
+use location::{FRAME_LOCATIONS, GPR_SLOTS, Location};
 
 const BYTE_LOAD_BYTES: u8 = 1;
 const WORD_LOAD_BYTES: u8 = 4;
@@ -70,16 +66,6 @@ pub struct OptimizedRegion {
     pub code: Vec<u8>,
     pub consumed_instructions: usize,
     pub source_map: Vec<(GuestAddress, usize)>,
-    /// Legacy GPR-location snapshots for internal clean-load validation.
-    /// Live-version spans expose no mid-native reconstruction service; their
-    /// complete architectural state is canonical at every admitted boundary.
-    pub recovery: Vec<RecoveryPoint>,
-    #[cfg(test)]
-    pub exit_pc: Option<GuestAddress>,
-    #[cfg(test)]
-    pub exit_gprs: [Location; GPR_SLOTS],
-    #[cfg(test)]
-    pub liveness: Liveness,
     pub stats: AllocationStats,
 }
 
@@ -95,10 +81,6 @@ struct Emitter<'a> {
     locations: [Location; GPR_SLOTS],
     effects: &'a [Effects],
     current: usize,
-    #[cfg(test)]
-    pc: GuestAddress,
-    #[cfg(test)]
-    phase: Phase,
     constants: constant::ConstantRegisters,
     reserved_hosts: u16,
     pinned_hosts: u16,
@@ -116,23 +98,8 @@ impl Emitter<'_> {
         encode(&mut self.output.code);
         let end = self.output.code.len();
         debug_assert!(end > start);
-        // Legacy snapshots do not describe dead-version elimination. The new
-        // nonfaulting span promises complete state only at its canonical exits.
-        if self.allocation.is_none() {
-            self.output.recovery.push(RecoveryPoint {
-                #[cfg(test)]
-                native_start: start,
-                #[cfg(test)]
-                native_end: end,
-                #[cfg(test)]
-                guest_pc: self.pc,
-                #[cfg(test)]
-                retired_instructions: self.current,
-                #[cfg(test)]
-                phase: self.phase,
-                gprs: self.locations,
-            });
-        }
+        // Value allocation tracks versions, not per-instruction locations.
+        debug_assert!(self.allocation.is_some() || location::valid(&self.locations));
         self.output.stats.native_instructions += 1;
     }
 
@@ -890,23 +857,12 @@ fn emit_prefix_selected(
             code: vec![],
             consumed_instructions: consumed,
             source_map: vec![],
-            recovery: vec![],
-            #[cfg(test)]
-            exit_pc,
-            #[cfg(test)]
-            exit_gprs: FRAME_LOCATIONS,
-            #[cfg(test)]
-            liveness: Liveness::compute(&effects),
             stats: AllocationStats::default(),
         },
         resident: [None; encoding::ALLOCATABLE_SLOTS],
         locations: FRAME_LOCATIONS,
         effects: &effects,
         current: 0,
-        #[cfg(test)]
-        pc: entry.unwrap_or(GuestAddress(0)),
-        #[cfg(test)]
-        phase: Phase::BeforeGuestCommit,
         constants: constant::ConstantRegisters::default(),
         reserved_hosts: if contains_load {
             HostGpr::Rcx.mask()
@@ -928,26 +884,13 @@ fn emit_prefix_selected(
         allocating_output: false,
     };
     for instruction in instructions.iter().take(consumed) {
-        #[cfg(test)]
-        {
-            emitter.pc = instruction.pc;
-        }
         emitter.instruction(instruction)?;
         emitter.current += 1;
-        #[cfg(test)]
-        {
-            emitter.pc = GuestAddress(instruction.pc.0 + 4);
-        }
-    }
-    #[cfg(test)]
-    {
-        emitter.phase = Phase::ExitSettlement;
     }
     for index in 0..POOL.len() {
         emitter.spill(index, true);
     }
     debug_assert_eq!(emitter.locations, FRAME_LOCATIONS);
-    debug_assert!(emitter.output.recovery.iter().all(RecoveryPoint::validate));
     Ok(emitter.output)
 }
 

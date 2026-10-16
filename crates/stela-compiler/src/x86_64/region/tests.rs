@@ -29,20 +29,6 @@ fn chain_reuses_value_and_settles_once() {
     assert_eq!(result.stats.exit_stores, 1);
     assert_eq!(result.stats.commits, 256);
     assert_eq!(result.stats.peak_resident, 1);
-    assert_eq!(result.exit_pc, Some(GuestAddress(0x1400)));
-    assert_eq!(result.liveness.live_exit, u32::MAX);
-    assert_eq!(result.liveness.live_before, vec![u32::MAX; 256]);
-    assert!(
-        result
-            .recovery
-            .windows(2)
-            .all(|rows| rows[0].native_end == rows[1].native_start)
-    );
-    assert_eq!(
-        result.recovery.last().unwrap().native_end,
-        result.code.len()
-    );
-    assert_eq!(result.recovery.last().unwrap().retired_instructions, 256);
 }
 
 #[test]
@@ -80,8 +66,6 @@ fn product_rotate_chain_stays_resident_until_canonical_exit() {
     assert_eq!(region.stats.pressure_stores, 0);
     assert_eq!(region.stats.input_cache_loads, 2);
     assert_eq!(region.stats.peak_resident, 3);
-    assert!(region.recovery.iter().all(RecoveryPoint::validate));
-    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
 }
 
 #[test]
@@ -169,7 +153,6 @@ fn pressure_never_discards_final_architectural_values() {
     let result = emit_prefix(&instructions).unwrap();
     assert_eq!(result.stats.pressure_stores + result.stats.exit_stores, 31);
     assert_eq!(result.stats.peak_resident, 6);
-    assert!(result.recovery.iter().all(RecoveryPoint::validate));
 }
 #[test]
 fn boundary_does_not_emit_or_consume_later_instructions() {
@@ -180,11 +163,9 @@ fn boundary_does_not_emit_or_consume_later_instructions() {
     ];
     let result = emit_prefix(&instructions).unwrap();
     assert_eq!(result.consumed_instructions, 1);
-    assert_eq!(result.exit_pc, Some(instructions[1].pc));
     assert_eq!(result.source_map.len(), 1);
     let empty = emit_prefix(&instructions[1..]).unwrap();
     assert!(empty.code.is_empty());
-    assert!(empty.recovery.is_empty());
     assert_eq!(empty.consumed_instructions, 0);
 }
 #[test]
@@ -257,26 +238,19 @@ fn bounded_contiguous_and_overflow_checked() {
     );
     assert!(emit_prefix(&[]).unwrap().code.is_empty());
 }
+
 #[test]
-fn recovery_refuses_scratch_alias_or_wrong_frame_slot() {
-    let mut point = RecoveryPoint {
-        native_start: 0,
-        native_end: 3,
-        guest_pc: GuestAddress(0x1000),
-        retired_instructions: 0,
-        phase: Phase::BeforeGuestCommit,
-        gprs: FRAME_LOCATIONS,
-    };
-    point.gprs[0] = Location::Host(HostGpr::Rax);
-    assert!(!point.validate());
-    point.gprs[0] = Location::Host(POOL[0]);
-    point.gprs[1] = Location::Host(POOL[0]);
-    assert!(!point.validate());
-    point.gprs = FRAME_LOCATIONS;
-    point.gprs[0] = Location::Frame { byte_offset: 8 };
-    assert!(!point.validate());
-    point.gprs = FRAME_LOCATIONS;
-    assert_eq!(point.reconstruct(&[7; 32], &[8; 16]), Some([7; 32]));
+fn locations_refuse_scratch_alias_or_wrong_frame_slot() {
+    let mut gprs = FRAME_LOCATIONS;
+    assert!(location::valid(&gprs));
+    gprs[0] = Location::Host(HostGpr::Rax);
+    assert!(!location::valid(&gprs));
+    gprs[0] = Location::Host(POOL[0]);
+    gprs[1] = Location::Host(POOL[0]);
+    assert!(!location::valid(&gprs));
+    gprs = FRAME_LOCATIONS;
+    gprs[0] = Location::Frame { byte_offset: 8 };
+    assert!(!location::valid(&gprs));
 }
 
 #[test]
@@ -423,19 +397,6 @@ fn clean_byte_load_tier_retains_five_nonclobbered_slots() {
     assert_eq!(output.consumed_instructions, 5);
     assert_eq!(output.stats.clean_loads, 1);
     assert_eq!(output.stats.load_boundary_stores, 2);
-    assert!(
-        output
-            .recovery
-            .iter()
-            .any(|row| { row.gprs[16] == Location::Host(HostGpr::Rcx) })
-    );
-    assert!(output.recovery.iter().all(|row| {
-        row.gprs
-            .iter()
-            .enumerate()
-            .all(|(guest, location)| guest == 16 || *location != Location::Host(HostGpr::Rcx))
-    }));
-    assert_eq!(output.exit_gprs, FRAME_LOCATIONS);
     assert_eq!(emit_prefix(&instructions).unwrap().consumed_instructions, 2);
 }
 
@@ -502,24 +463,6 @@ fn borrowed_load_result_settles_dirty_changes_before_next_faultable_load() {
     ])
     .unwrap();
     assert_eq!(output.stats.load_boundary_stores, 1);
-    let accesses: Vec<_> = output
-        .code
-        .windows(3)
-        .enumerate()
-        .filter(|(_, bytes)| *bytes == [0x0f, 0xb6, 0x08])
-        .map(|(offset, _)| {
-            output
-                .recovery
-                .iter()
-                .find(|row| row.native_start == offset)
-                .unwrap()
-        })
-        .collect();
-    assert_eq!(accesses.len(), 2);
-    assert_eq!(accesses[1].gprs[10], FRAME_LOCATIONS[10]);
-    assert_eq!(accesses[1].gprs[11], FRAME_LOCATIONS[11]);
-    assert_eq!(output.exit_gprs, FRAME_LOCATIONS);
-    assert!(output.recovery.iter().all(RecoveryPoint::validate));
 }
 
 #[test]
@@ -594,20 +537,7 @@ fn word_load_tier_keeps_clean_residents_and_canonical_fault_state() {
         assert_eq!(region.consumed_instructions, instructions.len());
         assert_eq!(region.stats.clean_loads, 1);
         assert_eq!(region.stats.load_boundary_stores, 1);
-        assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
-        assert!(region.recovery.iter().all(RecoveryPoint::validate));
-        let access = region
-            .code
-            .windows(2)
-            .position(|bytes| bytes == [0x8b, 0x08])
-            .unwrap();
-        let boundary = region
-            .recovery
-            .iter()
-            .find(|row| row.native_start == access)
-            .unwrap();
-        assert_eq!(boundary.retired_instructions, 1);
-        assert_eq!(boundary.phase, Phase::BeforeGuestCommit);
+        assert!(region.code.windows(2).any(|bytes| bytes == [0x8b, 0x08]));
     }
 }
 
@@ -665,8 +595,6 @@ fn repeated_read_only_inputs_are_cached_without_architectural_writes() {
     assert!(region.stats.cache_hits >= 3);
     assert_eq!(region.stats.pressure_stores, 0);
     assert_eq!(region.stats.exit_stores + region.stats.lifetime_stores, 2);
-    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
-    assert!(region.recovery.iter().all(RecoveryPoint::validate));
 }
 
 #[test]
@@ -692,8 +620,6 @@ fn pair_loads_retain_clean_results_and_reject_changed_shared_recipe() {
     let region = emit_clean_load_prefix(&source).unwrap();
     assert_eq!(region.consumed_instructions, source.len());
     assert_eq!(region.stats.pair_loads, 1);
-    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
-    assert!(region.recovery.iter().all(RecoveryPoint::validate));
     let mut raw = vec![];
     super::super::memory_pair(
         &mut raw,
@@ -892,11 +818,6 @@ fn packed_flags_survive_nonflag_arithmetic_without_frame_roundtrip() {
     assert_eq!(region.stats.flag_loads, 0);
     assert_eq!(region.stats.flag_stores, 1);
     assert_eq!(region.stats.pressure_stores, 0);
-    assert!(
-        region.recovery.is_empty(),
-        "no invented mid-native recovery service"
-    );
-    assert_eq!(region.exit_gprs, FRAME_LOCATIONS);
 }
 
 #[test]

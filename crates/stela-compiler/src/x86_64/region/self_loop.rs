@@ -5,8 +5,6 @@ use super::{
     AllocationStats, Effects, Emitter, FRAME_LOCATIONS, GPR_SLOTS, HostGpr, Location,
     MAX_INSTRUCTIONS, OptimizedRegion, POOL, Resident, analysis, constant, encoding, flags,
 };
-#[cfg(test)]
-use super::{Liveness, Phase};
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{Instruction, Operation},
@@ -227,23 +225,12 @@ impl LegacyPlan {
                 code,
                 consumed_instructions: instructions.len(),
                 source_map: vec![],
-                recovery: vec![],
-                #[cfg(test)]
-                exit_pc: Some(fallthrough),
-                #[cfg(test)]
-                exit_gprs: FRAME_LOCATIONS,
-                #[cfg(test)]
-                liveness: Liveness::compute(&effects),
                 stats: AllocationStats::default(),
             },
             resident: [None; encoding::ALLOCATABLE_SLOTS],
             locations: FRAME_LOCATIONS,
             effects: &effects,
             current: 0,
-            #[cfg(test)]
-            pc: entry,
-            #[cfg(test)]
-            phase: Phase::BeforeGuestCommit,
             constants: constant::ConstantRegisters::default(),
             reserved_hosts: HostGpr::Rcx.mask(),
             pinned_hosts: 0,
@@ -268,16 +255,8 @@ impl LegacyPlan {
         }
         let header = emitter.output.code.len();
         for (instruction, step) in prefix.iter().zip(&prefix_steps) {
-            #[cfg(test)]
-            {
-                emitter.pc = instruction.pc;
-            }
             flags::emit(&mut emitter, instruction, *step)?;
             emitter.current += 1;
-        }
-        #[cfg(test)]
-        {
-            emitter.pc = last.pc;
         }
         emitter
             .output
@@ -419,10 +398,6 @@ fn allocated_loop(
         let cold_loads = emitter.output.stats.state_loads;
         let header = emitter.output.code.len();
         for (instruction, (_, _, step)) in instructions.iter().zip(&analyzed) {
-            #[cfg(test)]
-            {
-                emitter.pc = instruction.pc;
-            }
             emitter.value_instruction(instruction, *step).ok()?;
             emitter.current += 1;
         }

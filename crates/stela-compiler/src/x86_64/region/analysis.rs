@@ -1,5 +1,5 @@
 //! Bounded architectural liveness. Every final GPR is live at the exit.
-use super::recovery::GPR_SLOTS;
+use super::location::GPR_SLOTS;
 use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::integer_math::Kind as IntegerMath;
 use crate::aarch64::{
@@ -11,8 +11,6 @@ use alloc::vec::Vec;
 pub const MAX_INSTRUCTIONS: usize = 256;
 const PAIR_OFFSET_BITS: u32 = 7;
 const PAIR_OFFSET_HALF_RANGE: i32 = 1 << (PAIR_OFFSET_BITS - 1);
-#[cfg(test)]
-pub const ALL_GPRS: u32 = u32::MAX;
 
 pub fn slot(register: Register) -> Option<usize> {
     match register {
@@ -191,29 +189,6 @@ pub fn prefix_clean_load_effects(instructions: &[Instruction]) -> Vec<Effects> {
         .iter()
         .map_while(|instruction| clean_load_effects(&instruction.operation))
         .collect()
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Liveness {
-    pub live_before: Vec<u32>,
-    pub live_exit: u32,
-}
-
-#[cfg(test)]
-impl Liveness {
-    pub fn compute(effects: &[Effects]) -> Self {
-        let mut live = ALL_GPRS;
-        let mut live_before = vec![0; effects.len()];
-        for (index, effect) in effects.iter().enumerate().rev() {
-            live = (live & !effect.writes) | effect.reads;
-            live_before[index] = live;
-        }
-        Self {
-            live_before,
-            live_exit: ALL_GPRS,
-        }
-    }
 }
 
 /// A future overwrite kills the current value even if a later version is read.
