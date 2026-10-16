@@ -228,8 +228,29 @@ impl Manifest {
             .ok_or_else(|| manifest_error(format!("no file {name}")))
     }
 
-    /// Check every file's size and SHA-256 and every region's extent and
-    /// SHA-256. `contents` returns a file's bytes by name.
+    /// Whether the regions cover `file` exactly once, end to end.
+    fn tiled(&self, file: &File) -> bool {
+        let mut ranges: Vec<(u64, u64)> = self
+            .regions
+            .iter()
+            .filter(|r| r.file == file.name)
+            .map(|r| (r.file_offset, r.file_offset.saturating_add(r.bytes)))
+            .collect();
+        ranges.sort_unstable();
+        let mut cursor = 0;
+        for (start, end) in ranges {
+            if start != cursor {
+                return false;
+            }
+            cursor = end;
+        }
+        cursor == file.bytes
+    }
+
+    /// Check every file's size and every region's extent and SHA-256. A
+    /// file the regions do not tile exactly is also checked against its own
+    /// SHA-256; a tiled file's region hashes already cover every byte.
+    /// `contents` returns a file's bytes by name.
     pub fn verify<'a>(
         &'a self,
         contents: &dyn Fn(&str) -> Option<&'a [u8]>,
@@ -246,7 +267,7 @@ impl Manifest {
                     reason: format!("is {} bytes, not {}", bytes.len(), file.bytes),
                 });
             }
-            if crate::sha256(bytes) != file.sha256 {
+            if !self.tiled(file) && crate::sha256(bytes) != file.sha256 {
                 return Err(BundleError::File {
                     name: file.name.clone(),
                     reason: "SHA-256 differs from bundle.json".into(),
@@ -618,9 +639,10 @@ mod tests {
         let tampered = [0xab; 100];
         let files: BTreeMap<&str, &[u8]> =
             BTreeMap::from([("kernel.img", &tampered[..]), ("devicetree.adt", &tree[..])]);
+        // The kernel is tiled by its region, whose hash catches the change.
         assert!(matches!(
             manifest.verify(&|name| files.get(name).copied()),
-            Err(BundleError::File { .. })
+            Err(BundleError::Region { .. })
         ));
         let files: BTreeMap<&str, &[u8]> =
             BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
@@ -639,6 +661,27 @@ mod tests {
         assert!(matches!(
             verified.load(&small, &mut entropy, &mut write),
             Err(BundleError::Machine(_))
+        ));
+        // A file no region covers is checked by its own hash.
+        let extra = json.replace(
+            r#"  ],
+  "regions""#,
+            &format!(
+                r#",    {{"name": "extra.bin", "bytes": 3, "sha256": "{}"}}
+  ],
+  "regions""#,
+                crate::sha256(b"abc")
+            ),
+        );
+        let extra = Manifest::parse(extra.as_bytes())?;
+        let files: BTreeMap<&str, &[u8]> = BTreeMap::from([
+            ("kernel.img", &kernel[..]),
+            ("devicetree.adt", &tree[..]),
+            ("extra.bin", &b"abd"[..]),
+        ]);
+        assert!(matches!(
+            extra.verify(&|name| files.get(name).copied()),
+            Err(BundleError::File { .. })
         ));
         let unsafe_name = json.replace("\"kernel.img\"", "\"../kernel.img\"");
         assert!(Manifest::parse(unsafe_name.as_bytes()).is_err());
