@@ -240,14 +240,13 @@ impl Emitter<'_> {
             self.commit_value(destination, width);
             return;
         }
-        // All original operands have been consumed. Result allocation may now
-        // evict them according to next use without changing this operation.
+        // The operands are consumed, so result allocation may evict them by
+        // next use.
         self.pinned_hosts = 0;
         if let Some(guest) = slot(destination) {
             if !self.persistent && next_use(self.effects, self.current + 1, guest) == usize::MAX {
-                // This value has reached its last use in the region. Commit to
-                // its canonical final location, retaining the old Host recipe
-                // until the store succeeds. Other resident values stay cached.
+                // This value's last use in the region: store it to its final
+                // location, keeping the old host copy until the store succeeds.
                 self.emit(|code| encoding::store(code, RESULT, guest));
                 self.output.stats.lifetime_stores += 1;
                 self.locations[guest] = FRAME_LOCATIONS[guest];
@@ -268,8 +267,8 @@ impl Emitter<'_> {
             self.locations[guest] = Location::Host(POOL[index]);
             self.resident[index] = Some(Resident { guest, dirty: true });
         } else {
-            // Nonfaulting ZR writes have no architectural effects. Keep an
-            // explicit host boundary so retirement is still observable.
+            // A non-faulting write to ZR has no effect, but a host instruction
+            // keeps the retirement observable.
             self.emit(encoding::nop);
         }
         self.output.stats.commits += 1;
@@ -669,9 +668,9 @@ impl Emitter<'_> {
             }
             Operation::IntegerMath(operand) => match operand.kind {
                 IntegerMath::Low { width } => {
-                    // All sources retain their original architectural value until
-                    // commit, including Rd==Rn/Rm/Ra. The low product is identical
-                    // for signed and unsigned inputs modulo the selected width.
+                    // Sources keep their values until commit, including Rd ==
+                    // Rn/Rm/Ra. The low product is the same for signed and
+                    // unsigned inputs.
                     self.read(operand.left, RESULT);
                     let right = self.cached(operand.right);
                     if right.is_some() {
@@ -779,9 +778,9 @@ impl Emitter<'_> {
     }
 }
 
-/// Emit the longest eligible prefix. No RET, helper, dispatch or guest faulting
-/// access is appended. The consumer starts the unchanged baseline emitter at
-/// consumed_instructions with a fully canonical frame and exact exit_pc.
+/// Emit the longest eligible prefix, with no RET, helper, dispatch or faulting
+/// access. The caller continues with the baseline emitter at
+/// `consumed_instructions`, with the full frame written back and `exit_pc` set.
 #[cfg(test)]
 pub fn emit_prefix(instructions: &[Instruction]) -> Result<OptimizedRegion, RegionError> {
     emit_prefix_selected(instructions, false)

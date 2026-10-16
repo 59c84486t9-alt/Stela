@@ -343,14 +343,13 @@ fn insert(code: &mut Vec<u8>, format: Format, lane: usize, checked: bool, target
     }
 }
 
-/// Exact normal-domain two-form kernel. Special values, subnormal inputs,
-/// reciprocal subnormal/overflow outputs and negative RSQRT inputs leave the
-/// complete instruction uncommitted for mature semantic completion. Normal
-/// Half input/output ignores AHP and needs no FZ16 effects. AH suppresses
-/// retained enable rejection; actual immutable RPRES availability plus dynamic
-/// Single AH chooses enhanced constants. No guest FPSR bit is newly raised.
-/// Clobbers volatile RAX/RCX/RDX/R8/R9/R10/R11, host flags and XMM0..7; preserves
-/// all callee-saved GPRs, RDI/R15, source banks and complete caller MXCSR.
+/// Normal-value kernel for the two estimate forms. Special values, subnormal
+/// inputs, subnormal or overflowing reciprocals and negative RSQRT inputs leave
+/// the instruction to software completion. Normal half precision ignores AHP
+/// and FZ16. FPCR.AH suppresses enabled-trap rejection; FEAT_RPRES with
+/// single-precision AH selects the enhanced constants. No new FPSR bits are
+/// raised. Clobbers RAX/RCX/RDX/R8-R11, flags and XMM0-7; preserves the
+/// callee-saved GPRs, RDI/R15, the sources and the caller's MXCSR.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,

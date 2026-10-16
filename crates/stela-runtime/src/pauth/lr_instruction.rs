@@ -42,8 +42,8 @@ pub enum StageError {
     UnalignedPc,
 }
 
-/// A snapshot, never an execution token. All values come from the same pre-state.
-/// The actual owner must authorize source, CPU, selected key/controls and effects.
+/// A snapshot of the instruction's operands, all from the same pre-state. The
+/// executing owner authorizes and applies the effects.
 pub fn stage(
     instruction: Instruction,
     pc: u64,

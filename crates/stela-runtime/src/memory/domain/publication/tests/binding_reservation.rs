@@ -13,7 +13,7 @@ fn actual_service_write_invalidates_the_original_backing_reservation() {
     use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
     let (mut owner, base) = owned();
     let system = MemorySystem::new(16, 8).unwrap();
-    // SAFETY: actual fresh owned anonymous storage and its complete writers.
+    // SAFETY: new owned anonymous storage with every writer.
     let domain =
         unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 75), &mut []) }.unwrap();
     let mapping = &domain.registered_views()[0];

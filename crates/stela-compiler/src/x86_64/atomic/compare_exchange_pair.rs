@@ -119,8 +119,8 @@ fn doubleword_pair(code: &mut Vec<u8>, compare: [Register; 2], source: [Register
     code.extend(MOV_R8_RDX);
     if source == compare {
         code.extend(MOV_R9_RBX);
-        // CAS128(0, 0) leaves RAM unchanged on either outcome and returns old128,
-        // including when the original same-pair comparison would have succeeded.
+        // CAS128(0, 0) never changes RAM and always returns the old 128 bits,
+        // even when the pair comparison would have succeeded.
         code.extend(XOR_EAX_EAX);
         code.extend(XOR_EDX_EDX);
         code.extend(XOR_EBX_EBX);

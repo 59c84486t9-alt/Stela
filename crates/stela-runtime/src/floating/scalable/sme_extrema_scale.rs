@@ -39,9 +39,9 @@ fn lane(values: &[u8], offset: usize, bytes: usize) -> u64 {
     u64::from_le_bytes(result)
 }
 
-/// All original inputs are captured before lane evaluation, including a scale
-/// broadcast alias within the destination group. Unsupported controls commit
-/// neither Z output nor FPSR. FPCR, NZCV, P, ZA, ZT and FPMR are preserved.
+/// Every input is captured before evaluation, including a scale vector inside
+/// the destination group. Unsupported controls commit neither Z nor FPSR; FPCR,
+/// NZCV, P, ZA, ZT0 and FPMR are preserved.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

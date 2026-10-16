@@ -138,8 +138,8 @@ fn reserved_fields_decline_for_every_register_pair() {
 
 #[test]
 fn allocated_neighbors_remain_owned_by_their_existing_families() {
-    // Exact June canonical facts: FSQRT, FCVT, FCMP, FMAX, scalar FMOV,
-    // FCVTNS, vector FRECPE/FCVTN/FCMEQ and the modified-immediate class.
+    // Neighboring forms: FSQRT, FCVT, FCMP, FMAX, scalar FMOV, FCVTNS, vector
+    // FRECPE/FCVTN/FCMEQ and the modified-immediate class.
     const NEIGHBORS: [u32; 10] = [
         0x1e21_c000,
         0x1e22_c000,

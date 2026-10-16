@@ -27,8 +27,8 @@ pub enum Error {
     Commit(CommitError),
 }
 
-/// Uncompleted decisions carry their original request for exact trap syndromes
-/// and actual backend dispatch. They have applied no instruction effects.
+/// A pending decision, keeping its request for trap syndromes and backend
+/// dispatch; nothing has been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Completion {
     Complete {
@@ -40,8 +40,8 @@ pub enum Completion {
     },
 }
 
-/// Recheck the canonical typed descriptor against actual original bytes before
-/// using its immediate. CRm is the operand; no GPR or XZR value is sampled.
+/// Re-check the descriptor against the source bytes before using its immediate.
+/// CRm is the operand; no GPR is read.
 pub fn request(
     instruction: SystemInstruction,
     source_pc: GuestAddress,
@@ -56,11 +56,10 @@ pub fn request(
     Ok(Request::write(encoding, ZERO_REGISTER, 0))
 }
 
-/// Complete only effects for which the actual state owner suffices. Source
-/// Undefined/Trap/NotHandled and optional backend decisions remain unapplied.
-/// DAIF requires the real postcommit asynchronous boundary owner, which is not
-/// supplied by a PSTATE snapshot or the current pure interrupt-access planner.
-/// Parent runtime must dispatch that requirement before permitting mutation.
+/// Complete the effects the state owner can apply alone. Undefined, Trap,
+/// NotHandled and backend decisions stay unapplied. DAIF needs the asynchronous
+/// boundary owner after commit, which a PSTATE snapshot does not provide, so
+/// the runtime must dispatch it before allowing the change.
 pub fn complete(
     instruction: SystemInstruction,
     source_pc: GuestAddress,

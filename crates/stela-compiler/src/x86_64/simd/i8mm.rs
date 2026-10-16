@@ -55,7 +55,7 @@ fn dot_sum(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
 }
 
 fn matrix_sse2(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
-    // XMM5/6 retain the original left/right inputs throughout both halves.
+    // XMM5/6 keep the left and right inputs for both halves.
     shuffle(code, LEFT, ORIGINAL_LEFT, MATRIX_LEFT_LOW);
     shuffle(code, RIGHT, ORIGINAL_RIGHT, MATRIX_RIGHT_LOW);
     dot_sum(code, left_signed, right_signed);

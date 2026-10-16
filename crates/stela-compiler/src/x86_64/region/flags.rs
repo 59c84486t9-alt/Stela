@@ -125,8 +125,8 @@ pub(super) fn emit(
         Step::Define => {
             let mut lowered = instruction.clone();
             remove_flag_capture(&mut lowered.operation);
-            // Existing register arithmetic defines the actual host flags; its
-            // register copies and zero-destination NOP preserve those flags.
+            // The register arithmetic sets the host flags; the following
+            // register copies and ZR NOP preserve them.
             emitter.instruction_defining_flags(&lowered)
         }
         Step::Select(carry) => {
@@ -195,8 +195,8 @@ fn emit_select(emitter: &mut Emitter<'_>, pc: crate::GuestAddress, operand: Oper
     emitter.commit(operand.destination, operand.width);
 }
 
-/// Architectural NZCV survives a host arithmetic clobber in the same allocator
-/// as GPR values. Frame is authoritative only at entry or after actual settlement.
+/// NZCV is tracked by the same allocator as GPR values. The frame copy is
+/// current only at entry or after a write-back.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Location {
     Frame,
@@ -212,8 +212,8 @@ pub(super) enum ValueStep {
 }
 
 pub(super) fn analyze_value(operation: &Operation) -> Option<(Effects, ValueEffects, ValueStep)> {
-    // A synthetic provenance permits every valid conditional selector. The real
-    // producer/location is selected at emission, never inferred from this token.
+    // A placeholder carry source that permits every condition; the real
+    // producer is chosen at emission.
     let mut provenance = Some(Carry::Native);
     let (gprs, step) = analyze(operation, &mut provenance)?;
     let (reads_flags, writes_flags, step) = match step {

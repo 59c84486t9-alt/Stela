@@ -138,8 +138,8 @@ fn widen_pairs(code: &mut Vec<u8>, shape: Shape) {
 fn odd_add(code: &mut Vec<u8>, shape: Shape, rollback: &mut Vec<usize>, check: SumCheck) {
     packed(code, Host::MoveAligned, ORIGINAL_LEFT, LEFT);
     arithmetic(code, ArithmeticOpcode::Add, LEFT, RIGHT);
-    // RTZ overflow can clamp to normal max-finite: check real status before
-    // either the result classifier or any residual can replace that evidence.
+    // Round-toward-zero overflow can clamp to the largest finite value, so
+    // check the host status before the result classifier or residual hides it.
     guard_real_status(code, rollback);
     prepare_vector_input_range(code, Format::Single);
     guard_normal_or_zero(code, shape, LEFT, rollback);
@@ -284,8 +284,8 @@ pub(in crate::x86_64) fn emit_matrix(
     matrix_accumulator(code, Host::StoreUnaligned);
     code.extend(ZERO_MATRIX_COUNTER);
     let next_stage = code.len();
-    // Reloads remain snapshots of original guest inputs until the sole final
-    // commit, including Vd=Vn, Vd=Vm and all-register aliases.
+    // Reloads see the original inputs until the single final commit, including
+    // Vd=Vn, Vd=Vm and full aliasing.
     read_vector(code, operand.left, LEFT);
     read_vector(code, operand.right, RIGHT);
     code.extend(TEST_MATRIX_COUNTER);

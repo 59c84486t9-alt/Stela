@@ -101,14 +101,13 @@ fn expand_without_rpath(path: &str, executable_dir: &str, loader_dir: &str) -> R
     bail!("bare relative guest dependency path is unsupported: {path:?}")
 }
 
-/// Expand one install name into ordered, deduplicated absolute guest paths.
+/// Expand an install name into ordered, deduplicated absolute guest paths.
 ///
-/// `ctx.rpaths` must already represent the requesting image's load chain in
-/// nearest-first order. Each LC_RPATH's `@loader_path` uses its defining owner;
-/// `@executable_path` always uses the main executable. Recursive `@rpath`
-/// declarations and bare relative paths are explicit unsupported cases.
-/// An empty result means an `@rpath` request had no declared search directories.
-/// Lexical containment does not authorize following host filesystem symlinks.
+/// `ctx.rpaths` holds the requesting image's load chain, nearest first. Each
+/// LC_RPATH's `@loader_path` refers to the image that declares it;
+/// `@executable_path` always refers to the main executable. Recursive `@rpath`
+/// entries and bare relative paths are unsupported. An empty result means an
+/// `@rpath` request had no search directories.
 pub fn candidates(name: &str, ctx: &PathContext<'_>) -> Result<Vec<String>> {
     checked_path(name)?;
     ensure!(

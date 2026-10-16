@@ -29,9 +29,9 @@ pub(super) struct Pair {
     pub follower_features: Vec<FeatureRequirement>,
 }
 
-/// Return no pair for a nonprefix instruction. A prefix requires both complete
-/// words from this exact immutable source window, never a fabricated follower.
-/// Only reviewed total register-only followers may execute before restart support exists.
+/// Returns None for an instruction that is not MOVPRFX. A prefix needs both
+/// words from the source window, and until restart support exists only
+/// register-only followers may run.
 pub(super) fn decode_pair(
     source: &[u8],
     offset: usize,

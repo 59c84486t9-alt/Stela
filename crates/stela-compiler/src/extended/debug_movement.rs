@@ -18,9 +18,8 @@ use crate::{
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// Required by the existing scalable-checker interface, solely as an external
-/// source-word diagnostic anchor. Zero denotes no fetched PC; it grants no fetch
-/// provenance, exception-delivery PC, ordinary block/cache or branch authority.
+/// Address passed to the scalable checker for diagnostics only; zero means the
+/// word was not fetched.
 const EXTERNAL_WORD_ANCHOR: GuestAddress = GuestAddress(0);
 const EXTERNAL_WORD_ORDINAL: usize = 0;
 const ZERO_REGISTER: u8 = 31;

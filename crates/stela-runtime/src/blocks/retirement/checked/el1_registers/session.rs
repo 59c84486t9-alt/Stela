@@ -28,7 +28,7 @@ pub(crate) enum RegisterFailure {
 #[derive(Debug)]
 pub(crate) struct RegisterNativeReport {
     pub(in crate::blocks::retirement::checked) invoked: bool,
-    /// Descriptive post-native bank only; never a commit or PE authority.
+    /// The register bank after the native call, for diagnostics.
     #[cfg(not(feature = "std"))]
     pub(in crate::blocks::retirement::checked) observed_registers: Option<GuestState>,
     pub(in crate::blocks::retirement::checked) raw_carrier: Option<(u64, u64)>,
@@ -55,9 +55,8 @@ impl ContextIdentity {
         }
     }
 }
-/// Actual original source/bank/outer/System/context and reached physical pin
-/// remain borrowed inside the retained authority guard before native invocation.
-/// This session cannot create authority, use a callback or expose an entry ptr.
+/// The source, register bank, system state, context and the fetched physical
+/// page stay borrowed for the native call.
 pub(in crate::blocks::retirement::checked) struct RegisterSession<'call, 'code> {
     bound: &'call BoundSource<'code>,
     outer: &'call MemoryExecutionLoan,
@@ -182,10 +181,10 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         ))]
         {
             self.invoked = true;
-            // SAFETY: caller already owns original retained NativeActive and
-            // SAME full ThreadState/System/backend/closed-producer/outer. Whole
-            // typed source is register-only, with no memory/helper/FP operation;
-            // actual compiled mapping/ABI/source/map and physical fetch match.
+            // SAFETY: the caller holds the native session and the full thread,
+            // system, backend and outer state. The block is register-only (no
+            // memory, helper or FP operation), and its mapping, ABI, source map
+            // and physical fetch all match.
             let reached = match unsafe {
                 if self.bound.runtime.profile()
                     == stela_compiler::block::BlockProfile::El1DirectBranchV1
@@ -210,11 +209,11 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             {
                 report.observed_registers = Some(candidate.clone());
             }
-            // Preserve actual raw bits and actual storage postcheck FIRST.
+            // Record the raw result and the storage check first.
             report.raw_carrier = Some((returned.next_pc, returned.kind));
             report.storage_after = Some(after);
-            // Neither typed register ABI installs service views. No context helper or
-            // borrowed-view finalizer was installed; preserve its actual state.
+            // The register ABIs install no service views, so the context must
+            // be unchanged.
             if !self.context_unchanged() {
                 report.failure = Some(RegisterFailure::ContextChanged);
             }

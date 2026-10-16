@@ -32,11 +32,10 @@ pub struct PeExecutionAuthority {
 
 impl PeExecutionAuthority {
     /// # Safety
-    /// Only the actual fresh-PE constructor may call this, exactly once for a
-    /// genuinely NEW PE. Retain this non-Clone owner for the full executable
-    /// lifetime, binding its actual ThreadState/System/backend/control resources.
-    /// Recreating it for an adopted PE, cloned diagnostics or after failure/Drop
-    /// is forbidden. All integrated native and completion routes must borrow it.
+    /// Called once, by the constructor of a new PE. Keep this owner for the
+    /// PE's whole run, bound to its thread, system state, backend and controls;
+    /// never recreate it for an existing PE, a copy or after failure. Every
+    /// native and completion route borrows it.
     pub(crate) unsafe fn new_pe() -> Self {
         Self {
             identity: PeIdentity(Arc::new(())),
@@ -45,9 +44,8 @@ impl PeExecutionAuthority {
         }
     }
 
-    /// Fresh owner only, after actual lifecycle STATUS/ITR validation. This is
-    /// the same PE authority allocation with its explicit initial halted phase,
-    /// never an adoption/reset API for an existing or poisoned processor.
+    /// As `new_pe`, but starting halted, after validating STATUS and the ITR.
+    /// For new PEs only.
     pub(crate) unsafe fn new_pe_halted() -> Self {
         let mut authority = unsafe { Self::new_pe() };
         authority.phase = Phase::Halted;
@@ -62,10 +60,8 @@ impl PeExecutionAuthority {
         self.phase == Phase::Ready
     }
 
-    /// Readonly diagnostics may inspect a quiescent or terminally blocked PE.
-    /// The closed consumer must additionally hold the actual same-domain service
-    /// loan before reading retained backend snapshots. This grants no entry,
-    /// reset, mutable resource access or phase transition.
+    /// Read-only diagnostics for a quiescent or blocked PE. The consumer must
+    /// also hold the domain's service borrow before reading backend snapshots.
     #[cfg(feature = "std")]
     pub(crate) fn check_observation(
         &self,
@@ -125,9 +121,8 @@ impl PeExecutionAuthority {
         self.phase == Phase::Halted
     }
 
-    /// Canonical checked consumer settles real HLT effects while its original
-    /// source/control/memory/lifecycle loans remain held. No ordinary next-PC or
-    /// Ready grant follows this terminal. A wrong phase poisons the same PE.
+    /// The consumer settles HLT's effects while its borrows are held. No next
+    /// PC follows; a wrong phase marks the PE failed.
     pub(crate) fn finish_halt(
         &mut self,
         _consumer: &crate::blocks::retirement::ConsumerKey,
@@ -161,9 +156,8 @@ impl PeExecutionAuthority {
     pub(crate) fn debug_attempt(&self, attempt: u64) -> bool {
         self.sequence == attempt && self.phase == Phase::DebugActive(attempt)
     }
-    /// The same canonical consumer certifies exact debug completion/prefix and
-    /// actual ITE-ready/Halted lifecycle before returning this phase. Any later
-    /// error/Drop still poisons; this method supplies no normal native entry.
+    /// The consumer has verified the debug completion and the halted state. Any
+    /// later error or Drop still marks the PE failed.
     pub(crate) fn finish_debug(
         &mut self,
         _consumer: &crate::blocks::retirement::ConsumerKey,
@@ -194,8 +188,8 @@ impl PeExecutionAuthority {
         self.sequence == attempt && self.phase == Phase::Retiring(attempt)
     }
 
-    /// Called only by the closed consumer while actual settled ThreadState and
-    /// real source/control/backend leases remain exclusively held.
+    /// Called by the consumer while it holds the settled thread state and its
+    /// borrows.
     pub(crate) fn finish_refusal(
         &mut self,
         _consumer: &crate::blocks::retirement::ConsumerKey,
@@ -227,8 +221,8 @@ impl PeExecutionAuthority {
         Ok(())
     }
 
-    /// Only the closed actual checked-native consumer may present ConsumerKey,
-    /// after validating full source/map/requirements/finalizer observations.
+    /// Only the checked-native consumer may call this, after validating the
+    /// source, map, requirements and finalizer.
     pub(crate) fn start_native_retirement(
         &mut self,
         _consumer: &crate::blocks::retirement::ConsumerKey,
@@ -242,8 +236,8 @@ impl PeExecutionAuthority {
         Ok(())
     }
 
-    /// Exact pre-FFI decline only. The same closed consumer retains actual
-    /// thread/source/domain/control owners and proves no native/prefix effects.
+    /// A refusal before the native call; the consumer has shown there were no
+    /// effects.
     pub(crate) fn finish_native_refusal(
         &mut self,
         _consumer: &crate::blocks::retirement::ConsumerKey,
@@ -257,9 +251,8 @@ impl PeExecutionAuthority {
         Ok(())
     }
 
-    /// A validated precise fault preserves actual faultPC and completed prefix.
-    /// This never reopens native entry without genuine exception delivery and
-    /// a separately reviewed requalification proof, which is not supplied here.
+    /// A precise fault keeps its fault PC and the completed prefix. Native
+    /// entry stays closed: exception delivery is not implemented.
     pub(crate) fn finish_native_fault(
         &mut self,
         _consumer: &crate::blocks::retirement::ConsumerKey,
@@ -273,13 +266,11 @@ impl PeExecutionAuthority {
         Ok(())
     }
 
-    /// Prepare the bounded no-source native commit after every fallible source,
-    /// finalizer, control, domain and proposed-state check has completed. The
-    /// canonical consumer must pair this loan with the ORIGINAL retained
-    /// ThreadState/System/backend/source borrows, candidate and continuation in
-    /// a private commit object with no caller inputs or callback. It stores the
-    /// actual state and PC exactly once before consuming finish. This method
-    /// does not qualify Device effects or implement pending interrupt delivery.
+    /// Prepare the native commit after every fallible check. The consumer pairs
+    /// this borrow with the thread state, system state, backend, source,
+    /// candidate and continuation in a private commit, which stores the state
+    /// and PC exactly once before `finish`. Device effects and pending
+    /// interrupt delivery are not handled.
     pub(crate) fn prepare_native_commit(
         &mut self,
         _consumer: &crate::blocks::retirement::ConsumerKey,
@@ -289,8 +280,8 @@ impl PeExecutionAuthority {
             self.poison();
             return Err(());
         }
-        // Distinct from generic Retiring: forgetting this loan must not let a
-        // caller finish via the generic fallible retirement path.
+        // A separate phase, so a forgotten borrow cannot finish through the
+        // generic fallible retirement path.
         self.phase = Phase::NativeCommitting;
         Ok(NativeRetirementCommit {
             authority: self,
@@ -303,22 +294,19 @@ impl PeExecutionAuthority {
     }
 }
 
-/// Private non-Clone phase loan for an already-qualified bounded native commit.
-/// The exclusive authority borrow prevents all phase changes until settlement.
-/// Dropping or unwinding before finish poisons this PE. Forgetting this loan
-/// cannot reopen entry: its authority remains NativeCommitting, which generic
-/// retirement completion cannot finish.
+/// Phase borrow for a validated native commit. The exclusive borrow prevents
+/// other phase changes until settlement; dropping or unwinding before `finish`
+/// marks the PE failed, and forgetting it leaves the phase stuck in
+/// NativeCommitting.
 pub(crate) struct NativeRetirementCommit<'commit> {
     authority: &'commit mut PeExecutionAuthority,
     finished: bool,
 }
 
 impl NativeRetirementCommit<'_> {
-    /// The canonical paired commit has already moved the qualified candidate
-    /// into its ORIGINAL actual register bank and stored actual PC once. No
-    /// fallible work, external callback or source/owner substitution may occur
-    /// between those stores and this infallible phase settlement. Actual closed
-    /// producer/control/source/domain leases remain held for this whole scope.
+    /// The paired commit has already stored the candidate registers and PC
+    /// once. Nothing fallible or external may happen between those stores and
+    /// this settlement, and the borrows stay held throughout.
     pub(crate) fn finish(mut self, _consumer: &crate::blocks::retirement::ConsumerKey) {
         self.authority.phase = Phase::Ready;
         self.finished = true;

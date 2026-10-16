@@ -465,7 +465,7 @@ fn half_forward_chunk(
             code.extend(MOVQ_R8_XMM0);
             half_forward_group(code, access, chunk, integer, mapping, true, failures);
             pack_half_results(code, integer, mapping, access.target);
-            // RDX cannot hold group one: original-Z and P reloads clobber it.
+            // RDX cannot hold group one: the Z and P reloads clobber it.
             code.extend(MOVQ_XMM7_R8);
             Host::UnpackLowQword.register(code, PACK, SCALAR, access.target);
             PACK

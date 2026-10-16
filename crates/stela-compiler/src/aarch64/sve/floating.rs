@@ -28,8 +28,7 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// Requirements for this declared SME-derived streaming profile. Source
-    /// admission remains separate from allocation and host capabilities.
+    /// The features these instructions require in streaming mode.
     pub fn required_streaming_features(self, numerical: NumericalFeatures) -> FeatureRequirement {
         use ScalableFeature as Feature;
         let sme = ScalableFeatures::of(Feature::Sme);
@@ -101,7 +100,7 @@ impl Operation {
         if let Some(result) = rounding::decode(word) {
             return Some(result.map(Self::Rounding));
         }
-        // Published integer DOT/CDOT remain owned by the generic SVE decoder.
+        // Integer DOT/CDOT are decoded by the integer SVE decoder.
         dot::decode(word).and_then(|result| {
             result.ok().and_then(|operand| {
                 matches!(

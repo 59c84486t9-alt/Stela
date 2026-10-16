@@ -92,9 +92,8 @@ pub(crate) enum EditrDisposition {
     Execute,
 }
 
-/// Actual external controls of this fresh declared software resource. These
-/// values are owned here, not copied from a running/debugger-stopped hardware PE.
-/// No public setter or independently mutable DebugControls bank is exposed.
+/// The external debug controls of this software PE, owned here with no public
+/// setter.
 #[derive(Debug)]
 pub struct ExternalControls {
     pub powered: bool,
@@ -104,16 +103,15 @@ pub struct ExternalControls {
     pub secure_invasive: bool,
 }
 
-/// EDHSR has no inferred absence here. This is an explicit implementation
-/// declaration accepted only for a newly created declared-software resource.
+/// EDHSR is declared by the implementation, not inferred absent; accepted only
+/// for a new software PE.
 #[derive(Debug)]
 pub enum ExtendedHaltSyndrome {
     DeclaredAbsent,
 }
 
-/// Every initial value is explicit; no reset/fresh Halt() effect is inferred.
-/// In particular ResetCatch is an initial software STATUS, not a physical reset
-/// capture or proof that Halt/CTI/ITR architectural entry has already executed.
+/// Every initial value is explicit; no reset or Halt() effect is inferred.
+/// ResetCatch is an initial status, not a captured reset.
 pub struct Initialization {
     pub edscr: u32,
     pub edprsr: u32,
@@ -138,8 +136,8 @@ struct DebugRegisters {
     edecr: u32,
     mdscr_el1: u64,
 }
-/// Real software instruction-fetch/injection state for this retained PE. The
-/// canonical native consumer must check this gate before every normal entry.
+/// Instruction fetch and injection state of the PE; the consumer checks it
+/// before every entry.
 #[derive(Debug)]
 struct InstructionGate {
     itr_enabled: bool,
@@ -194,9 +192,8 @@ impl DebugMachine {
         {
             return Err(LifecycleError::InitialStatus);
         }
-        // A new serialized resource has no outstanding instruction. If Halted,
-        // ITE must explicitly permit its first injection; no transport flag is
-        // interpreted as an already completed original instruction.
+        // A new resource has no outstanding instruction, so if it starts
+        // halted, ITE must allow the first injection.
         if status.halted() && initial.edscr & EDSCR_ITE == 0 {
             return Err(LifecycleError::InitialGate);
         }
@@ -313,8 +310,7 @@ impl DebugMachine {
             && self.registers.edecr & EDECR_SS == 0
     }
 
-    /// Exact facts established once from this same immutable Snapshot. EDHSR
-    /// absence is the explicit software implementation declaration stored here.
+    /// Facts derived once from the snapshot, plus the declared EDHSR absence.
     pub(crate) fn halting_features(&self) -> super::halting::Features {
         let edhsr = match self.extended_halt_syndrome {
             ExtendedHaltSyndrome::DeclaredAbsent => false,
@@ -355,8 +351,8 @@ impl DebugMachine {
         }
         let previous = system.pstate(registers);
         if self.registers.mdscr_el1 & MDSCR_SS != 0 && previous & PSTATE_SS_MASK != 0 {
-            // This qualified profile has all present ELs A64, hence DebugTarget
-            // cannot be an A32 target. Actual source PSTATE remains sole storage.
+            // Every EL is AArch64 in this profile, so the debug target cannot
+            // be A32.
             system.transition_pstate(registers, previous & !PSTATE_SS_MASK)?;
         }
         self.gate.should_advance_ss = false;
@@ -376,8 +372,7 @@ impl DebugMachine {
         self.registers.mdscr_el1
     }
 
-    /// Private canonical-consumer mutations. They grant no source/phase permit;
-    /// only the exact same Active consumes actual architecture effects.
+    /// State changes made only by the consumer.
     pub(crate) fn save_halt_state(&mut self, restart: u64, saved_psr: u64) {
         self.registers.dlr = restart;
         self.registers.dspsr = saved_psr;

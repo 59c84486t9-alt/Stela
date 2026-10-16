@@ -10,8 +10,8 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 
-/// Constructor key is private to this actual retained-owner module. Only it can
-/// supply actual resources to the canonical consumer's private-field container.
+/// Private constructor key; only this module supplies resources to the
+/// consumer's container.
 pub(crate) struct OwnerKey(());
 
 pub struct SystemExecutionOwner<'pe, B> {
@@ -24,21 +24,18 @@ pub struct SystemExecutionOwner<'pe, B> {
 
 impl<'pe, B> SystemExecutionOwner<'pe, B> {
     /// # Safety
-    /// These are the uniquely held actual resources of a genuinely NEW PE, not
-    /// copied diagnostics or replacements. All event/monitor/scalable and real
-    /// mutable control/publication owners are same-PE, retained by B or this
-    /// machine, and every integrated entry/completion borrows this owner.
-    /// Retain it for the PE's complete executable lifetime. Its Drop does not
-    /// allow execution to resume or permit another constructor for that PE.
-    /// Raw component APIs forbid this adopted PE except under its unique active
-    /// permit for the exact call/resources. No identity/reset/Clone adoption.
+    /// These are the exclusively held resources of a new PE. Every event,
+    /// monitor, scalable and mutable control or publication owner belongs to
+    /// this PE, is held by `B` or the machine, and is borrowed by every entry
+    /// and completion. Keep this owner for the PE's whole run; dropping it does
+    /// not allow execution to resume or another owner to be created for the PE.
     pub(crate) unsafe fn new_pe(
         thread: &'pe mut ThreadState,
         system: &'pe mut SystemState,
         backend: &'pe mut B,
     ) -> Self {
         Self {
-            // SAFETY: actual fresh-PE lifetime/all-entry obligations above.
+            // SAFETY: the new-PE obligations above.
             authority: unsafe { PeExecutionAuthority::new_pe() },
             thread,
             system,
@@ -47,13 +44,13 @@ impl<'pe, B> SystemExecutionOwner<'pe, B> {
         }
     }
 
-    /// Descriptive identity only; cloning it cannot produce a loan or authority.
+    /// Identity for diagnostics.
     #[cfg(feature = "std")]
     pub(crate) fn identity(&self) -> super::authority::PeIdentity {
         self.authority.identity()
     }
 
-    /// Read-only diagnostics confer no execution or constructor authority.
+    /// Read-only diagnostics.
     pub(crate) fn pc(&self) -> stela_compiler::GuestAddress {
         self.thread.pc
     }
@@ -82,9 +79,8 @@ pub(crate) struct SystemExecutionLoan<'run, B> {
 }
 
 impl<'run, B> SystemExecutionLoan<'run, B> {
-    /// ConsumerKey can only be constructed inside canonical blocks::retirement.
-    /// No public resource tuple, caller closure, mutable-field accessor or
-    /// replace-thread/dispatcher API can extract these actual borrowed owners.
+    /// Only the retirement module can construct the key, so nothing else can
+    /// extract these resources.
     pub(crate) fn into_retirement(self, _key: ConsumerKey) -> RetainedResources<'run, B> {
         RetainedResources::from_owner(
             OwnerKey(()),
@@ -97,13 +93,13 @@ impl<'run, B> SystemExecutionLoan<'run, B> {
     }
 }
 
-// Hosted process observation over this owner's actual private fields.
+// Hosted observation of the owner's private fields.
 #[cfg(feature = "std")]
 impl<'pe, 'backend>
     SystemExecutionOwner<'pe, crate::blocks::retirement::checked::CheckedProcessOwner<'backend>>
 {
-    /// Inspect this actual retained PE without exposing mutable state, context
-    /// pointers, callbacks, producer owners or an execution/completion grant.
+    /// Inspect the PE without exposing mutable state, context pointers,
+    /// callbacks or producers.
     pub(crate) fn observe(
         &mut self,
     ) -> anyhow::Result<crate::blocks::retirement::checked::OwnedProcessObservation> {
@@ -112,14 +108,13 @@ impl<'pe, 'backend>
     }
 }
 
-// Only the concrete actual privileged producer can own an enabled lifecycle.
+// Only the privileged backend owns a debug lifecycle.
 impl<'pe, 'backend>
     SystemExecutionOwner<'pe, crate::blocks::retirement::checked::PrivilegedOwner<'backend>>
 {
-    /// Fresh actual resources only, as new_pe above. The lifecycle contains no
-    /// CPU, ThreadState, SystemState, scalable backing or second phase authority.
-    /// The backend must derive debug views from this same resource under the
-    /// retained loan and include every CTI/debug producer in its async registry.
+    /// As `new_pe`, with a debug lifecycle. The lifecycle holds no CPU or
+    /// thread state; the backend derives debug views from it and registers
+    /// every CTI and debug producer.
     pub(crate) unsafe fn new_pe_with_debug(
         thread: &'pe mut ThreadState,
         system: &'pe mut SystemState,
@@ -148,8 +143,8 @@ impl<'pe, 'backend>
 impl<'pe, 'backend>
     SystemExecutionOwner<'pe, crate::blocks::retirement::checked::PrivilegedOwner<'backend>>
 {
-    /// Actual serialized declared-software debugger input; no physical debug or
-    /// stopped hardware adoption. This same original owner must actually Halt.
+    /// Queue software-debugger input (no hardware debugger). The PE must itself
+    /// halt.
     pub(crate) fn queue_editr(&mut self, route_slot: usize, word: u32) -> anyhow::Result<()> {
         anyhow::ensure!(self.authority.halted(), "actual PE is not Halted");
         let debug = self
@@ -171,7 +166,7 @@ impl<'pe, 'backend>
 }
 
 impl SystemExecutionOwner<'_, crate::blocks::retirement::checked::PrivilegedOwner<'_>> {
-    /// Actual read-only original lifecycle observation; no resource/permit escapes.
+    /// Read-only lifecycle observation.
     pub(crate) fn privileged_observation(&self) -> String {
         format!(
             "authority={:?};debug={:?};MDSCR={:?};DLR={:?};DSPSR={:?};CTI={:?}",
@@ -186,7 +181,7 @@ impl SystemExecutionOwner<'_, crate::blocks::retirement::checked::PrivilegedOwne
 }
 
 impl SystemExecutionOwner<'_, crate::blocks::retirement::checked::PrivilegedOwner<'_>> {
-    /// Same actual phase, used only to stop this consuming request sequence.
+    /// Whether the PE is in a terminal phase, which ends the request sequence.
     pub(crate) fn privileged_terminal(&self) -> bool {
         !self.authority.ready() && !self.authority.halted()
     }

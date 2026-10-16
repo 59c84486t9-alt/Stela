@@ -395,8 +395,8 @@ fn decode_prefetch(word: u32) -> Option<Result<Prefetch, ()>> {
     }))
 }
 
-/// All owned decode classes select CheckSVEEnabled. ST1W/D's other source
-/// branch requires esize128 and belongs to separate, unowned XML classes.
+/// Every decoded class uses CheckSVEEnabled. The other ST1W/ST1D branch
+/// requires 128-bit elements, which these classes never have.
 pub(crate) fn execution_access_requirements(operand: &Operand) -> ScalableAccessRequirements {
     match operand {
         Operand::Store(_) | Operand::Whole(_) | Operand::Prefetch(_) => {
@@ -405,8 +405,8 @@ pub(crate) fn execution_access_requirements(operand: &Operand) -> ScalableAccess
     }
 }
 
-/// Maximum individual guest Mem quantity; source lanes and host envelopes
-/// remain separate. Whole-register source Operations explicitly access bytes.
+/// Largest single guest memory access of the instruction. Whole-register forms
+/// access bytes.
 pub(crate) const fn guest_memory_quantity(operand: &Operand) -> GuestMemoryQuantity {
     match operand {
         Operand::Store(store) => GuestMemoryQuantity::Maximum(store.memory_element),

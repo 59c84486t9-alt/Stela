@@ -46,8 +46,8 @@ fn prepare_sources(code: &mut Vec<u8>, operand: &MultiplyOperand) {
     match operand.right {
         MultiplySource::Vector(source) => select_vector(code, source, RIGHT, operand.parity),
         MultiplySource::Indexed { register, index } => {
-            // Indexed Vm may name any original Half lane, independent of the
-            // left parity. Snapshot the complete source before selection.
+            // Indexed Vm may name any half-precision lane, whatever the left
+            // parity, so snapshot the whole source first.
             read_vector(code, register, RIGHT);
             if index != FIRST_LANE {
                 ShiftOpcode::RightBytes.emit(

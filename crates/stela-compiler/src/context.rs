@@ -53,9 +53,10 @@ impl ExecutionContext {
     }
 }
 
-/// Borrowed scalable storage. GuestState.v is the sole owner of low128 Z bits.
-/// Runtime owns backing allocations and keeps them fixed during native entry.
-/// Mode changes go through the runtime so reset and allocation remain atomic.
+/// Scalable register storage. `GuestState::v` holds the low 128 bits of each Z
+/// register. The runtime owns the allocations and keeps them in place during
+/// native entry; mode changes go through the runtime so that reset and
+/// allocation stay atomic.
 #[repr(C)]
 #[derive(Debug)]
 pub struct ScalableStateView {

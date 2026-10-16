@@ -53,8 +53,8 @@ pub(crate) struct Operand {
     data: Register,
     base: Register,
     address: Address,
-    /// Retained source distinction. The initial EL0 profile makes this descriptor
-    /// privilege equal to ordinary EL0; broader EL/UAO needs its actual CPU owner.
+    /// Whether the source instruction was unprivileged. At EL0 this is the same
+    /// as an ordinary access.
     unprivileged: bool,
     /// A separately qualified MMU-off staged scalar read, never Normal-WB.
     m0_scalar_load: bool,
@@ -177,8 +177,8 @@ impl Operand {
         }
         Some(operand)
     }
-    /// Reuse the canonical checked scalar adapter, with a distinct staged M0
-    /// capability. Literal operands are already lifted by the shared decoder.
+    /// The checked scalar adapter with the staged M0 capability. Literal
+    /// operands are already lifted by the decoder.
     pub(crate) fn from_m0_scalar_load(operation: &Operation) -> Option<Self> {
         if let Operation::Literal(operand) = *operation {
             let literal::Transfer::Integer {
@@ -257,15 +257,14 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             },
             required_host_caps: 0,
             required_profile: profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD,
-            // The actual EL1 owner checks original SP against current SCTLR.SA
-            // before address arithmetic; this body grants no SA0 specialization.
+            // The EL1 runtime checks SP against SCTLR.SA before address
+            // arithmetic.
             required_sp_alignment: SpAlignmentRequirement::Any,
         };
     }
     if operand.profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
-        // Actual runtime preflight enforces the original eight-byte alignment
-        // before the Device transaction. There is no widened snapshot envelope,
-        // allocation-tag plane, source WB or source SCA16 requirement here.
+        // The runtime enforces the 8-byte alignment before the Device access;
+        // no wider snapshot, tag plane or 16-byte atomicity is required.
         return MemoryRequirements {
             required_address_checks: Default::default(),
             required_pointer_arithmetic: None,

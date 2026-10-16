@@ -45,12 +45,12 @@ pub(crate) enum M0WriteSessionFailure {
     InvalidCompletion,
 }
 
-/// Output only; no constructor/call accepts this as write or commit authority.
-/// Typed post-write errors and raw carrier survive regardless of qualification.
+/// Output only. Typed errors after the write and the raw result are always
+/// kept.
 #[derive(Debug)]
 pub(crate) struct M0WriteNativeReport {
     pub(super) invoked: bool,
-    /// Descriptive post-native bank only; never a commit or PE authority.
+    /// The register bank after the native call, for diagnostics.
     #[cfg(not(feature = "std"))]
     pub(super) observed_registers: Option<GuestState>,
     pub(super) raw_carrier: Option<(u64, u64)>,
@@ -89,9 +89,9 @@ impl ContextIdentity {
     }
 }
 
-/// Constructed with NO target read. Canonical Active MUST put this whole object
-/// in RetainedM0Session before invoke, so ORIGINAL authority poisons before any
-/// prepared pin/order/control/source resources release on error or unwind.
+/// Constructed before any write. The consumer must place it in the failure
+/// guard before the call, so an error or unwind marks the PE failed before its
+/// resources are released.
 pub(super) struct NativeM0WriteSession<'call, 'owner, 'code> {
     prepared: M0RamWritePrepared<'call, 'owner>,
     bound: &'call BoundSource<'code>,
@@ -167,9 +167,9 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
             ))]
             {
                 let mut context_loan = ContextLoan::memory(self.context, view);
-                // SAFETY: exact BoundSource/source/map/requirements/RX and current
-                // context are retained. ORIGINAL RetainedM0Session authority guard
-                // already owns this NO-WRITE physical session before FFI is reached.
+                // SAFETY: the bound source, map, requirements, native code and
+                // context are held, and the failure guard owns this session
+                // before the call.
                 let reached = unsafe {
                     self.bound
                         .block
@@ -189,8 +189,8 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
                 {
                     report.observed_registers = Some(candidate.clone());
                 }
-                // Capture raw carrier and actual service footprint before any
-                // fallible validation/finalizer can erase these observations.
+                // Record the raw result and the service footprint before any
+                // fallible validation or finalizer.
                 report.raw_carrier = Some((returned.next_pc, returned.kind));
                 report.memory = Some(RawM0WriteMemory {
                     status: view.fault_kind,
@@ -248,8 +248,8 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
         report
     }
 
-    /// Every fallible native/context/Device finalizer completes before the
-    /// paired infallible actual-register/PC commit, with original pins held.
+    /// Every fallible finalizer completes before the infallible register and PC
+    /// commit, with the pins still held.
     pub(super) fn precommit(&self) -> Result<(), M0WriteSessionFailure> {
         if !self.invoked || !self.valid_return {
             return Err(M0WriteSessionFailure::InvalidCompletion);

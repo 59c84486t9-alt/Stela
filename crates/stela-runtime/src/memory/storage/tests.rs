@@ -18,7 +18,7 @@ fn anonymous(bytes: usize) -> NativeMapping {
         )
     };
     assert_ne!(pointer, libc::MAP_FAILED);
-    // SAFETY: this complete page extent is newly owned coherent Normal-WB RAM.
+    // SAFETY: a newly owned page extent of coherent write-back RAM.
     unsafe { NativeMapping::adopt(NonNull::new(pointer.cast()).unwrap(), bytes) }
 }
 
@@ -166,8 +166,9 @@ fn canonical_backing_retains_both_publication_aliases_and_file() {
     let retained_storage = Arc::downgrade(&storage);
     let descriptor = std::os::fd::AsRawFd::as_raw_fd(storage._file.as_ref().unwrap());
     assert_eq!(storage.kind(), StorageKind::PublishedAliases);
-    // SAFETY: same private-file aliases retained together; host authority uses
-    // the RW publisher, and this test excludes all other byte/rights operations.
+    // SAFETY: both private-file aliases are held together, host rights come
+    // from the writable publisher, and the test performs no other byte or
+    // rights operations.
     let backing =
         unsafe { MemoryBacking::new(publisher, storage.bytes(), permissions(), storage) }.unwrap();
     let readonly = AccessPermissions {

@@ -80,8 +80,8 @@ impl Key {
     }
 }
 
-/// Explicit process-owned keys, never Debug/Serialize. Limbs follow each
-/// architectural KeyLo/KeyHi register. A missing domain is not a zero key.
+/// Process keys, never Debug or Serialize. Each pair follows the architectural
+/// KeyLo/KeyHi registers. A missing key is not a zero key.
 pub struct Keys {
     words: [Option<[u64; 2]>; 4],
     generic: Option<[u64; 2]>,
@@ -93,7 +93,7 @@ impl Keys {
     pub fn from_words(ia: [u64; 2], ib: [u64; 2], da: [u64; 2], db: [u64; 2]) -> Self {
         Self::from_optional_words([Some(ia), Some(ib), Some(da), Some(db)])
     }
-    /// Initialize this same fresh bank with explicit absent domains, never zero keys.
+    /// Build a key set where absent keys stay absent rather than zero.
     pub(crate) fn from_optional_words(words: [Option<[u64; 2]>; 4]) -> Self {
         Self {
             words,
@@ -259,7 +259,7 @@ impl Context {
         Ok(strip_domain(key, pointer))
     }
 
-    /// Backward-compatible IB/SP service with exactly the original profile math.
+    /// Sign with the IB key (the original single-key profile).
     pub fn sign_ib(&self, pointer: u64, modifier: u64) -> Result<u64> {
         self.sign(Key::Ib, pointer, modifier)
     }

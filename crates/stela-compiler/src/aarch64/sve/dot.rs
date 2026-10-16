@@ -145,9 +145,8 @@ const fn integer(signedness: Signedness, products: Products) -> Kind {
     }
 }
 
-// Fixed bits are the canonical Arm A64 2026-06 forms. In particular, the
-// SME2 two-product forms have 32-bit outputs and 16-bit multiplicands; the
-// separate SVE2p3 byte-to-Half forms are not selected by the Apple inventory.
+// In the SME2 two-product forms the outputs are 32-bit and the multiplicands
+// 16-bit. The SVE2p3 byte-to-half forms are not decoded.
 const ENCODINGS: &[Encoding] = &[
     Encoding {
         mask: 0xffa0fc00,

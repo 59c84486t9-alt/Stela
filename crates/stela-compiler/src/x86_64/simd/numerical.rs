@@ -201,7 +201,8 @@ pub(super) fn environment_alternative_nearest(code: &mut Vec<u8>) {
     resolve(code, done, end);
 }
 
-/// Commit accepted host precision status only when AH permits fresh status.
+/// Commit the accepted host inexact status, only when FPCR.AH allows fresh
+/// status.
 pub(super) fn commit_ah0_inexact(code: &mut Vec<u8>) {
     use crate::aarch64::floating::FPCR_AH;
     test_control(code, FPCR_AH);
@@ -501,8 +502,8 @@ pub(super) fn read_numerical_vector(code: &mut Vec<u8>, shape: Shape, source: u8
     }
 }
 
-/// Select from the complete indexed source before broadcasting active lanes.
-/// Indexed Q=0 operations may read a lane in the original upper qword.
+/// Select from the whole indexed source before broadcasting. A 64-bit indexed
+/// form may read a lane in the upper qword.
 pub(super) fn read_numerical_right(
     code: &mut Vec<u8>,
     format: Format,
@@ -556,8 +557,8 @@ pub(in crate::x86_64) fn prepare_vector_input_range(code: &mut Vec<u8>, format: 
         MINIMUM_EXPONENT_VECTOR,
     );
 }
-/// Initialize a bounded exclusive maximum while preserving the normal lower
-/// bound used by vector_exponent_range. Half repeats the limit in both words.
+/// Set an exclusive upper bound, keeping the normal lower bound used by
+/// `vector_exponent_range`. Half precision repeats the limit in both words.
 pub(super) fn prepare_vector_input_range_below(code: &mut Vec<u8>, format: Format, maximum: u32) {
     const MOVD_MAXIMUM_EAX: &[u8] = &[0x66, 0x0f, 0x6e, 0xe0];
     const BROADCAST_LOW_DWORD: u8 = 0;
@@ -603,7 +604,7 @@ pub(super) fn emit_opcode(
     emit_opcode_to(code, format, shape, opcode, LEFT_VECTOR, right);
 }
 
-/// Shared arithmetic encoding with an explicitly allocated destination.
+/// Arithmetic encoding with an explicit destination register.
 pub(in crate::x86_64) fn emit_opcode_to(
     code: &mut Vec<u8>,
     format: Format,

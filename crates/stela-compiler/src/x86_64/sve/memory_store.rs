@@ -317,10 +317,9 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     }
 }
 
-/// Candidate extended body, returning MemoryStatus in EAX with private stack
-/// storage released. The enclosing dispatcher must exit on nonzero status.
-/// The declared Normal-RAM profile has AlignmentEnforced=false; original SP16
-/// still checks before any offset, including the empty-predicate choice.
+/// Returns the MemoryStatus in EAX with the private stack released; the caller
+/// exits on nonzero. Alignment is not enforced, but the 16-byte SP check runs
+/// before any offset, even with an empty predicate.
 pub(crate) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,

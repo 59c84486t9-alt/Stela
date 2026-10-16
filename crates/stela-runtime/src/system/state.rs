@@ -220,10 +220,8 @@ impl SystemState {
         )
     }
 
-    /// Explicit PACM storage for this original fresh SystemState. The actual PE
-    /// constructor supplies the initial value and same-Snapshot feature fact;
-    /// this does not infer a thread reset value or grant instruction authority.
-    /// Initial scope keeps MTE and BTI storage absent.
+    /// PACM storage for a new system state, with the initial value and feature
+    /// fact from the PE constructor. MTE and BTI storage stay absent.
     pub fn new_with_pacm(
         pstate_misc: u64,
         inactive_sp: u64,
@@ -251,10 +249,8 @@ impl SystemState {
         })
     }
 
-    /// Initialize new actual higher-EL storage on a fresh lower-EL software PE.
-    /// The same immutable Snapshot must be retained by the executable consumer.
-    /// Explicit initialization is not admission of an external CPU or a grant to
-    /// execute; no initialized bank or existing live PE is replaced here.
+    /// Add higher-EL storage to a new lower-EL software PE. The consumer must
+    /// keep the same snapshot.
     pub fn new_with_higher_el(
         pstate_misc: u64,
         inactive_sp: u64,
@@ -270,9 +266,8 @@ impl SystemState {
         Ok(state)
     }
 
-    /// Storage qualification for an executable profile that declares EL2/EL3
-    /// absent. Zero-valued higher banks are still present capacity, and do not
-    /// become lower-only storage. This grants no source or PE authority.
+    /// Check storage for a profile that declares EL2 and EL3 absent.
+    /// Zero-valued higher banks still count as present.
     pub(crate) fn check_lower_el_storage(&self) -> Result<(), StateError> {
         if self.higher_el.is_some() {
             Err(StateError::UnexpectedHigherElStorage)
@@ -285,8 +280,7 @@ impl SystemState {
         self.higher_el.as_ref()
     }
 
-    /// Actual saved destination bank, not a diagnostic copy. The canonical
-    /// consumer separately owns source/phase/control qualification for effects.
+    /// The saved destination bank itself, not a copy.
     pub fn exception_registers(&self, level: ExceptionLevel) -> Result<&El1Registers, StateError> {
         if level == ExceptionLevel::El1 {
             return Ok(&self.el1_registers);
@@ -309,8 +303,8 @@ impl SystemState {
             .exception_mut(level)
     }
 
-    /// PSTATE bits owned here; NZCV remains authoritative in GuestState.
-    /// Use `pstate` when the complete composed value is required.
+    /// The PSTATE bits held here; NZCV lives in GuestState. Use `pstate` for
+    /// the full value.
     pub const fn pstate_misc(&self) -> u64 {
         self.pstate_misc
     }
@@ -333,9 +327,9 @@ impl SystemState {
         stack_bank(self.pstate_misc)
     }
 
-    /// Legacy infallible access for implemented stack banks. Lower banks always
-    /// exist. Runtime target selection must use the fallible read below so that
-    /// an absent higher bank is an explicit refusal before effects.
+    /// Infallible access for implemented stack banks (the lower banks always
+    /// exist). Target selection must use the fallible read below, so that an
+    /// absent higher bank is refused before effects.
     pub fn stack_pointer(&self, bank: StackBank, registers: &GuestState) -> u64 {
         self.read_stack_pointer(bank, registers)
             .expect("requested stack bank is implemented")
@@ -413,8 +407,8 @@ impl SystemState {
         Ok(())
     }
 
-    /// Store only an already authorized DAIF state effect. The executing owner
-    /// retains asynchronous arbitration and once-only PC settlement authority.
+    /// Store an authorized DAIF value. The executing owner keeps asynchronous
+    /// arbitration and PC settlement.
     pub(crate) fn write_daif(&mut self, value: u64) {
         self.pstate_misc = (self.pstate_misc & !DAIF_MASK) | (value & DAIF_MASK);
     }
@@ -431,7 +425,7 @@ impl SystemState {
     pub fn mte_mut(&mut self) -> Option<&mut MteState> {
         self.mte.as_mut()
     }
-    /// Storage capacity only; actual CPU/source/control permission is separate.
+    /// Whether PACM storage exists.
     pub const fn pacm_state_feature(&self) -> PacmStateFeature {
         self.pacm_feature
     }
@@ -440,9 +434,8 @@ impl SystemState {
         pacm::read(self.pstate_misc)
     }
 
-    /// Apply a source-authorized PACM/reset/entry value to this same PSTATE owner.
-    /// The canonical Active/exception owner must validate the complete staged
-    /// effect before GPR/PC commits; this setter is not execution authority.
+    /// Apply an authorized PACM value. The consumer validates the whole staged
+    /// effect before the GPR and PC commits.
     pub fn set_pacm(&mut self, value: Pacm) -> Result<(), StateError> {
         if self.pacm_feature != PacmStateFeature::Full {
             return Err(StateError::UnsupportedPacmProfile);

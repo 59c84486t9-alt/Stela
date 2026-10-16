@@ -18,9 +18,8 @@ pub(crate) enum RamCompletionError {
     AlreadyAttempted(RamCompletionProgress),
 }
 
-/// The same original physical/source owner, outer and Device-RAM serializer
-/// stay borrowed through actual completion and canonical architectural settling.
-/// This type reads/writes no target RAM and supplies no new execution loan.
+/// The physical owner, outer object and Device-RAM serializer stay borrowed
+/// through completion and settlement. No target RAM is accessed.
 #[must_use]
 pub(crate) struct PhysicalRamCompletion<'loan> {
     physical: &'loan PhysicalAddressSpace,
@@ -40,10 +39,10 @@ impl PhysicalRamCompletion<'_> {
         self.progress
     }
 
-    /// Called only after the original canonical owner enters Retiring. The
-    /// actual SystemEffectCommit validates the exact source/outer/PE separately.
-    /// Failure before MFENCE is NoEffect. Completed is stored infallibly before
-    /// returning, so a later owner check preserves this reached prefix.
+    /// Called after the owner enters Retiring; the system-effect commit
+    /// validates the source, outer object and PE separately. A failure before
+    /// the MFENCE has no effect; completion is recorded infallibly before
+    /// returning, so a later check keeps it.
     pub(crate) fn complete(&mut self) -> Result<(), RamCompletionError> {
         if self.progress != RamCompletionProgress::Unattempted {
             return Err(RamCompletionError::AlreadyAttempted(self.progress));
@@ -52,11 +51,11 @@ impl PhysicalRamCompletion<'_> {
         self.validate_current()?;
         #[cfg(target_arch = "x86_64")]
         {
-            // SAFETY: the SAME physical domain/current source binding and outer
-            // are checked above; this original MemorySystem order guard excludes
-            // simultaneous staged Device-RAM sessions. Its bounded host backing
-            // is coherent RAM; this fence grants no device-bus/MMIO semantics.
-            // No nomem/readonly/pure may erase the compiler memory boundary.
+            // SAFETY: the physical domain, source binding and outer object are
+            // checked above, and the order guard excludes other staged
+            // Device-RAM sessions. The backing is coherent RAM. The asm must
+            // not use `nomem`, `readonly` or `pure`, which would remove the
+            // compiler barrier.
             unsafe {
                 core::arch::asm!("mfence", options(nostack, preserves_flags));
             }
@@ -73,9 +72,8 @@ impl PhysicalRamCompletion<'_> {
 }
 
 impl PhysicalAddressSpace {
-    /// Prepare without data/maintenance/architectural effects. Busy or poisoned
-    /// real order/source owners decline finitely before acquiring a completion.
-    /// This real RAM participant is not complete factory-wide DSB authority.
+    /// Prepare without any data, maintenance or architectural effect. A busy or
+    /// failed order or source owner is refused.
     pub(crate) fn prepare_ram_completion<'loan>(
         &'loan self,
         execution: &'loan MemoryExecutionLoan,

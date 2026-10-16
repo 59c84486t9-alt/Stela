@@ -31,8 +31,7 @@ pub mod flags {
     /// Ordinary Mem accessor pair metadata. Atomic/exclusive pairs use their
     /// dedicated category and must never enter ordinary decomposition.
     pub const PAIR: u32 = 1 << 6;
-    /// Reserved category allocations; ordinary dispatch rejects them. Their
-    /// owners must add reviewed routing before extending global KNOWN.
+    /// Reserved categories; ordinary dispatch rejects them.
     pub const ATOMIC: u32 = 1 << 7;
     pub const ORDERED: u32 = 1 << 8;
     pub const EXCLUSIVE: u32 = 1 << 9;
@@ -55,7 +54,7 @@ pub struct MemoryRequirements {
         skip_serializing_if = "address::AddressCheckRequirements::is_empty"
     )]
     pub required_address_checks: address::AddressCheckRequirements,
-    /// Feature-qualified CPA arithmetic at the original current EL.
+    /// FEAT_CPA arithmetic at the current EL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_pointer_arithmetic: Option<crate::context::pointer::PointerArithmeticRequirement>,
 }
@@ -70,11 +69,10 @@ pub enum SpAlignmentRequirement {
     Disabled,
 }
 
-/// Named implementation identity for the current scalable memory artifacts.
-/// The supported identity selects both independent SVE-streaming SIMD/FP and
-/// SME-LDR/STR tag-suppression choices false, and selects
-/// the permitted CHECKSPNONEACTIVE=true translation policy. Suppression is a
-/// known CPU implementation choice, explicitly unsupported by these bodies.
+/// The implementation choices the scalable memory code is built for: no
+/// tag-check suppression for streaming SIMD/FP or SME LDR/STR, and
+/// CHECKSPNONEACTIVE true. Implementations that suppress tag checks are not
+/// supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryImplementationProfile {
     ScalableTagChecks,
@@ -142,14 +140,13 @@ pub mod profile_requirements {
     /// Source-bound EL1 MMU-off staged Device RAM read64. No Normal-WB,
     /// allocation-tag or host-pointer permission is conferred by this bit.
     pub const M0_DEVICE_RAM_READ64: u32 = 1 << 3;
-    /// Same-owner MMU-off Device RAM write8/pair. No Normal-WB or host-pointer
-    /// authority: each reached aligned8B member needs the real source loan.
+    /// MMU-off Device RAM 8-byte and pair writes. Each aligned 8-byte member is
+    /// checked against the source when it is reached.
     pub const M0_DEVICE_RAM_WRITE8_OR_PAIR: u32 = 1 << 4;
-    /// Same-owner MMU-off Device pair reads with actual no-LSE2 qualification.
+    /// MMU-off Device pair reads, on a PE without FEAT_LSE2.
     pub const M0_DEVICE_RAM_READ64_PAIR_NO_LSE2: u32 = 1 << 5;
-    /// Source-bound EL1 MMU-off scalar loads of exactly 1/2/4/8 bytes. Actual
-    /// controls, original-SP alignment and physical ordered access remain owned
-    /// by the runtime; no Normal-WB, tag-plane or host-pointer loan is implied.
+    /// EL1 MMU-off scalar loads of 1, 2, 4 or 8 bytes. The runtime handles
+    /// controls, SP alignment and the ordered physical access.
     pub const M0_DEVICE_RAM_SCALAR_LOAD: u32 = 1 << 6;
     pub const KNOWN: u32 = NATIVE_ACCESS
         | TAG_GRANULES
@@ -160,7 +157,7 @@ pub mod profile_requirements {
         | M0_DEVICE_RAM_SCALAR_LOAD;
 }
 
-/// Explicit runtime outcomes; only Success permits architectural load commits.
+/// Memory-service outcomes; a load commits only on Success.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryStatus {

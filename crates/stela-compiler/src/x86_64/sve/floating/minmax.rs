@@ -149,11 +149,11 @@ fn selection(code: &mut Vec<u8>, operation: MinMaxOperation, format: Format) {
     ]);
 }
 
-/// Emit eight predicated destructive vector/immediate min/max forms. Half and
-/// unsupported shapes leave `code` untouched. Guard failure exits at the original
-/// PC with every architectural source unchanged, including destination aliases.
-/// Accepted selections preserve complete caller MXCSR and add no guest FPSR bits.
-/// Clobbers RAX/RCX/RDX, host flags and XMM0..7; preserves RDI/R15 and guest NZCV.
+/// Emit the eight predicated vector and immediate min/max forms. Half precision
+/// and unsupported shapes leave `code` untouched. A failed guard exits at the
+/// instruction with every source unchanged. Accepted lanes keep the caller's
+/// MXCSR and add no FPSR bits. Clobbers RAX/RCX/RDX, flags and XMM0-7;
+/// preserves RDI/R15 and NZCV.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,

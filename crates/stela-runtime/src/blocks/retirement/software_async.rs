@@ -58,13 +58,11 @@ pub(super) enum AsyncError {
 
 impl SoftwareAsyncDomain {
     /// # Safety
-    /// The actual fresh declared-software CPU constructor owns this domain and
-    /// every possible IRQ/FIQ/SError/NMI/debug producer for its executable
-    /// lifetime. Each producer must register here before it can emit, including
-    /// timers/devices/other PEs and software debug injection. No external raw
-    /// signal/MMIO/queue writer may bypass this domain. This constructor may not
-    /// be used to assert anything about a captured hardware CPU or an existing
-    /// PE, or to replace a domain with registered/unknown producers.
+    /// The software CPU constructor owns this domain and every possible IRQ,
+    /// FIQ, SError, NMI and debug producer for its lifetime. Every producer
+    /// (timers, devices, other PEs, debug injection) must register here before
+    /// it can signal, and nothing may signal around the domain. Never use this
+    /// for hardware or for a domain that already has producers.
     pub(super) unsafe fn fresh_software_pe() -> Self {
         Self {
             identity: Arc::new(()),
@@ -90,10 +88,10 @@ impl SoftwareAsyncDomain {
         })
     }
 
-    /// Registration is intentionally sticky. Dropping a producer does not
-    /// erase architectural pending effects or reestablish a no-source universe.
-    /// A nonempty registry requires the real source-class arbitration/delivery
-    /// implementation, which this first bounded provider explicitly lacks.
+    /// Registration is permanent: dropping a producer neither clears its
+    /// pending effects nor restores a domain without producers. Any registered
+    /// producer needs arbitration and delivery, which this provider does not
+    /// implement.
     pub(super) fn lease_no_sources(&mut self) -> Result<NoAsyncSources<'_>, AsyncError> {
         if !self.registered.is_empty() {
             return Err(AsyncError::RegisteredProducer);
@@ -108,9 +106,8 @@ impl SoftwareAsyncDomain {
     }
 }
 
-/// Lifetime-bound exclusive borrow of the actual complete producer registry.
-/// It cannot be minted from an empty pending queue, ID field or copied epoch.
-/// Its lifetime prevents any registration/injection during the retained run.
+/// An exclusive borrow of the whole producer registry, which prevents
+/// registration or injection while it is held.
 pub(super) struct NoAsyncSources<'pe> {
     identity: Arc<()>,
     domain: &'pe mut SoftwareAsyncDomain,

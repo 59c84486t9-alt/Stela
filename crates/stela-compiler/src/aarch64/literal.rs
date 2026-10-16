@@ -37,8 +37,8 @@ pub struct Operand {
     pub transfer: Transfer,
 }
 
-/// PRFM and reserved SIMD opcode 11 remain explicit unsupported forms.
-/// Literal arithmetic wraps at 64 bits and uses this instruction's guest PC.
+/// PRFM (literal) and reserved SIMD opcode 11 are unsupported. The address
+/// wraps at 64 bits and uses this instruction's guest PC.
 #[allow(clippy::result_unit_err)]
 pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, ()>> {
     if word & CLASS_MASK != LITERAL_CLASS {

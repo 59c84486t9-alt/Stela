@@ -115,13 +115,13 @@ fn signed_half_range(code: &mut Vec<u8>, failures: &mut Vec<usize>, target: Targ
     reject_mask(code, REJECTIONS, failures, target);
 }
 
-/// Convert four dword-low16 Half fields into four dword integer values in XMM0.
-/// Caller zeroes inactive architectural slots before unpacking/shuffling here.
-/// Normal/zero signed inputs fit W/X; signed H gets an exact range guard.
-/// Unsigned negative nonzero inputs explicitly fall back, including valid (-1,0).
-/// Preserves invariant XMM2/3/4; clobbers XMM0/1/5/6/7, EAX/ECX and flags.
-/// Caller checks usable F16C before choosing that compute path.
-/// Private host PE is the only admitted status, mapped to guest IXC by caller.
+/// Convert four half-precision values in the low 16 bits of each dword into
+/// four dword integers in XMM0. The caller zeroes inactive lanes first. Normal
+/// and zero signed inputs fit W/X, with an exact range guard for signed half;
+/// unsigned conversion of a negative nonzero input (even one that would give 0)
+/// takes the fallback. Keeps XMM2-4; clobbers XMM0/1/5-7, EAX/ECX and flags.
+/// The caller checks for F16C first. Host PE is the only status accepted,
+/// mapped to guest inexact by the caller.
 pub(crate) fn to_integer_words(
     code: &mut Vec<u8>,
     destination: IntegerFormat,

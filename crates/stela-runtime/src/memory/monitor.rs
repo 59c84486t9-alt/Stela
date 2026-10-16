@@ -228,9 +228,9 @@ impl Drop for FailureBoundary<'_> {
     }
 }
 
-/// Gates serialize only bounded callbacks, never a load-exclusive/store-exclusive
-/// sequence. Hash collisions share a gate, never reservation identity.
-/// std::Mutex fairness is unspecified: progress admission remains unproven.
+/// Gates serialize bounded callbacks, never a whole
+/// load-exclusive/store-exclusive sequence. Hash collisions share a gate but
+/// never a reservation. Fairness is whatever std::Mutex provides.
 pub struct MonitorDomain<B, M, A> {
     erg_bytes: u64,
     stripes: Vec<Mutex<Entries<B>>>,
@@ -296,8 +296,8 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         }
     }
 
-    /// Bind one real PE endpoint while this context is unreserved/unbound.
-    /// The endpoint-global non-Clone claim also excludes other monitor domains.
+    /// Bind one PE endpoint while the context has no reservation or binding.
+    /// The endpoint can be bound to only one monitor domain.
     pub fn bind_events(
         &self,
         thread: &mut ThreadMonitor<B, M, A>,
@@ -454,8 +454,8 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         }
     }
 
-    /// Selected CLREX/spurious global-opening policy, separate from local clear.
-    /// This is finite explicit clearing; it makes no fairness/progress admission.
+    /// The selected policy for CLREX and spurious global-monitor opening,
+    /// separate from the local clear.
     pub fn clear_and_open_global(
         &self,
         thread: &mut ThreadMonitor<B, M, A>,

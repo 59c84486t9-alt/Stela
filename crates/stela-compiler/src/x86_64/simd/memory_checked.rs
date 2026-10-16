@@ -181,8 +181,7 @@ impl Transfer {
     }
 }
 
-/// Decoder-derived fixed-width transfer with the actual selected SP policy.
-/// The runtime must separately retain FP/System/Guest and memory authorities.
+/// A fixed-width transfer from the decoder, with the selected SP policy.
 #[derive(Clone, Copy)]
 pub(crate) struct CheckedOperand {
     transfer: Transfer,

@@ -156,8 +156,8 @@ fn core_binary_subset_preserves_canonical_direction_under_register_aliases() {
         };
         let forward = selected(false);
         let reverse = selected(true);
-        // All registers and Pg are zero: canonical direction is no longer
-        // represented by the public typed operand, so class filtering matters.
+        // With every register and Pg zero, the typed operand no longer shows
+        // the direction, so the encoding class must.
         assert_eq!(decode(forward), decode(reverse));
         assert!(matches!(decode_core_binary(forward), Some(Ok(_))));
         assert_eq!(decode_core_binary(reverse), None);

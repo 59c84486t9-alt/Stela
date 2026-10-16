@@ -76,9 +76,8 @@ pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8) {
     address_offset(code, base, bytes, 0);
 }
 
-/// Check the original SP before applying the signed displacement. The SCA
-/// boundary belongs to the effective address; known aligned SP needs no runtime
-/// boundary test. The zero-displacement recipe retains its established bytes.
+/// Check SP before adding the displacement. The single-copy-atomic boundary
+/// applies to the effective address; a known-aligned SP needs no run-time test.
 pub(super) fn address_offset(code: &mut Vec<u8>, base: Register, bytes: u8, displacement: i32) {
     load(code, base);
     if base == Register::Sp {

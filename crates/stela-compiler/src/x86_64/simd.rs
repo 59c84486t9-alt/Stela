@@ -333,7 +333,7 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
             lane_bytes,
         } => {
             use IntegerOperation::*;
-            // Stage original sources before committing any overlapping V register.
+            // Stage the sources before writing any overlapping V register.
             read_vector(code, left, 0);
             let mut result = 0;
             if !matches!(operation, Abs | Neg) {
@@ -444,8 +444,8 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
                 commit(code, vectors[0], 0);
                 commit(code, vectors[1], 1);
             } else {
-                // Read both original sources before exposing either RAM write;
-                // duplicate source indices are valid and retain the same value.
+                // Read both sources before either RAM write; duplicate source
+                // registers are allowed.
                 read_vector(code, vectors[0], 0);
                 read_vector(code, vectors[1], 1);
                 memory::wide_transfer(code, false, bytes, 0, 0, aligned);

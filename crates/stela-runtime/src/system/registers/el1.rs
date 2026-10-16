@@ -120,8 +120,8 @@ pub enum BackendRequest {
         offset: u16,
         request: Request,
     },
-    /// SPSR/ESR have feature/EC-dependent reserved and writable fields. This
-    /// source-reviewed access leaf does not invent a universal write mask.
+    /// SPSR and ESR have feature- and EC-dependent reserved and writable
+    /// fields, so there is no single write mask.
     RegisterFields {
         register: Register,
         request: Request,
@@ -239,8 +239,8 @@ pub enum CommitError {
     WrongExceptionLevel,
     UnalignedVectorBase,
 }
-/// Commit an authorized direct effect to the existing sole bank. The caller
-/// retains source/control authorization through this synchronous exclusive loan.
+/// Commit an authorized direct effect to the bank under the caller's exclusive
+/// borrow.
 pub fn commit(effect: Effect, state: &mut SystemState) -> Result<(), CommitError> {
     if state.pstate_misc() & PSTATE_IL_MASK != 0 {
         return Err(CommitError::IllegalExecutionState);

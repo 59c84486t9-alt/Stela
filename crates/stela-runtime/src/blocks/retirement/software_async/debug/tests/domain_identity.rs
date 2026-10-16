@@ -18,7 +18,7 @@ fn colliding_numeric_source_sequence_word_never_cross_domains() {
         assert_eq!(lease.consume_editr(&event), Err(AsyncError::WrongProducer));
         assert!(lease.next_editr().unwrap().is_some());
     }
-    // The original keys survive lease release and certify later injections.
+    // The keys survive the lease and still identify later injections.
     b.enqueue_editr(&bk[0], 0xd6bf03e0).unwrap();
     assert!(b.lease_debug_sources(&bk).is_ok());
 }

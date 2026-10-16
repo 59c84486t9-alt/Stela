@@ -202,7 +202,7 @@ impl From<checked_memory::MemoryFault> for MemoryFaultObservation {
 pub struct PointerAuthenticationEvent {
     pub instruction: PointerAuthentication,
     pub next_pc: GuestAddress,
-    /// Signing has no authentication result; AUT/RET report the actual check.
+    /// None for signing; AUT and RET report whether authentication succeeded.
     pub authenticated: Option<bool>,
 }
 
@@ -224,7 +224,7 @@ pub struct ThreadRegisterEvent {
 #[derive(Debug, Serialize)]
 pub struct RunOutcome {
     pub reason: StopReason,
-    /// Completed original blocks, including resident internal edges.
+    /// Completed blocks, including iterations of resident loops.
     pub blocks_executed: usize,
     pub compiled_blocks: usize,
     pub disk_cache_hits: usize,
@@ -268,7 +268,8 @@ struct LoadedBlock {
     checked: core::cell::OnceCell<retirement::checked::CheckedFacts>,
 }
 
-/// Services borrowed for one serialized run; absent owners remain explicit stops.
+/// Services borrowed for one run; a missing service stops execution at the
+/// instruction that needs it.
 struct AuthenticatedMemory<'a> {
     reader: &'a mut dyn memory::domain::MemoryReader,
     controls: pauth::memory::Controls,
@@ -355,7 +356,7 @@ impl<'a> RuntimeServices<'a> {
 /// No function pointer, mutable code slice or executable mapping escapes.
 #[derive(Debug)]
 pub struct BlockRuntime {
-    /// Opaque membership in this original source/RX cache; no PE permission.
+    /// Identifies this runtime's source and native-code cache.
     identity: alloc::sync::Arc<()>,
     address_space: u64,
     profile: BlockProfile,
@@ -631,10 +632,10 @@ impl BlockRuntime {
         })
     }
 
-    /// Follow known static successors only. A call continuation is a candidate,
-    /// not proof of a return; BR/BLR/RET targets remain explicitly unresolved.
-    /// Budget counts all attempted entries, including declines/missing regions.
-    /// No native instructions or guest data accesses execute during discovery.
+    /// Follow known static successors only. Call continuations are candidates,
+    /// since the callee may not return; BR/BLR/RET targets stay unresolved. The
+    /// budget counts every attempted entry, including refusals and missing
+    /// regions. Nothing executes during discovery.
     pub fn discover(&mut self, roots: &[GuestAddress], budget: usize) -> Result<DiscoveryReport> {
         ensure!(
             !roots.is_empty() && roots.len() <= 1024,
@@ -802,25 +803,24 @@ impl BlockRuntime {
         Ok(())
     }
 
-    /// Execute native blocks until a caller-owned stop address, a dispatch
-    /// boundary that cannot be satisfied, a synchronous trap, or the finite
-    /// block budget is reached. A trap leaves PC at its instruction and reports
-    /// the preferred exception-return PC separately; only the caller may resume.
-    /// No host syscall, guest exception entry or architectural EL change occurs.
-    /// Unsupported compilation is returned as a stop, not a guest exception.
-    /// A zero budget executes no blocks. PC denotes the next guest instruction.
+    /// Run native blocks until the stop address, an unsatisfiable dispatch, a
+    /// synchronous trap or the block budget. A trap leaves PC at the trapping
+    /// instruction and reports the preferred return address separately; only
+    /// the caller resumes. No host syscall, guest exception entry or EL change
+    /// happens here. Unsupported code is returned as a stop, not a guest
+    /// exception. A zero budget runs nothing. PC is the next guest instruction.
     ///
     /// # Safety
-    /// Registered instructions and their generated code must be trusted. Every
-    /// guest data access must satisfy the compiler's direct private-RAM profile:
-    /// live bounds, appropriate permissions/alignment, untagged/authenticated
-    /// pointers, identical native virtual addresses, exclusive writes and no
-    /// alias of Rust references, state, native code, runtime metadata or host
-    /// stack. Source snapshots are instruction-fetch storage, not guest data
-    /// mappings. The caller excludes concurrent mutation and assumes unguarded
-    /// instruction pages with GCS disabled; PAC/BTI/GCS exception behavior is not
-    /// modeled. Native faults can terminate the host process. This is neither a
-    /// signal sandbox nor a complete Apple process/exception implementation.
+    /// The registered code, and the code generated from it, must be trusted.
+    /// Every guest data access must satisfy the direct-RAM profile: in live
+    /// bounds with suitable permissions and alignment, untagged or
+    /// authenticated pointers, guest addresses equal to host addresses,
+    /// exclusive writes, and no aliasing of Rust references, state, native
+    /// code, runtime metadata or the host stack. Source snapshots are
+    /// instruction storage, not guest data. The caller excludes concurrent
+    /// mutation. Instruction pages are assumed unguarded with GCS disabled;
+    /// PAC/BTI/GCS exceptions are not modeled. A native fault can terminate the
+    /// host process.
     pub unsafe fn run(
         &mut self,
         state: &mut ThreadState,
@@ -837,13 +837,12 @@ impl BlockRuntime {
         }
     }
 
-    /// Execute the explicit software PAuth profile with a process-owned key domain.
-    /// Keys are borrowed, never emitted into artifacts or copied into guest RAM.
+    /// Run with software PAuth, using the process's keys. Keys are borrowed;
+    /// they never enter artifacts or guest RAM.
     ///
     /// # Safety
-    /// Same direct-RAM and trusted-code requirements as [`Self::run`]. The caller
-    /// must retain a coherent process key lifecycle; this does not provide Apple
-    /// hardware key identity, TLS, shared-cache signing or exception delivery.
+    /// As for [`Self::run`]. The caller keeps the process keys consistent for
+    /// the duration.
     pub unsafe fn run_with_pauth(
         &mut self,
         state: &mut ThreadState,
@@ -869,16 +868,16 @@ impl BlockRuntime {
         }
     }
 
-    /// Execute PAC helpers with the address-space owner's checked data reader.
-    /// Authenticated loads retain tags through the reader's translation policy;
-    /// their base and destination commit only after the complete eight-byte read.
+    /// Run PAC helpers with the address space's checked data reader.
+    /// Authenticated loads keep tags through the reader's translation policy,
+    /// and their base and destination are written only after the full
+    /// eight-byte read.
     ///
     /// # Safety
-    /// Ordinary native prefixes retain the trusted-code/direct-RAM contract of
-    /// [`Self::run`]. The reader is the actual owner of this guest address space,
-    /// and its mappings, policy and backing remain valid throughout this call.
-    /// `controls` is the effective SP-alignment policy from that same CPU owner;
-    /// no SA0/SA/exception-level policy is inferred from RAM or process keys.
+    /// Ordinary native code has the requirements of [`Self::run`]. The reader
+    /// must own this guest address space, and its mappings, policy and backing
+    /// must stay valid for the call. `controls` is the effective SP-alignment
+    /// policy of the same CPU.
     pub unsafe fn run_with_pauth_memory(
         &mut self,
         state: &mut ThreadState,
@@ -915,14 +914,13 @@ impl BlockRuntime {
         }
     }
 
-    /// Execute explicit PAC/clock helpers using caller-owned address-space services.
-    /// The clock owns its read-only commpage and publishes only at helper boundaries.
+    /// Run PAC and clock helpers with caller-owned services. The clock owns its
+    /// read-only commpage and publishes only at helper boundaries.
     ///
     /// # Safety
-    /// Same trusted-code/direct-RAM requirements as [`Self::run`]. No concurrent
-    /// translated execution may access the clock page during publication. The
-    /// profile models ISB with host instruction serialization for immutable guest
-    /// code, not arbitrary privilege/context/cache-maintenance changes.
+    /// As for [`Self::run`]. No other translated code may access the clock page
+    /// while it is published. ISB is modeled as host instruction serialization
+    /// for unchanging guest code.
     pub unsafe fn run_with_clock(
         &mut self,
         state: &mut ThreadState,
@@ -953,13 +951,11 @@ impl BlockRuntime {
         }
     }
 
-    /// Execute explicit thread-register helpers from the same context used by
-    /// Darwin thread services. Cached code never embeds the current TSD value.
-    /// Optional PAC/clock services retain their own profile/ownership checks.
+    /// Run thread-register helpers with the context used by the Darwin thread
+    /// services. Cached code never embeds the current TSD value.
     ///
     /// # Safety
-    /// Same trusted-code/direct-RAM requirements as [`Self::run`]. The context
-    /// must remain on its owning host thread; this does not alter host TLS.
+    /// As for [`Self::run`]. The context must stay on its owning host thread.
     pub unsafe fn run_with_thread(
         &mut self,
         state: &mut ThreadState,
@@ -1007,13 +1003,13 @@ impl BlockRuntime {
         }
     }
 
-    /// Execute the restricted System service profile. Registered prefixes have
-    /// no ordinary RAM effects; dedicated memory services use their actual
-    /// shared domain. System failures retain their exact original PC and prefix.
+    /// Run with the system-instruction service. Registered prefixes have no
+    /// direct-RAM effects; memory services use their shared domain. A failure
+    /// keeps its PC and completed prefix.
     ///
     /// # Safety
-    /// Same trusted-code and invocation exclusions as [`Self::run`]. The service
-    /// backend owns its architectural effects and memory synchronization domain.
+    /// As for [`Self::run`]. The service backend owns its architectural effects
+    /// and memory synchronization.
     pub unsafe fn run_with_system(
         &mut self,
         state: &mut ThreadState,
@@ -1039,12 +1035,12 @@ impl BlockRuntime {
         }
     }
 
-    /// Execute only the source-derived checked GPR memory profile against the
-    /// existing System authority and its same MemoryThread/address space.
+    /// Run checked GPR memory code against the system state and its memory
+    /// thread.
     ///
     /// # Safety
-    /// Same trusted-code exclusions as run; backend owns pinned disjoint coherent
-    /// memory. Context views cannot escape synchronous native invocation.
+    /// As for [`Self::run`]; the backend owns pinned, disjoint, coherent
+    /// memory. Context views never outlive the native call.
     pub unsafe fn run_with_memory(
         &mut self,
         state: &mut ThreadState,
@@ -1627,8 +1623,8 @@ fn serialize_instruction_execution() -> Result<()> {
     {
         use core::sync::atomic::{Ordering, compiler_fence};
         compiler_fence(Ordering::SeqCst);
-        // CPUID is available on the x86-64 baseline. Leaf0 is a genuine
-        // serializing instruction; the intrinsic owns its host scratch outputs.
+        // CPUID is part of the x86-64 baseline, and leaf 0 serializes
+        // execution.
         let _ = core::arch::x86_64::__cpuid(0);
         compiler_fence(Ordering::SeqCst);
         Ok(())
@@ -1887,8 +1883,8 @@ fn complete_pauth_with_memory(
             } else {
                 registers.x[usize::from(destination)]
             };
-            // XPAC chooses an address domain, not a cryptographic key. No key
-            // needs to exist; the context owns the reviewed address/TBI profile.
+            // XPAC selects an address domain, not a key, so no key needs to
+            // exist.
             let value =
                 context.strip(if data { pauth::Key::Da } else { pauth::Key::Ia }, pointer)?;
             if destination != ZERO_REGISTER_INDEX {

@@ -48,8 +48,8 @@ pub(crate) enum M0ControlError {
     UnsupportedProfile,
     Configuration(stage1::Unsupported),
     SourceFetch(super::FetchFailure),
-    /// Only initial qualification may return the canonical source fault or
-    /// unsupported translation. Currency checks never manufacture guest faults.
+    /// Only the initial check may return the source fault or an unsupported
+    /// translation; later checks never create guest faults.
     Translation(stage1::TranslationError),
     UnexpectedAttributes,
     WrongSourceKind,
@@ -57,9 +57,9 @@ pub(crate) enum M0ControlError {
 }
 
 impl TranslationControls {
-    /// Internal calculation only; no externally supplied Config/snapshot/flags
-    /// are accepted. The caller must first validate the actual same-PE source
-    /// and installed context under the canonical source/memory owner loan.
+    /// Compute the current M0 configuration from the live bank. The caller
+    /// first validates the source and installed context under the source and
+    /// memory borrow.
     fn current_m0_config(
         &self,
         system: &SystemState,
@@ -74,8 +74,8 @@ impl TranslationControls {
         if actual_pstate & (PSTATE_IL_MASK | PSTATE_SS_MASK) != 0 || system.mte().is_some() {
             return Err(M0ControlError::UnsupportedState);
         }
-        // Keep the reviewed base entry-effect subset. The bounded SystemState
-        // rejects UAO state; ordinary LDR uses uao=false independently of PAN.
+        // Keep the base entry-effect subset. SystemState rejects UAO, and an
+        // ordinary LDR uses uao = false regardless of PAN.
         if self.profile.facts.pan != PanFeatures::Absent
             || self.profile.facts.ssbs != Presence::Absent
             || self.profile.facts.exs != Presence::Absent
@@ -86,8 +86,8 @@ impl TranslationControls {
         if effective.sctlr_el1 & SCTLR_M != 0 {
             return Err(M0ControlError::MmuEnabled);
         }
-        // Retained Config deliberately leaves EE dormant for M0; EL1 data
-        // byte order therefore needs this actual live-bank check explicitly.
+        // The configuration leaves EE unused for M0, so EL1 data byte order
+        // needs this explicit check of the live bank.
         if effective.sctlr_el1 & SCTLR_EE != 0 {
             return Err(M0ControlError::BigEndian);
         }
@@ -100,8 +100,8 @@ impl TranslationControls {
         Ok(config)
     }
 
-    /// Derive only after actual instruction-source fetch qualification. Config
-    /// is private output of the live bank above, never a caller's permission.
+    /// Derive only after the instruction fetch is validated; the configuration
+    /// comes from the live bank above.
     fn derive_m0_read8(
         config: &stage1::Config,
         physical: &PhysicalAddressSpace,
@@ -153,10 +153,9 @@ impl TranslationControls {
     }
 }
 
-/// Private type erasure retains the REAL opaque input with all its original
-/// source/System/outer/scope references. No caller implementation or callback is
-/// accepted. This avoids leaking the input's nested source lifetime into the
-/// writer's one-lifetime loan and holds no GuestState/actual-PC/authority borrow.
+/// Erases the input's type while keeping all its source, system, outer and
+/// scope references, so its nested lifetime does not leak into the writer's
+/// borrow. Holds no guest state or PC borrow.
 trait InputCurrency {
     fn validate(&self, owner: &TranslationControls) -> Result<(), M0ControlError>;
     fn physical(&self) -> &PhysicalAddressSpace;
@@ -176,10 +175,10 @@ impl InputCurrency for M0SourceInput<'_, '_> {
     }
 }
 
-/// Live CPU/source qualification only. Non-Clone/non-Copy, private fields and no
-/// constructor except the actual bank method below. RAM/host ordering/physical
-/// read pins remain the separate Device producer's obligations. The SAME outer
-/// execution loan stays borrowed through the writer's staging and PC commit.
+/// CPU and source validation for an M0 read. Not Clone or Copy, and constructed
+/// only by the bank method below. RAM ordering and physical pins are the Device
+/// producer's job; the outer execution borrow stays held through staging and
+/// the PC commit.
 pub(crate) struct M0DataReadLoan<'cpu> {
     owner: &'cpu TranslationControls,
     source: &'cpu dyn InputCurrency,
@@ -189,8 +188,8 @@ pub(crate) struct M0DataReadLoan<'cpu> {
     translation: stage1::Translation,
 }
 impl M0DataReadLoan<'_> {
-    /// Post-mint failures are source/control/domain currency refusals, never a
-    /// newly synthesized architectural translation fault or read completion.
+    /// Later failures are currency refusals, never new translation faults or
+    /// read completions.
     pub(crate) fn validate_current(
         &self,
         execution: &MemoryExecutionLoan,
@@ -223,9 +222,8 @@ impl M0DataReadLoan<'_> {
 }
 
 impl TranslationControls {
-    /// Compare the actual current bank against the ORIGINAL installed context
-    /// under its genuine, private-constructed source/physical lease. A caller's
-    /// independent snapshot, CPU profile or hash cannot invoke this interface.
+    /// Compare the current bank with the installed context under its source and
+    /// physical lease.
     pub(crate) fn validate_installed_m0_source(
         &self,
         scope: &InstalledM0SourceScope<'_>,
@@ -257,8 +255,8 @@ impl TranslationControls {
         input
             .validate_source_current()
             .map_err(|error| M0ControlError::Source(error.to_string()))?;
-        // Only admission checks here: do not raise a data address fault before
-        // the genuine installed context qualifies the source instruction fetch.
+        // Admission checks only: a data address fault must not be raised before
+        // the installed context validates the instruction fetch.
         let config = self.current_m0_config(input.actual_system(), input.actual_pstate())?;
         let outer = input.outer_execution();
         input
@@ -271,10 +269,10 @@ impl TranslationControls {
         if !alloc::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
             return Err(M0ControlError::WrongMemorySystem);
         }
-        // The real scope checks exact physical-domain/outer membership as well
-        // as original source/RX/installed-context currency. It performs no data
-        // transaction. Initial source fetch faults remain typed; source/RX/owner
-        // mismatches are unavailable/platform failures, never fake data aborts.
+        // The scope checks physical-domain and outer membership and source,
+        // native-code and installed-context currency, without any data access.
+        // Initial fetch faults stay typed; mismatches are platform failures,
+        // never data aborts.
         scope
             .qualify_source(self, input)
             .map_err(M0ControlError::SourceFetch)?;
@@ -282,8 +280,8 @@ impl TranslationControls {
         if !matches!(intent.bytes, 1 | 2 | 4 | 8) {
             return Err(M0ControlError::WrongSourceKind);
         }
-        // Original active SP is checked before any offset-derived data address.
-        // This follows actual effective SCTLR.SA, never a compiler default.
+        // SP is checked before any offset-derived address, following the
+        // effective SCTLR.SA.
         if self.profile.consumers(self.readbacks).sctlr_el1 & super::fields::SCTLR_SA_MASK != 0
             && let Some(original_sp) = intent.stack_pointer
             && original_sp & 15 != 0
@@ -346,9 +344,9 @@ impl WriteCurrency for M0WriteSourceInput<'_, '_> {
     }
 }
 
-/// Noncopyable actual-bank/source/outer loan. This is not a writable PA pin.
-/// Each reached member derives its translation from the SAME live bank; the
-/// physical owner alone can resolve current storage and perform publication.
+/// The bank, source and outer borrow for an M0 write; not a writable physical
+/// pin. Each member's translation comes from the live bank, and only the
+/// physical owner resolves storage and publishes.
 pub(crate) struct M0DataWriteLoan<'cpu> {
     owner: &'cpu TranslationControls,
     source: &'cpu dyn WriteCurrency,
@@ -449,9 +447,9 @@ impl M0DataWriteLoan<'_> {
     }
 }
 impl TranslationControls {
-    /// Qualifies the actual instruction first, but performs no data translation
-    /// or target access. The original physical session prepares only First;
-    /// Second is qualified only after the reached first8B completion.
+    /// Validates the instruction first, without translating or accessing the
+    /// target. The physical session prepares the first member; the second is
+    /// validated only after the first 8 bytes complete.
     pub(crate) fn loan_m0_write8_or_pair<'cpu>(
         &'cpu self,
         input: &'cpu M0WriteSourceInput<'_, '_>,
@@ -508,8 +506,8 @@ impl PairReadCurrency for M0PairReadSourceInput<'_, '_> {
         self.original().actual_pstate()
     }
 }
-/// Same actual source/control/identification/outer. No target is translated or
-/// read at mint. The physical session qualifies each member only when reached.
+/// The same borrows for an M0 pair read. Nothing is translated or read at
+/// creation; each member is validated when reached.
 pub(crate) struct M0DataPairReadLoan<'cpu> {
     owner: &'cpu TranslationControls,
     source: &'cpu dyn PairReadCurrency,

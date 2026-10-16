@@ -31,11 +31,11 @@ impl core::fmt::Display for TagStoreError {
 
 impl core::error::Error for TagStoreError {}
 
-/// One tag plane for an existing physical backing, without a separate identity.
+/// The tag plane of an existing physical backing.
 ///
-/// Construction and pristine reads allocate no tag chunks. Each populated chunk
-/// holds at most TAG_CHUNK_GRANULES atomic bytes. The backing owner chooses its
-/// explicit initial tag; this does not infer an architectural power-on value.
+/// Construction and reads of untouched granules allocate nothing; each
+/// populated chunk holds at most TAG_CHUNK_GRANULES atomic bytes. The backing
+/// owner chooses the initial tag.
 #[derive(Debug)]
 pub struct TagStore {
     backing_bytes: usize,

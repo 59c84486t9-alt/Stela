@@ -44,8 +44,8 @@ fn retained_execution_membership_requires_same_domain_system_and_health() {
     );
     assert_eq!(domain.state.lock().unwrap().native_loans, 1);
     assert!(thread.observation_loan().is_err());
-    // A retained identity is not a health bypass after the actual owner
-    // publishes failure; checking does not change the invocation count.
+    // A retained identity does not bypass a published failure, and checking
+    // does not change the invocation count.
     system.failed.store(true, Ordering::Release);
     assert_eq!(
         execution.check_thread_domain(&thread),
@@ -101,8 +101,8 @@ fn exhausted_generation_rejects_retirement_without_revoking_view_or_reservation(
     const SOURCE_LOWER_BITS: u8 = 47;
     let (mut owner, base) = owned();
     let system = MemorySystem::new(16, 8).unwrap();
-    // SAFETY: fixture owns actual anonymous storage and every source/writer
-    // in this fresh untagged/shareable Normal-WB software address space.
+    // SAFETY: the test owns the anonymous storage and every source and writer
+    // of this untagged, shareable write-back address space.
     let domain =
         unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 99), &mut []) }.unwrap();
     domain.generation.store(u64::MAX, Ordering::Release);
@@ -124,8 +124,7 @@ fn exhausted_generation_rejects_retirement_without_revoking_view_or_reservation(
             Ok::<_, ()>(native(&backing, 0, 8))
         })
         .unwrap();
-    // SAFETY: this fixture's explicit complete current source map is the
-    // same fresh software machine throughout; no native invocation runs.
+    // SAFETY: the same source map throughout, with no native call running.
     let before =
         unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(&domain)) }.unwrap();
     let features = ProcessMemoryFeatures::from_id_registers(
@@ -136,8 +135,8 @@ fn exhausted_generation_rejects_retirement_without_revoking_view_or_reservation(
         BaseSpeAbsence::from_id_aa64dfr0_el1(0).unwrap(),
     )
     .unwrap();
-    // SAFETY: same complete source declaration, independently captured for
-    // the immutable fixed-control owner; no epoch number grants authority.
+    // SAFETY: the same source declaration, captured again for the fixed-control
+    // owner.
     let source =
         unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(&domain)) }.unwrap();
     let mut controls = FixedProcessMemoryControls::new(
@@ -170,8 +169,8 @@ fn actual_thread_observation_pins_views_and_preserves_reservation_without_writer
     let mut publisher = published();
     let published_base = publisher.region().guest_address;
     let system = MemorySystem::new(16, 8).unwrap();
-    // SAFETY: actual owned anonymous RAM and publisher aliases, serialized
-    // through this single domain and all its existing physical writers.
+    // SAFETY: owned anonymous RAM and publisher aliases, serialized through
+    // this domain and all its physical writers.
     let domain =
         unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 7), &mut [&mut publisher]) }
             .unwrap();

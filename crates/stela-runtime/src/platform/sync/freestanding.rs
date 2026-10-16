@@ -101,8 +101,8 @@ impl<T: ?Sized + core::fmt::Debug> core::fmt::Debug for Mutex<T> {
         }
     }
 }
-/// Reads also acquire exclusive metadata access. The atomic tag cells retain
-/// their original publication ordering. Reduced read concurrency is explicit.
+/// Reads also take exclusive access; the atomic tag cells keep their own
+/// ordering.
 pub(crate) struct RwLock<T>(Mutex<T>);
 impl<T> RwLock<T> {
     pub(crate) const fn new(value: T) -> Self {

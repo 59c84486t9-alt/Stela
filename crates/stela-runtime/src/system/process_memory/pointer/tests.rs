@@ -63,7 +63,7 @@ fn domain() -> Arc<MemoryDomain> {
     .unwrap()
 }
 fn source(domain: &Arc<MemoryDomain>) -> super::super::SourceNormalWbDomain {
-    // SAFETY: fresh empty declared domain, construction/qualification only.
+    // SAFETY: a new empty declared domain, used only for construction.
     unsafe { super::super::SourceNormalWbDomain::from_source_resolved(Arc::clone(domain)) }.unwrap()
 }
 fn memory(domain: &Arc<MemoryDomain>) -> MemoryThread<MemoryControls> {

@@ -116,10 +116,9 @@ fn is_transfer(operation: &Operation) -> bool {
     )
 }
 
-/// Compile a bounded consumed prefix. Ordinary RAM, legacy FP/SIMD, mode writes
-/// and MOVPRFX retain the explicit declines of the context leaf compiler.
-/// NumericalFeatures must come from the same immutable guest/control identity
-/// used by runtime completion; no callback or host capability grants a feature.
+/// Compile a block prefix. Direct RAM, AdvSIMD/FP, mode writes and MOVPRFX are
+/// refused as in the context leaf compiler. `NumericalFeatures` must match the
+/// guest identity the runtime uses for completion.
 pub fn compile_for_profile(
     source: &[u8],
     base: GuestAddress,

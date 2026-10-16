@@ -124,7 +124,7 @@ impl PreparedEffect {
         }
         Ok(())
     }
-    /// Only canonical Active lends these original mutable resources after validation.
+    /// Called by the consumer after validation.
     pub(super) fn commit(self, registers: &mut GuestState, system: &mut SystemState) -> Result<()> {
         match self.effect {
             Effect::Register { destination, value } => {
@@ -146,8 +146,9 @@ pub(super) enum Prepared {
     AuthenticationFault { code: u8 },
 }
 
-/// Stage AFTER the genuine ordinary prefix. Selected-key bypass precedes layout,
-/// pointer canonicalization and key lookup, including high/tagged raw operands.
+/// Stage after the ordinary prefix has run. The selected-key bypass is checked
+/// before layout, pointer canonicalization and key lookup, even for high or
+/// tagged operands.
 pub(super) fn prepare(
     instruction: PointerAuthentication,
     service: &BorrowedLinkRegisterService<'_>,

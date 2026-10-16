@@ -105,8 +105,8 @@ fn bind_retains_actual_storage_after_facade_drop() {
             ..Default::default()
         })
         .unwrap();
-    // SAFETY: exact checked read, private disjoint staging, and only the retained
-    // domain owns the actual native mapping after both facade/backing drops.
+    // SAFETY: a checked read with private staging; after the facade and backing
+    // are dropped, only the domain owns the mapping.
     let status = unsafe { entry.with_view(|view| (view.callback)(view, &request)) };
     assert_eq!(status, MemoryStatus::Success as u32);
     assert_eq!(staging, [42]);
@@ -209,8 +209,8 @@ fn whole_range_bounds_failure_has_no_prefix_effect() {
 #[test]
 fn split_rights_and_private_file_decline_before_binding() {
     let (mut memory, base) = owned();
-    // Initial one-page shape cannot split, so explicitly represent a split view
-    // as a private metadata fault fixture without touching host protections.
+    // A one-page mapping cannot split, so represent a split view with private
+    // metadata, without touching host protections.
     let original = memory.regions[0].clone();
     let mut second = original.clone();
     second.guest_address += 16;
@@ -230,8 +230,8 @@ fn split_rights_and_private_file_decline_before_binding() {
     use std::io::Write;
     file.write_all(&vec![0; page]).unwrap();
     const MAX_MAPPING_ATTEMPTS: usize = 32;
-    // Another parallel fixture can claim a fresh address after free_address
-    // releases it. Acquire the real private file mapping before testing binding.
+    // A parallel test can take an address right after `free_address` releases
+    // it, so obtain the private file mapping first.
     let mut last_mapping_error = None;
     let mut mapped = (0..MAX_MAPPING_ATTEMPTS)
         .find_map(|_| {
@@ -313,8 +313,8 @@ fn multi_span_failure_reports_total_completed_prefix() {
     let other =
         unsafe { rival.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 8), &mut []) }
             .unwrap();
-    // This distinct physical allocation has exactly its own canonical backing.
-    // Deliberately corrupt only the destination slot to exercise rejection.
+    // This allocation has its own backing; corrupt only the destination slot to
+    // exercise rejection.
     memory.allocations[1].shared_backing = Some(Arc::clone(
         rival.allocations[0].shared_backing.as_ref().unwrap(),
     ));
@@ -397,7 +397,7 @@ impl crate::memory::domain::DataPolicy for Policy {
 fn actual_service_borrow_excludes_native_and_competing_facade_operations() {
     let (mut memory, base) = owned();
     let (mut facade, other) = owned();
-    // SAFETY: fresh owned anonymous Normal-WB storage and its complete writers.
+    // SAFETY: new owned anonymous write-back storage with every writer.
     let domain = unsafe {
         memory.bind_shared_memory_group(
             config(MemorySystem::new(16, 8).unwrap(), 72),
@@ -432,12 +432,12 @@ fn actual_service_borrow_excludes_native_and_competing_facade_operations() {
 fn service_borrow_requires_actual_domain_even_with_equal_namespace() {
     let (mut memory, base) = owned();
     let (mut other, _) = owned();
-    // SAFETY: each fixture owns an independent complete fresh software domain.
+    // SAFETY: each test owns an independent software domain.
     let domain = unsafe {
         memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 73), &mut [])
     }
     .unwrap();
-    // SAFETY: independent actual storage, deliberately the same numeric ASID.
+    // SAFETY: independent storage, deliberately with the same ASID.
     let other_domain =
         unsafe { other.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 73), &mut []) }
             .unwrap();
@@ -468,7 +468,7 @@ fn service_borrow_requires_actual_domain_even_with_equal_namespace() {
 #[test]
 fn service_failure_poison_cannot_restore_native_admission_on_drop() {
     let (mut memory, _) = owned();
-    // SAFETY: fresh owned software storage and complete serialized writers.
+    // SAFETY: new owned storage with serialized writers.
     let domain = unsafe {
         memory.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 74), &mut [])
     }

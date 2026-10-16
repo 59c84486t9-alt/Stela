@@ -49,9 +49,8 @@ pub enum Register {
 }
 
 impl Register {
-    /// Canonical selector for this backend destination. An indexed destination
-    /// uses its low four index bits; its physical bank remains in the context.
-    /// The original request is retained separately in every backend request.
+    /// The selector for this destination. An indexed destination uses its low
+    /// four index bits; the bank stays in the context.
     pub const fn encoding(self) -> Encoding {
         match self {
             Self::DbgbvrEl1(index) => bank_encoding(index, BREAKPOINT_VALUE_OP2),

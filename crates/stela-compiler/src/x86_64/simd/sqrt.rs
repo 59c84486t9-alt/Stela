@@ -132,9 +132,10 @@ fn widen_half(code: &mut Vec<u8>, upper: bool) {
     packed(code, Host::AddDword, RESULT, HALF_BIAS);
 }
 
-/// The pinned Half midpoint proof permits same-rounding Single sqrt followed
-/// by Half rounding, with Single PE exactly equal to direct Half IXC. Results
-/// are positive normal H, at most 256, so signed dword packing is exact.
+/// Rounding single-precision sqrt and then rounding to half gives the same
+/// result as direct half-precision sqrt, with single PE exactly matching half
+/// inexact. Results are positive normal halves of at most 256, so signed dword
+/// packing is exact.
 fn half_fields(code: &mut Vec<u8>) {
     packed(code, Host::SubDword, RESULT, HALF_BIAS);
     packed(code, Host::MoveAligned, TEMP, RESULT);
@@ -233,8 +234,8 @@ fn checked_half_root(code: &mut Vec<u8>, shape: Shape, target: TargetCpu) {
 fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
     if operand.shape == Shape::Scalar {
         if operand.format == Format::Half {
-            // Reconstitute the Half scalar result in original Vd, including
-            // source aliases/V31, after arithmetic and field packing.
+            // Rebuild the half-precision scalar result in Vd after the
+            // arithmetic and packing, which handles source aliases and V31.
             code.extend(MOVD_EAX_XMM_PREFIX);
             code.push(REGISTER_DIRECT | (RESULT << MODRM_REGISTER_SHIFT));
             read_vector(code, operand.destination, RESULT);

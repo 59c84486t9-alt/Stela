@@ -25,12 +25,12 @@ struct Storage {
 
 // SAFETY: this owner retains raw storage without lending Rust references.
 unsafe impl Send for Storage {}
-// SAFETY: actual byte accesses use the tested native execution domain.
+// SAFETY: byte accesses go through the tested execution domain.
 unsafe impl Sync for Storage {}
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: the original raw allocation and layout remain owned here.
+        // SAFETY: the allocation and layout are owned here.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
@@ -1288,7 +1288,7 @@ fn small_combined_pair_read_still_requires_atomic16_when_it_crosses_host8() {
     assert_eq!(data, [0xa5; 8]);
 }
 
-// Exclusive service descendant proofs use the existing family storage/monitor fixture.
+// Exclusive-service tests use the shared storage and monitor fixture.
 use stela_compiler::context::memory::{
     MemoryOperationClass, MemoryOrder,
     exclusive::{EXCLUSIVE_FAILED, ExclusiveData, ExclusiveOperation, ExclusiveShape},
@@ -1381,8 +1381,8 @@ fn exclusive_invoke(
         pc: TEST_PC,
     };
     let mut observed = (MemoryStatus::Success, 0, address, TEST_PC);
-    // SAFETY: actual private aligned payload and disjoint valid ABI objects;
-    // the fixture retains stable coherent native storage and the bound PE owner.
+    // SAFETY: an aligned private payload and valid disjoint ABI objects; the
+    // fixture keeps stable coherent storage and the bound PE.
     let finalized = unsafe {
         thread.with_checked_view(|view| {
             let status = (view.callback)(view, &request);
@@ -1791,8 +1791,8 @@ fn exclusive_joined() -> (Arc<MemoryBacking>, Arc<MemoryDomain>, Arc<MemoryView>
 fn exclusive_service_second_view_retirement_and_mapdead_gap_clear_actual_global_mark() {
     let (backing, domain, second) = exclusive_joined();
     let (mut thread, mut endpoint, events) = exclusive_bound(&domain);
-    // Directed map-dead/view-live gap: actual first generation remains live,
-    // so load must be caught by the final physical retirement invalidation.
+    // The mapping is dead but its first-generation view is live, so the load
+    // must be caught by the final retirement invalidation.
     domain
         .system
         .reservations
@@ -1902,11 +1902,11 @@ fn exclusive_service_inflight_load_refuses_retirement_until_original_finalizatio
     let retire = std::thread::spawn(move || {
         refusal_tx.send(d.retire(&retiring)).unwrap();
     });
-    // The actual native loan remains live inside the blocked original callback.
-    // Service admission must refuse before waiting on the callback's monitor gate.
+    // The native borrow is still live inside the blocked callback, so service
+    // admission must refuse instead of waiting on the callback's monitor gate.
     let refusal = refusal_rx.recv_timeout(std::time::Duration::from_secs(2));
-    // Always release and join the actual load before asserting, even if a broken
-    // retirement path waited on its monitor gate instead of refusing admission.
+    // Always release and join the load before asserting, even if a broken
+    // retirement path waited on the gate.
     release.wait();
     let (mut thread, mut endpoint, events, result) = load.join().unwrap();
     retire.join().unwrap();
@@ -1916,8 +1916,8 @@ fn exclusive_service_inflight_load_refuses_retirement_until_original_finalizatio
     assert!(monitor.is_live());
     assert_eq!(domain.generation().unwrap(), generation);
     assert!(!endpoint.is_set());
-    // Original checked finalization released its actual loan. The same domain
-    // may now retire the same view and invalidate the real alias reservation.
+    // Finalization released the borrow, so the domain may now retire the view
+    // and invalidate the alias reservation.
     domain.retire(&second).unwrap();
     assert!(!second.is_current());
     assert!(!monitor.is_live());
@@ -2037,8 +2037,8 @@ fn exclusive_service_poisoned_domain_refuses_retirement_before_mapping_effects()
     assert_eq!(domain.state.lock().unwrap().snapshot.generation, generation);
     assert!(!endpoint.is_set());
     assert_eq!(domain.retire(&second), Err(MemoryStatus::Domain));
-    // Liveness is diagnostic only: the poisoned actual domain admits neither
-    // native execution nor service mutation, and retains the original storage.
+    // A failed domain admits neither native execution nor service mutation, and
+    // keeps its storage.
     assert!(domain.check_execution().is_err());
     assert!(domain.execution_loan().is_err());
     let mut declined = exclusive_data(ExclusiveOperation::Load, ExclusiveShape::Scalar, 0);
@@ -2055,7 +2055,7 @@ fn exclusive_service_poisoned_domain_refuses_retirement_before_mapping_effects()
 #[test]
 fn exclusive_service_shifted_relative_erg_geometry_declines_before_prefix_only_for_transfers() {
     let layout = Layout::from_size_align(STORAGE_BYTES, SCA_BYTES).unwrap();
-    // SAFETY: actual owner retains the complete allocation, including prefix.
+    // SAFETY: the owner keeps the whole allocation, including the prefix.
     let raw = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
     let owner = Arc::new(Storage {
         pointer: raw,

@@ -55,9 +55,9 @@ const PROTOTYPE: BsdPrototype = BsdPrototype {
     return_type: BsdReturnType::Int,
 };
 
-/// A caller-declared guest configuration, rather than inferred boot policy.
-/// Active configuration and the effective CHECK mask intentionally differ:
-/// ARM XNU allows kernel debugging when untrusted kexts or AppleInternal is set.
+/// A guest configuration supplied by the caller. The active configuration and
+/// the effective CHECK mask differ on purpose: ARM XNU allows kernel debugging
+/// when untrusted kexts or AppleInternal is set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ArmSecurityPolicy {
     active_configuration: u32,
@@ -91,10 +91,10 @@ pub fn handles(state: &ThreadState, trap: &SynchronousTrap) -> bool {
     classify_bsd_call(state, trap).is_ok_and(|selector| selector.number == SYSCALL_NUMBER)
 }
 
-/// Service a query over serialized owned guest memory. Unknown operations use
-/// the syscall's ENOSYS result; calls for other services remain pending.
-/// Copyout checks the user address range first, then preserves the completed
-/// byte prefix if a later destination byte is unmapped or not writable.
+/// Service a query against owned guest memory. Unknown operations return the
+/// syscall's ENOSYS; calls for other services stay pending. Copyout checks the
+/// user range first, then keeps the completed prefix if a later byte is
+/// unmapped or read-only.
 pub fn service(
     state: &mut ThreadState,
     trap: &SynchronousTrap,

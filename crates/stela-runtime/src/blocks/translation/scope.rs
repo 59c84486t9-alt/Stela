@@ -35,10 +35,8 @@ pub(super) enum ContextState {
     Failed,
 }
 
-/// A loan of the actual code owner, not an idle counter or publication token.
-/// Construction is private to the owner that transfers sole physical retirement
-/// and publication authority. The runtime borrow independently excludes all of
-/// its actual translation/RX/native calls until this scope returns.
+/// A borrow of the code owner, constructed only by it. The runtime borrow
+/// excludes translation and native calls until the scope ends.
 pub(crate) struct ControlCodeScope<'run> {
     pub(super) runtime: &'run mut BlockRuntime,
     pub(super) physical: &'run PhysicalAddressSpace,
@@ -334,8 +332,8 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
                     cpu,
                 )
                 .map_err(|_| "initial controls have no canonical configuration backend")?;
-                // Reserve the sole context slot during initial preparation,
-                // before any guest/control publication. Later commits reuse it.
+                // Reserve the single context slot during initial preparation;
+                // later commits reuse it.
                 (
                     PreparedAction::Install(Box::new(InstalledContext {
                         snapshot,

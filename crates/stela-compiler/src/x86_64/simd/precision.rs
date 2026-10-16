@@ -135,8 +135,8 @@ fn half_to_single(code: &mut Vec<u8>) {
 }
 
 fn scalar_odd_jam(code: &mut Vec<u8>) {
-    // Source is an accepted normal D and result is normal S. Exactly the low
-    // 29 original fraction bits are discarded, independently of the sign.
+    // The source is a normal double and the result a normal single, so exactly
+    // the low 29 fraction bits are discarded.
     code.extend(MOVQ_RAX_XMM1);
     code.push(AND_EAX_IMM32);
     code.extend(DOUBLE_TO_SINGLE_DISCARDED_MASK.to_le_bytes());
@@ -147,10 +147,10 @@ fn scalar_odd_jam(code: &mut Vec<u8>) {
 }
 
 pub(in crate::x86_64) fn jam_odd_pair(code: &mut Vec<u8>, one_vector: u8) {
-    // Normal S widens exactly and compares with its original normal D lane
-    // without raising host status, even after caller MXCSR has been restored.
-    // Never use aggregate PE to choose a lane's jam bit. Result-range preparation
-    // leaves MINIMUM_EXPONENT_VECTOR holding one in every dword.
+    // The normal single widens exactly and is compared with its source double
+    // lane without raising host status. A lane's sticky bit never comes from
+    // the aggregate PE flag. The range preparation leaves 1 in every dword of
+    // MINIMUM_EXPONENT_VECTOR.
     code.extend(CVTPS2PD_XMM6_XMM0);
     code.extend(CMPEQPD_XMM6_XMM1);
     super::shuffle(code, JAM_VECTOR, JAM_VECTOR, COMPACT_QWORD_LOW_DWORDS);

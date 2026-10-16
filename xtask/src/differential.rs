@@ -21,8 +21,8 @@ use stela_oracle::{
 
 /// Every leaf ends in RET, so the leaf RET form needs no case of its own.
 const LEAF_TERMINATOR: &str = "RET_64R_branch_reg";
-/// FPCR controls of the reviewed profile that QEMU also implements: AHP, DN,
-/// FZ, RMode, FZ16 and the AFP bits. QEMU has no FP trap enables.
+/// FPCR controls that QEMU also implements: AHP, DN, FZ, RMode, FZ16 and the
+/// AFP bits. QEMU has no FP trap enables.
 const FPCR_MASK: u32 = 0x07c8_0007;
 /// FPSR QC and cumulative flags; QEMU also keeps AArch32 NZCV, which Apple
 /// silicon does not implement.

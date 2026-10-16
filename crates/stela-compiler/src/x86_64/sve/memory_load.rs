@@ -356,10 +356,9 @@ fn commit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: Ta
     }
 }
 
-/// Emit one callback-backed instruction. Failure cleans up before returning
-/// through the shared inner-body epilogue; success falls through. Both paths
-/// restore the exact private stack allocation.
-/// The declared data profile has SCTLR.A=0; original SP alignment remains checked.
+/// Emit one instruction backed by memory-service callbacks. Failure cleans up
+/// and returns through the shared epilogue; success falls through. Both restore
+/// the private stack allocation. SCTLR.A is 0; SP alignment is still checked.
 pub(crate) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,

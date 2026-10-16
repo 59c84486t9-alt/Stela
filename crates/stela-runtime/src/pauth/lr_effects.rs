@@ -62,9 +62,9 @@ pub(crate) fn evaluate(
     )
 }
 
-/// Legacy SP/1716/RET forms select modifiers from actual borrowed PACM.
-/// None leaves other forms with their existing single-modifier service.
-/// XZR discards only a successful result, after key/resource/fault checks.
+/// The SP, 1716 and RET forms take their modifiers from PACM; other forms keep
+/// the single-modifier service. XZR discards only a successful result, after
+/// the key, resource and fault checks.
 pub(crate) fn evaluate_conditional(
     operation: PointerAuthenticationOperation,
     service: &BorrowedLinkRegisterService<'_>,

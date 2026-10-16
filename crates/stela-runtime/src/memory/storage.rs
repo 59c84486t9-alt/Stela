@@ -23,16 +23,16 @@ pub(super) struct NativeMapping {
 }
 
 impl NativeMapping {
-    /// Transfer an existing native mapping's unmap obligation into this owner.
+    /// Take over the unmap obligation of an existing native mapping.
     ///
     /// # Safety
-    /// `base..base+bytes` must be a nonempty, complete, page-aligned live native
-    /// mapping, with checked extent arithmetic and sole unmap authority. The
-    /// storage is coherent Normal-WB RAM, never device/MMIO memory. No Rust byte
-    /// references may escape. Raw accesses and host protection changes require
-    /// external synchronization; all accesses must finish before rights are
-    /// revoked, pages remapped, or the last owner released. File mappings retain
-    /// their separate source-stability contract. Adoption itself changes no rights.
+    /// `base..base+bytes` must be a non-empty, whole, page-aligned live mapping
+    /// whose unmap obligation the caller owns. The storage is coherent
+    /// write-back RAM, never device memory or MMIO. No Rust reference to its
+    /// bytes may escape. Raw accesses and protection changes need external
+    /// synchronization, and every access must finish before rights are revoked,
+    /// pages are remapped or the last owner is released. File mappings
+    /// additionally require stable files. Adoption changes no rights.
     #[cfg(feature = "std")]
     pub(super) unsafe fn adopt(base: NonNull<u8>, bytes: usize) -> Self {
         Self { base, bytes }
@@ -43,14 +43,15 @@ impl NativeMapping {
 // unmap obligation. It provides no safe byte access/protection/remap operation;
 // adoption requires stable storage and externally synchronized raw accesses.
 unsafe impl Send for NativeMapping {}
-// SAFETY: sharing the descriptor lends no Rust byte references or mutation
-// authority. The mapping remains live until the final retained owner is dropped.
+// SAFETY: sharing the descriptor hands out no references or mutation rights;
+// the mapping lives until the last owner drops.
 unsafe impl Sync for NativeMapping {}
 
 #[cfg(feature = "std")]
 impl Drop for NativeMapping {
     fn drop(&mut self) {
-        // SAFETY: adoption transferred the sole obligation for this exact extent.
+        // SAFETY: adoption transferred the unmap obligation for this exact
+        // extent.
         unsafe { libc::munmap(self.base.as_ptr().cast(), self.bytes) };
     }
 }
@@ -71,9 +72,9 @@ impl core::fmt::Display for StorageError {
 #[cfg(feature = "std")]
 impl core::error::Error for StorageError {}
 
-/// One physical storage lifetime, optionally retaining its two native aliases.
-/// A canonical `MemoryBacking` retains this owner; this owner must never retain
-/// that backing, which would create a strong-reference cycle.
+/// One physical storage lifetime, optionally with its two native aliases. A
+/// `MemoryBacking` holds this owner; this owner must never hold the backing,
+/// which would form a reference cycle.
 pub(super) struct NativeStorage {
     primary: NativeMapping,
     publisher: Option<NativeMapping>,
@@ -139,8 +140,8 @@ impl NativeStorage {
             unsafe { libc::munmap(raw, bytes) };
             return Err(std::io::Error::other("source RAM allocation has null base"));
         };
-        // SAFETY: mmap returned this complete checked page-aligned extent. The
-        // mapping owner now owns its sole unmap obligation on every error path.
+        // SAFETY: mmap returned this whole page-aligned extent, and the mapping
+        // owner now unmaps it on every error path.
         let mapping = unsafe { NativeMapping::adopt(base, bytes) };
         // SAFETY: validated destination extent, private mapping and independent
         // input bytes; no native access or source binding has been published.

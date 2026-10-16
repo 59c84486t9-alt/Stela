@@ -17,8 +17,8 @@ pub(crate) fn parse_pointer_mode(value: &str) -> Result<EffectivePointerChecks, 
         _ => Err("expected unchecked, addition, or addition-multiplication".into()),
     }
 }
-/// The source/current EL0 owner must later validate this complete specialization.
-/// Without an explicit mode, preserve the exact existing profile and ABI.
+/// Checked EL0 process profile. Without a pointer mode, the existing profile
+/// and ABI are kept.
 pub(crate) fn checked_process(
     mode: Option<EffectivePointerChecks>,
 ) -> Result<CheckedMemoryProfile, CompileError> {
@@ -56,7 +56,7 @@ pub(crate) fn block_profile(
     }
 }
 
-/// Validate declared guest specialization before reading or compiling input.
+/// Validate the guest profile before reading or compiling the input.
 pub(crate) fn compile_scalable_profile(
     id: Option<&str>,
     length: Option<stela_compiler::aarch64::scalable::VectorLength>,

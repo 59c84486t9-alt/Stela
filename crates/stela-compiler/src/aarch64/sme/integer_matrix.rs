@@ -43,9 +43,8 @@ impl Operand {
 #[cfg(test)]
 mod tests;
 
-// Private integration proposal: all 26 assigned canonical outer-product forms.
-// Feature availability and SME/streaming/ZA gates belong to the shared profile.
-// All variable fields accept their complete encoded range; no GPR/ZR/SP operands.
+// All 26 outer-product forms. Every variable field accepts its full encoded
+// range; there are no GPR, ZR or SP operands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OuterKind {
     AddHorizontal,

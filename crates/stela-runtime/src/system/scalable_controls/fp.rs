@@ -6,9 +6,9 @@ use super::{
 };
 use stela_compiler::GuestAddress;
 
-/// Selected declared software behavior for CPACR fields absent in this CPU.
-/// The historical scalable owner retains its writable readback choice; a fresh
-/// ordinary FP owner selects hardwired-zero/write-ignore for absent SMEN/ZEN.
+/// The software behavior chosen for CPACR fields of absent features. The
+/// scalable owner keeps its writable readback; a new ordinary FP owner makes
+/// absent SMEN/ZEN RAZ/WI.
 #[derive(Clone, Copy)]
 enum AbsentFieldPolicy {
     WritableReadback,
@@ -70,20 +70,18 @@ impl<'id> FpControlOwner<'id> {
         self.generation
     }
 
-    /// Evaluate the June CheckFPEnabled subset for this actual EL0/EL1 state.
-    /// Same-Snapshot construction proves EL2/EL3 absent, including host routing.
-    /// The returned trap is a decision; the caller owns reached-source delivery.
+    /// Evaluate the CheckFPEnabled subset for the current EL0/EL1 state; the
+    /// snapshot shows EL2 and EL3 absent. Returns the trap decision; the caller
+    /// delivers it.
     pub fn check_fp_enabled(&self, state: &SystemState, pc: GuestAddress) -> Result<(), Error> {
         check_state(state)?;
         self.check_fp_at_el(state.current_el(), pc)
     }
 
-    /// Architectural CPACR register writes require actual AArch64 EL1.
-    /// Optional consumers are restricted by the same constructor subset used by
-    /// ScalableControlOwner. Fresh generic owners select RAZ/WI for absent
-    /// SMEN/ZEN; existing scalable owners retain their writable readback choice.
-    /// Other reserved bits retain the declared writable policy. Neither policy
-    /// certifies captured hardware or implements an unowned control consumer.
+    /// CPACR writes require AArch64 EL1. Optional consumers follow the same
+    /// subset as ScalableControlOwner. New generic owners make absent SMEN/ZEN
+    /// RAZ/WI, existing scalable owners keep their writable readback, and other
+    /// reserved bits stay writable.
     pub fn prepare_write<'loan>(
         &'loan mut self,
         value: u64,

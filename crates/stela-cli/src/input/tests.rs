@@ -13,7 +13,7 @@ fn research_state_json_retains_vector_bits_and_fp_status() -> Result<()> {
     assert_eq!(input.v, state.v);
     assert_eq!(input.fpcr, state.fpcr);
     assert_eq!(input.fpsr, state.fpsr);
-    // Scalar-only older inputs are accepted with explicitly zero initial SIMD state.
+    // Older scalar-only inputs are accepted with zeroed SIMD state.
     let scalar: RegisterInput = serde_json::from_value(serde_json::json!({"x":([0u64;31])}))?;
     assert_eq!(scalar.v, [[0; 2]; 32]);
     assert_eq!((scalar.fpcr, scalar.fpsr), (0, 0));

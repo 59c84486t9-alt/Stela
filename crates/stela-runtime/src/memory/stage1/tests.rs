@@ -40,8 +40,7 @@ impl PhysicalMemory for Ram {
     }
 }
 
-// Explicit synthetic CPU witness for mathematical source fixtures. Production
-// CPU construction must obtain every field from its authentic owner.
+// A test CPU profile.
 fn cpu() -> CpuProfile {
     CpuProfile {
         pa_max: PaBits::Bits48,

@@ -154,9 +154,8 @@ fn installed(
         ttbr1_el1: 0,
         mair_el1: 0xff,
     };
-    // SAFETY: the original fresh factory owns these exact table/code allocations,
-    // sole physical domain and all aliases; no PE/native/external producer exists.
-    // Initial installation is the original publisher, not a copied config grant.
+    // SAFETY: the test owns these table and code allocations, the physical
+    // domain and every alias; no PE, native code or external producer exists.
     let (sources, controls) = unsafe {
         InstalledCodeSources::install(
             &mut runtime,
@@ -176,7 +175,7 @@ fn real_4k_and_16k_tables_fetch_distinct_va_pa_under_original_outer() {
     for kib16 in [false, true] {
         let (sources, controls, state, mut runtime) = installed(kib16, AF, false);
         let scope = sources.el1_scope().unwrap();
-        // Historical M0 admission stays an explicit refusal.
+        // M0 admission is refused.
         assert!(scope.check_installed(&controls, &state).is_err());
         let outer = scope
             .physical_space()
@@ -192,7 +191,7 @@ fn real_4k_and_16k_tables_fetch_distinct_va_pa_under_original_outer() {
             assert_eq!(bound.physical_address(), CODE_PA + VA);
             assert_eq!(bound.word(), SOURCE_WORD);
             assert!(bound.is_current());
-            // Reuse original source/code cache binding, no parallel instruction cache.
+            // Reuse the runtime's source and code cache.
             runtime
                 .bind_physical_instruction(scope.installed_snapshot(), bound)
                 .unwrap();

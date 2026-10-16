@@ -6,7 +6,7 @@ use crate::system::state::SystemState;
 use alloc::sync::Arc;
 use stela_compiler::{GuestState, aarch64::system::synchronization::Operation};
 
-/// An actual fetch, not a request to trust a copied virtual byte buffer.
+/// A real fetch, not a request to trust a copied buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalFetch {
     pub pc: u64,
@@ -71,8 +71,7 @@ pub enum PublicationRequest<'a> {
     },
 }
 
-/// Source-qualified synchronization for an exception, distinct from an ISB.
-/// This describes a required effect; it grants no exception or native authority.
+/// Context synchronization for an exception, distinct from an ISB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextSynchronizationCause {
     ExceptionEntry,
@@ -98,10 +97,10 @@ impl ContextSynchronizationCause {
     }
 }
 
-/// The state borrow is checked during preparation. The canonical consumer keeps
-/// its ORIGINAL state exclusively owned until the prepared service commits;
-/// the service retains the genuine source/control/publication resources instead
-/// of immutably borrowing the bank that exception execution must mutate next.
+/// The state borrow is checked during preparation. The consumer keeps its state
+/// exclusively until the service commits, and the service keeps the source,
+/// control and publication resources instead of borrowing the bank the
+/// exception must change next.
 pub struct ContextSynchronizationRequest<'state> {
     pub before: ControlSnapshot,
     pub after: ControlSnapshot,
@@ -111,8 +110,8 @@ pub struct ContextSynchronizationRequest<'state> {
     pub cause: ContextSynchronizationCause,
 }
 
-/// Exact internal backend prefix, not a claim of architectural instruction
-/// completion. The control owner separately reports a committed MSR register.
+/// How far the backend got; the control owner reports a committed MSR
+/// separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationProgress {
     None,
@@ -128,52 +127,38 @@ pub struct PublicationFailure {
     pub reason: &'static str,
 }
 
-/// Noncloneable service preparation, holding actual memory/source/code gates.
-/// Commit should be infallible after preparation wherever possible. Any real
-/// failure reports the exact reached prefix; the control authority is poisoned
-/// rather than exposing mismatched old views or retrying a committed MSR. A
-/// failing concrete adapter must likewise make its derived execution/source
-/// state unusable until explicit recovery; dropping a failed Initial authority
-/// must not leave partially installed state reusable by another constructor.
+/// A prepared service holding memory, source and code gates. Commit should not
+/// fail after preparation; when it does, it reports the reached prefix and the
+/// control owner is marked failed rather than exposing stale views or retrying
+/// a committed MSR. A failing adapter must also make its derived state unusable
+/// until recovered, and a dropped failed initial install must not leave
+/// reusable partial state.
 pub trait PreparedPublication {
     fn commit(self) -> Result<(), PublicationFailure>;
 }
 
-/// Concrete implementations MUST belong to the returned real MemorySystem.
-/// There are no default successful methods or scalar stand-ins for maintenance.
+/// The memory and publication services behind the translation controls.
+/// Implementations belong to the returned MemorySystem, and nothing succeeds by
+/// default.
 ///
-/// `prepare` must check the original source word/generation and actual PE/control,
-/// backing/view/code generations under gates retained through commit. It performs
-/// no guest-visible effect. It reserves all required services before accepting:
+/// `prepare` checks the source word and generation, the PE and controls, and
+/// the backing, view and code generations, under gates held until commit. It
+/// has no guest-visible effect and reserves every service needed:
 ///
-/// - Initial installs the authentic per-PE policy, or declines; a register bank
-///   without a usable/explicitly unavailable current context is not admission.
-/// - Read revalidates fetched source, access and current owner binding; it does
-///   not act as CSE, TLBI, DSB or code serialization.
-/// - Write derives from ALL applicable consumer inputs, including zero controls.
-///   It must retire/rebind affected virtual views, translations and source/RX
-///   dependencies and ensure future fetch/access cannot reuse stale validity.
-///   Dormant/faulting intermediate states are legal. It must not deliver a future
-///   architectural fetch fault during preparation or invent a valid final MMU.
-///   The serial implementation uses the new current controls for the next actual
-///   fetch. Any deferred architectural fault is delivered by `fetch` after MSR.
-/// - Isb completes real CSE/instruction-fetch publication/serialization and any
-///   present BRBE effect, preserving the original raw option. It neither invents
-///   a data barrier nor silently invalidates all TLBs. The ISB itself was fetched
-///   under the current post-MSR policy before this request can be produced.
+/// - Initial installs the per-PE policy or refuses.
+/// - Read re-validates the fetched source, the access and the owner binding; it does not act as a context synchronization, TLBI, DSB or code serialization.
+/// - Write derives from every applicable consumer input, including zero controls. It retires or rebinds the affected views, translations and source and native code, so that later fetches and accesses cannot reuse stale state. Intermediate states may be dormant or faulting, but preparation must not raise a future fetch fault or invent a valid final MMU state. The next fetch uses the new controls, and any deferred fault is raised by `fetch` after the MSR.
+/// - Isb completes context synchronization, instruction-fetch publication and any BRBE effect, keeping the raw option. It adds no data barrier and does not invalidate every TLB. The ISB itself was fetched under the post-MSR policy.
 ///
-/// MMU-off Device data and WT/NC fetch need their genuine attribute/backing
-/// adapters. Unsupported effects/profile/configuration paths return Unavailable;
-/// register storage is never a substitute. EL2/3, devices, other PEs, instruction
-/// traps, keys, PSTATE defaults and optional features need their actual owners.
-/// Returned fetch faults are canonical faults, never conversions from generic
-/// host MemoryStatus. Pending in-scope work must be drained by real participants.
-/// Physical byte publication and reservation invalidation alone prove none of
-/// the translation/code/TLBI/DSB obligations above.
+/// MMU-off Device data and WT/NC fetch need their own adapters. Unsupported
+/// effects or configurations return Unavailable. EL2/EL3, devices, other PEs,
+/// instruction traps, keys, PSTATE defaults and optional features need their
+/// own owners. Fetch faults are architectural faults, never converted from host
+/// MemoryStatus. Physical byte publication and reservation invalidation alone
+/// satisfy none of these obligations.
 pub trait TranslationServices {
-    /// Reserve real exception context publication without retaining a state
-    /// borrow across the subsequent original-bank exception effects. Services
-    /// without this actual producer explicitly refuse; no successful fallback.
+    /// Reserve the exception's context publication without holding a state
+    /// borrow across the exception's bank effects. Services without it refuse.
     fn prepare_context_synchronization<'a>(
         &'a mut self,
         _request: ContextSynchronizationRequest<'_>,

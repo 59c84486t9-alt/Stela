@@ -7,9 +7,8 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-/// Exact decoded access, owned by the plan that emits its callback request.
-/// The actual runtime must revalidate source, controls, physical RAM and outer
-/// exclusion before reading; a copied intent is never a memory permission.
+/// A decoded access of the plan that emits its callback request. The runtime
+/// re-validates source, controls and physical RAM before reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiteralRead64 {
     pub source_pc: GuestAddress,

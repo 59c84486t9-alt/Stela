@@ -116,7 +116,7 @@ fn clone_and_scoped_view_keep_storage_independent_and_stable() -> Result<()> {
     let mut byte = [0];
     state.read_za(0, &mut byte)?;
     assert_eq!(byte, [7]);
-    // SAFETY: Only live bounded storage is accessed; no pointers escape.
+    // SAFETY: only live bounded storage is accessed, and no pointers escape.
     unsafe {
         state.with_view(|view| {
             assert_eq!(view.svl_bytes, 32);

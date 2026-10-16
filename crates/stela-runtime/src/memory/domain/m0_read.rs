@@ -32,10 +32,9 @@ pub(crate) enum ControlMetadataFailure {
     BigEndianEl1Data,
 }
 
-/// The real control owner must apply this to the same effective snapshot used
-/// by canonical translation, before lending any physical access. Config's M0
-/// branch does not validate EE. C/I do not change the M0 data memory type; E0E
-/// selects EL0 endianness and cannot substitute for EL1's EE check here.
+/// The control owner applies this to the same snapshot used for translation,
+/// before any physical access. C and I do not change the M0 data memory type;
+/// E0E selects EL0 endianness and does not replace EL1's EE check.
 #[cfg(test)]
 pub(crate) fn check_el1_m0_data_controls(
     controls: &stage1::Controls,
@@ -169,8 +168,8 @@ impl M0ScalarReadSource {
         }
     }
 
-    /// Effective AddressAdd behavior requires the canonical profile to exclude
-    /// CPA/other unsupported address operations. This computes metadata only.
+    /// AddressAdd behavior assumes the profile excludes FEAT_CPA and other
+    /// unsupported address operations.
     pub(crate) fn intent(&self, registers: &GuestState) -> M0ScalarReadIntent {
         if let ReadAddress::Scalar(load) = self.address {
             return scalar::intent(load, self.word, registers);
@@ -195,8 +194,8 @@ impl M0ScalarReadSource {
     }
 }
 
-/// No references or pointers to RAM or authority. Copying this cannot admit an
-/// access; the actual CPU/source/physical parents requalify every reached use.
+/// Holds no references to RAM; the CPU, source and physical owners re-check
+/// every use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct M0ScalarReadIntent {
     pub(crate) source_pc: GuestAddress,
@@ -220,8 +219,8 @@ pub(crate) enum MetadataFailure {
 }
 
 impl M0ScalarReadIntent {
-    /// Compare metadata returned by canonical current-control translation.
-    /// Success grants no current control, physical target, read or commit loan.
+    /// Compare with the metadata returned by translation under the current
+    /// controls.
     pub(crate) fn check_translation(
         self,
         translation: &stage1::Translation,
@@ -268,11 +267,9 @@ impl M0ScalarReadIntent {
 #[cfg(test)]
 mod tests;
 
-// Private implementation remains unregistered until actual producers close.
 mod ram;
 pub(crate) use ram::{
     M0RamReadPlatformError, M0RamReadPrepared, prepare_aligned_device_ram_scalar,
 };
 
-// Canonical shared-operand metadata only; no physical/source/PE authority.
 mod scalar;

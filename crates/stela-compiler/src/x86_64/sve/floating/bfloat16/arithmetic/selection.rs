@@ -89,8 +89,8 @@ fn guard(
     reject_mask(code, failures, target);
 }
 
-/// Inputs LEFT/RIGHT remain original until comparison. Equal encodings may
-/// choose either source; opposite zeros use the required standard numeric order.
+/// LEFT and RIGHT keep their inputs until the comparison. Equal encodings may
+/// return either source; opposite zeros follow the standard numeric order.
 fn select(code: &mut Vec<u8>, minimum: bool, alternative: bool, recipe: Recipe, target: TargetCpu) {
     if alternative {
         Host::MoveAligned.register(code, TEMPORARY, LEFT, target);

@@ -52,9 +52,8 @@ fn legacy_entry_refuses_typed_el1_branch_before_body_or_pc_effect() {
         registers: GuestState::default(),
         pc: BASE,
     };
-    // SAFETY: own bounded immutable B source/state, no direct RAM references.
-    // This selected profile MUST refuse before code loading or native execution;
-    // the canonical retained owner is the only admissible entry route.
+    // SAFETY: owned B source and state with no RAM references. This profile
+    // must be refused before any code is loaded or run.
     let returned = unsafe { runtime.run(&mut thread, Some(TARGET), 1) };
     assert!(returned.is_err());
     assert_eq!(thread.pc, BASE);

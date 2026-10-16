@@ -81,9 +81,7 @@ struct El3Bank {
     tcr: u64,
 }
 
-/// These bank values are owned solely inside the actual SystemState. Clone is
-/// diagnostic storage only, following SystemState's existing snapshot contract;
-/// no clone can allocate a retained PE or obtain its canonical phase authority.
+/// Banks owned by the system state. Cloning them makes a diagnostic copy only.
 #[derive(Debug, Clone)]
 pub struct HigherElState {
     snapshot: Arc<Snapshot>,
@@ -125,10 +123,9 @@ fn field(
 }
 
 impl HigherElState {
-    /// First declared scope: lower ELs NonSecure, all present ELs currently A64,
-    /// SEL2/RME/NV absent, base optional entry effects absent. Identification
-    /// absence and bank initialization must agree exactly. Both bank controls
-    /// and Snapshot remain under this same actual owner for subsequent routing.
+    /// The first supported scope: non-secure lower ELs, all ELs AArch64, no
+    /// SEL2, RME or NV, and no base optional entry effects. The identification
+    /// snapshot and the initialized banks must agree exactly.
     pub(super) fn initialized(
         snapshot: Arc<Snapshot>,
         initial: Initialization,

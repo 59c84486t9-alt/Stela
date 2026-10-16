@@ -163,8 +163,8 @@ fn domain_read_loan_intentionally_does_not_identify_a_pe_or_thread() {
     let first = memory(&domain);
     let second = memory(&domain);
     let outer = first.execution_loan().unwrap();
-    // Both are admitted as DOMAIN reads. The consumer must independently retain
-    // its exact original frame/System/PE/outer object; this is not a PE permit.
+    // Both are admitted as domain reads; the consumer must still hold its own
+    // frame, system, PE and outer object.
     assert!(bank.extended_controls(&ids, &first, &outer).is_ok());
     assert!(bank.extended_controls(&ids, &second, &outer).is_ok());
 }
@@ -312,8 +312,8 @@ fn cpt_fields_require_cpa2_and_the_qualified_same_bank_constructor() {
             0,
         );
         if cpa == u64::from(CPA_WITH_CHECKING) {
-            // The separately qualified same-bank constructor now retains CPA2;
-            // actual entry still needs its exact source/profile/owner token.
+            // The same-bank constructor keeps FEAT_CPA2; entry still needs its
+            // source, profile and owner token.
             let bank = result.expect("qualified CPA2 same-bank declaration");
             assert_eq!(bank.extended.as_ref().unwrap().sctlr2_el1, SCTLR2_CPTA);
             assert_eq!(

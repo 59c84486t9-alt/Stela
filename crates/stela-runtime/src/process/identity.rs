@@ -6,11 +6,8 @@ use serde::Serialize;
 pub const PROFILE_ID: &str = "darwin-explicit-process-identity-v1";
 pub const MAX_PROCESS_ID: u32 = 99_999;
 
-/// Shared by the actual guest thread/task owner through Rc. Cloning that owner
-/// represents the same process; it must never implement fork. Caller-owned
-/// address-space identity supplies the execution binding, not the numeric PID.
-/// Future exec must preserve PID under a reviewed address-space replacement
-/// protocol; constructing or mutating this immutable owner is not that protocol.
+/// Shared through Rc by the guest thread and task. Cloning the owner means the
+/// same process, never a fork. The address space, not the PID, binds execution.
 #[derive(Debug)]
 pub struct Context {
     address_space: u64,

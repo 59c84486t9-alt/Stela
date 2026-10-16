@@ -35,10 +35,9 @@ pub(crate) enum Error {
     Authentication(AuthenticationError),
 }
 
-/// One immutable Context and the same actual Snapshot allocation held together.
-/// This type deliberately has no Clone/Copy and no key or mutable-state getter.
-/// A successful constructor supplies crypto ownership only. The executing owner
-/// must still resolve actual enable/traps and retain all instruction effect loans.
+/// One context and its identification snapshot, held together. Not Clone or
+/// Copy, with no key or state getters. The executing owner still resolves
+/// enables and traps.
 pub(crate) struct LinkRegisterContext<'run, 'profile> {
     capability: &'run LinkRegisterPauthCapability<'profile>,
     context: &'run Context,
@@ -82,7 +81,7 @@ impl<'run, 'profile> LinkRegisterContext<'run, 'profile> {
             .map_err(Error::Configuration)
     }
 
-    /// Existing single-modifier semantics for legacy forms with actual PACM zero.
+    /// Single-modifier signing, for the older forms when PACM is zero.
     pub(crate) fn sign_single(
         &self,
         key: InstructionKey,

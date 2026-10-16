@@ -126,8 +126,8 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
     })
 }
 
-/// Only existing ordinary unsigned byte/word loads with an X-register base.
-/// All other memory addressing/transfer forms remain canonical boundaries.
+/// Only unsigned byte and halfword loads with an X-register base. Every other
+/// memory form ends a region.
 pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
     if let Operation::MemoryPair {
         transfer:
@@ -465,8 +465,8 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     Some(ends)
 }
 
-/// Every direct target and control-transfer fallthrough is a fresh region entry.
-/// Guest instructions and branch fixups remain original typed operations.
+/// Every direct target and fallthrough after a control transfer starts a new
+/// region.
 #[cfg(test)]
 pub fn leaf_entries(instructions: &[Instruction]) -> alloc::collections::BTreeSet<u64> {
     let mut entries = alloc::collections::BTreeSet::new();

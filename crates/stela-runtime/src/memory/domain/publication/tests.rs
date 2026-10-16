@@ -34,7 +34,7 @@ unsafe impl Sync for Storage {}
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: this owner retains its original allocation and layout.
+        // SAFETY: this owner keeps its allocation and layout.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
@@ -72,8 +72,8 @@ fn publish(
     offset: usize,
     bytes: &[u8],
 ) -> Result<(), PublicationFault> {
-    // SAFETY: tests own publication authority; inputs are private, host storage
-    // is pinned and disjoint, and every write uses this same physical domain.
+    // SAFETY: the test may publish; inputs are private, host storage is pinned
+    // and disjoint, and every write uses this domain.
     unsafe { system.publish(backing, offset, bytes) }
 }
 

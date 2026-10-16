@@ -11,7 +11,7 @@ const PC: GuestAddress = GuestAddress(0x1000);
 const BFCVT_WORD: u32 = crate::aarch64::sme::fp8_conversion::BFCVT_Z8_MZ2;
 const BFCVT_HIGH_OPERANDS: u32 = (30 << 5) | 31;
 const NOP_WORD: u32 = 0xd503_201f;
-// Pinned June encoding facts: canonical ID, lowest operands, highest operands.
+// Each form: name, lowest-operand encoding, highest-operand encoding.
 const PUBLIC_FORMS: &[(&str, u32, u32)] = &[
     ("fdot_za_z8z8i_2xi", 0xc1d00020, 0xc1df6fef),
     ("fdot_za_z8z8i_4xi", 0xc1109040, 0xc11fffcf),

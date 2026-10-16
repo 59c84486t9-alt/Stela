@@ -29,8 +29,8 @@ pub(crate) struct BoundSource<'code> {
     el1_m0: Option<stela_compiler::block::el1_m0::Intent>,
 }
 
-/// What the original plan says about a loaded block's exact source. It is a
-/// pure function of that immutable source, so each block validates it once.
+/// What the compilation plan says about a loaded block's source. It depends
+/// only on that immutable source, so each block computes it once.
 #[derive(Debug)]
 pub(crate) struct CheckedFacts {
     requirements: Option<MemoryRequirements>,
@@ -96,8 +96,8 @@ impl<'code> BoundSource<'code> {
         self.analysis.trap
     }
 
-    /// Old checked-memory/M0/FP routes must demand the ORIGINAL actual Some.
-    /// A branch's real None can never turn into default memory permission.
+    /// Routes that access memory must have requirements; a block with none
+    /// never gets default memory access.
     pub(super) fn memory_requirements(&self) -> anyhow::Result<MemoryRequirements> {
         self.requirements
             .ok_or_else(|| anyhow::anyhow!("actual source has no checked memory requirements"))
@@ -134,9 +134,9 @@ impl<'code> BoundSource<'code> {
         self.analysis.pointer_authentication
     }
 
-    /// Descriptors are borrowed from the actual prepared token, never accepted
-    /// from the run request. Every association field still matches this exact
-    /// retained source/plan/map/RX owner immediately before native invocation.
+    /// Descriptors come from the prepared token, never from the request. Every
+    /// association must still match the source, plan, map and native code
+    /// immediately before the call.
     pub(super) fn check_descriptor(&self, boundary: &EntryBoundary) -> anyhow::Result<()> {
         anyhow::ensure!(
             boundary.address_space() == self.entry.address_space()
@@ -251,8 +251,7 @@ impl<'code> BoundSource<'code> {
             "actual source/compiler/profile/target differs"
         );
         validate_source_map(&block.prepared.manifest, pc, block.source_bytes)?;
-        // Parse-only canonical producer: no emission, fallback plan or copied
-        // requirements. Compare the actual original plan with the loaded token.
+        // Re-parse without emitting, and compare that plan with the loaded one.
         let plan = CompilationPlan::new(source, pc, runtime.profile, runtime.target_cpu())?;
         let requirements = plan.memory_requirements();
         match runtime.profile {
@@ -459,8 +458,9 @@ impl<'code> BoundSource<'code> {
             ),
             "nonarchitectural status cannot settle as a fault"
         );
-        // The exact original word must identify an admitted reached memory
-        // instruction. Helper/branch/arithmetic source locations cannot forge it.
+        // The source word must be an admitted memory instruction that was
+        // reached; helper, branch or arithmetic locations cannot stand in for
+        // it.
         let offset = usize::try_from(
             fault
                 .pc

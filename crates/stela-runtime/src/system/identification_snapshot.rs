@@ -39,9 +39,9 @@ pub enum Origin {
     DeclaredGuest,
 }
 
-/// Evidence identity, not independent authentication of hardware. Captured input
-/// is supplied by the trusted source owner after its acquisition verification.
-/// Retained bytes and offsets let later evidence review verify exact readbacks.
+/// Where the snapshot came from. This identifies the input without
+/// authenticating hardware; the retained bytes and offsets allow the readbacks
+/// to be verified later.
 pub struct Provenance {
     origin: Origin,
     source_identity: &'static str,
@@ -150,9 +150,8 @@ fn insert(
 }
 
 impl Snapshot {
-    /// An explicit software-machine declaration; every supplied value is retained.
-    /// Missing IDs remain missing. Canonical declaration bytes bind the machine
-    /// name and supplied values without implying hardware evidence or features.
+    /// A software-machine declaration. Every value is kept and missing IDs stay
+    /// missing; the declaration bytes bind the machine name and the values.
     pub fn declared(
         machine_identity: &'static str,
         entries: &[(Register, u64)],
@@ -189,10 +188,8 @@ impl Snapshot {
         })
     }
 
-    /// Trusted acquisition adapter only: it supplies verified immutable input
-    /// and source-format offsets. Values are extracted here, never independently
-    /// supplied or normalized. This binding does not authenticate hardware; the
-    /// actual acquisition/receipt owner remains responsible for that evidence.
+    /// Build a snapshot from verified captured input and its offsets; values
+    /// are extracted here, not supplied separately.
     #[cfg(test)]
     pub(crate) fn captured(
         source_identity: &'static str,

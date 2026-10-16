@@ -558,8 +558,8 @@ fn outer_negate_dot_member(kind: DotFormat, fpcr: u32, bits: u16) -> u16 {
     match kind {
         DotFormat::Half => floating::sign::negate(Format::Half, fpcr, u64::from(bits)) as u16,
         DotFormat::BFloat16 => {
-            // BFMOPS (BF16->F32) explicitly sets honor_altfp=FALSE. Reuse the
-            // architectural BFNeg helper with AH disabled for this transform.
+            // BFMOPS (BF16 to F32) sets honor_altfp to FALSE, so BFNeg runs
+            // with AH cleared.
             floating::bfloat16::arithmetic::negate(fpcr & !floating::FPCR_AH, bits)
         }
     }

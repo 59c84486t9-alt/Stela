@@ -62,7 +62,7 @@ pub struct MappingAttributes {
 /// Effective CPU controls belong to the per-thread policy, not each ISA family.
 /// Policy callbacks must not reenter or retire this domain while an access is active.
 pub trait DataPolicy {
-    /// Typed service classes require actual CPU-owner admission.
+    /// Typed service classes must be admitted by the CPU owner.
     fn validate_operation_execution(
         &self,
         _class: MemoryOperationClass,
@@ -71,8 +71,7 @@ pub trait DataPolicy {
     }
     /// Reject unavailable effective-control profiles before any guest effect.
     fn validate_execution(&self, required_flags: u32) -> Result<(), MemoryStatus>;
-    /// Check the body's original-SP specialization against authoritative
-    /// effective controls. An arbitrary policy cannot silently prove a control.
+    /// Check the body's SP specialization against the effective controls.
     fn validate_sp_alignment(&self, required: SpAlignmentRequirement) -> Result<(), MemoryStatus> {
         if required == SpAlignmentRequirement::Any {
             Ok(())
@@ -80,8 +79,7 @@ pub trait DataPolicy {
             Err(MemoryStatus::Unsupported)
         }
     }
-    /// Validate emitted CPA address specialization against the actual CPU owner.
-    /// Arbitrary policies cannot silently adopt a specialized native body.
+    /// Check the emitted FEAT_CPA address specialization against the CPU owner.
     fn validate_address_checks(
         &self,
         required: stela_compiler::context::memory::address::AddressCheckRequirements,
@@ -92,8 +90,8 @@ pub trait DataPolicy {
             Err(MemoryStatus::Unsupported)
         }
     }
-    /// CPA arithmetic requires actual same-CPU feature/mode qualification even
-    /// when a discarded result emits no visible register or memory effect.
+    /// FEAT_CPA arithmetic must be admitted by the CPU even when its result is
+    /// discarded.
     fn validate_pointer_arithmetic(
         &self,
         required: Option<stela_compiler::context::pointer::PointerArithmeticRequirement>,
@@ -156,8 +154,7 @@ pub struct MemorySystem {
     reservations: Arc<ReservationDomain>,
     mappings: Mutex<MappingRegistry>,
     failed: AtomicBool,
-    // Serialize qualified DeviceRAM transactions in this same machine. This
-    // gate alone grants no source attributes, physical interpretation or PE.
+    // Serializes Device RAM transactions on this machine.
     device_ram_order: Mutex<()>,
 }
 
@@ -183,7 +180,8 @@ impl MemorySystem {
             .bind_coherence(&self.identity)
             .map_err(|_| MemoryStatus::Domain)?;
         let mut mappings = self.mappings.lock().map_err(|_| MemoryStatus::Domain)?;
-        // Keep registry work/space bounded by live generations, not map history.
+        // Keep the registry bounded by live generations rather than mapping
+        // history.
         mappings.retain(|_, mapping| mapping.strong_count() != 0);
         if let Some(mapping) = mappings.get(&view.id()).and_then(Weak::upgrade) {
             if *mapping.attributes() != attributes {
@@ -357,8 +355,8 @@ impl MemoryDomain {
     /// accesses before native rights changes or unmapping.
     pub fn retire(self: &Arc<Self>, view: &Arc<MemoryView>) -> Result<(), MemoryStatus> {
         let _loan = self.service_loan()?;
-        // Exhausted generations must decline before invalidating any mapping or
-        // reservation. The exclusive service loan pins this preflight value.
+        // Refuse on generation exhaustion before invalidating any mapping or
+        // reservation; the exclusive service borrow keeps this value stable.
         let next_generation = self
             .generation()?
             .checked_add(1)
@@ -557,9 +555,8 @@ impl<P: DataPolicy> MemoryThread<P> {
         self.domain.execution_loan()
     }
 
-    /// Observe this actual domain under an exclusive read-only service loan.
-    /// The caller retains its source/PE observation boundary; this loan supplies
-    /// physical serialization, current views and private diagnostic staging.
+    /// Observe the domain under an exclusive read-only service borrow, which
+    /// provides physical serialization, the current views and private staging.
     pub fn observation_loan(&self) -> Result<MemoryObservationLoan, MemoryStatus> {
         self.domain.observation_loan()
     }
@@ -613,8 +610,8 @@ impl<P: DataPolicy> MemoryThread<P> {
         &mut self.policy
     }
 
-    /// Bind this actual reservation context to one real PE before any mark.
-    /// Binding is fixed until context teardown; live marks cannot be reassigned.
+    /// Bind this reservation context to one PE before any mark. The binding
+    /// lasts until the context is torn down.
     pub fn bind_events(&mut self, producer: &EventProducer) -> Result<(), MemoryStatus> {
         self.domain.check_execution()?;
         self.domain
@@ -645,14 +642,14 @@ impl<P: DataPolicy> MemoryThread<P> {
             .reservations
             .clear(&mut self.reservation)
             .map_err(|_| MemoryStatus::Domain)?;
-        // Cleanup can wait behind another PE. A terminal failure while waiting
-        // must remain an explicit backend failure, never guest ERET success.
+        // Cleanup can wait behind another PE; a failure while waiting is a
+        // backend failure, never a successful ERET.
         self.domain.check_execution()
     }
 
-    /// Selected implementation policy after a genuine architectural memory
-    /// fault. Platform/ABI declines preserve the existing local reservation.
-    /// This does not alter the fault's source location or completed prefix.
+    /// Apply the implementation's policy after an architectural memory fault.
+    /// Platform and ABI declines keep the local reservation. The fault's
+    /// location and completed prefix are unchanged.
     pub fn settle_fault(&mut self, status: MemoryStatus) -> Result<(), MemoryStatus> {
         if is_guest_fault(status as u32) {
             self.domain
@@ -664,17 +661,17 @@ impl<P: DataPolicy> MemoryThread<P> {
         Ok(())
     }
 
-    /// Borrow a service view for one synchronous context-backed invocation.
-    /// This legacy API returns R even when finalization fails; owned checked
-    /// execution must use with_checked_view and observe its outer Result.
+    /// Borrow a service view for one synchronous context-backed call. This
+    /// older API returns `R` even when finalization fails; checked execution
+    /// uses `with_checked_view`.
     ///
     /// # Safety
-    /// Native code may call only the supplied callback with valid requests and
-    /// disjoint private staging buffers of the declared size. It must preserve
-    /// the header, opaque pointer and callback, retain no pointers, not reenter
-    /// this owner, and honor the mapping/staging lifetime and separation contracts.
-    /// Guest and native physical addresses must have congruent low four bits
-    /// for the declared SCA16 profile; unsupported native footprints fail explicitly.
+    /// Native code may call only the supplied callback, with valid requests and
+    /// disjoint private staging of the declared size. It must keep the header,
+    /// opaque pointer and callback intact, keep no pointers, not re-enter this
+    /// owner, and respect the mapping and staging lifetimes. Guest and native
+    /// addresses must agree in their low four bits for 16-byte single-copy
+    /// atomicity; unsupported footprints fail.
     pub unsafe fn with_view<R>(&mut self, callback: impl FnOnce(&mut MemoryContextView) -> R) -> R {
         // Legacy low-level contract: callers cannot infer successful finalization
         // from R. Owned checked execution must use with_checked_view instead.
@@ -688,18 +685,18 @@ impl<P: DataPolicy> MemoryThread<P> {
         result
     }
 
-    /// Invoke and finalize one checked memory body before returning its result.
-    /// A finalization failure discards R even when native code already returned.
-    /// Callers retaining fault provenance must copy it during the callback.
+    /// Run and finalize one checked memory body. A finalization failure
+    /// discards `R` even when native code returned; callers needing the fault
+    /// details must copy them during the callback.
     ///
     /// # Safety
-    /// Inherits with_view's complete synchronous native/staging contract. The
-    /// caller retains the actual policy and storage loan throughout.
+    /// As for `with_view`. The caller keeps the policy and storage borrows
+    /// throughout.
     pub unsafe fn with_checked_view<R>(
         &mut self,
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
-        // SAFETY: the caller retains the same owner and native invocation loan.
+        // SAFETY: the caller keeps the owner and the native invocation borrow.
         self.domain.check_data_execution()?;
         let _loan = self.execution_loan()?;
         let (result, finalization) = unsafe { self.invoke_memory_view(callback) };
@@ -828,8 +825,9 @@ impl<P: DataPolicy> MemoryThread<P> {
                     .with_writer(&range, policy, || {
                         self.policy
                             .check(physical.data(raw, part.bytes, part.flags))?;
-                        // SAFETY: exact resolved spans pin stable rights/lifetime;
-                        // staging never aliases guest bytes; checked target is owned.
+                        // SAFETY: the resolved spans pin stable rights and
+                        // lifetime, staging never aliases guest bytes, and the
+                        // target is owned.
                         mutation.attempting();
                         unsafe { access::write_part(pointer, part.bytes, value, target) }
                             .map_err(|_| MemoryStatus::Unsupported)?;

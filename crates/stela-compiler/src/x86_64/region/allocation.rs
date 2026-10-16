@@ -76,8 +76,8 @@ impl LiveRanges {
         Self { before, inputs }
     }
 
-    /// Values read before their first definition. A loop header must preserve
-    /// these original inputs across its internal edge or record a real spill.
+    /// Values read before their first definition. A loop header must keep them
+    /// across its back edge or spill them.
     pub(super) fn inputs(&self) -> ValueMask {
         self.inputs
     }
@@ -99,9 +99,9 @@ impl LiveRanges {
     }
 }
 
-/// Find an actual read of this version, stopping at its next definition. A
-/// canonical-exit-only value has no next read, but dirty final values still
-/// remain required by `LiveRanges` and cannot be discarded.
+/// Find the next read of this version, stopping at its next definition. A value
+/// used only at the exit has no next read, but dirty final values remain live
+/// in `LiveRanges`.
 pub(super) fn next_read(
     effects: &[ValueEffects],
     after: usize,
@@ -421,8 +421,8 @@ pub(super) fn emitter<'a>(
     }
 }
 
-/// Pure, bounded span admission. Memory/helper/control operations remain outside
-/// this candidate, and all callers keep their previous chunking on rejection.
+/// Admit a span of register operations. Memory, helper and control operations
+/// end it; callers keep their chunking when it is rejected.
 pub(super) fn prefix(
     instructions: &[crate::aarch64::Instruction],
 ) -> Result<Option<super::OptimizedRegion>, super::RegionError> {
@@ -474,9 +474,9 @@ pub(super) fn prefix(
     let participants = gprs
         .iter()
         .fold(0, |mask, effect| mask | effect.reads | effect.writes);
-    // Do not split an existing plain ALU+clean-load chunk merely to try a larger
-    // pool. Flag or dead-version spans introduce new work; other plain spans
-    // need actual participant pressure and must end before the existing terminal.
+    // Do not split an existing ALU plus clean-load chunk only to try a larger
+    // pool. Spans with flags or dead versions add work; other plain spans need
+    // register pressure and must end before the existing terminal.
     if !has_flags
         && !killed
         && (analyzed.len() != instructions.len()
@@ -518,8 +518,8 @@ pub(super) fn prefix(
 }
 
 impl Emitter<'_> {
-    /// Establish a stable header only for actual read-before-definition inputs.
-    /// Extra participants use the same demand/pressure policy as ordinary spans.
+    /// Load only the loop inputs that are read before they are defined. Other
+    /// values follow the ordinary demand and pressure policy.
     pub(super) fn preload_loop_inputs(&mut self) -> Vec<(Value, HostGpr)> {
         let plan = self.allocation.as_ref().unwrap();
         let inputs = plan.live.inputs();
@@ -572,8 +572,8 @@ impl Emitter<'_> {
                 .then_some((encoding::pool_host(index), value))
             })
             .collect();
-        // Header inputs beyond actual host capacity require real backing stores
-        // before any parallel move may overwrite their final resident source.
+        // Header inputs beyond the host registers need backing stores before a
+        // parallel move can overwrite their resident source.
         for (host, value) in overflow {
             self.emit(|code| encoding::store(code, host, value.slot()));
             self.output.stats.pressure_stores += 1;

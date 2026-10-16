@@ -3,8 +3,8 @@
 pub const RESIDENT_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-resident-budget-v1";
 
-/// Native code consumes original basic blocks, including internal backedges.
-/// The caller retains this exact context until canonical native return.
+/// Native code counts the basic blocks it completes, including internal back
+/// edges. The caller keeps this context alive until native return.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoopBudget {
@@ -22,7 +22,8 @@ impl LoopBudget {
         self.remaining
     }
 
-    /// Reject an increased counter and return only actual completed blocks.
+    /// Reject a counter that increased, and return the number of completed
+    /// blocks.
     pub fn consumed(self, initial: usize) -> Option<usize> {
         let consumed = (initial as u64).checked_sub(self.remaining)?;
         usize::try_from(consumed).ok()

@@ -78,8 +78,8 @@ pub(crate) unsafe fn run_protected_services(
         .thread
         .take()
         .ok_or_else(|| anyhow::anyhow!("missing actual thread service owner"))?;
-    // This bounded software machine has no asynchronous devices or injection
-    // APIs. The exclusive registry loan spans construction, FFI and settlement.
+    // This software machine has no asynchronous devices or injection; the
+    // registry stays borrowed through construction, the call and settlement.
     let debug = DebugControls {
         halted: false,
         ignore_traps_in_debug: false,

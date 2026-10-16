@@ -29,8 +29,8 @@ pub enum ExceptionLevel {
     El1,
 }
 
-/// Ordinary access intent. Unprivileged LDTR/STTR and UAO need an explicit
-/// instruction-owner adapter; they must not silently become ordinary accesses.
+/// Ordinary access. LDTR/STTR and UAO need their own adapter rather than being
+/// treated as ordinary accesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Access {
     pub kind: AccessKind,
@@ -77,8 +77,8 @@ pub enum FaultKind {
     ExternalAbort,
 }
 
-/// The authoritative CPU/exception owner derives ESR/FAR from this provenance.
-/// Descriptor PA is diagnostic; FAR remains the original access's raw VA.
+/// Where a fault came from, from which the CPU owner derives ESR and FAR. The
+/// descriptor PA is diagnostic; FAR is the access's raw VA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fault {
     pub kind: FaultKind,
@@ -150,7 +150,7 @@ pub struct Translation {
     /// Remaining bytes in this leaf or flat output, before translation is needed.
     contiguous_bytes: u64,
     attributes: Attributes,
-    /// Page permission metadata exists only after a genuine table walk.
+    /// Page permissions, present only after a table walk.
     permissions: Option<Permissions>,
     walk: Option<WalkMetadata>,
 }

@@ -59,8 +59,8 @@ fn run(
     enabled: bool,
     budget: usize,
 ) -> Result<ServiceRunOutcome> {
-    // SAFETY: immutable SVC/RET fixtures have no direct RAM accesses. The
-    // serialized backend exclusively owns allocation and bounded copyout.
+    // SAFETY: SVC/RET code with no RAM access; the backend owns the allocation
+    // and copyout.
     unsafe {
         run_services(
             runtime,

@@ -154,12 +154,12 @@ fn read_input(
     ))
 }
 
-/// Load each image's immediate dependencies, then recursively process them in
-/// command order. The first dependency-processing context supplies its runpath
-/// ancestors, even when the file was loaded earlier as another node's sibling.
-/// Canonical paths deduplicate symlink aliases/cycles.
-/// Search uses only the guest tree and recorded owner-aware LC_RPATH chains.
-/// Unsupported/missing candidates become explicit unresolved edges, never stubs.
+/// Load each image's immediate dependencies, then process them recursively in
+/// load-command order. The first context that processes a dependency supplies
+/// its rpath ancestors, even if the file was already loaded as another image's
+/// sibling. Canonical paths deduplicate symlink aliases and cycles. Only the
+/// guest tree and the recorded LC_RPATH chains are searched; unsupported or
+/// missing candidates become unresolved edges.
 pub fn discover(main: &Path, options: DiscoveryOptions) -> Result<Discovery> {
     let root = options
         .guest_root

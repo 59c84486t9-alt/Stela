@@ -541,8 +541,8 @@ fn actual_register_extensions_and_zero_index_keep_original_inputs() {
             }
         }
     }
-    // ZR must discard its State slot; aliasing the base as index must use its
-    // original value rather than the pending/result effective address.
+    // A ZR index discards its slot, and an index aliasing the base uses the
+    // base's original value, not the effective address.
     for (index, base_value) in [
         (Register::Zero, GUEST_BASE + 32),
         (Register::X(2), GUEST_BASE / 2 + 16),

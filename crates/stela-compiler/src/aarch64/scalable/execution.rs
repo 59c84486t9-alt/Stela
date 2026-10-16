@@ -8,11 +8,10 @@ use alloc::vec::Vec;
 
 pub const SCALABLE_EXECUTION_REQUIREMENTS_VERSION: u32 = 2;
 
-/// Source-derived helper obligation. Known sequences retain literal source
-/// helper spelling; explicitly guarded specializations retain their reviewed
-/// equivalent helper sequence under the named authoritative state guard.
-/// Nested checks, their ordering and conditional semantics belong to the
-/// shared source-control evaluator; they are never expanded into booleans here.
+/// An access check the scalable body requires. Known sequences keep the
+/// pseudocode's helper calls; specializations keep an equivalent sequence under
+/// a named state guard. Nesting and conditions are evaluated by the shared
+/// control evaluator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScalableAccessCheck {
     SveEnabled,
@@ -24,16 +23,14 @@ pub enum ScalableAccessCheck {
     SmeZt0Enabled,
 }
 
-/// Unknown source facts decline checked qualification. An empty known sequence
-/// is reserved for an explicitly audited source that calls no scalable helper.
+/// Unknown requirements fail checked entry. An empty sequence means the body
+/// calls no scalable helper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalableAccessRequirements {
     Known(Box<[ScalableAccessCheck]>),
-    /// Reviewed equivalence specialized to actual FEAT_SME and actual SM=1.
-    /// The consumer must validate both facts before evaluating any contained
-    /// helper. Failure is a conservative Unsupported decline before effects,
-    /// never an inferred source SM=0 trap. The same actual owners stay borrowed
-    /// through the native body and checked finalization.
+    /// An equivalent check sequence valid only with FEAT_SME and PSTATE.SM set.
+    /// The consumer checks both first; if either fails the entry is refused
+    /// before any effect.
     StreamingSmeSpecialization(Box<[ScalableAccessCheck]>),
     Unqualified,
 }

@@ -26,9 +26,8 @@ impl SourceMutationTracker {
     }
 }
 
-/// Constructed only immediately after an actual tracked byte effect. Private
-/// fields bind the original backing/System and contiguous before/after epochs.
-/// It is not Clone and copied progress cannot replace it.
+/// Created only right after a tracked byte write. Its private fields bind the
+/// backing, system and the epochs before and after. Not Clone.
 pub(crate) struct SourceWriteReceipt {
     backing: Arc<MemoryBacking>,
     system: Arc<()>,
@@ -206,8 +205,7 @@ impl MemorySystem {
         Ok(guard)
     }
 
-    /// Serialize the exact source read against all admitted byte writers.
-    /// The closure is memory-owned raw RAM access, never a caller producer.
+    /// Serialize the source read against every admitted byte writer.
     pub(in crate::memory) fn read_instruction_source<T>(
         &self,
         backing: &Arc<MemoryBacking>,

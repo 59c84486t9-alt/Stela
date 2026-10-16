@@ -162,8 +162,8 @@ fn add(fpcr: u32, left: u32, right: u32) -> u32 {
     }
 }
 
-/// EBF16 is absent from the declared profile. Each classic stage rounds
-/// independently; only AH's default-NaN sign is read from the supplied FPCR.
+/// FEAT_EBF16 is off: each stage rounds separately, and only FPCR.AH (for the
+/// default NaN sign) is read.
 pub fn dot_add(fpcr: u32, addend: u32, left: [u16; 2], right: [u16; 2]) -> u32 {
     let first = multiply(fpcr, left[0], right[0]);
     let second = multiply(fpcr, left[1], right[1]);

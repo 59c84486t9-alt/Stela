@@ -66,11 +66,11 @@ pub(crate) enum OwnedStop {
         instruction: stela_compiler::block::PointerAuthentication,
         target: GuestAddress,
     },
-    /// No Ready/retry grant: delivery requires a separately reviewed consumer.
+    /// A fault is pending; delivering it is not implemented.
     FaultPending(OwnedMemoryFault),
     /// Original synchronous trap is settled, but no Darwin callback is exposed.
     TrapPending(stela_compiler::block::SynchronousTrap),
-    /// All retained observations survive; actual authority is poisoned.
+    /// Every observation is kept and the PE is marked failed.
     Indeterminate(String),
 }
 
@@ -93,7 +93,7 @@ pub(crate) struct OwnedRunOutcome {
     pub service_events: darwin_services::TrapServiceEvents,
 }
 
-/// Diagnostic metadata only; cannot mint entry/retirement/source authority.
+/// Diagnostic metadata only.
 #[derive(Debug)]
 // Hosted process reports read every retained observation.
 #[cfg_attr(not(feature = "std"), allow(dead_code))]
@@ -173,8 +173,7 @@ pub(crate) enum NativeObservation {
 }
 
 impl BlockRuntime {
-    /// Sole proposed adopted-PE entry. B is sealed to the concrete owner below.
-    /// A request has no mapping, ThreadState, dispatcher, callbacks or permit.
+    /// Run a request on the owned PE. `B` is sealed to the concrete backends.
     pub(crate) fn run_owned<B: provider::Owner>(
         &mut self,
         loan: SystemExecutionLoan<'_, B>,
@@ -312,9 +311,9 @@ impl BlockRuntime {
                     &mut settled_prefixes,
                 ) {
                     Ok(m0::M0Step::Committed) => {
-                        // The one-word write carrier has returned, settled and
-                        // dropped its original source/native/outer loans. Retire
-                        // only derived snapshots made stale by real source writes.
+                        // The write block has returned and released its
+                        // borrows; now drop only the snapshots made stale by
+                        // its source writes.
                         if last_m0_write_observation
                             .as_ref()
                             .is_some_and(m0::M0WriteObservation::modified_instruction_ram)
@@ -395,9 +394,8 @@ impl BlockRuntime {
                     Err(error) => break OwnedStop::Indeterminate(error.to_string()),
                 }
             }
-            // The immutable typed source profile selects the concrete consumer;
-            // it grants no CPU/domain access. The sealed M0 backend still must
-            // lend its original resources and genuine control/source witnesses.
+            // The source profile selects the consumer; the M0 backend still
+            // lends its own resources and checks.
             if matches!(
                 self.profile,
                 BlockProfile::El1M0IntegerV1 | BlockProfile::El1PlatformV1
@@ -487,7 +485,7 @@ impl BlockRuntime {
     }
 }
 
-/// Drop never repairs authority or discards the native/finalizer failure.
+/// Dropping it never repairs state or discards a native or finalizer failure.
 struct Active<'active, 'run, B> {
     pe: &'active mut RetainedResources<'run, B>,
     outer: Option<MemoryExecutionLoan>,
@@ -517,8 +515,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     return Err(error);
                 }
             };
-        // Preserve the actual return/fault/finalizer record before any fallible
-        // carrier/source qualification. A validation error cannot erase it.
+        // Record the return, fault or finalizer result before any fallible
+        // validation, so an error cannot erase it.
         *observation = Some(result.clone());
         // `invoke` wraps ALL of checked_memory::call, including outer Result,
         // ContextLoan restoration and provider finalization. outer remains live.
@@ -547,9 +545,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 raw_memory,
                 raw_returned_carrier,
             } => {
-                // No carrier authorizes success after a failed finalizer. The
-                // actual old PC is preserved unless an exact original fault PC
-                // can still be established; either way Drop poisons this PE.
+                // A failed finalizer never yields success. The old PC is kept
+                // unless the fault PC can still be determined; either way Drop
+                // marks the PE failed.
                 if let Some(fault) = original_fault {
                     bound.validate_fault(&fault)?;
                     prefixes.push(bound.prefix(Some(fault.pc), fault.completed_bytes)?);
@@ -615,10 +613,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             .authority
                             .enter_system(&ConsumerKey(()), self.attempt)
                             .map_err(|()| anyhow::anyhow!("helper entry authority failed"))?;
-                        // Publication helpers use the real canonical service
-                        // loan, which rejects native_loans>0. Only now, with
-                        // actual prefix/terminal PC settled and SystemActive,
-                        // may the old mapping exclusion be released.
+                        // Publication helpers need the memory service, which
+                        // refuses while native calls are active. Release the
+                        // mapping exclusion only now, with PC settled.
                         if helper.needs_publication() {
                             self.outer.take();
                         }
@@ -670,7 +667,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                         anyhow::anyhow!("LR retirement authority failed")
                                     })?;
                                 effect.commit(&mut self.pe.thread.registers, self.pe.system)?;
-                                // A staged candidate becomes an actual service observation only after commit.
+                                // A staged effect is recorded as an event only
+                                // after it commits.
                                 accounting.pointer_authentication_events.push(
                                     crate::blocks::PointerAuthenticationEvent {
                                         instruction,
@@ -725,9 +723,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 continuation,
                                 event,
                             } => {
-                                // This actual same-call helper completed even
-                                // if later requalification fails. Retain its
-                                // observation before any fallible transition.
+                                // The helper completed even if later validation
+                                // fails; record it before any fallible step.
                                 let poisoned_transfer = event.poisoned_transfer();
                                 event.record(accounting);
                                 self.pe
@@ -842,8 +839,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 debug
                                     .qualify_halted_boundary()
                                     .map_err(|e| anyhow::anyhow!("Halt gate: {e:?}"))?;
-                                // EndOfInstruction(Exception): the actual instruction PC remains
-                                // the restart source, and the sole phase becomes Halted. No Ready.
+                                // The instruction PC stays the restart point
+                                // and the PE becomes halted.
                                 self.pe
                                     .authority
                                     .finish_halt(&ConsumerKey(()), self.attempt)
@@ -861,8 +858,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             .authority
                             .enter_system(&ConsumerKey(()), self.attempt)
                             .map_err(|()| anyhow::anyhow!("trap entry authority failed"))?;
-                        // Non-memory Darwin services retain native mapping
-                        // exclusion as well as this same actual SystemActive PE.
+                        // Darwin services that do not touch memory still keep
+                        // native mappings excluded.
                         let continuation = match self.pe.backend.complete_trap(
                             &trap,
                             self.pe.system,
@@ -956,7 +953,8 @@ impl<B> Drop for Active<'_, '_, B> {
         if !self.closed {
             self.pe.authority.poison();
         }
-        // outer drops only after qualified closure or actual failstop poison.
+        // `outer` is dropped only after successful completion or after the PE
+        // is marked failed.
     }
 }
 

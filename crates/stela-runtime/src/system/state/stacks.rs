@@ -22,8 +22,8 @@ impl InactiveStacks {
         Self { values }
     }
 
-    /// Additional fresh banks are explicit inputs. An absent bank is None;
-    /// initialization never creates an architectural zero for missing storage.
+    /// Additional banks are explicit inputs; an absent bank is None, never
+    /// zero.
     pub(super) fn initialize_higher(&mut self, el2: Option<u64>, el3: Option<u64>) {
         self.values[StackBank::El2.index()] = el2;
         self.values[StackBank::El3.index()] = el3;
@@ -72,8 +72,8 @@ impl InactiveStacks {
         Ok(())
     }
 
-    /// Every failure precedes mutation. There is one actual active SP exchange,
-    /// including lower-to-higher, higher-to-lower and higher-to-higher paths.
+    /// Every failure happens before any change, and there is exactly one
+    /// active-SP exchange on every path between lower and higher ELs.
     pub(super) fn select(
         &mut self,
         active: StackBank,

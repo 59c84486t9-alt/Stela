@@ -28,7 +28,7 @@ fn snapshot() -> Arc<Snapshot> {
     )
 }
 fn controls(ids: &Arc<Snapshot>) -> ProcessEntryControls {
-    // SAFETY: fresh local declared controls; no entry permission or live PE adoption.
+    // SAFETY: locally declared test controls.
     unsafe {
         ProcessEntryControls::fresh_software_link_register_pauth(
             ids,
@@ -90,7 +90,8 @@ fn fresh_lr_scope_rejects_actual_halted_or_step_controls() {
             },
         ),
     ] {
-        // SAFETY: fresh local declared controls; constructor must decline this profile.
+        // SAFETY: locally declared test controls, which the constructor must
+        // refuse.
         assert!(
             unsafe {
                 ProcessEntryControls::fresh_software_link_register_pauth(

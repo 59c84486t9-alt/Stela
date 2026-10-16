@@ -60,7 +60,7 @@ impl Load {
             && self.displacement % (1 << LOAD_SCALE) == 0
     }
 
-    /// The declared implementation chooses the permitted UNDEF constraint.
+    /// The implementation takes the permitted UNDEFINED choice.
     pub const fn undefined_overlap(self) -> bool {
         self.writeback && self.base == self.destination && self.base != REGISTER_MASK as u8
     }

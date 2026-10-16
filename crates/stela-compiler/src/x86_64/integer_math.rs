@@ -219,9 +219,9 @@ fn bind(code: &mut [u8], displacement: usize, target: usize) {
     code[displacement..displacement + 4].copy_from_slice(&offset.to_le_bytes());
 }
 
-/// RAX and RCX hold the original operands. x86 DIV/IDIV would fault on a zero
-/// divisor and IDIV on MIN/-1. Arm instead returns zero or the wrapped MIN.
-/// Negating for divisor -1 handles that overflow without issuing IDIV.
+/// RAX and RCX hold the operands. x86 DIV/IDIV fault on a zero divisor, and
+/// IDIV also on MIN / -1, where Arm returns zero or the wrapped MIN. A divisor
+/// of -1 is handled by negation instead of IDIV.
 fn divide(code: &mut Vec<u8>, signed: bool, width: Width) {
     if width == Width::W32 {
         code.extend([0x89, 0xc0]); // mov eax,eax: clear discarded high dividend

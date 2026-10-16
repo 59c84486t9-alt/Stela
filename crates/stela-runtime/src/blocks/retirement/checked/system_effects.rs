@@ -31,8 +31,8 @@ pub(crate) struct SystemEffectObservation {
     pub(crate) failure: Option<String>,
 }
 
-/// Poison the original owner BEFORE the real RAM/source loans release on a
-/// reached effect or settlement failure. This stores no alternate phase/state.
+/// Marks the PE failed before the RAM and source borrows are released if the
+/// effect or settlement fails.
 struct RetainedRamCompletion<'active, 'resources> {
     authority: &'active mut PeExecutionAuthority,
     prepared: PreparedRamDsb<'resources>,
@@ -83,8 +83,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 bound.source.len(),
                 instruction,
             );
-            // End the ORIGINAL native session and mutable context loan before
-            // splitting completion resources from the same retained backend.
+            // End the native session and the mutable context borrow before
+            // splitting completion resources from the backend.
             {
                 let provider::El1ExecutionResources {
                     sources,
@@ -221,10 +221,10 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 report.completion = Some(result);
             }
             let next = next?;
-            // A successful apply has fully qualified the reached completion;
-            // no additional fallible step precedes the sole PC store. An apply
-            // failure after MFENCE retains Completed and blocks replay instead.
-            // Later owner failures preserve the actual committed PC/prefix.
+            // A successful apply validated the completion, so nothing fallible
+            // precedes the PC store. If apply fails after the MFENCE, the
+            // effect stays completed and replay is blocked; later failures keep
+            // the committed PC and prefix.
             self.pe.thread.pc = next;
             if let Some(report) = observation {
                 report.actual_continuation = Some(next);

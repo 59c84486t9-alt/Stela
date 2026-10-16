@@ -103,7 +103,7 @@ pub struct Operand {
 }
 
 impl Operand {
-    /// Supply only the exact June-reviewed canonical follower requirements.
+    /// MOVPRFX follower requirements from the specification.
     #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,
@@ -138,8 +138,8 @@ impl Operand {
         Ok(Some(PrefixRequirement::Vector {
             destination: self.destination,
             predicated,
-            // Include the explicit source, excluding the implicit old D.
-            // Exact decoder/self equality checked its register range first.
+            // Include the explicit source but not the implicit old destination.
+            // The decoder already checked the register range.
             other_vector_sources: 1_u32 << source,
         }))
     }

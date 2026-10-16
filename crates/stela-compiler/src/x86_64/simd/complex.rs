@@ -78,8 +78,8 @@ fn prepare_right(code: &mut Vec<u8>, operand: &Operand) {
             read_numerical_vector(code, operand.shape, source, RIGHT);
         }
         Source::Indexed { register, index } => {
-            // Select the whole original complex pair before any numerical
-            // classification. Every other indexed component is irrelevant.
+            // Select the whole complex pair before classification; the other
+            // indexed components are unused.
             read_vector(code, register, RIGHT);
             match operand.format {
                 Format::Half => {
@@ -229,8 +229,8 @@ pub(in crate::x86_64) fn emit(
     }
     prepare_sources(code, operand);
     if operand.format == Format::Half {
-        // The child owns Half controls, normal guards, original Vd snapshot,
-        // sign rotation, its lane frame and the sole architectural commit.
+        // The half-precision path handles its own controls, guards, Vd
+        // snapshot, rotation and commit.
         half::emit(code, operand, pc, target);
         return;
     }

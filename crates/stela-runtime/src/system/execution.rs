@@ -78,8 +78,8 @@ impl EntryBoundary {
     }
 }
 
-/// A runtime-validated original terminal instruction. External consumers cannot
-/// construct this from artifact metadata or replace freshly decoded operands.
+/// A terminal instruction validated by the runtime. Callers cannot construct
+/// one from artifact metadata.
 #[derive(Debug)]
 pub struct Boundary {
     source: EntryBoundary,
@@ -206,9 +206,9 @@ fn tag_cause_report(cause: &tag_transfer::Cause<MemoryStatus>) -> serde_json::Va
     }
 }
 
-/// A synchronous Rust dispatch seam. The actual BlockRuntime constructs the
-/// boundary and commits PC only after successful completion. A failure preserves
-/// its source PC while retaining any already committed effects in `Failure`.
+/// Synchronous dispatch from the block runtime, which sets PC only after
+/// successful completion. A failure keeps its source PC and records any
+/// committed effects.
 pub trait Dispatcher {
     fn address_space(&self) -> u64;
     /// Validate authoritative PSTATE/control state before any native prefix.
@@ -289,14 +289,12 @@ pub struct SendEventServices<'a> {
 /// The thread is the same physical writer/tag/reservation domain used by other
 /// guest memory accesses.
 pub trait Backend: ExceptionServices<Error = String> {
-    /// Check the same authoritative CPU/control identity used by completion.
-    /// `source` is the immutable bounded window starting at boundary.entry().
-    /// Use the shared parser to identify the consumed prefix and authorize every
-    /// required guest feature; the context-independent classifier is not feature
-    /// availability proof. The borrow ends with this call and must not be copied
-    /// into another mutable source owner. This performs no architectural effect.
-    /// Context-backed memory extensions
-    /// must also refresh and validate their policy from this SystemState here.
+    /// Check against the same CPU and control identity used by completion.
+    /// `source` is the immutable window starting at `boundary.entry()`. Use the
+    /// shared parser to find the prefix and check every feature it needs (the
+    /// context-free classifier does not prove availability). The borrow ends
+    /// with this call. No architectural effect. Context-backed memory must also
+    /// refresh and validate its policy from the system state here.
     fn validate_entry(
         &mut self,
         boundary: &EntryBoundary,
@@ -304,7 +302,7 @@ pub trait Backend: ExceptionServices<Error = String> {
         system: &SystemState,
         registers: &GuestState,
     ) -> Result<(), String>;
-    /// One opaque scoped loan from actual controls/SystemState and same thread.
+    /// One scoped borrow from the controls, the system state and this thread.
     fn prepare_process_memory<'run>(
         &'run mut self,
         _boundary: &EntryBoundary,
@@ -329,10 +327,10 @@ pub trait Backend: ExceptionServices<Error = String> {
     ) -> Result<TagSnapshot, String>;
     fn tag_memory(&mut self) -> Result<&mut MemoryThread<MemoryControls>, String>;
 
-    /// The profile comes from the same authoritative source/control owner used
-    /// by validate_entry. The endpoint is also used by exception-return event
-    /// publication and the local monitor binding; a second event bank is invalid.
-    /// The default explicitly declines availability for existing non-event backends.
+    /// The event services, with the profile from the same owner as
+    /// `validate_entry`. The endpoint is shared with exception-return event
+    /// publication and the local monitor binding. By default events are
+    /// unavailable.
     fn send_event_services(
         &mut self,
         _boundary: &Boundary,
@@ -496,9 +494,8 @@ impl<'a, B: Backend> Execution<'a, B> {
             if let Err(fault) =
                 tag_execution::complete_memory(operand, registers, snapshot_memory.transfer, memory)
             {
-                // This is the common selected reservation policy, not a mandatory
-                // TakeException effect. Retain the original fault even if the
-                // settlement service itself fails.
+                // The selected reservation policy (not a TakeException effect).
+                // Keep the fault even if settlement fails.
                 let status = match &fault.cause {
                     tag_transfer::Cause::StackAlignment { .. }
                     | tag_transfer::Cause::DataAlignment { .. } => Some(MemoryStatus::Alignment),

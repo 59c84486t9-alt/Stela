@@ -33,9 +33,9 @@ fn run(
     enabled: bool,
     stop: u64,
 ) -> Result<ServiceRunOutcome> {
-    // SAFETY: immutable SVC/RET fixtures access no guest data. This raw process
-    // owns no guest shared-region attachment; private RAM does not attach one.
-    // The serialized absence service consumes only a numeric destination.
+    // SAFETY: SVC/RET code with no guest data access. The process has no
+    // shared-region attachment (private RAM does not create one), and the
+    // service reads only a numeric destination.
     unsafe {
         run_services(
             runtime,
@@ -243,7 +243,7 @@ fn stop_budget_resume_and_cache_preserve_actual_absence_results() -> Result<()> 
     assert_eq!(first.shared_region_services.len(), 1);
     let after_first = expected_error(&initial, BASE + INSTRUCTION_BYTES);
     assert_state(&state, &after_first);
-    // The second actual SVC receives the preceding errno as its destination.
+    // The second SVC receives the previous errno as its destination.
     let second = run(&mut runtime, &mut state, &mut memory, 2, true, STOP)?;
     assert_eq!(second.execution.reason, StopReason::StopAddress);
     assert_eq!(second.execution.blocks_executed, 2);

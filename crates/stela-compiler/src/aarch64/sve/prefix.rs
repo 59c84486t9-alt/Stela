@@ -18,7 +18,7 @@ pub enum PrefixRequirement {
     Forbidden,
     Vector {
         destination: u8,
-        /// None permits only an unpredicated prefix.
+        /// None allows only an unpredicated prefix.
         predicated: Option<PredicatedPrefixRequirement>,
         /// Explicit vector sources other than the implicit old destination.
         other_vector_sources: u32,
@@ -59,9 +59,9 @@ fn allocated_element(element: ElementSize) -> bool {
     )
 }
 
-/// Validate operands and the predictable-pair requirements for an allocated
-/// follower. Malformed metadata remains explicit; the caller must not convert
-/// missing source or unsupported decoding into a known pair violation.
+/// Validate the operands of an allocated follower against its prefix
+/// requirements. Malformed metadata is reported as such, never as a pair
+/// violation.
 pub fn validate(
     prefix: DecodedPrefix,
     requirement: PrefixRequirement,

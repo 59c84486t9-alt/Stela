@@ -77,7 +77,7 @@ fn rounds_baseline(code: &mut Vec<u8>, operand: &Operand) {
         Rotate32::Left.emit(code, R9D, HASH_A_ROTATE);
         Add.register(code, e, R9D);
         Add.register(code, e, R10D);
-        // No guest state is written until every original message lane is read.
+        // No guest state is written until every message lane is read.
         Add.state(code, e, operand.right, lane);
         Rotate32::Left.emit(code, b, HASH_B_ROTATE);
         state = [e, a, b, c, d];

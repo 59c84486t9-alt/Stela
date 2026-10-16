@@ -200,8 +200,8 @@ pub fn plan_library(data: &[u8]) -> Result<LoadPlan> {
     Ok(plan_kind(data, macho::MH_DYLIB)?.image)
 }
 
-/// Plan a thin classic arm64/arm64e dynamic linker with one reviewed kernel
-/// thread-entry descriptor. This does not map, rebase or execute dyld.
+/// Plan a thin arm64/arm64e dynamic linker with one thread-entry command.
+/// Nothing is mapped, rebased or run.
 pub fn plan_dynamic_linker(data: &[u8]) -> Result<DynamicLinkerPlan> {
     let planned = plan_kind(data, macho::MH_DYLINKER)?;
     Ok(DynamicLinkerPlan {

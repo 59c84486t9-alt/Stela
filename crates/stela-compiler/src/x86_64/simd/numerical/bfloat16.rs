@@ -62,8 +62,9 @@ pub(in crate::x86_64) fn quantize_bfloat_packed(code: &mut Vec<u8>) {
     packed(code, Host::AddDword, RESULT, TEMPORARY);
 }
 
-/// Round Single-shaped EAX bits; OR original discarded bits into R10D.
-/// ECX/EDX are scratch. XMMs, state, stack and MXCSR remain untouched.
+/// Round the single-precision bits in EAX to BF16, ORing the discarded bits
+/// into R10D. ECX/EDX are scratch; XMM registers, state, stack and MXCSR are
+/// untouched.
 pub(in crate::x86_64) fn quantize_bfloat_scalar_bits(code: &mut Vec<u8>) {
     code.extend(MOV_EDX_EAX);
     code.extend(AND_EDX_IMM32);

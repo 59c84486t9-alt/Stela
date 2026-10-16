@@ -31,8 +31,8 @@ fn active(predicate: &[u8], byte: usize) -> bool {
     predicate[byte / BITS_PER_BYTE] & (1 << (byte % BITS_PER_BYTE)) != 0
 }
 
-/// Exactly the twenty-eight canonical integer conversion shapes.
-/// Integer H pairs only with Half; W/X pair with IEEE Half/Single/Double.
+/// The twenty-eight integer conversion shapes: an H integer pairs only with
+/// half precision, W and X with half, single and double.
 fn admitted_integer(kind: Kind) -> bool {
     match kind {
         Kind::FromInteger {
@@ -137,8 +137,8 @@ fn integer_lane(kind: Kind, fpcr: u32, bits: u64) -> Result<Outcome, CompletionE
     if let Kind::ToInteger { destination, .. } = kind
         && destination.signed
     {
-        // FPToFixed first narrows to its declared integer width. Extend then
-        // sign-extends the result through the complete max-width SVE slot.
+        // FPToFixed narrows to the integer width first, then the result is
+        // sign-extended across the full SVE element.
         let shift = u64::BITS - destination.width.bits();
         outcome.bits = (((outcome.bits << shift) as i64) >> shift) as u64;
     }

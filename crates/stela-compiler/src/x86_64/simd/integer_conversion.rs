@@ -487,9 +487,9 @@ pub(in crate::x86_64) fn javascript(
         format: Format::Double,
         frac_bits: 0,
     };
-    // A normal input whose truncated integer fits signed32 agrees with JS
-    // coercion. Other inputs exit unchanged at the original FJCVTZS word;
-    // its exact core owns modulo, exceptional values and zero distinctions.
+    // A normal input whose truncated value fits in 32 bits gives the JavaScript
+    // result directly. Other inputs exit to software completion of FJCVTZS,
+    // which handles wrapping, special values and zeros.
     to_integer(code, &operand, IntegerRounding::TowardZero, pc);
     // commit_inexact leaves only fresh IXC in ECX. Accumulated FPSR.IXC must
     // not clear Z for a later exact input, including a discarded WZR result.

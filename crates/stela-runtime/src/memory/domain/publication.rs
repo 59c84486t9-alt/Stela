@@ -28,39 +28,35 @@ impl core::fmt::Display for PublicationFault {
 impl core::error::Error for PublicationFault {}
 
 impl MemorySystem {
-    /// Publish private host bytes to physical backing, invalidating reservations.
+    /// Publish private host bytes to the backing, invalidating reservations.
     ///
-    /// Logical guest permission and whole-operation checks belong to the caller.
-    /// A host publisher may therefore update a guest read-only view when it owns
-    /// writable host publication authority. Every actual fragment invalidates
-    /// reservations, including same-value writes and ABA updates through aliases.
-    /// Bounds, host rights and recipe failures decline before any byte is written.
-    /// Later domain/access errors report the prefix actually published; this is
-    /// a host copyout API, not a whole guest-instruction transaction.
-    /// Empty publication still validates and binds physical coherence ownership.
+    /// Guest permissions and whole-operation checks are the caller's, so a host
+    /// publisher with writable rights may update a guest read-only view. Every
+    /// fragment invalidates reservations, including same-value writes and ABA
+    /// updates through aliases. Bounds, rights and recipe failures are reported
+    /// before any byte is written; later errors report the published prefix.
+    /// This is a host copyout, not a guest-instruction transaction. An empty
+    /// publication still validates and binds the coherence owner.
     ///
     /// # Safety
-    /// The caller must own authority to publish to this backing and prevalidate
-    /// any higher-level operation. The complete host extent must remain live,
-    /// pinned, readable and writable coherent Normal-WB RAM throughout the call.
-    /// Source bytes must be private and disjoint from all shared guest RAM. No
-    /// Rust references may alias the destination. All physical writers and
-    /// reservations must use this same system and backing identity. Do not
-    /// reenter this system or call while holding any of its monitor gates.
-    /// Native host faults require a separate resumable adapter; this API does
-    /// not catch them.
+    /// The caller may publish to this backing and has validated the operation.
+    /// The whole extent stays live, pinned, readable and writable coherent
+    /// write-back RAM for the call. The source bytes are private and disjoint
+    /// from shared guest RAM, and no Rust reference aliases the destination.
+    /// Every physical writer and reservation uses this system and backing. Do
+    /// not re-enter the system or call while holding a monitor gate. Host
+    /// faults are not caught.
     pub unsafe fn publish(
         &self,
         backing: &Arc<MemoryBacking>,
         offset: usize,
         bytes: &[u8],
     ) -> Result<(), PublicationFault> {
-        // SAFETY: identical caller-owned publication contract below.
+        // SAFETY: the same contract as `publish_tracked`.
         unsafe { self.publish_tracked(backing, offset, bytes, None) }
     }
 
-    /// Same physical publication, retaining real source mutation receipts for
-    /// the original canonical write session. No copied observation is accepted.
+    /// The same publication, recording source writes for the write session.
     pub(in crate::memory) unsafe fn publish_tracked(
         &self,
         backing: &Arc<MemoryBacking>,

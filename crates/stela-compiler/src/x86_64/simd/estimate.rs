@@ -300,8 +300,8 @@ fn integer_estimate(code: &mut Vec<u8>, sqrt: bool) {
     packed(code, Host::ConvertPackedSingleToDword, RESULT, RESULT);
 }
 
-/// RCP has no FP exceptions. Its bounded error makes floor(q') either r or
-/// r-1; the exact odd product A*(2*r0+1) selects the required increment.
+/// RCP raises no exceptions. Its error bound makes floor(q') either r or r - 1;
+/// the exact odd product A*(2*r0+1) decides the increment.
 fn corrected_reciprocal(code: &mut Vec<u8>, target: TargetCpu) {
     packed(code, Host::ConvertPackedDwordToSingle, RESULT, DENOMINATOR);
     packed(code, Host::ReciprocalPackedSingle, RESULT, RESULT);

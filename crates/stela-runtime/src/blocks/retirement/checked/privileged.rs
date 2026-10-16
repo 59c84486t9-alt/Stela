@@ -41,8 +41,8 @@ const VECTOR_ALIGNMENT_MASK: u64 = 0x7ff;
 const VECTOR_LOWER_A64: u64 = 0x400;
 const ONE_SOURCE_WORD_BYTES: usize = size_of::<u32>();
 
-/// Actual lower-EL control storage for this fresh producer. No MDSCR or debug
-/// view is retained here: those come from the canonical lifecycle resource.
+/// Lower-EL control storage. MDSCR and the debug view come from the debug
+/// lifecycle instead.
 pub(super) struct LowerElControls {
     pub snapshot: Arc<Snapshot>,
     pub sctlr_el1: u64,
@@ -73,8 +73,7 @@ pub(crate) enum Committed {
     HaltPublished,
     FieldsUpdated,
 }
-/// Only this concrete backend constructs completions, and only the canonical
-/// Active consumes them into actual ThreadState PC/phase while all loans live.
+/// Created only by this backend and consumed by the consumer into PC and phase.
 pub(crate) enum SystemOutcome {
     NoEffect(anyhow::Error),
     Indeterminate {
@@ -90,7 +89,7 @@ pub(crate) enum SystemOutcome {
 }
 
 impl<'pe> PrivilegedOwner<'pe> {
-    /// Descriptive receipt from the actual published output, never CTI authority.
+    /// The last CTI output recorded, for diagnostics.
     pub(crate) fn last_cti_receipt(&self) -> Option<(u64, usize)> {
         self.last_cti_receipt
     }
@@ -102,11 +101,11 @@ impl<'pe> PrivilegedOwner<'pe> {
     }
 
     /// # Safety
-    /// Fresh declared-software PE only. memory/domain/producers are the actual
-    /// original exclusive resources of the same PE and complete producer universe;
-    /// lower owns the original lower control storage and same immutable Snapshot.
-    /// Retain this producer for the whole executable lifetime, with no alternate
-    /// native entry, CPU/control copies, raw producer writers or adoption/reset.
+    /// For a new software PE only. `memory`, `domain` and `producers` are that
+    /// PE's exclusive resources and its complete set of event producers;
+    /// `lower` owns its lower-EL controls and identification snapshot. Keep the
+    /// backend for the PE's whole lifetime, with no other native entry, control
+    /// copies, producer writers, adoption or reset.
     pub(super) unsafe fn fresh_software(
         address_space: u64,
         lower: LowerElControls,
@@ -199,8 +198,8 @@ impl<'pe> PrivilegedOwner<'pe> {
         self.producers
             .check_registry()
             .map_err(|e| anyhow::anyhow!("actual SError universe: {e:?}"))?;
-        // The closed actual domain owns Debug only, and actual controls below
-        // exclude virtual/delegated SError routes. No placeholder pending query.
+        // Only the debug producer exists, and the controls exclude virtual and
+        // delegated SError routing.
         let context = self.halting_context(system, debug);
         match halting::pending_serror_source(context) {
             halting::PendingSError::Physical => {}
@@ -283,8 +282,8 @@ impl<'pe> PrivilegedOwner<'pe> {
         Ok(())
     }
 
-    /// All preparation and source/control/storage/resource checks precede first
-    /// architectural effects. No mutable PC/authority is exposed to this method.
+    /// Every preparation and check precedes the first architectural effect. The
+    /// method never sees PC.
     pub(super) fn complete_system(
         &mut self,
         bound: &BoundSource<'_>,
@@ -351,8 +350,8 @@ impl<'pe> PrivilegedOwner<'pe> {
         debug: &mut DebugMachine,
         call: Call,
     ) -> SystemOutcome {
-        // Borrowed selector intent is consumed into local values before the
-        // original SystemState is mutated. Saved SPSR is read after real prefix.
+        // Copy the selector inputs into locals before mutating the system
+        // state. SPSR is read after the prefix.
         let selected = (|| -> anyhow::Result<_> {
             let higher = system
                 .higher_el()
@@ -451,11 +450,11 @@ impl<'pe> PrivilegedOwner<'pe> {
             bank.set_esr(esr);
             bank.set_spsr(saved);
             bank.set_elr(preferred);
-            // FAR/HPFAR are ARBITRARY for these calls: retain actual old bytes.
+            // FAR/HPFAR are UNKNOWN for these calls, so keep the old values.
             committed = Committed::ExceptionBankWritten;
-            // Canonical Active stores the architectural target PC before actual
-            // destination/source/domain finalization. Late failure must retain
-            // the entry bank/SP prefix and target PC, never become a refusal.
+            // The consumer stores the target PC before the finalizers run. A
+            // late failure must keep the entry bank, SP and target PC; it is
+            // not a refusal.
             Ok(())
         })();
         match result {
@@ -495,8 +494,8 @@ impl<'pe> PrivilegedOwner<'pe> {
         };
         let mut committed = Committed::None;
         let result = (|| -> anyhow::Result<()> {
-            // The typed output/target ledger is actual domain state and survives
-            // every subsequent failure. There is no successful CTI callback.
+            // The CTI output ledger is domain state and survives any later
+            // failure.
             let cti = self
                 .producers
                 .publish_cross_halt(cross)
@@ -520,8 +519,8 @@ impl<'pe> PrivilegedOwner<'pe> {
                 .publish_halt_instruction()
                 .map_err(|e| anyhow::anyhow!("actual halt publication: {e:?}"))?;
             committed = Committed::HaltPublished;
-            // Complete actual producer registry has only Debug producers; HCR
-            // virtual-pending/AMO and SCR delegated SError controls were refused.
+            // Only debug producers are registered; HCR virtual-pending/AMO and
+            // SCR delegated-SError controls were refused.
             self.producers
                 .check_registry()
                 .map_err(|e| anyhow::anyhow!("actual SError universe: {e:?}"))?;
@@ -630,9 +629,9 @@ impl provider::Owner for PrivilegedOwner<'_> {
             _ => None,
         };
         if let Some(el) = target_el {
-            // This is cache preparation only. Actual selection/target bank/control
-            // and same-runtime loaded source are requalified with original GPRs
-            // after the native source carrier, before architectural prefix effects.
+            // Cache preparation only. The selection, target bank, controls and
+            // loaded source are re-checked against the GPRs after the native
+            // block, before any architectural effect.
             if let Ok(bank) = system.exception_registers(el) {
                 let target = GuestAddress(
                     (bank.vbar() & !VECTOR_ALIGNMENT_MASK).wrapping_add(VECTOR_LOWER_A64),
@@ -679,9 +678,8 @@ impl provider::Owner for PrivilegedOwner<'_> {
         self.domain
             .check_execution()
             .map_err(|e| anyhow::anyhow!("actual immediate native domain: {e:?}"))?;
-        // Exact one-word SystemV1 mapping returns only the original terminal;
-        // no guest RAM, ExecutionContext or checked-memory callback is used by
-        // this distinct compiler ABI. Actual Active retains source/RX/outer.
+        // The one-word mapping returns only the terminal; this ABI uses no
+        // guest RAM, execution context or memory callback.
         let exit = match unsafe { bound.block.mapping.call_block(registers) } {
             Ok(exit) => exit,
             Err(error) => {
@@ -697,8 +695,7 @@ impl provider::Owner for PrivilegedOwner<'_> {
                 });
             }
         };
-        // Retain actual native bits even if source/control/domain finalization
-        // cannot certify them. No saved observation is accepted as authority.
+        // Keep the native result even if finalization cannot validate it.
         let finalized = self
             .domain
             .check_execution()

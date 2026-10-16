@@ -76,8 +76,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             "EL1 register actual PC differs before call"
         );
         {
-            // One whole-backend split. Never reborrow B until every original
-            // field/session/source loan ends; original outer Active stays armed.
+            // Split the backend once; do not borrow `B` again until these
+            // borrows end.
             let provider::El1ExecutionResources {
                 sources,
                 platform: _,
@@ -112,8 +112,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 report,
                 settlement_failure: None,
             });
-            // All actual reached observations already belong to output before
-            // any fallible source/postcheck/finalization/settlement validation.
+            // Every observation is in the output before any fallible
+            // validation.
             let settled = (|| -> anyhow::Result<_> {
                 anyhow::ensure!(valid, "EL1 register reached call is not qualified");
                 let (next_pc, kind) =
@@ -141,9 +141,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     retained.authority.native_attempt(self.attempt),
                     "EL1 register original NativeActive attempt lost"
                 );
-                // validate_return already binds conditional taken/fallthrough
-                // to the actual post-prefix predicate. Only a taken branch uses
-                // BranchAddr; a sequential continuation keeps its original PC.
+                // `validate_return` already tied a conditional branch to the
+                // post-prefix predicate. Only a taken branch uses BranchAddr;
+                // otherwise PC continues sequentially.
                 let next = match ExitKind::try_from(exit.kind) {
                     Ok(ExitKind::Fallthrough) => next,
                     Ok(

@@ -105,7 +105,8 @@ pub(in crate::x86_64) fn emit(
         Host::AndNot.register(code, TEMPORARY, RESULT, target);
         Host::Or.register(code, SOURCE, TEMPORARY, target);
         quantize_normal_conversion(code, &mut failures);
-        // Consume discarded-lane evidence before another state-access helper.
+        // Record the discarded-bit status before another state-access helper
+        // runs.
         conversion_inexact(code);
         numerical::add_fpsr(code, &frame);
         ShiftOpcode::RightDword.emit(code, RESULT, BFLOAT_SHIFT);

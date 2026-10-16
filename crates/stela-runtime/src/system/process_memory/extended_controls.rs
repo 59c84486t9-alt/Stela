@@ -35,7 +35,7 @@ const CPA_WITH_CHECKING: u8 = 2;
 /// Full raw registers are retained. Future EnFPM or mutation belongs to this
 /// same owner; the current constructor rejects unimplemented extended bits.
 #[derive(Debug)]
-// Only the hosted CPA read loan reads the retained raw registers back.
+// Only the hosted FEAT_CPA read borrow reads the raw registers back.
 #[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(super) struct ExtendedControlBank {
     sctlr2_el1: u64,
@@ -79,10 +79,8 @@ fn require(
 }
 
 impl FixedProcessMemoryControls {
-    /// Consume explicit source facts for a genuinely fresh declared software
-    /// bank. This is not an upgrade/adoption method for an existing live bank.
-    /// SourceNormalWbDomain's genuine full-domain source-resolution contract and
-    /// existing constructor contracts remain required. No reset value is guessed.
+    /// Build a new software control bank from explicit source facts; not for
+    /// upgrading an existing bank. No reset value is guessed.
     pub fn new_source_resolved_with_extended_controls(
         identification: Arc<Snapshot>,
         sctlr_el1: u64,
@@ -122,9 +120,8 @@ impl FixedProcessMemoryControls {
                 value: sctlr2_el1,
             });
         }
-        // Nonzero feature-dependent fields cannot be stored as known controls
-        // under an absent/reserved/unsupported LR profile. This uses the sole
-        // reviewed same-Snapshot tuple check; no crypto or entry is authorized.
+        // Nonzero feature-dependent fields cannot be stored when FEAT_PAuth_LR
+        // is absent, reserved or unsupported.
         if sctlr2_el1 & SCTLR2_PACM_FIELDS != 0 {
             LinkRegisterPauthCapability::from_profile(&identification)
                 .map_err(Error::PauthProfile)?;
@@ -162,8 +159,8 @@ impl FixedProcessMemoryControls {
             source,
         )
         .map_err(Error::Process)?;
-        // This fresh owned value has never escaped. Existing constructors remain
-        // explicitly unavailable; there is no setter on an existing bank.
+        // This new value has not escaped yet; there is no setter on an existing
+        // bank.
         bank.extended = Some(ExtendedControlBank {
             sctlr2_el1,
             tcr2_el1,
@@ -171,13 +168,11 @@ impl FixedProcessMemoryControls {
         Ok(bank)
     }
 
-    /// Validate the actual thread with a short borrow, then retain only original
-    /// bank/Snapshot/outer references. The canonical consumer separately retains
-    /// the exact mutable thread/PE through its existing memory/native stages.
-    /// No caller raw epoch,
-    /// integer ASID, equivalent-looking Snapshot or separate domain is accepted.
-    /// This bounded loan validates current source and actual outer-domain identity; it does
-    /// not expand MTE memory support or prove PE/ThreadState identity.
+    /// Validate the thread with a short borrow, then keep only the bank,
+    /// snapshot and outer references; the consumer keeps the mutable thread and
+    /// PE through its memory and native stages. The borrow validates the
+    /// current source and outer domain; it does not extend MTE support or prove
+    /// PE identity.
     #[cfg(feature = "std")]
     pub(crate) fn extended_controls<'run>(
         &'run self,
@@ -209,8 +204,8 @@ impl FixedProcessMemoryControls {
     }
 }
 
-/// Non-Clone loan: renewal/mutation of the bank and release of the actual outer
-/// pin are excluded while borrowed. No copied controls/IDs or second bank.
+/// While borrowed, the bank cannot be renewed or changed and the outer pin
+/// cannot be released.
 #[cfg(feature = "std")]
 pub(crate) struct ExtendedControlLoan<'run> {
     bank: &'run FixedProcessMemoryControls,

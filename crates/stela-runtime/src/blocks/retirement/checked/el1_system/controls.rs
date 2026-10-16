@@ -28,8 +28,8 @@ enum SecurityImplementation {
     NonSecureOnly,
 }
 
-/// Created once by the genuine fresh software factory. Missing unrelated IDs
-/// stay missing; these explicit values are declared implementation facts.
+/// Created once with the software PE. Missing IDs stay missing; the values
+/// given are declared implementation facts.
 pub(in crate::blocks::retirement::checked) struct El1PlatformControls {
     identification: Snapshot,
     security: SecurityImplementation,
@@ -86,13 +86,13 @@ impl El1PlatformControls {
         );
         Ok(())
     }
-    /// The actual retained immutable declaration must positively exclude LSE2.
-    /// Missing ID values are not absence; this grants no source/outer/read loan.
+    /// The PE's declaration must positively exclude FEAT_LSE2; a missing ID
+    /// value does not count as absent.
     pub(in crate::blocks::retirement::checked) fn check_pair_read_profile(
         &self,
         system: &SystemState,
     ) -> Result<()> {
-        // Same checks as the original pair source producer, in original order.
+        // The same checks, in the same order, as the pair-read producer.
         self.context(system)?;
         let value = self.identification.read(Register::IdAa64Mmfr2El1)?;
         ensure!(

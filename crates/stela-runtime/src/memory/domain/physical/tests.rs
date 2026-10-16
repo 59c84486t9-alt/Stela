@@ -78,8 +78,8 @@ fn explicit_pa_materialization_pins_exact_initialized_bytes_and_alignment() {
         physical.memory_system().as_ref()
     ));
     pin.check_current().unwrap();
-    // SAFETY: genuine source materialization, exact aligned readable quantity,
-    // same-domain invocation and every reached backing/view remain retained.
+    // SAFETY: materialized source, an aligned readable quantity, and every
+    // reached backing and view held through the read.
     let value = unsafe { access::read_part(pin.pointer(), 8, TargetCpu::Baseline) }.unwrap();
     assert_eq!(
         value as u64,
@@ -205,8 +205,8 @@ fn malformed_capacity_extents_and_write_execute_decline_without_binding() {
 fn metadata_fetch_check_never_mints_a_loan_and_initial_loan_excludes_service() {
     let physical = physical();
     let service = physical.domain.service_loan().unwrap();
-    // Metadata observation must succeed without acquiring a native loan while
-    // the exclusive service scope is held. The old temporary-loan path fails.
+    // The metadata check must succeed without a native borrow while the service
+    // scope is held.
     physical.check_fetch_execution().unwrap();
     assert!(matches!(
         physical.initial_source_execution_loan(),
@@ -230,7 +230,7 @@ fn actual_ram_completion_retains_same_order_owner_and_cannot_be_replayed() {
     let outer = actual.domain().execution_loan().unwrap();
     let mut prepared = actual.prepare_ram_completion(&outer).unwrap();
     assert_eq!(prepared.progress(), RamCompletionProgress::Unattempted);
-    // A second session cannot bypass this SAME machine's live serializer.
+    // A second session cannot bypass the machine's serializer.
     assert!(matches!(
         actual.prepare_ram_completion(&outer),
         Err(RamCompletionError::Ordering(_))
@@ -243,7 +243,7 @@ fn actual_ram_completion_retains_same_order_owner_and_cannot_be_replayed() {
             RamCompletionProgress::Completed
         ))
     ));
-    // Completion doesn't release original loans before architectural settlement.
+    // Completion keeps its borrows until settlement.
     assert!(matches!(
         actual.prepare_ram_completion(&outer),
         Err(RamCompletionError::Ordering(_))

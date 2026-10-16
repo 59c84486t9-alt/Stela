@@ -36,9 +36,8 @@ fn domain() -> Arc<MemoryDomain> {
     .unwrap()
 }
 fn source(domain: &Arc<MemoryDomain>) -> SourceNormalWbDomain {
-    // SAFETY: these fixtures explicitly declare retained source mappings
-    // NormalWB with matching rights, tag/shareability attributes and offsets.
-    // This is a fresh software component declaration, not a hardware observation.
+    // SAFETY: the fixtures declare their source mappings Normal write-back with
+    // matching rights, tag and shareability attributes, and offsets.
     unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(domain)) }.unwrap()
 }
 fn controls(domain: &Arc<MemoryDomain>) -> FixedProcessMemoryControls {
@@ -353,9 +352,9 @@ fn actual_mapping_publication_invalidates_same_domain_source_until_explicit_rene
     };
     let mut owner = OwnedMemory::map(Vec::new()).unwrap();
     let allocation = owner.allocate_data(request).unwrap();
-    // SAFETY: fixture is the sole source/creation owner of actual anonymous
-    // software-machine RAM. All current untagged/shareable Normal-WB views
-    // and host writers participate in this same domain; no native run is active.
+    // SAFETY: the fixture owns the anonymous RAM; every untagged, shareable
+    // write-back view and host writer belongs to this domain, and no native
+    // code is running.
     let domain = unsafe {
         owner.bind_shared_memory(
             SharedMemoryConfig {
@@ -399,8 +398,8 @@ fn actual_mapping_publication_invalidates_same_domain_source_until_explicit_rene
         authority.renew_source_resolved(old),
         Err(ProcessMemoryError::WrongMemoryDomain)
     );
-    // This explicit fixture source owner resolves the entire resulting view set
-    // under serialization; host mprotect alone does not mint this witness.
+    // The fixture resolves the entire resulting view set under serialization; a
+    // host mprotect alone does not produce the witness.
     authority.renew_source_resolved(source(&domain)).unwrap();
     assert!(authority.source.matches(&thread));
     owner.allocate_data(request).unwrap();

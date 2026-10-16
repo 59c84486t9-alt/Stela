@@ -77,8 +77,9 @@ pub fn prepare_segments(
     prepare_segments_inner(data, plan, load_base, writes, true)
 }
 
-/// Kernel-style original bytes/initprot: original dyld owns relocation and its
-/// later SG_READ_ONLY lockdown. Never mix this route with pre-applied fixups.
+/// Map the original bytes with their initial protections, as the kernel does;
+/// dyld then performs its own relocation and read-only lockdown. Never combine
+/// this with pre-applied fixups.
 pub fn prepare_raw_segments(data: &[u8], plan: &LoadPlan, load_base: u64) -> Result<PreparedImage> {
     prepare_segments_inner(data, plan, load_base, &[], false)
 }
@@ -267,12 +268,12 @@ pub fn add_stack(
 }
 
 impl MappedImage {
-    /// Copy file-backed bytes, zero-fill segment tails, apply initial data
-    /// protections and register immutable instruction snapshots. Guest execute
-    /// permission never gives original Arm bytes host execute permission.
-    /// Selected addresses must be available; no host mappings are replaced.
-    /// Unauthenticated chained rebases are applied before final protections;
-    /// imports, authenticated pointers, signatures and initializers remain pending.
+    /// Copy file-backed bytes, zero-fill segment tails, apply initial
+    /// protections and register the instruction snapshots. Guest-executable
+    /// segments are never host-executable. The addresses must be free; no host
+    /// mapping is replaced. Unauthenticated chained rebases are applied before
+    /// the final protections; imports, authenticated pointers, signatures and
+    /// initializers stay pending.
     pub fn load(
         data: &[u8],
         cache: PathBuf,
@@ -333,18 +334,17 @@ impl MappedImage {
         self.memory.read_snapshot(address, bytes)
     }
 
-    /// Run under the native block direct-RAM profile while every segment/stack
-    /// mapping is alive and exclusively owned by this image.
+    /// Run with direct RAM while every segment and the stack stay mapped and
+    /// owned by this image.
     ///
     /// # Safety
-    /// Code must be trusted and every accessed address must lie within suitable
-    /// live mappings or caller-owned direct RAM. Accessed data must not require
-    /// any still-pending relocation/import/initializer. Guest writes must not
-    /// alias runtime/state/host objects or immutable instruction snapshots.
-    /// Caller supplies the required entry ABI and excludes concurrent mutation.
-    /// PAC/GCS/guarded transfer semantics, process startup and exception delivery
-    /// remain unsupported; native faults may terminate the host process. Skipped
-    /// guards and page padding are not hardware guest-bounds guarantees.
+    /// The code must be trusted, and every address it accesses must be in a
+    /// live mapping or caller-owned direct RAM. Accessed data must not need a
+    /// pending relocation, import or initializer. Guest writes must not alias
+    /// runtime, state or host objects, or the instruction snapshots. The caller
+    /// supplies the entry ABI and excludes concurrent mutation. PAC, GCS,
+    /// guarded pages, process startup and exception delivery are unsupported; a
+    /// native fault may terminate the host process.
     pub unsafe fn run(
         &mut self,
         state: &mut ThreadState,

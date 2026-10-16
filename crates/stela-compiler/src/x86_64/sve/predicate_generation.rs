@@ -431,10 +431,11 @@ fn write_counted(
 }
 
 mod breaks {
-    //! Packed predicate breaks with alias-safe SSE2 staging and checked BMI1 cores.
+    //! Predicate BRK* forms with alias-safe SSE2 staging and BMI1 cores.
     //!
-    //! Only packed P storage is read/written. RDI/R15 and the host stack survive.
-    //! Results use XMM0..3; flagged non-Next forms keep original Pg in XMM4..7.
+    //! Only packed P storage is accessed. RDI/R15 and the host stack survive.
+    //! Results use XMM0-3; flag-setting forms other than BRKN keep Pg in
+    //! XMM4-7.
 
     use crate::aarch64::scalable::{ElementSize, VectorLength};
     use crate::aarch64::sve::predicate_generation::{Boundary, BreakKind, BreakOperand};

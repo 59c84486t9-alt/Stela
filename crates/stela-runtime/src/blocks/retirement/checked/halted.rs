@@ -23,9 +23,8 @@ pub(crate) struct OwnedDebugOutcome {
     pub record: Option<DebugRecord>,
 }
 
-/// Serialized original software debugger input was queued in the actual complete
-/// domain before this exclusive loan. CrossHalt/unknown producers are retained
-/// and refused for their own future source-ordered arbitration, never discarded.
+/// Software debugger input was queued in the domain before this call.
+/// Cross-halt and unknown events are kept and refused, never discarded.
 pub(crate) fn run_halted_owned(
     loan: SystemExecutionLoan<'_, PrivilegedOwner<'_>>,
 ) -> OwnedDebugOutcome {
@@ -76,9 +75,7 @@ pub(crate) fn run_halted_owned(
 }
 
 impl Active<'_, '_, PrivilegedOwner<'_>> {
-    /// Sole canonical closure after the original source-bound body/finalizer.
-    /// Tests can insert a real original-domain failure between body and closure;
-    /// they cannot turn a detached record into completion authority.
+    /// Complete the debug instruction after its body and finalizer.
     pub(super) fn settle_debug(&mut self, source_pc: GuestAddress) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.pe.authority.debug_attempt(self.attempt),
@@ -138,8 +135,8 @@ impl Active<'_, '_, PrivilegedOwner<'_>> {
             self.settle_debug(source_pc)?;
             Ok(())
         })();
-        // Every actual prefix/source/native/context-finalizer observation survives
-        // error. Drop poisons unfinished authority and never returns Ready.
+        // Every observation survives an error; Drop marks unfinished work
+        // failed and never reports ready.
         *record = Some(prepared.record);
         result
     }

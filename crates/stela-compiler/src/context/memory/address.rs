@@ -4,8 +4,8 @@ use crate::context::pointer::EffectivePointerChecks;
 
 pub use crate::context::pointer::AccessEl;
 
-/// Effective AddressAdd checking after the architectural owner resolves CPTA.
-/// AddressIncrement uses the explicit unchecked CPACHECK implementation choice.
+/// Effective AddressAdd checking once CPTA is resolved. AddressIncrement uses
+/// the unchecked CPACHECK implementation choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AddressAddChecks {
     Disabled,

@@ -352,9 +352,10 @@ pub(in crate::x86_64) fn emit_candidate(
                 ADDEND,
             );
         }
-        // Half multiplication is exact (<=22 significant bits). Reject
-        // every Double status event before the sole Half rounding, so
-        // no rounded intermediate or lost exception reaches the packer.
+        // Half multiplication is exact (at most 22 significant bits). Any
+        // double-precision status event rejects the instruction before the
+        // single half rounding, so no rounded intermediate or lost exception
+        // reaches the packer.
         numerical::capture_status(code, &frame);
         code.extend(TEST_ECX_IMMEDIATE);
         code.extend(MXCSR_STATUS_MASK.to_le_bytes());

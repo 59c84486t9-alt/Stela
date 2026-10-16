@@ -3,8 +3,8 @@ use super::*;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
-/// Original sticky registration key. It contains no domain writer; every
-/// injector still requires the same actual domain's exclusive mutable borrow.
+/// A permanent registration key. Injecting still requires the domain's
+/// exclusive borrow.
 pub(in crate::blocks::retirement) struct DebugSourceKey(SourceKey);
 
 /// Explicit software routing by retained registrations. Empty targets means an
@@ -20,8 +20,8 @@ pub(in crate::blocks::retirement) struct DebugSources<'pe> {
     keys: &'pe [DebugSourceKey],
 }
 
-/// Unapplied, non-Clone recipe; it owns no authority. Commit requires the same
-/// actual exclusive domain lease and rechecks identity/registration/sequence.
+/// An unapplied cross-halt. Committing it re-checks the identity, registration
+/// and sequence under the domain's exclusive borrow.
 pub(in crate::blocks::retirement) struct PreparedCrossHalt {
     identity: Arc<()>,
     source: u64,
@@ -34,9 +34,8 @@ pub(in crate::blocks::retirement) struct CrossHaltReceipt {
     pub delivered_targets: usize,
 }
 
-/// Actual queued external instruction, not a fetched guest-PC/source identity.
-/// The canonical consumer retains the original domain loan and must settle the
-/// exact raw EDITR decision before interpreting this as an executed instruction.
+/// A queued external instruction (not fetched from a guest PC). The consumer
+/// settles the raw EDITR decision before treating it as executed.
 #[derive(Debug)]
 pub(in crate::blocks::retirement) struct EditrSource {
     identity: Arc<()>,
@@ -97,9 +96,8 @@ impl SoftwareAsyncDomain {
 }
 
 impl DebugSources<'_> {
-    /// Serialized retained software-debug input. The route names one original
-    /// key borrowed by this actual complete-domain lease; no integer grants a
-    /// foreign producer/domain association and no writer bypasses this borrow.
+    /// Queue software-debug input on the route of a key borrowed from this
+    /// domain.
     pub(in crate::blocks::retirement) fn enqueue_editr_slot(
         &mut self,
         slot: usize,
@@ -216,8 +214,8 @@ impl DebugSources<'_> {
         {
             return Err(AsyncError::Capacity);
         }
-        // The actual typed CTI output is committed before its configured target
-        // inputs. It remains in the domain's ledger even when unconnected.
+        // The CTI output is committed before its configured target inputs and
+        // stays in the ledger even when unconnected.
         let delivered_targets = plan.targets.len();
         self.domain.cross_halt_sequence = plan.sequence;
         self.domain.cross_halt_outputs.push(CrossHaltOutput {
@@ -262,9 +260,8 @@ impl DebugSources<'_> {
             Some(_) => Err(AsyncError::UnsupportedPending),
         }
     }
-    /// Consume only after the canonical consumer has qualified the exact raw
-    /// request and actual Ignore/Overrun/Execute disposition. This grants no PE
-    /// execution/PC/ITR authority and never discards a CrossHalt input event.
+    /// Consume once the consumer has validated the request and its Ignore,
+    /// Overrun or Execute disposition. Cross-halt inputs are never discarded.
     pub(in crate::blocks::retirement) fn consume_editr(
         &mut self,
         source: &EditrSource,
@@ -290,7 +287,7 @@ impl DebugSources<'_> {
 mod tests;
 
 impl SoftwareAsyncDomain {
-    /// Descriptive original pending/output ledger after the executable scope.
+    /// The pending and output ledger after execution, for reporting.
     pub(in crate::blocks::retirement) fn debug_observation(&self) -> String {
         format!(
             "registered={:?};pending={:?};cross_halt_outputs={:?}",

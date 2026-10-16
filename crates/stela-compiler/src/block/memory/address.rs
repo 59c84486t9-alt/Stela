@@ -8,9 +8,8 @@ use crate::context::memory::{
     },
 };
 
-/// Access levels are resolved from the original descriptor's privilege rules.
-/// The same owner must validate these selections and both resolved CPTA effects
-/// before entry; constructing this compilation value grants no permission.
+/// Access levels follow the instruction's privilege rules. The runtime
+/// validates these choices and both resolved CPTA effects before entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct CheckedAddressProfile {
     sp_alignment: SpAlignmentRequirement,

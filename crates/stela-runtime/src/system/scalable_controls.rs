@@ -118,7 +118,8 @@ impl Implementation {
     }
 }
 
-/// Source architectural atomicity, independently declared from host envelopes.
+/// The source's architectural atomicity, declared independently of host access
+/// sizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAtomicity {
     Unspecified,
@@ -171,8 +172,7 @@ pub enum Error {
     GenerationExhausted,
 }
 
-/// Descriptive facts valid inside with_checked_execution's retained loan.
-/// Holding a copy after the callback does not grant future native entry.
+/// Facts valid inside `with_checked_execution`'s borrow.
 #[derive(Debug, Clone, Copy)]
 pub struct EffectiveContext {
     source_atomicity: SourceAtomicity,
@@ -233,7 +233,7 @@ impl<'id> ScalableControlOwner<'id> {
     pub const fn identification_snapshot(&self) -> &Snapshot {
         self.fp.identification_snapshot()
     }
-    /// Borrow the same sole CPACR bank for ordinary FP/AdvSIMD consumers.
+    /// The shared CPACR bank, for AdvSIMD/FP consumers.
     pub const fn fp_controls(&self) -> &FpControlOwner<'id> {
         &self.fp
     }
@@ -263,10 +263,10 @@ impl<'id> ScalableControlOwner<'id> {
         })
     }
 
-    /// No cached permission survives a write: callers must re-enter the checked
-    /// loan for the next body. A live loan immutably borrows this entire bank.
-    /// Reserved fields use an explicit writable/readback-preserving software
-    /// implementation; only SMCR[8:4] is source-specified RAZ/WI.
+    /// No cached permission survives a write: the next body must re-enter the
+    /// checked borrow, and a live borrow holds the whole bank immutably.
+    /// Reserved fields are writable with preserved readback; only SMCR[8:4] is
+    /// RAZ/WI by specification.
     pub fn prepare_write<'a>(
         &'a mut self,
         register: Register,
@@ -399,7 +399,7 @@ impl<'id> ScalableControlOwner<'id> {
         }
         let zt0 = features::sme(self.fp.identification_snapshot())? == 2
             && self.smcr_el1 & SMCR_EZT0_MASK != 0;
-        // CPU availability and EZT0 do not prove this actual state has storage.
+        // CPU support and EZT0 do not prove that this state has ZT0 storage.
         if zt0 && scalable.mode().za_enabled() && !scalable.has_zt0_storage() {
             return Err(Error::StateFeatureMismatch);
         }

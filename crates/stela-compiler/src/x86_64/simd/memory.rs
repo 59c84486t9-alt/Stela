@@ -72,8 +72,8 @@ pub(super) fn wide_transfer(
     }
 }
 
-/// Transfer one original vector through RAX without base writeback. GuestState
-/// is independently live/writable; failed loads never commit their destination.
+/// Transfer one vector through RAX, without base writeback. A failed load
+/// commits nothing.
 pub(in crate::x86_64) fn transfer(
     code: &mut Vec<u8>,
     load: bool,

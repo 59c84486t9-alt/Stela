@@ -59,14 +59,13 @@ pub(crate) struct CheckedProcessOwner<'pe> {
 #[cfg(feature = "std")]
 impl<'pe> CheckedProcessOwner<'pe> {
     /// # Safety
-    /// Called once by the actual fresh software machine constructor before it
-    /// creates its sole SystemExecutionOwner. Every resource is actual same-PE,
-    /// same-namespace and lifetime-held; controls own original SCTLR/TCR facts,
-    /// execution owns the actual declared debug/optional-feature subset, and
-    /// pending borrows the COMPLETE producer universe. This cannot adopt a live
-    /// hardware PE or mint a backend for copied diagnostics. No raw producer,
-    /// mutable control alias, alternate native entry or source writer bypasses
-    /// the retained machine. Clock publication is already canonically bound.
+    /// Called once by the software machine constructor, before it creates its
+    /// execution owner. Every resource belongs to the same PE and namespace and
+    /// lives as long as it; `controls` holds the SCTLR/TCR facts, `execution`
+    /// the declared debug and optional-feature subset, and `pending` the
+    /// complete set of event producers. No raw producer, mutable control alias,
+    /// other native entry or source writer may bypass the machine. The clock is
+    /// already bound.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_software(
         address_space: u64,
@@ -192,9 +191,9 @@ impl<'pe> CheckedProcessOwner<'pe> {
                 self.endpoint,
             );
         }
-        // The actual CPU/control producer validates current EL0/PSTATE/TCO,
-        // source generation/domain, required category and SP specialization.
-        // The unused token is dropped before FFI: it changes no policy/effect.
+        // The control producer validates the current EL0/PSTATE/TCO state,
+        // source generation, domain, required category and SP specialization.
+        // The unused token is dropped before the call; it changes nothing.
         self.controls
             .prepare_profile(
                 &bound.entry,
@@ -217,7 +216,7 @@ pub(super) mod sealed {
 #[cfg(feature = "std")]
 impl sealed::Concrete for CheckedProcessOwner<'_> {}
 
-/// Only this source module can implement the canonical consumer's backend.
+/// Only this module can implement a backend.
 pub(crate) trait Owner: sealed::Concrete {
     fn supports_profile(&self, profile: stela_compiler::block::BlockProfile) -> bool {
         profile.checked_memory().is_some()
@@ -264,21 +263,20 @@ pub(crate) trait Owner: sealed::Concrete {
         registers: &mut GuestState,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()>;
-    /// One disjoint loan of this concrete backend's ORIGINAL fields. No
-    /// caller/resource tuple, context clone or second backend can supply it.
-    /// The canonical Active retains this through real source/control mint,
-    /// no-read preparation, FFI/finalization and once-only PC settlement.
+    /// Lend this backend's own fields once. The consumer keeps them through
+    /// source and control validation, preparation, the native call,
+    /// finalization and PC settlement.
     fn split_m0_resources(&mut self) -> anyhow::Result<M0ExecutionResources<'_>> {
         anyhow::bail!("actual M0 backend resources are unavailable")
     }
 
-    /// Only the SAME concrete installed owner in its exact B cohort can lend
-    /// these original fields. All other sealed owners refuse before FFI.
+    /// Only the installed EL1 owner lends these fields; other backends refuse
+    /// before the call.
     fn split_el1_resources(&mut self) -> anyhow::Result<El1ExecutionResources<'_>> {
         anyhow::bail!("actual installed branch backend resources are unavailable")
     }
 
-    /// Actual mutable publication/monitor loan, after all native loans end.
+    /// Mutable publication and monitor access, after all native borrows end.
     fn split_el1_system_effect_resources(
         &mut self,
     ) -> anyhow::Result<El1SystemEffectResources<'_>> {
@@ -333,9 +331,9 @@ impl Owner for CheckedProcessOwner<'_> {
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
         self.qualify_current_resources(bound, system, registers, outer)?;
-        // Pointer operands may be produced by the ordinary prefix (including
-        // loaded LR/SP). They are qualified only at the actual source-validated
-        // helper boundary, after the canonical consumer settles that prefix.
+        // Pointer operands may come from the ordinary prefix (including a
+        // loaded LR or SP), so they are checked only at the helper, after the
+        // prefix settles.
         Ok(())
     }
     fn invoke(
@@ -372,9 +370,9 @@ impl Owner for CheckedProcessOwner<'_> {
             endpoint: self.endpoint,
             bound,
         };
-        // SAFETY: the canonical caller retains NativeActive and the same-domain
-        // outer loan; exact source/plan/map/context owners above remain borrowed
-        // through call's complete outer Result and every checked finalizer.
+        // SAFETY: the caller holds the native session and the domain borrow;
+        // the source, plan, map and context stay borrowed through the call and
+        // every finalizer.
         let returned = unsafe {
             checked_memory::call(
                 &mut dispatcher,
@@ -388,9 +386,7 @@ impl Owner for CheckedProcessOwner<'_> {
                 self.context,
             )?
         };
-        // This conversion is descriptive only. Canonical consumer invokes this
-        // sealed actual owner synchronously; no API accepts a saved observation
-        // as completion/Ready authority. Narrow raw component types stay private.
+        // Conversion of the raw result into the public type, for reporting.
         Ok(match returned {
             checked_memory::CheckedReturn::Returned(exit) => NativeObservation::Returned {
                 next_pc: exit.next_pc,
@@ -455,8 +451,7 @@ impl Owner for CheckedProcessOwner<'_> {
         registers: &mut GuestState,
         outer: Option<&MemoryExecutionLoan>,
     ) -> HelperOutcome {
-        // Actual terminal PC was already stored by the consumer, which retains
-        // it exclusively; this provider receives no PC/authority accessor.
+        // The consumer has already stored the terminal PC.
         if let Err(error) = self.check_resources() {
             return HelperOutcome::NoEffect(error);
         }
@@ -527,9 +522,8 @@ impl Owner for CheckedProcessOwner<'_> {
                 }
             }
             Helper::Clock(instruction) => {
-                // The canonical consumer released native exclusion only after
-                // SystemActive and actual source settlement. Publication itself
-                // acquires the same domain's real service_loan. No raw fallback.
+                // Native exclusion was released after PC settled, and
+                // publication takes the domain's service borrow.
                 match complete_clock(self.clock, instruction, registers) {
                     Ok(counter) => HelperOutcome::Complete {
                         continuation: instruction.next_pc,
@@ -573,8 +567,7 @@ impl Owner for CheckedProcessOwner<'_> {
         if let Err(error) = self.check_resources() {
             return super::darwin_services::Outcome::Indeterminate(error);
         }
-        // Source settlement and SystemActive belong to canonical Active. This
-        // owner lends only its actual thread; no PC or authority accessor escapes.
+        // The consumer settles PC; this backend lends only its thread.
         super::darwin_services::complete(trap, registers, self.thread, events)
     }
 
@@ -585,16 +578,15 @@ impl Owner for CheckedProcessOwner<'_> {
         registers: &mut GuestState,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
-        // This is an actual exhaustive registry lease, not an empty queue test
-        // or successful pending-delivery stub. Any registered producer fails.
-        // A completed helper has changed its operand (for example, signing
-        // LR). Revalidate current resources without treating that output as
-        // the original input to a second helper invocation.
+        // Fail if any event producer is registered. A completed helper has
+        // changed its operand (for example, signing LR), so re-validate the
+        // current resources without treating that output as the input of
+        // another helper.
         self.qualify_current_resources(bound, system, registers, outer)
     }
 }
 
-/// Ephemeral borrows of SAME actual system/control/domain resources; no state.
+/// Short-lived borrows of the system, control and domain resources.
 #[cfg(feature = "std")]
 struct ProcessDispatcher<'call, 'code> {
     address_space: u64,
@@ -747,8 +739,8 @@ impl CheckedProcessOwner<'_> {
                 && self.thread.address_space() == self.address_space,
             "actual retained observation namespace differs"
         );
-        // Numeric namespace equality alone does not prove the actual publication
-        // alias retains this thread's actual domain and bound backing association.
+        // Equal namespace numbers do not prove the clock alias still belongs to
+        // this thread's domain and backing.
         self.clock
             .check_execution_thread(self.memory)
             .map_err(|error| anyhow::anyhow!("actual observation clock binding: {error:?}"))?;
@@ -763,8 +755,8 @@ impl CheckedProcessOwner<'_> {
             .memory
             .observation_loan()
             .map_err(|error| anyhow::anyhow!("actual observation domain exclusion: {error:?}"))?;
-        // Snapshot through the existing loan: clock.snapshot_bytes() would
-        // attempt another service admission and must not be nested here.
+        // Snapshot through the existing borrow; `clock.snapshot_bytes()` would
+        // take a second, nested service borrow.
         let legacy_clock_bytes = loan
             .snapshot(region.guest_address, full_virtual_bytes)
             .map_err(|error| anyhow::anyhow!("actual clock facade observation: {error:?}"))?;

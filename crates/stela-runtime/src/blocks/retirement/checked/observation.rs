@@ -4,9 +4,8 @@ use crate::{clock, thread};
 use alloc::vec::Vec;
 use stela_compiler::{GuestAddress, GuestState};
 
-/// Produced only from the actual retained owner while a same-domain read-only
-/// service loan excludes native execution, finalizers and mapping/publication.
-/// All fields are owned diagnostics; changing them cannot change actual state.
+/// Taken from the PE while a read-only service borrow excludes native
+/// execution, finalizers and mapping changes. Every field is an owned copy.
 #[derive(Debug, Clone)]
 pub(crate) struct OwnedProcessObservation {
     pub actual_pc: GuestAddress,

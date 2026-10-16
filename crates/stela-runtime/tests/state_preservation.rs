@@ -62,7 +62,8 @@ fn scalar_leaf_preserves_all_vector_bits_and_opaque_fp_control_status() -> Resul
     for flags in 0..16 {
         let initial = state(flags);
         let mut actual = initial.clone();
-        // SAFETY: owned finite register-only code has no guest RAM or host calls.
+        // SAFETY: owned, terminating register-only code with no RAM access or
+        // host calls.
         unsafe { leaf.execute(&leaves, &mut actual)? };
         assert_eq!(actual, expected(&initial));
     }
@@ -86,8 +87,8 @@ fn scalar_aot_disk_hot_and_fresh_runtime_paths_preserve_the_enlarged_state() -> 
                 registers: initial.clone(),
                 pc: ENTRY,
             };
-            // SAFETY: all paths are finite owned scalar register instructions,
-            // both branch arms are registered, and the actual RET names STOP.
+            // SAFETY: terminating scalar register code; both branch targets are
+            // registered and the RET goes to STOP.
             let outcome = unsafe { runtime.run(&mut thread, Some(STOP), 4)? };
             assert_eq!(outcome.reason, StopReason::StopAddress);
             assert_eq!(outcome.blocks_executed, 2);

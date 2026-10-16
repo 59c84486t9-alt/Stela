@@ -587,8 +587,8 @@ fn ties_away(code: &mut Vec<u8>, format: Format, shape: Shape, target: TargetCpu
     packed(code, Host::Or, RESIDUAL, MASK);
     packed(code, Host::And, RESIDUAL, CONSTANT);
     fp_arithmetic(code, format, shape, ArithmeticOpcode::Add, RESULT, RESIDUAL);
-    // Exact zero addition/subtraction can choose a host-RC sign. Force the
-    // architectural original sign on every result, including signed zero.
+    // An exact zero sum can take the host rounding mode's sign, so force the
+    // architectural sign on every result, including signed zero.
     magnitude_mask(code, format, MASK);
     packed(code, Host::And, RESULT, MASK);
     packed(code, Host::EqualDword, CONSTANT, CONSTANT);

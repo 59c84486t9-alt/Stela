@@ -153,10 +153,10 @@ fn fused_opcode(operation: FusedOperation) -> FusedOpcode {
     }
 }
 
-/// Emit the fourteen canonical fused forms. S/D native admission is deliberately
-/// normal-only; exact completion retains all H/S/D semantics outside this domain.
-/// RDI/R15 and all guest sources survive; RAX/RCX/RDX/flags/XMM0..7 are volatile.
-/// TargetCpu::Fma includes usable AVX OS state. Baseline never emits VEX or FMA.
+/// Emit the fourteen fused forms, natively only for normal single and double
+/// values; software completion handles the rest. RDI/R15 and the guest sources
+/// survive; RAX/RCX/RDX, flags and XMM0-7 are clobbered. `TargetCpu::Fma`
+/// implies OS-enabled AVX state; the baseline target never emits VEX.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,
@@ -250,8 +250,8 @@ pub(in crate::x86_64) fn emit(
                 LEFT,
                 RIGHT,
             );
-            // An exact normal product permits a separate ADD with one rounding.
-            // Any product status, including precision, rejects the entire instruction.
+            // An exact normal product allows a separate ADD with one rounding;
+            // any product status rejects the instruction.
             numerical::capture_status(code, &frame);
             code.extend(TEST_ECX_ECX);
             reject(code, &mut failures);

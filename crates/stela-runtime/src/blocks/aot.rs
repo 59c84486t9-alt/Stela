@@ -31,8 +31,8 @@ impl ArtifactPreparation {
 }
 
 impl LoadedBlock {
-    // SAME original storage publication/check/insertion data for both intake
-    // paths. Descriptive metadata cannot replace BoundSource or PE admission.
+    // Both intake paths share the same storage publication, checks and
+    // insertion.
     pub(super) fn from_artifact(
         target: stela_compiler::TargetCpu,
         profile: BlockProfile,
@@ -81,10 +81,8 @@ impl BlockRuntime {
         }
     }
 
-    /// New original runtime using explicit AOT intake. A missing loaded body
-    /// declines before disk-cache access or runtime emission. This changes only
-    /// artifact availability; it grants no CPU, source, mapping or PE permission.
-    /// Plain TargetCpu is requirements metadata, not hardware qualification.
+    /// A runtime that loads ahead-of-time artifacts. A missing body is refused
+    /// before any disk-cache access or code generation.
     pub fn new_aot_for_target(
         address_space: u64,
         profile: BlockProfile,
@@ -98,11 +96,9 @@ impl BlockRuntime {
         )
     }
 
-    /// Normal freestanding preparation compiles true misses through the same
-    /// CompilationPlan and original loaded map. Persistent cache acceleration
-    /// is unavailable until a real filesystem adapter is installed. Existing
-    /// standard AOT intake remains available and the strict AOT constructor
-    /// still refuses misses. Availability supplies no source or PE authority.
+    /// Freestanding builds compile misses through the same compilation plan.
+    /// There is no persistent cache without a filesystem; preloaded artifacts
+    /// still work, and the strict AOT constructor still refuses misses.
     #[cfg(not(feature = "std"))]
     pub fn new_in_memory_for_target(
         address_space: u64,
@@ -117,12 +113,10 @@ impl BlockRuntime {
         )
     }
 
-    /// Mount standard manifest.json / manifest.sha256.json / native.bin bytes.
-    /// No alternate bundle codec or supplied source plan is accepted. Expected
-    /// identity/profile/requirements come from the SAME compiler plan over this
-    /// runtime's actual registered immutable source; source/PE ownership remains
-    /// with the canonical parent. Original source maps and native checks precede
-    /// RX storage publication. No native instructions or guest data are executed.
+    /// Load standard `manifest.json`, `manifest.sha256.json` and `native.bin`
+    /// bytes. The expected identity, profile and requirements come from the
+    /// compiler plan for this runtime's registered source; the source maps and
+    /// native bytes are checked before the code is mapped. Nothing executes.
     pub fn preload_artifact(
         &mut self,
         pc: GuestAddress,

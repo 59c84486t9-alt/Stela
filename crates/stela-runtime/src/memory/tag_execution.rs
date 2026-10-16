@@ -37,8 +37,8 @@ pub fn complete_random_tag(
     complete_random_tag_with_entropy(operand, registers, controls, generation, host_entropy)
 }
 
-/// Complete a dedicated memory instruction through the checked domain entry.
-/// The caller retains the original instruction PC for exception dispatch.
+/// Complete a dedicated tag memory instruction through the checked domain. The
+/// caller keeps the instruction PC for exceptions.
 pub fn complete_memory<P: AllocationTagPolicy>(
     operand: Operand,
     registers: &mut GuestState,
@@ -104,9 +104,9 @@ fn external_tag(
         return Ok(AllocationTag::new(allowed.trailing_zeros() as u8));
     }
     let allowed_count = allowed.count_ones() as u16;
-    // Reject the incomplete final interval rather than biasing a modulo choice.
-    // One bounded kernel sample is enough for sixteen candidate bytes; an
-    // exhausted sample reports failure instead of silently selecting a tag.
+    // Reject the incomplete last interval instead of biasing a modulo choice.
+    // One kernel sample covers sixteen candidate bytes; if it runs out, report
+    // failure rather than choosing a tag.
     let unbiased_limit = RANDOM_BYTE_VALUES / allowed_count * allowed_count;
     let mut bytes = [0; ENTROPY_BYTES];
     entropy(&mut bytes)?;
@@ -144,8 +144,8 @@ fn write(registers: &mut GuestState, register: Register, value: u64) {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn host_entropy(bytes: &mut [u8]) -> Result<(), TagGenerationError> {
-    // SAFETY: this is a private bounded writable buffer, disjoint from guest RAM
-    // and architectural state. The OS reports any entropy failure explicitly.
+    // SAFETY: a private bounded buffer, disjoint from guest RAM and
+    // architectural state.
     if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } == 0 {
         Ok(())
     } else {

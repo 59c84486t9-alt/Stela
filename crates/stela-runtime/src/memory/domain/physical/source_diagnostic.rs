@@ -5,9 +5,8 @@ use crate::memory::{MAX_IMAGE_MEMORY_BYTES, backing::AccessKind, domain::MemoryS
 use stela_compiler::context::memory::MemoryStatus;
 
 impl PhysicalAddressSpace {
-    /// Canonical source-owner fixtures may observe quiescent bytes without
-    /// widening the original memory-only service-loan constructor visibility.
-    /// Busy execution/services refuse; this acquires no execution loan.
+    /// Let source-owner tests observe quiescent bytes. Refused while execution
+    /// or a service is active.
     pub(crate) fn source_diagnostic_snapshot_quiescent(
         &self,
         address: u64,
@@ -20,12 +19,10 @@ impl PhysicalAddressSpace {
         self.source_diagnostic_snapshot(&service, address, bytes)
     }
 
-    /// Read diagnostic bytes only under this ORIGINAL domain's service exclusion.
-    /// This is not an architectural data or instruction fetch. Execute-only
-    /// source views keep their original denied guest Read permission throughout.
-    /// The opaque materialized binding proves ordinary coherent host-readable
-    /// storage: SourceRAM's factory mapped readable || executable bytes RO/RW,
-    /// never executable host mappings or MMIO. No other declaration is accepted.
+    /// Read bytes for diagnostics under the domain's service exclusion. This is
+    /// not a guest fetch, and execute-only views keep denying guest reads. The
+    /// source-RAM factory mapped these bytes host-readable, never
+    /// host-executable or MMIO.
     pub(in crate::memory) fn source_diagnostic_snapshot(
         &self,
         service: &MemoryServiceLoan,
@@ -73,8 +70,8 @@ impl PhysicalAddressSpace {
             let kind = if permissions.readable {
                 AccessKind::Read
             } else if permissions.executable {
-                // Only original source-factory Execute can select this path.
-                // Resolving it does not execute or confer guest data Read.
+                // Only source-factory execute views come here; resolving one
+                // neither executes nor grants guest read.
                 AccessKind::Execute
             } else {
                 return Err(PhysicalReadPlatformError::Unavailable);
@@ -82,11 +79,9 @@ impl PhysicalAddressSpace {
             let access = view
                 .resolve(current, reached, kind)
                 .map_err(|_| PhysicalReadPlatformError::Unavailable)?;
-            // SAFETY: original source binding owns this exact current view and
-            // backing, which was positively mapped host-readable by its factory.
-            // SAME domain service loan excludes every native invocation and
-            // other service/protection writer through this exact raw copy.
-            // Destination is a fresh independent Vec; no raw reference escapes.
+            // SAFETY: the source binding owns this view and its host-readable
+            // backing, the service borrow excludes native calls and other
+            // writers during the copy, and the destination is a new Vec.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     access.host_ptr().as_ptr(),

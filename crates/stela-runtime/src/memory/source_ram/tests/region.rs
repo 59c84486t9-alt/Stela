@@ -117,7 +117,8 @@ fn warm_prefix_reload_preserves_tail_and_refuses_active_outer() {
     let mut physical = PhysicalAddressSpace::from_materialized(binding).unwrap();
     {
         let _service = physical.domain().service_loan().unwrap();
-        // SAFETY: original storage/System plus quiescent service, private staging.
+        // SAFETY: the original storage and system, a quiescent service and
+        // private staging.
         unsafe {
             physical
                 .memory_system()
@@ -161,7 +162,8 @@ fn generation_exhaustion_precedes_byte_effect_and_unknown_attempt_fails_closed()
     let physical = PhysicalAddressSpace::from_materialized(binding).unwrap();
     view.backing().exhaust_instruction_generation_for_test();
     let _service = physical.domain().service_loan().unwrap();
-    // SAFETY: valid owned publisher, rejection is before target bytes change.
+    // SAFETY: a valid owned publisher; the rejection happens before any target
+    // byte changes.
     let error = unsafe {
         physical
             .memory_system()

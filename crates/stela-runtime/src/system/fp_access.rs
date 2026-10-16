@@ -29,8 +29,8 @@ pub enum Error {
     ReservedSveField(u8),
     SmeStateRequired,
     ReservedSmeField(u8),
-    /// Admission decline at the original source PC. No prefix has run here;
-    /// this must not be delivered as an already reached architectural exception.
+    /// Refused at the source PC before any prefix ran; not an architectural
+    /// exception.
     PreflightTrap(AccessTrap),
 }
 
@@ -56,8 +56,8 @@ impl<'id> NoSme<'id> {
     }
 }
 
-/// Select real state when SME exists, or a same-Snapshot absence witness when
-/// it does not. This enum contains no caller-selected permission boolean.
+/// The streaming state when SME exists, or proof from the same snapshot that it
+/// does not.
 pub enum StreamingState<'loan> {
     Actual(&'loan ScalableState),
     Absent(NoSme<'loan>),
@@ -74,9 +74,7 @@ pub struct Low128FpContext<'loan, 'id> {
 }
 
 impl Low128FpContext<'_, '_> {
-    /// Check the actual SystemState retained by this live scoped loan. This
-    /// compares object identity, not copied controls or value equality, and
-    /// independently grants no PE, source, memory or retirement authority.
+    /// Check that `system` is the very object this borrow holds.
     pub fn check_system(&self, system: &SystemState) -> Result<(), Error> {
         if core::ptr::eq(self._system, system) {
             Ok(())
@@ -85,11 +83,8 @@ impl Low128FpContext<'_, '_> {
         }
     }
 
-    /// Check only the identity of the state supplied to memory preparation or
-    /// native entry against this live scoped loan. The pointer is never read or
-    /// dereferenced and proves no PE/source/memory authority independently of
-    /// this context's retained owners. The actual entry token must retain this
-    /// context and check the same bound bank through the native call.
+    /// Check that `guest` is the very state this borrow was taken for; the
+    /// pointer is compared, never read.
     pub fn check_guest(&self, guest: &GuestState) -> Result<(), Error> {
         if core::ptr::eq(self.guest_identity, guest) {
             Ok(())
@@ -99,9 +94,9 @@ impl Low128FpContext<'_, '_> {
     }
 }
 
-/// Retains the context alongside the actual mutable GuestState. Authorization
-/// and memory preparation/invocation occur inside its split callback, allowing
-/// the memory token to retain a shared context while the guest bank is mutable.
+/// Holds the context alongside the mutable guest state. Authorization and the
+/// memory call happen inside the split callback, so the memory token can share
+/// the context while the bank is mutable.
 pub struct Low128FpAccess<'loan, 'id> {
     context: Low128FpContext<'loan, 'id>,
     registers: &'loan mut GuestState,
@@ -114,10 +109,8 @@ impl<'loan, 'id> Low128FpAccess<'loan, 'id> {
         self.registers
     }
 
-    /// The memory requirement owner borrows this typed context during admission
-    /// and retains it through native invocation using the same actual guest.
-    /// Any native invocation still requires its real source and memory loans;
-    /// this method alone supplies neither authority.
+    /// The memory owner borrows this context during admission and keeps it
+    /// through the native call with the same guest state.
     pub fn with_guest<R>(
         &mut self,
         operation: impl FnOnce(&Low128FpContext<'loan, 'id>, &mut GuestState) -> R,
@@ -126,10 +119,10 @@ impl<'loan, 'id> Low128FpAccess<'loan, 'id> {
     }
 }
 
-/// Qualify this bounded ordinary FP/AdvSIMD bank for one synchronous operation.
-/// The higher-ranked callback prevents returning a capability or GuestState loan.
-/// SVE-present CPUs explicitly decline: their low128 writes also require a real
-/// nonstreaming scalable upper-Z setter, absent from the current ScalableState.
+/// Admit AdvSIMD/FP access to the low 128 bits for one synchronous operation;
+/// the higher-ranked callback prevents leaking the borrow. CPUs with SVE are
+/// refused, because their V writes also need a non-streaming upper-Z clear that
+/// ScalableState does not provide.
 pub fn with_nonstreaming_low128<'id, R>(
     ids: &Snapshot,
     controls: &FpControlOwner<'id>,

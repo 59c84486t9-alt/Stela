@@ -33,8 +33,9 @@ const OR_RCX_R11: &[u8] = &[0x4c, 0x09, 0xd9];
 const TEST_R9_R9: &[u8] = &[0x4d, 0x85, 0xc9];
 const CMOVNZ_RAX_RCX: &[u8] = &[0x48, 0x0f, 0x45, 0xc1];
 
-/// RAX=result, RDX=original base; R8 is a normalized multiplication predicate
-/// when requested. RCX/R9/R10/R11 are scratch. No branch depends on guest data.
+/// RAX is the result and RDX the base; R8 holds the normalized multiplication
+/// predicate when requested. RCX/R9/R10/R11 are scratch. No branch depends on
+/// guest data.
 pub(super) fn emit(code: &mut Vec<u8>, multiplication: bool) {
     code.extend(MOV_R9_RAX);
     code.extend(XOR_R9_RDX);

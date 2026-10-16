@@ -6,8 +6,7 @@ use stela_compiler::{
     block::{BlockAnalysis, ExitKind, SuccessorKind},
 };
 
-/// None denotes a source without a conditional terminal. This function grants
-/// no entry, PE, retirement, source generation, memory or replay authority.
+/// None means the block has no conditional terminal.
 pub(super) fn validate(
     analysis: &BlockAnalysis,
     source: &[u8],
@@ -16,10 +15,9 @@ pub(super) fn validate(
     kind: ExitKind,
     next: GuestAddress,
 ) -> anyhow::Result<Option<()>> {
-    // The block parser owns special terminal encodings such as BL. Its
-    // rechecked immutable analysis must identify a conditional source before
-    // the ordinary instruction decoder is called. Decode errors on an actual
-    // conditional source remain errors, never a generic fallback.
+    // The block parser owns special terminal encodings such as BL, so its
+    // analysis must identify a conditional branch before the instruction
+    // decoder is used. A decode error on a conditional branch stays an error.
     let has_target = analysis
         .static_successors
         .iter()

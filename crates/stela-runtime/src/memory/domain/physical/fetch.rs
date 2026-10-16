@@ -12,26 +12,23 @@ use alloc::sync::Arc;
 const INSTRUCTION_BYTES: usize = size_of::<u32>();
 const INSTRUCTION_ALIGNMENT_MASK: u64 = INSTRUCTION_BYTES as u64 - 1;
 
-/// Retained canonical storage with a stronger immutable-code producer contract.
-/// This wraps the real backing/lifetime owner, never a caller-created ID token.
+/// Retained storage under the stronger contract for immutable code.
 pub(crate) struct ImmutableCodeBacking {
     backing: Arc<MemoryBacking>,
 }
 
 impl ImmutableCodeBacking {
-    /// Adopt existing owned immutable code storage without changing its identity.
+    /// Wrap existing immutable code storage without changing its identity.
     ///
     /// # Safety
-    /// The real native storage owner has finalized the complete physical extent
-    /// as readable, coherent Normal-WB RAM with no host-writable mapping/alias.
-    /// It pins those rights and bytes until the last retained backing is dropped.
-    /// No guest, host publisher, DMA, firmware, NMI or external agent may modify
-    /// any byte through another alias/address space. There are no surviving Rust
-    /// references to these bytes. Every physical alias uses this same canonical
-    /// backing and machine. Retention alone does not establish immutability:
-    /// the caller must own the actual native allocation/protection authority.
-    /// Guest Execute is permission to read original instruction bytes, never
-    /// native execute permission for these ARM bytes.
+    /// The storage owner has made the whole extent readable coherent write-back
+    /// RAM with no host-writable mapping or alias, and keeps its rights and
+    /// bytes fixed until the last backing is dropped. Nothing (guest, host
+    /// publisher, DMA, firmware, NMI or other agent) may modify a byte through
+    /// another alias or address space, and no Rust reference to the bytes
+    /// survives. Every physical alias uses this backing and machine. Guest
+    /// execute means permission to read the instruction bytes, never host
+    /// execute permission.
     pub(crate) unsafe fn adopt(backing: Arc<MemoryBacking>) -> Result<Self, &'static str> {
         let maximum = backing.maximum_permissions();
         if maximum.writable || !maximum.executable {
@@ -92,9 +89,9 @@ impl BoundPhysicalInstruction {
             None => self.backing().instruction_generation().is_none(),
         }
     }
-    /// The exact pre-effect snapshot may settle its own modifying instruction.
-    /// Only contiguous real receipts from the original same-System writer can
-    /// explain a changed backing; unrelated mutations or copied epochs fail.
+    /// The pre-effect snapshot may settle its own modifying instruction. A
+    /// changed backing is accepted only when contiguous write records from this
+    /// system's writer explain it.
     pub(crate) fn validate_owned_writes(
         &self,
         system: &crate::memory::domain::MemorySystem,
@@ -106,7 +103,7 @@ impl BoundPhysicalInstruction {
         system.validate_owned_source_writes(self.backing(), self.mutation_generation, writes)
     }
 
-    /// Equal actual storage and all reached mapping generations, not just bytes.
+    /// Same storage and same mapping generations, not just equal bytes.
     pub(crate) fn same_source(&self, other: &Self) -> bool {
         self.raw_pc == other.raw_pc
             && self.physical_address == other.physical_address
@@ -123,10 +120,8 @@ impl BoundPhysicalInstruction {
 }
 
 impl PhysicalAddressSpace {
-    /// Legacy control-owner fetch, outside the canonical M0 Active path.
-    /// M0 WT/NC exists only through the actual closed control execution scope.
-    /// No caller-supplied Translation or Boolean permit enters this path. The
-    /// real scope derives current controls and uses this identical PA owner.
+    /// Instruction fetch for the control owner, outside the M0 path. The scope
+    /// derives the current controls and uses this physical owner.
     pub(crate) fn fetch_control_instruction(
         &self,
         raw_pc: u64,
@@ -166,12 +161,10 @@ impl PhysicalAddressSpace {
         Ok(reached)
     }
 
-    /// Separately admitted single ordinary LDR64 instruction fetch under the
-    /// genuine factored installed owner. The legacy control whitelist remains
-    /// unchanged. This reads immutable original instruction bytes with guest
-    /// Execute rights; it performs no Device data access or native invocation.
-    /// Current qualification/revalidation borrows the exact retained Active
-    /// outer. Fresh construction supplies its single pre-PE construction loan.
+    /// Fetch a single LDR64 instruction for the installed M0 owner, reading the
+    /// immutable instruction bytes with guest execute rights. Re-validation
+    /// borrows the consumer's outer object; construction supplies its single
+    /// construction borrow.
     pub(crate) fn fetch_m0_instruction(
         &self,
         execution: &MemoryExecutionLoan,
@@ -207,8 +200,8 @@ impl PhysicalAddressSpace {
         Ok(reached)
     }
 
-    /// One exact typed EL1 direct-B source fetch under the ORIGINAL installed
-    /// source and SAME retained outer. This performs no branch/native execution.
+    /// Fetch one EL1 direct-B instruction from the installed source under the
+    /// outer borrow.
     pub(crate) fn fetch_el1_instruction(
         &self,
         execution: &MemoryExecutionLoan,
@@ -253,8 +246,7 @@ impl PhysicalAddressSpace {
             .map_err(|_| "physical fetch source binding is unavailable")
     }
 
-    // Unjoined legacy owners own this first local loan. Canonical M0 source
-    // qualification never routes here and never mints a replacement outer.
+    // Older owners take this local borrow; the M0 path never comes here.
     fn read_legacy_instruction(
         &self,
         translation: &stage1::Translation,
@@ -349,19 +341,18 @@ impl PhysicalAddressSpace {
         {
             return Err("physical instruction view has been retired");
         }
-        // SAFETY: the canonical immutable owner pins coherent readable native
-        // storage and excludes every byte writer/reference alias. Resolution
-        // checks Execute on all reached views and retains their generations.
-        // The caller's actual same-domain execution loan remains borrowed
-        // through this read and subsequent source registration/revalidation.
-        // The actual recipe has the exact authorized four-byte footprint.
+        // SAFETY: the immutable owner pins coherent readable storage and
+        // excludes every writer and aliasing reference. Resolution checks
+        // execute permission on all reached views and keeps their generations.
+        // The caller's execution borrow lasts through this read, registration
+        // and re-validation, and the access is exactly four bytes.
         let (word, mutation_generation) =
             self.domain
                 .system
                 .read_instruction_source(first.view().backing(), || {
-                    // SAFETY: current exact Execute span pins readable coherent RAM;
-                    // immutable owner or actual tracked writer exclusion covers all
-                    // byte writers. No reference to mutable source bytes escapes.
+                    // SAFETY: the execute span pins readable coherent RAM, and
+                    // either the immutable owner or the tracked writer excludes
+                    // every byte writer. No reference to source bytes escapes.
                     unsafe { access::read_part(pointer, INSTRUCTION_BYTES, self.domain.target) }
                         .map(|value| value as u32)
                         .map_err(|_| "physical instruction read is unavailable")

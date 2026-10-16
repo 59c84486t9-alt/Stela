@@ -154,7 +154,7 @@ pub(in crate::x86_64) fn emit(
     resolve(code, success, success_start);
     commit_inexact(code);
     if operand.shape == Shape::Scalar {
-        // Legacy register MOVSS/MOVSD replaces only the result lane in original A.
+        // Register MOVSS/MOVSD replaces only the result lane of A.
         code.extend([
             if operand.format == Format::Single {
                 SINGLE_PREFIX

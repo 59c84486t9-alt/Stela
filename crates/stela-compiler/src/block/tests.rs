@@ -585,7 +585,7 @@ fn basic_pac_integer_fields_distinguish_sp_zero_and_discard() {
             }
         }
     }
-    // Actual original dyld signer data-key operands are X17 and X16.
+    // dyld's pointer signer uses X17 and X16 as the data-key operands.
     for (word, key) in [(0xdac10a11, Da), (0xdac10e11, Db)] {
         assert_eq!(
             decode_pointer_authentication(pc, word)

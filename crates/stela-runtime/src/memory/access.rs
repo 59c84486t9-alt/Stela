@@ -57,14 +57,14 @@ pub(super) fn read_footprint(
     Ok((address & !SCA_OFFSET_MASK, SCA_BYTES))
 }
 
-/// Read one atomic part, returning its zero-extended little-endian value.
+/// Read one atomic part and return its zero-extended little-endian value.
 ///
 /// # Safety
-/// The complete `read_footprint` must be live, readable coherent Normal-WB RAM
-/// throughout this call. No Rust reference may alias concurrently mutated RAM.
-/// The selected target's capabilities must have been checked against the actual
-/// host. The caller must provide any guest ordering and reservation protocol.
-/// Host faults are not resumable through this function without a separate adapter.
+/// The whole `read_footprint` must be live, readable, coherent write-back RAM
+/// for the call, with no Rust reference aliasing concurrently mutated RAM. The
+/// target's features must have been checked against the host. The caller
+/// provides guest ordering and reservations. Host faults are not recoverable
+/// here.
 pub(super) unsafe fn read_part(
     pointer: *const u8,
     bytes: usize,
@@ -74,8 +74,8 @@ pub(super) unsafe fn read_part(
     #[cfg(target_arch = "x86_64")]
     {
         if footprint_bytes == SCA_BYTES {
-            // SAFETY: the caller prevalidates the entire aligned snapshot and
-            // actual host AtomicLoad16 capability. No write permission is used.
+            // SAFETY: the caller validated the whole aligned snapshot and the
+            // host's 16-byte atomic load; nothing is written.
             let snapshot = unsafe { read_quadword(address as *const u8) };
             let shifted = snapshot >> ((pointer as usize & SCA_OFFSET_MASK) * BITS_PER_BYTE);
             let mask = u128::MAX >> ((QUADWORD_BYTES - bytes) * BITS_PER_BYTE);
@@ -125,12 +125,12 @@ pub(super) unsafe fn read_part(
 /// Write the low `bytes` of `value` as one atomic little-endian part.
 ///
 /// # Safety
-/// The exact part must remain live, readable and writable coherent Normal-WB RAM
-/// throughout this call, without aliasing Rust references. The selected target's
-/// capabilities must have been checked against the actual host. The caller owns
-/// guest ordering, reservation invalidation and preflight before acquiring gates.
-/// Host faults need a separate resumable adapter. The 16-byte retry loop can retry
-/// under competing writers; it does not provide a wait-free progress guarantee.
+/// The part must stay live, readable and writable coherent write-back RAM for
+/// the call, with no aliasing Rust references. The target's features must have
+/// been checked against the host. The caller provides guest ordering,
+/// reservation invalidation and validation before taking any gate. Host faults
+/// are not recoverable here. The 16-byte loop may retry under competing
+/// writers; it is not wait-free.
 pub(super) unsafe fn write_part(
     pointer: *mut u8,
     bytes: usize,
@@ -142,8 +142,8 @@ pub(super) unsafe fn write_part(
         return Err(AccessError::MissingCx16);
     }
     #[cfg(target_arch = "x86_64")]
-    // SAFETY: caller supplies stable prevalidated coherent RAM and actual host
-    // capabilities. Scalar exchange supplies explicit strong WB ordering.
+    // SAFETY: the caller supplies stable, validated, coherent RAM and the host
+    // features. The scalar exchange gives strong write-back ordering.
     unsafe {
         if bytes == QUADWORD_BYTES {
             write_quadword(pointer, value);
@@ -262,10 +262,11 @@ unsafe fn read_quadword(pointer: *const u8) -> u128 {
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn write_quadword(pointer: *mut u8, value: u128) {
-    // SAFETY: caller guarantees a live aligned readable/writable quantity and
-    // Cx16. Each iteration is one actual atomic 16-byte update. A failed first
-    // compare acquires the next expected value; no torn initial read is needed.
-    // LLVM reserves RBX, so save and restore it inside the assembly statement.
+    // SAFETY: the caller guarantees a live, aligned, readable and writable
+    // quantity and CMPXCHG16B. Each iteration is one atomic 16-byte update; a
+    // failed first compare loads the next expected value, so no separate
+    // initial read can tear. LLVM reserves RBX, so it is saved and restored
+    // inside the asm.
     unsafe {
         core::arch::asm!(
             "mov r9, rbx",

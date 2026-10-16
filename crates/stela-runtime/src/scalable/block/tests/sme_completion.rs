@@ -155,8 +155,8 @@ fn sme_owned_completion_uses_exact_pc_without_replaying_native_prefix() {
             assert_eq!(block.source_map()[1].0, GuestAddress(BASE.0 + WORD_BYTES));
             let (mut thread, mut scalable) = owner(bytes, za);
             let mut context = ExecutionContext::default();
-            // SAFETY: Source is bounded arithmetic with owned disjoint register
-            // storage and the exact declared SME2 streaming profile.
+            // SAFETY: bounded arithmetic over disjoint register storage, with
+            // the declared SME2 streaming profile.
             let exit = unsafe { block.invoke(&mut thread, &mut scalable, &mut context) }.unwrap();
             assert_eq!(exit.kind, ExitKind::ScalableNumerical as u64);
             assert_eq!(exit.next_pc, BASE.0 + WORD_BYTES);

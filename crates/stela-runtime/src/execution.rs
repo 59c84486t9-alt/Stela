@@ -26,14 +26,11 @@ use stela_compiler::{GuestState, NATIVE_ABI};
 #[cfg(feature = "std")]
 use stela_core::sha256;
 
-// Deliberately bounded research entry point; an oversized cache artifact cannot
-// force an unbounded file allocation or executable mapping.
+// Bounds a cached artifact so it cannot force an unbounded allocation or
+// mapping.
 pub(crate) const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 
-/// An owned RX copy of one registered leaf's current generated artifact.
-///
-/// The object cannot be sent or shared between threads. Cross-thread execution,
-/// invalidation barriers and executable-page retirement need a separate design.
+/// An owned RX copy of one registered leaf's code. It is neither Send nor Sync.
 #[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct ExecutableLeaf {
@@ -146,8 +143,8 @@ impl ExecutableLeaf {
             dispatcher.is_current(&self.resolved),
             "refusing stale or foreign native execution"
         );
-        // SAFETY: Caller upholds the documented direct-RAM and finite execution
-        // contract; the mapping is owned, immutable RX, and has the checked ABI.
+        // SAFETY: the caller upholds the direct-RAM and termination contract;
+        // the mapping is owned, immutable RX with the checked ABI.
         unsafe { self.mapping.call(state) }
     }
 }
@@ -210,8 +207,9 @@ pub(crate) mod platform {
                     bytes.len(),
                 );
             }
-            // SAFETY: The entire owned mapping is initialized. Transition RW to
-            // RX atomically through the OS; x86 instruction/data caches cohere.
+            // SAFETY: the whole mapping is initialized. The OS switches it from
+            // RW to RX atomically, and x86 instruction and data caches are
+            // coherent.
             let result = unsafe {
                 libc::mprotect(
                     mapping.pointer.as_ptr().cast(),
@@ -227,8 +225,8 @@ pub(crate) mod platform {
         }
 
         pub unsafe fn call(&self, state: &mut GuestState) -> Result<()> {
-            // SAFETY: original mapping ownership and caller's exact raw leaf ABI
-            // contract are unchanged. Adopted PEs require their retained Active.
+            // SAFETY: the mapping is still owned and the caller upholds the
+            // leaf ABI.
             let reached = match unsafe { NativeImage::borrow(self).call(state) } {
                 Ok(reached) => reached,
                 Err(never) => match never {},
@@ -242,8 +240,8 @@ pub(crate) mod platform {
             state: &mut GuestState,
             context: &mut stela_compiler::context::ExecutionContext,
         ) -> Result<stela_compiler::block::BlockExit> {
-            // SAFETY: actual immutable mapping and checked block/context owners
-            // stay borrowed for this synchronous call under canonical Active.
+            // SAFETY: the mapping and the block's context stay borrowed for
+            // this synchronous call.
             let reached = match unsafe { self.call_context_block_observed(state, context) } {
                 Ok(reached) => reached,
                 Err(never) => match never {},
@@ -251,8 +249,8 @@ pub(crate) mod platform {
             Ok(reached.into_infallible())
         }
 
-        /// Invoke the two-argument context-leaf ABI. Architectural failure is
-        /// recorded in the owned memory view, never inferred from RAX.
+        /// Call the two-argument context-leaf ABI. Architectural failures are
+        /// recorded in the memory view, never inferred from RAX.
         pub unsafe fn call_context(
             &self,
             state: &mut GuestState,
@@ -268,16 +266,14 @@ pub(crate) mod platform {
             Ok(())
         }
 
-        /// Retain the actual reached FFI carrier beside storage's postcheck.
-        /// The outer Err is a typed pre-FFI refusal; current hosted ownership is
-        /// infallible. Fallible protected storage must retain reached carrier too.
+        /// Keep the native result alongside the storage check. Err is a refusal
+        /// before the call; hosted storage cannot fail.
         ///
         /// # Safety
-        /// Exact source/native/ABI/map/requirements and the original context must
-        /// be bound. An adopted PE may call only under its original canonical
-        /// Active/session retaining full ThreadState/System/backend/source/domain
-        /// through this receipt, whole context finalization, and once-only PC
-        /// settlement. Owned observations grant no completion/Ready or retry.
+        /// The source, native code, ABI, map, requirements and context must be
+        /// bound. A PE may call only from its session, which holds the thread,
+        /// system state, backend, source and domain through this call, the
+        /// context finalization and PC settlement.
         pub(crate) unsafe fn call_context_block_observed(
             &self,
             state: &mut GuestState,
@@ -286,27 +282,25 @@ pub(crate) mod platform {
             super::ObservedNativeCall<stela_compiler::block::BlockExit, Infallible>,
             Infallible,
         > {
-            // SAFETY: original concrete mapping stays borrowed; caller retains
-            // the actual complete canonical owner/context execution contract.
+            // SAFETY: the mapping stays borrowed, and the caller upholds the
+            // execution contract.
             unsafe { NativeImage::borrow(self).call_context_block(state, context) }
         }
 
-        /// Invoke the exact ordinary resident-budget ABI over this original
-        /// mapping. The budget bounds execution; it grants no PE or domain loan.
+        /// Call the resident-budget block ABI. The budget bounds execution.
         ///
         /// # Safety
-        /// Caller binds the actual source/ABI/target and same canonical bank.
-        /// Selected resident loops are nonfaulting integer regions. A fallback
-        /// retains the original ordinary call's memory, fault and target
-        /// prerequisites. Asynchronous producer domains and checked/System/
-        /// threaded entry are excluded; the budget grants no such admission.
+        /// The caller binds the source, ABI, target and register bank. Resident
+        /// loops are non-faulting integer code; a fallback has the ordinary
+        /// call's memory, fault and target requirements. Not for asynchronous
+        /// producer domains or checked, system or threaded entry.
         pub unsafe fn call_budgeted_block(
             &self,
             state: &mut GuestState,
             budget: &mut stela_compiler::block::loop_budget::LoopBudget,
         ) -> Result<stela_compiler::block::BlockExit> {
-            // SAFETY: the original immutable RX mapping and exact invocation
-            // bank/budget stay borrowed through returned storage observations.
+            // SAFETY: the mapping, register bank and budget stay borrowed
+            // through the call.
             let reached =
                 match unsafe { NativeImage::borrow(self).call_budgeted_block(state, budget) } {
                     Ok(reached) => reached,
@@ -315,9 +309,9 @@ pub(crate) mod platform {
             Ok(reached.into_infallible())
         }
 
-        /// Actual reached carrier/storage observations for the declared ONE
-        /// GuestState-pointer block ABI. The canonical retained Active/session
-        /// must own original full PE/source/System/domain through settlement.
+        /// The native result and storage check for the one-pointer block ABI.
+        /// The PE's session must hold its state, source and domain through
+        /// settlement.
         pub(crate) unsafe fn call_block_observed(
             &self,
             state: &mut GuestState,
@@ -325,8 +319,8 @@ pub(crate) mod platform {
             super::ObservedNativeCall<stela_compiler::block::BlockExit, Infallible>,
             Infallible,
         > {
-            // SAFETY: exact original source/profile/ABI/map and full retained
-            // canonical owner contract are caller obligations; storage is real.
+            // SAFETY: the caller upholds the source, profile, ABI and map, and
+            // the session contract.
             unsafe { NativeImage::borrow(self).call_block(state) }
         }
 
@@ -334,8 +328,8 @@ pub(crate) mod platform {
             &self,
             state: &mut GuestState,
         ) -> Result<stela_compiler::block::BlockExit> {
-            // SAFETY: caller retains the original trusted struct-return ABI and
-            // direct-RAM contract; this does not mint adopted-PE admission.
+            // SAFETY: the caller upholds the struct-return ABI and the
+            // direct-RAM contract.
             let reached = match unsafe { self.call_block_observed(state) } {
                 Ok(reached) => reached,
                 Err(never) => match never {},
@@ -366,8 +360,8 @@ pub(crate) mod platform {
 
     impl Drop for Mapping {
         fn drop(&mut self) {
-            // SAFETY: The mapping is uniquely owned and no function pointer or
-            // byte slice escapes. Calls borrow self, so none survives Drop.
+            // SAFETY: the mapping is uniquely owned and no pointer into it
+            // escapes; calls borrow `self`, so none outlives Drop.
             unsafe { libc::munmap(self.pointer.as_ptr().cast(), self.length) };
         }
     }

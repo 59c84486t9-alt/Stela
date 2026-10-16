@@ -120,8 +120,8 @@ impl LegacyPlan {
         let normal_condition = *encoding::SUBTRACTION_CONDITIONS
             .get(usize::from(*condition ^ ARM_CONDITION_INVERSE_BIT))?;
         let (last, prefix) = instructions.split_last()?;
-        // Every internal flag read has known host provenance. The final complete
-        // subtraction defines every flag observed by the edge and canonical exit.
+        // Every flag read inside the loop has a known host source, and the
+        // final subtraction defines every flag seen by the edge and the exit.
         let Operation::AddSub {
             width,
             subtract: true,
@@ -269,15 +269,15 @@ impl LegacyPlan {
             emitter.emit(|code| {
                 encoding::arithmetic_immediate(code, encoding::RESULT, true, immediate, width)
             });
-            // Register copies and explicit ZR NOP preserve the subtraction flags.
+            // Register copies and the ZR NOP preserve the subtraction's flags.
             emitter.commit(destination, width);
         }
         emitter.current += 1;
         let code = &mut emitter.output.code;
         emitter.output.source_map.push((branch_pc, code.len()));
         encoding::decrement_budget_preserving_flags(code);
-        // The actual original edge has priority over budget exhaustion. A false
-        // edge returns fallthrough even when this completed block used the budget.
+        // The loop edge takes priority over budget exhaustion: a false
+        // condition falls through even when the budget ran out.
         let normal_exit_jump = encoding::conditional_jump(code, normal_condition);
         encoding::skip_jump_if_budget_zero(code);
         let backedge = encoding::near_jump(code);

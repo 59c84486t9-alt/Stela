@@ -521,7 +521,8 @@ fn scalar_narrow_qwords(code: &mut Vec<u8>, operand: Operand) {
         code.push(REGISTER_MODE | (MASK_XMM << MODRM_REGISTER_SHIFT));
         if !operand.kind.is_extract() {
             if operand.shift == QWORD_BITS {
-                // x86 scalar shift counts mask to six bits: handle the full width explicitly.
+                // x86 scalar shift counts are masked to six bits, so full-width
+                // shifts are handled explicitly.
                 if rounded(operand.kind) && signed_input(operand.kind) {
                     code.extend(XOR_EAX_EAX);
                 } else if rounded(operand.kind) || signed_input(operand.kind) {

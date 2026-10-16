@@ -232,10 +232,10 @@ fn bound_write(binding: &Binding) -> RebaseFixup {
 }
 
 impl LinkedImages {
-    /// Plan and bind every supplied image before atomically allocating the entire
-    /// memory set. Input zero is MH_EXECUTE; later inputs must be MH_DYLIB with
-    /// unique install identities. No dependency search, host substitution or
-    /// initializers occur. Unreferenced dependencies remain explicit in receipts.
+    /// Plan and bind every image, then allocate all their memory at once. Input
+    /// zero is the MH_EXECUTE; the others must be MH_DYLIBs with unique install
+    /// names. No dependency search or initializers run; unreferenced
+    /// dependencies are reported.
     pub fn load(inputs: Vec<ImageInput>, cache: PathBuf, stack: StackSpec) -> Result<Self> {
         Self::load_with_links(inputs, cache, stack, None)
     }
@@ -353,14 +353,15 @@ impl LinkedImages {
         self.memory.read_snapshot(address, bytes)
     }
 
-    /// Dispatch across the immutable source windows of every owned image.
+    /// Run from the entry point across the source of every image.
     ///
     /// # Safety
-    /// All code must be trusted, entry state must satisfy the research ABI, and
-    /// accesses must stay in live suitable direct RAM without aliasing host state.
-    /// Bound targets must require no pending initializer, TLS, signature, PAC or
-    /// other launch work. Guest fault delivery and process isolation are absent;
-    /// native faults may terminate this process. No concurrent mutation is allowed.
+    /// All code must be trusted and the entry state must satisfy its ABI.
+    /// Accesses must stay in live direct RAM that aliases no host state. Bound
+    /// targets must need no pending initializer, TLS, signature, PAC or other
+    /// launch work. There is no guest fault delivery or process isolation, so a
+    /// native fault may terminate the process. Nothing may mutate the images
+    /// concurrently.
     pub unsafe fn run(
         &mut self,
         state: &mut ThreadState,

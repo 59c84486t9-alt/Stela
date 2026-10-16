@@ -109,8 +109,8 @@ pub struct SignedFixupPlan {
     pub pauth_profile: &'static str,
 }
 impl DecodedFixups {
-    /// Plan all rebase values under one explicit process key domain. This does
-    /// not write an image, resolve binds, or replace original dyld's self-rebase.
+    /// Compute signed values for every rebase under one process key set.
+    /// Nothing is written and no bind is resolved.
     pub fn sign_rebases(&self, context: &stela_runtime::pauth::Context) -> Result<SignedFixupPlan> {
         ensure!(
             self.binds.is_empty() && self.authenticated_binds.is_empty(),
@@ -175,7 +175,7 @@ pub struct RebaseFixup {
     /// Relocated guest address of the eight-byte pointer slot.
     pub guest_address: u64,
     pub raw: u64,
-    /// Decoded address including its original high8 bits; never PAC-stripped.
+    /// The decoded address with its high 8 bits; PAC bits are never stripped.
     pub value: u64,
     pub pointer_format: u16,
 }
@@ -461,7 +461,7 @@ fn decode_pointer(
     Ok((Pointer::Rebase(value), next))
 }
 
-/// Legacy rebase-only API and JSON: binds still require explicit resolution.
+/// Rebase-only plan; binds still need resolution.
 pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> {
     let decoded = decode(data, image, load_base)?;
     if let Some(bind) = decoded.binds.first() {
@@ -479,14 +479,13 @@ pub fn plan(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<FixupPlan> 
     })
 }
 
-/// Decode one validated thin image's chained payload without resolving symbols.
+/// Decode an image's chained-fixup payload without resolving symbols.
 ///
-/// Absence of a payload is empty metadata, not proof of loader completeness.
-/// Authenticated pointers, compressed symbol pools, multi-start 64-bit pages
-/// and non-userland formats fail explicitly. All pointer slots are disjoint,
-/// fully file-backed and within their declared chain page. Bind addends combine
-/// import and inline values with checked i64 arithmetic. High8 address bits are
-/// retained; this does not authorize dereferencing tagged/noncanonical addresses.
+/// A missing payload decodes as empty. Authenticated pointers, compressed
+/// symbol pools, multi-start 64-bit pages and non-userland formats are errors.
+/// Every pointer slot is disjoint, fully file-backed and within its chain page.
+/// Bind addends combine import and inline values with checked i64 arithmetic.
+/// High 8 address bits are kept.
 pub fn decode(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<DecodedFixups> {
     decode_impl(data, image, load_base, false)
 }

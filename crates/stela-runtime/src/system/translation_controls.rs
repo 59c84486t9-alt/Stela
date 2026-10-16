@@ -70,8 +70,8 @@ impl Register {
     }
 }
 
-/// Authentic architectural initial values or a deliberately declared software
-/// machine's values. There is no Default, unknown-as-zero, or firmware inference.
+/// Architectural or declared initial values; there is no default,
+/// unknown-as-zero or firmware inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterValues {
     pub sctlr_el1: u64,
@@ -115,9 +115,8 @@ impl RegisterValues {
     }
 }
 
-/// Immutable source/CPU/regime policy. No alternate mutable register storage.
-/// Field facts and the canonical resolver CPU witness must describe the same
-/// declared/captured CPU. Their origin is retained by the machine constructor.
+/// Immutable source, CPU and regime policy. The field facts and the resolver's
+/// CPU witness must describe the same CPU.
 pub struct ControlProfile {
     policies: [fields::RegisterPolicy; REGISTER_COUNT],
     cpu: stage1::CpuProfile,
@@ -173,8 +172,8 @@ impl ControlProfile {
     }
 }
 
-/// A read-only derived snapshot. Copying it confers no access/publication
-/// authority. Owner and control generation remain checked at every entry.
+/// A read-only derived snapshot; the owner and control generation are
+/// re-checked at every entry.
 #[derive(Debug, Clone)]
 pub struct ControlSnapshot {
     identity: Arc<()>,
@@ -208,9 +207,8 @@ impl ControlSnapshot {
     }
 }
 
-/// System-register access is for a genuinely supplied NonSecure A64 EL0/EL1
-/// machine with no EL2/EL3. Current EL always comes from actual SystemState.
-/// There is no caller-supplied current-EL copy to drift from that owner.
+/// System-register access for a non-secure AArch64 EL0/EL1 machine without EL2
+/// or EL3. The current EL always comes from SystemState.
 pub struct TranslationControls {
     identity: Arc<()>,
     memory: Arc<MemorySystem>,
@@ -222,8 +220,8 @@ pub struct TranslationControls {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlError {
-    /// The actual illegal-execution-state exception needs its exception owner.
-    /// No control instruction or service callback has executed on this decline.
+    /// The illegal-execution-state exception needs the exception owner; nothing
+    /// executed before this refusal.
     IllegalExecutionState,
     Undefined,
     NotOwned,
@@ -241,9 +239,9 @@ pub enum ControlError {
     },
 }
 
-/// Actual fetch output admitted by the bound controls/effects owner. The raw
-/// word and source generation must be revalidated by preparation; no copied
-/// virtual source buffer can bypass actual fetch permissions or publication.
+/// A fetch admitted by the bound controls. Preparation re-validates the word
+/// and source generation; a copied source buffer cannot bypass fetch
+/// permissions or publication.
 pub struct FetchedInstruction {
     snapshot: ControlSnapshot,
     pub(super) source: PhysicalFetch,
@@ -265,14 +263,14 @@ impl FetchedInstruction {
 pub enum Completion {
     /// MRS completed; System terminal owner commits the destination and next PC.
     Read { rt: u8, value: u64, next_pc: u64 },
-    /// Native execution must return. The next instruction requires actual fetch
-    /// under current controls, including fetching an ISB before executing it.
+    /// Native execution must return: the next instruction, even an ISB, has to
+    /// be fetched under the current controls.
     FetchRequired { pc: u64, control_generation: u64 },
 }
 
 impl TranslationControls {
-    /// Construction installs the actual initial policy through the real memory
-    /// and publication owner; a populated bank alone is not machine admission.
+    /// Install the initial policy through the memory and publication owner; a
+    /// filled bank alone does not admit the machine.
     pub fn install<S: TranslationServices>(
         readbacks: RegisterValues,
         profile: ControlProfile,
@@ -346,8 +344,8 @@ impl TranslationControls {
         )
     }
 
-    /// Fetch through the actual canonical resolver/backing/source authority.
-    /// Fault provenance is supplied by that owner, never guessed from MemoryStatus.
+    /// Fetch through the resolver, backing and source owner, which supplies the
+    /// fault details.
     pub fn fetch<S: TranslationServices>(
         &self,
         pc: u64,
@@ -371,7 +369,7 @@ impl TranslationControls {
         Ok(FetchedInstruction { snapshot, source })
     }
 
-    /// Read after an actual fetched MRS. No guest destination is modified here.
+    /// Read after a fetched MRS; the guest destination is not written here.
     pub fn read<S: TranslationServices>(
         &mut self,
         fetched: &FetchedInstruction,
@@ -381,8 +379,8 @@ impl TranslationControls {
         self.prepare_read(fetched, state, services)?.commit()
     }
 
-    /// Reserve a real MRS publication before canonical Retiring; the actual
-    /// readback value and destination remain frozen under the original bank loan.
+    /// Reserve the MRS publication before retiring; the value and destination
+    /// stay fixed under the bank borrow.
     pub fn prepare_read<'a, S: TranslationServices>(
         &'a mut self,
         fetched: &FetchedInstruction,
@@ -417,9 +415,9 @@ impl TranslationControls {
         })
     }
 
-    /// Preflight no guest effects. Raw Xt is obtained from the actual GuestState,
-    /// including XZR semantics. No register, source, control or context copy can
-    /// be substituted between this request and the prepared transaction.
+    /// Preflight without guest effects. Xt is read from GuestState (including
+    /// XZR), and nothing can be substituted between this request and the
+    /// prepared transaction.
     pub fn prepare_write<'a, S: TranslationServices>(
         &'a mut self,
         fetched: &'a FetchedInstruction,
@@ -638,9 +636,8 @@ impl<P: PreparedPublication> PreparedIsb<'_, P> {
     }
 }
 
-/// Universal instruction-entry decline over the actual misc-PSTATE owner.
-/// Source/native sequencing remains the concrete service caller's contract;
-/// this guard also protects authoritative interpreted/service execution.
+/// Refuse entry when PSTATE.IL is set, for native and interpreted execution
+/// alike.
 fn check_execution_state(state: &SystemState) -> Result<(), ControlError> {
     state
         .check_lower_el_storage()

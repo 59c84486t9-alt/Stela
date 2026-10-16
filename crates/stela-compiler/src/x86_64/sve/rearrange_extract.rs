@@ -219,8 +219,8 @@ fn emit_last(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target:
     }
     code.extend(AND_R8D_IMM8);
     code.push(CHUNK_OFFSET_MASK);
-    // Only the selected 16-byte chunk is staged. All ordinary paths consume
-    // the same bounded frame before committing architectural state.
+    // Only the selected 16-byte chunk is staged, in the same bounded frame for
+    // every path.
     code.extend(SUB_RSP_IMM8);
     code.push(STAGING_FRAME_BYTES);
     code.extend(MOVDQU_STACK_XMM0);

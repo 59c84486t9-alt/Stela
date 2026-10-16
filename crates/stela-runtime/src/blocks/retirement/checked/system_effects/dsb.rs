@@ -42,10 +42,9 @@ pub(crate) struct RamDsbApplied {
     pub(crate) progress: RamCompletionProgress,
 }
 
-/// No authority/state borrow survives preparation. These are original actual
-/// source/control/RAM/outer loans, not a profile inferred from the DSB word.
-/// The sole fresh platform factory closes its physical participants for the
-/// entire executable lifetime; its constructor excludes external memory masters.
+/// Holds the source, control, RAM and outer borrows; no state borrow survives
+/// preparation. The platform factory owns every physical participant for the
+/// machine's lifetime and excludes external memory masters.
 pub(super) struct PreparedRamDsb<'loan> {
     boundary: &'loan Boundary,
     outer: &'loan MemoryExecutionLoan,
@@ -133,8 +132,8 @@ impl<'loan> PreparedRamDsb<'loan> {
             })
     }
 
-    /// This mutating entry cannot be called with loose banks: the closed view
-    /// checks the original Retiring attempt/source/outer/PE and both actual banks.
+    /// The view checks the retiring attempt, source, outer state, PE and both
+    /// banks before mutating.
     pub(super) fn apply_owned(
         &mut self,
         commit: &SystemEffectCommitView<'_>,
@@ -158,8 +157,8 @@ impl<'loan> PreparedRamDsb<'loan> {
                 .context(system)
                 .map_err(|error| RamDsbError::Owner(error.to_string()))?;
             self.ram.complete().map_err(RamDsbError::Completion)?;
-            // Retain the complete reached receipt even if a later actual owner
-            // check fails. Such a failure is terminal, never a replay permit.
+            // Keep the completion record even if a later check fails; such a
+            // failure is terminal and never allows replay.
             self.ram
                 .validate_current()
                 .map_err(RamDsbError::Completion)?;

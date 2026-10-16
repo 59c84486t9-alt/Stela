@@ -6,9 +6,9 @@ use super::{
 use crate::system::state::SystemState;
 
 impl TranslationControls {
-    /// The canonical post-native consumer retains the same original state,
-    /// source, outer and PE loans. This method only reserves its genuine CSE
-    /// producer; the exception plan separately validates and commits CPU state.
+    /// The post-native consumer holds the state, source, outer object and PE.
+    /// This only reserves the context synchronization; the exception plan
+    /// validates and commits the CPU state.
     pub(crate) fn prepare_exception_context<'a, S: TranslationServices>(
         &'a mut self,
         fetched: &FetchedInstruction,
@@ -20,8 +20,8 @@ impl TranslationControls {
         self.check_services(services)?;
         self.check_site(fetched)?;
         if !cause.matches_source(fetched.word()) {
-            // Authenticated return/failure needs its feature-present original
-            // PAuth service before it can select this synchronization cause.
+            // An authenticated return or failure needs the PAuth service before
+            // it can be a synchronization cause.
             return Err(ControlError::Unavailable(
                 "exception source needs another actual context service",
             ));
@@ -54,16 +54,16 @@ impl TranslationControls {
     }
 }
 
-/// Same original mutable controls and actual prepared source/publication gates.
-/// No PC, return target, cloned SystemState or detached retirement owner exists.
+/// The controls and the prepared source and publication gates; no PC, return
+/// target or copied system state.
 pub(crate) struct PreparedContextSynchronization<'a, P: PreparedPublication> {
     owner: &'a mut TranslationControls,
     prepared: P,
     next_generation: u64,
 }
 impl<'a, P: PreparedPublication> PreparedContextSynchronization<'a, P> {
-    /// Recover the SAME controls after the actual publication attempt. A failed
-    /// bank remains poisoned; returning its loan grants neither retry nor entry.
+    /// Return the controls after the publication attempt. A failed bank stays
+    /// failed.
     #[must_use = "recover the original controls and inspect exact publication outcome"]
     pub(crate) fn commit(self) -> (&'a mut TranslationControls, Result<(), ControlError>) {
         let Self {

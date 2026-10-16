@@ -9,10 +9,9 @@ use super::{
 use alloc::vec::Vec;
 use stela_compiler::context::memory::MemoryStatus;
 
-/// Holds the original canonical service guard and the actual mutable resources.
-/// Drop this borrow before source renewal and native execution requalification.
-/// Whole-request writes are a component operation: callers retain responsibility
-/// for source-defined copy store order and fault-prefix semantics.
+/// Holds the service guard and the mutable resources; drop it before source
+/// renewal and native re-entry. Whole-request writes do not order stores as the
+/// source instruction would, so callers handle store order and fault prefixes.
 pub struct GuestServiceMemory<'a, P: DataPolicy> {
     owner: &'a mut OwnedMemory,
     service: MemoryServiceLoan,
@@ -20,9 +19,9 @@ pub struct GuestServiceMemory<'a, P: DataPolicy> {
 }
 
 impl OwnedMemory {
-    /// Borrow only this owner's actual executing thread and original domain.
-    /// An outstanding native execution loan rejects service admission. Equal
-    /// numeric address-space identifiers cannot substitute for domain identity.
+    /// Borrow this owner's executing thread and domain. Refused while a native
+    /// execution borrow is outstanding; equal address-space numbers do not
+    /// stand in for domain identity.
     pub fn service_memory<'a, P: DataPolicy>(
         &'a mut self,
         thread: &'a mut MemoryThread<P>,
@@ -62,8 +61,8 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
         Ok(())
     }
 
-    /// Copy current readable logical bytes into independent owned staging.
-    /// Domain aliases owned by another facade are not admitted by this facade.
+    /// Copy the current readable bytes into owned staging. Aliases owned by
+    /// another facade are refused.
     pub fn read_snapshot(&self, address: u64, bytes: usize) -> anyhow::Result<Vec<u8>> {
         self.check().map_err(SharedBindingError::Domain)?;
         self.owner.validate_access(address, bytes, false)?;
@@ -79,15 +78,15 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
         self.owner.validate_write(address, bytes)
     }
 
-    /// Publish a validated whole request through the original backing monitor.
-    /// PublicationFault preserves the actual completed prefix on domain failure.
+    /// Publish a validated request through the backing's monitor. On a domain
+    /// failure, PublicationFault keeps the completed prefix.
     pub fn write(&mut self, address: u64, bytes: &[u8]) -> anyhow::Result<()> {
         self.owner
             .write_shared_in_service(&self.service, address, bytes)
     }
 
-    /// Stage a fresh anonymous allocation under this same original guard.
-    /// The returned transaction borrows this wrapper until publication or drop.
+    /// Stage a new anonymous allocation under this guard; the transaction
+    /// borrows the wrapper until it is published or dropped.
     pub fn begin_data_allocation(
         &mut self,
         request: AllocateDataRequest,
@@ -98,8 +97,8 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
             .begin_data_allocation_in_service(request, &self.service)
     }
 
-    /// Protect only actual owned data, preserving the original transaction's
-    /// view retirement, host rollback and quarantine semantics.
+    /// Protect owned data only, with the transaction's view retirement, host
+    /// rollback and quarantine.
     #[cfg(feature = "std")]
     pub fn protect_data(
         &mut self,
@@ -117,8 +116,8 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
             writable,
             Some(&self.service),
             |base, length, protection| {
-                // SAFETY: original owned transaction preflights all pages;
-                // this same service guard excludes every native invocation.
+                // SAFETY: the transaction validated every page, and the service
+                // guard excludes native calls.
                 if unsafe {
                     libc::mprotect(
                         base as usize as *mut libc::c_void,
@@ -147,7 +146,7 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
         Err(ProtectionError::PlatformUnavailable)
     }
 
-    /// Current logical view metadata, carrying no guest references or authority.
+    /// The current view metadata.
     pub fn regions(&self) -> &[MemoryRegion] {
         self.owner.regions()
     }
@@ -157,7 +156,7 @@ impl<P: DataPolicy> GuestServiceMemory<'_, P> {
         self.owner.data_allocation_at(address)
     }
 
-    /// Whether the actual memory owner remains usable after service effects.
+    /// Whether the memory owner is still usable after service effects.
     pub fn is_usable(&self) -> bool {
         self.check().is_ok()
     }

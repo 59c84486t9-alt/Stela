@@ -25,8 +25,8 @@ pub fn handles(state: &ThreadState, trap: &SynchronousTrap) -> bool {
     classify_bsd_call(state, trap).is_ok_and(|selector| selector.number == SYSCALL_NUMBER)
 }
 
-/// Complete the declared unavailable-service result without reading guest
-/// memory or querying host state. Unknown or invalid calls remain pending.
+/// Complete the unavailable-service result without reading guest memory or host
+/// state. Unknown or invalid calls stay pending.
 pub fn service(state: &mut ThreadState, trap: &SynchronousTrap) -> BsdServiceEvent {
     let mut event = BsdServiceEvent {
         trap: *trap,

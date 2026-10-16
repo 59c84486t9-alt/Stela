@@ -65,9 +65,8 @@ fn mapping(operand: Operand, length: VectorLength) -> Mapping {
         Mapping::Immediate
     }
 }
-/// Whether the selected host route needs an explicit DIT=0 declaration.
-/// Fixed packed/immediate routes retain the original profile; only noted
-/// variable instructions using scalar count-dependent control flow need V2.
+/// Whether the selected recipe needs a profile declaring DIT clear. Only
+/// variable shifts with count-dependent scalar control flow do.
 pub(crate) fn requires_declared_dit_zero(operand: Operand, length: VectorLength) -> bool {
     operand.has_dit_guarantee
         && !matches!(operand.count, Count::Immediate(_))

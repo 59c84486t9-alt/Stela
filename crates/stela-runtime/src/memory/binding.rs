@@ -93,10 +93,11 @@ impl SharedBinding {
         offset: usize,
         bytes: &[u8],
     ) -> Result<(), PublicationFault> {
-        // SAFETY: binding retains stable real storage and pins its current host
-        // rights; facade methods prevalidate current logical extent/authority.
-        // The retained service loan excludes native access and rights changes.
-        // The unsafe binding caller owns all-writer admission and private sources.
+        // SAFETY: the binding keeps stable storage and pins its current host
+        // rights, and the facade methods validate the logical extent first. The
+        // service borrow excludes native access and rights changes. The caller
+        // of the unsafe binding ensures every writer participates and sources
+        // are private.
         let service = self
             .domain
             .service_loan()
@@ -120,18 +121,18 @@ impl SharedBinding {
                 completed: 0,
             });
         }
-        // SAFETY: same-domain service loan pins all current host rights and
-        // canonical backing; caller validated logical extent/private source.
+        // SAFETY: the service borrow pins the host rights and the backing; the
+        // caller validated the extent and the private source.
         unsafe { self.system.publish(backing, offset, bytes) }
     }
 }
 
 impl OwnedMemory {
-    /// Bind complete facade participants without lending their private allocators
-    /// or allowing publication outside the facade's declared field contract.
+    /// Bind whole facade participants without lending their allocators or
+    /// allowing publication outside the facade.
     ///
     /// # Safety
-    /// Inherits bind_shared_memory's complete owner/alias/source contract.
+    /// As for `bind_shared_memory`.
     pub unsafe fn bind_shared_memory_participants(
         &mut self,
         config: SharedMemoryConfig,
@@ -148,29 +149,31 @@ impl OwnedMemory {
                 ParticipantOwner::Published(owner) => publishers.push(&mut **owner),
             }
         }
-        // SAFETY: every opaque participant retains its actual facade owner.
+        // SAFETY: every participant keeps its facade owner.
         unsafe { self.bind_shared_memory_group(config, &mut owners, &mut publishers) }
     }
 
-    /// Bind this fixed anonymous owner and optional guest-RO publisher aliases.
+    /// Bind this fixed anonymous owner and its optional read-only guest
+    /// publisher aliases.
     ///
-    /// File COW, split initial host protections and rebinding explicitly decline.
-    /// Bound owners use serialized canonical lifecycle and snapshot APIs. The returned
-    /// domain retains actual storage even after facade owners are dropped.
-    /// This does not admit exclusive instructions or legacy direct-RAM writers.
+    /// File copy-on-write, split initial host protections and rebinding are
+    /// refused. Bound owners use the serialized lifecycle and snapshot APIs,
+    /// and the returned domain keeps the storage even after the facade owners
+    /// are dropped. Exclusive instructions and direct-RAM writers are not
+    /// supported.
     ///
     /// # Safety
-    /// No native access/service may be in flight. The caller supplies the actual
-    /// ASID, mapping attributes and checked host target, with coherent Normal-WB
-    /// storage and pinned current host rights. Every physical writer/alias must
-    /// participate in the same system/backing identity; incompatible direct-RAM
-    /// execution and external inode/native writers are excluded. Sources passed
-    /// to bound writer methods must be private/disjoint from all guest RAM. No
-    /// existing untracked backing identity or retained access may own this storage.
-    /// Guest storage must be disjoint from all live Rust references, guest state,
-    /// registered source/code snapshots, native code, host stack and runtime
-    /// metadata. Source-derived checked entry and
-    /// effective policy validation are still required before guest prefix effects.
+    /// No native access or service may be in flight. The caller supplies the
+    /// ASID, mapping attributes and checked host target, with coherent
+    /// write-back storage and pinned host rights. Every physical writer and
+    /// alias must participate in the same system and backing; direct-RAM
+    /// execution and external file or native writers are excluded. Sources
+    /// passed to the bound writer methods must be private and disjoint from
+    /// guest RAM. No existing backing or access may already own this storage.
+    /// Guest storage must be disjoint from live Rust references, guest state,
+    /// registered source snapshots, native code, the host stack and runtime
+    /// metadata. Checked entry and policy validation are still required before
+    /// guest effects.
     pub unsafe fn bind_shared_memory(
         &mut self,
         config: SharedMemoryConfig,
@@ -180,10 +183,10 @@ impl OwnedMemory {
         unsafe { self.bind_shared_memory_group(config, &mut [], publishers) }
     }
 
-    /// Bind complete facade owners to the same system and actual storage.
+    /// Bind whole facade owners to the same system and storage.
     ///
     /// # Safety
-    /// Inherits bind_shared_memory's contract for every owner and publisher.
+    /// As for `bind_shared_memory`, for every owner and publisher.
     pub unsafe fn bind_shared_memory_group(
         &mut self,
         config: SharedMemoryConfig,
@@ -282,9 +285,10 @@ impl OwnedMemory {
                 writable: region.writable,
                 executable: region.executable,
             };
-            // SAFETY: actual anonymous owner/current rights checked. Binding
-            // retains sole current-view authority; managed protection/publication
-            // exclude native access through the same domain's real loans.
+            // SAFETY: the anonymous owner and its current rights are checked.
+            // The binding alone controls the current view; protection changes
+            // and publication exclude native access through the domain's
+            // borrows.
             let backing = unsafe {
                 MemoryBacking::new_managed(
                     allocation.storage.primary_base(),
@@ -315,8 +319,9 @@ impl OwnedMemory {
                 writable: true,
                 executable: false,
             };
-            // SAFETY: one real storage owns both equal private-file aliases. The
-            // canonical backing uses writable publisher authority, not guestRO.
+            // SAFETY: one storage owns both private-file aliases; the backing
+            // uses the writable publisher's rights, not the read-only guest
+            // view.
             let backing = unsafe {
                 MemoryBacking::new(
                     owner.storage.publisher_base().expect("validated publisher"),
@@ -431,7 +436,7 @@ impl OwnedMemory {
                 )
                 .map_err(|fault| PublicationFault {
                     status: fault.status,
-                    // Both prefixes are bounded by the already validated source.
+                    // Both prefixes are bounded by the validated source.
                     completed: source_offset + fault.completed,
                 })?;
         }
@@ -450,7 +455,7 @@ pub(crate) mod tests;
 mod lifecycle;
 
 impl PublishedReadOnlyRegion {
-    /// Check the actual canonical backing/domain association of a live helper.
+    /// Check that a live helper belongs to this backing and domain.
     pub(crate) fn check_execution_thread<P: super::domain::DataPolicy>(
         &self,
         thread: &super::domain::MemoryThread<P>,

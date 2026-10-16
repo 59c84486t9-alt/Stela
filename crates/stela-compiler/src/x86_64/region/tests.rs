@@ -317,7 +317,7 @@ fn cached_right_is_read_directly_only_without_transform() {
         ));
     }
     let result = emit_prefix(&instructions).unwrap();
-    // Initial load+ADD+MOV, four one-ALU commits, final canonical STORE.
+    // Initial load, ADD and MOV; four one-ALU commits; final store.
     assert_eq!(result.stats.native_instructions, 8);
     assert_eq!(result.stats.state_loads, 1);
     assert_eq!(result.stats.exit_stores, 1);

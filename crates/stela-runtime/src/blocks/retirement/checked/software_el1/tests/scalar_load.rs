@@ -83,7 +83,7 @@ fn run(config: SoftwareEl1Config) -> SoftwareEl1Report {
 }
 #[test]
 fn widths_extensions_literals_and_zero_discard_preserve_complete_banks_and_exact_ram() {
-    // Concrete authored source words, not an encoding or decoder model.
+    // Hand-written source words.
     for (word, bytes, value) in [
         (0x39400020_u32, 1, 0x80_u64),
         (0x79400020, 2, 0x8080),

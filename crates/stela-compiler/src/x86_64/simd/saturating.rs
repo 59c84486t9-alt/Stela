@@ -173,8 +173,8 @@ fn mixed_add(code: &mut Vec<u8>, lane: u8, unsigned_result: bool) {
     }
 }
 
-/// Clamp original wide source lanes. XMM6 holds the upper-bound mask across
-/// the second comparison; the existing compare recipe uses only XMM0..4/7.
+/// Clamp the wide source lanes. XMM6 holds the upper-bound mask across the
+/// second comparison; the compare recipe uses only XMM0-4 and XMM7.
 fn narrow(
     code: &mut Vec<u8>,
     operand: &Operand,

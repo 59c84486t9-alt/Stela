@@ -445,8 +445,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 }
 
 impl Operand {
-    /// Exact documented MOVPRFX follower requirements. Other allocations remain
-    /// unaudited; a matching typed operand alone cannot authorize a canonical word.
+    /// MOVPRFX follower requirements from the specification. Other encodings
+    /// are refused even when their typed operand matches.
     #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,

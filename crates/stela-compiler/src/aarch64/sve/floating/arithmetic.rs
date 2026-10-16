@@ -226,10 +226,9 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     decode_encoding(word, matching_encoding(word)?)
 }
 
-/// Closed first-admission subset: forward vector-register ADD/SUB/MUL/DIV and
-/// unpredicated vector-register ADD/SUB/MUL, with exact H/S/D completion.
-/// Canonical direction comes from the original encoding layout because reverse
-/// forms become indistinguishable typed operands when their registers alias.
+/// Supported subset: forward predicated ADD/SUB/MUL/DIV and unpredicated
+/// ADD/SUB/MUL, for H/S/D. The direction comes from the encoding, since
+/// reversed forms with aliased registers decode to identical operands.
 #[allow(clippy::result_unit_err)]
 pub fn decode_core_binary(word: u32) -> Option<Result<Operand, ()>> {
     let encoding = matching_encoding(word)?;
@@ -239,8 +238,8 @@ pub fn decode_core_binary(word: u32) -> Option<Result<Operand, ()>> {
     decode_encoding(word, encoding)
 }
 
-/// Numerical arithmetic admission uses the shared canonical encoding table.
-/// Total sign instructions retain their separately published decoder and emitter.
+/// Arithmetic decoding uses the shared encoding table; FABS/FNEG keep their own
+/// decoder and emitter.
 #[allow(clippy::result_unit_err)]
 pub fn decode_numerical(word: u32) -> Option<Result<Operand, ()>> {
     let encoding = matching_encoding(word)?;

@@ -7,8 +7,8 @@ use super::{
 };
 use crate::system::fp_access::Low128FpContext;
 
-/// Externally unconstructible, non-Clone/non-Copy. These are actual owner loans,
-/// not a CPACR/PSTATE snapshot or a copied low128 feature/grant bit.
+/// Borrows from the owners themselves, not a snapshot of CPACR or PSTATE.
+/// Cannot be constructed outside this module.
 pub(crate) struct Low128ProcessMemoryAuthorization<'run, 'loan, 'id> {
     boundary: &'run EntryBoundary,
     context: &'run Low128FpContext<'loan, 'id>,
@@ -31,22 +31,21 @@ impl Low128ProcessMemoryAuthorization<'_, '_, '_> {
     }
 }
 
-/// The actual FP context and exact borrowed entry descriptor survive alongside
-/// the existing prepared memory loan. The descriptor does not itself authenticate
-/// fetched bytes or an RX mapping; the actual provider retains those authorities.
-/// The bound guest remains mutable inside the original split callback; no shared
-/// GuestState borrow or detached pointer capability is substituted for it.
+/// Keeps the FP context and the entry descriptor alongside the prepared memory
+/// borrow. The descriptor does not authenticate the fetched bytes or native
+/// code; the provider does. The guest state stays mutable inside the split
+/// callback.
 pub struct PreparedLow128ProcessMemory<'run, 'loan, 'id> {
     authorization: Low128ProcessMemoryAuthorization<'run, 'loan, 'id>,
     prepared: PreparedProcessMemory<'run>,
 }
 
 impl FixedProcessMemoryControls {
-    /// Qualify unchanged ASIMD requirements using the actual common FP owner.
-    /// Register-only SIMD retains ASIMD even without NATIVE_ACCESS; no memory
-    /// requirement is removed to make the base factory accept an instruction.
-    /// Mixed exclusive/ordered/atomic/scalable classes require their own reviewed
-    /// composition and decline explicitly in this bounded ordinary LE scope.
+    /// Admit the unchanged AdvSIMD requirements using the shared FP owner.
+    /// Register-only SIMD keeps its AdvSIMD requirement even without
+    /// NATIVE_ACCESS, and no memory requirement is dropped. Exclusive, ordered,
+    /// atomic and scalable classes are refused in this little-endian ordinary
+    /// scope.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_with_low128<'run, 'loan, 'id>(
         &'run self,
@@ -70,8 +69,7 @@ impl FixedProcessMemoryControls {
         )
     }
 
-    /// Same low128 owner with source-bound CPA specialization; no separate FP
-    /// bank, RAM authority or policy-installation path is introduced.
+    /// The same owner with the FEAT_CPA specialization from the source.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_profile_with_low128<'run, 'loan, 'id>(
         &'run self,
@@ -173,17 +171,16 @@ impl PreparedLow128ProcessMemory<'_, '_, '_> {
         self.prepared.requirements()
     }
 
-    /// Recheck the actual bound guest/system at invocation and immediately
-    /// before the native callback, retaining the original context throughout.
+    /// Re-check the bound guest and system state at the call and immediately
+    /// before the native callback, keeping the context throughout.
     ///
     /// # Safety
-    /// The actual provider binds this token to its exact consumed source plan,
-    /// compiler requirements and native RX body, and invokes that body with the
-    /// supplied `registers`. Existing checked-view/backing contracts apply. Its
-    /// outer actual PE/source/domain loan must survive once-only PC settlement.
-    /// This callback must not substitute another bank, retain raw pointers,
-    /// reenter or change mappings. SVE-present V writes/upper-Z effects still
-    /// require the canonical scalable writer; this token cannot enable them.
+    /// The provider binds this token to its source plan, requirements and
+    /// native body, and calls that body with `registers`. The checked-view and
+    /// backing contracts apply, and the provider's outer PE, source and domain
+    /// borrow must last through PC settlement. The callback must not substitute
+    /// another bank, keep raw pointers, re-enter or change mappings. On CPUs
+    /// with SVE, V writes still need the scalable writer for the upper Z bytes.
     pub(crate) unsafe fn with_view<R>(
         self,
         registers: &mut GuestState,

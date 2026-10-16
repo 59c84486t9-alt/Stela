@@ -196,8 +196,8 @@ pub fn prepare_block_for_target(
     prepare_block_plan(source, base, root, target, plan)
 }
 
-/// Ordinary dispatch may select a source-derived resident ABI; explicit service
-/// profiles retain their existing call and recovery contracts.
+/// Ordinary dispatch may choose the resident ABI; service profiles keep their
+/// own call contract.
 #[cfg(feature = "std")]
 pub(crate) fn prepare_runtime_block_for_target(
     source: &[u8],
@@ -236,8 +236,8 @@ fn prepare_block_plan(
     })
 }
 
-// Descriptive identity from the SAME immutable source plan, shared by hosted
-// preparation and existing-format AOT intake. This mints no execution authority.
+// Identity derived from the source plan, shared by hosted preparation and AOT
+// intake.
 fn block_plan_identity(
     source: &[u8],
     base: GuestAddress,

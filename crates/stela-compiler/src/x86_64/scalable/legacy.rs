@@ -8,9 +8,9 @@ use crate::{
 };
 use alloc::vec::Vec;
 
-/// Apply an accepted legacy V write's upper-Z clearing effect. The caller owns
-/// instruction legality and which destination(s) require this effect. Clobbers
-/// the selected zero XMM and RDX; preserves the canonical low128 V register.
+/// Clear the upper Z bytes after an AdvSIMD write to V. The caller decides
+/// which destinations need it. Clobbers the chosen zero XMM and RDX; the low
+/// 128 bits are kept.
 pub(crate) fn clear_z_upper(
     code: &mut Vec<u8>,
     register: u8,

@@ -126,7 +126,7 @@ impl Storage {
 }
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: final Arc releases the exact allocation and original layout.
+        // SAFETY: the last Arc frees the allocation with its layout.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
@@ -167,9 +167,9 @@ fn fixed_with_lower_bits(
     sa0: bool,
     lower_bits: u8,
 ) -> Result<FixedProcessMemoryControls, ProcessMemoryError> {
-    // SAFETY: this fixture explicitly declares the actual data and code views
-    // Normal-WB with matching source/native rights. No second memory domain or
-    // external raw writer participates in native invocation.
+    // SAFETY: the fixture declares its data and code views Normal write-back
+    // with matching source and native rights; no other domain or raw writer is
+    // involved.
     let source = unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(domain)) }
         .map_err(ProcessMemoryError::Memory)?;
     FixedProcessMemoryControls::new_with_identification(
@@ -420,8 +420,8 @@ impl Fixture {
         let code_offset = guest_base as usize & (CODE_PAGE_BYTES - 1);
         let code_page = guest_base - code_offset as u64;
         let storage = Storage::new(&source, code_offset, original_code_page);
-        // SAFETY: raw storage is pinned, owned, disjoint and never accessed
-        // concurrently with the single domain's synchronous native invocation.
+        // SAFETY: the storage is pinned, owned and disjoint, and never accessed
+        // concurrently with the domain's synchronous native call.
         let backing = unsafe {
             MemoryBacking::new(
                 storage.pointer,
@@ -577,8 +577,8 @@ impl Fixture {
         );
         let system = self.system.clone();
         let host_mxcsr = mxcsr();
-        // SAFETY: fixed finite source, retained same Snapshot/domain authority,
-        // actual controls and disjoint pinned native backing established above.
+        // SAFETY: fixed terminating source, the same snapshot and domain, the
+        // controls and disjoint pinned backing established above.
         let result = unsafe {
             self.controls.execute_scalable_leaf(
                 &access,

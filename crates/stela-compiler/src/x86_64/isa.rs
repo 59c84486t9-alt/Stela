@@ -315,9 +315,9 @@ impl CrcOpcode {
     }
 }
 
-/// Fixed caller-saved register recipe primitives for scalar CRC table lowering.
-/// RAX is the W accumulator, RCX is original data, RDX the table index,
-/// and R8 the immutable RIP-relative table base. GuestState remains in RDI.
+/// Register recipe for the table-driven CRC: RAX is the W accumulator, RCX the
+/// data, RDX the table index and R8 the RIP-relative table base. RDI holds
+/// GuestState.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CrcTableInstruction {
     TruncateByteData,

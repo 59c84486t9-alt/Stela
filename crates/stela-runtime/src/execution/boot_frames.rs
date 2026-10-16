@@ -154,12 +154,9 @@ impl Allocation {
     }
 }
 
-/// Sole owner of one boot-reserved identity arena and its actual active 4K PT.
-/// Real acquire/release metadata exclusion serializes allocation and PTE writes.
-/// Immutable integer table locations carry no Rust aliasing references; all
-/// physical lifetime and no-alias obligations remain in the unsafe claim.
-/// The storage owner mints no guest physical binding, source producer or PE.
-/// No raw entry pointer, byte reference or mutable page-table accessor escapes.
+/// Owns one boot-reserved identity-mapped arena and its active 4 KiB page
+/// table. A lock serializes allocation and PTE writes. Table locations are
+/// stored as integers, so no Rust references alias them.
 pub(crate) struct BootFramePool {
     base: usize,
     pages: usize,
@@ -171,19 +168,18 @@ pub(crate) struct BootFramePool {
 }
 
 impl BootFramePool {
-    /// Claim original boot-reserved frames and their initially empty active PT.
+    /// Claim boot-reserved frames and their empty page table.
     ///
     /// # Safety
-    /// Run at CPL0 after four-level identity paging is installed. Every table
-    /// page reached from actual CR3 is live identity-mapped Normal-WB memory.
-    /// `base` is a 2MiB-aligned reservation of `pages` complete physical frames;
-    /// 1..512 frames and the entire containing PT are exclusively owned here for the entire boot. No frame/table aliases, huge/global mappings, allocator, firmware,
-    /// DMA, interrupt handler or other CPU may read/write/reclaim these frames,
-    /// alter their path/controls, or acquire a writer. The arena/table pages are
-    /// disjoint from guest/source RAM, native source bytes, stack and metadata.
-    /// Root/control ownership is retained through every storage observation and
-    /// retirement; the loader must keep all parent/table identity mappings live.
-    /// These actual obligations cannot be supplied by boolean facts or CPU tokens.
+    /// Run at CPL0 after four-level identity paging is installed, with every
+    /// table page reachable from CR3 identity-mapped Normal write-back memory.
+    /// `base` is a 2 MiB-aligned reservation of `pages` (1 to 512) whole
+    /// frames; they and their page table are owned here for the rest of the
+    /// boot. Nothing else (aliases, huge or global mappings, allocators,
+    /// firmware, DMA, interrupt handlers, other CPUs) may access or reclaim
+    /// them or change their path or controls. The arena and table are disjoint
+    /// from guest RAM, source bytes, the stack and metadata, and the loader
+    /// keeps every parent table identity-mapped.
     pub(crate) unsafe fn claim(base: NonNull<u8>, pages: usize) -> Result<Arc<Self>, FrameError> {
         let address = base.as_ptr() as usize;
         let end = pages
@@ -214,7 +210,8 @@ impl BootFramePool {
             if table_address >= address && table_address < end {
                 return Err(FrameError::InvalidArena);
             }
-            // SAFETY: claim contract keeps reached actual table pages identity-mapped.
+            // SAFETY: the claim contract keeps the reached table pages
+            // identity-mapped.
             let slot = unsafe {
                 NonNull::new_unchecked(table.as_ptr().add((address >> shift) & TABLE_INDEX_MASK))
             };
@@ -238,7 +235,7 @@ impl BootFramePool {
             return Err(FrameError::InvalidArena);
         }
         for index in 0..TABLE_ENTRIES {
-            // SAFETY: final actual PT is owned by claim's boot contract.
+            // SAFETY: this page table is owned under the claim contract.
             if unsafe { table.as_ptr().add(index).read_volatile() } != 0 {
                 return Err(FrameError::ArenaAlreadyMapped);
             }
@@ -267,7 +264,8 @@ impl BootFramePool {
             return Err(FrameError::ChangedRoot);
         }
         for parent in self.parents {
-            // SAFETY: original root owner retains all path table pages for the entire boot.
+            // SAFETY: the root owner keeps every table on the path for the
+            // whole boot.
             if unsafe { (parent.slot as *const u64).read_volatile() } & !ACCESSED != parent.expected
             {
                 return Err(FrameError::ChangedParent);
@@ -276,9 +274,9 @@ impl BootFramePool {
         Ok(())
     }
 
-    /// Validate every claimed leaf against its original allocation metadata.
-    /// The registry runs this before and after FFI, including actual RAM PTEs.
-    /// No lock survives the native call. Concurrent PTE production refuses.
+    /// Check every claimed leaf against its allocation record, before and after
+    /// each native call. No lock is held across the call; a concurrent PTE
+    /// change fails the check.
     pub(crate) fn validate_live(&self) -> Result<(), FrameError> {
         self.validate_path()?;
         let allocation = self.allocation.try_lock().map_err(|_| FrameError::Busy)?;
@@ -314,21 +312,22 @@ impl BootFramePool {
     }
 
     fn pte(&self, page: usize) -> u64 {
-        // SAFETY: indices are internal checked arena pages in the owned PT.
+        // SAFETY: the index is a checked arena page in the owned table.
         unsafe { (self.table as *mut u64).add(page).read_volatile() }
     }
 
     fn set_pte(&self, page: usize, value: u64) {
-        // SAFETY: this owner exclusively updates these actual PTEs on one CPU;
-        // the mapping has no global/PCID translations or external aliases.
+        // SAFETY: only this owner writes these PTEs, on one CPU, and the
+        // mapping has no global or PCID translations or other aliases.
         unsafe {
             (self.table as *mut u64).add(page).write_volatile(value);
             asm!("invlpg [{}]", in(reg) self.address(page), options(nostack, preserves_flags));
         }
     }
 
-    /// Initialize a fresh bounded allocation, then publish immutable RO+X pages.
-    /// The caller still owes all original artifact/source/map/requirements checks.
+    /// Copy native code into a new allocation and map it read-only and
+    /// executable. The caller still validates the artifact, source, map and
+    /// requirements.
     pub(crate) fn copy_native(self: &Arc<Self>, bytes: &[u8]) -> Result<BootFrames, FrameError> {
         self.initialize(
             bytes,
@@ -441,9 +440,8 @@ impl BootFramePool {
     }
 }
 
-/// Unique original executable storage; borrowing it cannot mint source/PE rights.
-/// A cache generation replacement drops this storage through original LoadedBlock.
-/// No source generation is guessed or maintained in this platform component.
+/// Unique executable storage, dropped through its LoadedBlock when the cache
+/// replaces it.
 pub(crate) struct BootFrames {
     pool: Arc<BootFramePool>,
     first: usize,
@@ -490,15 +488,14 @@ impl BootFrames {
     }
 }
 
-// SAFETY: this concrete owner retains actual original frames/PT/root and checks
-// the live CR3 path/WP/NXE/PTEs on every original NativeImage observation. Copying
-// privately initializes RW+NX, then removes write permission before returning;
-// no writable alias or accessor exists. Native entry is used ONLY by the original
-// NativeImage; canonical Active/source/profile/ABI/finalization stays the caller's.
+// SAFETY: this owner keeps the frames, page table and root, and checks the live
+// CR3 path, WP, NXE and PTEs on every call. Code is copied with RW+NX, then
+// write permission is removed before returning; no writable alias remains. Only
+// `NativeImage` enters the code.
 unsafe impl ExecutableStorage for BootFrames {
     type Error = FrameError;
     fn entry(&self) -> NonNull<u8> {
-        // SAFETY: original nonnull arena plus internally checked bounded offset.
+        // SAFETY: the arena base is non-null and the offset is checked.
         unsafe { NonNull::new_unchecked(self.pool.address(self.first) as *mut u8) }
     }
     fn revalidate(&self) -> Result<(), Self::Error> {
@@ -531,7 +528,7 @@ impl Drop for BootFrames {
 pub(crate) struct BootRam(BootFrames);
 impl BootRam {
     pub(crate) fn base(&self) -> NonNull<u8> {
-        // SAFETY: the retained original frame allocation has a nonnull base.
+        // SAFETY: the retained allocation has a non-null base.
         unsafe { NonNull::new_unchecked(self.0.pool.address(self.0.first) as *mut u8) }
     }
     pub(crate) fn bytes(&self) -> usize {

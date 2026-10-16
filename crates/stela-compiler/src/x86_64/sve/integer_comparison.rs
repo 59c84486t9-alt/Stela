@@ -303,9 +303,9 @@ fn accumulate_predtest(code: &mut Vec<u8>) {
     finish_branch(code, empty);
 }
 
-/// Complete comparison effects in the validated streaming context. Results are
-/// staged on the native stack until every governor bit and PredTest input has
-/// been consumed, so Pd==Pg observes the original predicate throughout.
+/// Comparison results are staged on the stack until every governing bit and
+/// PredTest input is consumed, so Pd == Pg sees the original predicate
+/// throughout.
 pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, target: TargetCpu) {
     use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, write_predicate_chunk};
     let single_chunk = length.chunks() == 1;

@@ -101,8 +101,8 @@ pub enum Operand {
     Matrix(MatrixOperand),
 }
 
-/// Exact masks leave other formats and adjacent allocated families unclaimed.
-/// Registers are ordinary V registers; indexed multiply permits only V0..V15.
+/// The masks match only this family's formats. Indexed multiplies accept only
+/// V0-V15.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     decode_conversion(word)

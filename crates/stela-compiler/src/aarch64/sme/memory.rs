@@ -133,8 +133,8 @@ impl Operand {
         GuestMemoryQuantity::Maximum(element)
     }
 
-    /// Exact top-level access helpers from the pinned source Operation section.
-    /// The shared CPU owner evaluates their nested checks against actual state.
+    /// The top-level access checks from the pseudocode; the CPU owner evaluates
+    /// them against live state.
     pub(crate) fn execution_access_requirements(&self) -> ScalableAccessRequirements {
         use ScalableAccessCheck::{
             SmeAndZaEnabled, SmeEnabled, SmeZt0Enabled, StreamingSveAndZaEnabled,

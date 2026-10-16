@@ -17,7 +17,7 @@ const INSTRUCTION_BYTES: u64 = core::mem::size_of::<u32>() as u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemOperation {
     Exception(exception::Operation),
-    /// Canonical effect description; the actual retained owner grants admission.
+    /// The effect to apply; the runtime decides whether it is admitted.
     Synchronization(synchronization::Operation),
     TagMemory(tag_memory::Operand),
     Register(registers::RegisterAccess),
@@ -100,8 +100,8 @@ pub fn decode_system_instruction(
     }))
 }
 
-/// Extend the fixed EL1 cohort only for its actual mounted RAM completion.
-/// Existing NOP, PAuth aliases and unmounted hints keep their original selection.
+/// Decode the EL1 system instructions the platform completes. NOP, PAuth
+/// aliases and other hints keep their existing decoding.
 pub(super) fn decode_el1_system_instruction(
     pc: GuestAddress,
     word: u32,
@@ -136,8 +136,7 @@ impl SystemInstruction {
         )
     }
 
-    /// Source classification only. This grants no PE/control/publication loan.
-    /// The actual lifetime-fixed platform must mount the corresponding owner.
+    /// Whether this operation needs the EL1 platform context.
     pub fn is_el1_context_operation(self) -> bool {
         match self.operation {
             SystemOperation::Register(access) => {

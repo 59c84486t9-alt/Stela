@@ -37,8 +37,8 @@ pub struct OwnedRamExtent {
     pub permissions: SourceRamPermissions,
 }
 
-/// Explicit initial zero contents, never an implicit assignment of capacity.
-/// Executable source must supply original bytes through `OwnedRamExtent`.
+/// Zero-initialized RAM. Executable source must supply its bytes through
+/// `OwnedRamExtent`.
 pub struct ZeroedRamExtent {
     pub source_pa: u64,
     pub bytes: u64,
@@ -74,8 +74,7 @@ impl RamExtent {
         match &self.initial {
             RamInitial::Bytes(bytes) => bytes,
             RamInitial::FilePrefix { prefix, .. } => prefix,
-            // Fresh anonymous storage supplies all remaining zeros. This is
-            // explicit Zeroed metadata, not a sentinel in an original image.
+            // New anonymous storage provides the zeros.
             RamInitial::Zeroed(_) => &[0],
         }
     }
@@ -92,10 +91,10 @@ impl RamExtent {
                 mapped_bytes: bytes,
                 ..
             } => {
-                // SAFETY: this sole factory still owns fresh anonymous zero
-                // storage before any domain/PE or writer is published. The
-                // validated logical range is readable and fits this retained
-                // allocation. The temporary reference cannot escape hashing.
+                // SAFETY: the factory still owns the new zeroed storage before
+                // any domain, PE or writer exists. The range is readable and
+                // inside the allocation, and the temporary reference does not
+                // escape the hash.
                 let initial = unsafe {
                     core::slice::from_raw_parts(
                         storage.primary_base().as_ptr().add(leading),
@@ -157,8 +156,7 @@ pub(crate) struct SourceRamLayout {
     pub initialized: Vec<InitializedRamLayout>,
 }
 
-/// Only the materialization factory can create this genuine physical binding.
-/// No existing Domain/System, numeric identity or caller token is accepted.
+/// The physical binding, created only by the materialization factory.
 pub(crate) struct SourcePhysicalRamBinding {
     domain: Arc<MemoryDomain>,
     system: Arc<MemorySystem>,
@@ -200,8 +198,7 @@ pub(crate) struct MaterializedSourceRam {
     immutable_sources: Vec<ImmutableCodeBacking>,
 }
 impl MaterializedSourceRam {
-    /// Actual fixture-created mapping handle, for ownership/retirement checks.
-    /// No writable reference or new mapping/source authority is returned.
+    /// The test-created mapping, for ownership and retirement checks.
     #[cfg(test)]
     pub(crate) fn test_view(&self, source_pa: u64) -> Option<Arc<MemoryView>> {
         self.binding
@@ -211,8 +208,8 @@ impl MaterializedSourceRam {
             .map(Arc::clone)
     }
 
-    /// Supply these original resources once to the fresh physical/source owner.
-    /// The immutable code owners retain the same backings as the physical views.
+    /// Hand the resources to the physical and source owner, once. The immutable
+    /// code owners keep the same backings as the physical views.
     pub(crate) fn into_parts(self) -> (SourcePhysicalRamBinding, Vec<ImmutableCodeBacking>) {
         (self.binding, self.immutable_sources)
     }
@@ -228,8 +225,8 @@ fn end(range: PhysicalRamRange) -> Result<u64, SourceRamBuildError> {
         .ok_or(SourceRamBuildError::Declaration("physical range overflow"))
 }
 
-/// Create the sole machine/domain from initialized owned bytes, before any PE.
-/// Host addresses are OS-selected and never interpreted as source PAs.
+/// Create the machine's domain from initialized bytes, before any PE. Host
+/// addresses are chosen by the OS and are not source physical addresses.
 #[cfg(test)]
 pub(crate) fn materialize_source_ram(
     declaration: SourceRamDeclaration,
@@ -238,8 +235,8 @@ pub(crate) fn materialize_source_ram(
     materialize_source_ram_with_zeroed(declaration, Vec::new(), config)
 }
 
-/// Extend the same sole materialization with explicit zero-initialized RAM.
-/// Validate the complete mixed set before allocating any native storage.
+/// Materialize with additional zero-initialized RAM. The whole set is validated
+/// before any storage is allocated.
 pub(crate) fn materialize_source_ram_with_zeroed(
     declaration: SourceRamDeclaration,
     zeroed: Vec<ZeroedRamExtent>,
@@ -248,8 +245,7 @@ pub(crate) fn materialize_source_ram_with_zeroed(
     materialize_source_ram_impl(declaration, zeroed, Vec::new(), config)
 }
 
-/// Materialize complete explicitly initialized regions through the original
-/// factory. The existing byte/zero extent APIs retain their stricter contracts.
+/// Materialize initialized regions.
 pub(crate) fn materialize_source_ram_regions(
     declaration: SourceRamDeclaration,
     zeroed: Vec<ZeroedRamExtent>,
@@ -340,7 +336,7 @@ fn materialize_source_ram_impl(
     let mut recipes = Vec::with_capacity(extents.len());
     let mut allocated = 0_usize;
     previous = None;
-    // Every fallible declaration/budget check precedes actual RAM allocation.
+    // Every fallible check comes before allocating RAM.
     for extent in &extents {
         let range = PhysicalRamRange {
             source_pa: extent.source_pa,
@@ -403,9 +399,10 @@ fn materialize_source_ram_impl(
             permissions.writable,
         )
         .map_err(E::Platform)?;
-        // SAFETY: this factory owns anonymous private storage and all rights.
-        // Initialization is complete, host rights final, no byte references or
-        // aliases escape, and the sole resulting domain owns every later access.
+        // SAFETY: the factory owns the anonymous private storage and its
+        // rights. Initialization is complete, the host rights are final, no
+        // references or aliases escape, and the resulting domain owns every
+        // later access.
         let backing = unsafe {
             MemoryBacking::new_managed(
                 storage.primary_base(),

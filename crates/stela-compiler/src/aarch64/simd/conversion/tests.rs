@@ -95,8 +95,7 @@ fn integer_register(operand: IntegerOperand, register: u8) -> IntegerOperand {
     }
 }
 
-// Every arrangement exercises all source/destination aliases and V31/ZR
-// roles, independently of the register values used by native fixtures.
+// Every arrangement covers all source/destination aliases and the V31/ZR roles.
 fn check_registers(word: u32, expected: Operand) {
     for destination in 0..REGISTER_COUNT {
         for source in 0..REGISTER_COUNT {
@@ -402,8 +401,8 @@ fn reserved_formats_scales_and_vector_one_double_are_rejected() {
 
 #[test]
 fn adjacent_features_and_unrelated_families_do_not_gain_support() {
-    // Exact June canonical facts: BFCVT/BFCVTN, both FP8 FCVTN classes,
-    // representative signed/unsigned FPRCVT forms, FMOV and FRINTN.
+    // Neighboring forms: BFCVT/BFCVTN, both FP8 FCVTN classes, signed and
+    // unsigned FPRCVT, FMOV and FRINTN.
     const OTHER_FAMILIES: [u32; 12] = [
         0x1e634000, 0x0ea16800, 0x0e40f400, 0x0e60f400, 0x1e7a0000, 0x1e7b0000, 0x1e6a0000,
         0x1e6b0000, 0x9efc0000, 0x9efd0000, 0x1e204000, 0x1e244000,

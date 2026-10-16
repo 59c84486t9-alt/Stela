@@ -53,9 +53,7 @@ fn qualified_entry_owns_source_and_executes_same_snapshot_domain() {
         );
         assert_eq!(f.storage.bytes(), ram);
     }
-    // Whole ZA-row and ZT0 transfers use their source SME helpers even with
-    // SM=0. This is the two-bank legal control from the six C1 originals;
-    // these executions are current declared-owner acceptance only.
+    // Whole ZA-row and ZT0 transfers use their SME helpers even with SM = 0.
     for (word, bytes, lookup, write) in [
         (LDR_ZA_W12_X5, VL, false, false),
         (STR_ZA_W12_X5, VL, false, true),
@@ -96,9 +94,8 @@ fn qualified_entry_owns_source_and_executes_same_snapshot_domain() {
         }
         assert_eq!(f.execute().unwrap(), ScalableLeafExit::Returned);
         assert_eq!(f.registers, expected);
-        // SM=0 intentionally makes Z/P/FFR public reads unavailable; Debug
-        // observes the complete owned allocations without changing mode or
-        // zeroing ZA by a false re-enable solely for inspection.
+        // With SM = 0, Z, P and FFR reads are unavailable, so Debug shows the
+        // allocations without changing mode (re-enabling would zero ZA).
         assert_eq!(format!("{:?}", f.scalable), format!("{scalable:?}"));
         assert_eq!(f.storage.bytes(), ram);
     }
@@ -118,8 +115,8 @@ fn same_domain_observation_excludes_scalable_entry_until_released() {
     let state = banks(&f.registers, &f.scalable);
     let ram = f.storage.bytes();
     let generation = f.domain.generation().unwrap();
-    // The opaque observation holds the actual thread's same-domain service
-    // loan. Admission must decline before any prefix or policy installation.
+    // The observation holds the thread's domain service borrow, so admission
+    // must refuse before any prefix or policy installation.
     let observation = f.memory.observation_loan().unwrap();
     assert!(matches!(
         f.execute(),
@@ -130,8 +127,9 @@ fn same_domain_observation_excludes_scalable_entry_until_released() {
     ));
     unchanged(&f, &before, &state, &ram);
     assert_eq!(f.domain.generation().unwrap(), generation);
-    // Reuse the same prepared body, source witness, controls and state. Dropping
-    // a read-only loan changes neither mapping generation nor source authority.
+    // Reuse the same prepared body, source witness, controls and state;
+    // dropping a read-only borrow changes neither the mapping generation nor
+    // the source.
     drop(observation);
     let mut expected = before;
     expected.x[3] = 7;
@@ -331,9 +329,9 @@ fn q16_native_aligned_residue8_and_other_residues() {
 
 #[test]
 fn qualified_q16_translation_permission_order_and_prefix() {
-    // SME retains its descriptor and uses byte parts when an unaligned Q
-    // straddles the declared SCA16 granule. Permission and translation controls
-    // independently fault at the first inaccessible reached byte.
+    // SME keeps its descriptor and uses byte parts when an unaligned quadword
+    // crosses a 16-byte granule; permission and translation still fault at the
+    // first inaccessible byte.
     for word in [LD1Q_ZA_P0_X5, ST1Q_ZA_P0_X5, ST2Q_Z1_P0_X5] {
         for translation in [false, true] {
             let mut f = if word == ST2Q_Z1_P0_X5 {

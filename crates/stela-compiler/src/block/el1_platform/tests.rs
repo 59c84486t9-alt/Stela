@@ -120,8 +120,7 @@ fn canonical_branch_operations_reach_existing_terminal_plan() {
 }
 #[test]
 fn every_declared_platform_route_reaches_plan_and_shared_emitter() {
-    // One authored canonical row per permitted operation family and terminal.
-    // These check integration/admission; differential ISA evidence is separate.
+    // One row per permitted operation family and terminal.
     for (name, word, lane) in [
         ("bitfield", 0xd341fc20, 0),
         ("pc_relative", 0x90000000, 0),

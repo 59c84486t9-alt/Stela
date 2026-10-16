@@ -30,8 +30,8 @@ pub(crate) struct ProcessEntryControls {
 }
 impl ProcessEntryControls {
     /// # Safety
-    /// These are this fresh software PE's sole actual declared controls. Retain
-    /// them through the sole execution owner and complete producer registry.
+    /// These are this software PE's declared controls; keep them for as long as
+    /// the PE runs.
     pub(crate) unsafe fn fresh_software(
         features: EntryProfile,
         spe: BaseSpeAbsence,
@@ -48,9 +48,8 @@ impl ProcessEntryControls {
         Ok(owner)
     }
     /// # Safety
-    /// The Arc is the SAME immutable Snapshot allocation as the actual fixed
-    /// control bank of this fresh PE; no hardware/diagnostic adoption occurs.
-    /// Other owner/producer obligations are identical to fresh_software.
+    /// The Arc is the same snapshot allocation as this PE's fixed controls.
+    /// Otherwise as for `fresh_software`.
     #[cfg(feature = "std")]
     pub(crate) unsafe fn fresh_software_link_register_pauth(
         snapshot: &Arc<Snapshot>,

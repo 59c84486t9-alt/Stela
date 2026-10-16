@@ -73,8 +73,8 @@ impl SoftwareEl1Profile {
     }
 }
 
-/// Explicit initialization of a NEW software machine. RAM is allocated and
-/// protected here; no caller-owned MemorySystem, mapping or PE is accepted.
+/// Initialization of a new software machine. RAM is allocated and protected
+/// here.
 pub struct SoftwareEl1Config {
     pub profile: SoftwareEl1Profile,
     #[cfg(feature = "std")]
@@ -135,8 +135,8 @@ enum InstalledSource {
     Read64(InstalledM0Owner),
 }
 
-/// Owns the actual original resources until its one consuming execution scope.
-/// Private fields prevent caller substitution, raw entry or reset/retry.
+/// Owns the machine's resources until it runs. Private fields prevent
+/// substitution, raw entry or reset.
 pub struct SoftwareEl1Machine {
     profile: SoftwareEl1Profile,
     platform: Option<El1PlatformControls>,
@@ -156,8 +156,7 @@ pub struct SoftwareEl1Machine {
 }
 
 fn declared_profile(platform: Option<&El1PlatformControls>) -> Result<ControlProfile> {
-    // This static identity describes this factory's explicitly created base
-    // software CPU. It authenticates no external hardware or incoming controls.
+    // Identity string of the base software CPU this factory creates.
     const DECLARATION: &[u8] = b"stela-owned-base-el1-m0-software-v1;A64EL01;PA40;ASID8;4K16K;LittleOnly;optional-entry/debug/SPE-absent";
     let digest = match platform {
         Some(platform) => platform
@@ -212,10 +211,8 @@ fn declared_profile(platform: Option<&El1PlatformControls>) -> Result<ControlPro
 }
 
 impl SoftwareEl1Machine {
-    /// Reload unchanged declared file prefixes into the original quiescent RAM.
-    /// The consuming executable scope has not started; no PE is reconstructed.
-    /// Tail bytes and architectural CPU/System state are retained. A platform
-    /// CPU reset/entry or migration restore requires its separate real owner.
+    /// Reload the unchanged file prefixes of the declared RAM before the
+    /// machine runs. Tail bytes and CPU state are kept.
     pub fn reload_ram_file_prefixes(&mut self) -> Result<()> {
         match &mut self.installed {
             InstalledSource::El1(owner) => {
@@ -293,9 +290,8 @@ impl SoftwareEl1Machine {
         )
     }
 
-    // The production path and authored ownership tests share the SAME original
-    // construction body. MaterializedSourceRam has no public/caller constructor;
-    // only the genuine fresh source-RAM factory can provide this storage owner.
+    // The production path and the tests share this construction; only the
+    // source-RAM factory can provide `MaterializedSourceRam`.
     fn from_materialized(
         profile: SoftwareEl1Profile,
         #[cfg(feature = "std")] cache_directory: PathBuf,
@@ -376,8 +372,8 @@ impl SoftwareEl1Machine {
             )
             .map_err(|error| anyhow::anyhow!("software EL1 entry declaration: {error:?}"))?,
         };
-        // SAFETY: this factory creates the actual fresh PE's declared controls;
-        // all producer paths are private and owned by the retained registry.
+        // SAFETY: these are the new PE's declared controls, and every producer
+        // is private to its registry.
         let execution = unsafe {
             ProcessEntryControls::fresh_software(
                 entry,
@@ -412,9 +408,9 @@ impl SoftwareEl1Machine {
         #[cfg(not(feature = "std"))]
         let runtime =
             BlockRuntime::new_in_memory_for_target(address_space, profile.compiler(), target);
-        // SAFETY: all physical/source storage was freshly allocated above and
-        // is exclusively owned here. No raw alias, DMA, external writer or PE
-        // exists. This transfers the sole Initial publication owner once.
+        // SAFETY: the physical and source storage was just allocated and is
+        // owned here, with no alias, DMA or other PE. This hands over initial
+        // publication once.
         let installed = unsafe {
             match profile {
                 SoftwareEl1Profile::DirectBranchV1

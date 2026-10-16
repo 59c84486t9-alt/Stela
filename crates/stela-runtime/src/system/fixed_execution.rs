@@ -26,8 +26,8 @@ const CONDITIONAL_BRANCH_MASK: u32 = 0xff00_0000;
 const CONDITIONAL_BRANCH_CLASS: u32 = 0x5400_0000;
 const CONSISTENT_BRANCH_HINT: u32 = 1 << 4;
 
-/// Exclusive state and monitor borrows plus the actual immutable control owner.
-/// The endpoint is the same per-PE event register used by WFx/SEVL services.
+/// Exclusive state and monitor borrows, plus the control owner. The endpoint is
+/// the PE's event register used by WFx and SEVL.
 pub struct FixedEl1Dispatcher<'a, P> {
     address_space: u64,
     system: &'a mut SystemState,
@@ -236,9 +236,9 @@ pub(crate) fn validate_source(boundary: &EntryBoundary, source: &[u8]) -> Result
 }
 
 fn baseline_register_operation(word: u32, operation: &Operation) -> bool {
-    // The shared decoder intentionally selects some constrained memory NOPs
-    // and erases BC's HBC origin. This fixed profile authorizes neither those
-    // memory/FP assumptions nor HBC, so retain the original-word distinction.
+    // The shared decoder turns some constrained memory forms into NOPs and
+    // erases BC's HBC origin. This profile supports neither, so the original
+    // word is kept.
     match operation {
         Operation::Nop => return word == NOP_WORD,
         Operation::BranchCondition { .. } => {
@@ -346,8 +346,8 @@ fn no_effect(error: String) -> EffectFailure<String> {
     }
 }
 
-// The memory owner retains the non-cloneable binding for this actual monitor.
-// Matching address spaces alone cannot authorize independently supplied PEs.
+// The memory owner keeps the PE's monitor binding; matching address spaces
+// alone do not admit another PE.
 fn check_pe_binding<P: DataPolicy>(
     memory: &MemoryThread<P>,
     event: &EventEndpoint,

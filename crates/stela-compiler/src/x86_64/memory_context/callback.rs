@@ -127,8 +127,8 @@ pub(crate) fn patch_branch(code: &mut [u8], displacement: usize, destination: us
     code[displacement..end].copy_from_slice(&relative.to_le_bytes());
 }
 
-/// Record a locally detected fault (such as original SP alignment). RAX is the
-/// faulting guest address. The reached prefix remains intact. Clobbers RCX/RDX.
+/// Record a fault found in emitted code (such as SP misalignment). RAX is the
+/// faulting address; the completed prefix stays. Clobbers RCX/RDX.
 pub(crate) fn fault(code: &mut Vec<u8>, status: MemoryStatus, pc: u64) {
     use crate::context::memory::MemoryContextView;
     memory_pointer(code);

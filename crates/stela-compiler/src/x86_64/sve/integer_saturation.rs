@@ -529,7 +529,8 @@ pub(crate) fn emit(code: &mut Vec<u8>, operand: Operand, length: VectorLength, t
                 binary(code, Host::Xor, 0, 0);
                 saturating(code, element, Signedness::Signed, true);
                 if operand.kind == Kind::Absolute {
-                    // XMM1 still contains the original lane; clamp min signed magnitude.
+                    // XMM1 still holds the original lane; clamp the most
+                    // negative magnitude.
                     sign_mask(code, 4, 1, element);
                     copy(code, 5, 0);
                     copy(code, 0, 1);

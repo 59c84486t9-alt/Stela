@@ -70,9 +70,8 @@ impl ExceptionPlan {
 }
 
 impl<B: provider::Owner> Active<'_, '_, B> {
-    /// Caller has ended its immutable BoundSource borrow before supplying the
-    /// SAME mutable runtime. Actual native validation is repeated below; no
-    /// request-carried descriptor or stale cache metadata authorizes effects.
+    /// The caller has ended its BoundSource borrow and passes the same runtime
+    /// mutably. Native validation is repeated here.
     pub(super) fn execute_el1_context(
         mut self,
         runtime: &mut BlockRuntime,
@@ -360,13 +359,13 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 }
                 _ => anyhow::bail!("source has no actual context effect owner"),
             };
-            // Original effects and exact observations precede the sole PC store.
+            // Effects and observations come before the single PC store.
             self.pe.thread.pc = next_pc;
             if let Some(report) = observation {
                 report.actual_continuation = Some(next_pc);
             }
-            // All prepared source/publication loans are consumed above; the
-            // scope is no longer used before original-resource requalification.
+            // The prepared loans are consumed above, so the scope is unused
+            // while resources are re-checked.
             resources.check(outer)?;
             resources
                 .execution

@@ -17,12 +17,12 @@ use profile::*;
 #[derive(Args)]
 pub(crate) struct CompileBlock {
     input: PathBuf,
-    /// Select native host features or an explicit portable AOT tier.
+    /// Use the host's CPU features, or a portable feature tier.
     #[arg(long,default_value="native",value_parser=parse_cpu_target)]
     cpu_target: stela_compiler::TargetCpu,
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
     guest_base: u64,
-    /// Compile for an explicit guest execution profile.
+    /// Compile for a guest execution profile.
     #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
     guest_profile: Option<String>,
     /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.
@@ -54,10 +54,10 @@ pub(crate) struct CompileBlock {
     rpres: Option<bool>,
     #[arg(long)]
     output_dir: PathBuf,
-    /// Emit explicit software PAuth helper boundaries; preparation needs no keys.
+    /// Emit software PAuth helper calls; no keys are needed to compile.
     #[arg(long)]
     software_pauth: bool,
-    /// Prepare reviewed clock helper boundaries without executing a clock service.
+    /// Emit clock helper calls.
     #[arg(long, requires = "software_pauth")]
     software_clock: bool,
     /// Prepare guest TPIDRRO_EL0 reads without supplying a thread context.
@@ -75,7 +75,7 @@ pub(crate) struct CompileBlock {
     /// Prepare checked memory plus PAuth/clock/TSD exits with SA0 disabled; no native entry.
     #[arg(long, conflicts_with_all = ["checked_memory_sa0_off", "system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile"])]
     checked_process_sa0_off: bool,
-    /// Select explicit CPA effects for checked preparation; no CPU/native grant.
+    /// FEAT_CPA effects for checked compilation.
     #[arg(long,requires="checked_process_sa0_off",value_parser=parse_pointer_mode)]
     checked_pointer_mode: Option<stela_compiler::context::pointer::EffectivePointerChecks>,
 }
@@ -92,12 +92,12 @@ pub(crate) struct PrepareLeaf {
 #[derive(Args)]
 pub(crate) struct CompileLeaf {
     input: PathBuf,
-    /// Select native host features or an explicit portable AOT tier.
+    /// Use the host's CPU features, or a portable feature tier.
     #[arg(long,default_value="native",value_parser=parse_cpu_target)]
     cpu_target: stela_compiler::TargetCpu,
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
     guest_base: u64,
-    /// Compile for an explicit guest execution profile.
+    /// Compile for a guest execution profile.
     #[arg(long, requires_all = ["svl_bytes", "svcr"], value_parser = [stela_compiler::extended::PROFILE_ID, stela_compiler::extended::DECLARED_PROFILE_ID])]
     guest_profile: Option<String>,
     /// Streaming vector length in bytes: 16, 32, 64, 128 or 256.

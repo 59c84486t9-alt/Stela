@@ -324,8 +324,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 }
 
 impl Operand {
-    /// MOVPRFX policy for the exact canonical follower before any destructive
-    /// operand normalization. All 48 policies are pinned to Arm A64 2026-06.
+    /// MOVPRFX requirements of the follower, determined before destructive
+    /// operands are normalized.
     #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,

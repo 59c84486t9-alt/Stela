@@ -58,7 +58,7 @@ unsafe impl Sync for Storage {}
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: original layout and unique allocation remain owned here.
+        // SAFETY: the allocation and its layout are owned here.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
@@ -160,7 +160,8 @@ fn sp_offset_skips_tag_check_but_sp_writeback_checks_before_any_commit() -> Resu
         let mut state = state();
         state.registers.sp = context.sign(Key::Da, tagged(GUEST_RAM), 0)?;
         let mut expected = state.registers.clone();
-        // SAFETY: only an explicit LDRA helper, with actual bound owned RAM.
+        // SAFETY: only the LDRA helper accesses memory, through the bound owned
+        // RAM.
         let outcome = unsafe {
             runtime.run_with_pauth_memory(
                 &mut state,
@@ -255,7 +256,7 @@ fn complete_read_fault_preserves_destination_and_authenticated_base() -> Result<
         let mut state = state();
         state.registers.x[0] = context.sign(Key::Da, tagged(GUEST_RAM), 0)?;
         let expected = state.registers.clone();
-        // SAFETY: checked reader validates each reached span in owned RAM.
+        // SAFETY: the checked reader validates each span in owned RAM.
         let outcome = unsafe {
             runtime.run_with_pauth_memory(
                 &mut state,
@@ -287,11 +288,12 @@ fn effective_cpu_alignment_control_selects_sp_fault_or_complete_read() -> Result
     for check_sp_alignment in [true, false] {
         let mut runtime = runtime(cache.path(), LDRAA_X1_SP)?;
         let mut state = state();
-        // Eight-byte alignment permits the baseline reader; SP still violates SA0.
+        // Eight-byte alignment satisfies the baseline reader, but SP still
+        // violates SA0.
         state.registers.sp =
             context.sign(Key::Da, tagged(GUEST_RAM + size_of::<u64>() as u64), 0)?;
         let mut expected = state.registers.clone();
-        // SAFETY: fixed EL0 CPU controls and actual same-address-space reader.
+        // SAFETY: fixed EL0 controls and a reader for the same address space.
         let outcome = unsafe {
             runtime.run_with_pauth_memory(
                 &mut state,
@@ -332,8 +334,8 @@ fn mismatched_memory_privilege_is_rejected_before_dispatch() -> Result<()> {
     let mut runtime = runtime(cache.path(), LDRAA_X1_X0)?;
     let mut state = state();
     let expected = state.registers.clone();
-    // SAFETY: real owned reader; this deliberately mismatched profile must fail
-    // its entry check before generated code or a data callback can execute.
+    // SAFETY: the mismatched profile must fail entry before any native code or
+    // data callback runs.
     let result = unsafe {
         runtime.run_with_pauth_memory(
             &mut state,

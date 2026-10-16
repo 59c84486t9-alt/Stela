@@ -223,7 +223,7 @@ fn failed_final_protection_rolls_back_new_mapping_without_changing_old_memory() 
         let failed = *transaction.allocation();
         let page = memory_page();
         let error = transaction.publish_with(|base, _, _| {
-            // SAFETY: change one owned page, then simulate a partial host failure.
+            // Change one owned page, then simulate a partial host failure.
             assert_eq!(
                 unsafe {
                     libc::mprotect(

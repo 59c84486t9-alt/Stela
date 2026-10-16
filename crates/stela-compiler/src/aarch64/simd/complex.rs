@@ -99,9 +99,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let right = if indexed {
         let high = (word >> INDEX_H_SHIFT) & INDEX_BIT_MASK;
         let low = (word >> INDEX_L_SHIFT) & INDEX_BIT_MASK;
-        // The June indexed FP16 predicate tests size10, despite Half being
-        // size01. This decoder's FP16-enabled profile does not resolve or
-        // claim disabled-FP16 behavior by silently correcting that source.
+        // The indexed FP16 encoding tests size 10 even though half precision is
+        // size 01; the decoder follows the specification as written.
         let index = if format == Format::Half {
             if shape == Shape::Vector64 && high != 0 {
                 return Some(Err(()));

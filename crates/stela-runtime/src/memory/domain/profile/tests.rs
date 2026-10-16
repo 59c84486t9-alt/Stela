@@ -19,9 +19,9 @@ const ATTRIBUTES: MappingAttributes = MappingAttributes {
     shareable: true,
 };
 struct Storage(NonNull<u8>, Layout);
-// SAFETY: ownership grants no references or unsynchronized data accesses.
+// SAFETY: ownership hands out no references or unsynchronized accesses.
 unsafe impl Send for Storage {}
-// SAFETY: ownership grants no references or unsynchronized data accesses.
+// SAFETY: ownership hands out no references or unsynchronized accesses.
 unsafe impl Sync for Storage {}
 impl Drop for Storage {
     fn drop(&mut self) {

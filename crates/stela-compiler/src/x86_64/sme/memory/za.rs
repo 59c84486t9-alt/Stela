@@ -178,8 +178,8 @@ fn za_copy_tile(
         return;
     }
     let element = transfer.element.bytes();
-    // R8 advances through compact ZA rows; R9 advances through private staging.
-    // There are no callbacks within this bounded internal-state copy loop.
+    // R8 steps through the ZA rows and R9 through private staging. The copy
+    // loop makes no callbacks.
     za_selected_pointer(code, SCALABLE_ZA_OFFSET, Some(scratch.selector));
     if transfer.tile != 0 {
         code.extend(ZA_ADD_R8_IMM32);

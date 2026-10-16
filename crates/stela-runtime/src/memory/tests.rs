@@ -70,8 +70,8 @@ fn allocate_files(
     let page = host_page_size().unwrap();
     for _ in 0..32 {
         let address = candidate(page * pages);
-        // SAFETY: callers provide exclusively owned temporary backing files;
-        // no test modifies/truncates their mapped inodes while owners live.
+        // SAFETY: callers provide exclusively owned temporary files, and no
+        // test modifies or truncates them while the owners live.
         if let Ok(memory) = unsafe { OwnedMemory::map_files(make(address, page as u64)) } {
             return memory;
         }
@@ -322,7 +322,7 @@ fn publication_preserves_guest_permissions_and_logical_bounds() {
     assert!(PublishedReadOnlyRegion::map(address, &[9; 13]).is_err());
     assert_eq!(published.read_snapshot(4, 3).unwrap(), [1, 2, 3]);
     drop(published);
-    // A parallel test can claim the released address immediately.
+    // A parallel test can take the released address immediately.
     let reused = (0..32)
         .find_map(|_| PublishedReadOnlyRegion::map(candidate(page), &[8; 13]).ok())
         .unwrap();
@@ -594,8 +594,8 @@ fn retained_file_descriptor_maps_original_inode_after_path_replacement() {
         [1, 2, 3]
     );
     assert_eq!(std::fs::read(path).unwrap(), [4, 5, 6]);
-    // This only proves descriptor ownership. External writes/truncation to
-    // the original inode still require caller-side lifetime guards.
+    // This shows only descriptor ownership; changes to the file itself still
+    // need caller-side guards.
 }
 
 #[test]

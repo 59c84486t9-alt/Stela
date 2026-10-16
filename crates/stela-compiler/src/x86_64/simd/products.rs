@@ -55,8 +55,8 @@ pub(super) fn extend(code: &mut Vec<u8>, xmm: u8, lane: u8, upper: bool, signed:
 fn low_product(code: &mut Vec<u8>, lane: u8, target: TargetCpu) {
     match lane {
         1 => {
-            // Compute even and odd bytes separately in 16-bit lanes. Mask/shift
-            // each product back to one byte before merging the original order.
+            // Multiply even and odd bytes separately in 16-bit lanes, then mask
+            // or shift each product back to a byte before merging.
             packed(code, Host::MoveAligned, 2, 0);
             packed(code, Host::MoveAligned, 3, 1);
             constant(
@@ -192,7 +192,7 @@ fn indexed(code: &mut Vec<u8>, lane: u8, index: u8) {
         code.push((index % 4) * 0x55);
         shuffle(code, 1, 1, if index < 4 { 0 } else { 0xaa });
     } else {
-        // Select and broadcast the original dword in one packed operation.
+        // Select and broadcast the dword in one shuffle.
         shuffle(code, 1, 1, index * 0x55);
     }
 }
@@ -297,8 +297,8 @@ fn dot(code: &mut Vec<u8>, operand: &Operand, signed: bool) {
     accumulate(code, operand.destination, 4, Accumulate::Add);
 }
 
-/// Clamp signed doubled-width sums once, after the rounded product has been
-/// combined with the original accumulator. XMM6 survives for half assembly.
+/// Clamp the doubled-width sums once, after the rounded product is added to the
+/// accumulator. XMM6 survives for assembling the halves.
 fn clamp_rounded_accumulate(code: &mut Vec<u8>, lane: u8, active: u8) {
     packed(code, Host::MoveAligned, 5, 0);
     if lane == 2 {
@@ -311,8 +311,8 @@ fn clamp_rounded_accumulate(code: &mut Vec<u8>, lane: u8, active: u8) {
         const COMPACT_LOW_DWORDS: u8 = 0x88;
         const SWAP_QWORD_DWORDS: u8 = 0xb1;
         const DWORD_SIGN_BIT: u8 = 31;
-        // Sign-extend each truncated low dword. Equality with the original
-        // qword identifies exactly those sums which already fit signed32.
+        // Sign-extend each truncated low dword; equality with the qword marks
+        // the sums that fit in 32 bits.
         shuffle(code, 2, 0, COMPACT_LOW_DWORDS);
         packed(code, Host::MoveAligned, 3, 2);
         Shift::ArithmeticDword.emit(code, 3, DWORD_SIGN_BIT);

@@ -37,7 +37,7 @@ impl PendingCall {
         Self::from_registers(state.pc, &state.registers, trap, argument_count)
     }
 
-    /// Capture immutable ABI evidence; actual PC remains with its consumer.
+    /// Capture the trap's ABI registers.
     pub(crate) fn from_registers(
         pc: stela_compiler::GuestAddress,
         registers: &stela_compiler::GuestState,
@@ -78,7 +78,7 @@ impl PendingCall {
         Ok(())
     }
 
-    /// Commit only the actual register bank; caller retires the returned PC.
+    /// Write the register bank; the caller sets PC.
     pub(crate) fn complete_registers(
         self,
         registers: &mut stela_compiler::GuestState,

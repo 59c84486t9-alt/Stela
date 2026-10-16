@@ -58,9 +58,8 @@ pub struct Operand {
 }
 
 impl Operand {
-    /// Recheck the exact original reduction before supplying pairing metadata.
-    /// The reviewed June scalar and quadword reduction pages document no
-    /// MOVPRFX compatibility. Shared V/Z storage alone grants no authority.
+    /// The scalar and quadword reductions allow no MOVPRFX; the word is
+    /// re-checked before returning that.
     #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,

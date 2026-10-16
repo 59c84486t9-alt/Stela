@@ -16,7 +16,7 @@ const MEMBER_BYTES: u64 = size_of::<u64>() as u64;
 const PAIR_BYTES: u64 = MEMBER_BYTES * 2;
 const HOST_ALIGNMENT_MASK: usize = size_of::<u64>() - 1;
 
-/// Actual read observations only; no source, retry or settlement authority.
+/// Read observations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct M0RamPairReadProgress {
     pub(crate) attempted: bool,
@@ -36,9 +36,9 @@ impl M0RamPairReadProgress {
     }
 }
 
-/// Keeps original errors and the actual reached prefix. Physical ownership
-/// refusals are not invented Arm external aborts. Translation errors can only
-/// originate from the genuine reached-member control producer.
+/// Keeps the original errors and the reached prefix. Physical ownership
+/// refusals are not reported as Arm external aborts, and translation errors
+/// come only from the per-member control check.
 pub(crate) enum M0RamPairReadPlatformError {
     SourceControl {
         error: M0ControlError,
@@ -57,8 +57,7 @@ pub(crate) enum M0RamPairReadPlatformError {
     AlreadyAttempted(M0RamPairReadProgress),
 }
 
-// Retain every original diagnostic field explicitly; no field is discarded or
-// hidden behind derived formatting or a dead-code lint exemption.
+// Format every diagnostic field explicitly.
 impl core::fmt::Debug for M0RamPairReadPlatformError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -98,10 +97,10 @@ impl M0RamPairReadPlatformError {
     }
 }
 
-/// NO-READ session. The original canonical authority guard must own this object
-/// before `read`, and retain it through finalization/once-only state+PC settle.
-/// On failure/unwind that guard poisons the actual PE BEFORE these loans drop.
-/// No destination, base, SP, architectural bank or PC is retained or written.
+/// Created before any read. The failure guard must own it before `read` and
+/// keep it through finalization and settlement, so a failure or unwind marks
+/// the PE failed before these borrows drop. No destination, base, SP, register
+/// bank or PC is held or written.
 #[must_use]
 pub(crate) struct M0RamPairReadPrepared<'loan, 'owner> {
     execution: &'loan MemoryExecutionLoan,
@@ -189,12 +188,12 @@ impl M0RamPairReadPrepared<'_, '_> {
             let second_pointer = second.pointer();
             self.second = Some(second);
             self.validate_current()?;
-            // The just-installed pin remains retained through canonical settle.
+            // The pin stays held until settlement.
             self.check_alignment(second_pointer, M0ReadMember::Second)?;
             self.progress.read_attempted = Some(M0ReadMember::Second);
             self.progress.uncertain_member = Some(M0ReadMember::Second);
-            // SAFETY: the same genuine reached-member producer/pin/order now
-            // qualifies only this second aligned8B coherent host RAM quantity.
+            // SAFETY: the member check, pin and order guard now cover this
+            // second aligned 8-byte quantity of coherent host RAM.
             let second_value = unsafe { super::ram::read_host_ram8(second_pointer) };
             self.progress.completed_bytes = PAIR_BYTES;
             self.progress.uncertain_member = None;
@@ -223,15 +222,12 @@ impl M0RamPairReadPrepared<'_, '_> {
     }
 }
 
-/// Qualify only First and acquire one SAME-System order gate without reading.
-/// Actual loan mint must authenticate original instruction, operands/overlap,
-/// source currency, EL1 little endian/M0, positive no-LSE2 profile and actual
-/// same-outer physical owner. Base-register forms/offset/pre/post and ZR data
-/// are descriptive source policy; SP forms require their own original-SP fault
-/// owner and must decline unless that owner is joined. This leaf checks neither
-/// a copied Config nor application address. It grants no ATOMIC_LOAD16 capability.
-/// Device order is the existing bounded side-effect-free coherent RAM profile,
-/// with no MMIO, debug/watchpoint, speculation or host fault emulation claim.
+/// Check the first member and take the system's order guard without reading.
+/// Creating the source borrow must verify the instruction, operands and
+/// overlap, source currency, EL1 little-endian M0 state, the absence of
+/// FEAT_LSE2 and the physical owner. SP-based forms are refused. Device order
+/// uses the coherent RAM profile without side effects: there is no MMIO,
+/// watchpoint, speculation or host fault emulation.
 pub(crate) fn prepare_aligned_device_ram8_pair<'loan, 'owner>(
     execution: &'loan MemoryExecutionLoan,
     source: &'loan M0DataPairReadLoan<'owner>,

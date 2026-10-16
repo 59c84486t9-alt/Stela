@@ -27,9 +27,9 @@ const MOVSXD_RCX_ECX: &[u8] = &[0x48, 0x63, 0xc9];
 const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
 const LEA_RAX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x04, 0x08];
 
-/// Check original SP before offset arithmetic. Patch the returned rel32 failure
-/// displacement to the leaf's one scratch cleanup. RAX contains raw fault SP.
-/// Clobbers RAX/RCX/RDX and host flags; no GuestState field changes.
+/// Check SP before the offset is applied. The caller patches the returned rel32
+/// to its cleanup. On failure RAX holds the faulting SP. Clobbers RAX/RCX/RDX
+/// and flags.
 pub(crate) fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64) -> Option<usize> {
     if base != Register::Sp {
         return None;
@@ -84,10 +84,10 @@ pub(crate) fn immediate(code: &mut Vec<u8>, base: Register, displacement: i32, m
     }
 }
 
-/// Source AddressAdd, using the actual access level's resolved specialization.
-/// Original-SP checks and store staging precede this helper. RAX is the access
-/// address; Pre/Post also produce RDX=pending writeback. No guest effect occurs.
-/// PostIndex retains the original access address while marking only writeback.
+/// AddressAdd at the access level's resolved specialization, after the SP check
+/// and store staging. RAX is the access address; pre- and post-index forms also
+/// leave the pending writeback in RDX. Post-index keeps the original access
+/// address and marks only the writeback.
 pub(crate) fn immediate_with_checks(
     code: &mut Vec<u8>,
     base: Register,
@@ -95,8 +95,7 @@ pub(crate) fn immediate_with_checks(
     mode: AddressMode,
     checks: AddressAddChecks,
 ) {
-    // Zero-offset marking is idempotent, including an already marked base.
-    // The containing body must still retain its actual control requirement.
+    // Marking a zero offset is idempotent, even on an already marked base.
     if checks == AddressAddChecks::Disabled || displacement == 0 {
         immediate(code, base, displacement, mode);
         return;
@@ -113,8 +112,8 @@ pub(crate) fn immediate_with_checks(
         code.extend(LEA_RAX_RAX_DISP32);
         code.extend(displacement.to_le_bytes());
     }
-    // The common CPA recipe preserves original RDX and, without multiplication,
-    // R8. Only RAX/RCX/R9/R10/R11 and host flags are scratch.
+    // The CPA recipe preserves RDX and, without multiplication, R8.
+    // RAX/RCX/R9/R10/R11 and flags are scratch.
     crate::x86_64::pointer_checks::emit(code, false);
     if mode != AddressMode::Offset {
         code.extend(MOV_RDX_RAX);
@@ -147,8 +146,8 @@ pub(crate) fn register_offset(
     code.extend(LEA_RAX_RAX_RCX);
 }
 
-/// Source AddressAdd for a decoded extended/shifted register offset. RAX=EA;
-/// RDX retains original base across the shared marker. No writeback is present.
+/// AddressAdd for an extended or shifted register offset. RAX is the effective
+/// address and RDX keeps the base. There is no writeback.
 pub(crate) fn register_offset_with_checks(
     code: &mut Vec<u8>,
     base: Register,

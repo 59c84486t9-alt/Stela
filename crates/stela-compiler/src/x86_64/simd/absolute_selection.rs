@@ -144,8 +144,8 @@ pub(in crate::x86_64) fn emit(
         Host::MoveAligned.register(code, equal, a, target);
         Host::EqualDword.register(code, equal, b, target);
         shuffle(code, equal, HIGH_DWORDS, target);
-        // Low dwords need unsigned comparison. Bias only bit31, then signed
-        // compare; all original operand bits are restored before selection.
+        // The low dwords need an unsigned comparison: flip bit 31, compare
+        // signed, then restore the bits before selecting.
         Host::EqualDword.register(code, bias, bias, target);
         ShiftOpcode::RightQword.emit(code, bias, 63);
         ShiftOpcode::LeftQword.emit(code, bias, 31);

@@ -37,9 +37,9 @@ fn run(
     budget: usize,
     stop: u64,
 ) -> Result<ServiceRunOutcome> {
-    // SAFETY: immutable original SVC/RET fixtures access no data. Process ID is
-    // read from the same serialized actual thread/task owner; all RAM stays owned
-    // and unchanged and no guest pointer is passed to the identity service.
+    // SAFETY: SVC/RET code with no data access. The process ID comes from the
+    // thread's own process, RAM is unchanged, and no guest pointer reaches the
+    // service.
     unsafe {
         run_services(
             runtime,
@@ -108,8 +108,7 @@ fn native_queries_preserve_full_state_ram_and_shared_process_owner() -> Result<(
 
 #[test]
 fn original_getpid_request_window_uses_the_declared_owner_and_precise_return_pc() -> Result<()> {
-    // Unchanged dyld slice offsets0x518c..0x5194:900280d2011000d4. The original
-    // full startup driver owns source identity and later continuation separately.
+    // Bytes at offsets 0x518c-0x5194 of the dyld slice (900280d2011000d4).
     let cache = tempfile::tempdir()?;
     let mut runtime = vm_runtime(cache.path(), BASE, &[MOV_X16_GETPID, SVC_DARWIN, RET_X30])?;
     let (mut memory, address) = vm_buffer(true)?;

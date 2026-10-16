@@ -158,9 +158,9 @@ const fn valid_displacement(displacement: i32, minimum: i32, maximum: i32) -> bo
     displacement >= minimum && displacement <= maximum && displacement % TAG_GRANULE_BYTES == 0
 }
 
-/// Decode all twenty canonical forms without choosing execution privilege.
-/// Tag-store Rt31 denotes SP; LDG, bulk and STGP data31 denote ZR. Store
-/// writeback aliases are allocated: all sources precede final base writeback.
+/// Decode all twenty forms. Tag-store Rt 31 is SP; LDG, bulk and STGP data
+/// register 31 is ZR. Store writeback aliases are allowed: all sources are read
+/// before the base is written back.
 pub fn decode(word: u32) -> Option<Operand> {
     let data = word & REGISTER_MASK;
     let base = register((word >> BASE_SHIFT) & REGISTER_MASK, true);

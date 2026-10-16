@@ -27,7 +27,7 @@ const GUEST_PIPE: u64 = 0x70000000;
 const PAYLOAD: &[u8] = b"Stela native guest write\n";
 const DARWIN_EBADF: u32 = 9;
 const DARWIN_EFAULT: u32 = 14;
-// Assembled from fixtures/darwin-syscall-arm64.S. B.CC jumps from +8 to +20.
+// Assembled from `fixtures/darwin-syscall-arm64.S`. B.CC jumps from +8 to +20.
 const WRITE_STUB: [u32; 7] = [
     0xd2800090, // MOV X16, #4
     0xd4001001, // SVC #0x80
@@ -167,8 +167,8 @@ impl PipeBackend {
             });
         };
         self.host_writes += 1;
-        // SAFETY: only an owned descriptor capability reaches libc. bytes is a
-        // live private Rust copy; no unvalidated guest pointer crosses this call.
+        // SAFETY: libc receives an owned descriptor and a private Rust buffer;
+        // no guest pointer crosses this call.
         let written =
             unsafe { libc::write(descriptor.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
         if written < 0 {
@@ -424,8 +424,8 @@ fn data_vm_service_preserves_full_state_and_guest_page_rounding_on_success_and_e
                 expected.registers.nzcv =
                     (expected.registers.nzcv & !CARRY) | if errno == 0 { 0 } else { CARRY };
                 let mut runtime = vm_runtime(cache.path(), BASE, &[0xd4001001, 0xd65f03c0])?;
-                // SAFETY: original-style SVC/RET fixture never accesses guest RAM
-                // directly; the explicit service validates the exclusively owned pages.
+                // SAFETY: the SVC/RET code never accesses guest RAM directly;
+                // the service validates the owned pages.
                 let result = unsafe {
                     run_data_vm(
                         &mut runtime,
@@ -612,8 +612,8 @@ mod native_crossarch {
         budget: usize,
         enabled: bool,
     ) -> Result<ServiceRunOutcome> {
-        // SAFETY: immutable SVC/RET fixtures access no data. The declared
-        // unavailable service consumes a numeric namespace without pointers.
+        // SAFETY: SVC/RET code with no data access; the service reads only a
+        // numeric namespace.
         unsafe {
             run_services(
                 runtime,
@@ -763,7 +763,7 @@ mod native_crossarch {
         assert_eq!(second.execution.reason, StopReason::StopAddress);
         assert_eq!(second.execution.blocks_executed, 2);
         assert_eq!(second.crossarch_services.len(), 1);
-        // The second actual SVC observes the first errno as its namespace.
+        // The second SVC sees the first call's errno as its namespace.
         let mut expected = initial.clone();
         expected.pc = GuestAddress(STOP);
         expected.registers.x[0] = u64::from(DARWIN_EINVAL);
@@ -844,8 +844,8 @@ mod native_thread_services {
     impl HostTlsSentinel {
         fn new() -> Result<Self> {
             let mut key = 0;
-            // SAFETY: key is a valid out-pointer; no destructor is needed for
-            // the separately owned Box, released after this private key.
+            // SAFETY: `key` is a valid out-pointer; the separately owned Box
+            // needs no destructor and is freed after the key.
             ensure!(unsafe { libc::pthread_key_create(&mut key, None) } == 0);
             let sentinel = Self {
                 key,
@@ -904,8 +904,8 @@ mod native_thread_services {
         budget: usize,
     ) -> Result<ServiceRunOutcome> {
         let mut memory = OwnedMemory::map(Vec::new())?;
-        // SAFETY: fixtures are immutable owned SVC/MRS/RET code without loads or
-        // stores. Services store numeric guest TSD values without dereferencing.
+        // SAFETY: SVC/MRS/RET code without loads or stores; the services store
+        // TSD values without dereferencing them.
         unsafe {
             run_services(
                 runtime,
@@ -1096,8 +1096,8 @@ mod native_thread_services {
             };
             assert!(result.is_err());
             assert_state(&state, &before);
-            // SAFETY: owned MOV/MRS/RET accesses no RAM. Missing context must
-            // preserve the executed prefix and leave even an XZR read pending.
+            // SAFETY: MOV/MRS/RET accesses no RAM. Without a context the
+            // executed prefix is kept and even an XZR read stays pending.
             let missing = unsafe { runtime.run(&mut state, Some(GuestAddress(STOP)), 1)? };
             let StopReason::ThreadRegisterRequired { instruction } = missing.reason else {
                 bail!("thread register read did not request its owning context");
@@ -1238,8 +1238,8 @@ mod native_thread_services {
         let mut expected = state.clone();
         expected.registers.x[PREFIX_REGISTER] = PREFIX_VALUE;
         expected.pc = GuestAddress(BASE + INSTRUCTION_BYTES);
-        // SAFETY: a missing optional clock leaves the genuine counter helper
-        // pending after the memory-free prefix, preserving all other state.
+        // SAFETY: without a clock, the counter helper stays pending after the
+        // memory-free prefix and all other state is kept.
         let result = unsafe {
             runtime.run_with_thread(
                 &mut state,
@@ -1433,8 +1433,8 @@ mod native_thread_services {
             let mut memory = OwnedMemory::map(Vec::new())?;
             let mut state = thread(15, 1);
             let before = state.clone();
-            // SAFETY: validation must reject either foreign ownership or two
-            // independent port owners before any immutable fixture executes.
+            // SAFETY: validation must reject foreign ownership or two port
+            // owners before any code runs.
             let outcome = unsafe {
                 run_services(
                     &mut runtime,

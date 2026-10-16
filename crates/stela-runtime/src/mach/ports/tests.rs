@@ -120,10 +120,11 @@ mod native {
             fn thread_self_trap() -> u32;
             fn mach_port_deallocate(task: u32, name: u32) -> i32;
         }
-        // Observe this test's current host thread, not task-wide references
-        // concurrently acquired by unrelated tests. Retain one explicit query
-        // reference until the owner has closed, then release it exactly once.
-        // SAFETY: genuine current-task/thread names and private stack output.
+        // Observe this test's own thread rather than task-wide references taken
+        // by other tests running concurrently. Hold one query reference until
+        // the owner closes, then release it once.
+        //
+        // SAFETY: current task and thread names, with local output.
         let task_host = unsafe { mach_task_self_ };
         let thread_host = unsafe { thread_self_trap() };
         assert_ne!(thread_host, MACH_PORT_NULL);
@@ -266,8 +267,8 @@ mod native {
                 host::port_type(host_name).unwrap(),
                 (KERN_SUCCESS, entry.state.type_bits())
             );
-            // No copyout has occurred. The allocated resource remains owned even
-            // when the later memory adapter cannot publish its output word.
+            // No copyout has happened; the allocation stays owned even if the
+            // memory adapter later cannot write its output.
             assert_eq!(
                 output(ports.execute(Operation::Type {
                     task,

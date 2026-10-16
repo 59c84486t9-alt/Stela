@@ -52,7 +52,7 @@ pub(crate) struct PlanFixups {
     architecture: Option<String>,
     #[arg(long, value_parser = parse_address)]
     image_base: Option<u64>,
-    /// Plan authenticated rebases under explicit IA/IB/DA/DB process keys.
+    /// Plan authenticated rebases with the given IA/IB/DA/DB keys.
     #[arg(long)]
     software_pauth_keys: Option<PathBuf>,
 }

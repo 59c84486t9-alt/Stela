@@ -74,8 +74,8 @@ fn startup_target(words: [u32; 5], entry: u64) -> Result<u64> {
     u64::try_from(i128::from(branch_pc) + i128::from(delta)).context("startup target overflow")
 }
 
-// These exact original windows bound the unsafe direct-RAM execution contract.
-// Untaken hardware alternatives remain present, rather than patched instructions.
+// The startup instruction ranges that may run. Code outside them is never
+// executed; alternative hardware paths stay unpatched.
 fn bootstrap_windows(
     data: &[u8],
     plan: &load_plan::LoadPlan,
@@ -243,8 +243,7 @@ pub fn probe(
             "dyld clock bootstrap requires 1728 bytes of working stack"
         );
     }
-    // No fixups are applied. Original dyld's self-rebase/cache handoff must be
-    // reviewed before executing beyond the whitelisted startup instructions.
+    // No fixups are applied, so execution must stop before dyld's self-rebase.
     let mut main_mapping =
         mapped_image::prepare_raw_segments(main_bytes, &main, options.image_base)?;
     let dyld_mapping = mapped_image::prepare_raw_segments(dyld_bytes, &dyld.image, dyld_base)?;
@@ -343,10 +342,10 @@ pub fn probe(
         },
     };
     let initial = crate::input::register_json(&thread.registers);
-    // SAFETY: hash-reviewed original windows, fixed clock selectors and zero X3
-    // bound the executed path to register operations, checked private-stack
-    // stores/loads, RO clock loads and validated PAC/clock helpers. Stop precedes
-    // all unreviewed continuation code. Every mapping remains exclusively owned.
+    // SAFETY: the executed path is limited to the reviewed startup windows:
+    // register operations, private stack accesses, read-only clock loads and
+    // the PAC and clock helpers. Execution stops before any other code, and
+    // every mapping is exclusively owned.
     let outcome = unsafe {
         if let Some(clock) = &mut clock {
             runtime.run_with_clock(
@@ -357,8 +356,7 @@ pub fn probe(
                 clock,
             )?
         } else if let Some(context) = &context {
-            // All resources below are created once for this bounded fresh
-            // software process. Its checked route cannot resume via raw entry.
+            // Every resource below belongs to this one software process.
             protected::run(
                 &mut runtime,
                 &mut thread,

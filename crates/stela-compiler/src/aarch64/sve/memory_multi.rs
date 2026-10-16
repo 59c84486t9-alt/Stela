@@ -48,8 +48,8 @@ impl Operand {
     }
 }
 
-/// Both source helper branches have identical effects under actual SME and SM=1.
-/// The canonical owner checks all specialization guards before any helper.
+/// Both pseudocode branches have the same effect with FEAT_SME and PSTATE.SM
+/// set; the owner checks those guards first.
 pub(crate) fn execution_access_requirements(_operand: &Operand) -> ScalableAccessRequirements {
     ScalableAccessRequirements::StreamingSmeSpecialization(Box::new([
         ScalableAccessCheck::StreamingSveEnabled,

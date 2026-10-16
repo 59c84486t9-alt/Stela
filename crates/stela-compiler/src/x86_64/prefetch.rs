@@ -40,9 +40,9 @@ fn locality(hint: Hint) -> Option<Locality> {
     const STREAMING: u8 = 1;
     let raw = hint.encoding();
     if !matches!(raw & TYPE_MASK, 0 | STORE_HINT) || raw & TARGET_MASK == SYSTEM_CACHE {
-        // Arm Hint_Prefetch explicitly permits any/all hints to be NOPs.
-        // PLI needs translated instruction addresses/execute permissions; SLC,
-        // intent-to-read-on-update and unallocated hints have no selected host map.
+        // Arm allows any prefetch hint to be a NOP. PLI needs translated
+        // instruction addresses, and SLC, intent-to-read-on-update and
+        // unallocated hints have no host equivalent.
         return None;
     }
     Some(if raw & STREAMING != 0 {

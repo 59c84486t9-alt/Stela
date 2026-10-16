@@ -83,8 +83,8 @@ fn revisiting_modified_cached_source_rebinds_before_any_old_instruction_executes
         &[ADD_X2_1, NOP, STP_X0_X3_X1, B_BACK_12],
         BASE,
     );
-    // The second reached pair member overwrites its own STP/next branch with
-    // identical words; both actual byte writes still advance source history.
+    // The second pair member overwrites its own STP and the following branch
+    // with identical words; both writes still count as source changes.
     config.thread.registers.x[3] = u64::from(STP_X0_X3_X1) | u64::from(B_BACK_12) << 32;
     let mut expected = config.thread.registers.clone();
     expected.x[2] = expected.x[2].wrapping_add(8);

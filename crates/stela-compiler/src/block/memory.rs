@@ -13,21 +13,21 @@ pub const ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID: &str =
     "el0-le-lse2-a0-cpa2off-mte0-spe0-normal-wb-gpr-memory-v3";
 pub const CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID: &str =
     "el0-le-lse2-a0-cpa-qualified-mte0-spe0-normal-wb-memory-v4";
-/// Immutable specialization selected from the actual process-control owner.
+/// Checked-memory specialization, selected from the process controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckedMemoryProfile {
     SpAlignmentEnabled,
     SpAlignmentDisabled,
-    /// One ordinary unsigned 64-bit load, non-SP base and no writeback.
-    /// The state pointer is private staging; authoritative state commits only
-    /// after the canonical M0 parent's checked completion and finalization.
+    /// One unsigned 64-bit load with a non-SP base and no writeback. The state
+    /// pointer is private staging; guest state is committed only after the M0
+    /// parent finishes the access.
     M0DeviceRamRead64Staged,
     AddressChecks(CheckedAddressProfile),
 }
 impl CheckedMemoryProfile {
-    /// Select compiler effects only; the actual owner validates source access EL,
-    /// controls and implementation choice before the native prefix can run.
+    /// Select the compiler's address checks. The runtime validates the access
+    /// level and controls before the block runs.
     pub const fn with_address_checks(
         self,
         ordinary_access_el: crate::context::memory::address::AccessEl,
@@ -42,8 +42,8 @@ impl CheckedMemoryProfile {
         ))
     }
 
-    /// Require CPA availability and bind the exact arithmetic effects at the
-    /// profile's original current EL. AddressAdd and arithmetic must agree.
+    /// Require FEAT_CPA and bind the arithmetic effects at the profile's
+    /// current EL. The AddressAdd and arithmetic checks must agree.
     pub fn with_pointer_arithmetic(
         self,
         checks: crate::context::pointer::EffectivePointerChecks,

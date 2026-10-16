@@ -78,8 +78,8 @@ impl PendingCall {
         &self.request
     }
 
-    /// Apply one actual thread-service result. A declined service must leave the
-    /// call pending. Invalid replies and changed state never mutate saved state.
+    /// Apply a thread-service result. Declined services leave the call pending;
+    /// an invalid reply or changed state never modifies the saved state.
     pub fn complete(self, state: &mut ThreadState, completion: Completion) -> Result<()> {
         ensure!(
             state.pc == self.issued.pc,

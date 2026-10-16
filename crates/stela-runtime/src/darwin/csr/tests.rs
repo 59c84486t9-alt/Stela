@@ -320,9 +320,8 @@ fn native_original_request_window_resumes_through_explicit_policy() -> Result<()
     use crate::blocks::{BlockRuntime, StopReason};
     use stela_compiler::{TargetCpu, block::BlockProfile};
 
-    // Unchanged 26A434 dyld slice offsets 0x504c..0x5054, verified in the
-    // source-bound original continuation. Only the request window executes;
-    // original libSystem initialization and process exit remain outside it.
+    // Instructions at offsets 0x504c-0x5054 of the 26A434 dyld slice. Only this
+    // request window runs.
     const MOV_X16_CSRCTL: u32 = 0xd2803c70;
     const SVC_DARWIN: u32 = 0xd4001001;
     const ORIGINAL_REQUEST: [u32; 2] = [MOV_X16_CSRCTL, SVC_DARWIN];
@@ -384,9 +383,8 @@ fn native_original_request_window_resumes_through_explicit_policy() -> Result<()
             expected.registers.x[1] = 0;
             expected.registers.nzcv =
                 (expected.registers.nzcv & !CARRY) | if error.is_some() { CARRY } else { 0 };
-            // SAFETY: original MOV/SVC only produce a numeric request.
-            // CSR validates owned data; no guest memory references escape
-            // and this serialized profile has no live exclusive monitor.
+            // SAFETY: MOV and SVC only produce a request. CSR writes owned
+            // data, and no exclusive monitor is live.
             let outcome = unsafe {
                 run_services(
                     &mut runtime,

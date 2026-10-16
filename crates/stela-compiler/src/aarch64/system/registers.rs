@@ -66,8 +66,7 @@ impl Encoding {
     }
 }
 
-/// Canonical shared EL1 translation-control encodings. Allocation/effects still
-/// require the retained runtime's actual feature and control owners.
+/// EL1 translation-control register encodings.
 pub const SCTLR_EL1: Encoding = Encoding::new(3, 0, 1, 0, 0);
 pub const TCR_EL1: Encoding = Encoding::new(3, 0, 2, 0, 2);
 pub const TTBR0_EL1: Encoding = Encoding::new(3, 0, 2, 0, 0);

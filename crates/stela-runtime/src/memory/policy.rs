@@ -63,8 +63,7 @@ pub enum TagCheckFaultMode {
     Asymmetric,
 }
 
-/// Typed operation admission installed only by the checked process policy loan.
-/// It is not a guest feature/control bit and cannot be selected by a loose flag.
+/// Typed operations admitted by the checked process policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperationScope {
     Unbound,
@@ -112,10 +111,10 @@ impl MemoryControls {
         }
     }
 
-    /// Build the temporary snapshot from the retained checked CPU authority.
-    /// Only the process owner's same-thread loan may install this snapshot; its
-    /// opaque native scope retains the controls, SystemState and event endpoint,
-    /// and restores the previous policy on every return, decline or unwind.
+    /// Build the temporary snapshot from the checked CPU authority. Only the
+    /// process owner's same-thread borrow may install it; its native scope
+    /// holds the controls, system state and event endpoint and restores the
+    /// previous policy on every return, refusal or unwind.
     pub(crate) fn for_exclusive_authority(
         authority: &crate::system::process_memory::ExclusiveProcessMemoryAuthorization<'_>,
     ) -> Self {
@@ -144,8 +143,8 @@ impl MemoryControls {
         self
     }
 
-    /// Bind the actual current-EL selected SA0/SA effect from the CPU owner.
-    /// This is resolved control state, not a duplicate raw SCTLR register.
+    /// Set the effective SA0/SA for the current EL, as resolved by the CPU
+    /// owner.
     pub const fn with_effective_sp_alignment(mut self, enabled: bool) -> Self {
         self.effective_sp_alignment = Some(enabled);
         self
@@ -190,8 +189,8 @@ impl MemoryControls {
             self.tag_check_fault_mode,
             TagCheckFaultMode::Asynchronous | TagCheckFaultMode::Asymmetric
         ) {
-            // TFSR accumulation and asymmetric read/write selection require the
-            // actual CPU fault-state owner. Never substitute synchronous faults.
+            // TFSR accumulation and asymmetric read/write checking need the
+            // CPU's fault state; synchronous faults are never substituted.
             return Err(MemoryStatus::Unsupported);
         }
         let logical_tag = AllocationTag::from_address(access.raw_address);
@@ -239,8 +238,8 @@ impl DataPolicy for MemoryControls {
                 MemoryImplementationProfile::ScalableTagChecks,
                 Some(MemoryImplementationProfile::ScalableTagChecks),
             ) => Ok(()),
-            // The compiler implements the checking contract only. A known
-            // suppression choice is explicit incompatibility, not authorization.
+            // The compiler implements tag checking only; an implementation that
+            // suppresses checks is incompatible.
             _ => Err(MemoryStatus::Unsupported),
         }
     }

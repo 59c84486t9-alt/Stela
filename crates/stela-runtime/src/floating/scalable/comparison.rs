@@ -66,8 +66,8 @@ pub(super) fn complete(
         result[byte] |= u8::from(outcome.predicate) << bit;
         exceptions |= outcome.exceptions;
     }
-    // A complete P write clears nonleading and inactive group bits. Pg may
-    // alias Pd because its entire original value was snapshotted above.
+    // A full P write clears non-leading and inactive group bits. Pg may alias
+    // Pd because it was snapshotted above.
     scalable.write_predicate(operand.destination, &result[..predicate_bytes])?;
     state.fpsr |= exceptions;
     Ok(())

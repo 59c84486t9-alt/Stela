@@ -28,10 +28,9 @@ pub fn handles(state: &ThreadState, trap: &SynchronousTrap) -> bool {
     classify_bsd_call(state, trap).is_ok_and(|selector| selector.number == SYSCALL_NUMBER)
 }
 
-/// Obtain fresh kernel entropy before validating and publishing the complete
-/// destination. Source-defined store prefixes survive supported copyout faults;
-/// ambiguous pair-fault shapes explicitly decline before publication. This
-/// service accepts only serialized, non-shareable OwnedMemory.
+/// Get fresh kernel entropy, then validate and write the whole destination.
+/// Store prefixes survive supported copyout faults; ambiguous pair faults
+/// decline before writing. Requires non-shared OwnedMemory.
 pub fn service(
     state: &mut ThreadState,
     trap: &SynchronousTrap,
@@ -98,8 +97,8 @@ fn host_entropy(bytes: &mut [u8]) -> io::Result<()> {
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        // SAFETY: the complete writable buffer is local Rust-owned storage and
-        // bounded by MAX_BYTES. No guest pointer is passed to the host syscall.
+        // SAFETY: the buffer is local, writable and at most MAX_BYTES; no guest
+        // pointer reaches the host call.
         let result = unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) };
         if result == 0 {
             Ok(())

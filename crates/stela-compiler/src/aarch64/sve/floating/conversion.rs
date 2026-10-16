@@ -154,7 +154,7 @@ pub struct Operand {
     pub source: u8,
 }
 
-/// Exactly 28 integer, 12 precision and 2 BF16 canonical forms decode.
+/// Decodes exactly 28 integer, 12 precision and 2 BF16 forms.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let kind = match word & CONVERSION_MASK {

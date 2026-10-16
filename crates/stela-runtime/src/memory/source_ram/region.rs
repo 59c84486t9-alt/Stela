@@ -3,9 +3,8 @@
 use super::{PhysicalRamRange, SourceRamBuildError, SourceRamPermissions};
 use alloc::{string::String, vec::Vec};
 
-/// Cold allocation initializes the declared region to zero, then loads exactly
-/// this unchanged owned file prefix. Normal warm reset reloads only that prefix.
-/// This recipe is generic platform data; no path/name/hash selects behavior.
+/// A cold allocation zeroes the region, then loads this file prefix; a warm
+/// reset reloads only the prefix.
 pub struct InitializedRamRegion {
     pub range: PhysicalRamRange,
     pub file_prefix: Vec<u8>,

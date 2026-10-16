@@ -14,8 +14,8 @@ pub(crate) enum ConfigurationError {
 }
 
 impl Context {
-    /// ComputePAC2QARMA packing plus the existing InsertPAC implementation.
-    /// The actual CPU/source owner must separately qualify APA6/API0/APA3zero.
+    /// ComputePAC2QARMA packing with the shared InsertPAC. The executing owner
+    /// checks APA, API and the other enables.
     pub(crate) fn sign_two_modifiers(
         &self,
         key: Key,
@@ -28,8 +28,9 @@ impl Context {
             .map_err(|_| ConfigurationError::KeyUnavailable { key })
     }
 
-    /// Return canonical standalone/combined policy results without a state commit.
-    /// Configuration errors remain separate from architectural authentication.
+    /// Return the standalone and combined authentication results without
+    /// committing state. Configuration errors are reported separately from
+    /// authentication failures.
     pub(crate) fn authenticate_two_modifiers(
         &self,
         key: Key,

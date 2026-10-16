@@ -41,7 +41,7 @@ impl Clone for ScalableState {
             fpmr: self.fpmr,
             vectors: self.vectors.clone(),
             matrices: self.matrices.clone(),
-            // Scratch is operational storage, including while a loan is active.
+            // Scratch space is always available, even during a borrow.
             za_scratch: Some(Vec::new()),
         }
     }
@@ -61,12 +61,11 @@ impl ScalableState {
         }
     }
 
-    /// Borrow reusable staging for affected numerical ZA rows, bounded by the
-    /// complete physical matrix. The callback owns evaluation and architectural commit;
-    /// this loan does not roll back writes the callback chooses to perform.
-    /// Contents are unspecified: initialize every staged row before evaluation.
-    /// Initialized high-water storage is retained without repeated zeroing after
-    /// success, errors and unwinding. Nested loans on this owner are rejected.
+    /// Borrow reusable staging for the ZA rows an instruction affects, bounded
+    /// by the whole matrix. The callback evaluates and commits; writes it
+    /// chooses to make are not rolled back. Contents are unspecified, so every
+    /// staged row must be initialized before use. Storage is kept between uses
+    /// without re-zeroing; nested borrows are rejected.
     pub fn with_za_row_scratch<R, E>(
         &mut self,
         rows: usize,
@@ -291,7 +290,7 @@ impl ScalableState {
         let (z_upper, predicates, ffr) = match (self.mode.streaming(), &mut self.vectors) {
             (true, Some(storage)) => {
                 let pointer = storage.as_mut_ptr();
-                // SAFETY: Both offsets lie within the owned nonempty allocation.
+                // SAFETY: both offsets are within the owned allocation.
                 unsafe {
                     (
                         pointer,

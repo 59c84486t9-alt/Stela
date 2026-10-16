@@ -18,7 +18,7 @@ const REGISTRIES: [&str; 4] = [
 const README: &str = "README.md";
 const README_START: &str = "<!-- stela-instruction-progress:start -->";
 const README_END: &str = "<!-- stela-instruction-progress:end -->";
-/// Best first; a form takes the best status of any reviewed profile.
+/// Best first; a form takes the best status across its profiles.
 const STATUSES: [&str; 3] = ["implemented", "partial", "unsupported"];
 /// Checklist form fields in their published order.
 const FACT_FIELDS: [&str; 8] = [

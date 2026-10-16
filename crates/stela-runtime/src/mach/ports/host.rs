@@ -19,8 +19,8 @@ unsafe extern "C" {
 pub(super) fn acquire(role: PortKind) -> Result<u32> {
     #[cfg(target_os = "macos")]
     {
-        // SAFETY: zero-argument host acquisition; the returned owned name never
-        // escapes to a guest or authorizes a second namespace.
+        // SAFETY: takes no arguments; the returned name never reaches the
+        // guest.
         unsafe {
             match role {
                 PortKind::ReplyReceive => Ok(mach_reply_port()),
@@ -42,7 +42,7 @@ pub(super) fn allocate(right: RightKind) -> Result<(i32, u32)> {
     #[cfg(target_os = "macos")]
     {
         let mut name = 0;
-        // SAFETY: target is actual current host task; output is private storage.
+        // SAFETY: the target is the current task, and the output is local.
         let status = unsafe { mach_port_allocate(mach_task_self_, right as u32, &mut name) };
         Ok((status, name))
     }
@@ -70,7 +70,7 @@ pub(super) fn port_type(name: u32) -> Result<(i32, u32)> {
 
 pub(super) fn deallocate(name: u32) -> Result<i32> {
     #[cfg(target_os = "macos")]
-    // SAFETY: one actual reference acquired and retained by this owner.
+    // SAFETY: releases the one reference this owner acquired.
     unsafe {
         Ok(mach_port_deallocate(mach_task_self_, name))
     }
@@ -127,8 +127,8 @@ pub(super) fn thread_identifier(port: u32) -> Result<u64> {
             (size_of::<ThreadIdentifierInfo>() / size_of::<i32>()) as u32;
         let mut info = ThreadIdentifierInfo::default();
         let mut count = THREAD_IDENTIFIER_INFO_COUNT;
-        // SAFETY: actual owned thread send right and correctly sized private
-        // output; pointer-like host fields never leave this function.
+        // SAFETY: an owned thread send right and correctly sized local output;
+        // host pointer fields never leave this function.
         let status = unsafe {
             thread_info(
                 port,

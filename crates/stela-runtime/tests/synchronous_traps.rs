@@ -111,8 +111,8 @@ fn pretrap_register_flags_and_ram_effects_survive_without_executing_the_suffix()
             expected.x[0] = 42;
             expected.x[2] = 39;
             expected.nzcv = 0x20000000; // Positive nonzero subtraction, no borrow.
-            // SAFETY: owned bounded code stores only to the live exclusive Box;
-            // the trap is an ABI exit and neither SVC nor BRK reaches the host.
+            // SAFETY: the code stores only to the exclusively owned Box; the
+            // trap is an ABI exit, so SVC and BRK never reach the host.
             let outcome = unsafe { runtime.run(&mut thread, None, 1)? };
             assert_trap(&outcome, record(kind, immediate, BASE + 12));
             assert_eq!(thread.pc, GuestAddress(BASE + 12));
@@ -131,7 +131,8 @@ fn traps_report_the_same_record_through_cold_hot_and_disk_aot_paths() -> Result<
         let mut first = runtime(cache.path(), &program)?;
         for (compiled, hot) in [(1, 0), (0, 1)] {
             let mut thread = state(10, 15);
-            // SAFETY: owned finite memory-free program with an explicit trap exit.
+            // SAFETY: owned terminating code without memory access, ending in a
+            // trap.
             let outcome = unsafe { first.run(&mut thread, None, 8)? };
             assert_trap(&outcome, record(kind, immediate, BASE + 4));
             assert_eq!(
@@ -191,7 +192,7 @@ fn only_explicit_caller_resume_advances_past_a_trap() -> Result<()> {
         } else {
             thread.pc = trap.exception_return_pc;
         }
-        // SAFETY: caller selected the remaining ADD/RET continuation explicitly.
+        // SAFETY: the caller chose the remaining ADD/RET continuation.
         let resumed = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
         assert_eq!(resumed.reason, StopReason::StopAddress);
         assert_eq!(resumed.blocks_executed, 1);

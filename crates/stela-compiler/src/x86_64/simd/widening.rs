@@ -78,8 +78,8 @@ fn prepare_integer_widening(code: &mut Vec<u8>) {
 fn prepare_checked_widening(code: &mut Vec<u8>, shape: Shape, target: TargetCpu) {
     for vector in [LEFT, RIGHT] {
         if shape == Shape::Vector64 {
-            // Exactly two Half lanes are active. Clear unselected H2/H3 before
-            // VCVTPH2PS, including poisoned signaling NaNs from original Vm.
+            // Exactly two half lanes are active. Clear H2/H3 before VCVTPH2PS
+            // so that stale signaling NaNs in Vm cannot raise status.
             clear_scalar(code, Format::Single, vector);
         }
         Host::ConvertHalfToSingle.register(code, vector, vector, target);
@@ -106,9 +106,9 @@ fn arithmetic(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             ShiftOpcode::LeftDword.emit(code, SIGN_MASK, SINGLE_SIGN_SHIFT);
             packed(code, Host::Xor, LEFT, SIGN_MASK);
         }
-        // Two finite Half significands have at most 22 product bits; their
-        // exponent range fits normal Single. MULPS is therefore exact under
-        // every RC, so ADDPS is the sole architectural rounding.
+        // Two finite half significands give at most 22 product bits and their
+        // exponents fit a normal single, so MULPS is exact under any rounding
+        // mode and ADDPS performs the only rounding.
         emit_opcode(
             code,
             Format::Single,

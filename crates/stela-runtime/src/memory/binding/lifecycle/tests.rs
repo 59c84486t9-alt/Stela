@@ -39,7 +39,7 @@ fn actual_service_guard_spans_allocation_copyout_and_data_protection() {
     let page = host_page_size().unwrap() as u64;
     let (mut owner, pointer) = owned();
     let (mut facade, other) = owned();
-    // SAFETY: actual owned Normal-WB software storage and complete writers.
+    // SAFETY: owned write-back storage with every writer.
     let domain = unsafe {
         owner.bind_shared_memory_group(
             config(MemorySystem::new(16, 8).unwrap(), 77),
@@ -99,11 +99,11 @@ fn supplied_guard_never_falls_back_to_private_or_other_domain_mapping() {
     let page = host_page_size().unwrap() as u64;
     let (mut owner, base) = owned();
     let (mut other, _) = owned();
-    // SAFETY: complete fresh owned software domains with independent storage.
+    // SAFETY: new software domains with independent storage.
     let domain =
         unsafe { owner.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 78), &mut []) }
             .unwrap();
-    // SAFETY: independent actual source/storage, deliberately same numeric ASID.
+    // SAFETY: independent storage, deliberately with the same ASID.
     let other_domain =
         unsafe { other.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 78), &mut []) }
             .unwrap();
@@ -141,7 +141,7 @@ fn borrowed_protection_rollback_renews_views_and_failed_rollback_quarantines() {
     let page = host_page_size().unwrap() as u64;
     for restore in [true, false] {
         let (mut owner, base) = owned();
-        // SAFETY: fresh actual owned software storage and complete writers.
+        // SAFETY: new owned storage with every writer.
         let domain = unsafe {
             owner.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 79), &mut [])
         }

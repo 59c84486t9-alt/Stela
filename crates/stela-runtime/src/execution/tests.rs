@@ -22,7 +22,7 @@ fn executes_first_resolved_native_leaf_and_rejects_replaced_or_removed_handles()
     );
     assert_eq!(executable.resolved().identity(), first.identity());
     let mut state = GuestState::default();
-    // SAFETY: Own register-only finite MOV/RET fixture has no guest memory.
+    // SAFETY: register-only MOV/RET with no guest memory.
     unsafe { executable.execute(&dispatcher, &mut state)? };
     assert_eq!(state.x[0], 42);
     dispatcher.register(entry, source(43))?;
@@ -84,9 +84,9 @@ fn registered_direct_ram_leaf_writes_owned_memory_without_state_aliasing() -> Re
     state.x[0] = ram.as_mut_ptr() as u64;
     state.x[1] = 0xfedc_ba98_7654_3210;
     state.nzcv = 0xa000_0000;
-    // SAFETY: Source is finite, with exactly one aligned in-bounds store
-    // and load into separately owned RAM. No Rust RAM reference is retained
-    // during the call, and RAM cannot alias state or the executable mapping.
+    // SAFETY: the code makes one aligned in-bounds store and load to separately
+    // owned RAM. No Rust reference to that RAM is held during the call, and it
+    // aliases neither the state nor the mapping.
     unsafe { executable.execute(&dispatcher, &mut state)? };
     assert_eq!(ram, [0xfedc_ba98_7654_3210, 0]);
     assert_eq!(state.x[2], state.x[1]);

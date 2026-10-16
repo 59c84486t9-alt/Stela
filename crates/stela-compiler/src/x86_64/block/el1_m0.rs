@@ -40,8 +40,8 @@ fn literal(code: &mut Vec<u8>, read: LiteralRead64) {
     let cleanup = code.len();
     service::patch_branch(code, failed, cleanup);
     code.extend(ADD_RSP);
-    // The runtime consumes actual fault metadata before the raw ABI carrier.
-    // Failed reads cannot commit a destination or retire the instruction.
+    // The runtime reads the fault details before the ABI result. A failed read
+    // commits nothing.
     service::address::return_if_failed(code);
 }
 
@@ -118,8 +118,8 @@ pub(crate) fn emit_scalar_load(
     Ok(block)
 }
 
-/// Uses the original checked pair emitter and enclosing context ABI. Its M0
-/// variant stages inputs and publishes base writeback only on full callback success.
+/// The checked pair emitter in the context ABI. The M0 variant stages inputs
+/// and writes back the base only after the callback succeeds.
 pub(crate) fn emit_write_pair(
     instruction: &Instruction,
     target: TargetCpu,
@@ -130,7 +130,7 @@ pub(crate) fn emit_write_pair(
     emit_pair(instruction, operand, target)
 }
 
-/// Same staging/request body; actual no-LSE2 owner qualifies read effects.
+/// The same body for reads, on a PE without FEAT_LSE2.
 pub(crate) fn emit_read_pair(
     instruction: &Instruction,
     target: TargetCpu,

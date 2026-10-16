@@ -194,8 +194,8 @@ fn failure_after_first_row_evaluation_does_not_commit_any_za_bytes() {
     scalable.read_za(0, &mut actual).unwrap();
     assert_eq!(actual, initial_za);
     assert_eq!(state, original);
-    // The failed evaluation returns its scratch loan. A later instruction
-    // initializes those dirty bytes from architectural ZA and completes.
+    // The failed evaluation returns its scratch space; a later instruction
+    // initializes those bytes from ZA and completes.
     operand.sources = Sources::Group {
         left: 28,
         right: 28,

@@ -18,15 +18,15 @@ const SCA_MASK: u64 = SCA_BYTES as u64 - 1;
 const EXCLUSIVE_ALLOWED: u32 = flags::EXCLUSIVE | flags::WRITE | flags::TAG_CHECKED;
 
 impl<P: DataPolicy> MemoryThread<P> {
-    /// Invoke one checked reserved load, conditional write or local clear.
-    /// The common dispatcher owns panic containment and architectural fault
-    /// settlement; this method stages every output until the complete operation.
+    /// Perform one checked exclusive load, conditional store or CLREX. The
+    /// dispatcher contains panics and settles faults; outputs are staged until
+    /// the whole operation completes.
     ///
     /// # Safety
-    /// Request data grants 32 initialized bytes of aligned, disjoint private
-    /// ExclusiveData staging, not merely request.bytes bytes. The checked entry
-    /// retains the actual CPU policy and live same-PE endpoint through this call.
-    /// Native backing rights/lifetime obey with_view's unsafe invocation contract.
+    /// Request data is 32 initialized bytes of aligned, disjoint private
+    /// ExclusiveData staging, not just `request.bytes`. The checked entry keeps
+    /// the CPU policy and the PE's endpoint live through the call. Backing
+    /// rights and lifetime follow `with_view`'s contract.
     pub(super) unsafe fn transfer_exclusive(
         &mut self,
         view: &mut MemoryContextView,
@@ -105,9 +105,9 @@ impl<P: DataPolicy> MemoryThread<P> {
             return Err(fail(MemoryStatus::Unsupported));
         }
         let bytes = request.bytes as usize;
-        // Source explicitly permits abort detection before the local-monitor
-        // check. A Store requires guest WRITE only; native read-modify-write
-        // helper readability is a host-footprint condition below.
+        // The architecture allows abort detection before the local-monitor
+        // check. A store requires only guest write permission; the helper's
+        // read-modify-write readability is a host footprint condition below.
         let physical = self
             .domain
             .resolve(
@@ -162,8 +162,8 @@ impl<P: DataPolicy> MemoryThread<P> {
                 .host_pointer(offset, footprint, AccessKind::Read)
                 .map_err(|_| fail(MemoryStatus::Unsupported))?;
         }
-        // Resolve already proved the whole quantity; this lookup retrieves its
-        // actual first registered mapping without creating another monitor owner.
+        // Resolution already covered the whole quantity; this lookup returns
+        // its first mapping without creating another monitor.
         let state = self
             .domain
             .state
@@ -211,8 +211,9 @@ impl<P: DataPolicy> MemoryThread<P> {
                     unsafe { access::write_part(pointer, bytes, value, target) }
                         .map_err(|_| MemoryStatus::Unsupported)?;
                     let _receipt = mutation.complete();
-                    // Preserve actual committed bytes if later terminal state is
-                    // observed; no payload/GPR result is published on that error.
+                    // Record the committed bytes in case a later state is
+                    // terminal; no payload or register result is published on
+                    // that error.
                     view.completed_bytes = u64::from(request.bytes);
                     Ok::<_, MemoryStatus>(())
                 })
@@ -237,12 +238,12 @@ impl<P: DataPolicy> MemoryThread<P> {
                         .check(physical.data(raw, bytes, request.flags))?;
                     self.domain.check_execution()?;
                     if order == MemoryOrder::AcquireRcsc {
-                        // Conservative checked x86 WB recipe. Inspect/compare
-                        // actual emitted fences before optimizing this mapping.
+                        // Conservative fences for x86 write-back memory.
                         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                     }
-                    // SAFETY: exact requested part plus read envelope is live;
-                    // no Rust RAM reference exists; actual host caps are checked.
+                    // SAFETY: the requested part and read envelope are live, no
+                    // Rust reference to the RAM exists, and the host features
+                    // are checked.
                     unsafe { access::read_part(pointer, bytes, target) }
                         .map_err(|_| MemoryStatus::Unsupported)
                 })

@@ -12,8 +12,8 @@ use crate::{
 };
 use stela_compiler::context::memory::MemoryStatus;
 
-/// Platform/authority diagnostics, never an Arm TranslationError or an invented
-/// physical external abort. Post-read failures preserve the actual source-width completion.
+/// Platform failures, never an Arm translation error or invented external
+/// abort. Failures after the read keep the completed access.
 pub(crate) enum M0RamReadPlatformError {
     SourceControl {
         error: M0ControlError,
@@ -32,22 +32,19 @@ pub(crate) enum M0RamReadPlatformError {
     },
 }
 
-/// Internal observation state, never source, access or retirement authority.
-/// An attempted read cannot be retried, including after a pre-read refusal.
+/// Internal state. A read is attempted at most once, even after a refusal.
 enum ReadState {
     Unattempted,
     Attempted,
     Completed,
 }
 
-/// NO-READ session plus the SAME invocation's retained resources.
+/// A session created before the read, holding the invocation's resources.
 ///
-/// Preparation acquires current physical pins and the same-System ordering
-/// guard without reading target bytes. The canonical consumer must put this
-/// object inside its ORIGINAL authority guard BEFORE calling `read`. On error
-/// or unwind that outer guard poisons the real PE before these fields drop.
-/// Success retains this object through finalization and once-only architectural
-/// state/PC settlement. Extracting a value is not settlement or loan release.
+/// Preparation takes the physical pins and the order guard without reading the
+/// target. The consumer must place this inside its failure guard before calling
+/// `read`, so an error or unwind marks the PE failed before these fields drop.
+/// On success it is kept through finalization and settlement.
 #[must_use]
 pub(crate) struct M0RamReadPrepared<'loan, 'owner> {
     execution: &'loan MemoryExecutionLoan,
@@ -74,9 +71,9 @@ impl M0RamReadPrepared<'_, '_> {
             })
     }
 
-    /// Perform at most one target read, after the real authority guard owns this
-    /// session. Failure never releases the retained fields or permits a retry.
-    /// A successful read stores the candidate and completion before returning.
+    /// Perform the single target read once the failure guard owns this session.
+    /// Failure never releases the fields or allows a retry; success records the
+    /// value and completion before returning.
     pub(crate) fn read(&mut self) -> Result<u64, M0RamReadPlatformError> {
         if !matches!(self.state, ReadState::Unattempted) {
             return Err(M0RamReadPlatformError::ReadAlreadyAttempted {
@@ -91,11 +88,10 @@ impl M0RamReadPrepared<'_, '_> {
         }
         #[cfg(target_arch = "x86_64")]
         {
-            // SAFETY: actual opaque CPU/physical producers qualified this exact
-            // current source-width coherent RAM quantity and supported baseline.
-            // The original authority guard owns this session before invocation;
-            // all source/outer/pin/order resources stay retained through read,
-            // finalization and success or poison settlement.
+            // SAFETY: the CPU and physical checks covered this exact coherent
+            // RAM access of the source width, and the failure guard owns the
+            // session, keeping the source, outer, pin and order resources
+            // through the read, finalization and settlement.
             let value = unsafe { read_host_ram_scalar(pointer, self.intent().bytes) };
             // Scalar/enum assignments are infallible; no callback, allocation or
             // fallible validation occurs between the read and this observation.
@@ -113,8 +109,7 @@ impl M0RamReadPrepared<'_, '_> {
         self.source.intent()
     }
 
-    /// Zero until the sole read returns; source width afterward. Unexpected host faults
-    /// remain outside this recipe, not fabricated completed/fault observations.
+    /// Zero until the read returns, then the access width.
     pub(crate) fn completed_bytes(&self) -> u64 {
         match self.state {
             ReadState::Completed => self.intent().bytes as u64,
@@ -123,26 +118,17 @@ impl M0RamReadPrepared<'_, '_> {
     }
 }
 
-/// Prepare a retained NO-READ session under actual CPU/source/physical owners.
+/// Prepare a session under the CPU, source and physical owners, without
+/// reading.
 ///
-/// Required producer contracts:
-/// - `source` retains the actual same PE/thread/System, sole translation-control
-///   bank, source and the identical `execution` object. Its successful mint has
-///   already performed canonical translation; `validate_current` reports only
-///   authority/platform failure, never a new architectural fault.
-/// - `physical_space().resolve_ram_scalar` is a genuine PA-registry operation. It checks
-///   the same actual execution domain/System and returns exact current readable,
-///   side-effect-free host-RAM spans. Numeric VA/PA equality grants nothing.
-/// - The physical/host producer qualifies the bounded side-effect-free coherent
-///   RAM profile. MFENCE orders architectural loads/stores here; speculative host
-///   cache traffic is unobservable. MMIO, watchpoints, bus transactions and
-///   non-speculative instruction dispatch are explicitly outside this profile.
+/// Producer contracts:
+/// - `source` holds the PE's thread and system state, its translation controls, the source and the same `execution` object. Creating it already performed translation, so `validate_current` reports only platform failures, never a new architectural fault.
+/// - `physical_space().resolve_ram_scalar` checks the physical registry for the same domain and system and returns readable host RAM spans without side effects. Equal VA and PA values prove nothing.
+/// - MFENCE orders the architectural loads and stores; speculative host cache traffic is not observable. MMIO, watchpoints and bus transactions are outside this profile.
 ///
-/// No target byte is read and no candidate or GuestState destination is committed
-/// by this function. Producer/current checks must issue no TARGET or descriptor
-/// read. Immutable instruction-source revalidation remains with the actual source/
-/// fetch owner; that is distinct from this pending target read. This function does not
-/// acquire a second execution/service/snapshot loan or change a reservation.
+/// No target byte is read and nothing is committed here. The checks read
+/// neither the target nor any descriptor, and no second execution, service or
+/// snapshot borrow is taken.
 pub(crate) fn prepare_aligned_device_ram_scalar<'loan, 'owner>(
     execution: &'loan MemoryExecutionLoan,
     source: &'loan M0DataReadLoan<'owner>,
@@ -173,9 +159,8 @@ pub(crate) fn prepare_aligned_device_ram_scalar<'loan, 'owner>(
             error,
             completed_bytes: 0,
         })?;
-    // Borrow from the original outer loan, not from the movable local pin.
-    // This is same-System serialization only; it grants no CPU/PA/PE authority.
-    // Busy/reentrant transactions decline finitely before any physical read.
+    // Borrow from the outer object, not from the local pin. Busy or re-entrant
+    // transactions are refused before any read.
     let order = execution
         .device_ram_order()
         .map_err(M0RamReadPlatformError::DeviceOrdering)?;
@@ -209,29 +194,24 @@ pub(crate) fn prepare_aligned_device_ram_scalar<'loan, 'owner>(
     })
 }
 
-/// Read one naturally aligned atomic eight-byte quantity from ordinary host RAM.
+/// Read one naturally aligned atomic 8-byte value from host RAM.
 ///
 /// # Safety
-/// The memory-owned caller must retain the actual CPU/source permission, same
-/// canonical physical registry/execution loan, Device order gate and every
-/// current readable view/backing covering this exact eight-byte footprint.
-/// The actual host must support the x86-64/SSE2 baseline. `pointer` is the
-/// resolved backing pointer, aligned to eight, without incompatible Rust aliases.
-/// It denotes side-effect-free coherent host-WB RAM, never MMIO. These storage
-/// properties do not change logical guest Device-nGnRnE attributes.
-///
-/// MFENCE supplies architectural host load/store ordering. This RAM-only mapping
-/// permits unobservable speculative host cache traffic and makes no device-bus,
-/// watchpoint or non-speculative-dispatch promise. No `nomem`, `readonly` or
-/// `pure` option may remove the compiler memory barriers. Unexpected host faults
-/// are outside this recipe and cannot become fabricated Arm translation faults
-/// or physical external aborts. Actual emitted-code inspection remains required.
+/// The caller holds the CPU and source permission, the physical registry and
+/// execution borrow, the Device order guard and every readable view covering
+/// these eight bytes. The host supports the x86-64 baseline. `pointer` is the
+/// resolved backing address, 8-byte aligned, with no incompatible Rust aliases,
+/// and points to coherent host write-back RAM without side effects, never MMIO;
+/// this does not change the guest's Device-nGnRnE attributes. MFENCE provides
+/// the host load and store ordering. The asm must not use `nomem`, `readonly`
+/// or `pure`, which would remove the compiler barriers. Unexpected host faults
+/// are not converted into Arm faults.
 #[cfg(target_arch = "x86_64")]
 pub(super) unsafe fn read_host_ram8(pointer: *const u8) -> u64 {
     let value: u64;
-    // SAFETY: caller-owned current pins and the order guard protect this exact
-    // aligned RAM quantity. The qword MOV uses no wider host snapshot and writes
-    // no RAM. Neither fences nor MOV modify flags, MXCSR or undeclared registers.
+    // SAFETY: the caller's pins and order guard cover this aligned access. The
+    // MOV reads exactly this qword and writes no RAM; neither it nor the fences
+    // change flags, MXCSR or other registers.
     unsafe {
         core::arch::asm!(
             "mfence",
@@ -276,14 +256,13 @@ impl core::fmt::Debug for M0RamReadPlatformError {
     }
 }
 
-/// Read exactly the source-qualified naturally aligned scalar width. No widened
-/// eight-byte snapshot is used for a narrow architectural access.
+/// Read exactly the source's naturally aligned width; narrow accesses never use
+/// a wider snapshot.
 ///
 /// # Safety
-/// The original scalar source/control/outer/current physical RAM pin and order
-/// guard must cover exactly `bytes` (1, 2, 4 or 8). The eight-byte recipe retains
-/// its original contract; every narrow recipe has the same barriers and no
-/// observable access beyond the architectural footprint. MMIO is not admitted.
+/// The scalar source, control, outer, physical pin and order guard must cover
+/// exactly `bytes` (1, 2, 4 or 8). Every width has the same barriers and
+/// touches nothing beyond its footprint. MMIO is not supported.
 #[cfg(target_arch = "x86_64")]
 unsafe fn read_host_ram_scalar(pointer: *const u8, bytes: u8) -> u64 {
     let value: u64;

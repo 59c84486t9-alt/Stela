@@ -27,7 +27,7 @@ const APA_QARMA5_COMBINED: u64 = 5 << 4;
 const AT_LSE2: u64 = 1 << 32;
 const MASKED_EL0T: u64 = 0x3c0;
 
-/// This explicit software machine declaration makes no captured-hardware claim.
+/// The identification registers of the software machine.
 fn identification() -> Result<Arc<Snapshot>> {
     use Register::*;
     Ok(Arc::new(Snapshot::declared(
@@ -70,8 +70,8 @@ pub(super) unsafe fn run(
         runtime.address_space(),
         stela_runtime::thread::VmMaximum::new((1u64 << ADDRESS_BITS) - 1)?,
     )?;
-    // These actual owned images/stack and the clock are the complete mappings
-    // of this fresh software namespace; no caller retains a writable raw alias.
+    // These images, the stack and the clock are all of this namespace's
+    // mappings; nothing else holds a writable alias.
     let domain = unsafe {
         memory.bind_shared_memory_participants(
             SharedMemoryConfig {

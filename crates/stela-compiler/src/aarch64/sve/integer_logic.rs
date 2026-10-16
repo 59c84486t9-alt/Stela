@@ -278,8 +278,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     None
 }
 
-/// Decode only canonical MOVPRFX forms using this family's named encodings.
-/// Pair legality, feature/mode admission and source adjacency belong to the caller.
+/// Decode MOVPRFX itself. Pair legality and adjacency are checked by the
+/// caller.
 pub fn decode_prefix(word: u32) -> Option<Operand> {
     if word & PREFIX_MASK != PREFIX_PREDICATED && word & MOVE_MASK != PREFIX_UNPREDICATED {
         return None;
@@ -288,8 +288,8 @@ pub fn decode_prefix(word: u32) -> Option<Operand> {
 }
 
 impl Operand {
-    /// Exact canonical-word MOVPRFX requirements. Rechecking the typed operand
-    /// prevents normalized kinds or artifact metadata from authorizing a form.
+    /// MOVPRFX requirements of the follower word. The typed operand is checked
+    /// again so that normalized kinds cannot admit another encoding.
     #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,

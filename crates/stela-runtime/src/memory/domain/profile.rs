@@ -15,11 +15,10 @@ use stela_compiler::{
     },
 };
 
-/// Cached properties of host storage, never a prewalk of guest permissions or
-/// logical tags. The backing constructor pins these rights and extents for the
-/// immutable domain's lifetime. The supported native data profile is coherent
-/// Normal-WB, LSE2/SCA16, AlignmentEnforced=false and CPA2 disabled; emitters
-/// retain original-SP checks independently.
+/// Cached properties of the host storage (not guest permissions or tags),
+/// pinned for the domain's lifetime. Native data access supports coherent
+/// write-back RAM with FEAT_LSE2 16-byte atomicity, unenforced alignment and
+/// FEAT_CPA2 off; emitters still check SP.
 #[derive(Clone)]
 pub struct MemoryProfile {
     native_congruent: bool,
@@ -31,8 +30,8 @@ pub struct MemoryProfile {
     tag_ineligible: Vec<MappingAttributes>,
 }
 
-// These body identities require their original physical/source/control owners.
-// The generic Normal-WB and tag entrypoints must never adopt their metadata.
+// Profiles that need their own physical, source and control owners; the generic
+// entry points never accept them.
 const SEPARATELY_OWNED_M0_PROFILES: u32 = profile_requirements::M0_DEVICE_RAM_READ64
     | profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR
     | profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
@@ -51,8 +50,7 @@ impl MemoryProfile {
         };
         for (view, attributes) in views {
             let backing = view.backing();
-            // Construction has already checked this physical extent. Taking
-            // its address grants no guest permission and reads no guest byte.
+            // The extent is already checked; taking its address reads nothing.
             let pointer = backing.host_pointer(
                 view.backing_offset(),
                 view.bytes(),
@@ -120,9 +118,8 @@ impl MemoryProfile {
         {
             return Err(MemoryStatus::InvalidRequest);
         }
-        // The additive staged M0 identity is deliberately not a generic memory
-        // permission. A separate canonical source/control/physical/order loan
-        // must admit it. Existing EL0 Normal-WB entry keeps its exact meaning.
+        // The staged M0 profiles are not generic memory permission; their own
+        // owner must admit them.
         if requirements.required_profile & SEPARATELY_OWNED_M0_PROFILES != 0 {
             return Err(MemoryStatus::Unsupported);
         }
@@ -225,9 +222,9 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
 }
 
 impl<P: AllocationTagPolicy> MemoryThread<P> {
-    /// Dedicated tag access preflight uses authoritative privilege and actual
-    /// cached mapping attributes. Disabled ATA/untagged storage does not use the
-    /// physical tag plane and therefore needs no unused tag-plane requirements.
+    /// Preflight for a dedicated tag access, from the effective privilege and
+    /// the mapping attributes. Untagged storage, or ATA disabled, needs no tag
+    /// plane.
     pub fn prepare_tag(
         &mut self,
         requirements: MemoryRequirements,

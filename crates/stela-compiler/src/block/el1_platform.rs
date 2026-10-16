@@ -20,7 +20,7 @@ pub enum Intent {
     Read64Pair(Read64Pair),
 }
 
-/// Source-derived addressing only. These values confer no memory permission.
+/// Addressing derived from the source instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarLoadAddress {
     Literal {
@@ -39,8 +39,8 @@ pub enum ScalarLoadAddress {
     },
 }
 
-/// Exact canonical scalar load. One shared checked operand supplies analysis,
-/// runtime metadata and emission; a descriptor is never a physical read loan.
+/// A scalar load. One checked operand drives analysis, runtime metadata and
+/// emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalarLoad {
     source_pc: GuestAddress,

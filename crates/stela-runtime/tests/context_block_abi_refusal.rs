@@ -135,9 +135,8 @@ fn normal_thread_rejects_a_numerical_exit_before_pc_or_instruction_commit() -> R
     );
     runtime.register_code(BASE, source())?;
     let prepared = runtime.prepare(BASE)?.prepared;
-    // Deliberately invalid ABI fixture, not a translation/original oracle:
-    // a trusted no-effect struct-return body asks an ordinary engine for the
-    // context-only service kind. It uses the existing engine, not another runner.
+    // A deliberately invalid native body: a no-effect struct-return that asks
+    // an ordinary engine for the context-only service exit.
     let mut native = MOV_RAX_IMMEDIATE.to_vec();
     native.extend(BASE.0.to_le_bytes());
     native.push(MOV_EDX_IMMEDIATE);
@@ -157,7 +156,7 @@ fn normal_thread_rejects_a_numerical_exit_before_pc_or_instruction_commit() -> R
         registers: GuestState::default(),
     };
     let before = state.registers.clone();
-    // SAFETY: The fixed fixture only returns RAX/RDX and touches no guest state/RAM.
+    // SAFETY: the body only sets RAX/RDX and touches no guest state or RAM.
     let error = unsafe { runtime.run(&mut state, None, 1) }.unwrap_err();
     assert!(error.to_string().contains("requires owned scalable entry"));
     assert_eq!(state.pc, BASE);

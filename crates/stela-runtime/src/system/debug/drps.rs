@@ -42,11 +42,9 @@ pub(crate) enum Preparation {
     Plan(Plan),
 }
 
-/// `saved` is a diagnostic read of the actual source EL1 bank, not independent
-/// storage or permission. The real consumer must requalify same-owner controls,
-/// the no-optional-state base subset, source identity and saved state under its
-/// canonical loan before effects. RestoreActualSavedPstate reads that bank at
-/// its source step after actual synchronization. No callback is provided here.
+/// `saved` is a diagnostic read of the EL1 bank. The consumer re-checks the
+/// controls, the base subset, the source and the saved state before any effect;
+/// RestoreActualSavedPstate reads the bank at its step after synchronization.
 pub(crate) fn prepare(
     word: u32,
     status: Status,
@@ -94,9 +92,8 @@ impl Plan {
     }
 }
 
-/// Deterministic ARBITRARY zero choice following real SetPSTATEFromPSR. Other
-/// state (including selected EL/SP) remains as actually restored. This is model
-/// policy, never an equality assertion for original-unobservable fields.
+/// The ARBITRARY bits are chosen as zero after SetPSTATEFromPSR; the rest of
+/// the state is as restored.
 pub(crate) fn arbitrary_pstate(restored: u64) -> u64 {
     restored & !ARBITRARY_MASK
 }

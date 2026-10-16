@@ -101,8 +101,8 @@ impl PrivilegedOwner<'_> {
             None
         } else if let Some(instruction) = halting::Instruction::prepare(source.word()) {
             let context = self.halting_context(system, debug);
-            // DCPS MaybeZeroSVEUppers has no effects only when actual same IDs
-            // prove SVE/SME absent. No fake zeroing helper is accepted.
+            // DCPS's MaybeZeroSVEUppers has no effect only when the ID
+            // registers show SVE and SME absent.
             self.lower
                 .snapshot
                 .base_entry_effect_profile()
@@ -435,8 +435,9 @@ impl PrivilegedOwner<'_> {
                     "MOVT native/view finalization failed"
                 };
                 result?;
-                // ContextLoan restored the exact original pointers; finalization
-                // failure preserves actual register effects and poisons Active.
+                // The context borrow restored the original pointers; a
+                // finalization failure keeps the register effects and marks the
+                // PE failed.
                 anyhow::ensure!(
                     context.memory == original_memory
                         && context.scalable == original_scalable

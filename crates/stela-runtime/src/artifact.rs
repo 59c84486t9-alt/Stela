@@ -14,8 +14,8 @@ pub struct Identity {
     pub guest_base: u64,
     pub abi: String,
     pub target_cpu: String,
-    /// Compiler specialization identity; never runtime authority or secret state.
-    /// Absent for old profiles, preserving their exact serialized cache key.
+    /// Compiler specialization identity. Absent for older profiles, which keeps
+    /// their serialized cache key unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_specialization_sha256: Option<String>,
 }
@@ -67,9 +67,8 @@ pub(crate) fn validate_native_snapshot(
     Ok(())
 }
 
-/// The first offset is the selected canonical ABI's actual wrapper extent.
-/// This geometry validator grants no permission and accepts no executable entry.
-/// Exact source/compiler/profile/typed-requirement binding remains at its caller.
+/// The first offset is the size of the ABI wrapper. This checks the map's
+/// geometry only; the caller binds it to the source, compiler and profile.
 pub(crate) fn validate_source_map(
     manifest: &Manifest,
     base: GuestAddress,

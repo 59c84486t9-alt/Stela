@@ -70,9 +70,9 @@ fn pacga_preserves_original_state_and_provenance_across_aot_hot_and_disk_cache()
         state.registers.x[3] = 0x33a1_4317_4773_58e7;
         let mut expected = state.registers.clone();
         expected.x[7] = 42;
-        // Pinned direct-original PACGA/QARMA5 vector, not the runtime under test.
+        // PACGA/QARMA5 vector recorded from an independent implementation.
         expected.x[1] = 0x7cec_813d_0000_0000;
-        // SAFETY: one register-only prefix and an explicit key helper; no guest RAM.
+        // SAFETY: one register-only prefix and a key helper; no guest RAM.
         let outcome = unsafe { runtime.run_with_pauth(&mut state, None, 1, &context)? };
         assert_eq!(state.registers, expected);
         assert_eq!(state.pc, GuestAddress(BASE.0 + 8));

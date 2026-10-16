@@ -156,8 +156,8 @@ impl Encoding {
     }
 }
 
-// The compact table names the operand layout and arithmetic separately; shared
-// field derivation does not interpret mnemonic text or modify canonical bits.
+// The table names each form's operand layout and arithmetic separately; field
+// derivation never looks at mnemonic text.
 macro_rules! encoding {
     ($mask:expr, $value:expr, $acc:ident, $shape:ident, $product:ident) => {
         Encoding::new(

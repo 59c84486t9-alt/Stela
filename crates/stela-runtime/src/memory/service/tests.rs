@@ -7,7 +7,7 @@ use crate::memory::{
 #[test]
 fn actual_guard_poison_invalidates_health_and_preflight_without_owner_flag() {
     let (mut owner, base) = owned();
-    // SAFETY: actual fresh anonymous storage and complete software writers.
+    // SAFETY: new anonymous storage with every software writer.
     let domain =
         unsafe { owner.bind_shared_memory(config(MemorySystem::new(16, 8).unwrap(), 76), &mut []) }
             .unwrap();

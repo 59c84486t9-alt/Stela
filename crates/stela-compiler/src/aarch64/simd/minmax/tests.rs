@@ -224,8 +224,8 @@ fn reserved_formats_one_double_half_pair_size_and_reduction_sizes_decline() {
 
 #[test]
 fn allocated_comparison_conversion_and_absolute_minmax_neighbors_stay_separate() {
-    // June canonical facts: FAMIN/FAMAX H/S/D-vector classes, scalar FCMP,
-    // AdvSIMD FCMEQ, conversion FCVTN and modified immediate MOVI.
+    // Neighboring forms: FAMIN/FAMAX vector classes, scalar FCMP, AdvSIMD
+    // FCMEQ, FCVTN and MOVI.
     const NEIGHBORS: [u32; 8] = [
         0x0ea0dc00, 0x2ea0dc00, 0x0ec01c00, 0x2ec01c00, 0x1e202000, 0x0e20e400, 0x0e216800,
         0x6f00e400,

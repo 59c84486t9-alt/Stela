@@ -108,9 +108,9 @@ pub struct Context {
     pub readbacks: Readbacks,
 }
 
-/// A responsibility classification, not an instruction to flush every TLB.
-/// The backend must apply the actual architectural synchronization rules and
-/// may retain stale cached translations exactly where the architecture permits.
+/// Which caches a change affects, not an instruction to flush every TLB. The
+/// backend applies the architectural synchronization rules and may keep stale
+/// translations where the architecture allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
     ExecutionAndTranslationControl,

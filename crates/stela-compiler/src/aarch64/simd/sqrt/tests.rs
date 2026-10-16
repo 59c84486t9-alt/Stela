@@ -78,8 +78,8 @@ fn fixed_bit_changes_do_not_retain_sqrt_semantics() {
 
 #[test]
 fn allocated_rounding_comparison_and_estimate_neighbors_stay_separate() {
-    // Exact June canonical facts: scalar/vector FRINT64X, scalar FRINTN,
-    // FRSQRTE, FRECPE, FCMP, FCVT and modified-immediate MOVI.
+    // Neighboring forms: scalar and vector FRINT64X, scalar FRINTN, FRSQRTE,
+    // FRECPE, FCMP, FCVT and MOVI.
     const NEIGHBORS: [u32; 8] = [
         0x1e29_c000,
         0x2e21_f800,

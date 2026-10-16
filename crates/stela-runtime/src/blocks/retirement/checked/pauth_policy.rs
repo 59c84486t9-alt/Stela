@@ -63,8 +63,8 @@ pub(super) fn qualify(
     let data = matches!(operation, Op::Strip { data: true, .. })
         || matches!(operation.required_key(), Some(Key::Da | Key::Db));
     if data {
-        // Pointer admission separately requires bit55=0. Data helpers preserve
-        // the tag byte, matching the lower range's actual TBI0 semantics.
+        // Pointer admission separately requires bit 55 clear. Data helpers keep
+        // the tag byte, matching TBI0 for the lower range.
         anyhow::ensure!(
             tcr_el1 & TCR_TBI0 != 0,
             "PAuth data domain requires actual TBI0"
@@ -94,8 +94,8 @@ pub(super) fn qualify(
     Ok(())
 }
 
-/// Check the actual helper operand AFTER its genuine ordinary prefix. This
-/// reads the sole register bank and has no effect; it cannot qualify entry or PC.
+/// Check the helper's operand after the ordinary prefix has run. Reads the
+/// register bank only.
 pub(super) fn qualify_pointer(
     operation: Op,
     registers: &stela_compiler::GuestState,

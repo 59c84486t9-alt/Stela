@@ -26,9 +26,9 @@ enum Task {
     /// Build, run and debug the freestanding Multiboot mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
-    /// Compare native leaf translations with the QEMU original, form by form.
+    /// Compare native translations with the QEMU original, form by form.
     Differential(differential::Differential),
-    /// Merge reviewed instruction registries into the checklist and README.
+    /// Merge the instruction registries into the checklist and the README.
     Progress {
         /// Fail instead of writing when either file is stale.
         #[arg(long)]

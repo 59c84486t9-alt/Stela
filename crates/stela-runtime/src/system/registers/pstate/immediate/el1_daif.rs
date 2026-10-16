@@ -21,9 +21,8 @@ pub(crate) enum PrepareError {
     AccessContextRequired,
 }
 
-/// Private fields retain the decoded source intent, not a copied CPU or permit.
-/// The checked consumer retains original source/control/domain/async loans and
-/// revalidates those actual owners before applying this plan to the same state.
+/// The decoded source intent. The consumer re-validates its owners before
+/// applying the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PreparedEl1Daif {
     effect: Effect,
@@ -46,8 +45,8 @@ impl PreparedEl1Daif {
             return Err(PrepareError::NotDaif);
         }
         Self::check_state(system)?;
-        // CheckDAIFAccess's UMA/EL2 routing is conditional on actual EL0. The
-        // sole SystemState supports A64 modes only; this plan admits only EL1.
+        // CheckDAIFAccess's UMA and EL2 routing apply only at EL0; this plan
+        // admits EL1 only.
         let mask = u64::from(selected.crm()) << DAIF_SHIFT;
         let value = if selected.op2() == DAIF_SET_OP2 {
             mask
@@ -70,10 +69,9 @@ impl PreparedEl1Daif {
         Ok(())
     }
 
-    /// Validate and normalize the current DAIF state before any mutation. The
-    /// canonical consumer retains the same exclusive System/register borrow,
-    /// source/control/outer/async loans and this exact staged value across its
-    /// fallible retirement transition, then applies it once under Retiring.
+    /// Validate and normalize the current DAIF state before any change. The
+    /// consumer holds the system and register borrow, its other borrows and the
+    /// staged value across the retirement transition, then applies it once.
     pub(crate) fn stage(
         self,
         system: &SystemState,
@@ -104,9 +102,8 @@ pub(crate) enum StageError {
     InvalidValue,
 }
 
-/// An unapplied state value, never an actual source/control/entry permit. The
-/// canonical private session binds this exact value to its original descriptor
-/// and retained owners; it must not accept a caller's saved replacement stage.
+/// An unapplied state value. The session binds it to its descriptor and owners
+/// and never accepts a saved replacement.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StagedEl1Daif {
     instruction: SystemInstruction,
@@ -119,9 +116,9 @@ impl StagedEl1Daif {
     pub(crate) const fn value(&self) -> u64 {
         self.value
     }
-    /// The token has a private canonical constructor, retains the original
-    /// mutable state, and is validated against this exact source/staged value
-    /// before start_retirement. No fallible step follows the first mutation.
+    /// The token is constructed only by the consumer, holds the mutable state
+    /// and is validated against this source and value before retirement starts.
+    /// Nothing fallible follows the first change.
     pub(crate) fn apply(
         self,
         mut loan: crate::blocks::retirement::checked::el1_system::El1SystemEffectLoan<'_>,

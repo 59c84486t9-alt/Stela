@@ -26,8 +26,8 @@ impl Operand {
     }
 }
 
-/// Matching allocated operands are never silently discarded. None means this
-/// decoder does not own the word; Err is reserved for an owned invalid operand.
+/// None means another decoder owns the word; Err means an owned but invalid
+/// operand.
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     if let Some(result) = basic::decode_basic(word) {
         return Some(result.map(Operand::Basic));
@@ -698,7 +698,8 @@ mod whiles {
                                 if form.mask & (1 << bit) != 0 {
                                     let changed = word ^ (1 << bit);
                                     if let Some(Ok(changed_op)) = decode(changed) {
-                                        // Another owned WHILE form may occupy a changed class.
+                                        // A changed class may select another
+                                        // WHILE form.
                                         assert!(
                                             FORMS.iter().any(|candidate| changed & candidate.mask
                                                 == candidate.class)

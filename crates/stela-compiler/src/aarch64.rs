@@ -436,8 +436,8 @@ impl Lifter for Decoder {
         } else if let Some(decoded) = exclusive::decode(word) {
             Operation::Exclusive(decoded.map_err(|_| unsupported())?)
         } else if let Some(_reason) = constrained::decode(word) {
-            // Pinned constrained outcomes select NOP under the declared FP-present,
-            // unguarded-page/BTYPE=0 profile, before FP enablement or memory effects.
+            // The CONSTRAINED UNPREDICTABLE choice here is NOP, taken before
+            // any FP enable check or memory effect.
             Operation::Nop
         } else if let Some(decoded) = pc_relative::decode(pc, word) {
             Operation::PcRelative(decoded)

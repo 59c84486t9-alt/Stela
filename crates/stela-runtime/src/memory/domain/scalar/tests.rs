@@ -40,7 +40,7 @@ unsafe impl Sync for Storage {}
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: original allocation/layout remain owned by this value.
+        // SAFETY: this value owns its allocation and layout.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
@@ -68,7 +68,8 @@ fn backing(system: &MemorySystem) -> Arc<MemoryBacking> {
     // SAFETY: owner pins coherent readable/writable RAM, without byte references.
     let backing = unsafe { MemoryBacking::new(pointer, STORAGE_BYTES, RIGHTS, owner) }.unwrap();
     let initial: Vec<_> = (0..STORAGE_BYTES).map(|index| index as u8 * 3).collect();
-    // SAFETY: private source is disjoint from owned live RAM; all writes use system.
+    // SAFETY: the private source is disjoint from the owned RAM, and all writes
+    // go through `system`.
     unsafe { system.publish(&backing, 0, &initial) }.unwrap();
     for offset in (0..STORAGE_BYTES).step_by(TAG_GRANULE_BYTES) {
         backing
@@ -659,8 +660,8 @@ fn checked_scalar_late_success_is_terminal_with_full_read_prefix() {
             completed_bytes: 8,
         })
     );
-    // One reached check and complete prefix mean actual native read returned;
-    // checked finalization still withholds the private staged value.
+    // One check and a complete prefix mean the native read returned;
+    // finalization still withholds the staged value.
     assert_eq!(calls.check.get(), 1);
     assert_eq!(domain.check_execution(), Err(MemoryStatus::Domain));
     assert_eq!(snapshot(&backing), before);
@@ -683,10 +684,10 @@ fn checked_scalar_mid_transfer_health_failure_stops_before_next_fragment() {
             completed_bytes: 1,
         })
     );
-    // The first reached byte's policy check poisons actual System health. Its
-    // read completes; the next byte's resolve refuses before another check or
-    // native access. No Permission/TagCheck fault was reached, so guest-fault
-    // cleanup must not clear the existing local reservation.
+    // The first byte's policy check marks the system failed. That read
+    // completes, but the next byte's resolve refuses before another check or
+    // access. No permission or tag fault occurred, so fault cleanup must not
+    // clear the local reservation.
     assert_eq!(calls.check.get(), 1);
     assert!(marked(&mut thread, &access));
     assert_eq!(domain.check_execution(), Err(MemoryStatus::Domain));
@@ -756,9 +757,10 @@ fn checked_scalar_late_zero_prefix_fault_observes_reached_callback() {
             completed_bytes: 0,
         })
     );
-    // A genuine synchronous tag fault reached the callback before any native
-    // read. Late terminal health failure dominates that fault without losing
-    // its raw source location; prefix zero alone does not imply preentry.
+    // A synchronous tag fault reached the callback before any native read. The
+    // later terminal health failure takes precedence without losing the fault's
+    // source location; a zero prefix alone does not mean the access never
+    // started.
     assert_eq!(calls.check.get(), 1);
     assert!(!marked(&mut thread, &access));
     assert_eq!(domain.check_execution(), Err(MemoryStatus::Domain));

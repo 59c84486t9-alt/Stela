@@ -114,9 +114,10 @@ pub fn fatal_interrupts() {
     }
 }
 /// # Safety
-/// One boot BSP, no external root/PTE writer/DMA/SMI/preemption/migration. The
-/// trusted loader owns every static image/table/stack byte and module extent.
-/// Claimed arenas must remain reserved through all original runtime owners.
+/// Runs once on the boot processor with no other page-table writer, DMA, SMI,
+/// preemption or migration. The loader owns every image, table and stack byte
+/// and the module extent, and the claimed arenas stay reserved for the
+/// runtime's lifetime.
 pub unsafe fn install(transport: &Transport) -> Result<(), &'static str> {
     let image_start = ptr::addr_of!(__image_start) as usize;
     let text_end = ptr::addr_of!(__text_end) as usize;
@@ -137,8 +138,8 @@ pub unsafe fn install(transport: &Transport) -> Result<(), &'static str> {
             return Err("reserved frame arena overlaps live resources or non-RAM");
         }
     }
-    // SAFETY: actual identity mappings currently cover the complete low1GiB;
-    // all static tables are exclusive boot image storage with no Rust aliases.
+    // SAFETY: identity mappings cover the whole low 1 GiB, and the static
+    // tables are boot-image storage with no Rust aliases.
     unsafe {
         let directory = ptr::addr_of_mut!(stela_boot_pd).cast::<u64>();
         let tables = ptr::addr_of_mut!(IMAGE).cast::<Table>();
@@ -187,8 +188,8 @@ pub unsafe fn install(transport: &Transport) -> Result<(), &'static str> {
                     .write(table as u64 | PRESENT | WRITABLE);
             }
         }
-        // PCID/PGE were excluded by the bootstrap. Reload the SAME original
-        // root to remove every bootstrap huge translation before any claim.
+        // PCID and PGE are disabled, so reloading the same root flushes every
+        // bootstrap huge-page translation.
         asm!("mov cr3, {}", in(reg) ptr::addr_of!(stela_boot_pml4) as u64, options(nostack, preserves_flags));
     }
     Ok(())

@@ -14,12 +14,11 @@ const STACK_SIB: u8 = 0x24;
 const SUB_RSP_IMMEDIATE: [u8; 3] = [0x48, 0x81, 0xec];
 const ADD_RSP_IMMEDIATE: [u8; 3] = [0x48, 0x81, 0xc4];
 
-// Peralta/Calik's 113-gate forward and 121-gate inverse mathematical circuits:
-// https://www.cs.yale.edu/homes/peralta/CircuitStuff/{SLP_AES_113.txt,Sinv.txt}.
-// Hash-pinned research receipts retain source identity and exhaustive checks
-// against Arm's independent S-box tables. U0/S0 are the most significant bits.
-// Every gate is evaluated on sixteen independent 0/1 byte planes. Fixed stack
-// locations keep lowering simple; no secret-indexed access or allocation policy.
+// Boyar-Peralta 113-gate forward and Calik 121-gate inverse S-box circuits
+// (https://www.cs.yale.edu/homes/peralta/CircuitStuff/{SLP_AES_113.txt,Sinv.txt}),
+// checked exhaustively against the Arm S-box tables. U0/S0 are the most
+// significant bits. Every gate is evaluated on sixteen independent 0/1 byte
+// planes held at fixed stack slots; no access is secret-indexed.
 #[derive(Clone, Copy)]
 enum Gate {
     And(u8, u8),

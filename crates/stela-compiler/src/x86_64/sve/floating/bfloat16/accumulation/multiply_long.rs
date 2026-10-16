@@ -50,7 +50,7 @@ pub(super) fn install_environment(
         test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
         failures.push(branch(code, Condition::NotZero));
     }
-    // The sole generic RC encoder has no frame, MXCSR or guest-state effect.
+    // The rounding-control encoder has no frame, MXCSR or guest-state effect.
     rounding_control(code);
     code.push(JMP_REL32);
     let installed = code.len();

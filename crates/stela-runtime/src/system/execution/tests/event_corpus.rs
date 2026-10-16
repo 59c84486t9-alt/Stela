@@ -77,8 +77,8 @@ fn fixture_single_step_refusal_precedes_native_prefix_and_publication() -> Resul
     let original_system = system.clone();
     let original_pc = thread.pc;
     let original_events = [owners[0].endpoint.is_set(), owners[1].endpoint.is_set()];
-    // SAFETY: the fixture's actual SS check rejects before this admitted
-    // register/send source enters native code. No guest RAM access is possible.
+    // SAFETY: the fixture's SS check refuses before this code runs; no guest
+    // RAM access is possible.
     let outcome = unsafe {
         runtime.run_with_system(
             &mut thread,

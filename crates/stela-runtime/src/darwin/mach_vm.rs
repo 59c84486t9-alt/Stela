@@ -36,8 +36,8 @@ pub fn handles(state: &ThreadState, trap: &SynchronousTrap) -> bool {
         && state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32 == -(PROTECT_TRAP as i32)
 }
 
-/// Protect only mapped ordinary data owned by this address space. Valid policy
-/// requests outside this profile remain stopped, with no fabricated completion.
+/// Protect mapped ordinary data of this address space. Valid requests outside
+/// this profile stay stopped.
 pub fn service(
     state: &mut ThreadState,
     trap: &SynchronousTrap,
@@ -146,8 +146,8 @@ fn normalized_range(address: u64, size: u64) -> core::result::Result<(u64, u64),
     if end > start {
         return Ok((start, end));
     }
-    // Protect-specific source compatibility rewrites some rounding overflow to
-    // INVALID_ADDRESS. Preserve its wrapping unsigned arithmetic explicitly.
+    // For protect, XNU maps some rounding overflows to INVALID_ADDRESS; keep
+    // its wrapping unsigned arithmetic.
     let bytes = end.wrapping_sub(start);
     if bytes == 0 || start.checked_add(bytes).is_some() {
         Err(KERN_INVALID_ADDRESS)

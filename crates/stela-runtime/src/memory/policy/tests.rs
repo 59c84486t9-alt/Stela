@@ -22,7 +22,7 @@ unsafe impl Sync for Storage {}
 
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: this owner retains the original allocation and layout.
+        // SAFETY: this owner keeps its allocation and layout.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }

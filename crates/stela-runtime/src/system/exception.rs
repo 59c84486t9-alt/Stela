@@ -47,8 +47,8 @@ pub enum EntryEvent {
         instruction_pc: u64,
         request: Request,
     },
-    /// The controller has presented an actual physical IRQ at an architectural
-    /// boundary. Entry does not acknowledge or deassert that interrupt source.
+    /// The interrupt controller presents a physical IRQ at an instruction
+    /// boundary. Entry neither acknowledges nor deasserts it.
     Irq {
         next_pc: u64,
     },
@@ -107,17 +107,16 @@ pub struct EffectFailure<E> {
     pub completion: Completion,
 }
 
-/// Authoritative runtime effects, not architectural storage substitutes.
+/// Runtime services for exception entry and return.
 ///
-/// Preflight may reserve resources but must not change guest architectural
-/// state, synchronization state, the exclusive monitor, or the local event.
-/// Verify the requested scope/profile and controls against the current authoritative context.
-/// Verify source_pc against the runtime PC and immutable original source extent.
-/// IRQ preflight additionally verifies a real pending physical IRQ at the
-/// precise architectural boundary; it must not acknowledge the controller.
-/// A permit is consumed by one execution and may release reservations on drop.
-/// Successful callbacks certify their complete effect. Implementations must not
-/// supply successful no-ops for unavailable services.
+/// Preflight may reserve resources but must not change architectural state,
+/// synchronization state, the exclusive monitor or the local event. It checks
+/// the scope, profile and controls against the current context, and `source_pc`
+/// against the runtime PC and the source extent; IRQ preflight also checks that
+/// a physical IRQ is pending at this boundary, without acknowledging it. One
+/// execution consumes the reservation, which may release resources on drop. A
+/// successful callback means its whole effect happened; unavailable services
+/// must not succeed as no-ops.
 pub trait ExceptionServices {
     type Permit;
     type Error;
@@ -136,8 +135,8 @@ pub trait ExceptionServices {
         &mut self,
         permit: &mut Self::Permit,
     ) -> Result<(), EffectFailure<Self::Error>>;
-    /// Apply architectural BranchAddr with the destination's actual address
-    /// controls. This is not a target fetch or permission/alignment probe.
+    /// Apply BranchAddr with the destination's address controls. This neither
+    /// fetches the target nor checks its permission or alignment.
     fn branch_address(
         &mut self,
         permit: &mut Self::Permit,
@@ -406,8 +405,7 @@ impl EntryPlan {
         self.execute_preflighted(system, registers, services, permit)
     }
 
-    /// Describe the source-bound effects before the canonical Retiring phase.
-    /// The actual consumer retains the resulting service permit across it.
+    /// The effects to reserve before retiring.
     pub(crate) fn service_request(&self) -> ServiceRequest {
         ServiceRequest {
             effects: RequiredEffects::Entry { irq: self.irq },
@@ -427,8 +425,8 @@ impl EntryPlan {
         ExceptionLevel::El1
     }
 
-    /// Consume the original preflight permit. Effects can still fail with an
-    /// exact committed prefix; this never grants PC or retry authority.
+    /// Consume the preflight reservation. Effects can still fail with a known
+    /// committed prefix.
     pub(crate) fn execute_preflighted<S: ExceptionServices>(
         self,
         system: &mut SystemState,
@@ -481,8 +479,7 @@ impl ReturnPlan {
         self.execute_preflighted(system, registers, services, permit)
     }
 
-    /// Describe the source-bound effects before the canonical Retiring phase.
-    /// The actual consumer retains the resulting service permit across it.
+    /// The effects to reserve before retiring.
     pub(crate) fn service_request(&self) -> ServiceRequest {
         ServiceRequest {
             effects: RequiredEffects::Return,
@@ -502,8 +499,8 @@ impl ReturnPlan {
         self.destination_el
     }
 
-    /// Consume the original preflight permit. Effects can still fail with an
-    /// exact committed prefix; this never grants PC or retry authority.
+    /// Consume the preflight reservation. Effects can still fail with a known
+    /// committed prefix.
     pub(crate) fn execute_preflighted<S: ExceptionServices>(
         self,
         system: &mut SystemState,
@@ -548,7 +545,7 @@ impl ReturnPlan {
                 committed: CommittedPrefix::SetLocalEvent,
                 failure,
             })?;
-        // ELR/SPSR become UNKNOWN after ERET. Retention is our explicit policy.
+        // ELR and SPSR become UNKNOWN after ERET; keeping them is our choice.
         Ok(target)
     }
 }

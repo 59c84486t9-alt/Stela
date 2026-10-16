@@ -9,7 +9,7 @@ const fn bits(msb: u32, lsb: u32) -> u64 {
     (u64::MAX >> (63 - msb)) & (u64::MAX << lsb)
 }
 
-// Narrow shared field identity for the original scalar data-control consumer.
+// SCTLR.SA, for the scalar data-control consumer.
 pub(super) const SCTLR_SA_MASK: u64 = sctlr::SA;
 
 mod sctlr {
@@ -197,8 +197,8 @@ pub(super) mod tcr {
 
 mod ttbr {
     use super::bits;
-    // Both TTBR pages, fieldset_1: D128 absent/disabled. Alignment is an access-
-    // time canonical root decision. This is not an all-low-14-bits-ignore mask.
+    // Both TTBR pages, fieldset 1 (D128 absent). Root alignment is checked at
+    // access time; this is not a mask of ignored low bits.
     pub const CNP: u64 = 1;
     pub const BADDR: u64 = bits(47, 1);
     pub const ASID_LOW: u64 = bits(55, 48);
@@ -245,15 +245,15 @@ pub enum Endianness {
     MixedEl0El1,
 }
 
-/// Facts supplied by the actual CPU/implementation owner, never derived from
-/// an MSR literal. This named profile requires AArch64-only EL0/EL1, no EL2/EL3,
-/// PA <= 48 bits and no FEAT_PAuth_EnhCtl. Optional selected features are below.
-/// All other conditional features on these June pages are explicitly absent:
-/// TIDCP1, NMI, SME, MTE families, LS64 families, TWED, BTI, FPMR, MOPS, CMOW,
-/// LSMAOC, IESB, CSV2_2/CSV2_1p2, SPECRES, LSE2, AA32EL0, LPA2, D128, E0PD,
-/// SVE, HPDS/HPDS2, HAF/HAFDBS, TTCNP and any TCR2 extension affecting controls.
-/// PAN3 selects FEAT_PAN and FEAT_PAN3 together; Absent selects neither.
-/// Unsupported actual feature combinations require another reviewed profile.
+/// Facts from the CPU implementation, never derived from an MSR value. This
+/// profile requires AArch64-only EL0/EL1, no EL2 or EL3, at most 48-bit PA and
+/// no FEAT_PAuth_EnhCtl; the optional features are below. Every other
+/// conditional feature on these register pages is absent: TIDCP1, NMI, SME, the
+/// MTE and LS64 families, TWED, BTI, FPMR, MOPS, CMOW, LSMAOC, IESB,
+/// CSV2_2/CSV2_1p2, SPECRES, LSE2, AA32EL0, LPA2, D128, E0PD, SVE, HPDS/HPDS2,
+/// HAF/HAFDBS, TTCNP and any TCR2 extension affecting these controls. PAN3
+/// means FEAT_PAN and FEAT_PAN3; Absent means neither. Other combinations need
+/// another profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BaseEl1FeatureFacts {
     pub pauth: Presence,
@@ -264,8 +264,8 @@ pub struct BaseEl1FeatureFacts {
     pub endianness: Endianness,
 }
 
-/// Immutable source/owner ledger binding. Nonempty metadata is only structural
-/// validation: the composing machine owner must authenticate the actual ledger.
+/// The source and owner ledger binding. Non-empty metadata is checked for
+/// structure only; the machine owner authenticates the ledger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvidenceBinding {
     pub id: &'static str,
@@ -332,9 +332,9 @@ fn partition(masks: &[u64]) -> bool {
 }
 
 impl RegisterPolicy {
-    /// Select the source-permitted writable-reserved/readback implementation.
-    /// TCR granule readback selects the source-permitted programmed value;
-    /// canonical consumers must still implement the selected effective fallback.
+    /// Choose writable reserved bits with preserved readback where permitted.
+    /// TCR granule readback returns the programmed value; consumers still
+    /// implement the effective fallback.
     pub(super) fn base_el1(
         register: Register,
         facts: BaseEl1FeatureFacts,
@@ -467,8 +467,7 @@ impl RegisterPolicy {
         Ok(())
     }
 
-    /// Pure field application. `old` is the actual owner's validated readback;
-    /// no bank, side effect, exception, or successful service is created here.
+    /// Apply a write to the fields. `old` is the owner's validated readback.
     pub(super) fn apply(&self, old: u64, operand: u64) -> Result<AppliedWrite, FieldError> {
         self.validate_initial(old)?;
         let stored = (old & !self.masks.write_stored) | (operand & self.masks.write_stored);

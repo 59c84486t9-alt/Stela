@@ -60,12 +60,11 @@ impl PhysicalCodeBinding {
 }
 
 impl BlockRuntime {
-    /// Add the actual reached word to the existing source/RX cache.
+    /// Add the fetched word to the source and native-code cache.
     ///
-    /// This initial private control-transition cohort registers one instruction
-    /// per source region. It is not a production block-size/performance choice.
-    /// A different backing, offset, view generation or control generation retires
-    /// the old RX through the existing register_code replacement path.
+    /// Each source region holds one instruction. A different backing, offset,
+    /// view generation or control generation retires the old native code
+    /// through `register_code`.
     pub(crate) fn bind_physical_instruction(
         &mut self,
         snapshot: &ControlSnapshot,
@@ -75,9 +74,9 @@ impl BlockRuntime {
             instruction.is_current() && instruction.bytes_are_current(),
             "retired physical instruction source"
         );
-        // Every physical source region in this lane is exactly one instruction.
-        // In particular an M0 write carrier returns at that write. No remaining
-        // decoded source can execute before canonical fresh fetch/rebind.
+        // Every source region here is one instruction, so an M0 write block
+        // returns at that write and nothing stale can run before the next
+        // fetch.
         let pc = instruction.raw_pc();
         let physical_address = instruction.physical_address();
         let word = instruction.word();
@@ -115,10 +114,10 @@ impl BlockRuntime {
         })
     }
 
-    /// Validate actual source/physical/control identities, without CSE or mutation.
-    /// The reached instruction comes from a fresh canonical Fetch under current
-    /// controls, including permissions. Compare its actual physical/view identity;
-    /// equal copied metadata or an old cache entry never substitutes for that fetch.
+    /// Validate the source, physical and control identities without side
+    /// effects. The instruction comes from a fresh fetch under the current
+    /// controls, including permissions; matching metadata or an old cache entry
+    /// never replaces that fetch.
     pub(crate) fn check_physical_source(
         &self,
         snapshot: &ControlSnapshot,
@@ -145,10 +144,10 @@ impl BlockRuntime {
         Ok(())
     }
 
-    /// Called only after a completed mutable-source write has left all native
-    /// and BoundSource loans. Ordinary data-only writes never reach this scan.
-    /// Stale immutable compilation snapshots stay pinned until the last in-flight
-    /// user has left; then original dependent RX entries retire before dispatch.
+    /// Called after a mutable-source write completes and every native and
+    /// source borrow has ended. Stale compiled snapshots stay pinned until
+    /// their last user leaves, then the dependent native code is retired before
+    /// dispatch.
     pub(crate) fn retire_mutated_translation_sources(&mut self) {
         self.regions.retain(|_, region| {
             region.physical_binding.as_ref().is_none_or(|binding| {
@@ -188,5 +187,5 @@ mod el1_source_lease;
 pub(crate) use el1_source_lease::{InstalledEl1SourceScope, walked::InstalledWalkedSource};
 pub(crate) use source_lease::InstalledM0SourceScope;
 
-// Required by the original Initial publication/fetch service; grants no public owner entry.
+// Used by initial publication and fetch.
 pub(crate) use scope::ControlCodeScope;

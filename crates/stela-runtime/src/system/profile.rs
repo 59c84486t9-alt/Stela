@@ -22,11 +22,11 @@ pub struct UnsupportedSpe {
     pub pms_version: u8,
 }
 
-/// Explicit base FEAT_SPE absence, independent from FEAT_SPE_EXC absence.
+/// Base FEAT_SPE is absent (independent of FEAT_SPE_EXC).
 ///
-/// Construct from this software machine's actual declared ID field or retained
-/// hardware readback. Disabled profiling does not suffice: branch helpers can
-/// still change previous-branch history. This is a feature fact, not a CPU bank.
+/// Construct from the declared ID field or a hardware readback. Disabled
+/// profiling is not enough: branch helpers can still change the previous-branch
+/// history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaseSpeAbsence(());
 
@@ -43,8 +43,8 @@ impl BaseSpeAbsence {
     }
 }
 
-/// Optional effects reachable in the reviewed A64 entry/return helpers.
-/// EL2/EL3 routing and debug enablement are separate execution-state checks.
+/// Optional effects reachable in the A64 entry and return helpers. EL2/EL3
+/// routing and debug enables are checked separately.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemEntryFeature {
@@ -122,14 +122,13 @@ impl SystemEntryFeature {
     }
 }
 
-/// Complete explicit declaration for this bounded entry-effect subset.
-/// There is deliberately no Default, host detection or unknown-ID fallback.
+/// Declaration for this entry-effect subset. There is no default, detection or
+/// unknown-ID fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemEntryFeatures(u32);
 
 impl SystemEntryFeatures {
-    /// Declare every reviewed optional entry effect absent in a software profile.
-    /// This does not infer absence on hardware or establish readback provenance.
+    /// Declare every optional entry effect absent, for a software profile.
     pub const fn declared_absent() -> Self {
         Self(0)
     }
@@ -146,7 +145,7 @@ impl SystemEntryFeatures {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryProfileError {
     UnsupportedSystemFeature(SystemEntryFeature),
-    /// A nonzero reviewed ID field means present or unreviewed, never absent.
+    /// A nonzero ID field means present or unknown, never absent.
     UnsupportedScalableState {
         feature: &'static str,
         id_value: u8,
@@ -157,16 +156,15 @@ pub enum EntryProfileError {
     },
 }
 
-/// Narrow source-fact witness, not a copy of scalable features or mutable state.
-/// The complete machine profile owns the original ID/control evidence.
+/// The absence of SVE and SME state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalableEntryAbsence {
     _private: (),
 }
 
 impl ScalableEntryAbsence {
-    /// Exact June PFR0.SVE and PFR1.SME zero values declare their architectural
-    /// state absent. Present and reserved values explicitly decline this subset.
+    /// PFR0.SVE and PFR1.SME equal to zero mean their state is absent; any
+    /// other value is refused.
     pub const fn from_id_registers(
         id_aa64pfr0_el1: u64,
         id_aa64pfr1_el1: u64,

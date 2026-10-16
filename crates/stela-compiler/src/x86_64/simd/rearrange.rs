@@ -27,7 +27,7 @@ fn load_lane(code: &mut Vec<u8>, source: LaneSource, bytes: u8) {
         LaneSource::Vector { register, byte } => vector_offset(register) + u32::from(byte),
         LaneSource::General(Register::Sp) => unreachable!("lane transfers use ZR, not SP"),
     };
-    // Exact-width zero-extending load into RAX, from the owned GuestState.
+    // Zero-extending load of the exact width into RAX, from GuestState.
     match bytes {
         1 => code.extend([0x0f, 0xb6, 0x87]),
         2 => code.extend([0x0f, 0xb7, 0x87]),

@@ -64,7 +64,7 @@ pub trait Lifter {
     -> Result<Self::Instruction, UnsupportedReason>;
 }
 
-/// Emission must retain guest addresses for faults, debugging and evidence.
+/// Each native range keeps its guest address for faults and debugging.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NativeBlock {
     pub x86_64_code: Vec<u8>,

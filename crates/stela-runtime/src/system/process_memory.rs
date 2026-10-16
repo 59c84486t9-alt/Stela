@@ -111,10 +111,9 @@ pub enum ProcessMemoryError {
     PointerChecks(PointerChecksError),
 }
 
-/// Checked facts for this bounded data contract, not a complete CPU inventory.
-/// The shared BaseSpeAbsence is also required because base branch helpers can
-/// change profiling history even with profiling disabled. No Default, hardware
-/// detection or unknown-value fallback exists.
+/// The checked facts this memory contract needs. Base SPE absence is required
+/// too, because base branch helpers can change profiling history even with
+/// profiling disabled. There is no default or detection.
 #[derive(Debug)]
 pub struct ProcessMemoryFeatures {
     _base_spe_absence: BaseSpeAbsence,
@@ -122,8 +121,7 @@ pub struct ProcessMemoryFeatures {
 }
 
 impl ProcessMemoryFeatures {
-    /// Derive only this bounded memory feature seal from the same named source.
-    /// Missing IDs remain unsupported; no exception-feature absence is inferred.
+    /// Derive these facts from the snapshot. Missing IDs are unsupported.
     pub fn from_snapshot(identification: &Snapshot) -> Result<Self, ProcessMemoryError> {
         let read = |register| {
             identification
@@ -210,11 +208,11 @@ impl ProcessMemoryFeatures {
     }
 }
 
-/// Sole immutable owner of these supplied controls in the fresh process scope.
-/// The raw controls must select M=1/C=1 and the declared lower namespace must
-/// match T0SZ in the bounded 4-KiB/DS=0 translation scope. The retained source
-/// witness binds the exact domain and published generation; neither host storage nor M/C alone
-/// establish effective ARM attributes. This does not implement a page-table walk.
+/// Owner of these controls in the process scope. The controls must set M and C,
+/// and the lower namespace must match T0SZ with 4 KiB granules and DS = 0. The
+/// source witness binds the domain and its published generation; M and C alone
+/// do not establish the effective attributes. No page-table walk is
+/// implemented.
 #[derive(Debug)]
 pub struct FixedProcessMemoryControls {
     features: ProcessMemoryFeatures,
@@ -290,8 +288,8 @@ impl FixedProcessMemoryControls {
         Ok(controls)
     }
 
-    // Only the same-bank extended-control factory may construct CPA2 data
-    // authority. Generic/raw-ID constructors continue to reject that feature.
+    // Only the extended-control factory constructs FEAT_CPA2 data access; the
+    // other constructors reject it.
     fn new_with_pointer_identification(
         identification: Arc<Snapshot>,
         sctlr_el1: u64,
@@ -323,8 +321,8 @@ impl FixedProcessMemoryControls {
         Ok(controls)
     }
 
-    /// The same immutable source used at construction, if this scope has one.
-    /// Legacy raw-ID construction intentionally supplies no scalable authority.
+    /// The source used at construction, if any; raw-ID construction supplies
+    /// none.
     #[cfg(feature = "std")]
     pub(crate) fn identification_snapshot_owner(&self) -> Option<&Arc<Snapshot>> {
         self.identification.as_ref()
@@ -342,12 +340,10 @@ impl FixedProcessMemoryControls {
         self.tcr_el1
     }
 
-    /// Install a freshly source-resolved witness after a successful mapping
-    /// transaction, preserving this actual domain and all fixed controls.
-    /// The source owner must resolve the entire resulting mapping set before
-    /// minting `fresh`; there is no raw epoch or automatic refresh entry point.
-    /// Failed transactions or incompatible effective controls require their
-    /// actual owner path, not renewal through this method.
+    /// Install a newly resolved source witness after a successful mapping
+    /// transaction, keeping the domain and fixed controls. The source owner
+    /// resolves the whole resulting mapping set first. Failed transactions or
+    /// incompatible controls go through their own owner.
     pub fn renew_source_resolved(
         &mut self,
         fresh: SourceNormalWbDomain,
@@ -381,8 +377,8 @@ impl FixedProcessMemoryControls {
             ));
         }
 
-        // ASIMD/structure/scalable and the other typed memory categories require
-        // their own reviewed CPU contracts. Exclusive is not an Atomic alias.
+        // AdvSIMD, structure, scalable and other typed memory categories need
+        // their own CPU contracts. Exclusive is not a kind of Atomic.
         let unsupported_classes =
             flags::ATOMIC | flags::ORDERED | flags::ASIMD | flags::SME | flags::SVE_PREDICATED;
         if requirements.required_flags & unsupported_classes != 0 {
@@ -399,9 +395,9 @@ impl FixedProcessMemoryControls {
         thread: &MemoryThread<MemoryControls>,
     ) -> Result<MemoryExecutionLoan, ProcessMemoryError> {
         self.validate_source_state(system, registers)?;
-        // Capture the actual provider loan before validating source generation.
-        // It owns the same domain Arc without borrowing/extracting the policy;
-        // failed preparation releases it through Drop before returning.
+        // Take the provider borrow before validating the source generation. It
+        // holds the domain Arc without touching the policy, and a failed
+        // preparation releases it on drop.
         let execution_loan = thread
             .execution_loan()
             .map_err(ProcessMemoryError::Memory)?;
@@ -575,22 +571,21 @@ impl PreparedProcessMemory<'_> {
         self.requirements
     }
 
-    /// Install a temporary same-thread policy only for this checked invocation.
-    /// All CPU owner borrows survive through the callback. Storage declines and
-    /// Rust unwinding restore the previous policy before these borrows expire.
+    /// Install a temporary policy on this thread for one checked call. The CPU
+    /// owner's borrows last through the callback, and storage refusals and
+    /// unwinding restore the previous policy before they expire.
     ///
     /// # Safety
-    /// The caller must bind this callback to the sole compiler-derived body and
-    /// requirements admitted by the owned runtime. All MemoryThread::with_view
-    /// contracts apply: no raw pointer escape, reentry, owner retirement, thread
-    /// replacement, policy extraction or asynchronous use is permitted. Rust
-    /// borrowing cannot prove the native/raw-pointer portion of this contract.
+    /// The callback must run the compiler-derived body and requirements
+    /// admitted by the runtime. `MemoryThread::with_view`'s contract applies:
+    /// no raw pointer escape, re-entry, owner retirement, thread replacement,
+    /// policy extraction or asynchronous use.
     pub(crate) unsafe fn with_view<R>(
         self,
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
         let policy = self.authority.temporary_policy();
-        // SAFETY: this base route retains its original checked source/body contract.
+        // SAFETY: this route keeps the checked source and body contract.
         unsafe { self.with_policy(policy, callback) }
     }
 
@@ -601,10 +596,9 @@ impl PreparedProcessMemory<'_> {
         policy: MemoryControls,
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
-        // This inner guard closes prepare->invoke, body and checked finalization.
-        // The actual v2.5 invocation provider must additionally retain an outer
-        // same-domain execution loan through once-only PC settlement, then drop
-        // that outer guard before entering a Darwin mapping service transaction.
+        // This guard covers preparation, the call, the body and finalization.
+        // The invocation provider must also hold an outer domain borrow through
+        // PC settlement, then drop it before any Darwin mapping service.
         let _execution_loan = self.execution_loan;
         let policy = if let Some(pointer) = &self.pointer {
             policy.with_pointer_authority(pointer)
@@ -617,19 +611,19 @@ impl PreparedProcessMemory<'_> {
             // native entry; no bind/rebind can be performed by this path.
             loan.thread.check_event_endpoint(endpoint)?;
         }
-        // prepare validates the storage/SP/host requirements; typed class
-        // admission remains an explicit policy check before any callback.
+        // `prepare` validates storage, SP and host requirements; typed class
+        // admission is a separate check before any callback.
         loan.thread
             .validate_execution(self.requirements.required_flags)?;
         let checked = loan.thread.prepare(self.requirements)?;
-        // SAFETY: the owned runtime binds the exact checked native body and
-        // retains its mapping/context plus all native storage contracts.
+        // SAFETY: the runtime binds the checked native body and keeps its
+        // mapping, context and storage contracts.
         unsafe { checked.with_checked_view(callback) }
     }
 }
 
-/// Internal same-policy-type loan. This swaps only effective policy, never the
-/// actual thread, reservation, domain or PE binding. It exposes nothing publicly.
+/// Swaps the effective policy only; the thread, reservation, domain and PE
+/// binding stay the same.
 struct PolicyLoan<'run, P: DataPolicy> {
     thread: &'run mut MemoryThread<P>,
     previous: Option<P>,

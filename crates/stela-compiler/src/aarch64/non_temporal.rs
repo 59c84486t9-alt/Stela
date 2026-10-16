@@ -40,8 +40,8 @@ pub struct Operand {
     pub displacement: i32,
 }
 
-/// Only signed-offset non-temporal pairs match. Reserved sizes and duplicate
-/// LDNP destinations decline; STNP permits repeated sources. No writeback exists.
+/// Only signed-offset forms match (there is no writeback). Reserved sizes and
+/// duplicate LDNP destinations are errors; STNP may repeat a source.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     if word & CLASS_MASK != NON_TEMPORAL_PAIR_CLASS {

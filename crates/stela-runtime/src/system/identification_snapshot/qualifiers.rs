@@ -169,8 +169,7 @@ impl Snapshot {
         self.check_fixed_exception_levels()
     }
 
-    /// Actual fixed-EL optional-effect facts except PAuth_LR. This creates no
-    /// entry grant and makes no claim that PAuth_LR is absent or implemented.
+    /// The optional-effect facts for the fixed EL, except FEAT_PAuth_LR.
     pub(crate) fn non_pauth_entry_absence(&self) -> Result<ScalableEntryAbsence, Unsupported> {
         self.check_fixed_exception_levels()?;
         for &field in REQUIRED_ABSENCES {
@@ -196,7 +195,7 @@ impl Snapshot {
         .map_err(Unsupported::EntryProfile)
     }
 
-    /// Derive the existing bounded exception entry token, including LR absence.
+    /// The exception entry profile, including the absence of FEAT_PAuth_LR.
     pub fn entry_profile(&self) -> Result<EntryProfile, Unsupported> {
         let scalable = self.non_pauth_entry_absence()?;
         let isar1 = self.read(Register::IdAa64Isar1El1)?;
@@ -204,9 +203,9 @@ impl Snapshot {
         let apa = ((isar1 >> APA_SHIFT) & FIELD_MASK) as u8;
         let api = ((isar1 >> API_SHIFT) & FIELD_MASK) as u8;
         let apa3 = ((isar2 >> APA3_SHIFT) & FIELD_MASK) as u8;
-        // This narrow source-reviewed PAuth_LR-absence path supports the current
-        // Classic/Auth2 algorithm tuples or all algorithms absent. Other tuples decline;
-        // it never mistakes PAuth_LR absence for general PAuth absence.
+        // Supports the classic and PAuth2 algorithm tuples, or no algorithm;
+        // other tuples are refused. FEAT_PAuth_LR absence is never mistaken for
+        // PAuth absence.
         if !matches!(
             (apa, api, apa3),
             (FEATURE_ABSENT, FEATURE_ABSENT, FEATURE_ABSENT)
@@ -215,15 +214,15 @@ impl Snapshot {
         ) {
             return Err(Unsupported::PauthLrTuple { apa, api, apa3 });
         }
-        // Primary MTE=0 is the absence fact. MTE_frac/MTEX are invalid under that
-        // primary value and are not interpreted as independent absence claims.
+        // MTE = 0 means MTE is absent; MTE_frac and MTEX are invalid in that
+        // case and are not read.
         EntryProfile::base(SystemEntryFeatures::declared_absent(), scalable)
             .map_err(Unsupported::EntryProfile)
     }
 
-    /// The same exact optional-effect facts, independently of EL availability.
-    /// Higher-EL owners must additionally validate their actual EL/security and
-    /// execution-state controls; this method never relaxes check_el10_regime.
+    /// The same optional-effect facts, independent of EL availability.
+    /// Higher-EL owners must also validate their EL, security and
+    /// execution-state controls.
     pub(crate) fn base_entry_effect_profile(&self) -> Result<EntryProfile, Unsupported> {
         self.check_base_optional_entry_effects()?;
         let scalable = ScalableEntryAbsence::from_id_registers(
@@ -235,8 +234,8 @@ impl Snapshot {
             .map_err(Unsupported::EntryProfile)
     }
 
-    /// Same optional system-state effects for a debug lifecycle which may retain
-    /// actual SME storage. This grants no scalable access or exception entry.
+    /// The same optional-state checks, for a debug lifecycle that may keep SME
+    /// storage.
     pub(crate) fn check_base_optional_entry_effects(&self) -> Result<(), Unsupported> {
         for &field in REQUIRED_ABSENCES {
             self.require_zero(field)?;
@@ -259,9 +258,9 @@ impl Snapshot {
         let apa = ((isar1 >> APA_SHIFT) & FIELD_MASK) as u8;
         let api = ((isar1 >> API_SHIFT) & FIELD_MASK) as u8;
         let apa3 = ((isar2 >> APA3_SHIFT) & FIELD_MASK) as u8;
-        // This narrow source-reviewed PAuth_LR-absence path supports the current
-        // Classic/Auth2 algorithm tuples or all algorithms absent. Other tuples decline;
-        // it never mistakes PAuth_LR absence for general PAuth absence.
+        // Supports the classic and PAuth2 algorithm tuples, or no algorithm;
+        // other tuples are refused. FEAT_PAuth_LR absence is never mistaken for
+        // PAuth absence.
         if !matches!(
             (apa, api, apa3),
             (FEATURE_ABSENT, FEATURE_ABSENT, FEATURE_ABSENT)

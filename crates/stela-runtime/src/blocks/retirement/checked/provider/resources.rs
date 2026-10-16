@@ -11,8 +11,7 @@ use crate::{
 };
 use stela_compiler::context::ExecutionContext;
 
-/// All fields are borrowed directly from the original concrete M0Owner. No
-/// resource bundle, raw pointer or caller implementation can construct this.
+/// Every field is borrowed from the M0 owner.
 pub(crate) struct InstalledExecutionResources<'pe> {
     pub(in crate::blocks::retirement::checked) sources: &'pe InstalledM0Sources,
     pub(in crate::blocks::retirement::checked) platform:
@@ -26,9 +25,8 @@ pub(crate) struct InstalledExecutionResources<'pe> {
 pub(crate) type M0ExecutionResources<'pe> = InstalledExecutionResources<'pe>;
 pub(crate) type El1ExecutionResources<'pe> = InstalledExecutionResources<'pe>;
 
-/// Shared requalification excludes context so the original mutable context can
-/// remain in the retained session. The original registry lease stays borrowed;
-/// an empty queue or a copied register profile cannot replace this owner.
+/// Checks shared by every M0 attempt. The context is excluded so the mutable
+/// context can stay in the session; the registry stays borrowed.
 pub(in crate::blocks::retirement::checked) struct M0ExecutionChecks<'pe> {
     pub(super) execution: &'pe ProcessEntryControls,
     pub(super) pending: &'pe NoAsyncSources<'pe>,
@@ -78,7 +76,7 @@ impl M0ExecutionChecks<'_> {
     }
 }
 
-/// Disjoint original publication/monitor resources after native finalization.
+/// Publication and monitor resources, after native finalization.
 pub(crate) struct El1ContextResources<'pe> {
     pub(in crate::blocks::retirement::checked) sources: &'pe mut InstalledM0Sources,
     pub(in crate::blocks::retirement::checked) controls: &'pe mut TranslationControls,

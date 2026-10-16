@@ -25,14 +25,12 @@ pub fn handles(state: &ThreadState, trap: &SynchronousTrap) -> bool {
     classify_bsd_call(state, trap).is_ok_and(|selector| selector.number == SYSCALL_NUMBER)
 }
 
-/// Service BSD294 for a process that owns no guest shared-region attachment.
+/// Service BSD call 294 for a process with no shared-region attachment.
 ///
-/// The caller must establish that absence from its actual process ownership;
-/// host shared-cache mappings cannot satisfy this ARM guest condition. XNU
-/// returns EINVAL before accessing the destination, including a NULL pointer.
-/// There is consequently no guest-memory read, copyout or mapping transition.
-/// The map-with-linking command requires process policy state and remains
-/// pending. Existing empty/mapped regions require a separate reviewed profile.
+/// The caller must establish the absence from its own process state; host
+/// shared-cache mappings do not count. XNU returns EINVAL before touching the
+/// destination (even a NULL one), so there is no guest memory access. The
+/// map-with-linking command needs process policy state and stays pending.
 pub fn service_absent(state: &mut ThreadState, trap: &SynchronousTrap) -> BsdServiceEvent {
     let mut event = BsdServiceEvent {
         trap: *trap,

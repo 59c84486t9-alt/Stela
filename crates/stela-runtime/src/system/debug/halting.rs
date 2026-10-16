@@ -32,12 +32,11 @@ const EDSCR_ITO: u32 = 1 << 28;
 const HCR_AMO: u64 = 1 << 5;
 const HCR_TGE: u64 = 1 << 27;
 
-/// One documented, deterministic ARBITRARY selection, not an original oracle.
+/// The value chosen for ARBITRARY registers.
 pub(crate) const ARBITRARY_REGISTER_ZERO: u64 = 0;
 const ARBITRARY_HALT_PSTATE_ZERO: u64 = 0;
 
-/// Filter the compiler-owned decoder without discarding its immediate/source
-/// identity. There is no second runtime encoding table.
+/// Filter the compiler's decoder, keeping the immediate and source identity.
 fn halting_operation(word: u32) -> Option<Operation> {
     match exception::decode(word)? {
         operation @ (Operation::Halt { .. } | Operation::DebugChange { .. }) => Some(operation),
@@ -45,9 +44,8 @@ fn halting_operation(word: u32) -> Option<Operation> {
     }
 }
 
-/// Immutable instruction identity prepared by the existing System boundary.
-/// Decoding is preparation work and is never repeated in the execution callback.
-/// The containing canonical artifact retains input identity/build/source maps.
+/// Instruction identity prepared at the system boundary; decoding happens once,
+/// during preparation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Instruction {
     word: u32,
@@ -62,9 +60,9 @@ impl Instruction {
     }
 }
 
-/// Readbacks of the owner while its exclusive lease is held. The canonical
-/// snapshot adapter derives feature presence; callers cannot manufacture a CPU
-/// profile from compiler feature metadata. This value is never a mutable bank.
+/// Readbacks taken while the owner's exclusive borrow is held. Feature presence
+/// comes from the identification snapshot, never from compiler feature
+/// metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Features {
     pub pan: bool,
@@ -140,8 +138,8 @@ enum Kind {
     },
 }
 
-/// Non-Clone, non-executable intent. Context/status/EDSCR are diagnostics, not
-/// authority; the canonical consumer must requalify them under its actual loan.
+/// A plan, not an execution. The context, status and EDSCR are diagnostics that
+/// the consumer re-checks under its borrow.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
     instruction: Instruction,
@@ -218,8 +216,8 @@ impl Plan {
         self.instruction.word
     }
 
-    /// Source-ordered intent only. In particular, a DCPS target Undefined is
-    /// subsequent to actual SynchronizeContext, never a preparation success.
+    /// The steps in source order. A DCPS to an undefined target is detected
+    /// after SynchronizeContext.
     pub(crate) fn steps(&self) -> Vec<Step> {
         match self.kind {
             Kind::Halt => {
@@ -267,8 +265,8 @@ impl Plan {
     }
 }
 
-/// Apply only to the actual source PSTATE at SetHaltPstate. The deterministic
-/// ARBITRARY zero policy is a software choice, not original-oracle equality.
+/// Apply to the source PSTATE at SetHaltPstate; ARBITRARY bits are chosen as
+/// zero.
 pub(crate) fn halt_pstate(previous: u64, features: Features) -> u64 {
     let mut next = previous & !(PSTATE_SS | PSTATE_SSBS | PSTATE_DAIF | PSTATE_IL);
     next |= ARBITRARY_HALT_PSTATE_ZERO;
@@ -363,8 +361,9 @@ pub(crate) enum PendingSError {
     Delegated,
 }
 
-/// Read the actual destination context after state/bank selection. Selecting a
-/// pending source does not consume, acknowledge, or synthesize an interrupt.
+/// Read the destination context after the state and bank are selected.
+/// Selecting a pending source does not consume, acknowledge or create an
+/// interrupt.
 pub(crate) fn pending_serror_source(context: Context) -> PendingSError {
     if context.el2_enabled
         && context
@@ -383,8 +382,8 @@ pub(crate) fn pending_serror_source(context: Context) -> PendingSError {
     }
 }
 
-/// Pure EDSCR field calculation; `pending` is the real selected source readback,
-/// not an assumed zero. Invoke only with actual destination EL/security state.
+/// Compute the EDSCR fields. `pending` is the selected source's readback; call
+/// with the destination's EL and security state.
 pub(crate) fn edscr_fields(previous: u32, destination: Context, pending: bool) -> u32 {
     let updated = (previous & !(EDSCR_EL_MASK | EDSCR_RW_MASK))
         | ((el_number(destination.current_el) as u32) << EDSCR_EL_SHIFT)

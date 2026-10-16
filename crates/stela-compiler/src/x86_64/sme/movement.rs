@@ -241,8 +241,8 @@ pub(crate) fn emit(
     Ok(())
 }
 
-/// Only the separate halted-ITR compiler entry calls this mapping. The normal
-/// movement emitter above retains its explicit TableGpr rejection unchanged.
+/// Called only by the halted-ITR entry; the ordinary movement emitter still
+/// rejects TableGpr.
 pub(crate) fn emit_debug_table_gpr(
     code: &mut Vec<u8>,
     operand: &Operand,

@@ -36,10 +36,9 @@ pub(crate) enum Preparation {
     },
 }
 
-/// Revalidate the exact canonical source before reading its register operand.
-/// EL1 access priority, alignment and optional/NV/FGT behavior are delegated to
-/// the accepted shared resolver. A different register is a family miss, never
-/// permission to write another bank or apply a guessed reserved-field mask.
+/// Re-validate the source before reading its register operand. EL1 access
+/// priority, alignment and NV/FGT behavior come from the shared resolver. Any
+/// other register is a family miss.
 pub(crate) fn prepare(
     instruction: SystemInstruction,
     source_pc: GuestAddress,
@@ -106,9 +105,9 @@ impl StagedEl1Vbar {
     pub(crate) const fn value(&self) -> u64 {
         self.value
     }
-    /// The private token constructor binds instruction/kind/destination/value,
-    /// original state/context/source and current attempt before start_retirement.
-    /// This consuming effect has no fallible step and cannot store PC itself.
+    /// The token binds the instruction, kind, destination, value, state,
+    /// context, source and attempt before retirement starts. Applying it cannot
+    /// fail and does not store PC.
     pub(crate) fn apply(
         self,
         mut loan: crate::blocks::retirement::checked::el1_system::El1SystemEffectLoan<'_>,

@@ -91,9 +91,8 @@ fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: Target
     Host::Or.register(code, input, MASK_SCRATCH, target);
 }
 
-/// Decoded sources already express reverse operation order. The private owner
-/// supplies exactly the eleven canonical forms in manifest.json. When both
-/// source registers alias, forward/reverse encodings have identical operands.
+/// Decoded sources already encode reversed operand order. With both source
+/// registers aliased, forward and reverse forms decode identically.
 fn inputs(operand: Operand) -> Option<(BinaryOperation, Source, Source)> {
     let Inputs::Binary { left, right } = operand.inputs else {
         return None;

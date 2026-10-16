@@ -332,8 +332,8 @@ impl PendingDataAllocation<'_> {
             .try_reserve_exact(bytes)
             .map_err(|_| AllocateDataError::MetadataAllocation)?;
         snapshot.resize(bytes, 0);
-        // SAFETY: the transaction's raw storage is live RW and exclusively owned;
-        // snapshot is independent, without any guest-memory Rust references.
+        // SAFETY: the transaction's storage is live, writable and exclusively
+        // owned; the snapshot is a separate buffer.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 (self.allocation.guest_address as usize as *const u8).add(offset),
@@ -380,8 +380,8 @@ impl PendingDataAllocation<'_> {
                 writable: self.allocation.maximum.writable,
                 executable: self.allocation.maximum.executable,
             };
-            // SAFETY: fresh actual privately initialized anonymous storage;
-            // service loan excludes native entry until view publication. Current
+            // SAFETY: new, privately initialized anonymous storage. The service
+            // borrow excludes native entry until the view is published, and the
             // logical rights below limit each host access after mprotect.
             let backing = unsafe {
                 super::backing::MemoryBacking::new_managed(
@@ -516,7 +516,7 @@ impl NewMapping {
 impl Drop for NewMapping {
     #[cfg(feature = "std")]
     fn drop(&mut self) {
-        // SAFETY: this exact newly created extent remains exclusively owned.
+        // SAFETY: this newly created extent is still exclusively owned.
         unsafe {
             libc::munmap(self.base as usize as *mut libc::c_void, self.bytes as usize);
         }

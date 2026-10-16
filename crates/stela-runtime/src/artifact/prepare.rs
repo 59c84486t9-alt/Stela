@@ -5,10 +5,9 @@ use stela_compiler::context::memory::MemoryRequirements;
 pub(crate) const MAX_CACHE_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_CACHE_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 
-/// The one native-generation and standard-manifest path for both hosted cache
-/// misses and freestanding in-memory preparation. It has no filesystem, source
-/// admission, RX mapping or execution authority. Unsupported source is returned
-/// before any persistent cache entry or native mapping can be published.
+/// The one path that generates native code and its manifest, for hosted cache
+/// misses and freestanding preparation alike. Unsupported source is reported
+/// before anything is cached or mapped.
 pub(crate) fn generate(
     identity: Identity,
     memory_requirements: Option<MemoryRequirements>,
@@ -33,9 +32,7 @@ pub(crate) fn generate(
     Ok((manifest, x86_64_code))
 }
 
-/// Validate exact serialized manifest bytes before the existing codec decodes
-/// them. This checksum does not associate a separately supplied typed Manifest
-/// with those bytes; the actual byte provider must retain that codec association.
+/// Validate the serialized manifest bytes before they are decoded.
 pub(crate) fn validate_manifest_bytes(
     manifest_bytes: &[u8],
     expected_sha256: &str,
@@ -49,9 +46,8 @@ pub(crate) fn validate_manifest_bytes(
     Ok(())
 }
 
-/// Validate the actual decoded metadata BEFORE opening/reading native bytes.
-/// This preserves the original hosted refusal and I/O order. It neither decodes
-/// source nor chooses an ABI/profile; the original compiler/source owner does.
+/// Validate decoded metadata before reading the native bytes, keeping the
+/// hosted path's error and I/O order.
 pub(crate) fn validate_preparation_metadata(
     manifest: &Manifest,
     identity: &Identity,
@@ -73,10 +69,9 @@ pub(crate) fn validate_preparation_metadata(
     Ok(())
 }
 
-/// Bind exact bounded native bytes through the ORIGINAL snapshot validator.
-/// The caller retains the original "cached native code checksum mismatch"
-/// context for this function's native-snapshot error. Verified metadata is
-/// checked separately afterwards, preserving the original error ordering.
+/// Validate the native bytes against their snapshot. The caller adds the
+/// "cached native code checksum mismatch" context; metadata is checked
+/// afterwards, keeping the error order.
 pub(crate) fn validate_preparation_native(
     manifest: &Manifest,
     native: &[u8],

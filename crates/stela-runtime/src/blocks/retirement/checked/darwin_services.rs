@@ -35,11 +35,11 @@ pub(crate) struct ServiceRefusal {
 }
 
 pub(crate) enum Outcome {
-    /// No service effect. The original trap stays pending under this same owner.
+    /// No effect; the trap stays pending.
     NoEffect,
     #[cfg(feature = "std")]
     Complete(GuestAddress),
-    /// A host or ABI operation failed; canonical consumer preserves all effects.
+    /// A host or ABI operation failed; every effect so far is kept.
     Indeterminate(anyhow::Error),
 }
 
@@ -226,8 +226,8 @@ fn complete_mach(
             effects,
         ),
     };
-    // Preserve actual acquisitions, releases and uncertain cleanup attempts
-    // before ABI validation or canonical authority settlement may fail.
+    // Record acquisitions, releases and uncertain cleanups before ABI
+    // validation can fail.
     events.mach_effects.push(MachEffects {
         trap: *trap,
         effects,

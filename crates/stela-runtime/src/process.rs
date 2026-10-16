@@ -202,8 +202,9 @@ pub fn plan_kernel_args(
 }
 
 impl KernelArgsPlan {
-    /// Install one prevalidated span. Every declared stack byte must be owned RW
-    /// memory without guest execute permission. Failure leaves all bytes untouched.
+    /// Install one validated span. Every stack byte must be owned writable
+    /// memory that the guest cannot execute. Failure leaves all bytes
+    /// untouched.
     pub fn install(&self, memory: &mut OwnedMemory) -> Result<()> {
         let end = add(self.stack_base, self.stack_bytes)?;
         ensure!(

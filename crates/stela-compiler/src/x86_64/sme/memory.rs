@@ -118,9 +118,9 @@ fn required_host_caps(operand: &Operand) -> u32 {
     if direction == Direction::Store && bytes == VECTOR_CHUNK_BYTES {
         return host_caps::CX16;
     }
-    // A generic unaligned element may cross an 8-byte host quantity while
-    // remaining one architectural 16-byte SCA part. SP-based element offsets
-    // preserve natural alignment after the original SP16 check.
+    // An unaligned element may cross an 8-byte host boundary while remaining
+    // one 16-byte single-copy-atomic part. SP-based offsets keep natural
+    // alignment after the 16-byte SP check.
     if direction == Direction::Load
         && bytes > 1
         && (bytes == VECTOR_CHUNK_BYTES || base != Register::Sp)

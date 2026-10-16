@@ -257,7 +257,7 @@ fn dynamic_linker_entry_requires_complete_readable_executable_file_bytes() {
     let mut items = dynamic_linker_commands();
     items[2] = unix_thread_command(0x10fc);
     assert!(plan_dynamic_linker(&dynamic_linker_image(items.clone())).is_ok());
-    // The final aligned address has only three original instruction bytes.
+    // The final aligned address has only three bytes of instructions.
     u64_put(&mut items[0], 48, 0x10ff);
     assert!(plan_dynamic_linker(&dynamic_linker_image(items)).is_err());
     for protection in [0, 1, 3, 4] {

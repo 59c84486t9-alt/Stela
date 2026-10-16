@@ -100,8 +100,8 @@ fn selection(
     ]);
 }
 
-/// Normal half values have a signed-word order key. The same transform recovers
-/// the original bit pattern after integer min/max; host FP state is irrelevant.
+/// Normal half-precision values map to a signed-word order key, and the same
+/// transform restores the bit pattern after integer min/max.
 fn half_order(code: &mut Vec<u8>, vector: u8) {
     packed(code, Host::MoveAligned, SIGN_VECTOR, vector);
     ShiftOpcode::ArithmeticWord.emit(code, SIGN_VECTOR, HALF_SIGN_SHIFT);
@@ -181,8 +181,8 @@ fn unpack_double(code: &mut Vec<u8>, destination: u8, right: u8, high: bool) {
     ]);
 }
 
-/// Adjacent pair results occupy both words of each original pair. Only integer
-/// operations run here, so inactive or duplicated result lanes have no effects.
+/// Pairwise results fill both words of each pair. Only integer operations run,
+/// so inactive or duplicated lanes have no effect.
 fn half_pairs(code: &mut Vec<u8>, operation: MinMaxOperation, source: u8) {
     shuffle(
         code,

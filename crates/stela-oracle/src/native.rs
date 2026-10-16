@@ -48,8 +48,8 @@ struct Windows {
     data: NonNull<u8>,
 }
 
-// SAFETY: the mappings are owned for the process lifetime and only touched
-// while the surrounding mutex is held.
+// SAFETY: the mappings live for the whole process and are only touched while
+// the surrounding mutex is held.
 unsafe impl Send for Windows {}
 
 fn windows() -> Result<&'static Mutex<Windows>> {
@@ -236,9 +236,8 @@ impl Translation {
     /// Run the translation against `case`'s state and data window.
     ///
     /// # Safety
-    ///
-    /// The original must have completed on the oracle, so every access stays
-    /// in the windows.
+    /// The case must have completed on the oracle, so every access stays inside
+    /// the windows.
     pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
         let windows = windows()?.lock().expect("native windows lock");
         // SAFETY: both windows are owned and sized as copied here; the code page
@@ -403,8 +402,8 @@ fn scalable_leaf(
     let (mut thread, mut scalable) = load_scalable(case, profile)?;
     let mut memory = memory_thread(windows, leaf.identity().memory_requirements)?;
     let mut context = ExecutionContext::default();
-    // SAFETY: the windows are owned, disjoint from every register owner and
-    // only accessed through this domain during the call.
+    // SAFETY: the windows are owned, disjoint from every register store and
+    // accessed only through this domain during the call.
     let exit = unsafe {
         leaf.execute(
             &mut thread.registers,

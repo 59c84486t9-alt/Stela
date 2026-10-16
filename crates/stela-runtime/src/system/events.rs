@@ -63,8 +63,8 @@ impl EventDomain {
         }
     }
 
-    /// Both initial values are explicit architectural initialization inputs.
-    /// Dropping the returned endpoint retires this PE's publication identity.
+    /// Both initial values are explicit. Dropping the endpoint retires this
+    /// PE's event identity.
     pub fn register(
         &self,
         initial_event: bool,
@@ -281,9 +281,8 @@ impl EventProducer {
         Weak::ptr_eq(&self.event, &other.event)
     }
 
-    /// Claim one active monitor owner across every memory domain. A successful
-    /// claim does not keep the PE alive; retirement may occur immediately after
-    /// return, and subsequent publications then return false.
+    /// Claim the single monitor owner across every memory domain. The claim
+    /// does not keep the PE alive: after retirement, publications return false.
     pub fn try_bind_monitor(&self) -> Result<MonitorBinding, MonitorBindError> {
         let event = self
             .event
@@ -319,9 +318,9 @@ pub enum MonitorBindError {
     AlreadyBound,
 }
 
-/// Non-Clone lifetime claim for one monitor owner of the real PE endpoint.
-/// Memory retains this guard while any of that owner's global marks survive;
-/// it owns once-only mark opening and signals through this concrete handle.
+/// The claim of the PE endpoint's monitor owner. Memory keeps this guard while
+/// any of the owner's global marks survive; it opens marks once and signals
+/// through this handle.
 #[derive(Debug)]
 pub struct MonitorBinding {
     producer: EventProducer,
@@ -352,9 +351,8 @@ pub enum ContextError {
     HaltedUnsupported,
 }
 
-/// Validated nonhalting NonSecure A64 EL0/EL1 cooperative profile, without
-/// TWED, EL2 or EL3. The CPU/context owner supplies every control explicitly;
-/// this is an execution-policy check, not a second CPU feature registry.
+/// The supported non-halting, non-secure AArch64 EL0/EL1 profile without TWED,
+/// EL2 or EL3. The CPU owner supplies every control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Context {
     current_el: ExceptionLevel,

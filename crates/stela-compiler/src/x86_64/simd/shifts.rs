@@ -201,10 +201,10 @@ fn saturating_narrow_pack(
     let wide = lane * 2;
     packed(code, Host::MoveAligned, 3, 0);
     if !signed_source {
-        // Shift>=1 leaves only one possible negative signed representation:
-        // unsigned MAX rounded by one becomes exactly the wide sign bit.
-        // Change it to signed MAX before the signed-input host pack; both
-        // values saturate to the same bound. Compare against the original.
+        // With a shift of at least one, only one negative signed pattern is
+        // possible: unsigned MAX rounded by one becomes exactly the wide sign
+        // bit. Change it to signed MAX before the signed host pack (both
+        // saturate to the same bound), comparing against the original value.
         super::saturating::sign_mask(code, 4, 0, wide);
         packed(code, Host::Xor, 0, 4);
     }
@@ -466,8 +466,9 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
                 } else {
                     let bits = lane_bytes * 8;
                     let preserve = (!(u128::from(u64::MAX) >> (64 - bits + amount))) as u64;
-                    // The u128 shift permits bits=64, amount=64 without Rust or
-                    // x86 count masking. lane_mask keeps only this lane's bits.
+                    // A u128 shift allows bits = 64 and amount = 64 without
+                    // Rust or x86 count masking; `lane_mask` keeps only this
+                    // lane's bits.
                     lane_mask(code, 2, lane_bytes, preserve);
                     packed(code, Host::And, 1, 2);
                     packed(code, Host::Or, 0, 1);
@@ -481,8 +482,9 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     commit(code, destination, 0);
 }
 
-/// Constant counts permit packed SSE2 shifts. The general path stages wrapped
-/// results in XMM3 and originals in XMM6; XMM4's active-byte sign bits publish QC.
+/// Constant counts allow packed SSE2 shifts. The general path stages wrapped
+/// results in XMM3 and the originals in XMM6; the sign bits of XMM4's active
+/// bytes set QC.
 fn saturating_immediate_vector(
     code: &mut Vec<u8>,
     operand: &Operand,
@@ -493,8 +495,8 @@ fn saturating_immediate_vector(
     read_vector(code, operand.source, 0);
     if operand.amount == 0 {
         if signed_source && unsigned_result {
-            // SQSHLU zero clamps negative lanes to zero. Publish their original
-            // sign mask before PANDN consumes it; the publisher only uses ECX.
+            // SQSHLU clamps negative lanes to zero. Record their sign mask for
+            // QC before PANDN consumes it; the recorder uses only ECX.
             super::saturating::sign_mask(code, 4, 0, lane);
             super::saturating::publish_qc(code, operand.bytes);
             packed(code, Host::AndNot, 4, 0);
@@ -506,11 +508,11 @@ fn saturating_immediate_vector(
         return;
     }
     if operand.amount == 1 && lane <= 2 && signed_source != unsigned_result {
-        // A shift by one is a saturating add of identical operands. Unlike the
-        // general add_sub recipe, doubling needs no second source/copy. Signed
-        // overflow flips the sign between wrapped and saturated results. For
-        // unsigned inputs, saturation occurs exactly when the original MSB is
-        // set; signed-word replication prevents low-byte MSBs publishing QC.
+        // A shift by one is a saturating add of a value to itself, so no second
+        // source copy is needed. Signed overflow shows as a sign change between
+        // wrapped and saturated results; unsigned inputs saturate exactly when
+        // the MSB is set, and replicating to signed words keeps low-byte MSBs
+        // from setting QC.
         if !signed_source && lane == 2 {
             super::saturating::sign_mask(code, 4, 0, lane);
         } else {
@@ -549,8 +551,8 @@ fn saturating_immediate_vector(
     if signed_source {
         super::saturating::sign_mask(code, 5, 6, lane);
         if unsigned_result {
-            // A negative original source must clamp to zero even when shifting
-            // by zero leaves its raw bits unchanged (including qword lanes).
+            // A negative source must clamp to zero even when a zero shift
+            // leaves its bits unchanged (qword lanes included).
             packed(code, Host::Or, 4, 5);
             packed(code, Host::EqualDword, 1, 1);
             packed(code, Host::Xor, 5, 1); // positive bound=MAX, negative bound=0
@@ -652,8 +654,8 @@ fn load_bound(code: &mut Vec<u8>, bound: u64) {
     code.extend([0x48, 0xb8]); // movabs rax,bound
     code.extend(bound.to_le_bytes());
 }
-/// Count CL is 1..128. Rounding adds CF from the final discarded bit rather
-/// than adding a potentially overflowing bias to the original qword.
+/// CL is 1 to 128. Rounding adds CF from the last discarded bit instead of
+/// adding a bias that could overflow the qword.
 fn register_right(code: &mut Vec<u8>, signed: bool, round: bool) {
     code.extend([0x83, 0xf9, 64]); // cmp ecx,64
     let large = lane_branch(code, LaneBranch::AboveOrEqual);

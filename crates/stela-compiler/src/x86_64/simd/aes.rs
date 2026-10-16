@@ -82,8 +82,8 @@ fn shift_rows(code: &mut Vec<u8>, inverse: bool, target: TargetCpu) {
     packed(code, Host::MoveAligned, RESULT, RIGHT);
 }
 
-/// Rotate every four-byte AES column right, preserving the original input.
-/// MASK/HIGH remain available for xtime; RESULT may also be the destination.
+/// Rotate each four-byte AES column right, keeping the input. MASK and HIGH
+/// stay free for xtime; RESULT may be the destination.
 fn rotate_column(code: &mut Vec<u8>, destination: u8, source: u8, bits: u8) {
     packed(code, Host::MoveAligned, TERM, source);
     packed(code, Host::MoveAligned, destination, source);

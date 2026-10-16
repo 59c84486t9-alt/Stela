@@ -44,8 +44,8 @@ fn shuffle(code: &mut Vec<u8>, register: u8, order: u8, target: TargetCpu) {
     code.push(order);
 }
 
-/// Return false before emitting for the separately owned BF16 arithmetic forms.
-/// Every output is private until all source/result guards have passed.
+/// Returns false before emitting for the BF16 arithmetic forms, which are
+/// emitted elsewhere. Outputs stay private until every guard passes.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,

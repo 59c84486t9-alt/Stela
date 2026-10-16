@@ -157,9 +157,8 @@ fn emit_selected(
                     .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
                 code.extend(baseline_code);
             }
-            // Every admitted region settled the complete canonical frame.
-            // Memory, numerical helpers, baseline fallback and terminal exits
-            // therefore observe the same ordinary direct-RAM ABI as before.
+            // Each region wrote back the full register frame, so what follows
+            // sees the ordinary direct-RAM ABI.
             cursor += count;
             continue;
         }
@@ -193,8 +192,7 @@ fn emit_terminal(
                 super::simd::emit_numerical(code, operand, *pc, target);
             }
             Terminator::Clock(request) => {
-                // MRS results and ISB synchronization belong to the explicit
-                // runtime clock service, not a host counter or placeholder.
+                // MRS results and ISB come from the runtime clock service.
                 direct_exit(code, request.instruction_pc, ExitKind::Clock);
             }
             Terminator::ThreadRegister(request) => {
@@ -213,9 +211,8 @@ fn emit_terminal(
                 direct_exit(code, request.instruction_pc, ExitKind::System);
             }
             Terminator::Trap(trap) => {
-                // The original instruction remains the stop PC for both SVC
-                // and BRK. Exception-return metadata stays with the decoder;
-                // neither host syscalls nor architectural exception entry run.
+                // SVC and BRK stop at the trapping instruction; the runtime
+                // handles the trap.
                 direct_exit(code, trap.instruction_pc, ExitKind::Trap);
             }
             Terminator::DirectCall(target) => {
@@ -226,7 +223,7 @@ fn emit_terminal(
             Terminator::Register { source, kind } => {
                 super::load(code, *source);
                 if *kind == ExitKind::Call {
-                    // Capture BLR X30's original target before overwriting LR.
+                    // Capture BLR X30's target before LR is overwritten.
                     code.extend([0x48, 0x89, 0xc1]); // mov rcx,rax
                     super::immediate(code, fallthrough.0);
                     super::store(code, Register::X(30));

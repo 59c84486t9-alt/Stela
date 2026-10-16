@@ -233,10 +233,9 @@ fn benign_inactive(code: &mut Vec<u8>, format: Format, input: u8, target: Target
     Host::Or.register(code, input, MASK_SCRATCH, target);
 }
 
-/// The private leaf owns exactly four canonical complex forms, not registration.
-/// S/D active operands/results are normal; indexed Half and non-FMA FCMLA return
-/// false untouched. Shared frame, RC adapter and exact completion retain their
-/// respective ownership. RAX/RCX/RDX/flags and XMM0..7 are caller-volatile.
+/// The four complex forms. Active single/double operands and results must be
+/// normal; indexed half precision and FCMLA without FMA return false without
+/// emitting. RAX/RCX/RDX, flags and XMM0-7 are clobbered.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,

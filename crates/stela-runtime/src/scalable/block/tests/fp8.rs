@@ -121,8 +121,8 @@ fn fixed_fp8_owned_completion_preserves_context_and_clears_upper_z() -> Result<(
             expected.v[0] = [0x3f00_3f00_3f00_3f00; 2];
             let mut context = context();
             let pointers = (context.memory, context.scalable, context.system);
-            // SAFETY: Fixed trusted source, disjoint owned state and exact
-            // declared FP8/FPMR/EnFPM/FullA64 profile for this synchronous call.
+            // SAFETY: fixed trusted source, disjoint owned state and the
+            // declared FP8/FPMR/EnFPM/FA64 profile.
             let exit = unsafe { prepared.invoke(&mut thread, &mut scalable, &mut context)? };
             assert_eq!(thread.pc, NUMERICAL_PC);
             assert_eq!(exit.kind, ExitKind::ScalableNumerical as u64);
@@ -170,8 +170,8 @@ fn fixed_fp8_retains_exception_enables_and_commits_nothing_on_failure() -> Resul
             let mut expected = thread.registers.clone();
             expected.x[5] += 1;
             let mut context = context();
-            // SAFETY: Same bounded explicit profile; numerical trap delivery
-            // is expected to decline completion before architectural effects.
+            // SAFETY: the same profile; enabled numerical traps must refuse
+            // completion before any effect.
             let exit = unsafe { prepared.invoke(&mut thread, &mut scalable, &mut context)? };
             assert!(matches!(
                 prepared.complete_numerical(&mut thread, &mut scalable, exit),
@@ -206,8 +206,8 @@ fn fixed_fp8_reused_prepared_entry_reads_each_owners_current_fpmr() -> Result<()
                     u64::from_le_bytes(expected_bfloat.to_le_bytes().repeat(4).try_into().unwrap());
                 expected.v[0] = [limb; 2];
                 let mut context = context();
-                // SAFETY: Each fresh owned state matches the same immutable
-                // profile; FPMR values are runtime state, never code parameters.
+                // SAFETY: each new state matches the same profile; FPMR values
+                // are state, not code parameters.
                 let exit = unsafe { prepared.invoke(&mut thread, &mut scalable, &mut context)? };
                 prepared.complete_numerical(&mut thread, &mut scalable, exit)?;
                 assert_eq!(thread.registers, expected);
@@ -230,7 +230,7 @@ fn fixed_fp8_upper_narrow_snapshots_alias_before_insertion() -> Result<()> {
         thread.registers.v[2] = one;
         scalable.set_fpmr(1 << 6 | 1 << 24); // E4M3, NSCALE=+1 => 2.0 => 0x40.
         let mut context = context();
-        // SAFETY: Same fixed nonstreaming owned profile; Vd aliases Vn.
+        // SAFETY: the same non-streaming profile; Vd aliases Vn.
         let exit = unsafe { prepared.invoke(&mut thread, &mut scalable, &mut context)? };
         prepared.complete_numerical(&mut thread, &mut scalable, exit)?;
         assert_eq!(thread.registers.v[1], [one[0], 0x4040_4040_4040_4040]);

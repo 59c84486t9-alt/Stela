@@ -124,8 +124,9 @@ impl OwnedMemory {
         let restored = loan
             .prepare(rollback_views)
             .map_err(|_| E::AllocationFailure)?;
-        // Revocation invalidates all reservations for each affected actual view.
-        // Fresh generations are required even if host rollback restores old rights.
+        // Revoking rights invalidates every reservation on each affected view;
+        // new generations are required even if a host rollback restores the old
+        // rights.
         if loan.retire(&changed).is_err() {
             loan.poison();
             self.usable = false;

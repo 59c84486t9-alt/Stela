@@ -265,7 +265,7 @@ fn zero_flags(code: &mut Vec<u8>, format: Format) {
     code.push(MOV_EDX_IMMEDIATE);
     code.extend(NZCV_N.to_le_bytes());
     select_flags(code, FlagSelect::Sign);
-    // Shift off the sign at the actual lane width. Both +0 and -0 set ZF.
+    // Shift off the sign at the lane width; both +0 and -0 set ZF.
     code.extend(match format {
         Format::Half => SHL_CX_1,
         Format::Single => SHL_ECX_1,
@@ -374,7 +374,7 @@ fn half_predicate(code: &mut Vec<u8>, operation: Predicate) -> u8 {
         half_order_key(code, LEFT_VECTOR);
         half_order_key(code, RIGHT_VECTOR);
     }
-    // Original right is in XMM0 and original left is in XMM1.
+    // Right is in XMM0, left in XMM1.
     match operation {
         Predicate::Greater | Predicate::AbsoluteGreater => {
             packed(code, Host::GreaterWord, RIGHT_VECTOR, LEFT_VECTOR);
@@ -555,8 +555,8 @@ fn emit_predicate(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
             || absolute(operation)
             || matches!(operation, Predicate::Less | Predicate::LessEqual));
     if let CompareSource::Register(right) = right {
-        // Reversed operands make ordered LT/LE implement original GT/GE while
-        // preserving original Vm upper bits for the ordinary scalar case.
+        // Reversed operands let ordered LT/LE implement GT/GE, and keep Vm's
+        // upper bits for the scalar case.
         read_numerical_vector(code, shape, right, LEFT_VECTOR);
         read_numerical_vector(code, shape, left, RIGHT_VECTOR);
         if merge {

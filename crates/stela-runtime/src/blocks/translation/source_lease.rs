@@ -22,9 +22,8 @@ const SCTLR_M: u64 = 1;
 const SCTLR_EE: u64 = 1 << 25;
 const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 
-/// Non-Clone, non-Copy, externally unconstructible and read-only. It retains the
-/// ORIGINAL installed context allocation, physical authority and immutable code
-/// owners. It borrows neither the whole runtime nor its mutable native cache.
+/// Read-only access to the installed context, physical memory and code, without
+/// borrowing the whole runtime or its native cache.
 pub(crate) struct InstalledM0SourceScope<'run> {
     sources: &'run InstalledM0Sources,
     installed: &'run super::scope::InstalledContext,
@@ -42,7 +41,7 @@ impl<'run> InstalledM0SourceScope<'run> {
         self.sources.physical_space()
     }
 
-    /// Read the original installed slot, never a reconstructed control bank.
+    /// The installed control snapshot.
     pub(crate) fn installed_snapshot(&self) -> &ControlSnapshot {
         &self.installed.snapshot
     }
@@ -129,17 +128,13 @@ impl<'run> InstalledM0SourceScope<'run> {
         profile::check_immutable_fetch(translation, raw_pc, state)
     }
 
-    /// Exact canonical read/write source shapes under the installed immutable
-    /// cohort. Shape classification alone grants no data or control authority;
-    /// the separate typed System/ISB source lane retains its own qualifier.
+    /// Check the read and write source shapes allowed for installed M0 code.
     pub(crate) fn check_source_word(&self, pc: u64, word: u32) -> Result<(), &'static str> {
         check_data_source_word(self.sources.compiler_profile(), pc, word)
     }
 
-    /// Re-fetch actual original bytes/Execute rights using the original installed
-    /// context and physical owner, then compare the SINGLE original CodeRegion
-    /// physical binding through the canonical input's actual BoundSource.
-    /// Logical RX/plan checks alone never establish installed source currency.
+    /// Re-fetch the instruction bytes and execute rights through the installed
+    /// context, then compare with the code region's physical binding.
     pub(crate) fn qualify_source(
         &self,
         owner: &TranslationControls,
@@ -148,7 +143,7 @@ impl<'run> InstalledM0SourceScope<'run> {
         self.pin_source(owner, input).map(|_| ())
     }
 
-    /// Retain the original actual fetch for an in-flight modifying instruction.
+    /// Pin the fetch of an instruction that modifies its own source.
     pub(crate) fn pin_source(
         &self,
         owner: &TranslationControls,
@@ -167,8 +162,8 @@ impl<'run> InstalledM0SourceScope<'run> {
                 )
             })?;
 
-        // This is the ORIGINAL retained NativeActive outer object. The
-        // physical reader must borrow it and must not mint a nested loan.
+        // This is the session's outer object; the physical reader borrows it
+        // rather than taking a nested borrow.
         let reached: BoundPhysicalInstruction = self.physical_space().fetch_m0_instruction(
             input.outer_execution(),
             owner,
@@ -196,11 +191,9 @@ impl<'run> InstalledM0SourceScope<'run> {
         Ok(reached)
     }
 
-    /// Postmint currency only. The initial factory uses qualify_source so an
-    /// original instruction-fetch architectural/alignment fault remains typed
-    /// and precedes data-address faults. Under the retained immutable bank and
-    /// source/physical/outer loans, later failure is an authority/platform loss,
-    /// never a newly synthesized guest exception or successful continuation.
+    /// Re-check after creation. The factory uses `qualify_source` first so that
+    /// an instruction-fetch fault stays typed and precedes data faults; a later
+    /// failure means the platform failed, never a new guest exception.
     pub(crate) fn validate_current(
         &self,
         owner: &TranslationControls,

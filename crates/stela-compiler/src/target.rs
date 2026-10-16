@@ -39,7 +39,7 @@ enum SseTier {
     Sse42,
 }
 
-// Retain the established public tier names and their canonical cache identities.
+// Keep the published tier names and their cache identities.
 #[allow(non_upper_case_globals)]
 impl TargetCpu {
     pub const Baseline: Self = Self {
@@ -147,8 +147,8 @@ impl TargetCpu {
             && (!required.cx8 || self.cx8)
             && (!required.avx2 || self.avx2)
     }
-    /// Detect usable host capabilities in the hosted execution environment.
-    /// Freestanding callers supply a positively qualified explicit target.
+    /// Detect the host's usable CPU features. Freestanding callers supply a
+    /// target explicitly.
     #[cfg(any(feature = "std", test))]
     pub fn detect() -> Self {
         static DETECTED: std::sync::OnceLock<TargetCpu> = std::sync::OnceLock::new();
@@ -271,8 +271,8 @@ impl core::str::FromStr for TargetCpu {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut target = Self::Baseline;
         let mut tier_name = value;
-        // Strip each optional suffix once, in reverse canonical order. Any
-        // duplicate, unknown or reordered suffix remains and fails tier parsing.
+        // Strip each optional suffix once, in reverse order. A duplicate,
+        // unknown or out-of-order suffix is left behind and fails parsing.
         for (suffix, enabled) in [
             ("+avx2", &mut target.avx2),
             ("+cx16", &mut target.cx16),

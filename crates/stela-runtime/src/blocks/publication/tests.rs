@@ -188,6 +188,5 @@ fn publication_scope_additive_default_preserves_legacy_completion() {
         Ok(ENTRY)
     );
     assert_eq!(legacy.0, 1);
-    // The default performs only the pre-existing provider's completion. It
-    // receives no fixed-control/exception permit and certifies no new sync.
+    // The default performs only the provider's existing completion.
 }

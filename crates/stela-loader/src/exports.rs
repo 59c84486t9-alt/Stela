@@ -215,11 +215,10 @@ fn regular_address(image: &LoadPlan, preferred: u64, loaded: u64, value: u64) ->
     u64::try_from(i128::from(loaded) + offset).context("regular export loaded address overflow")
 }
 
-/// Parse a modern or legacy export trie tied to the original thin-slice identity.
-/// Regular offsets are interpreted as signed 64-bit values, then relocated to
-/// `load_base`; absolute values are unchanged. Shared subtries are supported,
-/// but cycles, overlapping serialized nodes and ambiguous edges are refused.
-/// Work, payload bytes and cumulative copied names are independently bounded.
+/// Parse a modern or legacy export trie. Regular offsets are signed 64-bit
+/// values relocated to `load_base`; absolute values are kept. Shared subtries
+/// are allowed; cycles, overlapping nodes and ambiguous edges are errors. Work,
+/// payload size and total name length are bounded.
 pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export>> {
     ensure!(
         image.slice_bytes == data.len() as u64 && image.slice_sha256 == stela_core::sha256(data),

@@ -7,8 +7,7 @@ use alloc::vec::Vec;
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 mod native_component;
 
-// The historical contracts retain the Enabled specialization. Production callers
-// must construct the immutable profile-bound operand explicitly.
+// Tests use the SP-alignment-enabled specialization.
 fn requirements(operand: &Operand) -> Result<MemoryRequirements, CompileError> {
     Ok(super::requirements(&CheckedOperand::new(
         *operand,

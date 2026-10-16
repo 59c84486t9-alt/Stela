@@ -37,10 +37,10 @@ const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 const REL32_BYTES: usize = size_of::<i32>();
 const INEXACT_SHIFT: u8 = INEXACT.trailing_zeros() as u8;
 
-/// Admit S/D normal/signed-zero active lanes for all seven ordinary FRINT forms.
-/// Half leaves code untouched for exact completion. Every late rejection rolls
-/// back the staged Z/status result and restores caller MXCSR at the original PC.
-/// The caller owns streaming legality and the immutable numerical profile.
+/// Handle the seven FRINT forms for active single/double lanes that are normal
+/// or signed zero; half precision is left to software completion. A late
+/// rejection discards the staged result and restores the caller's MXCSR at the
+/// instruction.
 pub(crate) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,
@@ -78,8 +78,8 @@ pub(crate) fn emit(
         // The frame masks every host exception, clears status and disables flush.
         rounding_control(code);
     } else {
-        // Existing kernels use explicit direction immediates and dynamic arms.
-        // Their ties-away residual arithmetic retains nearest private control.
+        // The kernels use explicit direction immediates; the ties-away residual
+        // arithmetic uses round-to-nearest.
         code.extend(XOR_EAX_EAX);
     }
     numerical::install_mxcsr(code, &frame);
@@ -121,8 +121,8 @@ pub(crate) fn emit(
             code.push(INEXACT_SHIFT);
             numerical::add_fpsr(code, &frame);
         }
-        // Both mature recipes may destroy the active mask. Architectural P and
-        // the original destination remain intact until the final staged commit.
+        // Both recipes may destroy the active mask; P and the destination stay
+        // intact until the final staged commit.
         read_predicate_mask(
             code,
             operand.governing,

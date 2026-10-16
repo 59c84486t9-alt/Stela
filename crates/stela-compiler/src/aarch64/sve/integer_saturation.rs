@@ -277,8 +277,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
 }
 
 impl Operand {
-    /// Exact June canonical-word MOVPRFX requirements. Call before normalizing
-    /// destructive operands; a typed operand must still match its source word.
+    /// MOVPRFX requirements of the follower word. Call before normalizing
+    /// destructive operands; the typed operand must still match the word.
     #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,

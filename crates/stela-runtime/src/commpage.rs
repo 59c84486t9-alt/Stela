@@ -37,7 +37,8 @@ pub struct Field {
     pub value: u8,
 }
 
-/// An address-space-owned static mapping; no host pointer or writable alias escapes.
+/// A static mapping owned by the address space; no host pointer or writable
+/// alias escapes.
 #[derive(Debug)]
 pub struct Context {
     address_space: u64,
@@ -64,7 +65,7 @@ impl Context {
         })
     }
 
-    /// Join the actual static backing to the process canonical domain.
+    /// Add the static backing to the process's memory domain.
     pub fn shared_memory_participant(&mut self) -> crate::memory::SharedMemoryParticipant<'_> {
         crate::memory::SharedMemoryParticipant::owned(&mut self.memory, self.address_space)
     }

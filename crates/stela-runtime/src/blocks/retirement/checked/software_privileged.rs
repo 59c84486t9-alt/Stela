@@ -45,8 +45,8 @@ pub use crate::system::debug::halted::{
 pub use crate::system::exception::higher_el::TrapSmcWithoutEl3;
 pub use crate::system::state::higher_el::Initialization as DeclaredHigherElInitialization;
 
-/// Owned original instruction bytes. SystemV1 in this factory admits one
-/// no-memory instruction at a time. No data RAM/MMU/fetch-fault route is implied.
+/// Owned instruction bytes. This factory runs one instruction without memory
+/// access at a time.
 pub struct DeclaredPrivilegedCode {
     pub base: GuestAddress,
     pub bytes: Vec<u8>,
@@ -110,9 +110,8 @@ pub struct DeclaredPrivilegedReport {
     pub compiler_source_sha256: String,
 }
 
-/// Creates one new declared PE, retains it for this complete executable lifetime,
-/// and consumes all original owners before returning descriptive final state.
-/// IRQ/FIQ/SError/NMI/deadline sources and hardware-state adoption are unavailable.
+/// Create a new declared PE, run the requests on it, and return its final
+/// state. IRQ, FIQ, SError, NMI and deadline sources are not available.
 pub fn run_declared_privileged(
     config: DeclaredPrivilegedConfig,
     requests: Vec<DeclaredPrivilegedRequest>,
@@ -175,8 +174,8 @@ pub fn run_declared_privileged(
     let debug =
         crate::system::debug::halted::DebugMachine::fresh_declared(Arc::clone(&snapshot), debug)
             .map_err(|e| anyhow::anyhow!("declared debug storage: {e:?}"))?;
-    // Advertised SME requires its original storage/control owner even before a
-    // request uses it. SVE-only ordinary execution has no owner in this factory.
+    // An advertised SME needs its own storage and control owner even before
+    // use; this factory has none for SVE-only execution.
     let pfr0 = snapshot
         .read(Register::IdAa64Pfr0El1)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
@@ -270,8 +269,9 @@ pub fn run_declared_privileged(
                     context: &mut context,
                     specialization: input.specialization,
                 });
-        // SAFETY: disjoint original fields, fresh sole controls, complete producer
-        // lease and empty actual data domain are retained through the same owner.
+        // SAFETY: the fields are disjoint, the controls new, the producer
+        // registry complete and the data domain empty, all held by the same
+        // owner.
         let mut backend = unsafe {
             PrivilegedOwner::fresh_software(
                 address_space,
@@ -295,8 +295,8 @@ pub fn run_declared_privileged(
                 scalable_resource,
             )
         }?;
-        // SAFETY: genuinely new PE, original sole Thread/System/backend/debug.
-        // No adopted resource or raw entry escapes this one executable lifetime.
+        // SAFETY: a new PE with its own thread, system state, backend and debug
+        // state; nothing escapes this execution.
         let mut pe = unsafe {
             SystemExecutionOwner::new_pe_with_debug(&mut thread, &mut system, &mut backend, debug)
         }?;
@@ -341,8 +341,8 @@ pub fn run_declared_privileged(
                     )
                 }
                 DeclaredPrivilegedRequest::Editr { route_slot, word } => {
-                    // Failed queue admission leaves the original PE/source intact;
-                    // retain the refusal rather than dropping earlier receipts.
+                    // A refused queue entry leaves the PE and source intact;
+                    // record the refusal and keep the earlier results.
                     match pe.queue_editr(route_slot, word) {
                         Err(error) => (
                             DeclaredPrivilegedReceipt {

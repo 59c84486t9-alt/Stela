@@ -8,8 +8,8 @@ enum Policy {
     Predicated,
 }
 
-// Independent canonical policy table from the pinned June facts. Minimum
-// sizes are encoding fields; the decoder remains the only operand decoder.
+// Expected prefix policies, written independently of the decoder from the
+// specification. Minimum sizes are encoding fields.
 const CASES: [(u32, u32, Policy); 25] = [
     (SUNPKLO, 1, Policy::Unknown),
     (SUNPKHI, 1, Policy::Unknown),

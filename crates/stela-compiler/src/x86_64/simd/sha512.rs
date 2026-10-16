@@ -114,8 +114,8 @@ fn large_sigma(
     scratch: [Gpr; 2],
     rotations: [u8; 3],
 ) {
-    // Independent rotates expose parallel work. Callers reuse dead original
-    // inputs, keeping every state access and avoiding spills or extra features.
+    // Independent rotates expose parallelism. Callers reuse dead inputs as
+    // scratch, avoiding spills and extra CPU features.
     let [first, second] = scratch;
     let [low, middle, high] = rotations;
     QwordOpcode::Move.emit(code, destination, source);
@@ -146,9 +146,9 @@ fn majority(code: &mut Vec<u8>, destination: Gpr, scratch: Gpr, x: Gpr, y: Gpr, 
 
 fn hash(code: &mut Vec<u8>, operand: &Operand, second: bool) {
     let right = operand.right.expect("three-register SHA512 hash form");
-    // Stage every required original qword before either destination store.
-    // The high result may then be stored before low-result computation, even
-    // when all three guest register names alias. No guest memory is accessed.
+    // Stage every needed qword before either destination store, so the high
+    // result can be stored before the low one is computed even when all three
+    // registers alias.
     for (vector, lane, register) in [
         (operand.destination, LOW, W0),
         (operand.destination, HIGH, W1),
@@ -165,8 +165,8 @@ fn hash(code: &mut Vec<u8>, operand: &Operand, second: bool) {
     } else {
         state_qword(code, operand.left, HIGH, X1, true);
         choose(code, VALUE, Y1, X0, X1);
-        // Consume old W1 before sigma so its register and dead X1 can hold
-        // independent rotations. Modular addition preserves the original sum.
+        // Use the old W1 before sigma so that its register and the dead X1 can
+        // hold independent rotations.
         QwordOpcode::Add.emit(code, VALUE, W1);
         large_sigma(code, SIGMA, Y1, [X1, W1], LARGE_SIGMA1_ROTATIONS);
     }
@@ -178,8 +178,8 @@ fn hash(code: &mut Vec<u8>, operand: &Operand, second: bool) {
 
     if second {
         large_sigma(code, SIGMA, VALUE, [X0, X1], LARGE_SIGMA0_ROTATIONS);
-        // W1 and X0 are dead original inputs. Keep VALUE as the sigma source
-        // until sigma completes, then use it as the first majority operand.
+        // W1 and X0 are dead inputs. VALUE stays the sigma source until sigma
+        // completes, then becomes the first majority operand.
         majority(code, W1, X0, VALUE, Y0, Y1);
         QwordOpcode::Add.emit(code, W1, SIGMA);
         QwordOpcode::Add.emit(code, W1, W0);

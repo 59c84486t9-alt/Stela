@@ -15,7 +15,7 @@ use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 const STORE_BYTES: usize = size_of::<u64>();
 const STORE_ALIGNMENT_MASK: u64 = STORE_BYTES as u64 - 1;
 
-/// A copied observation only, never source/control/physical or retry authority.
+/// A copied observation.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct M0RamWriteProgress {
     pub(crate) attempted: bool,
@@ -62,8 +62,7 @@ pub(crate) enum M0RamWritePlatformError {
 }
 
 impl M0RamWritePlatformError {
-    /// Read-only actual prefix/attempt diagnostic for canonical settlement.
-    /// This grants no retry, translation or architectural-fault authority.
+    /// The write progress, for settlement diagnostics.
     pub(crate) fn progress(&self) -> M0RamWriteProgress {
         match self {
             Self::SourceControl { progress, .. }
@@ -78,8 +77,8 @@ impl M0RamWritePlatformError {
     }
 }
 
-// Keep the actual error and reached prefix in diagnostics, including errors
-// discovered during no-write preparation. No observation grants retry authority.
+// Show the error and the reached prefix, including errors found during
+// preparation.
 impl core::fmt::Debug for M0RamWritePlatformError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -135,12 +134,12 @@ impl PhysicalRamWritePin<'_> {
         receipts: &mut Vec<crate::memory::domain::SourceWriteReceipt>,
     ) -> Result<(), PublicationFault> {
         let first = self.reached.first();
-        // SAFETY: the actual typed source loan qualified this reached Write;
-        // same original outer/order retain current physical rights/storage.
-        // Resolution checked the whole aligned8B logical/native footprint and
-        // host RMW readability. Staging is independent private stack bytes.
-        // Original MemorySystem publication supplies exact8B XCHG and real
-        // same-value/alias reservation invalidation; it grants no guest type.
+        // SAFETY: the source borrow admitted this write, and the outer object
+        // and order guard pin the physical rights and storage. Resolution
+        // checked the aligned 8-byte footprint and host read-modify-write
+        // readability, and the staging is private stack memory. Publication
+        // performs the 8-byte XCHG and invalidates reservations on every alias,
+        // even for same-value writes.
         unsafe {
             self.physical.domain.system.publish_tracked(
                 first.view().backing(),
@@ -204,9 +203,8 @@ fn resolve_write_pin<'loan>(
     })
 }
 
-/// NO-WRITE session held by the original canonical authority guard BEFORE
-/// attempt, through finalization and exactly-once base/PC settlement or poison.
-/// Success/failure never releases these actual source/outer/order/current pins.
+/// Created before any write and held by the failure guard through finalization
+/// and the single base and PC settlement. Neither outcome releases its pins.
 #[must_use]
 pub(crate) struct M0RamWritePrepared<'loan, 'owner> {
     execution: &'loan MemoryExecutionLoan,
@@ -330,7 +328,8 @@ impl M0RamWritePrepared<'_, '_> {
                 .publish8(value, &mut self.receipts);
             self.record_publication(result)?;
         }
-        // A post-effect authority failure reports the exact known0/8/16 prefix.
+        // A failure after the effect reports the known prefix of 0, 8 or 16
+        // bytes.
         self.validate_current()
     }
 }

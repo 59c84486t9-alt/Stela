@@ -119,8 +119,8 @@ fn reciprocal_exponent(code: &mut Vec<u8>, format: Format, target: TargetCpu) {
     Host::EqualDword.register(code, TEMPORARY, TEST_MASK, target);
     replicate_exponent_comparison(code, format, TEMPORARY, target);
     Host::And.register(code, TEMPORARY, BIAS_OR_EXPONENT_UNIT, target);
-    // Complement only the raw exponent and retain the original sign. For zero
-    // exponent, one field unit changes its complement from all-ones to max-1.
+    // Complement only the exponent and keep the sign. For a zero exponent, one
+    // field unit changes the complement from all ones to max - 1.
     Host::EqualDword.register(code, TEST_MASK, TEST_MASK, target);
     Host::Xor.register(code, TEST_MASK, FRACTION_MASK, target);
     Host::And.register(code, VALUE, TEST_MASK, target);

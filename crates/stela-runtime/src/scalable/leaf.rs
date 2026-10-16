@@ -59,7 +59,7 @@ pub enum ScalableLeafExit {
     Returned,
     /// Effective controls or platform storage declined before native entry.
     EntryDeclined(MemoryStatus),
-    /// Includes architectural faults and explicit callback service failures.
+    /// Architectural faults and callback service failures.
     MemoryFault(MemoryFault),
     /// The body returned, but common fault settlement or domain health failed.
     /// Original architectural fault provenance remains distinct from this failure.
@@ -71,8 +71,8 @@ pub enum ScalableLeafExit {
     },
 }
 
-/// Immutable owned RX code, derived requirements and original source bytes.
-/// Calls remain serialized, matching the existing native leaf boundary.
+/// Immutable native code, its requirements and source bytes. Calls are
+/// serialized.
 #[derive(Debug)]
 pub struct PreparedScalableLeaf {
     identity: ScalableLeafIdentity,
@@ -155,24 +155,21 @@ impl PreparedScalableLeaf {
         self.native_bytes
     }
 
-    /// Invoke after complete-body memory preflight and owned-view validation.
-    /// Platform declines leave guest state unchanged. Genuine faults retain
-    /// completed preceding instructions and the memory service's reached prefix.
+    /// Run after the memory preflight and view validation. Platform refusals
+    /// leave guest state unchanged; faults keep the completed instructions and
+    /// the memory service's reached prefix.
     ///
     /// # Safety
-    /// The CPU owner must establish that the prepared guest feature/SMCR profile
-    /// and `profile.required_dit()` match effective controls, and current-EL
-    /// FP/SVE/SME access is enabled (including CPACR/CPTR trap permissions).
-    /// Native memory requires little-endian data execution,
-    /// AlignmentEnforced=false and CPA2 disabled.
-    /// View validation and memory preflight do not observe those CPU controls;
-    /// memory preflight separately validates effective SA/SA0 and its requested
-    /// named memory implementation profile.
-    /// The source must be trusted to return in finite time. Guest backing storage
-    /// must remain disjoint from guest register owners, this RX mapping, context,
-    /// native stack and live Rust references for the synchronous invocation.
-    /// The backing owners must uphold their pinned-host-rights contract. No
-    /// signal recovery or unwind through generated native code is provided.
+    /// The CPU owner must ensure the prepared feature and SMCR profile and
+    /// `profile.required_dit()` match the effective controls, and that FP, SVE
+    /// and SME access is enabled at the current EL (including CPACR and CPTR
+    /// traps). Native memory access requires little-endian data, unenforced
+    /// alignment and FEAT_CPA2 disabled; view validation does not check these,
+    /// while the memory preflight checks SA/SA0 and the memory implementation
+    /// profile. The source must be trusted to terminate. Guest memory must be
+    /// disjoint from register storage, the native code, the context, the native
+    /// stack and live Rust references, and its owners must keep host rights
+    /// pinned. There is no signal recovery or unwinding through native code.
     pub unsafe fn execute<P: DataPolicy>(
         &self,
         registers: &mut GuestState,
@@ -193,9 +190,9 @@ impl PreparedScalableLeaf {
                 && scalable.mode() == self.identity.profile.mode(),
             "owned scalable state differs from prepared profile"
         );
-        // SAFETY: The state owner retains all register allocations. The nested
-        // guards restore service pointers before their respective loans expire;
-        // the execution caller supplies disjoint backing and finite execution.
+        // SAFETY: the state owner keeps every register allocation; the guards
+        // restore the service pointers before their borrows expire; the caller
+        // supplies disjoint memory and terminating code.
         unsafe {
             scalable.with_view(|view| {
                 let mut scalable_loan = ContextLoan::scalable(context, view);
@@ -225,8 +222,8 @@ impl PreparedScalableLeaf {
                         pc: GuestAddress(memory_view.fault_pc),
                         completed_bytes: memory_view.completed_bytes,
                     };
-                    // Checked finalization can discard the callback result.
-                    // Retain the original fault before validating its source PC.
+                    // Finalization can discard the callback result, so keep the
+                    // fault before validating its PC.
                     original_fault = Some(fault);
                     ensure!(
                         self.source_map

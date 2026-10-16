@@ -51,8 +51,8 @@ const MOV_EAX_RSP_DISP8: &[u8] = &[0x8b, 0x44, 0x24];
 const MOV_RAX_RSP_DISP8: &[u8] = &[0x48, 0x8b, 0x44, 0x24];
 const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 
-/// One immutable control specialization feeds both consumed-body metadata and
-/// native emission. The checked entry chooses this profile from actual controls.
+/// One control specialization drives both the body's metadata and its emission.
+/// The checked entry selects it from the live controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CheckedOperand {
     operand: Operand,
@@ -264,9 +264,9 @@ fn transfer_data(code: &mut Vec<u8>, data: Data, element_bytes: u8, loading: boo
     }
 }
 
-/// The enclosing checked entry binds full-body requirements and the actual
-/// per-thread memory owner before execution. One callback handles one exclusive
-/// quantity or local CLREX; failures release scratch before returning to it.
+/// The checked entry binds the body's requirements and the thread's memory
+/// owner before execution. Each callback handles one exclusive access or CLREX;
+/// on failure scratch space is released first.
 pub(crate) fn emit_context(
     code: &mut Vec<u8>,
     checked: &CheckedOperand,

@@ -91,7 +91,7 @@ pub struct Operand {
     pub kind: Kind,
 }
 
-/// Reserved RMW operations and odd CASP first registers decline explicitly.
+/// Reserved RMW operations and odd CASP first registers are errors.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let source = register((word >> SOURCE_SHIFT) & REGISTER_MASK, false);

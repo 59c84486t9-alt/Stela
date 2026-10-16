@@ -320,8 +320,8 @@ fn complex_lane(
     }
 }
 
-/// Complete one original instruction. Raw FPCR, unrelated registers and RAM stay intact.
-/// Enabled traps under FA64 retain the existing precise unsupported-control result.
+/// Complete one instruction. Raw FPCR, unrelated registers and RAM are
+/// untouched; with FA64, enabled traps are refused as unsupported controls.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

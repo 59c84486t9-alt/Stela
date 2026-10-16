@@ -73,8 +73,7 @@ const SUBPS: &[u8] = &[0x0f, 0x5c];
 const SHUFPS: &[u8] = &[0x0f, 0xc6];
 const VZEROUPPER: &[u8] = &[0xc5, 0xf8, 0x77];
 
-/// Candidate selection remains explicit so research and production share the
-/// same qualified kernel implementations.
+/// Which native kernels to use.
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::x86_64) struct Recipe {
     pub half_convert: bool,

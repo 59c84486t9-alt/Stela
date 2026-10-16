@@ -219,9 +219,10 @@ fn widened_product(code: &mut Vec<u8>, shape: Shape) {
     );
 }
 
-/// Called only after the exact-product path has restored the caller environment.
-/// Double multiplication of widened Singles is exact (at most 48 bits); the
-/// affine operation must also be exact before the sole target-Single rounding.
+/// Runs only after the exact-product path has restored the caller's
+/// environment. The double product of widened singles is exact (at most 48
+/// bits), and the affine step must also be exact before the single final
+/// rounding.
 fn widened_single_fallback(code: &mut Vec<u8>, operand: &Operand, helper_start: usize) {
     packed(code, Host::MoveAligned, LEFT, SAVED_SINGLE_LEFT);
     constant(code, Format::Double, operand.kind, CONSTANT);
@@ -266,8 +267,8 @@ fn emit_single_double(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress, t
         packed(code, Host::MoveAligned, ORIGINAL_LEFT, LEFT);
         ORIGINAL_LEFT
     } else {
-        // VEX scalar FMA preserves the DEST upper XMM bits, not ADDEND
-        // upper bits (Intel SDM VFNMADD132SS/SD). LEFT still holds original Vn.
+        // VEX scalar FMA keeps the destination's upper XMM bits, not the
+        // addend's (Intel SDM, VFNMADD132SS/SD). LEFT still holds Vn.
         LEFT
     };
     normal_sources(code, operand, &mut helper);

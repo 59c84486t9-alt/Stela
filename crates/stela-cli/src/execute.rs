@@ -68,7 +68,7 @@ pub(crate) struct RunMappedImage {
 #[command(group(clap::ArgGroup::new("software_pauth_context").args(["software_pauth_ib_key", "software_pauth_keys"])))]
 pub(crate) struct RunBlocks {
     input: PathBuf,
-    /// Select native host features or an explicit portable AOT tier.
+    /// Use the host's CPU features, or a portable feature tier.
     #[arg(long,default_value="native",value_parser=parse_cpu_target)]
     cpu_target: stela_compiler::TargetCpu,
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
@@ -83,7 +83,7 @@ pub(crate) struct RunBlocks {
     block_budget: usize,
     #[arg(long, default_value = ".stela/cache/blocks-v1")]
     cache_dir: PathBuf,
-    /// Opt into software IB/SP authentication with explicit {low,high} test keys.
+    /// Enable software IB/SP authentication with the given {low, high} key.
     #[arg(long)]
     software_pauth_ib_key: Option<PathBuf>,
     /// Explicit IA/IB/DA/DB low/high key pairs for the software ARM profile.
@@ -98,7 +98,7 @@ pub(crate) struct RunBlocks {
     /// Explicit immutable guest ARM CSR active flags; never inferred from host policy.
     #[arg(long)]
     csr_active_configuration: Option<u32>,
-    /// Explicit normal guest process ID, shared by its actual thread/task owner.
+    /// Guest process ID, shared by the thread and its task.
     #[arg(long)]
     guest_process_id: Option<u32>,
     /// Explicit guest vm_map_max for ARM TSD sanitization; never inferred from host RAM.
@@ -109,7 +109,7 @@ pub(crate) struct RunBlocks {
     arm_commpage_kernel_page_shift: Option<stela_runtime::commpage::KernelPageSize>,
     #[arg(long, requires = "memory", value_parser = parse_memory_query)]
     read_memory: Vec<MemoryQuery>,
-    /// Explicit finite replay for one reviewed virtual-counter read.
+    /// Replay this virtual-counter sample for clock reads.
     #[arg(long, requires = "software_pauth_context")]
     clock_snapshot: Option<PathBuf>,
     /// Explicitly declare legacy commpage kernel tracing disabled.
@@ -123,15 +123,15 @@ pub(crate) struct RunBlocks {
 /// Darwin trap services that `run-blocks` can own for the guest.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Service {
-    /// Data-only mprotect over owned mappings.
+    /// Data-only mprotect of guest mappings.
     DataVm,
-    /// The declared-unavailable cross-architecture service.
+    /// The cross-architecture query, answered as unavailable.
     Crossarch,
-    /// Queries of the declared-absent shared-region attachment.
+    /// The shared-region query, answered as absent.
     AbsentSharedRegion,
-    /// Host kernel entropy through owned-memory copyout.
+    /// Host entropy copied into guest memory.
     Entropy,
-    /// Mach VM protection of owned current-task data pages.
+    /// Mach VM protection of guest data pages.
     MachVm,
     /// Anonymous guest data allocation through Mach map calls.
     MachVmMap,
@@ -162,7 +162,7 @@ pub(crate) struct ProbeDyldEntry {
     /// Opt into software IB/SP authentication; alone, stop after the first PACIBSP.
     #[arg(long)]
     software_pauth_ib_key: Option<PathBuf>,
-    /// Run the reviewed clock bootstrap through mach_continuous_time's return.
+    /// Run the clock bootstrap until mach_continuous_time returns.
     #[arg(long, requires = "software_pauth_ib_key")]
     bootstrap_clock: bool,
     /// Explicit replay {counter,sleep_ticks}; otherwise use the validated Darwin host clock.
@@ -297,9 +297,9 @@ impl RunLinkedImages {
         };
         thread.registers.x[30] = stop_pc;
         let initial_state = register_json(&thread.registers);
-        // SAFETY: This command explicitly assumes trusted research entry code
-        // and ABI state; every supplied image and the stack remain owned while
-        // serialized dispatch runs. Pending launch/initializer work is excluded.
+        // SAFETY: the user vouches for the entry code and its ABI state. Every
+        // image and the stack stay mapped while dispatch runs, and no pending
+        // loader work is executed.
         let outcome = unsafe {
             images.run(
                 &mut thread,
@@ -405,9 +405,9 @@ impl RunMappedImage {
         }
         thread.registers.x[30] = stop_pc;
         let initial_state = register_json(&thread.registers);
-        // SAFETY: Explicit research execution assumes trusted entry code,
-        // suitable caller-supplied ABI state and data that needs no pending
-        // fixup/import. Owned mappings stay alive throughout serialized dispatch.
+        // SAFETY: the user vouches for the entry code, its ABI state, and data
+        // that needs no pending fixups or imports. The mappings stay alive
+        // throughout dispatch.
         let outcome = unsafe {
             image.run(
                 &mut thread,
@@ -568,8 +568,8 @@ impl RunBlocks {
             cpu_target,
         );
         runtime.register_code(stela_compiler::GuestAddress(guest_base), source)?;
-        // SAFETY: This explicit research command accepts trusted guest code
-        // and caller-provided direct native RAM addresses under its documented ABI.
+        // SAFETY: the user vouches for the guest code and the native RAM
+        // addresses it uses.
         let mut mach_ports = mach_port_services
             .then(|| stela_runtime::mach::HostPorts::new(ADDRESS_SPACE_ID))
             .transpose()?;

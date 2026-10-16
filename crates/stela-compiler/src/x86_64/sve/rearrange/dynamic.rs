@@ -279,8 +279,8 @@ fn table_recipe(
     }
 }
 
-/// Scalar table gathers branch and address stack bytes using guest index values.
-/// Their architectural DIT promise requires an explicitly declared DIT=0 profile.
+/// Scalar table gathers branch on and address stack bytes with guest index
+/// values, which requires a profile declaring DIT clear.
 pub(super) fn requires_explicit_dit_zero(
     operand: Operand,
     length: VectorLength,
@@ -303,7 +303,8 @@ fn emit_table(code: &mut Vec<u8>, op: Table, length: VectorLength, target: Targe
     }
 }
 
-/// SSE2 baseline: full unsigned B/H/S/D bounds check before a bounded gather.
+/// SSE2 baseline: a full unsigned bounds check of B/H/S/D indices before a
+/// bounded gather.
 fn emit_table_unrolled(code: &mut Vec<u8>, op: Table, length: VectorLength, target: TargetCpu) {
     let width = op.element_size.bytes();
     assert!(width <= QWORD_BYTES);
@@ -345,10 +346,9 @@ fn broadcast_byte(code: &mut Vec<u8>, value: u8, destination: u8, target: Target
     code.push(FIRST_DWORD);
 }
 
-/// Selected checked byte shuffle. Every
-/// PSHUFB is paired with an explicit unsigned relative-index <16 mask. Thus
-/// indices 16..127 cannot wrap, and TBL2 at SVL256 cannot address its upper table
-/// using byte indices. The scalar baseline covers full-width H/S/D indices.
+/// PSHUFB with every index masked to below 16, so indices 16-127 cannot wrap
+/// and two-table TBL at a 256-bit vector length cannot reach the upper table
+/// through byte indices. The scalar baseline handles full-width H/S/D indices.
 fn emit_table_ssse3(code: &mut Vec<u8>, op: Table, length: VectorLength, target: TargetCpu) {
     assert_eq!(op.element_size, ElementSize::Byte);
     assert!(target.supports(TargetCpu::Ssse3));

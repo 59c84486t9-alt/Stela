@@ -5,8 +5,7 @@ fn actual_system() -> SystemState {
     SystemState::new(PSTATE_EL1H, 0, El1Registers::new(0, 0, 0, 0, 0)).unwrap()
 }
 
-// These are genuinely initialized immutable test declarations, never a
-// changed live PE or copied mutable control bank. No execution authority.
+// A test declaration of the controls.
 fn declared_pair_profile(mmfr2: Option<u64>) -> El1PlatformControls {
     let base = El1PlatformControls::declared_base().unwrap();
     let mut fields = [
@@ -31,8 +30,8 @@ fn declared_pair_profile(mmfr2: Option<u64>) -> El1PlatformControls {
         identification: Snapshot::declared("authored-pair-read-negative-identification", &fields)
             .unwrap(),
         security: SecurityImplementation::NonSecureOnly,
-        // Descriptive original absence tuple is not a substitute for the
-        // actual Snapshot: context() must independently recheck it.
+        // The absence tuple alone is not enough: `context()` re-checks the
+        // snapshot.
         entry: base.entry,
     }
 }

@@ -53,8 +53,8 @@ fn fixed_bits_never_accept_another_arrangement_or_scalar_form() {
             if mask & (1 << bit) != 0 {
                 let changed = base ^ (1 << bit);
                 if let Some(Ok(other)) = decode(changed) {
-                    // A changed opcode can select another canonical I8MM form,
-                    // but must not retain the original semantic kind.
+                    // A changed opcode may select another I8MM form, but never
+                    // the same kind.
                     assert_ne!(other.kind, decode(base).unwrap().unwrap().kind);
                 }
             }

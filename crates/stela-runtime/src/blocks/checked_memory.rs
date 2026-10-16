@@ -89,14 +89,14 @@ pub(super) unsafe fn call(
         context.has_supported_header(),
         "unsupported checked execution context"
     );
-    // Preserve the existing source/execution boundary authority. Memory-policy
-    // eligibility cannot replace IL, execution-state, debug/step or source gates.
+    // Entry validation still applies; memory-policy eligibility does not bypass
+    // the execution-state, debug-step or source checks.
     if let Err(failure) = dispatcher.validate_entry(boundary, source, registers) {
         return Ok(CheckedReturn::CpuDeclined(failure));
     }
-    // The actual CPU/backend owner validates dynamic SystemState plus its fixed
-    // immutable control declaration and refreshes this exact thread's policy.
-    // No GuestState reference survives in the returned opaque borrow.
+    // The backend validates the dynamic system state against its fixed controls
+    // and refreshes this thread's policy. No GuestState reference escapes in
+    // the returned borrow.
     let process_memory =
         match dispatcher.prepare_memory_entry(boundary, source, requirements, registers) {
             Ok(entry) => entry,
@@ -119,8 +119,8 @@ pub(super) unsafe fn call(
     let mut raw_returned_carrier = None;
     let mut raw_memory = None;
     let mut callback_failure = None;
-    // SAFETY: source/target/CPU/policy/storage preflight is complete. Both guards
-    // restore their scoped view before owner loans expire, including errors.
+    // SAFETY: source, target, CPU, policy and storage are validated. Both
+    // guards restore their views before the borrows end, including on error.
     let finalized = unsafe {
         process_memory.with_view(|view| {
             callback_started = true;
@@ -184,9 +184,9 @@ pub(super) unsafe fn call(
             observed_exit,
             raw_returned_carrier,
         },
-        // Only a refusal before the callback is a component entry decline.
-        // After the callback starts, finalizer errors preserve all observations
-        // and the canonical consumer poisons the unresolved actual attempt.
+        // Only a refusal before the callback starts is an entry decline. After
+        // that, finalizer errors keep every observation, and the consumer marks
+        // the attempt failed.
         Err(status) if !callback_started => CheckedReturn::EntryDeclined(status),
         Err(status) => CheckedReturn::FinalizationFailed {
             status,

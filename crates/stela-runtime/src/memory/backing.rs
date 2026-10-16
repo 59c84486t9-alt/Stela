@@ -151,17 +151,17 @@ impl MemoryBacking {
     /// Bind a native mapping to a stable physical identity and lifetime owner.
     ///
     /// # Safety
-    /// `host_base..host_base + bytes` must remain one live native storage extent
-    /// with a stable address until the last retained backing/access is dropped.
-    /// `lifetime_owner` must retain that storage; an unrelated token is not enough.
-    /// Storage must be coherent Normal-WB RAM. MMIO and device mappings are not
-    /// admitted by this native backing contract.
-    /// Host rights must support every permitted data read/write and guest execute
-    /// must permit reading instruction bytes. They must not be revoked while any
-    /// retained access can execute. Never bind storage subject to incompatible
-    /// Rust reference aliasing. All accesses, including external aliases, must
-    /// obey one synchronization/fault contract; this constructor enforces none.
-    /// Each physical storage must have one backing owner, shared by every alias.
+    /// `host_base..host_base + bytes` must stay one live native extent at a
+    /// stable address until the last backing or access is dropped, and
+    /// `lifetime_owner` must keep that storage alive. The storage must be
+    /// coherent write-back RAM, not MMIO or device memory. Host rights must
+    /// allow every permitted data read and write, guest execute must allow
+    /// reading instruction bytes, and these rights must not be revoked while
+    /// any access can run. Never bind storage that incompatible Rust references
+    /// alias. Every access, including through external aliases, must follow one
+    /// synchronization and fault contract, which this constructor does not
+    /// enforce. Each physical storage has exactly one backing, shared by all
+    /// its aliases.
     pub unsafe fn new<O: Send + Sync + 'static>(
         host_base: NonNull<u8>,
         bytes: usize,
@@ -171,16 +171,15 @@ impl MemoryBacking {
         Self::construct(host_base, bytes, maximum_permissions, lifetime_owner)
     }
 
-    /// Canonical owner-managed host rights over one stable physical identity.
+    /// A backing whose host rights are managed by its owner.
     ///
     /// # Safety
-    /// The real storage owner retains this extent and excludes all native access
-    /// through the same domain's execution/service loans before changing rights.
-    /// Every current view and host publication must validate the actual current
-    /// rights. Maximum permissions are the immutable owner authorization, not
-    /// permission to access a protected page. Do not expose this backing to an
-    /// independently constructed domain/view or raw consumer. The original
-    /// constructor's alias, storage, coherence and reference rules still apply.
+    /// The storage owner keeps this extent alive and excludes all native access
+    /// through the domain's execution and service borrows before changing
+    /// rights. Every view and host publication validates the current rights;
+    /// the maximum permissions are an upper bound, not permission to access a
+    /// protected page. Do not give this backing to another domain, view or raw
+    /// consumer. The rules of `new` also apply.
     pub(in crate::memory) unsafe fn new_managed<O: Send + Sync + 'static>(
         host_base: NonNull<u8>,
         bytes: usize,
@@ -209,8 +208,7 @@ impl MemoryBacking {
             host_base,
             bytes,
             maximum_permissions,
-            // Fresh software-owned physical storage begins with zero tags.
-            // This policy does not initialize native RAM or import hardware tags.
+            // New software-owned storage starts with zero tags.
             allocation_tags: TagStore::new(bytes, AllocationTag::ZERO)
                 .map_err(|_| AccessError::EmptyRange)?,
             coherence: Mutex::new(None),
@@ -282,9 +280,9 @@ impl MemoryBacking {
     }
 }
 
-/// One logical guest mapping generation over part of a physical backing.
-/// Replacing a mapping or changing its rights creates a new view, even when the
-/// backing and guest address remain unchanged. Retire the old view explicitly.
+/// One generation of a guest mapping over part of a backing. Replacing the
+/// mapping or changing its rights creates a new view even when the backing and
+/// address are unchanged; the old view must be retired explicitly.
 #[derive(Debug)]
 pub struct MemoryView {
     id: MappingId,

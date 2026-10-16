@@ -65,7 +65,7 @@ fn context_publication_rejects_other_same_profile_cache_before_fetch() {
     let InstalledSource::El1(installed) = machine.installed else {
         panic!("actual platform owner absent")
     };
-    // Moving the installed owner retains its original cache allocation.
+    // Moving the installed owner keeps its cache allocation.
     installed
         .into_executable_scope(&ConsumerKey(()), |runtime, sources, controls| {
             let outer = memory.execution_loan().unwrap();

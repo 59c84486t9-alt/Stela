@@ -118,8 +118,8 @@ impl Operand {
         operand.is_valid().then_some(operand)
     }
 
-    /// Same staging/request emitter, distinct M0 Device requirements. SP and
-    /// non-temporal/scalar forms remain outside this producer's actual owner.
+    /// The same emitter with M0 Device requirements. SP-based, non-temporal and
+    /// scalar forms are not produced here.
     pub(crate) fn from_m0_write_pair(operation: &Operation) -> Option<Self> {
         let Operation::MemoryPair {
             transfer: MemoryTransfer::Store,
@@ -231,11 +231,11 @@ impl Operand {
     }
 }
 
-/// Loads require the canonical readonly16 snapshot capability conservatively.
-/// Variable X-pair stores can reach one 16-byte quantity and require CX16
-/// before effects. With checked SP16 and a fixed offset of 8 modulo16, Offset
-/// and PreIndex can only reach two 8-byte halves. PostIndex uses original SP.
-/// Disabled SP checks supply no alignment proof: every X pair requires CX16.
+/// Loads conservatively require the 16-byte read-only snapshot. X-register pair
+/// stores that may reach one 16-byte quantity need CMPXCHG16B first. With SP
+/// alignment checked and an offset of 8 modulo 16, offset and pre-index forms
+/// touch two separate 8-byte halves; post-index uses the unmodified SP. Without
+/// SP checks every X pair needs CMPXCHG16B.
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     let required_flags = operand.flags();
     if matches!(
@@ -263,8 +263,8 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
         required_address_checks: profile.address_requirements(false),
         required_flags,
         required_host_caps: if matches!(operand.transfer, MemoryTransfer::Load { .. }) {
-            // Dynamic read parts can cross aligned8 within SCA16. The canonical
-            // readonly16 snapshot capability is independent of store CX16.
+            // Reads may cross an 8-byte boundary within a 16-byte quantity. The
+            // read-only snapshot capability is separate from CMPXCHG16B.
             host_caps::ATOMIC_LOAD16
         } else if operand.bytes == DOUBLEWORD_BYTES
             && (operand.base != Register::Sp

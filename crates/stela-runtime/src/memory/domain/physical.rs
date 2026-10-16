@@ -15,16 +15,14 @@ pub(in crate::memory) use mutable_source::RegionReload;
 const DESCRIPTOR_BYTES: usize = 8;
 const DESCRIPTOR_ALIGNMENT_MASK: u64 = DESCRIPTOR_BYTES as u64 - 1;
 
-/// The original opaque binding owns explicit PA placements and their exact
-/// backing/view generations. Arbitrary logical domains cannot be promoted.
+/// Owns the physical address placements and their backing and view generations.
 pub struct PhysicalAddressSpace {
     domain: Arc<MemoryDomain>,
     binding: SourcePhysicalRamBinding,
 }
 
-/// Descriptor-only view of the original physical domain and retained invocation.
-/// Private references cannot acquire another exclusion, replace a domain, or
-/// detach physical reads from the actual outer loan's lifetime.
+/// Descriptor reads of the physical domain, tied to the lifetime of the outer
+/// borrow.
 pub(crate) struct BorrowedDescriptors<'loan> {
     physical: &'loan PhysicalAddressSpace,
     execution: &'loan MemoryExecutionLoan,
@@ -78,8 +76,7 @@ impl PhysicalAddressSpace {
         Ok(physical)
     }
 
-    /// Borrow this original domain to construct the fresh machine's actual
-    /// Thread/Active. It remains physical-role and denies generic data callbacks.
+    /// The domain, for constructing the new machine's thread and consumer.
     pub(crate) fn domain(&self) -> &Arc<MemoryDomain> {
         &self.domain
     }
@@ -87,10 +84,8 @@ impl PhysicalAddressSpace {
         self.binding.layout()
     }
 
-    /// One construction loan for the fresh installed-source owner before its
-    /// first PE exists. The constructor retains this through original source
-    /// fetch and runtime registration. This loan alone proves no Initial phase
-    /// or PE authority; current Active paths must borrow their retained outer.
+    /// One construction borrow for the installed-source owner before any PE
+    /// exists, held through the initial source fetch and registration.
     pub(crate) fn initial_source_execution_loan(
         &self,
     ) -> Result<MemoryExecutionLoan, PhysicalReadPlatformError> {
@@ -102,9 +97,8 @@ impl PhysicalAddressSpace {
         Ok(execution)
     }
 
-    /// Metadata-only health/current-binding observation. This does not pin
-    /// rights or authorize byte access; a caller reading bytes must retain and
-    /// separately validate its actual same-domain execution loan.
+    /// Check health and the current binding from metadata only; byte reads must
+    /// hold and validate their own execution borrow.
     fn check_source_binding(&self) -> Result<(), PhysicalReadPlatformError> {
         self.domain
             .check_execution()
@@ -124,8 +118,7 @@ impl PhysicalAddressSpace {
         Ok(())
     }
 
-    /// Membership/health only; exact original Thread/PE/outer-object identity is
-    /// retained separately by the canonical Active and installed-source witness.
+    /// Check domain membership and health.
     pub(crate) fn check_execution_loan(
         &self,
         execution: &MemoryExecutionLoan,
@@ -157,9 +150,7 @@ impl PhysicalAddressSpace {
     ) -> Result<PhysicalRamReadPin<'loan>, PhysicalReadPlatformError> {
         self.resolve_ram_scalar(execution, physical_address, DESCRIPTOR_BYTES as u8)
     }
-    /// Resolve only the exact naturally aligned scalar footprint. The original
-    /// physical factory, source loan and retained outer establish permission;
-    /// an integer width or numeric physical address never grants access.
+    /// Resolve exactly the naturally aligned scalar footprint.
     pub(crate) fn resolve_ram_scalar<'loan>(
         &'loan self,
         execution: &'loan MemoryExecutionLoan,
@@ -203,9 +194,8 @@ impl PhysicalAddressSpace {
             bytes,
         })
     }
-    /// Borrow physical descriptor reads under the actual retained outer loan.
-    /// Membership/current binding is checked now and on every reached read;
-    /// this grants no CPU, source publication, control or retirement authority.
+    /// Borrow physical descriptor reads under the outer borrow. Membership and
+    /// binding are checked now and on every read.
     pub(crate) fn borrow_descriptors<'loan>(
         &'loan self,
         execution: &'loan MemoryExecutionLoan,
@@ -217,8 +207,8 @@ impl PhysicalAddressSpace {
         })
     }
 
-    /// Reuse the exact supplied physical invocation through one descriptor read.
-    /// No nested loan/execution exclusion or virtual lookup is created here.
+    /// One descriptor read using the supplied invocation; no nested borrow or
+    /// virtual lookup.
     fn read_descriptor_with_loan(
         &self,
         execution: &MemoryExecutionLoan,
@@ -278,11 +268,10 @@ impl PhysicalAddressSpace {
                 "physical descriptor mapping has been retired",
             ));
         }
-        // SAFETY: genuine private source-RAM materialization and PA/native
-        // alignment establish the exact eight-byte coherent host-RAM footprint.
-        // The actual same-domain execution loan excludes host-rights changes;
-        // every current source-bound view/backing remains pinned through the read.
-        // Host storage properties confer no guest data-memory attribute grant.
+        // SAFETY: materialized source RAM and the alignment checks establish an
+        // 8-byte coherent host-RAM footprint. The execution borrow excludes
+        // rights changes, and the source views and backings stay pinned through
+        // the read.
         let value = unsafe { access::read_part(pointer, DESCRIPTOR_BYTES, self.domain.target) }
             .map_err(|_| {
                 PhysicalReadError::Platform("physical descriptor native read is unsupported")
@@ -300,7 +289,7 @@ impl PhysicalAddressSpace {
 
 impl PhysicalMemory for PhysicalAddressSpace {
     fn read_descriptor(&self, physical_address: u64) -> Result<u64, PhysicalReadError> {
-        // Preserve standalone refusal order: alignment precedes acquiring a loan.
+        // Check alignment before taking a borrow, as the standalone path does.
         if physical_address & DESCRIPTOR_ALIGNMENT_MASK != 0 {
             return Err(PhysicalReadError::Platform(
                 "physical descriptor address is not aligned to eight bytes",
@@ -345,12 +334,11 @@ pub(crate) use stores::{
     prepare_aligned_device_ram8_or_pair,
 };
 
-// Fixture-only original RAM observations; no guest access permission.
+// Raw RAM observations for tests.
 #[cfg(test)]
 mod source_diagnostic;
 
-// These fixture-only operations grant no memory access or CPU/source authority.
-// The original owner remains installed and must reject stale/conflicting entry.
+// Test-only operations.
 #[cfg(all(
     test,
     target_arch = "x86_64",

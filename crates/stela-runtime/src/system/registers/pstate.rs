@@ -12,8 +12,8 @@ use stela_compiler::GuestState;
 
 const ZERO_REGISTER: u8 = 31;
 
-/// An unapplied effect. Constructing one is not architectural access permission.
-/// Optional effects must reach their actual owner, never a successful bit store.
+/// An unapplied effect. Optional effects must reach their owner, never a plain
+/// bit store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
     Nzcv { value: u32 },
@@ -34,10 +34,9 @@ pub enum CommitError {
     BackendRequired,
 }
 
-/// Resolve against actual flags, PSTATE and the sole inactive stack owner.
-/// TLS values have no owner here: reads retain the leaf's explicit Unsupported,
-/// and writes remain StateWrite for the facade's explicit typed owner conversion.
-/// NotHandled is a family miss, not proof of architectural UNDEFINED.
+/// Resolve against the flags, PSTATE and the inactive stack pointers. TLS reads
+/// stay unsupported here and TLS writes stay StateWrite for the typed owner.
+/// NotHandled is a family miss, not proof of UNDEFINED.
 pub fn resolve(
     request: Request,
     context: &Context,

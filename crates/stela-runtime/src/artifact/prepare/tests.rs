@@ -57,7 +57,7 @@ fn fixture() -> (Identity, Manifest, &'static [u8]) {
         target_cpu: "x86 baseline".into(),
         memory_specialization_sha256: None,
     };
-    // Descriptive cache fixture only; these bytes are never mapped/executed.
+    // These bytes are never mapped or executed.
     let native = b"immutable original native snapshot";
     let manifest = Manifest {
         identity: identity.clone(),

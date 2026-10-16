@@ -253,8 +253,7 @@ fn directed_pair_inputs_use_the_common_decoder_and_stage_whole_architectural_suc
         let bytes = case.source();
         let word = u32::from_le_bytes(bytes[..4].try_into().unwrap());
         let instruction = Decoder.lift(SOURCE_PC, word).unwrap();
-        // The authentic source metadata reuses this SAME common decoder. This
-        // typed descriptor is descriptive only; no source/control loan is minted.
+        // The source metadata uses the same decoder.
         let source = M0ReadPairSource::from_source(&instruction, word).unwrap();
         let before = case.before();
         let intent = source.intent(&before);
@@ -376,8 +375,8 @@ pub(crate) fn rejected_sources() -> [(&'static str, u32); 7] {
 #[test]
 fn actual_pair_metadata_declines_outside_source_scope_and_copied_instruction() {
     for (name, word) in rejected_sources() {
-        // Constrained policy may yield NOP or reject the original encoding.
-        // Neither case authorizes this pair-read producer to reinterpret it.
+        // Constrained policy may give NOP or reject the encoding; neither lets
+        // this producer reinterpret it.
         if let Ok(instruction) = Decoder.lift(SOURCE_PC, word) {
             assert!(
                 M0ReadPairSource::from_source(&instruction, word).is_err(),

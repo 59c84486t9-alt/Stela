@@ -45,9 +45,8 @@ mod thread_sealed {
     }
 }
 
-/// Readonly currency for the ORIGINAL backend MemoryThread, never a caller
-/// implementation, copied ASID or identity label. The object borrows the actual
-/// MemoryThread<P> and erases only its policy type; no policy callback is invoked.
+/// Read-only access to the backend's memory thread, with its policy type
+/// erased.
 pub(super) trait M0ThreadCurrency: thread_sealed::ActualMemoryThread {
     fn validate_outer(&self, outer: &MemoryExecutionLoan) -> anyhow::Result<()>;
     fn actual_address_space(&self) -> Option<u64>;
@@ -63,12 +62,11 @@ impl<P: DataPolicy> M0ThreadCurrency for MemoryThread<P> {
     }
 }
 
-/// Opaque source input minted only by the actual NativeActive path below.
-/// This retains the original immutable System/source and SAME outer loan, but
-/// no GuestState, actual-PC, PeAuthority or mutable-backend borrow. Copied intent
-/// and PSTATE describe the actual pre-read registers sampled under that loan.
-/// Installed CPU/context/physical currency is a separate mandatory producer
-/// check; validate_source_current does not establish it.
+/// Source input created only by the native-session path below. It holds the
+/// system state, source and outer borrow, but no guest state or mutable
+/// backend. The copied intent and PSTATE are the pre-read registers sampled
+/// under that borrow. The installed context must be checked separately;
+/// `validate_source_current` does not do it.
 pub(crate) struct M0SourceInput<'source, 'native> {
     bound: &'source BoundSource<'source>,
     system: &'native SystemState,
@@ -86,9 +84,8 @@ enum M0SourceIntent {
     PairRead(M0ReadPairIntent),
 }
 
-/// Same original source/currency input, restricted to an actual write descriptor.
-/// Only checked Active may construct this with the sealed ConsumerKey. No CPU,
-/// source, outer or thread reference is replaced by copied metadata.
+/// The same input, for a write descriptor. Only the checked consumer constructs
+/// it.
 pub(crate) struct M0WriteSourceInput<'source, 'native> {
     original: M0SourceInput<'source, 'native>,
 }
@@ -137,14 +134,13 @@ impl<'source, 'native> M0WriteSourceInput<'source, 'native> {
     }
 }
 
-/// Actual pair input; only original Active lends platform identification.
-/// Copying descriptive intent cannot mint this sealed same-PE source loan.
+/// Input for a pair read; the consumer lends the platform identification.
 pub(crate) struct M0PairReadSourceInput<'source, 'native> {
     original: M0SourceInput<'source, 'native>,
     platform: &'native super::el1_system::El1PlatformControls,
 }
 impl<'source, 'native> M0PairReadSourceInput<'source, 'native> {
-    // Explicit original resources are split borrows of one retained PE.
+    // The resources are split borrows of one PE.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement::checked) fn new(
         _: &ConsumerKey,
@@ -243,10 +239,8 @@ impl M0SourceInput<'_, '_> {
         self.bound.source
     }
 
-    /// Authority/platform currency only, not an architectural data fault.
-    /// SAME-domain membership is checked on the actual immutable thread object
-    /// retained from the sealed backend's original field at the sole mint below.
-    /// No external caller can substitute another same-domain MemoryThread.
+    /// Check that the thread is still the PE's own memory thread (not an
+    /// architectural fault).
     pub(crate) fn validate_thread_current(&self) -> anyhow::Result<()> {
         self.thread.validate_outer(self.outer)?;
         anyhow::ensure!(
@@ -256,10 +250,8 @@ impl M0SourceInput<'_, '_> {
         Ok(())
     }
 
-    /// Compare a genuine fresh installed-context fetch to the SINGLE original
-    /// CodeRegion physical registration. No copied source registry or snapshot.
-    /// Same-domain/System/ASID qualification remains the source/control/PA
-    /// producer's mandatory check against actual outer and actual MemoryThread.
+    /// Compare a fresh fetch from the installed context with the code region's
+    /// physical registration.
     pub(crate) fn validate_installed_fetch(
         &self,
         scope: &InstalledM0SourceScope<'_>,
@@ -291,9 +283,8 @@ impl M0SourceInput<'_, '_> {
             .map_err(|reason| anyhow::anyhow!(reason))
     }
 
-    /// Recheck the retained logical source/RX/plan association. This never
-    /// substitutes for genuine installed-context instruction re-fetch or an
-    /// actual CPU/control/physical-space witness. No metadata grants access.
+    /// Re-check the logical source, native-code and plan association. This does
+    /// not replace re-fetching the instruction.
     pub(crate) fn validate_source_current(&self) -> anyhow::Result<()> {
         self.validate_thread_current()?;
         anyhow::ensure!(
@@ -356,10 +347,9 @@ impl M0SourceInput<'_, '_> {
     }
 }
 
-/// Drop order is architectural: poison the ORIGINAL PE in Drop's body BEFORE
-/// releasing the owned session fields (Device mutex/pins). This covers invoke
-/// panic, typed fault, validation/precommit error and every early return. No
-/// replacement authority or ready-on-drop behavior is introduced.
+/// Drop marks the PE failed before releasing the session's fields (the Device
+/// mutex and pins), covering panics, faults, validation errors and early
+/// returns.
 struct RetainedM0Session<'active, S> {
     authority: &'active mut PeExecutionAuthority,
     session: S,
@@ -379,7 +369,7 @@ impl<S> Drop for RetainedM0Session<'_, S> {
         if !self.closed {
             self.authority.poison();
         }
-        // session fields release only after this body's actual failstop store.
+        // The session fields are released only after the PE is marked failed.
     }
 }
 
@@ -391,8 +381,7 @@ pub(super) enum M0Step {
     Indeterminate(String),
 }
 
-/// Owned output only. Preserve the genuine report before fallible validation;
-/// it never supplies a source, exception-delivery, retry or commit capability.
+/// Owned output, recorded before any fallible validation.
 pub(crate) enum M0Observation {
     SourceResourceFailure {
         source_pc: GuestAddress,
@@ -428,9 +417,9 @@ impl M0Observation {
     }
 }
 
-/// Only this actual Active path creates the paired commit. Session borrows
-/// retain the genuine control/input/scope and physical pins; checks retain the
-/// original execution/closed-producer/thread resources. No whole-B reborrow.
+/// Created only by the consumer. The session borrows its controls, input, scope
+/// and physical pins; the checks borrow the execution, producer and thread
+/// resources.
 struct PreparedM0Commit<'commit, 'code, C, S> {
     authority: NativeRetirementCommit<'commit>,
     actual_thread: &'commit mut ThreadState,
@@ -484,9 +473,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             "M0 requirements differ"
         );
         let intent = source.intent(&self.pe.thread.registers);
-        // The whole-B loan is split ONCE. Never access B again while any of
-        // these original field loans is live. Outer Active stays armed through
-        // all opaque producer/session teardown, including after Ready.
+        // Split the backend once and do not touch `B` again while these borrows
+        // are live. The outer consumer stays active through teardown, even
+        // after a ready result.
         let result = {
             let provider::M0ExecutionResources {
                 sources,
@@ -543,8 +532,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     return Ok(M0Step::PreparationBlocked);
                 }
             };
-            // Own the NO-READ session under ORIGINAL authority BEFORE invoke.
-            // Errors and panic poison before physical pin/order resources drop.
+            // Hold the session in the failure guard before the call, so an
+            // error or panic marks the PE failed before the pins are released.
             let mut retained = RetainedM0Session {
                 authority: &mut *self.pe.authority,
                 session,
@@ -564,8 +553,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 settlement_failure: None,
             });
             if !valid_report {
-                // The genuine report is already owned by output. Diagnostic
-                // formatting may allocate or panic; it cannot erase the report.
+                // The report is already in the output; formatting may allocate
+                // or panic without losing it.
                 let detail = match observation.as_ref() {
                     Some(M0Observation::Native { report, .. }) => format!(
                         "M0 native report incomplete: invoked={}; completed={}; callback={:?}; failure={:?}; carrier={:?}",
@@ -627,8 +616,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 }
             };
             if let Err(failure) = retained.session.precommit() {
-                // Move the actual typed error into retained output BEFORE any
-                // fallible diagnostic formatting, without Clone or conversion.
+                // Move the typed error into the output before any fallible
+                // formatting.
                 let detail = match observation {
                     Some(M0Observation::Native {
                         precommit_failure, ..
@@ -648,8 +637,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 M0Observation::retain_settlement_failure(observation, &error);
                 return Err(error);
             }
-            // Mint the borrowed authority token directly, never return it from
-            // a closure that also captures the retained mutable authority loan.
+            // Create the borrowed token directly rather than returning it from
+            // a closure that also captures the mutable borrow.
             let authority = match retained
                 .authority
                 .prepare_native_commit(&ConsumerKey(()), self.attempt)

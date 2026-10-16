@@ -20,9 +20,8 @@ impl ScalableControls {
         }
     }
 
-    /// Declare effective indirect FPMR access after all applicable EnFPM
-    /// controls have been resolved for the actual guest EL/host configuration.
-    /// FPMR readback and FEAT_FP8 availability do not grant this permission.
+    /// Set the effective FPMR access after resolving every applicable EnFPM
+    /// control. FPMR readback and FEAT_FP8 do not imply it.
     pub const fn with_fpmr_enabled(mut self, enabled: bool) -> Self {
         self.fpmr_enabled = enabled;
         self

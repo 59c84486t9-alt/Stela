@@ -18,7 +18,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         Table::Discard.emit(code);
         return;
     }
-    // Both original inputs are staged before writing the W destination.
+    // Both inputs are staged before W is written.
     load(code, operand.accumulator);
     right_operand(code, operand.data, Width::X64, Shift::Lsl, 0);
     if operand.polynomial == Polynomial::Castagnoli && target.supports(TargetCpu::Sse42) {

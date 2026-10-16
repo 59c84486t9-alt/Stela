@@ -104,8 +104,8 @@ impl<'loan, 'run> InstalledWalkedSource<'loan, 'run> {
                 aligned: true,
             },
         );
-        // Health is requalified even after a canonical architectural failure;
-        // poisoned platform state must not masquerade as guest exception entry.
+        // Health is re-checked even after an architectural failure, so a failed
+        // platform cannot look like a guest exception.
         self.check_current()?;
         result.map_err(|error| match error {
             stage1::TranslationError::Fault(fault) => FetchFailure::Architectural(fault),

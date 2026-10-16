@@ -1,10 +1,7 @@
 use super::*;
 
-// Original PACIBSP/AUTIBSP under explicitly enabled Unicorn 2.1.4 MAX,
-// QARMA5/PAuth1 and VA47/instruction-TBI-off. These are public fixed test
-// keys, never production context material. Source/controls are retained in
-// .stela/research/pac-implementation/oracle-ib-vectors.json.
-// Fixture SHA256: 577f508d22a8807b01cbf87a11d606169617f710b501edba0c9177231b417dcd
+// PACIBSP/AUTIBSP vectors recorded from Unicorn 2.1.4 (CPU max, QARMA5, PAuth1,
+// VA47, instruction TBI off) with public test keys.
 const POINTERS: [u64; 4] = [0x0, 0x1400, 0x7fffffffffff, 0x123456789abc];
 const MODIFIERS: [u64; 4] = [0x0, 0x2000, 0xffffffffffffffff, 0x123456789abcdef];
 const IB_VECTORS: [([u64; 2], [u64; 16]); 4] = [
@@ -114,9 +111,8 @@ fn original_enabled_arm_ib_vectors_match_and_round_trip() -> Result<()> {
     Ok(())
 }
 
-// Independent nibble-array ASL reference; full64 is mathematical evidence,
-// while its upper32 was additionally checked using original PACGA.
-// oracle-full64-asl.json SHA256: 9c5147fc8dde0cdf8580997d3213e0930f8da99a60578ad72b771db3af9523b2
+// Independent nibble-array implementation of the Arm pseudocode; the upper 32
+// bits were also checked against original PACGA.
 #[test]
 fn full64_qarma5_matches_independent_nibble_asl_vectors() {
     let vectors = [
@@ -291,9 +287,9 @@ fn null_upper_region_and_invalid_extensions_follow_classic_math() -> Result<()> 
             }
         );
     }
-    // The exact June ASL invalid-extension corruption is PAC bit62.
-    // Installed Unicorn's older helper flips bit63 instead; canonical
-    // vectors above agree, while these cases deliberately follow June ASL.
+    // The Arm pseudocode corrupts PAC bit 62 for an invalid extension;
+    // Unicorn's older helper flips bit 63 instead. The vectors above agree;
+    // these cases follow the pseudocode.
     for bit in 47..64 {
         for pointer in [(1u64 << bit) | 0x1400, !(1u64 << bit) & !0x1234] {
             let extension = pointer >> 47;

@@ -34,11 +34,12 @@ struct Storage {
 }
 // SAFETY: raw allocation owner lends no Rust references to the bytes.
 unsafe impl Send for Storage {}
-// SAFETY: every byte access in this fixture uses the same coherent domain.
+// SAFETY: every byte access in this fixture goes through the same coherent
+// domain.
 unsafe impl Sync for Storage {}
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: this owner retains the original allocation and layout.
+        // SAFETY: this owner keeps its allocation and layout.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
@@ -135,7 +136,7 @@ fn reservation_survives_scoped_policy_return_error_decline_and_unwind() {
                 Some(&endpoint),
             )
             .unwrap();
-        // SAFETY: actual checked service component invocation with stable RAM.
+        // SAFETY: a checked service call over stable RAM.
         let loaded =
             unsafe { entry.with_view(|view| transfer(view, ExclusiveOperation::Load)) }.unwrap();
         assert_eq!(loaded.value, [0; 2]);

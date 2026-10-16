@@ -226,11 +226,9 @@ fn every_retained_exception_enable_refuses_even_early_return_values() {
 
 #[test]
 fn all_positive_finite_half_values_match_independent_double_sqrt_and_packing() {
-    // Component oracle only: correctly rounded host Double sqrt is much
-    // farther from any Half midpoint than its own error bound. Dyadic
-    // square-grid separation also prevents reaching a Half endpoint unless
-    // the root is exact, including directed packing after nearest Double.
-    // Original ARM evidence is separate.
+    // Host double sqrt is correctly rounded and far from any half-precision
+    // midpoint, and dyadic separation keeps it from reaching a half endpoint
+    // unless the root is exact, so it is an exact reference here.
     for input in 0..Format::Half.infinity(false) {
         let mut loses = false;
         let wide: StatusAnd<Double> =

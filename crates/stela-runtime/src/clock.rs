@@ -174,8 +174,8 @@ impl Context {
             self.events.len() < MAX_COUNTER_EVENTS,
             "clock diagnostic event budget exhausted"
         );
-        // Reserve before sampling/publication so failure cannot publish a sample
-        // without its record. Typical bounded probes need only two records.
+        // Reserve the record first so a failure cannot publish a sample without
+        // recording it.
         self.events.try_reserve(1)?;
         let sample = self.source.sample()?;
         validate(sample, Some(self.snapshot()))?;

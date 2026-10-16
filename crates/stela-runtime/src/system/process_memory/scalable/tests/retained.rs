@@ -43,9 +43,9 @@ impl<'a> RetainedEntry<'a> {
         }
     }
     pub(super) fn execute(&mut self) -> Result<ScalableLeafExit, ScalableExecutionError> {
-        // SAFETY: exclusive Fixture borrow retains its pinned disjoint backing,
-        // actual Snapshot, same domain and fixed finite prepared source. Native
-        // entry is synchronous; no external raw writer or state alias exists.
+        // SAFETY: the exclusive fixture borrow keeps its pinned disjoint
+        // backing, the snapshot, the domain and the fixed prepared source.
+        // Native entry is synchronous, with no raw writer or state alias.
         unsafe {
             self.controls.execute_scalable_leaf(
                 &self.access,

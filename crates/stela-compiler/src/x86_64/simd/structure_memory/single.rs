@@ -20,7 +20,8 @@ const ECX: u8 = 1;
 const MOVD_XMM0_ECX: [u8; 4] = [0x66, 0x0f, 0x6e, 0xc1];
 const REPEAT_LOW_ELEMENT: u8 = 0;
 
-/// RAX is the original address; RDX pending writeback and RDI state survive.
+/// RAX is the address; the pending writeback in RDX and the state in RDI
+/// survive.
 pub(super) fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     match operand.layout {
         Layout::Lane { structures, index } => lane(code, operand, structures, index),

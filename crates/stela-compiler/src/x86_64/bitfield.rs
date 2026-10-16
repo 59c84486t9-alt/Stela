@@ -58,8 +58,8 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 
     if operand.kind == Kind::Insert {
         let field_mask = (u64::MAX >> (64 - field_width)) << destination_shift;
-        // No guest destination has been committed: source and destination may
-        // alias. RCX receives the original destination after staging the source.
+        // Nothing has been written yet, so source and destination may alias.
+        // RCX receives the old destination after the source is staged.
         right_operand(code, operand.destination, Width::X64, Shift::Lsl, 0);
         if operand.width == Width::X64 {
             code.extend([0x48, 0xba]); // movabs rdx,~field_mask

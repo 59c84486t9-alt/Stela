@@ -37,7 +37,8 @@ pub enum Error {
     ExtendedControlUnavailable,
 }
 
-/// Exact bounded feature declaration; checking effects alone cannot prove CPA.
+/// The declared feature subset; checking the effects alone does not prove
+/// FEAT_CPA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CpaFeature {
     Absent,
@@ -66,7 +67,7 @@ impl CpaFeature {
     }
 }
 
-/// Resolved effects only. Copies of this value are not actual control loans.
+/// Resolved effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResolvedPointerChecks {
     feature: CpaFeature,

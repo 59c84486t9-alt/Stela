@@ -18,7 +18,7 @@ pub struct DispatchIdentity {
     pub translation: Identity,
 }
 
-/// A generated leaf and its registration identity, never a verification claim.
+/// A generated leaf and its registration identity.
 #[derive(Debug, Clone)]
 pub struct ResolvedLeaf {
     identity: DispatchIdentity,
@@ -57,9 +57,9 @@ struct RegisteredLeaf {
     generation: u64,
 }
 
-/// Serialized, process-local registration and lookup of bounded leaf regions.
-/// The caller supplies its address-space ID; independent registries also have
-/// private issuer identities, so their handles cannot validate one another.
+/// Process-local registration and lookup of leaf regions. Each registry also
+/// has a private issuer identity, so handles from one never validate in
+/// another.
 #[derive(Debug)]
 pub struct LeafDispatcher {
     address_space: u64,
@@ -121,9 +121,9 @@ impl LeafDispatcher {
         self.leaves.remove(&entry.0).is_some()
     }
 
-    /// Resolve only an explicitly registered entry. Interior addresses do not
-    /// inherit executable-entry status from the reverse instruction map.
-    /// Revalidate persisted checksums on every lookup, including a disk hit.
+    /// Resolve a registered entry only; interior addresses are not entries.
+    /// Persisted checksums are revalidated on every lookup, including disk
+    /// hits.
     pub fn resolve(&self, entry: GuestAddress) -> Result<ResolvedLeaf> {
         let leaf = self
             .leaves

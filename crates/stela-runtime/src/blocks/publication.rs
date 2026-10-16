@@ -25,10 +25,8 @@ struct SourceSite {
     consumed_bytes: usize,
 }
 
-/// A non-cloneable, post-return borrow of the actual registered code owner.
-/// It exposes neither mutable source nor executable pointers. External memory
-/// publication is not globally frozen; these private owners have no valid
-/// writable MemoryBacking aliases in the supported fixed execution contract.
+/// A non-cloneable borrow of the registered code, taken after native return. It
+/// exposes neither mutable source nor executable pointers.
 pub struct CodePublicationScope<'run> {
     runtime: &'run BlockRuntime,
     site: SourceSite,
@@ -95,9 +93,9 @@ impl<'run> CodePublicationScope<'run> {
         Ok(())
     }
 
-    /// Complete the actual host serializing component only after validating
-    /// the immutable control owner and exact typed original source. No control,
-    /// cache, TLBI, data, device or IRQ producer is admitted by this authority.
+    /// Perform the host serialization once the controls and the source
+    /// instruction are validated. Control, cache, TLBI, data, device and IRQ
+    /// effects are not handled here.
     pub(crate) fn synchronize_fixed_el1(
         &mut self,
         controls: &FixedEl1Controls,

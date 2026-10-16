@@ -127,8 +127,7 @@ impl BackendFixture {
     }
 }
 
-// Test fixtures record ordering/failure only. They are not production backends
-// and do not certify synchronization, monitor or event architectural effects.
+// Records ordering and failures only.
 impl ExceptionServices for BackendFixture {
     type Permit = ();
     type Error = String;
@@ -483,8 +482,8 @@ fn actual_block_runtime_preserves_failed_exception_pc_and_completed_prefix() -> 
     backend.fail_synchronize = true;
     backend.expected_source_pc = SOURCE_PC.0 + size_of::<u32>() as u64;
     let mut execution = Execution::new(ADDRESS_SPACE, &mut system, &mut backend);
-    // SAFETY: trusted pure ADD prefix and a checked System service boundary;
-    // the fixture fails synchronization before any exception architectural effect.
+    // SAFETY: a trusted ADD followed by a checked system boundary; the fixture
+    // fails synchronization before any exception effect.
     let outcome = unsafe { runtime.run_with_system(&mut thread, None, 1, &mut execution)? };
     assert!(matches!(
         outcome.reason,
@@ -630,7 +629,7 @@ fn unavailable_optional_feature_beyond_first_word_prevents_all_prefix_effects() 
     assert_eq!(outcome.blocks_executed, 0);
     assert_eq!(outcome.compiled_blocks, 0);
     assert_eq!(backend.calls, ["validate_entry"]);
-    // The shared parser bounds authorization at the first actual terminator.
+    // The parser stops authorization at the first terminator.
     let source: Vec<_> = [SVC, CSSC_ABS]
         .into_iter()
         .flat_map(u32::to_le_bytes)
@@ -783,8 +782,8 @@ fn native_event_blocks_share_real_two_pe_domain_and_exact_source_maps() -> anyho
                 pc: SOURCE_PC,
             };
             let before = thread.registers.clone();
-            // SAFETY: the registered original is one trusted event instruction;
-            // the concrete dispatcher performs no guest RAM access.
+            // SAFETY: one trusted event instruction; the dispatcher performs no
+            // guest RAM access.
             let outcome = unsafe {
                 runtime.run_with_system(
                     &mut thread,

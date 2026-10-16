@@ -74,7 +74,8 @@ fn sign_authenticate_and_return_share_aot_hot_and_new_runtime_cache_without_keys
             let mut state = thread(flags);
             let mut expected = state.registers.clone();
             expected.x[0] = expected.x[0].wrapping_add(1);
-            // SAFETY: only reviewed register/helper operations, no guest RAM access.
+            // SAFETY: register and helper operations only, with no guest RAM
+            // access.
             let result =
                 unsafe { vm.run_with_pauth(&mut state, Some(GuestAddress(STOP)), 8, &keys)? };
             assert_eq!(result.reason, StopReason::StopAddress);

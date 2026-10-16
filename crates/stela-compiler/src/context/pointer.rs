@@ -13,7 +13,7 @@ pub enum EffectivePointerChecks {
     AdditionAndMultiplication,
 }
 
-/// The two requested check levels supported by the bounded EL10 contract.
+/// The two check levels supported at EL1 and EL0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AccessEl {
     El0,
@@ -41,7 +41,7 @@ impl PointerArithmeticRequirement {
 }
 
 impl EffectivePointerChecks {
-    /// Validates resolved effects only; the caller retains their authority lease.
+    /// Validate resolved effects.
     pub const fn from_effective(cpta: bool, cptm: bool) -> Option<Self> {
         match (cpta, cptm) {
             (false, false) => Some(Self::Unchecked),

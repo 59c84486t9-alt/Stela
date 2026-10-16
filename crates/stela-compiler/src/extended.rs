@@ -72,7 +72,7 @@ enum ScalableProfileKind {
 }
 
 impl ScalableProfile {
-    /// Preserve the original fixed SME2 profile and its artifact identity.
+    /// The fixed SME2 profile, keeping its artifact identity.
     pub const fn new(length: VectorLength, mode: ScalableMode) -> Self {
         Self {
             length,
@@ -81,9 +81,9 @@ impl ScalableProfile {
         }
     }
 
-    /// Declare guest availability and controls explicitly, without inferring
-    /// Apple hardware capabilities or silently adding feature dependencies.
-    /// V2 requires PSTATE.DIT=0; the execution caller must validate that state.
+    /// Declare guest features and controls explicitly; no hardware is inferred
+    /// and no feature dependency is added. Version 2 requires PSTATE.DIT clear,
+    /// which the caller validates.
     pub fn new_with_features(
         length: VectorLength,
         mode: ScalableMode,
@@ -172,8 +172,8 @@ impl ScalableProfile {
         )))
     }
 
-    /// Only V2 manifests carry a declared feature list. V1 artifacts retain
-    /// their original shape and fixed profile ID.
+    /// Only version 2 manifests list declared features; version 1 artifacts
+    /// keep their fixed profile ID.
     pub const fn declared_features(self) -> Option<ScalableFeatures> {
         match self.kind {
             ScalableProfileKind::V1 => None,
@@ -422,8 +422,8 @@ impl Decoded {
         }
     }
 
-    /// Original canonical word is rechecked by each frozen family adapter.
-    /// None remains unaudited; no unreviewed effect class receives a default permit.
+    /// Each family adapter re-checks the original word. Encodings without a
+    /// policy are refused.
     fn prefix_requirement(
         &self,
         original_word: u32,
@@ -469,8 +469,9 @@ impl Decoded {
         }
     }
 
-    /// Pair execution currently permits only reviewed total register-only mappings.
-    /// Metadata alone never authorizes a service, numerical or memory restart edge.
+    /// Pairs may currently use only register-only followers that compile
+    /// completely inline. A service, numerical or memory exit would need
+    /// restart support.
     fn require_total_inline_prefix(&self, pc: GuestAddress) -> Result<(), CompileError> {
         match self {
             Self::IntegerLogic(_)
@@ -1738,8 +1739,8 @@ fn decode_leaf(
     Ok(instructions)
 }
 
-/// Derive complete-body service requirements from the same validated leaf
-/// parser used by compilation. Pure leaves return explicit empty requirements.
+/// Derive the whole body's service requirements with the same parser used to
+/// compile it. Leaves with no memory access return empty requirements.
 pub fn memory_requirements(
     source: &[u8],
     base: GuestAddress,
@@ -1803,8 +1804,8 @@ pub fn prepare_leaf(
     })
 }
 
-/// Compile an extended two-argument leaf ending in RET X30. The runtime must
-/// validate this exact profile against its owned view before unsafe invocation.
+/// Compile a two-argument context leaf ending in RET X30. The runtime validates
+/// this profile against its state before calling it.
 pub fn compile_for_profile(
     source: &[u8],
     base: GuestAddress,

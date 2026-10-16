@@ -134,8 +134,9 @@ pub(super) fn translate(
     if !table.contains(raw, config.address_top(region, access.kind), region) {
         return Err(fault(access, FaultKind::Translation, 0, None, false));
     }
-    // Strip only canonical extension/tag bits; initial tables can have fewer
-    // index bits than a full table, including upper-region4K47/16K48 roots.
+    // Strip only the extension and tag bits; initial tables can have fewer
+    // index bits than a full table, including the upper-range 4K/47-bit and
+    // 16K/48-bit roots.
     let va = raw & ((1_u64 << table.va_bits) - 1);
     let mut table_base = table.table_base;
     if table_base & !config.pa_mask != 0 {

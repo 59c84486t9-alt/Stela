@@ -41,7 +41,7 @@ fn checked_process_helpers_use_distinct_immutable_abi_and_exact_terminals() {
                 .is_err()
             );
         }
-        // Authenticated data loads still need the canonical helper reader.
+        // Authenticated data loads still need the helper reader.
         let load = 0xf8200400u32.to_le_bytes();
         assert!(CompilationPlan::new(&load, base, selected, crate::TargetCpu::Baseline).is_err());
     }

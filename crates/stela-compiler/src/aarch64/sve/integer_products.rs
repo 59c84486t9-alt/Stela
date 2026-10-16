@@ -643,8 +643,8 @@ fn classify(word: u32) -> Option<(Kind, Format)> {
 }
 
 impl Operand {
-    /// Exact canonical-word MOVPRFX requirements, independently of normalized
-    /// arithmetic kinds. Future unaudited allocations remain unauthorized.
+    /// MOVPRFX requirements of the follower word, independent of the normalized
+    /// kind. Unlisted encodings are refused.
     #[allow(clippy::result_unit_err)]
     pub fn prefix_requirement(
         self,

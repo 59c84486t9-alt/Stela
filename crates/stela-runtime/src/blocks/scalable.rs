@@ -13,9 +13,9 @@ use stela_compiler::{
 
 use super::validate_interior_word;
 
-/// Re-fetch an interior exit from registered immutable source before minting its
-/// admission proof. Artifact-supplied operands and continuation PCs are not used.
-/// Current owned state must separately match the admitted profile at completion.
+/// Re-fetch an exit from the registered source before admitting it; operands
+/// and continuation PCs from the artifact are not used. The live state must
+/// still match the admitted profile at completion.
 pub(crate) fn validate_scalable_numerical_exit(
     entry: GuestAddress,
     exit: GuestAddress,

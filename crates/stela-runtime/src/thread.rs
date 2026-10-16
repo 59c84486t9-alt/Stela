@@ -21,8 +21,7 @@ pub const PROFILE_ID: &str = "darwin-host-thread-arm-tsd-v1";
 pub const THREAD_SELFID_SYSCALL: u16 = 372;
 const RETURN_WORD_BITS: u32 = u32::BITS;
 
-/// Explicit guest vm_map_max input, independently bounded by the native RAM
-/// profile. The host allocation limit is not a substitute for a guest VM contract.
+/// The guest's vm_map_max, also bounded by the native RAM profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmMaximum(u64);
 impl VmMaximum {
@@ -71,8 +70,8 @@ impl Context {
             process: None,
         })
     }
-    /// Bind this actual thread/task owner to one explicitly declared process.
-    /// Acquires the existing native thread identity and rights exactly once.
+    /// Bind this thread to a declared process, acquiring the native thread
+    /// identity and rights once.
     pub fn native_in_process(process: Rc<process::Context>, vm_maximum: VmMaximum) -> Result<Self> {
         let mut thread = Self::native(process.address_space(), vm_maximum)?;
         thread.process = Some(process);
@@ -112,8 +111,7 @@ impl Context {
         })
     }
 
-    /// Complete only the borrowed ABI bank, then commit actual TSD infallibly.
-    /// No actual PC, host TLS or guest pointer access is available here.
+    /// Write the ABI registers, then commit the TSD.
     pub(crate) fn complete_platform_registers(
         &mut self,
         pending: platform::PendingCall,
@@ -188,7 +186,8 @@ impl Event {
     }
 }
 
-/// Classify only owned services; ordinary BSD calls remain with their backends.
+/// Whether this trap is one of the thread services; other BSD calls go to their
+/// backends.
 pub fn handles(state: &ThreadState, trap: &SynchronousTrap) -> bool {
     let selector = state.registers.x[SYSCALL_SELECTOR_REGISTER] as u32 as i32;
     selector == platform::PLATFORM_CALL_SELECTOR

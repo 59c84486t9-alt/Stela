@@ -47,11 +47,10 @@ pub(crate) struct M0Owner<'pe> {
 
 impl<'pe> M0Owner<'pe> {
     /// # Safety
-    /// Called once inside InstalledM0Owner's consuming fresh-machine scope.
-    /// Every original resource belongs to that one declared PE/System/domain;
-    /// the complete producer registry and physical/source mutation ownership
-    /// remain closed for the sole SystemExecutionOwner's executable lifetime.
-    /// This cannot adopt hardware/caller-provided copied state or reset a PE.
+    /// Called once inside InstalledM0Owner's consuming scope. Every resource
+    /// belongs to the one declared PE, system and domain, and the producer
+    /// registry and physical and source mutation stay closed for the execution
+    /// owner's lifetime.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_software(
         address_space: u64,
@@ -80,10 +79,8 @@ impl<'pe> M0Owner<'pe> {
     }
 
     /// # Safety
-    /// Same once-only ORIGINAL fresh machine contract as fresh_software. Caller
-    /// must consume genuine InstalledEl1Owner resources and create its sole
-    /// SystemExecutionOwner once. This is the SAME sealed backend/PE contract,
-    /// not an M0Read64 relabel or caller-selected mode/authority flag.
+    /// As for `fresh_software`: the caller consumes InstalledEl1Owner resources
+    /// and creates the execution owner once.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_el1_branch(
         address_space: u64,
@@ -112,10 +109,8 @@ impl<'pe> M0Owner<'pe> {
     }
 
     /// # Safety
-    /// Same once-only ORIGINAL fresh machine contract as fresh_software. Caller
-    /// must consume genuine InstalledEl1Owner resources and create its sole
-    /// SystemExecutionOwner once. This is the SAME sealed backend/PE contract,
-    /// not an M0Read64 relabel or caller-selected mode/authority flag.
+    /// As for `fresh_software`: the caller consumes InstalledEl1Owner resources
+    /// and creates the execution owner once.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_el1_integer(
         address_space: u64,
@@ -144,10 +139,8 @@ impl<'pe> M0Owner<'pe> {
     }
 
     /// # Safety
-    /// Same once-only ORIGINAL fresh machine contract as fresh_software. Caller
-    /// must consume genuine InstalledEl1Owner resources and create its sole
-    /// SystemExecutionOwner once. This is the SAME sealed backend/PE contract,
-    /// not an M0Read64 relabel or caller-selected mode/authority flag.
+    /// As for `fresh_software`: the caller consumes InstalledEl1Owner resources
+    /// and creates the execution owner once.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_el1_platform(
         address_space: u64,
@@ -273,8 +266,8 @@ impl Owner for M0Owner<'_> {
         system
             .check_lower_el_storage()
             .map_err(|error| anyhow::anyhow!("actual M0 lower-EL storage: {error:?}"))?;
-        // This declared base EL1 profile has no LR/PACM lifecycle. Recheck the
-        // actual original storage before native entry, including zero PACM.
+        // This EL1 profile has no LR or PACM lifecycle; re-check the storage
+        // before native entry, including a zero PACM.
         self.execution.check_snapshot(None, system)?;
         self.check_resources()?;
         outer
@@ -309,9 +302,9 @@ impl Owner for M0Owner<'_> {
                 bound.el1_platform_intent()?;
             }
         }
-        // Actual installed fetch and current bank translation require the opaque
-        // input containing the EXACT outer object. Active mints it after source
-        // admission, before any prepared RAM transaction or native call.
+        // The installed fetch and the bank translation need the input holding
+        // the outer object, which the consumer creates after source admission
+        // and before any RAM access or native call.
         Ok(())
     }
 

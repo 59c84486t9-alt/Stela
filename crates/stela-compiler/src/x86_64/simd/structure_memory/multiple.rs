@@ -24,7 +24,7 @@ const MOVQ_STORE: &[u8] = &[0x66, 0x0f, 0xd6];
 const JMP_REL32: u8 = 0xe9;
 const SHUFFLE_ZERO: u8 = 0x80;
 
-/// RAX is the original guest address. RDI and pending writeback RDX survive.
+/// RAX is the guest address; RDI and the pending writeback in RDX survive.
 pub(super) fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     let Layout::Multiple {
         repetitions,
@@ -386,8 +386,8 @@ fn shuffled_interleaved(
             chunk(code, false, output_bytes, RESULT_XMM, output * VECTOR_BYTES);
         }
     }
-    // Every mask is exactly sixteen bytes. The sole unconditional branch skips
-    // the complete trailing mask pool, and every RIP load targets its own mask.
+    // Every mask is exactly sixteen bytes. One unconditional branch skips the
+    // trailing mask pool, and each RIP-relative load targets its own mask.
     code.push(JMP_REL32);
     let done = code.len();
     code.extend(0i32.to_le_bytes());

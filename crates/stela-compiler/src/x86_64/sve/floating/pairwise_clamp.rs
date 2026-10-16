@@ -209,9 +209,8 @@ pub(in crate::x86_64) fn emit_pairwise(
     Ok(true)
 }
 
-/// Unpredicated destructive FCLAMP: MaxNum(lower, oldD), then MinNum(result, upper).
-/// The second guard sees the selected first-stage bits and the original upper
-/// bank. Source/destination aliases remain intact until the final staged commit.
+/// Destructive FCLAMP: MaxNum(lower, old Zd), then MinNum(result, upper).
+/// Aliases stay intact until the final staged commit.
 pub(in crate::x86_64) fn emit_clamp(
     code: &mut Vec<u8>,
     operand: Operand,

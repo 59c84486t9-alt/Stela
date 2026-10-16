@@ -1,8 +1,7 @@
 use super::*;
 
 fn fresh() -> SoftwareAsyncDomain {
-    // SAFETY: each test owns the whole declared software producer universe;
-    // every constructor/injector below operates on this actual unique domain.
+    // SAFETY: each test owns the whole set of producers of its domain.
     unsafe { SoftwareAsyncDomain::fresh_software_pe() }
 }
 

@@ -287,7 +287,7 @@ fn mixed_access_specializations_have_distinct_keys_and_exact_cache_reuse() -> Re
         CheckedMemoryProfile::SpAlignmentEnabled,
         CheckedMemoryProfile::SpAlignmentDisabled,
     ] {
-        // SP is explicitly used by the first access to make SA compile-affecting.
+        // SP is used by the first access so that SA affects compilation.
         let mut source = source.clone();
         let stack_word = (LDR_X0_X9_8 & !(REGISTER_FIELD_MASK << BASE_REGISTER_SHIFT))
             | (REGISTER_FIELD_MASK << BASE_REGISTER_SHIFT);

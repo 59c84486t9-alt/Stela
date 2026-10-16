@@ -54,8 +54,8 @@ fn resident_budget_counts_original_blocks_and_prioritizes_actual_edge() -> Resul
                     expected.x[0] = count - consumed as u64;
                     expected.nzcv = ARM_CARRY | if expected.x[0] == 0 { ARM_ZERO } else { 0 };
                 }
-                // SAFETY: owned nonfaulting SUBS/conditional loop is bounded by
-                // the exact invocation counter; no guest data or host calls.
+                // SAFETY: a non-faulting SUBS/branch loop bounded by the block
+                // counter, with no data access or host calls.
                 let outcome = unsafe { runtime.run(&mut state, Some(FALLTHROUGH), budget)? };
                 assert_eq!(state.registers, expected);
                 assert_eq!(outcome.blocks_executed, consumed);
@@ -95,7 +95,7 @@ fn ordinary_fallback_preserves_flags_and_consumes_one_block() -> Result<()> {
     let mut state = thread(5);
     let mut expected = state.registers.clone();
     expected.x[0] = 99;
-    // SAFETY: owned MOV/RET fixture has no data access and returns finitely.
+    // SAFETY: MOV/RET with no data access.
     let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
     assert_eq!(state.registers, expected);
     assert_eq!(state.pc, STOP);
@@ -113,7 +113,7 @@ fn source_replacement_discards_the_loaded_resident_loop() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let mut runtime = runtime(cache.path(), &[SUBS_X0_ONE, B_NE_SELF])?;
     let mut state = thread(5);
-    // SAFETY: same bounded nonfaulting source and exact budget as above.
+    // SAFETY: the same loop and budget as above.
     unsafe { runtime.run(&mut state, None, 2)? };
     assert_eq!(state.registers.x[0], 3);
     runtime.register_code(
@@ -126,7 +126,7 @@ fn source_replacement_discards_the_loaded_resident_loop() -> Result<()> {
     assert!(runtime.loaded_manifest(BASE).is_none());
     let mut expected = state.registers.clone();
     expected.x[0] = 99;
-    // SAFETY: replacement source is a finite owned MOV/RET without data access.
+    // SAFETY: the replacement is MOV/RET with no data access.
     let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
     assert_eq!(state.registers, expected);
     assert_eq!(state.pc, STOP);
@@ -192,8 +192,8 @@ fn ordinary_runtime_selects_mixed_artifact_abis_and_reuses_their_exact_cache() -
     let mut runtime = ordinary(cache.path(), &words)?;
     for loaded in [false, true] {
         let (mut state, expected) = crc_thread();
-        // SAFETY: owned scalar loop and RET are nonfaulting; the original-block
-        // budget and stop sentinel bind the complete finite mixed-ABI run.
+        // SAFETY: the scalar loop and RET cannot fault, and the block budget
+        // and stop address bound the run.
         let outcome = unsafe { runtime.run(&mut state, Some(STOP), CRC_BITS + 1)? };
         assert_eq!(state.registers, expected);
         assert_eq!(state.pc, STOP);
@@ -212,7 +212,7 @@ fn ordinary_runtime_selects_mixed_artifact_abis_and_reuses_their_exact_cache() -
     }
     let mut disk_runtime = ordinary(cache.path(), &words)?;
     let (mut state, expected) = crc_thread();
-    // SAFETY: same immutable source and owned finite scalar state as above.
+    // SAFETY: the same source and state as above.
     let outcome = unsafe { disk_runtime.run(&mut state, Some(STOP), CRC_BITS + 1)? };
     assert_eq!(state.registers, expected);
     assert_eq!(outcome.blocks_executed, CRC_BITS + 1);
@@ -226,7 +226,7 @@ fn ordinary_source_replacement_switches_abis_and_zero_budget_stays_cold() -> Res
     let cache = tempfile::tempdir()?;
     let mut runtime = ordinary(cache.path(), &[SUBS_X0_ONE, B_NE_SELF])?;
     let mut state = thread(5);
-    // SAFETY: owned bounded subtraction loop has no guest data access.
+    // SAFETY: a bounded subtraction loop with no data access.
     let outcome = unsafe { runtime.run(&mut state, None, 2)? };
     assert_eq!(outcome.blocks_executed, 2);
     assert_eq!(state.registers.x[0], 3);
@@ -245,7 +245,7 @@ fn ordinary_source_replacement_switches_abis_and_zero_budget_stays_cold() -> Res
     state.pc = BASE;
     let mut expected = state.registers.clone();
     expected.x[0] = 99;
-    // SAFETY: replacement is a finite owned MOV/RET with canonical state.
+    // SAFETY: the replacement is MOV/RET.
     let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
     assert_eq!(outcome.blocks_executed, 1);
     assert_eq!(state.registers, expected);
@@ -268,7 +268,7 @@ fn ordinary_source_replacement_switches_abis_and_zero_budget_stays_cold() -> Res
     assert_eq!(state.pc, BASE);
     assert_eq!(outcome.blocks_executed, 0);
     assert!(runtime.loaded_manifest(BASE).is_none());
-    // SAFETY: restored source is the same finite owned loop.
+    // SAFETY: the restored source is the same bounded loop.
     let outcome = unsafe { runtime.run(&mut state, Some(FALLTHROUGH), 1)? };
     assert_eq!(outcome.blocks_executed, 1);
     assert_eq!(outcome.reason, StopReason::StopAddress);
@@ -298,8 +298,8 @@ fn ordinary_clobbered_host_flags_remain_resident_and_preserve_guest_flags() -> R
     expected.x[8] = 0;
     expected.x[11] = u64::from(CRC_POLYNOMIAL);
     expected.nzcv = ARM_CARRY;
-    // SAFETY: one owned nonfaulting scalar block; CSEL observes the guest TST
-    // even though the intervening guest EOR overwrites native flags.
+    // SAFETY: one non-faulting scalar block. CSEL must see the guest TST even
+    // though the EOR in between overwrites the host flags.
     let outcome = unsafe { runtime.run(&mut state, None, 1)? };
     assert_eq!(state.registers, expected);
     assert_eq!(state.pc, BASE);
@@ -344,9 +344,9 @@ fn dirty_loop_header_inputs_survive_pressure_before_their_next_write() -> Result
     expected.x[22] = 0;
     expected.x[23] = 0;
     expected.nzcv = ARM_NEGATIVE | ARM_CARRY;
-    // SAFETY: the owned nonfaulting scalar loop has ten carried inputs plus
-    // two outputs. Pressure can evict the counter before its SUBS; every later
-    // iteration must retain the carried value rather than reload cold state.
+    // SAFETY: a non-faulting scalar loop with ten carried inputs and two
+    // outputs. Register pressure can evict the counter before its SUBS; later
+    // iterations must keep the carried value rather than reload stale state.
     let outcome = unsafe { runtime.run(&mut state, None, BUDGET)? };
     assert_eq!(state.registers, expected);
     assert_eq!(state.pc, BASE);

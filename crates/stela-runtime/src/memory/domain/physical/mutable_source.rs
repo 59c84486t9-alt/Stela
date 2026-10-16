@@ -54,10 +54,10 @@ impl PhysicalAddressSpace {
         self.binding.has_mutable_instruction_sources()
     }
 
-    /// Only a mutable borrow of the real physical owner can request this storage
-    /// reset. The service loan excludes every original native/outer participant.
-    /// The caller must retire its derived source/RX cache before re-entry; fresh
-    /// fetch also rejects every old mutation generation. No PE is reconstructed.
+    /// Reset the storage to the original prefixes; requires a mutable borrow of
+    /// the physical owner. The service borrow excludes native code. The caller
+    /// must retire the derived source and native-code cache before re-entry,
+    /// and fresh fetches also reject the old mutation generations.
     pub(crate) fn reload_original_region_prefixes(
         &mut self,
     ) -> Result<RegionResetObservation, RegionResetFailure> {
@@ -79,9 +79,10 @@ impl PhysicalAddressSpace {
             completed_regions: 0,
         };
         for reload in &self.binding.reloads {
-            // SAFETY: the sole region factory retained original private prefix,
-            // actual RW backing and same System. Quiescent service excludes all
-            // native effects/rights changes; every fragment uses tracked writer.
+            // SAFETY: the region factory kept the original prefix, the writable
+            // backing and the system. The quiescent service excludes native
+            // effects and rights changes, and every fragment uses the tracked
+            // writer.
             let result = unsafe {
                 self.domain
                     .system

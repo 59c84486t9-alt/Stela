@@ -67,9 +67,9 @@ impl Staged {
     }
 }
 
-/// No public constructor or mutable state accessor. Only this canonical Active
-/// creates the token after real source/control/async validation and the actual
-/// Retiring transition. All fields borrow the same original retained objects.
+/// Created only by the consumer after source, control and asynchronous
+/// validation and the transition to retiring. Every field borrows the PE's own
+/// objects.
 pub(crate) struct El1SystemEffectLoan<'loan> {
     system: &'loan mut SystemState,
     registers: &'loan mut GuestState,
@@ -257,9 +257,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 .blocks_executed
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("System accounting overflow"))?;
-            // All actual pre-effect source/control/async and state resolution
-            // precedes the fallible phase transition. The exact staged value
-            // remains private and cannot be replaced by a saved caller value.
+            // Every pre-effect check precedes the fallible phase transition,
+            // and the staged value stays private.
             retained.session.validate_current(self.pe.system)?;
             checks.check(outer)?;
             platform.context(self.pe.system)?;
@@ -282,8 +281,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 _checks: &checks,
             };
             let continuation = staged.apply(loan);
-            // Infallible observation and the sole actual PC store follow the
-            // bank effect; no fallible work or callback lies between them.
+            // Recording the observation and storing PC follow the effect
+            // directly, with nothing fallible in between.
             if let Some(report) = observation {
                 report.applied = true;
             }
@@ -294,8 +293,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             prefixes.push(prefix);
             accounting.blocks_executed = blocks;
             accounting.last_exit = carrier;
-            // Actual original resources perform post-retirement qualification
-            // while the same source/context/native-finalizer pins stay held.
+            // Re-check the resources after retirement while the pins are still
+            // held.
             retained.session.validate_current(self.pe.system)?;
             checks.post_retirement_el1(outer, &scope, controls, platform, self.pe.system)?;
             retained

@@ -105,8 +105,7 @@ impl<'run> InstalledEl1SourceScope<'run> {
         profile::check_immutable_fetch(translation, raw_pc, state)
     }
     pub(crate) fn check_source_word(&self, pc: u64, word: u32) -> Result<(), &'static str> {
-        // The actual immutable compiler profile decodes one reached word.
-        // No descriptive bitmask or legacy whitelist supplies admission.
+        // The compiler profile decodes the fetched word.
         if !matches!(
             self.sources.compiler_profile(),
             BlockProfile::El1DirectBranchV1
@@ -130,7 +129,7 @@ impl<'run> InstalledEl1SourceScope<'run> {
 
 pub(super) mod walked;
 impl<'run> InstalledEl1SourceScope<'run> {
-    /// Readonly enabled fetch/refill loan. Existing MMU-off admission is intact.
+    /// Read-only borrow for fetch and refill with the MMU enabled.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "enabled-source component remains unmounted")

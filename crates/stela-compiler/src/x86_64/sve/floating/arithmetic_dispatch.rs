@@ -16,9 +16,9 @@ use super::{
     unsigned_estimates,
 };
 
-/// The admitted proof supplies the original word and its decoded operand.
-/// Core7 class identity comes from the shared encoding metadata, so reverse-equal
-/// aliases cannot accidentally exercise the already proven forward-only emitter.
+/// The admission check supplies the original word and its decoded operand. The
+/// encoding class comes from the shared metadata, so reversed forms with
+/// aliased registers cannot reach the forward-only emitter.
 pub(super) fn emit(
     code: &mut Vec<u8>,
     word: u32,

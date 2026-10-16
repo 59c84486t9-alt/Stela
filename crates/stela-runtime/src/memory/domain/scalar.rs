@@ -10,7 +10,7 @@ use stela_compiler::context::memory::{MemoryRequirements, profile_requirements};
 const SCALAR_READ_FLAGS: u32 =
     flags::TAG_CHECKED | flags::NON_TEMPORAL | flags::SME | flags::SVE_PREDICATED | flags::ASIMD;
 
-/// A scalar read fault with the original guest source location and read prefix.
+/// A scalar read fault with its guest source location and read prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct MemoryFault {
     #[serde(serialize_with = "serialize_status")]
@@ -75,14 +75,13 @@ impl<P: AllocationTagPolicy> MemoryReader for MemoryThread<P> {
 }
 
 impl<P: DataPolicy> MemoryThread<P> {
-    /// Read an exact scalar into private staging, committing a value on success.
+    /// Read a scalar into private staging and return it on success.
     ///
-    /// `address` retains its raw logical tag for the thread's data policy. The
-    /// checked service supplies translation, rights, tags, atomic parts and
-    /// reservation cleanup. The backing's unsafe construction contract pins
-    /// native storage and rights; this method creates no references to guest RAM.
-    /// Unsupported host footprints remain explicit service failures. Partial
-    /// reads remain private and only their diagnostic byte count is returned.
+    /// `address` keeps its logical tag for the thread's data policy. The
+    /// checked service handles translation, rights, tags, atomic parts and
+    /// reservation cleanup, and no reference to guest RAM is created.
+    /// Unsupported host footprints are service failures. A partial read stays
+    /// private; only its byte count is reported.
     pub fn read_scalar(
         &mut self,
         address: u64,
@@ -123,11 +122,10 @@ impl<P: DataPolicy> MemoryThread<P> {
             flags: required_flags,
             pc: guestpc,
         };
-        // SAFETY: entry checks the native mapping profile and effective policy;
-        // this invocation constructs valid ABI objects and private, disjoint
-        // staging. Reached host recipes remain checked by the actual service.
-        // Keep diagnostics outside R: checked finalization may discard the
-        // callback result after real native reads have filled private staging.
+        // SAFETY: entry checked the mapping profile and policy, and this call
+        // builds valid ABI objects and private, disjoint staging. Diagnostics
+        // live outside `R` because finalization may discard the callback result
+        // after native reads filled the staging.
         let mut observed = MemoryFault {
             status: MemoryStatus::Domain,
             address,

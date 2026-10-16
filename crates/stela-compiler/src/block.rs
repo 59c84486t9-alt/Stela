@@ -35,10 +35,8 @@ const NOP_ENCODING: u32 = 0xd503_201f;
 
 /// Separate from the leaf ABI: RAX/RDX return the next guest PC and exit kind.
 pub const BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-direct-ram";
-/// Same state/return layout, with an explicitly enabled runtime PAC boundary.
-/// This identifies software-profile helper requests, not Apple signature identity.
-/// Runtime Context selects the versioned authentication policy; cached helper
-/// bodies contain neither process keys nor a PAuth-version assumption.
+/// The block ABI with software PAuth helper exits. Keys and the PAuth version
+/// are chosen at run time, so cached code contains neither.
 pub const PAUTH_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-apple-arm64e-software-pauth-v1";
 pub const CLOCK_BLOCK_ABI: &str =
@@ -59,12 +57,11 @@ pub const SYSTEM_REGISTER_BLOCK_ABI: &str =
 pub const EL1_PLATFORM_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v1";
 
-/// Exactly one ordinary B immediate. The distinct ABI identifies only the
-/// source/body shape; actual EL1/control/source/PE ownership belongs to entry.
+/// Blocks of exactly one B (immediate) at EL1.
 pub const EL1_DIRECT_BRANCH_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-el1-direct-branch-v1";
-/// Context ABI for generic EL1 MMU-off integer blocks. Literal reads always
-/// use a source-qualified staged RAM callback; this string grants no CPU entry.
+/// Context ABI for EL1 integer blocks with the MMU off. Literal reads go
+/// through a staged RAM callback.
 pub const EL1_M0_INTEGER_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v3-context-block-exit-el1-m0-integer-v1";
 
@@ -73,7 +70,7 @@ pub const EL1_M0_INTEGER_BLOCK_ABI: &str =
 pub enum BlockProfile {
     #[default]
     Ordinary,
-    /// Ordinary direct RAM with bounded nonfaulting resident self-loops.
+    /// Direct RAM, with non-faulting self-loops kept resident.
     OrdinaryResidentV1,
     El1DirectBranchV1,
     El1M0IntegerV1,
@@ -225,9 +222,8 @@ pub struct ClockInstruction {
     pub next_pc: GuestAddress,
 }
 
-/// Only reviewed ISB SY and MRS CNTVCT_EL0, with X31 denoting the discard
-/// destination. Other counter/control registers and barrier options decline.
-/// Completion requires an explicit virtual-clock/synchronization service.
+/// Only ISB SY and MRS CNTVCT_EL0 (X31 discards). Other counter registers and
+/// barrier options are refused; both need the clock service.
 pub fn decode_clock_instruction(
     pc: GuestAddress,
     word: u32,
@@ -278,7 +274,7 @@ pub enum PointerAuthenticationModifier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PointerAuthenticationOperation {
-    // Preserve the original descriptor representation for existing consumers.
+    // Keep the existing descriptor representation.
     /// Exact HINT source identity: general PACIA X17,X16 remains distinct.
     Sign1716 {
         key: PointerAuthenticationKey,
@@ -350,8 +346,8 @@ impl PointerAuthenticationOperation {
     }
 }
 
-/// A helper request at an unchanged original instruction. The native block
-/// commits its ordinary prefix but performs no PAC operation or guest transfer.
+/// A helper request at an instruction that has not executed. The block commits
+/// the instructions before it but performs no PAC operation or transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PointerAuthentication {
     pub operation: PointerAuthenticationOperation,
@@ -359,12 +355,11 @@ pub struct PointerAuthentication {
     pub next_pc: GuestAddress,
 }
 
-/// June2026 PAC/AUT integer and HINT forms, XPAC, PACGA and authenticated
-/// transfers. Process keys and PAuth1/PAuth2/FPAC policy belong to the
-/// explicit runtime context. LR descriptors require actual LR/control/PACM
-/// ownership; key-only consumers continue to decline them. GCS and general
-/// dynamic-control effects remain separate unsupported requirements.
-/// Runtime consumers revalidate this descriptor against immutable source bytes.
+/// PAC/AUT (integer and HINT forms), XPAC, PACGA and authenticated loads. Keys
+/// and the PAuth1/PAuth2/FPAC policy come from the runtime context.
+/// FEAT_PAuth_LR forms need LR and PACM state, so key-only consumers refuse
+/// them. GCS and dynamic controls are unsupported. Consumers re-validate the
+/// descriptor against the source bytes.
 pub fn decode_pointer_authentication(
     pc: GuestAddress,
     word: u32,
@@ -500,7 +495,7 @@ pub fn decode_pointer_authentication(
     }))
 }
 
-/// Identifies the original instruction, without performing exception delivery.
+/// Identifies the instruction; the exception itself is raised elsewhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrapKind {
@@ -547,7 +542,7 @@ pub fn decode_trap(pc: GuestAddress, word: u32) -> Result<Option<SynchronousTrap
     }))
 }
 
-/// Raw kind permits validation before converting results from executable code.
+/// The raw kind, validated before the result is converted.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockExit {
@@ -618,7 +613,7 @@ struct ParsedBlock {
     source_bytes: usize,
 }
 
-/// Semantic-analysis failure attached to the original failing instruction.
+/// An analysis failure at the instruction that caused it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlockAnalysisError {
     pub pc: GuestAddress,
@@ -670,9 +665,9 @@ pub struct BlockAnalysis {
     pub clock_instruction: Option<ClockInstruction>,
     pub thread_register_instruction: Option<ThreadRegisterInstruction>,
 }
-/// Discover boundaries and edges from the exact parser used by both AOT and JIT.
-/// Static call continuations are candidates, not proof that the callee returns.
-/// Dynamic targets and trap resumption require external runtime evidence.
+/// Find block boundaries and edges with the parser shared by AOT and JIT. Call
+/// continuations are candidates, since the callee may not return; dynamic
+/// targets and trap resumption are resolved at run time.
 pub fn analyze(source: &[u8], base: GuestAddress) -> Result<BlockAnalysis, BlockAnalysisError> {
     analyze_with_profile(source, base, BlockProfile::Ordinary)
 }

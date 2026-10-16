@@ -319,7 +319,8 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
             if phase == 2 {
                 thread.registers.fpsr |= FPSR_QC;
             }
-            // SAFETY: owned, finite register-only code; no guest RAM accesses.
+            // SAFETY: owned, terminating register-only code with no guest RAM
+            // access.
             let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
             assert_eq!(result.reason, StopReason::StopAddress);
             assert_eq!(thread.pc, GuestAddress(STOP));
@@ -415,7 +416,8 @@ fn simd_register_shifts_and_doubled_products_share_dispatch_and_persistent_code(
             if phase == 2 {
                 thread.registers.fpsr |= FPSR_QC;
             }
-            // SAFETY: finite owned register-only code with an explicit guest return.
+            // SAFETY: owned, terminating register-only code returning to the
+            // stop address.
             let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
             assert_eq!(result.reason, StopReason::StopAddress);
             assert_eq!(thread.pc, GuestAddress(STOP));
@@ -449,7 +451,8 @@ fn nested_direct_and_indirect_calls_preserve_architectural_link_registers() -> R
     runtime.register_code(GuestAddress(0x2000), words(&[0x91000c00, RET]))?;
     let mut thread = state(BASE, 7);
     thread.registers.x[9] = 0x2000;
-    // SAFETY: all code is owned, memory-free and terminating; execution is serialized.
+    // SAFETY: owned, terminating code with no memory access; execution is
+    // serialized.
     let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 10)? };
     assert_eq!(result.reason, StopReason::StopAddress);
     assert_eq!(result.blocks_executed, 5);
@@ -468,17 +471,18 @@ fn finite_budget_suspends_loop_at_real_guest_pc_and_resumes_from_cached_block() 
     let mut runtime = BlockRuntime::new(18, cache.path().to_path_buf());
     runtime.register_code(GuestAddress(BASE), words(&[0xf1000400, 0x54ffffe1, RET]))?;
     let mut thread = state(BASE, 3);
-    // SAFETY: this memory-free decrement loop is bounded by the dispatch budget.
+    // SAFETY: a decrement loop without memory access, bounded by the dispatch
+    // budget.
     let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
     assert_eq!(first.reason, StopReason::BudgetExhausted);
     assert_eq!(first.blocks_executed, 2);
     assert_eq!(first.compiled_blocks, 1);
-    // Both original iterations retire in the first loaded native body; the
-    // internal edge performs no second cache lookup.
+    // Both iterations run in the first loaded block; the internal edge makes no
+    // second cache lookup.
     assert_eq!(first.memory_cache_hits, 0);
     assert_eq!(thread.pc, GuestAddress(BASE));
     assert_eq!(thread.registers.x[0], 1);
-    // SAFETY: the same owned code now reaches its return within two blocks.
+    // SAFETY: the same code now returns within two blocks.
     let resumed = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
     assert_eq!(resumed.reason, StopReason::StopAddress);
     assert_eq!(resumed.blocks_executed, 2);
@@ -496,7 +500,8 @@ fn straight_line_window_limit_falls_through_without_losing_an_instruction() -> R
     program.push(RET);
     runtime.register_code(GuestAddress(BASE), words(&program))?;
     let mut thread = state(BASE, 0);
-    // SAFETY: finite, memory-free additions with an explicit guest return sentinel.
+    // SAFETY: terminating additions without memory access, returning to the
+    // stop address.
     let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
     assert_eq!(first.reason, StopReason::BudgetExhausted);
     assert_eq!(thread.pc, GuestAddress(BASE + 256 * 4));
@@ -565,7 +570,7 @@ fn registration_replacement_removal_and_reregistration_invalidate_loaded_blocks(
     let second_generation = runtime.register_code(GuestAddress(BASE), words(&[0xd2800040, RET]))?;
     assert!(second_generation > first_generation);
     thread = state(BASE, 0);
-    // SAFETY: replacement is another owned constant-return program.
+    // SAFETY: the replacement is another owned constant-return program.
     let replaced = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
     assert_eq!(replaced.reason, StopReason::StopAddress);
     assert_eq!(replaced.compiled_blocks, 1);
@@ -580,7 +585,7 @@ fn registration_replacement_removal_and_reregistration_invalidate_loaded_blocks(
     assert_eq!(removed.blocks_executed, 0);
     assert_eq!(thread.registers.x[0], 99);
     assert!(runtime.register_code(GuestAddress(BASE), original)? > second_generation);
-    // SAFETY: original owned code has been explicitly registered anew.
+    // SAFETY: the original code has been registered again.
     let restored = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
     assert_eq!(restored.reason, StopReason::StopAddress);
     assert_eq!(restored.memory_cache_hits, 0);
@@ -712,9 +717,8 @@ fn direct_ram_effects_survive_call_and_return_dispatch_boundaries() -> Result<()
     let mut cell = Box::new(0u64);
     let mut thread = state(BASE, 40);
     thread.registers.x[1] = (&raw mut *cell) as u64;
-    // SAFETY: X1 points to one exclusively owned aligned u64 for the whole run.
-    // Code accesses exactly that cell and neither aliases Rust/runtime state nor
-    // escapes it; no Rust reference to the cell is active during execution.
+    // SAFETY: X1 points to one exclusively owned aligned u64 for the whole run;
+    // the code accesses only that cell, and no Rust reference to it is live.
     let result = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 4)? };
     assert_eq!(result.reason, StopReason::StopAddress);
     assert_eq!(result.blocks_executed, 3);
@@ -894,7 +898,7 @@ fn prepared_aot_artifact_is_reused_by_jit_and_source_replacement_changes_identit
     assert!(!prepared.prepared.cache_hit);
     assert!(runtime.loaded_manifest(GuestAddress(BASE)).is_none());
     let mut thread = state(BASE, 9);
-    // SAFETY: independently owned memory-free code and an explicit return sentinel.
+    // SAFETY: owned code without memory access, returning to the stop address.
     let ran = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 2)? };
     assert_eq!(ran.compiled_blocks, 0);
     assert_eq!(ran.disk_cache_hits, 1);

@@ -21,8 +21,7 @@ pub struct Operand {
     pub right: u8,
 }
 
-/// Decode only canonical allocated forms; size00 remains explicitly reserved.
-/// Guest feature and streaming access checks belong to profile admission.
+/// Size 00 is reserved.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let operation = match word & FORM_MASK {

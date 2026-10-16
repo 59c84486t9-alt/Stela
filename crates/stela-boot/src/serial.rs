@@ -45,7 +45,7 @@ pub struct Serial;
 impl Write for Serial {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         for byte in value.bytes() {
-            // QEMU's actual VC terminal treats LF and CR independently.
+            // QEMU's terminal treats LF and CR independently.
             if byte == b'\n' {
                 send(b'\r');
             }

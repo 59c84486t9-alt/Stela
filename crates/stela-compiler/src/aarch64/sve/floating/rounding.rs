@@ -25,8 +25,8 @@ pub struct Operand {
     pub source: u8,
 }
 
-/// Merging encodings only; FEAT_SVE2p2 zeroing encodings and bounded FRINT
-/// forms are separate candidates outside the pinned Apple family inventory.
+/// Merging forms only. The FEAT_SVE2p2 zeroing forms and the bounded FRINT
+/// forms are not decoded.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     let operation = match word & OPCODE_MASK {

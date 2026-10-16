@@ -132,7 +132,7 @@ fn other_hint_slots_require_delegation_and_never_become_nop() {
             })
         );
     }
-    // Adjacent DMB and CLREX remain owned by their existing/forthcoming families.
+    // The adjacent DMB and CLREX encodings belong to other families.
     for word in [
         0xd503_3fbf,
         0xd503_3f5f,

@@ -124,8 +124,8 @@ pub enum Operand {
     },
 }
 
-/// None denotes another encoding class; Err is an unsupported/reserved member.
-/// Each reviewed family validates its reserved encodings.
+/// None means another encoding class; Err means an unsupported or reserved
+/// member.
 #[allow(clippy::result_unit_err)]
 pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
     if let Some(operand) = lut::decode(word) {
@@ -282,8 +282,8 @@ pub fn decode(word: u32) -> Option<Result<Operand, ()>> {
         }
         let load = word & (1 << 22) != 0;
         let vectors = [(word & 31) as u8, ((word >> 10) & 31) as u8];
-        // LDPOVERLAP permits UNKNOWN/UNDEF/NOP, not ordinary two-result writes.
-        // Decline every duplicate destination, including the real V31 register.
+        // LDPOVERLAP allows UNKNOWN, UNDEFINED or NOP, never two ordinary
+        // writes, so every duplicate destination is refused (V31 included).
         if load && vectors[0] == vectors[1] {
             return Some(Err(()));
         }

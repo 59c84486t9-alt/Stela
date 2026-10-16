@@ -11,7 +11,7 @@ use super::{
 use alloc::vec::Vec;
 
 fn round_half_magnitude(code: &mut Vec<u8>, rounding: RoundingPolicy) {
-    // RAX holds positive rebased Double fields, RCX the original sign.
+    // RAX holds the rebased double fields, RCX the sign.
     let nearest_ah = if rounding == RoundingPolicy::AhNearestEven {
         test_control(code, FPCR_AH);
         Some(branch(code, Condition::NotZero))

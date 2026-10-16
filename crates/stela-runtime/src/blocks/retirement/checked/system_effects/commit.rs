@@ -22,9 +22,8 @@ pub(crate) enum SystemEffectCommitError {
     ChangedRegisterBank,
 }
 
-/// Constructed by the canonical parent only AFTER its actual Retiring transition.
-/// These are original retained objects, never copied state or replacement loans.
-/// No mutable state getter, phase transition, PC write or authority mint exists.
+/// Constructed by the parent after the transition to retiring. Every field is
+/// the PE's own object.
 pub(crate) struct SystemEffectCommit<'commit> {
     pub(in crate::blocks::retirement::checked) authority: &'commit PeExecutionAuthority,
     pub(in crate::blocks::retirement::checked) boundary: &'commit Boundary,
@@ -34,9 +33,9 @@ pub(crate) struct SystemEffectCommit<'commit> {
     pub(in crate::blocks::retirement::checked) registers: &'commit mut GuestState,
 }
 
-/// Required read-only split of the SAME live retiring commit. Only the concrete
-/// family delegators below construct it; raw pointers are identity diagnostics,
-/// never dereferenced and never permission without the actual borrowed phase.
+/// A read-only view of the same live commit, built only by the family
+/// delegators below. Its raw pointers are identity diagnostics and are never
+/// dereferenced.
 pub(crate) struct SystemEffectCommitView<'commit> {
     authority: &'commit PeExecutionAuthority,
     boundary: &'commit Boundary,
@@ -121,7 +120,8 @@ impl SystemEffectCommit<'_> {
         prepared: &mut super::dsb::PreparedRamDsb<'_>,
     ) -> Result<super::dsb::RamDsbApplied, super::dsb::RamDsbFailure> {
         prepared.validate_commit(self)?;
-        // Split only original fields; no whole-commit borrow overlaps banks.
+        // Split field by field, so no borrow of the whole commit overlaps the
+        // banks.
         let view = SystemEffectCommitView {
             authority: self.authority,
             boundary: self.boundary,

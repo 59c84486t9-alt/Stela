@@ -101,8 +101,8 @@ fn ordered(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-/// Packed scalar candidate: the proven same-granule footprint permits exact
-/// displacement accesses, without redundant per-element store guards.
+/// The whole footprint is within one granule, so elements are accessed at fixed
+/// displacements without per-element store guards.
 fn ordered_in_granule(code: &mut Vec<u8>, operand: &Operand) {
     for access in operand.accesses() {
         transfer_access(code, operand, access, access.byte_offset, true);

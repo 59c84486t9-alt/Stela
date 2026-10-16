@@ -100,9 +100,9 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             "M0 requirements differ"
         );
         let intent = source.intent(&self.pe.thread.registers);
-        // The whole-B loan is split ONCE. Never access B again while any of
-        // these original field loans is live. Outer Active stays armed through
-        // all opaque producer/session teardown, including after Ready.
+        // Split the backend once and do not touch `B` again while these borrows
+        // are live. The outer consumer stays active through teardown, even
+        // after a ready result.
         let result = {
             let provider::M0ExecutionResources {
                 sources,
@@ -159,8 +159,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     return Ok(M0Step::PreparationBlocked);
                 }
             };
-            // Own the NO-WRITE session under ORIGINAL authority BEFORE invoke.
-            // Errors and panic poison before physical pin/order resources drop.
+            // Hold the session in the failure guard before the call, so an
+            // error or panic marks the PE failed before the pins are released.
             let mut retained = RetainedM0Session {
                 authority: &mut *self.pe.authority,
                 session,
@@ -182,8 +182,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 settlement_failure: None,
             });
             if !valid_report {
-                // The genuine report is already owned by output. Diagnostic
-                // formatting may allocate or panic; it cannot erase the report.
+                // The report is already in the output; formatting may allocate
+                // or panic without losing it.
                 let detail = match observation.as_ref() {
                     Some(M0WriteObservation::Native { report, .. }) => format!(
                         "M0 write native report incomplete: invoked={}; completed={}; callback={:?}; failure={:?}; carrier={:?}",
@@ -231,8 +231,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 }
             };
             if let Err(failure) = retained.session.precommit() {
-                // Move the actual typed error into retained output BEFORE any
-                // fallible diagnostic formatting, without Clone or conversion.
+                // Move the typed error into the output before any fallible
+                // formatting.
                 let detail = match observation {
                     Some(M0WriteObservation::Native {
                         precommit_failure, ..
@@ -252,8 +252,8 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 M0WriteObservation::retain_settlement_failure(observation, &error);
                 return Err(error);
             }
-            // Mint the borrowed authority token directly, never return it from
-            // a closure that also captures the retained mutable authority loan.
+            // Create the borrowed token directly rather than returning it from
+            // a closure that also captures the mutable borrow.
             let authority = match retained
                 .authority
                 .prepare_native_commit(&ConsumerKey(()), self.attempt)

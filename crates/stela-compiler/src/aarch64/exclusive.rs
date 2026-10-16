@@ -40,8 +40,8 @@ pub enum Operand {
     },
 }
 
-/// These constrained aliases select the architectural UNDEF alternative.
-/// A caller must deliver that exception or decline translation explicitly.
+/// These CONSTRAINED UNPREDICTABLE aliases take the UNDEFINED choice; the
+/// caller must raise that exception or refuse to translate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstrainedUndefined {
     PairLoadOutputs,

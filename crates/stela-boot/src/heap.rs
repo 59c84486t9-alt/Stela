@@ -79,9 +79,9 @@ fn aligned(value: usize, alignment: usize) -> Option<usize> {
         .checked_add(alignment - 1)
         .map(|v| v & !(alignment - 1))
 }
-// SAFETY: caller supplies ordinary GlobalAlloc layout/ownership contracts. The
-// checked list split returns a disjoint aligned extent; its private header owns
-// the original bytes until exactly one deallocation under the same exclusion.
+// SAFETY: callers follow the GlobalAlloc contract. The free-list split returns
+// a disjoint aligned extent, and its header records the original bytes until
+// the single matching deallocation.
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _guard = self.lock();

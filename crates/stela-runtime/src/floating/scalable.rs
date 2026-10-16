@@ -83,10 +83,9 @@ impl NumericalControls {
     }
 }
 
-/// Complete an instruction admitted by the immutable streaming profile after
-/// the caller recovers its registered original source. The current owned state
-/// must still match that profile. Each family snapshots affected sources and
-/// stages its complete architectural outputs before committing.
+/// Complete an instruction admitted under the streaming profile, after the
+/// caller re-reads its source. The live state must still match the profile.
+/// Each family snapshots its sources and stages all outputs before committing.
 pub(crate) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

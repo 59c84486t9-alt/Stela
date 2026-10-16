@@ -214,9 +214,9 @@ fn evaluate(
     })
 }
 
-/// Complete one BF instruction without changing raw FPCR or unrelated state.
-/// FA64 enabled numerical traps retain an explicit transactional refusal.
-/// BFDOT selects enhanced semantics only when both EBF16 and EBF are available.
+/// Complete one BF16 instruction without changing raw FPCR or unrelated state.
+/// With FA64, enabled numerical traps are refused. BFDOT uses the enhanced
+/// semantics only when FEAT_EBF16 is present and FPCR.EBF is set.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

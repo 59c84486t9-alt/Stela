@@ -38,8 +38,7 @@ impl<'call, 'loan, 'owner> PairReadCallback<'call, 'loan, 'owner> {
         }
     }
 
-    /// Stack-view scoping only; this neither enters native code nor grants a
-    /// permit. The closed session supplies the actual call under its PE guard.
+    /// Scopes the stack view; the session makes the native call.
     pub(super) fn with_view<R>(&mut self, call: impl FnOnce(&mut MemoryContextView) -> R) -> R {
         let mut view = MemoryContextView {
             version: MEMORY_CONTEXT_VERSION,
@@ -92,12 +91,11 @@ impl<'call, 'loan, 'owner> PairReadCallback<'call, 'loan, 'owner> {
 }
 
 /// # Safety
-/// Native code is the exact validated finite LDP64 body. `view` and `request`
-/// are its live ABI objects; opaque points to this invocation's retained
-/// PairReadCallback, and request.data is a writable, private sixteen-byte staging
-/// quantity disjoint from RAM, architectural state, source and host metadata.
-/// The original PE settlement guard already owns prepared RAM/order/source
-/// resources before entry and retains them through this callback and commit.
+/// The native code is the validated LDP body. `view` and `request` are its live
+/// ABI objects; `opaque` points to this call's PairReadCallback, and
+/// `request.data` is writable private 16-byte staging, disjoint from RAM,
+/// architectural state, source and host metadata. The PE's guard holds the
+/// prepared RAM, ordering and source resources from before entry until commit.
 unsafe extern "C" fn reached_pair_read(
     view: *mut MemoryContextView,
     request: *const MemoryRequest,
@@ -111,8 +109,8 @@ unsafe extern "C" fn reached_pair_read(
         view.record(MemoryStatus::InvalidRequest, 0, 0, view.completed_bytes);
         return MemoryStatus::InvalidRequest as u32;
     }
-    // SAFETY: only with_view publishes this opaque pointer and the native call
-    // returns before its original exclusive callback borrow ends.
+    // SAFETY: only `with_view` publishes this pointer, and the native call
+    // returns before its exclusive borrow ends.
     let callback = unsafe { &mut *view.opaque.cast::<PairReadCallback<'_, '_, '_>>() };
     // SAFETY: the generated ABI retains its request throughout the callback.
     let request = unsafe { &*request };
@@ -161,8 +159,8 @@ unsafe extern "C" fn reached_pair_read(
         }
         Err(error) => {
             callback.failure = Some(error);
-            // Unsupported is only an ABI stop signal. The original typed
-            // error and completion survive separately; this is no guest abort.
+            // Unsupported only tells the native code to stop; the typed error
+            // and completion are kept separately. It is not a guest abort.
             view.record(
                 MemoryStatus::Unsupported,
                 request.address,

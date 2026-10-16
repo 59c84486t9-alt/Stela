@@ -51,7 +51,7 @@ fn replacement_uses_new_registered_generation_and_original_word() -> Result<()> 
     };
     let mut recorder = Recorder { seen: Vec::new() };
     let first = runtime.register_code(BASE, SVC.to_le_bytes().to_vec())?;
-    // SAFETY: exact trusted fixture; the service boundary performs no RAM access.
+    // SAFETY: trusted test code; the service boundary performs no RAM access.
     let outcome = unsafe {
         runtime.run_with_system(&mut state, Some(GuestAddress(BASE.0 + 4)), 1, &mut recorder)?
     };
@@ -59,7 +59,7 @@ fn replacement_uses_new_registered_generation_and_original_word() -> Result<()> 
     let second = runtime.register_code(BASE, UDF.to_le_bytes().to_vec())?;
     assert!(second > first);
     state.pc = BASE;
-    // SAFETY: replacement is serialized; the immutable original is revalidated.
+    // SAFETY: replacement is serialized, and the original is revalidated.
     unsafe {
         runtime.run_with_system(&mut state, Some(GuestAddress(BASE.0 + 4)), 1, &mut recorder)?
     };

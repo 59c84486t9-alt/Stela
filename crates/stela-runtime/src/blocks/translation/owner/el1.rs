@@ -19,14 +19,11 @@ pub(in crate::blocks) struct InstalledEl1Owner {
 }
 impl InstalledEl1Owner {
     /// # Safety
-    /// Same original fresh-machine/physical/source ownership contract as
-    /// InstalledM0Owner::new: all resources belong to ONE declared CPU/PE/System;
-    /// sole actual publication/retirement and immutable storage rights cover ALL
-    /// aliases/participants through the executable scope. No external writer,
-    /// firmware/DMA/debugger/NMI/other PE or hidden producer bypasses that owner.
-    /// This does not adopt a hardware PE or claim an Apple firmware handoff.
-    /// The canonical original PE/outer/ThreadState/System/closed-producer/native
-    /// finalization and neutral retirement path remains mandatory after creation.
+    /// As for `InstalledM0Owner::new`: every resource belongs to one declared
+    /// CPU, and this owner alone publishes, retires and holds the storage for
+    /// every alias while the machine runs. The PE, thread, system state,
+    /// producers and native finalization checks remain mandatory after
+    /// creation.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks) unsafe fn new(
         mut runtime: BlockRuntime,
@@ -51,8 +48,8 @@ impl InstalledEl1Owner {
             runtime.regions.is_empty() && runtime.loaded.is_empty(),
             "fresh EL1 source owner requires an unbound actual runtime"
         );
-        // SAFETY: this one actual fresh owner transfers the complete ORIGINAL
-        // source/physical/publication ownership described above to shared Initial.
+        // SAFETY: this owner hands its source, physical and publication
+        // resources to initial publication as described above.
         let (sources, controls) = unsafe {
             InstalledCodeSources::install(
                 &mut runtime,
@@ -103,10 +100,9 @@ impl InstalledEl1Owner {
             .bind_physical_instruction(scope.installed_snapshot(), reached)?;
         Ok(())
     }
-    /// One consuming executable lifetime, sealed by the ORIGINAL consumer key.
-    /// Stable outer slots avoid self-reference; no resource tuple/public adoption
-    /// escapes and no PE is recreated per run. System is captured by canonical
-    /// constructor so it can own the SAME actual mutable System throughout.
+    /// Consume this owner once for the machine's whole run. The callback
+    /// captures the system state so the execution owner can hold it mutably
+    /// throughout.
     pub(in crate::blocks) fn into_executable_scope<R>(
         mut self,
         _key: &crate::blocks::retirement::ConsumerKey,

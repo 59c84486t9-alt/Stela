@@ -25,9 +25,9 @@ pub(crate) struct Operands {
     pub destination: Option<u8>,
 }
 
-/// None means this operation is not conditional on PACM. Data keys and ordinary
-/// register modifiers keep their existing path. Some snapshots every operand,
-/// including OLD X16/X15, before the canonical consumer can write any register.
+/// None if the operation does not depend on PACM; data keys and ordinary
+/// register modifiers take the normal path. Some snapshots every operand,
+/// including the old X16/X15, before any register is written.
 pub(crate) fn stage(
     operation: Operation,
     pc: u64,

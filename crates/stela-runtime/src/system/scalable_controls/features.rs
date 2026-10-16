@@ -35,8 +35,8 @@ pub(super) fn sve(ids: &Snapshot) -> Result<bool, Error> {
     Ok(level(ids, Register::IdAa64Pfr0El1, "SVE", 32, &[0, 1])? == 1)
 }
 
-/// This subset excludes optional CPACR consumers without an actual owner.
-/// Their RES0 storage choice is explicit and does not infer write-ignore.
+/// Excludes optional CPACR consumers that have no owner; their RES0 storage
+/// choice is explicit.
 pub(super) fn check_control_subset(ids: &Snapshot) -> Result<(), Error> {
     ids.check_el10_regime().map_err(Error::Identification)?;
     let fp = level(ids, Register::IdAa64Pfr0El1, "FP", 16, &[0, 1, 15])?;

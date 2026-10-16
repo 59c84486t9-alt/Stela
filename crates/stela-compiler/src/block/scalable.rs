@@ -34,9 +34,9 @@ pub struct ScalableNumericalInstruction {
     pub word: u32,
 }
 
-/// A source-consistent numerical request admitted by an immutable streaming
-/// profile. Runtime completion must additionally recover the registered source
-/// word and match the current owned state to this exact profile before entry.
+/// A numerical exit admitted under a streaming profile. At completion the
+/// runtime re-reads the source word and checks the live state against this
+/// profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmittedScalableNumericalInstruction {
     instruction: ScalableNumericalInstruction,

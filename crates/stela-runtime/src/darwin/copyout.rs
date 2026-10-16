@@ -77,8 +77,8 @@ fn publish_prefix(
     bytes: &[u8],
     completed: usize,
 ) -> Result<Completion> {
-    // Coalescing already validated stores is observationally equivalent here:
-    // this profile permits no concurrent execution, device memory or observers.
+    // Coalescing stores that were already validated is unobservable here: there
+    // is no concurrent execution, device memory or observer.
     memory.write(address, &bytes[..completed])?;
     Ok(Completion::Fault { completed })
 }

@@ -38,9 +38,8 @@ pub enum ThreadProtection {
     Disabled,
 }
 
-/// Raw legacy DYLD_FLAGS. Unknown bits round-trip without invented semantics.
-/// The supplied platform profile explicitly disables hardware TPRO; a guest
-/// entering a TPRO operation still reaches an unsupported architectural boundary.
+/// Raw legacy DYLD_FLAGS; unknown bits round-trip unchanged. Hardware TPRO is
+/// disabled, so a guest TPRO operation stops as unsupported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DyldFlags {
     pub value: u64,

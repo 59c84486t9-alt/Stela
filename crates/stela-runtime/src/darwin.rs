@@ -40,7 +40,7 @@ pub enum BsdReturnType {
     None,
 }
 
-/// Caller-declared sysent metadata; the adapter never guesses a syscall table.
+/// System-call table entry supplied by the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BsdPrototype {
     pub argument_count: usize,
@@ -62,7 +62,7 @@ pub struct BsdRequest {
 }
 
 impl BsdRequest {
-    /// Exactly the argument slots declared by the validated call prototype.
+    /// The argument slots declared by the call's prototype.
     pub fn arguments(&self) -> &[u64] {
         &self.arguments[..self.prototype.argument_count]
     }
@@ -86,7 +86,7 @@ impl Serialize for BsdRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BsdCompletion {
-    /// The two original 32-bit uthread retval slots, before ABI normalization.
+    /// The two 32-bit uthread return slots, before ABI normalization.
     Success {
         values: [u32; 2],
     },
@@ -133,7 +133,7 @@ pub(crate) fn validate_trap(state: &ThreadState, trap: &SynchronousTrap) -> Resu
     validate_trap_parts(state.pc, &state.registers, trap)
 }
 
-/// Validate borrowed actual registers without granting access to the PC owner.
+/// Validate the borrowed registers.
 pub(crate) fn validate_trap_parts(
     pc: GuestAddress,
     registers: &GuestState,
@@ -201,8 +201,8 @@ pub(crate) fn classify_bsd_call_parts(
     })
 }
 
-/// Owns an immutable request and complete pre-service thread snapshot.
-/// This is a pending ABI event, not evidence that its service has executed.
+/// A trapped request and the full thread state before the service. The service
+/// has not run yet.
 #[derive(Debug)]
 pub struct PendingBsdCall {
     request: BsdRequest,
@@ -256,10 +256,10 @@ impl PendingBsdCall {
         &self.request
     }
 
-    /// Apply one actual backend result after proving the stopped state unchanged.
-    /// A declined service must not call this method. Invalid replies and declined
-    /// context restoration leave all state unchanged. BSD completion touches only
-    /// the declared return registers, carry and PC; no EL/PSTATE entry is modeled.
+    /// Apply a backend result after checking that the stopped state is
+    /// unchanged. Declined services must not call this. An invalid reply, or a
+    /// context restoration that is declined, leaves all state unchanged. BSD
+    /// completion writes only the return registers, carry and PC.
     pub fn complete(
         self,
         state: &mut ThreadState,
@@ -272,8 +272,8 @@ impl PendingBsdCall {
         Ok(())
     }
 
-    /// Normalize one backend result in the actual bank. The issued clone is
-    /// validation evidence only; the caller retains exclusive actual PC authority.
+    /// Apply a backend result to the register bank. The issued copy is only
+    /// used for validation; the caller sets PC.
     pub(crate) fn complete_registers(
         self,
         registers: &mut GuestState,
@@ -325,7 +325,7 @@ impl PendingBsdCall {
     }
 }
 
-/// Captured request and explicit completion/decline from one BSD backend.
+/// The captured request and the backend's completion or decline.
 #[derive(Debug, Serialize)]
 pub struct BsdServiceEvent {
     pub trap: SynchronousTrap,
@@ -335,7 +335,7 @@ pub struct BsdServiceEvent {
 }
 #[derive(Debug, Serialize)]
 pub struct ServiceRunOutcome {
-    /// Descriptive retained-owner diagnostics; these confer no entry authority.
+    /// Diagnostics from the retained owner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protected_observation: Option<serde_json::Value>,
     pub execution: crate::blocks::RunOutcome,
@@ -385,7 +385,8 @@ pub struct ExecutionServices<'a> {
     pub mach_vm: bool,
     pub mach_vm_map: bool,
     pub crossarch: bool,
-    /// Caller-established absence of an owned guest shared-region attachment.
+    /// The caller has established that the guest has no shared-region
+    /// attachment.
     pub absent_shared_region: bool,
     pub csr: Option<&'a csr::ArmSecurityPolicy>,
     pub entropy: bool,
@@ -398,11 +399,10 @@ pub struct ExecutionServices<'a> {
 pub const DATA_VM_PROFILE: &str = "darwin-arm64-va47-page16k-data-mprotect-v1";
 pub const GUEST_PAGE_BYTES: u64 = 16 * 1024;
 
-/// Service the reviewed BSD74 ABI using owned guest pages, never host pointers
-/// supplied unchecked by the guest. Unsupported requests preserve pending state.
-/// Reference: pinned XNU bsd/kern/kern_mman.c mprotect/mprotect_sanitize and
-/// syscalls.master. W implies R in that source; guest pages are16KiB regardless
-/// of the host's page size. This is not the complete Darwin security/VM policy.
+/// Service BSD call 74 (mprotect) on owned guest pages; guest pointers are
+/// never used directly. Unsupported requests stay pending. Follows XNU
+/// `bsd/kern/kern_mman.c`: W implies R, and guest pages are 16 KiB whatever the
+/// host page size.
 #[cfg(feature = "std")]
 pub fn service_data_mprotect(
     state: &mut ThreadState,
@@ -499,22 +499,19 @@ pub fn service_data_mprotect(
     event
 }
 
-/// Run native dispatch with explicitly selected data-VM, crossarch and thread/Mach services.
-/// Unknown services remain precise trap stops, and a single aggregate budget
-/// counts every native block across resumptions.
+/// Run native dispatch with the selected data-VM, cross-architecture and
+/// thread/Mach services. Unknown services stop at their trap, and one budget
+/// counts every block across resumptions.
 ///
 /// # Safety
-/// All BlockRuntime direct-RAM requirements apply; this owner must cover data
-/// used by trusted code. No concurrent guest execution or code/data mutation is
-/// allowed. Executable transitions are declined rather than invalidated here.
-/// Selecting `absent_shared_region` requires actual process ownership without a
-/// guest shared-region attachment; file and anonymous RAM alone do not attach one.
-/// For a checked profile this is the complete bounded executable lifetime of
-/// one genuinely fresh declared software PE. All protected resources and the
-/// complete asynchronous producer universe are original and uniquely borrowed.
-/// No raw entry, copied state, producer alias or later constructor may resume
-/// this PE after this call. Unsupported services remain stopped; no legacy
-/// execution fallback is available for this route.
+/// All `BlockRuntime` direct-RAM requirements apply, and `memory` must cover
+/// the data the trusted code uses. No concurrent guest execution or code or
+/// data mutation is allowed; executable transitions are declined.
+/// `absent_shared_region` requires that the process has no shared-region
+/// attachment (file and anonymous RAM do not create one). For a checked profile
+/// this call is the whole run of a new software PE: its protected resources and
+/// every asynchronous producer are uniquely borrowed, and nothing may resume
+/// the PE afterwards.
 #[cfg(feature = "std")]
 pub unsafe fn run_services(
     runtime: &mut crate::blocks::BlockRuntime,

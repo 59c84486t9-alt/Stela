@@ -94,7 +94,7 @@ impl Instruction {
     }
 }
 
-/// Fixed bits taken from the exact June members, not assembler acceptance.
+/// Fixed bits of each form, from the specification.
 const EXACT_FORMS: [(u32, Instruction); 9] = [
     (0xdac1_bbfe, Instruction::Authenticate171615(Key::Ia)),
     (0xdac1_bffe, Instruction::Authenticate171615(Key::Ib)),
@@ -138,7 +138,7 @@ const PC_MASK: u32 = 0xffe0_001f;
 const AUTH_PC_FORMS: [(u32, Key); 2] = [(0xf380_001f, Key::Ia), (0xf3a0_001f, Key::Ib)];
 const RETURN_PC_FORMS: [(u32, Key); 2] = [(0x5500_001f, Key::Ia), (0x5520_001f, Key::Ib)];
 
-/// A match conveys source facts only; it grants no execution capability.
+/// Decode a FEAT_PAuth_LR instruction.
 pub fn decode(word: u32) -> Option<Instruction> {
     for (value, instruction) in EXACT_FORMS {
         if word == value {

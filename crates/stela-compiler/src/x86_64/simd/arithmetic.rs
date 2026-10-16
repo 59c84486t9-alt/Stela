@@ -108,9 +108,9 @@ fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) -> u8 {
             right_lane,
         } => {
             read_numerical_vector(code, operand.shape, left, LEFT_VECTOR);
-            // Both policies select from the complete original Vm. The direct
-            // 128-bit shuffle saves one instruction; Q0 retains its measured
-            // shift/broadcast policy and can still select an upper-half lane.
+            // Both policies select from the whole Vm. The 128-bit form uses one
+            // shuffle; the 64-bit form keeps its shift and broadcast and can
+            // still select an upper lane.
             if operand.shape == Shape::Vector128 {
                 read_vector(code, right, RIGHT_VECTOR);
                 let lanes = match operand.format {
@@ -252,8 +252,8 @@ fn emit_vector(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
         helper.push(branch(code, Condition::NotZero));
     }
     if operand.shape == Shape::Vector64 && operand.operation == BinaryOperation::Divide {
-        // Inactive numerators are zero. Supply 1.0 denominators to avoid 0/0
-        // contributing host invalid status; inactive original bits never execute.
+        // Inactive numerators are zero; 1.0 denominators keep 0/0 from raising
+        // host invalid.
         packed(code, Host::EqualDword, EXPONENT_VECTOR, EXPONENT_VECTOR);
         ShiftOpcode::RightDword.emit(
             code,

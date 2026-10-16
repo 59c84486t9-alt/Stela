@@ -231,14 +231,13 @@ impl<M: Memory> Executor<'_, M> {
     }
 }
 
-/// Complete a memory-only MTE instruction. Successful earlier memory callbacks
-/// remain observable after a later fault; no destination or writeback is committed
-/// on that path. The backend may not probe future subaccesses on this helper's
-/// behalf. This is an allowed deterministic implementation policy, not a claim
-/// that Arm requires a completed prefix: DDI0487M.c RTNVSL permits UNKNOWN
-/// outcomes for nonfaulting locations of an aborted multi-SCA instruction, and
-/// RPJCWS does not order its separate data/tag MMU faults. Address-calculation
-/// registers and undeclared state remain preserved on this helper's fault path.
+/// Complete a memory-only MTE instruction. Memory callbacks that succeeded
+/// before a later fault stay visible, and no destination or writeback is
+/// committed on that path. The backend may not probe later sub-accesses. This
+/// deterministic choice is allowed: the architecture leaves non-faulting
+/// locations of an aborted multi-access instruction UNKNOWN (DDI0487 M.c
+/// RTNVSL) and does not order its data and tag faults (RPJCWS). Address
+/// registers and other state are preserved on the fault path.
 pub fn complete<M: Memory>(
     operand: Operand,
     registers: &mut GuestState,
@@ -262,8 +261,9 @@ pub fn complete<M: Memory>(
             (false, false, false, [Some(index(destination)), None])
         }
         Operand::StoreTags { kind, source, .. } => {
-            // STZ2G has an original pair descriptor with Rt == Rt2. Mem32
-            // clears ispair for its two SCA16 data subaccesses; tags retain it.
+            // STZ2G's descriptor is a pair with Rt == Rt2. Mem32 clears
+            // `ispair` for its two 16-byte data accesses; the tag accesses keep
+            // it.
             let pair = kind == StoreKind::ZeroTagPair;
             (
                 pair,

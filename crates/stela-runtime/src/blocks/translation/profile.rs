@@ -57,15 +57,13 @@ pub(super) fn check_features(
     Ok(())
 }
 
-/// Current compiler source has no canonical System carrier for the retained
-/// legacy five-register/ISB candidate. This is an explicit platform refusal,
-/// reached before fetch or any legacy step effect; it does not affect M0 Initial.
+/// The compiler has no system-instruction block for the five-register/ISB
+/// sequence, so it is refused before fetch.
 pub(super) fn require_legacy_carrier() -> Result<(), &'static str> {
     Err("unsupported legacy five-register/ISB carrier in the current compiler")
 }
 
-/// Descriptive legacy dispatch only. This type is not a canonical compiler
-/// descriptor, source/PE permit, or authority to invoke native code.
+/// Control operations recognized by the dispatcher.
 pub(super) enum LegacyControlOperation {
     Read,
     Write,
@@ -107,8 +105,7 @@ pub(super) fn legacy_control_operation(word: u32) -> Option<LegacyControlOperati
 pub(super) fn check_instruction(pc: u64, word: u32) -> Result<SystemInstruction, &'static str> {
     legacy_control_operation(word)
         .ok_or("instruction has no producer in the control-only execution entry")?;
-    // Do not fabricate a descriptor for a source word the actual compiler cannot
-    // emit as a System exit. Descriptive recognition above is not admission.
+    // Only words the compiler can emit as a system exit get a descriptor.
     let instruction = decode_system_instruction(GuestAddress(pc), word)
         .map_err(|_| "control instruction PC or canonical descriptor is invalid")?
         .ok_or("unsupported legacy five-register/ISB carrier in the current compiler")?;

@@ -591,7 +591,7 @@ pub fn decrement_budget_preserving_flags(code: &mut Vec<u8>) {
     code.extend((-1i8).to_le_bytes());
 }
 
-/// Fallback consumes one original block before entering its unchanged body.
+/// The fallback path counts one block before running its body.
 pub fn decrement_stored_budget(code: &mut Vec<u8>) {
     code.extend([
         REX | REX_W,

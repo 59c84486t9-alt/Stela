@@ -13,10 +13,9 @@ pub enum EmitError {
     ContextRequired,
 }
 
-/// Emit only effects independent of guest system context. R8 is host scratch.
-/// CPUID leaf0 serializes execution; preserve the System V callee-saved RBX.
-/// All guest state remains in memory and is untouched by these recipes.
-/// Other operations require their explicit runtime/context owner.
+/// Emit the barriers and hints that need no system context. R8 is scratch.
+/// CPUID leaf 0 serializes; RBX is saved around it. Other operations go to the
+/// runtime.
 pub fn emit(code: &mut Vec<u8>, operation: &Operation) -> Result<(), EmitError> {
     match operation {
         Operation::Yield => code.extend_from_slice(PAUSE),

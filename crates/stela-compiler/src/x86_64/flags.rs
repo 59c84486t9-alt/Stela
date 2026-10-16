@@ -127,7 +127,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
             mask,
         } => {
             if mask == 0 {
-                // Every original instruction retains a nonempty source-map interval.
+                // Every instruction keeps a non-empty source-map range.
                 Opcode::Nop.emit(code);
                 return;
             }

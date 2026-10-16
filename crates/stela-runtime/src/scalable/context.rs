@@ -2,8 +2,8 @@
 
 use stela_compiler::context::{ExecutionContext, ScalableStateView, memory::MemoryContextView};
 
-/// Pointers are restored before the matching register/service loan expires,
-/// including ordinary Rust error unwinding around a completed native call.
+/// Restores the pointers before the register and service borrows expire,
+/// including when an error unwinds after the native call.
 pub(super) struct ContextLoan<'a> {
     context: &'a mut ExecutionContext,
     memory: *mut core::ffi::c_void,

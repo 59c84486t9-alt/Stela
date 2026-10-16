@@ -182,14 +182,12 @@ pub fn resolve(word: u32, context: Context) -> Resolution<Request> {
     })
 }
 
-/// Resolve EL0/EL1 ordinary DSB when the authoritative profile disables EL2.
+/// Resolve an EL0/EL1 DSB when the profile has EL2 disabled.
 ///
-/// June IsHCRXEL2Enabled ends with EL2Enabled, so effective HCRX is disabled
-/// independently of XS/HCX availability. Preserve those unavailable readbacks
-/// instead of inventing feature absence. The caller must derive Profile from
-/// its actual PE/control owner; this pure decoder confers no execution permit,
-/// source authority, mapped history or completion/publication implementation.
-/// Explicit nXS, ISB and bypass aliases remain with the complete dispatcher.
+/// IsHCRXEL2Enabled ends with EL2Enabled, so HCRX is disabled whether or not XS
+/// and HCX exist; those readbacks stay unknown rather than absent. The caller
+/// derives `Profile` from its PE. nXS, ISB and bypass aliases are handled by
+/// the full dispatcher.
 pub fn resolve_ordinary_el2_disabled(word: u32, profile: Profile) -> Resolution<Request> {
     if !matches!(
         synchronization::decode(word),
@@ -225,24 +223,18 @@ pub struct ServiceRequest {
     pub kind: RequestKind,
 }
 
-/// A permit binds actual source/control provenance and the owning PE, machine
-/// and address space throughout this one execution. Preflight has no guest or
-/// barrier effect. It reserves every required service before any completion.
+/// Services that complete barriers for one execution, bound to the PE, machine
+/// and address space.
 ///
-/// Data completion combines real synchronous data completion with every
-/// maintenance obligation required by the raw option/scope/effective nXS.
-/// Unsupported-before-issue or immutable-code/fixed-control eligibility must
-/// come from the source-generation/runtime exclusion contract. Zero counters
-/// and absent host queues do not establish global architectural absence.
-///
-/// Instruction synchronization publishes the actual guest instruction stream
-/// and relevant control/translation changes before the next guest instruction.
-/// CPUID or another host serialization recipe alone does not establish this.
-/// Do not clear unrelated trace/error work: the DSB/ISB source calls no blanket
-/// TraceUnitFlush or SynchronizeErrors. Any unavailable requirement stops here.
-/// Every callback `Ok(())` certifies its complete architectural effect, not
-/// issuance or queued work. Failure completion describes that current stage;
-/// CommittedPrefix describes earlier stages that already completed.
+/// Preflight has no effect and reserves every service needed. Data completion
+/// covers the synchronous data accesses and every maintenance obligation of the
+/// option, scope and nXS. Zero counters or empty host queues do not prove there
+/// is no outstanding work. Instruction synchronization publishes the
+/// instruction stream and any control or translation changes before the next
+/// instruction; host serialization alone is not enough. Unrelated trace and
+/// error work is not flushed. Any unavailable requirement stops execution. A
+/// callback's `Ok(())` means its whole architectural effect is complete; on
+/// failure, CommittedPrefix lists the stages already completed.
 pub trait BarrierServices {
     type Permit;
     type Error;
@@ -288,12 +280,11 @@ pub enum ExecuteError<E> {
 }
 
 impl Request {
-    /// On failure preserve earlier instructions, memory and completed owner
-    /// effects. A consumed request is not a whole-operation retry token.
-    /// The caller commits the returned PC only after successful completion.
-    /// On every failure the caller must settle the actual reached terminal PC
-    /// under the PE lease, including NoEffect after a native prefix. Failure
-    /// never authorizes replay from block entry or rollback of prior effects.
+    /// On failure, earlier instructions, memory and completed effects stand;
+    /// the request cannot be retried as a whole. The caller commits the
+    /// returned PC only on success, and on failure settles the reached PC
+    /// (including NoEffect after a native prefix). Failure never permits replay
+    /// from block entry or rollback.
     pub fn execute<S: BarrierServices>(
         self,
         source_pc: u64,
@@ -305,7 +296,7 @@ impl Request {
         self.execute_preflighted(source_pc, services, permit)
     }
 
-    /// Pure request for reservation before the canonical Retiring transition.
+    /// The service request, for reservation before retiring.
     pub(crate) const fn service_request(&self, source_pc: u64) -> ServiceRequest {
         ServiceRequest {
             original_word: self.word,
@@ -315,8 +306,7 @@ impl Request {
         }
     }
 
-    /// Consume the exact original prepared service permit once. No second
-    /// preflight, authority transition or PC commit occurs in the semantic leaf.
+    /// Consume the prepared service reservation once.
     pub(crate) fn execute_preflighted<S: BarrierServices>(
         self,
         source_pc: u64,

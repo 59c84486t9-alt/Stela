@@ -138,9 +138,9 @@ pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
     }
 }
 
-/// RDI/R15 and entry RSP are preserved. Failures return their MemoryStatus in
-/// EAX to the outer wrapper; success sets EAX=0 and falls through. The fixed
-/// profile checks original SP even when every predicate lane is inactive.
+/// RDI/R15 and the entry RSP are preserved. Failures return their MemoryStatus
+/// in EAX; success sets EAX to 0 and falls through. SP is checked even when
+/// every lane is inactive.
 pub(crate) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,

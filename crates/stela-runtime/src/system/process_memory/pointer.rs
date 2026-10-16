@@ -49,8 +49,8 @@ impl FixedProcessMemoryControls {
         if debug.halted {
             return Err(fail());
         }
-        // Missing SCTLR2 is not a zero value. The helper may bypass the lookup
-        // only after actual feature/SCTLRX facts have made it inapplicable.
+        // A missing SCTLR2 is not zero; the lookup may be skipped only when the
+        // feature facts make it inapplicable.
         let extended = if self.extended.is_some() {
             Some(
                 self.extended_controls(snapshot, thread, execution)
@@ -70,9 +70,9 @@ impl FixedProcessMemoryControls {
         } else {
             CheckedMemoryProfile::SpAlignmentDisabled
         };
-        // acquire_source_loan already proves actual EL0t. Both normal and
-        // unprivileged access descriptors therefore use EL0 in this owner.
-        // Compare the complete profile, not aggregate used-EL requirements.
+        // `acquire_source_loan` proved EL0t, so both normal and unprivileged
+        // accesses use EL0 here. Compare the whole profile, not the combined EL
+        // requirements.
         let expected =
             base.with_address_checks(AccessEl::El0, AccessEl::El0, checks.address_checks());
         let arithmetic = if checks.feature().has_arithmetic() {
@@ -139,9 +139,8 @@ impl FixedProcessMemoryControls {
         }
     }
 
-    /// Private source-bound entry. The canonical provider must retain its actual
-    /// debug owner, PE/source/outer and exact immutable runtime profile. This is
-    /// not a public loose-control or permission-boolean constructor.
+    /// Private entry for the provider, which holds its debug owner, PE, source,
+    /// outer object and runtime profile.
     #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "std")]
     pub(crate) fn prepare_pointer<'run>(

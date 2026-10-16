@@ -71,8 +71,8 @@ pub(super) fn emit(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Sour
         fast(code, bytes, displacement, source);
         return;
     }
-    // An access spanning a 4 KiB boundary flips address bit12. Comparing with
-    // the pair's original base can conservatively include its second element.
+    // An access crossing a 4 KiB boundary flips address bit 12. Comparing
+    // against the pair's base may conservatively include the second element.
     code.extend(LEA_R10D_RAX_DISP8);
     code.push(displacement + bytes - 1);
     code.extend(XOR_R10D_EAX);

@@ -125,7 +125,7 @@ fn emit_offset(
         return;
     }
     load(code, source);
-    // Extract the original tag before address arithmetic; its carry/borrow can
+    // Extract the tag before the address arithmetic; the carry or borrow may
     // cross the tag field and must still reach the preserved high nibble.
     tag_input(code, source, tag_offset);
     if address_offset != 0 {
@@ -152,8 +152,8 @@ fn emit_offset(
 
 fn emit_mask(code: &mut Vec<u8>, destination: Register, address: Register, mask: Register) {
     if destination == mask {
-        // Consume the original tag before any in-place update, including when
-        // the address aliases the mask. EDX's high half stays zero for tag0..15.
+        // Read the tag before any in-place update, including when the address
+        // aliases the mask. EDX's high half stays zero for tags 0-15.
         tag_input(code, address, 0);
         code.push(MOV_EDX_IMM32);
         code.extend(MASK_BIT.to_le_bytes());

@@ -33,15 +33,15 @@ const ESR_EXCEPTION_CLASS_SHIFT: u32 = 26;
 const HVC_EXCEPTION_CLASS: u64 = 0x16;
 const SMC_EXCEPTION_CLASS: u64 = 0x17;
 
-/// Readbacks under one canonical control-owner loan. An absent bank is None;
-/// an implemented but unavailable bank must also remain None, never zero.
+/// Readbacks under one control-owner borrow. A bank that is absent, or
+/// implemented but unavailable, is None, never zero.
 #[derive(Debug, Clone, Copy)]
 pub struct ControlReadbacks<'a> {
     pub hcr_el2: Option<&'a u64>,
     pub scr_el3: Option<&'a u64>,
 }
 
-/// Actual declared implementation choices, not defaults or enable controls.
+/// Declared implementation choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Implementation {
     pub without_el3_security: WithoutEl3Security,
@@ -95,9 +95,7 @@ pub enum Undefined {
     SecureMonitorLevelAbsent,
 }
 
-/// Required architectural instruction prefix, selected as one indivisible kind.
-/// The canonical exception owner consumes real source-bound phase authority;
-/// this description cannot certify completion or authorize any runtime effect.
+/// The architectural steps before the call, as one kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallPrefix {
     Hypervisor,
@@ -111,9 +109,8 @@ pub enum Selection<'a> {
     Entry(EntryRequest<'a>),
 }
 
-/// Non-Copy intent consumed by the generalized canonical entry preparer. It is
-/// not a permit and cannot execute independently. The entry preparer validates
-/// debug/step/IL/optional-state requirements and loans the destination bank.
+/// Consumed by the shared entry preparer, which validates the debug, step, IL
+/// and optional-state requirements and lends the destination bank.
 #[derive(Debug)]
 pub struct EntryRequest<'a> {
     pub(crate) snapshot: &'a Snapshot,
@@ -125,8 +122,8 @@ pub struct EntryRequest<'a> {
     pub(crate) target_security: SecurityState,
     pub(crate) preferred_pc: u64,
     pub(crate) esr: u64,
-    // HVC: SSAdvance; SMC: HSAdvance then SSAdvance; trapped SMC: neither.
-    // Any applicable PACM clear follows these steps in the canonical owner.
+    // HVC: SSAdvance. SMC: HSAdvance, then SSAdvance. Trapped SMC: neither. Any
+    // PACM clear follows these steps.
     pub(crate) call_prefix: CallPrefix,
 }
 
@@ -153,11 +150,10 @@ fn read(snapshot: &Snapshot, register: Register) -> Result<u64, Unsupported> {
     snapshot.read(register).map_err(Unsupported::Identification)
 }
 
-/// Exact June selection for actual A64 EL0/EL1 sources. Secure EL2, Realm and
-/// nested-virtualization execution are explicitly outside this first subset.
-/// A64+A32 capability is distinct from actual state: canonical PSTATE and
-/// reached HCR/SCR execution-state controls must establish A64 independently.
-/// No source-state mutation or platform service occurs during selection.
+/// Select the target for AArch64 EL0/EL1 sources. Secure EL2, Realm and nested
+/// virtualization are unsupported. A64 capability is not the current state:
+/// PSTATE and the HCR/SCR execution-state controls must establish AArch64
+/// separately. Nothing is changed during selection.
 pub fn select<'a>(
     snapshot: &'a Snapshot,
     controls: ControlReadbacks<'a>,
@@ -305,10 +301,10 @@ pub fn select<'a>(
     if source_security != SecurityState::NonSecure {
         return Err(Unsupported::SecureSource);
     }
-    // EL3 is the highest A64-capable EL, so ELStateUsingAArch32K(EL3)
-    // returns FALSE even when its capability also permits A32. For a dual-state
-    // EL2 below EL3, actual SCR.RW selects its state. EL1's checked PSTATE is
-    // A64; require its actual nonhost lower-EL execution controls to agree.
+    // EL3 is the highest AArch64-capable EL, so ELStateUsingAArch32K(EL3) is
+    // FALSE even if A32 is also allowed. A dual-state EL2 below EL3 takes its
+    // state from SCR.RW. EL1's PSTATE is A64, and its lower-EL execution
+    // controls must agree.
     let el1_dual = (pfr0 >> PFR0_EL1_SHIFT) & ID_FIELD_MASK == A64_AND_A32;
     let el2_dual = (pfr0 >> PFR0_EL2_SHIFT) & ID_FIELD_MASK == A64_AND_A32;
     if let Some(scr) = scr

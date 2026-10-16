@@ -69,11 +69,10 @@ pub enum Operand {
     },
 }
 
-/// SBO fields select the documented execute-as-one constrained behavior.
-/// They do not become register inputs; data31 is ZR and base31 is SP.
-/// With no matching LORegion, limited accesses have full acquire/release order.
-/// The declared EL0 profile has FEAT_LOR and no enabled regions.
-/// Reserved DMB options with low bits00 have the specified SY behavior.
+/// SBO fields take the documented constrained behavior and are not register
+/// inputs; data register 31 is ZR and base 31 is SP. With FEAT_LOR but no
+/// enabled LORegions, limited accesses have full acquire/release order.
+/// Reserved DMB options with low bits 00 behave as SY.
 pub fn decode(word: u32) -> Option<Operand> {
     if word & BARRIER_MASK == DMB_CLASS {
         let option = ((word >> OPTION_SHIFT) & OPTION_MASK) as u8;

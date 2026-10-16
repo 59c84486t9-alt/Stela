@@ -22,21 +22,21 @@ impl Mapping {
         })
     }
     /// # Safety
-    /// Caller retains the original full canonical Active/session, actual source,
-    /// context, state, backend and outer through typed finalization/settlement.
+    /// The caller's session holds the source, context, state, backend and outer
+    /// object through finalization and settlement.
     pub(crate) unsafe fn call_context_block_observed(
         &self,
         state: &mut GuestState,
         context: &mut ExecutionContext,
     ) -> core::result::Result<super::ObservedNativeCall<BlockExit, StorageError>, StorageError>
     {
-        // SAFETY: caller binds the original complete canonical ownership/ABI;
-        // NativeImage borrows this actual checked protected frame allocation.
+        // SAFETY: the caller upholds the ownership and ABI contract;
+        // `NativeImage` borrows this checked frame allocation.
         unsafe { NativeImage::borrow(&self.frames).call_context_block(state, context) }
     }
     /// # Safety
-    /// Exact one-state-pointer ABI and full original canonical owner contract
-    /// apply. The raw carrier and storage postcheck both survive a reached call.
+    /// The one-pointer block ABI and the session contract apply. The raw result
+    /// and the storage check are both kept.
     pub(crate) unsafe fn call_block_observed(
         &self,
         state: &mut GuestState,
@@ -45,8 +45,9 @@ impl Mapping {
         unsafe { NativeImage::borrow(&self.frames).call_block(state) }
     }
 
-    // Legacy research context calls have no fallible-storage report/finalizer
-    // contract. Refuse BEFORE FFI; mounted canonical paths use observed methods.
+    // Plain context calls have no storage report or finalizer, so they are
+    // refused before the call; the freestanding build uses the observed
+    // methods.
     pub unsafe fn call_context(
         &self,
         _state: &mut GuestState,

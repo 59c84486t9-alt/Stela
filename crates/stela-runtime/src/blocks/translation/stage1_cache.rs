@@ -17,8 +17,7 @@ impl Stage1Cache {
             entries: CacheEntries::new(config),
         }
     }
-    /// Concrete original storage and outer are required at the refill entry.
-    /// A copied Config and arbitrary PhysicalMemory cannot publish cache cells.
+    /// Refill requires the installed storage and outer object.
     pub(super) fn translate(
         &self,
         config: &Config,
@@ -48,8 +47,8 @@ impl Stage1Cache {
     }
 }
 
-// Private algorithm core; only the concrete original-owner wrapper above can
-// call it in production. Descendant tests may supply mathematical table models.
+// The cache algorithm, reachable in production only through the wrapper above.
+// Tests may use table models directly.
 struct CacheEntries {
     config: Config,
     cells: Mutex<[Option<Translation>; CACHE_CELLS]>,
@@ -61,9 +60,9 @@ impl CacheEntries {
             cells: Mutex::new([None; CACHE_CELLS]),
         }
     }
-    /// Caller retains actual installed/controls/source/physical/outer loans.
-    /// Only the unchanged canonical walker creates results. Faults never enter
-    /// this cache, and a colliding entry may be evicted without guest effects.
+    /// The caller holds the installed context, controls, source, physical
+    /// memory and outer borrows. Only the walker creates entries, faults are
+    /// never cached, and a colliding entry may be evicted.
     fn translate(
         &self,
         config: &Config,

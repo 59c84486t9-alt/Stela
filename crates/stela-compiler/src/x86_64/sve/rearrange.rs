@@ -378,7 +378,7 @@ fn reverse(
     }
 }
 
-/// Profile requirement for the actual selected instruction recipe.
+/// Whether the selected recipe requires a profile declaring DIT clear.
 pub(crate) fn requires_explicit_dit_zero(
     operand: Operand,
     length: VectorLength,

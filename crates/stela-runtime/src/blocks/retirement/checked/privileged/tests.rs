@@ -1,4 +1,4 @@
-// Declared-software actual-owner tests; no original ARM/debug oracle claims.
+// Tests of the software privileged PE.
 use super::*;
 use crate::{
     blocks::{
@@ -692,7 +692,7 @@ fn actual_fresh_factory_hvc_hlt_dcps_lifetime() {
     use super::super::software_privileged::*;
     let ids = ids(true);
     let initial_system = system(Arc::clone(&ids), true, 0);
-    // Explicit initialization values only; no PE or authority has been created.
+    // Initialization values only.
     let initial_debug = DebugInitialization {
         edscr: Status::NonDebug as u32 | ITE | HDE,
         edprsr: 0,

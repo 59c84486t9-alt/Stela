@@ -80,10 +80,9 @@ pub(crate) fn address(code: &mut Vec<u8>, operand: Address, length: VectorLength
     }
 }
 
-/// Check the original SP before applying its instruction displacement.
-/// Preflight requires effective SA/SA0 enabled; CHECKSPNONEACTIVE=true is fixed.
-/// Prefetch families must not call this helper. Patch its fault site to the
-/// family's scratch cleanup; the memory view retains the alignment fault.
+/// Check SP before applying the displacement. Requires SA/SA0 enabled, with
+/// CHECKSPNONEACTIVE true. Prefetches must not call this. The caller patches
+/// the fault site to its cleanup.
 pub(crate) fn check_sp(code: &mut Vec<u8>, base: Register, pc: u64) -> Option<usize> {
     if base != Register::Sp {
         return None;

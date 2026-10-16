@@ -79,9 +79,9 @@ pub(in crate::x86_64) fn emit(
             Host::GreaterQword,
         ),
     };
-    // Extract the positive exponent with no sign/fraction bits. Addition of a
-    // bounded positive exponent to a signed lane can overflow only to negative;
-    // the signed range guards therefore reject every unrepresentable sum.
+    // Extract the exponent field alone. Adding a bounded positive exponent to a
+    // signed lane can overflow only to negative, so the signed range checks
+    // catch every unrepresentable sum.
     packed(code, Host::MoveAligned, EXPONENT, LEFT);
     left_shift.emit(code, EXPONENT, ONE_BIT);
     right_shift.emit(code, EXPONENT, (format.fraction_bits() + 1) as u8);

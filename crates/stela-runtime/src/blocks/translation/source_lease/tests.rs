@@ -18,7 +18,7 @@ fn actual_installed_data_classifier_keeps_pair_read_in_immutable_platform_cohort
             assert!(check_data_source_word(profile, SOURCE_PC, word).is_err());
         }
     }
-    // Preserve the two existing actual Platform memory source shapes.
+    // The two platform memory source shapes.
     check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, LDR_X_LITERAL).unwrap();
     check_data_source_word(BlockProfile::El1PlatformV1, SOURCE_PC, STP_X_OFFSET).unwrap();
 }

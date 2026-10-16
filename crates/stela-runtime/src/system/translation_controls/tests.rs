@@ -214,7 +214,7 @@ impl TranslationServices for Observer {
             .words
             .get(&pc)
             .ok_or(FetchFailure::Unavailable("synthetic unmapped fetch"))?;
-        // An observer of current policy, not an MMU implementation or claim.
+        // Observes the current policy; this is not an MMU.
         let physical_address = if snapshot.consumer_inputs().sctlr_el1 & 1 != 0 {
             pc + 0x4000
         } else {
@@ -542,8 +542,7 @@ fn illegal_state_guard_uses_only_the_actual_owned_il_bit() {
     .unwrap();
     assert_eq!(check_execution_state(&single_step), Ok(()));
     assert_eq!(check_execution_state(&state()), Ok(()));
-    // The concrete service still owns stepping/debug eligibility. This helper
-    // makes no claim that a single-step instruction may execute without it.
+    // The service owns stepping and debug eligibility.
 }
 
 fn branch_machine(tcr_el1: u64, pauth: Presence) -> TranslationControls {

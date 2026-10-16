@@ -185,9 +185,9 @@ pub enum Effect {
     Released { name: u32, state: RightState },
 }
 
-/// Intermediate output is not a completed syscall. Source-required allocation
-/// or query has occurred; the canonical memory adapter must attempt this write
-/// next and retain effects even if it returns a Mach copy fault.
+/// An allocation or query has happened, but the syscall is not complete: the
+/// memory adapter must attempt this write next, and the effects stand even if
+/// it faults.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outcome {
@@ -236,8 +236,8 @@ impl Outcome {
     }
 }
 
-/// One thread-confined actual owner. Virtual urefs never determine host Drop
-/// iteration counts; each entry retains one host resource in this profile.
+/// Owner of host port rights, confined to one thread. Each entry holds one host
+/// resource; guest user-reference counts never drive host releases.
 pub struct HostPorts {
     address_space: u64,
     rights: Vec<PortRight>,
@@ -346,14 +346,14 @@ impl HostPorts {
         if host_name == MACH_PORT_NULL {
             return Outcome::complete(0, effects);
         }
-        // Reply receive rights are separate actual allocations. Send bootstrap
-        // duplicates normalize the acquired extra before virtual ref changes.
+        // Reply receive rights are separate allocations. Duplicated bootstrap
+        // send rights are normalized before the guest reference count changes.
         if let Some(index) = self.rights.iter().position(|right| {
             right.host_name == host_name && right.kind == role && right.state == RightState::Send
         }) {
             self.acquisitions += 1;
-            // Attempt only the newly acquired temporary. The original retained
-            // reference was not attempted and remains cleanup-owned.
+            // Release only the newly acquired reference; the retained one stays
+            // owned for cleanup.
             let result = host::deallocate(host_name);
             let observation = ReleaseObservation::new(
                 self.rights[index].guest_name,
@@ -692,9 +692,8 @@ impl HostPorts {
         Outcome::complete(KERN_SUCCESS, effects)
     }
 
-    /// Explicit terminal teardown lets the process owner retain actual cleanup
-    /// results. A failed release is recorded, never retried as an uncertain
-    /// operation. Drop is the bounded fallback when no report consumer remains.
+    /// Tear down and return the release results. A failed release is recorded,
+    /// never retried. Drop does this when no one reads the report.
     pub fn close(&mut self) -> &[ReleaseObservation] {
         if !self.closed {
             self.failed = true;

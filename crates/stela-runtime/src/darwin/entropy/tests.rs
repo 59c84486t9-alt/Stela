@@ -424,9 +424,9 @@ fn native_original_request_resumes_only_when_entropy_is_enabled() -> Result<()> 
                         expected.registers.nzcv = (expected.registers.nzcv & !CARRY)
                             | if errno.is_some() { CARRY } else { 0 };
                     }
-                    // SAFETY: immutable original MOV/SVC accesses no RAM.
-                    // Serialized OwnedMemory copyout owns all affected data;
-                    // no live exclusive monitor or concurrent execution exists.
+                    // SAFETY: MOV and SVC access no RAM; the copyout owns all
+                    // affected data, and no exclusive monitor or concurrent
+                    // execution exists.
                     let outcome = unsafe {
                         run_services(
                             &mut runtime,

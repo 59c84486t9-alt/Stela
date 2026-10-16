@@ -24,8 +24,7 @@ pub struct NumericalFeatures {
 }
 
 impl NumericalFeatures {
-    /// Construct an explicit declared software profile. This does not establish
-    /// hardware availability; retain the profile's feature/control evidence.
+    /// A software-declared feature set; it says nothing about the host.
     pub const fn new(full_a64: bool, ebf16: bool, rpres: bool) -> Self {
         Self {
             full_a64,
@@ -34,9 +33,9 @@ impl NumericalFeatures {
         }
     }
 
-    /// Decode reviewed ID fields. The final argument is the combined applicable
-    /// privileged-control enable, not a host CPU feature or raw FPCR bit.
-    /// Unreviewed ID values fail explicitly instead of guessing future behavior.
+    /// Decode ID register fields. The last argument is the effective
+    /// privileged-control enable, not a host feature or FPCR bit. Unknown ID
+    /// values are errors.
     pub const fn from_id_registers(
         id_aa64isar1: u64,
         id_aa64isar2: u64,

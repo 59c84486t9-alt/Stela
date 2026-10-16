@@ -75,7 +75,7 @@ impl Storage {
 }
 impl Drop for Storage {
     fn drop(&mut self) {
-        // SAFETY: the final Arc releases the exact original allocation/layout.
+        // SAFETY: the last Arc frees the original allocation with its layout.
         unsafe {
             dealloc(self.pointer.as_ptr(), self.layout);
         }
@@ -117,8 +117,8 @@ fn owner(
     split_permission: bool,
 ) -> (Arc<Storage>, MemoryThread<MemoryControls>) {
     let storage = Storage::new();
-    // SAFETY: raw allocation remains owned, disjoint and RW; no byte references
-    // exist, and all published accesses use this one serialized domain.
+    // SAFETY: the allocation stays owned, disjoint and writable; no byte
+    // references exist, and all accesses use this domain.
     let backing = unsafe {
         MemoryBacking::new(
             storage.pointer,
@@ -229,8 +229,8 @@ fn pure_ret_ignores_unconstrained_rax_and_restores_context() {
     let before = registers.clone();
     let mut context = context();
     let pointers = (context.memory, context.scalable, context.system);
-    // SAFETY: declared test CPU controls match this fixed profile; all owners
-    // are disjoint and source is a finite NOP/MOVZ/RET leaf.
+    // SAFETY: the test's controls match this profile, storage is disjoint, and
+    // the source is NOP/MOVZ/RET.
     let result =
         unsafe { leaf.execute(&mut registers, &mut scalable, &mut memory, &mut context) }.unwrap();
     assert_eq!(result, ScalableLeafExit::Returned);
@@ -252,8 +252,8 @@ fn checked_async_preflight_precedes_the_gpr_prefix() {
     let before = registers.clone();
     let mut context = context();
     let pointers = (context.memory, context.scalable, context.system);
-    // SAFETY: owners are disjoint and the finite declared profile is explicit;
-    // effective async controls must decline before invoking any native byte.
+    // SAFETY: disjoint storage and an explicit profile; the asynchronous
+    // controls must refuse before any native code runs.
     let result =
         unsafe { leaf.execute(&mut registers, &mut scalable, &mut memory, &mut context) }.unwrap();
     assert_eq!(
@@ -366,8 +366,8 @@ fn checked_streaming_profile_is_validated_before_the_gpr_prefix() {
         let mut expected = registers.clone();
         let mut context = context();
         let pointers = (context.memory, context.scalable, context.system);
-        // SAFETY: disjoint owned buffers and finite source. The strict named
-        // artifact contract is independent of current ATA/TCO/TBI bypasses.
+        // SAFETY: disjoint storage and terminating source; the artifact
+        // contract does not depend on ATA, TCO or TBI.
         let result =
             unsafe { leaf.execute(&mut registers, &mut scalable, &mut memory, &mut context) }
                 .unwrap();
@@ -443,8 +443,8 @@ fn inactive_sp_fault_is_local_and_the_next_entry_clears_it() {
     expected.x[0] = 7;
     let mut context = context();
     let pointers = (context.memory, context.scalable, context.system);
-    // SAFETY: the finite body has disjoint owned buffers. The declared SA0 and
-    // CHECKSPNONEACTIVE profile faults before issuing any memory request.
+    // SAFETY: disjoint storage; the declared SA0 and CHECKSPNONEACTIVE profile
+    // faults before any memory request.
     let result =
         unsafe { leaf.execute(&mut registers, &mut scalable, &mut memory, &mut context) }.unwrap();
     assert_eq!(
@@ -510,8 +510,8 @@ fn baseline_byte_load_preserves_enabled_vector_banks_at_every_length() {
         scalable.write_ffr(&vec![0xa5; bytes / 8]).unwrap();
         let before = registers.clone();
         let ram = storage.bytes();
-        // SAFETY: fixed declared CPU controls, disjoint pinned owners and finite
-        // baseline byte accesses; caller-saved host values are not guest state.
+        // SAFETY: fixed controls, disjoint pinned storage and baseline byte
+        // accesses.
         let result =
             unsafe { leaf.execute(&mut registers, &mut scalable, &mut memory, &mut context()) }
                 .unwrap();
@@ -586,8 +586,8 @@ fn invalid_owned_view_restores_pointers_before_returning_error() {
     let before = registers.clone();
     let mut context = context();
     let pointers = (context.memory, context.scalable, context.system);
-    // SAFETY: no native call is allowed: the prepared SME2 ZA view requires ZT0,
-    // while this explicit non-SME2 owner provides no ZT0 backing.
+    // SAFETY: no native call happens: the SME2 ZA view needs ZT0, which this
+    // owner does not provide.
     let result = unsafe { leaf.execute(&mut registers, &mut scalable, &mut memory, &mut context) };
     assert!(result.is_err());
     assert_eq!(registers, before);

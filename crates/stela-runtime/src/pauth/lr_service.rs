@@ -24,7 +24,7 @@ pub(crate) enum KeySelection {
     UseKey,
 }
 
-/// Selected actual raw control value; this creates no PACM state effect.
+/// The selected raw control value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PacmControlValue {
     Zero,
@@ -40,8 +40,8 @@ pub(crate) enum Error {
     MissingPacmStorage,
 }
 
-/// Exclusive execution remains with the caller that lent these original refs.
-/// No Clone/Copy or mutable getters; no state snapshot or secondary bank is kept.
+/// Borrowed access for an executing caller. Not Clone or Copy, with no mutable
+/// getters or saved state.
 pub(crate) struct BorrowedLinkRegisterService<'run> {
     capability: LinkRegisterPauthCapability<'run>,
     context: &'run Context,
@@ -52,9 +52,8 @@ pub(crate) struct BorrowedLinkRegisterService<'run> {
 }
 
 impl<'run> BorrowedLinkRegisterService<'run> {
-    /// Consumes the actual bank/source read loan, not copied control values.
-    /// Namespace equality is a crypto consistency check, not source authority.
-    /// The actual closed owner must lend its own namespace and original refs.
+    /// Takes the bank and source read borrow. Namespace equality is a
+    /// consistency check of the keys only.
     pub(crate) fn new(
         controls: ExtendedControlLoan<'run>,
         context: &'run Context,
@@ -84,8 +83,8 @@ impl<'run> BorrowedLinkRegisterService<'run> {
         })
     }
 
-    /// Read current original registers and the canonical settled source PC.
-    /// Decode/source/lifecycle authorization and all state commits stay outside.
+    /// Read the current registers and the settled source PC. Decoding,
+    /// authorization and all state commits happen elsewhere.
     pub(crate) fn stage(&self, instruction: Instruction) -> Result<Staged, Error> {
         lr_instruction::stage(
             instruction,
@@ -96,8 +95,8 @@ impl<'run> BorrowedLinkRegisterService<'run> {
         .map_err(Error::Stage)
     }
 
-    /// Legacy conditional operands use actual PACM from the sole SystemState.
-    /// None leaves ordinary register/data-key operations on their existing path.
+    /// Conditional forms read PACM from the system state; None leaves other
+    /// operations on their normal path.
     pub(crate) fn stage_conditional(
         &self,
         operation: PointerAuthenticationOperation,
@@ -112,7 +111,7 @@ impl<'run> BorrowedLinkRegisterService<'run> {
         .map_err(Error::Stage)
     }
 
-    /// Test-only architectural observation; this grants no execution permission.
+    /// Test-only observation.
     #[cfg(test)]
     pub(crate) fn pstate(&self) -> u64 {
         self.system.pstate(self.registers)

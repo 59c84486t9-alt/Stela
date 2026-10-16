@@ -55,8 +55,8 @@ fn finite(format: Format, kind: Kind, control: Control, left: u64, right: u64) -
     precision::round_ieee(value, format, control, control.round(), true, false)
 }
 
-/// Fresh status only. AH suppresses all exceptions, so retained enables cannot
-/// trap; AH0 retains the current explicit enabled-exception refusal boundary.
+/// Returns fresh status only. FPCR.AH suppresses all exceptions; with AH clear,
+/// enabled traps are refused.
 pub fn evaluate(
     kind: Kind,
     format: Format,

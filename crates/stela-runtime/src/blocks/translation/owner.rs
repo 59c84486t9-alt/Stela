@@ -22,9 +22,8 @@ use stela_compiler::{
     block::{BlockProfile, CheckedMemoryProfile},
 };
 
-/// Original installed source resources produced once by actual Initial
-/// publication over this machine's M0-profile runtime. No legacy raw owner is
-/// constructed, and no copied snapshot/config can create these private fields.
+/// The installed source resources, produced once by initial publication over
+/// this machine's M0 runtime.
 pub(in crate::blocks) struct InstalledCodeSources {
     context: ContextState,
     runtime_identity: Arc<()>,
@@ -34,8 +33,7 @@ pub(in crate::blocks) struct InstalledCodeSources {
     entry_profile: EntryProfile,
 }
 
-// Preserve the existing LDR-only source API. The alias itself grants nothing;
-// InstalledM0SourceScope still performs its exact existing source qualification.
+// Name kept for the LDR-only source API.
 pub(in crate::blocks) type InstalledM0Sources = InstalledCodeSources;
 pub(in crate::blocks) type InstalledEl1Sources = InstalledCodeSources;
 
@@ -43,17 +41,14 @@ mod el1;
 pub(in crate::blocks) use el1::InstalledEl1Owner;
 
 impl InstalledCodeSources {
-    /// Reuse the ORIGINAL Initial installation/storage producer. This is not
-    /// profile/source admission, a PE constructor or a mutable control-bank copy.
-    /// The typed cohort's fresh owner must separately check its actual runtime
-    /// profile, perform genuine source fetch/registration and retain this storage
-    /// with the sole returned controls through its one executable scope.
+    /// Reuse the initial installation. Profile admission, PE construction and
+    /// the control bank are the caller's: it checks the runtime profile,
+    /// fetches and registers the source, and keeps this storage with the
+    /// returned controls while it runs.
     ///
     /// # Safety
-    /// InstalledM0Owner::new's actual same-machine physical/source retirement,
-    /// immutable backing, complete producer and no-alias ownership obligations
-    /// apply to these original resources. No external participant may bypass
-    /// this sole Initial publisher. No native entry occurs here.
+    /// As for `InstalledM0Owner::new`. Nothing else may publish initial state.
+    /// No native code runs here.
     #[allow(clippy::too_many_arguments)]
     unsafe fn install(
         runtime: &mut BlockRuntime,
@@ -73,9 +68,8 @@ impl InstalledCodeSources {
             .check_fetch_execution()
             .map_err(anyhow::Error::msg)?;
         let mut context = ContextState::Unbound;
-        // This is the original concrete Initial preparation/commit service:
-        // one context allocation and the SAME physical MemorySystem. It never
-        // constructs the legacy System-only owner or changes runtime.profile.
+        // The initial preparation and commit: one context allocation on the
+        // same physical memory system, leaving the runtime profile unchanged.
         let controls = {
             let memory = Arc::clone(physical.memory_system());
             let mut initial = ControlCodeScope {
@@ -111,8 +105,8 @@ impl InstalledCodeSources {
             Arc::ptr_eq(&runtime.identity, &self.runtime_identity),
             "RAM reload cache is not the original installed runtime"
         );
-        // All native/source loans have ended: callers own this actual envelope
-        // before its consuming executable scope. Release dependent RX first.
+        // Every native and source borrow has ended; release the dependent
+        // native code first.
         runtime.retire_translation_sources();
         self.physical
             .reload_original_region_prefixes()
@@ -143,11 +137,11 @@ impl InstalledCodeSources {
         }
     }
 
-    /// Retain the original complete synchronous RAM/source participants while
-    /// the canonical fresh EL1 owner completes a DSB. The immutable source and
-    /// runtime borrows exclude another publication/cache/context mutation.
-    /// Fresh construction owns ALL physical aliases and excludes external
-    /// memory masters; this does not certify arbitrary MMIO or DMA completion.
+    /// Hold the RAM and source participants while the EL1 owner completes a
+    /// DSB. The source and runtime borrows exclude other publication or cache
+    /// and context changes. The machine owns every physical alias and excludes
+    /// external memory masters; arbitrary MMIO or DMA completion is not
+    /// covered.
     pub(in crate::blocks) fn ram_completion_scope<'run>(
         &'run self,
         runtime: &'run BlockRuntime,
@@ -164,17 +158,17 @@ impl InstalledCodeSources {
         self.physical
             .check_execution_loan(outer)
             .map_err(|_| "RAM completion original physical/outer differs")?;
-        // Installed excludes Unbound/Failed. All successful context publication
-        // producers finish synchronously before returning to the original PE;
-        // no separate deferred maintenance producer exists in this fixed factory.
+        // Installed excludes Unbound and Failed. Every context publication
+        // finishes before returning to the PE, and this factory has no deferred
+        // maintenance.
         let scope = self.el1_scope()?;
         scope.check_installed(controls, system)?;
         Ok(scope)
     }
 
-    /// Loan the SAME installed context/physical/code owners after native return.
-    /// The canonical consumer separately binds the exact returned source and
-    /// retains its original PE, outer and control loans through publication.
+    /// Lend the installed context, physical memory and code after native
+    /// return. The consumer binds the returned source and keeps its PE, outer
+    /// and control borrows through publication.
     pub(in crate::blocks) fn publication_scope<'run>(
         &'run mut self,
         runtime: &'run mut BlockRuntime,
@@ -216,10 +210,8 @@ impl InstalledCodeSources {
     }
 }
 
-/// Fresh private owner of the ONE actual M0 runtime, installed source resources
-/// and sole TranslationControls bank returned by real Initial publication.
-/// There is no legacy step method, profile transition, public tuple or raw-parts
-/// extraction. A canonical PE factory consumes this envelope once.
+/// Private owner of the M0 runtime, its installed source and its translation
+/// controls. A PE factory consumes it once.
 pub(in crate::blocks) struct InstalledM0Owner {
     runtime: BlockRuntime,
     sources: InstalledM0Sources,
@@ -227,27 +219,21 @@ pub(in crate::blocks) struct InstalledM0Owner {
 }
 
 impl InstalledM0Owner {
-    /// Install the sole live control bank directly over the actual M0 runtime.
+    /// Install the control bank over the M0 runtime.
     ///
     /// # Safety
-    /// The caller is the actual fresh machine/source-RAM owner. The runtime,
-    /// genuine physical role/domain, immutable source storage, EntryProfile,
-    /// readbacks and ControlProfile belong to the SAME declared CPU/PE/System.
-    /// It transfers sole physical-view retirement and descriptor/source
-    /// publication authority for ALL aliases and participants until this
-    /// envelope and every synchronous field-split loan are dropped. No retained
-    /// MemoryDomain/System writer, raw pointer, DMA, firmware, debugger, NMI,
-    /// async work or other PE can bypass that authority. Source storage satisfies
-    /// the actual native RO/coherence/lifetime contract of ImmutableCodeBacking;
-    /// no guest/host writable alias or Rust reference to it survives. No active
-    /// debug/IRQ/timer/cache-maintenance/trace producer can observe omitted
-    /// effects. The genuine root physical factory must establish these facts;
-    /// labels, Configs, snapshots or arbitrary domain constructors cannot.
-    /// Canonical actual PE ownership, exact outer/thread/domain/source/RX checks,
-    /// the no-read prepared session and once-only state/PC settlement are
-    /// independently required before any native invocation. This constructor
-    /// performs real Initial installation and original instruction registration,
-    /// but no native invocation or guest data transaction.
+    /// The caller owns the new machine and its source RAM. The runtime,
+    /// physical domain, source storage, entry profile, readbacks and control
+    /// profile all belong to the same declared CPU. Until this owner and every
+    /// borrow split from it are dropped, it alone may retire physical views and
+    /// publish descriptors and source for every alias: no memory-domain or
+    /// system writer, raw pointer, DMA, firmware, debugger, NMI, asynchronous
+    /// work or other PE may bypass it. The source storage meets the read-only,
+    /// coherence and lifetime contract of `ImmutableCodeBacking`, with no
+    /// writable alias or Rust reference surviving. No debug, IRQ, timer,
+    /// cache-maintenance or trace producer can observe skipped effects. The PE
+    /// checks and PC settlement are still required before any native call; this
+    /// constructor only installs and registers the instructions.
     #[allow(clippy::too_many_arguments)] // Explicit actual resource/control inputs at the unsafe boundary.
     pub(in crate::blocks) unsafe fn new(
         mut runtime: BlockRuntime,
@@ -268,9 +254,9 @@ impl InstalledM0Owner {
             runtime.regions.is_empty() && runtime.loaded.is_empty(),
             "fresh M0 source owner requires an unbound actual runtime"
         );
-        // SAFETY: this same fresh owner transfers its original physical/source
-        // resources under the complete contract above, to the sole Initial
-        // producer. The original typed profile/empty-runtime checks precede it.
+        // SAFETY: this owner hands its physical and source resources to initial
+        // publication under the contract above, after the profile and
+        // empty-runtime checks.
         let (sources, controls) = unsafe {
             InstalledCodeSources::install(
                 &mut runtime,
@@ -291,9 +277,8 @@ impl InstalledM0Owner {
         scope
             .check_installed(&owner.controls, system)
             .map_err(anyhow::Error::msg)?;
-        // Exactly one short construction loan, before any PE exists. Retain
-        // it through BOTH the original instruction read and its registration;
-        // current NativeActive revalidation instead borrows its exact outer.
+        // One short construction borrow before any PE exists, held across both
+        // the instruction read and its registration.
         let source_execution = scope
             .physical_space()
             .initial_source_execution_loan()
@@ -332,12 +317,9 @@ impl InstalledM0Owner {
         Ok(())
     }
 
-    /// Consume this fresh envelope ONCE for the complete executable lifetime.
-    /// The sole canonical consumer key seals its disjoint field split. The
-    /// canonical fresh-machine callback constructs its one SystemExecutionOwner
-    /// and retains original ThreadState/System/backend resources until shutdown;
-    /// it cannot recreate PE authority for repeated per-run callbacks. All loans
-    /// stay inside this one callback and no public tuple or owner escapes.
+    /// Consume this owner once for the machine's whole run. The callback builds
+    /// the execution owner and keeps the thread state, system state and backend
+    /// until shutdown; no borrow or owner escapes.
     pub(in crate::blocks) fn into_executable_scope<R>(
         mut self,
         _key: &crate::blocks::retirement::ConsumerKey,
@@ -355,10 +337,9 @@ impl InstalledM0Owner {
             .physical_space()
             .check_fetch_execution()
             .map_err(anyhow::Error::msg)?;
-        // Do not borrow System here: the canonical callback must capture its
-        // ORIGINAL System mutably for the sole actual execution owner. Initial
-        // construction checked it; each actual M0 input rechecks that same PE
-        // System through the retained scope/control/source authority.
+        // Do not borrow the system state here: the callback captures it mutably
+        // for the execution owner. Construction checked it, and each M0 input
+        // re-checks it.
         Ok(operation(
             &mut self.runtime,
             &mut self.sources,

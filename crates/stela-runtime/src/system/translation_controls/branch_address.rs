@@ -6,9 +6,8 @@ const TOP_BYTE_BITS: u32 = u8::BITS;
 const ADDRESS_RANGE_BIT: u32 = u64::BITS - TOP_BYTE_BITS - 1;
 
 impl TranslationControls {
-    /// Normalize using the actual destination-regime TCR and feature facts.
-    /// The canonical exception plan separately binds the target/destination EL;
-    /// fetching the resulting target is a subsequent architectural operation.
+    /// Normalize with the destination regime's TCR and features; the exception
+    /// plan binds the target EL, and fetching the target happens afterwards.
     pub(crate) fn branch_address(
         &self,
         target: u64,

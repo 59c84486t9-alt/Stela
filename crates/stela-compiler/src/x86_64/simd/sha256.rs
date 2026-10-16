@@ -189,7 +189,7 @@ fn schedule1(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     read_vector(code, operand.left, LEFT);
     read_vector(code, operand.right, RIGHT);
     if target.supports(TargetCpu::Ssse3) {
-        // Keep the original M vector for schedule feedback and SHA256MSG2.
+        // Keep the M vector for schedule feedback and SHA256MSG2.
         packed(code, Host::MoveAligned, TEMPORARY, RIGHT);
         Host::AlignBytes.register(code, TEMPORARY, LEFT, target);
         code.push(WORD_BYTES); // [n1,n2,n3,m0]

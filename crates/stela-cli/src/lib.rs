@@ -29,27 +29,27 @@ pub(crate) enum Command {
     CpuInfo,
     /// AOT-compile a raw ARM64 leaf region with internal branches into x86.
     CompileLeaf(compile::CompileLeaf),
-    /// Compile one native block with explicit guest-address exits.
+    /// Compile one native block.
     CompileBlock(compile::CompileBlock),
     /// Prepare a supported leaf function on demand; reuse an exact cached AOT.
     PrepareLeaf(compile::PrepareLeaf),
-    /// Execute trusted raw code through bounded native block dispatch.
+    /// Run raw code through native block dispatch.
     RunBlocks(execute::RunBlocks),
     /// Map a trusted image's initial segments and probe its translated entry.
     RunMappedImage(execute::RunMappedImage),
-    /// Bind explicit Apple images and probe cross-image native entry execution.
+    /// Bind a set of images and run from an entry point.
     RunLinkedImages(execute::RunLinkedImages),
-    /// Probe a reviewed original-dyld startup prefix with owned arguments.
+    /// Run original dyld's startup prefix.
     ProbeDyldEntry(execute::ProbeDyldEntry),
     /// Validate an Apple executable's guest mappings and unresolved loader work.
     PlanExecutable(loader::PlanExecutable),
     /// Validate and plan supported chained rebases without mapping or execution.
     PlanFixups(loader::PlanFixups),
-    /// Discover Apple image dependencies inside an explicit guest filesystem.
+    /// Discover image dependencies inside a guest filesystem.
     DiscoverImages(loader::DiscoverImages),
     /// Inventory standalone Mach-O files in an extracted filesystem.
     Inventory(loader::Inventory),
-    /// Track per-build translation stages and hashed evidence.
+    /// Track per-build translation progress.
     #[command(subcommand)]
     Progress(loader::ProgressCommand),
     /// Discover and fetch restore images directly from Apple's public feed.
@@ -59,7 +59,7 @@ pub(crate) enum Command {
     ImageManifest(images::ImageManifest),
     /// Extract one named ZIP member with a size limit and hash receipt.
     ExtractImage(images::ExtractImage),
-    /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
+    /// Inspect AEA1 envelope metadata (never key material).
     InspectAea(images::InspectAea),
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
     FetchAeaKey(images::FetchAeaKey),

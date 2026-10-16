@@ -20,14 +20,12 @@ pub struct MemoryExecutionLoan {
     domain: Arc<MemoryDomain>,
 }
 impl MemoryExecutionLoan {
-    /// Domain identity of this actual live mapping-exclusion pin, not PE or
-    /// thread identity, source-attribute authority or a copied epoch permit.
+    /// Whether this mapping-exclusion pin belongs to `domain`.
     pub(crate) fn belongs_to(&self, domain: &Arc<MemoryDomain>) -> bool {
         Arc::ptr_eq(&self.domain, domain)
     }
-    /// Check membership in the supplied thread's actual domain, not Thread/PE
-    /// identity. A loan retains a domain and counted invocation, not its acquirer.
-    /// Equal address-space numbers or a shared machine do not prove membership.
+    /// Check membership in the thread's domain (not thread or PE identity).
+    /// Equal address-space numbers do not prove membership.
     pub fn check_thread_domain<P: DataPolicy>(
         &self,
         thread: &MemoryThread<P>,
@@ -35,8 +33,7 @@ impl MemoryExecutionLoan {
         self.check_domain(&thread.domain)
     }
 
-    /// Check the actual physical coherence owner without exposing it or
-    /// minting another invocation, source witness or mapping capability.
+    /// Check the physical memory system without exposing it.
     pub fn check_memory_system(&self, system: &Arc<MemorySystem>) -> Result<(), MemoryStatus> {
         if !Arc::ptr_eq(&self.domain.system, system) {
             return Err(MemoryStatus::Domain);
@@ -44,8 +41,7 @@ impl MemoryExecutionLoan {
         self.check_domain(&self.domain)
     }
 
-    /// Borrow the actual machine's order serializer through this retained loan.
-    /// This is only lock/lifetime exclusion, not CPU, PA, Thread or PE authority.
+    /// Borrow the machine's Device-order lock through this borrow.
     pub(super) fn device_ram_order(
         &self,
     ) -> Result<crate::platform::sync::MutexGuard<'_, ()>, MemoryStatus> {
@@ -64,8 +60,8 @@ impl MemoryExecutionLoan {
         if !Arc::ptr_eq(&self.domain, domain) {
             return Err(MemoryStatus::Domain);
         }
-        // This outstanding loan excludes every service loan, so only domain
-        // failure can make it unusable.
+        // This borrow excludes every service borrow, so only a domain failure
+        // can make it unusable.
         self.domain.check_execution()
     }
 }
@@ -82,8 +78,7 @@ impl Drop for MemoryExecutionLoan {
 pub(in crate::memory) struct MemoryServiceLoan {
     domain: Arc<MemoryDomain>,
 }
-/// Read-only observations from the actual executing thread's canonical domain.
-/// This non-Clone loan exposes no writer, epoch mutation or authority constructor.
+/// Read-only observations of the executing thread's domain.
 pub struct MemoryObservationLoan {
     service: MemoryServiceLoan,
 }
@@ -111,7 +106,7 @@ impl MemoryDomain {
         })
     }
 
-    /// Current mapping generation. This number is not source authority by itself.
+    /// The current mapping generation.
     pub fn generation(&self) -> Result<u64, MemoryStatus> {
         self.check_execution()?;
         Ok(self.generation.load(Ordering::Acquire))
@@ -269,9 +264,9 @@ impl MemoryServiceLoan {
                     }
                     _ => MemoryStatus::Translation,
                 })?;
-            // SAFETY: the actual service loan excludes every native invocation and
-            // mapping change. Current canonical view pins rights/storage; result
-            // is independent staging and no guest references are created.
+            // SAFETY: the service borrow excludes native calls and mapping
+            // changes, the current view pins rights and storage, and the result
+            // goes to separate staging.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     access.host_ptr().as_ptr(),

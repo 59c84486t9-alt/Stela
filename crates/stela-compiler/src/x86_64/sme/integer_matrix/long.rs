@@ -36,7 +36,7 @@ const AND_ECX_IMM32: &[u8] = &[0x81, 0xe1];
 const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
 const ADD_R8_RCX: &[u8] = &[0x49, 0x01, 0xc8];
 
-/// Checked recipe controls; the parent chooses the reviewed production mapping.
+/// Recipe controls; the parent selects the mapping.
 #[derive(Clone, Copy)]
 pub(crate) struct Recipe {
     pub(crate) multiply_dword: bool,

@@ -50,8 +50,8 @@ fn index_right(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
-/// Separate original byte pairs into signed or positive unsigned word lanes.
-/// XMM0/2 contain even/odd left bytes; XMM1/3 contain even/odd right bytes.
+/// Split byte pairs into signed or unsigned word lanes. XMM0/2 receive the
+/// even/odd left bytes, XMM1/3 the even/odd right bytes.
 fn byte_components(code: &mut Vec<u8>, left_signed: bool, right_signed: bool) {
     packed(code, Host::MoveAligned, LEFT_HIGH, LEFT);
     packed(code, Host::MoveAligned, RIGHT_HIGH, RIGHT);
@@ -114,9 +114,9 @@ fn sum_halfword_pairs(code: &mut Vec<u8>, target: TargetCpu) {
     }
 }
 
-/// Four original 32-bit products become one replicated exact 64-bit sum.
-/// For complex subtraction, sum even and odd products separately before
-/// subtracting them. Individual signed products fit i32, but pair sums may not.
+/// Four 32-bit products become one exact 64-bit sum, replicated. For complex
+/// subtraction the even and odd products are summed separately first; each
+/// signed product fits in 32 bits, but pair sums may not.
 fn sum_four_wide(code: &mut Vec<u8>, source: u8, signed: bool, subtract_odd: bool) {
     packed(code, Host::MoveAligned, WIDE_HIGH, source);
     if signed {
@@ -191,9 +191,8 @@ fn complex_halfword_dot(code: &mut Vec<u8>, select_imaginary: bool, subtract: bo
     packed(code, Host::UnpackLowQword, LEFT, RIGHT_HIGH);
 }
 
-/// Emit only integer dot forms. A floating or invalid manually constructed
-/// operand returns false before appending any bytes. Shared scalable access owns
-/// the actual state layout and the enclosing emitter owns feature/mode checks.
+/// Emit the integer dot forms only. Any other operand returns false before
+/// appending bytes.
 pub(crate) fn emit_integer(
     code: &mut Vec<u8>,
     operand: &Operand,

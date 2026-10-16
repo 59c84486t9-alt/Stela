@@ -7,13 +7,10 @@ use crate::system::{
     },
     state::SystemState,
 };
-/// Only this canonical module constructs the consumer key.
+/// Only this module constructs the consumer key.
 pub(crate) struct ConsumerKey(());
 
-/// Opaque producer loan. This type/its constructor must be private to the
-/// retained owner; only this canonical blocks consumer may extract its fields.
-/// A production join uses the reviewed SystemExecutionOwner constructor rather
-/// than adding a second actual-PE allocator in this module.
+/// Resources lent to the consumer. Only this module may take their fields.
 pub(crate) struct RetainedResources<'pe, B> {
     authority: &'pe mut PeExecutionAuthority,
     thread: &'pe mut ThreadState,

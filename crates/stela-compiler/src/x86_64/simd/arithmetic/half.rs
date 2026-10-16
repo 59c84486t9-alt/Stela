@@ -68,7 +68,7 @@ fn prepare_inputs(code: &mut Vec<u8>, operand: &Operand) {
             right_lane,
         } => {
             read_numerical_vector(code, operand.shape, left, lanes::LEFT);
-            // Read the complete Vm: Q0 may select its original upper qword.
+            // Read all of Vm: a 64-bit form may select its upper qword.
             read_numerical_right(code, Format::Half, operand.shape, right, Some(right_lane));
         }
         Inputs::Pairwise { left, right } => {

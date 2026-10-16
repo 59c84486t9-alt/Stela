@@ -28,8 +28,7 @@ pub enum FixedControlsError {
     UnsupportedDestination(ExceptionLevel),
 }
 
-/// Sole owner of these actual controls in the declared software machine.
-/// Deliberately neither Clone nor Copy; replacing it requires ending run borrows.
+/// Owner of the software machine's controls. Not Clone or Copy.
 #[derive(Debug)]
 pub struct FixedEl1Controls {
     features: EntryProfile,
@@ -74,8 +73,7 @@ impl FixedEl1Controls {
         self.entry
     }
 
-    /// Ephemeral values read from this owner and the actual state. This does not
-    /// freeze another bank or cache PSTATE, stack selection or saved registers.
+    /// Values read from this owner and the current state.
     pub fn entry_snapshot(
         &self,
         system: &SystemState,
@@ -92,8 +90,8 @@ impl FixedEl1Controls {
         })
     }
 
-    /// CodePublicationScope separately checks the exact runtime, source site and
-    /// typed operation. The existing exception plan checks actual source state.
+    /// CodePublicationScope checks the runtime, source site and operation; the
+    /// exception plan checks the source state.
     pub fn check_exception_request(
         &self,
         request: &ServiceRequest,
@@ -128,8 +126,8 @@ impl FixedEl1Controls {
         }
     }
 
-    /// TBI is checked off in the actual owner, so BranchAddr preserves all target
-    /// bits. Alignment, instruction lookup and fetch faults are subsequent work.
+    /// TBI is off in this owner, so BranchAddr keeps every target bit.
+    /// Alignment and fetch faults are checked later.
     pub fn branch_address(
         &self,
         target: u64,

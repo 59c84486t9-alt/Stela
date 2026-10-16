@@ -15,7 +15,7 @@ pub enum Mode {
     Scalable,
 }
 
-/// Every reviewed registry under `isa/`, with how its forms compile.
+/// Every registry under `isa/`, with how its forms compile.
 pub const REGISTRIES: [(&str, Mode); 4] = [
     ("apple-silicon-reviewed-forms.json", Mode::Leaf),
     ("apple-silicon-block-forms.json", Mode::Block),

@@ -92,8 +92,9 @@ struct Tree {
 }
 
 impl Tree {
-    // The tree emits high subtree first and ADD(low,high). Inactive +0 leaves
-    // remain explicit arithmetic inputs, including an entirely inactive tree.
+    // The tree emits the high subtree first and computes ADD(low, high).
+    // Inactive lanes contribute +0 as real inputs, even when the whole tree is
+    // inactive.
     fn emit(
         &self,
         code: &mut Vec<u8>,
@@ -236,9 +237,8 @@ fn pairwise(
     }
 }
 
-/// Shared numerical visibility/rounding-control proposal is required at linking.
-/// No emitter is registered by this source. Unsupported lengths/formats return
-/// false before changing code, for the normal exact whole-instruction route.
+/// Unsupported lengths or formats return false before emitting, leaving the
+/// instruction to software completion.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: Operand,

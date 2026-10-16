@@ -162,8 +162,8 @@ pub enum Readback {
     VirtualMpidr,
     /// Already resolves DCZID.DZP from effective TDZ/DZE and current EL.
     DynamicDczid,
-    /// Must reflect the selected cache; invalid selections require an explicit
-    /// architectural constrained-unpredictable/UNKNOWN policy from the backend.
+    /// Reflects the selected cache; invalid selections need an explicit
+    /// CONSTRAINED UNPREDICTABLE policy from the backend.
     SelectedCache(Register),
 }
 

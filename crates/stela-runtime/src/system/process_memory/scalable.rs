@@ -69,22 +69,21 @@ pub enum ScalableExecutionError {
 }
 
 impl FixedProcessMemoryControls {
-    /// Execute one immutable compiler-prepared body under retained CPU controls.
-    /// This source scope remains EL0/MTE-absent. The shared CPU owner checks
-    /// each source helper and feature clause; the prepared leaf checks the
-    /// actual domain's storage profile and read/write capabilities before entry.
-    /// Native memory also requires an explicit SCA16 source implementation.
-    /// Quadword requests retain their emitted architectural descriptor, so the
-    /// canonical memory service owns their alignment, partition and fault order.
-    /// Unsupported source facts and access controls decline before any prefix.
+    /// Run one compiler-prepared body under the held CPU controls. This scope
+    /// is EL0 without MTE. The CPU owner checks every helper and feature clause
+    /// from the source; the prepared leaf checks the domain's storage profile
+    /// and read/write capabilities before entry. Native memory also needs
+    /// 16-byte single-copy atomicity. Quadword requests keep their
+    /// architectural descriptor, so the memory service decides their alignment,
+    /// splitting and fault order. Unsupported facts or controls are refused
+    /// before any prefix runs.
     ///
     /// # Safety
-    /// Original source must return finitely. All raw guest backing must remain
-    /// disjoint from these live state/context owners, this RX mapping and native
-    /// stack; actual native rights and coherent storage remain pinned throughout
-    /// invocation. No asynchronous reentry, host protection change or unwind /
-    /// signal recovery through generated native code is permitted. Qualification
-    /// establishes CPU/source authority, not these raw native-storage contracts.
+    /// The source must terminate. Raw guest memory must stay disjoint from the
+    /// live state and context, this native code and the native stack, with host
+    /// rights and coherent storage pinned throughout. No asynchronous re-entry,
+    /// host protection change, unwinding or signal recovery through native code
+    /// is allowed.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn execute_scalable_leaf(
         &self,
@@ -99,7 +98,7 @@ impl FixedProcessMemoryControls {
         let identity = prepared.identity();
         let pc = identity.guest_base;
         let memory_error = |cause| ScalableExecutionError::MemoryAuthority { pc, cause };
-        // Same ordered source-state checks as the GPR authority, including IL
+        // The same ordered source-state checks as the GPR path, including IL
         // before identification, source or service access.
         self.validate_source_state(system, registers)
             .map_err(memory_error)?;
@@ -112,17 +111,18 @@ impl FixedProcessMemoryControls {
             });
         }
 
-        // Legacy raw-ID GPR controls carry no shared identification authority.
-        // This MTE0-only provider must retain the same actual Snapshot allocation.
+        // Raw-ID GPR controls carry no identification snapshot; this MTE-free
+        // provider must keep the same snapshot allocation.
         let identification = self
             .identification_snapshot()
             .ok_or(ScalableExecutionError::MissingIdentificationSnapshot { pc })?;
         if !core::ptr::eq(identification, access.identification_snapshot()) {
             return Err(ScalableExecutionError::WrongIdentificationSnapshot { pc });
         }
-        // Pin this actual domain before validating its source generation.
-        // Retain the loan through native finalization and policy/control restore;
-        // the actual PE owner separately retains its outer PC-settlement loan.
+        // Pin the domain before validating its source generation, and keep the
+        // borrow through native finalization and the policy and control
+        // restore. The PE owner separately holds its outer borrow for PC
+        // settlement.
         let _execution_loan = memory
             .execution_loan()
             .map_err(ProcessMemoryError::Memory)
@@ -159,9 +159,9 @@ impl FixedProcessMemoryControls {
                 }
             }
         }
-        // Shared references to both actual fixed owners and SystemState remain
-        // live for the callback. Guest/scalable mutable reborrows are its sole
-        // subjects; no detached approval or conflicting immutable state survives.
+        // Shared references to both fixed owners and the system state stay live
+        // for the callback, whose only mutable subjects are the guest and
+        // scalable state.
         access
             .with_checked_execution(
                 &identity.execution_requirements,
@@ -184,10 +184,10 @@ impl FixedProcessMemoryControls {
                         .memory_controls(system)
                         .with_implementation_profile(effective.implementation_profile());
                     let loan = PolicyLoan::new(memory, policy);
-                    // SAFETY: all source/CPU qualification precedes this actual
-                    // prepared mapping. The caller retains the raw backing contract.
-                    // The existing leaf alone prepares complete-body requirements,
-                    // publishes views, invokes native and settles checked finalization.
+                    // SAFETY: all source and CPU checks precede this call, and
+                    // the caller keeps the raw backing contract. The leaf
+                    // prepares the requirements, publishes views, runs the
+                    // native code and finalizes.
                     unsafe { prepared.execute(registers, scalable, loan.thread, context) }.map_err(
                         |cause| ScalableExecutionError::Execution {
                             entry_pc: pc,

@@ -18,9 +18,9 @@ use stela_compiler::{
     context::{ExecutionContext, memory::MemoryStatus},
 };
 
-/// Effect-free qualification consumes no native callback and changes no policy.
-/// The typed access and unused prepared entry remain inside this actual-bank
-/// callback; no context/permission can escape or apply to a replacement bank.
+/// Checking for effect-free execution uses no native callback and changes no
+/// policy. The typed access and the unused prepared entry stay inside this
+/// callback.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn qualify(
     bound: &BoundSource<'_>,
@@ -72,8 +72,8 @@ pub(super) fn qualify(
     .map_err(|error| anyhow::anyhow!("actual low128 access: {error:?}"))?
 }
 
-/// Canonical Active already owns NativeActive and outer SAME-domain exclusion.
-/// It retains them until all returned observations and actual PC are settled.
+/// The consumer already holds the native session and the domain exclusion, and
+/// keeps them until the observations and PC are settled.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn call(
     bound: &BoundSource<'_>,
@@ -102,8 +102,8 @@ pub(super) fn call(
             )));
         }
     };
-    // These actual observations outlive the consuming token's outer Result and
-    // remain inside the whole typed FP callback. Finalization cannot erase them.
+    // These observations outlive the token's result and stay inside the FP
+    // callback, so finalization cannot erase them.
     let result = fp_access::with_nonstreaming_low128(
         ids,
         fp,
@@ -131,14 +131,14 @@ pub(super) fn call(
                 let mut raw_memory = None;
                 let mut completed_bytes = 0;
                 let mut callback_failure = None;
-                // SAFETY: actual source/RX/FP/context/domain owners are retained
-                // here and canonical Active retains the outer PE/memory loan.
+                // SAFETY: the source, native code, FP state, context and domain
+                // are held here, and the consumer holds the PE and memory.
                 let finalized = unsafe { prepared.with_view(actual_guest, |actual_boundary, checked_guest, view| {
                     callback_started = true;
                     let invoked = (|| -> anyhow::Result<NativeObservation> {
-                        // The token passes its exact borrowed descriptor/bank.
-                        // Recheck their association to the original admitted
-                        // source/requirements/map/RX immediately before FFI.
+                        // Re-check, immediately before the call, that the
+                        // borrowed descriptor and bank still belong to the
+                        // admitted source, requirements, map and native code.
                         bound.check_descriptor(actual_boundary)?;
                         context.check_system(system).map_err(|error| anyhow::anyhow!("actual FP System: {error:?}"))?;
                         context.check_guest(checked_guest).map_err(|error| anyhow::anyhow!("actual FP bank: {error:?}"))?;

@@ -145,9 +145,9 @@ fn convert_lane(
     }
 }
 
-/// Stage every affected destination and cumulative status before committing any
-/// register. Group aliases always read original inputs. Raw FPCR, GPR, P, ZA and
-/// ZT state are untouched, including when a numerical control is unsupported.
+/// Stage every destination and the cumulative status before committing any
+/// register. Group aliases always read the original inputs. Raw FPCR, GPRs, P,
+/// ZA and ZT0 are untouched, even when a control is unsupported.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,

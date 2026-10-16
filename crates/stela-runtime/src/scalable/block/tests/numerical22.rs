@@ -261,8 +261,8 @@ fn actual_owned_block_fast_path_returns_native_fallthrough_after_commit() -> Res
         expected.set_result(&THREE_SINGLE.to_le_bytes())?;
         let mut context = context();
         let pointers = context_pointers(&context);
-        // SAFETY: Declared DIT=0/SMCR/features match this bounded fixture;
-        // all owners remain disjoint and the trusted block returns once.
+        // SAFETY: the declared DIT, SMCR and features match the fixture;
+        // storage is disjoint and the block returns once.
         let exit =
             unsafe { prepared.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
         assert_eq!(
@@ -289,7 +289,7 @@ fn guarded_nan_exit_keeps_exact_pc_and_completes_the_whole_original_instruction(
         let before_numerical = fixture.expected_prefix(NUMERICAL_PC);
         let mut context = context();
         let pointers = context_pointers(&context);
-        // SAFETY: Same bounded owned fixture and declared controls as above.
+        // SAFETY: the same fixture and controls as above.
         let exit =
             unsafe { prepared.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
         assert_eq!(
@@ -333,7 +333,7 @@ fn half_shape_uses_whole_instruction_service_without_prefix_reexecution() -> Res
         let before_numerical = fixture.expected_prefix(NUMERICAL_PC);
         let mut context = context();
         let pointers = context_pointers(&context);
-        // SAFETY: The trusted immutable prepared copy owns this bounded source.
+        // SAFETY: the prepared copy owns this bounded source.
         let exit =
             unsafe { prepared.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
         assert_eq!(
@@ -363,8 +363,8 @@ fn unsupported_controls_retain_prefix_exact_pc_and_all_numerical_input_state() -
     let expected = fixture.expected_prefix(NUMERICAL_PC);
     let mut context = context();
     let pointers = context_pointers(&context);
-    // SAFETY: Effective FullA64 and declared FEAT_SME_FA64 agree; unsupported
-    // numerical controls must leave the instruction pending rather than commit.
+    // SAFETY: effective FA64 matches the declared FEAT_SME_FA64; unsupported
+    // numerical controls must leave the instruction pending.
     let exit =
         unsafe { prepared.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
     assert_eq!(
@@ -643,7 +643,7 @@ fn new19_actual_admission_and_completion_rejections() -> Result<()> {
     let mut fixture = Fixture::new(32, false)?;
     fixture.scalable.set_fpmr(0);
     let mut context = context();
-    // SAFETY: Same explicit finite software guest profile/disjoint owners as above.
+    // SAFETY: the same profile and disjoint storage as above.
     let exit = unsafe { entry.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
     assert_eq!(
         (exit.next_pc, exit.kind),
@@ -710,7 +710,7 @@ fn new19_actual_admission_and_completion_rejections() -> Result<()> {
             &repeated(&TWO_SINGLE.to_le_bytes(), 32),
         )?;
         let expected = fixture.expected_prefix(if active { NUMERICAL_PC } else { NEXT_PC });
-        // SAFETY: Explicit software FA64/control declaration and owned finite input.
+        // SAFETY: declared FA64 and controls, and owned input.
         let exit =
             unsafe { entry.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
         assert_eq!(fixture.snapshot()?, expected.snapshot()?);
@@ -736,7 +736,7 @@ fn new19_actual_admission_and_completion_rejections() -> Result<()> {
     let entry = PreparedScalableBlock::prepare(&source(FP8), BASE, fa64, TargetCpu::Baseline)?;
     fixture.thread.pc = BASE;
     fixture.thread.registers.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
-    // SAFETY: The independently declared software FA64/control profile is bound.
+    // SAFETY: the declared FA64 and control profile is bound.
     let exit = unsafe { entry.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context)? };
     let before = fixture.snapshot()?;
     assert!(matches!(

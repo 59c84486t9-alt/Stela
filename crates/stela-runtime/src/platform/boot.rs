@@ -20,8 +20,8 @@ const CPUID_ADDRESS_SIZE: u32 = 0x8000_0008;
 const CPUID_LONG_MODE_AND_NX: u32 = (1 << 29) | (1 << 20);
 const PAGE_BYTES: usize = 4096;
 
-/// A reserved identity arena and its entire empty 4K PT. This is descriptive
-/// input to unsafe installation; copied addresses supply no execution authority.
+/// A reserved identity-mapped arena and its empty 4 KiB page table, as input to
+/// installation.
 #[derive(Clone, Copy, Debug)]
 pub struct BootArena {
     pub base: NonNull<u8>,
@@ -145,19 +145,18 @@ struct Platform {
 }
 static PLATFORM: Mutex<Option<Platform>> = Mutex::new(None);
 
-/// Transfer exclusive static arena/root ownership to the real shared runtime.
+/// Hand the static arenas and root to the runtime.
 ///
 /// # Safety
-/// The caller runs at CPL0 on the boot BSP with IF clear, no other PEs/APs,
-/// preemption or migration. NMI and fatal exception handlers must terminate
-/// without entering Rust/runtime/allocator locks; SMI/firmware reentry and DMA
-/// into these reservations must be excluded by the actual machine environment.
-/// All arena/PT/root pages are reserved live identity-mapped Normal-WB physical
-/// RAM, disjoint from each other, tables, image, heap, stack, and guest RAM.
-/// Their complete physical extents and empty PTs have no aliases or external
-/// writers. The caller retains the root/table identity mappings forever and
-/// transfers every arena's reclamation/PTE obligation for the whole boot.
-/// These lifetime/exclusion obligations are not inferred from CPUID or IF alone.
+/// Runs at CPL0 on the boot processor with interrupts disabled, no other
+/// processors, and no preemption or migration. NMI and fatal exception handlers
+/// must stop without entering Rust, runtime or allocator locks, and the machine
+/// must exclude SMI, firmware re-entry and DMA into these reservations. Every
+/// arena, page table and root page is reserved live identity-mapped write-back
+/// RAM, disjoint from each other and from the tables, image, heap, stack and
+/// guest RAM, with no aliases or external writers. The caller keeps the root
+/// and table identity mappings for the rest of the boot and transfers every
+/// arena's reclamation and PTE obligations.
 pub unsafe fn install(
     native: &[BootArena],
     ram: &[BootArena],
@@ -194,8 +193,9 @@ pub unsafe fn install(
         arenas
             .iter()
             .map(|a| {
-                // SAFETY: exclusive resources/lifetimes are this function's transfer
-                // contract; claim independently checks the actual root/path/PTs.
+                // SAFETY: this function's contract covers the exclusive
+                // resources; `claim` also checks the root, path and page
+                // tables.
                 unsafe { BootFramePool::claim(a.base, a.pages) }.map_err(MountError::from)
             })
             .collect()
@@ -233,8 +233,8 @@ pub(crate) fn ensure_live() -> Result<(), MountError> {
     Ok(())
 }
 pub(crate) fn admitted(target: TargetCpu) -> bool {
-    // Extensions remain explicit unsupported until their actual usable-control
-    // requirements are mounted. Baseline still requires all real observations.
+    // Extended targets stay unsupported until their control requirements are
+    // mounted; the baseline still requires every live check.
     target == TargetCpu::Baseline && ensure_live().is_ok()
 }
 pub(crate) fn native(bytes: &[u8]) -> Result<BootFrames, MountError> {
@@ -280,8 +280,7 @@ pub(crate) fn ram(
     Err(FrameError::Exhausted.into())
 }
 
-/// Read-only current hardware/storage verification after canonical shutdown.
-/// Failure remains terminal/quarantined; this report grants no new authority.
+/// Verify the hardware and storage after shutdown. A failure is terminal.
 pub fn verify() -> Result<CpuObservation, MountError> {
     ensure_live()?;
     observe()

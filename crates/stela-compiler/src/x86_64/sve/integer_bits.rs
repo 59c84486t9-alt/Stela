@@ -299,8 +299,8 @@ fn reverse_bits(code: &mut Vec<u8>, element: ElementSize, target: TargetCpu) {
     }
 }
 
-/// The selected BSR leading-count recipe requires an explicit DIT=0 profile.
-/// Fixed-work packed recipes retain the existing profile admission.
+/// The BSR leading-count recipe requires a profile declaring DIT clear; the
+/// fixed-work packed recipes do not.
 pub(crate) fn requires_declared_dit_zero(operand: Operand, length: VectorLength) -> bool {
     matches!(operand.kind, Kind::LeadingSignBits | Kind::LeadingZeros)
         && (operand.element_size == ElementSize::Doubleword

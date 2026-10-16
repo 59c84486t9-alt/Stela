@@ -46,11 +46,11 @@ pub use allocation::{
 };
 
 pub const MAX_IMAGE_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
-/// File-backed research mappings have a separate virtual-space budget. Safe
-/// snapshot/write operations retain the smaller MAX_IMAGE_MEMORY_BYTES bound.
+/// Virtual-space limit for file-backed mappings. Snapshot and write operations
+/// keep the smaller MAX_IMAGE_MEMORY_BYTES limit.
 pub const MAX_FILE_MEMORY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-/// Exclusive end of the lower canonical user range in the direct-RAM x86-64
-/// profile. This native mapping bound does not define a guest kernel VM maximum.
+/// End of the lower canonical user range in the direct-RAM profile. It does not
+/// define the guest's VM maximum.
 pub const DIRECT_RAM_USER_END: u64 = 1 << 47;
 
 #[derive(Debug, Clone)]
@@ -306,12 +306,11 @@ impl OwnedMemory {
     /// Map owned file-backed regions without copying their contents.
     ///
     /// # Safety
-    /// Every backing inode's contents and length must remain unchanged for the
-    /// complete lifetime of the returned owner, including during construction.
-    /// This excludes writes/truncation through other descriptors or processes;
-    /// private COW writes through this owner do not modify the backing inode.
-    /// Retained File handles and pre/post hashes cannot enforce this condition.
-    /// Changing a pathname to name another inode does not change the mapped one.
+    /// The contents and length of every backing file must stay unchanged while
+    /// the returned owner lives, including during construction: no writes or
+    /// truncation through other descriptors or processes. Private copy-on-write
+    /// writes through this owner do not change the file. Renaming a path to
+    /// another file does not affect the mapping.
     #[cfg(feature = "std")]
     pub unsafe fn map_files(specs: Vec<FileMemoryRegionSpec>) -> Result<Self> {
         Self::map_specs(
@@ -436,9 +435,9 @@ impl OwnedMemory {
             // kernels may ignore this flag; the exact-address check below
             // also handles that case without ever using MAP_FIXED.
             let flags = flags | libc::MAP_FIXED_NOREPLACE;
-            // SAFETY: private allocation with no host mapping replacement and
-            // validated size/source extent. File descriptors remain owned and
-            // live. The returned pointer is checked before any byte access.
+            // SAFETY: a private allocation that replaces no mapping, with
+            // validated size and extent. The descriptors stay open, and the
+            // pointer is checked before use.
             let mapped = unsafe {
                 libc::mmap(
                     requested,
@@ -463,8 +462,9 @@ impl OwnedMemory {
                     spec.guest_address
                 );
             }
-            // SAFETY: exact newly owned complete pages, checked address/extent,
-            // coherent Normal-WB storage and no escaping guest references.
+            // SAFETY: newly owned whole pages with a checked address and
+            // extent, coherent write-back storage and no guest references
+            // escaping.
             let native = unsafe {
                 NativeMapping::adopt(
                     core::ptr::NonNull::new(mapped.cast()).expect("nonzero exact mapping"),
@@ -537,11 +537,11 @@ impl OwnedMemory {
         self.usable
     }
 
-    /// Change owned data pages without ever granting host execute permission.
-    /// Address/length must be host-page multiples. Rounded allocation padding
-    /// may be protected but remains outside logical byte-access bounds. Source
-    /// snapshots require coordinated invalidation and are explicitly declined.
-    /// Caller excludes all concurrent translated execution during this operation.
+    /// Change the protection of owned data pages; host execute permission is
+    /// never granted. Address and length must be multiples of the host page
+    /// size; allocation padding may be protected but stays outside the
+    /// byte-access bounds. Source snapshots would need invalidation and are
+    /// refused. The caller excludes concurrent translated execution.
     #[cfg(feature = "std")]
     pub fn protect_data(
         &mut self,
@@ -925,15 +925,16 @@ impl PublishedReadOnlyRegion {
             unsafe { libc::munmap(guest, bytes as usize) };
             bail!("published guest address {guest_base:#x} is unavailable");
         }
-        // SAFETY: exact newly owned RO pages with checked complete extent;
-        // native accesses remain serialized and no guest references escape.
+        // SAFETY: newly owned read-only pages with a checked extent; accesses
+        // are serialized and no guest references escape.
         let guest_mapping = unsafe {
             NativeMapping::adopt(
                 core::ptr::NonNull::new(guest.cast()).expect("nonzero exact mapping"),
                 bytes as usize,
             )
         };
-        // SAFETY: the kernel chooses a separate new mapping of the owned backing.
+        // SAFETY: the kernel creates a new, separate mapping of the owned
+        // backing.
         let publisher = unsafe {
             libc::mmap(
                 core::ptr::null_mut(),
@@ -1013,8 +1014,9 @@ impl PublishedReadOnlyRegion {
                 .map_err(Into::into);
         }
         let mut result = vec![0; bytes];
-        // SAFETY: live RO mapping, bounded copy, independent owned destination;
-        // publication cannot run concurrently through this non-Send/Sync owner.
+        // SAFETY: a live read-only mapping, a bounded copy and a separate
+        // destination; this owner is neither Send nor Sync, so publication
+        // cannot run concurrently.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 (self.region.guest_address as usize as *const u8).add(offset),
