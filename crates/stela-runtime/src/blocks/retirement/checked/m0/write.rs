@@ -1,4 +1,4 @@
-//! Execution of M0 blocks that perform an STP.
+//! Execution of M0 blocks that perform a scalar store or an STP.
 use super::super::source::{BoundSource, ReturnedTerminal};
 use super::{
     Active, ConsumerKey, INSTRUCTION_BYTES, M0Step, M0WriteSourceInput, PreparedM0Commit,
@@ -58,7 +58,7 @@ impl M0WriteObservation {
 }
 
 impl<B: provider::Owner> Active<'_, '_, B> {
-    pub(in crate::blocks::retirement::checked) fn execute_m0_write64_pair(
+    pub(in crate::blocks::retirement::checked) fn execute_m0_write(
         mut self,
         bound: &BoundSource<'_>,
         accounting: &mut RunOutcome,
@@ -83,16 +83,28 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         let instruction = Decoder
             .lift(bound.entry.entry(), word)
             .map_err(|reason| anyhow::anyhow!("M0 source decode: {reason:?}"))?;
-        let stela_compiler::block::el1_platform::Intent::Write64Pair(descriptor) =
-            bound.el1_platform_intent()?
-        else {
-            anyhow::bail!("EL1 source is not a canonical M0 pair write");
+        let descriptor_requirements = match bound.el1_platform_intent()? {
+            stela_compiler::block::el1_platform::Intent::ScalarStore(descriptor) => {
+                anyhow::ensure!(
+                    descriptor.matches_instruction(&instruction)
+                        && descriptor.matches_source(instruction.pc, word),
+                    "scalar store source differs"
+                );
+                descriptor.requirements()
+            }
+            stela_compiler::block::el1_platform::Intent::Write64Pair(descriptor) => {
+                anyhow::ensure!(
+                    descriptor.source_pc() == instruction.pc,
+                    "pair write source differs"
+                );
+                descriptor.requirements()
+            }
+            _ => anyhow::bail!("EL1 source is not a canonical M0 scalar or pair store"),
         };
         let source = M0WriteSource::from_source(&instruction, word)
             .map_err(|failure| anyhow::anyhow!("M0 write source shape: {failure:?}"))?;
         anyhow::ensure!(
-            descriptor.source_pc() == instruction.pc
-                && descriptor.requirements() == source.requirements(),
+            descriptor_requirements == source.requirements(),
             "M0 write descriptor/requirements differ"
         );
         anyhow::ensure!(
@@ -136,7 +148,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
 
             // Real source/control witness, stable BEFORE the RAM session borrows
             // it. All M0/EE0/current-source qualification precedes target read.
-            let control = match controls.loan_m0_write8_or_pair(&input) {
+            let control = match controls.loan_m0_scalar_or_pair_write(&input) {
                 Ok(control) => control,
                 Err(error) => {
                     *observation = Some(M0WriteObservation::SourceControlFailure {
@@ -214,8 +226,16 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     "M0 PC changed before settlement"
                 );
                 let mut permitted = self.pe.thread.registers.clone();
-                if let Some((base, value)) = source.writeback(&self.pe.thread.registers) {
-                    permitted.x[usize::from(base)] = value;
+                if let Some((base, value)) = intent.writeback {
+                    match base {
+                        stela_compiler::aarch64::Register::X(index) => {
+                            permitted.x[usize::from(index)] = value
+                        }
+                        stela_compiler::aarch64::Register::Sp => permitted.sp = value,
+                        stela_compiler::aarch64::Register::Zero => {
+                            anyhow::bail!("M0 store writeback cannot target ZR")
+                        }
+                    }
                 }
                 anyhow::ensure!(candidate == permitted, "M0 changed unrelated state");
                 // Allocate diagnostics BEFORE infallible state/PC/Ready commit.

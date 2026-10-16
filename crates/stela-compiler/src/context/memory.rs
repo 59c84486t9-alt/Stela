@@ -148,13 +148,16 @@ pub mod profile_requirements {
     /// EL1 MMU-off scalar loads of 1, 2, 4 or 8 bytes. The runtime handles
     /// controls, SP alignment and the ordered physical access.
     pub const M0_DEVICE_RAM_SCALAR_LOAD: u32 = 1 << 6;
+    /// A staged scalar store to M0 RAM at its exact width.
+    pub const M0_DEVICE_RAM_SCALAR_STORE: u32 = 1 << 7;
     pub const KNOWN: u32 = NATIVE_ACCESS
         | TAG_GRANULES
         | SCALABLE_TAG_CHECKS
         | M0_DEVICE_RAM_READ64
         | M0_DEVICE_RAM_WRITE8_OR_PAIR
         | M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
-        | M0_DEVICE_RAM_SCALAR_LOAD;
+        | M0_DEVICE_RAM_SCALAR_LOAD
+        | M0_DEVICE_RAM_SCALAR_STORE;
 }
 
 /// Memory-service outcomes; a load commits only on Success.

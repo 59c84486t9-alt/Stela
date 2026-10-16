@@ -12,7 +12,7 @@ use crate::{
         MemoryExecutionLoan,
         physical::{
             M0RamWritePlatformError, M0RamWritePrepared, M0RamWriteProgress,
-            prepare_aligned_device_ram8_or_pair,
+            prepare_aligned_device_ram_scalar_or_pair,
         },
     },
     system::translation_controls::m0_data::M0DataWriteLoan,
@@ -107,7 +107,7 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
         control: &'call M0DataWriteLoan<'owner>,
         context: &'call mut ExecutionContext,
     ) -> Result<Self, M0RamWritePlatformError> {
-        let prepared = prepare_aligned_device_ram8_or_pair(outer, control)?;
+        let prepared = prepare_aligned_device_ram_scalar_or_pair(outer, control)?;
         let context_before = ContextIdentity::capture(context);
         Ok(Self {
             prepared,

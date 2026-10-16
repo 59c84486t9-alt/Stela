@@ -144,6 +144,7 @@ fn every_declared_platform_route_reaches_plan_and_shared_emitter() {
         ("indirect_call", 0xd63f0000, 0),
         ("return", 0xd65f03c0, 0),
         ("literal_read64", 0x58000040, 1),
+        ("scalar_store", 0xf9000040, 5),
         ("pair_offset", 0xa9000440, 2),
         ("pair_preindex", 0xa9800440, 2),
         ("pair_postindex", 0xa8800440, 2),
@@ -167,12 +168,13 @@ fn every_declared_platform_route_reaches_plan_and_shared_emitter() {
             Intent::Write64Pair(_) => 2,
             Intent::System(_) => 3,
             Intent::Read64Pair(_) => 4,
+            Intent::ScalarStore(_) => 5,
         };
         assert_eq!(actual_lane, lane, "{name}");
         assert_eq!(plan.source_bytes(), size_of::<u32>(), "{name}");
         assert_eq!(
             plan.memory_requirements().is_some(),
-            lane == 1 || lane == 2 || lane == 4,
+            matches!(lane, 1 | 2 | 4 | 5),
             "{name}"
         );
         if lane == 4 {
@@ -190,7 +192,7 @@ fn every_declared_platform_route_reaches_plan_and_shared_emitter() {
         assert_eq!(block.native.source_map.len(), 1, "{name}");
     }
     for word in [
-        0xf9000040u32,
+        0xf8000840u32, // STTR is not a platform scalar store.
         0xa90007e0,
         0xa8000440,
         0x29000440,
@@ -218,9 +220,9 @@ fn every_declared_platform_route_reaches_plan_and_shared_emitter() {
 #[test]
 fn unowned_memory_atomic_fp_and_exception_effects_never_use_direct_ram_or_services() {
     for word in [
-        0xf9000000u32,
-        0xd69f0bff, // ERETAA still needs its actual feature-present owner.
-        0xd69f0fff, // ERETAB likewise remains outside this base profile.
+        0xf8000800u32, // STTR is not a platform scalar store.
+        0xd69f0bff,    // ERETAA still needs its actual feature-present owner.
+        0xd69f0fff,    // ERETAB likewise remains outside this base profile.
         0x1e602800,
         0x5ac02000,
     ] {
@@ -307,7 +309,13 @@ fn canonical_scalar_load_family_has_one_staged_attempt_and_exact_source_intent()
             TargetCpu::Baseline,
         );
         if !wanted {
-            assert!(plan.is_err(), "unowned {word:08x}");
+            // The load fixture's plain stores are now admitted as stores.
+            if let Ok(plan) = plan {
+                assert!(
+                    matches!(plan.el1_platform_intent(), Some(Intent::ScalarStore(_))),
+                    "unowned {word:08x}"
+                );
+            }
             declined += 1;
             continue;
         }
@@ -398,4 +406,148 @@ fn scalar_result_metadata_preserves_width_sign_and_literal_address() {
         ScalarLoadAddress::Literal { address: 0x1035c0 }
     );
     assert_eq!(load.writeback_base(), None);
+}
+
+#[test]
+fn canonical_scalar_store_family_has_one_staged_attempt_and_exact_source_intent() {
+    use crate::context::memory::{SpAlignmentRequirement, flags, profile_requirements};
+    let fixture = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/el1-scalar-stores.S"
+    ));
+    let mut admitted = 0;
+    let mut declined = 0;
+    let mut other = 0;
+    for row in fixture
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(".inst "))
+    {
+        let word = u32::from_str_radix(
+            row.split_whitespace()
+                .next()
+                .unwrap()
+                .trim_start_matches("0x"),
+            16,
+        )
+        .unwrap();
+        let instruction = Decoder.lift(BASE, word);
+        let plan = CompilationPlan::new(
+            &bytes(&[word, 0xd503201f]),
+            BASE,
+            BlockProfile::El1PlatformV1,
+            TargetCpu::Baseline,
+        );
+        if !row.ends_with("; admit") {
+            if let Ok(instruction) = instruction {
+                assert!(ScalarStore::from_instruction(&instruction).is_none());
+            }
+            if row.ends_with("; decline") {
+                assert!(plan.is_err(), "unowned {word:08x}");
+                declined += 1;
+            } else {
+                let plan = plan.unwrap_or_else(|error| panic!("other {word:08x}: {error:?}"));
+                assert!(!matches!(
+                    plan.el1_platform_intent(),
+                    Some(Intent::ScalarStore(_))
+                ));
+                other += 1;
+            }
+            continue;
+        }
+        let plan = plan.unwrap_or_else(|error| panic!("store {word:08x}: {error:?}"));
+        let Some(Intent::ScalarStore(store)) = plan.el1_platform_intent() else {
+            panic!("scalar store intent {word:08x}")
+        };
+        assert_eq!(plan.source_bytes(), size_of::<u32>());
+        assert_eq!(store.source_pc(), BASE);
+        assert!(store.matches_instruction(&instruction.unwrap()));
+        assert!(store.matches_source(BASE, word));
+        assert!(!store.matches_source(GuestAddress(BASE.0 + 4), word));
+        assert!(!store.matches_source(BASE, word ^ 1));
+        let requirements = store.requirements();
+        assert_eq!(plan.memory_requirements(), Some(requirements));
+        assert_eq!(
+            requirements.required_profile,
+            profile_requirements::M0_DEVICE_RAM_SCALAR_STORE
+        );
+        assert_eq!(requirements.required_host_caps, 0);
+        assert_eq!(requirements.required_address_checks, Default::default());
+        assert_eq!(requirements.required_pointer_arithmetic, None);
+        assert_eq!(
+            requirements.required_sp_alignment,
+            SpAlignmentRequirement::Any
+        );
+        let (tag_checked, writeback) = match store.address() {
+            ScalarStoreAddress::Literal { .. } => panic!("store cannot have a literal address"),
+            ScalarStoreAddress::Immediate { base, mode, .. } => (
+                mode != AddressMode::Offset || base != Register::Sp,
+                (mode != AddressMode::Offset).then_some(base),
+            ),
+            ScalarStoreAddress::RegisterOffset { .. } => (true, None),
+        };
+        assert_eq!(store.writeback_base(), writeback);
+        assert_eq!(
+            requirements.required_flags,
+            flags::WRITE | if tag_checked { flags::TAG_CHECKED } else { 0 }
+        );
+        assert_eq!(
+            plan.compile().unwrap().native.source_map,
+            vec![(BASE, crate::extended::context_wrapper().len())]
+        );
+        let prefix = CompilationPlan::new(
+            &bytes(&[ADD_X0, word, 0xd503201f]),
+            BASE,
+            BlockProfile::El1PlatformV1,
+            TargetCpu::Baseline,
+        )
+        .unwrap();
+        assert_eq!(prefix.source_bytes(), size_of::<u32>());
+        assert_eq!(prefix.el1_platform_intent(), Some(Intent::Registers));
+        assert!(prefix.memory_requirements().is_none());
+        admitted += 1;
+    }
+    assert_eq!((admitted, declined, other), (101, 20, 9));
+}
+
+#[test]
+fn scalar_store_metadata_keeps_exact_width_source_roles_and_distinct_capability() {
+    use crate::context::memory::profile_requirements;
+    for (word, bytes) in [
+        (0x39000c20, 1),
+        (0x79000c20, 2),
+        (0xb9000c20, 4),
+        (0xf9000c20, 8),
+    ] {
+        let instruction = Decoder.lift(BASE, word).unwrap();
+        let store = ScalarStore::from_instruction(&instruction).unwrap();
+        assert_eq!(store.bytes(), bytes);
+        assert_eq!(store.source_register(), Register::X(0));
+        assert_eq!(
+            store.address(),
+            ScalarStoreAddress::Immediate {
+                base: Register::X(1),
+                displacement: i32::from(bytes) * 3,
+                mode: AddressMode::Offset
+            }
+        );
+        assert_eq!(store.writeback_base(), None);
+        assert_ne!(
+            store.requirements().required_profile,
+            profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR
+        );
+        assert!(ScalarLoad::from_instruction(&instruction).is_none());
+    }
+    let zero = ScalarStore::from_instruction(&Decoder.lift(BASE, 0xf90003ff).unwrap()).unwrap();
+    assert_eq!(zero.source_register(), Register::Zero);
+    assert_eq!(
+        zero.address(),
+        ScalarStoreAddress::Immediate {
+            base: Register::Sp,
+            displacement: 0,
+            mode: AddressMode::Offset
+        }
+    );
+    for word in [0xa9000820, 0x18000040, 0xb8400820, 0xd503201f] {
+        assert!(ScalarStore::from_instruction(&Decoder.lift(BASE, word).unwrap()).is_none());
+    }
 }

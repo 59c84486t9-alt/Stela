@@ -15,6 +15,7 @@ pub enum Intent {
     Registers,
     LiteralRead64(el1_m0::LiteralRead64),
     ScalarLoad(ScalarLoad),
+    ScalarStore(ScalarStore),
     System(system::SystemInstruction),
     Write64Pair(Write64Pair),
     Read64Pair(Read64Pair),
@@ -37,6 +38,30 @@ pub enum ScalarLoadAddress {
         extend: IndexExtend,
         shift: u8,
     },
+}
+
+fn scalar_address(
+    operand: crate::x86_64::memory_store::checked_scalar::Operand,
+) -> ScalarLoadAddress {
+    use crate::x86_64::memory_store::checked_scalar::Address;
+    match operand.address() {
+        Address::Literal { address } => ScalarLoadAddress::Literal { address },
+        Address::Immediate { displacement, mode } => ScalarLoadAddress::Immediate {
+            base: operand.base(),
+            displacement,
+            mode,
+        },
+        Address::RegisterOffset {
+            index,
+            extend,
+            shift,
+        } => ScalarLoadAddress::RegisterOffset {
+            base: operand.base(),
+            index,
+            extend,
+            shift,
+        },
+    }
 }
 
 /// A scalar load. One checked operand drives analysis, runtime metadata and
@@ -77,29 +102,66 @@ impl ScalarLoad {
         signed
     }
     pub fn address(self) -> ScalarLoadAddress {
-        use crate::x86_64::memory_store::checked_scalar::Address;
-        match self.operand.address() {
-            Address::Literal { address } => ScalarLoadAddress::Literal { address },
-            Address::Immediate { displacement, mode } => ScalarLoadAddress::Immediate {
-                base: self.operand.base(),
-                displacement,
-                mode,
-            },
-            Address::RegisterOffset {
-                index,
-                extend,
-                shift,
-            } => ScalarLoadAddress::RegisterOffset {
-                base: self.operand.base(),
-                index,
-                extend,
-                shift,
-            },
-        }
+        scalar_address(self.operand)
     }
     pub fn writeback_base(self) -> Option<Register> {
         match self.address() {
             ScalarLoadAddress::Immediate { base, mode, .. } if mode != AddressMode::Offset => {
+                Some(base)
+            }
+            _ => None,
+        }
+    }
+    pub fn requirements(self) -> MemoryRequirements {
+        crate::x86_64::memory_store::checked_scalar::requirements(&self.operand)
+    }
+    pub fn matches_instruction(self, instruction: &Instruction) -> bool {
+        Self::from_instruction(instruction) == Some(self)
+    }
+    pub fn matches_source(self, pc: GuestAddress, word: u32) -> bool {
+        Decoder
+            .lift(pc, word)
+            .is_ok_and(|instruction| self.matches_instruction(&instruction))
+    }
+    pub(crate) fn operand(self) -> crate::x86_64::memory_store::checked_scalar::Operand {
+        self.operand
+    }
+}
+
+/// Store addressing; `ScalarStore::address` never produces `Literal`.
+pub type ScalarStoreAddress = ScalarLoadAddress;
+
+/// A scalar integer store. The shared checked operand stages the source value
+/// and holds base writeback until the store succeeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScalarStore {
+    source_pc: GuestAddress,
+    operand: crate::x86_64::memory_store::checked_scalar::Operand,
+}
+impl ScalarStore {
+    pub fn from_instruction(instruction: &Instruction) -> Option<Self> {
+        Some(Self {
+            source_pc: instruction.pc,
+            operand: crate::x86_64::memory_store::checked_scalar::Operand::from_m0_scalar_store(
+                &instruction.operation,
+            )?,
+        })
+    }
+    pub fn source_pc(self) -> GuestAddress {
+        self.source_pc
+    }
+    pub fn bytes(self) -> u8 {
+        self.operand.bytes()
+    }
+    pub fn source_register(self) -> Register {
+        self.operand.data()
+    }
+    pub fn address(self) -> ScalarStoreAddress {
+        scalar_address(self.operand)
+    }
+    pub fn writeback_base(self) -> Option<Register> {
+        match self.address() {
+            ScalarStoreAddress::Immediate { base, mode, .. } if mode != AddressMode::Offset => {
                 Some(base)
             }
             _ => None,
@@ -241,6 +303,8 @@ pub(super) fn validate_operation(operation: &Operation) -> Result<(), CompileErr
     }
     if crate::x86_64::memory_store::checked_scalar::Operand::from_m0_scalar_load(operation)
         .is_some()
+        || crate::x86_64::memory_store::checked_scalar::Operand::from_m0_scalar_store(operation)
+            .is_some()
     {
         return Ok(());
     }
@@ -309,6 +373,7 @@ enum Body {
         fallthrough: GuestAddress,
     },
     Scalar(Instruction, ScalarLoad),
+    Store(Instruction, ScalarStore),
     Write(Instruction, Write64Pair),
     Read(Instruction, Read64Pair),
     System(system::SystemInstruction),
@@ -359,6 +424,15 @@ impl Plan {
                 ));
             }
             Body::Scalar(instruction.clone(), load)
+        } else if let Some(instruction) = parsed.instructions.first()
+            && let Some(store) = ScalarStore::from_instruction(instruction)
+        {
+            if parsed.instructions.len() != 1 || parsed.terminal.is_some() {
+                return Err(CompileError(
+                    "M0 scalar store requires one separate complete attempt".into(),
+                ));
+            }
+            Body::Store(instruction.clone(), store)
         } else {
             Body::Registers {
                 instructions: parsed.instructions.clone(),
@@ -372,6 +446,7 @@ impl Plan {
         match &self.body {
             Body::Registers { .. } => Intent::Registers,
             Body::Scalar(_, load) => Intent::ScalarLoad(*load),
+            Body::Store(_, store) => Intent::ScalarStore(*store),
             Body::System(instruction) => Intent::System(*instruction),
             Body::Write(_, write) => Intent::Write64Pair(*write),
             Body::Read(_, read) => Intent::Read64Pair(*read),
@@ -380,6 +455,7 @@ impl Plan {
     pub(super) fn requirements(&self) -> Option<MemoryRequirements> {
         match &self.body {
             Body::Scalar(_, load) => Some(load.requirements()),
+            Body::Store(_, store) => Some(store.requirements()),
             Body::Write(_, write) => Some(write.requirements()),
             Body::Read(_, read) => Some(read.requirements()),
             Body::Registers { .. } | Body::System(_) => None,
@@ -389,6 +465,9 @@ impl Plan {
         match self.body {
             Body::Scalar(instruction, load) => {
                 crate::x86_64::block::el1_m0::emit_scalar_load(&instruction, load, target)
+            }
+            Body::Store(instruction, store) => {
+                crate::x86_64::block::el1_m0::emit_scalar_store(&instruction, store, target)
             }
             Body::Write(instruction, _) => {
                 crate::x86_64::block::el1_m0::emit_write_pair(&instruction, target)

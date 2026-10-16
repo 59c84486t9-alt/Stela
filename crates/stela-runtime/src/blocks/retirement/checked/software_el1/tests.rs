@@ -8,6 +8,8 @@ mod mutable_source;
 mod platform;
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 mod scalar_load;
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+mod scalar_store;
 
 #[test]
 fn full_pacm_storage_is_refused_before_ram_materialization() {

@@ -56,8 +56,8 @@ pub(crate) struct Operand {
     /// Whether the source instruction was unprivileged. At EL0 this is the same
     /// as an ordinary access.
     unprivileged: bool,
-    /// A separately qualified MMU-off staged scalar read, never Normal-WB.
-    m0_scalar_load: bool,
+    /// An MMU-off staged scalar load or store, never Normal-WB.
+    m0_scalar: bool,
 }
 fn data_register(register: Register) -> bool {
     matches!(register, Register::X(index) if index < 31) || register == Register::Zero
@@ -88,7 +88,7 @@ impl Operand {
                 base,
                 address: Address::Immediate { displacement, mode },
                 unprivileged: false,
-                m0_scalar_load: false,
+                m0_scalar: false,
             },
             Operation::MemoryRegisterOffset(operand) => Self {
                 profile,
@@ -102,7 +102,7 @@ impl Operand {
                     shift: operand.shift,
                 },
                 unprivileged: false,
-                m0_scalar_load: false,
+                m0_scalar: false,
             },
             Operation::MemoryUnprivileged(operand) => Self {
                 profile,
@@ -115,7 +115,7 @@ impl Operand {
                     mode: AddressMode::Offset,
                 },
                 unprivileged: true,
-                m0_scalar_load: false,
+                m0_scalar: false,
             },
             _ => return None,
         };
@@ -204,7 +204,7 @@ impl Operand {
                     address: operand.address,
                 },
                 unprivileged: false,
-                m0_scalar_load: true,
+                m0_scalar: true,
             });
         }
         let mut operand =
@@ -212,7 +212,17 @@ impl Operand {
         if operand.unprivileged || !matches!(operand.transfer, MemoryTransfer::Load { .. }) {
             return None;
         }
-        operand.m0_scalar_load = true;
+        operand.m0_scalar = true;
+        Some(operand)
+    }
+    /// The scalar store operand; unprivileged and literal forms are excluded.
+    pub(crate) fn from_m0_scalar_store(operation: &Operation) -> Option<Self> {
+        let mut operand =
+            Self::from_operation(operation, CheckedMemoryProfile::SpAlignmentDisabled)?;
+        if operand.unprivileged || operand.transfer != MemoryTransfer::Store {
+            return None;
+        }
+        operand.m0_scalar = true;
         Some(operand)
     }
     pub(crate) fn bytes(self) -> u8 {
@@ -246,17 +256,23 @@ impl Operand {
 }
 
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
-    if operand.m0_scalar_load {
+    if operand.m0_scalar {
+        let write = operand.transfer == MemoryTransfer::Store;
         return MemoryRequirements {
             required_address_checks: Default::default(),
             required_pointer_arithmetic: None,
-            required_flags: if operand.tag_checked() {
-                flags::TAG_CHECKED
-            } else {
-                0
-            },
+            required_flags: if write { flags::WRITE } else { 0 }
+                | if operand.tag_checked() {
+                    flags::TAG_CHECKED
+                } else {
+                    0
+                },
             required_host_caps: 0,
-            required_profile: profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD,
+            required_profile: if write {
+                profile_requirements::M0_DEVICE_RAM_SCALAR_STORE
+            } else {
+                profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD
+            },
             // The EL1 runtime checks SP against SCTLR.SA before address
             // arithmetic.
             required_sp_alignment: SpAlignmentRequirement::Any,

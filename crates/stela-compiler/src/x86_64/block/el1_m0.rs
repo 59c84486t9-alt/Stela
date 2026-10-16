@@ -91,6 +91,26 @@ pub(crate) fn emit_scalar_load(
     if !load.matches_instruction(instruction) {
         return Err(CompileError("changed M0 scalar load instruction".into()));
     }
+    emit_scalar(instruction, load.operand(), target)
+}
+
+/// The same staged body as the scalar load, under the store capability.
+pub(crate) fn emit_scalar_store(
+    instruction: &Instruction,
+    store: crate::block::el1_platform::ScalarStore,
+    target: TargetCpu,
+) -> Result<NativeBlock, CompileError> {
+    if !store.matches_instruction(instruction) {
+        return Err(CompileError("changed M0 scalar store instruction".into()));
+    }
+    emit_scalar(instruction, store.operand(), target)
+}
+
+fn emit_scalar(
+    instruction: &Instruction,
+    operand: x86_64::memory_store::checked_scalar::Operand,
+    target: TargetCpu,
+) -> Result<NativeBlock, CompileError> {
     let mut block = NativeBlock {
         x86_64_code: crate::extended::context_wrapper(),
         source_map: Vec::new(),
@@ -100,14 +120,14 @@ pub(crate) fn emit_scalar_load(
         .push((instruction.pc, block.x86_64_code.len()));
     x86_64::memory_store::checked_scalar::emit_context(
         &mut block.x86_64_code,
-        &load.operand(),
+        &operand,
         instruction.pc.0,
     );
     let next = instruction
         .pc
         .0
         .checked_add(size_of::<u32>() as u64)
-        .ok_or_else(|| CompileError("M0 scalar load continuation overflow".into()))?;
+        .ok_or_else(|| CompileError("M0 scalar continuation overflow".into()))?;
     super::emit_terminal(
         &mut block.x86_64_code,
         &mut block.source_map,

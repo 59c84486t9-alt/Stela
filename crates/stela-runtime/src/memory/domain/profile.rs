@@ -35,7 +35,8 @@ pub struct MemoryProfile {
 const SEPARATELY_OWNED_M0_PROFILES: u32 = profile_requirements::M0_DEVICE_RAM_READ64
     | profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR
     | profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
-    | profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD;
+    | profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD
+    | profile_requirements::M0_DEVICE_RAM_SCALAR_STORE;
 
 impl MemoryProfile {
     pub(super) fn inspect(views: &[(Arc<MemoryView>, MappingAttributes)]) -> Self {

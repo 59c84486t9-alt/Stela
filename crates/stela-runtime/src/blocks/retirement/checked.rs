@@ -273,10 +273,11 @@ impl BlockRuntime {
             if self.profile == BlockProfile::El1PlatformV1
                 && matches!(
                     bound.el1_platform_intent(),
-                    Ok(stela_compiler::block::el1_platform::Intent::Write64Pair(_))
+                    Ok(stela_compiler::block::el1_platform::Intent::Write64Pair(_)
+                        | stela_compiler::block::el1_platform::Intent::ScalarStore(_))
                 )
             {
-                match active.execute_m0_write64_pair(
+                match active.execute_m0_write(
                     &bound,
                     &mut accounting,
                     &mut last_m0_write_observation,

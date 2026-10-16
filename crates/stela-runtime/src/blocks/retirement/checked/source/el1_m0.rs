@@ -14,6 +14,7 @@ impl BoundSource<'_> {
                     Ok(Intent::LiteralRead64(read))
                 }
                 stela_compiler::block::el1_platform::Intent::ScalarLoad(_)
+                | stela_compiler::block::el1_platform::Intent::ScalarStore(_)
                 | stela_compiler::block::el1_platform::Intent::System(_)
                 | stela_compiler::block::el1_platform::Intent::Write64Pair(_)
                 | stela_compiler::block::el1_platform::Intent::Read64Pair(_) => {

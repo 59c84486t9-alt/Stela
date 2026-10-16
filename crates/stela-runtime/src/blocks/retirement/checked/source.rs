@@ -265,6 +265,7 @@ impl<'code> BoundSource<'code> {
                     Some(
                         Intent::LiteralRead64(_)
                         | Intent::ScalarLoad(_)
+                        | Intent::ScalarStore(_)
                         | Intent::Write64Pair(_)
                         | Intent::Read64Pair(_),
                     ) => anyhow::ensure!(

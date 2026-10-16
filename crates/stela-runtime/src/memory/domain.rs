@@ -23,6 +23,7 @@ pub use lifecycle::{MemoryExecutionLoan, MemoryObservationLoan};
 
 mod exclusive;
 pub(crate) mod m0_read;
+mod m0_scalar;
 pub(crate) mod m0_write;
 pub(crate) mod physical;
 

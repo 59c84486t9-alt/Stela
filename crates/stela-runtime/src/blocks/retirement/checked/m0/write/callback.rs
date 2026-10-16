@@ -1,4 +1,4 @@
-//! Memory-service callback for the M0 STP.
+//! Memory-service callback for the M0 scalar store or STP.
 use crate::memory::domain::physical::{
     M0RamWritePlatformError, M0RamWritePrepared, M0RamWriteProgress,
 };
@@ -82,36 +82,47 @@ impl<'call, 'loan, 'owner> WriteCallback<'call, 'loan, 'owner> {
                 completed_bytes: self.prepared.progress().completed_bytes,
             });
         }
-        // SAFETY: the closed exact generated pair ABI supplies private readable
-        // staging for this request. Validate ALL staged source values before
-        // any physical effect; copied caller metadata is never accepted.
-        for index in 0..usize::try_from(intent.bytes()).expect("bounded pair") / MEMBER_BYTES {
-            let value = unsafe {
-                request
-                    .data
-                    .add(index * MEMBER_BYTES)
-                    .cast::<u64>()
-                    .read_unaligned()
-            };
-            if u64::from_le(value) != intent.data[index] {
-                return Err(CallbackFailure::InvalidRequest {
-                    address: request.address,
-                    pc: request.pc,
-                    bytes: request.bytes,
-                    flags: request.flags,
-                    attempts: self.attempts,
-                    completed_bytes: self.prepared.progress().completed_bytes,
-                });
-            }
+        // SAFETY: the generated body supplies private staging for this
+        // request. Every staged value is checked before any physical effect.
+        if !unsafe { staged_values_match(intent, request.data) } {
+            return Err(CallbackFailure::InvalidRequest {
+                address: request.address,
+                pc: request.pc,
+                bytes: request.bytes,
+                flags: request.flags,
+                attempts: self.attempts,
+                completed_bytes: self.prepared.progress().completed_bytes,
+            });
         }
         self.prepared.attempt().map_err(CallbackFailure::Platform)
     }
 }
 
+/// Whether the private staging holds the intent's values.
+///
 /// # Safety
-/// The native code is the validated X-register STP body. `view` and `request`
-/// are its live ABI objects; `opaque` points to this call's WriteCallback, and
-/// `request.data` is readable private 16-byte staging, disjoint from RAM,
+/// `data` is the request's private staging: one u64 per member, even when a
+/// narrow store publishes only its low bytes.
+unsafe fn staged_values_match(
+    intent: crate::memory::domain::m0_write::M0WriteIntent,
+    data: *const u8,
+) -> bool {
+    (0..intent.member_count()).all(|index| {
+        // SAFETY: guaranteed by the caller.
+        let value = unsafe {
+            data.add(index * MEMBER_BYTES)
+                .cast::<u64>()
+                .read_unaligned()
+        };
+        u64::from_le(value) == intent.data[index]
+    })
+}
+
+/// # Safety
+/// The native code is the validated scalar store or X-register STP body.
+/// `view` and `request` are its live ABI objects; `opaque` points to this
+/// call's WriteCallback, and `request.data` is readable private 8- or 16-byte
+/// staging, disjoint from RAM,
 /// architectural state, source and host metadata. The PE's guard holds the
 /// prepared RAM, ordering and source resources from before entry until commit.
 unsafe extern "sysv64" fn reached_write(
@@ -204,3 +215,6 @@ impl core::fmt::Debug for CallbackFailure {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

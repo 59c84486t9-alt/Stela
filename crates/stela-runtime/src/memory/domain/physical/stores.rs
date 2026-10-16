@@ -1,4 +1,4 @@
-//! M0 STP stores to physical RAM.
+//! M0 scalar and STP stores to physical RAM, in exact source widths.
 
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
 use crate::platform::sync::MutexGuard;
@@ -11,9 +11,6 @@ use crate::{
 };
 use alloc::vec::Vec;
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
-
-const STORE_BYTES: usize = size_of::<u64>();
-const STORE_ALIGNMENT_MASK: u64 = STORE_BYTES as u64 - 1;
 
 /// A copied observation.
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +118,7 @@ struct PhysicalRamWritePin<'loan> {
     physical: &'loan PhysicalAddressSpace,
     execution: &'loan MemoryExecutionLoan,
     reached: PhysicalAccess,
+    bytes: usize,
 }
 impl PhysicalRamWritePin<'_> {
     fn check_current(&self) -> Result<(), PhysicalReadPlatformError> {
@@ -128,7 +126,7 @@ impl PhysicalRamWritePin<'_> {
         self.physical.check_reached(&self.reached)
     }
 
-    fn publish8(
+    fn publish(
         &self,
         value: u64,
         receipts: &mut Vec<crate::memory::domain::SourceWriteReceipt>,
@@ -136,15 +134,15 @@ impl PhysicalRamWritePin<'_> {
         let first = self.reached.first();
         // SAFETY: the source borrow admitted this write, and the outer object
         // and order guard pin the physical rights and storage. Resolution
-        // checked the aligned 8-byte footprint and host read-modify-write
-        // readability, and the staging is private stack memory. Publication
-        // performs the 8-byte XCHG and invalidates reservations on every alias,
-        // even for same-value writes.
+        // checked the naturally aligned source-width footprint and host
+        // read-modify-write readability, and the staging is private stack
+        // memory. Publication performs an exact-width XCHG and invalidates
+        // reservations on every alias, even for same-value writes.
         unsafe {
             self.physical.domain.system.publish_tracked(
                 first.view().backing(),
                 first.backing_offset(),
-                &value.to_le_bytes(),
+                &value.to_le_bytes()[..self.bytes],
                 Some(receipts),
             )
         }
@@ -155,20 +153,23 @@ fn resolve_write_pin<'loan>(
     physical: &'loan PhysicalAddressSpace,
     execution: &'loan MemoryExecutionLoan,
     physical_address: u64,
+    bytes: u8,
 ) -> Result<PhysicalRamWritePin<'loan>, PhysicalReadPlatformError> {
     use crate::memory::{access, backing::AccessKind};
     physical.check_execution_loan(execution)?;
     if !cfg!(target_arch = "x86_64") {
         return Err(PhysicalReadPlatformError::UnsupportedHost);
     }
-    if physical_address & STORE_ALIGNMENT_MASK != 0
-        || physical_address.checked_add(STORE_BYTES as u64).is_none()
+    let bytes = usize::from(bytes);
+    if !matches!(bytes, 1 | 2 | 4 | 8)
+        || physical_address & (bytes as u64 - 1) != 0
+        || physical_address.checked_add(bytes as u64).is_none()
     {
         return Err(PhysicalReadPlatformError::Alignment);
     }
     let reached = physical
         .domain
-        .resolve_source_physical(execution, physical_address, STORE_BYTES, AccessKind::Write)
+        .resolve_source_physical(execution, physical_address, bytes, AccessKind::Write)
         .map_err(PhysicalReadPlatformError::Domain)?;
     physical.check_reached(&reached)?;
     if core::iter::once(reached.first())
@@ -182,24 +183,24 @@ fn resolve_write_pin<'loan>(
     }
     let first = reached.first();
     let pointer = first.host_ptr().as_ptr();
-    if pointer as usize & (STORE_BYTES - 1) != 0 {
+    if pointer as usize & (bytes - 1) != 0 {
         return Err(PhysicalReadPlatformError::HostAlignment);
     }
     first
         .view()
         .backing()
-        .host_pointer(first.backing_offset(), STORE_BYTES, AccessKind::Read)
+        .host_pointer(first.backing_offset(), bytes, AccessKind::Read)
         .map_err(|_| PhysicalReadPlatformError::Unavailable)?;
-    let (address, bytes) =
-        access::read_footprint(pointer as usize, STORE_BYTES, TargetCpu::Baseline)
-            .map_err(|_| PhysicalReadPlatformError::UnsupportedHost)?;
-    if address != pointer as usize || bytes != STORE_BYTES {
+    let (address, footprint) = access::read_footprint(pointer as usize, bytes, TargetCpu::Baseline)
+        .map_err(|_| PhysicalReadPlatformError::UnsupportedHost)?;
+    if address != pointer as usize || footprint != bytes {
         return Err(PhysicalReadPlatformError::UnsupportedHost);
     }
     Ok(PhysicalRamWritePin {
         physical,
         execution,
         reached,
+        bytes,
     })
 }
 
@@ -257,15 +258,15 @@ impl M0RamWritePrepared<'_, '_> {
         match result {
             Ok(()) => {
                 // Infallible primitive observations immediately follow the
-                // actual8B publication; no validation/allocation/callback here.
-                self.progress.completed_bytes += STORE_BYTES as u64;
+                // The member published at its source width.
+                self.progress.completed_bytes += u64::from(self.intent().member_bytes);
                 self.progress.uncertain_member = None;
                 Ok(())
             }
             Err(fault) => {
-                // Aligned8B publication is one exact part. Preserve any
-                // unexpected raw prefix as a terminal conformance diagnostic;
-                // never clamp it, invent a whole-word completion or retry.
+                // An aligned scalar is published in one part, so any reported
+                // prefix is a terminal diagnostic: never clamped, completed
+                // or retried.
                 if fault.completed != 0 {
                     return Err(M0RamWritePlatformError::UnexpectedPublicationPrefix {
                         fault,
@@ -280,9 +281,9 @@ impl M0RamWritePrepared<'_, '_> {
         }
     }
 
-    /// At most one attempt, including pre-write refusal. Two ascending reached
-    /// exact8B stores do not assert16B atomicity. Second qualification happens
-    /// after the first actual8B completion; no upfront second-fault suppression.
+    /// At most one attempt, including pre-write refusal. A pair store is two
+    /// ascending 8-byte writes without 16-byte atomicity; the second member is
+    /// checked only after the first completes.
     pub(crate) fn attempt(&mut self) -> Result<(), M0RamWritePlatformError> {
         if self.progress.attempted {
             return Err(M0RamWritePlatformError::AlreadyAttempted(self.progress));
@@ -297,7 +298,7 @@ impl M0RamWritePrepared<'_, '_> {
         )?;
         self.progress.publication_attempted = Some(M0WriteMember::First);
         self.progress.uncertain_member = Some(M0WriteMember::First);
-        let result = self.first.publish8(first, &mut self.receipts);
+        let result = self.first.publish(first, &mut self.receipts);
         self.record_publication(result)?;
         self.validate_current()?;
         if let Some((_, value)) = self.source.intent().member(M0WriteMember::Second) {
@@ -312,6 +313,7 @@ impl M0RamWritePrepared<'_, '_> {
                 self.source.physical_space(),
                 self.execution,
                 translated.physical_address(),
+                self.intent().member_bytes,
             )
             .map_err(|error| M0RamWritePlatformError::Physical {
                 error,
@@ -325,7 +327,7 @@ impl M0RamWritePrepared<'_, '_> {
                 .second
                 .as_ref()
                 .expect("resolved reached second member")
-                .publish8(value, &mut self.receipts);
+                .publish(value, &mut self.receipts);
             self.record_publication(result)?;
         }
         // A failure after the effect reports the known prefix of 0, 8 or 16
@@ -334,7 +336,7 @@ impl M0RamWritePrepared<'_, '_> {
     }
 }
 
-pub(crate) fn prepare_aligned_device_ram8_or_pair<'loan, 'owner>(
+pub(crate) fn prepare_aligned_device_ram_scalar_or_pair<'loan, 'owner>(
     execution: &'loan MemoryExecutionLoan,
     source: &'loan M0DataWriteLoan<'owner>,
 ) -> Result<M0RamWritePrepared<'loan, 'owner>, M0RamWritePlatformError> {
@@ -349,6 +351,7 @@ pub(crate) fn prepare_aligned_device_ram8_or_pair<'loan, 'owner>(
         source.physical_space(),
         execution,
         translated.physical_address(),
+        source.intent().member_bytes,
     )
     .map_err(|error| M0RamWritePlatformError::Physical { error, progress })?;
     let order = execution

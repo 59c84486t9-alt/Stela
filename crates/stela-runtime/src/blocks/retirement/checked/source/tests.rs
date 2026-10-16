@@ -73,6 +73,10 @@ fn exact_platform_source_keeps_effect_free_and_memory_intent_requirements_distin
         (0x98000040, true),
         (0x39400020, true),
         (0xb9400020, true),
+        (0x39000020, true),
+        (0x79000020, true),
+        (0xb9000020, true),
+        (0xf9000020, true),
         (0xa9000440, true),
         (0xa9400440, true),
     ] {
@@ -94,6 +98,7 @@ fn exact_platform_source_keeps_effect_free_and_memory_intent_requirements_distin
                 intent,
                 Intent::LiteralRead64(_)
                     | Intent::ScalarLoad(_)
+                    | Intent::ScalarStore(_)
                     | Intent::Write64Pair(_)
                     | Intent::Read64Pair(_)
             ),

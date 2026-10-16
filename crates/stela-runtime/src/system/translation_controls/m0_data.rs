@@ -57,6 +57,25 @@ pub(crate) enum M0ControlError {
 }
 
 impl TranslationControls {
+    /// Check the original SP against the effective SCTLR.SA, before any
+    /// offset-derived address.
+    fn check_m0_sp_alignment(
+        &self,
+        source_pc: u64,
+        stack_pointer: Option<u64>,
+    ) -> Result<(), M0ControlError> {
+        if self.profile.consumers(self.readbacks).sctlr_el1 & super::fields::SCTLR_SA_MASK != 0
+            && let Some(original_sp) = stack_pointer
+            && original_sp & 15 != 0
+        {
+            return Err(M0ControlError::StackAlignment {
+                source_pc,
+                original_sp,
+            });
+        }
+        Ok(())
+    }
+
     /// Compute the current M0 configuration from the live bank. The caller
     /// first validates the source and installed context under the source and
     /// memory borrow.
@@ -280,17 +299,7 @@ impl TranslationControls {
         if !matches!(intent.bytes, 1 | 2 | 4 | 8) {
             return Err(M0ControlError::WrongSourceKind);
         }
-        // SP is checked before any offset-derived address, following the
-        // effective SCTLR.SA.
-        if self.profile.consumers(self.readbacks).sctlr_el1 & super::fields::SCTLR_SA_MASK != 0
-            && let Some(original_sp) = intent.stack_pointer
-            && original_sp & 15 != 0
-        {
-            return Err(M0ControlError::StackAlignment {
-                source_pc: intent.source_pc.0,
-                original_sp,
-            });
-        }
+        self.check_m0_sp_alignment(intent.source_pc.0, intent.stack_pointer)?;
         let translation = Self::derive_m0_scalar_read(
             &config,
             scope.physical_space(),
@@ -423,7 +432,7 @@ impl M0DataWriteLoan<'_> {
                 source_pc: self.intent.source_pc.0,
                 pan: false,
                 uao: false,
-                aligned: raw_address.is_multiple_of(READ_BYTES),
+                aligned: raw_address.is_multiple_of(u64::from(self.intent.member_bytes)),
             },
         )
         .map_err(M0ControlError::Translation)?;
@@ -438,8 +447,10 @@ impl M0DataWriteLoan<'_> {
             || attributes.guarded_page
             || translation.permissions().is_some()
             || translation.walk().is_some()
-            || translation.contiguous_bytes() < READ_BYTES
-            || !translation.physical_address().is_multiple_of(READ_BYTES)
+            || translation.contiguous_bytes() < u64::from(self.intent.member_bytes)
+            || !translation
+                .physical_address()
+                .is_multiple_of(u64::from(self.intent.member_bytes))
         {
             return Err(M0ControlError::UnexpectedAttributes);
         }
@@ -450,7 +461,7 @@ impl TranslationControls {
     /// Validates the instruction first, without translating or accessing the
     /// target. The physical session prepares the first member; the second is
     /// validated only after the first 8 bytes complete.
-    pub(crate) fn loan_m0_write8_or_pair<'cpu>(
+    pub(crate) fn loan_m0_scalar_or_pair_write<'cpu>(
         &'cpu self,
         input: &'cpu M0WriteSourceInput<'_, '_>,
     ) -> Result<M0DataWriteLoan<'cpu>, M0ControlError> {
@@ -473,12 +484,20 @@ impl TranslationControls {
         let source_pin = scope
             .pin_source(self, original)
             .map_err(M0ControlError::SourceFetch)?;
+        let intent = input.intent();
+        if !matches!(intent.member_bytes, 1 | 2 | 4 | 8)
+            || intent.members == crate::memory::domain::m0_write::M0WriteMembers::Pair
+                && intent.member_bytes != 8
+        {
+            return Err(M0ControlError::WrongSourceKind);
+        }
+        self.check_m0_sp_alignment(intent.source_pc.0, intent.stack_pointer)?;
         Ok(M0DataWriteLoan {
             owner: self,
             source: input,
             outer,
             generation: self.generation,
-            intent: input.intent(),
+            intent,
             source_pin,
         })
     }

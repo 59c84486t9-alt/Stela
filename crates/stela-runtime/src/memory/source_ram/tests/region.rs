@@ -188,3 +188,108 @@ fn generation_exhaustion_precedes_byte_effect_and_unknown_attempt_fails_closed()
     drop(attempt); // injected unknown host-effect outcome, never a false success
     assert!(physical.check_fetch_execution().is_err());
 }
+
+#[test]
+fn full_file_configuration_reset_and_partial_firmware_reset_share_original_owner() {
+    const CONFIG: u64 = 0x400000;
+    const CONFIG_BYTES: usize = 0x10000;
+    let mut template = vec![0; CONFIG_BYTES];
+    template[..8].copy_from_slice(&[9, 8, 7, 6, 5, 4, 3, 2]);
+    template[CONFIG_BYTES - 8..].copy_from_slice(&[0x5a; 8]);
+    let mut declared = declaration();
+    declared.declared_capacity.push(PhysicalRamRange {
+        source_pa: CONFIG,
+        bytes: CONFIG_BYTES as u64,
+    });
+    let config_region = InitializedRamRegion {
+        range: PhysicalRamRange {
+            source_pa: CONFIG,
+            bytes: CONFIG_BYTES as u64,
+        },
+        file_prefix: template.clone(),
+        file_sha256: crate::sha256(&template),
+        permissions: RWX,
+    };
+    let materialized = materialize_source_ram_regions(
+        declared,
+        Vec::new(),
+        vec![region(), config_region],
+        config(),
+    )
+    .unwrap();
+    let firmware = materialized.test_view(BASE).unwrap();
+    let configuration = materialized.test_view(CONFIG).unwrap();
+    assert!(!Arc::ptr_eq(firmware.backing(), configuration.backing()));
+    let (binding, _) = materialized.into_parts();
+    let mut physical = PhysicalAddressSpace::from_materialized(binding).unwrap();
+    {
+        let _service = physical.domain().service_loan().unwrap();
+        // SAFETY: both original backings belong to this System, and original
+        // quiescent service excludes execution; all staging is private.
+        unsafe {
+            physical
+                .memory_system()
+                .publish(firmware.backing(), firmware.backing_offset(), &[0xab; 16])
+                .unwrap();
+            physical
+                .memory_system()
+                .publish(
+                    configuration.backing(),
+                    configuration.backing_offset() + 0x3ac,
+                    &[0xcd; 4],
+                )
+                .unwrap();
+            physical
+                .memory_system()
+                .publish(
+                    configuration.backing(),
+                    configuration.backing_offset() + CONFIG_BYTES - 8,
+                    &[0xef; 8],
+                )
+                .unwrap();
+        }
+    }
+    let firmware_generation = firmware.backing().instruction_generation();
+    let configuration_generation = configuration.backing().instruction_generation();
+    let outer = physical.initial_source_execution_loan().unwrap();
+    assert!(physical.reload_original_region_prefixes().is_err());
+    assert_eq!(
+        firmware.backing().instruction_generation(),
+        firmware_generation
+    );
+    assert_eq!(
+        configuration.backing().instruction_generation(),
+        configuration_generation
+    );
+    drop(outer);
+    let reset = physical.reload_original_region_prefixes().unwrap();
+    assert_eq!(
+        (reset.completed_bytes, reset.completed_regions),
+        (8 + CONFIG_BYTES, 2)
+    );
+    assert_eq!(
+        physical.read_descriptor(BASE).unwrap(),
+        u64::from_le_bytes(PREFIX)
+    );
+    assert_eq!(
+        physical.read_descriptor(BASE + 8).unwrap(),
+        u64::from_le_bytes([0xab; 8])
+    );
+    for offset in (0..CONFIG_BYTES).step_by(8) {
+        assert_eq!(
+            physical.read_descriptor(CONFIG + offset as u64).unwrap(),
+            u64::from_le_bytes(template[offset..offset + 8].try_into().unwrap())
+        );
+    }
+    assert!(
+        !firmware
+            .backing()
+            .instruction_generation_current(firmware_generation.unwrap())
+    );
+    assert!(
+        !configuration
+            .backing()
+            .instruction_generation_current(configuration_generation.unwrap())
+    );
+    // This is a quiescent RAM reload; it grants no CPU reset or SMP authority.
+}

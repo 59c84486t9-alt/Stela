@@ -304,6 +304,7 @@ fn generic_data_and_tag_entries_refuse_every_separately_owned_m0_identity() {
         profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR,
         profile_requirements::M0_DEVICE_RAM_READ64_PAIR_NO_LSE2,
         profile_requirements::M0_DEVICE_RAM_SCALAR_LOAD,
+        profile_requirements::M0_DEVICE_RAM_SCALAR_STORE,
     ] {
         for generic in [0, profile_requirements::NATIVE_ACCESS] {
             let requirements = MemoryRequirements {

@@ -333,7 +333,7 @@ fn directed_models_match_actual_canonical_store_source_without_minting_a_loan() 
         );
         assert!(case.completed_bytes <= intent.bytes());
         assert_eq!(case.expected_ram().len(), case.observed_data_bytes());
-        let writeback = descriptor.writeback(&case.before());
+        let writeback = intent.writeback;
         assert_eq!(
             writeback.is_some(),
             matches!(
@@ -345,6 +345,9 @@ fn directed_models_match_actual_canonical_store_source_without_minting_a_loan() 
         if case.outcome == StoreOutcome::Complete
             && let Some((base, value)) = writeback
         {
+            let stela_compiler::aarch64::Register::X(base) = base else {
+                panic!("pair fixture must write back X base");
+            };
             expected.x[usize::from(base)] = value;
         }
         assert_eq!(case.expected_state(), expected);

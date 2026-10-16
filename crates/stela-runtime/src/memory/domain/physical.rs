@@ -331,7 +331,7 @@ pub(crate) use fetch::{BoundPhysicalInstruction, ImmutableCodeBacking};
 mod stores;
 pub(crate) use stores::{
     M0RamWritePlatformError, M0RamWritePrepared, M0RamWriteProgress,
-    prepare_aligned_device_ram8_or_pair,
+    prepare_aligned_device_ram_scalar_or_pair,
 };
 
 // Raw RAM observations for tests.
