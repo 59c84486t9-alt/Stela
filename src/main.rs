@@ -4,13 +4,9 @@ use clap::{Parser, Subcommand};
 use std::{fs::File, path::PathBuf};
 use stela_core::{Progress, Stage, read_json, write_json};
 mod apple;
-mod containers;
-mod corpus_progress;
 mod dyld_entry;
 mod image;
-mod linked_benchmark;
 mod macho;
-mod platform_el1;
 
 #[derive(Parser)]
 #[command(
@@ -25,30 +21,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Execute a declared fresh software EL1 machine through its owned source/PE runtime.
-    RunSoftwareEl1 {
-        input: PathBuf,
-        #[arg(long, default_value = "integer-v1", value_parser = ["direct-branch-v1", "integer-v1", "read64-v1", "platform-v1"])]
-        profile: String,
-        #[arg(long, default_value = "baseline", value_parser = parse_cpu_target)]
-        cpu_target: stela_compiler::TargetCpu,
-        #[arg(long)]
-        cache_dir: PathBuf,
-        #[arg(long, value_parser = parse_address)]
-        stop_pc: Option<u64>,
-        #[arg(long, default_value_t = platform_el1::DEFAULT_BLOCK_BUDGET)]
-        block_budget: usize,
-    },
     /// Report detected x86 capabilities and the named SIMD output catalog.
     CpuInfo,
-    /// Benchmark the known linked-image fixture in a release build.
-    BenchmarkLinkedImages {
-        input: PathBuf,
-        #[arg(long)]
-        library: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-    },
     /// Discover Apple image dependencies inside an explicit guest filesystem.
     DiscoverImages {
         input: PathBuf,
@@ -277,26 +251,8 @@ enum Command {
         #[arg(long, requires = "clock_snapshot", value_parser = parse_address)]
         opaque_dyld_flags: Option<u64>,
     },
-    /// Probe trusted executable entry code; dyld/process setup remains unresolved.
-    ProbeImageEntry {
-        input: PathBuf,
-        #[arg(long, value_parser = ["arm64", "arm64e"])]
-        architecture: Option<String>,
-        #[arg(long, default_value = "0xffff0000", value_parser = parse_address)]
-        stop_pc: u64,
-        #[arg(long, default_value_t = 10000)]
-        block_budget: usize,
-        #[arg(long, default_value = ".stela/cache/blocks-v1")]
-        cache_dir: PathBuf,
-    },
     /// Validate an Apple executable's guest mappings and unresolved loader work.
     PlanExecutable {
-        input: PathBuf,
-        #[arg(long, value_parser = ["arm64", "arm64e"])]
-        architecture: Option<String>,
-    },
-    /// Plan a classic Apple dynamic linker's original UNIXTHREAD entry.
-    PlanDynamicLinker {
         input: PathBuf,
         #[arg(long, value_parser = ["arm64", "arm64e"])]
         architecture: Option<String>,
@@ -329,28 +285,6 @@ enum Command {
         #[arg(long, requires = "bootstrap_clock")]
         clock_snapshot: Option<PathBuf>,
     },
-    /// Inspect kernel collection images using collection-relative offsets.
-    FilesetManifest {
-        input: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-    },
-    /// Read original linked root thread metadata; this does not establish boot state.
-    FilesetRootThread {
-        input: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-    },
-    /// Decode a bare plaintext kernel IM4P payload into a bounded output file.
-    DecodeIm4p {
-        input: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, default_value_t = 512 * 1024 * 1024)]
-        max_input_bytes: u64,
-        #[arg(long, default_value_t = 1024 * 1024 * 1024)]
-        max_output_bytes: u64,
-    },
     /// Inspect BuildManifest identities and model-specific component paths.
     ImageManifest {
         image: PathBuf,
@@ -369,113 +303,6 @@ enum Command {
         #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
         max_bytes: u64,
     },
-    /// Export Mach-O text slices, symbols and bounded leaf-decoder recognition.
-    BinaryText { input: PathBuf },
-    /// Inventory an Apple ARM dyld shared-cache file without extracting dylibs.
-    SharedCacheManifest {
-        input: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long)]
-        with_subcaches: bool,
-        #[arg(long, requires = "with_subcaches")]
-        apple_map: Option<PathBuf>,
-    },
-    /// Decode original cache slide chains, retaining unresolved authentication.
-    PlanCacheFixups {
-        input: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, value_parser = parse_address)]
-        cache_base: Option<u64>,
-        #[arg(long, default_value_t = 32)]
-        samples: usize,
-    },
-    /// Briefly map an original cache read-only and compare its original VM views.
-    ProbeCacheMappings {
-        input: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, value_parser = parse_address)]
-        cache_base: Option<u64>,
-    },
-    /// Discover static code paths and prepare shared AOT/JIT artifacts without execution.
-    DiscoverCode {
-        input: PathBuf,
-        #[arg(long)]
-        architecture: Option<String>,
-        /// Require MH_DYLINKER and seed its typed LC_UNIXTHREAD PC instead of LC_MAIN.
-        #[arg(long, conflicts_with = "guest_base")]
-        dynamic_linker: bool,
-        /// Prepare software PAuth helper boundaries without executing or supplying keys.
-        #[arg(long)]
-        software_pauth: bool,
-        /// Prepare reviewed clock helper boundaries without executing a clock service.
-        #[arg(long, requires = "software_pauth")]
-        software_clock: bool,
-        /// Prepare guest TPIDRRO_EL0 reads without supplying a thread context.
-        #[arg(long)]
-        thread_registers: bool,
-        /// Treat input as raw code registered at this address instead of a Mach-O.
-        #[arg(long, value_parser = parse_address)]
-        guest_base: Option<u64>,
-        #[arg(long, value_parser = parse_address)]
-        entry: Vec<u64>,
-        /// Include declared LC_FUNCTION_STARTS roots as well as the image entry.
-        #[arg(long)]
-        function_starts: bool,
-        #[arg(long, default_value_t = 128)]
-        block_budget: usize,
-        #[arg(long, default_value = ".stela/cache/blocks-v1")]
-        cache_dir: PathBuf,
-        #[arg(long)]
-        output: PathBuf,
-    },
-    /// Read typed exports and function boundaries from an unchanged cache image.
-    CacheExports {
-        input: PathBuf,
-        #[arg(long)]
-        image: String,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, value_parser = parse_address)]
-        cache_base: Option<u64>,
-    },
-    /// Resolve named exports through original cache dependency and reexport metadata.
-    ResolveCacheExports {
-        input: PathBuf,
-        #[arg(long)]
-        image: String,
-        #[arg(long, required = true)]
-        symbol: Vec<String>,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, value_parser = parse_address)]
-        cache_base: Option<u64>,
-        #[arg(long)]
-        weak_import: bool,
-    },
-    /// Execute complete original cached register-only functions against case inputs.
-    ProbeCachedFunctions {
-        input: PathBuf,
-        #[arg(long)]
-        image: String,
-        #[arg(long, value_parser = parse_cached_function, required = true)]
-        function: Vec<macho::cached_functions::FunctionInput>,
-        #[arg(long)]
-        output: PathBuf,
-        #[arg(long, value_parser = parse_address)]
-        cache_base: Option<u64>,
-        #[arg(long, default_value = "0x220000100000", value_parser = parse_address)]
-        stop_pc: u64,
-        #[arg(long, default_value_t = 128)]
-        block_budget: usize,
-        #[arg(long, default_value = ".stela/cache/blocks-v1")]
-        cache_dir: PathBuf,
-        /// Prepare static paths before running; unresolved targets still use JIT.
-        #[arg(long)]
-        aot: bool,
-    },
     /// Inspect bounded AEA1/profile-1 acquisition metadata, without key bodies.
     InspectAea { input: PathBuf },
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
@@ -483,13 +310,6 @@ enum Command {
         input: PathBuf,
         #[arg(long)]
         output: PathBuf,
-    },
-    /// Measure actual isolated native emission over pinned ARM instruction words.
-    #[command(alias = "instruction-progress")]
-    CorpusProgress {
-        input: PathBuf,
-        #[arg(long)]
-        fileset_manifest: Option<PathBuf>,
     },
     /// Prepare a supported leaf function on demand; reuse an exact cached AOT.
     PrepareLeaf {
@@ -536,8 +356,6 @@ enum Command {
         #[command(subcommand)]
         command: Images,
     },
-    /// List ZIP members without extracting or mounting an IPSW.
-    InspectImage { image: PathBuf },
     /// Inventory standalone Mach-O files in an extracted filesystem.
     Inventory {
         root: PathBuf,
@@ -689,31 +507,6 @@ fn scalable_execution_manifest(
     Ok(execution)
 }
 
-const MAX_FILESET_ROOT_COMMAND_BYTES: usize = 1024 * 1024;
-
-fn fileset_root_thread_metadata(
-    mut input: impl std::io::Read,
-) -> Result<Option<macho::fileset::RootThreadMetadata>> {
-    use object::{LittleEndian, read::macho::MachHeader};
-
-    const HEADER_BYTES: usize = std::mem::size_of::<object::macho::MachHeader64<LittleEndian>>();
-    let mut bytes = vec![0; HEADER_BYTES];
-    input
-        .read_exact(&mut bytes)
-        .context("truncated fileset header")?;
-    let header = object::macho::MachHeader64::<LittleEndian>::parse(bytes.as_slice(), 0)?;
-    let command_bytes = usize::try_from(header.sizeofcmds(LittleEndian))?;
-    ensure!(
-        command_bytes <= MAX_FILESET_ROOT_COMMAND_BYTES,
-        "fileset root load commands exceed the metadata input limit"
-    );
-    bytes.resize(HEADER_BYTES + command_bytes, 0);
-    input
-        .read_exact(&mut bytes[HEADER_BYTES..])
-        .context("truncated fileset root load commands")?;
-    macho::fileset::root_thread_metadata(&bytes)
-}
-
 fn parse_address(value: &str) -> Result<u64, String> {
     if let Some(hex) = value.strip_prefix("0x") {
         u64::from_str_radix(hex, 16)
@@ -721,17 +514,6 @@ fn parse_address(value: &str) -> Result<u64, String> {
         value.parse()
     }
     .map_err(|e| e.to_string())
-}
-
-fn parse_cached_function(value: &str) -> Result<macho::cached_functions::FunctionInput, String> {
-    let (symbol, cases) = value.split_once('=').ok_or("expected SYMBOL=CASES_JSON")?;
-    if symbol.is_empty() || symbol.len() > 4096 || cases.is_empty() {
-        return Err("expected a bounded nonempty symbol and case-file path".into());
-    }
-    Ok(macho::cached_functions::FunctionInput {
-        symbol: symbol.into(),
-        cases: cases.into(),
-    })
 }
 
 #[derive(Debug, Clone)]
@@ -1113,60 +895,8 @@ enum ProgressCommand {
     },
 }
 
-fn write_new_report(output: &std::path::Path, report: &mut serde_json::Value) -> Result<()> {
-    use std::io::Write;
-    ensure!(
-        !output.try_exists()?,
-        "report exists; choose a new --output path"
-    );
-    report["cli_executable_sha256"] = serde_json::json!(stela_core::sha256(&std::fs::read(
-        std::env::current_exe()?
-    )?));
-    let parent = output
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(&mut pending, report)?;
-    pending.write_all(b"\n")?;
-    pending.as_file().sync_all()?;
-    pending
-        .persist_noclobber(output)
-        .map_err(|error| error.error)?;
-    Ok(())
-}
-
 fn run() -> Result<()> {
     match Cli::parse().command {
-        Command::RunSoftwareEl1 {
-            input,
-            profile,
-            cpu_target,
-            cache_dir,
-            stop_pc,
-            block_budget,
-        } => {
-            use stela_runtime::blocks::{SoftwareEl1Profile, SoftwareEl1Request};
-            let profile = match profile.as_str() {
-                "direct-branch-v1" => SoftwareEl1Profile::DirectBranchV1,
-                "integer-v1" => SoftwareEl1Profile::IntegerV1,
-                "platform-v1" => SoftwareEl1Profile::PlatformV1,
-                "read64-v1" => SoftwareEl1Profile::Read64V1,
-                _ => anyhow::bail!("unsupported software EL1 profile"),
-            };
-            let report = platform_el1::run(
-                &input,
-                profile,
-                cpu_target,
-                cache_dir,
-                SoftwareEl1Request {
-                    stop_pc: stop_pc.map(stela_compiler::GuestAddress),
-                    block_budget,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
         Command::CpuInfo => {
             use stela_compiler::{
                 TargetCpu,
@@ -1205,13 +935,6 @@ fn run() -> Result<()> {
                     "scope": "Named legacy SIMD output forms; scalar encoding recipes remain in x86_64 modules. Catalog membership is not input ISA coverage.",
                 }))?
             );
-        }
-        Command::BenchmarkLinkedImages {
-            input,
-            library,
-            output,
-        } => {
-            linked_benchmark::run(&input, &library, &output)?;
         }
         Command::DiscoverImages {
             input,
@@ -1918,64 +1641,6 @@ fn run() -> Result<()> {
                 "complete_binary_verified":false}))?
             );
         }
-        Command::ProbeImageEntry {
-            input,
-            architecture,
-            stop_pc,
-            block_budget,
-            cache_dir,
-        } => {
-            use stela_runtime::blocks::{BlockRuntime, ThreadState};
-            ensure!(
-                block_budget <= 1_000_000,
-                "research block budget exceeds 1,000,000"
-            );
-            let data = std::fs::read(&input)?;
-            let (slice_offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
-            let image = macho::block_image::BlockImage::from_slice(bytes)?;
-            let mut runtime = BlockRuntime::new(1, cache_dir);
-            let mut executable_regions = Vec::new();
-            for region in image.regions() {
-                ensure!(
-                    stop_pc < region.guest_address()
-                        || stop_pc >= region.guest_address() + region.bytes().len() as u64,
-                    "research return address overlaps executable source"
-                );
-                let generation = runtime.register_code(
-                    stela_compiler::GuestAddress(region.guest_address()),
-                    region.bytes().to_vec(),
-                )?;
-                executable_regions.push(serde_json::json!({"segment":region.segment_name(),
-                    "guest_address":region.guest_address(),"file_offset":region.file_offset(),
-                    "source_bytes":region.bytes().len(),"source_sha256":stela_core::sha256(region.bytes()),
-                    "mapping_generation":generation}));
-            }
-            let mut thread = ThreadState {
-                pc: stela_compiler::GuestAddress(image.plan().executable_entry()?.guest_address),
-                registers: Default::default(),
-            };
-            thread.registers.x[30] = stop_pc;
-            // SAFETY: Research entry probing requires trusted code whose data
-            // references satisfy the direct-RAM ABI. No dyld/process setup is supplied.
-            let outcome = unsafe {
-                runtime.run(
-                    &mut thread,
-                    Some(stela_compiler::GuestAddress(stop_pc)),
-                    block_budget,
-                )?
-            };
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"kind":"macho_entry_block_probe",
-                "container_sha256":stela_core::sha256(&data),"slice_offset":slice_offset,"plan":image.plan(),
-                "executable_regions":executable_regions,
-                "pc":thread.pc.0,"state":register_json(&thread.registers),"outcome":outcome,
-                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
-                "complete_binary_verified":false})
-                )?
-            );
-        }
         Command::PlanExecutable {
             input,
             architecture,
@@ -1988,22 +1653,6 @@ fn run() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "kind": "macho_executable_load_plan", "container_sha256": stela_core::sha256(&data),
                     "slice_offset": offset, "plan": plan
-                }))?
-            );
-        }
-        Command::PlanDynamicLinker {
-            input,
-            architecture,
-        } => {
-            let data = std::fs::read(&input)?;
-            let (offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
-            let plan = macho::load_plan::plan_dynamic_linker(bytes)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "kind":"macho_dynamic_linker_load_plan", "container_sha256":stela_core::sha256(&data),
-                    "slice_offset":offset, "plan":plan, "native_executed":false,
-                    "complete_binary_verified":false
                 }))?
             );
         }
@@ -2044,72 +1693,6 @@ fn run() -> Result<()> {
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::FilesetManifest { input, output } => {
-            ensure!(
-                !output.exists(),
-                "report exists; choose a new --output path"
-            );
-            let report = crate::macho::fileset::inspect(&std::fs::read(input)?)?;
-            write_json(&output, &report)?;
-            eprintln!(
-                "{} embedded images, {} unique instruction-section bytes; {}",
-                report.images.len(),
-                report.unique_executable_file_bytes,
-                output.display()
-            );
-        }
-        Command::FilesetRootThread { input, output } => {
-            ensure!(
-                !output.exists(),
-                "report exists; choose a new --output path"
-            );
-            let report = fileset_root_thread_metadata(File::open(input)?)?;
-            write_json(&output, &report)?;
-            eprintln!(
-                "{}; linked metadata only, no firmware state or boot admission; {}",
-                if report.is_some() {
-                    "root thread descriptor"
-                } else {
-                    "no root thread descriptor"
-                },
-                output.display()
-            );
-        }
-        Command::DecodeIm4p {
-            input,
-            output,
-            max_input_bytes,
-            max_output_bytes,
-        } => {
-            use std::io::Read;
-            ensure!(max_input_bytes < u64::MAX, "invalid input limit");
-            let mut bytes = vec![];
-            File::open(input)?
-                .take(max_input_bytes + 1)
-                .read_to_end(&mut bytes)?;
-            ensure!(
-                bytes.len() as u64 <= max_input_bytes,
-                "input exceeds --max-input-bytes"
-            );
-            let mut receipt_path = output.as_os_str().to_owned();
-            receipt_path.push(".json");
-            let receipt_path = PathBuf::from(receipt_path);
-            ensure!(
-                !output.exists() && !receipt_path.exists(),
-                "output or receipt exists"
-            );
-            let parent = output
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(std::path::Path::new("."));
-            std::fs::create_dir_all(parent)?;
-            let mut pending = tempfile::NamedTempFile::new_in(parent)?;
-            let receipt = crate::containers::decode_kernel(&bytes, &mut pending, max_output_bytes)?;
-            pending.as_file().sync_all()?;
-            pending.persist_noclobber(output).map_err(|e| e.error)?;
-            write_json(&receipt_path, &receipt)?;
-            println!("{}", serde_json::to_string_pretty(&receipt)?);
-        }
         Command::ImageManifest {
             image: input,
             model,
@@ -2138,88 +1721,10 @@ fn run() -> Result<()> {
             let report = image::extract(&input, &member, &output, max_bytes)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::CorpusProgress {
-            input,
-            fileset_manifest,
-        } => {
-            let report = corpus_progress::measure(&input, fileset_manifest.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
         Command::InspectAea { input } => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&apple::aea::inspect(&input)?)?
-            );
-        }
-        Command::SharedCacheManifest {
-            input,
-            output,
-            with_subcaches,
-            apple_map,
-        } => {
-            ensure!(
-                !output.try_exists()?,
-                "report exists; choose a new --output path"
-            );
-            let mut report = if with_subcaches {
-                macho::shared_cache::manifest_set(&input)?
-            } else {
-                macho::shared_cache::manifest(&input)?
-            };
-            if let Some(path) = apple_map {
-                report["apple_map_verification"] =
-                    macho::shared_cache::verify_apple_map(&report, &path)?;
-            }
-            write_new_report(&output, &mut report)?;
-            println!(
-                "{}",
-                serde_json::json!({"report":output,
-                "images":report["images"].as_array().map(Vec::len),
-                "source_sha256":report["source_sha256"], "complete_binary_verified":false})
-            );
-        }
-        Command::PlanCacheFixups {
-            input,
-            output,
-            cache_base,
-            samples,
-        } => {
-            ensure!(samples <= 256, "cache fixup samples must be at most 256");
-            ensure!(
-                !output.try_exists()?,
-                "report exists; choose a new --output path"
-            );
-            let set = macho::shared_cache::manifest_set(&input)?;
-            let preferred = set["files"][0]["header"]["shared_region_start"]
-                .as_u64()
-                .context("cache shared-region base is unavailable")?;
-            let mut report =
-                macho::shared_cache_slide::plan(&set, cache_base.unwrap_or(preferred), samples)?;
-            write_new_report(&output, &mut report)?;
-            println!(
-                "{}",
-                serde_json::json!({"report":output,"kind":report["kind"],
-                "complete_binary_verified":false,"fixups_applied":false})
-            );
-        }
-        Command::ProbeCacheMappings {
-            input,
-            output,
-            cache_base,
-        } => {
-            ensure!(
-                !output.try_exists()?,
-                "report exists; choose a new --output path"
-            );
-            // SAFETY: this developer command operates on trusted, serialized
-            // acquisition files that the caller keeps unchanged until it exits.
-            // The probe checks hashes/identities, but does not lock the inodes.
-            let mut report = unsafe { macho::shared_cache_memory::probe(&input, cache_base)? };
-            write_new_report(&output, &mut report)?;
-            println!(
-                "{}",
-                serde_json::json!({"report":output,"mappings":report["mapping_count"],
-                "image_headers_verified":report["image_headers_verified"],"complete_binary_verified":false})
             );
         }
         Command::FetchAeaKey { input, output } => {
@@ -2227,240 +1732,6 @@ fn run() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&apple::aea::fetch_key(&input, &output)?)?
             );
-        }
-        Command::DiscoverCode {
-            input,
-            architecture,
-            dynamic_linker,
-            software_pauth,
-            software_clock,
-            thread_registers,
-            guest_base,
-            entry,
-            function_starts,
-            block_budget,
-            cache_dir,
-            output,
-        } => {
-            use std::io::Read;
-            use stela_compiler::GuestAddress;
-            use stela_runtime::blocks::BlockRuntime;
-            ensure!(
-                !output.try_exists()?,
-                "report exists; choose a new --output path"
-            );
-            let mut data = Vec::new();
-            std::fs::File::open(&input)?
-                .take(256 * 1024 * 1024 + 1)
-                .read_to_end(&mut data)?;
-            ensure!(
-                data.len() <= 256 * 1024 * 1024,
-                "code-discovery input exceeds 256 MiB"
-            );
-            let mut runtime = BlockRuntime::new_with_profile(
-                0x534f_5245_414f_5401,
-                cache_dir,
-                block_profile(software_pauth, software_clock, thread_registers),
-            );
-            let mut regions = Vec::new();
-            let mut roots = entry;
-            let provenance;
-            if let Some(base) = guest_base {
-                ensure!(
-                    architecture.is_none() && !function_starts && !dynamic_linker,
-                    "raw discovery has no Mach-O architecture or function-start metadata"
-                );
-                let generation = runtime.register_code(GuestAddress(base), data.clone())?;
-                regions.push(
-                    serde_json::json!({"guest_address":base,"source_bytes":data.len(),
-                    "source_sha256":stela_core::sha256(&data),"mapping_generation":generation}),
-                );
-                if roots.is_empty() {
-                    roots.push(base);
-                }
-                provenance =
-                    serde_json::json!({"format":"raw","source_sha256":stela_core::sha256(&data)});
-            } else {
-                let (slice_offset, bytes) = apple_slice(&data, &input, architecture.as_deref())?;
-                let image = if dynamic_linker {
-                    macho::block_image::BlockImage::from_dynamic_linker_slice(bytes)?
-                } else {
-                    macho::block_image::BlockImage::from_slice(bytes)?
-                };
-                let thread_entry = if dynamic_linker {
-                    Some(macho::load_plan::plan_dynamic_linker(bytes)?.thread)
-                } else {
-                    None
-                };
-                let sources = image.discovery_sources(bytes, function_starts)?;
-                roots.extend(sources.roots);
-                for region in sources.regions {
-                    let generation = runtime.register_code(
-                        GuestAddress(region.guest_address()),
-                        region.bytes().to_vec(),
-                    )?;
-                    regions.push(serde_json::json!({"segment":region.segment_name(),
-                        "guest_address":region.guest_address(),"file_offset":region.file_offset(),
-                        "source_bytes":region.bytes().len(),"source_sha256":stela_core::sha256(region.bytes()),
-                        "mapping_generation":generation}));
-                }
-                provenance = serde_json::json!({"format":"macho","slice_offset":slice_offset,
-                    "plan":image.plan(),"data_in_code":sources.data_in_code,
-                    "function_start_count":sources.function_start_count,
-                    "thread_entry":thread_entry});
-            }
-            let mut seen = std::collections::BTreeSet::new();
-            roots.retain(|root| seen.insert(*root));
-            let roots: Vec<_> = roots.into_iter().map(GuestAddress).collect();
-            let discovery = runtime.discover(&roots, block_budget)?;
-            let mut report = serde_json::json!({"schema_version":1,"kind":"apple_code_discovery_aot_preparation",
-                "input":input,"container_sha256":stela_core::sha256(&data),"provenance":provenance,
-                "executable_regions":regions,"discovery":discovery,
-                "abi":runtime.profile().abi(),
-                "compiler_source_sha256":stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
-                "discovery_source_sha256":stela_core::sha256(include_bytes!("../crates/stela-runtime/src/blocks.rs")),
-                "metadata_source_sha256":stela_core::sha256(include_bytes!("macho/block_image.rs")),
-                "native_executed":false,"complete_binary_verified":false});
-            write_new_report(&output, &mut report)?;
-            println!(
-                "{}",
-                serde_json::json!({"report":output,"native_executed":false,"complete_binary_verified":false})
-            );
-        }
-        Command::CacheExports {
-            input,
-            image,
-            output,
-            cache_base,
-        } => {
-            ensure!(
-                !output.try_exists()?,
-                "report exists; choose a new --output path"
-            );
-            let set = macho::shared_cache::manifest_set(&input)?;
-            let preferred = set["files"][0]["header"]["shared_region_start"]
-                .as_u64()
-                .context("cache shared-region base is unavailable")?;
-            let exports =
-                macho::shared_cache_exports::read(&set, &image, cache_base.unwrap_or(preferred))?;
-            let mut report = serde_json::to_value(exports)?;
-            write_new_report(&output, &mut report)?;
-            println!(
-                "{}",
-                serde_json::json!({"report":output,"complete_binary_verified":false})
-            );
-        }
-        Command::ResolveCacheExports {
-            input,
-            image,
-            symbol,
-            output,
-            cache_base,
-            weak_import,
-        } => {
-            ensure!(
-                !output.try_exists()?,
-                "report exists; choose a new --output path"
-            );
-            ensure!(
-                !symbol.is_empty() && symbol.len() <= 64,
-                "resolve requires 1..64 symbols"
-            );
-            let mut names = std::collections::BTreeSet::new();
-            for name in &symbol {
-                ensure!(
-                    !name.is_empty() && name.len() <= 4096 && names.insert(name),
-                    "symbols must be distinct bounded nonempty names"
-                );
-            }
-            let set = macho::shared_cache::manifest_set(&input)?;
-            let preferred = set["files"][0]["header"]["shared_region_start"]
-                .as_u64()
-                .context("cache shared-region base is unavailable")?;
-            let base = cache_base.unwrap_or(preferred);
-            let mut resolver = macho::shared_cache_exports::CacheResolver::new(&set, base)?;
-            let mut resolutions = Vec::with_capacity(symbol.len());
-            for name in symbol {
-                resolutions.push(resolver.resolve(&image, &name, weak_import)?);
-            }
-            let mut report = serde_json::json!({
-                "schema_version":1,"kind":"original_shared_cache_export_resolution_batch",
-                "source_sha256":set["source_sha256"],"image_path":image,
-                "cache_base":base,"weak_import":weak_import,"resolutions":resolutions,
-                "cache_fixups_applied":false,"complete_binary_verified":false
-            });
-            write_new_report(&output, &mut report)?;
-            println!(
-                "{}",
-                serde_json::json!({"report":output,"complete_binary_verified":false})
-            );
-        }
-        Command::ProbeCachedFunctions {
-            input,
-            image,
-            function,
-            output,
-            cache_base,
-            stop_pc,
-            block_budget,
-            cache_dir,
-            aot,
-        } => {
-            ensure!(
-                !output.try_exists()?,
-                "report exists; choose a new --output path"
-            );
-            let mut report = macho::cached_functions::probe(
-                &input,
-                &image,
-                cache_base,
-                &function,
-                macho::cached_functions::ProbeOptions {
-                    stop_pc,
-                    block_budget,
-                    cache_dir: &cache_dir,
-                    aot,
-                },
-            )?;
-            write_new_report(&output, &mut report)?;
-            println!(
-                "{}",
-                serde_json::json!({"report":output,"total_cases":report["total_cases"],
-                "complete_binary_verified":false})
-            );
-        }
-        Command::BinaryText { input } => {
-            use stela_compiler::Lifter;
-            let bytes = std::fs::read(&input)?;
-            let slices = crate::macho::text_slices(&bytes, &input.display().to_string())?;
-            let mut output = vec![];
-            for slice in slices {
-                let arm = matches!(slice.artifact.architecture.as_str(), "arm64" | "arm64e");
-                let mut recognized = 0;
-                let mut words = 0;
-                if arm {
-                    for section in &slice.sections {
-                        let data = hex::decode(&section.data_hex)?;
-                        for (index, word) in data.as_chunks::<4>().0.iter().enumerate() {
-                            let pc = section
-                                .guest_address
-                                .checked_add(index as u64 * 4)
-                                .context("text address overflow")?;
-                            words += 1;
-                            if stela_compiler::aarch64::Decoder
-                                .lift(stela_compiler::GuestAddress(pc), u32::from_le_bytes(*word))
-                                .is_ok()
-                            {
-                                recognized += 1;
-                            }
-                        }
-                    }
-                }
-                output.push(serde_json::json!({"slice": slice, "arm64_text_words": words, "recognized_leaf_words": recognized,
-                    "compiler_source_sha256": stela_core::sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()),
-                    "note": "Word recognition is not function translation, reachability, or verified application coverage."}));
-            }
-            println!("{}", serde_json::to_string(&output)?);
         }
         Command::PrepareLeaf {
             input,
@@ -2622,15 +1893,6 @@ fn run() -> Result<()> {
                 }
             }
         },
-        Command::InspectImage { image } => {
-            let mut archive = zip::ZipArchive::new(File::open(image)?)?;
-            let mut members = vec![];
-            for i in 0..archive.len() {
-                let file = archive.by_index(i)?;
-                members.push(serde_json::json!({"name": file.name(), "bytes": file.size(), "compressed_bytes": file.compressed_size()}));
-            }
-            println!("{}", serde_json::to_string_pretty(&members)?);
-        }
         Command::Inventory {
             root,
             build,
@@ -2920,14 +2182,6 @@ mod clock_cli_tests {
                 "out",
                 "--software-clock",
             ],
-            vec![
-                "stela",
-                "discover-code",
-                "code",
-                "--output",
-                "out",
-                "--software-clock",
-            ],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
@@ -2952,18 +2206,6 @@ mod clock_cli_tests {
                 "compile-block",
                 "code",
                 "--output-dir",
-                "out",
-                "--software-pauth",
-                "--software-clock"
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "stela",
-                "discover-code",
-                "code",
-                "--output",
                 "out",
                 "--software-pauth",
                 "--software-clock"
@@ -3023,9 +2265,6 @@ mod clock_cli_tests {
         assert!(
             Cli::try_parse_from(["stela", "run-blocks", "code", "--system-boundaries"]).is_err()
         );
-        assert!(
-            Cli::try_parse_from(["stela", "discover-code", "code", "--system-boundaries"]).is_err()
-        );
     }
 
     #[test]
@@ -3060,32 +2299,22 @@ mod clock_cli_tests {
             assert!(parse(&[flag]).is_err());
         }
         assert!(Cli::try_parse_from(["stela", "run-blocks", "code", "--el1-platform"]).is_err());
-        assert!(Cli::try_parse_from(["stela", "discover-code", "code", "--el1-platform"]).is_err());
     }
 
     #[test]
     fn thread_register_preparation_flags_select_distinct_profiles_without_context() {
         use stela_compiler::block::BlockProfile;
-        for args in [
-            vec![
+        assert!(
+            Cli::try_parse_from([
                 "stela",
                 "compile-block",
                 "code",
                 "--output-dir",
                 "out",
                 "--thread-registers",
-            ],
-            vec![
-                "stela",
-                "discover-code",
-                "code",
-                "--output",
-                "out",
-                "--thread-registers",
-            ],
-        ] {
-            assert!(Cli::try_parse_from(args).is_ok());
-        }
+            ])
+            .is_ok()
+        );
         assert_eq!(
             block_profile(false, false, true),
             BlockProfile::DarwinArm64ThreadV1
@@ -3394,85 +2623,6 @@ mod context_block_cli_tests {
             assert!(resolve(&[flag, "false"]).is_err());
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod fileset_root_thread_cli_tests {
-    use super::*;
-    use std::io::Cursor;
-
-    fn header(command_bytes: u32) -> Vec<u8> {
-        [
-            object::macho::MH_MAGIC_64,
-            object::macho::CPU_TYPE_ARM64,
-            0,
-            object::macho::MH_FILESET,
-            0,
-            command_bytes,
-            0,
-            0,
-        ]
-        .into_iter()
-        .flat_map(u32::to_le_bytes)
-        .collect()
-    }
-
-    #[test]
-    fn metadata_command_is_separate_from_inventory() -> Result<()> {
-        assert!(matches!(
-            Cli::try_parse_from([
-                "stela",
-                "fileset-root-thread",
-                "input",
-                "--output",
-                "metadata.json"
-            ])?
-            .command,
-            Command::FilesetRootThread { .. }
-        ));
-        assert!(matches!(
-            Cli::try_parse_from([
-                "stela",
-                "fileset-manifest",
-                "input",
-                "--output",
-                "inventory.json"
-            ])?
-            .command,
-            Command::FilesetManifest { .. }
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn metadata_reader_consumes_only_the_declared_prefix() -> Result<()> {
-        let prefix = header(0);
-        let mut bytes = prefix.clone();
-        bytes.extend_from_slice(b"unread collection contents");
-        let mut input = Cursor::new(bytes);
-        assert!(fileset_root_thread_metadata(&mut input)?.is_none());
-        assert_eq!(input.position(), prefix.len() as u64);
-        assert_eq!(
-            serde_json::to_value(fileset_root_thread_metadata(Cursor::new(prefix))?)?,
-            serde_json::Value::Null
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn metadata_reader_bounds_untrusted_declared_sizes() {
-        let prefix = header((MAX_FILESET_ROOT_COMMAND_BYTES + 1) as u32);
-        let mut input = Cursor::new(prefix);
-        let error = fileset_root_thread_metadata(&mut input).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "fileset root load commands exceed the metadata input limit"
-        );
-        assert_eq!(input.position(), input.get_ref().len() as u64);
-        for bytes in [header(0)[..1].to_vec(), header(8)] {
-            assert!(fileset_root_thread_metadata(Cursor::new(bytes)).is_err());
-        }
     }
 }
 

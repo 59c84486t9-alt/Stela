@@ -15,9 +15,12 @@ const MAX_VISITS: usize = 65_536;
 const MAX_NAME_BYTES: usize = 4096;
 const MAX_TOTAL_NAME_BYTES: usize = 16 * 1024 * 1024;
 const KIND_MASK: u64 = 3;
+const KIND_THREAD_LOCAL: u64 = 1;
 const KIND_ABSOLUTE: u64 = 2;
+const KIND_RESERVED: u64 = 3;
 const WEAK_DEFINITION: u64 = 4;
-const FUNCTION_VARIANT: u64 = 0x20;
+const REEXPORT: u64 = 8;
+const STUB_AND_RESOLVER: u64 = 0x10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Export {
@@ -29,43 +32,16 @@ pub struct Export {
     pub address: u64,
 }
 
-/// Structurally decoded terminal; resolving its runtime semantics is separate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RawTerminal {
-    Regular {
-        value: u64,
-    },
-    Absolute {
-        value: u64,
-    },
-    ThreadLocal {
-        value: u64,
-    },
-    Reexport {
-        library_ordinal: u64,
-        import_name: String,
-    },
-    StubResolver {
-        value: u64,
-        resolver: u64,
-    },
-    FunctionVariant {
-        value: u64,
-        table_index: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RawExport {
-    pub name: String,
-    pub flags: u64,
-    pub terminal: RawTerminal,
+/// A decoded terminal of a supported kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Terminal {
+    flags: u64,
+    value: u64,
 }
 
 #[derive(Debug)]
 struct Node {
-    terminal: Option<(u64, RawTerminal)>,
+    terminal: Option<Terminal>,
     edges: Vec<(Vec<u8>, usize)>,
 }
 
@@ -103,12 +79,7 @@ fn insert_node_range(ranges: &mut BTreeMap<usize, usize>, start: usize, end: usi
     Ok(())
 }
 
-fn node(
-    bytes: &[u8],
-    offset: usize,
-    ranges: &mut BTreeMap<usize, usize>,
-    strict: bool,
-) -> Result<Node> {
+fn node(bytes: &[u8], offset: usize, ranges: &mut BTreeMap<usize, usize>) -> Result<Node> {
     ensure!(
         offset < bytes.len(),
         "export-trie node offset exceeds payload"
@@ -132,75 +103,32 @@ fn node(
     } else {
         let mut at = 0;
         let flags = uleb(terminal_bytes, &mut at)?;
-        if strict {
-            ensure!(
-                flags & 8 == 0,
-                "unsupported reexport requires dependency/name resolution"
-            );
-            ensure!(
-                flags & 0x10 == 0,
-                "unsupported stub/resolver export requires resolver execution"
-            );
-            ensure!(
-                flags & !(KIND_MASK | WEAK_DEFINITION) == 0,
-                "unsupported export flags {flags:#x}"
-            );
-            ensure!(
-                flags & KIND_MASK != 1,
-                "unsupported thread-local export requires TLV setup"
-            );
-        }
-        ensure!(flags & !0x3f == 0, "unsupported export flags {flags:#x}");
-        ensure!(flags & KIND_MASK != 3, "unsupported export kind");
+        ensure!(
+            flags & REEXPORT == 0,
+            "unsupported reexport requires dependency/name resolution"
+        );
+        ensure!(
+            flags & STUB_AND_RESOLVER == 0,
+            "unsupported stub/resolver export requires resolver execution"
+        );
+        ensure!(
+            flags & !(KIND_MASK | WEAK_DEFINITION) == 0,
+            "unsupported export flags {flags:#x}"
+        );
+        ensure!(
+            flags & KIND_MASK != KIND_THREAD_LOCAL,
+            "unsupported thread-local export requires TLV setup"
+        );
+        ensure!(
+            flags & KIND_MASK != KIND_RESERVED,
+            "unsupported export kind"
+        );
         let value = uleb(terminal_bytes, &mut at)?;
-        let terminal = if flags & 8 != 0 {
-            ensure!(
-                flags & (KIND_MASK | 0x10 | FUNCTION_VARIANT) == 0,
-                "incompatible reexport flags"
-            );
-            ensure!(value > 0, "reexport library ordinal is zero");
-            let rest = &terminal_bytes[at..];
-            let length = rest
-                .iter()
-                .take(MAX_NAME_BYTES + 1)
-                .position(|b| *b == 0)
-                .context("unterminated or excessive reexport import name")?;
-            let import_name = std::str::from_utf8(&rest[..length])
-                .context("non-UTF-8 reexport import name")?
-                .to_owned();
-            at += length + 1;
-            RawTerminal::Reexport {
-                library_ordinal: value,
-                import_name,
-            }
-        } else if flags & FUNCTION_VARIANT != 0 {
-            ensure!(
-                flags & (KIND_MASK | 0x10) == 0,
-                "incompatible function-variant flags"
-            );
-            RawTerminal::FunctionVariant {
-                value,
-                table_index: uleb(terminal_bytes, &mut at)?,
-            }
-        } else if flags & 0x10 != 0 {
-            ensure!(flags & KIND_MASK == 0, "incompatible stub/resolver flags");
-            RawTerminal::StubResolver {
-                value,
-                resolver: uleb(terminal_bytes, &mut at)?,
-            }
-        } else {
-            match flags & KIND_MASK {
-                0 => RawTerminal::Regular { value },
-                1 => RawTerminal::ThreadLocal { value },
-                KIND_ABSOLUTE => RawTerminal::Absolute { value },
-                _ => unreachable!(),
-            }
-        };
         ensure!(
             at == terminal_bytes.len(),
             "unexpected trailing export terminal bytes"
         );
-        Some((flags, terminal))
+        Some(Terminal { flags, value })
     };
     cursor = terminal_end;
     let children = usize::from(
@@ -349,19 +277,17 @@ pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export
         "exports require one preferred __TEXT base"
     );
     let preferred = preferred[0].guest.address;
-    decode_trie(bytes, true)?
+    decode_trie(bytes)?
         .into_iter()
-        .map(|raw| {
-            let (value, address) = match raw.terminal {
-                RawTerminal::Regular { value } => {
-                    (value, regular_address(image, preferred, load_base, value)?)
-                }
-                RawTerminal::Absolute { value } => (value, value),
-                _ => bail!("unsupported standalone export terminal"),
+        .map(|(name, Terminal { flags, value })| {
+            let address = if flags & KIND_MASK == KIND_ABSOLUTE {
+                value
+            } else {
+                regular_address(image, preferred, load_base, value)?
             };
             Ok(Export {
-                name: raw.name,
-                flags: raw.flags,
+                name,
+                flags,
                 value,
                 address,
             })
@@ -369,14 +295,8 @@ pub fn parse(data: &[u8], image: &LoadPlan, load_base: u64) -> Result<Vec<Export
         .collect()
 }
 
-/// Decode mixed Apple export terminal forms without running their resolvers.
-/// Unsupported runtime forms remain typed entries, so unrelated ordinary lookups
-/// can succeed. Structural ambiguity, reserved flags and malformed payloads fail.
-pub fn parse_trie(bytes: &[u8]) -> Result<Vec<RawExport>> {
-    decode_trie(bytes, false)
-}
-
-fn decode_trie(bytes: &[u8], strict: bool) -> Result<Vec<RawExport>> {
+/// Decode every terminal, sorted by name.
+fn decode_trie(bytes: &[u8]) -> Result<Vec<(String, Terminal)>> {
     ensure!(
         bytes.len() <= MAX_TRIE_BYTES,
         "export trie exceeds payload limit"
@@ -402,21 +322,17 @@ fn decode_trie(bytes: &[u8], strict: bool) -> Result<Vec<RawExport>> {
         };
         ensure!(active.insert(offset), "cyclic export trie");
         if let std::collections::btree_map::Entry::Vacant(entry) = nodes.entry(offset) {
-            let parsed = node(bytes, offset, &mut ranges, strict)?;
+            let parsed = node(bytes, offset, &mut ranges)?;
             entry.insert(parsed);
         }
         let current = &nodes[&offset];
-        if let Some((flags, terminal)) = &current.terminal {
+        if let Some(terminal) = current.terminal {
             ensure!(!name.is_empty(), "empty exported symbol name");
             let name = std::str::from_utf8(&name)
                 .context("unsupported non-UTF-8 export name")?
                 .to_owned();
             ensure!(names.insert(name.clone()), "duplicate exported symbol name");
-            exports.push(RawExport {
-                name,
-                flags: *flags,
-                terminal: terminal.clone(),
-            });
+            exports.push((name, terminal));
         }
         actions.push(Action::Leave(offset));
         for (label, child) in current.edges.iter().rev() {
@@ -449,7 +365,7 @@ fn decode_trie(bytes: &[u8], strict: bool) -> Result<Vec<RawExport>> {
             });
         }
     }
-    exports.sort_by(|a, b| a.name.cmp(&b.name));
+    exports.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(exports)
 }
 
@@ -574,67 +490,10 @@ mod tests {
         let image = super::super::load_plan::plan(&bytes).unwrap();
         (bytes, image)
     }
+
     fn parse_trie(bytes: &[u8]) -> Result<Vec<Export>> {
         let (data, image) = fixture(bytes, false);
         parse(&data, &image, BASE)
-    }
-
-    #[test]
-    fn raw_decoder_preserves_mixed_runtime_terminals_without_resolving_them() {
-        fn single(payload: &[u8]) -> Vec<u8> {
-            let mut bytes = vec![0, 1, b'a', 0, 5, payload.len() as u8];
-            bytes.extend(payload);
-            bytes.push(0);
-            bytes
-        }
-        for (payload, terminal) in [
-            (vec![0, 4], RawTerminal::Regular { value: 4 }),
-            (vec![2, 9], RawTerminal::Absolute { value: 9 }),
-            (vec![1, 4], RawTerminal::ThreadLocal { value: 4 }),
-            (
-                vec![8, 1, 0],
-                RawTerminal::Reexport {
-                    library_ordinal: 1,
-                    import_name: String::new(),
-                },
-            ),
-            (
-                vec![8, 2, b'b', 0],
-                RawTerminal::Reexport {
-                    library_ordinal: 2,
-                    import_name: "b".into(),
-                },
-            ),
-            (
-                vec![16, 4, 8],
-                RawTerminal::StubResolver {
-                    value: 4,
-                    resolver: 8,
-                },
-            ),
-            (
-                vec![32, 4, 3],
-                RawTerminal::FunctionVariant {
-                    value: 4,
-                    table_index: 3,
-                },
-            ),
-        ] {
-            let decoded = super::parse_trie(&single(&payload)).unwrap();
-            assert_eq!(decoded[0].terminal, terminal);
-        }
-        for payload in [
-            vec![8, 0, 0],
-            vec![8, 1],
-            vec![16, 4],
-            vec![32, 4],
-            vec![64, 0],
-            vec![3, 0],
-            vec![8 | 16, 1, 0],
-            vec![8, 1, 0, 0],
-        ] {
-            assert!(super::parse_trie(&single(&payload)).is_err());
-        }
     }
 
     #[test]
