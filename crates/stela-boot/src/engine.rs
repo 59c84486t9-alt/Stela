@@ -1,6 +1,7 @@
 //! System mode, engine phase: runs in the Stela window after the loader has
 //! switched to LA57. It never touches identity addresses again; host physical
 //! memory is reached through the physmap.
+mod bundle;
 mod host;
 mod interrupts;
 
@@ -17,8 +18,9 @@ use core::{
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
-    Cpu, CpuProfile, Event, Machine, NoDevices, Stop, exception::Pstate,
-    registers::encodings::DCZID_EL0,
+    Cpu, CpuProfile, Event, Machine, NoDevices, Stop,
+    exception::Pstate,
+    registers::encodings::{DCZID_EL0, MPIDR_EL1},
 };
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
@@ -37,6 +39,8 @@ struct Options {
     entry: u64,
     x0: u64,
     budget: u64,
+    /// Load the boot bundle the loader read instead of `source.bin`.
+    bundle: bool,
 }
 
 fn number(value: &str) -> Result<u64, &'static str> {
@@ -56,12 +60,18 @@ impl Options {
             entry: DRAM_BASE,
             x0: 0,
             budget: 0,
+            bundle: false,
         };
         let mut words = text.split_ascii_whitespace();
         if words.next() != Some("--system") {
             return Err("system options must start with --system");
         }
         while let Some(name) = words.next() {
+            if name == "--bundle" {
+                words.next().ok_or("missing bundle directory")?;
+                options.bundle = true;
+                continue;
+            }
             let value = number(words.next().ok_or("missing system option value")?)?;
             match name {
                 "--dram-base" => options.dram_base = value,
@@ -141,13 +151,28 @@ fn guest_ram(handoff: &Handoff, options: &Options) -> Result<Vec<RamRange>, &'st
     Ok(ranges)
 }
 
-fn profile() -> CpuProfile {
+/// Stela's own test kernel reads no identification register; its DC ZVA
+/// block is Stela's choice of 64 bytes.
+fn test_profile() -> CpuProfile {
     CpuProfile {
-        // Stela's own test kernel reads no identification register; DC ZVA
-        // block size follows the architecture's 64-byte example value.
         name: "stela-test-kernel",
         counter_frequency: 24_000_000,
         fixed: alloc::vec![(DCZID_EL0, 4)],
+    }
+}
+
+/// The M2 Mac mini (J473AP) profile, running as cpu0. Only values with
+/// evidence are declared; every other identification read refuses.
+fn j473_profile() -> CpuProfile {
+    CpuProfile {
+        name: "apple-j473-draft",
+        counter_frequency: 24_000_000,
+        fixed: alloc::vec![
+            // Apple's DeviceTree gives cpu0 `reg` 0 (cpu4 is 0x100: Aff1 is
+            // the cluster), and MPIDR_EL1 bit 31 is RES1. U and MT are 0 for
+            // a multiprocessor without multithreading (inferred).
+            (MPIDR_EL1, 0x8000_0000),
+        ],
     }
 }
 
@@ -247,30 +272,49 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         output::fatal(error);
     }
     let (_, _, _, apic_hz) = host::statistics();
-    // SAFETY: the guest image was left allocated by the loader.
-    let source = unsafe {
-        core::slice::from_raw_parts(
-            layout::physical(handoff.source.physical) as *const u8,
-            handoff.source.bytes as usize,
-        )
-    };
     let mut bare = BareHost;
-    if !stela_runtime::machine::Host::write_ram(&mut bare, options.load, source) {
-        output::fatal("guest image does not fit guest DRAM at its load address");
-    }
     let target = target();
+    let (entry, x0, profile) = if options.bundle {
+        let files = &handoff.files[..handoff.file_count];
+        let loaded = match bundle::load(&mut bare, files, options.dram_base, options.ram_bytes) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                output::arguments(format_args!("bundle refusal: {error}\n"));
+                output::fatal("the boot bundle could not be loaded")
+            }
+        };
+        output::arguments(format_args!(
+            "BUNDLE regions={} patched={} kept={:?} dram_base={:#x}\n",
+            loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
+        ));
+        (loaded.pc, loaded.x0, j473_profile())
+    } else {
+        // SAFETY: the guest image was left allocated by the loader.
+        let source = unsafe {
+            core::slice::from_raw_parts(
+                layout::physical(handoff.source.physical) as *const u8,
+                handoff.source.bytes as usize,
+            )
+        };
+        if !stela_runtime::machine::Host::write_ram(&mut bare, options.load, source) {
+            output::fatal("guest image does not fit guest DRAM at its load address");
+        }
+        output::arguments(format_args!(
+            "GUEST IMAGE pa={:#x} bytes={} sha256={}\n",
+            options.load,
+            source.len(),
+            stela_runtime::sha256(source),
+        ));
+        (options.entry, options.x0, test_profile())
+    };
     output::arguments(format_args!(
-        "GUEST IMAGE pa={:#x} bytes={} sha256={} entry={:#x} x0={:#x} target={} apic_hz={apic_hz}\n",
-        options.load,
-        source.len(),
-        stela_runtime::sha256(source),
-        options.entry,
-        options.x0,
+        "ENTRY pc={entry:#x} x0={x0:#x} el=1 mmu=off profile={} target={} apic_hz={apic_hz}\n",
+        profile.name,
         target.id(),
     ));
-    let mut cpu = Cpu::new(options.entry, Pstate::RESET_EL1);
-    cpu.state.x[0] = options.x0;
-    let mut machine = Machine::new(cpu, bare, NoDevices, profile(), target);
+    let mut cpu = Cpu::new(entry, Pstate::RESET_EL1);
+    cpu.state.x[0] = x0;
+    let mut machine = Machine::new(cpu, bare, NoDevices, profile, target);
     let started = host::rdtsc();
     let stop = machine.run(options.budget);
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;

@@ -73,6 +73,9 @@ const KERNEL_RESULTS: [(usize, Option<u64>); 8] = [
     (7, Some(0x5600_0001)),
 ];
 
+/// System options for a boot bundle: the J473AP DRAM base and 8 GiB.
+const BUNDLE_OPTIONS: &str = "--system --bundle \\EFI\\stela\\bundle --ram-bytes 0x200000000";
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Scenario {
     /// Four instructions on the bounded MMU-off EL1 diagnostic.
@@ -90,7 +93,7 @@ pub enum Command {
         release: bool,
     },
     /// Boot `stela.efi` with an ARM image in single-CPU x86 QEMU.
-    Run(Run),
+    Run(Box<Run>),
 }
 
 #[derive(Args)]
@@ -104,9 +107,14 @@ pub struct Run {
     /// The built-in image and options to run when no module is given.
     #[arg(long, value_enum, default_value_t = Scenario::Smoke)]
     scenario: Scenario,
-    /// Guest machine memory for QEMU; defaults to 1G, or 8G for system mode.
+    /// Guest machine memory for QEMU; defaults to 1G, 8G for system mode
+    /// and 12G with a boot bundle.
     #[arg(long)]
     memory: Option<String>,
+    /// A kernel boot bundle directory (`stela boot prepare` output) to start
+    /// on the system-mode engine; it is copied to `\EFI\stela\bundle`.
+    #[arg(long, conflicts_with_all = ["module", "opencore"])]
+    bundle: Option<PathBuf>,
     /// Fresh directory for the boot volume, serial log and run report.
     #[arg(long)]
     output: PathBuf,
@@ -163,7 +171,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
             println!("{}", build(release)?.display());
             Ok(ExitCode::SUCCESS)
         }
-        Command::Run(arguments) => launch(arguments),
+        Command::Run(arguments) => launch(*arguments),
     }
 }
 
@@ -209,6 +217,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let volume = output.join("volume");
     let source = volume.join("EFI/stela/source.bin");
     let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
+        _ if arguments.bundle.is_some() => (
+            Vec::new(),
+            arguments.append.unwrap_or_else(|| BUNDLE_OPTIONS.into()),
+        ),
         (Some(module), _) => (fs::read(module)?, arguments.append.unwrap_or_default()),
         (None, Scenario::Smoke) => (
             SMOKE.iter().flat_map(|word| word.to_le_bytes()).collect(),
@@ -273,6 +285,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             fs::copy(&image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
             fs::write(&source, bytes)?;
             fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
+            if let Some(bundle) = &arguments.bundle {
+                copy_bundle(bundle, &volume.join("EFI/stela/bundle"))?;
+            }
         }
         Some(esp) => {
             ensure!(
@@ -317,10 +332,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     } else {
         ("off", "qemu64", "readonly=on,file=fat:")
     };
-    let memory = arguments
-        .memory
-        .clone()
-        .unwrap_or_else(|| if system { "8G" } else { "1G" }.into());
+    let memory = arguments.memory.clone().unwrap_or_else(|| {
+        match (arguments.bundle.is_some(), system) {
+            (true, _) => "12G",
+            (false, true) => "8G",
+            (false, false) => "1G",
+        }
+        .into()
+    });
     command
         .arg("-machine")
         .arg(format!(
@@ -430,9 +449,16 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Some(status) => status.code().map_or(TIMEOUT_EXIT, |code| code as u8),
         None => TIMEOUT_EXIT,
     };
-    let verification = if arguments.module.is_none() && arguments.scenario == Scenario::SystemKernel
+    let serial_text = fs::read_to_string(&serial).unwrap_or_default();
+    let unsupported = serial_text
+        .lines()
+        .find_map(|line| line.strip_prefix("STOP UNSUPPORTED "))
+        .map(String::from);
+    let verification = if arguments.bundle.is_none()
+        && arguments.module.is_none()
+        && arguments.scenario == Scenario::SystemKernel
     {
-        let checked = verify_kernel(&fs::read_to_string(&serial).unwrap_or_default());
+        let checked = verify_kernel(&serial_text);
         if checked.is_err() && code == IDLE_EXIT {
             code = FAILED_EXIT;
         }
@@ -462,6 +488,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "options": options,
         "opencore": arguments.opencore,
         "scenario": verification,
+        "bundle": arguments.bundle,
+        "first_unsupported": unsupported,
         "returncode": code,
         "payload": arguments.payload.map(|mode| mode == PayloadMode::Stage),
         "staging": target.exists().then(|| staged(&target)).transpose()?,
@@ -479,6 +507,29 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         return Err(error.context("host storage check failed"));
     }
     Ok(ExitCode::from(code))
+}
+
+/// Copy `bundle.json` and every file it lists.
+fn copy_bundle(from: &Path, to: &Path) -> Result<()> {
+    let manifest = fs::read(from.join("bundle.json"))
+        .with_context(|| format!("{} has no bundle.json", from.display()))?;
+    let value: Value = serde_json::from_slice(&manifest)?;
+    fs::create_dir_all(to)?;
+    fs::write(to.join("bundle.json"), &manifest)?;
+    for file in value["files"]
+        .as_array()
+        .context("bundle.json lists no files")?
+    {
+        let name = file["name"]
+            .as_str()
+            .context("bundle file without a name")?;
+        ensure!(
+            !name.contains(['/', '\\']),
+            "bundle file {name} names a directory"
+        );
+        fs::copy(from.join(name), to.join(name))?;
+    }
+    Ok(())
 }
 
 /// QEMU's exit status when the engine reports a terminal idle state.

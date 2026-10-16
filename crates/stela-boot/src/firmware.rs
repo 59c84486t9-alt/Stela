@@ -76,16 +76,15 @@ fn configured_volume() -> Option<FileSystem> {
         })
 }
 
-/// Read the options and ARM image from the volume Stela was loaded from.
-/// When the firmware names no such volume, as for an image a boot manager
-/// starts from memory, or that volume has no `stela.cfg`, the first volume
-/// with one is used instead.
-pub(crate) fn files() -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+/// The volume Stela was loaded from. When the firmware names no such volume,
+/// as for an image a boot manager starts from memory, or that volume has no
+/// `stela.cfg`, the first volume with one is used instead.
+pub(crate) fn volume() -> Result<FileSystem, &'static str> {
     let own = boot_volume().map(|mut volume| {
         let configured = configured(&mut volume);
         (volume, configured)
     });
-    let mut volume = match own {
+    Ok(match own {
         Some((volume, true)) => volume,
         Some((volume, false)) => {
             // Close the boot volume so the scan can open every volume.
@@ -97,16 +96,31 @@ pub(crate) fn files() -> Result<(Vec<u8>, Vec<u8>), &'static str> {
         }
         None => configured_volume()
             .ok_or("no boot volume, and no volume has \\EFI\\stela\\stela.cfg")?,
-    };
-    let options = if configured(&mut volume) {
-        volume.read(OPTIONS).map_err(|_| "cannot read stela.cfg")?
+    })
+}
+
+/// `stela.cfg`, or nothing when the volume has none.
+pub(crate) fn options(volume: &mut FileSystem) -> Result<Vec<u8>, &'static str> {
+    if configured(volume) {
+        volume.read(OPTIONS).map_err(|_| "cannot read stela.cfg")
     } else {
-        Vec::new()
-    };
-    let source = volume
+        Ok(Vec::new())
+    }
+}
+
+/// `\EFI\stela\source.bin`, the unchanged ARM bytes.
+pub(crate) fn source(volume: &mut FileSystem) -> Result<Vec<u8>, &'static str> {
+    volume
         .read(SOURCE)
-        .map_err(|_| "cannot read \\EFI\\stela\\source.bin")?;
-    Ok((options, source))
+        .map_err(|_| "cannot read \\EFI\\stela\\source.bin")
+}
+
+/// Any file of the volume, by its backslash-separated path.
+pub(crate) fn read(volume: &mut FileSystem, path: &str) -> Result<Vec<u8>, &'static str> {
+    let path = uefi::CString16::try_from(path).map_err(|_| "file path is not UCS-2")?;
+    volume
+        .read(path.as_ref())
+        .map_err(|_| "cannot read a configured file")
 }
 
 /// Page rights of Stela's own PE image: code RX, constants R, data RW+NX.

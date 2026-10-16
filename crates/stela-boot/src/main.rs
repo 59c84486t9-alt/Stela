@@ -43,7 +43,8 @@ mod system;
 mod tables;
 #[global_allocator]
 pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new();
-const HEAP_BYTES: usize = 64 * 1024 * 1024;
+/// Large enough for a J473AP boot bundle (about 135 MB) read whole.
+const HEAP_BYTES: usize = 384 * 1024 * 1024;
 
 #[derive(Debug)]
 struct Options {
@@ -159,10 +160,13 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
-    let (options, source) = firmware::files().unwrap_or_else(|e| output::fatal(e));
+    let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
+    let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
     if options.starts_with(b"--system") {
-        system::boot(options, source);
+        system::boot(options, volume);
     }
+    let source = firmware::source(&mut volume).unwrap_or_else(|e| output::fatal(e));
+    drop(volume);
     let (mut handoff, tables) =
         firmware::take_over(options, source).unwrap_or_else(|e| output::fatal(e));
     if let Some(screen) = handoff.screen {

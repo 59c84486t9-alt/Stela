@@ -8,14 +8,15 @@
 use crate::{
     console::Framebuffer,
     firmware,
-    handoff::{Handoff, MAGIC, MAX_GUEST_RANGES, Region},
+    handoff::{File, Handoff, MAGIC, MAX_FILES, MAX_GUEST_RANGES, MAX_NAME, Region},
     la57, layout, output, paging,
     tables::{self, Frames, LARGE, NX, PAGE, PRESENT, WRITABLE},
 };
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
 use core::{arch::asm, cell::UnsafeCell};
 use uefi::{
     boot::{self, AllocateType, MemoryType},
+    fs::FileSystem,
     mem::memory_map::MemoryMap,
     proto::loaded_image::LoadedImage,
 };
@@ -186,15 +187,71 @@ fn identity(
     Ok(())
 }
 
+/// Bundle files by name, `bundle.json` first.
+type BundleFiles = Vec<(String, Vec<u8>)>;
+
+/// The value after `name` in the options, as text.
+fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
+    let mut words = options.split_ascii_whitespace();
+    words.find(|word| *word == name)?;
+    words.next()
+}
+
+/// The guest inputs: `source.bin`, or with `--bundle DIR` the directory's
+/// `bundle.json` and every file it lists, read unchanged.
+fn inputs(options: &[u8], volume: &mut FileSystem) -> Result<(Vec<u8>, BundleFiles), &'static str> {
+    let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+    let Some(directory) = option(text, "--bundle") else {
+        return Ok((firmware::source(volume)?, Vec::new()));
+    };
+    let directory = directory.trim_end_matches('\\');
+    let manifest = firmware::read(volume, &format!("{directory}\\bundle.json"))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&manifest).map_err(|_| "bundle.json is not JSON")?;
+    let names: Vec<String> = value
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("bundle.json has no files list")?
+        .iter()
+        .map(|file| {
+            file.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from)
+                .ok_or("bundle file without a name")
+        })
+        .collect::<Result<_, _>>()?;
+    let mut files = alloc::vec![(String::from("bundle.json"), manifest)];
+    for name in names {
+        if name.contains('\\') || name.contains('/') {
+            return Err("bundle file names must not contain directories");
+        }
+        output::arguments(format_args!("READ {directory}\\{name}\n"));
+        let contents = firmware::read(volume, &format!("{directory}\\{name}"))?;
+        files.push((name, contents));
+    }
+    if files.len() > MAX_FILES {
+        return Err("bundle lists too many files");
+    }
+    Ok((Vec::new(), files))
+}
+
 /// Run the engine; never returns.
-pub fn boot(options: Vec<u8>, source: Vec<u8>) -> ! {
-    match load(options, source) {
+pub fn boot(options: Vec<u8>, mut volume: FileSystem) -> ! {
+    let inputs = inputs(&options, &mut volume);
+    // The protocol must be closed before boot services end.
+    drop(volume);
+    let result = inputs.and_then(|(source, files)| load(options, source, files));
+    match result {
         Ok(never) => match never {},
         Err(error) => output::fatal(error),
     }
 }
 
-fn load(options: Vec<u8>, source: Vec<u8>) -> Result<core::convert::Infallible, &'static str> {
+fn load(
+    options: Vec<u8>,
+    source: Vec<u8>,
+    bundle: BundleFiles,
+) -> Result<core::convert::Infallible, &'static str> {
     let leaf7 = core::arch::x86_64::__cpuid_count(7, 0);
     if leaf7.ecx & CPUID_LA57 == 0 {
         return Err("system mode needs five-level paging (LA57), which this CPU lacks");
@@ -341,9 +398,23 @@ fn load(options: Vec<u8>, source: Vec<u8>) -> Result<core::convert::Infallible, 
         physical: source.as_ptr() as u64,
         bytes: source.len() as u64,
     };
-    // Both stay allocated: the engine reads them through the physmap.
+    let mut files = [File::default(); MAX_FILES];
+    for (slot, (name, contents)) in files.iter_mut().zip(&bundle) {
+        if name.len() > MAX_NAME {
+            return Err("bundle file name too long");
+        }
+        slot.name[..name.len()].copy_from_slice(name.as_bytes());
+        slot.name_bytes = name.len();
+        slot.contents = Region {
+            physical: contents.as_ptr() as u64,
+            bytes: contents.len() as u64,
+        };
+    }
+    let file_count = bundle.len();
+    // All stay allocated: the engine reads them through the physmap.
     core::mem::forget(options);
     core::mem::forget(source);
+    core::mem::forget(bundle);
     let handoff = handoff_page.physical as *mut Handoff;
     let engine_entry =
         layout::IMAGE + (crate::engine::entry as *const () as u64 - image.start as u64);
@@ -385,6 +456,8 @@ fn load(options: Vec<u8>, source: Vec<u8>) -> Result<core::convert::Infallible, 
             magic: MAGIC,
             options: options_region,
             source: source_region,
+            files,
+            file_count,
             heap,
             stack,
             code,
