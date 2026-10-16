@@ -620,6 +620,9 @@ impl<P: PreparedPublication> PreparedIsb<'_, P> {
 /// Source/native sequencing remains the concrete service caller's contract;
 /// this guard also protects authoritative interpreted/service execution.
 fn check_execution_state(state: &SystemState) -> Result<(), ControlError> {
+    state
+        .check_lower_el_storage()
+        .map_err(|_| ControlError::Unavailable("EL1 controls do not own higher-EL storage"))?;
     if state.pstate_misc() & PSTATE_IL_MASK != 0 {
         Err(ControlError::IllegalExecutionState)
     } else {

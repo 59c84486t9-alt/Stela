@@ -4,6 +4,7 @@
 mod darwin_services;
 mod diagnostics;
 mod el1_registers;
+pub(crate) mod el1_system;
 mod entry_controls;
 mod halted;
 mod low128_call;
@@ -25,7 +26,7 @@ use crate::{
     memory::domain::MemoryExecutionLoan,
 };
 pub(crate) use entry_controls::ProcessEntryControls;
-pub(crate) use m0::M0SourceInput;
+pub(crate) use m0::{M0SourceInput, M0WriteSourceInput};
 pub(crate) use provider::CheckedProcessOwner;
 use source::{BoundSource, ReturnedTerminal};
 use stela_compiler::{
@@ -36,6 +37,12 @@ use stela_compiler::{
 pub(crate) struct OwnedRunRequest {
     pub stop_pc: Option<GuestAddress>,
     pub block_budget: usize,
+    #[cfg(all(
+        test,
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub verify_pair_alias_monitor: bool,
 }
 
 pub(crate) enum OwnedStop {
@@ -69,7 +76,9 @@ pub(crate) struct OwnedRunOutcome {
     pub actual_pc: GuestAddress,
     pub last_native_observation: Option<NativeObservation>,
     pub last_m0_observation: Option<m0::M0Observation>,
+    pub last_m0_write_observation: Option<m0::M0WriteObservation>,
     pub last_el1_register_observation: Option<el1_registers::RegisterObservation>,
+    pub last_el1_system_observation: Option<el1_system::SystemObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
     pub service_events: darwin_services::TrapServiceEvents,
 }
@@ -161,7 +170,9 @@ impl BlockRuntime {
         let mut accounting = empty_accounting();
         let mut last_native_observation = None;
         let mut last_m0_observation = None;
+        let mut last_m0_write_observation = None;
         let mut last_el1_register_observation = None;
+        let mut last_el1_system_observation = None;
         let mut settled_prefixes = Vec::new();
         let mut service_events = darwin_services::TrapServiceEvents::default();
         let stop = loop {
@@ -220,9 +231,68 @@ impl BlockRuntime {
                 attempt,
                 closed: false,
             };
+            if self.profile == BlockProfile::El1PlatformV1
+                && matches!(
+                    bound.el1_platform_intent(),
+                    Ok(stela_compiler::block::el1_platform::Intent::System(_))
+                )
+            {
+                match active.execute_el1_system(
+                    &bound,
+                    &mut accounting,
+                    &mut last_el1_system_observation,
+                    &mut settled_prefixes,
+                ) {
+                    Ok(None) => continue,
+                    Ok(Some(stop)) => break stop,
+                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                }
+            }
+            if self.profile == BlockProfile::El1PlatformV1
+                && matches!(
+                    bound.el1_platform_intent(),
+                    Ok(stela_compiler::block::el1_platform::Intent::Write64Pair(_))
+                )
+            {
+                match active.execute_m0_write64_pair(
+                    &bound,
+                    &mut accounting,
+                    &mut last_m0_write_observation,
+                    &mut settled_prefixes,
+                    #[cfg(all(
+                        test,
+                        target_arch = "x86_64",
+                        any(target_os = "macos", target_os = "linux")
+                    ))]
+                    request.verify_pair_alias_monitor,
+                ) {
+                    Ok(m0::M0Step::Committed) => continue,
+                    Ok(m0::M0Step::SourceResourcesBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 write original resources unavailable".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::SourceControlBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 write source/control qualification blocked".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::PreparationBlocked) => {
+                        break OwnedStop::Indeterminate(
+                            "M0 write no-effect preparation blocked".into(),
+                        );
+                    }
+                    Ok(m0::M0Step::Indeterminate(detail)) => {
+                        break OwnedStop::Indeterminate(detail);
+                    }
+                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                }
+            }
             if matches!(
                 self.profile,
-                BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
+                BlockProfile::El1DirectBranchV1
+                    | BlockProfile::El1M0IntegerV1
+                    | BlockProfile::El1PlatformV1
             ) && bound.el1_register_intent().is_ok()
             {
                 match active.execute_el1_registers(
@@ -238,9 +308,11 @@ impl BlockRuntime {
             // The immutable typed source profile selects the concrete consumer;
             // it grants no CPU/domain access. The sealed M0 backend still must
             // lend its original resources and genuine control/source witnesses.
-            if self.profile == BlockProfile::El1M0IntegerV1
-                || self.profile
-                    == BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged)
+            if matches!(
+                self.profile,
+                BlockProfile::El1M0IntegerV1 | BlockProfile::El1PlatformV1
+            ) || self.profile
+                == BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged)
             {
                 match active.execute_m0_read64(
                     &bound,
@@ -312,7 +384,9 @@ impl BlockRuntime {
             actual_pc: pe.thread.pc,
             last_native_observation,
             last_m0_observation,
+            last_m0_write_observation,
             last_el1_register_observation,
+            last_el1_system_observation,
             settled_prefixes,
             service_events,
         }

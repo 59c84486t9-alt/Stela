@@ -80,3 +80,39 @@ pub(crate) fn emit(
     );
     Ok(block)
 }
+
+/// Uses the original checked pair emitter and enclosing context ABI. Its M0
+/// variant stages inputs and publishes base writeback only on full callback success.
+pub(crate) fn emit_write_pair(
+    instruction: &Instruction,
+    target: TargetCpu,
+) -> Result<NativeBlock, CompileError> {
+    let operand =
+        x86_64::memory_store::checked_pair::Operand::from_m0_write_pair(&instruction.operation)
+            .ok_or_else(|| CompileError("unqualified M0 pair emitter operand".into()))?;
+    let mut block = NativeBlock {
+        x86_64_code: crate::extended::context_wrapper(),
+        source_map: Vec::new(),
+    };
+    block
+        .source_map
+        .push((instruction.pc, block.x86_64_code.len()));
+    x86_64::memory_store::checked_pair::emit_context(
+        &mut block.x86_64_code,
+        &operand,
+        instruction.pc.0,
+    );
+    let next = instruction
+        .pc
+        .0
+        .checked_add(size_of::<u32>() as u64)
+        .ok_or_else(|| CompileError("M0 pair continuation overflow".into()))?;
+    super::emit_terminal(
+        &mut block.x86_64_code,
+        &mut block.source_map,
+        None,
+        GuestAddress(next),
+        target,
+    );
+    Ok(block)
+}

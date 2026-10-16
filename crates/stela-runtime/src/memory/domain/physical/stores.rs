@@ -1,0 +1,366 @@
+//! Source-only consumer draft for qemu's actual typed M0 write loan.
+//!
+//! Deliberately unregistered until the real producer joins. No dummy loan,
+//! generic callback, permissive unsafe capability or architectural bank lives here.
+
+use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
+use crate::{
+    memory::domain::{
+        MemoryExecutionLoan, PhysicalAccess, PublicationFault,
+        m0_write::{M0WriteIntent, M0WriteMember},
+    },
+    system::translation_controls::m0_data::{M0ControlError, M0DataWriteLoan},
+};
+use std::sync::MutexGuard;
+use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
+
+const STORE_BYTES: usize = size_of::<u64>();
+const STORE_ALIGNMENT_MASK: u64 = STORE_BYTES as u64 - 1;
+
+/// A copied observation only, never source/control/physical or retry authority.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct M0RamWriteProgress {
+    pub(crate) attempted: bool,
+    pub(crate) completed_bytes: u64,
+    pub(crate) publication_attempted: Option<M0WriteMember>,
+    pub(crate) uncertain_member: Option<M0WriteMember>,
+}
+impl M0RamWriteProgress {
+    const fn unattempted() -> Self {
+        Self {
+            attempted: false,
+            completed_bytes: 0,
+            publication_attempted: None,
+            uncertain_member: None,
+        }
+    }
+}
+
+pub(crate) enum M0RamWritePlatformError {
+    SourceControl {
+        error: M0ControlError,
+        progress: M0RamWriteProgress,
+    },
+    Physical {
+        error: PhysicalReadPlatformError,
+        progress: M0RamWriteProgress,
+    },
+    DeviceOrdering(MemoryStatus),
+    MissingMember {
+        member: M0WriteMember,
+        progress: M0RamWriteProgress,
+    },
+    Publication {
+        fault: PublicationFault,
+        progress: M0RamWriteProgress,
+    },
+    UnexpectedPublicationPrefix {
+        fault: PublicationFault,
+        progress: M0RamWriteProgress,
+    },
+    AlreadyAttempted(M0RamWriteProgress),
+}
+
+impl M0RamWritePlatformError {
+    /// Read-only actual prefix/attempt diagnostic for canonical settlement.
+    /// This grants no retry, translation or architectural-fault authority.
+    pub(crate) fn progress(&self) -> M0RamWriteProgress {
+        match self {
+            Self::SourceControl { progress, .. }
+            | Self::Physical { progress, .. }
+            | Self::MissingMember { progress, .. }
+            | Self::Publication { progress, .. }
+            | Self::UnexpectedPublicationPrefix { progress, .. }
+            | Self::AlreadyAttempted(progress) => *progress,
+            // Ordering refusal occurs only in NO-WRITE preparation.
+            Self::DeviceOrdering(_) => M0RamWriteProgress::unattempted(),
+        }
+    }
+}
+
+// Keep the actual error and reached prefix in diagnostics, including errors
+// discovered during no-write preparation. No observation grants retry authority.
+impl std::fmt::Debug for M0RamWritePlatformError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceControl { error, .. } => f
+                .debug_struct("SourceControl")
+                .field("error", error)
+                .field("progress", &self.progress())
+                .finish(),
+            Self::Physical { error, .. } => f
+                .debug_struct("Physical")
+                .field("error", error)
+                .field("progress", &self.progress())
+                .finish(),
+            Self::DeviceOrdering(status) => f.debug_tuple("DeviceOrdering").field(status).finish(),
+            Self::MissingMember { member, .. } => f
+                .debug_struct("MissingMember")
+                .field("member", member)
+                .field("progress", &self.progress())
+                .finish(),
+            Self::Publication { fault, .. } => f
+                .debug_struct("Publication")
+                .field("fault", fault)
+                .field("progress", &self.progress())
+                .finish(),
+            Self::UnexpectedPublicationPrefix { fault, .. } => f
+                .debug_struct("UnexpectedPublicationPrefix")
+                .field("fault", fault)
+                .field("progress", &self.progress())
+                .finish(),
+            Self::AlreadyAttempted(_) => f
+                .debug_tuple("AlreadyAttempted")
+                .field(&self.progress())
+                .finish(),
+        }
+    }
+}
+
+// Private physical pin; no standalone write capability escapes this module.
+struct PhysicalRamWritePin<'loan> {
+    physical: &'loan PhysicalAddressSpace,
+    execution: &'loan MemoryExecutionLoan,
+    reached: PhysicalAccess,
+}
+impl PhysicalRamWritePin<'_> {
+    fn check_current(&self) -> Result<(), PhysicalReadPlatformError> {
+        self.physical.check_execution_loan(self.execution)?;
+        self.physical.check_reached(&self.reached)
+    }
+
+    fn publish8(&self, value: u64) -> Result<(), PublicationFault> {
+        let first = self.reached.first();
+        // SAFETY: the actual typed source loan qualified this reached Write;
+        // same original outer/order retain current physical rights/storage.
+        // Resolution checked the whole aligned8B logical/native footprint and
+        // host RMW readability. Staging is independent private stack bytes.
+        // Original MemorySystem publication supplies exact8B XCHG and real
+        // same-value/alias reservation invalidation; it grants no guest type.
+        unsafe {
+            self.physical.domain.system.publish(
+                first.view().backing(),
+                first.backing_offset(),
+                &value.to_le_bytes(),
+            )
+        }
+    }
+}
+
+fn resolve_write_pin<'loan>(
+    physical: &'loan PhysicalAddressSpace,
+    execution: &'loan MemoryExecutionLoan,
+    physical_address: u64,
+) -> Result<PhysicalRamWritePin<'loan>, PhysicalReadPlatformError> {
+    use crate::memory::{access, backing::AccessKind};
+    physical.check_execution_loan(execution)?;
+    if !cfg!(target_arch = "x86_64") {
+        return Err(PhysicalReadPlatformError::UnsupportedHost);
+    }
+    if physical_address & STORE_ALIGNMENT_MASK != 0
+        || physical_address.checked_add(STORE_BYTES as u64).is_none()
+    {
+        return Err(PhysicalReadPlatformError::Alignment);
+    }
+    let reached = physical
+        .domain
+        .resolve_source_physical(execution, physical_address, STORE_BYTES, AccessKind::Write)
+        .map_err(PhysicalReadPlatformError::Domain)?;
+    physical.check_reached(&reached)?;
+    if std::iter::once(reached.first())
+        .chain(reached._remaining.iter())
+        .any(|span| span.view().permissions().executable)
+    {
+        return Err(PhysicalReadPlatformError::Unavailable);
+    }
+    let first = reached.first();
+    let pointer = first.host_ptr().as_ptr();
+    if pointer as usize & (STORE_BYTES - 1) != 0 {
+        return Err(PhysicalReadPlatformError::HostAlignment);
+    }
+    first
+        .view()
+        .backing()
+        .host_pointer(first.backing_offset(), STORE_BYTES, AccessKind::Read)
+        .map_err(|_| PhysicalReadPlatformError::Unavailable)?;
+    let (address, bytes) =
+        access::read_footprint(pointer as usize, STORE_BYTES, TargetCpu::Baseline)
+            .map_err(|_| PhysicalReadPlatformError::UnsupportedHost)?;
+    if address != pointer as usize || bytes != STORE_BYTES {
+        return Err(PhysicalReadPlatformError::UnsupportedHost);
+    }
+    Ok(PhysicalRamWritePin {
+        physical,
+        execution,
+        reached,
+    })
+}
+
+/// NO-WRITE session held by the original canonical authority guard BEFORE
+/// attempt, through finalization and exactly-once base/PC settlement or poison.
+/// Success/failure never releases these actual source/outer/order/current pins.
+#[must_use]
+pub(crate) struct M0RamWritePrepared<'loan, 'owner> {
+    execution: &'loan MemoryExecutionLoan,
+    source: &'loan M0DataWriteLoan<'owner>,
+    first: PhysicalRamWritePin<'loan>,
+    second: Option<PhysicalRamWritePin<'loan>>,
+    _order: MutexGuard<'loan, ()>,
+    progress: M0RamWriteProgress,
+}
+
+impl M0RamWritePrepared<'_, '_> {
+    pub(crate) fn validate_current(&self) -> Result<(), M0RamWritePlatformError> {
+        self.source
+            .validate_current(self.execution)
+            .map_err(|error| M0RamWritePlatformError::SourceControl {
+                error,
+                progress: self.progress,
+            })?;
+        self.first
+            .check_current()
+            .map_err(|error| M0RamWritePlatformError::Physical {
+                error,
+                progress: self.progress,
+            })?;
+        if let Some(second) = &self.second {
+            second
+                .check_current()
+                .map_err(|error| M0RamWritePlatformError::Physical {
+                    error,
+                    progress: self.progress,
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn progress(&self) -> M0RamWriteProgress {
+        self.progress
+    }
+
+    pub(crate) fn intent(&self) -> M0WriteIntent {
+        self.source.intent()
+    }
+
+    fn record_publication(
+        &mut self,
+        result: Result<(), PublicationFault>,
+    ) -> Result<(), M0RamWritePlatformError> {
+        match result {
+            Ok(()) => {
+                // Infallible primitive observations immediately follow the
+                // actual8B publication; no validation/allocation/callback here.
+                self.progress.completed_bytes += STORE_BYTES as u64;
+                self.progress.uncertain_member = None;
+                Ok(())
+            }
+            Err(fault) => {
+                // Aligned8B publication is one exact part. Preserve any
+                // unexpected raw prefix as a terminal conformance diagnostic;
+                // never clamp it, invent a whole-word completion or retry.
+                if fault.completed != 0 {
+                    return Err(M0RamWritePlatformError::UnexpectedPublicationPrefix {
+                        fault,
+                        progress: self.progress,
+                    });
+                }
+                Err(M0RamWritePlatformError::Publication {
+                    fault,
+                    progress: self.progress,
+                })
+            }
+        }
+    }
+
+    /// At most one attempt, including pre-write refusal. Two ascending reached
+    /// exact8B stores do not assert16B atomicity. Second qualification happens
+    /// after the first actual8B completion; no upfront second-fault suppression.
+    pub(crate) fn attempt(&mut self) -> Result<(), M0RamWritePlatformError> {
+        if self.progress.attempted {
+            return Err(M0RamWritePlatformError::AlreadyAttempted(self.progress));
+        }
+        self.progress.attempted = true;
+        self.validate_current()?;
+        let (_, first) = self.source.intent().member(M0WriteMember::First).ok_or(
+            M0RamWritePlatformError::MissingMember {
+                member: M0WriteMember::First,
+                progress: self.progress,
+            },
+        )?;
+        self.progress.publication_attempted = Some(M0WriteMember::First);
+        self.progress.uncertain_member = Some(M0WriteMember::First);
+        let result = self.first.publish8(first);
+        self.record_publication(result)?;
+        self.validate_current()?;
+        if let Some((_, value)) = self.source.intent().member(M0WriteMember::Second) {
+            let translated = self
+                .source
+                .qualify_member(self.execution, M0WriteMember::Second)
+                .map_err(|error| M0RamWritePlatformError::SourceControl {
+                    error,
+                    progress: self.progress,
+                })?;
+            let second = resolve_write_pin(
+                self.source.physical_space(),
+                self.execution,
+                translated.physical_address(),
+            )
+            .map_err(|error| M0RamWritePlatformError::Physical {
+                error,
+                progress: self.progress,
+            })?;
+            self.second = Some(second);
+            self.validate_current()?;
+            self.progress.publication_attempted = Some(M0WriteMember::Second);
+            self.progress.uncertain_member = Some(M0WriteMember::Second);
+            let result = self
+                .second
+                .as_ref()
+                .expect("resolved reached second member")
+                .publish8(value);
+            self.record_publication(result)?;
+        }
+        // A post-effect authority failure reports the exact known0/8/16 prefix.
+        self.validate_current()
+    }
+}
+
+pub(crate) fn prepare_aligned_device_ram8_or_pair<'loan, 'owner>(
+    execution: &'loan MemoryExecutionLoan,
+    source: &'loan M0DataWriteLoan<'owner>,
+) -> Result<M0RamWritePrepared<'loan, 'owner>, M0RamWritePlatformError> {
+    let progress = M0RamWriteProgress::unattempted();
+    source
+        .validate_current(execution)
+        .map_err(|error| M0RamWritePlatformError::SourceControl { error, progress })?;
+    let translated = source
+        .qualify_member(execution, M0WriteMember::First)
+        .map_err(|error| M0RamWritePlatformError::SourceControl { error, progress })?;
+    let first = resolve_write_pin(
+        source.physical_space(),
+        execution,
+        translated.physical_address(),
+    )
+    .map_err(|error| M0RamWritePlatformError::Physical { error, progress })?;
+    let order = execution
+        .device_ram_order()
+        .map_err(M0RamWritePlatformError::DeviceOrdering)?;
+    let prepared = M0RamWritePrepared {
+        execution,
+        source,
+        first,
+        second: None,
+        _order: order,
+        progress,
+    };
+    prepared.validate_current()?;
+    Ok(prepared)
+}
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "stores/tests.rs"]
+pub(crate) mod fixtures;

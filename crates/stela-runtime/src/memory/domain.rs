@@ -26,6 +26,7 @@ pub use lifecycle::{MemoryExecutionLoan, MemoryObservationLoan};
 mod exclusive;
 #[path = "domain/m0_read.rs"]
 pub(crate) mod m0_read;
+pub(crate) mod m0_write;
 #[path = "domain/physical.rs"]
 pub(crate) mod physical;
 

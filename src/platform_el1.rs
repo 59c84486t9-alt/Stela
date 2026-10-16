@@ -13,7 +13,7 @@ use stela_runtime::{
     blocks::{
         OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config, SoftwareEl1Machine,
         SoftwareEl1Profile, SoftwareEl1Request, SourceRamDeclaration, SourceRamPermissions,
-        ThreadState,
+        ThreadState, ZeroedRamExtent,
     },
     system::{
         state::{El1Registers, SystemState},
@@ -35,6 +35,8 @@ struct Input {
     translation: Translation,
     capacity: Vec<Range>,
     initialized: Vec<Extent>,
+    #[serde(default)]
+    zeroed: Vec<Zeroed>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +68,16 @@ struct Extent {
     source_pa: u64,
     path: PathBuf,
     sha256: String,
+    readable: bool,
+    writable: bool,
+    executable: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Zeroed {
+    source_pa: u64,
+    bytes: u64,
     readable: bool,
     writable: bool,
     executable: bool,
@@ -147,32 +159,48 @@ pub(crate) fn run(
     )
     .map_err(|error| anyhow::anyhow!("software EL1 initial System: {error:?}"))?;
     let values = declaration.translation;
-    let machine = SoftwareEl1Machine::new(SoftwareEl1Config {
-        profile,
-        cache_directory,
-        ram: SourceRamDeclaration {
-            address_space: declaration.address_space,
-            target,
-            declared_capacity: declaration
-                .capacity
-                .into_iter()
-                .map(|range| PhysicalRamRange {
-                    source_pa: range.source_pa,
-                    bytes: range.bytes,
-                })
-                .collect(),
-            initialized,
+    let zeroed = declaration
+        .zeroed
+        .into_iter()
+        .map(|extent| ZeroedRamExtent {
+            source_pa: extent.source_pa,
+            bytes: extent.bytes,
+            permissions: SourceRamPermissions {
+                readable: extent.readable,
+                writable: extent.writable,
+                executable: extent.executable,
+            },
+        })
+        .collect();
+    let machine = SoftwareEl1Machine::new_with_zeroed(
+        SoftwareEl1Config {
+            profile,
+            cache_directory,
+            ram: SourceRamDeclaration {
+                address_space: declaration.address_space,
+                target,
+                declared_capacity: declaration
+                    .capacity
+                    .into_iter()
+                    .map(|range| PhysicalRamRange {
+                        source_pa: range.source_pa,
+                        bytes: range.bytes,
+                    })
+                    .collect(),
+                initialized,
+            },
+            thread,
+            system,
+            translation: RegisterValues {
+                sctlr_el1: values.sctlr_el1,
+                tcr_el1: values.tcr_el1,
+                ttbr0_el1: values.ttbr0_el1,
+                ttbr1_el1: values.ttbr1_el1,
+                mair_el1: values.mair_el1,
+            },
         },
-        thread,
-        system,
-        translation: RegisterValues {
-            sctlr_el1: values.sctlr_el1,
-            tcr_el1: values.tcr_el1,
-            ttbr0_el1: values.ttbr0_el1,
-            ttbr1_el1: values.ttbr1_el1,
-            mair_el1: values.mair_el1,
-        },
-    })
+        zeroed,
+    )
     .context("create actual owned software EL1 machine")?;
     let report = machine.run_to_shutdown(request)?;
     let translation = match report.translation {
@@ -187,13 +215,13 @@ pub(crate) fn run(
         .into_iter()
         .map(|range| serde_json::json!({"source_pa":range.source_pa,"bytes":range.bytes}))
         .collect();
-    let initialized_ram: Vec<_> = report.initialized_ram.into_iter().map(|extent|serde_json::json!({"source_pa":extent.range.source_pa,"bytes":extent.range.bytes,"readable":extent.permissions.readable,"writable":extent.permissions.writable,"executable":extent.permissions.executable,"sha256":extent.sha256})).collect();
+    let initialized_ram: Vec<_> = report.initialized_ram.into_iter().map(|extent|serde_json::json!({"source_pa":extent.range.source_pa,"bytes":extent.range.bytes,"readable":extent.permissions.readable,"writable":extent.permissions.writable,"executable":extent.permissions.executable,"sha256":extent.sha256,"zero_initialized":extent.zero_initialized})).collect();
     Ok(serde_json::json!({
         "kind":"owned-software-el1-diagnostic","profile":format!("{profile:?}"),"target_cpu":target.id(),
         "declaration_sha256":stela_core::sha256(&bytes),"source_inputs":source_inputs,
         "stop":report.stop,"pc":report.thread.pc.0,"state":super::register_json(&report.thread.registers),
         "system":format!("{:#?}",report.system),"translation":translation,"accounting":report.accounting,
-        "native_observation":report.native_observation,"memory_observation":report.memory_observation,"register_observation":report.register_observation,
+        "native_observation":report.native_observation,"memory_observation":report.memory_observation,"memory_write_observation":report.memory_write_observation,"register_observation":report.register_observation,"system_observation":report.system_observation,"platform_identification_sha256":report.platform_identification_sha256,
         "compiler_source_sha256":report.compiler_source_sha256,"ram_after":ram,"declared_capacity":declared_capacity,"initialized_ram":initialized_ram,
         "scope":"Fresh declared software PE and actual owned initialized RAM. Unsupported effects decline explicitly; this does not establish native hardware-state adoption, full OS boot or installer compatibility."
     }))

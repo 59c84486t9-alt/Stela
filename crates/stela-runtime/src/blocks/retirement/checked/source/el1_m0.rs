@@ -8,6 +8,18 @@ use stela_compiler::{
 
 impl BoundSource<'_> {
     pub(in crate::blocks::retirement::checked) fn el1_m0_intent(&self) -> anyhow::Result<Intent> {
+        if self.runtime.profile() == BlockProfile::El1PlatformV1 {
+            return match self.el1_platform_intent()? {
+                stela_compiler::block::el1_platform::Intent::Registers => Ok(Intent::Registers),
+                stela_compiler::block::el1_platform::Intent::LiteralRead64(read) => {
+                    Ok(Intent::LiteralRead64(read))
+                }
+                stela_compiler::block::el1_platform::Intent::System(_)
+                | stela_compiler::block::el1_platform::Intent::Write64Pair(_) => {
+                    anyhow::bail!("System carrier has no M0 read intent")
+                }
+            };
+        }
         self.recheck()?;
         anyhow::ensure!(
             self.runtime.profile() == BlockProfile::El1M0IntegerV1,
@@ -55,6 +67,11 @@ impl BoundSource<'_> {
             BlockProfile::El1DirectBranchV1 => {
                 self.direct_branch_target()?;
             }
+            BlockProfile::El1PlatformV1 => anyhow::ensure!(
+                self.el1_platform_intent()?
+                    == stela_compiler::block::el1_platform::Intent::Registers,
+                "EL1 register consumer cannot apply System or memory effects"
+            ),
             BlockProfile::El1M0IntegerV1 => anyhow::ensure!(
                 self.el1_m0_intent()? == Intent::Registers,
                 "EL1 register consumer cannot read memory"
@@ -62,5 +79,49 @@ impl BoundSource<'_> {
             _ => anyhow::bail!("actual source is not a typed EL1 register profile"),
         }
         Ok(())
+    }
+}
+
+impl BoundSource<'_> {
+    pub(in crate::blocks::retirement::checked) fn el1_platform_intent(
+        &self,
+    ) -> anyhow::Result<stela_compiler::block::el1_platform::Intent> {
+        self.recheck()?;
+        anyhow::ensure!(
+            self.runtime.profile() == BlockProfile::El1PlatformV1,
+            "source is not the actual mixed platform profile"
+        );
+        let plan = CompilationPlan::new(
+            self.source,
+            self.entry.entry(),
+            self.runtime.profile(),
+            self.runtime.target_cpu(),
+        )?;
+        anyhow::ensure!(
+            plan.source_bytes() == self.source.len()
+                && plan.memory_requirements() == self.requirements,
+            "actual mixed EL1 source/requirements differ"
+        );
+        plan.el1_platform_intent()
+            .ok_or_else(|| anyhow::anyhow!("mixed EL1 source intent absent"))
+    }
+    pub(in crate::blocks::retirement::checked) fn el1_carrier_intent(
+        &self,
+    ) -> anyhow::Result<Option<stela_compiler::block::SystemInstruction>> {
+        if self.runtime.profile() == BlockProfile::El1PlatformV1 {
+            anyhow::ensure!(
+                self.requirements.is_none(),
+                "effect-free native carrier cannot access memory"
+            );
+            return match self.el1_platform_intent()? {
+                stela_compiler::block::el1_platform::Intent::Registers => Ok(None),
+                stela_compiler::block::el1_platform::Intent::System(instruction) => {
+                    Ok(Some(instruction))
+                }
+                _ => anyhow::bail!("memory source is not an effect-free native carrier"),
+            };
+        }
+        self.el1_register_intent()?;
+        Ok(None)
     }
 }

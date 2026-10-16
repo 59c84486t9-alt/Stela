@@ -64,6 +64,7 @@ pub enum StateError {
     StackOwnership,
     StackSelectionLevel,
     UnavailableExceptionLevel(ExceptionLevel),
+    UnexpectedHigherElStorage,
     HigherEl(higher_el::InitializationError),
 }
 
@@ -274,6 +275,17 @@ impl SystemState {
         Ok(state)
     }
 
+    /// Storage qualification for an executable profile that declares EL2/EL3
+    /// absent. Zero-valued higher banks are still present capacity, and do not
+    /// become lower-only storage. This grants no source or PE authority.
+    pub(crate) fn check_lower_el_storage(&self) -> Result<(), StateError> {
+        if self.higher_el.is_some() {
+            Err(StateError::UnexpectedHigherElStorage)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn higher_el(&self) -> Option<&HigherElState> {
         self.higher_el.as_ref()
     }
@@ -404,6 +416,12 @@ impl SystemState {
             .select(self.active_stack_bank(), stack_bank(misc), registers)?;
         self.pstate_misc = misc;
         Ok(())
+    }
+
+    /// Store only an already authorized DAIF state effect. The executing owner
+    /// retains asynchronous arbitration and once-only PC settlement authority.
+    pub(crate) fn write_daif(&mut self, value: u64) {
+        self.pstate_misc = (self.pstate_misc & !DAIF_MASK) | (value & DAIF_MASK);
     }
 
     pub const fn el1_registers(&self) -> &El1Registers {

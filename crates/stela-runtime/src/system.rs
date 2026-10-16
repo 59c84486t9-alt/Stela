@@ -14,6 +14,7 @@ pub mod interrupt;
 pub mod process_memory;
 pub mod profile;
 pub mod pstate;
+pub mod registers;
 pub mod scalable_controls;
 pub mod state;
 pub mod timer;

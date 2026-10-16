@@ -230,6 +230,9 @@ fn validate_source(
     system: &SystemState,
     registers: &GuestState,
 ) -> Result<SourceState, PrepareError> {
+    system
+        .check_lower_el_storage()
+        .map_err(|_| PrepareError::UnsupportedScope)?;
     if profile.security != SecurityState::NonSecure || profile.el2_enabled || profile.el3_present {
         return Err(PrepareError::UnsupportedScope);
     }

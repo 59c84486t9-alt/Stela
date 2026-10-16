@@ -11,6 +11,7 @@ use crate::{
     memory::{
         domain::{
             m0_read::M0Read64Source,
+            m0_write::M0WriteSource,
             physical::{BoundPhysicalInstruction, ImmutableCodeBacking, PhysicalAddressSpace},
         },
         stage1,
@@ -135,7 +136,16 @@ impl<'run> InstalledM0SourceScope<'run> {
         let instruction = Decoder
             .lift(GuestAddress(pc), word)
             .map_err(|_| "installed M0 source decode unavailable")?;
-        if self.sources.compiler_profile() == stela_compiler::block::BlockProfile::El1M0IntegerV1 {
+        if self.sources.compiler_profile() == stela_compiler::block::BlockProfile::El1PlatformV1
+            && M0WriteSource::from_source(&instruction, word).is_ok()
+        {
+            return Ok(());
+        }
+        if matches!(
+            self.sources.compiler_profile(),
+            stela_compiler::block::BlockProfile::El1M0IntegerV1
+                | stela_compiler::block::BlockProfile::El1PlatformV1
+        ) {
             M0Read64Source::from_el1_integer_source(&instruction, word)
         } else {
             M0Read64Source::from_source(&instruction, word)
@@ -165,7 +175,7 @@ impl<'run> InstalledM0SourceScope<'run> {
                     "M0 source uses a different/unavailable outer execution loan",
                 )
             })?;
-        let intent = input.intent();
+
         // This is the ORIGINAL retained NativeActive outer object. The
         // physical reader must borrow it and must not mint a nested loan.
         let reached: BoundPhysicalInstruction = self.physical_space().fetch_m0_instruction(
@@ -173,10 +183,10 @@ impl<'run> InstalledM0SourceScope<'run> {
             owner,
             self,
             input.actual_system(),
-            intent.source_pc.0,
+            input.source_pc().0,
         )?;
-        if reached.raw_pc() != intent.source_pc.0
-            || reached.word() != intent.source_word
+        if reached.raw_pc() != input.source_pc().0
+            || reached.word() != input.source_word()
             || input.source_bytes() != reached.word().to_le_bytes()
         {
             return Err(FetchFailure::Unavailable(

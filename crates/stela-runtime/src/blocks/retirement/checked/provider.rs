@@ -3,6 +3,7 @@
 mod m0_owner;
 mod resources;
 pub(crate) use m0_owner::M0Owner;
+pub(super) use resources::M0ExecutionChecks;
 pub(crate) use resources::{El1ExecutionResources, M0ExecutionResources};
 
 use super::super::super::{checked_memory, complete_clock, complete_pauth_with_memory};

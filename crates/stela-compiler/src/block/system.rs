@@ -9,7 +9,7 @@
 use crate::{
     CompileError, GuestAddress,
     aarch64::{
-        system::{exception, synchronization},
+        system::{exception, registers, synchronization},
         tag_memory,
     },
 };
@@ -21,6 +21,8 @@ const INSTRUCTION_BYTES: u64 = std::mem::size_of::<u32>() as u64;
 pub enum SystemOperation {
     Exception(exception::Operation),
     TagMemory(tag_memory::Operand),
+    Register(registers::RegisterAccess),
+    PstateImmediate(registers::Encoding),
     SendEvent { local: bool },
 }
 
@@ -40,6 +42,8 @@ fn serialize_family<S: Serializer>(
     serializer.serialize_str(match operation {
         SystemOperation::Exception(_) => "exception",
         SystemOperation::TagMemory(_) => "tag_memory",
+        SystemOperation::Register(_) => "system_register",
+        SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
     })
 }
@@ -57,15 +61,21 @@ pub fn decode_system_instruction(
         Some(synchronization::Operation::SendEvent { local }) => Some(local),
         _ => None,
     };
-    let operation = match (exception::decode(word), tag_memory::decode(word), event) {
-        (Some(operation), None, None) => SystemOperation::Exception(operation),
-        (None, Some(operand), None) => SystemOperation::TagMemory(operand),
-        (None, None, Some(local)) => SystemOperation::SendEvent { local },
-        (None, None, None) => return Ok(None),
-        _ => {
-            return Err(CompileError("ambiguous system instruction family".into()));
-        }
+    let mut operations = [
+        exception::decode(word).map(SystemOperation::Exception),
+        tag_memory::decode(word).map(SystemOperation::TagMemory),
+        event.map(|local| SystemOperation::SendEvent { local }),
+        registers::decode(word).map(SystemOperation::Register),
+        registers::decode_pstate_immediate(word).map(SystemOperation::PstateImmediate),
+    ]
+    .into_iter()
+    .flatten();
+    let Some(operation) = operations.next() else {
+        return Ok(None);
     };
+    if operations.next().is_some() {
+        return Err(CompileError("ambiguous system instruction family".into()));
+    }
     let next_pc = GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
         CompileError("system continuation PC overflows guest address range".into())
     })?);

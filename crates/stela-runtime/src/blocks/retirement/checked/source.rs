@@ -218,6 +218,20 @@ impl<'code> BoundSource<'code> {
         let plan = CompilationPlan::new(source, pc, runtime.profile, runtime.target_cpu())?;
         let requirements = plan.memory_requirements();
         match runtime.profile {
+            BlockProfile::El1PlatformV1 => {
+                use stela_compiler::block::el1_platform::Intent;
+                match plan.el1_platform_intent() {
+                    Some(Intent::Registers | Intent::System(_)) => anyhow::ensure!(
+                        requirements.is_none(),
+                        "effect-free EL1 platform carrier unexpectedly requires memory"
+                    ),
+                    Some(Intent::LiteralRead64(_) | Intent::Write64Pair(_)) => anyhow::ensure!(
+                        requirements.is_some(),
+                        "EL1 platform memory intent requirements absent"
+                    ),
+                    None => anyhow::bail!("EL1 platform source plan intent absent"),
+                }
+            }
             BlockProfile::El1M0IntegerV1 => anyhow::ensure!(
                 plan.el1_m0_intent().is_some(),
                 "EL1 integer source plan intent absent"

@@ -61,3 +61,40 @@ fn legacy_entry_refuses_typed_el1_branch_before_body_or_pc_effect() {
     assert_eq!(thread.registers, GuestState::default());
     assert!(runtime.loaded.is_empty());
 }
+
+#[test]
+fn exact_platform_source_keeps_effect_free_and_memory_intent_requirements_distinct() {
+    use stela_compiler::block::el1_platform::Intent;
+    // Canonical branch, DAIFSet, LDR literal64 and STP X0,X1,[X2].
+    for (word, memory) in [
+        (B_PLUS8, false),
+        (0xd5034fdf, false),
+        (0x58000040, true),
+        (0xa9000440, true),
+    ] {
+        let cache = tempfile::tempdir().unwrap();
+        let mut runtime = BlockRuntime::new_with_profile(
+            73,
+            cache.path().to_owned(),
+            BlockProfile::El1PlatformV1,
+        );
+        runtime
+            .register_code(BASE, word.to_le_bytes().to_vec())
+            .unwrap();
+        let mut accounting = super::super::empty_accounting();
+        runtime.load(BASE, &mut accounting).unwrap();
+        let bound = BoundSource::new(&runtime, BASE).unwrap();
+        let intent = bound.el1_platform_intent().unwrap();
+        assert_eq!(
+            matches!(intent, Intent::LiteralRead64(_) | Intent::Write64Pair(_)),
+            memory
+        );
+        assert_eq!(bound.memory_requirements().is_ok(), memory);
+        assert_eq!(
+            bound.block.prepared.manifest.memory_requirements.is_some(),
+            memory
+        );
+        assert_eq!(accounting.blocks_executed, 0);
+        bound.recheck().unwrap();
+    }
+}

@@ -50,7 +50,7 @@ const XOR_EAX_EAX: &[u8] = &[0x31, 0xc0];
 /// before this adapter; constructed overlapping writeback operands decline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Operand {
-    profile: CheckedMemoryProfile,
+    profile: Profile,
     transfer: MemoryTransfer,
     bytes: u8,
     data: [Register; 2],
@@ -58,6 +58,12 @@ pub(crate) struct Operand {
     displacement: i32,
     mode: AddressMode,
     non_temporal: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    NormalWb(CheckedMemoryProfile),
+    M0DeviceWrite8Pair,
 }
 
 impl Operand {
@@ -74,7 +80,7 @@ impl Operand {
                 displacement,
                 mode,
             } => Self {
-                profile,
+                profile: Profile::NormalWb(profile),
                 transfer: *transfer,
                 bytes: *bytes,
                 data: *data,
@@ -88,7 +94,7 @@ impl Operand {
                     return None;
                 };
                 Self {
-                    profile,
+                    profile: Profile::NormalWb(profile),
                     transfer: if operand.load {
                         MemoryTransfer::Load {
                             signed: false,
@@ -110,6 +116,33 @@ impl Operand {
                 }
             }
             _ => return None,
+        };
+        operand.is_valid().then_some(operand)
+    }
+
+    /// Same staging/request emitter, distinct M0 Device requirements. SP and
+    /// non-temporal/scalar forms remain outside this producer's actual owner.
+    pub(crate) fn from_m0_write_pair(operation: &Operation) -> Option<Self> {
+        let Operation::MemoryPair {
+            transfer: MemoryTransfer::Store,
+            bytes: DOUBLEWORD_BYTES,
+            data,
+            base: Register::X(base),
+            displacement,
+            mode,
+        } = *operation
+        else {
+            return None;
+        };
+        let operand = Self {
+            profile: Profile::M0DeviceWrite8Pair,
+            transfer: MemoryTransfer::Store,
+            bytes: DOUBLEWORD_BYTES,
+            data,
+            base: Register::X(base),
+            displacement,
+            mode,
+            non_temporal: false,
         };
         operand.is_valid().then_some(operand)
     }
@@ -173,9 +206,22 @@ impl Operand {
 /// Disabled SP checks supply no alignment proof: every X pair requires CX16.
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     let required_flags = operand.flags();
+    if operand.profile == Profile::M0DeviceWrite8Pair {
+        return MemoryRequirements {
+            required_flags,
+            required_host_caps: 0,
+            required_profile: profile_requirements::M0_DEVICE_RAM_WRITE8_OR_PAIR,
+            required_sp_alignment: SpAlignmentRequirement::Any,
+            required_address_checks: Default::default(),
+            required_pointer_arithmetic: None,
+        };
+    }
+    let Profile::NormalWb(profile) = operand.profile else {
+        unreachable!("M0 returned above")
+    };
     MemoryRequirements {
         required_pointer_arithmetic: None,
-        required_address_checks: operand.profile.address_requirements(false),
+        required_address_checks: profile.address_requirements(false),
         required_flags,
         required_host_caps: if matches!(operand.transfer, MemoryTransfer::Load { .. }) {
             // Dynamic read parts can cross aligned8 within SCA16. The canonical
@@ -183,7 +229,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             host_caps::ATOMIC_LOAD16
         } else if operand.bytes == DOUBLEWORD_BYTES
             && (operand.base != Register::Sp
-                || operand.profile.sp_requirement() == SpAlignmentRequirement::Disabled
+                || profile.sp_requirement() == SpAlignmentRequirement::Disabled
                 || operand.mode == AddressMode::PostIndex
                 || operand.displacement % i32::from(DOUBLEWORD_PAIR_BYTES) == 0)
         {
@@ -198,7 +244,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
                 0
             },
         required_sp_alignment: if operand.base == Register::Sp {
-            operand.profile.sp_requirement()
+            profile.sp_requirement()
         } else {
             SpAlignmentRequirement::Any
         },
@@ -242,7 +288,9 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
     code.extend(SUB_RSP_IMM8);
     code.push(STACK_BYTES as u8);
     memory::begin(code);
-    let sp_failure = if operand.profile.sp_requirement() == SpAlignmentRequirement::Enabled {
+    let sp_failure = if matches!(operand.profile, Profile::NormalWb(profile)
+        if profile.sp_requirement() == SpAlignmentRequirement::Enabled)
+    {
         address::check_sp(code, operand.base, pc)
     } else {
         None
@@ -263,7 +311,14 @@ pub(crate) fn emit_context(code: &mut Vec<u8>, operand: &Operand, pc: u64) {
         operand.base,
         operand.displacement,
         operand.mode,
-        operand.profile.address_checks(false),
+        match operand.profile {
+            Profile::NormalWb(profile) => profile.address_checks(false),
+            // Actual fixed EL1 software profile declares CPA absent. This
+            // branch never supplies checked-process or CPA-enabled admission.
+            Profile::M0DeviceWrite8Pair => {
+                crate::context::memory::address::AddressAddChecks::Disabled
+            }
+        },
     );
     if operand.mode != AddressMode::Offset {
         code.extend(MOV_RSP_DISP8_RDX);

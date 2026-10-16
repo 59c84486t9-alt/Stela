@@ -48424,6 +48424,7 @@
     "crates/stela-compiler/src/block.rs",
     "crates/stela-compiler/src/block/memory.rs",
     "crates/stela-compiler/src/block/el1_m0.rs",
+    "crates/stela-compiler/src/block/el1_platform.rs",
     "crates/stela-compiler/src/x86_64/block/el1_m0.rs",
     "crates/stela-compiler/src/block/memory/address.rs",
     "crates/stela-compiler/src/block/memory/address/tests.rs",

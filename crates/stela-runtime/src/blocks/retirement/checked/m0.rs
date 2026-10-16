@@ -12,6 +12,7 @@ use crate::{
     memory::domain::{
         DataPolicy, MemoryExecutionLoan, MemoryThread,
         m0_read::{M0RamReadPlatformError, M0Read64Intent, M0Read64Source},
+        m0_write::{M0WriteIntent, M0WriteSource},
         physical::BoundPhysicalInstruction,
     },
     system::{
@@ -27,6 +28,8 @@ use stela_compiler::{
 };
 
 mod callback;
+mod write;
+pub(super) use write::M0WriteObservation;
 mod session;
 use session::{M0NativeReport, M0SessionFailure, NativeM0Session};
 
@@ -71,8 +74,63 @@ pub(crate) struct M0SourceInput<'source, 'native> {
     outer: &'native MemoryExecutionLoan,
     thread: &'native dyn M0ThreadCurrency,
     installed: &'native InstalledM0SourceScope<'native>,
-    intent: M0Read64Intent,
+    intent: M0SourceIntent,
     pstate: u64,
+}
+
+#[derive(Clone, Copy)]
+enum M0SourceIntent {
+    Read(M0Read64Intent),
+    Write(M0WriteIntent),
+}
+
+/// Same original source/currency input, restricted to an actual write descriptor.
+/// Only checked Active may construct this with the sealed ConsumerKey. No CPU,
+/// source, outer or thread reference is replaced by copied metadata.
+pub(crate) struct M0WriteSourceInput<'source, 'native> {
+    original: M0SourceInput<'source, 'native>,
+}
+impl<'source, 'native> M0WriteSourceInput<'source, 'native> {
+    pub(in crate::blocks::retirement::checked) fn new(
+        _: &ConsumerKey,
+        bound: &'source BoundSource<'source>,
+        system: &'native SystemState,
+        outer: &'native MemoryExecutionLoan,
+        thread: &'native dyn M0ThreadCurrency,
+        installed: &'native InstalledM0SourceScope<'native>,
+        actual_registers: &GuestState,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            bound.source.len() == INSTRUCTION_BYTES,
+            "M0 write input source extent differs"
+        );
+        let word = u32::from_le_bytes(bound.source.try_into()?);
+        let instruction = Decoder
+            .lift(bound.entry.entry(), word)
+            .map_err(|error| anyhow::anyhow!("M0 write canonical decode: {error:?}"))?;
+        let source = M0WriteSource::from_source(&instruction, word)
+            .map_err(|error| anyhow::anyhow!("M0 write canonical shape: {error:?}"))?;
+        let original = M0SourceInput {
+            bound,
+            system,
+            outer,
+            thread,
+            installed,
+            intent: M0SourceIntent::Write(source.intent(actual_registers)),
+            pstate: system.pstate(actual_registers),
+        };
+        original.validate_source_current()?;
+        Ok(Self { original })
+    }
+    pub(crate) fn original(&self) -> &M0SourceInput<'source, 'native> {
+        &self.original
+    }
+    pub(crate) fn intent(&self) -> M0WriteIntent {
+        match self.original.intent {
+            M0SourceIntent::Write(intent) => intent,
+            M0SourceIntent::Read(_) => unreachable!("private write-only constructor"),
+        }
+    }
 }
 
 impl M0SourceInput<'_, '_> {
@@ -82,8 +140,37 @@ impl M0SourceInput<'_, '_> {
     pub(crate) fn outer_execution(&self) -> &MemoryExecutionLoan {
         self.outer
     }
-    pub(crate) fn intent(&self) -> M0Read64Intent {
-        self.intent
+    #[cfg(test)]
+    pub(crate) fn source_generation(&self) -> u64 {
+        self.bound.entry.generation()
+    }
+    #[cfg(test)]
+    pub(crate) fn actual_address_space(&self) -> Option<u64> {
+        self.thread.actual_address_space()
+    }
+    pub(crate) fn read_intent(&self) -> Option<M0Read64Intent> {
+        match self.intent {
+            M0SourceIntent::Read(intent) => Some(intent),
+            M0SourceIntent::Write(_) => None,
+        }
+    }
+    pub(crate) fn source_pc(&self) -> GuestAddress {
+        match self.intent {
+            M0SourceIntent::Read(intent) => intent.source_pc,
+            M0SourceIntent::Write(intent) => intent.source_pc,
+        }
+    }
+    pub(crate) fn source_word(&self) -> u32 {
+        match self.intent {
+            M0SourceIntent::Read(intent) => intent.source_word,
+            M0SourceIntent::Write(intent) => intent.source_word,
+        }
+    }
+    fn next_pc(&self) -> GuestAddress {
+        match self.intent {
+            M0SourceIntent::Read(intent) => intent.next_pc,
+            M0SourceIntent::Write(intent) => intent.next_pc,
+        }
     }
     pub(crate) fn installed_source_scope(&self) -> &InstalledM0SourceScope<'_> {
         self.installed
@@ -123,8 +210,8 @@ impl M0SourceInput<'_, '_> {
             "M0 installed scope is not the original input borrow"
         );
         anyhow::ensure!(
-            reached.raw_pc() == self.intent.source_pc.0
-                && reached.word() == self.intent.source_word
+            reached.raw_pc() == self.source_pc().0
+                && reached.word() == self.source_word()
                 && self.bound.source == reached.word().to_le_bytes(),
             "M0 reached original source differs"
         );
@@ -155,29 +242,45 @@ impl M0SourceInput<'_, '_> {
         );
         let word = u32::from_le_bytes(self.bound.source.try_into()?);
         anyhow::ensure!(
-            word == self.intent.source_word && self.bound.entry.entry() == self.intent.source_pc,
+            word == self.source_word() && self.bound.entry.entry() == self.source_pc(),
             "M0 source input identity differs"
         );
         let instruction = Decoder
-            .lift(self.intent.source_pc, word)
+            .lift(self.source_pc(), word)
             .map_err(|reason| anyhow::anyhow!("M0 source decode: {reason:?}"))?;
-        let source = if self.bound.runtime.profile()
-            == stela_compiler::block::BlockProfile::El1M0IntegerV1
-        {
-            M0Read64Source::from_el1_integer_source(&instruction, word)
-        } else {
-            M0Read64Source::from_source(&instruction, word)
-        }
-        .map_err(|failure| anyhow::anyhow!("M0 source input shape: {failure:?}"))?;
+        let requirements = match self.intent {
+            M0SourceIntent::Read(_) => {
+                let source = if matches!(
+                    self.bound.runtime.profile(),
+                    stela_compiler::block::BlockProfile::El1M0IntegerV1
+                        | stela_compiler::block::BlockProfile::El1PlatformV1
+                ) {
+                    M0Read64Source::from_el1_integer_source(&instruction, word)
+                } else {
+                    M0Read64Source::from_source(&instruction, word)
+                }
+                .map_err(|failure| anyhow::anyhow!("M0 read source shape: {failure:?}"))?;
+                source.requirements()
+            }
+            M0SourceIntent::Write(_) => {
+                anyhow::ensure!(
+                    self.bound.runtime.profile()
+                        == stela_compiler::block::BlockProfile::El1PlatformV1,
+                    "M0 write source requires the immutable platform cohort"
+                );
+                M0WriteSource::from_source(&instruction, word)
+                    .map_err(|failure| anyhow::anyhow!("M0 write source shape: {failure:?}"))?
+                    .requirements()
+            }
+        };
         anyhow::ensure!(
-            self.bound.memory_requirements()? == source.requirements(),
-            "M0 source input requirements differ"
+            self.bound.memory_requirements()? == requirements,
+            "M0 source requirements differ"
         );
         anyhow::ensure!(
-            self.intent.next_pc.0
+            self.next_pc().0
                 == self
-                    .intent
-                    .source_pc
+                    .source_pc()
                     .0
                     .checked_add(INSTRUCTION_BYTES as u64)
                     .ok_or_else(|| anyhow::anyhow!("M0 source input PC overflow"))?,
@@ -309,13 +412,16 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         let instruction = Decoder
             .lift(bound.entry.entry(), word)
             .map_err(|reason| anyhow::anyhow!("M0 source decode: {reason:?}"))?;
-        let source =
-            if bound.runtime.profile() == stela_compiler::block::BlockProfile::El1M0IntegerV1 {
-                M0Read64Source::from_el1_integer_source(&instruction, word)
-            } else {
-                M0Read64Source::from_source(&instruction, word)
-            }
-            .map_err(|failure| anyhow::anyhow!("M0 source shape: {failure:?}"))?;
+        let source = if matches!(
+            bound.runtime.profile(),
+            stela_compiler::block::BlockProfile::El1M0IntegerV1
+                | stela_compiler::block::BlockProfile::El1PlatformV1
+        ) {
+            M0Read64Source::from_el1_integer_source(&instruction, word)
+        } else {
+            M0Read64Source::from_source(&instruction, word)
+        }
+        .map_err(|failure| anyhow::anyhow!("M0 source shape: {failure:?}"))?;
         anyhow::ensure!(
             bound.memory_requirements()? == source.requirements(),
             "M0 requirements differ"
@@ -327,6 +433,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         let result = {
             let provider::M0ExecutionResources {
                 sources,
+                platform: _,
                 controls,
                 memory,
                 context,
@@ -350,7 +457,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 outer,
                 thread: memory,
                 installed: &installed,
-                intent,
+                intent: M0SourceIntent::Read(intent),
                 pstate: self.pe.system.pstate(&self.pe.thread.registers),
             };
             input.validate_source_current()?;

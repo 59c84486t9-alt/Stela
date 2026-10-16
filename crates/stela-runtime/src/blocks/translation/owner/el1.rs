@@ -40,7 +40,9 @@ impl InstalledEl1Owner {
         ensure!(
             matches!(
                 runtime.profile(),
-                BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
+                BlockProfile::El1DirectBranchV1
+                    | BlockProfile::El1M0IntegerV1
+                    | BlockProfile::El1PlatformV1
             ),
             "fresh EL1 source owner requires actual typed EL1 direct-B compiler profile"
         );

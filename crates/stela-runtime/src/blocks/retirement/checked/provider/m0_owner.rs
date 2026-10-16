@@ -30,6 +30,7 @@ enum InstalledCohort {
     M0Read64,
     El1DirectBranch,
     El1Integer,
+    El1Platform,
 }
 
 pub(crate) struct M0Owner<'pe> {
@@ -42,6 +43,7 @@ pub(crate) struct M0Owner<'pe> {
     endpoint: &'pe EventEndpoint,
     context: &'pe mut ExecutionContext,
     pending: NoAsyncSources<'pe>,
+    platform: Option<&'pe super::super::el1_system::El1PlatformControls>,
 }
 
 impl<'pe> M0Owner<'pe> {
@@ -72,6 +74,7 @@ impl<'pe> M0Owner<'pe> {
             endpoint,
             context,
             pending,
+            platform: None,
         };
         owner.check_resources()?;
         Ok(owner)
@@ -103,6 +106,7 @@ impl<'pe> M0Owner<'pe> {
             endpoint,
             context,
             pending,
+            platform: None,
         };
         owner.check_resources()?;
         Ok(owner)
@@ -134,6 +138,40 @@ impl<'pe> M0Owner<'pe> {
             endpoint,
             context,
             pending,
+            platform: None,
+        };
+        owner.check_resources()?;
+        Ok(owner)
+    }
+
+    /// # Safety
+    /// Same once-only ORIGINAL fresh machine contract as fresh_software. Caller
+    /// must consume genuine InstalledEl1Owner resources and create its sole
+    /// SystemExecutionOwner once. This is the SAME sealed backend/PE contract,
+    /// not an M0Read64 relabel or caller-selected mode/authority flag.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::blocks::retirement) unsafe fn fresh_el1_platform(
+        address_space: u64,
+        sources: &'pe InstalledEl1Sources,
+        controls: &'pe TranslationControls,
+        execution: &'pe ProcessEntryControls,
+        memory: &'pe mut MemoryThread<MemoryControls>,
+        endpoint: &'pe EventEndpoint,
+        context: &'pe mut ExecutionContext,
+        pending: NoAsyncSources<'pe>,
+        platform: &'pe super::super::el1_system::El1PlatformControls,
+    ) -> anyhow::Result<Self> {
+        let owner = Self {
+            cohort: InstalledCohort::El1Platform,
+            address_space,
+            sources,
+            controls,
+            execution,
+            memory,
+            endpoint,
+            context,
+            pending,
+            platform: Some(platform),
         };
         owner.check_resources()?;
         Ok(owner)
@@ -155,11 +193,16 @@ impl<'pe> M0Owner<'pe> {
         self.memory
             .check_event_endpoint(self.endpoint)
             .map_err(|error| anyhow::anyhow!("actual M0 PE monitor: {error:?}"))?;
+        if let Some(platform) = self.platform {
+            platform.check()?;
+        }
         match self.cohort {
             InstalledCohort::M0Read64 => self
                 .controls
                 .validate_installed_m0_source(&self.sources.source_scope()),
-            InstalledCohort::El1DirectBranch | InstalledCohort::El1Integer => self
+            InstalledCohort::El1DirectBranch
+            | InstalledCohort::El1Integer
+            | InstalledCohort::El1Platform => self
                 .controls
                 .validate_installed_el1_source(&self.sources.el1_scope()),
         }
@@ -169,6 +212,18 @@ impl<'pe> M0Owner<'pe> {
 
 impl sealed::Concrete for M0Owner<'_> {}
 impl Owner for M0Owner<'_> {
+    fn supports_profile(&self, profile: BlockProfile) -> bool {
+        profile
+            == match self.cohort {
+                InstalledCohort::M0Read64 => {
+                    BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged)
+                }
+                InstalledCohort::El1DirectBranch => BlockProfile::El1DirectBranchV1,
+                InstalledCohort::El1Integer => BlockProfile::El1M0IntegerV1,
+                InstalledCohort::El1Platform => BlockProfile::El1PlatformV1,
+            }
+    }
+
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan> {
         self.memory
             .execution_loan()
@@ -182,12 +237,22 @@ impl Owner for M0Owner<'_> {
         pc: stela_compiler::GuestAddress,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
-        if self.cohort != InstalledCohort::El1Integer {
+        system
+            .check_lower_el_storage()
+            .map_err(|error| anyhow::anyhow!("installed lower-EL source storage: {error:?}"))?;
+        if !matches!(
+            self.cohort,
+            InstalledCohort::El1Integer | InstalledCohort::El1Platform
+        ) {
             return Ok(());
         }
         self.check_resources()?;
         anyhow::ensure!(
-            runtime.profile() == BlockProfile::El1M0IntegerV1,
+            runtime.profile()
+                == match self.cohort {
+                    InstalledCohort::El1Platform => BlockProfile::El1PlatformV1,
+                    _ => BlockProfile::El1M0IntegerV1,
+                },
             "installed integer runtime differs"
         );
         let scope = self.sources.el1_scope();
@@ -206,6 +271,9 @@ impl Owner for M0Owner<'_> {
         _registers: &mut GuestState,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
+        system
+            .check_lower_el_storage()
+            .map_err(|error| anyhow::anyhow!("actual M0 lower-EL storage: {error:?}"))?;
         // This declared base EL1 profile has no LR/PACM lifecycle. Recheck the
         // actual original storage before native entry, including zero PACM.
         self.execution.check_snapshot(None, system)?;
@@ -221,6 +289,7 @@ impl Owner for M0Owner<'_> {
                         BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged),
                     InstalledCohort::El1DirectBranch => BlockProfile::El1DirectBranchV1,
                     InstalledCohort::El1Integer => BlockProfile::El1M0IntegerV1,
+                    InstalledCohort::El1Platform => BlockProfile::El1PlatformV1,
                 },
             "M0 backend requires actual staged M0 source profile"
         );
@@ -238,6 +307,9 @@ impl Owner for M0Owner<'_> {
             InstalledCohort::El1DirectBranch => {
                 bound.direct_branch_target()?;
             }
+            InstalledCohort::El1Platform => {
+                bound.el1_platform_intent()?;
+            }
         }
         // Actual installed fetch and current bank translation require the opaque
         // input containing the EXACT outer object. Active mints it after source
@@ -249,13 +321,16 @@ impl Owner for M0Owner<'_> {
         anyhow::ensure!(
             matches!(
                 self.cohort,
-                InstalledCohort::M0Read64 | InstalledCohort::El1Integer
+                InstalledCohort::M0Read64
+                    | InstalledCohort::El1Integer
+                    | InstalledCohort::El1Platform
             ),
             "branch cohort cannot lend M0 data resources"
         );
         self.check_resources()?;
         Ok(M0ExecutionResources {
             sources: self.sources,
+            platform: self.platform,
             controls: self.controls,
             memory: &*self.memory,
             context: &mut *self.context,
@@ -273,13 +348,16 @@ impl Owner for M0Owner<'_> {
         anyhow::ensure!(
             matches!(
                 self.cohort,
-                InstalledCohort::El1DirectBranch | InstalledCohort::El1Integer
+                InstalledCohort::El1DirectBranch
+                    | InstalledCohort::El1Integer
+                    | InstalledCohort::El1Platform
             ),
             "M0 data cohort cannot lend branch resources"
         );
         self.check_resources()?;
         Ok(El1ExecutionResources {
             sources: self.sources,
+            platform: self.platform,
             controls: self.controls,
             memory: &*self.memory,
             context: &mut *self.context,

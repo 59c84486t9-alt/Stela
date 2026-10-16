@@ -17,6 +17,9 @@ use stela_compiler::{
 };
 
 pub(super) fn check_entry(state: &SystemState) -> Result<(), &'static str> {
+    state
+        .check_lower_el_storage()
+        .map_err(|_| "installed lower-EL profile does not own higher-EL storage")?;
     if state.current_el() != ExceptionLevel::El1 {
         return Err("control-only execution requires actual EL1");
     }

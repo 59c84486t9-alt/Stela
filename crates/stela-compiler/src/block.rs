@@ -15,6 +15,7 @@ use crate::{
 use serde::Serialize;
 
 pub mod el1_m0;
+pub mod el1_platform;
 pub mod loop_budget;
 pub mod memory;
 pub mod pauth_lr;
@@ -52,6 +53,10 @@ pub const CLOCK_THREAD_BLOCK_ABI: &str =
 /// Restricted context-independent prefixes and checked System runtime exits.
 /// This identifies a service boundary, not CPU feature availability.
 pub const SYSTEM_BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-system-v1";
+pub const SYSTEM_REGISTER_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v2-block-exit-system-registers-v1";
+pub const EL1_PLATFORM_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v1";
 
 /// Exactly one ordinary B immediate. The distinct ABI identifies only the
 /// source/body shape; actual EL1/control/source/PE ownership belongs to entry.
@@ -71,11 +76,13 @@ pub enum BlockProfile {
     OrdinaryResidentV1,
     El1DirectBranchV1,
     El1M0IntegerV1,
+    El1PlatformV1,
     CheckedMemory(CheckedMemoryProfile),
     /// Checked memory plus the existing serialized PAC/clock/thread helpers.
     /// The immutable ABI keeps every cache entry distinct from direct RAM.
     CheckedMemoryPauthClockThread(CheckedMemoryProfile),
     SystemV1,
+    SystemRegistersV1,
     AppleArm64eSoftwarePauthV1,
     AppleArm64eSoftwarePauthClockV1,
     DarwinArm64ThreadV1,
@@ -90,9 +97,11 @@ impl BlockProfile {
             Self::OrdinaryResidentV1 => loop_budget::RESIDENT_BLOCK_ABI,
             Self::El1DirectBranchV1 => EL1_DIRECT_BRANCH_BLOCK_ABI,
             Self::El1M0IntegerV1 => EL1_M0_INTEGER_BLOCK_ABI,
+            Self::El1PlatformV1 => EL1_PLATFORM_BLOCK_ABI,
             Self::CheckedMemory(profile) => profile.abi(),
             Self::CheckedMemoryPauthClockThread(profile) => profile.process_helpers_abi(),
             Self::SystemV1 => SYSTEM_BLOCK_ABI,
+            Self::SystemRegistersV1 => SYSTEM_REGISTER_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
             Self::DarwinArm64ThreadV1 => THREAD_BLOCK_ABI,
@@ -119,7 +128,14 @@ impl BlockProfile {
     }
 
     pub const fn supports_system(self) -> bool {
-        matches!(self, Self::SystemV1)
+        matches!(
+            self,
+            Self::SystemV1 | Self::SystemRegistersV1 | Self::El1PlatformV1
+        )
+    }
+
+    pub const fn supports_system_registers(self) -> bool {
+        matches!(self, Self::SystemRegistersV1 | Self::El1PlatformV1)
     }
 
     pub const fn supports_pointer_authentication(self) -> bool {
@@ -716,7 +732,10 @@ pub fn analyze_with_profile(
             system_instruction = Some(*value);
             if matches!(
                 value.operation,
-                system::SystemOperation::TagMemory(_) | system::SystemOperation::SendEvent { .. }
+                system::SystemOperation::TagMemory(_)
+                    | system::SystemOperation::SendEvent { .. }
+                    | system::SystemOperation::Register(_)
+                    | system::SystemOperation::PstateImmediate(_)
             ) {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }
@@ -829,7 +848,24 @@ fn parse(
                     pc,
                     detail: error.0,
                 })?
+            && (profile.supports_system_registers()
+                || !matches!(
+                    decoded.operation,
+                    system::SystemOperation::Register(_)
+                        | system::SystemOperation::PstateImmediate(_)
+                ))
         {
+            if profile == BlockProfile::El1PlatformV1 {
+                el1_platform::validate_system(decoded).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?;
+                if !instructions.is_empty() {
+                    source_bytes -= size_of::<u32>();
+                    next_pc = pc;
+                    break;
+                }
+            }
             terminal = Some((pc, Terminator::System(decoded)));
             break;
         }
@@ -875,6 +911,12 @@ fn parse(
                     detail: error.0,
                 })?;
             }
+            if profile == BlockProfile::El1PlatformV1 {
+                el1_platform::validate_terminal(&decoded).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?;
+            }
             terminal = Some((pc, decoded));
             break;
         }
@@ -882,6 +924,25 @@ fn parse(
             pc,
             detail: format!("unsupported ARM64 semantics: {error:?}"),
         })?;
+        if profile == BlockProfile::El1PlatformV1 {
+            el1_platform::validate_operation(&instruction.operation).map_err(|error| {
+                BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                }
+            })?;
+            if matches!(instruction.operation, Operation::Literal(_))
+                || el1_platform::Write64Pair::from_instruction(&instruction).is_some()
+            {
+                if !instructions.is_empty() {
+                    source_bytes -= size_of::<u32>();
+                    next_pc = pc;
+                } else {
+                    instructions.push(instruction);
+                }
+                break;
+            }
+        }
         if profile == BlockProfile::El1M0IntegerV1 {
             el1_m0::validate_operation(&instruction.operation).map_err(|error| {
                 BlockAnalysisError {
@@ -901,7 +962,7 @@ fn parse(
                 break;
             }
         }
-        if profile.checked_memory().is_some()
+        if (profile.checked_memory().is_some() || profile == BlockProfile::El1PlatformV1)
             && instruction.operation == Operation::Nop
             && word != NOP_ENCODING
         {
@@ -996,6 +1057,7 @@ pub struct CompilationPlan {
     parsed: ParsedBlock,
     checked: Option<memory::CheckedPlan>,
     el1_m0: Option<el1_m0::Plan>,
+    el1_platform: Option<el1_platform::Plan>,
     target: crate::TargetCpu,
     profile: BlockProfile,
     resident: Option<crate::x86_64::block::ResidentLoopPlan>,
@@ -1041,10 +1103,14 @@ impl CompilationPlan {
         } else {
             None
         };
+        let el1_platform = (profile == BlockProfile::El1PlatformV1)
+            .then(|| el1_platform::Plan::new(&parsed))
+            .transpose()?;
         Ok(Self {
             parsed,
             checked,
             el1_m0,
+            el1_platform,
             target,
             profile,
             resident,
@@ -1074,6 +1140,9 @@ impl CompilationPlan {
         self.parsed.source_bytes
     }
     pub fn memory_requirements(&self) -> Option<crate::context::memory::MemoryRequirements> {
+        if let Some(plan) = &self.el1_platform {
+            return plan.requirements();
+        }
         if let Some(plan) = &self.el1_m0 {
             return plan.requirements();
         }
@@ -1083,8 +1152,13 @@ impl CompilationPlan {
     pub fn el1_m0_intent(&self) -> Option<el1_m0::Intent> {
         self.el1_m0.as_ref().map(el1_m0::Plan::intent)
     }
+    pub fn el1_platform_intent(&self) -> Option<el1_platform::Intent> {
+        self.el1_platform.as_ref().map(el1_platform::Plan::intent)
+    }
     pub fn compile(self) -> Result<CompiledBlock, CompileError> {
-        let native = if let Some(plan) = self.el1_m0 {
+        let native = if let Some(plan) = self.el1_platform {
+            plan.emit(self.target)?
+        } else if let Some(plan) = self.el1_m0 {
             plan.emit(self.target)?
         } else if let Some(checked) = self.checked {
             checked.emit(

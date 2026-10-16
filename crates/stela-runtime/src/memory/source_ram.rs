@@ -1,5 +1,7 @@
 //! Fresh loader-owned RAM with explicit source-physical placements.
-//! Capacity is descriptive; only supplied initialized extents acquire backing.
+//! Capacity is descriptive; only explicitly initialized/zeroed extents acquire backing.
+#[cfg(test)]
+use super::backing::AccessKind;
 use super::{
     MAX_IMAGE_MEMORY_BYTES,
     backing::{AccessError, AccessPermissions, MemoryBacking, MemoryView},
@@ -30,6 +32,63 @@ pub struct OwnedRamExtent {
     pub source_pa: u64,
     pub bytes: Vec<u8>,
     pub permissions: SourceRamPermissions,
+}
+
+/// Explicit initial zero contents, never an implicit assignment of capacity.
+/// Executable source must supply original bytes through `OwnedRamExtent`.
+pub struct ZeroedRamExtent {
+    pub source_pa: u64,
+    pub bytes: u64,
+    pub permissions: SourceRamPermissions,
+}
+
+enum RamInitial {
+    Bytes(Vec<u8>),
+    Zeroed(usize),
+}
+
+struct RamExtent {
+    source_pa: u64,
+    initial: RamInitial,
+    permissions: SourceRamPermissions,
+}
+
+impl RamExtent {
+    fn bytes(&self) -> usize {
+        match &self.initial {
+            RamInitial::Bytes(bytes) => bytes.len(),
+            RamInitial::Zeroed(bytes) => *bytes,
+        }
+    }
+
+    fn initializer(&self) -> &[u8] {
+        match &self.initial {
+            RamInitial::Bytes(bytes) => bytes,
+            // Fresh anonymous storage supplies all remaining zeros. This is
+            // explicit Zeroed metadata, not a sentinel in an original image.
+            RamInitial::Zeroed(_) => &[0],
+        }
+    }
+
+    fn zero_initialized(&self) -> bool {
+        matches!(&self.initial, RamInitial::Zeroed(_))
+    }
+
+    fn initial_hash(&self, storage: &NativeStorage, leading: usize) -> String {
+        match &self.initial {
+            RamInitial::Bytes(bytes) => stela_core::sha256(bytes),
+            RamInitial::Zeroed(bytes) => {
+                // SAFETY: this sole factory still owns fresh anonymous zero
+                // storage before any domain/PE or writer is published. The
+                // validated logical range is readable and fits this retained
+                // allocation. The temporary reference cannot escape hashing.
+                let initial = unsafe {
+                    std::slice::from_raw_parts(storage.primary_base().as_ptr().add(leading), *bytes)
+                };
+                stela_core::sha256(initial)
+            }
+        }
+    }
 }
 
 pub struct SourceRamDeclaration {
@@ -82,6 +141,7 @@ pub(crate) struct InitializedRamLayout {
     pub range: PhysicalRamRange,
     pub permissions: SourceRamPermissions,
     pub source_sha256: String,
+    pub zero_initialized: bool,
 }
 
 #[derive(Debug)]
@@ -156,17 +216,28 @@ fn end(range: PhysicalRamRange) -> Result<u64, SourceRamBuildError> {
 
 /// Create the sole machine/domain from initialized owned bytes, before any PE.
 /// Host addresses are OS-selected and never interpreted as source PAs.
+#[cfg(test)]
 pub(crate) fn materialize_source_ram(
     declaration: SourceRamDeclaration,
     config: SourceRamSystemConfig,
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
+    materialize_source_ram_with_zeroed(declaration, Vec::new(), config)
+}
+
+/// Extend the same sole materialization with explicit zero-initialized RAM.
+/// Validate the complete mixed set before allocating any native storage.
+pub(crate) fn materialize_source_ram_with_zeroed(
+    declaration: SourceRamDeclaration,
+    zeroed: Vec<ZeroedRamExtent>,
+    config: SourceRamSystemConfig,
+) -> Result<MaterializedSourceRam, SourceRamBuildError> {
     #[cfg(test)]
     {
-        materialize_source_ram_impl(declaration, config, &[])
+        materialize_source_ram_impl(declaration, zeroed, config, &[])
     }
     #[cfg(not(test))]
     {
-        materialize_source_ram_impl(declaration, config)
+        materialize_source_ram_impl(declaration, zeroed, config)
     }
 }
 
@@ -178,19 +249,30 @@ pub(crate) fn materialize_source_ram_with_test_aliases(
     config: SourceRamSystemConfig,
     aliases: &[SourceRamTestAlias],
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-    materialize_source_ram_impl(declaration, config, aliases)
+    materialize_source_ram_impl(declaration, Vec::new(), config, aliases)
+}
+
+#[cfg(test)]
+pub(crate) fn materialize_source_ram_with_zeroed_test_aliases(
+    declaration: SourceRamDeclaration,
+    zeroed: Vec<ZeroedRamExtent>,
+    config: SourceRamSystemConfig,
+    aliases: &[SourceRamTestAlias],
+) -> Result<MaterializedSourceRam, SourceRamBuildError> {
+    materialize_source_ram_impl(declaration, zeroed, config, aliases)
 }
 
 fn materialize_source_ram_impl(
     mut declaration: SourceRamDeclaration,
+    zeroed: Vec<ZeroedRamExtent>,
     config: SourceRamSystemConfig,
     #[cfg(test)] aliases: &[SourceRamTestAlias],
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
     use SourceRamBuildError as E;
     if declaration.declared_capacity.is_empty()
-        || declaration.initialized.is_empty()
+        || declaration.initialized.is_empty() && zeroed.is_empty()
         || declaration.declared_capacity.len() > MAX_SOURCE_RAM_EXTENTS
-        || declaration.initialized.len() > MAX_SOURCE_RAM_EXTENTS
+        || declaration.initialized.len().saturating_add(zeroed.len()) > MAX_SOURCE_RAM_EXTENTS
         || config.reservation_stripe_count == 0
         || config.reservation_stripe_count > MAX_SOURCE_RAM_STRIPES
     {
@@ -217,17 +299,37 @@ fn materialize_source_ram_impl(
         }
         previous = Some(limit);
     }
-    declaration
-        .initialized
-        .sort_unstable_by_key(|extent| extent.source_pa);
-    let mut recipes = Vec::with_capacity(declaration.initialized.len());
+    let mut extents: Vec<_> = std::mem::take(&mut declaration.initialized)
+        .into_iter()
+        .map(|extent| RamExtent {
+            source_pa: extent.source_pa,
+            initial: RamInitial::Bytes(extent.bytes),
+            permissions: extent.permissions,
+        })
+        .collect();
+    for extent in zeroed {
+        if extent.permissions.executable {
+            return Err(E::Declaration(
+                "zero-initialized RAM cannot be executable source",
+            ));
+        }
+        extents.push(RamExtent {
+            source_pa: extent.source_pa,
+            initial: RamInitial::Zeroed(
+                usize::try_from(extent.bytes).map_err(|_| E::AllocationLimit)?,
+            ),
+            permissions: extent.permissions,
+        });
+    }
+    extents.sort_unstable_by_key(|extent| extent.source_pa);
+    let mut recipes = Vec::with_capacity(extents.len());
     let mut allocated = 0_usize;
     previous = None;
     // Every fallible declaration/budget check precedes actual RAM allocation.
-    for extent in &declaration.initialized {
+    for extent in &extents {
         let range = PhysicalRamRange {
             source_pa: extent.source_pa,
-            bytes: extent.bytes.len() as u64,
+            bytes: extent.bytes() as u64,
         };
         let limit = end(range)?;
         if previous.is_some_and(|limit| limit > range.source_pa) {
@@ -249,7 +351,7 @@ fn materialize_source_ram_impl(
         // Preserve PA/host congruence without equating their address spaces.
         let leading = (extent.source_pa & (page as u64 - 1)) as usize;
         let bytes = leading
-            .checked_add(extent.bytes.len())
+            .checked_add(extent.bytes())
             .and_then(|bytes| bytes.checked_add(page - 1))
             .map(|bytes| bytes & !(page - 1))
             .ok_or(E::AllocationLimit)?;
@@ -261,21 +363,19 @@ fn materialize_source_ram_impl(
     }
     #[cfg(test)]
     let alias_recipes = {
-        if declaration.initialized.len().saturating_add(aliases.len()) > MAX_SOURCE_RAM_EXTENTS {
+        if extents.len().saturating_add(aliases.len()) > MAX_SOURCE_RAM_EXTENTS {
             return Err(E::Declaration("source RAM fixture alias bound"));
         }
-        let mut occupied: Vec<PhysicalRamRange> = declaration
-            .initialized
+        let mut occupied: Vec<PhysicalRamRange> = extents
             .iter()
             .map(|extent| PhysicalRamRange {
                 source_pa: extent.source_pa,
-                bytes: extent.bytes.len() as u64,
+                bytes: extent.bytes() as u64,
             })
             .collect();
         let mut validated = Vec::with_capacity(aliases.len());
         for alias in aliases {
-            let (index, extent) = declaration
-                .initialized
+            let (index, extent) = extents
                 .iter()
                 .enumerate()
                 .find(|(_, extent)| extent.source_pa == alias.initialized_source_pa)
@@ -286,7 +386,7 @@ fn materialize_source_ram_impl(
                 .source_offset
                 .checked_add(alias.bytes)
                 .ok_or(E::Declaration("fixture alias source offset overflow"))?;
-            if source_end > extent.bytes.len() {
+            if source_end > extent.bytes() {
                 return Err(E::Declaration(
                     "fixture alias exceeds initialized source bytes",
                 ));
@@ -334,7 +434,12 @@ fn materialize_source_ram_impl(
                 .0
                 .checked_add(alias.source_offset)
                 .ok_or(E::Declaration("fixture alias backing offset overflow"))?;
-            let source_sha256 = stela_core::sha256(&extent.bytes[alias.source_offset..source_end]);
+            let source_sha256 = match &extent.initial {
+                RamInitial::Bytes(bytes) => {
+                    Some(stela_core::sha256(&bytes[alias.source_offset..source_end]))
+                }
+                RamInitial::Zeroed(_) => None,
+            };
             validated.push((index, alias, backing_offset, source_sha256));
         }
         validated
@@ -345,17 +450,17 @@ fn materialize_source_ram_impl(
         config.reservation_stripe_count,
     )
     .map_err(E::Domain)?;
-    let mut views = Vec::with_capacity(declaration.initialized.len());
+    let mut views = Vec::with_capacity(extents.len());
     let mut immutable_sources = Vec::new();
-    let mut layout = Vec::with_capacity(declaration.initialized.len());
-    for (extent, (leading, bytes)) in declaration.initialized.into_iter().zip(recipes) {
+    let mut layout = Vec::with_capacity(extents.len());
+    for (extent, (leading, bytes)) in extents.into_iter().zip(recipes) {
         let permissions = AccessPermissions {
             readable: extent.permissions.readable,
             writable: extent.permissions.writable,
             executable: extent.permissions.executable,
         };
         let storage = NativeStorage::initialized_ram(
-            &extent.bytes,
+            extent.initializer(),
             leading,
             bytes,
             permissions.readable || permissions.executable,
@@ -378,7 +483,7 @@ fn materialize_source_ram_impl(
             Arc::clone(&backing),
             extent.source_pa,
             leading,
-            extent.bytes.len(),
+            extent.bytes(),
             permissions,
         )
         .map_err(E::Backing)?;
@@ -392,10 +497,11 @@ fn materialize_source_ram_impl(
         layout.push(InitializedRamLayout {
             range: PhysicalRamRange {
                 source_pa: extent.source_pa,
-                bytes: extent.bytes.len() as u64,
+                bytes: extent.bytes() as u64,
             },
             permissions: extent.permissions,
-            source_sha256: stela_core::sha256(&extent.bytes),
+            source_sha256: extent.initial_hash(&storage, leading),
+            zero_initialized: extent.zero_initialized(),
         });
         views.push(view);
     }
@@ -408,6 +514,19 @@ fn materialize_source_ram_impl(
             writable: alias.permissions.writable,
             executable: alias.permissions.executable,
         };
+        let source_sha256 = match source_sha256 {
+            Some(hash) => hash,
+            None => {
+                let pointer = backing
+                    .host_pointer(offset, alias.bytes, AccessKind::Read)
+                    .map_err(E::Backing)?;
+                // SAFETY: sole factory, same fresh zero backing, validated
+                // readable alias bounds, and no published writer or PE yet.
+                stela_core::sha256(unsafe {
+                    std::slice::from_raw_parts(pointer.as_ptr(), alias.bytes)
+                })
+            }
+        };
         let view = MemoryView::new(backing, alias.source_pa, offset, alias.bytes, permissions)
             .map_err(E::Backing)?;
         // A real alias retains identical original storage; no copied-byte alias
@@ -419,6 +538,7 @@ fn materialize_source_ram_impl(
             },
             permissions: alias.permissions,
             source_sha256,
+            zero_initialized: layout[index].zero_initialized,
         });
         views.push(view);
     }
@@ -461,6 +581,175 @@ impl core::fmt::Debug for InitializedRamLayout {
         f.debug_struct("InitializedRamLayout")
             .field("range", &self.range)
             .field("permissions", &self.permissions)
+            .field("zero_initialized", &self.zero_initialized)
             .finish()
+    }
+}
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod zeroed_tests {
+    use super::*;
+    use crate::memory::{domain::physical::PhysicalAddressSpace, stage1::PhysicalMemory};
+
+    const CODE_PA: u64 = 0x1000;
+    const RAM_PA: u64 = 0x2000;
+    const ALIAS_PA: u64 = 0x3000;
+    const RAM_BYTES: u64 = 24;
+    const ORIGINAL: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    fn declaration() -> SourceRamDeclaration {
+        SourceRamDeclaration {
+            address_space: 51,
+            target: TargetCpu::Baseline,
+            declared_capacity: vec![PhysicalRamRange {
+                source_pa: CODE_PA,
+                bytes: MAX_IMAGE_MEMORY_BYTES + 0x4000,
+            }],
+            initialized: vec![OwnedRamExtent {
+                source_pa: CODE_PA,
+                bytes: ORIGINAL.to_vec(),
+                permissions: SourceRamPermissions {
+                    readable: true,
+                    writable: false,
+                    executable: true,
+                },
+            }],
+        }
+    }
+
+    fn config() -> SourceRamSystemConfig {
+        SourceRamSystemConfig {
+            reservation_granule_bytes: 16,
+            reservation_stripe_count: 8,
+        }
+    }
+
+    fn zeroed(source_pa: u64, bytes: u64) -> ZeroedRamExtent {
+        ZeroedRamExtent {
+            source_pa,
+            bytes,
+            permissions: SourceRamPermissions {
+                readable: true,
+                writable: true,
+                executable: false,
+            },
+        }
+    }
+
+    #[test]
+    fn explicit_zeroed_ram_preserves_original_code_and_unassigned_capacity_holes() {
+        let materialized = materialize_source_ram_with_zeroed(
+            declaration(),
+            vec![zeroed(RAM_PA, RAM_BYTES)],
+            config(),
+        )
+        .unwrap();
+        let code = materialized.test_view(CODE_PA).unwrap();
+        let ram = materialized.test_view(RAM_PA).unwrap();
+        assert!(!code.permissions().writable);
+        assert!(code.permissions().executable);
+        assert!(ram.permissions().readable && ram.permissions().writable);
+        assert!(!ram.permissions().executable);
+        let (binding, original_sources) = materialized.into_parts();
+        assert_eq!(original_sources.len(), 1);
+        let layout = binding.layout();
+        assert_eq!(layout.initialized.len(), 2);
+        assert!(!layout.initialized[0].zero_initialized);
+        assert_eq!(
+            layout.initialized[0].source_sha256,
+            stela_core::sha256(&ORIGINAL)
+        );
+        assert!(layout.initialized[1].zero_initialized);
+        assert_eq!(
+            layout.initialized[1].source_sha256,
+            stela_core::sha256(&[0; RAM_BYTES as usize])
+        );
+        let physical = PhysicalAddressSpace::from_materialized(binding).unwrap();
+        assert_eq!(
+            physical.read_descriptor(CODE_PA).unwrap(),
+            u64::from_le_bytes(ORIGINAL)
+        );
+        for offset in [0, 8, 16] {
+            assert_eq!(physical.read_descriptor(RAM_PA + offset).unwrap(), 0);
+        }
+        assert!(physical.read_descriptor(CODE_PA + 8).is_err());
+        assert!(physical.read_descriptor(RAM_PA + RAM_BYTES).is_err());
+        assert!(physical.read_descriptor(0x1800).is_err());
+    }
+
+    #[test]
+    fn mixed_zeroed_ranges_reject_invalid_declarations_before_materialization() {
+        for extent in [
+            zeroed(CODE_PA + 4, 8),
+            zeroed(RAM_PA, 0),
+            zeroed(u64::MAX - 7, 16),
+            zeroed(RAM_PA, MAX_IMAGE_MEMORY_BYTES),
+            ZeroedRamExtent {
+                permissions: SourceRamPermissions {
+                    readable: true,
+                    writable: false,
+                    executable: true,
+                },
+                ..zeroed(RAM_PA, 8)
+            },
+            ZeroedRamExtent {
+                permissions: SourceRamPermissions {
+                    readable: false,
+                    writable: true,
+                    executable: false,
+                },
+                ..zeroed(RAM_PA, 8)
+            },
+        ] {
+            assert!(
+                materialize_source_ram_with_zeroed(declaration(), vec![extent], config()).is_err()
+            );
+        }
+        assert!(
+            materialize_source_ram_with_zeroed(
+                declaration(),
+                vec![zeroed(RAM_PA, 16), zeroed(RAM_PA + 8, 16)],
+                config(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fixture_alias_of_zeroed_ram_retains_the_original_backing_and_exact_initial_hash() {
+        let materialized = materialize_source_ram_with_zeroed_test_aliases(
+            declaration(),
+            vec![zeroed(RAM_PA, RAM_BYTES)],
+            config(),
+            &[SourceRamTestAlias {
+                source_pa: ALIAS_PA,
+                initialized_source_pa: RAM_PA,
+                source_offset: 8,
+                bytes: 8,
+                permissions: SourceRamPermissions {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                },
+            }],
+        )
+        .unwrap();
+        let ram = materialized.test_view(RAM_PA).unwrap();
+        let alias = materialized.test_view(ALIAS_PA).unwrap();
+        assert!(Arc::ptr_eq(ram.backing(), alias.backing()));
+        assert_eq!(alias.backing_offset(), ram.backing_offset() + 8);
+        assert!(!alias.permissions().writable);
+        let (binding, _) = materialized.into_parts();
+        assert!(binding.layout().initialized[2].zero_initialized);
+        assert_eq!(
+            binding.layout().initialized[2].source_sha256,
+            stela_core::sha256(&[0; 8])
+        );
+        let physical = PhysicalAddressSpace::from_materialized(binding).unwrap();
+        assert_eq!(physical.read_descriptor(ALIAS_PA).unwrap(), 0);
     }
 }

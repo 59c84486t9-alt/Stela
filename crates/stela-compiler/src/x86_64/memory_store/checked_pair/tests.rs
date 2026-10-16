@@ -134,7 +134,7 @@ fn constrained_writeback_nops_never_enter_pair_service() {
 #[test]
 fn forged_store_descriptors_decline_before_emission() {
     let valid = Operand {
-        profile: CheckedMemoryProfile::SpAlignmentEnabled,
+        profile: Profile::NormalWb(CheckedMemoryProfile::SpAlignmentEnabled),
         transfer: MemoryTransfer::Store,
         bytes: DOUBLEWORD_BYTES,
         data: [Register::X(0), Register::Zero],
@@ -204,7 +204,7 @@ fn checked_sp_fixed_half_pairs_need_no_unused_quadword_capability() {
         ] {
             for base in [Register::Sp, Register::X(2)] {
                 let operand = Operand {
-                    profile: CheckedMemoryProfile::SpAlignmentEnabled,
+                    profile: Profile::NormalWb(CheckedMemoryProfile::SpAlignmentEnabled),
                     transfer: MemoryTransfer::Store,
                     bytes: DOUBLEWORD_BYTES,
                     data: [Register::X(0), Register::X(1)],

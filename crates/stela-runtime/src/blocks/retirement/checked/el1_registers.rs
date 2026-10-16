@@ -15,7 +15,7 @@ use crate::{
 };
 use stela_compiler::{GuestAddress, GuestState, block::BlockExit};
 mod session;
-use session::{RegisterNativeReport, RegisterSession};
+pub(super) use session::{RegisterNativeReport, RegisterSession};
 
 pub(crate) struct RegisterObservation {
     pub source_pc: GuestAddress,
@@ -77,6 +77,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             // field/session/source loan ends; original outer Active stays armed.
             let provider::El1ExecutionResources {
                 sources,
+                platform: _,
                 controls,
                 memory: _,
                 context,
@@ -98,7 +99,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 closed: false,
             };
             let mut candidate = self.pe.thread.registers.clone();
-            let report = retained.session.invoke(&mut candidate);
+            let report = retained.session.invoke(&*self.pe.system, &mut candidate);
             let carrier = report.raw_carrier;
             let valid = report.invoked
                 && report.failure.is_none()
@@ -131,7 +132,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     self.pe.thread.pc == bound.entry.entry(),
                     "EL1 register changed full state or terminal intent"
                 );
-                retained.session.validate_current()?;
+                retained.session.validate_current(&*self.pe.system)?;
                 checks.check(outer)?;
                 anyhow::ensure!(
                     retained.authority.native_attempt(self.attempt),

@@ -5,7 +5,7 @@ pub(crate) mod retirement;
 pub use retirement::checked::software_el1::{
     OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config, SoftwareEl1InitialRam, SoftwareEl1Machine,
     SoftwareEl1Profile, SoftwareEl1Report, SoftwareEl1Request, SourceRamDeclaration,
-    SourceRamPermissions,
+    SourceRamPermissions, ZeroedRamExtent,
 };
 
 pub use retirement::checked::software_privileged::{

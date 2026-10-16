@@ -270,3 +270,17 @@ mod source_ram_tests;
 #[path = "physical/fetch.rs"]
 mod fetch;
 pub(crate) use fetch::{BoundPhysicalInstruction, ImmutableCodeBacking};
+
+#[path = "physical/stores.rs"]
+mod stores;
+pub(crate) use stores::{
+    M0RamWritePlatformError, M0RamWritePrepared, M0RamWriteProgress,
+    prepare_aligned_device_ram8_or_pair,
+};
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+pub(crate) use stores::fixtures as store_fixtures;

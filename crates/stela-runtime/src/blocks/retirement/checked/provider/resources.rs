@@ -19,6 +19,8 @@ use stela_compiler::context::ExecutionContext;
 /// resource bundle, raw pointer or caller implementation can construct this.
 pub(crate) struct InstalledExecutionResources<'pe> {
     pub(in crate::blocks::retirement::checked) sources: &'pe InstalledM0Sources,
+    pub(in crate::blocks::retirement::checked) platform:
+        Option<&'pe super::super::el1_system::El1PlatformControls>,
     pub(in crate::blocks::retirement::checked) controls: &'pe TranslationControls,
     pub(in crate::blocks::retirement::checked) memory: &'pe MemoryThread<MemoryControls>,
     pub(in crate::blocks::retirement::checked) context: &'pe mut ExecutionContext,
@@ -61,6 +63,21 @@ impl M0ExecutionChecks<'_> {
         // A physical-role domain intentionally refuses the ordinary EL0
         // validate_execution path. Actual M0 source/control/physical producers
         // qualify its access instead; do not call or weaken that generic gate.
+        Ok(())
+    }
+    pub(in crate::blocks::retirement::checked) fn post_retirement_el1(
+        &self,
+        outer: &MemoryExecutionLoan,
+        scope: &crate::blocks::InstalledEl1SourceScope<'_>,
+        controls: &TranslationControls,
+        platform: &super::super::el1_system::El1PlatformControls,
+        system: &crate::system::state::SystemState,
+    ) -> anyhow::Result<()> {
+        self.check(outer)?;
+        scope
+            .check_installed(controls, system)
+            .map_err(anyhow::Error::msg)?;
+        platform.context(system)?;
         Ok(())
     }
 }

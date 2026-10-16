@@ -157,3 +157,29 @@ fn dual_state_controls_and_lower_security_must_be_explicit_a64() {
         InitializationError::LowerSecurity
     );
 }
+
+#[test]
+fn lower_only_storage_guard_rejects_present_zero_higher_banks() {
+    let lower = SystemState::new(PSTATE_EL1H, 0, El1Registers::new(0, 0, 0, 0, 0)).unwrap();
+    assert_eq!(lower.check_lower_el_storage(), Ok(()));
+    let mut banks = initial();
+    let el2 = banks.el2.as_mut().unwrap();
+    el2.exception = El1Registers::new(0, 0, 0, 0, 0);
+    el2.stack_pointer = 0;
+    el2.hpfar = 0;
+    let el3 = banks.el3.as_mut().unwrap();
+    el3.exception = El1Registers::new(0, 0, 0, 0, 0);
+    el3.stack_pointer = 0;
+    let higher = SystemState::new_with_higher_el(
+        PSTATE_EL1H,
+        0,
+        El1Registers::new(0, 0, 0, 0, 0),
+        snapshot(0x1111),
+        banks,
+    )
+    .unwrap();
+    assert_eq!(
+        higher.check_lower_el_storage(),
+        Err(StateError::UnexpectedHigherElStorage)
+    );
+}

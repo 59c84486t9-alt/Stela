@@ -5,9 +5,17 @@
 
 use super::{PanFeatures, Presence, TranslationControls};
 use crate::{
-    blocks::{InstalledM0SourceScope, retirement::M0SourceInput},
+    blocks::{
+        InstalledM0SourceScope,
+        retirement::{M0SourceInput, M0WriteSourceInput},
+    },
     memory::{
-        domain::{MemoryExecutionLoan, m0_read::M0Read64Intent, physical::PhysicalAddressSpace},
+        domain::{
+            MemoryExecutionLoan,
+            m0_read::M0Read64Intent,
+            m0_write::{M0WriteIntent, M0WriteMember},
+            physical::PhysicalAddressSpace,
+        },
         stage1,
     },
     system::{
@@ -38,6 +46,8 @@ pub(crate) enum M0ControlError {
     /// unsupported translation. Currency checks never manufacture guest faults.
     Translation(stage1::TranslationError),
     UnexpectedAttributes,
+    WrongSourceKind,
+    MissingWriteMember,
 }
 
 impl TranslationControls {
@@ -253,7 +263,7 @@ impl TranslationControls {
         scope
             .qualify_source(self, input)
             .map_err(M0ControlError::SourceFetch)?;
-        let intent = input.intent();
+        let intent = input.read_intent().ok_or(M0ControlError::WrongSourceKind)?;
         let translation = Self::derive_m0_read8(
             &config,
             scope.physical_space(),
@@ -267,6 +277,178 @@ impl TranslationControls {
             generation: self.generation,
             intent,
             translation,
+        })
+    }
+}
+
+impl InputCurrency for M0WriteSourceInput<'_, '_> {
+    fn validate(&self, owner: &TranslationControls) -> Result<(), M0ControlError> {
+        self.original().validate(owner)
+    }
+    fn physical(&self) -> &PhysicalAddressSpace {
+        self.original().physical()
+    }
+}
+trait WriteCurrency: InputCurrency {
+    fn actual_system(&self) -> &SystemState;
+    fn actual_pstate(&self) -> u64;
+    #[cfg(test)]
+    fn source_generation(&self) -> u64;
+    #[cfg(test)]
+    fn actual_address_space(&self) -> Option<u64>;
+}
+impl WriteCurrency for M0WriteSourceInput<'_, '_> {
+    fn actual_system(&self) -> &SystemState {
+        self.original().actual_system()
+    }
+    fn actual_pstate(&self) -> u64 {
+        self.original().actual_pstate()
+    }
+    #[cfg(test)]
+    fn source_generation(&self) -> u64 {
+        self.original().source_generation()
+    }
+    #[cfg(test)]
+    fn actual_address_space(&self) -> Option<u64> {
+        self.original().actual_address_space()
+    }
+}
+
+/// Noncopyable actual-bank/source/outer loan. This is not a writable PA pin.
+/// Each reached member derives its translation from the SAME live bank; the
+/// physical owner alone can resolve current storage and perform publication.
+pub(crate) struct M0DataWriteLoan<'cpu> {
+    owner: &'cpu TranslationControls,
+    source: &'cpu dyn WriteCurrency,
+    outer: &'cpu MemoryExecutionLoan,
+    generation: u64,
+    intent: M0WriteIntent,
+}
+impl M0DataWriteLoan<'_> {
+    /// Descriptive fixture data read from original retained owners, never a permit.
+    #[cfg(test)]
+    pub(crate) fn producer_observation(
+        &self,
+        execution: &MemoryExecutionLoan,
+    ) -> Result<serde_json::Value, M0ControlError> {
+        self.validate_current(execution)?;
+        Ok(serde_json::json!({"source_pc":self.intent.source_pc.0,
+            "source_word":self.intent.source_word,"source_generation":self.source.source_generation(),
+            "control_generation":self.generation,
+            "physical_domain_generation":self.physical_space().domain().generation().map_err(M0ControlError::Domain)?,
+            "actual_address_space":self.source.actual_address_space(),
+            "actual_pre_pstate":self.source.actual_pstate(),
+            "same_original_outer":std::ptr::eq(execution,self.outer),
+            "readbacks":{"sctlr_el1":self.owner.readbacks.sctlr_el1,
+                "tcr_el1":self.owner.readbacks.tcr_el1,"ttbr0_el1":self.owner.readbacks.ttbr0_el1,
+                "ttbr1_el1":self.owner.readbacks.ttbr1_el1,"mair_el1":self.owner.readbacks.mair_el1}}))
+    }
+
+    pub(crate) fn validate_current(
+        &self,
+        execution: &MemoryExecutionLoan,
+    ) -> Result<(), M0ControlError> {
+        if !std::ptr::eq(execution, self.outer) {
+            return Err(M0ControlError::DifferentExecutionLoan);
+        }
+        execution
+            .check_memory_system(&self.owner.memory)
+            .map_err(M0ControlError::Domain)?;
+        if self.owner.poisoned {
+            return Err(M0ControlError::Poisoned);
+        }
+        if self.owner.generation != self.generation {
+            return Err(M0ControlError::Source(
+                "M0 write control generation differs".into(),
+            ));
+        }
+        self.source.validate(self.owner)
+    }
+    pub(crate) fn physical_space(&self) -> &PhysicalAddressSpace {
+        self.source.physical()
+    }
+    pub(crate) fn intent(&self) -> M0WriteIntent {
+        self.intent
+    }
+    pub(crate) fn qualify_member(
+        &self,
+        execution: &MemoryExecutionLoan,
+        member: M0WriteMember,
+    ) -> Result<stage1::Translation, M0ControlError> {
+        self.validate_current(execution)?;
+        let (raw_address, _) = self
+            .intent
+            .member(member)
+            .ok_or(M0ControlError::MissingWriteMember)?;
+        let config = self
+            .owner
+            .current_m0_config(self.source.actual_system(), self.source.actual_pstate())?;
+        let translation = stage1::translate(
+            &config,
+            self.physical_space(),
+            stage1::Access {
+                kind: stage1::AccessKind::Write,
+                exception_level: stage1::ExceptionLevel::El1,
+                raw_virtual_address: raw_address,
+                source_pc: self.intent.source_pc.0,
+                pan: false,
+                uao: false,
+                aligned: raw_address.is_multiple_of(READ_BYTES),
+            },
+        )
+        .map_err(M0ControlError::Translation)?;
+        let attributes = translation.attributes();
+        if attributes.memory_type != stage1::MemoryType::DeviceNgnrne
+            || attributes.origin != stage1::AttributeOrigin::MmuDisabled
+            || attributes.shareability != stage1::Shareability::Outer
+            || attributes.mair.is_some()
+            || attributes.tagged
+            || !attributes.xs
+            || attributes.not_global
+            || attributes.guarded_page
+            || translation.permissions().is_some()
+            || translation.walk().is_some()
+            || translation.contiguous_bytes() < READ_BYTES
+            || !translation.physical_address().is_multiple_of(READ_BYTES)
+        {
+            return Err(M0ControlError::UnexpectedAttributes);
+        }
+        Ok(translation)
+    }
+}
+impl TranslationControls {
+    /// Qualifies the actual instruction first, but performs no data translation
+    /// or target access. The original physical session prepares only First;
+    /// Second is qualified only after the reached first8B completion.
+    pub(crate) fn loan_m0_write8_or_pair<'cpu>(
+        &'cpu self,
+        input: &'cpu M0WriteSourceInput<'_, '_>,
+    ) -> Result<M0DataWriteLoan<'cpu>, M0ControlError> {
+        let original = input.original();
+        original
+            .validate_source_current()
+            .map_err(|error| M0ControlError::Source(error.to_string()))?;
+        self.current_m0_config(original.actual_system(), original.actual_pstate())?;
+        original
+            .validate_thread_current()
+            .map_err(|error| M0ControlError::Source(error.to_string()))?;
+        let outer = original.outer_execution();
+        outer
+            .check_memory_system(&self.memory)
+            .map_err(M0ControlError::Domain)?;
+        let scope = original.installed_source_scope();
+        if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
+            return Err(M0ControlError::WrongMemorySystem);
+        }
+        scope
+            .qualify_source(self, original)
+            .map_err(M0ControlError::SourceFetch)?;
+        Ok(M0DataWriteLoan {
+            owner: self,
+            source: input,
+            outer,
+            generation: self.generation,
+            intent: input.intent(),
         })
     }
 }

@@ -285,6 +285,12 @@ fn synthetic_read8_full_state_and_owned_ram() {
                 let result = runtime.run_owned(
                     owner.loan(),
                     OwnedRunRequest {
+                        #[cfg(all(
+                            test,
+                            target_arch = "x86_64",
+                            any(target_os = "macos", target_os = "linux")
+                        ))]
+                        verify_pair_alias_monitor: false,
                         stop_pc: Some(inputs::EXPECTED_PC),
                         block_budget: 1,
                     },

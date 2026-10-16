@@ -573,6 +573,9 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             }
             SystemOperation::TagMemory(operand) => self.tag(&boundary, registers, operand),
             SystemOperation::SendEvent { local } => self.send_event(&boundary, registers, local),
+            SystemOperation::Register(_) | SystemOperation::PstateImmediate(_) => Err(
+                Failure::Unsupported("register operation requires retained authoritative owners"),
+            ),
         }
     }
 }

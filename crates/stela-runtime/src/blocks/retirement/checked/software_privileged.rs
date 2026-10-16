@@ -306,6 +306,12 @@ pub fn run_declared_privileged(
                         OwnedRunRequest {
                             stop_pc,
                             block_budget,
+                            #[cfg(all(
+                                test,
+                                target_arch = "x86_64",
+                                any(target_os = "macos", target_os = "linux")
+                            ))]
+                            verify_pair_alias_monitor: false,
                         },
                     );
                     let terminal = matches!(

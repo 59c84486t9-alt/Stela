@@ -22,10 +22,10 @@ pub(crate) enum RegisterFailure {
 }
 #[derive(Debug)]
 pub(crate) struct RegisterNativeReport {
-    pub(super) invoked: bool,
-    pub(super) raw_carrier: Option<(u64, u64)>,
-    pub(super) storage_after: Option<Result<(), Infallible>>,
-    pub(super) failure: Option<RegisterFailure>,
+    pub(in crate::blocks::retirement::checked) invoked: bool,
+    pub(in crate::blocks::retirement::checked) raw_carrier: Option<(u64, u64)>,
+    pub(in crate::blocks::retirement::checked) storage_after: Option<Result<(), Infallible>>,
+    pub(in crate::blocks::retirement::checked) failure: Option<RegisterFailure>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ContextIdentity {
@@ -49,27 +49,26 @@ impl ContextIdentity {
 /// Actual original source/bank/outer/System/context and reached physical pin
 /// remain borrowed inside the retained authority guard before native invocation.
 /// This session cannot create authority, use a callback or expose an entry ptr.
-pub(super) struct RegisterSession<'call, 'code> {
+pub(in crate::blocks::retirement::checked) struct RegisterSession<'call, 'code> {
     bound: &'call BoundSource<'code>,
     outer: &'call MemoryExecutionLoan,
     scope: &'call InstalledEl1SourceScope<'call>,
     controls: &'call TranslationControls,
-    system: &'call SystemState,
     context: &'call mut ExecutionContext,
     before: ContextIdentity,
     reached: BoundPhysicalInstruction,
     invoked: bool,
 }
 impl<'call, 'code> RegisterSession<'call, 'code> {
-    pub(super) fn prepare(
+    pub(in crate::blocks::retirement::checked) fn prepare(
         bound: &'call BoundSource<'code>,
         outer: &'call MemoryExecutionLoan,
         scope: &'call InstalledEl1SourceScope<'call>,
         controls: &'call TranslationControls,
-        system: &'call SystemState,
+        system: &SystemState,
         context: &'call mut ExecutionContext,
     ) -> anyhow::Result<Self> {
-        bound.el1_register_intent()?;
+        bound.el1_carrier_intent()?;
         anyhow::ensure!(
             context.has_supported_header()
                 && context.bytes == stela_compiler::context::EXECUTION_CONTEXT_BYTES
@@ -88,7 +87,6 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             outer,
             scope,
             controls,
-            system,
             before: ContextIdentity::capture(context),
             context,
             reached,
@@ -122,8 +120,11 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
     fn context_unchanged(&self) -> bool {
         self.context.has_supported_header() && ContextIdentity::capture(self.context) == self.before
     }
-    pub(super) fn validate_current(&self) -> anyhow::Result<()> {
-        self.bound.el1_register_intent()?;
+    pub(in crate::blocks::retirement::checked) fn validate_current(
+        &self,
+        system: &SystemState,
+    ) -> anyhow::Result<()> {
+        self.bound.el1_carrier_intent()?;
         anyhow::ensure!(
             self.context_unchanged(),
             "EL1 register actual context changed"
@@ -135,7 +136,7 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
                 self.outer,
                 self.controls,
                 self.scope,
-                self.system,
+                system,
                 self.bound.entry.entry().0,
             )
             .map_err(|error| anyhow::anyhow!("EL1 register current source fetch: {error:?}"))?;
@@ -145,7 +146,11 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         );
         Self::check_binding(self.bound, self.scope, &reached)
     }
-    pub(super) fn invoke(&mut self, candidate: &mut GuestState) -> RegisterNativeReport {
+    pub(in crate::blocks::retirement::checked) fn invoke(
+        &mut self,
+        system: &SystemState,
+        candidate: &mut GuestState,
+    ) -> RegisterNativeReport {
         let mut report = RegisterNativeReport {
             invoked: false,
             raw_carrier: None,
@@ -156,7 +161,7 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             report.failure = Some(RegisterFailure::AlreadyInvoked);
             return report;
         }
-        if let Err(error) = self.validate_current() {
+        if let Err(error) = self.validate_current(system) {
             report.failure = Some(RegisterFailure::Source(error.to_string()));
             return report;
         }

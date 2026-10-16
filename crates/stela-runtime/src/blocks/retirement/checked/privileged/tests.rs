@@ -226,6 +226,12 @@ fn actual_hvc_smc_enter_original_banks_and_sp_once() {
                 OwnedRunRequest {
                     stop_pc: Some(GuestAddress(target)),
                     block_budget: 1,
+                    #[cfg(all(
+                        test,
+                        target_arch = "x86_64",
+                        any(target_os = "macos", target_os = "linux")
+                    ))]
+                    verify_pair_alias_monitor: false,
                 },
             );
             assert!(matches!(outcome.stop, OwnedStop::StopAddress));
@@ -267,6 +273,12 @@ fn actual_hlt_stops_native_and_keeps_restart_pc() {
             OwnedRunRequest {
                 stop_pc: None,
                 block_budget: 1,
+                #[cfg(all(
+                    test,
+                    target_arch = "x86_64",
+                    any(target_os = "macos", target_os = "linux")
+                ))]
+                verify_pair_alias_monitor: false,
             },
         );
         assert!(matches!(
@@ -288,6 +300,12 @@ fn actual_hlt_stops_native_and_keeps_restart_pc() {
             OwnedRunRequest {
                 stop_pc: None,
                 block_budget: 1,
+                #[cfg(all(
+                    test,
+                    target_arch = "x86_64",
+                    any(target_os = "macos", target_os = "linux")
+                ))]
+                verify_pair_alias_monitor: false,
             },
         );
         assert!(matches!(denied.stop, OwnedStop::EntryDeclined(_)));
@@ -800,6 +818,12 @@ fn absent_actual_exception_target_refuses_before_native_or_source_effects() {
             OwnedRunRequest {
                 stop_pc: None,
                 block_budget: 1,
+                #[cfg(all(
+                    test,
+                    target_arch = "x86_64",
+                    any(target_os = "macos", target_os = "linux")
+                ))]
+                verify_pair_alias_monitor: false,
             },
         );
         assert!(matches!(outcome.stop, OwnedStop::EntryDeclined(_)));

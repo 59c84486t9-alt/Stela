@@ -107,7 +107,9 @@ impl<'run> InstalledEl1SourceScope<'run> {
         // No descriptive bitmask or legacy whitelist supplies admission.
         if !matches!(
             self.sources.compiler_profile(),
-            BlockProfile::El1DirectBranchV1 | BlockProfile::El1M0IntegerV1
+            BlockProfile::El1DirectBranchV1
+                | BlockProfile::El1M0IntegerV1
+                | BlockProfile::El1PlatformV1
         ) {
             return Err("installed integer source profile differs");
         }
