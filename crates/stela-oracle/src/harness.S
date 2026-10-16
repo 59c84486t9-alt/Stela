@@ -1,0 +1,364 @@
+// Bare-metal AArch64 oracle harness for QEMU `virt` with `-cpu max`.
+//
+// The host loads this image at HARNESS and a case batch at BATCH, then starts
+// the CPU at EL1. Each case runs at EL0 from the code page until its closing
+// SVC or the first exception; the lower-EL vector records full register state.
+// Results are written to the host file named in the batch header through
+// semihosting, and QEMU exits with the harness status.
+//
+// Layout constants are shared with `src/layout.rs`.
+
+    // QEMU places the device tree in the first MiB of RAM.
+    .equ RAM,              0x40000000
+    .equ HARNESS,          0x40100000
+    .equ L1_TABLE,         0x40110000
+    .equ L2_TABLE,         0x40111000
+    .equ L3_DATA,          0x40113000
+    .equ BATCH,            0x41000000
+    .equ RESULTS,          0x50000000
+    // Case windows sit above 8 GiB, where a macOS host process can map them.
+    .equ CASE_REGION,      0x200000000
+    .equ L2_CASE_TABLE,    0x40114000
+    .equ CODE_PAGE,        0x200200000
+    .equ DATA_WINDOW,      0x208000000
+    .equ DATA_BYTES,       0x4000
+    .equ PAGE_BYTES,       0x1000
+
+    // Batch header.
+    .equ BATCH_COUNT,      0
+    .equ BATCH_NAME_BYTES, 8
+    .equ BATCH_NAME,       16
+    .equ BATCH_CASES,      0x1000
+
+    // One case input.
+    .equ CASE_WORDS,       0
+    .equ CASE_CODE,        16
+    .equ CASE_STATE,       512
+    .equ CASE_DATA,        0x1000
+    .equ CASE_BYTES,       0x5000
+
+    // One result record; DATA_BYTES of the window follow the header.
+    .equ RESULT_X,         0
+    .equ RESULT_SP,        248
+    .equ RESULT_SPSR,      256
+    .equ RESULT_FPCR,      264
+    .equ RESULT_FPSR,      272
+    .equ RESULT_ESR,       280
+    .equ RESULT_ELR,       288
+    .equ RESULT_FAR,       296
+    .equ RESULT_V,         320
+    .equ RESULT_DATA,      0x400
+    .equ RESULT_BYTES,     0x4400
+
+    // GuestState layout (stela-state).
+    .equ STATE_X,          0
+    .equ STATE_SP,         248
+    .equ STATE_NZCV,       256
+    .equ STATE_V,          264
+    .equ STATE_FPCR,       776
+    .equ STATE_FPSR,       780
+
+    // Architectural values.
+    .equ CPACR_FP_SVE_SME, (3 << 20) | (3 << 16) | (3 << 24)
+    .equ MAIR_NORMAL_WB,   0xff
+    // T0SZ=25, inner/outer WB, inner shareable, 4 KiB granule, TTBR1 off, 48-bit PA.
+    .equ TCR_VALUE,        25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (5 << 32)
+    // RES1 bits with the MMU on; caches, alignment and SP alignment checks off.
+    // ATA0 allows EL0 allocation-tag arithmetic; tag checks stay disabled.
+    .equ SCTLR_VALUE,      0x30d00801 | (1 << 42)
+    .equ SPSR_EL0T_MASKED, 0x3c0
+    .equ NZCV_MASK,        0xf0000000
+    .equ SVC_0,            0xd4000001
+    .equ DESC_TABLE,       3
+    .equ DESC_BLOCK,       1
+    .equ DESC_PAGE,        3
+    // AF, inner shareable, AttrIndx 0.
+    .equ DESC_NORMAL,      (1 << 10) | (3 << 8)
+    .equ DESC_EL0_RW,      1 << 6
+    .equ DESC_PXN,         1 << 53
+    .equ DESC_UXN,         1 << 54
+    .equ L2_ENTRIES,       512
+    .equ BLOCK_2M,         0x200000
+    .equ BLOCK_1G,         0x40000000
+
+    // Semihosting.
+    .equ SYS_OPEN,         0x01
+    .equ SYS_CLOSE,        0x02
+    .equ SYS_WRITE,        0x05
+    .equ SYS_EXIT,         0x18
+    .equ OPEN_WRITE_BINARY, 5
+    .equ EXIT_APPLICATION, 0x20026
+    .equ EXIT_HARNESS_FAULT, 0x20023
+
+    .text
+    .global _start
+_start:
+    adr     x0, vectors
+    msr     vbar_el1, x0
+    ldr     x0, =CPACR_FP_SVE_SME
+    msr     cpacr_el1, x0
+    isb
+    bl      build_tables
+    ldr     x0, =MAIR_NORMAL_WB
+    msr     mair_el1, x0
+    ldr     x0, =TCR_VALUE
+    msr     tcr_el1, x0
+    ldr     x0, =L1_TABLE
+    msr     ttbr0_el1, x0
+    isb
+    msr     gcr_el1, xzr
+    ldr     x0, =SCTLR_VALUE
+    msr     sctlr_el1, x0
+    isb
+
+    ldr     x20, =BATCH
+    ldr     x22, [x20, #BATCH_COUNT]
+    add     x20, x20, #BATCH_CASES
+    ldr     x21, =RESULTS
+    mov     x19, #0
+next_case:
+    cmp     x19, x22
+    b.eq    finish
+
+    // Install the code followed by SVC #0 on a cleared page, then the initial
+    // data window.
+    ldr     x2, =CODE_PAGE
+    mov     x3, #PAGE_BYTES
+3:  stp     xzr, xzr, [x2], #16
+    subs    x3, x3, #16
+    b.ne    3b
+    ldr     x0, [x20, #CASE_WORDS]
+    add     x1, x20, #CASE_CODE
+    ldr     x2, =CODE_PAGE
+1:  cbz     x0, 2f
+    ldr     w3, [x1], #4
+    str     w3, [x2], #4
+    sub     x0, x0, #1
+    b       1b
+2:  ldr     w3, =SVC_0
+    str     w3, [x2]
+    add     x0, x20, #CASE_DATA
+    ldr     x1, =DATA_WINDOW
+    mov     x2, #DATA_BYTES
+    bl      copy
+    dsb     ish
+    ic      iallu
+    dsb     ish
+    isb
+
+    // Load the guest state and enter EL0.
+    add     x30, x20, #CASE_STATE
+    ldr     w0, [x30, #STATE_FPCR]
+    msr     fpcr, x0
+    ldr     w0, [x30, #STATE_FPSR]
+    msr     fpsr, x0
+    add     x0, x30, #STATE_V
+    ldp     q0, q1, [x0], #32
+    ldp     q2, q3, [x0], #32
+    ldp     q4, q5, [x0], #32
+    ldp     q6, q7, [x0], #32
+    ldp     q8, q9, [x0], #32
+    ldp     q10, q11, [x0], #32
+    ldp     q12, q13, [x0], #32
+    ldp     q14, q15, [x0], #32
+    ldp     q16, q17, [x0], #32
+    ldp     q18, q19, [x0], #32
+    ldp     q20, q21, [x0], #32
+    ldp     q22, q23, [x0], #32
+    ldp     q24, q25, [x0], #32
+    ldp     q26, q27, [x0], #32
+    ldp     q28, q29, [x0], #32
+    ldp     q30, q31, [x0], #32
+    ldr     x0, [x30, #STATE_SP]
+    msr     sp_el0, x0
+    ldr     w0, [x30, #STATE_NZCV]
+    and     x0, x0, #NZCV_MASK
+    orr     x0, x0, #SPSR_EL0T_MASKED
+    msr     spsr_el1, x0
+    ldr     x0, =CODE_PAGE
+    msr     elr_el1, x0
+    mov     sp, x21
+    ldp     x0, x1, [x30, #0]
+    ldp     x2, x3, [x30, #16]
+    ldp     x4, x5, [x30, #32]
+    ldp     x6, x7, [x30, #48]
+    ldp     x8, x9, [x30, #64]
+    ldp     x10, x11, [x30, #80]
+    ldp     x12, x13, [x30, #96]
+    ldp     x14, x15, [x30, #112]
+    ldp     x16, x17, [x30, #128]
+    ldp     x18, x19, [x30, #144]
+    ldp     x20, x21, [x30, #160]
+    ldp     x22, x23, [x30, #176]
+    ldp     x24, x25, [x30, #192]
+    ldp     x26, x27, [x30, #208]
+    ldp     x28, x29, [x30, #224]
+    ldr     x30, [x30, #240]
+    eret
+
+    // Lower-EL synchronous exception: SP_EL1 is the case result record.
+lower_sync:
+    stp     x0, x1, [sp, #0]
+    stp     x2, x3, [sp, #16]
+    stp     x4, x5, [sp, #32]
+    stp     x6, x7, [sp, #48]
+    stp     x8, x9, [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    str     x30, [sp, #240]
+    mrs     x0, sp_el0
+    mrs     x1, spsr_el1
+    stp     x0, x1, [sp, #RESULT_SP]
+    mrs     x0, fpcr
+    mrs     x1, fpsr
+    stp     x0, x1, [sp, #RESULT_FPCR]
+    mrs     x0, esr_el1
+    mrs     x1, elr_el1
+    stp     x0, x1, [sp, #RESULT_ESR]
+    mrs     x0, far_el1
+    str     x0, [sp, #RESULT_FAR]
+    add     x0, sp, #RESULT_V
+    stp     q0, q1, [x0], #32
+    stp     q2, q3, [x0], #32
+    stp     q4, q5, [x0], #32
+    stp     q6, q7, [x0], #32
+    stp     q8, q9, [x0], #32
+    stp     q10, q11, [x0], #32
+    stp     q12, q13, [x0], #32
+    stp     q14, q15, [x0], #32
+    stp     q16, q17, [x0], #32
+    stp     q18, q19, [x0], #32
+    stp     q20, q21, [x0], #32
+    stp     q22, q23, [x0], #32
+    stp     q24, q25, [x0], #32
+    stp     q26, q27, [x0], #32
+    stp     q28, q29, [x0], #32
+    stp     q30, q31, [x0], #32
+
+    // Restore the loop registers from the record position and save the window.
+    mov     x21, sp
+    ldr     x20, =BATCH + BATCH_CASES
+    ldr     x22, =BATCH
+    ldr     x22, [x22, #BATCH_COUNT]
+    ldr     x0, =RESULTS
+    sub     x19, x21, x0
+    mov     x0, #RESULT_BYTES
+    udiv    x19, x19, x0
+    mov     x0, #CASE_BYTES
+    madd    x20, x19, x0, x20
+    ldr     x0, =DATA_WINDOW
+    add     x1, x21, #RESULT_DATA
+    mov     x2, #DATA_BYTES
+    bl      copy
+    add     x19, x19, #1
+    add     x20, x20, #CASE_BYTES
+    mov     x0, #RESULT_BYTES
+    add     x21, x21, x0
+    b       next_case
+
+finish:
+    ldr     x23, =BATCH
+    adr     x0, params
+    add     x1, x23, #BATCH_NAME
+    ldr     x2, [x23, #BATCH_NAME_BYTES]
+    mov     x3, #OPEN_WRITE_BINARY
+    stp     x1, x3, [x0]
+    str     x2, [x0, #16]
+    mov     x1, x0
+    mov     w0, #SYS_OPEN
+    hlt     #0xf000
+    mov     x24, x0
+    adr     x1, params
+    ldr     x2, =RESULTS
+    ldr     x3, [x23, #BATCH_COUNT]
+    mov     x4, #RESULT_BYTES
+    mul     x3, x3, x4
+    stp     x24, x2, [x1]
+    str     x3, [x1, #16]
+    mov     w0, #SYS_WRITE
+    hlt     #0xf000
+    adr     x1, params
+    str     x24, [x1]
+    mov     w0, #SYS_CLOSE
+    hlt     #0xf000
+    ldr     x0, =EXIT_APPLICATION
+    b       exit
+
+harness_fault:
+    ldr     x0, =EXIT_HARNESS_FAULT
+exit:
+    adr     x1, params
+    stp     x0, xzr, [x1]
+    mov     w0, #SYS_EXIT
+    hlt     #0xf000
+    b       .
+
+    // copy x2 bytes (a multiple of 16) from x0 to x1; clobbers x0-x4.
+copy:
+    ldp     x3, x4, [x0], #16
+    stp     x3, x4, [x1], #16
+    subs    x2, x2, #16
+    b.ne    copy
+    ret
+
+    // Identity-map the first GiB of RAM for EL1. EL0 may execute the 2 MiB code
+    // region and read or write the 2 MiB below it, so literal loads reach
+    // +-1 MiB of the code, and may read or write the data window. Everything
+    // else faults at EL0.
+build_tables:
+    ldr     x0, =L1_TABLE
+    ldr     x1, =L2_TABLE | DESC_TABLE
+    str     x1, [x0, #(RAM / BLOCK_1G) * 8]
+    ldr     x1, =L2_CASE_TABLE | DESC_TABLE
+    str     x1, [x0, #(CASE_REGION / BLOCK_1G) * 8]
+    ldr     x0, =L2_TABLE
+    ldr     x1, =RAM | DESC_NORMAL | DESC_BLOCK | DESC_UXN
+    mov     x2, #L2_ENTRIES
+1:  str     x1, [x0], #8
+    add     x1, x1, #BLOCK_2M
+    subs    x2, x2, #1
+    b.ne    1b
+    ldr     x0, =L2_CASE_TABLE
+    ldr     x1, =CASE_REGION | DESC_NORMAL | DESC_BLOCK | DESC_EL0_RW | DESC_PXN | DESC_UXN
+    str     x1, [x0]
+    ldr     x1, =CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_EL0_RW | DESC_PXN
+    str     x1, [x0, #((CODE_PAGE - CASE_REGION) / BLOCK_2M) * 8]
+    ldr     x1, =L3_DATA | DESC_TABLE
+    str     x1, [x0, #((DATA_WINDOW - CASE_REGION) / BLOCK_2M) * 8]
+    ldr     x0, =L3_DATA
+    ldr     x1, =DATA_WINDOW | DESC_NORMAL | DESC_PAGE | DESC_EL0_RW | DESC_PXN | DESC_UXN
+    mov     x2, #DATA_BYTES / PAGE_BYTES
+2:  str     x1, [x0], #8
+    add     x1, x1, #PAGE_BYTES
+    subs    x2, x2, #1
+    b.ne    2b
+    dsb     ish
+    ret
+
+    .ltorg
+
+    .balign 16
+params:
+    .quad   0, 0, 0
+
+    // Only lower-EL synchronous exceptions are expected.
+    .balign 2048
+vectors:
+    .rept 8
+    .balign 128
+    b       harness_fault
+    .endr
+    .balign 128
+    b       lower_sync
+    .rept 7
+    .balign 128
+    b       harness_fault
+    .endr
