@@ -112,33 +112,43 @@ pub trait Host {
     fn report(&mut self, _event: &Event) {}
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceError {
     /// No device model covers this physical address.
     NoDevice,
-    /// The device refused this register or width.
-    Refused(&'static str),
+    /// The device refused this register, width or state.
+    Refused(String),
 }
 
-/// The board's devices on the guest physical bus.
+/// The board's devices on the guest physical bus. `now` is the system
+/// counter value (24 MHz ticks) of the access.
 pub trait Devices {
-    fn read(&mut self, physical: u64, bytes: u8) -> Result<u64, DeviceError>;
-    fn write(&mut self, physical: u64, bytes: u8, value: u64) -> Result<(), DeviceError>;
-    /// Interrupt lines the devices drive into this PE.
-    fn lines(&mut self) -> Lines;
+    fn read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
+    fn write(&mut self, physical: u64, bytes: u8, value: u64, now: u64) -> Result<(), DeviceError>;
+    /// Bring time-driven state up to `now` and report the interrupt lines
+    /// the devices drive into this PE.
+    fn lines(&mut self, now: u64) -> Lines;
+    /// The next counter value at which a device changes state by itself.
+    fn deadline(&mut self, _now: u64) -> Option<u64> {
+        None
+    }
+    /// A reset or power-off the guest requested from a device, once.
+    fn take_reset(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// A bus with no devices: every access is [`DeviceError::NoDevice`].
 pub struct NoDevices;
 
 impl Devices for NoDevices {
-    fn read(&mut self, _: u64, _: u8) -> Result<u64, DeviceError> {
+    fn read(&mut self, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
         Err(DeviceError::NoDevice)
     }
-    fn write(&mut self, _: u64, _: u8, _: u64) -> Result<(), DeviceError> {
+    fn write(&mut self, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
         Err(DeviceError::NoDevice)
     }
-    fn lines(&mut self) -> Lines {
+    fn lines(&mut self, _: u64) -> Lines {
         Lines::default()
     }
 }
@@ -190,7 +200,7 @@ pub enum RequirementKind {
     Device {
         physical: u64,
         write: bool,
-        detail: &'static str,
+        detail: String,
     },
     IllegalReturn(IllegalReturn),
     Native(&'static str),
@@ -263,6 +273,8 @@ pub enum Stop {
     Budget,
     /// WFI or WFE with no interrupt able to wake the PE.
     Idle,
+    /// A device carried out the guest's reset or power-off request.
+    Reset(String),
     Unsupported(Requirement),
 }
 
@@ -407,7 +419,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let now = self.host.counter();
         let system = &self.cpu.system;
         let timer = system.virtual_timer.asserted(now) || system.physical_timer.asserted(now);
-        let device = self.devices.lines();
+        let device = self.devices.lines(now);
         Lines {
             irq: device.irq,
             // Apple cores signal the generic timers as FIQ.
@@ -460,7 +472,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn step(&mut self) -> Step {
-        if self.deliver_interrupts() {
+        let delivered = self.deliver_interrupts();
+        if let Some(reason) = self.devices.take_reset() {
+            return Err(Stop::Reset(reason));
+        }
+        if delivered {
             return Ok(());
         }
         let pc = self.cpu.pc;
@@ -867,7 +883,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Complete one single-register scalar access to a device.
     fn device_access(&mut self, word: u32, address: u64, physical: u64, write: bool) -> Step {
         let pc = self.cpu.pc;
-        let refuse = |machine: &Self, detail| {
+        let refuse = |machine: &Self, detail: String| {
             let mut requirement = machine.requirement(RequirementKind::Device {
                 physical,
                 write,
@@ -877,21 +893,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Stop::Unsupported(requirement)
         };
         let Ok(instruction) = Decoder.lift(GuestAddress(pc), word) else {
-            return Err(refuse(self, "device access by an undecodable instruction"));
+            return Err(refuse(
+                self,
+                "device access by an undecodable instruction".into(),
+            ));
         };
         self.statistics.device_accesses += 1;
         if let Some(load) = ScalarLoad::from_instruction(&instruction) {
             let (accessed, writeback) = self.scalar_address(load.address());
             if accessed != address {
-                return Err(refuse(self, "device load address differs from the fault"));
+                return Err(refuse(
+                    self,
+                    "device load address differs from the fault".into(),
+                ));
             }
             let bytes = load.bytes();
             if !address.is_multiple_of(u64::from(bytes)) {
                 return self.alignment_fault(address, false);
             }
-            let raw = match self.devices.read(physical, bytes) {
+            let now = self.host.counter();
+            let raw = match self.devices.read(physical, bytes, now) {
                 Ok(value) => value,
-                Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model")),
+                Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
                 Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
             };
             let bits = u32::from(bytes) * 8;
@@ -914,16 +937,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else if let Some(store) = ScalarStore::from_instruction(&instruction) {
             let (accessed, writeback) = self.scalar_address(store.address());
             if accessed != address {
-                return Err(refuse(self, "device store address differs from the fault"));
+                return Err(refuse(
+                    self,
+                    "device store address differs from the fault".into(),
+                ));
             }
             let bytes = store.bytes();
             if !address.is_multiple_of(u64::from(bytes)) {
                 return self.alignment_fault(address, true);
             }
             let value = self.read_register(store.source_register());
-            match self.devices.write(physical, bytes, value) {
+            let now = self.host.counter();
+            match self.devices.write(physical, bytes, value, now) {
                 Ok(()) => {}
-                Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model")),
+                Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
                 Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
             }
             if let Some((base, updated)) = writeback {
@@ -932,11 +959,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             return Err(refuse(
                 self,
-                "device access by other than a single-register scalar integer transfer",
+                "device access by other than a single-register scalar integer transfer".into(),
             ));
         }
         self.cpu.pc = pc + INSTRUCTION;
-        Ok(())
+        match self.devices.take_reset() {
+            Some(reason) => Err(Stop::Reset(reason)),
+            None => Ok(()),
+        }
     }
 
     fn alignment_fault(&mut self, address: u64, write: bool) -> Step {
@@ -1153,7 +1183,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if lines.irq || lines.fiq {
                 break;
             }
-            let deadline = self.timer_deadline();
+            let now = self.host.counter();
+            let deadline = match (self.timer_deadline(), self.devices.deadline(now)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             if deadline.is_none() {
                 return Err(Stop::Idle);
             }
@@ -1313,7 +1347,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return Err(self.unsupported(RequirementKind::Device {
                         physical,
                         write: true,
-                        detail: "DC ZVA outside RAM",
+                        detail: "DC ZVA outside RAM".into(),
                     }));
                 }
                 self.next()

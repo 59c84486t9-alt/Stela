@@ -1,0 +1,255 @@
+//! The Apple T8112 device models (`platform::apple`) as the engine's
+//! [`Devices`]: one [`Bus`] for the guest physical address space, an
+//! [`InterruptLatch`] for the wires, AIC input forwarding and reset requests.
+//! The models own every register decision; this adapter only routes accesses
+//! and time, and turns each `MmioError` into an explicit refusal.
+use super::{
+    engine::{DeviceError, Devices},
+    registers::Lines,
+};
+use crate::platform::apple::{
+    aic::Aic2,
+    bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
+    interrupt::{CpuIndex, InterruptLatch},
+    uart::S5lUart,
+    wdt::AppleWdt,
+};
+use alloc::{boxed::Box, format, string::String};
+
+pub use crate::platform::apple::{
+    interrupt::AicInput,
+    uart::{ConsoleBusy, ConsoleSink},
+};
+
+/// One guest physical range of a device: DeviceTree `reg` translated
+/// through the parent `ranges`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Range {
+    pub physical: u64,
+    pub bytes: u64,
+}
+
+pub struct AppleDevices {
+    bus: Bus,
+    latch: InterruptLatch,
+    aic: Option<DeviceId>,
+    cpu: CpuIndex,
+    reset: Option<String>,
+}
+
+fn describe(error: MmioError) -> DeviceError {
+    match error {
+        MmioError::Unmapped { .. } => DeviceError::NoDevice,
+        MmioError::Misaligned { address, width } => DeviceError::Refused(format!(
+            "misaligned {}-byte device access at {address:#x}",
+            width.bytes()
+        )),
+        MmioError::Unsupported {
+            device,
+            offset,
+            width,
+            direction,
+            reason,
+        } => DeviceError::Refused(format!(
+            "{device} {direction:?} of {} bytes at offset {offset:#x}: {reason}",
+            width.bytes()
+        )),
+    }
+}
+
+impl AppleDevices {
+    /// Devices of the PE numbered `cpu` (0 is the DeviceTree's running cpu0).
+    pub fn new(cpu: CpuIndex) -> Self {
+        Self {
+            bus: Bus::new(),
+            latch: InterruptLatch::new(),
+            aic: None,
+            cpu,
+            reset: None,
+        }
+    }
+
+    fn map(&mut self, device: DeviceId, ranges: &[Range]) -> Result<(), MapError> {
+        let mut offset = 0;
+        for range in ranges {
+            self.bus.map(device, range.physical, range.bytes, offset)?;
+            offset += range.bytes;
+        }
+        Ok(())
+    }
+
+    /// The S5L console UART at its DeviceTree ranges.
+    pub fn add_uart<C: ConsoleSink + 'static>(
+        &mut self,
+        console: C,
+        ranges: &[Range],
+        irq: Option<AicInput>,
+    ) -> Result<(), MapError> {
+        let device = self.bus.add(Box::new(S5lUart::new(console, irq)));
+        self.map(device, ranges)
+    }
+
+    /// The SoC watchdog; `now` is the counter value its timers start from.
+    pub fn add_watchdog(
+        &mut self,
+        ranges: &[Range],
+        irq: Option<AicInput>,
+        now: u64,
+    ) -> Result<(), MapError> {
+        let device = self.bus.add(Box::new(AppleWdt::new(irq, now)));
+        self.map(device, ranges)
+    }
+
+    /// The interrupt controller; device wires on `Wire::Aic` reach it.
+    pub fn add_aic(&mut self, aic: Aic2, physical: u64) -> Result<(), MapError> {
+        let span = aic.span();
+        let device = self.bus.add(Box::new(aic));
+        self.aic = Some(device);
+        self.bus.map(device, physical, span, 0)
+    }
+
+    /// Forward queued device wires into the AIC and record a reset request.
+    fn settle(&mut self, now: u64, reset: Option<String>) -> Result<(), DeviceError> {
+        if self.reset.is_none() {
+            self.reset = reset;
+        }
+        loop {
+            let inputs = self.latch.take_aic_inputs();
+            if inputs.is_empty() {
+                return Ok(());
+            }
+            let Some(aic) = self.aic else {
+                return Err(DeviceError::Refused(format!(
+                    "AIC input {:?} changed but no AIC model is mapped",
+                    inputs[0].0
+                )));
+            };
+            let mut access = Access::new(self.cpu, now, &mut self.latch);
+            let controller = self
+                .bus
+                .device_mut::<Aic2>(aic)
+                .expect("the AIC id names an Aic2");
+            for (input, level) in inputs {
+                controller
+                    .set_input(input, level, &mut access)
+                    .map_err(|error| DeviceError::Refused(format!("AIC input: {error:?}")))?;
+            }
+        }
+    }
+}
+
+fn width(bytes: u8) -> Result<Width, DeviceError> {
+    Width::from_bytes(u64::from(bytes))
+        .ok_or_else(|| DeviceError::Refused(format!("{bytes}-byte device access")))
+}
+
+fn reset_reason(access: &Access<'_>) -> Option<String> {
+    access.reset_request().map(|request| {
+        format!(
+            "{}: {} at counter {}",
+            request.device, request.reason, request.at
+        )
+    })
+}
+
+impl Devices for AppleDevices {
+    fn read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        let width = width(bytes)?;
+        let mut access = Access::new(self.cpu, now, &mut self.latch);
+        let value = self
+            .bus
+            .read(physical, width, &mut access)
+            .map_err(describe)?;
+        let reset = reset_reason(&access);
+        self.settle(now, reset)?;
+        Ok(value)
+    }
+
+    fn write(&mut self, physical: u64, bytes: u8, value: u64, now: u64) -> Result<(), DeviceError> {
+        let width = width(bytes)?;
+        let mut access = Access::new(self.cpu, now, &mut self.latch);
+        self.bus
+            .write(physical, width, value, &mut access)
+            .map_err(describe)?;
+        let reset = reset_reason(&access);
+        self.settle(now, reset)
+    }
+
+    fn lines(&mut self, now: u64) -> Lines {
+        let mut access = Access::new(self.cpu, now, &mut self.latch);
+        let advanced = self.bus.advance(&mut access);
+        let reset = reset_reason(&access);
+        let settled = self.settle(now, reset);
+        if let Err(error) = advanced.map_err(describe).and(settled)
+            && self.reset.is_none()
+        {
+            // A model that cannot advance stops the machine like a reset
+            // would, with the model's own reason.
+            self.reset = Some(format!("device advance refused: {error:?}"));
+        }
+        let pins = self.latch.pins(self.cpu);
+        Lines {
+            irq: pins.irq,
+            fiq: pins.fiq,
+        }
+    }
+
+    fn deadline(&mut self, now: u64) -> Option<u64> {
+        let mut access = Access::new(self.cpu, now, &mut self.latch);
+        self.bus.advance(&mut access).ok().flatten()
+    }
+
+    fn take_reset(&mut self) -> Option<String> {
+        self.reset.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::{rc::Rc, vec::Vec};
+    use core::cell::RefCell;
+
+    #[derive(Clone, Default)]
+    struct Console(Rc<RefCell<Vec<u8>>>);
+    impl ConsoleSink for Console {
+        fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
+            self.0.borrow_mut().push(byte);
+            Ok(())
+        }
+    }
+
+    const UART: u64 = 0x2_3520_0000;
+
+    #[test]
+    fn routes_the_console_and_refuses_unmapped_and_unknown_registers() {
+        let console = Console::default();
+        let mut devices = AppleDevices::new(0);
+        devices
+            .add_uart(
+                console.clone(),
+                &[Range {
+                    physical: UART,
+                    bytes: 0x4000,
+                }],
+                None,
+            )
+            .unwrap();
+        // UTRSTAT reports an empty transmitter; UTXH sends one byte.
+        assert_eq!(devices.read(UART + 0x10, 4, 0).unwrap() & 6, 6);
+        for byte in *b"ok" {
+            devices.write(UART + 0x20, 4, u64::from(byte), 0).unwrap();
+        }
+        assert_eq!(console.0.borrow().as_slice(), b"ok");
+        assert_eq!(
+            devices.read(0x2_0000_0000, 4, 0),
+            Err(DeviceError::NoDevice)
+        );
+        assert!(matches!(
+            devices.read(UART + 0x3c, 4, 0),
+            Err(DeviceError::Refused(reason)) if reason.contains("UVER")
+        ));
+        assert!(!devices.lines(0).irq);
+        assert_eq!(devices.take_reset(), None);
+    }
+}

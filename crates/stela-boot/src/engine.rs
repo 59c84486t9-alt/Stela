@@ -1,6 +1,7 @@
 //! System mode, engine phase: runs in the Stela window after the loader has
 //! switched to LA57. It never touches identity addresses again; host physical
 //! memory is reached through the physmap.
+mod adt;
 mod bundle;
 mod host;
 mod interrupts;
@@ -10,7 +11,7 @@ use crate::{
     handoff::{Handoff, MAGIC},
     layout, output,
 };
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::{
     arch::x86_64::{__cpuid, __cpuid_count},
     sync::atomic::{AtomicU64, Ordering},
@@ -18,7 +19,8 @@ use core::{
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
-    Cpu, CpuProfile, Event, Machine, NoDevices, Stop,
+    Cpu, CpuProfile, Event, Machine, Stop,
+    apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::{DCZID_EL0, MPIDR_EL1},
 };
@@ -176,6 +178,88 @@ fn j473_profile() -> CpuProfile {
     }
 }
 
+/// The guest's console UART, shown line by line as `GUEST| ...`.
+#[derive(Default)]
+struct GuestConsole(Vec<u8>);
+
+impl ConsoleSink for GuestConsole {
+    fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
+        if byte == b'\n' || self.0.len() == 200 {
+            output::arguments(format_args!(
+                "GUEST| {}\n",
+                String::from_utf8_lossy(&self.0)
+            ));
+            self.0.clear();
+        } else if byte != b'\r' {
+            self.0.push(byte);
+        }
+        Ok(())
+    }
+}
+
+/// J473AP placement from Apple's DeviceTree (26A434 `DeviceTree.j473ap`):
+/// `/arm-io` maps child 0 to PA 0x2_0000_0000; `uart0` is `reg` 0x35200000
+/// +0x4000 with AIC input 739 and `wdt` is `reg` 0x3d2b0000 +0x4000 with AIC
+/// input 379. Used when no DeviceTree is loaded (the test kernel).
+const ARM_IO: u64 = 0x2_0000_0000;
+const J473_UART: (u64, u64, u32) = (0x3520_0000, 0x4000, 739);
+const J473_WDT: (u64, u64, u32) = (0x3d2b_0000, 0x4000, 379);
+
+/// A device node's first `reg` range in guest PA and its AIC input, read
+/// from the DeviceTree.
+fn placement(tree: &[u8], name: &str) -> Result<(Range, AicInput), String> {
+    let root = adt::Node::root(tree).ok_or("DeviceTree has no root")?;
+    let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
+    let node = io
+        .child(name)
+        .ok_or_else(|| alloc::format!("DeviceTree has no /arm-io/{name}"))?;
+    let (offset, bytes) = node
+        .pairs("reg")
+        .and_then(|reg| reg.first().copied())
+        .ok_or_else(|| alloc::format!("/arm-io/{name} has no reg"))?;
+    let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
+    let physical = ranges
+        .iter()
+        .find(|(child, _, size)| (*child..child + size).contains(&offset))
+        .map(|(child, parent, _)| parent + (offset - child))
+        .ok_or_else(|| alloc::format!("/arm-io/{name} lies outside /arm-io ranges"))?;
+    let irq = node
+        .first_u32("interrupts")
+        .ok_or_else(|| alloc::format!("/arm-io/{name} has no interrupts"))?;
+    Ok((Range { physical, bytes }, AicInput::new(0, irq as u16)))
+}
+
+/// The modeled board devices: the console UART and the watchdog. The AIC is
+/// not placed until the board profile records its NR_IRQ and MAX_IRQ, so an
+/// access to it, or a device wire that would reach it, stops explicitly.
+fn devices(tree: Option<&[u8]>, now: u64) -> Result<AppleDevices, String> {
+    let fixed = |(offset, bytes, irq): (u64, u64, u32)| {
+        (
+            Range {
+                physical: ARM_IO + offset,
+                bytes,
+            },
+            AicInput::new(0, irq as u16),
+        )
+    };
+    let (uart, wdt) = match tree {
+        Some(tree) => (placement(tree, "uart0")?, placement(tree, "wdt")?),
+        None => (fixed(J473_UART), fixed(J473_WDT)),
+    };
+    let mut devices = AppleDevices::new(0);
+    devices
+        .add_uart(GuestConsole::default(), &[uart.0], Some(uart.1))
+        .map_err(|error| alloc::format!("UART placement: {error:?}"))?;
+    devices
+        .add_watchdog(&[wdt.0], Some(wdt.1), now)
+        .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
+    output::arguments(format_args!(
+        "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic=unplaced\n",
+        uart.0.physical, uart.0.bytes, uart.1.irq, wdt.0.physical, wdt.0.bytes, wdt.1.irq
+    ));
+    Ok(devices)
+}
+
 static EVENTS: AtomicU64 = AtomicU64::new(0);
 static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
 
@@ -314,14 +398,41 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     ));
     let mut cpu = Cpu::new(entry, Pstate::RESET_EL1);
     cpu.state.x[0] = x0;
-    let mut machine = Machine::new(cpu, bare, NoDevices, profile, target);
+    let tree = options.bundle.then(|| {
+        handoff.files[..handoff.file_count]
+            .iter()
+            .find(|file| file.name() == "devicetree.adt")
+            .map(|file| {
+                // SAFETY: the loader left every bundle file allocated.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        layout::physical(file.contents.physical) as *const u8,
+                        file.contents.bytes as usize,
+                    )
+                }
+            })
+    });
+    let tree = match tree {
+        Some(None) => output::fatal("the boot bundle has no devicetree.adt"),
+        Some(Some(tree)) => Some(tree),
+        None => None,
+    };
+    let now = stela_runtime::machine::Host::counter(&mut bare);
+    let devices = match devices(tree, now) {
+        Ok(devices) => devices,
+        Err(error) => {
+            output::arguments(format_args!("device refusal: {error}\n"));
+            output::fatal("the board devices could not be placed")
+        }
+    };
+    let mut machine = Machine::new(cpu, bare, devices, profile, target);
     let started = host::rdtsc();
     let stop = machine.run(options.budget);
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&machine, stop, seconds)
 }
 
-fn finish(machine: &Machine<BareHost, NoDevices>, stop: Stop, seconds: f64) -> ! {
+fn finish(machine: &Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
     let cpu = &machine.cpu;
     let (fills, resets, stray, _) = host::statistics();
     output::arguments(format_args!(
@@ -353,6 +464,10 @@ fn finish(machine: &Machine<BareHost, NoDevices>, stop: Stop, seconds: f64) -> !
         Stop::Idle => {
             output::arguments(format_args!("STOP idle: WFI with no wake source\n"));
             output::terminate(0x10)
+        }
+        Stop::Reset(reason) => {
+            output::arguments(format_args!("STOP reset: {reason}\n"));
+            output::terminate(0x15)
         }
         Stop::Budget => {
             output::arguments(format_args!("STOP budget\n"));

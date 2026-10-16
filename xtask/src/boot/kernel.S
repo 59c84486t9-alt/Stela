@@ -32,6 +32,12 @@
 // M, C, SA, I, SPAN and the SCTLR_EL1 RES1 bits; EL0 WFI/WFE trap.
 .set SCTLR, 0x30d0180d
 .set KERNEL_BLOCK, 0x0040000000000701 // block, SH inner, AF, Attr0, UXN
+.set DEVICE_BLOCK, 0x0060000000000405 // block, AF, Attr1 Device, PXN, UXN
+// J473AP S5L UART (DeviceTree /arm-io/uart0) and its 32 MiB device block,
+// mapped by TTBR1 level 2 entry 1.
+.set UART_PA, 0x235200000
+.set UART_BLOCK, 0x234000000
+.set UART_VA, (KERNEL_VA + BLOCK + (UART_PA - UART_BLOCK))
 .set USER_TEXT, 0x0020000000000fc3   // page, AF, nG, AP EL0 RO, PXN
 .set USER_DATA, 0x0060000000000f43   // page, AF, nG, AP EL0 RW, PXN, UXN
 
@@ -72,6 +78,8 @@ _start:
     orr x6, x20, x7
     str x6, [x2]                        // KERNEL_VA -> block
     str x6, [x4, #(0x400 * 8)]          // identity for the MMU switch
+    ldr x6, =(UART_BLOCK | DEVICE_BLOCK)
+    str x6, [x2, #8]                    // KERNEL_VA + 32 MiB -> UART block
     orr x6, x4, #3
     str x6, [x3]
     orr x6, x5, #3
@@ -124,6 +132,16 @@ high:
     mov sp, x6
     isb
     ldr x22, =(KERNEL_VA + KDATA)
+    // Device loads and stores: the banner through the UART.
+    adr x1, banner
+    ldr x2, =UART_VA
+3:  ldrb w3, [x1], #1
+    cbz w3, 5f
+4:  ldr w4, [x2, #0x10]                 // UTRSTAT: wait for TX buffer empty
+    tbz w4, #1, 4b
+    str w3, [x2, #0x20]                 // UTXH
+    b 3b
+5:
     // EL1 data abort: level 2 of TTBR1 maps only the first block.
     ldr x6, =(KERNEL_VA + 0x4000000)
     ldr x7, [x6]
@@ -292,6 +310,10 @@ finish:
     b 1b
 
 .ltorg
+
+banner:
+    .asciz "STELA TEST KERNEL: MMU ON, UART MMIO\n"
+.balign 4
 
 // The EL1 vector table; only the expected entries are reachable.
 .balign 2048

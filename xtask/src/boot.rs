@@ -76,6 +76,9 @@ const KERNEL_RESULTS: [(usize, Option<u64>); 8] = [
 /// System options for a boot bundle: the J473AP DRAM base and 8 GiB.
 const BUNDLE_OPTIONS: &str = "--system --bundle \\EFI\\stela\\bundle --ram-bytes 0x200000000";
 
+/// The line the test kernel writes through the S5L UART model.
+const KERNEL_BANNER: &str = "GUEST| STELA TEST KERNEL: MMU ON, UART MMIO";
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Scenario {
     /// Four instructions on the bounded MMU-off EL1 diagnostic.
@@ -540,6 +543,9 @@ const FAILED_EXIT: u8 = 1;
 fn verify_kernel(serial: &str) -> Result<(), String> {
     if !serial.contains("STOP idle") {
         return Err("the engine did not reach the kernel's final idle state".into());
+    }
+    if !serial.contains(KERNEL_BANNER) {
+        return Err("the kernel's UART banner did not reach the console".into());
     }
     let mut registers = [0u64; 32];
     for line in serial.lines() {
