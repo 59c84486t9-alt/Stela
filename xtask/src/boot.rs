@@ -38,6 +38,8 @@ mod disks;
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
 const TIMEOUT_EXIT: u8 = 124;
 const MAX_TIMEOUT_SECONDS: f64 = 120.0;
+/// QEMU's FAT16 directory volume holds at most 516 MB; keep a margin.
+const VVFAT_BYTES: u64 = 480 * 1024 * 1024;
 /// A real restore payload verifies in tens of minutes under TCG.
 const MAX_USB_TIMEOUT_SECONDS: f64 = 4.0 * 3600.0;
 const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
@@ -342,6 +344,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         }
     }
 
+    // QEMU's directory volume is FAT16 and holds 516 MB; larger volumes,
+    // such as a recovery bundle with its ramdisk, go into a FAT32 image.
+    let fat = match (&arguments.usb_image, &arguments.opencore) {
+        (None, None) if directory_bytes(&volume)? > VVFAT_BYTES => {
+            Some(fat_image(&volume, &output)?)
+        }
+        _ => None,
+    };
     let qemu = qemu()?;
     let firmware = firmware(&qemu)?;
     let variables = output.join("variables.fd");
@@ -389,7 +399,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 "if=none,id=volume,format=raw,snapshot=on,file={}",
                 usb.display()
             ),
-            None => format!("if=none,id=volume,format=raw,{access}{}", volume.display()),
+            None => match &fat {
+                Some(image) => format!(
+                    "if=none,id=volume,format=raw,readonly=on,file={}",
+                    image.display()
+                ),
+                None => format!("if=none,id=volume,format=raw,{access}{}", volume.display()),
+            },
         })
         .args(["-device", "virtio-blk-pci,drive=volume"]);
     for (index, disk) in disks.iter().enumerate() {
@@ -688,6 +704,48 @@ fn staged(target: &Path) -> Result<Value> {
         "partitions": partitions,
         "members_verified": members.iter().map(|m| &m.name).collect::<Vec<_>>(),
     }))
+}
+
+fn directory_bytes(path: &Path) -> Result<u64> {
+    let mut total = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        total += match entry.file_type()?.is_dir() {
+            true => directory_bytes(&entry.path())?,
+            false => entry.metadata()?.len(),
+        };
+    }
+    Ok(total)
+}
+
+/// A raw FAT32 image of `volume`, without a partition table, which the
+/// firmware mounts whole.
+fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
+    ensure!(
+        cfg!(target_os = "macos"),
+        "volumes over {VVFAT_BYTES} bytes need a FAT32 image, which this host cannot make; \
+         build it with hdiutil on macOS"
+    );
+    let bytes = directory_bytes(volume)?;
+    let size = (bytes + bytes / 8 + (64 << 20)).div_ceil(1 << 20);
+    let base = output.join("volume");
+    exec(
+        Process::new("hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-fs",
+                "MS-DOS FAT32",
+                "-volname",
+                "STELA",
+            ])
+            .args(["-layout", "NONE", "-format", "UDTO", "-size"])
+            .arg(format!("{size}m"))
+            .arg("-srcfolder")
+            .arg(volume)
+            .arg(&base),
+    )?;
+    Ok(output.join("volume.cdr"))
 }
 
 /// Copy an EFI directory tree; at its top, leave out Windows' boot files.
