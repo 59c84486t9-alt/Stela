@@ -36,6 +36,8 @@ const POINTER_ALIGNMENT: u64 = 16;
 /// Attempts to find each random field word Stela accepts.
 const FIELD_ATTEMPTS: usize = 64;
 const REGISTER_FIELD: u32 = 0x1f;
+/// Words compared per oracle run; bounds memory on large runs.
+const BATCH_WORDS: usize = 1024;
 const ZERO_OR_SP: u32 = 31;
 
 #[derive(Args)]
@@ -216,12 +218,75 @@ impl Lane<'_> {
     }
 }
 
+/// Totals across every compared batch.
+#[derive(Default)]
+struct Report {
+    words: usize,
+    compared: usize,
+    mismatches: usize,
+    shown: usize,
+    skipped: usize,
+    mismatched: BTreeSet<String>,
+    covered: BTreeSet<String>,
+    /// Original exception classes per form, kept for forms that never complete.
+    uncovered: BTreeMap<String, BTreeMap<u64, usize>>,
+}
+
 impl Differential {
     pub fn run(self) -> Result<()> {
+        let oracle = match &self.qemu {
+            Some(qemu) => Oracle::new(qemu)?,
+            None => Oracle::locate(&root().join(".tools/qemu/bin"))?,
+        };
         let mut random = Random(self.seed);
+        let mut report = Report::default();
+        let mut batch = Vec::with_capacity(BATCH_WORDS);
         let mut skipped = 0;
-        let mut subjects = self.subjects(&mut random, &mut skipped)?;
-        let cases: Vec<Case> = subjects
+        self.subjects(&mut random, &mut skipped, |random, subject| {
+            batch.push(subject);
+            if batch.len() == BATCH_WORDS {
+                self.compare(&oracle, random, &mut batch, &mut report)?;
+            }
+            Ok(())
+        })?;
+        self.compare(&oracle, &mut random, &mut batch, &mut report)?;
+        report
+            .uncovered
+            .retain(|form, _| !report.covered.contains(form));
+
+        for form in &report.mismatched {
+            println!("mismatch: {form}");
+        }
+        for (form, classes) in &report.uncovered {
+            println!("uncovered: {form}, exception classes {classes:x?}");
+        }
+        println!(
+            "{} words, {} comparisons, {} mismatches in {} forms, {} forms never \
+             completed, {} samples need services the differential does not provide",
+            report.words,
+            report.compared,
+            report.mismatches,
+            report.mismatched.len(),
+            report.uncovered.len(),
+            report.skipped
+        );
+        ensure!(report.words > 0, "no forms selected");
+        ensure!(
+            report.mismatches == 0,
+            "native translation differs from the original"
+        );
+        Ok(())
+    }
+
+    /// Run `batch` from random states on the oracle and natively, then empty it.
+    fn compare(
+        &self,
+        oracle: &Oracle,
+        random: &mut Random,
+        batch: &mut Vec<Subject>,
+        report: &mut Report,
+    ) -> Result<()> {
+        let cases: Vec<Case> = batch
             .iter()
             .flat_map(|subject| std::iter::repeat_n(subject, self.states))
             .map(|subject| Case {
@@ -234,70 +299,48 @@ impl Differential {
                     .map(|(svl, svcr)| random.scalable(svl, svcr)),
             })
             .collect();
-        let oracle = match &self.qemu {
-            Some(qemu) => Oracle::new(qemu)?,
-            None => Oracle::locate(&root().join(".tools/qemu/bin"))?,
-        };
         let originals = oracle.run(&cases)?;
-
-        let mut compared = 0;
-        let mut mismatches = vec![];
-        let mut covered = BTreeSet::new();
-        // Original exception classes per form, kept for forms that never complete.
-        let mut uncovered: BTreeMap<String, BTreeMap<u64, usize>> = BTreeMap::new();
         for (index, (case, original)) in cases.iter().zip(&originals).enumerate() {
-            let subject = &mut subjects[index / self.states];
+            let subject = &mut batch[index / self.states];
             if let Some(exception) = original.exception {
-                *uncovered
+                *report
+                    .uncovered
                     .entry(subject.form.clone())
                     .or_default()
                     .entry(exception.syndrome >> ESR_CLASS_SHIFT)
                     .or_default() += 1;
                 continue;
             }
-            covered.insert(subject.form.clone());
+            report.covered.insert(subject.form.clone());
             if oracle_limit(&subject.form, &case.state) {
                 continue;
             }
             // SAFETY: the original completed, so every access stays in the windows.
             let translated = unsafe { subject.translation.run(case)? };
-            compared += 1;
+            report.compared += 1;
             if comparable(&translated) != comparable(original) {
-                mismatches.push((subject.form.clone(), case, original, translated));
+                report.mismatches += 1;
+                report.mismatched.insert(subject.form.clone());
+                if report.shown < self.show {
+                    report.shown += 1;
+                    println!("{} {:08x?}:", subject.form, case.code);
+                    print_difference(case, original, &translated);
+                }
             }
         }
-        uncovered.retain(|form, _| !covered.contains(form));
-
-        for (form, case, original, translated) in mismatches.iter().take(self.show) {
-            println!("{form} {:08x?}:", case.code);
-            print_difference(case, original, translated);
-        }
-        let forms: BTreeSet<_> = mismatches.iter().map(|(form, ..)| form).collect();
-        for form in &forms {
-            println!("mismatch: {form}");
-        }
-        for (form, classes) in &uncovered {
-            println!("uncovered: {form}, exception classes {classes:x?}");
-        }
-        println!(
-            "{} words, {compared} comparisons, {} mismatches in {} forms, {} forms never \
-             completed, {skipped} samples need services the differential does not provide",
-            subjects.len(),
-            mismatches.len(),
-            forms.len(),
-            uncovered.len()
-        );
-        ensure!(
-            mismatches.is_empty(),
-            "native translation differs from the original"
-        );
+        report.words += batch.len();
+        batch.clear();
         Ok(())
     }
 
-    /// Every compared word sequence; samples needing other services count in
-    /// `skipped`.
-    fn subjects(&self, random: &mut Random, skipped: &mut usize) -> Result<Vec<Subject>> {
-        let mut subjects = vec![];
+    /// Pass every compared word sequence to `each`; samples needing other
+    /// services count in `skipped`.
+    fn subjects(
+        &self,
+        random: &mut Random,
+        skipped: &mut usize,
+        mut each: impl FnMut(&mut Random, Subject) -> Result<()>,
+    ) -> Result<()> {
         for (name, mode) in registry::REGISTRIES {
             if mode == Mode::Service {
                 continue;
@@ -334,12 +377,15 @@ impl Differential {
                         continue;
                     };
                     seen.insert(code[0]);
-                    subjects.push(Subject {
-                        form: id.into(),
-                        scalable: lane.scalable(sample),
-                        code,
-                        translation,
-                    });
+                    each(
+                        random,
+                        Subject {
+                            form: id.into(),
+                            scalable: lane.scalable(sample),
+                            code,
+                            translation,
+                        },
+                    )?;
                 }
                 // Random field words reuse the first sample's profile.
                 let Some(sample) = samples.first() else {
@@ -358,18 +404,20 @@ impl Differential {
                     });
                     if let Some((word, translation)) = found {
                         seen.insert(word);
-                        subjects.push(Subject {
-                            form: id.into(),
-                            scalable: lane.scalable(sample),
-                            code: vec![word],
-                            translation,
-                        });
+                        each(
+                            random,
+                            Subject {
+                                form: id.into(),
+                                scalable: lane.scalable(sample),
+                                code: vec![word],
+                                translation,
+                            },
+                        )?;
                     }
                 }
             }
         }
-        ensure!(!subjects.is_empty(), "no forms selected");
-        Ok(subjects)
+        Ok(())
     }
 }
 
