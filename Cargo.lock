@@ -2110,6 +2110,7 @@ dependencies = [
  "clap",
  "libc",
  "object",
+ "plist",
  "serde_json",
  "stela-cli",
  "stela-compiler",

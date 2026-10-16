@@ -15,6 +15,7 @@ stela-cli.workspace = true
 stela-compiler.workspace = true
 stela-runtime.workspace = true
 object = { version = "0.37", features = ["read"] }
+plist = "1"
 
 [build-dependencies]
 object = { version = "0.37", features = ["read"] }

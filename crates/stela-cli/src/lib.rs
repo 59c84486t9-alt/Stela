@@ -5,6 +5,7 @@ use std::process::ExitCode;
 mod args;
 pub mod compile;
 mod dyld_entry;
+pub mod efi;
 mod execute;
 mod images;
 mod input;
@@ -67,6 +68,9 @@ pub(crate) enum Command {
     DecryptAea(images::DecryptAea),
     /// Copy selected guest files out of a decrypted disk image.
     ExtractGuestFiles(images::ExtractGuestFiles),
+    /// Add the UEFI mount to an OpenCore EFI folder, or remove it.
+    #[command(subcommand)]
+    Efi(efi::EfiCommand),
 }
 
 impl Command {
@@ -92,6 +96,7 @@ impl Command {
             Self::FetchAeaKey(command) => command.run(),
             Self::DecryptAea(command) => command.run(),
             Self::ExtractGuestFiles(command) => command.run(),
+            Self::Efi(command) => command.run(),
         }
     }
 }
