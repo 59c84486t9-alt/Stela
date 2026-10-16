@@ -189,6 +189,7 @@ impl MemoryServiceLoan {
     }
 
     /// Prepare every fallible view/profile/monitor operation before host effects.
+    #[cfg(feature = "std")]
     pub(in crate::memory) fn prepare(
         &self,
         mut views: Vec<(Arc<MemoryView>, MappingAttributes)>,
@@ -222,6 +223,7 @@ impl MemoryServiceLoan {
         })
     }
 
+    #[cfg(feature = "std")]
     pub(in crate::memory) fn retire(&self, views: &[Arc<MemoryView>]) -> Result<(), MemoryStatus> {
         for view in views {
             self.domain.retire_view(view)?;
@@ -229,6 +231,7 @@ impl MemoryServiceLoan {
         Ok(())
     }
 
+    #[cfg(feature = "std")]
     pub(in crate::memory) fn commit(&self, snapshot: DomainSnapshot) -> Result<(), MemoryStatus> {
         let mut state = self.domain.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.domain.check_execution()?;

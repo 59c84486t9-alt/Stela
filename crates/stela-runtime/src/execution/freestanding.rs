@@ -46,11 +46,8 @@ impl Mapping {
         unsafe { NativeImage::borrow(&self.frames).call_block(state) }
     }
 
-    // Legacy research calls have no fallible-storage report/finalizer contract.
-    // Refuse BEFORE FFI; mounted canonical paths use the two observed methods.
-    pub unsafe fn call(&self, _state: &mut GuestState) -> Result<()> {
-        anyhow::bail!("freestanding native entry requires the original observed canonical session")
-    }
+    // Legacy research context calls have no fallible-storage report/finalizer
+    // contract. Refuse BEFORE FFI; mounted canonical paths use observed methods.
     pub unsafe fn call_context(
         &self,
         _state: &mut GuestState,

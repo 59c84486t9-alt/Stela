@@ -477,18 +477,6 @@ impl BootFrames {
         Ok(())
     }
 
-    /// Retire only the actual original RX mapping after all original calls finish.
-    /// On failure the allocation is quarantined; no recycled frame can hide it.
-    pub(crate) fn retire(mut self) -> Result<(), FrameError> {
-        let result = self.unmap();
-        // Failure remains quarantined and must not become an implicit Drop retry.
-        self.live = false;
-        if let Err(error) = result {
-            self.pool.quarantine(error);
-        }
-        result
-    }
-
     fn unmap(&mut self) -> Result<(), FrameError> {
         self.validate()?;
         let mut allocation = self

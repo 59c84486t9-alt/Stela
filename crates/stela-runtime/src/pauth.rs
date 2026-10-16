@@ -1070,16 +1070,23 @@ mod tests {
 pub(crate) mod features;
 pub use features::UnsupportedInstructionProfile;
 
+#[cfg(feature = "std")]
 pub(crate) mod lr_context;
 
+#[cfg(feature = "std")]
 pub(crate) mod lr_instruction;
 
+#[cfg(feature = "std")]
 pub(crate) mod lr_service;
 
+#[cfg(feature = "std")]
 mod two_modifier;
 
+#[cfg(feature = "std")]
 pub(crate) use two_modifier::ConfigurationError as TwoModifierError;
 
+#[cfg(feature = "std")]
 pub(crate) mod lr_effects;
 
+#[cfg(feature = "std")]
 pub(crate) mod conditional;

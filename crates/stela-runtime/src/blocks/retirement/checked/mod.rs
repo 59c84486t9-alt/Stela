@@ -10,9 +10,12 @@ mod el1_registers;
 pub(crate) mod el1_system;
 mod entry_controls;
 mod halted;
+#[cfg(feature = "std")]
 mod low128_call;
 mod m0;
+#[cfg(feature = "std")]
 mod pauth_lr;
+#[cfg(feature = "std")]
 mod pauth_policy;
 mod privileged;
 mod privileged_debug;
@@ -31,6 +34,7 @@ use crate::{
 };
 pub(crate) use entry_controls::ProcessEntryControls;
 pub(crate) use m0::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
+#[cfg(feature = "std")]
 pub(crate) use provider::CheckedProcessOwner;
 use source::{BoundSource, ReturnedTerminal};
 use stela_compiler::{
@@ -63,10 +67,12 @@ pub(crate) enum OwnedStop {
     Halted {
         instruction_pc: GuestAddress,
     },
+    #[cfg(feature = "std")]
     PointerAuthenticationFault {
         instruction: stela_compiler::block::PointerAuthentication,
         code: u8,
     },
+    #[cfg(feature = "std")]
     PointerAuthenticationPoisonedTransfer {
         instruction: stela_compiler::block::PointerAuthentication,
         target: GuestAddress,
@@ -80,6 +86,8 @@ pub(crate) enum OwnedStop {
 }
 
 #[derive(Debug)]
+// Hosted process reports read every retained observation.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) struct OwnedRunOutcome {
     pub stop: OwnedStop,
     pub accounting: RunOutcome,
@@ -98,6 +106,8 @@ pub(crate) struct OwnedRunOutcome {
 
 /// Diagnostic metadata only; cannot mint entry/retirement/source authority.
 #[derive(Debug)]
+// Hosted process reports read every retained observation.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) struct SettledPrefix {
     pub entry: GuestAddress,
     pub generation: u64,
@@ -137,6 +147,8 @@ impl From<super::super::checked_memory::MemoryFault> for OwnedMemoryFault {
 }
 
 #[derive(Clone)]
+// Only the hosted EL0 process owner produces entry declines and faults today.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) enum NativeObservation {
     Returned {
         next_pc: u64,
@@ -462,6 +474,7 @@ impl BlockRuntime {
             },
             OwnedStop::StopAddress => StopReason::StopAddress,
             OwnedStop::BudgetExhausted => StopReason::BudgetExhausted,
+            #[cfg(feature = "std")]
             OwnedStop::PointerAuthenticationPoisonedTransfer {
                 instruction,
                 target,
@@ -668,6 +681,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 Ok(Some(OwnedStop::HelperRefused(error.to_string())))
                             }
                             HelperOutcome::Indeterminate(error) => Err(error),
+                            #[cfg(feature = "std")]
                             HelperOutcome::PreparedPauth {
                                 instruction,
                                 effect,
@@ -703,6 +717,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 self.finish_retirement(false)?;
                                 Ok(None)
                             }
+                            #[cfg(feature = "std")]
                             HelperOutcome::AuthenticationFault { instruction, code } => {
                                 // Precise no-commit fault. No exception owner or destination/link write is fabricated.
                                 anyhow::ensure!(
@@ -731,6 +746,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                                 }))
                             }
 
+                            #[cfg(feature = "std")]
                             HelperOutcome::Complete {
                                 continuation,
                                 event,
@@ -879,6 +895,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                             &mut self.pe.thread.registers,
                             service_events,
                         ) {
+                            #[cfg(feature = "std")]
                             darwin_services::Outcome::Complete(pc) => Some(pc),
                             darwin_services::Outcome::NoEffect => None,
                             darwin_services::Outcome::Indeterminate(error) => return Err(error),
@@ -984,12 +1001,14 @@ fn empty_accounting() -> RunOutcome {
     }
 }
 
-// Add alongside checked's existing provider/source declarations and reexports.
+#[cfg(feature = "std")]
 mod observation;
+#[cfg(feature = "std")]
 pub(crate) use observation::OwnedProcessObservation;
 
 // ConsumerKey is constructed only by the canonical retirement consumer.
 // This check is immutable and grants no execution or service completion.
+#[cfg(feature = "std")]
 pub(crate) fn qualify_observation(
     authority: &crate::system::execution::authority::PeExecutionAuthority,
 ) -> anyhow::Result<()> {

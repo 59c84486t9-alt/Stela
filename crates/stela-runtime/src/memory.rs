@@ -163,6 +163,8 @@ pub struct DataProtectionLimit {
     pub writable: bool,
 }
 #[derive(Debug)]
+// The freestanding mount does not create host mappings.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 struct Allocation {
     shared_backing: Option<Arc<backing::MemoryBacking>>,
     storage: Arc<NativeStorage>,
@@ -233,6 +235,7 @@ pub fn host_page_size() -> Result<usize> {
     Ok(4096)
 }
 
+#[cfg(feature = "std")]
 fn page_rounded(bytes: u64, page: u64) -> Result<u64> {
     Ok(bytes
         .checked_add(page - 1)
@@ -584,6 +587,7 @@ impl OwnedMemory {
         Err(ProtectionError::PlatformUnavailable)
     }
 
+    #[cfg(feature = "std")]
     fn protect_data_with(
         &mut self,
         address: u64,
@@ -596,6 +600,7 @@ impl OwnedMemory {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "std")]
     fn protect_data_with_service(
         &mut self,
         address: u64,
@@ -847,10 +852,6 @@ fn host_protection(readable: bool, writable: bool) -> i32 {
     }) | (if writable { libc::PROT_WRITE } else { 0 })
 }
 
-#[cfg(not(feature = "std"))]
-fn host_protection(readable: bool, writable: bool) -> i32 {
-    (if readable { 1 } else { 0 }) | (if writable { 2 } else { 0 })
-}
 /// Runtime-published data with a permanently read-only, non-executable guest
 /// view and an unexposed writable alias. Publication and translated accesses
 /// must be serialized by the caller; this is not a concurrent kernel seqlock.

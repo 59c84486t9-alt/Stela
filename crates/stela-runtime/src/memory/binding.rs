@@ -65,6 +65,8 @@ impl core::fmt::Display for SharedBindingError {
 impl core::error::Error for SharedBindingError {}
 
 /// One group/system, retained by its facades and returned immutable snapshot.
+// Only hosted shared-binding lifecycle reads the attributes back.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(super) struct SharedBinding {
     system: Arc<MemorySystem>,
     pub(super) domain: Arc<MemoryDomain>,
@@ -218,6 +220,7 @@ impl OwnedMemory {
             .flat_map(|owner| owner.allocations.iter().zip(&owner.regions))
         {
             match allocation.storage.kind() {
+                #[cfg(feature = "std")]
                 StorageKind::PrivateFile => return Err(E::FileCopyOnWrite),
                 StorageKind::Anonymous => {}
                 _ => return Err(E::IncompatibleStorage),
@@ -445,6 +448,7 @@ impl OwnedMemory {
 pub(crate) mod tests;
 
 #[path = "binding/lifecycle.rs"]
+#[cfg(feature = "std")]
 mod lifecycle;
 
 impl PublishedReadOnlyRegion {

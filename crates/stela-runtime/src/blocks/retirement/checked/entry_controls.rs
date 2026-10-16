@@ -1,16 +1,18 @@
 //! Actual fresh-software debug controls and distinct retained execution scopes.
 //! LR execution does not manufacture an LR-absent exception-entry token.
-use crate::{
-    pauth::features::LinkRegisterPauthCapability,
-    system::{
-        debug::DebugControls,
-        identification_snapshot::Snapshot,
-        profile::{BaseSpeAbsence, EntryProfile},
-        state::{PacmStateFeature, SystemState},
-    },
+#[cfg(feature = "std")]
+use crate::pauth::features::LinkRegisterPauthCapability;
+use crate::system::{
+    debug::DebugControls,
+    identification_snapshot::Snapshot,
+    profile::{BaseSpeAbsence, EntryProfile},
+    state::{PacmStateFeature, SystemState},
 };
+#[cfg(feature = "std")]
 use alloc::sync::Arc;
-use anyhow::{Context, Result, ensure};
+#[cfg(feature = "std")]
+use anyhow::Context;
+use anyhow::{Result, ensure};
 const MDSCR_SOFTWARE_STEP: u64 = 1;
 const MDSCR_KERNEL_DEBUG_ENABLE: u64 = 1 << 13;
 const MDSCR_MONITOR_DEBUG_ENABLE: u64 = 1 << 15;
@@ -18,6 +20,7 @@ const MDSCR_ACTIVE_DEBUG: u64 =
     MDSCR_SOFTWARE_STEP | MDSCR_KERNEL_DEBUG_ENABLE | MDSCR_MONITOR_DEBUG_ENABLE;
 enum FeatureScope {
     Base(EntryProfile),
+    #[cfg(feature = "std")]
     LinkRegister(Arc<Snapshot>),
 }
 pub(crate) struct ProcessEntryControls {
@@ -49,6 +52,7 @@ impl ProcessEntryControls {
     /// The Arc is the SAME immutable Snapshot allocation as the actual fixed
     /// control bank of this fresh PE; no hardware/diagnostic adoption occurs.
     /// Other owner/producer obligations are identical to fresh_software.
+    #[cfg(feature = "std")]
     pub(crate) unsafe fn fresh_software_link_register_pauth(
         snapshot: &Arc<Snapshot>,
         spe: BaseSpeAbsence,
@@ -67,6 +71,7 @@ impl ProcessEntryControls {
         owner.check()?;
         Ok(owner)
     }
+    #[cfg(feature = "std")]
     pub(super) fn link_register(&self) -> bool {
         matches!(self.features, FeatureScope::LinkRegister(_))
     }
@@ -119,6 +124,7 @@ impl ProcessEntryControls {
                     "base entry scope has unqualified PACM storage"
                 );
             }
+            #[cfg(feature = "std")]
             FeatureScope::LinkRegister(snapshot) => {
                 let ids = identification.context("actual LR identification owner unavailable")?;
                 ensure!(

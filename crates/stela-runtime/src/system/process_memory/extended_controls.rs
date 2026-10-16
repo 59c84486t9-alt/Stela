@@ -7,9 +7,11 @@
 //! effects and PC settlement. No read loan grants native entry or completion.
 
 use super::{
-    FixedProcessMemoryControls, MemoryControls, MemoryExecutionLoan, MemoryStatus, MemoryThread,
-    ProcessMemoryError, Register, Snapshot, SourceNormalWbDomain,
+    FixedProcessMemoryControls, MemoryStatus, ProcessMemoryError, Register, Snapshot,
+    SourceNormalWbDomain,
 };
+#[cfg(feature = "std")]
+use super::{MemoryControls, MemoryExecutionLoan, MemoryThread};
 use crate::{
     pauth::features::{LinkRegisterPauthCapability, UnsupportedInstructionProfile},
     system::identification_snapshot::{Origin, Unsupported},
@@ -39,6 +41,8 @@ const CPA_WITH_CHECKING: u8 = 2;
 /// Full raw registers are retained. Future EnFPM or mutation belongs to this
 /// same owner; the current constructor rejects unimplemented extended bits.
 #[derive(Debug)]
+// Only the hosted CPA read loan reads the retained raw registers back.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(super) struct ExtendedControlBank {
     sctlr2_el1: u64,
     tcr2_el1: u64,
@@ -180,6 +184,7 @@ impl FixedProcessMemoryControls {
     /// integer ASID, equivalent-looking Snapshot or separate domain is accepted.
     /// This bounded loan validates current source and actual outer-domain identity; it does
     /// not expand MTE memory support or prove PE/ThreadState identity.
+    #[cfg(feature = "std")]
     pub(crate) fn extended_controls<'run>(
         &'run self,
         expected_snapshot: &Snapshot,
@@ -212,6 +217,7 @@ impl FixedProcessMemoryControls {
 
 /// Non-Clone loan: renewal/mutation of the bank and release of the actual outer
 /// pin are excluded while borrowed. No copied controls/IDs or second bank.
+#[cfg(feature = "std")]
 pub(crate) struct ExtendedControlLoan<'run> {
     bank: &'run FixedProcessMemoryControls,
     extended: &'run ExtendedControlBank,
@@ -220,6 +226,7 @@ pub(crate) struct ExtendedControlLoan<'run> {
     address_space: u64,
 }
 
+#[cfg(feature = "std")]
 impl<'run> ExtendedControlLoan<'run> {
     pub(crate) fn snapshot(&self) -> &'run Snapshot {
         self.snapshot

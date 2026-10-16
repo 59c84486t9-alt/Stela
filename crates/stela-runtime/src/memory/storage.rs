@@ -11,6 +11,7 @@ use std::fs::File;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageKind {
     Anonymous,
+    #[cfg(feature = "std")]
     PrivateFile,
     PublishedAliases,
 }
@@ -99,17 +100,20 @@ impl Drop for NativeMapping {
     }
 }
 
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageError {
     AliasExtentMismatch,
     AliasesOverlap,
 }
 
+#[cfg(feature = "std")]
 impl core::fmt::Display for StorageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "retained native storage failed: {self:?}")
     }
 }
+#[cfg(feature = "std")]
 impl core::error::Error for StorageError {}
 
 /// One physical storage lifetime, optionally retaining its two native aliases.

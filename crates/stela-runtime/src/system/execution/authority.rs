@@ -66,6 +66,7 @@ impl PeExecutionAuthority {
     /// The closed consumer must additionally hold the actual same-domain service
     /// loan before reading retained backend snapshots. This grants no entry,
     /// reset, mutable resource access or phase transition.
+    #[cfg(feature = "std")]
     pub(crate) fn check_observation(
         &self,
         _consumer: &crate::blocks::retirement::ConsumerKey,

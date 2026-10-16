@@ -47,6 +47,7 @@ fn accept_retained_loan<B>(loan: SystemExecutionLoan<'_, B>) -> RetainedResource
 
 pub(crate) mod checked;
 pub(crate) use checked::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
+#[cfg(feature = "std")]
 mod process;
 mod software_async;
 #[cfg(feature = "std")]

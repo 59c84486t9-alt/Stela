@@ -5,6 +5,7 @@
 //! raw integers and Context key presence do not establish that provenance.
 //! Source/control/effect authorization remains with the runtime owners.
 
+#[cfg(feature = "std")]
 use super::Version;
 use crate::system::{identification::Register, identification_snapshot::Snapshot};
 
@@ -28,6 +29,8 @@ pub enum UnsupportedInstructionProfile {
 
 /// Exact QARMA5 PAuth_LR feature fact borrowed from the same CPU snapshot.
 /// This capability does not authorize controls, PACM, source, BTI or GCS effects.
+// Only the hosted PAuth_LR owner reads the snapshot back.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) struct LinkRegisterPauthCapability<'profile> {
     source: &'profile Snapshot,
 }
@@ -49,10 +52,12 @@ impl<'profile> LinkRegisterPauthCapability<'profile> {
         Ok(Self { source })
     }
 
+    #[cfg(feature = "std")]
     pub(crate) const fn snapshot(&self) -> &Snapshot {
         self.source
     }
 
+    #[cfg(feature = "std")]
     pub(crate) const fn version(&self) -> Version {
         Version::FaultingCombined
     }

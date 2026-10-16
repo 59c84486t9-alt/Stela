@@ -37,6 +37,7 @@ impl<R, E> ReachedCall<R, E> {
 }
 
 impl<R> ReachedCall<R, Infallible> {
+    #[cfg(feature = "std")]
     pub(super) fn into_infallible(self) -> R {
         let (returned, storage_after) = self.into_observations();
         match storage_after {
@@ -64,6 +65,7 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
     /// An adopted PE may call ONLY under its original canonical retained Active,
     /// full ThreadState/System/backend/source/domain loan through finalization and
     /// once-only PC settlement. No raw component call can bypass that owner.
+    #[cfg(feature = "std")]
     pub(super) unsafe fn call(
         &self,
         state: &mut GuestState,
@@ -106,6 +108,7 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
     /// counter is not a PE, source, checked-memory or retirement permission.
     /// Original storage and any applicable canonical owner remain borrowed
     /// through both observations.
+    #[cfg(feature = "std")]
     pub(super) unsafe fn call_budgeted_block(
         &self,
         state: &mut GuestState,

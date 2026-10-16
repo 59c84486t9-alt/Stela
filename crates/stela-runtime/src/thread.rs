@@ -152,6 +152,8 @@ impl Context {
     }
 }
 
+// Only hosted thread events read the prior value back.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) struct PlatformResult {
     pub next_pc: stela_compiler::GuestAddress,
     pub completion: platform::Completion,

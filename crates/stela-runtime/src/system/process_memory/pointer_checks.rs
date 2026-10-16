@@ -4,11 +4,13 @@
 //! The canonical consumer retains the actual PE/System/thread/source/outer and
 //! immutable control/debug owners through native effects and retirement.
 
+#[cfg(feature = "std")]
 use super::extended_controls::{
     ExtendedControlLoan, SCTLR2_CPTA, SCTLR2_CPTA0, SCTLR2_CPTM, SCTLR2_CPTM0,
 };
+#[cfg(feature = "std")]
+use crate::system::debug::DebugControls;
 use crate::system::{
-    debug::DebugControls,
     identification::Register,
     identification_snapshot::{Snapshot, Unsupported},
 };
@@ -22,8 +24,11 @@ const ISAR3_CPA_SHIFT: u32 = 0;
 const CPA_ABSENT: u8 = 0;
 const CPA_ARITHMETIC: u8 = 1;
 const CPA_CHECKED: u8 = 2;
+#[cfg(feature = "std")]
 const MMFR3_SCTLRX_SHIFT: u32 = 4;
+#[cfg(feature = "std")]
 const SCTLR2_ABSENT: u8 = 0;
+#[cfg(feature = "std")]
 const SCTLR2_PRESENT: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +79,7 @@ pub(crate) struct ResolvedPointerChecks {
 }
 
 impl ResolvedPointerChecks {
+    #[cfg(feature = "std")]
     const fn unchecked(feature: CpaFeature) -> Self {
         Self {
             feature,
@@ -102,6 +108,7 @@ impl ResolvedPointerChecks {
     }
 }
 
+#[cfg(feature = "std")]
 fn field(snapshot: &Snapshot, register: Register, shift: u32) -> Result<u8, Error> {
     let raw = snapshot.read(register).map_err(Error::Identification)?;
     Ok(((raw >> shift) & FIELD_MASK) as u8)
@@ -118,6 +125,7 @@ fn unsupported(register: Register, name: &'static str, value: u8) -> Error {
 /// Resolve both EL10 effects without collapsing a block's distinct access ELs.
 /// CPA0/1 returns before debug/regime/SCTLR2 lookup as the source helpers require.
 /// This does not select source AccessDescriptor.el or validate PSTATE legality.
+#[cfg(feature = "std")]
 pub(crate) fn resolve(
     snapshot: &Snapshot,
     actual_debug: Option<&DebugControls>,

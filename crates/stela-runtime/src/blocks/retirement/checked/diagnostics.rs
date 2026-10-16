@@ -15,11 +15,13 @@ impl fmt::Debug for OwnedStop {
                 .field("instruction_pc", instruction_pc)
                 .finish(),
             Self::HelperRefused(value) => f.debug_tuple("HelperRefused").field(value).finish(),
+            #[cfg(feature = "std")]
             Self::PointerAuthenticationFault { instruction, code } => f
                 .debug_struct("PointerAuthenticationFault")
                 .field("instruction", instruction)
                 .field("code", code)
                 .finish(),
+            #[cfg(feature = "std")]
             Self::PointerAuthenticationPoisonedTransfer {
                 instruction,
                 target,

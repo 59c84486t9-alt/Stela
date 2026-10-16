@@ -1,7 +1,5 @@
 //! Concrete fresh-software EL0 checked-memory/PAC/clock/TSD owner. No blanket
 //! provider, stored Dispatcher, caller callback, second CPU or copied System.
-#[cfg(not(feature = "std"))]
-use alloc::string::ToString;
 mod m0_owner;
 mod resources;
 pub(crate) use m0_owner::M0Owner;
@@ -10,35 +8,42 @@ pub(crate) use resources::{
     El1ContextResources, El1ExecutionResources, El1SystemEffectResources, M0ExecutionResources,
 };
 
-use super::super::super::{checked_memory, complete_clock, complete_pauth_with_memory};
-use super::super::software_async::NoAsyncSources;
 use super::NativeObservation;
+use super::entry_controls::ProcessEntryControls;
 use super::source::{BoundSource, Helper};
+use crate::{
+    memory::domain::MemoryExecutionLoan,
+    system::{execution::Boundary, state::SystemState},
+};
+use stela_compiler::{GuestAddress, GuestState};
+
+// The hosted EL0 process owner; the freestanding mount has no Darwin process.
+#[cfg(feature = "std")]
+use super::super::super::{checked_memory, complete_clock, complete_pauth_with_memory};
+#[cfg(feature = "std")]
+use super::super::software_async::NoAsyncSources;
+#[cfg(feature = "std")]
 use super::{low128_call, pauth_lr};
+#[cfg(feature = "std")]
 use crate::{
     blocks::{ClockEvent, PointerAuthenticationEvent, RunOutcome, ThreadRegisterEvent},
     clock,
-    memory::{
-        domain::{MemoryExecutionLoan, MemoryThread},
-        policy::MemoryControls,
-    },
+    memory::{domain::MemoryThread, policy::MemoryControls},
     pauth,
     system::{
         events::EventEndpoint,
-        execution::{Boundary, Dispatcher, EntryBoundary, Failure},
+        execution::{Dispatcher, EntryBoundary, Failure},
         process_memory::{FixedProcessMemoryControls, PreparedProcessMemory},
         scalable_controls::fp::FpControlOwner,
-        state::SystemState,
     },
     thread,
 };
+#[cfg(feature = "std")]
 use stela_compiler::{
-    GuestAddress, GuestState,
     block::PointerAuthenticationOperation,
     context::{ExecutionContext, memory::MemoryRequirements},
 };
-
-use super::entry_controls::ProcessEntryControls;
+#[cfg(feature = "std")]
 pub(crate) struct CheckedProcessOwner<'pe> {
     address_space: u64,
     controls: &'pe mut FixedProcessMemoryControls,
@@ -52,6 +57,7 @@ pub(crate) struct CheckedProcessOwner<'pe> {
     thread: &'pe mut thread::Context,
     fp: Option<&'pe FpControlOwner<'pe>>,
 }
+#[cfg(feature = "std")]
 impl<'pe> CheckedProcessOwner<'pe> {
     /// # Safety
     /// Called once by the actual fresh software machine constructor before it
@@ -210,6 +216,7 @@ impl<'pe> CheckedProcessOwner<'pe> {
 pub(super) mod sealed {
     pub(crate) trait Concrete {}
 }
+#[cfg(feature = "std")]
 impl sealed::Concrete for CheckedProcessOwner<'_> {}
 
 /// Only this source module can implement the canonical consumer's backend.
@@ -313,6 +320,7 @@ pub(crate) trait Owner: sealed::Concrete {
     ) -> anyhow::Result<()>;
 }
 
+#[cfg(feature = "std")]
 impl Owner for CheckedProcessOwner<'_> {
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan> {
         self.memory
@@ -589,6 +597,7 @@ impl Owner for CheckedProcessOwner<'_> {
 }
 
 /// Ephemeral borrows of SAME actual system/control/domain resources; no state.
+#[cfg(feature = "std")]
 struct ProcessDispatcher<'call, 'code> {
     address_space: u64,
     controls: &'call FixedProcessMemoryControls,
@@ -598,6 +607,7 @@ struct ProcessDispatcher<'call, 'code> {
     endpoint: &'call EventEndpoint,
     bound: &'call BoundSource<'code>,
 }
+#[cfg(feature = "std")]
 impl Dispatcher for ProcessDispatcher<'_, '_> {
     fn address_space(&self) -> u64 {
         self.address_space
@@ -679,26 +689,31 @@ impl Dispatcher for ProcessDispatcher<'_, '_> {
 }
 
 pub(crate) enum HelperOutcome {
+    #[cfg(feature = "std")]
     PreparedPauth {
         instruction: stela_compiler::block::PointerAuthentication,
         effect: pauth_lr::PreparedEffect,
     },
+    #[cfg(feature = "std")]
     AuthenticationFault {
         instruction: stela_compiler::block::PointerAuthentication,
         code: u8,
     },
     NoEffect(anyhow::Error),
+    #[cfg(feature = "std")]
     Complete {
         continuation: GuestAddress,
         event: HelperEvent,
     },
     Indeterminate(anyhow::Error),
 }
+#[cfg(feature = "std")]
 pub(crate) enum HelperEvent {
     Pauth(PointerAuthenticationEvent),
     Clock(ClockEvent),
     Thread(ThreadRegisterEvent),
 }
+#[cfg(feature = "std")]
 impl HelperEvent {
     pub(super) fn poisoned_transfer(
         &self,
@@ -722,8 +737,9 @@ impl HelperEvent {
     }
 }
 
-// Append to blocks::retirement::checked::provider, which owns these private
-// concrete resource fields. No generic provider or caller callback is involved.
+// This module owns these private concrete resource fields. No generic
+// provider or caller callback is involved.
+#[cfg(feature = "std")]
 impl CheckedProcessOwner<'_> {
     pub(crate) fn observe_retained(
         &self,
@@ -772,6 +788,7 @@ impl CheckedProcessOwner<'_> {
     }
 }
 
+#[cfg(feature = "std")]
 fn raw_memory_observation(
     raw: checked_memory::RawMemoryObservation,
 ) -> super::RawMemoryObservation {

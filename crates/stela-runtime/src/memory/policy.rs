@@ -130,6 +130,7 @@ impl MemoryControls {
     /// Admit ordinary ASIMD only while the same installed FP context and process
     /// memory owners remain borrowed by the opaque prepared invocation token.
     /// This snapshot has no raw flag/boolean constructor for the Low128 scope.
+    #[cfg(feature = "std")]
     pub(crate) fn for_low128_authority(
         authority: &crate::system::process_memory::Low128ProcessMemoryAuthorization<'_, '_, '_>,
     ) -> Self {

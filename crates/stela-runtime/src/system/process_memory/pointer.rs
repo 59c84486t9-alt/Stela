@@ -4,13 +4,19 @@
 //! bound compiler profile. The token retains those borrows and the original
 //! SystemState; its parent prepared token owns the same-domain execution pin.
 
-use super::pointer_checks::{self};
-use super::{
-    EntryBoundary, EventEndpoint, FixedProcessMemoryControls, GuestState, MemoryControls,
-    MemoryExecutionLoan, MemoryRequirements, MemoryThread, PointerChecksError,
-    PreparedProcessMemory, ProcessMemoryError, ResolvedPointerChecks, SystemState, flags,
-};
+use super::{FixedProcessMemoryControls, ResolvedPointerChecks, SystemState};
 use crate::system::debug::DebugControls;
+
+// Preparation is reached only by the hosted EL0 process owner.
+#[cfg(feature = "std")]
+use super::pointer_checks::{self};
+#[cfg(feature = "std")]
+use super::{
+    EntryBoundary, EventEndpoint, GuestState, MemoryControls, MemoryExecutionLoan,
+    MemoryRequirements, MemoryThread, PointerChecksError, PreparedProcessMemory,
+    ProcessMemoryError, flags,
+};
+#[cfg(feature = "std")]
 use stela_compiler::{
     block::CheckedMemoryProfile,
     context::memory::{
@@ -32,6 +38,7 @@ impl PointerMemoryAuthorization<'_> {
 }
 
 impl FixedProcessMemoryControls {
+    #[cfg(feature = "std")]
     pub(super) fn qualify_pointer<'run>(
         &'run self,
         profile: CheckedMemoryProfile,
@@ -108,6 +115,7 @@ impl FixedProcessMemoryControls {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "std")]
     pub(crate) fn prepare_profile<'run>(
         &'run self,
         boundary: &EntryBoundary,
@@ -139,6 +147,7 @@ impl FixedProcessMemoryControls {
     /// debug owner, PE/source/outer and exact immutable runtime profile. This is
     /// not a public loose-control or permission-boolean constructor.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "std")]
     pub(crate) fn prepare_pointer<'run>(
         &'run self,
         boundary: &EntryBoundary,

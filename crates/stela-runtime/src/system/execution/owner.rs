@@ -48,6 +48,7 @@ impl<'pe, B> SystemExecutionOwner<'pe, B> {
     }
 
     /// Descriptive identity only; cloning it cannot produce a loan or authority.
+    #[cfg(feature = "std")]
     pub(crate) fn identity(&self) -> super::authority::PeIdentity {
         self.authority.identity()
     }
@@ -56,6 +57,7 @@ impl<'pe, B> SystemExecutionOwner<'pe, B> {
     pub(crate) fn pc(&self) -> stela_compiler::GuestAddress {
         self.thread.pc
     }
+    #[cfg(feature = "std")]
     pub(crate) fn registers(&self) -> &stela_compiler::GuestState {
         &self.thread.registers
     }
@@ -95,7 +97,8 @@ impl<'run, B> SystemExecutionLoan<'run, B> {
     }
 }
 
-// Append to system::execution::owner, the owner of these actual private fields.
+// Hosted process observation over this owner's actual private fields.
+#[cfg(feature = "std")]
 impl<'pe, 'backend>
     SystemExecutionOwner<'pe, crate::blocks::retirement::checked::CheckedProcessOwner<'backend>>
 {

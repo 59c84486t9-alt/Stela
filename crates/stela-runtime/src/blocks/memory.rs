@@ -27,6 +27,8 @@ pub(super) struct MemoryFault {
 }
 /// Raw same-call diagnostics. These fields are never an entry or retirement grant.
 #[derive(Debug, Clone, Copy)]
+// Only hosted diagnostics read these raw fields back.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(super) struct RawMemoryObservation {
     pub status_code: u32,
     pub address: u64,
@@ -35,6 +37,8 @@ pub(super) struct RawMemoryObservation {
 }
 
 #[derive(Debug)]
+// Only hosted diagnostics read these raw fields back.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(super) enum CheckedReturn {
     CpuDeclined(Failure),
     EntryDeclined(MemoryStatus),

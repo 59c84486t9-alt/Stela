@@ -70,6 +70,7 @@ impl<'code> BoundSource<'code> {
             .ok_or_else(|| anyhow::anyhow!("original System instruction absent"))
     }
 
+    #[cfg(feature = "std")]
     pub(super) fn memory_profile(
         &self,
     ) -> anyhow::Result<stela_compiler::block::CheckedMemoryProfile> {
@@ -79,6 +80,7 @@ impl<'code> BoundSource<'code> {
             .ok_or_else(|| anyhow::anyhow!("bound source lacks checked memory profile"))
     }
 
+    #[cfg(feature = "std")]
     pub(super) fn trap(&self) -> Option<SynchronousTrap> {
         self.analysis.trap
     }
@@ -117,6 +119,7 @@ impl<'code> BoundSource<'code> {
         Ok(edge.target)
     }
 
+    #[cfg(feature = "std")]
     pub(super) fn pauth(&self) -> Option<PointerAuthentication> {
         self.analysis.pointer_authentication
     }

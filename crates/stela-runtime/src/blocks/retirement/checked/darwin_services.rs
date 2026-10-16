@@ -1,16 +1,22 @@
 //! Source-validated Darwin service settlement on the actual retained thread.
 //! No PC owner, dispatcher, memory alias or host callback is available here.
-use crate::{
-    darwin::{self, BsdPrototype, BsdReturnType, PendingBsdCall, platform},
-    mach, thread,
-};
+use crate::{darwin, mach, thread};
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, string::ToString, vec::Vec};
-use anyhow::{Context, Result};
+use alloc::{string::String, vec::Vec};
 use serde::Serialize;
-use stela_compiler::{GuestAddress, GuestState, block::SynchronousTrap};
+use stela_compiler::block::SynchronousTrap;
+
+// Settlement is reached only by the hosted Darwin process owner.
+#[cfg(feature = "std")]
+use crate::darwin::{BsdPrototype, BsdReturnType, PendingBsdCall, platform};
+#[cfg(feature = "std")]
+use anyhow::{Context, Result};
+#[cfg(feature = "std")]
+use stela_compiler::{GuestAddress, GuestState};
 
 #[derive(Debug, Default)]
+// Only the hosted Darwin process path reports these events.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) struct TrapServiceEvents {
     pub mach: Vec<mach::Event>,
     pub mach_effects: Vec<MachEffects>,
@@ -32,17 +38,20 @@ pub(crate) struct ServiceRefusal {
 pub(crate) enum Outcome {
     /// No service effect. The original trap stays pending under this same owner.
     NoEffect,
+    #[cfg(feature = "std")]
     Complete(GuestAddress),
     /// A host or ABI operation failed; canonical consumer preserves all effects.
     Indeterminate(anyhow::Error),
 }
 
+#[cfg(feature = "std")]
 enum Prepared {
     Mach(mach::PendingCall),
     ThreadIdentity(PendingBsdCall),
     ProcessIdentity(PendingBsdCall),
     Platform(platform::PendingCall),
 }
+#[cfg(feature = "std")]
 impl Prepared {
     fn from_registers(
         trap: &SynchronousTrap,
@@ -188,6 +197,7 @@ impl Prepared {
     }
 }
 
+#[cfg(feature = "std")]
 fn complete_mach(
     pending: mach::PendingCall,
     trap: &SynchronousTrap,
@@ -234,6 +244,7 @@ fn complete_mach(
     }
 }
 
+#[cfg(feature = "std")]
 pub(super) fn complete(
     trap: &SynchronousTrap,
     registers: &mut GuestState,

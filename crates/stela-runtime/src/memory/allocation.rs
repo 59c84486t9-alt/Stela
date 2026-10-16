@@ -6,12 +6,13 @@
 #[cfg(feature = "std")]
 use super::DIRECT_RAM_USER_END;
 #[cfg(feature = "std")]
+use super::host_protection;
+#[cfg(feature = "std")]
 use super::storage::NativeMapping;
 use super::storage::NativeStorage;
-use super::{
-    Allocation, MAX_FILE_MEMORY_BYTES, MAX_IMAGE_MEMORY_BYTES, MemoryRegion, OwnedMemory,
-    host_protection,
-};
+#[cfg(feature = "std")]
+use super::{Allocation, MemoryRegion};
+use super::{MAX_FILE_MEMORY_BYTES, MAX_IMAGE_MEMORY_BYTES, OwnedMemory};
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -256,6 +257,8 @@ impl OwnedMemory {
 
 /// An unpublished mapping borrowing the same non-Send/Sync `OwnedMemory` owner.
 /// Initialization is private and serialized; it never grants host execute rights.
+// The freestanding mount does not create host mappings.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub struct PendingDataAllocation<'a> {
     owner: &'a mut OwnedMemory,
     storage: Option<Arc<NativeStorage>>,
@@ -368,6 +371,7 @@ impl PendingDataAllocation<'_> {
         Err(AllocateDataError::UnsupportedPlatform)
     }
 
+    #[cfg(feature = "std")]
     fn publish_with(
         mut self,
         protect: impl FnOnce(u64, u64, i32) -> Result<(), Option<i32>>,
@@ -480,6 +484,8 @@ impl PendingDataAllocation<'_> {
     }
 }
 
+// Uninhabited without std: the freestanding mount creates no host mappings.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 struct NewMapping {
     #[cfg(not(feature = "std"))]
     _unmounted: core::convert::Infallible,
