@@ -22,7 +22,7 @@ use stela_runtime::machine::{
     Cpu, CpuProfile, Event, Machine, Stop,
     apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
-    registers::encodings::{DCZID_EL0, MPIDR_EL1},
+    registers::encodings::{DCZID_EL0, MIDR_EL1, MPIDR_EL1},
 };
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
@@ -174,6 +174,14 @@ fn j473_profile() -> CpuProfile {
             // the cluster), and MPIDR_EL1 bit 31 is RES1. U and MT are 0 for
             // a multiprocessor without multithreading (inferred).
             (MPIDR_EL1, 0x8000_0000),
+            // Implementer 0x61 (Apple), architecture 0xF and part 0x032
+            // (m1n1 `midr.h` MIDR_PART_T8112_BLIZZARD, cpu0's `apple,blizzard`).
+            // Variant and revision are unknown and taken as 0 until a
+            // reference capture supplies them.
+            (MIDR_EL1, 0x611f_0320),
+            // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s`
+            // zeroes with `dc zva` in fixed 64-byte steps.
+            (DCZID_EL0, 4),
         ],
     }
 }
@@ -406,6 +414,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     ));
     let mut cpu = Cpu::new(entry, Pstate::RESET_EL1);
     cpu.state.x[0] = x0;
+    if options.bundle {
+        // The bootloader hands SPTM FP/SIMD enabled at EL1: SPTM uses
+        // FP/SIMD before it would write CPACR_EL1 and never writes it at EL1
+        // (only CPACR_EL12), and public XNU `start.s` notes that a monitor
+        // sets CPACR_EL1 up for its client. Inferred hand-off value.
+        cpu.system.cpacr = 0b11 << 20;
+    }
     let tree = options.bundle.then(|| {
         handoff.files[..handoff.file_count]
             .iter()
