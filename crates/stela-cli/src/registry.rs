@@ -4,6 +4,7 @@ use crate::compile::{Compiled, compile};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::path::Path;
+use stela_compiler::extended::block::ExtendedBlockProfile;
 
 /// How a registry's forms compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,9 +99,22 @@ impl Probe {
     /// Compile `words` with this probe's command line.
     pub fn compile(&self, words: &[u32]) -> Result<Compiled> {
         let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        compile(&self.arguments(), &source)
+    }
+
+    /// The contextual block profile of a scalable `compile-block` probe; `None`
+    /// for leaves and service blocks.
+    pub fn context_block_profile_if_block(&self) -> Result<Option<ExtendedBlockProfile>> {
+        if self.command != "compile-block" {
+            return Ok(None);
+        }
+        crate::compile::context_block_profile(&self.arguments())
+    }
+
+    fn arguments(&self) -> Vec<&str> {
         let mut arguments = vec!["stela", self.command, "source", "--output-dir", "native"];
         arguments.extend(self.flags.iter().map(String::as_str));
-        compile(&arguments, &source)
+        arguments
     }
 }
 

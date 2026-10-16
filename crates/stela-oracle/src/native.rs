@@ -10,10 +10,15 @@ use std::{
 };
 use stela_compiler::{
     GuestAddress, GuestState, TargetCpu,
-    block::BlockProfile,
+    aarch64::scalable::{ScalableMode, VectorLength, features::ScalableFeature},
+    block::{BlockProfile, ExitKind},
     context::{ExecutionContext, ScalableStateView},
+    extended::block::ExtendedBlockProfile,
 };
-use stela_runtime::blocks::{BlockRuntime, ThreadState};
+use stela_runtime::{
+    blocks::{BlockRuntime, ThreadState},
+    scalable::{ScalableState, block::PreparedScalableBlock},
+};
 
 const PAGE_BYTES: usize = 0x1000;
 const INSTRUCTION_BYTES: usize = 4;
@@ -136,6 +141,8 @@ pub enum Translation {
     },
     /// A context leaf over guest and scalable state, without a memory service.
     Context(Executable),
+    /// A contextual scalable block whose numerical exits the runtime completes.
+    ScalableBlock(PreparedScalableBlock, ExtendedBlockProfile),
 }
 
 impl Translation {
@@ -180,6 +187,14 @@ impl Translation {
         Ok(Self::Context(Executable::new(native)?))
     }
 
+    /// Prepare `words` as one contextual scalable block under `profile`.
+    pub fn scalable_block(words: &[u32], profile: ExtendedBlockProfile) -> Result<Self> {
+        let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let block =
+            PreparedScalableBlock::prepare(&source, GuestAddress(CODE_PAGE), profile, target())?;
+        Ok(Self::ScalableBlock(block, profile))
+    }
+
     /// Run the translation against `case`'s state and data window.
     ///
     /// # Safety
@@ -210,6 +225,12 @@ impl Translation {
                 leaf(&mut state);
                 Ok((state, CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64))
             }
+            Self::ScalableBlock(block, profile) => {
+                scalable_block(block, *profile, case).map(|(state, next_pc, scalable)| {
+                    scalable_result = Some(scalable);
+                    (state, next_pc)
+                })
+            }
             Self::Context(executable) => context(executable, case).map(|(state, scalable)| {
                 scalable_result = Some(scalable);
                 (state, CODE_PAGE + (case.steps * INSTRUCTION_BYTES) as u64)
@@ -236,6 +257,78 @@ impl Translation {
             exception: None,
         })
     }
+}
+
+/// Invoke a scalable block on runtime-owned state, completing a numerical exit.
+fn scalable_block(
+    block: &PreparedScalableBlock,
+    profile: ExtendedBlockProfile,
+    case: &Case,
+) -> Result<(GuestState, u64, Scalable)> {
+    let initial = case
+        .scalable
+        .as_ref()
+        .context("scalable blocks need scalable state")?;
+    let svl = initial.svl;
+    let length = VectorLength::from_bytes(svl).context("unsupported SVL")?;
+    let mode = ScalableMode::from_svcr(initial.svcr).context("unsupported SVCR")?;
+    let sme2 = profile
+        .scalable()
+        .features()
+        .contains(ScalableFeature::Sme2);
+    let mut thread = ThreadState {
+        registers: case.state.clone(),
+        pc: GuestAddress(CODE_PAGE),
+    };
+    let mut scalable = ScalableState::new(length, sme2);
+    scalable.apply_mode(&mut thread.registers, mode)?;
+    thread.registers.v = case.state.v;
+    thread.registers.fpsr = case.state.fpsr;
+    scalable.set_tpidr2_el0(initial.tpidr2);
+    if mode.streaming() {
+        for (register, z) in initial.z.chunks_exact(svl).enumerate() {
+            scalable.write_z(&mut thread.registers, register as u8, z)?;
+        }
+        for (register, p) in initial.p.chunks_exact(svl / 8).enumerate() {
+            scalable.write_predicate(register as u8, p)?;
+        }
+        // The low part of each Z register is the case's V register.
+        thread.registers.v = case.state.v;
+    }
+    if mode.za_enabled() {
+        scalable.write_za(0, &initial.za)?;
+        if sme2 {
+            scalable.write_zt0(0, &initial.zt0)?;
+        }
+    }
+    let mut context = ExecutionContext::default();
+    // SAFETY: trusted single-instruction source over runtime-owned state.
+    let exit = unsafe { block.invoke(&mut thread, &mut scalable, &mut context)? };
+    if exit.kind == ExitKind::ScalableNumerical as u64 {
+        block
+            .complete_numerical(&mut thread, &mut scalable, exit)
+            .map_err(|error| anyhow::anyhow!("numerical completion: {error:?}"))?;
+    }
+    let mut result = Scalable {
+        svcr: scalable.mode().svcr(),
+        tpidr2: scalable.tpidr2_el0(),
+        ..initial.clone()
+    };
+    if scalable.mode().streaming() {
+        for (register, z) in result.z.chunks_exact_mut(svl).enumerate() {
+            scalable.read_z(&thread.registers, register as u8, z)?;
+        }
+        for (register, p) in result.p.chunks_exact_mut(svl / 8).enumerate() {
+            scalable.read_predicate(register as u8, p)?;
+        }
+    }
+    if scalable.mode().za_enabled() {
+        scalable.read_za(0, &mut result.za)?;
+        if sme2 {
+            scalable.read_zt0(0, &mut result.zt0)?;
+        }
+    }
+    Ok((thread.registers, thread.pc.0, result))
 }
 
 /// Call a context leaf with the case's scalable banks behind a state view.

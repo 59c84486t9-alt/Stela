@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use clap::Parser;
 use std::path::{Path, PathBuf};
+use stela_compiler::{block::BlockProfile, extended::block::ExtendedBlockProfile};
 use stela_core::write_json;
 
 mod profile;
@@ -160,57 +161,55 @@ pub(crate) fn cpu_info() -> Result<()> {
 }
 
 impl CompileBlock {
+    /// The service profile and, for scalable guests, the contextual profile.
+    fn profiles(&self) -> Result<(BlockProfile, Option<ExtendedBlockProfile>)> {
+        let services = if self.el1_platform {
+            BlockProfile::El1PlatformV1
+        } else if self.checked_process_sa0_off {
+            BlockProfile::CheckedMemoryPauthClockThread(checked_process(self.checked_pointer_mode)?)
+        } else if self.checked_memory_sa0_off {
+            BlockProfile::CheckedMemory(
+                stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
+            )
+        } else if self.system_boundaries {
+            BlockProfile::SystemV1
+        } else {
+            block_profile(
+                self.software_pauth,
+                self.software_clock,
+                self.thread_registers,
+            )
+        };
+        let scalable = compile_scalable_profile(
+            self.guest_profile.as_deref(),
+            self.svl_bytes,
+            self.svcr,
+            &self.guest_feature,
+            self.max_svl_bytes,
+            self.zt0_enabled,
+            self.fpmr_enabled,
+        )?;
+        let context = compile_context_block_profile(
+            scalable,
+            services,
+            self.full_a64,
+            self.ebf16,
+            self.rpres,
+        )?;
+        Ok((services, context))
+    }
+
     fn compile(self, source: &[u8]) -> Result<Compiled> {
+        let (profile, context_profile) = self.profiles()?;
         let Self {
-            input: _,
             cpu_target,
             guest_base,
-            guest_profile,
-            svl_bytes,
-            svcr,
-            guest_feature,
-            max_svl_bytes,
-            zt0_enabled,
             fpmr_enabled,
-            full_a64,
-            ebf16,
-            rpres,
-            output_dir: _,
-            software_pauth,
-            software_clock,
-            thread_registers,
-            system_boundaries,
             el1_platform,
             checked_memory_sa0_off,
             checked_process_sa0_off,
-            checked_pointer_mode,
+            ..
         } = self;
-        let profile = if el1_platform {
-            stela_compiler::block::BlockProfile::El1PlatformV1
-        } else if checked_process_sa0_off {
-            stela_compiler::block::BlockProfile::CheckedMemoryPauthClockThread(checked_process(
-                checked_pointer_mode,
-            )?)
-        } else if checked_memory_sa0_off {
-            stela_compiler::block::BlockProfile::CheckedMemory(
-                stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
-            )
-        } else if system_boundaries {
-            stela_compiler::block::BlockProfile::SystemV1
-        } else {
-            block_profile(software_pauth, software_clock, thread_registers)
-        };
-        let scalable = compile_scalable_profile(
-            guest_profile.as_deref(),
-            svl_bytes,
-            svcr,
-            &guest_feature,
-            max_svl_bytes,
-            zt0_enabled,
-            fpmr_enabled,
-        )?;
-        let context_profile =
-            compile_context_block_profile(scalable, profile, full_a64, ebf16, rpres)?;
         let window = &source[..source
             .len()
             .min(stela_compiler::block::MAX_BLOCK_INSTRUCTIONS * 4)];
@@ -418,6 +417,15 @@ impl Compiled {
         write_json(&output.join("manifest.json"), &self.manifest)?;
         println!("{}", serde_json::to_string_pretty(&self.manifest)?);
         Ok(())
+    }
+}
+
+/// The contextual block profile a `compile-block` command line selects, if its
+/// guest is scalable.
+pub fn context_block_profile(arguments: &[&str]) -> Result<Option<ExtendedBlockProfile>> {
+    match crate::Cli::try_parse_from(arguments)?.command {
+        crate::Command::CompileBlock(command) => Ok(command.profiles()?.1),
+        _ => anyhow::bail!("expected compile-block"),
     }
 }
 

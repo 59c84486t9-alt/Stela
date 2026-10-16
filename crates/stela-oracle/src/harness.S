@@ -77,7 +77,8 @@
     .equ TCR_VALUE,        25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (5 << 32)
     // RES1 bits with the MMU on; caches, alignment and SP alignment checks off.
     // ATA0 allows EL0 allocation-tag arithmetic; tag checks stay disabled.
-    .equ SCTLR_VALUE,      0x30d00801 | (1 << 42)
+    // EnTP2 allows EL0 access to TPIDR2_EL0.
+    .equ SCTLR_VALUE,      0x30d00801 | (1 << 42) | (1 << 60)
     .equ SPSR_EL0T_MASKED, 0x3c0
     .equ NZCV_MASK,        0xf0000000
     .equ SPSR_SS,          1 << 21

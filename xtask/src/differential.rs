@@ -192,8 +192,8 @@ impl Lane<'_> {
             Mode::Block => Translation::block(code).map(Some),
             Mode::Scalable => {
                 let probe = Probe::new(self.mode, self.registry, self.form, sample, CODE_PAGE)?;
-                if probe.command != "compile-leaf" {
-                    return Ok(None);
+                if let Some(profile) = probe.context_block_profile_if_block()? {
+                    return Translation::scalable_block(code, profile).map(Some);
                 }
                 let mut words = code.to_vec();
                 words.push(RET);
