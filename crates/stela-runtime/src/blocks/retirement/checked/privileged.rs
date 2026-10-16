@@ -680,16 +680,7 @@ impl provider::Owner for PrivilegedOwner<'_> {
         let exit = match unsafe { bound.block.mapping.call_block(registers) } {
             Ok(exit) => exit,
             Err(error) => {
-                return Ok(NativeObservation::InvocationFailed {
-                    detail: error.to_string(),
-                    native_invoked: true,
-                    native_executed: false,
-                    original_fault: None,
-                    raw_memory: None,
-                    completed_bytes: 0,
-                    observed_exit: None,
-                    raw_returned_carrier: None,
-                });
+                return Ok(NativeObservation::InvocationFailed(error.to_string()));
             }
         };
         // Keep the native result even if finalization cannot validate it.
@@ -705,14 +696,8 @@ impl provider::Owner for PrivilegedOwner<'_> {
         if let Err(error) = finalized {
             return Ok(NativeObservation::FinalizationFailed {
                 status: MemoryStatus::Unsupported,
-                native_executed: true,
-                original_fault: None,
-                completed_bytes: 0,
-                observed_exit: Some((exit.next_pc, exit.kind)),
-                native_invoked: Some(true),
-                callback_failure: Some(error.to_string()),
-                raw_memory: None,
-                raw_returned_carrier: Some((exit.next_pc, exit.kind)),
+                fault: None,
+                detail: format!("{error}; returned={:?}", (exit.next_pc, exit.kind)),
             });
         }
         Ok(NativeObservation::Returned {

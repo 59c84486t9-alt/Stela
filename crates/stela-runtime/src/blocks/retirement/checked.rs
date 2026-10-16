@@ -3,8 +3,8 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec::Vec};
+mod call;
 mod darwin_services;
-mod diagnostics;
 mod el1_context;
 mod el1_registers;
 pub(crate) mod el1_system;
@@ -21,6 +21,7 @@ mod privileged;
 mod privileged_debug;
 mod provider;
 pub(crate) mod system_effects;
+pub(crate) use call::CallRecord;
 pub(crate) use halted::{OwnedDebugOutcome, run_halted_owned};
 pub(crate) use privileged::PrivilegedOwner;
 pub(crate) mod software_el1;
@@ -48,6 +49,9 @@ pub(crate) struct OwnedRunRequest {
     pub block_budget: usize,
 }
 
+// Stop details are read through Debug, in run reports.
+#[allow(dead_code)]
+#[derive(Debug)]
 pub(crate) enum OwnedStop {
     StopAddress,
     BudgetExhausted,
@@ -108,7 +112,9 @@ pub(crate) struct SettledPrefix {
     pub completed_memory_bytes: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
+// The fault address is read through Debug, in run reports.
+#[allow(dead_code)]
 pub(crate) struct OwnedMemoryFault {
     pub status: stela_compiler::context::memory::MemoryStatus,
     pub address: GuestAddress,
@@ -116,26 +122,7 @@ pub(crate) struct OwnedMemoryFault {
     pub completed_bytes: u64,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct RawMemoryObservation {
-    pub status_code: u32,
-    pub address: u64,
-    pub pc: u64,
-    pub completed_bytes: u64,
-}
-
-impl From<super::super::checked_memory::MemoryFault> for OwnedMemoryFault {
-    fn from(fault: super::super::checked_memory::MemoryFault) -> Self {
-        Self {
-            status: fault.status,
-            address: fault.address,
-            pc: fault.pc,
-            completed_bytes: fault.completed_bytes,
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 // Only the hosted EL0 process owner produces entry declines and faults today.
 #[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) enum NativeObservation {
@@ -146,30 +133,15 @@ pub(crate) enum NativeObservation {
     Fault(OwnedMemoryFault),
     CpuDeclined(String),
     EntryDeclined(stela_compiler::context::memory::MemoryStatus),
+    /// The finalizer failed after the call started. `fault` is the memory
+    /// fault the call reported, if any; `detail` holds every other observation.
     FinalizationFailed {
         status: stela_compiler::context::memory::MemoryStatus,
-        native_executed: bool,
-        original_fault: Option<OwnedMemoryFault>,
-        completed_bytes: u64,
-        observed_exit: Option<(u64, u64)>,
-        native_invoked: Option<bool>,
-        callback_failure: Option<String>,
-        raw_memory: Option<RawMemoryObservation>,
-        /// Unqualified native bits; fault service state takes precedence.
-        raw_returned_carrier: Option<(u64, u64)>,
-    },
-    InvocationFailed {
+        fault: Option<OwnedMemoryFault>,
         detail: String,
-        native_invoked: bool,
-        native_executed: bool,
-        original_fault: Option<OwnedMemoryFault>,
-        raw_memory: Option<RawMemoryObservation>,
-        completed_bytes: u64,
-        observed_exit: Option<(u64, u64)>,
-        raw_returned_carrier: Option<(u64, u64)>,
     },
-    /// checked call's outer Err has no qualified completion/prefix result.
-    UnqualifiedCallFailure(String),
+    /// The call, or a check around it, failed without a qualified result.
+    InvocationFailed(String),
 }
 
 impl BlockRuntime {
@@ -510,8 +482,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    *observation =
-                        Some(NativeObservation::UnqualifiedCallFailure(error.to_string()));
+                    *observation = Some(NativeObservation::InvocationFailed(error.to_string()));
                     return Err(error);
                 }
             };
@@ -521,41 +492,32 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         // `invoke` wraps ALL of checked_memory::call, including outer Result,
         // ContextLoan restoration and provider finalization. outer remains live.
         match result {
-            NativeObservation::UnqualifiedCallFailure(error) => anyhow::bail!("{error}"),
-            NativeObservation::InvocationFailed { detail, .. } => anyhow::bail!("{detail}"),
+            NativeObservation::InvocationFailed(error) => anyhow::bail!("{error}"),
             NativeObservation::CpuDeclined(failure) => {
                 self.pre_ffi_refusal(bound)?;
                 Ok(Some(OwnedStop::EntryDeclined(format!("{failure:?}"))))
             }
             NativeObservation::EntryDeclined(status) => {
-                // Legacy checked call's native_executed flag is set only
-                // after mapping returns successfully. A future frame error
-                // plus failed finalizer must not be promoted to no-effect by
-                // this status-only carrier. Decline without reopening Ready.
+                // The checked call sets its executed flag only after the
+                // mapping returns. A frame error plus a failed finalizer must
+                // not be promoted to no-effect by this status-only carrier, so
+                // decline without reopening Ready.
                 anyhow::bail!("unqualified checked-entry/finalizer decline: {status:?}")
             }
             NativeObservation::FinalizationFailed {
                 status,
-                native_executed,
-                original_fault,
-                completed_bytes,
-                observed_exit,
-                native_invoked,
-                callback_failure,
-                raw_memory,
-                raw_returned_carrier,
+                fault,
+                detail,
             } => {
                 // A failed finalizer never yields success. The old PC is kept
                 // unless the fault PC can still be determined; either way Drop
                 // marks the PE failed.
-                if let Some(fault) = original_fault {
+                if let Some(fault) = fault {
                     bound.validate_fault(&fault)?;
                     prefixes.push(bound.prefix(Some(fault.pc), fault.completed_bytes)?);
                     self.pe.thread.pc = fault.pc;
                 }
-                anyhow::bail!(
-                    "checked finalization failed: {status:?}; native={native_executed}; original={original_fault:?}; completed={completed_bytes}; exit={observed_exit:?}; invoked={native_invoked:?}; callback={callback_failure:?}; raw={raw_memory:?}; raw_carrier={raw_returned_carrier:?}"
-                )
+                anyhow::bail!("checked finalization failed: {status:?}; {detail}")
             }
             NativeObservation::Fault(fault) => {
                 bound.validate_fault(&fault)?;

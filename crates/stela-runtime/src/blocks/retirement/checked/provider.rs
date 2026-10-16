@@ -373,7 +373,7 @@ impl Owner for CheckedProcessOwner<'_> {
         // SAFETY: the caller holds the native session and the domain borrow;
         // the source, plan, map and context stay borrowed through the call and
         // every finalizer.
-        let returned = unsafe {
+        unsafe {
             checked_memory::call(
                 &mut dispatcher,
                 &bound.entry,
@@ -384,64 +384,8 @@ impl Owner for CheckedProcessOwner<'_> {
                 &bound.block.mapping,
                 registers,
                 self.context,
-            )?
-        };
-        // Conversion of the raw result into the public type, for reporting.
-        Ok(match returned {
-            checked_memory::CheckedReturn::Returned(exit) => NativeObservation::Returned {
-                next_pc: exit.next_pc,
-                kind: exit.kind,
-            },
-            checked_memory::CheckedReturn::MemoryFault(fault) => {
-                NativeObservation::Fault(fault.into())
-            }
-            checked_memory::CheckedReturn::CpuDeclined(error) => {
-                NativeObservation::CpuDeclined(format!("{error:?}"))
-            }
-            checked_memory::CheckedReturn::EntryDeclined(status) => {
-                NativeObservation::EntryDeclined(status)
-            }
-            checked_memory::CheckedReturn::FinalizationFailed {
-                status,
-                native_executed,
-                original_fault,
-                completed_bytes,
-                observed_exit,
-                native_invoked,
-                callback_failure,
-                raw_memory,
-                raw_returned_carrier,
-            } => NativeObservation::FinalizationFailed {
-                status,
-                native_executed,
-                original_fault: original_fault.map(Into::into),
-                completed_bytes,
-                observed_exit,
-                native_invoked: Some(native_invoked),
-                callback_failure,
-                raw_memory: raw_memory.map(raw_memory_observation),
-                raw_returned_carrier,
-            },
-            checked_memory::CheckedReturn::InvocationFailed {
-                detail,
-                native_invoked,
-                native_executed,
-                original_fault,
-                raw_memory,
-                completed_bytes,
-                observed_exit,
-                raw_returned_carrier,
-            } => NativeObservation::InvocationFailed {
-                detail,
-                native_invoked,
-                native_executed,
-                original_fault: original_fault.map(Into::into),
-                raw_memory: raw_memory.map(raw_memory_observation),
-                completed_bytes,
-                observed_exit,
-                raw_returned_carrier,
-            },
-        })
+            )
+        }
     }
 
     fn complete_helper(
@@ -771,17 +715,5 @@ impl CheckedProcessOwner<'_> {
         // register bank, thread rights, PE phase, source or memory generation.
         drop(loan);
         Ok(observation)
-    }
-}
-
-#[cfg(feature = "std")]
-fn raw_memory_observation(
-    raw: checked_memory::RawMemoryObservation,
-) -> super::RawMemoryObservation {
-    super::RawMemoryObservation {
-        status_code: raw.status_code,
-        address: raw.address,
-        pc: raw.pc,
-        completed_bytes: raw.completed_bytes,
     }
 }
