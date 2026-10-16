@@ -1,8 +1,9 @@
 //! Run outcomes: why execution stopped and the service events it produced.
-use crate::{memory, system};
+use crate::{amx, memory, system};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 use serde::Serialize;
+use stela_compiler::amx::AmxInstruction;
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{
@@ -90,6 +91,15 @@ pub enum StopReason {
     ThreadRegisterRequired {
         instruction: ThreadRegisterInstruction,
     },
+    /// An AMX exit without a thread context to own the AMX state.
+    AmxRequired {
+        instruction: AmxInstruction,
+    },
+    /// The AMX instruction did not execute; see [`amx::Failure`].
+    AmxFailure {
+        instruction: AmxInstruction,
+        failure: amx::Failure,
+    },
     SystemContextRequired {
         instruction_pc: GuestAddress,
     },
@@ -145,10 +155,19 @@ pub struct RunOutcome {
     pub last_exit: Option<(u64, u64)>,
     /// Successful numerical slowpath completions; no per-instruction event allocation.
     pub floating_point_helpers: usize,
+    /// Completed AMX instructions, and how many of them ran native kernels.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub amx_operations: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub amx_native_operations: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pointer_authentication_events: Vec<PointerAuthenticationEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub clock_events: Vec<ClockEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub thread_register_events: Vec<ThreadRegisterEvent>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }

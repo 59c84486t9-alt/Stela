@@ -194,7 +194,8 @@ impl CheckedPlan {
                 | super::Terminator::PointerAuthentication(_)
                 | super::Terminator::Clock(_)
                 | super::Terminator::ThreadRegister(_)
-                | super::Terminator::System(_) => {
+                | super::Terminator::System(_)
+                | super::Terminator::Amx(_) => {
                     return Err(CompileError(
                         "terminal service is not admitted by checked GPR memory profile".into(),
                     ));

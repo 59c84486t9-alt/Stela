@@ -9,6 +9,7 @@ extern crate alloc;
 compile_error!(
     "freestanding runtime requires aborting panic; platform must terminate the machine on panic"
 );
+pub mod amx;
 pub mod blocks;
 pub mod boot_bundle;
 pub mod clock;

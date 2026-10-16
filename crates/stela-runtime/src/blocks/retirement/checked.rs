@@ -967,6 +967,8 @@ fn empty_accounting() -> RunOutcome {
         memory_cache_hits: 0,
         last_exit: None,
         floating_point_helpers: 0,
+        amx_operations: 0,
+        amx_native_operations: 0,
         pointer_authentication_events: Vec::new(),
         clock_events: Vec::new(),
         thread_register_events: Vec::new(),

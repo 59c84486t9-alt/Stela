@@ -71,6 +71,7 @@ pub struct BlockAnalysis {
     pub pointer_authentication: Option<PointerAuthentication>,
     pub clock_instruction: Option<ClockInstruction>,
     pub thread_register_instruction: Option<ThreadRegisterInstruction>,
+    pub amx_instruction: Option<crate::amx::AmxInstruction>,
 }
 /// Find block boundaries and edges with the parser shared by AOT and JIT. Call
 /// continuations are candidates, since the callee may not return; dynamic
@@ -92,6 +93,7 @@ pub fn analyze_with_profile(
     let mut pointer_authentication = None;
     let mut clock_instruction = None;
     let mut thread_register_instruction = None;
+    let mut amx_instruction = None;
     let mut add = |kind, target| successors.push(StaticSuccessor { kind, target });
     match parsed.terminal.as_ref().map(|(_, terminal)| terminal) {
         None => add(SuccessorKind::Fallthrough, parsed.next_pc),
@@ -181,6 +183,10 @@ pub fn analyze_with_profile(
         Some(Terminator::FloatingPoint(_)) => {
             add(SuccessorKind::Fallthrough, parsed.next_pc);
         }
+        Some(Terminator::Amx(value)) => {
+            amx_instruction = Some(*value);
+            add(SuccessorKind::Fallthrough, value.next_pc);
+        }
         Some(Terminator::Branch(_)) => {
             unreachable!("private parser only stores branch operations as terminators")
         }
@@ -195,6 +201,7 @@ pub fn analyze_with_profile(
         pointer_authentication,
         clock_instruction,
         thread_register_instruction,
+        amx_instruction,
     })
 }
 
@@ -331,6 +338,16 @@ pub(super) fn parse(
                 })?
         {
             terminal = Some((pc, Terminator::ThreadRegister(decoded)));
+            break;
+        }
+        if profile.supports_amx()
+            && let Some(decoded) =
+                crate::amx::decode(pc, word).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?
+        {
+            terminal = Some((pc, Terminator::Amx(decoded)));
             break;
         }
         if let Some(decoded) = decode_terminator(pc, word).map_err(|error| BlockAnalysisError {

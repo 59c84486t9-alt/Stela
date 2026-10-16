@@ -77,6 +77,7 @@ impl BlockRuntime {
             next_generation: 0,
             regions: BTreeMap::new(),
             loaded: BTreeMap::new(),
+            amx_kernels: None,
             _serialized: PhantomData,
         }
     }
@@ -249,6 +250,8 @@ mod tests {
             memory_cache_hits: 0,
             last_exit: None,
             floating_point_helpers: 0,
+            amx_operations: 0,
+            amx_native_operations: 0,
             pointer_authentication_events: Vec::new(),
             clock_events: Vec::new(),
             thread_register_events: Vec::new(),

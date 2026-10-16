@@ -1,6 +1,7 @@
 //! A guest thread on the current host thread: identity, Mach rights and TSD
 //! (XNU `thread_info.h`, `machine_thread_set_tsd_base`).
 use crate::{
+    amx,
     blocks::ThreadState,
     darwin::{
         self, BsdCompletion, BsdPrototype, BsdRequest, BsdReturnType, PendingBsdCall,
@@ -14,6 +15,7 @@ use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString};
 use anyhow::{Result, ensure};
+use core::cell::{RefCell, RefMut};
 use serde::Serialize;
 use stela_compiler::block::SynchronousTrap;
 
@@ -47,6 +49,8 @@ pub struct Context {
     thread_specific_data: u64,
     vm_maximum: VmMaximum,
     process: Option<Rc<process::Context>>,
+    /// AMX registers live with the thread, like its TSD.
+    amx: RefCell<amx::Thread>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
@@ -68,6 +72,7 @@ impl Context {
             thread_specific_data: 0,
             vm_maximum,
             process: None,
+            amx: RefCell::new(amx::Thread::new()),
         })
     }
     /// Bind this thread to a declared process, acquiring the native thread
@@ -85,6 +90,10 @@ impl Context {
     }
     pub fn thread_specific_data(&self) -> u64 {
         self.thread_specific_data
+    }
+    /// The thread's AMX state. Completion borrows it for one instruction.
+    pub fn amx(&self) -> RefMut<'_, amx::Thread> {
+        self.amx.borrow_mut()
     }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {

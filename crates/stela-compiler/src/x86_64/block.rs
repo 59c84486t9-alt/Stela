@@ -198,6 +198,10 @@ fn emit_terminal(
             Terminator::ThreadRegister(request) => {
                 direct_exit(code, request.instruction_pc, ExitKind::ThreadRegister);
             }
+            Terminator::Amx(request) => {
+                // The runtime runs the operation on the thread's AMX state.
+                direct_exit(code, request.instruction_pc, ExitKind::Amx);
+            }
             Terminator::PointerAuthentication(request) => {
                 // Return to the checked runtime helper with unchanged guest
                 // state at this instruction. Never embed keys/helper pointers.

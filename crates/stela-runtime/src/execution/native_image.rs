@@ -121,6 +121,32 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
         })
     }
 
+    /// Call an AMX kernel at `offset` in a `stela_compiler::x86_64::amx`
+    /// library image.
+    ///
+    /// # Safety
+    /// `offset` starts a kernel of that image, `z` is a writable 4 KiB Z grid,
+    /// and `x` and `y` are 64 readable bytes each. The host admits the
+    /// library's tier.
+    #[cfg(feature = "std")]
+    pub(super) unsafe fn call_amx_kernel(
+        &self,
+        offset: usize,
+        z: *mut u8,
+        x: *const u8,
+        y: *const u8,
+        row: u64,
+    ) -> Result<ReachedCall<(), S::Error>, S::Error> {
+        self.revalidate()?;
+        let function: unsafe extern "sysv64" fn(*mut u8, *const u8, *const u8, u64) =
+            unsafe { core::mem::transmute(self.storage.entry().as_ptr().add(offset)) };
+        unsafe { function(z, x, y, row) };
+        Ok(ReachedCall {
+            returned: (),
+            storage_after: self.revalidate(),
+        })
+    }
+
     /// # Safety
     /// The direct-RAM block ABI and every memory, fault and target requirement
     /// apply, as does the PE session contract above.

@@ -71,6 +71,7 @@ fn reject_unavailable_service(pc: GuestAddress, word: u32) -> Result<(), Compile
         || block::decode_pointer_authentication(pc, word)?.is_some()
         || block::decode_clock_instruction(pc, word)?.is_some()
         || block::decode_thread_register_instruction(pc, word)?.is_some()
+        || crate::amx::decode(pc, word)?.is_some()
     {
         return Err(CompileError(format!(
             "context block service is not integrated at {:#x}",

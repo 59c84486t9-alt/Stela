@@ -42,7 +42,7 @@ pub(in crate::blocks) use translation::{
     InstalledEl1Owner, InstalledEl1Sources, InstalledM0Owner, InstalledM0Sources,
 };
 
-use crate::{clock, execution::platform, floating, memory, pauth, system, thread};
+use crate::{amx, clock, execution::platform, floating, memory, pauth, system, thread};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
 use alloc::{collections::BTreeMap, rc::Rc};
@@ -63,8 +63,8 @@ use stela_compiler::{
     },
 };
 use validate::{
-    validate_clock_exit, validate_interior_word, validate_numerical_exit, validate_pauth_exit,
-    validate_source_map, validate_system_exit, validate_terminal_word,
+    validate_amx_exit, validate_clock_exit, validate_interior_word, validate_numerical_exit,
+    validate_pauth_exit, validate_source_map, validate_system_exit, validate_terminal_word,
     validate_thread_register_exit, validate_trap_exit,
 };
 
@@ -107,6 +107,8 @@ pub struct BlockRuntime {
     next_generation: u64,
     regions: BTreeMap<u64, CodeRegion>,
     loaded: BTreeMap<u64, LoadedBlock>,
+    /// Mapped on the first AMX exit; `Some(None)` when no tier is admitted.
+    amx_kernels: Option<Option<amx::Kernels>>,
     _serialized: PhantomData<Rc<()>>,
 }
 
@@ -557,6 +559,8 @@ impl BlockRuntime {
             pointer_authentication_events: Vec::new(),
             clock_events: Vec::new(),
             thread_register_events: Vec::new(),
+            amx_operations: 0,
+            amx_native_operations: 0,
         };
         loop {
             let pc = state.pc;
@@ -735,6 +739,21 @@ impl BlockRuntime {
             } else {
                 None
             };
+            let amx_instruction = if exit_kind == ExitKind::Amx {
+                ensure!(
+                    self.profile.supports_amx(),
+                    "block produced an unrequested AMX exit"
+                );
+                Some(validate_amx_exit(
+                    pc,
+                    GuestAddress(next_pc),
+                    block.source_bytes,
+                    block.region_base,
+                    &current.source,
+                )?)
+            } else {
+                None
+            };
             let system_boundary = if exit_kind == ExitKind::System {
                 ensure!(
                     self.profile.supports_system(),
@@ -816,6 +835,39 @@ impl BlockRuntime {
                     next_pc: instruction.next_pc,
                     value,
                 });
+            }
+            if let Some(instruction) = amx_instruction {
+                let Some(thread) = thread_context else {
+                    outcome.reason = StopReason::AmxRequired { instruction };
+                    break;
+                };
+                if self.amx_kernels.is_none() {
+                    self.amx_kernels = Some(amx::Kernels::new(self.target)?);
+                }
+                let kernels = self.amx_kernels.as_ref().and_then(Option::as_ref);
+                // SAFETY: this runtime executes the direct-RAM thread profile,
+                // whose guest addresses are host addresses of this process.
+                let completed = unsafe {
+                    thread
+                        .amx()
+                        .complete(&instruction, &state.registers, kernels)
+                };
+                match completed {
+                    Ok(completion) => {
+                        state.pc = instruction.next_pc;
+                        outcome.amx_operations += 1;
+                        if matches!(completion, amx::Completion::Native(_)) {
+                            outcome.amx_native_operations += 1;
+                        }
+                    }
+                    Err(failure) => {
+                        outcome.reason = StopReason::AmxFailure {
+                            instruction,
+                            failure,
+                        };
+                        break;
+                    }
+                }
             }
             if let Some(instruction) = clock_instruction {
                 let Some(clock) = clock_context.as_deref_mut() else {

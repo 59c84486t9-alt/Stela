@@ -1509,3 +1509,5 @@ mod native_shared_region;
 mod native_mach_vm_map;
 
 mod native_process;
+
+mod native_amx;

@@ -181,6 +181,33 @@ impl Mapping {
         Ok(reached.into_infallible())
     }
 
+    /// Call the AMX kernel at `offset` in this library image.
+    ///
+    /// # Safety
+    /// As for `NativeImage::call_amx_kernel`.
+    pub(crate) unsafe fn call_amx_kernel(
+        &self,
+        offset: usize,
+        z: *mut u8,
+        x: *const u8,
+        y: *const u8,
+        row: u64,
+    ) -> Result<()> {
+        ensure!(
+            offset < self.length,
+            "AMX kernel offset outside its library"
+        );
+        // SAFETY: the mapping stays borrowed and the caller upholds the
+        // kernel ABI.
+        let reached =
+            match unsafe { NativeImage::borrow(self).call_amx_kernel(offset, z, x, y, row) } {
+                Ok(reached) => reached,
+                Err(never) => match never {},
+            };
+        reached.into_infallible();
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn address(&self) -> usize {
         self.pointer.as_ptr() as usize

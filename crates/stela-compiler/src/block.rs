@@ -177,6 +177,17 @@ impl BlockProfile {
         )
     }
 
+    /// AMX state is per guest thread, so only the direct-RAM thread profiles
+    /// carry AMX exits.
+    pub const fn supports_amx(self) -> bool {
+        matches!(
+            self,
+            Self::DarwinArm64ThreadV1
+                | Self::AppleArm64eSoftwarePauthThreadV1
+                | Self::AppleArm64eSoftwarePauthClockThreadV1
+        )
+    }
+
     pub const fn supports_thread_registers(self) -> bool {
         matches!(
             self,
@@ -205,6 +216,9 @@ pub enum ExitKind {
     FloatingPoint = 9,
     ScalableNumerical = 10,
     System = 11,
+    /// An Apple AMX coprocessor instruction, still unexecuted; the runtime
+    /// completes it against the thread's AMX state.
+    Amx = 12,
 }
 
 impl TryFrom<u64> for ExitKind {
@@ -224,6 +238,7 @@ impl TryFrom<u64> for ExitKind {
             9 => Ok(Self::FloatingPoint),
             10 => Ok(Self::ScalableNumerical),
             11 => Ok(Self::System),
+            12 => Ok(Self::Amx),
             _ => Err(()),
         }
     }
@@ -349,6 +364,7 @@ pub(crate) enum Terminator {
     ThreadRegister(ThreadRegisterInstruction),
     /// Scalar mapping that unconditionally returns to numerical completion.
     FloatingPoint(crate::aarch64::FloatingPointOperation),
+    Amx(crate::amx::AmxInstruction),
 }
 
 fn decode_terminator(pc: GuestAddress, word: u32) -> Result<Option<Terminator>, CompileError> {
@@ -989,10 +1005,10 @@ mod tests {
         assert_eq!(core::mem::size_of::<BlockExit>(), 16);
         assert_eq!(core::mem::offset_of!(BlockExit, next_pc), 0);
         assert_eq!(core::mem::offset_of!(BlockExit, kind), 8);
-        for kind in 0..=ExitKind::System as u64 {
+        for kind in 0..=ExitKind::Amx as u64 {
             assert_eq!(ExitKind::try_from(kind).unwrap() as u64, kind);
         }
-        assert_eq!(ExitKind::try_from(ExitKind::System as u64 + 1), Err(()));
+        assert_eq!(ExitKind::try_from(ExitKind::Amx as u64 + 1), Err(()));
         assert_eq!(ExitKind::try_from(u64::MAX), Err(()));
     }
 

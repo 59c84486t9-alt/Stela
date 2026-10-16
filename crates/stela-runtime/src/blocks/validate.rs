@@ -168,6 +168,18 @@ pub(super) fn validate_thread_register_exit(
         .context("thread-register exit does not identify a reviewed instruction")
 }
 
+pub(super) fn validate_amx_exit(
+    entry: GuestAddress,
+    exit: GuestAddress,
+    source_bytes: usize,
+    region_base: u64,
+    source: &[u8],
+) -> Result<stela_compiler::amx::AmxInstruction> {
+    let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
+    stela_compiler::amx::decode(exit, word)?
+        .context("AMX exit does not identify an AMX instruction")
+}
+
 pub(super) fn validate_trap_exit(
     entry: GuestAddress,
     exit: GuestAddress,

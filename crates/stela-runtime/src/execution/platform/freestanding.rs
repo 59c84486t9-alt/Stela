@@ -76,4 +76,16 @@ impl Mapping {
     pub unsafe fn call_block(&self, _state: &mut GuestState) -> Result<BlockExit> {
         anyhow::bail!("freestanding native entry requires the original observed canonical session")
     }
+    /// The boot platform admits only the baseline target, so no AMX kernel
+    /// tier is ever mapped here.
+    pub(crate) unsafe fn call_amx_kernel(
+        &self,
+        _offset: usize,
+        _z: *mut u8,
+        _x: *const u8,
+        _y: *const u8,
+        _row: u64,
+    ) -> Result<()> {
+        anyhow::bail!("freestanding AMX kernels are not admitted")
+    }
 }

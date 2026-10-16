@@ -56,4 +56,15 @@ impl Mapping {
         ensure_supported()?;
         unreachable!()
     }
+
+    pub(crate) unsafe fn call_amx_kernel(
+        &self,
+        _offset: usize,
+        _z: *mut u8,
+        _x: *const u8,
+        _y: *const u8,
+        _row: u64,
+    ) -> Result<()> {
+        ensure_supported()
+    }
 }
