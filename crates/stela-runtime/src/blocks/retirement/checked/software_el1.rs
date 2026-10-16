@@ -14,7 +14,8 @@ use crate::{
         domain::{MemoryThread, physical::PhysicalAddressSpace},
         policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode},
         source_ram::{
-            MaterializedSourceRam, SourceRamSystemConfig, materialize_source_ram_with_zeroed,
+            MaterializedSourceRam, SourceRamSystemConfig, materialize_source_ram_regions,
+            materialize_source_ram_with_zeroed,
         },
         stage1,
     },
@@ -39,7 +40,8 @@ use stela_compiler::{
 };
 
 pub use crate::memory::source_ram::{
-    OwnedRamExtent, PhysicalRamRange, SourceRamDeclaration, SourceRamPermissions, ZeroedRamExtent,
+    InitializedRamRegion, OwnedRamExtent, PhysicalRamRange, SourceRamDeclaration,
+    SourceRamPermissions, ZeroedRamExtent,
 };
 
 const INSTRUCTION_ALIGNMENT_BYTES: u64 = size_of::<u32>() as u64;
@@ -100,6 +102,7 @@ pub struct SoftwareEl1InitialRam {
     pub permissions: SourceRamPermissions,
     pub sha256: String,
     pub zero_initialized: bool,
+    pub file_prefix: Option<(usize, String)>,
 }
 
 pub struct SoftwareEl1Report {
@@ -243,6 +246,21 @@ fn declared_profile(platform: Option<&El1PlatformControls>) -> Result<ControlPro
 }
 
 impl SoftwareEl1Machine {
+    /// Reload unchanged declared file prefixes into the original quiescent RAM.
+    /// The consuming executable scope has not started; no PE is reconstructed.
+    /// Tail bytes and architectural CPU/System state are retained. A platform
+    /// CPU reset/entry or migration restore requires its separate real owner.
+    pub fn reload_ram_file_prefixes(&mut self) -> Result<()> {
+        match &mut self.installed {
+            InstalledSource::El1(owner) => {
+                owner.reload_ram_file_prefixes(&self.system, self.thread.pc)
+            }
+            InstalledSource::Read64(owner) => {
+                owner.reload_ram_file_prefixes(&self.system, self.thread.pc)
+            }
+        }
+    }
+
     pub fn new(config: SoftwareEl1Config) -> Result<Self> {
         Self::new_with_zeroed(config, Vec::new())
     }
@@ -252,6 +270,16 @@ impl SoftwareEl1Machine {
     pub fn new_with_zeroed(
         config: SoftwareEl1Config,
         zeroed: Vec<ZeroedRamExtent>,
+    ) -> Result<Self> {
+        Self::new_with_regions(config, zeroed, Vec::new())
+    }
+
+    /// Explicit complete RAM regions with unchanged file prefixes and cold zero
+    /// tails. Mutable instruction RAM remains the scoped single-PE/I=C=0 lane.
+    pub fn new_with_regions(
+        config: SoftwareEl1Config,
+        zeroed: Vec<ZeroedRamExtent>,
+        regions: Vec<InitializedRamRegion>,
     ) -> Result<Self> {
         let SoftwareEl1Config {
             profile,
@@ -277,14 +305,15 @@ impl SoftwareEl1Machine {
             "software EL1 initial PC is unaligned"
         );
         let target = ram.target;
-        let materialized = materialize_source_ram_with_zeroed(
-            ram,
-            zeroed,
-            SourceRamSystemConfig {
-                reservation_granule_bytes: RESERVATION_GRANULE_BYTES,
-                reservation_stripe_count: RESERVATION_STRIPE_COUNT,
-            },
-        )?;
+        let materialization = SourceRamSystemConfig {
+            reservation_granule_bytes: RESERVATION_GRANULE_BYTES,
+            reservation_stripe_count: RESERVATION_STRIPE_COUNT,
+        };
+        let materialized = if regions.is_empty() {
+            materialize_source_ram_with_zeroed(ram, zeroed, materialization)?
+        } else {
+            materialize_source_ram_regions(ram, zeroed, regions, materialization)?
+        };
         Self::from_materialized(
             profile,
             cache_directory,
@@ -339,6 +368,7 @@ impl SoftwareEl1Machine {
                 permissions: extent.permissions,
                 sha256: extent.source_sha256.clone(),
                 zero_initialized: extent.zero_initialized,
+                file_prefix: extent.file_prefix.clone(),
             })
             .collect();
         let observed_ranges = initialized_ram
@@ -1444,3 +1474,11 @@ mod pair_read_tests;
 #[cfg(all(test, target_arch = "x86_64"))]
 #[path = "system_effects/fixture.rs"]
 mod system_effect_fixture;
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "software_el1/mutable_source_tests.rs"]
+mod mutable_source_tests;

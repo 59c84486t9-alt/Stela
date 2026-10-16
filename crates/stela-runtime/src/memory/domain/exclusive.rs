@@ -192,6 +192,11 @@ impl<P: DataPolicy> MemoryThread<P> {
         let mut output = data;
         if write {
             let value = u128::from(data.value[0]) | u128::from(data.value[1]) << u64::BITS;
+            let mut mutation = self
+                .domain
+                .system
+                .prepare_source_write(first.view().backing(), first.backing_offset(), bytes)
+                .map_err(fail)?;
             let result = self
                 .domain
                 .system
@@ -205,8 +210,10 @@ impl<P: DataPolicy> MemoryThread<P> {
                     // release variant too; no dependency on ordinary MOV stores.
                     // SAFETY: exact whole quantity, native rights and capabilities
                     // are checked and every reached view remains pinned/current.
+                    mutation.attempting();
                     unsafe { access::write_part(pointer, bytes, value, target) }
                         .map_err(|_| MemoryStatus::Unsupported)?;
+                    let _receipt = mutation.complete();
                     // Preserve actual committed bytes if later terminal state is
                     // observed; no payload/GPR result is published on that error.
                     view.completed_bytes = u64::from(request.bytes);

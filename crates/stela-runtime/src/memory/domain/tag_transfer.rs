@@ -172,6 +172,11 @@ impl<P: AllocationTagPolicy> tag_transfer::Memory for MemoryThread<P> {
         } else {
             monitor::Invalidation::OnCommit
         };
+        let mut mutation = self.domain.system.prepare_source_write(
+            first.view().backing(),
+            first.backing_offset(),
+            TAG_GRANULE_BYTES,
+        )?;
         self.domain
             .system
             .reservations
@@ -184,6 +189,7 @@ impl<P: AllocationTagPolicy> tag_transfer::Memory for MemoryThread<P> {
                 // SAFETY: resolution pins all exact contiguous spans and their
                 // rights; the host quantity is aligned/readable/writable, the
                 // target was checked, and private staging cannot alias RAM.
+                mutation.attempting();
                 unsafe {
                     access::write_part(
                         pointer,
@@ -192,7 +198,9 @@ impl<P: AllocationTagPolicy> tag_transfer::Memory for MemoryThread<P> {
                         target,
                     )
                 }
-                .map_err(|_| MemoryStatus::Unsupported)
+                .map_err(|_| MemoryStatus::Unsupported)?;
+                let _receipt = mutation.complete();
+                Ok::<_, MemoryStatus>(())
             })
             .map_err(|error| match error {
                 monitor::AccessError::Monitor(_) => MemoryStatus::Domain,

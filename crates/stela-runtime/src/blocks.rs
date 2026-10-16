@@ -3,9 +3,9 @@
 //! direct-RAM profile. Replacement invalidates dependent RX copies before return.
 pub(crate) mod retirement;
 pub use retirement::checked::software_el1::{
-    OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config, SoftwareEl1InitialRam, SoftwareEl1Machine,
-    SoftwareEl1Profile, SoftwareEl1Report, SoftwareEl1Request, SourceRamDeclaration,
-    SourceRamPermissions, ZeroedRamExtent,
+    InitializedRamRegion, OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config,
+    SoftwareEl1InitialRam, SoftwareEl1Machine, SoftwareEl1Profile, SoftwareEl1Report,
+    SoftwareEl1Request, SourceRamDeclaration, SourceRamPermissions, ZeroedRamExtent,
 };
 
 pub use retirement::checked::software_privileged::{
@@ -236,7 +236,9 @@ pub struct RunOutcome {
 
 #[path = "blocks/translation.rs"]
 mod translation;
-pub(crate) use translation::{ControlCodeScope, InstalledEl1SourceScope, InstalledM0SourceScope};
+pub(crate) use translation::{
+    ControlCodeScope, InstalledEl1SourceScope, InstalledM0SourceScope, InstalledWalkedSource,
+};
 pub(in crate::blocks) use translation::{
     InstalledEl1Owner, InstalledEl1Sources, InstalledM0Owner, InstalledM0Sources,
 };

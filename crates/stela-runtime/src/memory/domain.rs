@@ -11,6 +11,8 @@ pub use scalar::{MemoryFault, MemoryReader};
 #[path = "domain/publication.rs"]
 mod publication;
 pub use publication::PublicationFault;
+pub(in crate::memory) mod source_mutation;
+pub(crate) use source_mutation::SourceWriteReceipt;
 #[path = "domain/profile.rs"]
 mod profile;
 #[path = "domain/tag_transfer.rs"]
@@ -831,6 +833,15 @@ impl<P: DataPolicy> MemoryThread<P> {
                     monitor::Invalidation::OnCommit
                 };
                 let target = self.domain.target;
+                let mut mutation = self
+                    .domain
+                    .system
+                    .prepare_source_write(
+                        first.view().backing(),
+                        first.backing_offset(),
+                        part.bytes,
+                    )
+                    .map_err(|status| (status, raw))?;
                 self.domain
                     .system
                     .reservations
@@ -839,8 +850,11 @@ impl<P: DataPolicy> MemoryThread<P> {
                             .check(physical.data(raw, part.bytes, part.flags))?;
                         // SAFETY: exact resolved spans pin stable rights/lifetime;
                         // staging never aliases guest bytes; checked target is owned.
+                        mutation.attempting();
                         unsafe { access::write_part(pointer, part.bytes, value, target) }
-                            .map_err(|_| MemoryStatus::Unsupported)
+                            .map_err(|_| MemoryStatus::Unsupported)?;
+                        let _receipt = mutation.complete();
+                        Ok::<_, MemoryStatus>(())
                     })
                     .map_err(|error| {
                         (

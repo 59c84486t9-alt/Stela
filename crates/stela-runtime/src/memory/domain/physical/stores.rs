@@ -24,6 +24,7 @@ pub(crate) struct M0RamWriteProgress {
     pub(crate) completed_bytes: u64,
     pub(crate) publication_attempted: Option<M0WriteMember>,
     pub(crate) uncertain_member: Option<M0WriteMember>,
+    pub(crate) modified_instruction_ram: bool,
 }
 impl M0RamWriteProgress {
     const fn unattempted() -> Self {
@@ -32,6 +33,7 @@ impl M0RamWriteProgress {
             completed_bytes: 0,
             publication_attempted: None,
             uncertain_member: None,
+            modified_instruction_ram: false,
         }
     }
 }
@@ -129,7 +131,11 @@ impl PhysicalRamWritePin<'_> {
         self.physical.check_reached(&self.reached)
     }
 
-    fn publish8(&self, value: u64) -> Result<(), PublicationFault> {
+    fn publish8(
+        &self,
+        value: u64,
+        receipts: &mut Vec<crate::memory::domain::SourceWriteReceipt>,
+    ) -> Result<(), PublicationFault> {
         let first = self.reached.first();
         // SAFETY: the actual typed source loan qualified this reached Write;
         // same original outer/order retain current physical rights/storage.
@@ -138,10 +144,11 @@ impl PhysicalRamWritePin<'_> {
         // Original MemorySystem publication supplies exact8B XCHG and real
         // same-value/alias reservation invalidation; it grants no guest type.
         unsafe {
-            self.physical.domain.system.publish(
+            self.physical.domain.system.publish_tracked(
                 first.view().backing(),
                 first.backing_offset(),
                 &value.to_le_bytes(),
+                Some(receipts),
             )
         }
     }
@@ -169,7 +176,10 @@ fn resolve_write_pin<'loan>(
     physical.check_reached(&reached)?;
     if std::iter::once(reached.first())
         .chain(reached._remaining.iter())
-        .any(|span| span.view().permissions().executable)
+        .any(|span| {
+            span.view().permissions().executable
+                && span.view().backing().instruction_generation().is_none()
+        })
     {
         return Err(PhysicalReadPlatformError::Unavailable);
     }
@@ -207,12 +217,13 @@ pub(crate) struct M0RamWritePrepared<'loan, 'owner> {
     second: Option<PhysicalRamWritePin<'loan>>,
     _order: MutexGuard<'loan, ()>,
     progress: M0RamWriteProgress,
+    receipts: Vec<crate::memory::domain::SourceWriteReceipt>,
 }
 
 impl M0RamWritePrepared<'_, '_> {
     pub(crate) fn validate_current(&self) -> Result<(), M0RamWritePlatformError> {
         self.source
-            .validate_current(self.execution)
+            .validate_current_with_writes(self.execution, &self.receipts)
             .map_err(|error| M0RamWritePlatformError::SourceControl {
                 error,
                 progress: self.progress,
@@ -246,6 +257,7 @@ impl M0RamWritePrepared<'_, '_> {
         &mut self,
         result: Result<(), PublicationFault>,
     ) -> Result<(), M0RamWritePlatformError> {
+        self.progress.modified_instruction_ram = !self.receipts.is_empty();
         match result {
             Ok(()) => {
                 // Infallible primitive observations immediately follow the
@@ -289,13 +301,13 @@ impl M0RamWritePrepared<'_, '_> {
         )?;
         self.progress.publication_attempted = Some(M0WriteMember::First);
         self.progress.uncertain_member = Some(M0WriteMember::First);
-        let result = self.first.publish8(first);
+        let result = self.first.publish8(first, &mut self.receipts);
         self.record_publication(result)?;
         self.validate_current()?;
         if let Some((_, value)) = self.source.intent().member(M0WriteMember::Second) {
             let translated = self
                 .source
-                .qualify_member(self.execution, M0WriteMember::Second)
+                .qualify_member_after_writes(self.execution, M0WriteMember::Second, &self.receipts)
                 .map_err(|error| M0RamWritePlatformError::SourceControl {
                     error,
                     progress: self.progress,
@@ -317,7 +329,7 @@ impl M0RamWritePrepared<'_, '_> {
                 .second
                 .as_ref()
                 .expect("resolved reached second member")
-                .publish8(value);
+                .publish8(value, &mut self.receipts);
             self.record_publication(result)?;
         }
         // A post-effect authority failure reports the exact known0/8/16 prefix.
@@ -352,6 +364,7 @@ pub(crate) fn prepare_aligned_device_ram8_or_pair<'loan, 'owner>(
         second: None,
         _order: order,
         progress,
+        receipts: Vec::with_capacity(2),
     };
     prepared.validate_current()?;
     Ok(prepared)

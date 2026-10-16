@@ -39,6 +39,12 @@ pub(crate) enum M0WriteObservation {
     },
 }
 impl M0WriteObservation {
+    pub(in crate::blocks::retirement::checked) fn modified_instruction_ram(&self) -> bool {
+        match self {
+            Self::Native { report, .. } => report.progress.modified_instruction_ram,
+            _ => false,
+        }
+    }
     #[cfg(test)]
     pub(in crate::blocks::retirement::checked) fn progress_observation(
         &self,

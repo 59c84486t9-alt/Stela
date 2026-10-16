@@ -63,7 +63,7 @@ impl<'run> InstalledM0SourceScope<'run> {
     /// Actual live owner identity/generation/CPU/memory checks precede fetch.
     /// The real TranslationControls implementation owns those comparisons;
     /// accepting this concrete opaque scope does not add any bank field.
-    pub(super) fn check_installed(
+    pub(crate) fn check_installed(
         &self,
         owner: &TranslationControls,
         state: &SystemState,
@@ -150,6 +150,15 @@ impl<'run> InstalledM0SourceScope<'run> {
         owner: &TranslationControls,
         input: &M0SourceInput<'_, '_>,
     ) -> Result<(), FetchFailure> {
+        self.pin_source(owner, input).map(|_| ())
+    }
+
+    /// Retain the original actual fetch for an in-flight modifying instruction.
+    pub(crate) fn pin_source(
+        &self,
+        owner: &TranslationControls,
+        input: &M0SourceInput<'_, '_>,
+    ) -> Result<BoundPhysicalInstruction, FetchFailure> {
         input.validate_source_current().map_err(|_| {
             FetchFailure::Unavailable("M0 logical source/RX/plan association changed")
         })?;
@@ -188,7 +197,8 @@ impl<'run> InstalledM0SourceScope<'run> {
                 )
             })?;
         self.check_installed(owner, input.actual_system())
-            .map_err(FetchFailure::Unavailable)
+            .map_err(FetchFailure::Unavailable)?;
+        Ok(reached)
     }
 
     /// Postmint currency only. The initial factory uses qualify_source so an

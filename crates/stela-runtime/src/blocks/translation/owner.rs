@@ -64,8 +64,8 @@ impl InstalledCodeSources {
         system: &SystemState,
     ) -> Result<(Self, TranslationControls)> {
         ensure!(
-            !immutable_sources.is_empty(),
-            "fresh M0 source owner requires actual immutable instruction owners"
+            !immutable_sources.is_empty() || physical.owns_mutable_instruction_sources(),
+            "fresh source owner requires actual immutable or factory-owned mutable instruction owners"
         );
         super::super::platform::ensure_supported()?;
         physical
@@ -103,6 +103,20 @@ impl InstalledCodeSources {
             },
             controls,
         ))
+    }
+
+    fn reload_region_prefixes(&mut self, runtime: &mut BlockRuntime) -> Result<()> {
+        ensure!(
+            Arc::ptr_eq(&runtime.identity, &self.runtime_identity),
+            "RAM reload cache is not the original installed runtime"
+        );
+        // All native/source loans have ended: callers own this actual envelope
+        // before its consuming executable scope. Release dependent RX first.
+        runtime.retire_translation_sources();
+        self.physical
+            .reload_original_region_prefixes()
+            .map_err(|error| anyhow::anyhow!("RAM file-prefix reload: {error:?}"))?;
+        Ok(())
     }
 
     pub(in crate::blocks) fn el1_scope(
@@ -298,6 +312,23 @@ impl InstalledM0Owner {
             .bind_physical_instruction(scope.installed_snapshot(), reached)?;
         drop(source_execution);
         Ok(owner)
+    }
+
+    pub(in crate::blocks) fn reload_ram_file_prefixes(
+        &mut self,
+        system: &SystemState,
+        pc: GuestAddress,
+    ) -> Result<()> {
+        self.sources.reload_region_prefixes(&mut self.runtime)?;
+        let scope = self.sources.source_scope().map_err(anyhow::Error::msg)?;
+        let execution = scope.physical_space().initial_source_execution_loan()?;
+        let reached = scope
+            .physical_space()
+            .fetch_m0_instruction(&execution, &self.controls, &scope, system, pc.0)
+            .map_err(|error| anyhow::anyhow!("RAM reload original source fetch: {error:?}"))?;
+        self.runtime
+            .bind_physical_instruction(scope.installed_snapshot(), reached)?;
+        Ok(())
     }
 
     /// Consume this fresh envelope ONCE for the complete executable lifetime.

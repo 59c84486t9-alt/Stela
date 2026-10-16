@@ -100,6 +100,22 @@ impl InstalledEl1Owner {
         drop(execution);
         Ok(owner)
     }
+    pub(in crate::blocks) fn reload_ram_file_prefixes(
+        &mut self,
+        system: &SystemState,
+        pc: GuestAddress,
+    ) -> Result<()> {
+        self.sources.reload_region_prefixes(&mut self.runtime)?;
+        let scope = self.sources.el1_scope().map_err(anyhow::Error::msg)?;
+        let execution = scope.physical_space().initial_source_execution_loan()?;
+        let reached = scope
+            .physical_space()
+            .fetch_el1_instruction(&execution, &self.controls, &scope, system, pc.0)
+            .map_err(|error| anyhow::anyhow!("RAM reload original source fetch: {error:?}"))?;
+        self.runtime
+            .bind_physical_instruction(scope.installed_snapshot(), reached)?;
+        Ok(())
+    }
     /// One consuming executable lifetime, sealed by the ORIGINAL consumer key.
     /// Stable outer slots avoid self-reference; no resource tuple/public adoption
     /// escapes and no PE is recreated per run. System is captured by canonical
@@ -128,3 +144,11 @@ impl InstalledEl1Owner {
         ))
     }
 }
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "el1/walked_tests.rs"]
+mod walked_tests;

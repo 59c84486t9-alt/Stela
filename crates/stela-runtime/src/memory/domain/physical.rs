@@ -11,6 +11,10 @@ use crate::memory::{
     stage1::{PhysicalMemory, PhysicalReadError},
 };
 
+#[path = "physical/mutable_source.rs"]
+mod mutable_source;
+pub(in crate::memory) use mutable_source::RegionReload;
+
 const DESCRIPTOR_BYTES: usize = 8;
 const DESCRIPTOR_ALIGNMENT_MASK: u64 = DESCRIPTOR_BYTES as u64 - 1;
 
@@ -19,6 +23,14 @@ const DESCRIPTOR_ALIGNMENT_MASK: u64 = DESCRIPTOR_BYTES as u64 - 1;
 pub struct PhysicalAddressSpace {
     domain: Arc<MemoryDomain>,
     binding: SourcePhysicalRamBinding,
+}
+
+/// Descriptor-only view of the original physical domain and retained invocation.
+/// Private references cannot acquire another exclusion, replace a domain, or
+/// detach physical reads from the actual outer loan's lifetime.
+pub(crate) struct BorrowedDescriptors<'loan> {
+    physical: &'loan PhysicalAddressSpace,
+    execution: &'loan MemoryExecutionLoan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,23 +190,39 @@ impl PhysicalAddressSpace {
             reached,
         })
     }
-}
+    /// Borrow physical descriptor reads under the actual retained outer loan.
+    /// Membership/current binding is checked now and on every reached read;
+    /// this grants no CPU, source publication, control or retirement authority.
+    pub(crate) fn borrow_descriptors<'loan>(
+        &'loan self,
+        execution: &'loan MemoryExecutionLoan,
+    ) -> Result<BorrowedDescriptors<'loan>, PhysicalReadPlatformError> {
+        self.check_execution_loan(execution)?;
+        Ok(BorrowedDescriptors {
+            physical: self,
+            execution,
+        })
+    }
 
-impl PhysicalMemory for PhysicalAddressSpace {
-    fn read_descriptor(&self, physical_address: u64) -> Result<u64, PhysicalReadError> {
+    /// Reuse the exact supplied physical invocation through one descriptor read.
+    /// No nested loan/execution exclusion or virtual lookup is created here.
+    fn read_descriptor_with_loan(
+        &self,
+        execution: &MemoryExecutionLoan,
+        physical_address: u64,
+    ) -> Result<u64, PhysicalReadError> {
         if physical_address & DESCRIPTOR_ALIGNMENT_MASK != 0 {
             return Err(PhysicalReadError::Platform(
                 "physical descriptor address is not aligned to eight bytes",
             ));
         }
-        let execution = self.domain.execution_loan().map_err(platform_error)?;
-        self.check_execution_loan(&execution).map_err(|_| {
+        self.check_execution_loan(execution).map_err(|_| {
             PhysicalReadError::Platform("physical descriptor source binding is unavailable")
         })?;
         let physical = self
             .domain
             .resolve_source_physical(
-                &execution,
+                execution,
                 physical_address,
                 DESCRIPTOR_BYTES,
                 AccessKind::Read,
@@ -247,7 +275,33 @@ impl PhysicalMemory for PhysicalAddressSpace {
                 PhysicalReadError::Platform("physical descriptor native read is unsupported")
             })?;
         self.domain.check_execution().map_err(platform_error)?;
+        self.check_execution_loan(execution).map_err(|_| {
+            PhysicalReadError::Platform("physical descriptor source binding is unavailable")
+        })?;
+        self.check_reached(&physical).map_err(|_| {
+            PhysicalReadError::Platform("physical descriptor source generation is unavailable")
+        })?;
         Ok(value as u64)
+    }
+}
+
+impl PhysicalMemory for PhysicalAddressSpace {
+    fn read_descriptor(&self, physical_address: u64) -> Result<u64, PhysicalReadError> {
+        // Preserve standalone refusal order: alignment precedes acquiring a loan.
+        if physical_address & DESCRIPTOR_ALIGNMENT_MASK != 0 {
+            return Err(PhysicalReadError::Platform(
+                "physical descriptor address is not aligned to eight bytes",
+            ));
+        }
+        let execution = self.domain.execution_loan().map_err(platform_error)?;
+        self.read_descriptor_with_loan(&execution, physical_address)
+    }
+}
+
+impl PhysicalMemory for BorrowedDescriptors<'_> {
+    fn read_descriptor(&self, physical_address: u64) -> Result<u64, PhysicalReadError> {
+        self.physical
+            .read_descriptor_with_loan(self.execution, physical_address)
     }
 }
 
@@ -336,3 +390,6 @@ impl super::MemorySystem {
             .map_err(|_| anyhow::anyhow!("actual fixture device order unavailable"))
     }
 }
+
+#[path = "physical/walked.rs"]
+mod walked;

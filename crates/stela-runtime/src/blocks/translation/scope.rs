@@ -24,6 +24,7 @@ use std::sync::Arc;
 pub(super) struct InstalledContext {
     pub(super) snapshot: ControlSnapshot,
     pub(super) cpu: stage1::CpuProfile,
+    pub(super) cache: super::stage1_cache::Stage1Cache,
 }
 
 pub(super) enum ContextState {
@@ -52,11 +53,30 @@ impl ControlCodeScope<'_> {
         &mut self,
         snapshot: ControlSnapshot,
         cpu: stage1::CpuProfile,
+        preserve_translations: bool,
     ) -> Result<(), &'static str> {
         let ContextState::Installed(current) = self.context else {
             return Err("prepared publication lost its installed per-PE context");
         };
-        **current = InstalledContext { snapshot, cpu };
+        let config = stage1::Config::from_controls_for_cpu(
+            snapshot.consumer_inputs().stage1_controls(),
+            cpu,
+        )
+        .map_err(|_| "published controls have no canonical configuration")?;
+        if preserve_translations {
+            if current.cpu != cpu
+                || current.snapshot.consumer_inputs() != snapshot.consumer_inputs()
+            {
+                return Err("synchronization changes cached translation inputs");
+            }
+            current.snapshot = snapshot;
+        } else {
+            **current = InstalledContext {
+                snapshot,
+                cpu,
+                cache: super::stage1_cache::Stage1Cache::new(config, self.physical),
+            };
+        }
         Ok(())
     }
 
@@ -100,6 +120,18 @@ impl ControlCodeScope<'_> {
         std::ptr::eq(self.physical, physical)
     }
 
+    pub(crate) fn retained_outer(&self) -> Option<&crate::memory::domain::MemoryExecutionLoan> {
+        self._outer
+    }
+
+    pub(crate) fn source_cache_controls(&self) -> Result<u64, FetchFailure> {
+        match &*self.context {
+            ContextState::Installed(current) => Ok(current.snapshot.consumer_inputs().sctlr_el1),
+            _ => Err(FetchFailure::Unavailable(
+                "source visibility has no original installed controls",
+            )),
+        }
+    }
     pub(crate) fn immutable_sources(&self) -> &[ImmutableCodeBacking] {
         self.immutable_sources
     }
@@ -134,21 +166,32 @@ impl ControlCodeScope<'_> {
         .map_err(|_| {
             FetchFailure::Unavailable("current controls have no canonical configuration backend")
         })?;
-        stage1::translate(
-            &config,
-            self.physical,
-            stage1::Access {
-                kind: stage1::AccessKind::Fetch,
-                exception_level: stage1::ExceptionLevel::El1,
-                raw_virtual_address: pc,
-                source_pc: pc,
-                // Actual SystemState + base EntryProfile exclude these features.
-                pan: false,
-                uao: false,
-                aligned: true,
-            },
-        )
-        .map_err(|error| match error {
+        let access = stage1::Access {
+            kind: stage1::AccessKind::Fetch,
+            exception_level: stage1::ExceptionLevel::El1,
+            raw_virtual_address: pc,
+            source_pc: pc,
+            // Actual SystemState + base EntryProfile exclude these features.
+            pan: false,
+            uao: false,
+            aligned: true,
+        };
+        let result = if matches!(config.mode(), stage1::Mode::Enabled { .. }) {
+            let outer = self._outer.ok_or(FetchFailure::Unavailable(
+                "enabled control fetch requires original retained outer",
+            ))?;
+            current
+                .cache
+                .translate(&config, self.physical, outer, access)
+        } else {
+            stage1::translate(&config, self.physical, access)
+        };
+        if let Some(outer) = self._outer {
+            self.physical.check_execution_loan(outer).map_err(|_| {
+                FetchFailure::Platform("control fetch original outer became unavailable")
+            })?;
+        }
+        result.map_err(|error| match error {
             stage1::TranslationError::Fault(fault) => FetchFailure::Architectural(fault),
             stage1::TranslationError::Unsupported(stage1::Unsupported::PhysicalPlatform(
                 reason,
@@ -284,7 +327,7 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
                 profile::check_features(self.entry_profile, &snapshot)?;
                 // Config construction checks supported effective behavior only.
                 // Future root/leaf faults are not walked or raised during prepare.
-                stage1::Config::from_controls_for_cpu(
+                let config = stage1::Config::from_controls_for_cpu(
                     snapshot.consumer_inputs().stage1_controls(),
                     cpu,
                 )
@@ -292,7 +335,11 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
                 // Reserve the sole context slot during initial preparation,
                 // before any guest/control publication. Later commits reuse it.
                 (
-                    PreparedAction::Install(Box::new(InstalledContext { snapshot, cpu })),
+                    PreparedAction::Install(Box::new(InstalledContext {
+                        snapshot,
+                        cpu,
+                        cache: super::stage1_cache::Stage1Cache::new(config, self.physical),
+                    })),
                     None,
                 )
             }
@@ -422,14 +469,14 @@ impl PreparedPublication for PreparedCodePublication<'_, '_> {
                     scope.runtime.retire_translation_sources();
                     progress = PublicationProgress::CodeDependenciesRetired;
                     scope.physical.check_fetch_execution()?;
-                    scope.replace_current(snapshot, cpu)?;
+                    scope.replace_current(snapshot, cpu, false)?;
                     progress = PublicationProgress::CurrentContextInstalled;
                 }
                 PreparedAction::Synchronize { snapshot, cpu } => {
                     scope.runtime.retire_translation_sources();
                     progress = PublicationProgress::CodeDependenciesRetired;
                     scope.physical.check_fetch_execution()?;
-                    scope.replace_current(snapshot, cpu)?;
+                    scope.replace_current(snapshot, cpu, true)?;
                     progress = PublicationProgress::CurrentContextInstalled;
                     super::super::serialize_instruction_execution()
                         .map_err(|_| "actual host instruction serialization failed")?;

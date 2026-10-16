@@ -122,6 +122,7 @@ impl std::error::Error for AccessError {}
 /// obey the execution domain's synchronization and fault-handling contract.
 pub struct MemoryBacking {
     id: BackingId,
+    pub(in crate::memory) source_mutation: super::domain::source_mutation::SourceMutationTracker,
     host_base: NonNull<u8>,
     bytes: usize,
     maximum_permissions: AccessPermissions,
@@ -206,6 +207,7 @@ impl MemoryBacking {
         }
         Ok(Arc::new(Self {
             id: BackingId(Identity::new()),
+            source_mutation: super::domain::source_mutation::SourceMutationTracker::new(),
             host_base,
             bytes,
             maximum_permissions,

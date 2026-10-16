@@ -54,6 +54,19 @@ impl MemorySystem {
         offset: usize,
         bytes: &[u8],
     ) -> Result<(), PublicationFault> {
+        // SAFETY: identical caller-owned publication contract below.
+        unsafe { self.publish_tracked(backing, offset, bytes, None) }
+    }
+
+    /// Same physical publication, retaining real source mutation receipts for
+    /// the original canonical write session. No copied observation is accepted.
+    pub(in crate::memory) unsafe fn publish_tracked(
+        &self,
+        backing: &Arc<MemoryBacking>,
+        offset: usize,
+        bytes: &[u8],
+        mut receipts: Option<&mut Vec<super::SourceWriteReceipt>>,
+    ) -> Result<(), PublicationFault> {
         let preflight_fault = |status| PublicationFault {
             status,
             completed: 0,
@@ -93,7 +106,19 @@ impl MemorySystem {
             access::read_footprint(part.address, part.bytes, TargetCpu::Baseline)
                 .map_err(|_| preflight_fault(MemoryStatus::Unsupported))?;
         }
+        if let Some(receipts) = receipts.as_mut() {
+            // Every later push is allocation-free, including partial publication.
+            receipts
+                .try_reserve(PublicationParts::new(pointer.as_ptr() as usize, bytes.len()).count())
+                .map_err(|_| preflight_fault(MemoryStatus::Domain))?;
+        }
         for part in PublicationParts::new(pointer.as_ptr() as usize, bytes.len()) {
+            let mut mutation = self
+                .prepare_source_write(backing, offset + part.offset, part.bytes)
+                .map_err(|status| PublicationFault {
+                    status,
+                    completed: part.offset,
+                })?;
             let mut staging = [0; HOST_QUANTITY_BYTES];
             staging[..part.bytes].copy_from_slice(&bytes[part.offset..part.offset + part.bytes]);
             let value = u128::from(u64::from_le_bytes(staging));
@@ -108,6 +133,7 @@ impl MemorySystem {
             })?;
             self.reservations
                 .with_writer(&range, monitor::Invalidation::BeforeAttempt, || {
+                    mutation.attempting();
                     // SAFETY: whole host extent and scalar recipes were checked;
                     // the caller pins rights and lifetime, with private staging.
                     unsafe {
@@ -117,7 +143,13 @@ impl MemorySystem {
                             value,
                             TargetCpu::Baseline,
                         )
+                    }?;
+                    if let Some(receipt) = mutation.complete()
+                        && let Some(receipts) = receipts.as_mut()
+                    {
+                        receipts.push(receipt);
                     }
+                    Ok::<_, access::AccessError>(())
                 })
                 .map_err(|error| PublicationFault {
                     status: match error {

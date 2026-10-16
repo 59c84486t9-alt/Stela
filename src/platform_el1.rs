@@ -11,9 +11,9 @@ use std::{
 use stela_compiler::{GuestAddress, GuestState, TargetCpu};
 use stela_runtime::{
     blocks::{
-        OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config, SoftwareEl1Machine,
-        SoftwareEl1Profile, SoftwareEl1Request, SourceRamDeclaration, SourceRamPermissions,
-        ThreadState, ZeroedRamExtent,
+        InitializedRamRegion, OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config,
+        SoftwareEl1Machine, SoftwareEl1Profile, SoftwareEl1Request, SourceRamDeclaration,
+        SourceRamPermissions, ThreadState, ZeroedRamExtent,
     },
     system::{
         state::{El1Registers, SystemState},
@@ -37,6 +37,8 @@ struct Input {
     initialized: Vec<Extent>,
     #[serde(default)]
     zeroed: Vec<Zeroed>,
+    #[serde(default)]
+    initialized_regions: Vec<Region>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +85,39 @@ struct Zeroed {
     executable: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Region {
+    source_pa: u64,
+    mapped_bytes: u64,
+    path: PathBuf,
+    sha256: String,
+    readable: bool,
+    writable: bool,
+    executable: bool,
+}
+
+fn read_original_source(path: &Path, expected: &str) -> Result<Vec<u8>> {
+    let file = File::open(path)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "software EL1 source is not an ordinary file"
+    );
+    let mut data = Vec::new();
+    file.take(stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES + 1)
+        .read_to_end(&mut data)?;
+    ensure!(
+        data.len() as u64 <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
+        "software EL1 source exceeds memory bound"
+    );
+    ensure!(
+        stela_core::sha256(&data) == expected,
+        "software EL1 source hash differs: {}",
+        path.display()
+    );
+    Ok(data)
+}
+
 pub(crate) fn run(
     input: &Path,
     profile: SoftwareEl1Profile,
@@ -104,24 +139,8 @@ pub(crate) fn run(
     let mut source_inputs = Vec::new();
     for extent in declaration.initialized {
         let path = directory.join(extent.path);
-        let file = File::open(&path)?;
-        ensure!(
-            file.metadata()?.is_file(),
-            "software EL1 source is not an ordinary file"
-        );
-        let mut data = Vec::new();
-        file.take(stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES + 1)
-            .read_to_end(&mut data)?;
-        ensure!(
-            data.len() as u64 <= stela_runtime::memory::MAX_IMAGE_MEMORY_BYTES,
-            "software EL1 source exceeds memory bound"
-        );
+        let data = read_original_source(&path, &extent.sha256)?;
         let actual = stela_core::sha256(&data);
-        ensure!(
-            actual == extent.sha256,
-            "software EL1 source hash differs: {}",
-            path.display()
-        );
         source_inputs.push(serde_json::json!({"path":path,"sha256":actual,"bytes":data.len(),"source_pa":extent.source_pa}));
         initialized.push(OwnedRamExtent {
             source_pa: extent.source_pa,
@@ -130,6 +149,27 @@ pub(crate) fn run(
                 readable: extent.readable,
                 writable: extent.writable,
                 executable: extent.executable,
+            },
+        });
+    }
+    let mut initialized_regions = Vec::new();
+    for region in declaration.initialized_regions {
+        let path = directory.join(region.path);
+        let prefix = read_original_source(&path, &region.sha256)?;
+        source_inputs.push(serde_json::json!({"path":path,"sha256":region.sha256,
+            "bytes":prefix.len(),"source_pa":region.source_pa,"mapped_bytes":region.mapped_bytes,
+            "cold_remainder":"zeroed","warm_reload":"file_prefix_only"}));
+        initialized_regions.push(InitializedRamRegion {
+            range: PhysicalRamRange {
+                source_pa: region.source_pa,
+                bytes: region.mapped_bytes,
+            },
+            file_prefix: prefix,
+            file_sha256: region.sha256,
+            permissions: SourceRamPermissions {
+                readable: region.readable,
+                writable: region.writable,
+                executable: region.executable,
             },
         });
     }
@@ -172,7 +212,7 @@ pub(crate) fn run(
             },
         })
         .collect();
-    let machine = SoftwareEl1Machine::new_with_zeroed(
+    let machine = SoftwareEl1Machine::new_with_regions(
         SoftwareEl1Config {
             profile,
             cache_directory,
@@ -200,6 +240,7 @@ pub(crate) fn run(
             },
         },
         zeroed,
+        initialized_regions,
     )
     .context("create actual owned software EL1 machine")?;
     let report = machine.run_to_shutdown(request)?;
@@ -215,7 +256,7 @@ pub(crate) fn run(
         .into_iter()
         .map(|range| serde_json::json!({"source_pa":range.source_pa,"bytes":range.bytes}))
         .collect();
-    let initialized_ram: Vec<_> = report.initialized_ram.into_iter().map(|extent|serde_json::json!({"source_pa":extent.range.source_pa,"bytes":extent.range.bytes,"readable":extent.permissions.readable,"writable":extent.permissions.writable,"executable":extent.permissions.executable,"sha256":extent.sha256,"zero_initialized":extent.zero_initialized})).collect();
+    let initialized_ram: Vec<_> = report.initialized_ram.into_iter().map(|extent|serde_json::json!({"source_pa":extent.range.source_pa,"bytes":extent.range.bytes,"readable":extent.permissions.readable,"writable":extent.permissions.writable,"executable":extent.permissions.executable,"sha256":extent.sha256,"zero_initialized":extent.zero_initialized,"file_prefix":extent.file_prefix})).collect();
     Ok(serde_json::json!({
         "kind":"owned-software-el1-diagnostic","profile":format!("{profile:?}"),"target_cpu":target.id(),
         "declaration_sha256":stela_core::sha256(&bytes),"source_inputs":source_inputs,

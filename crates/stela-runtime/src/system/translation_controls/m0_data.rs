@@ -293,6 +293,7 @@ impl InputCurrency for M0WriteSourceInput<'_, '_> {
     }
 }
 trait WriteCurrency: InputCurrency {
+    fn validate_inflight(&self, owner: &TranslationControls) -> Result<(), M0ControlError>;
     fn actual_system(&self) -> &SystemState;
     fn actual_pstate(&self) -> u64;
     #[cfg(test)]
@@ -301,6 +302,19 @@ trait WriteCurrency: InputCurrency {
     fn actual_address_space(&self) -> Option<u64>;
 }
 impl WriteCurrency for M0WriteSourceInput<'_, '_> {
+    fn validate_inflight(&self, owner: &TranslationControls) -> Result<(), M0ControlError> {
+        let original = self.original();
+        original
+            .validate_source_current()
+            .map_err(|error| M0ControlError::Source(error.to_string()))?;
+        original
+            .validate_thread_current()
+            .map_err(|error| M0ControlError::Source(error.to_string()))?;
+        original
+            .installed_source_scope()
+            .check_installed(owner, original.actual_system())
+            .map_err(|reason| M0ControlError::Source(reason.into()))
+    }
     fn actual_system(&self) -> &SystemState {
         self.original().actual_system()
     }
@@ -326,6 +340,7 @@ pub(crate) struct M0DataWriteLoan<'cpu> {
     outer: &'cpu MemoryExecutionLoan,
     generation: u64,
     intent: M0WriteIntent,
+    source_pin: crate::memory::domain::physical::BoundPhysicalInstruction,
 }
 impl M0DataWriteLoan<'_> {
     /// Descriptive fixture data read from original retained owners, never a permit.
@@ -351,6 +366,13 @@ impl M0DataWriteLoan<'_> {
         &self,
         execution: &MemoryExecutionLoan,
     ) -> Result<(), M0ControlError> {
+        self.validate_current_with_writes(execution, &[])
+    }
+    pub(crate) fn validate_current_with_writes(
+        &self,
+        execution: &MemoryExecutionLoan,
+        writes: &[crate::memory::domain::SourceWriteReceipt],
+    ) -> Result<(), M0ControlError> {
         if !std::ptr::eq(execution, self.outer) {
             return Err(M0ControlError::DifferentExecutionLoan);
         }
@@ -365,7 +387,10 @@ impl M0DataWriteLoan<'_> {
                 "M0 write control generation differs".into(),
             ));
         }
-        self.source.validate(self.owner)
+        self.source.validate_inflight(self.owner)?;
+        self.source_pin
+            .validate_owned_writes(&self.owner.memory, writes)
+            .map_err(|reason| M0ControlError::Source(reason.into()))
     }
     pub(crate) fn physical_space(&self) -> &PhysicalAddressSpace {
         self.source.physical()
@@ -378,7 +403,15 @@ impl M0DataWriteLoan<'_> {
         execution: &MemoryExecutionLoan,
         member: M0WriteMember,
     ) -> Result<stage1::Translation, M0ControlError> {
-        self.validate_current(execution)?;
+        self.qualify_member_after_writes(execution, member, &[])
+    }
+    pub(crate) fn qualify_member_after_writes(
+        &self,
+        execution: &MemoryExecutionLoan,
+        member: M0WriteMember,
+        writes: &[crate::memory::domain::SourceWriteReceipt],
+    ) -> Result<stage1::Translation, M0ControlError> {
+        self.validate_current_with_writes(execution, writes)?;
         let (raw_address, _) = self
             .intent
             .member(member)
@@ -443,8 +476,8 @@ impl TranslationControls {
         if !std::sync::Arc::ptr_eq(&self.memory, scope.physical_space().memory_system()) {
             return Err(M0ControlError::WrongMemorySystem);
         }
-        scope
-            .qualify_source(self, original)
+        let source_pin = scope
+            .pin_source(self, original)
             .map_err(M0ControlError::SourceFetch)?;
         Ok(M0DataWriteLoan {
             owner: self,
@@ -452,6 +485,7 @@ impl TranslationControls {
             outer,
             generation: self.generation,
             intent: input.intent(),
+            source_pin,
         })
     }
 }

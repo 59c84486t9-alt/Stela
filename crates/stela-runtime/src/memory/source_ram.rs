@@ -12,6 +12,10 @@ use super::{
 use std::sync::Arc;
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
+#[path = "source_ram/region.rs"]
+mod region;
+pub use region::InitializedRamRegion;
+
 const MAX_SOURCE_RAM_EXTENTS: usize = 4096;
 const MAX_SOURCE_RAM_STRIPES: usize = 4096;
 
@@ -45,6 +49,11 @@ pub struct ZeroedRamExtent {
 enum RamInitial {
     Bytes(Vec<u8>),
     Zeroed(usize),
+    FilePrefix {
+        prefix: Vec<u8>,
+        mapped_bytes: usize,
+        file_sha256: String,
+    },
 }
 
 struct RamExtent {
@@ -58,12 +67,14 @@ impl RamExtent {
         match &self.initial {
             RamInitial::Bytes(bytes) => bytes.len(),
             RamInitial::Zeroed(bytes) => *bytes,
+            RamInitial::FilePrefix { mapped_bytes, .. } => *mapped_bytes,
         }
     }
 
     fn initializer(&self) -> &[u8] {
         match &self.initial {
             RamInitial::Bytes(bytes) => bytes,
+            RamInitial::FilePrefix { prefix, .. } => prefix,
             // Fresh anonymous storage supplies all remaining zeros. This is
             // explicit Zeroed metadata, not a sentinel in an original image.
             RamInitial::Zeroed(_) => &[0],
@@ -77,7 +88,11 @@ impl RamExtent {
     fn initial_hash(&self, storage: &NativeStorage, leading: usize) -> String {
         match &self.initial {
             RamInitial::Bytes(bytes) => stela_core::sha256(bytes),
-            RamInitial::Zeroed(bytes) => {
+            RamInitial::Zeroed(bytes)
+            | RamInitial::FilePrefix {
+                mapped_bytes: bytes,
+                ..
+            } => {
                 // SAFETY: this sole factory still owns fresh anonymous zero
                 // storage before any domain/PE or writer is published. The
                 // validated logical range is readable and fits this retained
@@ -142,6 +157,7 @@ pub(crate) struct InitializedRamLayout {
     pub permissions: SourceRamPermissions,
     pub source_sha256: String,
     pub zero_initialized: bool,
+    pub file_prefix: Option<(usize, String)>,
 }
 
 #[derive(Debug)]
@@ -158,9 +174,16 @@ pub(crate) struct SourcePhysicalRamBinding {
     views: Vec<Arc<MemoryView>>,
     generation: u64,
     layout: SourceRamLayout,
+    pub(in crate::memory) reloads: Vec<super::domain::physical::RegionReload>,
+    pub(in crate::memory) reset_generation: u64,
 }
 
 impl SourcePhysicalRamBinding {
+    pub(in crate::memory) fn has_mutable_instruction_sources(&self) -> bool {
+        self.views.iter().any(|view| {
+            view.permissions().executable && view.backing().instruction_generation().is_some()
+        })
+    }
     pub(in crate::memory) fn domain(&self) -> &Arc<MemoryDomain> {
         &self.domain
     }
@@ -233,11 +256,11 @@ pub(crate) fn materialize_source_ram_with_zeroed(
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
     #[cfg(test)]
     {
-        materialize_source_ram_impl(declaration, zeroed, config, &[])
+        materialize_source_ram_impl(declaration, zeroed, Vec::new(), config, &[])
     }
     #[cfg(not(test))]
     {
-        materialize_source_ram_impl(declaration, zeroed, config)
+        materialize_source_ram_impl(declaration, zeroed, Vec::new(), config)
     }
 }
 
@@ -249,7 +272,7 @@ pub(crate) fn materialize_source_ram_with_test_aliases(
     config: SourceRamSystemConfig,
     aliases: &[SourceRamTestAlias],
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-    materialize_source_ram_impl(declaration, Vec::new(), config, aliases)
+    materialize_source_ram_impl(declaration, Vec::new(), Vec::new(), config, aliases)
 }
 
 #[cfg(test)]
@@ -259,20 +282,44 @@ pub(crate) fn materialize_source_ram_with_zeroed_test_aliases(
     config: SourceRamSystemConfig,
     aliases: &[SourceRamTestAlias],
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-    materialize_source_ram_impl(declaration, zeroed, config, aliases)
+    materialize_source_ram_impl(declaration, zeroed, Vec::new(), config, aliases)
+}
+
+/// Materialize complete explicitly initialized regions through the original
+/// factory. The existing byte/zero extent APIs retain their stricter contracts.
+pub(crate) fn materialize_source_ram_regions(
+    declaration: SourceRamDeclaration,
+    zeroed: Vec<ZeroedRamExtent>,
+    regions: Vec<InitializedRamRegion>,
+    config: SourceRamSystemConfig,
+) -> Result<MaterializedSourceRam, SourceRamBuildError> {
+    #[cfg(test)]
+    {
+        materialize_source_ram_impl(declaration, zeroed, regions, config, &[])
+    }
+    #[cfg(not(test))]
+    {
+        materialize_source_ram_impl(declaration, zeroed, regions, config)
+    }
 }
 
 fn materialize_source_ram_impl(
     mut declaration: SourceRamDeclaration,
     zeroed: Vec<ZeroedRamExtent>,
+    regions: Vec<InitializedRamRegion>,
     config: SourceRamSystemConfig,
     #[cfg(test)] aliases: &[SourceRamTestAlias],
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
     use SourceRamBuildError as E;
     if declaration.declared_capacity.is_empty()
-        || declaration.initialized.is_empty() && zeroed.is_empty()
+        || declaration.initialized.is_empty() && zeroed.is_empty() && regions.is_empty()
         || declaration.declared_capacity.len() > MAX_SOURCE_RAM_EXTENTS
-        || declaration.initialized.len().saturating_add(zeroed.len()) > MAX_SOURCE_RAM_EXTENTS
+        || declaration
+            .initialized
+            .len()
+            .saturating_add(zeroed.len())
+            .saturating_add(regions.len())
+            > MAX_SOURCE_RAM_EXTENTS
         || config.reservation_stripe_count == 0
         || config.reservation_stripe_count > MAX_SOURCE_RAM_STRIPES
     {
@@ -321,6 +368,19 @@ fn materialize_source_ram_impl(
             permissions: extent.permissions,
         });
     }
+    for region in regions {
+        region.validate()?;
+        extents.push(RamExtent {
+            source_pa: region.range.source_pa,
+            initial: RamInitial::FilePrefix {
+                prefix: region.file_prefix,
+                mapped_bytes: usize::try_from(region.range.bytes)
+                    .map_err(|_| E::AllocationLimit)?,
+                file_sha256: region.file_sha256,
+            },
+            permissions: region.permissions,
+        });
+    }
     extents.sort_unstable_by_key(|extent| extent.source_pa);
     let mut recipes = Vec::with_capacity(extents.len());
     let mut allocated = 0_usize;
@@ -343,7 +403,10 @@ fn materialize_source_ram_impl(
             return Err(E::Declaration("initialized RAM outside declared capacity"));
         }
         let permissions = extent.permissions;
-        if permissions.writable && (!permissions.readable || permissions.executable)
+        if permissions.writable
+            && (!permissions.readable
+                || permissions.executable
+                    && !matches!(&extent.initial, RamInitial::FilePrefix { .. }))
             || !permissions.readable && !permissions.executable
         {
             return Err(E::Declaration("unsupported source RAM permissions"));
@@ -415,7 +478,10 @@ fn materialize_source_ram_impl(
             if permissions.readable && !maximum.readable
                 || permissions.writable && !maximum.writable
                 || permissions.executable && !maximum.executable
-                || permissions.writable && (!permissions.readable || permissions.executable)
+                || permissions.writable
+                    && (!permissions.readable
+                        || permissions.executable
+                            && !matches!(&extent.initial, RamInitial::FilePrefix { .. }))
                 || !permissions.readable && !permissions.executable
             {
                 return Err(E::Declaration("fixture alias exceeds source permissions"));
@@ -438,7 +504,7 @@ fn materialize_source_ram_impl(
                 RamInitial::Bytes(bytes) => {
                     Some(stela_core::sha256(&bytes[alias.source_offset..source_end]))
                 }
-                RamInitial::Zeroed(_) => None,
+                RamInitial::Zeroed(_) | RamInitial::FilePrefix { .. } => None,
             };
             validated.push((index, alias, backing_offset, source_sha256));
         }
@@ -452,6 +518,7 @@ fn materialize_source_ram_impl(
     .map_err(E::Domain)?;
     let mut views = Vec::with_capacity(extents.len());
     let mut immutable_sources = Vec::new();
+    let mut reloads = Vec::new();
     let mut layout = Vec::with_capacity(extents.len());
     for (extent, (leading, bytes)) in extents.into_iter().zip(recipes) {
         let permissions = AccessPermissions {
@@ -487,13 +554,35 @@ fn materialize_source_ram_impl(
             permissions,
         )
         .map_err(E::Backing)?;
-        if permissions.executable {
+        if permissions.executable && !permissions.writable {
             // SAFETY: initialized_ram finalized the complete allocation host-RO;
             // this private owner created no writable alias, publisher or Rust
             // byte reference. Its retained storage keeps those rights forever.
-            immutable_sources
-                .push(unsafe { ImmutableCodeBacking::adopt(backing) }.map_err(E::ImmutableSource)?);
+            immutable_sources.push(
+                unsafe { ImmutableCodeBacking::adopt(Arc::clone(&backing)) }
+                    .map_err(E::ImmutableSource)?,
+            );
         }
+        let file_prefix = match &extent.initial {
+            RamInitial::FilePrefix {
+                prefix,
+                file_sha256,
+                ..
+            } => {
+                if permissions.executable {
+                    backing
+                        .enable_instruction_mutation(&system)
+                        .map_err(E::Domain)?;
+                }
+                reloads.push(super::domain::physical::RegionReload::new(
+                    Arc::clone(&backing),
+                    leading,
+                    prefix.clone().into_boxed_slice(),
+                ));
+                Some((prefix.len(), file_sha256.clone()))
+            }
+            _ => None,
+        };
         layout.push(InitializedRamLayout {
             range: PhysicalRamRange {
                 source_pa: extent.source_pa,
@@ -502,6 +591,7 @@ fn materialize_source_ram_impl(
             permissions: extent.permissions,
             source_sha256: extent.initial_hash(&storage, leading),
             zero_initialized: extent.zero_initialized(),
+            file_prefix,
         });
         views.push(view);
     }
@@ -539,6 +629,7 @@ fn materialize_source_ram_impl(
             permissions: alias.permissions,
             source_sha256,
             zero_initialized: layout[index].zero_initialized,
+            file_prefix: None,
         });
         views.push(view);
     }
@@ -567,6 +658,8 @@ fn materialize_source_ram_impl(
             system,
             views,
             generation,
+            reloads,
+            reset_generation: 1,
             layout: SourceRamLayout {
                 declared_capacity: declaration.declared_capacity,
                 initialized: layout,
@@ -753,3 +846,11 @@ mod zeroed_tests {
         assert_eq!(physical.read_descriptor(ALIAS_PA).unwrap(), 0);
     }
 }
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "source_ram/region_tests.rs"]
+mod region_tests;

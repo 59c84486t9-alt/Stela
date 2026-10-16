@@ -42,6 +42,7 @@ impl PhysicalCodeBinding {
         self.snapshot.same_pe(snapshot)
             && self.snapshot.generation() == snapshot.generation()
             && self.instruction.is_current()
+            && self.instruction.bytes_are_current()
             && self.instruction.same_source(instruction)
     }
 
@@ -58,6 +59,7 @@ impl PhysicalCodeBinding {
             && self.instruction.physical_address() == source.physical_address
             && self.instruction.word() == source.word
             && self.instruction.is_current()
+            && self.instruction.bytes_are_current()
     }
 }
 
@@ -74,9 +76,12 @@ impl BlockRuntime {
         instruction: BoundPhysicalInstruction,
     ) -> Result<PhysicalFetch> {
         ensure!(
-            instruction.is_current(),
+            instruction.is_current() && instruction.bytes_are_current(),
             "retired physical instruction source"
         );
+        // Every physical source region in this lane is exactly one instruction.
+        // In particular an M0 write carrier returns at that write. No remaining
+        // decoded source can execute before canonical fresh fetch/rebind.
         let pc = instruction.raw_pc();
         let physical_address = instruction.physical_address();
         let word = instruction.word();
@@ -136,11 +141,29 @@ impl BlockRuntime {
             || region.source.as_ref() != source.word.to_le_bytes()
             || !binding.matches_fetch(snapshot, source, region.generation)
             || !reached.is_current()
+            || !reached.bytes_are_current()
             || !binding.matches_binding(reached, snapshot)
         {
             return Err("physical source, control or mapping generation is stale");
         }
         Ok(())
+    }
+
+    /// Called only after a completed mutable-source write has left all native
+    /// and BoundSource loans. Ordinary data-only writes never reach this scan.
+    /// Stale immutable compilation snapshots stay pinned until the last in-flight
+    /// user has left; then original dependent RX entries retire before dispatch.
+    pub(crate) fn retire_mutated_translation_sources(&mut self) {
+        self.regions.retain(|_, region| {
+            region.physical_binding.as_ref().is_none_or(|binding| {
+                binding.instruction.is_current() && binding.instruction.bytes_are_current()
+            })
+        });
+        self.loaded.retain(|_, block| {
+            self.regions
+                .get(&block.region_base)
+                .is_some_and(|region| region.generation == block.generation)
+        });
     }
 
     /// Retire this PE's derived code dependencies before a changed current context.
@@ -165,12 +188,14 @@ mod profile;
 mod scope;
 #[path = "translation/source_lease.rs"]
 mod source_lease;
+#[path = "translation/stage1_cache.rs"]
+mod stage1_cache;
 pub(super) use owner::{
     InstalledEl1Owner, InstalledEl1Sources, InstalledM0Owner, InstalledM0Sources,
 };
 #[path = "translation/el1_source_lease.rs"]
 mod el1_source_lease;
-pub(crate) use el1_source_lease::InstalledEl1SourceScope;
+pub(crate) use el1_source_lease::{InstalledEl1SourceScope, walked::InstalledWalkedSource};
 pub(crate) use source_lease::InstalledM0SourceScope;
 
 // Required by the original Initial publication/fetch service; grants no public owner entry.

@@ -56,6 +56,7 @@ pub(crate) struct BoundPhysicalInstruction {
     physical_address: u64,
     word: u32,
     reached: PhysicalAccess,
+    mutation_generation: Option<u64>,
 }
 
 impl BoundPhysicalInstruction {
@@ -88,11 +89,32 @@ impl BoundPhysicalInstruction {
         self.views().all(|view| view.is_current())
     }
 
+    pub(crate) fn bytes_are_current(&self) -> bool {
+        match self.mutation_generation {
+            Some(generation) => self.backing().instruction_generation_current(generation),
+            None => self.backing().instruction_generation().is_none(),
+        }
+    }
+    /// The exact pre-effect snapshot may settle its own modifying instruction.
+    /// Only contiguous real receipts from the original same-System writer can
+    /// explain a changed backing; unrelated mutations or copied epochs fail.
+    pub(crate) fn validate_owned_writes(
+        &self,
+        system: &crate::memory::domain::MemorySystem,
+        writes: &[crate::memory::domain::SourceWriteReceipt],
+    ) -> Result<(), &'static str> {
+        if !self.is_current() {
+            return Err("in-flight source mapping retired");
+        }
+        system.validate_owned_source_writes(self.backing(), self.mutation_generation, writes)
+    }
+
     /// Equal actual storage and all reached mapping generations, not just bytes.
     pub(crate) fn same_source(&self, other: &Self) -> bool {
         self.raw_pc == other.raw_pc
             && self.physical_address == other.physical_address
             && self.word == other.word
+            && self.mutation_generation == other.mutation_generation
             && Arc::ptr_eq(self.backing(), other.backing())
             && self.backing_offset() == other.backing_offset()
             && self.views().count() == other.views().count()
@@ -124,9 +146,23 @@ impl PhysicalAddressSpace {
         scope
             .check_fetch_policy(&translation, raw_pc, state)
             .map_err(FetchFailure::Unavailable)?;
-        let reached = self
-            .read_legacy_instruction(&translation, raw_pc, scope.immutable_sources())
-            .map_err(FetchFailure::Platform)?;
+        let source_controls = scope.source_cache_controls()?;
+        let reached = match scope.retained_outer() {
+            Some(outer) => self.read_instruction(
+                outer,
+                &translation,
+                raw_pc,
+                scope.immutable_sources(),
+                source_controls,
+            ),
+            None => self.read_legacy_instruction(
+                &translation,
+                raw_pc,
+                scope.immutable_sources(),
+                source_controls,
+            ),
+        }
+        .map_err(FetchFailure::Platform)?;
         scope
             .check_source_word(raw_pc, reached.word())
             .map_err(FetchFailure::Unavailable)?;
@@ -160,7 +196,13 @@ impl PhysicalAddressSpace {
             .check_fetch_policy(&translation, raw_pc, state)
             .map_err(FetchFailure::Unavailable)?;
         let reached = self
-            .read_instruction(execution, &translation, raw_pc, scope.immutable_sources())
+            .read_instruction(
+                execution,
+                &translation,
+                raw_pc,
+                scope.immutable_sources(),
+                scope.installed_snapshot().consumer_inputs().sctlr_el1,
+            )
             .map_err(FetchFailure::Platform)?;
         scope
             .check_source_word(raw_pc, reached.word())
@@ -191,7 +233,13 @@ impl PhysicalAddressSpace {
             .check_fetch_policy(&translation, raw_pc, state)
             .map_err(FetchFailure::Unavailable)?;
         let reached = self
-            .read_instruction(execution, &translation, raw_pc, scope.immutable_sources())
+            .read_instruction(
+                execution,
+                &translation,
+                raw_pc,
+                scope.immutable_sources(),
+                scope.installed_snapshot().consumer_inputs().sctlr_el1,
+            )
             .map_err(FetchFailure::Platform)?;
         scope
             .check_source_word(raw_pc, reached.word())
@@ -215,20 +263,28 @@ impl PhysicalAddressSpace {
         translation: &stage1::Translation,
         raw_pc: u64,
         immutable_sources: &[ImmutableCodeBacking],
+        source_controls: u64,
     ) -> Result<BoundPhysicalInstruction, &'static str> {
         let execution = self
             .domain
             .execution_loan()
             .map_err(|_| "legacy physical fetch domain is unavailable")?;
-        self.read_instruction(&execution, translation, raw_pc, immutable_sources)
+        self.read_instruction(
+            &execution,
+            translation,
+            raw_pc,
+            immutable_sources,
+            source_controls,
+        )
     }
 
-    fn read_instruction(
+    pub(super) fn read_instruction(
         &self,
         execution: &MemoryExecutionLoan,
         translation: &stage1::Translation,
         raw_pc: u64,
         immutable_sources: &[ImmutableCodeBacking],
+        source_controls: u64,
     ) -> Result<BoundPhysicalInstruction, &'static str> {
         let access = translation.access();
         if access.kind != stage1::AccessKind::Fetch || access.raw_virtual_address != raw_pc {
@@ -256,11 +312,18 @@ impl PhysicalAddressSpace {
         self.check_reached(&reached)
             .map_err(|_| "physical fetch source generation is unavailable")?;
         let first = reached.first();
-        if !immutable_sources
+        let mutable = first.view().backing().instruction_generation().is_some();
+        if mutable {
+            const SCTLR_DATA_CACHE: u64 = 1 << 2;
+            const SCTLR_INSTRUCTION_CACHE: u64 = 1 << 12;
+            if source_controls & (SCTLR_DATA_CACHE | SCTLR_INSTRUCTION_CACHE) != 0 {
+                return Err("mutable instruction visibility requires actual disabled I/C caches");
+            }
+        } else if !immutable_sources
             .iter()
             .any(|source| Arc::ptr_eq(source.backing(), first.view().backing()))
         {
-            return Err("physical fetch has no retained immutable code owner");
+            return Err("physical fetch has no retained instruction backing owner");
         }
         let pointer = first.host_ptr().as_ptr();
         let (address, bytes) =
@@ -295,13 +358,23 @@ impl PhysicalAddressSpace {
         // The caller's actual same-domain execution loan remains borrowed
         // through this read and subsequent source registration/revalidation.
         // The actual recipe has the exact authorized four-byte footprint.
-        let word = unsafe { access::read_part(pointer, INSTRUCTION_BYTES, self.domain.target) }
-            .map_err(|_| "physical instruction read is unavailable")? as u32;
+        let (word, mutation_generation) =
+            self.domain
+                .system
+                .read_instruction_source(first.view().backing(), || {
+                    // SAFETY: current exact Execute span pins readable coherent RAM;
+                    // immutable owner or actual tracked writer exclusion covers all
+                    // byte writers. No reference to mutable source bytes escapes.
+                    unsafe { access::read_part(pointer, INSTRUCTION_BYTES, self.domain.target) }
+                        .map(|value| value as u32)
+                        .map_err(|_| "physical instruction read is unavailable")
+                })?;
         let binding = BoundPhysicalInstruction {
             raw_pc,
             physical_address: translation.physical_address(),
             word,
             reached,
+            mutation_generation,
         };
         if !binding.is_current() {
             return Err("physical instruction view retired during fetch");

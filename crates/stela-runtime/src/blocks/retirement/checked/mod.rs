@@ -314,7 +314,18 @@ impl BlockRuntime {
                     ))]
                     request.verify_pair_alias_monitor,
                 ) {
-                    Ok(m0::M0Step::Committed) => continue,
+                    Ok(m0::M0Step::Committed) => {
+                        // The one-word write carrier has returned, settled and
+                        // dropped its original source/native/outer loans. Retire
+                        // only derived snapshots made stale by real source writes.
+                        if last_m0_write_observation
+                            .as_ref()
+                            .is_some_and(m0::M0WriteObservation::modified_instruction_ram)
+                        {
+                            self.retire_mutated_translation_sources();
+                        }
+                        continue;
+                    }
                     Ok(m0::M0Step::SourceResourcesBlocked) => {
                         break OwnedStop::Indeterminate(
                             "M0 write original resources unavailable".into(),

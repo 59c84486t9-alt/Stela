@@ -129,3 +129,21 @@ impl<'run> InstalledEl1SourceScope<'run> {
         Ok(())
     }
 }
+
+#[path = "el1_source_lease/walked.rs"]
+pub(super) mod walked;
+impl<'run> InstalledEl1SourceScope<'run> {
+    /// Readonly enabled fetch/refill loan. Existing MMU-off admission is intact.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "enabled-source component remains unmounted")
+    )]
+    pub(crate) fn walked<'loan>(
+        &'loan self,
+        controls: &'loan TranslationControls,
+        state: &'loan SystemState,
+        execution: &'loan crate::memory::domain::MemoryExecutionLoan,
+    ) -> Result<walked::InstalledWalkedSource<'loan, 'run>, FetchFailure> {
+        walked::InstalledWalkedSource::borrow(self, controls, state, execution)
+    }
+}
