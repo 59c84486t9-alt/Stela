@@ -1,5 +1,5 @@
 //! Run Stela's native translation of a case at the guest's own addresses.
-use crate::{
+use super::{
     CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Outcome, Scalable,
 };
 use anyhow::{Context, Result, ensure};

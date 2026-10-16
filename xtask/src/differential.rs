@@ -5,6 +5,9 @@
 //! Every word runs from seeded random states on the QEMU oracle and as Stela's
 //! native translation; registers, scalable banks, the next PC and the data
 //! window must match whenever the original completes.
+use crate::oracle::{
+    CODE_PAGE, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome, Scalable, native::Translation,
+};
 use crate::tools::root;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -15,9 +18,6 @@ use std::{
 };
 use stela_cli::registry::{self, Mode, Probe, hex};
 use stela_compiler::GuestState;
-use stela_oracle::{
-    CODE_PAGE, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome, Scalable, native::Translation,
-};
 
 /// Every leaf ends in RET, so the leaf RET form needs no case of its own.
 const LEAF_TERMINATOR: &str = "RET_64R_branch_reg";

@@ -1,7 +1,6 @@
-//! Process, path and hashing helpers shared by tasks.
+//! Process and path helpers shared by tasks.
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     env,
     ffi::OsStr,
@@ -11,6 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use stela_runtime::sha256;
 
 pub fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -48,10 +48,6 @@ pub fn qemu() -> Result<PathBuf> {
         return Ok(local);
     }
     which("qemu-system-x86_64").context("install QEMU 11 or newer")
-}
-
-pub fn sha256(data: &[u8]) -> String {
-    hex::encode(Sha256::digest(data))
 }
 
 /// Path, size and digest of one input or output file.

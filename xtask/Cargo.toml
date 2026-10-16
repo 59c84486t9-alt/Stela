@@ -9,11 +9,14 @@ publish = false
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-hex.workspace = true
+libc.workspace = true
+tempfile.workspace = true
 stela-cli.workspace = true
 stela-compiler.workspace = true
-stela-oracle.workspace = true
+stela-runtime.workspace = true
+object = { version = "0.37", features = ["read"] }
+
+[build-dependencies]
 object = { version = "0.37", features = ["read"] }
 
 [lints]

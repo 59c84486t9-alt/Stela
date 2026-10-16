@@ -2,7 +2,7 @@
 use object::{Object, ObjectSection};
 use std::{env, fs, path::PathBuf, process::Command};
 
-const SOURCE: &str = "src/harness.S";
+const SOURCE: &str = "src/oracle/harness.S";
 const TARGET: &str = "--target=aarch64-none-elf";
 const ARCHITECTURE: &str = "-march=armv9.4-a+sme2+memtag";
 

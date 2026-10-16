@@ -5,6 +5,7 @@ use std::process::ExitCode;
 mod boot;
 mod check;
 mod differential;
+mod oracle;
 mod progress;
 mod tools;
 

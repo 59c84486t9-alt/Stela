@@ -5,7 +5,7 @@
 //! Multiboot module; placement and initial state travel on the command line.
 use crate::{
     check::{BOOT_MANIFEST, BOOT_TARGET, BOOT_TARGET_DIR},
-    tools::{binding, cargo, exec, qemu, root, sha256, stop, wait},
+    tools::{binding, cargo, exec, qemu, root, stop, wait},
 };
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand, ValueEnum};
@@ -22,6 +22,7 @@ use std::{
     process::{Command as Process, ExitCode, Stdio},
     time::{Duration, Instant},
 };
+use stela_runtime::sha256;
 
 const IMAGE: &str = "stela-multiboot.bin";
 const MULTIBOOT_MAGIC: u32 = 0x1bad_b002;
