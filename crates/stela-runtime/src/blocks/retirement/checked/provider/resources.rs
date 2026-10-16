@@ -81,3 +81,41 @@ impl M0ExecutionChecks<'_> {
         Ok(())
     }
 }
+
+/// Disjoint original publication/monitor resources after native finalization.
+pub(crate) struct El1ContextResources<'pe> {
+    pub(in crate::blocks::retirement::checked) sources: &'pe mut InstalledM0Sources,
+    pub(in crate::blocks::retirement::checked) controls: &'pe mut TranslationControls,
+    pub(in crate::blocks::retirement::checked) platform:
+        &'pe super::super::el1_system::El1PlatformControls,
+    pub(in crate::blocks::retirement::checked) memory: &'pe mut MemoryThread<MemoryControls>,
+    pub(in crate::blocks::retirement::checked) execution: &'pe ProcessEntryControls,
+    pub(in crate::blocks::retirement::checked) pending: &'pe NoAsyncSources<'pe>,
+    pub(in crate::blocks::retirement::checked) endpoint: &'pe EventEndpoint,
+    pub(in crate::blocks::retirement::checked) address_space: u64,
+}
+impl El1ContextResources<'_> {
+    pub(in crate::blocks::retirement::checked) fn check(
+        &self,
+        outer: &MemoryExecutionLoan,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.memory.address_space() == Some(self.address_space),
+            "context namespace differs"
+        );
+        self.execution.check()?;
+        self.pending
+            .check_registry()
+            .map_err(|error| anyhow::anyhow!("context producer registry: {error:?}"))?;
+        self.memory
+            .check_event_endpoint(self.endpoint)
+            .map_err(|error| anyhow::anyhow!("context actual monitor: {error:?}"))?;
+        outer
+            .check_thread_domain(&*self.memory)
+            .map_err(|error| anyhow::anyhow!("context original outer: {error:?}"))?;
+        self.platform.check()?;
+        self.controls
+            .validate_installed_el1_source(&self.sources.el1_scope().map_err(anyhow::Error::msg)?)
+            .map_err(anyhow::Error::msg)
+    }
+}

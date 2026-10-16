@@ -214,7 +214,7 @@ fn synthetic_read8_full_state_and_owned_ram() {
     .unwrap();
     let outcome = installed
         .into_executable_scope(&ConsumerKey(()), |runtime, sources, controls| {
-            let scope = sources.source_scope();
+            let scope = sources.source_scope().unwrap();
             let system_before = system_controls(&system, &before, controls);
             std::fs::write(
                 root.join("system-controls-before.json"),

@@ -13,8 +13,9 @@ use crate::{
         profile::EntryProfile,
         state::SystemState,
         translation_controls::{
-            ControlSnapshot, FetchFailure, PhysicalFetch, PreparedPublication, PublicationFailure,
-            PublicationProgress, PublicationRequest, TranslationServices,
+            ContextSynchronizationRequest, ControlSnapshot, FetchFailure, PhysicalFetch,
+            PreparedPublication, PublicationFailure, PublicationProgress, PublicationRequest,
+            TranslationServices,
         },
     },
 };
@@ -41,6 +42,7 @@ pub(crate) struct ControlCodeScope<'run> {
     pub(super) immutable_sources: &'run [ImmutableCodeBacking],
     pub(super) entry_profile: EntryProfile,
     pub(super) context: &'run mut ContextState,
+    pub(super) _outer: Option<&'run crate::memory::domain::MemoryExecutionLoan>,
 }
 
 impl ControlCodeScope<'_> {
@@ -158,7 +160,11 @@ impl ControlCodeScope<'_> {
     }
 
     pub(crate) fn check_source_word(&self, pc: u64, word: u32) -> Result<(), &'static str> {
-        profile::check_instruction(pc, word).map(|_| ())
+        if self.runtime.profile() == stela_compiler::block::BlockProfile::El1PlatformV1 {
+            profile::check_context_instruction(pc, word).map(|_| ())
+        } else {
+            profile::check_instruction(pc, word).map(|_| ())
+        }
     }
 
     pub(crate) fn check_fetch_policy(
@@ -191,6 +197,42 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
         = PreparedCodePublication<'a, 'run>
     where
         Self: 'a;
+
+    fn prepare_context_synchronization<'a>(
+        &'a mut self,
+        request: ContextSynchronizationRequest<'_>,
+    ) -> Result<Self::Prepared<'a>, &'static str> {
+        let ContextSynchronizationRequest {
+            before,
+            after,
+            source,
+            cpu,
+            state,
+            cause,
+        } = request;
+        self.physical.check_fetch_execution()?;
+        if !cause.matches_source(source.word) {
+            return Err("exception CSE cause differs from actual source operation");
+        }
+        if self.current(&before)?.cpu != cpu
+            || !before.same_pe(&after)
+            || before.generation().checked_add(1) != Some(after.generation())
+            || before.readbacks() != after.readbacks()
+            || before.consumer_inputs() != after.consumer_inputs()
+        {
+            return Err("exception CSE changes controls or original PE authority");
+        }
+        profile::check_features(self.entry_profile, &after)?;
+        let retained = self.revalidate_source(&before, source, state)?;
+        Ok(PreparedCodePublication {
+            scope: self,
+            action: PreparedAction::Synchronize {
+                snapshot: after,
+                cpu,
+            },
+            _source: Some(retained),
+        })
+    }
 
     fn memory_system(&self) -> &Arc<MemorySystem> {
         self.physical.memory_system()

@@ -284,3 +284,7 @@ pub(crate) use stores::{
     any(target_os = "macos", target_os = "linux")
 ))]
 pub(crate) use stores::fixtures as store_fixtures;
+
+#[cfg(all(test, target_arch = "x86_64"))]
+#[path = "physical/exception_fixture.rs"]
+pub(crate) mod exception_fixture;

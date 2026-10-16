@@ -156,7 +156,7 @@ fn actual_one_b_original_owner_full_state_and_pc() {
     .unwrap();
     installed
         .into_executable_scope(&ConsumerKey(()), |runtime, sources, controls| {
-            let scope = sources.el1_scope();
+            let scope = sources.el1_scope().unwrap();
             let policy = MemoryControls::new(
                 LowerAddressProfile::new(48, false).unwrap(),
                 true,

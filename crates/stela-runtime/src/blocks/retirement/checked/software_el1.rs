@@ -103,6 +103,10 @@ pub struct SoftwareEl1InitialRam {
 }
 
 pub struct SoftwareEl1Report {
+    #[cfg(all(test, target_arch = "x86_64"))]
+    exception_fixture_probe: Option<exception_fixture::ProbeObservation>,
+    #[cfg(all(test, target_arch = "x86_64"))]
+    context_fixture_observation: Option<super::el1_context::ContextObservation>,
     pub declared_capacity: Vec<PhysicalRamRange>,
     pub initialized_ram: Vec<SoftwareEl1InitialRam>,
     pub stop: String,
@@ -122,6 +126,7 @@ pub struct SoftwareEl1Report {
         Option<crate::memory::domain::physical::M0RamWriteProgress>,
     pub register_observation: Option<String>,
     pub system_observation: Option<String>,
+    pub context_observation: Option<String>,
     pub platform_identification_sha256: Option<String>,
     pub compiler_source_sha256: String,
     pub ram: Vec<SoftwareEl1RamObservation>,
@@ -135,6 +140,8 @@ enum InstalledSource {
 /// Owns the actual original resources until its one consuming execution scope.
 /// Private fields prevent caller substitution, raw entry or reset/retry.
 pub struct SoftwareEl1Machine {
+    #[cfg(all(test, target_arch = "x86_64"))]
+    exception_fixture_canary: Option<u64>,
     #[cfg(all(
         test,
         target_arch = "x86_64",
@@ -414,6 +421,8 @@ impl SoftwareEl1Machine {
         // this NEW software PE; there is no external registration/delivery API.
         let asynchronous = unsafe { SoftwareAsyncDomain::fresh_software_pe() };
         Ok(Self {
+            #[cfg(all(test, target_arch = "x86_64"))]
+            exception_fixture_canary: None,
             #[cfg(all(
                 test,
                 target_arch = "x86_64",
@@ -440,6 +449,8 @@ impl SoftwareEl1Machine {
 
     pub fn run_to_shutdown(self, request: SoftwareEl1Request) -> Result<SoftwareEl1Report> {
         let Self {
+            #[cfg(all(test, target_arch = "x86_64"))]
+            exception_fixture_canary,
             #[cfg(all(
                 test,
                 target_arch = "x86_64",
@@ -466,9 +477,11 @@ impl SoftwareEl1Machine {
         // its one backend/PE. No self-reference or mutable resources escape.
         #[cfg(test)]
         let mut translation_before = None;
+        #[cfg(all(test, target_arch = "x86_64"))]
+        let mut exception_fixture_probe = None;
         let mut operation = |runtime: &mut BlockRuntime,
-                             sources: &InstalledM0Sources,
-                             controls: &TranslationControls|
+                             sources: &mut InstalledM0Sources,
+                             controls: &mut TranslationControls|
          -> Result<_> {
             #[cfg(test)]
             {
@@ -479,6 +492,29 @@ impl SoftwareEl1Machine {
                         .map_err(|error| format!("{error:?}")),
                 );
             }
+            #[cfg(all(test, target_arch = "x86_64"))]
+            let probe = if let Some(address) = exception_fixture_canary {
+                let outer = memory.execution_loan().unwrap();
+                let source = sources.el1_scope().map_err(anyhow::Error::msg)?;
+                let probe = source
+                    .physical_space()
+                    .seed_exception_reservation_for_fixture(&outer, &mut memory, address)
+                    .map_err(anyhow::Error::msg)?;
+                let before = exception_fixture::ProbeObservation {
+                    local_seeded: true,
+                    event_before: endpoint.is_set(),
+                    event_after: false,
+                    local_after: Err("actual PE has not ended".into()),
+                    generation_before: controls
+                        .snapshot()
+                        .map(|s| s.generation())
+                        .map_err(|e| format!("{e:?}")),
+                    generation_after: Err("actual PE has not ended".into()),
+                };
+                Some((probe, before))
+            } else {
+                None
+            };
             let outcome = {
                 let pending = asynchronous.lease_no_sources().map_err(|error| {
                     anyhow::anyhow!("software EL1 complete producer lease: {error:?}")
@@ -550,6 +586,17 @@ impl SoftwareEl1Machine {
                     },
                 )
             };
+            #[cfg(all(test, target_arch = "x86_64"))]
+            if let Some((probe, mut observed)) = probe {
+                // Capture SAME endpoint before the destructive metadata probe.
+                observed.event_after = endpoint.is_set();
+                observed.local_after = probe.probe_after_pe(&mut memory);
+                observed.generation_after = controls
+                    .snapshot()
+                    .map(|s| s.generation())
+                    .map_err(|e| format!("{e:?}"));
+                exception_fixture_probe = Some(observed);
+            }
             let readbacks = controls
                 .snapshot()
                 .map(|snapshot| snapshot.readbacks())
@@ -616,9 +663,12 @@ impl SoftwareEl1Machine {
             last_m0_write_observation,
             last_el1_register_observation,
             last_el1_system_observation,
+            last_el1_context_observation,
             ..
         } = outcome;
         Ok(SoftwareEl1Report {
+            #[cfg(all(test, target_arch = "x86_64"))]
+            exception_fixture_probe,
             declared_capacity,
             initialized_ram,
             stop: format!("{stop:?}"),
@@ -637,6 +687,11 @@ impl SoftwareEl1Machine {
             write_progress_observation,
             register_observation: last_el1_register_observation.map(|value| format!("{value:?}")),
             system_observation: last_el1_system_observation.map(|value| format!("{value:?}")),
+            context_observation: last_el1_context_observation
+                .as_ref()
+                .map(|value| format!("{value:?}")),
+            #[cfg(all(test, target_arch = "x86_64"))]
+            context_fixture_observation: last_el1_context_observation,
             platform_identification_sha256: platform.as_ref().map(|platform| {
                 platform
                     .identification()
@@ -872,6 +927,46 @@ mod platform_tests {
         })
         .unwrap()
     }
+    #[test]
+    fn context_publication_rejects_other_same_profile_cache_before_fetch() {
+        let machine = machine(PathBuf::new(), &[NOP], VECTOR_BASE);
+        let memory = machine.memory;
+        let system = machine.system;
+        let InstalledSource::El1(installed) = machine.installed else {
+            panic!("actual platform owner absent")
+        };
+        // Moving the installed owner retains its original cache allocation.
+        installed
+            .into_executable_scope(&ConsumerKey(()), |runtime, sources, controls| {
+                let outer = memory.execution_loan().unwrap();
+                let mut other = BlockRuntime::new_for_target(
+                    runtime.address_space(),
+                    PathBuf::new(),
+                    runtime.profile(),
+                    runtime.target_cpu(),
+                );
+                let before = controls.snapshot().unwrap();
+                let registered = runtime.regions.len();
+                let error = sources
+                    .publication_scope(&mut other, controls, &system, &outer)
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    error,
+                    "publication runtime is not the original installed source cache"
+                );
+                assert!(other.regions.is_empty() && other.loaded.is_empty());
+                assert_eq!(runtime.regions.len(), registered);
+                let after = controls.snapshot().unwrap();
+                assert_eq!(before.generation(), after.generation());
+                assert!(before.same_pe(&after));
+                let _scope = sources
+                    .publication_scope(runtime, controls, &system, &outer)
+                    .unwrap();
+            })
+            .unwrap();
+    }
+
     #[test]
     #[ignore = "actual native System carriers through sole factory; requires reviewed graph and fresh ignored output"]
     fn mixed_same_owner_daif_vbar_flags_and_branch_complete() {
@@ -1175,3 +1270,7 @@ mod platform_tests {
         }
     }
 }
+
+#[cfg(all(test, target_arch = "x86_64"))]
+#[path = "el1_context/fixture.rs"]
+mod exception_fixture;

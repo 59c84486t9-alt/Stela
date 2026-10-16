@@ -1,7 +1,7 @@
 //! Sole-PE owner of actual code execution and physical mutation authority.
 
 use super::{
-    BlockRuntime,
+    BlockRuntime, profile,
     scope::{ContextState, ControlCodeScope, InstalledContext},
     source_lease::InstalledM0SourceScope,
 };
@@ -24,7 +24,8 @@ use stela_compiler::{
 /// publication over this machine's M0-profile runtime. No legacy raw owner is
 /// constructed, and no copied snapshot/config can create these private fields.
 pub(in crate::blocks) struct InstalledCodeSources {
-    installed: Box<InstalledContext>,
+    context: ContextState,
+    runtime_identity: Arc<()>,
     compiler_profile: BlockProfile,
     physical: PhysicalAddressSpace,
     immutable_sources: Vec<ImmutableCodeBacking>,
@@ -82,16 +83,19 @@ impl InstalledCodeSources {
                 immutable_sources: &immutable_sources,
                 entry_profile,
                 context: &mut context,
+                _outer: None,
             };
             TranslationControls::install(readbacks, control_profile, memory, system, &mut initial)
                 .map_err(|error| anyhow::anyhow!("genuine M0 Initial installation: {error:?}"))?
         };
-        let ContextState::Installed(installed) = context else {
-            anyhow::bail!("genuine M0 Initial publication did not install its context");
-        };
+        ensure!(
+            matches!(context, ContextState::Installed(_)),
+            "genuine M0 Initial publication did not install its context"
+        );
         Ok((
             Self {
-                installed,
+                context,
+                runtime_identity: Arc::clone(&runtime.identity),
                 compiler_profile: runtime.profile(),
                 physical,
                 immutable_sources,
@@ -103,19 +107,59 @@ impl InstalledCodeSources {
 
     pub(in crate::blocks) fn el1_scope(
         &self,
-    ) -> super::el1_source_lease::InstalledEl1SourceScope<'_> {
+    ) -> Result<super::el1_source_lease::InstalledEl1SourceScope<'_>, &'static str> {
         super::el1_source_lease::InstalledEl1SourceScope::borrow(self)
     }
 
-    pub(in crate::blocks) fn source_scope(&self) -> InstalledM0SourceScope<'_> {
+    pub(in crate::blocks) fn source_scope(
+        &self,
+    ) -> Result<InstalledM0SourceScope<'_>, &'static str> {
         InstalledM0SourceScope::borrow(self)
     }
     pub(super) fn compiler_profile(&self) -> BlockProfile {
         self.compiler_profile
     }
 
-    pub(super) fn installed(&self) -> &InstalledContext {
-        &self.installed
+    pub(super) fn installed(&self) -> Result<&InstalledContext, &'static str> {
+        match &self.context {
+            ContextState::Installed(current) => Ok(current),
+            ContextState::Unbound => Err("original source context is unbound"),
+            ContextState::Failed => Err("original source publication has failed"),
+        }
+    }
+
+    /// Loan the SAME installed context/physical/code owners after native return.
+    /// The canonical consumer separately binds the exact returned source and
+    /// retains its original PE, outer and control loans through publication.
+    pub(in crate::blocks) fn publication_scope<'run>(
+        &'run mut self,
+        runtime: &'run mut BlockRuntime,
+        controls: &TranslationControls,
+        system: &SystemState,
+        outer: &'run crate::memory::domain::MemoryExecutionLoan,
+    ) -> Result<ControlCodeScope<'run>, &'static str> {
+        if !Arc::ptr_eq(&runtime.identity, &self.runtime_identity) {
+            return Err("publication runtime is not the original installed source cache");
+        }
+        if runtime.profile() != self.compiler_profile {
+            return Err("publication runtime profile differs from original installed source");
+        }
+        self.physical
+            .check_execution_loan(outer)
+            .map_err(|_| "publication uses a different/unavailable original outer")?;
+        let source = self.el1_scope()?;
+        controls.validate_installed_el1_source(&source)?;
+        profile::check_entry(system)?;
+        profile::check_features(self.entry_profile, source.installed_snapshot())?;
+        self.physical.check_fetch_execution()?;
+        Ok(ControlCodeScope {
+            runtime,
+            physical: &self.physical,
+            immutable_sources: &self.immutable_sources,
+            entry_profile: self.entry_profile,
+            context: &mut self.context,
+            _outer: Some(outer),
+        })
     }
     pub(super) fn physical_space(&self) -> &PhysicalAddressSpace {
         &self.physical
@@ -199,7 +243,7 @@ impl InstalledM0Owner {
             sources,
             controls,
         };
-        let scope = owner.sources.source_scope();
+        let scope = owner.sources.source_scope().map_err(anyhow::Error::msg)?;
         scope
             .check_installed(&owner.controls, system)
             .map_err(anyhow::Error::msg)?;
@@ -238,11 +282,11 @@ impl InstalledM0Owner {
         _key: &crate::blocks::retirement::ConsumerKey,
         operation: impl for<'run> FnOnce(
             &'run mut BlockRuntime,
-            &'run InstalledM0Sources,
-            &'run TranslationControls,
+            &'run mut InstalledM0Sources,
+            &'run mut TranslationControls,
         ) -> R,
     ) -> Result<R> {
-        let scope = self.sources.source_scope();
+        let scope = self.sources.source_scope().map_err(anyhow::Error::msg)?;
         self.controls
             .validate_installed_m0_source(&scope)
             .map_err(anyhow::Error::msg)?;
@@ -254,6 +298,10 @@ impl InstalledM0Owner {
         // ORIGINAL System mutably for the sole actual execution owner. Initial
         // construction checked it; each actual M0 input rechecks that same PE
         // System through the retained scope/control/source authority.
-        Ok(operation(&mut self.runtime, &self.sources, &self.controls))
+        Ok(operation(
+            &mut self.runtime,
+            &mut self.sources,
+            &mut self.controls,
+        ))
     }
 }

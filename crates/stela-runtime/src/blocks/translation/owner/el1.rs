@@ -68,7 +68,7 @@ impl InstalledEl1Owner {
             sources,
             controls,
         };
-        let scope = owner.sources.el1_scope();
+        let scope = owner.sources.el1_scope().map_err(anyhow::Error::msg)?;
         scope
             .check_installed(&owner.controls, system)
             .map_err(anyhow::Error::msg)?;
@@ -95,11 +95,11 @@ impl InstalledEl1Owner {
         _key: &crate::blocks::retirement::ConsumerKey,
         operation: impl for<'run> FnOnce(
             &'run mut BlockRuntime,
-            &'run InstalledEl1Sources,
-            &'run TranslationControls,
+            &'run mut InstalledEl1Sources,
+            &'run mut TranslationControls,
         ) -> R,
     ) -> Result<R> {
-        let scope = self.sources.el1_scope();
+        let scope = self.sources.el1_scope().map_err(anyhow::Error::msg)?;
         self.controls
             .validate_installed_el1_source(&scope)
             .map_err(anyhow::Error::msg)?;
@@ -107,6 +107,10 @@ impl InstalledEl1Owner {
             .physical_space()
             .check_fetch_execution()
             .map_err(anyhow::Error::msg)?;
-        Ok(operation(&mut self.runtime, &self.sources, &self.controls))
+        Ok(operation(
+            &mut self.runtime,
+            &mut self.sources,
+            &mut self.controls,
+        ))
     }
 }

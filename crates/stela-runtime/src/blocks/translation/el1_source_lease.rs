@@ -20,19 +20,23 @@ const SCTLR_M: u64 = 1;
 const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 pub(crate) struct InstalledEl1SourceScope<'run> {
     sources: &'run InstalledEl1Sources,
+    installed: &'run super::scope::InstalledContext,
 }
 impl<'run> InstalledEl1SourceScope<'run> {
-    pub(super) fn borrow(sources: &'run InstalledEl1Sources) -> Self {
-        Self { sources }
+    pub(super) fn borrow(sources: &'run InstalledEl1Sources) -> Result<Self, &'static str> {
+        Ok(Self {
+            sources,
+            installed: sources.installed()?,
+        })
     }
     pub(crate) fn physical_space(&self) -> &PhysicalAddressSpace {
         self.sources.physical_space()
     }
     pub(crate) fn installed_snapshot(&self) -> &ControlSnapshot {
-        &self.sources.installed().snapshot
+        &self.installed.snapshot
     }
     pub(crate) fn installed_cpu(&self) -> stage1::CpuProfile {
-        self.sources.installed().cpu
+        self.installed.cpu
     }
     pub(crate) fn immutable_sources(&self) -> &[ImmutableCodeBacking] {
         self.sources.immutable_sources()

@@ -104,10 +104,10 @@ pub(crate) struct SystemObservation {
     pub actual_continuation: Option<GuestAddress>,
     pub failure: Option<String>,
 }
-struct RetainedSystemSession<'active, S> {
-    authority: &'active mut PeExecutionAuthority,
-    session: S,
-    closed: bool,
+pub(super) struct RetainedSystemSession<'active, S> {
+    pub(super) authority: &'active mut PeExecutionAuthority,
+    pub(super) session: S,
+    pub(super) closed: bool,
 }
 impl<S> Drop for RetainedSystemSession<'_, S> {
     fn drop(&mut self) {
@@ -148,7 +148,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             })?;
             checks.check(outer)?;
             let context_snapshot = platform.context(self.pe.system)?;
-            let scope = sources.el1_scope();
+            let scope = sources.el1_scope().map_err(anyhow::Error::msg)?;
             let session =
                 RegisterSession::prepare(bound, outer, &scope, controls, self.pe.system, context)?;
             let mut retained = RetainedSystemSession {

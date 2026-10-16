@@ -70,6 +70,21 @@ impl ProcessEntryControls {
     pub(super) fn link_register(&self) -> bool {
         matches!(self.features, FeatureScope::LinkRegister(_))
     }
+    pub(super) fn exception_controls(
+        &self,
+        controls: &crate::system::translation_controls::TranslationControls,
+    ) -> Result<crate::system::exception::EntryControls> {
+        self.check()?;
+        let snapshot = controls
+            .snapshot()
+            .map_err(|error| anyhow::anyhow!("original exception controls: {error:?}"))?;
+        Ok(crate::system::exception::EntryControls {
+            tcr_el1: snapshot.consumer_inputs().tcr_el1,
+            mdscr_el1: self.mdscr_el1,
+            debug: self.debug,
+        })
+    }
+
     pub(crate) fn debug_controls(&self) -> &DebugControls {
         &self.debug
     }

@@ -24,6 +24,7 @@ pub enum SystemOperation {
     Register(registers::RegisterAccess),
     PstateImmediate(registers::Encoding),
     SendEvent { local: bool },
+    InstructionSynchronization { option: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -45,6 +46,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Register(_) => "system_register",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
+        SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
     })
 }
 
@@ -61,10 +63,17 @@ pub fn decode_system_instruction(
         Some(synchronization::Operation::SendEvent { local }) => Some(local),
         _ => None,
     };
+    let instruction_synchronization = match synchronization::decode(word) {
+        Some(synchronization::Operation::InstructionSynchronization { option }) => {
+            Some(SystemOperation::InstructionSynchronization { option })
+        }
+        _ => None,
+    };
     let mut operations = [
         exception::decode(word).map(SystemOperation::Exception),
         tag_memory::decode(word).map(SystemOperation::TagMemory),
         event.map(|local| SystemOperation::SendEvent { local }),
+        instruction_synchronization,
         registers::decode(word).map(SystemOperation::Register),
         registers::decode_pstate_immediate(word).map(SystemOperation::PstateImmediate),
     ]
@@ -88,6 +97,24 @@ pub fn decode_system_instruction(
 }
 
 impl SystemInstruction {
+    /// Source classification only. This grants no PE/control/publication loan.
+    /// The actual lifetime-fixed platform must mount the corresponding owner.
+    pub fn is_el1_context_operation(self) -> bool {
+        match self.operation {
+            SystemOperation::Register(access) => {
+                registers::is_translation_control(access.encoding())
+            }
+            SystemOperation::InstructionSynchronization { .. } => true,
+            SystemOperation::Exception(
+                exception::Operation::SupervisorCall { .. }
+                | exception::Operation::SoftwareBreakpoint { .. }
+                | exception::Operation::Undefined { .. }
+                | exception::Operation::ExceptionReturn { key: None },
+            ) => true,
+            _ => false,
+        }
+    }
+
     /// The runtime supplies a word fetched from its immutable registered region.
     /// A public descriptor cannot substitute different typed operands or a PC.
     pub fn matches_source(self, pc: GuestAddress, word: u32) -> bool {
@@ -117,6 +144,59 @@ mod tests {
     const ADD_IMMEDIATE: u32 = 0x9100_0000;
     const RET: u32 = 0xd65f_03c0;
     const UNALLOCATED: u32 = 0xffff_ffff;
+
+    #[test]
+    fn context_carriers_preserve_exact_operands_without_granting_other_families() {
+        let pc = GuestAddress(0x1000);
+        let isb = 0xd5033fdf;
+        let instruction = decode_system_instruction(pc, isb).unwrap().unwrap();
+        assert_eq!(
+            instruction.operation,
+            SystemOperation::InstructionSynchronization { option: 15 }
+        );
+        assert!(instruction.matches_source(pc, isb));
+        assert!(!instruction.matches_source(pc, isb ^ (1 << 8)));
+        assert!(instruction.is_el1_context_operation());
+        for encoding in [
+            registers::SCTLR_EL1,
+            registers::TCR_EL1,
+            registers::TTBR0_EL1,
+            registers::TTBR1_EL1,
+            registers::MAIR_EL1,
+        ] {
+            for base in [0xd5200000u32, 0xd5000000] {
+                for rt in [0, 30, 31] {
+                    let word = base | (u32::from(encoding.selector()) << 5) | rt;
+                    let instruction = decode_system_instruction(pc, word).unwrap().unwrap();
+                    assert!(instruction.matches_source(pc, word));
+                    assert!(instruction.is_el1_context_operation());
+                    let SystemOperation::Register(access) = instruction.operation else {
+                        panic!("register carrier")
+                    };
+                    assert_eq!(access.encoding(), encoding);
+                    assert_eq!(access.rt(), rt as u8);
+                }
+            }
+        }
+        for word in [SVC, ERET, 0xd4202460, 0x00001234] {
+            assert!(
+                decode_system_instruction(pc, word)
+                    .unwrap()
+                    .unwrap()
+                    .is_el1_context_operation()
+            );
+        }
+        for word in [
+            0xd69f0bff, 0xd69f0fff, 0xd4000002, 0xd4000003, SEV, SEVL, IRG,
+        ] {
+            assert!(
+                !decode_system_instruction(pc, word)
+                    .unwrap()
+                    .unwrap()
+                    .is_el1_context_operation()
+            );
+        }
+    }
 
     #[test]
     fn system_requests_preserve_exact_instruction_identity() {

@@ -547,3 +547,71 @@ fn illegal_state_guard_uses_only_the_actual_owned_il_bit() {
     // The concrete service still owns stepping/debug eligibility. This helper
     // makes no claim that a single-step instruction may execute without it.
 }
+
+fn branch_machine(tcr_el1: u64, pauth: Presence) -> TranslationControls {
+    let memory = MemorySystem::new(16, 8).unwrap();
+    let mut observer = Observer::new(Arc::clone(&memory), ISB_SY);
+    let mut actual_facts = facts();
+    actual_facts.pauth = pauth;
+    let mut actual_cpu = cpu();
+    actual_cpu.pauth = pauth == Presence::Present;
+    let profile = ControlProfile::base_el1(
+        actual_facts,
+        PolicyProvenance {
+            cpu_features: DECLARED_TEST_PROVENANCE,
+            implementation_choices: DECLARED_TEST_PROVENANCE,
+        },
+        actual_cpu,
+    )
+    .unwrap();
+    let mut readbacks = values();
+    readbacks.tcr_el1 = tcr_el1;
+    TranslationControls::install(readbacks, profile, memory, &state(), &mut observer).unwrap()
+}
+
+#[test]
+fn branch_address_uses_destination_region_and_instruction_tbid() {
+    use super::fields::tcr;
+    use crate::system::access::ExceptionLevel;
+    const LOWER_TAGGED: u64 = 0xab12_3456_789a_bcde;
+    const UPPER_TAGGED: u64 = 0xab92_3456_789a_bcde;
+    const LOWER: u64 = 0x0012_3456_789a_bcde;
+    const UPPER: u64 = 0xff92_3456_789a_bcde;
+    for destination in [ExceptionLevel::El0, ExceptionLevel::El1] {
+        for (bits, lower, upper) in [
+            (0, LOWER_TAGGED, UPPER_TAGGED),
+            (tcr::TBI0, LOWER, UPPER_TAGGED),
+            (tcr::TBI1, LOWER_TAGGED, UPPER),
+            (tcr::TBI0 | tcr::TBI1, LOWER, UPPER),
+            (tcr::TBI0 | tcr::TBI1 | tcr::TBID0, LOWER_TAGGED, UPPER),
+            (tcr::TBI0 | tcr::TBI1 | tcr::TBID1, LOWER, UPPER_TAGGED),
+        ] {
+            let owner = branch_machine(bits, Presence::Present);
+            assert_eq!(owner.branch_address(LOWER_TAGGED, destination), Ok(lower));
+            assert_eq!(owner.branch_address(UPPER_TAGGED, destination), Ok(upper));
+        }
+        let owner = branch_machine(
+            tcr::TBI0 | tcr::TBI1 | tcr::TBID0 | tcr::TBID1,
+            Presence::Absent,
+        );
+        assert_eq!(owner.branch_address(LOWER_TAGGED, destination), Ok(LOWER));
+        assert_eq!(owner.branch_address(UPPER_TAGGED, destination), Ok(UPPER));
+    }
+}
+
+#[test]
+fn branch_address_refuses_unowned_regimes_and_poisoned_controls() {
+    use crate::system::access::ExceptionLevel;
+    let (mut owner, _, _) = machine(ISB_SY);
+    for destination in [ExceptionLevel::El2, ExceptionLevel::El3] {
+        assert!(matches!(
+            owner.branch_address(PC, destination),
+            Err(ControlError::Unavailable(_))
+        ));
+    }
+    owner.poisoned = true;
+    assert_eq!(
+        owner.branch_address(PC, ExceptionLevel::El1),
+        Err(ControlError::Poisoned)
+    );
+}

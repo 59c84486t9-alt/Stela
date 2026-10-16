@@ -4,7 +4,7 @@ mod m0_owner;
 mod resources;
 pub(crate) use m0_owner::M0Owner;
 pub(super) use resources::M0ExecutionChecks;
-pub(crate) use resources::{El1ExecutionResources, M0ExecutionResources};
+pub(crate) use resources::{El1ContextResources, El1ExecutionResources, M0ExecutionResources};
 
 use super::super::super::{checked_memory, complete_clock, complete_pauth_with_memory};
 use super::super::software_async::NoAsyncSources;
@@ -267,6 +267,11 @@ pub(crate) trait Owner: sealed::Concrete {
     /// these original fields. All other sealed owners refuse before FFI.
     fn split_el1_resources(&mut self) -> anyhow::Result<El1ExecutionResources<'_>> {
         anyhow::bail!("actual installed branch backend resources are unavailable")
+    }
+
+    /// Actual mutable publication/monitor loan, after all native loans end.
+    fn split_el1_context_resources(&mut self) -> anyhow::Result<El1ContextResources<'_>> {
+        anyhow::bail!("actual EL1 context resources are unavailable")
     }
 
     fn invoke(

@@ -36,8 +36,8 @@ enum InstalledCohort {
 pub(crate) struct M0Owner<'pe> {
     cohort: InstalledCohort,
     address_space: u64,
-    sources: &'pe InstalledM0Sources,
-    controls: &'pe TranslationControls,
+    sources: &'pe mut InstalledM0Sources,
+    controls: &'pe mut TranslationControls,
     execution: &'pe ProcessEntryControls,
     memory: &'pe mut MemoryThread<MemoryControls>,
     endpoint: &'pe EventEndpoint,
@@ -56,8 +56,8 @@ impl<'pe> M0Owner<'pe> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_software(
         address_space: u64,
-        sources: &'pe InstalledM0Sources,
-        controls: &'pe TranslationControls,
+        sources: &'pe mut InstalledM0Sources,
+        controls: &'pe mut TranslationControls,
         execution: &'pe ProcessEntryControls,
         memory: &'pe mut MemoryThread<MemoryControls>,
         endpoint: &'pe EventEndpoint,
@@ -88,8 +88,8 @@ impl<'pe> M0Owner<'pe> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_el1_branch(
         address_space: u64,
-        sources: &'pe InstalledEl1Sources,
-        controls: &'pe TranslationControls,
+        sources: &'pe mut InstalledEl1Sources,
+        controls: &'pe mut TranslationControls,
         execution: &'pe ProcessEntryControls,
         memory: &'pe mut MemoryThread<MemoryControls>,
         endpoint: &'pe EventEndpoint,
@@ -120,8 +120,8 @@ impl<'pe> M0Owner<'pe> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_el1_integer(
         address_space: u64,
-        sources: &'pe InstalledEl1Sources,
-        controls: &'pe TranslationControls,
+        sources: &'pe mut InstalledEl1Sources,
+        controls: &'pe mut TranslationControls,
         execution: &'pe ProcessEntryControls,
         memory: &'pe mut MemoryThread<MemoryControls>,
         endpoint: &'pe EventEndpoint,
@@ -152,8 +152,8 @@ impl<'pe> M0Owner<'pe> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::blocks::retirement) unsafe fn fresh_el1_platform(
         address_space: u64,
-        sources: &'pe InstalledEl1Sources,
-        controls: &'pe TranslationControls,
+        sources: &'pe mut InstalledEl1Sources,
+        controls: &'pe mut TranslationControls,
         execution: &'pe ProcessEntryControls,
         memory: &'pe mut MemoryThread<MemoryControls>,
         endpoint: &'pe EventEndpoint,
@@ -197,14 +197,14 @@ impl<'pe> M0Owner<'pe> {
             platform.check()?;
         }
         match self.cohort {
-            InstalledCohort::M0Read64 => self
-                .controls
-                .validate_installed_m0_source(&self.sources.source_scope()),
+            InstalledCohort::M0Read64 => self.controls.validate_installed_m0_source(
+                &self.sources.source_scope().map_err(anyhow::Error::msg)?,
+            ),
             InstalledCohort::El1DirectBranch
             | InstalledCohort::El1Integer
-            | InstalledCohort::El1Platform => self
-                .controls
-                .validate_installed_el1_source(&self.sources.el1_scope()),
+            | InstalledCohort::El1Platform => self.controls.validate_installed_el1_source(
+                &self.sources.el1_scope().map_err(anyhow::Error::msg)?,
+            ),
         }
         .map_err(anyhow::Error::msg)
     }
@@ -255,7 +255,7 @@ impl Owner for M0Owner<'_> {
                 },
             "installed integer runtime differs"
         );
-        let scope = self.sources.el1_scope();
+        let scope = self.sources.el1_scope().map_err(anyhow::Error::msg)?;
         let reached = scope
             .physical_space()
             .fetch_el1_instruction(outer, self.controls, &scope, system, pc.0)
@@ -368,6 +368,26 @@ impl Owner for M0Owner<'_> {
                 endpoint: self.endpoint,
                 address_space: self.address_space,
             },
+        })
+    }
+
+    fn split_el1_context_resources(&mut self) -> anyhow::Result<super::El1ContextResources<'_>> {
+        anyhow::ensure!(
+            self.cohort == InstalledCohort::El1Platform,
+            "context requires original fixed platform cohort"
+        );
+        self.check_resources()?;
+        Ok(super::El1ContextResources {
+            sources: &mut *self.sources,
+            controls: &mut *self.controls,
+            platform: self
+                .platform
+                .ok_or_else(|| anyhow::anyhow!("actual context platform absent"))?,
+            memory: &mut *self.memory,
+            execution: self.execution,
+            pending: &self.pending,
+            endpoint: self.endpoint,
+            address_space: self.address_space,
         })
     }
 

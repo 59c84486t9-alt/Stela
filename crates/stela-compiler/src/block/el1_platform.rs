@@ -127,6 +127,9 @@ pub(super) fn validate_terminal(terminal: &Terminator) -> Result<(), CompileErro
 }
 
 pub(super) fn validate_system(instruction: system::SystemInstruction) -> Result<(), CompileError> {
+    if instruction.is_el1_context_operation() {
+        return Ok(());
+    }
     match instruction.operation {
         system::SystemOperation::Register(_) | system::SystemOperation::PstateImmediate(_) => {
             Ok(())
@@ -371,8 +374,9 @@ mod tests {
             0x18000040,
             0x98000040,
             0x1c000040,
-            0xd4000002,
-            0xd69f03e0,
+            0xd4000002, // HVC remains unsupported.
+            0xd69f0bff, // ERETAA: authenticated owner remains unmounted.
+            0xd69f0fff, // ERETAB likewise.
             0xd503207f,
             0xa9800420,
             0xffffffff,
@@ -393,8 +397,8 @@ mod tests {
     fn unowned_memory_atomic_fp_and_exception_effects_never_use_direct_ram_or_services() {
         for word in [
             0xf9000000u32,
-            0xd4000001,
-            0xd69f03e0,
+            0xd69f0bff, // ERETAA still needs its actual feature-present owner.
+            0xd69f0fff, // ERETAB likewise remains outside this base profile.
             0x1e602800,
             0x5ac02000,
         ] {

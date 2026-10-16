@@ -3,6 +3,7 @@
 
 mod darwin_services;
 mod diagnostics;
+mod el1_context;
 mod el1_registers;
 pub(crate) mod el1_system;
 mod entry_controls;
@@ -79,6 +80,7 @@ pub(crate) struct OwnedRunOutcome {
     pub last_m0_write_observation: Option<m0::M0WriteObservation>,
     pub last_el1_register_observation: Option<el1_registers::RegisterObservation>,
     pub last_el1_system_observation: Option<el1_system::SystemObservation>,
+    pub last_el1_context_observation: Option<el1_context::ContextObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
     pub service_events: darwin_services::TrapServiceEvents,
 }
@@ -173,6 +175,7 @@ impl BlockRuntime {
         let mut last_m0_write_observation = None;
         let mut last_el1_register_observation = None;
         let mut last_el1_system_observation = None;
+        let mut last_el1_context_observation = None;
         let mut settled_prefixes = Vec::new();
         let mut service_events = darwin_services::TrapServiceEvents::default();
         let stop = loop {
@@ -231,6 +234,24 @@ impl BlockRuntime {
                 attempt,
                 closed: false,
             };
+            if self.profile == BlockProfile::El1PlatformV1
+                && matches!(bound.el1_platform_intent(),
+                    Ok(stela_compiler::block::el1_platform::Intent::System(instruction))
+                        if instruction.is_el1_context_operation())
+            {
+                // End this immutable runtime loan before actual context/source
+                // publication; original Runtime keeps its physical source pin.
+                drop(bound);
+                match active.execute_el1_context(
+                    self,
+                    &mut accounting,
+                    &mut last_el1_context_observation,
+                    &mut settled_prefixes,
+                ) {
+                    Ok(()) => continue,
+                    Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                }
+            }
             if self.profile == BlockProfile::El1PlatformV1
                 && matches!(
                     bound.el1_platform_intent(),
@@ -387,6 +408,7 @@ impl BlockRuntime {
             last_m0_write_observation,
             last_el1_register_observation,
             last_el1_system_observation,
+            last_el1_context_observation,
             settled_prefixes,
             service_events,
         }

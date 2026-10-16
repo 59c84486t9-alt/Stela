@@ -76,6 +76,46 @@ pub enum PublicationRequest<'a> {
     },
 }
 
+/// Source-qualified synchronization for an exception, distinct from an ISB.
+/// This describes a required effect; it grants no exception or native authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSynchronizationCause {
+    ExceptionEntry,
+    ExceptionReturn,
+}
+impl ContextSynchronizationCause {
+    pub(crate) fn matches_source(self, word: u32) -> bool {
+        use stela_compiler::aarch64::system::exception::{Operation, decode};
+        matches!(
+            (self, decode(word)),
+            (
+                Self::ExceptionEntry,
+                Some(
+                    Operation::Undefined { .. }
+                        | Operation::SupervisorCall { .. }
+                        | Operation::SoftwareBreakpoint { .. }
+                )
+            ) | (
+                Self::ExceptionReturn,
+                Some(Operation::ExceptionReturn { key: None })
+            )
+        )
+    }
+}
+
+/// The state borrow is checked during preparation. The canonical consumer keeps
+/// its ORIGINAL state exclusively owned until the prepared service commits;
+/// the service retains the genuine source/control/publication resources instead
+/// of immutably borrowing the bank that exception execution must mutate next.
+pub struct ContextSynchronizationRequest<'state> {
+    pub before: ControlSnapshot,
+    pub after: ControlSnapshot,
+    pub source: PhysicalFetch,
+    pub cpu: stage1::CpuProfile,
+    pub state: &'state SystemState,
+    pub cause: ContextSynchronizationCause,
+}
+
 /// Exact internal backend prefix, not a claim of architectural instruction
 /// completion. The control owner separately reports a committed MSR register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +176,16 @@ pub trait PreparedPublication {
 /// Physical byte publication and reservation invalidation alone prove none of
 /// the translation/code/TLBI/DSB obligations above.
 pub trait TranslationServices {
+    /// Reserve real exception context publication without retaining a state
+    /// borrow across the subsequent original-bank exception effects. Services
+    /// without this actual producer explicitly refuse; no successful fallback.
+    fn prepare_context_synchronization<'a>(
+        &'a mut self,
+        _request: ContextSynchronizationRequest<'_>,
+    ) -> Result<Self::Prepared<'a>, &'static str> {
+        Err("actual exception context publication is unavailable")
+    }
+
     type Prepared<'a>: PreparedPublication
     where
         Self: 'a;

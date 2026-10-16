@@ -66,6 +66,18 @@ impl Encoding {
     }
 }
 
+/// Canonical shared EL1 translation-control encodings. Allocation/effects still
+/// require the retained runtime's actual feature and control owners.
+pub const SCTLR_EL1: Encoding = Encoding::new(3, 0, 1, 0, 0);
+pub const TCR_EL1: Encoding = Encoding::new(3, 0, 2, 0, 2);
+pub const TTBR0_EL1: Encoding = Encoding::new(3, 0, 2, 0, 0);
+pub const TTBR1_EL1: Encoding = Encoding::new(3, 0, 2, 0, 1);
+pub const MAIR_EL1: Encoding = Encoding::new(3, 0, 10, 2, 0);
+
+pub fn is_translation_control(encoding: Encoding) -> bool {
+    [SCTLR_EL1, TCR_EL1, TTBR0_EL1, TTBR1_EL1, MAIR_EL1].contains(&encoding)
+}
+
 const REGISTER_INSTRUCTION_MASK: u32 = 0xfff0_0000;
 const MRS_REGISTER_INSTRUCTION: u32 = 0xd530_0000;
 const MSR_REGISTER_INSTRUCTION: u32 = 0xd510_0000;

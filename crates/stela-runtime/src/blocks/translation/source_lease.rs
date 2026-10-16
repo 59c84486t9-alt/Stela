@@ -32,11 +32,15 @@ const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
 /// owners. It borrows neither the whole runtime nor its mutable native cache.
 pub(crate) struct InstalledM0SourceScope<'run> {
     sources: &'run InstalledM0Sources,
+    installed: &'run super::scope::InstalledContext,
 }
 
 impl<'run> InstalledM0SourceScope<'run> {
-    pub(super) fn borrow(sources: &'run InstalledM0Sources) -> Self {
-        Self { sources }
+    pub(super) fn borrow(sources: &'run InstalledM0Sources) -> Result<Self, &'static str> {
+        Ok(Self {
+            sources,
+            installed: sources.installed()?,
+        })
     }
 
     pub(crate) fn physical_space(&self) -> &PhysicalAddressSpace {
@@ -45,11 +49,11 @@ impl<'run> InstalledM0SourceScope<'run> {
 
     /// Read the original installed slot, never a reconstructed control bank.
     pub(crate) fn installed_snapshot(&self) -> &ControlSnapshot {
-        &self.sources.installed().snapshot
+        &self.installed.snapshot
     }
 
     pub(crate) fn installed_cpu(&self) -> stage1::CpuProfile {
-        self.sources.installed().cpu
+        self.installed.cpu
     }
 
     pub(crate) fn immutable_sources(&self) -> &[ImmutableCodeBacking] {

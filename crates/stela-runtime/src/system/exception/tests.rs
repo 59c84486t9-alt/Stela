@@ -503,3 +503,226 @@ fn illegal_execution_state_precedes_instruction_generated_events_and_eret() {
         Err(PrepareError::UnsupportedIllegalExecutionState)
     );
 }
+
+#[test]
+fn software_breakpoint_all_flags_immediates_pc_and_effect_sequence() {
+    for mode in [PSTATE_EL1T, PSTATE_EL1H] {
+        for flags in 0..16u32 {
+            for immediate in [0, 1, 0x7fff, 0x8000, u16::MAX] {
+                for instruction_pc in [SOURCE_PC, u64::MAX - 3] {
+                    let (profile, mut system, mut registers) = state(mode);
+                    registers.nzcv = flags << 28;
+                    let old = registers.clone();
+                    let source_pstate = system.pstate(&registers);
+                    let plan = prepare_entry(
+                        &features(),
+                        profile,
+                        controls(),
+                        &system,
+                        &registers,
+                        EntryEvent::SoftwareBreakpoint {
+                            instruction_pc,
+                            immediate,
+                        },
+                    )
+                    .unwrap();
+                    let mut services = Services::default();
+                    let target = plan
+                        .execute(&mut system, &mut registers, &mut services)
+                        .unwrap();
+                    assert_eq!(
+                        target,
+                        VECTOR_BASE + if mode == PSTATE_EL1H { 0x200 } else { 0 }
+                    );
+                    assert_eq!(
+                        system.el1_registers().esr(),
+                        0xf200_0000 | u64::from(immediate)
+                    );
+                    assert_eq!(system.el1_registers().elr(), instruction_pc);
+                    assert_eq!(system.el1_registers().spsr(), source_pstate);
+                    assert_eq!(system.el1_registers().far(), OLD_FAR);
+                    assert_eq!(
+                        system.pstate(&registers),
+                        u64::from(flags << 28) | DAIF_MASK | PSTATE_EL1H
+                    );
+                    assert_eq!(registers.x, old.x);
+                    assert_eq!(registers.v, old.v);
+                    assert_eq!((registers.fpcr, registers.fpsr), (old.fpcr, old.fpsr));
+                    assert_eq!(services.calls, [EffectStage::Synchronize]);
+                    assert!(!services.monitor_cleared && !services.event_set);
+                    assert_eq!(services.requests.len(), 1);
+                    assert_eq!(services.requests[0].source_pc, instruction_pc);
+                    assert_eq!(
+                        services.requests[0].effects,
+                        RequiredEffects::Entry { irq: false }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn software_breakpoint_failure_never_becomes_an_entry_or_local_event() {
+    for fail_preflight in [true, false] {
+        let (profile, mut system, mut registers) = state(PSTATE_EL1T);
+        let before_system = system.clone();
+        let before_registers = registers.clone();
+        let plan = prepare_entry(
+            &features(),
+            profile,
+            controls(),
+            &system,
+            &registers,
+            EntryEvent::SoftwareBreakpoint {
+                instruction_pc: SOURCE_PC,
+                immediate: 0xbeef,
+            },
+        )
+        .unwrap();
+        let mut services = Services {
+            fail_preflight,
+            fail: Some(EffectStage::Synchronize),
+            ..Services::default()
+        };
+        let error = plan
+            .execute(&mut system, &mut registers, &mut services)
+            .unwrap_err();
+        if fail_preflight {
+            assert!(matches!(error, ExecuteError::Preflight("unavailable")));
+            assert!(services.calls.is_empty());
+        } else {
+            assert!(matches!(
+                error,
+                ExecuteError::Effect {
+                    stage: EffectStage::Synchronize,
+                    committed: CommittedPrefix::None,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(system, before_system);
+        assert_eq!(registers, before_registers);
+        assert!(!services.monitor_cleared && !services.event_set);
+    }
+}
+
+#[test]
+fn entry_preflight_permit_is_consumed_once_without_a_second_preflight() {
+    let (profile, mut system, mut registers) = state(PSTATE_EL1H);
+    let plan = prepare_entry(
+        &features(),
+        profile,
+        controls(),
+        &system,
+        &registers,
+        EntryEvent::SoftwareBreakpoint {
+            instruction_pc: SOURCE_PC,
+            immediate: 7,
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.target_address(), VECTOR_BASE + VECTOR_CURRENT_EL_SPX);
+    assert_eq!(plan.target_exception_level(), ExceptionLevel::El1);
+    let mut services = Services::default();
+    services.preflight(plan.service_request()).unwrap();
+    assert!(services.calls.is_empty());
+    let target = plan
+        .execute_preflighted(&mut system, &mut registers, &mut services, ())
+        .unwrap();
+    assert_eq!(target, VECTOR_BASE + VECTOR_CURRENT_EL_SPX);
+    assert_eq!(services.requests.len(), 1);
+    assert_eq!(services.calls, [EffectStage::Synchronize]);
+    assert_eq!(system.el1_registers().elr(), SOURCE_PC);
+}
+
+#[test]
+fn return_preflight_does_not_hide_stale_state_or_fallible_synchronization() {
+    let (profile, mut system, mut registers) = state(PSTATE_EL1H);
+    let plan = prepare_return(
+        SOURCE_PC,
+        &features(),
+        profile,
+        controls(),
+        &system,
+        &registers,
+    )
+    .unwrap();
+    assert_eq!(plan.target_address(), RETURN_PC);
+    assert_eq!(plan.target_exception_level(), ExceptionLevel::El0);
+    let mut services = Services::default();
+    services.preflight(plan.service_request()).unwrap();
+    system
+        .el1_registers_mut()
+        .set_elr(RETURN_PC.wrapping_add(A64_INSTRUCTION_BYTES));
+    let before = registers.clone();
+    assert_eq!(
+        plan.execute_preflighted(&mut system, &mut registers, &mut services, ()),
+        Err(ExecuteError::StalePlan)
+    );
+    assert_eq!(registers, before);
+    assert!(services.calls.is_empty());
+    assert_eq!(services.requests.len(), 1);
+
+    let plan = prepare_return(
+        SOURCE_PC,
+        &features(),
+        profile,
+        controls(),
+        &system,
+        &registers,
+    )
+    .unwrap();
+    let mut services = Services {
+        fail: Some(EffectStage::Synchronize),
+        ..Services::default()
+    };
+    services.preflight(plan.service_request()).unwrap();
+    assert_eq!(
+        plan.execute_preflighted(&mut system, &mut registers, &mut services, ()),
+        Err(ExecuteError::Effect {
+            stage: EffectStage::Synchronize,
+            committed: CommittedPrefix::None,
+            failure: EffectFailure {
+                error: "injected",
+                completion: Completion::Partial
+            }
+        })
+    );
+    assert_eq!(registers, before);
+    assert_eq!(system.current_el(), ExceptionLevel::El1);
+    assert_eq!(services.requests.len(), 1);
+    assert!(!services.monitor_cleared && !services.event_set);
+}
+
+#[test]
+fn higher_el_profile_is_declined_before_capturing_base_stack_state() {
+    let (mut profile, system, registers) = state(PSTATE_EL1H);
+    for current_el in [ExceptionLevel::El2, ExceptionLevel::El3] {
+        profile.current_el = current_el;
+        assert!(matches!(
+            prepare_entry(
+                &features(),
+                profile,
+                controls(),
+                &system,
+                &registers,
+                EntryEvent::Undefined {
+                    instruction_pc: SOURCE_PC
+                }
+            ),
+            Err(PrepareError::UnsupportedScope)
+        ));
+        assert!(matches!(
+            prepare_return(
+                SOURCE_PC,
+                &features(),
+                profile,
+                controls(),
+                &system,
+                &registers
+            ),
+            Err(PrepareError::UnsupportedScope)
+        ));
+    }
+}

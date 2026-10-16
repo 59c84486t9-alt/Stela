@@ -21,6 +21,7 @@ const A64_INSTRUCTION_BYTES: u64 = 4;
 const ESR_INSTRUCTION_LENGTH: u64 = 1 << 25;
 const ESR_EXCEPTION_CLASS_SHIFT: u32 = 26;
 const SVC_EXCEPTION_CLASS: u64 = 0x15;
+const SOFTWARE_BREAKPOINT_EXCEPTION_CLASS: u64 = 0x3c;
 const VECTOR_ALIGNMENT_MASK: u64 = 0x7ff;
 const VECTOR_LOWER_EL_A64: u64 = 0x400;
 const VECTOR_CURRENT_EL_SPX: u64 = 0x200;
@@ -35,6 +36,12 @@ pub enum EntryEvent {
         instruction_pc: u64,
     },
     SupervisorCall {
+        instruction_pc: u64,
+        immediate: u16,
+    },
+    /// A64 BRK is a software breakpoint, independent of MDSCR monitor enable.
+    /// Its preferred return is the BRK address, unlike SVC's next address.
+    SoftwareBreakpoint {
         instruction_pc: u64,
         immediate: u16,
     },
@@ -233,7 +240,14 @@ fn validate_source(
     system
         .check_lower_el_storage()
         .map_err(|_| PrepareError::UnsupportedScope)?;
-    if profile.security != SecurityState::NonSecure || profile.el2_enabled || profile.el3_present {
+    if profile.security != SecurityState::NonSecure
+        || profile.el2_enabled
+        || profile.el3_present
+        || !matches!(
+            profile.current_el,
+            ExceptionLevel::El0 | ExceptionLevel::El1
+        )
+    {
         return Err(PrepareError::UnsupportedScope);
     }
     if profile.current_el != system.current_el() {
@@ -290,6 +304,18 @@ pub fn prepare_entry(
             ),
             0,
         ),
+        EntryEvent::SoftwareBreakpoint {
+            instruction_pc,
+            immediate,
+        } => (
+            instruction_pc,
+            Some(
+                (SOFTWARE_BREAKPOINT_EXCEPTION_CLASS << ESR_EXCEPTION_CLASS_SHIFT)
+                    | ESR_INSTRUCTION_LENGTH
+                    | u64::from(immediate),
+            ),
+            0,
+        ),
         EntryEvent::SystemAccess {
             instruction_pc,
             request,
@@ -313,6 +339,7 @@ pub fn prepare_entry(
     let source_pc = match event {
         EntryEvent::Undefined { instruction_pc }
         | EntryEvent::SupervisorCall { instruction_pc, .. }
+        | EntryEvent::SoftwareBreakpoint { instruction_pc, .. }
         | EntryEvent::SystemAccess { instruction_pc, .. } => instruction_pc,
         EntryEvent::Irq { next_pc } => next_pc,
     };
@@ -375,16 +402,45 @@ impl EntryPlan {
         if !self.source.matches(system, registers) {
             return Err(ExecuteError::StalePlan);
         }
-        let mut permit = services
-            .preflight(ServiceRequest {
-                effects: RequiredEffects::Entry { irq: self.irq },
-                profile: self.profile,
-                source_el: self.source_el,
-                source_pstate: self.source.pstate,
-                source_pc: self.source_pc,
-                controls: self.controls,
-            })
+        let permit = services
+            .preflight(self.service_request())
             .map_err(ExecuteError::Preflight)?;
+        self.execute_preflighted(system, registers, services, permit)
+    }
+
+    /// Describe the source-bound effects before the canonical Retiring phase.
+    /// The actual consumer retains the resulting service permit across it.
+    pub(crate) fn service_request(&self) -> ServiceRequest {
+        ServiceRequest {
+            effects: RequiredEffects::Entry { irq: self.irq },
+            profile: self.profile,
+            source_el: self.source_el,
+            source_pstate: self.source.pstate,
+            source_pc: self.source_pc,
+            controls: self.controls,
+        }
+    }
+
+    pub(crate) const fn target_address(&self) -> u64 {
+        self.target
+    }
+
+    pub(crate) const fn target_exception_level(&self) -> ExceptionLevel {
+        ExceptionLevel::El1
+    }
+
+    /// Consume the original preflight permit. Effects can still fail with an
+    /// exact committed prefix; this never grants PC or retry authority.
+    pub(crate) fn execute_preflighted<S: ExceptionServices>(
+        self,
+        system: &mut SystemState,
+        registers: &mut GuestState,
+        services: &mut S,
+        mut permit: S::Permit,
+    ) -> Result<u64, ExecuteError<S::Error>> {
+        if !self.source.matches(system, registers) {
+            return Err(ExecuteError::StalePlan);
+        }
         services
             .synchronize_context(&mut permit, self.source_el)
             .map_err(|failure| ExecuteError::Effect {
@@ -421,16 +477,45 @@ impl ReturnPlan {
         if !self.source.matches(system, registers) {
             return Err(ExecuteError::StalePlan);
         }
-        let mut permit = services
-            .preflight(ServiceRequest {
-                effects: RequiredEffects::Return,
-                profile: self.profile,
-                source_el: ExceptionLevel::El1,
-                source_pstate: self.source.pstate,
-                source_pc: self.source_pc,
-                controls: self.controls,
-            })
+        let permit = services
+            .preflight(self.service_request())
             .map_err(ExecuteError::Preflight)?;
+        self.execute_preflighted(system, registers, services, permit)
+    }
+
+    /// Describe the source-bound effects before the canonical Retiring phase.
+    /// The actual consumer retains the resulting service permit across it.
+    pub(crate) fn service_request(&self) -> ServiceRequest {
+        ServiceRequest {
+            effects: RequiredEffects::Return,
+            profile: self.profile,
+            source_el: ExceptionLevel::El1,
+            source_pstate: self.source.pstate,
+            source_pc: self.source_pc,
+            controls: self.controls,
+        }
+    }
+
+    pub(crate) const fn target_address(&self) -> u64 {
+        self.target
+    }
+
+    pub(crate) const fn target_exception_level(&self) -> ExceptionLevel {
+        self.destination_el
+    }
+
+    /// Consume the original preflight permit. Effects can still fail with an
+    /// exact committed prefix; this never grants PC or retry authority.
+    pub(crate) fn execute_preflighted<S: ExceptionServices>(
+        self,
+        system: &mut SystemState,
+        registers: &mut GuestState,
+        services: &mut S,
+        mut permit: S::Permit,
+    ) -> Result<u64, ExecuteError<S::Error>> {
+        if !self.source.matches(system, registers) {
+            return Err(ExecuteError::StalePlan);
+        }
         services
             .synchronize_context(&mut permit, ExceptionLevel::El1)
             .map_err(|failure| ExecuteError::Effect {

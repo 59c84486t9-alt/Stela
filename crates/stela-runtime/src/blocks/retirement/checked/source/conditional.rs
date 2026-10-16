@@ -210,6 +210,31 @@ mod tests {
     }
 
     #[test]
+    fn equal_target_and_fallthrough_keep_source_selected_branch_kind() {
+        // B.EQ +4 has the same address for both outcomes. BranchAddr still
+        // applies only to the taken branch, so target equality is insufficient.
+        const BRANCH_EQUAL_NEXT: u32 = 0x5400_0020;
+        let source = BRANCH_EQUAL_NEXT.to_le_bytes();
+        let analysis = analyze_with_profile(&source, BASE, BlockProfile::Ordinary).unwrap();
+        for (nzcv, kind, wrong) in [
+            (NZCV_Z, ExitKind::Direct, ExitKind::Fallthrough),
+            (0, ExitKind::Fallthrough, ExitKind::Direct),
+        ] {
+            let registers = GuestState {
+                nzcv,
+                ..GuestState::default()
+            };
+            let next = GuestAddress(BASE.0 + size_of::<u32>() as u64);
+            assert!(
+                validate(&analysis, &source, BASE, &registers, kind, next)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(validate(&analysis, &source, BASE, &registers, wrong, next).is_err());
+        }
+    }
+
+    #[test]
     fn true_fallthrough_and_direct_source_are_not_conditional_edges() {
         for word in [
             0xd503_201f_u32,

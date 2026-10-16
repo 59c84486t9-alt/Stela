@@ -450,7 +450,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 }
             };
             checks.check(outer)?;
-            let installed = sources.source_scope();
+            let installed = sources.source_scope().map_err(anyhow::Error::msg)?;
             let input = M0SourceInput {
                 bound,
                 system: &*self.pe.system,

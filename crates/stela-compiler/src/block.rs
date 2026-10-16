@@ -1094,6 +1094,9 @@ impl CompilationPlan {
         let el1_m0 = (profile == BlockProfile::El1M0IntegerV1)
             .then(|| el1_m0::Plan::new(&parsed))
             .transpose()?;
+        let el1_platform = (profile == BlockProfile::El1PlatformV1)
+            .then(|| el1_platform::Plan::new(&parsed))
+            .transpose()?;
         let resident = if profile.supports_resident_loops() {
             crate::x86_64::block::ResidentLoopPlan::new(
                 &parsed.instructions,
@@ -1103,9 +1106,6 @@ impl CompilationPlan {
         } else {
             None
         };
-        let el1_platform = (profile == BlockProfile::El1PlatformV1)
-            .then(|| el1_platform::Plan::new(&parsed))
-            .transpose()?;
         Ok(Self {
             parsed,
             checked,

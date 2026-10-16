@@ -42,11 +42,11 @@ impl Register {
 
     pub const fn encoding(self) -> Encoding {
         let (crn, crm, op2) = match self {
-            Self::SctlrEl1 => (0b0001, 0b0000, 0b000),
-            Self::TcrEl1 => (0b0010, 0b0000, 0b010),
-            Self::Ttbr0El1 => (0b0010, 0b0000, 0b000),
-            Self::Ttbr1El1 => (0b0010, 0b0000, 0b001),
-            Self::MairEl1 => (0b1010, 0b0010, 0b000),
+            Self::SctlrEl1 => return stela_compiler::aarch64::system::registers::SCTLR_EL1,
+            Self::TcrEl1 => return stela_compiler::aarch64::system::registers::TCR_EL1,
+            Self::Ttbr0El1 => return stela_compiler::aarch64::system::registers::TTBR0_EL1,
+            Self::Ttbr1El1 => return stela_compiler::aarch64::system::registers::TTBR1_EL1,
+            Self::MairEl1 => return stela_compiler::aarch64::system::registers::MAIR_EL1,
             Self::AmairEl1 => (0b1010, 0b0011, 0b000),
             Self::ParEl1 => (0b0111, 0b0100, 0b000),
             Self::ContextidrEl1 => (0b1101, 0b0000, 0b001),

@@ -183,7 +183,7 @@ fn actual_original_firmware_integer_prefix_full_state_and_pc() {
     .unwrap();
     installed
         .into_executable_scope(&ConsumerKey(()), |runtime, sources, controls| {
-            let scope = sources.el1_scope();
+            let scope = sources.el1_scope().unwrap();
             let policy = MemoryControls::new(
                 LowerAddressProfile::new(48, false).unwrap(),
                 true,
@@ -293,11 +293,12 @@ fn actual_original_firmware_integer_prefix_full_state_and_pc() {
                 assert_eq!(owner.pc(), GuestAddress(SOURCE_PC.0 + 8));
                 assert_eq!(owner.registers(), &expected);
                 std::fs::write(root.join("blocked-retry.txt"), format!("{retry:#?}")).unwrap();
-                assert_eq!(controls.snapshot().unwrap().readbacks(), readbacks);
                 drop(owner);
+                assert_eq!(controls.snapshot().unwrap().readbacks(), readbacks);
                 let system_after = format!("{system:#?}");
                 assert_eq!(system_before, system_after);
                 std::fs::write(root.join("system-after.txt"), system_after).unwrap();
+                let scope = sources.el1_scope().unwrap();
                 let backing = scope.immutable_sources()[0].backing();
                 let pointer = backing
                     .host_pointer(
@@ -347,20 +348,6 @@ fn actual_original_firmware_integer_prefix_full_state_and_pc() {
                     && refused.last_m0_observation.is_none()
             );
             std::fs::write(root.join("daif-refusal.txt"), format!("{refused:#?}")).unwrap();
-            let backing = scope.immutable_sources()[0].backing();
-            let pointer = backing
-                .host_pointer(
-                    0,
-                    firmware_before.len(),
-                    crate::memory::backing::AccessKind::Read,
-                )
-                .unwrap();
-            // SAFETY: actual retained immutable source allocation owns the whole
-            // image, readable bytes and no writer/alias for this executable scope.
-            let ram =
-                unsafe { std::slice::from_raw_parts(pointer.as_ptr(), firmware_before.len()) };
-            assert_eq!(ram, firmware_before);
-            std::fs::write(root.join("ram-after.bin"), ram).unwrap();
             std::fs::write(
                 root.join("actual-registers.txt"),
                 format!("{:?}", owner.registers()),
@@ -376,9 +363,24 @@ fn actual_original_firmware_integer_prefix_full_state_and_pc() {
             );
             assert!(matches!(observed.report.storage_after, Some(Ok(()))));
             assert!(observed.report.failure.is_none() && observed.settlement_failure.is_none());
-            assert_eq!(controls.snapshot().unwrap().readbacks(), readbacks);
             assert!(result.last_m0_observation.is_some());
             drop(owner);
+            assert_eq!(controls.snapshot().unwrap().readbacks(), readbacks);
+            let scope = sources.el1_scope().unwrap();
+            let backing = scope.immutable_sources()[0].backing();
+            let pointer = backing
+                .host_pointer(
+                    0,
+                    firmware_before.len(),
+                    crate::memory::backing::AccessKind::Read,
+                )
+                .unwrap();
+            // SAFETY: actual retained immutable source allocation owns the whole
+            // image, readable bytes and no writer/alias for this executable scope.
+            let ram =
+                unsafe { std::slice::from_raw_parts(pointer.as_ptr(), firmware_before.len()) };
+            assert_eq!(ram, firmware_before);
+            std::fs::write(root.join("ram-after.bin"), ram).unwrap();
             let system_after = format!("{system:#?}");
             assert_eq!(system_before, system_after);
             std::fs::write(root.join("system-after.txt"), system_after).unwrap();

@@ -13,7 +13,10 @@ use crate::{
         state::SystemState,
     },
 };
-use stela_compiler::{GuestAddress, GuestState, block::BlockExit};
+use stela_compiler::{
+    GuestAddress, GuestState,
+    block::{BlockExit, ExitKind},
+};
 mod session;
 pub(super) use session::{RegisterNativeReport, RegisterSession};
 
@@ -84,7 +87,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 checks,
             } = self.pe.backend.split_el1_resources()?;
             checks.check(outer)?;
-            let scope = sources.el1_scope();
+            let scope = sources.el1_scope().map_err(anyhow::Error::msg)?;
             let session = RegisterSession::prepare(
                 bound,
                 outer,
@@ -138,6 +141,20 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     retained.authority.native_attempt(self.attempt),
                     "EL1 register original NativeActive attempt lost"
                 );
+                // validate_return already binds conditional taken/fallthrough
+                // to the actual post-prefix predicate. Only a taken branch uses
+                // BranchAddr; a sequential continuation keeps its original PC.
+                let next = match ExitKind::try_from(exit.kind) {
+                    Ok(ExitKind::Fallthrough) => next,
+                    Ok(
+                        ExitKind::Direct | ExitKind::Call | ExitKind::Indirect | ExitKind::Return,
+                    ) => GuestAddress(
+                        controls
+                            .branch_address(next.0, self.pe.system.current_el())
+                            .map_err(|error| anyhow::anyhow!("EL1 branch address: {error:?}"))?,
+                    ),
+                    _ => anyhow::bail!("EL1 ordinary source/carrier kind differs"),
+                };
                 let prefix = bound.prefix(None, 0)?;
                 prefixes.try_reserve(1)?;
                 let blocks = accounting

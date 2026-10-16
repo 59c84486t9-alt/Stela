@@ -156,3 +156,20 @@ pub(super) fn check_immutable_fetch(
         _ => Err("instruction-fetch attributes are outside the immutable control-only policy"),
     }
 }
+
+/// The shared compiler's exact fixed-profile context terminal. Descriptor
+/// equality is source validation, not CPU/resource/native admission.
+pub(super) fn check_context_instruction(
+    pc: u64,
+    word: u32,
+) -> Result<SystemInstruction, &'static str> {
+    let instruction = decode_system_instruction(GuestAddress(pc), word)
+        .map_err(|_| "context instruction PC or canonical descriptor is invalid")?
+        .ok_or("source has no canonical context terminal")?;
+    if !instruction.matches_source(GuestAddress(pc), word)
+        || !instruction.is_el1_context_operation()
+    {
+        return Err("source is outside the exact canonical EL1 context profile");
+    }
+    Ok(instruction)
+}

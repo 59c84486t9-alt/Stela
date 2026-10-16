@@ -13,6 +13,11 @@
 //! current controls eagerly. An ISB is still a real CSE/fetch publication, not
 //! a deferred-register-bank switch or an implicit TLBI.
 
+#[path = "translation_controls/branch_address.rs"]
+mod branch_address;
+#[path = "translation_controls/context_sync.rs"]
+mod context_sync;
+pub(crate) use context_sync::PreparedContextSynchronization;
 #[path = "translation_controls/effects.rs"]
 mod effects;
 #[path = "translation_controls/el1_source.rs"]
@@ -388,6 +393,17 @@ impl TranslationControls {
         state: &SystemState,
         services: &mut S,
     ) -> Result<Completion, ControlError> {
+        self.prepare_read(fetched, state, services)?.commit()
+    }
+
+    /// Reserve a real MRS publication before canonical Retiring; the actual
+    /// readback value and destination remain frozen under the original bank loan.
+    pub fn prepare_read<'a, S: TranslationServices>(
+        &'a mut self,
+        fetched: &FetchedInstruction,
+        state: &'a SystemState,
+        services: &'a mut S,
+    ) -> Result<PreparedRead<'a, S::Prepared<'a>>, ControlError> {
         check_execution_state(state)?;
         self.check_services(services)?;
         self.check_site(fetched)?;
@@ -404,18 +420,15 @@ impl TranslationControls {
                 state,
             })
             .map_err(ControlError::Unavailable)?;
-        if let Err(error) = prepared.commit() {
-            self.poisoned = true;
-            return Err(ControlError::Publication {
-                register_committed: false,
-                progress: error.progress,
-                reason: error.reason,
-            });
-        }
-        Ok(Completion::Read {
+        let completion = Completion::Read {
             rt,
             value: self.readbacks.get(register),
             next_pc: next_pc(fetched.pc())?,
+        };
+        Ok(PreparedRead {
+            owner: self,
+            prepared,
+            completion,
         })
     }
 
@@ -548,6 +561,30 @@ impl TranslationControls {
             return Err(ControlError::StaleSource);
         }
         Ok(())
+    }
+}
+
+pub struct PreparedRead<'a, P: PreparedPublication> {
+    owner: &'a mut TranslationControls,
+    prepared: P,
+    completion: Completion,
+}
+impl<P: PreparedPublication> PreparedRead<'_, P> {
+    pub fn commit(self) -> Result<Completion, ControlError> {
+        let Self {
+            owner,
+            prepared,
+            completion,
+        } = self;
+        if let Err(error) = prepared.commit() {
+            owner.poisoned = true;
+            return Err(ControlError::Publication {
+                register_committed: false,
+                progress: error.progress,
+                reason: error.reason,
+            });
+        }
+        Ok(completion)
     }
 }
 

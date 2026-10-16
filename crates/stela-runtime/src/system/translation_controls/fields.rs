@@ -122,7 +122,7 @@ mod sctlr {
         | TIDCP;
 }
 
-mod tcr {
+pub(super) mod tcr {
     use super::bits;
     pub const T0SZ: u64 = bits(5, 0);
     pub const RESERVED_6: u64 = 1 << 6;

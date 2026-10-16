@@ -346,6 +346,8 @@ impl<'a> RuntimeServices<'a> {
 /// No function pointer, mutable code slice or executable mapping escapes.
 #[derive(Debug)]
 pub struct BlockRuntime {
+    /// Opaque membership in this original source/RX cache; no PE permission.
+    identity: std::sync::Arc<()>,
     address_space: u64,
     profile: BlockProfile,
     target: stela_compiler::TargetCpu,
@@ -435,6 +437,7 @@ impl BlockRuntime {
         target: stela_compiler::TargetCpu,
     ) -> Self {
         Self {
+            identity: std::sync::Arc::new(()),
             address_space,
             profile,
             target,
