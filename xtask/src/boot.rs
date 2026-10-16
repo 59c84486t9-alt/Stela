@@ -9,7 +9,8 @@
 //!
 //! `--payload` runs install mode on a synthetic IPSW (no Apple bytes) split
 //! onto the boot volume: `verify` checks every Erase member,
-//! `verify-archive` does so from the whole IPSW instead, and `stage`
+//! `verify-archive` does so from the whole IPSW instead, `stage` and
+//! `stage-path`
 //! also partitions a blank second disk and copies them into staging, which
 //! the run then reads back on the host.
 use crate::{
@@ -50,6 +51,8 @@ const SMOKE_OPTIONS: &str = "--entry 0x100000 --stop 0x10000c --budget 16";
 const TARGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Its PCI slot, which fixes its UEFI device path.
 const TARGET_SLOT: u8 = 5;
+/// The serial the NVMe target reports, which `stela.cfg` names.
+const TARGET_SERIAL: &str = "STELA-TARGET-01";
 /// Small slices, so the synthetic members span several.
 const SYNTHETIC_SLICE_BYTES: u64 = 400_000;
 
@@ -157,8 +160,11 @@ enum PayloadMode {
     Verify,
     /// Verify them from the whole IPSW, read through its ZIP directory.
     VerifyArchive,
-    /// Also partition a blank second disk and stage the members on it.
+    /// Also partition a blank NVMe disk, named by serial, and stage the
+    /// members on it.
     Stage,
+    /// The same on a virtio disk named by device path and size.
+    StagePath,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -266,13 +272,19 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             );
             match mode {
                 PayloadMode::Verify | PayloadMode::VerifyArchive => install.push_str("verify"),
-                PayloadMode::Stage => {
+                PayloadMode::Stage | PayloadMode::StagePath => {
                     fs::File::create_new(&target)?.set_len(TARGET_BYTES)?;
+                    let identity = match mode {
+                        PayloadMode::Stage => format!("--install-target-serial {TARGET_SERIAL}"),
+                        _ => format!(
+                            "--install-target-path PciRoot(0x0)/Pci({TARGET_SLOT:#x},0x0) \
+                             --install-target-bytes {TARGET_BYTES}"
+                        ),
+                    };
                     // A 4 GiB disk: 1 GiB cache, and an Apple region of at
                     // least 1 GiB instead of a real restore's 64 GiB.
                     install.push_str(&format!(
-                        "stage --install-target-path PciRoot(0x0)/Pci({TARGET_SLOT:#x},0x0) \
-                         --install-target-bytes {TARGET_BYTES} \
+                        "stage {identity} \
                          --install-cache-bytes 0x40000000 --install-min-apple-bytes 0x40000000"
                     ));
                 }
@@ -375,7 +387,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 target.display()
             ))
             .arg("-device")
-            .arg(format!("virtio-blk-pci,drive=target,addr={TARGET_SLOT:#x}"));
+            .arg(match arguments.payload {
+                Some(PayloadMode::StagePath) => {
+                    format!("virtio-blk-pci,drive=target,addr={TARGET_SLOT:#x}")
+                }
+                _ => format!("nvme,drive=target,serial={TARGET_SERIAL},addr={TARGET_SLOT:#x}"),
+            });
     }
     if picker {
         command.args(["-device", "VGA"]);
@@ -494,7 +511,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "bundle": arguments.bundle,
         "first_unsupported": unsupported,
         "returncode": code,
-        "payload": arguments.payload.map(|mode| mode == PayloadMode::Stage),
+        "payload": arguments.payload.map(|mode| {
+            matches!(mode, PayloadMode::Stage | PayloadMode::StagePath)
+        }),
         "staging": target.exists().then(|| staged(&target)).transpose()?,
         "timed_out": status.is_none(),
         "wall_seconds": started.elapsed().as_secs_f64(),

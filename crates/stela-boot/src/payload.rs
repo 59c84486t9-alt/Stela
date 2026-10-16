@@ -3,10 +3,11 @@
 //!
 //! `stela.cfg` turns this on with `--install-mode verify` or
 //! `--install-mode stage`, plus `--install-build BUILD`. Staging writes only
-//! the disk `stela.cfg` names, by its GPT disk GUID
-//! (`--install-target-guid`) or, for a blank disk, by its device path and
-//! exact size (`--install-target-path`, `--install-target-bytes`). The disk
-//! that holds the payload is never a target. Without `--install-mode` the
+//! the disk `stela.cfg` names: by its serial number (`--install-target-serial`,
+//! read from NVMe Identify Controller or ATA IDENTIFY data), by its GPT disk
+//! GUID (`--install-target-guid`), or by its device path and exact size
+//! (`--install-target-path`, `--install-target-bytes`). The disk that holds
+//! the payload is never a target. Without `--install-mode` the
 //! options pass through to the mount unchanged.
 use crate::output;
 use alloc::{
@@ -56,6 +57,7 @@ struct Install {
     mode: Option<Mode>,
     build: Option<String>,
     target_guid: Option<Guid>,
+    target_serial: Option<String>,
     target_path: Option<String>,
     target_bytes: Option<u64>,
     cache_bytes: Option<u64>,
@@ -93,6 +95,7 @@ fn parse(options: &str) -> Result<Install, &'static str> {
                 install.target_guid =
                     Some(Guid::parse(value).ok_or("--install-target-guid is not a GUID")?)
             }
+            "--install-target-serial" => install.target_serial = Some(value.into()),
             "--install-target-path" => install.target_path = Some(value.into()),
             "--install-target-bytes" => install.target_bytes = Some(number(value)?),
             "--install-cache-bytes" => install.cache_bytes = Some(number(value)?),
@@ -102,6 +105,7 @@ fn parse(options: &str) -> Result<Install, &'static str> {
     }
     let other = install.build.is_some()
         || install.target_guid.is_some()
+        || install.target_serial.is_some()
         || install.target_path.is_some()
         || install.target_bytes.is_some()
         || install.cache_bytes.is_some()
@@ -539,12 +543,18 @@ fn find_target(install: &Install, payload_path: &str) -> Result<Target, &'static
         };
         let media = media.media_id();
         let path = device_path(handle).unwrap_or_default();
+        output::arguments(format_args!(
+            "DISK path={path} bytes={} serial={:?}\n",
+            disk.blocks * disk.block_bytes,
+            disk_serial(handle, &path)
+        ));
         let matches = match (
             install.target_guid,
+            &install.target_serial,
             &install.target_path,
             install.target_bytes,
         ) {
-            (Some(guid), None, None) => {
+            (Some(guid), None, None, None) => {
                 let mut probe = Target {
                     io,
                     media,
@@ -553,14 +563,16 @@ fn find_target(install: &Install, payload_path: &str) -> Result<Target, &'static
                 };
                 matches!(probe.table(), Ok(Some(table)) if table.disk_guid == guid)
             }
-            (None, Some(want), Some(bytes)) => {
+            (None, Some(serial), None, None) => {
+                disk_serial(handle, &path).is_some_and(|found| found == *serial)
+            }
+            (None, None, Some(want), Some(bytes)) => {
                 *want == path && bytes == disk.blocks * disk.block_bytes
             }
             _ => {
-                return Err(
-                    "stage needs --install-target-guid, or --install-target-path with \
-                     --install-target-bytes",
-                );
+                return Err("stage needs exactly one of --install-target-serial, \
+                     --install-target-guid, or --install-target-path with \
+                     --install-target-bytes");
             }
         };
         if matches {
@@ -590,6 +602,96 @@ fn find_target(install: &Install, payload_path: &str) -> Result<Target, &'static
         disk,
         path: path.clone(),
     })
+}
+
+/// The NVMe admin command that returns controller data, and the controller
+/// data structure's serial number field.
+const NVME_IDENTIFY: u8 = 0x06;
+const NVME_IDENTIFY_CONTROLLER: u32 = 1;
+const NVME_IDENTIFY_BYTES: usize = 4096;
+const NVME_SERIAL: core::ops::Range<usize> = 4..24;
+/// edk2 treats a zero timeout as already expired; its own admin commands
+/// allow 5 seconds.
+const NVME_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(5);
+/// ATA IDENTIFY DEVICE words 10-19: the serial number, two characters per
+/// word with the first in the high byte.
+const ATA_IDENTIFY_BYTES: usize = 512;
+const ATA_SERIAL: core::ops::Range<usize> = 20..40;
+
+fn trimmed(bytes: &[u8]) -> Option<String> {
+    let text = core::str::from_utf8(bytes).ok()?.trim_matches([' ', '\0']);
+    (!text.is_empty()).then(|| text.into())
+}
+
+/// A whole disk's serial number, from its NVMe controller or its ATA
+/// IDENTIFY data. Other buses, such as virtio and USB, report none.
+fn disk_serial(handle: Handle, path: &str) -> Option<String> {
+    nvme_serial(path).or_else(|| ata_serial(handle))
+}
+
+fn nvme_serial(path: &str) -> Option<String> {
+    use uefi::proto::nvme::{NvmeQueueType, NvmeRequestBuilder, pass_thru::NvmePassThru};
+    for controller in boot::find_handles::<NvmePassThru>().ok()? {
+        let Some(prefix) = device_path(controller) else {
+            continue;
+        };
+        if !path.starts_with(format!("{prefix}/NVMe(").as_str()) {
+            continue;
+        }
+        // SAFETY: an admin Identify command reads controller data only.
+        let pass_thru = unsafe {
+            boot::open_protocol::<NvmePassThru>(
+                OpenProtocolParams {
+                    handle: controller,
+                    agent: boot::image_handle(),
+                    controller: None,
+                },
+                OpenProtocolAttributes::GetProtocol,
+            )
+        }
+        .ok()?;
+        let request =
+            NvmeRequestBuilder::new(pass_thru.io_align(), NVME_IDENTIFY, NvmeQueueType::ADMIN)
+                .with_cdw10(NVME_IDENTIFY_CONTROLLER)
+                .with_timeout(NVME_TIMEOUT)
+                .with_transfer_buffer(NVME_IDENTIFY_BYTES)
+                .ok()?
+                .build();
+        let response = pass_thru.controller().execute_command(request).ok()?;
+        return trimmed(response.transfer_buffer()?.get(NVME_SERIAL)?);
+    }
+    None
+}
+
+fn ata_serial(handle: Handle) -> Option<String> {
+    use uefi::proto::media::disk_info::{DiskInfo, DiskInfoInterface};
+    // SAFETY: the identify data is only read.
+    let info = unsafe {
+        boot::open_protocol::<DiskInfo>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
+    if !matches!(
+        info.interface(),
+        DiskInfoInterface::AHCI | DiskInfoInterface::IDE
+    ) {
+        return None;
+    }
+    let mut data = [0u8; ATA_IDENTIFY_BYTES];
+    if info.identify(&mut data).ok()? < ATA_SERIAL.end {
+        return None;
+    }
+    let mut serial = data[ATA_SERIAL].to_vec();
+    for pair in serial.as_chunks_mut::<2>().0 {
+        pair.swap(0, 1);
+    }
+    trimmed(&serial)
 }
 
 /// GUID entropy for a new table: the disk, the time and a counter. These

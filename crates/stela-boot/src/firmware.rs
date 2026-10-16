@@ -268,9 +268,13 @@ fn tables(
 
 /// Collect everything the mount needs, then leave boot services. The
 /// returned tables are not active yet.
-pub fn take_over(options: Vec<u8>, source: Vec<u8>) -> Result<(Handoff, Tables), &'static str> {
+pub fn take_over(
+    options: Vec<u8>,
+    source: Option<Vec<u8>>,
+) -> Result<(Handoff, Tables), &'static str> {
     // Install mode stages a payload and stops here; otherwise nothing changes.
     let options = crate::payload::run(options)?;
+    let source = source.ok_or("cannot read \\EFI\\stela\\source.bin")?;
     let storage = crate::storage::prepare(&options)?;
     let native = arenas::<NATIVE_ARENAS>()?;
     let ram = arenas::<RAM_ARENAS>()?;

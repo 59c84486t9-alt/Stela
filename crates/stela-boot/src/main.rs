@@ -165,7 +165,8 @@ fn main() -> Status {
     if options.starts_with(b"--system") {
         system::boot(options, volume);
     }
-    let source = firmware::source(&mut volume).unwrap_or_else(|e| output::fatal(e));
+    // Install mode needs no ARM image; `take_over` checks it is present.
+    let source = firmware::source(&mut volume).ok();
     drop(volume);
     let (mut handoff, tables) =
         firmware::take_over(options, source).unwrap_or_else(|e| output::fatal(e));
