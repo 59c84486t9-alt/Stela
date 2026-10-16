@@ -61,8 +61,6 @@ pub(crate) struct M0PairReadNativeReport {
     pub(super) memory: Option<RawM0PairReadMemory>,
     pub(super) completed_bytes: u64,
     pub(super) progress: M0RamPairReadProgress,
-    #[cfg(test)]
-    pub(super) producer_observation: Option<serde_json::Value>,
     pub(super) callback_failure: Option<CallbackFailure>,
     pub(super) failure: Option<M0PairReadSessionFailure>,
 }
@@ -106,8 +104,6 @@ pub(super) struct NativeM0PairReadSession<'call, 'owner, 'code> {
     invoked: bool,
     valid_return: bool,
     values: Option<[u64; 2]>,
-    #[cfg(test)]
-    producer_observation: Option<serde_json::Value>,
 }
 impl<'call, 'owner, 'code> NativeM0PairReadSession<'call, 'owner, 'code> {
     pub(super) fn prepare(
@@ -117,13 +113,6 @@ impl<'call, 'owner, 'code> NativeM0PairReadSession<'call, 'owner, 'code> {
         context: &'call mut ExecutionContext,
     ) -> Result<Self, M0RamPairReadPlatformError> {
         let prepared = prepare_aligned_device_ram8_pair(outer, control)?;
-        #[cfg(test)]
-        let producer_observation = control.producer_observation(outer).map_err(|error| {
-            M0RamPairReadPlatformError::SourceControl {
-                error,
-                progress: prepared.progress(),
-            }
-        })?;
         let context_before = ContextIdentity::capture(context);
         Ok(Self {
             prepared,
@@ -133,8 +122,6 @@ impl<'call, 'owner, 'code> NativeM0PairReadSession<'call, 'owner, 'code> {
             invoked: false,
             valid_return: false,
             values: None,
-            #[cfg(test)]
-            producer_observation: Some(producer_observation),
         })
     }
 
@@ -147,8 +134,6 @@ impl<'call, 'owner, 'code> NativeM0PairReadSession<'call, 'owner, 'code> {
             memory: None,
             completed_bytes: self.prepared.progress().completed_bytes,
             progress: self.prepared.progress(),
-            #[cfg(test)]
-            producer_observation: self.producer_observation.take(),
             callback_failure: None,
             failure: None,
         };

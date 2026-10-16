@@ -5,9 +5,6 @@ use std::path::{Path, PathBuf};
 use stela_compiler::{GuestAddress, GuestState};
 use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
 
-#[path = "blocks/tag_memory_corpus.rs"]
-mod tag_memory_corpus;
-
 const BASE: u64 = 0x1000;
 const STOP: u64 = 0xdead_0000;
 const RET: u32 = 0xd65f03c0;

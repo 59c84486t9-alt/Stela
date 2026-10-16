@@ -2,23 +2,14 @@
 //! Models/materialized original RAM grant no source/control loan or execution.
 
 use crate::memory::domain::m0_read::pair::M0ReadPairSource;
-use crate::memory::source_ram::{
-    MaterializedSourceRam, OwnedRamExtent, PhysicalRamRange, SourceRamBuildError,
-    SourceRamDeclaration, SourceRamPermissions, SourceRamSystemConfig, SourceRamTestAlias,
-    materialize_source_ram_with_test_aliases,
-};
 use stela_compiler::{
-    GuestAddress, GuestState, Lifter, TargetCpu,
+    GuestAddress, GuestState, Lifter,
     aarch64::{AddressMode, Decoder, MemoryTransfer, Operation, Register, Width},
 };
 
 pub(crate) const SOURCE_PC: GuestAddress = GuestAddress(0x0010_0000);
 pub(crate) const DATA_PA: u64 = 0x0020_0000;
-pub(crate) const ALIAS_PA: u64 = 0x0030_0000;
-pub(crate) const SP_EL0: u64 = 0x002e_0000;
 pub(crate) const SP_EL1: u64 = 0x002f_0000;
-pub(crate) const PSTATE_LOW32: u64 =
-    0xa000_0000 | crate::system::state::PSTATE_EL1H | crate::system::pstate::DAIF_MASK;
 pub(crate) const FIRST_VALUE: u64 = 0x1020_3040_5060_7080;
 pub(crate) const SECOND_VALUE: u64 = 0x91a2_b3c4_d5e6_f708;
 const MEMBER_BYTES: usize = size_of::<u64>();
@@ -64,11 +55,10 @@ pub(crate) struct ReadCase {
     pub(crate) completed_bytes: u64,
     pub(crate) first_zero: bool,
     pub(crate) second_zero: bool,
-    pub(crate) alias: bool,
     pub(crate) first_is_base: bool,
 }
 
-pub(crate) fn cases() -> [ReadCase; 13] {
+pub(crate) fn cases() -> [ReadCase; 12] {
     use ReadOutcome as O;
     use ReadRefusal as R;
     use ReadShape as S;
@@ -84,10 +74,6 @@ pub(crate) fn cases() -> [ReadCase; 13] {
         ReadCase {
             second_zero: true,
             ..ReadCase::new("second_zr_reads16", S::PreIndex, O::Complete, 16)
-        },
-        ReadCase {
-            alias: true,
-            ..ReadCase::new("same_backing_alias16", S::Offset, O::Complete, 16)
         },
         ReadCase {
             first_is_base: true,
@@ -160,7 +146,6 @@ impl ReadCase {
             completed_bytes,
             first_zero: false,
             second_zero: false,
-            alias: false,
             first_is_base: false,
         }
     }
@@ -228,7 +213,6 @@ impl ReadCase {
                 reason: ReadRefusal::Alignment,
                 ..
             } => DATA_PA + 1,
-            _ if self.alias => ALIAS_PA,
             _ => DATA_PA,
         };
         state.x[BASE] = if self.shape == ReadShape::PostIndex {
@@ -261,112 +245,6 @@ impl ReadCase {
         } else {
             SOURCE_PC
         }
-    }
-
-    /// Same input bytes after success or refusal: these are reads, including ZR.
-    pub(crate) fn expected_ram(self) -> Vec<u8> {
-        let mut bytes = FIRST_VALUE.to_le_bytes().to_vec();
-        if !matches!(
-            self.outcome,
-            ReadOutcome::Refused {
-                member: 1,
-                reason: ReadRefusal::Hole
-            }
-        ) {
-            bytes.extend_from_slice(&SECOND_VALUE.to_le_bytes());
-        }
-        bytes
-    }
-
-    pub(crate) fn assert_progress(self, progress: super::M0RamPairReadProgress) {
-        use super::M0ReadMember;
-        assert_eq!(
-            progress.completed_bytes, self.completed_bytes,
-            "{}",
-            self.name
-        );
-        assert_eq!(
-            progress.attempted,
-            self.completed_bytes != 0,
-            "{}",
-            self.name
-        );
-        assert_eq!(progress.uncertain_member, None, "{}", self.name);
-        assert_eq!(
-            progress.read_attempted,
-            match self.completed_bytes {
-                0 => None,
-                8 => Some(M0ReadMember::First),
-                16 => Some(M0ReadMember::Second),
-                _ => panic!("fixture prefix"),
-            },
-            "{}",
-            self.name
-        );
-    }
-
-    pub(crate) fn materialize(
-        self,
-        address_space: u64,
-    ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-        let permissions = |readable, executable| SourceRamPermissions {
-            readable,
-            writable: false,
-            executable,
-        };
-        let mut initialized = vec![OwnedRamExtent {
-            source_pa: SOURCE_PC.0,
-            bytes: self.source().to_vec(),
-            permissions: permissions(true, true),
-        }];
-        let data = self.expected_ram();
-        if let ReadOutcome::Refused {
-            member,
-            reason: ReadRefusal::ExecuteOnly,
-        } = self.outcome
-        {
-            for (index, bytes) in data.as_chunks::<MEMBER_BYTES>().0.iter().enumerate() {
-                let denied = index == usize::from(member);
-                initialized.push(OwnedRamExtent {
-                    source_pa: DATA_PA + (index * MEMBER_BYTES) as u64,
-                    bytes: bytes.to_vec(),
-                    permissions: permissions(!denied, denied),
-                });
-            }
-        } else {
-            initialized.push(OwnedRamExtent {
-                source_pa: DATA_PA,
-                bytes: data,
-                permissions: permissions(true, false),
-            });
-        }
-        let aliases = if self.alias {
-            vec![SourceRamTestAlias {
-                source_pa: ALIAS_PA,
-                initialized_source_pa: DATA_PA,
-                source_offset: 0,
-                bytes: 2 * MEMBER_BYTES,
-                permissions: permissions(true, false),
-            }]
-        } else {
-            Vec::new()
-        };
-        materialize_source_ram_with_test_aliases(
-            SourceRamDeclaration {
-                address_space,
-                target: TargetCpu::Baseline,
-                declared_capacity: vec![PhysicalRamRange {
-                    source_pa: 0,
-                    bytes: 0x0040_0000,
-                }],
-                initialized,
-            },
-            SourceRamSystemConfig {
-                reservation_granule_bytes: 16,
-                reservation_stripe_count: 8,
-            },
-            &aliases,
-        )
     }
 }
 

@@ -34,12 +34,6 @@ mod callback;
 mod pair_read;
 mod write;
 pub(super) use pair_read::M0PairReadObservation;
-#[cfg(all(
-    test,
-    target_arch = "x86_64",
-    any(target_os = "macos", target_os = "linux")
-))]
-pub(crate) use pair_read::PairReadFixture;
 pub(super) use write::M0WriteObservation;
 mod session;
 use session::{M0NativeReport, M0SessionFailure, NativeM0Session};
@@ -202,18 +196,6 @@ impl<'source, 'native> M0PairReadSourceInput<'source, 'native> {
             }
         }
     }
-    #[cfg(test)]
-    pub(crate) fn observed_pair_identification(&self) -> anyhow::Result<(u64, u64)> {
-        use crate::system::identification::Register;
-        Ok((
-            self.platform
-                .identification()
-                .read(Register::IdAa64Mmfr2El1)?,
-            self.platform
-                .identification()
-                .read(Register::IdAa64Isar3El1)?,
-        ))
-    }
     pub(crate) fn validate_pair_profile(&self) -> anyhow::Result<()> {
         self.platform
             .check_pair_read_profile(self.original.actual_system())
@@ -226,14 +208,6 @@ impl M0SourceInput<'_, '_> {
     }
     pub(crate) fn outer_execution(&self) -> &MemoryExecutionLoan {
         self.outer
-    }
-    #[cfg(test)]
-    pub(crate) fn source_generation(&self) -> u64 {
-        self.bound.entry.generation()
-    }
-    #[cfg(test)]
-    pub(crate) fn actual_address_space(&self) -> Option<u64> {
-        self.thread.actual_address_space()
     }
     pub(crate) fn read_intent(&self) -> Option<M0ScalarReadIntent> {
         match self.intent {
@@ -719,10 +693,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         result
     }
 }
-
-#[cfg(test)]
-#[path = "m0/fixture.rs"]
-mod fixture;
 
 impl core::fmt::Debug for M0Observation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

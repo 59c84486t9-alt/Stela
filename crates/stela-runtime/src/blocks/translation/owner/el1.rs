@@ -19,20 +19,6 @@ pub(in crate::blocks) struct InstalledEl1Owner {
     controls: TranslationControls,
 }
 impl InstalledEl1Owner {
-    #[cfg(test)]
-    pub(in crate::blocks) fn source_diagnostic_snapshot(
-        &self,
-        address: u64,
-        bytes: usize,
-    ) -> Result<Vec<u8>, String> {
-        self.sources
-            .source_scope()
-            .map_err(str::to_owned)?
-            .physical_space()
-            .source_diagnostic_snapshot_quiescent(address, bytes)
-            .map_err(|error| error.to_string())
-    }
-
     /// # Safety
     /// Same original fresh-machine/physical/source ownership contract as
     /// InstalledM0Owner::new: all resources belong to ONE declared CPU/PE/System;

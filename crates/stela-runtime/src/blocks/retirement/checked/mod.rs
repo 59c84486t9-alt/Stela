@@ -43,20 +43,8 @@ use stela_compiler::{
 };
 
 pub(crate) struct OwnedRunRequest {
-    #[cfg(all(
-        test,
-        target_arch = "x86_64",
-        any(target_os = "macos", target_os = "linux")
-    ))]
-    pub pair_read_fixture: Option<m0::PairReadFixture>,
     pub stop_pc: Option<GuestAddress>,
     pub block_budget: usize,
-    #[cfg(all(
-        test,
-        target_arch = "x86_64",
-        any(target_os = "macos", target_os = "linux")
-    ))]
-    pub verify_pair_alias_monitor: bool,
 }
 
 pub(crate) enum OwnedStop {
@@ -324,12 +312,6 @@ impl BlockRuntime {
                     &mut accounting,
                     &mut last_m0_write_observation,
                     &mut settled_prefixes,
-                    #[cfg(all(
-                        test,
-                        target_arch = "x86_64",
-                        any(target_os = "macos", target_os = "linux")
-                    ))]
-                    request.verify_pair_alias_monitor,
                 ) {
                     Ok(m0::M0Step::Committed) => {
                         // The one-word write carrier has returned, settled and
@@ -375,12 +357,6 @@ impl BlockRuntime {
                     &mut accounting,
                     &mut last_m0_pair_read_observation,
                     &mut settled_prefixes,
-                    #[cfg(all(
-                        test,
-                        target_arch = "x86_64",
-                        any(target_os = "macos", target_os = "linux")
-                    ))]
-                    request.pair_read_fixture.as_ref(),
                 ) {
                     Ok(m0::M0Step::Committed) => continue,
                     Ok(m0::M0Step::SourceResourcesBlocked) => {

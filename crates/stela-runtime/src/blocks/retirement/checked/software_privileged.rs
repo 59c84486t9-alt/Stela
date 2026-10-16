@@ -256,14 +256,6 @@ pub fn run_declared_privileged(
     }
     let mut receipts = Vec::new();
     receipts.try_reserve_exact(requests.len())?;
-    #[cfg(test)]
-    super::privileged::tests::artifacts::factory_state(
-        &thread,
-        &system,
-        scalable.as_ref().map(|input| &input.state),
-        format!("{debug:?}"),
-        "before-lifetime",
-    );
     let mut context = ExecutionContext::default();
     {
         let producers = asynchronous
@@ -318,20 +310,8 @@ pub fn run_declared_privileged(
                     let outcome = runtime.run_owned(
                         pe.loan(),
                         OwnedRunRequest {
-                            #[cfg(all(
-                                test,
-                                target_arch = "x86_64",
-                                any(target_os = "macos", target_os = "linux")
-                            ))]
-                            pair_read_fixture: None,
                             stop_pc,
                             block_budget,
-                            #[cfg(all(
-                                test,
-                                target_arch = "x86_64",
-                                any(target_os = "macos", target_os = "linux")
-                            ))]
-                            verify_pair_alias_monitor: false,
                         },
                     );
                     let terminal = matches!(

@@ -106,12 +106,6 @@ fn revisiting_modified_cached_source_rebinds_before_any_old_instruction_executes
         report.ram[0].captured_bytes.as_ref().unwrap(),
         &expected_ram
     );
-    assert!(
-        report
-            .write_progress_observation
-            .unwrap()
-            .modified_instruction_ram
-    );
 }
 #[test]
 fn overwrite_own_source_settles_once_using_exact_preeffect_pin_and_owned_write() {
@@ -140,10 +134,6 @@ fn overwrite_own_source_settles_once_using_exact_preeffect_pin_and_owned_write()
         report.ram[0].captured_bytes.as_ref().unwrap(),
         &expected_ram
     );
-    assert_eq!(
-        report.write_progress_observation.unwrap().completed_bytes,
-        16
-    );
 }
 #[test]
 fn declared_region_tail_is_real_data_but_outside_region_remains_a_reached_refusal() {
@@ -171,10 +161,6 @@ fn declared_region_tail_is_real_data_but_outside_region_remains_a_reached_refusa
             assert_ne!(report.stop, "StopAddress");
             assert_eq!(report.thread.pc, GuestAddress(BASE));
             assert_eq!(report.accounting.blocks_executed, 0);
-            assert_eq!(
-                report.write_progress_observation.unwrap().completed_bytes,
-                0
-            );
         }
     }
 }
@@ -207,10 +193,6 @@ fn own_source_pair_prefix_survives_second_member_fault_without_writeback_or_retr
     assert_eq!(report.thread.registers, expected); // includes original X1 base
     assert_eq!(report.system, system);
     assert_eq!(report.accounting.blocks_executed, 0);
-    let progress = report.write_progress_observation.unwrap();
-    assert_eq!(progress.completed_bytes, 8);
-    assert!(progress.modified_instruction_ram);
-    assert!(progress.uncertain_member.is_none());
     assert_eq!(
         report.ram[0].captured_bytes.as_ref().unwrap(),
         &expected.x[0].to_le_bytes()

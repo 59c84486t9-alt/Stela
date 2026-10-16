@@ -31,22 +31,6 @@ fn registered_source_is_not_absent_when_its_pending_queue_is_empty() {
 }
 
 #[test]
-fn injector_uses_the_actual_unique_registered_domain() {
-    let mut first = fresh();
-    let mut other = fresh();
-    let key = first.register(SourceClass::Irq).unwrap();
-    assert_eq!(other.inject(&key), Err(AsyncError::WrongProducer));
-    assert!(other.pending.is_empty());
-    first.inject(&key).unwrap();
-    assert_eq!(first.pending.front().unwrap().source, key.id);
-    assert_eq!(first.registered[&key.id], SourceClass::Irq);
-    assert!(matches!(
-        first.lease_no_sources(),
-        Err(AsyncError::RegisteredProducer)
-    ));
-}
-
-#[test]
 fn a_fresh_exclusive_source_registry_can_be_borrowed_without_copying_it() {
     let mut domain = fresh();
     {

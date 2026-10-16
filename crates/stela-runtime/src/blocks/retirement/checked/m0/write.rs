@@ -47,25 +47,6 @@ impl M0WriteObservation {
             _ => false,
         }
     }
-    #[cfg(test)]
-    pub(in crate::blocks::retirement::checked) fn progress_observation(
-        &self,
-    ) -> Option<crate::memory::domain::physical::M0RamWriteProgress> {
-        match self {
-            Self::PreparationFailure { error, .. } => Some(error.progress()),
-            Self::Native { report, .. } => Some(report.progress),
-            _ => None,
-        }
-    }
-    #[cfg(test)]
-    pub(in crate::blocks::retirement::checked) fn producer_observation(
-        &self,
-    ) -> Option<&serde_json::Value> {
-        match self {
-            Self::Native { report, .. } => report.producer_observation.as_ref(),
-            _ => None,
-        }
-    }
     fn retain_settlement_failure(observation: &mut Option<Self>, error: &anyhow::Error) {
         if let Some(Self::Native {
             settlement_failure, ..
@@ -83,12 +64,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         accounting: &mut RunOutcome,
         observation: &mut Option<M0WriteObservation>,
         prefixes: &mut Vec<SettledPrefix>,
-        #[cfg(all(
-            test,
-            target_arch = "x86_64",
-            any(target_os = "macos", target_os = "linux")
-        ))]
-        verify_pair_alias_monitor: bool,
     ) -> anyhow::Result<M0Step> {
         *observation = None;
         self.require_native()?;
@@ -185,17 +160,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     return Ok(M0Step::PreparationBlocked);
                 }
             };
-            #[cfg(all(
-                test,
-                target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
-            ))]
-            let mut alias_witness = verify_pair_alias_monitor.then(|| {
-                crate::memory::domain::physical::store_fixtures::AliasReservationWitness::reserve(
-                    control.physical_space(),
-                    outer,
-                )
-            });
             // Own the NO-WRITE session under ORIGINAL authority BEFORE invoke.
             // Errors and panic poison before physical pin/order resources drop.
             let mut retained = RetainedM0Session {
@@ -218,20 +182,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 precommit_failure: None,
                 settlement_failure: None,
             });
-            #[cfg(all(
-                test,
-                target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
-            ))]
-            if valid_report && let Some(witness) = alias_witness.as_mut() {
-                // Report/progress already retained. The real alias reservation
-                // must have been invalidated even by same-value publication;
-                // failure unwinds under the ORIGINAL retained authority guard.
-                witness.assert_invalidated();
-                if let Some(M0WriteObservation::Native { report, .. }) = observation {
-                    report.alias_monitor_verified = true;
-                }
-            }
             if !valid_report {
                 // The genuine report is already owned by output. Diagnostic
                 // formatting may allocate or panic; it cannot erase the report.

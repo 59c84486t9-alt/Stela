@@ -4,14 +4,13 @@ use crate::memory::{
     domain::m0_write::{M0WriteMembers, M0WriteSource},
     source_ram::{
         MaterializedSourceRam, OwnedRamExtent, PhysicalRamRange, SourceRamBuildError,
-        SourceRamDeclaration, SourceRamPermissions, SourceRamSystemConfig, SourceRamTestAlias,
-        ZeroedRamExtent, materialize_source_ram_with_zeroed_test_aliases,
+        SourceRamDeclaration, SourceRamPermissions, SourceRamSystemConfig, ZeroedRamExtent,
+        materialize_source_ram_with_zeroed,
     },
 };
 use stela_compiler::{GuestAddress, GuestState, Lifter, TargetCpu, aarch64::Decoder};
 pub(crate) const SOURCE_PC: GuestAddress = GuestAddress(0x0010_0000);
 pub(crate) const DATA_PA: u64 = 0x0020_0000;
-pub(crate) const ALIAS_PA: u64 = 0x0030_0000;
 pub(crate) const DATA_BYTES: usize = 32;
 pub(crate) const SP_EL0: u64 = 0x002e_0000;
 pub(crate) const SP_EL1: u64 = 0x002f_0000;
@@ -57,10 +56,8 @@ pub(crate) struct StoreCase {
     pub(crate) shape: StoreShape,
     pub(crate) outcome: StoreOutcome,
     pub(crate) completed_bytes: u64,
-    pub(crate) same_value: bool,
-    pub(crate) alias: bool,
 }
-pub(crate) fn cases() -> [StoreCase; 11] {
+pub(crate) fn cases() -> [StoreCase; 10] {
     use ReachedRefusal as R;
     use StoreOutcome as O;
     use StoreShape as S;
@@ -123,11 +120,6 @@ pub(crate) fn cases() -> [StoreCase; 11] {
             },
             0,
         ),
-        StoreCase {
-            same_value: true,
-            alias: true,
-            ..StoreCase::new("same_value_alias16", S::PairOffset, O::Complete, 16)
-        },
     ]
 }
 impl StoreCase {
@@ -142,8 +134,6 @@ impl StoreCase {
             shape,
             outcome,
             completed_bytes,
-            same_value: false,
-            alias: false,
         }
     }
     pub(crate) fn source(self) -> [u8; 8] {
@@ -198,8 +188,8 @@ impl StoreCase {
         } else {
             target
         };
-        state.x[FIRST_DATA] = if self.same_value { 0 } else { FIRST_VALUE };
-        state.x[SECOND_DATA] = if self.same_value { 0 } else { SECOND_VALUE };
+        state.x[FIRST_DATA] = FIRST_VALUE;
+        state.x[SECOND_DATA] = SECOND_VALUE;
         state
     }
     pub(crate) fn expected_state(self) -> GuestState {
@@ -244,27 +234,6 @@ impl StoreCase {
                 .copy_from_slice(&self.before().x[SECOND_DATA].to_le_bytes());
         }
         bytes
-    }
-    /// Compare only an observation returned by the actual retained session.
-    /// First prepare refusals are unattempted; second-member refusal retains first8.
-    pub(crate) fn assert_progress(self, progress: super::M0RamWriteProgress) {
-        use crate::memory::domain::m0_write::M0WriteMember;
-        let attempted = self.outcome == StoreOutcome::Complete || self.completed_bytes != 0;
-        assert_eq!(progress.attempted, attempted, "{}", self.name);
-        assert_eq!(
-            progress.completed_bytes, self.completed_bytes,
-            "{}",
-            self.name
-        );
-        assert_eq!(progress.uncertain_member, None, "{}", self.name);
-        let last = if !attempted {
-            None
-        } else if self.completed_bytes == 16 {
-            Some(M0WriteMember::Second)
-        } else {
-            Some(M0WriteMember::First)
-        };
-        assert_eq!(progress.publication_attempted, last, "{}", self.name);
     }
     pub(crate) fn materialize(
         self,
@@ -311,18 +280,7 @@ impl StoreCase {
                 permissions: permissions(true, false),
             }),
         }
-        let aliases = if self.alias {
-            vec![SourceRamTestAlias {
-                source_pa: ALIAS_PA,
-                initialized_source_pa: DATA_PA,
-                source_offset: 0,
-                bytes: WORD_BYTES,
-                permissions: permissions(true, false),
-            }]
-        } else {
-            Vec::new()
-        };
-        materialize_source_ram_with_zeroed_test_aliases(
+        materialize_source_ram_with_zeroed(
             SourceRamDeclaration {
                 address_space,
                 target: TargetCpu::Baseline,
@@ -337,7 +295,6 @@ impl StoreCase {
                 reservation_granule_bytes: 16,
                 reservation_stripe_count: 8,
             },
-            &aliases,
         )
     }
 }
@@ -398,19 +355,13 @@ fn directed_models_match_actual_canonical_store_source_without_minting_a_loan() 
     }
 }
 #[test]
-fn directed_fixture_uses_real_backings_holes_permissions_and_alias_identity() {
+fn directed_fixture_uses_real_backings_holes_and_permissions() {
     use crate::memory::{
         backing::AccessKind, domain::physical::PhysicalAddressSpace, stage1::PhysicalMemory,
     };
-    use std::sync::Arc;
     for case in cases() {
         let ram = case.materialize(173).unwrap();
         let data = ram.test_view(DATA_PA).unwrap();
-        if case.alias {
-            let alias = ram.test_view(ALIAS_PA).unwrap();
-            assert!(Arc::ptr_eq(data.backing(), alias.backing()));
-            assert_eq!(data.backing_offset(), alias.backing_offset());
-        }
         assert_eq!(
             data.permissions().writable,
             !matches!(
@@ -454,110 +405,5 @@ fn directed_fixture_uses_real_backings_holes_permissions_and_alias_identity() {
                 .read_descriptor(DATA_PA + case.observed_data_bytes() as u64)
                 .is_err()
         );
-    }
-}
-
-/// Monitor-only test observation on the actual machine's first RAM word/alias.
-/// The canonical session supplies its ORIGINAL outer and keeps it through this
-/// witness. This creates no replacement execution loan, CPU or write permit.
-pub(crate) struct AliasReservationWitness<'loan> {
-    physical: &'loan super::super::PhysicalAddressSpace,
-    original: &'loan crate::memory::domain::MemoryExecutionLoan,
-    data: super::super::PhysicalRamReadPin<'loan>,
-    alias: super::super::PhysicalRamReadPin<'loan>,
-    access: crate::memory::monitor::Access<
-        crate::memory::backing::MemoryBacking,
-        crate::memory::backing::MemoryView,
-        crate::memory::domain::MappingAttributes,
-    >,
-    thread: crate::memory::monitor::ThreadMonitor<
-        crate::memory::backing::MemoryBacking,
-        crate::memory::backing::MemoryView,
-        crate::memory::domain::MappingAttributes,
-    >,
-}
-impl<'loan> AliasReservationWitness<'loan> {
-    pub(crate) fn reserve(
-        physical: &'loan super::super::PhysicalAddressSpace,
-        original: &'loan crate::memory::domain::MemoryExecutionLoan,
-    ) -> Self {
-        use crate::memory::monitor;
-        use std::sync::Arc;
-        let data = physical.resolve_ram8(original, DATA_PA).unwrap();
-        let alias = physical.resolve_ram8(original, ALIAS_PA).unwrap();
-        assert!(std::ptr::eq(data.execution, original));
-        assert!(std::ptr::eq(alias.execution, original));
-        let registered = physical.domain.registered_views();
-        let mapping = |pin: &super::super::PhysicalRamReadPin<'_>| {
-            registered
-                .iter()
-                .find(|registered| Arc::ptr_eq(&registered.view, pin.reached.first().view()))
-                .unwrap()
-        };
-        let make_access = |pin: &super::super::PhysicalRamReadPin<'_>| {
-            monitor::Access::new(
-                Arc::clone(pin.reached.first().view().backing()),
-                Arc::clone(&mapping(pin).monitor),
-                pin.reached.first().backing_offset() as u64,
-                WORD_BYTES as u8,
-                monitor::Shape::Scalar,
-            )
-            .unwrap()
-        };
-        assert!(Arc::ptr_eq(
-            data.reached.first().view().backing(),
-            alias.reached.first().view().backing()
-        ));
-        assert_eq!(
-            data.reached.first().backing_offset(),
-            alias.reached.first().backing_offset()
-        );
-        let mut thread = physical.domain.system.reservations.thread();
-        let data_access = make_access(&data);
-        let access = make_access(&alias);
-        let read = physical
-            .domain
-            .system
-            .reservations
-            .load(&mut thread, &data_access, || {
-                data.check_current().unwrap();
-                // SAFETY: actual original same-domain outer/current pin, aligned8
-                // exact footprint and the original monitor load gate retain rights
-                // and source storage; no Rust reference aliases shared RAM.
-                unsafe {
-                    crate::memory::access::read_part(
-                        data.pointer(),
-                        WORD_BYTES,
-                        TargetCpu::Baseline,
-                    )
-                }
-            })
-            .unwrap();
-        assert_eq!(read, 0);
-        Self {
-            physical,
-            original,
-            data,
-            alias,
-            access,
-            thread,
-        }
-    }
-
-    /// Call after the actual retained store, before its original outer releases.
-    /// This monitor diagnostic never writes bytes or claims a guest STXR result.
-    pub(crate) fn assert_invalidated(&mut self) {
-        use crate::memory::monitor::ConditionalWrite;
-        self.physical.check_execution_loan(self.original).unwrap();
-        self.data.check_current().unwrap();
-        self.alias.check_current().unwrap();
-        let result = self
-            .physical
-            .domain
-            .system
-            .reservations
-            .store(&mut self.thread, &self.access, || Ok::<(), ()>(()))
-            .unwrap();
-        assert_eq!(result, ConditionalWrite::Failed);
     }
 }

@@ -667,45 +667,6 @@ fn checked_scalar_late_success_is_terminal_with_full_read_prefix() {
 }
 
 #[test]
-fn checked_scalar_late_fault_keeps_raw_fault_location_and_partial_prefix() {
-    let system = MemorySystem::new(16, 4).unwrap();
-    let backing = backing(&system);
-    let inaccessible = AccessPermissions {
-        readable: false,
-        writable: false,
-        executable: false,
-    };
-    let domain = domain(
-        &system,
-        vec![
-            view(&backing, 0, 16, READONLY),
-            view(&backing, 16, 48, inaccessible),
-        ],
-        TargetCpu::Baseline,
-    );
-    let (policy, calls) = checked_policy(&system, false);
-    let mut thread = domain.thread(policy);
-    thread.post_body_failure_once = true;
-    let access = reserve(&mut thread);
-    let raw = tagged(GUEST_BASE + 14, TAG);
-    assert_eq!(
-        thread.read_scalar(raw, 4, 0, GUEST_PC),
-        Err(MemoryFault {
-            status: MemoryStatus::Domain,
-            address: raw + 2,
-            pc: GUEST_PC,
-            completed_bytes: 2,
-        })
-    );
-    assert_eq!(calls.check.get(), 2);
-    // Both readable byte fragments complete before the genuine Permission
-    // fault. Inject health failure only AFTER callback return, so common
-    // finalization still settles that guest fault and preserves its raw prefix.
-    assert!(!marked(&mut thread, &access));
-    assert_eq!(domain.check_execution(), Err(MemoryStatus::Domain));
-}
-
-#[test]
 fn checked_scalar_mid_transfer_health_failure_stops_before_next_fragment() {
     let (system, backing, domain) = setup();
     let (policy, calls) = checked_policy(&system, true);

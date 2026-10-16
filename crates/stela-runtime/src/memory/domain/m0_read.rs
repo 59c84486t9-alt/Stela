@@ -11,7 +11,7 @@ pub(crate) mod pair;
 #[path = "m0_read/pair_ram.rs"]
 mod pair_ram;
 #[cfg(all(test, target_arch = "x86_64"))]
-pub(crate) use pair_ram::fixtures as pair_read_fixtures;
+pub(crate) use pair_ram::tests as pair_read_fixtures;
 pub(crate) use pair_ram::{
     M0RamPairReadPlatformError, M0RamPairReadPrepared, M0RamPairReadProgress,
     prepare_aligned_device_ram8_pair,

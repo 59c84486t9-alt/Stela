@@ -377,4 +377,4 @@ pub(crate) fn prepare_aligned_device_ram8_or_pair<'loan, 'owner>(
     any(target_os = "macos", target_os = "linux")
 ))]
 #[path = "stores/tests.rs"]
-pub(crate) mod fixtures;
+pub(crate) mod tests;

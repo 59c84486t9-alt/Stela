@@ -351,13 +351,6 @@ pub(crate) use stores::{
     prepare_aligned_device_ram8_or_pair,
 };
 
-#[cfg(all(
-    test,
-    target_arch = "x86_64",
-    any(target_os = "macos", target_os = "linux")
-))]
-pub(crate) use stores::fixtures as store_fixtures;
-
 // Fixture-only original RAM observations; no guest access permission.
 #[cfg(test)]
 #[path = "physical/source_diagnostic.rs"]
@@ -370,42 +363,14 @@ mod source_diagnostic;
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-impl PhysicalAddressSpace {
-    pub(crate) fn fixture_advance_source_generation(&self) -> Result<(), String> {
-        self.check_source_binding()
-            .map_err(|error| error.to_string())?;
-        let mut state = self
-            .domain
-            .state
-            .lock()
-            .map_err(|_| "actual domain lock poisoned".to_string())?;
-        state.snapshot.generation = state
-            .snapshot
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| "actual fixture domain generation overflow".to_string())?;
-        Ok(())
-    }
-}
-
-#[cfg(all(test, target_arch = "x86_64"))]
-#[path = "physical/exception_fixture.rs"]
-pub(crate) mod exception_fixture;
+impl PhysicalAddressSpace {}
 
 #[cfg(all(
     test,
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-impl super::MemorySystem {
-    pub(crate) fn fixture_hold_device_ram_order(
-        &self,
-    ) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
-        self.device_ram_order
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("actual fixture device order unavailable"))
-    }
-}
+impl super::MemorySystem {}
 
 #[path = "physical/walked.rs"]
 mod walked;

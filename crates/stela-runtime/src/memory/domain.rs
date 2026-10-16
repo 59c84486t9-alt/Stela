@@ -217,8 +217,6 @@ enum DomainRole {
 pub struct MemoryDomain {
     role: DomainRole,
     state: Mutex<DomainState>,
-    #[cfg(test)]
-    admission_barrier: Mutex<Option<Arc<std::sync::Barrier>>>,
     target: TargetCpu,
     system: Arc<MemorySystem>,
     address_space: Option<u64>,
@@ -314,8 +312,6 @@ impl MemoryDomain {
                 native_loans: 0,
                 servicing: false,
             }),
-            #[cfg(test)]
-            admission_barrier: Mutex::new(None),
             target,
             system,
             address_space,
@@ -347,8 +343,6 @@ impl MemoryDomain {
             domain: Arc::clone(self),
             reservation: self.system.reservations.thread(),
             policy,
-            #[cfg(test)]
-            post_body_failure_once: false,
         }
     }
 
@@ -546,8 +540,6 @@ pub struct MemoryThread<P> {
     domain: Arc<MemoryDomain>,
     reservation: ReservationThread,
     policy: P,
-    #[cfg(test)]
-    post_body_failure_once: bool,
 }
 
 impl<P: DataPolicy> MemoryThread<P> {
@@ -619,14 +611,6 @@ impl<P: DataPolicy> MemoryThread<P> {
             }
         }
         Ok(())
-    }
-
-    /// Test-only injection at the provider's real post-body finalization boundary.
-    /// The next returned body consumes the flag and fails the actual shared
-    /// MemorySystem; callers must retain fault/native-execution provenance.
-    #[cfg(test)]
-    pub(crate) fn inject_post_body_failure_once_for_test(&mut self) {
-        self.post_body_failure_once = true;
     }
 
     pub fn policy_mut(&mut self) -> &mut P {
@@ -744,10 +728,6 @@ impl<P: DataPolicy> MemoryThread<P> {
             reserved_tail: 0,
         };
         let result = callback(&mut view);
-        #[cfg(test)]
-        if core::mem::take(&mut self.post_body_failure_once) {
-            self.domain.system.failed.store(true, Ordering::Release);
-        }
         let finalization = MemoryStatus::from_code(view.fault_kind)
             .ok_or(MemoryStatus::Domain)
             .and_then(|status| self.settle_fault(status))

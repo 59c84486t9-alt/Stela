@@ -1,7 +1,5 @@
 //! Fresh loader-owned RAM with explicit source-physical placements.
 //! Capacity is descriptive; only explicitly initialized/zeroed extents acquire backing.
-#[cfg(test)]
-use super::backing::AccessKind;
 use super::{
     MAX_IMAGE_MEMORY_BYTES,
     backing::{AccessError, AccessPermissions, MemoryBacking, MemoryView},
@@ -116,17 +114,6 @@ pub struct SourceRamDeclaration {
     pub target: TargetCpu,
     pub declared_capacity: Vec<PhysicalRamRange>,
     pub initialized: Vec<OwnedRamExtent>,
-}
-
-/// Fixture-only alias of one actual initialized extent. It creates no new
-/// storage and cannot be used by a production declaration or constructor.
-#[cfg(test)]
-pub(crate) struct SourceRamTestAlias {
-    pub source_pa: u64,
-    pub initialized_source_pa: u64,
-    pub source_offset: usize,
-    pub bytes: usize,
-    pub permissions: SourceRamPermissions,
 }
 
 pub(crate) struct SourceRamSystemConfig {
@@ -259,35 +246,7 @@ pub(crate) fn materialize_source_ram_with_zeroed(
     zeroed: Vec<ZeroedRamExtent>,
     config: SourceRamSystemConfig,
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-    #[cfg(test)]
-    {
-        materialize_source_ram_impl(declaration, zeroed, Vec::new(), config, &[])
-    }
-    #[cfg(not(test))]
-    {
-        materialize_source_ram_impl(declaration, zeroed, Vec::new(), config)
-    }
-}
-
-/// Existing ownership fixtures may explicitly place real backing aliases before
-/// the sole physical domain exists. This API is absent from production builds.
-#[cfg(test)]
-pub(crate) fn materialize_source_ram_with_test_aliases(
-    declaration: SourceRamDeclaration,
-    config: SourceRamSystemConfig,
-    aliases: &[SourceRamTestAlias],
-) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-    materialize_source_ram_impl(declaration, Vec::new(), Vec::new(), config, aliases)
-}
-
-#[cfg(test)]
-pub(crate) fn materialize_source_ram_with_zeroed_test_aliases(
-    declaration: SourceRamDeclaration,
-    zeroed: Vec<ZeroedRamExtent>,
-    config: SourceRamSystemConfig,
-    aliases: &[SourceRamTestAlias],
-) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-    materialize_source_ram_impl(declaration, zeroed, Vec::new(), config, aliases)
+    materialize_source_ram_impl(declaration, zeroed, Vec::new(), config)
 }
 
 /// Materialize complete explicitly initialized regions through the original
@@ -298,14 +257,7 @@ pub(crate) fn materialize_source_ram_regions(
     regions: Vec<InitializedRamRegion>,
     config: SourceRamSystemConfig,
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
-    #[cfg(test)]
-    {
-        materialize_source_ram_impl(declaration, zeroed, regions, config, &[])
-    }
-    #[cfg(not(test))]
-    {
-        materialize_source_ram_impl(declaration, zeroed, regions, config)
-    }
+    materialize_source_ram_impl(declaration, zeroed, regions, config)
 }
 
 fn materialize_source_ram_impl(
@@ -313,7 +265,6 @@ fn materialize_source_ram_impl(
     zeroed: Vec<ZeroedRamExtent>,
     regions: Vec<InitializedRamRegion>,
     config: SourceRamSystemConfig,
-    #[cfg(test)] aliases: &[SourceRamTestAlias],
 ) -> Result<MaterializedSourceRam, SourceRamBuildError> {
     use SourceRamBuildError as E;
     if declaration.declared_capacity.is_empty()
@@ -429,92 +380,6 @@ fn materialize_source_ram_impl(
         }
         recipes.push((leading, bytes));
     }
-    #[cfg(test)]
-    let alias_recipes = {
-        if extents.len().saturating_add(aliases.len()) > MAX_SOURCE_RAM_EXTENTS {
-            return Err(E::Declaration("source RAM fixture alias bound"));
-        }
-        let mut occupied: Vec<PhysicalRamRange> = extents
-            .iter()
-            .map(|extent| PhysicalRamRange {
-                source_pa: extent.source_pa,
-                bytes: extent.bytes() as u64,
-            })
-            .collect();
-        let mut validated = Vec::with_capacity(aliases.len());
-        for alias in aliases {
-            let (index, extent) = extents
-                .iter()
-                .enumerate()
-                .find(|(_, extent)| extent.source_pa == alias.initialized_source_pa)
-                .ok_or(E::Declaration(
-                    "fixture alias has no initialized source extent",
-                ))?;
-            let source_end = alias
-                .source_offset
-                .checked_add(alias.bytes)
-                .ok_or(E::Declaration("fixture alias source offset overflow"))?;
-            if source_end > extent.bytes() {
-                return Err(E::Declaration(
-                    "fixture alias exceeds initialized source bytes",
-                ));
-            }
-            let range = PhysicalRamRange {
-                source_pa: alias.source_pa,
-                bytes: alias.bytes as u64,
-            };
-            let limit = end(range)?;
-            if !declaration.declared_capacity.iter().any(|capacity| {
-                capacity.source_pa <= range.source_pa
-                    && end(*capacity).is_ok_and(|capacity_end| limit <= capacity_end)
-            }) {
-                return Err(E::Declaration("fixture alias outside declared capacity"));
-            }
-            if occupied.iter().any(|other| {
-                other.source_pa < limit
-                    && end(*other).is_ok_and(|other_end| range.source_pa < other_end)
-            }) {
-                return Err(E::Declaration(
-                    "fixture alias overlaps physical source range",
-                ));
-            }
-            let permissions = alias.permissions;
-            let maximum = extent.permissions;
-            if permissions.readable && !maximum.readable
-                || permissions.writable && !maximum.writable
-                || permissions.executable && !maximum.executable
-                || permissions.writable
-                    && (!permissions.readable
-                        || permissions.executable
-                            && !matches!(&extent.initial, RamInitial::FilePrefix { .. }))
-                || !permissions.readable && !permissions.executable
-            {
-                return Err(E::Declaration("fixture alias exceeds source permissions"));
-            }
-            let original_address = extent
-                .source_pa
-                .checked_add(alias.source_offset as u64)
-                .ok_or(E::Declaration("fixture alias source address overflow"))?;
-            if alias.source_pa & 7 != original_address & 7 {
-                return Err(E::Declaration(
-                    "fixture alias loses physical eight-byte alignment",
-                ));
-            }
-            occupied.push(range);
-            let backing_offset = recipes[index]
-                .0
-                .checked_add(alias.source_offset)
-                .ok_or(E::Declaration("fixture alias backing offset overflow"))?;
-            let source_sha256 = match &extent.initial {
-                RamInitial::Bytes(bytes) => {
-                    Some(stela_core::sha256(&bytes[alias.source_offset..source_end]))
-                }
-                RamInitial::Zeroed(_) | RamInitial::FilePrefix { .. } => None,
-            };
-            validated.push((index, alias, backing_offset, source_sha256));
-        }
-        validated
-    };
     // Never accept an existing coherence owner or infer freshness from Arc counts.
     let system = MemorySystem::new(
         config.reservation_granule_bytes,
@@ -600,44 +465,6 @@ fn materialize_source_ram_impl(
         });
         views.push(view);
     }
-    #[cfg(test)]
-    for (index, alias, offset, source_sha256) in alias_recipes {
-        let source = &views[index];
-        let backing = Arc::clone(source.backing());
-        let permissions = AccessPermissions {
-            readable: alias.permissions.readable,
-            writable: alias.permissions.writable,
-            executable: alias.permissions.executable,
-        };
-        let source_sha256 = match source_sha256 {
-            Some(hash) => hash,
-            None => {
-                let pointer = backing
-                    .host_pointer(offset, alias.bytes, AccessKind::Read)
-                    .map_err(E::Backing)?;
-                // SAFETY: sole factory, same fresh zero backing, validated
-                // readable alias bounds, and no published writer or PE yet.
-                stela_core::sha256(unsafe {
-                    core::slice::from_raw_parts(pointer.as_ptr(), alias.bytes)
-                })
-            }
-        };
-        let view = MemoryView::new(backing, alias.source_pa, offset, alias.bytes, permissions)
-            .map_err(E::Backing)?;
-        // A real alias retains identical original storage; no copied-byte alias
-        // or host mapping is created. Immutable source backing stays host-RO.
-        layout.push(InitializedRamLayout {
-            range: PhysicalRamRange {
-                source_pa: alias.source_pa,
-                bytes: alias.bytes as u64,
-            },
-            permissions: alias.permissions,
-            source_sha256,
-            zero_initialized: layout[index].zero_initialized,
-            file_prefix: None,
-        });
-        views.push(view);
-    }
     let domain = MemoryDomain::new_source_physical_ram(
         declaration.address_space,
         Arc::clone(&system),
@@ -695,7 +522,6 @@ mod zeroed_tests {
 
     const CODE_PA: u64 = 0x1000;
     const RAM_PA: u64 = 0x2000;
-    const ALIAS_PA: u64 = 0x3000;
     const RAM_BYTES: u64 = 24;
     const ORIGINAL: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -815,40 +641,6 @@ mod zeroed_tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn fixture_alias_of_zeroed_ram_retains_the_original_backing_and_exact_initial_hash() {
-        let materialized = materialize_source_ram_with_zeroed_test_aliases(
-            declaration(),
-            vec![zeroed(RAM_PA, RAM_BYTES)],
-            config(),
-            &[SourceRamTestAlias {
-                source_pa: ALIAS_PA,
-                initialized_source_pa: RAM_PA,
-                source_offset: 8,
-                bytes: 8,
-                permissions: SourceRamPermissions {
-                    readable: true,
-                    writable: false,
-                    executable: false,
-                },
-            }],
-        )
-        .unwrap();
-        let ram = materialized.test_view(RAM_PA).unwrap();
-        let alias = materialized.test_view(ALIAS_PA).unwrap();
-        assert!(Arc::ptr_eq(ram.backing(), alias.backing()));
-        assert_eq!(alias.backing_offset(), ram.backing_offset() + 8);
-        assert!(!alias.permissions().writable);
-        let (binding, _) = materialized.into_parts();
-        assert!(binding.layout().initialized[2].zero_initialized);
-        assert_eq!(
-            binding.layout().initialized[2].source_sha256,
-            stela_core::sha256(&[0; 8])
-        );
-        let physical = PhysicalAddressSpace::from_materialized(binding).unwrap();
-        assert_eq!(physical.read_descriptor(ALIAS_PA).unwrap(), 0);
     }
 }
 

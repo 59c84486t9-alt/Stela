@@ -61,14 +61,6 @@ pub(crate) struct M0WriteNativeReport {
     pub(super) memory: Option<RawM0WriteMemory>,
     pub(super) completed_bytes: u64,
     pub(super) progress: M0RamWriteProgress,
-    #[cfg(all(
-        test,
-        target_arch = "x86_64",
-        any(target_os = "macos", target_os = "linux", target_os = "none")
-    ))]
-    pub(super) alias_monitor_verified: bool,
-    #[cfg(test)]
-    pub(super) producer_observation: Option<serde_json::Value>,
     pub(super) callback_failure: Option<CallbackFailure>,
     pub(super) failure: Option<M0WriteSessionFailure>,
 }
@@ -111,8 +103,6 @@ pub(super) struct NativeM0WriteSession<'call, 'owner, 'code> {
     context_before: ContextIdentity,
     invoked: bool,
     valid_return: bool,
-    #[cfg(test)]
-    producer_observation: Option<serde_json::Value>,
 }
 impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
     pub(super) fn prepare(
@@ -122,13 +112,6 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
         context: &'call mut ExecutionContext,
     ) -> Result<Self, M0RamWritePlatformError> {
         let prepared = prepare_aligned_device_ram8_or_pair(outer, control)?;
-        #[cfg(test)]
-        let producer_observation = control.producer_observation(outer).map_err(|error| {
-            M0RamWritePlatformError::SourceControl {
-                error,
-                progress: prepared.progress(),
-            }
-        })?;
         let context_before = ContextIdentity::capture(context);
         Ok(Self {
             prepared,
@@ -137,8 +120,6 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
             context_before,
             invoked: false,
             valid_return: false,
-            #[cfg(test)]
-            producer_observation: Some(producer_observation),
         })
     }
 
@@ -151,14 +132,6 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
             memory: None,
             completed_bytes: self.prepared.progress().completed_bytes,
             progress: self.prepared.progress(),
-            #[cfg(all(
-                test,
-                target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux", target_os = "none")
-            ))]
-            alias_monitor_verified: false,
-            #[cfg(test)]
-            producer_observation: self.producer_observation.take(),
             callback_failure: None,
             failure: None,
         };

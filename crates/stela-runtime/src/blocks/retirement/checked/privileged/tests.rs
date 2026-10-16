@@ -1,5 +1,3 @@
-#[path = "artifacts.rs"]
-pub(crate) mod artifacts;
 // Declared-software actual-owner tests; no original ARM/debug oracle claims.
 use super::*;
 use crate::{
@@ -224,20 +222,8 @@ fn actual_hvc_smc_enter_original_banks_and_sp_once() {
             let outcome = runtime.run_owned(
                 pe.loan(),
                 OwnedRunRequest {
-                    #[cfg(all(
-                        test,
-                        target_arch = "x86_64",
-                        any(target_os = "macos", target_os = "linux")
-                    ))]
-                    pair_read_fixture: None,
                     stop_pc: Some(GuestAddress(target)),
                     block_budget: 1,
-                    #[cfg(all(
-                        test,
-                        target_arch = "x86_64",
-                        any(target_os = "macos", target_os = "linux")
-                    ))]
-                    verify_pair_alias_monitor: false,
                 },
             );
             assert!(matches!(outcome.stop, OwnedStop::StopAddress));
@@ -277,20 +263,8 @@ fn actual_hlt_stops_native_and_keeps_restart_pc() {
         let outcome = runtime.run_owned(
             pe.loan(),
             OwnedRunRequest {
-                #[cfg(all(
-                    test,
-                    target_arch = "x86_64",
-                    any(target_os = "macos", target_os = "linux")
-                ))]
-                pair_read_fixture: None,
                 stop_pc: None,
                 block_budget: 1,
-                #[cfg(all(
-                    test,
-                    target_arch = "x86_64",
-                    any(target_os = "macos", target_os = "linux")
-                ))]
-                verify_pair_alias_monitor: false,
             },
         );
         assert!(matches!(
@@ -310,20 +284,8 @@ fn actual_hlt_stops_native_and_keeps_restart_pc() {
         let denied = runtime.run_owned(
             pe.loan(),
             OwnedRunRequest {
-                #[cfg(all(
-                    test,
-                    target_arch = "x86_64",
-                    any(target_os = "macos", target_os = "linux")
-                ))]
-                pair_read_fixture: None,
                 stop_pc: None,
                 block_budget: 1,
-                #[cfg(all(
-                    test,
-                    target_arch = "x86_64",
-                    any(target_os = "macos", target_os = "linux")
-                ))]
-                verify_pair_alias_monitor: false,
             },
         );
         assert!(matches!(denied.stop, OwnedStop::EntryDeclined(_)));
@@ -568,7 +530,6 @@ fn actual_halted_movt_480_literal_model_outputs_and_full_bank_preservation() {
                         .write_ffr(&vec![0x5a; length.predicate_bytes()])
                         .unwrap();
                 }
-                let before_artifact = artifacts::snapshot(&thread.registers, &scalable, &system);
                 let expected_banks = banks(&scalable, &thread.registers, sm);
                 let mut expected_registers = thread.registers.clone();
                 for change in case["x_changes"].as_array().unwrap() {
@@ -583,7 +544,6 @@ fn actual_halted_movt_480_literal_model_outputs_and_full_bank_preservation() {
                     ScalableControls::new(lengths[4], true),
                 )
                 .unwrap();
-                let before_context = artifacts::context(&context);
                 let (domain, mut memory) = memory();
                 let mut producers = unsafe { SoftwareAsyncDomain::fresh_software_pe() };
                 let keys = [producers.register_debug().unwrap()];
@@ -626,45 +586,12 @@ fn actual_halted_movt_480_literal_model_outputs_and_full_bank_preservation() {
                         )
                         .unwrap()
                     };
-                    let before_lifecycle = {
-                        let resources = accept_retained_loan(pe.loan());
-                        artifacts::actual_lifecycle(
-                            resources.debug.as_ref(),
-                            resources.system,
-                            resources.thread.pc,
-                        )
-                    };
                     pe.queue_editr(
                         0,
                         u32::from_str_radix(case["word"].as_str().unwrap(), 16).unwrap(),
                     )
                     .unwrap();
                     let outcome = pe.run_editr();
-                    // Retain complete actual after-state/outcome/context before
-                    // the first semantic assertion, including failure outcomes.
-                    {
-                        let resources = accept_retained_loan(pe.loan());
-                        let original_scalable = resources.backend.scalable.as_ref().unwrap();
-                        let after = artifacts::snapshot(
-                            &resources.thread.registers,
-                            original_scalable.state,
-                            resources.system,
-                        );
-                        let after_context = artifacts::context(original_scalable.context);
-                        let after_lifecycle = artifacts::actual_lifecycle(
-                            resources.debug.as_ref(),
-                            resources.system,
-                            resources.thread.pc,
-                        );
-                        artifacts::movement_case(
-                            u32::from_str_radix(case["word"].as_str().unwrap(), 16).unwrap(),
-                            before_artifact,
-                            after,
-                            serde_json::json!({"before":before_lifecycle,"after":after_lifecycle}),
-                            format!("{outcome:?}"),
-                            serde_json::json!({"before":before_context,"after":after_context}),
-                        );
-                    }
                     assert!(
                         matches!(outcome.stop, super::super::halted::DebugStop::Complete),
                         "{outcome:?}"
@@ -724,94 +651,6 @@ fn raw_editr_err_ignores_unallocated_word_before_decode() {
     });
 }
 
-/// Reuses dev/block_system_corpus.py's exact build/source binding and serialized
-/// invocation. This family contributes one focused ignored test and literal
-/// model data; it adds no original launcher or alternate execution runner.
-#[test]
-#[ignore = "requires coordinated exact-source privileged corpus slot and report path"]
-#[cfg(target_arch = "x86_64")]
-fn actual_privileged_model_corpus() {
-    let report_path = std::path::PathBuf::from(
-        std::env::var_os("STELA_PRIVILEGED_CORPUS_REPORT")
-            .expect("exact corpus report path required before any execution"),
-    );
-    assert!(
-        !report_path.exists(),
-        "immutable corpus report already exists"
-    );
-    artifacts::reset();
-    actual_fresh_factory_hvc_hlt_dcps_lifetime();
-    actual_fresh_factory_sme2_movt_owns_original_storage();
-    actual_hvc_smc_enter_original_banks_and_sp_once();
-    actual_hlt_stops_native_and_keeps_restart_pc();
-    actual_dcps_all_targets_stay_halted_and_preserve_pc();
-    actual_drps_restores_saved_sp_without_branch_or_resume();
-    refused_debug_input_stays_queued_and_dropped_active_poison_stays_terminal();
-    actual_halted_movt_480_literal_model_outputs_and_full_bank_preservation();
-    raw_editr_err_ignores_unallocated_word_before_decode();
-    absent_actual_exception_target_refuses_before_native_or_source_effects();
-    actual_domain_failure_after_debug_effects_preserves_prefix_and_poison();
-    let mut sources = std::collections::BTreeMap::new();
-    macro_rules! compiled_source {
-        ($relative:literal) => {
-            sources.insert(
-                concat!("crates/stela-runtime/src/", $relative),
-                stela_core::sha256(include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/src/",
-                    $relative
-                ))),
-            );
-        };
-    }
-    compiled_source!("blocks/retirement/checked/software_privileged.rs");
-    compiled_source!("blocks/retirement/checked/privileged/artifacts.rs");
-    compiled_source!("blocks/retirement/checked/privileged.rs");
-    compiled_source!("blocks/retirement/checked/privileged_debug.rs");
-    compiled_source!("blocks/retirement/checked/halted.rs");
-    compiled_source!("blocks/retirement/checked/provider.rs");
-    compiled_source!("blocks/retirement/checked/source.rs");
-    compiled_source!("blocks/retirement/checked/mod.rs");
-    compiled_source!("blocks/retirement/checked/privileged/tests.rs");
-    compiled_source!("system/execution/owner.rs");
-    compiled_source!("system/execution/authority.rs");
-    compiled_source!("system/state.rs");
-    compiled_source!("system/state/higher_el.rs");
-    compiled_source!("system/state/stacks.rs");
-    compiled_source!("system/debug/halted.rs");
-    compiled_source!("system/debug/halting.rs");
-    compiled_source!("system/debug/drps.rs");
-    compiled_source!("system/exception/higher_el.rs");
-    compiled_source!("blocks/retirement/software_async.rs");
-    compiled_source!("blocks/retirement/software_async/debug.rs");
-    let raw_observations = artifacts::rows();
-    let actual_system_calls = raw_observations
-        .iter()
-        .filter(|row| {
-            row["kind"] == "actual_system_rx_and_state" && row["phase"] == "before-native"
-        })
-        .count();
-    let actual_movt_cases = raw_observations
-        .iter()
-        .filter(|row| row["kind"] == "actual_movt_case")
-        .count();
-    let report = serde_json::json!({
-        "kind":"actual_privileged_model_corpus_v2", "passed":true,
-        "raw_observations":raw_observations,
-        "oracle":"source-reviewed architecture + independent MOVT model; no ARM/debug original",
-        "positive_originals":0, "halted_transport":"actual declared serialized software input only",
-        "native_movt_model_comparisons":actual_movt_cases, "native_system_carriers":actual_system_calls,
-        "factory_lifetime_cases":2, "extra_factory_movt_cases":1,
-        "compiled_sources_sha256":sources, "compiler_source_sha256":crate::compiler_source_sha256(),
-        "movement_literal_model_sha256":stela_core::sha256(include_bytes!("movement_model.json")),
-        "limits":["No instruction admission or positive original evidence follows from this corpus alone",
-            "Unqualified/Undefined/debug-access-fault delivery is unavailable and refused before source consumption",
-            "Current debug-only producer universe refuses IRQ/FIQ/wait-deadline composition",
-            "Context/native injected failure cases and current emitted-binary/performance inspection require separate focused proof"]
-    });
-    std::fs::write(report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
-}
-
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn absent_actual_exception_target_refuses_before_native_or_source_effects() {
@@ -834,20 +673,8 @@ fn absent_actual_exception_target_refuses_before_native_or_source_effects() {
         let outcome = runtime.run_owned(
             pe.loan(),
             OwnedRunRequest {
-                #[cfg(all(
-                    test,
-                    target_arch = "x86_64",
-                    any(target_os = "macos", target_os = "linux")
-                ))]
-                pair_read_fixture: None,
                 stop_pc: None,
                 block_budget: 1,
-                #[cfg(all(
-                    test,
-                    target_arch = "x86_64",
-                    any(target_os = "macos", target_os = "linux")
-                ))]
-                verify_pair_alias_monitor: false,
             },
         );
         assert!(matches!(outcome.stop, OwnedStop::EntryDeclined(_)));
@@ -857,79 +684,6 @@ fn absent_actual_exception_target_refuses_before_native_or_source_effects() {
         assert_eq!(pe.registers(), &before);
     });
     assert_eq!(system, original_system);
-}
-
-#[test]
-#[cfg(target_arch = "x86_64")]
-fn actual_domain_failure_after_debug_effects_preserves_prefix_and_poison() {
-    let ids = ids(false);
-    let mut system = system(Arc::clone(&ids), false, PSTATE_EL1T | NZCV_MASK | DAIF_MASK);
-    let mut thread = thread();
-    machine!(ids, system, thread, Status::ResetCatch, |pe| {
-        pe.queue_editr(0, 0xd6bf03e0).unwrap();
-        {
-            let mut resources = accept_retained_loan(pe.loan());
-            let outer = resources.backend.memory.execution_loan().unwrap();
-            let mut prepared = resources
-                .backend
-                .prepare_debug(
-                    resources.system,
-                    &mut resources.thread.registers,
-                    resources.debug.as_ref().unwrap(),
-                    &outer,
-                )
-                .unwrap()
-                .unwrap();
-            let attempt = resources
-                .authority
-                .begin_debug(&super::super::ConsumerKey(()))
-                .unwrap();
-            let mut active = super::super::Active {
-                pe: &mut resources,
-                outer: Some(outer),
-                attempt,
-                closed: false,
-            };
-            active
-                .pe
-                .backend
-                .execute_debug(
-                    &mut prepared,
-                    active.pe.system,
-                    &mut active.pe.thread.registers,
-                    active.pe.debug.as_mut().unwrap(),
-                    active.outer.as_ref().unwrap(),
-                )
-                .unwrap();
-            assert_eq!(prepared.record.last_effect, "ITE restored");
-            assert_eq!(active.pe.thread.registers.sp, 0x1110);
-            // Existing shared-memory failure injector fails the ORIGINAL MemorySystem
-            // at its real finalizer. This is test-only, no production callback hook.
-            active
-                .pe
-                .backend
-                .memory
-                .inject_post_body_failure_once_for_test();
-            let memory_failure = unsafe { active.pe.backend.memory.with_checked_view(|_| ()) };
-            assert_eq!(memory_failure, Err(MemoryStatus::Domain));
-            assert!(active.settle_debug(PC).is_err());
-            assert!(active.pe.authority.debug_attempt(attempt));
-            assert_eq!(active.pe.thread.registers.sp, 0x1110);
-            assert_eq!(active.pe.thread.pc, PC);
-            drop(active);
-            assert!(!resources.authority.halted());
-            assert!(!resources.authority.ready());
-            assert!(resources.backend.producers.next_editr().unwrap().is_none());
-            assert_eq!(resources.debug.as_ref().unwrap().edscr() & ITE, ITE);
-        }
-        assert!(matches!(
-            pe.run_editr().stop,
-            super::super::halted::DebugStop::EntryDeclined(_)
-        ));
-    });
-    assert_eq!(thread.registers.sp, 0x1110);
-    assert_eq!(thread.registers.nzcv, 0);
-    assert_eq!(system.pstate_misc(), PSTATE_EL1T);
 }
 
 #[test]
@@ -1038,7 +792,6 @@ fn actual_fresh_factory_hvc_hlt_dcps_lifetime() {
         ],
     )
     .unwrap();
-    artifacts::factory_report(&report);
     assert_eq!(report.receipts.len(), 3);
     assert_eq!(report.thread.pc, GuestAddress(0x8400));
     assert!(report.receipts[0].stop.contains("StopAddress"));
@@ -1166,7 +919,6 @@ fn actual_fresh_factory_sme2_movt_owns_original_storage() {
         }],
     )
     .unwrap();
-    artifacts::factory_report(&report);
     assert_eq!(report.thread.registers.x[0], expected_x0);
     assert_eq!(report.thread.pc, PC);
     assert_eq!(report.receipts[0].stop, "Complete");

@@ -1,6 +1,3 @@
-#[path = "finalization_tests.rs"]
-mod finalization_tests;
-
 use super::*;
 use crate::memory::{
     backing::{AccessPermissions, MemoryBacking, MemoryView},

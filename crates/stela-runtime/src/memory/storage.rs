@@ -23,19 +23,6 @@ pub(super) struct NativeMapping {
     _boot: crate::execution::boot_frames::BootRam,
     base: NonNull<u8>,
     bytes: usize,
-    #[cfg(test)]
-    retirement: Arc<std::sync::OnceLock<MappingRetirement>>,
-}
-
-/// Test observation of THIS allocation's real unmap, never global VA occupancy.
-/// The retained receipt owns no storage/backing/file or native access capability.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MappingRetirement {
-    base: usize,
-    bytes: usize,
-    status: i32,
-    os_error: Option<i32>,
 }
 
 impl NativeMapping {
@@ -51,12 +38,7 @@ impl NativeMapping {
     /// their separate source-stability contract. Adoption itself changes no rights.
     #[cfg(feature = "std")]
     pub(super) unsafe fn adopt(base: NonNull<u8>, bytes: usize) -> Self {
-        Self {
-            base,
-            bytes,
-            #[cfg(test)]
-            retirement: Arc::new(std::sync::OnceLock::new()),
-        }
+        Self { base, bytes }
     }
 }
 
@@ -72,31 +54,7 @@ unsafe impl Sync for NativeMapping {}
 impl Drop for NativeMapping {
     fn drop(&mut self) {
         // SAFETY: adoption transferred the sole obligation for this exact extent.
-        #[cfg(not(test))]
-        unsafe {
-            libc::munmap(self.base.as_ptr().cast(), self.bytes)
-        };
-        #[cfg(test)]
-        {
-            // SAFETY: same actual owned extent/one unmap obligation as production.
-            let status = unsafe { libc::munmap(self.base.as_ptr().cast(), self.bytes) };
-            let os_error = if status == 0 {
-                None
-            } else {
-                std::io::Error::last_os_error().raw_os_error()
-            };
-            assert!(
-                self.retirement
-                    .set(MappingRetirement {
-                        base: self.base.as_ptr() as usize,
-                        bytes: self.bytes,
-                        status,
-                        os_error,
-                    })
-                    .is_ok(),
-                "mapping retirement recorded twice"
-            );
-        }
+        unsafe { libc::munmap(self.base.as_ptr().cast(), self.bytes) };
     }
 }
 

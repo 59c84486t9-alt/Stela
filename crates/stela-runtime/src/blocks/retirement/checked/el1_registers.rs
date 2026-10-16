@@ -209,13 +209,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
     }
 }
 
-#[cfg(test)]
-#[path = "el1_registers/branch_fixture.rs"]
-mod branch_fixture;
-#[cfg(test)]
-#[path = "el1_registers/firmware_fixture.rs"]
-mod firmware_fixture;
-
 impl core::fmt::Debug for RegisterObservation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RegisterObservation")

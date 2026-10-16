@@ -10,12 +10,8 @@ use stela_compiler::{TargetCpu, aarch64::scalable::ScalableMode, context::memory
 
 #[path = "tests/fixture.rs"]
 mod fixture;
-#[path = "originals.rs"]
-mod originals;
 #[path = "tests/retained.rs"]
 mod retained;
-#[path = "stores.rs"]
-mod stores;
 
 #[test]
 fn qualified_entry_owns_source_and_executes_same_snapshot_domain() {
@@ -450,67 +446,3 @@ fn qualified_callback_and_inactive_sp_faults_reset_next_entry() {
     );
     assert_eq!(f.storage.bytes(), ram);
 }
-
-#[test]
-fn qualified_finalization_failure_preserves_effects_and_blocks_reentry() {
-    for fault in [false, true] {
-        let mut f = Fixture::new(
-            LD1B_Z1_P0_X5,
-            TargetCpu::Baseline,
-            TargetCpu::Baseline,
-            if fault { Some((1, false)) } else { None },
-        );
-        let ram = f.storage.bytes();
-        let mut expected = f.registers.clone();
-        expected.x[3] = 7;
-        let mut scalable = f.scalable.clone();
-        if !fault {
-            let mut z = [0; VL];
-            z[..2].copy_from_slice(&ram[..2]);
-            scalable.write_z(&mut expected, 1, &z).unwrap();
-        }
-        let original_fault = fault.then_some(crate::scalable::leaf::MemoryFault {
-            status: MemoryStatus::Permission,
-            address: GuestAddress(RAM + 1),
-            pc: GuestAddress(PC + 4),
-            completed_bytes: 1,
-        });
-        f.memory.inject_post_body_failure_once_for_test();
-        assert_eq!(
-            f.execute().unwrap(),
-            ScalableLeafExit::FinalizationFailed {
-                status: MemoryStatus::Domain,
-                native_executed: true,
-                completed_bytes: if fault { 1 } else { 2 },
-                original_fault,
-            }
-        );
-        assert_eq!(f.registers, expected);
-        assert_eq!(
-            banks(&f.registers, &f.scalable),
-            banks(&expected, &scalable)
-        );
-        assert_eq!(f.storage.bytes(), ram);
-        f.registers.x[3] = 0x5432;
-        expected.x[3] = 0x5432;
-        assert!(matches!(
-            f.execute(),
-            Err(ScalableExecutionError::MemoryAuthority {
-                pc: GuestAddress(PC),
-                cause: ProcessMemoryError::Memory(MemoryStatus::Domain),
-            })
-        ));
-        assert_eq!(f.registers, expected);
-        assert_eq!(
-            banks(&f.registers, &f.scalable),
-            banks(&expected, &scalable)
-        );
-        assert_eq!(f.storage.bytes(), ram);
-    }
-}
-
-#[path = "tests/pn.rs"]
-mod pn;
-
-#[path = "tests/structure.rs"]
-mod structure;

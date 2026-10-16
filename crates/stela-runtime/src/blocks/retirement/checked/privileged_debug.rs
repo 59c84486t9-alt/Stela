@@ -189,8 +189,6 @@ impl PrivilegedOwner<'_> {
             // W^X mapping and all metadata allocation precede source consumption,
             // ITE clear and first architectural instruction effect.
             let mapping = Mapping::new(prepared.code())?;
-            #[cfg(test)]
-            super::privileged::tests::artifacts::capsule(&prepared, &mapping);
             record.compiler_source_sha256 = Some(crate::compiler_source_sha256().to_owned());
             record.native_sha256 = Some(stela_core::sha256(prepared.code()));
             record.word_to_native = Some(*prepared.word_to_native());

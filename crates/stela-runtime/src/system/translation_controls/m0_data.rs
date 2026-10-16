@@ -326,10 +326,6 @@ trait WriteCurrency: InputCurrency {
     fn validate_inflight(&self, owner: &TranslationControls) -> Result<(), M0ControlError>;
     fn actual_system(&self) -> &SystemState;
     fn actual_pstate(&self) -> u64;
-    #[cfg(test)]
-    fn source_generation(&self) -> u64;
-    #[cfg(test)]
-    fn actual_address_space(&self) -> Option<u64>;
 }
 impl WriteCurrency for M0WriteSourceInput<'_, '_> {
     fn validate_inflight(&self, owner: &TranslationControls) -> Result<(), M0ControlError> {
@@ -351,14 +347,6 @@ impl WriteCurrency for M0WriteSourceInput<'_, '_> {
     fn actual_pstate(&self) -> u64 {
         self.original().actual_pstate()
     }
-    #[cfg(test)]
-    fn source_generation(&self) -> u64 {
-        self.original().source_generation()
-    }
-    #[cfg(test)]
-    fn actual_address_space(&self) -> Option<u64> {
-        self.original().actual_address_space()
-    }
 }
 
 /// Noncopyable actual-bank/source/outer loan. This is not a writable PA pin.
@@ -373,25 +361,6 @@ pub(crate) struct M0DataWriteLoan<'cpu> {
     source_pin: crate::memory::domain::physical::BoundPhysicalInstruction,
 }
 impl M0DataWriteLoan<'_> {
-    /// Descriptive fixture data read from original retained owners, never a permit.
-    #[cfg(test)]
-    pub(crate) fn producer_observation(
-        &self,
-        execution: &MemoryExecutionLoan,
-    ) -> Result<serde_json::Value, M0ControlError> {
-        self.validate_current(execution)?;
-        Ok(serde_json::json!({"source_pc":self.intent.source_pc.0,
-            "source_word":self.intent.source_word,"source_generation":self.source.source_generation(),
-            "control_generation":self.generation,
-            "physical_domain_generation":self.physical_space().domain().generation().map_err(M0ControlError::Domain)?,
-            "actual_address_space":self.source.actual_address_space(),
-            "actual_pre_pstate":self.source.actual_pstate(),
-            "same_original_outer":core::ptr::eq(execution,self.outer),
-            "readbacks":{"sctlr_el1":self.owner.readbacks.sctlr_el1,
-                "tcr_el1":self.owner.readbacks.tcr_el1,"ttbr0_el1":self.owner.readbacks.ttbr0_el1,
-                "ttbr1_el1":self.owner.readbacks.ttbr1_el1,"mair_el1":self.owner.readbacks.mair_el1}}))
-    }
-
     pub(crate) fn validate_current(
         &self,
         execution: &MemoryExecutionLoan,
@@ -531,34 +500,15 @@ impl InputCurrency for M0PairReadSourceInput<'_, '_> {
     }
 }
 trait PairReadCurrency: InputCurrency {
-    #[cfg(test)]
-    fn observed_identification(&self) -> Result<(u64, u64), M0ControlError>;
     fn actual_system(&self) -> &SystemState;
     fn actual_pstate(&self) -> u64;
-    #[cfg(test)]
-    fn source_generation(&self) -> u64;
-    #[cfg(test)]
-    fn actual_address_space(&self) -> Option<u64>;
 }
 impl PairReadCurrency for M0PairReadSourceInput<'_, '_> {
-    #[cfg(test)]
-    fn observed_identification(&self) -> Result<(u64, u64), M0ControlError> {
-        self.observed_pair_identification()
-            .map_err(|error| M0ControlError::Source(error.to_string()))
-    }
     fn actual_system(&self) -> &SystemState {
         self.original().actual_system()
     }
     fn actual_pstate(&self) -> u64 {
         self.original().actual_pstate()
-    }
-    #[cfg(test)]
-    fn source_generation(&self) -> u64 {
-        self.original().source_generation()
-    }
-    #[cfg(test)]
-    fn actual_address_space(&self) -> Option<u64> {
-        self.original().actual_address_space()
     }
 }
 /// Same actual source/control/identification/outer. No target is translated or
@@ -611,22 +561,6 @@ impl M0DataPairReadLoan<'_> {
             self.physical_space(),
             self.intent.source_pc.0,
             self.intent.member(member),
-        )
-    }
-    #[cfg(test)]
-    pub(crate) fn producer_observation(
-        &self,
-        execution: &MemoryExecutionLoan,
-    ) -> Result<serde_json::Value, M0ControlError> {
-        self.validate_current(execution)?;
-        Ok(
-            serde_json::json!({"source_pc":self.intent.source_pc.0,"source_word":self.intent.source_word,
-            "source_generation":self.source.source_generation(),"control_generation":self.generation,
-            "physical_domain_generation":self.physical_space().domain().generation().map_err(M0ControlError::Domain)?,
-            "actual_address_space":self.source.actual_address_space(),"actual_pre_pstate":self.source.actual_pstate(),
-            "same_original_outer":core::ptr::eq(execution,self.outer),"actual_identification_mmfr2_isar3":self.source.observed_identification()?,
-            "readbacks":{"sctlr_el1":self.owner.readbacks.sctlr_el1,"tcr_el1":self.owner.readbacks.tcr_el1,
-            "ttbr0_el1":self.owner.readbacks.ttbr0_el1,"ttbr1_el1":self.owner.readbacks.ttbr1_el1,"mair_el1":self.owner.readbacks.mair_el1}}),
         )
     }
 }

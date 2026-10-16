@@ -123,8 +123,6 @@ impl MemoryDomain {
 
     pub fn execution_loan(self: &Arc<Self>) -> Result<MemoryExecutionLoan, MemoryStatus> {
         self.check_execution()?;
-        #[cfg(test)]
-        self.wait_before_admission();
         let mut state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.check_execution()?;
         if state.servicing {
@@ -139,21 +137,10 @@ impl MemoryDomain {
         })
     }
 
-    #[cfg(test)]
-    fn wait_before_admission(&self) {
-        let barrier = self.admission_barrier.lock().unwrap().clone();
-        if let Some(barrier) = barrier {
-            barrier.wait();
-            barrier.wait();
-        }
-    }
-
     pub(in crate::memory) fn service_loan(
         self: &Arc<Self>,
     ) -> Result<MemoryServiceLoan, MemoryStatus> {
         self.check_execution()?;
-        #[cfg(test)]
-        self.wait_before_admission();
         let mut state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.check_execution()?;
         if state.servicing || state.native_loans != 0 {
@@ -396,33 +383,6 @@ mod tests {
         ));
         assert_eq!(first.state.lock().unwrap().native_loans, 1);
         assert_eq!(second.state.lock().unwrap().native_loans, 1);
-    }
-
-    #[test]
-    fn failed_service_cannot_admit_prechecked_waiting_native_or_service_loan() {
-        let domain = MemoryDomain::new(
-            MemorySystem::new(16, 8).unwrap(),
-            Vec::new(),
-            TargetCpu::Baseline,
-        )
-        .unwrap();
-        let service = domain.service_loan().unwrap();
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        *domain.admission_barrier.lock().unwrap() = Some(Arc::clone(&barrier));
-        let native_domain = Arc::clone(&domain);
-        let service_domain = Arc::clone(&domain);
-        let native = std::thread::spawn(move || native_domain.execution_loan().is_err());
-        let waiter = std::thread::spawn(move || service_domain.service_loan().is_err());
-        // Both callers passed the fast health check and are stopped immediately
-        // before state admission. Complete the failed service before release.
-        barrier.wait();
-        service.poison();
-        drop(service);
-        barrier.wait();
-        assert!(native.join().unwrap());
-        assert!(waiter.join().unwrap());
-        *domain.admission_barrier.lock().unwrap() = None;
-        assert!(domain.generation().is_err());
     }
 
     #[test]

@@ -16,19 +16,6 @@ mod callback;
 mod session;
 use session::{M0PairReadNativeReport, M0PairReadSessionFailure, NativeM0PairReadSession};
 
-/// Finite fixture corruption only. No constructor grants source/PE/read rights.
-/// Absent from production builds; all positive runs select None.
-#[cfg(all(
-    test,
-    target_arch = "x86_64",
-    any(target_os = "macos", target_os = "linux")
-))]
-pub(crate) enum PairReadFixture {
-    DifferentOuter(crate::memory::domain::MemoryExecutionLoan),
-    GenerationBeforeInvoke,
-    GenerationAfterInvoke,
-}
-
 pub(crate) enum M0PairReadObservation {
     SourceResourceFailure {
         source_pc: GuestAddress,
@@ -54,25 +41,6 @@ pub(crate) enum M0PairReadObservation {
     },
 }
 impl M0PairReadObservation {
-    #[cfg(test)]
-    pub(in crate::blocks::retirement::checked) fn progress_observation(
-        &self,
-    ) -> Option<crate::memory::domain::m0_read::M0RamPairReadProgress> {
-        match self {
-            Self::PreparationFailure { error, .. } => Some(error.progress()),
-            Self::Native { report, .. } => Some(report.progress),
-            _ => None,
-        }
-    }
-    #[cfg(test)]
-    pub(in crate::blocks::retirement::checked) fn producer_observation(
-        &self,
-    ) -> Option<&serde_json::Value> {
-        match self {
-            Self::Native { report, .. } => report.producer_observation.as_ref(),
-            _ => None,
-        }
-    }
     fn retain_settlement_failure(observation: &mut Option<Self>, error: &anyhow::Error) {
         if let Some(Self::Native {
             settlement_failure, ..
@@ -90,12 +58,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
         accounting: &mut RunOutcome,
         observation: &mut Option<M0PairReadObservation>,
         prefixes: &mut Vec<SettledPrefix>,
-        #[cfg(all(
-            test,
-            target_arch = "x86_64",
-            any(target_os = "macos", target_os = "linux")
-        ))]
-        fixture: Option<&PairReadFixture>,
     ) -> anyhow::Result<M0Step> {
         *observation = None;
         self.require_native()?;
@@ -160,26 +122,11 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             let platform = platform.ok_or_else(|| {
                 anyhow::anyhow!("actual pair-read platform identification absent")
             })?;
-            #[cfg(all(
-                test,
-                target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
-            ))]
-            let input_outer = match fixture {
-                Some(PairReadFixture::DifferentOuter(foreign)) => foreign,
-                _ => outer,
-            };
-            #[cfg(not(all(
-                test,
-                target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
-            )))]
-            let input_outer = outer;
             let input = M0PairReadSourceInput::new(
                 &ConsumerKey(()),
                 bound,
                 &*self.pe.system,
-                input_outer,
+                outer,
                 memory,
                 &installed,
                 platform,
@@ -218,17 +165,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 session,
                 closed: false,
             };
-            #[cfg(all(
-                test,
-                target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
-            ))]
-            if matches!(fixture, Some(PairReadFixture::GenerationBeforeInvoke)) {
-                control
-                    .physical_space()
-                    .fixture_advance_source_generation()
-                    .map_err(anyhow::Error::msg)?;
-            }
             let report = retained.session.invoke(&mut candidate);
             let exit = report.returned_exit();
             let valid_report = report.invoked
@@ -244,19 +180,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 precommit_failure: None,
                 settlement_failure: None,
             });
-            #[cfg(all(
-                test,
-                target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
-            ))]
-            if matches!(fixture, Some(PairReadFixture::GenerationAfterInvoke)) {
-                // The actual native/carrier/prefix report was retained above.
-                // Corruption cannot erase it or authorize candidate settlement.
-                control
-                    .physical_space()
-                    .fixture_advance_source_generation()
-                    .map_err(anyhow::Error::msg)?;
-            }
             if !valid_report {
                 // The genuine report is already owned by output. Diagnostic
                 // formatting may allocate or panic; it cannot erase the report.

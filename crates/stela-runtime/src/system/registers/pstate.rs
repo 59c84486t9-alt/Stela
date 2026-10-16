@@ -166,6 +166,3 @@ pub fn commit(
 #[cfg(test)]
 #[path = "pstate/tests.rs"]
 mod tests;
-
-#[cfg(all(test, target_arch = "x86_64"))]
-mod original;

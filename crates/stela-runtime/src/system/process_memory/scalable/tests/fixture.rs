@@ -124,23 +124,6 @@ impl Storage {
         // SAFETY: callers observe only between synchronous invocations.
         unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), DATA_BYTES).to_vec() }
     }
-    pub(super) fn code_page(&self) -> Vec<u8> {
-        // SAFETY: callers observe only between synchronous invocations, using
-        // the retained allocation; the published guest code view is read-only.
-        unsafe {
-            std::slice::from_raw_parts(self.pointer.as_ptr().add(DATA_BYTES), CODE_PAGE_BYTES)
-                .to_vec()
-        }
-    }
-    /// Initialize retained fixture bytes before the first domain operation.
-    /// Caller must exclude all live reservations, readers and competing writers.
-    pub(super) unsafe fn write_bytes(&self, bytes: &[u8]) {
-        assert!(bytes.len() <= DATA_BYTES);
-        // SAFETY: caller excludes native invocation and every competing reader.
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.pointer.as_ptr(), bytes.len())
-        };
-    }
 }
 impl Drop for Storage {
     fn drop(&mut self) {
@@ -413,35 +396,6 @@ impl Fixture {
             lower_bits,
             data_rights,
             None,
-        )
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new_program_at_with_original_code_page(
-        words: &[u32],
-        guest_base: u64,
-        ram_base: u64,
-        svl_bytes: usize,
-        compiler_target: TargetCpu,
-        domain_target: TargetCpu,
-        split: Option<(usize, bool)>,
-        sme_version: u64,
-        mode: ScalableMode,
-        lower_bits: u8,
-        original_code_page: &[u8],
-    ) -> Self {
-        Self::new_program_at_with_source_code_page(
-            words,
-            guest_base,
-            ram_base,
-            svl_bytes,
-            compiler_target,
-            domain_target,
-            split,
-            sme_version,
-            mode,
-            lower_bits,
-            DATA_RIGHTS,
-            Some(original_code_page),
         )
     }
     #[allow(clippy::too_many_arguments)]

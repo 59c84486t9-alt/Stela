@@ -38,12 +38,7 @@ pub(crate) struct SourceWriteReceipt {
     before: u64,
     after: u64,
 }
-impl SourceWriteReceipt {
-    #[cfg(test)]
-    pub(crate) fn bytes(&self) -> usize {
-        self.bytes
-    }
-}
+impl SourceWriteReceipt {}
 impl core::fmt::Debug for SourceWriteReceipt {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SourceWriteReceipt")

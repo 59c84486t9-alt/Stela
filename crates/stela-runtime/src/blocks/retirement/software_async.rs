@@ -24,15 +24,8 @@ struct SourceKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingKind {
-    #[cfg(test)]
-    Unqualified,
-    Editr {
-        word: u32,
-        sequence: u64,
-    },
-    CrossHalt {
-        sequence: u64,
-    },
+    Editr { word: u32, sequence: u64 },
+    CrossHalt { sequence: u64 },
 }
 struct PendingEvent {
     source: u64,
@@ -98,18 +91,6 @@ impl SoftwareAsyncDomain {
             domain: self.identity.clone(),
             id,
         })
-    }
-
-    #[cfg(test)]
-    fn inject(&mut self, key: &SourceKey) -> Result<(), AsyncError> {
-        if !Arc::ptr_eq(&self.identity, &key.domain) || !self.registered.contains_key(&key.id) {
-            return Err(AsyncError::WrongProducer);
-        }
-        self.pending.push_back(PendingEvent {
-            source: key.id,
-            kind: PendingKind::Unqualified,
-        });
-        Ok(())
     }
 
     /// Registration is intentionally sticky. Dropping a producer does not

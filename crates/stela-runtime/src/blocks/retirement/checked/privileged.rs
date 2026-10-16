@@ -682,8 +682,6 @@ impl provider::Owner for PrivilegedOwner<'_> {
         self.domain
             .check_execution()
             .map_err(|e| anyhow::anyhow!("actual immediate native domain: {e:?}"))?;
-        #[cfg(test)]
-        tests::artifacts::system_native(bound, _system, registers, "before-native");
         // Exact one-word SystemV1 mapping returns only the original terminal;
         // no guest RAM, ExecutionContext or checked-memory callback is used by
         // this distinct compiler ABI. Actual Active retains source/RX/outer.
@@ -702,8 +700,6 @@ impl provider::Owner for PrivilegedOwner<'_> {
                 });
             }
         };
-        #[cfg(test)]
-        tests::artifacts::system_native(bound, _system, registers, "after-native");
         // Retain actual native bits even if source/control/domain finalization
         // cannot certify them. No saved observation is accepted as authority.
         let finalized = self
