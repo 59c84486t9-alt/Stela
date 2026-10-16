@@ -151,9 +151,12 @@ fn unpredictable_overlap(form: &str, word: u32) -> bool {
 
 /// Known QEMU deviations from the architecture; matching cases are not compared.
 fn oracle_limit(form: &str, state: &GuestState) -> bool {
-    // QEMU clears the sign of a NaN for vector FABS and FNEG even when FPCR.AH
-    // is set; the architecture leaves it unchanged.
-    let sign_of_nan = form.starts_with("FABS_asimdmisc") || form.starts_with("FNEG_asimdmisc");
+    // QEMU changes the sign of a NaN in vector FABS and FNEG, and when negating
+    // the Zm element of indexed SVE FCMLA, even when FPCR.AH is set;
+    // the architecture leaves it unchanged.
+    let sign_of_nan = form.starts_with("FABS_asimdmisc")
+        || form.starts_with("FNEG_asimdmisc")
+        || form.starts_with("fcmla_z_zzzi_");
     // QEMU implements FEAT_RPRES, which refines AH=1 estimates; the Apple
     // profile declares it absent.
     let estimate = form.starts_with("FRECPE_") || form.starts_with("FRSQRTE_");
