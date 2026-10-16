@@ -413,3 +413,7 @@ fn actual_basefour_eight_originals_and_same_owner_effects() {
     }
     std::fs::write(output.join("report.json"),serde_json::to_vec_pretty(&json!({"passed":true,"rows":results,"original_comparisons":CASES,"new_original_runs":0,"profile":"current_fresh_software_el1_platform_v1","limits":plan["scope"]})).unwrap()).unwrap();
 }
+
+// Physical Apple-HV observations remain distinct from the retained QEMU cohort.
+#[path = "apple_hv_fixture.rs"]
+mod apple_hv_fixture;
