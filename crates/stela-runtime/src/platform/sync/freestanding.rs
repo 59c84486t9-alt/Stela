@@ -8,7 +8,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(not(all(target_arch = "x86_64", target_os = "uefi")))]
 compile_error!("freestanding metadata locks require the x86-64 ring-0 platform");
 
 pub(crate) struct Mutex<T: ?Sized> {

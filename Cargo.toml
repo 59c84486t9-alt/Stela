@@ -6,7 +6,7 @@ members = [
     "crates/stela-runtime",
     "xtask",
 ]
-# Freestanding x86_64-unknown-none image with its own linker script and lockfile.
+# The UEFI application builds for its own target with aborting panics.
 exclude = ["crates/stela-boot"]
 resolver = "2"
 

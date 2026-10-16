@@ -1,7 +1,7 @@
 //! Native execution of registered leaf regions. Each mapping owns an immutable
 //! copy of its checked native bytes; replacing a registration invalidates it.
 
-#[cfg(all(target_arch = "x86_64", target_os = "none", not(feature = "std")))]
+#[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 pub(crate) mod boot_frames;
 pub(crate) mod context;
 pub(crate) mod floating_environment;

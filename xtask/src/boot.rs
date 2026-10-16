@@ -1,66 +1,59 @@
-//! Freestanding Multiboot mount: build, package and run in x86 QEMU.
+//! The UEFI mount: build `stela.efi` and run it in x86 QEMU.
 //!
-//! The image is the real shared runtime linked for `x86_64-unknown-none`. The
-//! ARM module (firmware or test code) is passed to QEMU unchanged as the
-//! Multiboot module; placement and initial state travel on the command line.
+//! The run puts the application on a FAT volume as the removable-media boot
+//! file, beside `\EFI\stela\stela.cfg` (the mount options) and
+//! `\EFI\stela\source.bin` (the unchanged ARM bytes), and boots it with QEMU's
+//! edk2 firmware. A boot manager such as OpenCore uses the same layout.
 use crate::{
     check::{BOOT_MANIFEST, BOOT_TARGET, BOOT_TARGET_DIR},
     tools::{binding, cargo, exec, qemu, root, stop, wait},
 };
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand, ValueEnum};
-use object::{
-    Endianness, Object, ObjectSymbol,
-    elf::PT_LOAD,
-    read::elf::{ElfFile64, ProgramHeader},
-};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Command as Process, ExitCode, Stdio},
     time::{Duration, Instant},
 };
-use stela_runtime::sha256;
 
-const IMAGE: &str = "stela-multiboot.bin";
-const MULTIBOOT_MAGIC: u32 = 0x1bad_b002;
-/// Page-aligned modules, memory map and address fields.
-const MULTIBOOT_FLAGS: u32 = 0x0001_0003;
-const MULTIBOOT_HEADER_WORDS: usize = 8;
-const MULTIBOOT_SEARCH_BYTES: usize = 8192;
-/// The image and its heap must stay inside the loader's identity window.
-const IDENTITY_LIMIT: u64 = 0x1000_0000;
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
 const TIMEOUT_EXIT: u8 = 124;
 const MAX_TIMEOUT_SECONDS: f64 = 120.0;
+const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
+const FIRMWARE_VARIABLES: &str = "edk2-i386-vars.fd";
+
+/// The default ARM image: `movz x0, #0x1234; movz x1, #0x5678;
+/// add x2, x0, x1; b .`, run at EL1 with the MMU off up to the branch.
+const SMOKE: [u32; 4] = [0xd282_4680, 0xd28a_cf01, 0x8b01_0002, 0x1400_0000];
+const SMOKE_OPTIONS: &str = "--entry 0x100000 --stop 0x10000c --budget 16";
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Build the runtime image and package it for Multiboot.
+    /// Build `stela.efi`.
     Build {
         #[arg(long)]
         release: bool,
     },
-    /// Run a packaged image with an ARM module in single-CPU x86 QEMU.
+    /// Boot `stela.efi` with an ARM image in single-CPU x86 QEMU.
     Run(Run),
 }
 
 #[derive(Args)]
 pub struct Run {
-    /// Packaged image; defaults to a fresh release build.
+    /// The application; defaults to a fresh release build.
     #[arg(long)]
     image: Option<PathBuf>,
-    /// Original ARM bytes loaded as the Multiboot module.
+    /// Original ARM bytes; defaults to a four-instruction smoke program.
     #[arg(long)]
-    module: PathBuf,
-    /// Fresh directory for the serial log and run report.
+    module: Option<PathBuf>,
+    /// Fresh directory for the boot volume, serial log and run report.
     #[arg(long)]
     output: PathBuf,
     /// Mount options, for example `--entry 0x100000 --budget 1000`.
-    #[arg(long, default_value = "", allow_hyphen_values = true)]
-    append: String,
+    #[arg(long, allow_hyphen_values = true)]
+    append: Option<String>,
     #[arg(long, default_value_t = 60.0)]
     timeout: f64,
     #[arg(long, value_enum, default_value_t = Display::None)]
@@ -83,17 +76,11 @@ enum Display {
 pub fn run(command: Command) -> Result<ExitCode> {
     match command {
         Command::Build { release } => {
-            let image = build(release)?;
-            println!("{}", image.display());
+            println!("{}", build(release)?.display());
             Ok(ExitCode::SUCCESS)
         }
         Command::Run(arguments) => launch(arguments),
     }
-}
-
-fn profile_directory(release: bool) -> PathBuf {
-    let profile = if release { "release" } else { "debug" };
-    root().join(BOOT_TARGET_DIR).join(BOOT_TARGET).join(profile)
 }
 
 fn build(release: bool) -> Result<PathBuf> {
@@ -104,113 +91,22 @@ fn build(release: bool) -> Result<PathBuf> {
         command.arg("--release");
     }
     exec(&mut command)?;
-    let directory = profile_directory(release);
-    package(&directory.join("stela-boot"), &directory)
+    let profile = if release { "release" } else { "debug" };
+    Ok(root()
+        .join(BOOT_TARGET_DIR)
+        .join(BOOT_TARGET)
+        .join(profile)
+        .join("stela.efi"))
 }
 
-/// Copy the initialized bytes of the linked ELF into a flat Multiboot image.
-///
-/// QEMU's Multiboot loader uses the header's address fields, so the loadable
-/// segments must form one identity-mapped file range followed only by BSS.
-fn package(elf: &Path, output: &Path) -> Result<PathBuf> {
-    let raw = fs::read(elf).with_context(|| format!("cannot read {}", elf.display()))?;
-    let file = ElfFile64::<Endianness>::parse(&*raw)?;
-    let endian = file.endian();
-    let symbol = |name: &str| {
-        file.symbols()
-            .find(|symbol| symbol.name() == Ok(name))
-            .map(|symbol| symbol.address())
-            .with_context(|| format!("missing linker symbol {name}"))
-    };
-    let start = symbol("__image_start")?;
-    let load_end = symbol("__load_end")?;
-    let image_end = symbol("__image_end")?;
-    let header_address = symbol("stela_multiboot_header")?;
-    let entry = symbol("stela_start32")?;
-
-    let loads: Vec<_> = file
-        .elf_program_headers()
-        .iter()
-        .filter(|header| header.p_type(endian) == PT_LOAD)
-        .map(|header| {
-            (
-                header.p_offset(endian),
-                header.p_vaddr(endian),
-                header.p_paddr(endian),
-                header.p_filesz(endian),
-                header.p_memsz(endian),
-            )
-        })
-        .collect();
-    let (first_offset, ..) = *loads.first().context("ELF has no loadable segment")?;
-    let bias = start - first_offset;
-    let mut previous = start;
-    for &(offset, virtual_address, physical, file_bytes, memory_bytes) in &loads {
-        ensure!(
-            virtual_address == physical && physical >= previous,
-            "segments must be identity-mapped and ordered"
-        );
-        ensure!(
-            file_bytes <= memory_bytes && offset + file_bytes <= raw.len() as u64,
-            "segment exceeds its file"
-        );
-        if file_bytes != 0 {
-            ensure!(
-                physical - offset == bias,
-                "initialized segments are not one file range"
-            );
-            ensure!(
-                physical + file_bytes <= load_end,
-                "initialized segment past __load_end"
-            );
-        }
-        previous = physical + memory_bytes;
-    }
-    ensure!(
-        start < load_end && load_end <= image_end && image_end < IDENTITY_LIMIT,
-        "image does not fit the identity window"
-    );
-    ensure!(previous == image_end, "BSS does not end at __image_end");
-
-    let image = &raw[(start - bias) as usize..(load_end - bias) as usize];
-    let header_offset = (header_address - start) as usize;
-    ensure!(
-        header_offset.is_multiple_of(4)
-            && header_offset + MULTIBOOT_HEADER_WORDS * 4
-                <= image.len().min(MULTIBOOT_SEARCH_BYTES),
-        "Multiboot header must be aligned within the first 8 KiB"
-    );
-    let header: Vec<u32> = image[header_offset..][..MULTIBOOT_HEADER_WORDS * 4]
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|&word| u32::from_le_bytes(word))
-        .collect();
-    let address_fields: Vec<u64> = header[3..].iter().map(|&word| word.into()).collect();
-    ensure!(
-        header[0] == MULTIBOOT_MAGIC
-            && header[1] == MULTIBOOT_FLAGS
-            && header[..3]
-                .iter()
-                .fold(0u32, |sum, &word| sum.wrapping_add(word))
-                == 0
-            && address_fields == [header_address, start, load_end, image_end, entry],
-        "Multiboot header does not match the linked layout"
-    );
-
-    let flat = output.join(IMAGE);
-    fs::write(&flat, image)?;
-    let report = json!({
-        "elf": { "path": elf, "bytes": raw.len(), "sha256": sha256(&raw) },
-        "image": { "path": flat, "bytes": image.len(), "sha256": sha256(image) },
-        "symbols": BTreeMap::from([
-            ("__image_start", start), ("__load_end", load_end), ("__image_end", image_end),
-            ("stela_multiboot_header", header_address), ("stela_start32", entry),
-        ]),
-        "bss_bytes": image_end - load_end,
-    });
-    fs::write(output.join("image.json"), format!("{report:#}\n"))?;
-    Ok(flat)
+/// The directory of QEMU's bundled firmware, from `qemu -L help`.
+fn firmware(qemu: &Path) -> Result<PathBuf> {
+    let output = Process::new(qemu).args(["-L", "help"]).output()?;
+    String::from_utf8(output.stdout)?
+        .lines()
+        .map(PathBuf::from)
+        .find(|directory| directory.join(FIRMWARE_CODE).exists())
+        .with_context(|| format!("QEMU has no {FIRMWARE_CODE}"))
 }
 
 fn launch(arguments: Run) -> Result<ExitCode> {
@@ -226,37 +122,51 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if output.exists() {
         bail!("{} already exists", output.display());
     }
-    fs::create_dir_all(&output)?;
-    let serial = output.join("serial.txt");
-    let qemu = qemu()?;
+    let volume = output.join("volume");
+    fs::create_dir_all(volume.join("EFI/BOOT"))?;
+    fs::create_dir_all(volume.join("EFI/stela"))?;
+    fs::copy(&image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
+    let source = volume.join("EFI/stela/source.bin");
+    let options = match &arguments.module {
+        Some(module) => {
+            fs::copy(module, &source)?;
+            arguments.append.unwrap_or_default()
+        }
+        None => {
+            let bytes: Vec<u8> = SMOKE.iter().flat_map(|word| word.to_le_bytes()).collect();
+            fs::write(&source, bytes)?;
+            arguments.append.unwrap_or_else(|| SMOKE_OPTIONS.into())
+        }
+    };
+    fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
 
+    let qemu = qemu()?;
+    let firmware = firmware(&qemu)?;
+    let variables = output.join("variables.fd");
+    fs::copy(firmware.join(FIRMWARE_VARIABLES), &variables)?;
+    let serial = output.join("serial.txt");
     let mut command = Process::new(&qemu);
     command
         .args([
             "-machine",
             "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042=off,vmport=off",
         ])
-        .args([
-            "-accel",
-            "tcg,thread=single",
-            "-cpu",
-            "qemu64",
-            "-smp",
-            "1",
-            "-m",
-            "1G",
-        ])
-        .args([
-            "-nodefaults",
-            "-no-reboot",
-            "-device",
-            "isa-debug-exit,iobase=0xf4,iosize=4",
-        ])
-        .arg("-kernel")
-        .arg(&image)
-        .arg("-initrd")
-        .arg(&arguments.module)
-        .args(["-append", &arguments.append]);
+        .args(["-accel", "tcg,thread=single", "-cpu", "qemu64", "-smp", "1"])
+        .args(["-m", "1G", "-nodefaults", "-no-reboot"])
+        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=4"])
+        .arg("-drive")
+        .arg(format!(
+            "if=pflash,format=raw,readonly=on,file={}",
+            firmware.join(FIRMWARE_CODE).display()
+        ))
+        .arg("-drive")
+        .arg(format!("if=pflash,format=raw,file={}", variables.display()))
+        .arg("-drive")
+        .arg(format!(
+            "if=none,id=volume,format=raw,readonly=on,file=fat:{}",
+            volume.display()
+        ))
+        .args(["-device", "virtio-blk-pci,drive=volume"]);
     match arguments.display {
         Display::None => command
             .args(["-display", "none"])
@@ -281,10 +191,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .arg("-gdb")
             .arg(format!("tcp:127.0.0.1:{port}"))
             .arg("-S");
-        eprintln!(
-            "paused: gdb {} -ex 'target remote 127.0.0.1:{port}'",
-            image.with_file_name("stela-boot").display()
-        );
+        eprintln!("paused: gdb -ex 'target remote 127.0.0.1:{port}'");
     }
     let command_line: Vec<String> = std::iter::once(command.get_program())
         .chain(command.get_args())
@@ -324,7 +231,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "command": command_line,
         "qemu": binding(&qemu)?,
         "image": binding(&image)?,
-        "module": binding(&arguments.module)?,
+        "source": binding(&source)?,
+        "options": options,
         "returncode": code,
         "timed_out": status.is_none(),
         "wall_seconds": started.elapsed().as_secs_f64(),

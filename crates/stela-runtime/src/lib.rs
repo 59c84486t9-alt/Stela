@@ -24,7 +24,7 @@ pub mod mach;
 pub mod memory;
 pub mod pauth;
 mod platform;
-#[cfg(all(target_arch = "x86_64", target_os = "none", not(feature = "std")))]
+#[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 pub mod freestanding {
     pub use crate::execution::boot_frames::FrameError as BootStorageError;
     pub use crate::platform::boot::{BootArena, CpuObservation, MountError, install, verify};

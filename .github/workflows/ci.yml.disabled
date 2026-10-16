@@ -8,5 +8,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: rustup target add x86_64-unknown-none
+      - run: rustup target add x86_64-unknown-uefi
       - run: cargo xtask check

@@ -1,7 +1,7 @@
 //! One native call of an M0 STP block.
 #[cfg(all(
     target_arch = "x86_64",
-    any(target_os = "macos", target_os = "linux", target_os = "none")
+    any(target_os = "macos", target_os = "linux", target_os = "uefi")
 ))]
 use crate::execution::context::ContextLoan;
 
@@ -37,7 +37,7 @@ pub(crate) enum M0WriteSessionFailure {
     StorageAfter(crate::execution::NativeStorageError),
     #[cfg(not(all(
         target_arch = "x86_64",
-        any(target_os = "macos", target_os = "linux", target_os = "none")
+        any(target_os = "macos", target_os = "linux", target_os = "uefi")
     )))]
     UnsupportedHost,
     Platform(M0RamWritePlatformError),
@@ -148,14 +148,14 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
         }
         #[cfg(not(all(
             target_arch = "x86_64",
-            any(target_os = "macos", target_os = "linux", target_os = "none")
+            any(target_os = "macos", target_os = "linux", target_os = "uefi")
         )))]
         let _ = candidate;
         let mut callback = WriteCallback::new(&mut self.prepared);
         callback.with_view(|view| {
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux", target_os = "none")
+                any(target_os = "macos", target_os = "linux", target_os = "uefi")
             )))]
             {
                 let _ = view;
@@ -163,7 +163,7 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
             }
             #[cfg(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux", target_os = "none")
+                any(target_os = "macos", target_os = "linux", target_os = "uefi")
             ))]
             {
                 let mut context_loan = ContextLoan::memory(self.context, view);
@@ -280,7 +280,7 @@ impl core::fmt::Debug for M0WriteSessionFailure {
             Self::StorageAfter(error) => f.debug_tuple("StorageAfter").field(error).finish(),
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux", target_os = "none")
+                any(target_os = "macos", target_os = "linux", target_os = "uefi")
             )))]
             Self::UnsupportedHost => f.write_str("UnsupportedHost"),
             Self::ContextChanged => f.write_str("ContextChanged"),

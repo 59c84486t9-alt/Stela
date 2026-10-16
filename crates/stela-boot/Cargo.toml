@@ -3,15 +3,19 @@ name = "stela-boot"
 version = "0.1.0"
 edition = "2024"
 publish = false
-build = "build.rs"
+
+[[bin]]
+name = "stela"
+path = "src/main.rs"
 
 [workspace]
 
 [dependencies]
+uefi = { version = "0.41", default-features = false, features = ["alloc"] }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-compiler = { path = "../stela-compiler", default-features = false }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
-# The none target cannot codegen the optional hardware intrinsics in the local
+# The soft-float UEFI target cannot codegen the optional hardware intrinsics in the local
 # LLVM toolchain. Use the crate's real baseline SHA implementation.
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 

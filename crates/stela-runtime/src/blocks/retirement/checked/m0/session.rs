@@ -1,7 +1,7 @@
 //! One native call of an M0 scalar-read block.
 #[cfg(all(
     target_arch = "x86_64",
-    any(target_os = "macos", target_os = "linux", target_os = "none")
+    any(target_os = "macos", target_os = "linux", target_os = "uefi")
 ))]
 use crate::execution::context::ContextLoan;
 
@@ -137,14 +137,14 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
         }
         #[cfg(not(all(
             target_arch = "x86_64",
-            any(target_os = "macos", target_os = "linux", target_os = "none")
+            any(target_os = "macos", target_os = "linux", target_os = "uefi")
         )))]
         let _ = candidate;
         let mut callback = ReadCallback::new(&mut self.prepared);
         callback.with_view(|view| {
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux", target_os = "none")
+                any(target_os = "macos", target_os = "linux", target_os = "uefi")
             )))]
             {
                 let _ = view;
@@ -154,7 +154,7 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
             }
             #[cfg(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux", target_os = "none")
+                any(target_os = "macos", target_os = "linux", target_os = "uefi")
             ))]
             {
                 let mut context_loan = ContextLoan::memory(self.context, view);

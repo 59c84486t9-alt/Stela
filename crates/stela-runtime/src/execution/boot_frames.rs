@@ -1,5 +1,5 @@
 //! Boot-reserved storage backing native images in the freestanding build.
-#![cfg(all(target_arch = "x86_64", target_os = "none"))]
+#![cfg(all(target_arch = "x86_64", target_os = "uefi"))]
 
 use super::native_image::ExecutableStorage;
 use crate::platform::sync::Mutex;

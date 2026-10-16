@@ -5,5 +5,5 @@ pub(crate) mod memory;
 pub(crate) mod sync;
 pub(crate) mod unwind;
 
-#[cfg(all(target_arch = "x86_64", target_os = "none", not(feature = "std")))]
+#[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 pub(crate) mod boot;

@@ -1,12 +1,14 @@
-//! x86 QEMU boot mount of the shared compiler and runtime.
+//! UEFI application that runs an ARM image on the shared compiler and runtime.
 //!
-//! The ARM image arrives as a Multiboot module and runs on `SoftwareEl1Machine`,
-//! which owns its RAM, translation cache and native code.
+//! The firmware, or a boot manager such as OpenCore, starts `stela.efi`. It
+//! reads `\EFI\stela\stela.cfg` and the original ARM bytes in
+//! `\EFI\stela\source.bin` from its own volume, leaves boot services,
+//! installs its own page tables and runs the image on `SoftwareEl1Machine`.
 #![no_std]
 #![no_main]
 extern crate alloc;
 use alloc::{vec, vec::Vec};
-use core::{arch::global_asm, cell::UnsafeCell, fmt::Write, panic::PanicInfo};
+use core::{arch::asm, fmt::Write, panic::PanicInfo};
 use stela_compiler::{GuestAddress, GuestState, TargetCpu};
 use stela_runtime::{
     blocks::{
@@ -19,20 +21,17 @@ use stela_runtime::{
         translation_controls::RegisterValues,
     },
 };
+use uefi::{
+    Status,
+    boot::{AllocateType, MemoryType},
+};
+mod firmware;
 mod heap;
-mod multiboot;
 mod paging;
 mod serial;
-global_asm!(include_str!("entry.S"), options(att_syntax));
 #[global_allocator]
 static ALLOCATOR: heap::Heap = heap::Heap::new();
 const HEAP_BYTES: usize = 64 * 1024 * 1024;
-#[repr(align(4096))]
-struct HeapStorage(UnsafeCell<[u8; HEAP_BYTES]>);
-// SAFETY: no access outside once-only BSP heap initialization and the real
-// allocator's mutually exclusive raw extent ownership. No shared byte refs exist.
-unsafe impl Sync for HeapStorage {}
-static HEAP: HeapStorage = HeapStorage(UnsafeCell::new([0; HEAP_BYTES]));
 
 #[derive(Debug)]
 struct Options {
@@ -80,12 +79,7 @@ impl Options {
             zero_bytes: None,
             zero_capacity: None,
         };
-        let mut arguments = command.split_ascii_whitespace().peekable();
-        // QEMU's Multiboot transport prefixes its kernel filename. It selects
-        // no runtime behavior and is not a source/application identity key.
-        if arguments.peek().is_some_and(|v| !v.starts_with("--")) {
-            arguments.next();
-        }
+        let mut arguments = command.split_ascii_whitespace();
         while let Some(name) = arguments.next() {
             let value = number(arguments.next().ok_or("missing boot option value")?)?;
             match name {
@@ -138,47 +132,64 @@ impl Options {
         Ok(options)
     }
 }
-#[unsafe(no_mangle)]
-pub extern "C" fn stela_boot_main(address: u32, magic: u32) -> ! {
+#[uefi::entry]
+fn main() -> Status {
     serial::initialize();
-    paging::fatal_interrupts();
-    serial::arguments(format_args!("STELA DEVELOPMENT MOUNT entry={magic:08x}\n"));
-    // SAFETY: this entry is reached only through our trusted Multiboot bootstrap.
-    let transport = match unsafe { multiboot::Transport::read(address, magic) } {
-        Ok(value) => value,
-        Err(error) => serial::fatal(error),
-    };
-    serial::arguments(format_args!("ACTUAL TRANSPORT {transport:?}\n"));
-    if let Err(error) = unsafe { paging::install(&transport) } {
-        serial::fatal(error);
-    }
-    // SAFETY: final supervisor RW+NX image mapping owns this full static heap;
-    // BSP/IF/fatal NMI/SMI-off/nonmigration obligations precede every allocation.
+    serial::arguments(format_args!("STELA UEFI MOUNT\n"));
+    let heap = uefi::boot::allocate_pages(
+        AllocateType::AnyPages,
+        MemoryType::LOADER_DATA,
+        HEAP_BYTES / paging::PAGE,
+    )
+    .unwrap_or_else(|_| serial::fatal("firmware has no memory for the heap"));
+    // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
+    // initialized before any allocation.
+    unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
+    let (mut handoff, tables) = firmware::take_over().unwrap_or_else(|e| serial::fatal(e));
+    // SAFETY: boot services have ended; the new tables map the image, heap,
+    // both stacks and every RAM byte in use.
     unsafe {
-        ALLOCATOR.initialize(HEAP.0.get().cast::<u8>(), HEAP_BYTES);
-    }
-    serial::arguments(format_args!(
-        "ACTUAL HEAP base={:#x} bytes={} native={:?} ram={:?}\n",
-        HEAP.0.get() as usize,
-        HEAP_BYTES,
-        paging::native_arenas(),
-        paging::ram_arenas()
-    ));
-    let observed = match unsafe {
-        stela_runtime::freestanding::install(&paging::native_arenas(), &paging::ram_arenas())
-    } {
-        Ok(value) => value,
-        Err(error) => {
-            serial::arguments(format_args!("mount refusal: {error:?}\n"));
-            serial::fatal("platform qualification failed")
+        asm!("cli", options(nomem, nostack));
+        if let Err(error) = paging::activate(tables) {
+            serial::fatal(error);
         }
-    };
+        asm!(
+            "mov rsp, {top}",
+            "call {run}",
+            "ud2",
+            top = in(reg) handoff.stack_top,
+            run = sym run,
+            in("rdi") &raw mut handoff,
+            options(noreturn),
+        )
+    }
+}
+
+/// Run the mount on Stela's own stack.
+extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
+    serial::arguments(format_args!(
+        "ACTUAL HEAP bytes={HEAP_BYTES} native={:?} ram={:?}\n",
+        handoff.native, handoff.ram
+    ));
+    // SAFETY: one CPU with interrupts disabled; the arenas are reserved RAM
+    // under Stela's own tables, disjoint from everything else in use.
+    let observed =
+        match unsafe { stela_runtime::freestanding::install(&handoff.native, &handoff.ram) } {
+            Ok(value) => value,
+            Err(error) => {
+                serial::arguments(format_args!("mount refusal: {error:?}\n"));
+                serial::fatal("platform qualification failed")
+            }
+        };
     serial::arguments(format_args!("ACTUAL CPU {observed:?}\n"));
-    let options = match transport.command().and_then(Options::parse) {
+    let options = match core::str::from_utf8(&handoff.options)
+        .map_err(|_| "stela.cfg is not UTF-8")
+        .and_then(Options::parse)
+    {
         Ok(v) => v,
         Err(e) => serial::fatal(e),
     };
-    let original = transport.source();
+    let original = &handoff.source[..];
     if original.len() as u64 > options.region_bytes {
         serial::fatal("original module exceeds declared RAM region");
     }

@@ -20,7 +20,7 @@ pub(crate) enum RegisterFailure {
     ContextChanged,
     #[cfg(not(all(
         target_arch = "x86_64",
-        any(target_os = "macos", target_os = "linux", target_os = "none")
+        any(target_os = "macos", target_os = "linux", target_os = "uefi")
     )))]
     PlatformUnavailable,
     Source(String),
@@ -174,7 +174,7 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         }
         #[cfg(all(
             target_arch = "x86_64",
-            any(target_os = "macos", target_os = "linux", target_os = "none")
+            any(target_os = "macos", target_os = "linux", target_os = "uefi")
         ))]
         {
             self.invoked = true;
@@ -217,7 +217,7 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         }
         #[cfg(not(all(
             target_arch = "x86_64",
-            any(target_os = "macos", target_os = "linux", target_os = "none")
+            any(target_os = "macos", target_os = "linux", target_os = "uefi")
         )))]
         {
             let _ = candidate;
@@ -232,7 +232,7 @@ impl core::fmt::Debug for RegisterFailure {
         match self {
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux", target_os = "none")
+                any(target_os = "macos", target_os = "linux", target_os = "uefi")
             )))]
             Self::PlatformUnavailable => f.write_str("PlatformUnavailable"),
             Self::AlreadyInvoked => f.write_str("AlreadyInvoked"),

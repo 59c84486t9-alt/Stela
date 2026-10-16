@@ -3,7 +3,7 @@ use crate::tools::{cargo, exec};
 use anyhow::Result;
 
 pub const BOOT_MANIFEST: &str = "crates/stela-boot/Cargo.toml";
-pub const BOOT_TARGET: &str = "x86_64-unknown-none";
+pub const BOOT_TARGET: &str = "x86_64-unknown-uefi";
 pub const BOOT_TARGET_DIR: &str = "target/boot";
 
 pub fn run(fix: bool) -> Result<()> {

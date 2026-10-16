@@ -24,7 +24,7 @@ enum Task {
         #[arg(long)]
         fix: bool,
     },
-    /// Build, run and debug the freestanding Multiboot mount in x86 QEMU.
+    /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
     /// Compare native translations with the QEMU original, form by form.
