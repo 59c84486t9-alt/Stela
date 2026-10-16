@@ -8,6 +8,9 @@ pub const LARGE_PAGE: usize = PAGE * ENTRIES;
 pub const PRESENT: u64 = 1;
 pub const WRITABLE: u64 = 1 << 1;
 const LARGE: u64 = 1 << 7;
+/// Write-through and cache-disable: PAT entry 3, uncached.
+const UNCACHED: u64 = 1 << 3 | 1 << 4;
+const DEVICE: u64 = PRESENT | WRITABLE | UNCACHED | NX;
 pub const NX: u64 = 1 << 63;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
@@ -97,6 +100,44 @@ impl Tables {
                 return Err("2 MiB chunk mapped twice");
             }
             *entry = new_table()? as u64 | PRESENT | WRITABLE;
+        }
+        Ok(())
+    }
+
+    /// Map device registers at `start..end` uncached RW+NX, with 2 MiB pages
+    /// where a chunk is otherwise unmapped. RAM mappings are never changed.
+    pub fn device(&mut self, start: usize, end: usize) -> Result<(), &'static str> {
+        let start = start & !(PAGE - 1);
+        let end = end.next_multiple_of(PAGE);
+        let mut chunk = start & !(LARGE_PAGE - 1);
+        while chunk < end {
+            let entry = self.directory_entry(chunk)?;
+            let whole = start <= chunk && chunk + LARGE_PAGE <= end;
+            // SAFETY: a live directory entry of this builder.
+            let current = unsafe { *entry };
+            if current == 0 && whole {
+                // SAFETY: as above, unused until now.
+                unsafe { *entry = chunk as u64 | DEVICE | LARGE };
+            } else if current & LARGE != 0 {
+                if current & !ADDRESS & !LARGE != DEVICE {
+                    return Err("device registers overlap mapped RAM");
+                }
+            } else {
+                if current == 0 {
+                    self.small(chunk)?;
+                }
+                // SAFETY: the entry now names one of this builder's tables.
+                let table = unsafe { (*entry & ADDRESS) as *mut Table };
+                for page in (chunk.max(start)..(chunk + LARGE_PAGE).min(end)).step_by(PAGE) {
+                    // SAFETY: as above.
+                    let slot = unsafe { &mut (*table)[(page >> 12) & (ENTRIES - 1)] };
+                    if *slot != 0 && *slot & !ADDRESS != DEVICE {
+                        return Err("device registers overlap mapped RAM");
+                    }
+                    *slot = page as u64 | DEVICE;
+                }
+            }
+            chunk += LARGE_PAGE;
         }
         Ok(())
     }

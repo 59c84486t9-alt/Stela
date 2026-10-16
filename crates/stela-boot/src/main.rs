@@ -31,6 +31,7 @@ mod heap;
 mod output;
 mod paging;
 mod serial;
+mod storage;
 #[global_allocator]
 static ALLOCATOR: heap::Heap = heap::Heap::new();
 const HEAP_BYTES: usize = 64 * 1024 * 1024;
@@ -188,9 +189,13 @@ extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
             }
         };
     output::arguments(format_args!("ACTUAL CPU {observed:?}\n"));
+    if let Some(storage) = handoff.storage.take() {
+        storage.run();
+    }
     let options = match core::str::from_utf8(&handoff.options)
         .map_err(|_| "stela.cfg is not UTF-8")
-        .and_then(Options::parse)
+        .and_then(storage::split)
+        .and_then(|(_, _, rest)| Options::parse(&rest))
     {
         Ok(v) => v,
         Err(e) => output::fatal(e),

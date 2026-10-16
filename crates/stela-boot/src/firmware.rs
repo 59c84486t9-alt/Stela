@@ -34,6 +34,8 @@ pub struct Handoff {
     pub ram: [BootArena; RAM_ARENAS],
     /// The firmware's framebuffer, mapped RW+NX, when it has a usable one.
     pub screen: Option<Framebuffer>,
+    /// Host storage state, when `stela.cfg` names a disk.
+    pub storage: Option<crate::storage::Prepared>,
 }
 
 fn pages(count: usize) -> Result<usize, &'static str> {
@@ -254,17 +256,21 @@ fn tables(
 /// returned tables are not active yet.
 pub fn take_over() -> Result<(Handoff, Tables), &'static str> {
     let (options, source) = files()?;
+    let storage = crate::storage::prepare(&options)?;
     let native = arenas::<NATIVE_ARENAS>()?;
     let ram = arenas::<RAM_ARENAS>()?;
     let guard = pages(STACK_PAGES + 1)?;
     let image = Image::loaded()?;
     let screen = Framebuffer::from_firmware();
-    let tables = tables(
+    let mut tables = tables(
         &image,
         [0, guard],
         &[&native[..], &ram[..]].concat(),
         screen.as_ref(),
     )?;
+    if let Some(storage) = &storage {
+        storage.map(&mut tables)?;
+    }
     // SAFETY: no protocol or pool allocation outlives this call; the heap,
     // stack, arenas and tables are LOADER_DATA, which Stela keeps.
     let map = unsafe { boot::exit_boot_services(None) };
@@ -277,6 +283,7 @@ pub fn take_over() -> Result<(Handoff, Tables), &'static str> {
             native,
             ram,
             screen,
+            storage,
         },
         tables,
     ))

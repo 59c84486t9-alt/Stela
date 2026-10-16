@@ -23,6 +23,8 @@ use std::{
 };
 use stela_cli::efi;
 
+mod disks;
+
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
 const TIMEOUT_EXIT: u8 = 124;
 const MAX_TIMEOUT_SECONDS: f64 = 120.0;
@@ -78,6 +80,11 @@ pub struct Run {
     /// Disable this `UEFI.Drivers` path in the OpenCore copy; repeatable.
     #[arg(long, requires = "opencore")]
     disable_driver: Vec<String>,
+    /// Attach a GPT disk image through virtio-blk, NVMe and AHCI, have the
+    /// mount overwrite and read back one partition of each, and verify the
+    /// mount's hashes and every byte of the images.
+    #[arg(long)]
+    storage_check: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -138,13 +145,21 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     let volume = output.join("volume");
     let source = volume.join("EFI/stela/source.bin");
-    let (bytes, options) = match &arguments.module {
+    let (bytes, mut options) = match &arguments.module {
         Some(module) => (fs::read(module)?, arguments.append.unwrap_or_default()),
         None => (
             SMOKE.iter().flat_map(|word| word.to_le_bytes()).collect(),
             arguments.append.unwrap_or_else(|| SMOKE_OPTIONS.into()),
         ),
     };
+    let disks = match arguments.storage_check {
+        true => {
+            fs::create_dir_all(&output)?;
+            disks::create(&output)?
+        }
+        false => Vec::new(),
+    };
+    options.extend(disks.iter().map(disks::Disk::option));
     match &arguments.opencore {
         None => {
             fs::create_dir_all(volume.join("EFI/BOOT"))?;
@@ -208,6 +223,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             volume.display()
         ))
         .args(["-device", "virtio-blk-pci,drive=volume"]);
+    for (index, disk) in disks.iter().enumerate() {
+        disk.attach(index, &mut command);
+    }
     if picker {
         command.args(["-device", "VGA"]);
     }
@@ -290,6 +308,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .filter(|path| path.exists())
         .map(|path| binding(&path))
         .collect::<Result<_>>()?;
+    let storage = match arguments.storage_check {
+        true => Some(disks::verify(&disks, &output.join("serial.txt"))),
+        false => None,
+    };
     let report = json!({
         "command": command_line,
         "qemu": binding(&qemu)?,
@@ -301,9 +323,16 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "timed_out": status.is_none(),
         "wall_seconds": started.elapsed().as_secs_f64(),
         "outputs": outputs,
+        "storage": storage.as_ref().map(|result| match result {
+            Ok(disks) => disks.clone(),
+            Err(error) => json!({ "error": format!("{error:#}") }),
+        }),
     });
     fs::write(output.join("run.json"), format!("{report:#}\n"))?;
     println!("{report:#}");
+    if let Some(Err(error)) = storage {
+        return Err(error.context("host storage check failed"));
+    }
     Ok(ExitCode::from(code))
 }
 
