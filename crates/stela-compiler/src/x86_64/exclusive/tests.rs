@@ -4,6 +4,9 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+mod native_component;
+
 // The historical contracts retain the Enabled specialization. Production callers
 // must construct the immutable profile-bound operand explicitly.
 fn requirements(operand: &Operand) -> Result<MemoryRequirements, CompileError> {

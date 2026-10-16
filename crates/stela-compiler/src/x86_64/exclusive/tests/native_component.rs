@@ -1,8 +1,5 @@
 //! Private emitted adapter ABI tests with an explicit callback test double.
 //! These tests make no MemoryThread, original ARM or checked-entry claim.
-use alloc::format;
-use alloc::vec;
-use alloc::vec::Vec;
 use super::*;
 use crate::{
     GuestState,

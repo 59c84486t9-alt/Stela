@@ -114,7 +114,7 @@ fn widths_extensions_literals_and_zero_discard_preserve_complete_banks_and_exact
         assert_eq!(report.thread.registers, expected, "{word:#x}");
         assert_eq!(report.system, system);
         assert_eq!(report.accounting.blocks_executed, 1);
-        assert_eq!(report.ram[1].captured_bytes.as_ref().unwrap(), &data);
+        assert_eq!(report.ram[1].sha256, Ok(stela_core::sha256(&data)));
     }
 }
 #[test]

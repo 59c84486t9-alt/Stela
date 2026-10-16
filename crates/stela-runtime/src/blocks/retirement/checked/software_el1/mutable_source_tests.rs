@@ -3,6 +3,9 @@
 use super::*;
 use crate::system::state::{El1Registers, PSTATE_EL1H};
 use stela_compiler::{GuestState, TargetCpu};
+fn assert_ram(report: &SoftwareEl1Report, index: usize, bytes: &[u8]) {
+    assert_eq!(report.ram[index].sha256, Ok(stela_core::sha256(bytes)));
+}
 const BASE: u64 = 0x100000;
 const STP_X0_X3_X1: u32 = 0xa9000c20;
 const ADD_X2_1: u32 = 0x91000442;
@@ -102,10 +105,7 @@ fn revisiting_modified_cached_source_rebinds_before_any_old_instruction_executes
     assert_eq!(report.system, system);
     assert_eq!(report.thread.pc, GuestAddress(BASE + 4));
     assert_eq!(report.accounting.blocks_executed, 5);
-    assert_eq!(
-        report.ram[0].captured_bytes.as_ref().unwrap(),
-        &expected_ram
-    );
+    assert_ram(&report, 0, &expected_ram);
 }
 #[test]
 fn overwrite_own_source_settles_once_using_exact_preeffect_pin_and_owned_write() {
@@ -130,10 +130,7 @@ fn overwrite_own_source_settles_once_using_exact_preeffect_pin_and_owned_write()
     assert_eq!(report.system, system);
     assert_eq!(report.thread.pc, GuestAddress(BASE + 8));
     assert_eq!(report.accounting.blocks_executed, 2);
-    assert_eq!(
-        report.ram[0].captured_bytes.as_ref().unwrap(),
-        &expected_ram
-    );
+    assert_ram(&report, 0, &expected_ram);
 }
 #[test]
 fn declared_region_tail_is_real_data_but_outside_region_remains_a_reached_refusal() {
@@ -154,9 +151,11 @@ fn declared_region_tail_is_real_data_but_outside_region_remains_a_reached_refusa
         if target == BASE + 48 {
             assert_eq!(report.stop, "StopAddress");
             assert_eq!(report.thread.pc, GuestAddress(BASE + 4));
-            let ram = report.ram[0].captured_bytes.as_ref().unwrap();
-            assert_eq!(&ram[48..56], &expected.x[0].to_le_bytes());
-            assert_eq!(&ram[56..64], &expected.x[3].to_le_bytes());
+            let mut ram = [0; 64];
+            ram[..4].copy_from_slice(&STP_X0_X3_X1.to_le_bytes());
+            ram[48..56].copy_from_slice(&expected.x[0].to_le_bytes());
+            ram[56..64].copy_from_slice(&expected.x[3].to_le_bytes());
+            assert_ram(&report, 0, &ram);
         } else {
             assert_ne!(report.stop, "StopAddress");
             assert_eq!(report.thread.pc, GuestAddress(BASE));
@@ -193,8 +192,5 @@ fn own_source_pair_prefix_survives_second_member_fault_without_writeback_or_retr
     assert_eq!(report.thread.registers, expected); // includes original X1 base
     assert_eq!(report.system, system);
     assert_eq!(report.accounting.blocks_executed, 0);
-    assert_eq!(
-        report.ram[0].captured_bytes.as_ref().unwrap(),
-        &expected.x[0].to_le_bytes()
-    );
+    assert_ram(&report, 0, &expected.x[0].to_le_bytes());
 }
