@@ -332,18 +332,6 @@ impl TranslationControls {
         }
     }
 
-    pub fn canonical_config(&self) -> Result<stage1::Config, stage1::Unsupported> {
-        if self.poisoned {
-            return Err(stage1::Unsupported::Control(
-                "poisoned translation-control owner",
-            ));
-        }
-        stage1::Config::from_controls_for_cpu(
-            self.profile.consumers(self.readbacks).stage1_controls(),
-            self.profile.cpu,
-        )
-    }
-
     /// Fetch through the resolver, backing and source owner, which supplies the
     /// fault details.
     pub fn fetch<S: TranslationServices>(

@@ -23,7 +23,6 @@ use alloc::vec::Vec;
 const EXTERNAL_WORD_ANCHOR: GuestAddress = GuestAddress(0);
 const EXTERNAL_WORD_ORDINAL: usize = 0;
 const ZERO_REGISTER: u8 = 31;
-pub const SOURCE_KIND: &str = "external-editr-single-word";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recipe {
@@ -57,9 +56,6 @@ impl PreparedDebugMovement {
     }
     pub const fn abi(&self) -> &'static str {
         CONTEXT_LEAF_ABI
-    }
-    pub const fn source_kind(&self) -> &'static str {
-        SOURCE_KIND
     }
     pub fn code(&self) -> &[u8] {
         &self.code

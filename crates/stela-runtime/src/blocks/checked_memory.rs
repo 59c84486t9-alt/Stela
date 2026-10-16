@@ -73,6 +73,7 @@ pub(super) enum CheckedReturn {
 /// no live Rust guest-byte reference, concurrent protection change, unwind or
 /// unsupported host-fault recovery is allowed. Native code must return finitely.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(super) unsafe fn call(
     dispatcher: &mut dyn Dispatcher,
     boundary: &EntryBoundary,

@@ -10,7 +10,6 @@ use serde::Serialize;
 
 pub(crate) mod host;
 
-pub const LIFECYCLE_PROFILE: &str = "darwin-owned-mach-port-lifecycle-v1";
 pub const ALLOCATE_TRAP: u32 = 16;
 pub const DEALLOCATE_TRAP: u32 = 18;
 pub const MOD_REFS_TRAP: u32 = 19;

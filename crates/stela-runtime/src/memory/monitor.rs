@@ -454,19 +454,6 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         }
     }
 
-    /// The selected policy for CLREX and spurious global-monitor opening,
-    /// separate from the local clear.
-    pub fn clear_and_open_global(
-        &self,
-        thread: &mut ThreadMonitor<B, M, A>,
-    ) -> Result<(), MonitorError> {
-        let _failure = FailureBoundary(&self.failed);
-        self.owner(thread)?;
-        self.retire(thread.reservation.take());
-        self.finish_global(thread.global.take(), thread.event.as_ref(), true);
-        Ok(())
-    }
-
     #[cfg(feature = "std")]
     fn stripe(&self, key: Key) -> usize {
         let mut hasher = DefaultHasher::new();

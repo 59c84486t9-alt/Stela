@@ -41,34 +41,6 @@ pub struct PreparedLow128ProcessMemory<'run, 'loan, 'id> {
 }
 
 impl FixedProcessMemoryControls {
-    /// Admit the unchanged AdvSIMD requirements using the shared FP owner.
-    /// Register-only SIMD keeps its AdvSIMD requirement even without
-    /// NATIVE_ACCESS, and no memory requirement is dropped. Exclusive, ordered,
-    /// atomic and scalable classes are refused in this little-endian ordinary
-    /// scope.
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare_with_low128<'run, 'loan, 'id>(
-        &'run self,
-        boundary: &'run EntryBoundary,
-        requirements: MemoryRequirements,
-        system: &'run SystemState,
-        context: &'run Low128FpContext<'loan, 'id>,
-        registers: &GuestState,
-        thread: &'run mut MemoryThread<MemoryControls>,
-        endpoint: Option<&'run EventEndpoint>,
-    ) -> Result<PreparedLow128ProcessMemory<'run, 'loan, 'id>, ProcessMemoryError> {
-        self.prepare_low128_profile(
-            boundary,
-            requirements,
-            system,
-            context,
-            registers,
-            thread,
-            endpoint,
-            None,
-        )
-    }
-
     /// The same owner with the FEAT_CPA specialization from the source.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_profile_with_low128<'run, 'loan, 'id>(

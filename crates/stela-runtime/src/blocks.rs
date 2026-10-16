@@ -147,25 +147,6 @@ pub enum StopReason {
         word: u32,
         failure: system::execution::Failure,
     },
-    MemoryEntryDeclined {
-        instruction_pc: GuestAddress,
-        status: u32,
-    },
-    MemoryFault {
-        instruction_pc: GuestAddress,
-        address: GuestAddress,
-        status: u32,
-        completed_bytes: u64,
-    },
-    MemoryFinalizationFailed {
-        instruction_pc: GuestAddress,
-        status: u32,
-        native_executed: bool,
-        original_fault: Option<MemoryFaultObservation>,
-        completed_bytes: u64,
-        observed_exit: Option<(u64, u64)>,
-        retry_safe: bool,
-    },
     SystemFailure {
         instruction: SystemInstruction,
         failure: system::execution::Failure,
@@ -177,25 +158,6 @@ pub enum StopReason {
         instruction: ClockInstruction,
         detail: String,
     },
-}
-
-/// Copied host callback outcome; this does not invent an ARM syndrome or delivery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MemoryFaultObservation {
-    pub status: u32,
-    pub address: GuestAddress,
-    pub instruction_pc: GuestAddress,
-    pub completed_bytes: u64,
-}
-impl From<checked_memory::MemoryFault> for MemoryFaultObservation {
-    fn from(fault: checked_memory::MemoryFault) -> Self {
-        Self {
-            status: fault.status as u32,
-            address: fault.address,
-            instruction_pc: fault.pc,
-            completed_bytes: fault.completed_bytes,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -294,7 +256,6 @@ struct RuntimeServices<'a> {
     clock: Option<&'a mut clock::Context>,
     thread: Option<&'a thread::Context>,
     system: Option<&'a mut dyn system::execution::Dispatcher>,
-    memory_context: Option<&'a mut stela_compiler::context::ExecutionContext>,
 }
 
 impl<'a> RuntimeServices<'a> {
@@ -308,7 +269,6 @@ impl<'a> RuntimeServices<'a> {
             clock,
             thread,
             system: None,
-            memory_context: None,
         }
     }
 
@@ -325,7 +285,6 @@ impl<'a> RuntimeServices<'a> {
             clock: None,
             thread: None,
             system: None,
-            memory_context: None,
         }
     }
 
@@ -335,19 +294,6 @@ impl<'a> RuntimeServices<'a> {
             clock: None,
             thread: None,
             system: Some(dispatcher),
-            memory_context: None,
-        }
-    }
-    fn checked_memory(
-        dispatcher: &'a mut dyn system::execution::Dispatcher,
-        context: &'a mut stela_compiler::context::ExecutionContext,
-    ) -> Self {
-        Self {
-            pointer_authentication: None,
-            clock: None,
-            thread: None,
-            system: Some(dispatcher),
-            memory_context: Some(context),
         }
     }
 }
@@ -1035,44 +981,6 @@ impl BlockRuntime {
         }
     }
 
-    /// Run checked GPR memory code against the system state and its memory
-    /// thread.
-    ///
-    /// # Safety
-    /// As for [`Self::run`]; the backend owns pinned, disjoint, coherent
-    /// memory. Context views never outlive the native call.
-    pub unsafe fn run_with_memory(
-        &mut self,
-        state: &mut ThreadState,
-        stop_pc: Option<GuestAddress>,
-        block_budget: usize,
-        dispatcher: &mut dyn system::execution::Dispatcher,
-        context: &mut stela_compiler::context::ExecutionContext,
-    ) -> Result<RunOutcome> {
-        let _floating_environment =
-            crate::execution::floating_environment::HostFloatingEnvironment::capture();
-        ensure!(
-            self.profile.checked_memory().is_some(),
-            "checked memory execution requires its distinct ABI/profile"
-        );
-        ensure!(
-            dispatcher.address_space() == self.address_space,
-            "checked dispatcher address space mismatch"
-        );
-        ensure!(
-            context.has_supported_header(),
-            "unsupported checked context header"
-        );
-        unsafe {
-            self.run_inner(
-                state,
-                stop_pc,
-                block_budget,
-                RuntimeServices::checked_memory(dispatcher, context),
-            )
-        }
-    }
-
     unsafe fn run_inner(
         &mut self,
         state: &mut ThreadState,
@@ -1092,11 +1000,10 @@ impl BlockRuntime {
             clock: mut clock_context,
             thread: thread_context,
             system: mut system_dispatcher,
-            mut memory_context,
         } = services;
         platform::ensure_supported()?;
         ensure!(
-            self.profile.checked_memory().is_none() || memory_context.is_some(),
+            self.profile.checked_memory().is_none(),
             "checked artifact cannot execute through direct entry"
         );
         let mut outcome = RunOutcome {
@@ -1207,91 +1114,7 @@ impl BlockRuntime {
                 "refusing stale block execution"
             );
             let mut completed_blocks = 1;
-            let native_exit = if self.profile.checked_memory().is_some() {
-                let requirements = block
-                    .prepared
-                    .manifest
-                    .memory_requirements
-                    .context("checked block lacks source-derived memory requirements")?;
-                let boundary = system_entry
-                    .as_ref()
-                    .context("checked source boundary missing")?;
-                let dispatcher = system_dispatcher
-                    .as_deref_mut()
-                    .context("checked CPU owner missing")?;
-                let context = memory_context
-                    .as_deref_mut()
-                    .context("checked context missing")?;
-                let offset = usize::try_from(pc.0 - block.region_base)?;
-                let source = &current.source[offset..offset + block.source_bytes];
-                let result = unsafe {
-                    checked_memory::call(
-                        dispatcher,
-                        boundary,
-                        source,
-                        &block.prepared.manifest.source_map,
-                        stela_compiler::block::ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
-                        requirements,
-                        &block.mapping,
-                        &mut state.registers,
-                        context,
-                    )?
-                };
-                match result {
-                    checked_memory::CheckedReturn::Returned(exit) => exit,
-                    checked_memory::CheckedReturn::CpuDeclined(failure) => {
-                        outcome.reason = StopReason::SystemEntryFailure {
-                            instruction_pc: pc,
-                            word: boundary.word(),
-                            failure,
-                        };
-                        break;
-                    }
-                    checked_memory::CheckedReturn::EntryDeclined(status) => {
-                        outcome.reason = StopReason::MemoryEntryDeclined {
-                            instruction_pc: pc,
-                            status: status as u32,
-                        };
-                        break;
-                    }
-                    checked_memory::CheckedReturn::FinalizationFailed {
-                        status,
-                        native_executed,
-                        original_fault,
-                        completed_bytes,
-                        observed_exit,
-                        ..
-                    } => {
-                        let instruction_pc = original_fault.map_or(pc, |fault| fault.pc);
-                        state.pc = instruction_pc;
-                        outcome.blocks_executed += usize::from(native_executed);
-                        outcome.reason = StopReason::MemoryFinalizationFailed {
-                            instruction_pc,
-                            status: status as u32,
-                            native_executed,
-                            original_fault: original_fault.map(Into::into),
-                            completed_bytes,
-                            observed_exit,
-                            retry_safe: false,
-                        };
-                        break;
-                    }
-                    failed @ checked_memory::CheckedReturn::InvocationFailed { .. } => {
-                        anyhow::bail!("checked native invocation unresolved: {failed:?}");
-                    }
-                    checked_memory::CheckedReturn::MemoryFault(fault) => {
-                        state.pc = fault.pc;
-                        outcome.blocks_executed += 1;
-                        outcome.reason = StopReason::MemoryFault {
-                            instruction_pc: fault.pc,
-                            address: fault.address,
-                            status: fault.status as u32,
-                            completed_bytes: fault.completed_bytes,
-                        };
-                        break;
-                    }
-                }
-            } else if block.profile.supports_resident_loops() {
+            let native_exit = if block.profile.supports_resident_loops() {
                 let available = block_budget - outcome.blocks_executed;
                 let mut budget = stela_compiler::block::loop_budget::LoopBudget::new(available);
                 // SAFETY: the distinct immutable profile/ABI binds this source
