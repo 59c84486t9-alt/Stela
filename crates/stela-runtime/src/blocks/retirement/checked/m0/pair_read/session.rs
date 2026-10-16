@@ -5,8 +5,6 @@
     any(target_os = "macos", target_os = "linux", target_os = "none")
 ))]
 use crate::execution::context::ContextLoan;
-#[cfg(not(feature = "std"))]
-use alloc::{string::String, string::ToString};
 
 use super::super::super::source::BoundSource;
 use super::callback::{CallbackFailure, PairReadCallback};
@@ -45,7 +43,6 @@ pub(crate) enum M0PairReadSessionFailure {
     UnsupportedHost,
     Platform(M0RamPairReadPlatformError),
     ContextChanged,
-    SourceChanged(String),
     InvalidCompletion,
 }
 
@@ -146,10 +143,6 @@ impl<'call, 'owner, 'code> NativeM0PairReadSession<'call, 'owner, 'code> {
         self.invoked = true;
         if !self.context_before.matches(self.context) {
             report.failure = Some(M0PairReadSessionFailure::ContextChanged);
-            return report;
-        }
-        if let Err(error) = self.bound.recheck() {
-            report.failure = Some(M0PairReadSessionFailure::SourceChanged(error.to_string()));
             return report;
         }
         if let Err(error) = self.prepared.validate_current() {
@@ -277,10 +270,7 @@ impl<'call, 'owner, 'code> NativeM0PairReadSession<'call, 'owner, 'code> {
         }
         self.prepared
             .validate_current()
-            .map_err(M0PairReadSessionFailure::Platform)?;
-        self.bound
-            .recheck()
-            .map_err(|error| M0PairReadSessionFailure::SourceChanged(error.to_string()))
+            .map_err(M0PairReadSessionFailure::Platform)
     }
 }
 
@@ -307,7 +297,6 @@ impl core::fmt::Debug for M0PairReadSessionFailure {
             Self::ContextChanged => f.write_str("ContextChanged"),
             Self::InvalidCompletion => f.write_str("InvalidCompletion"),
             Self::Platform(value) => f.debug_tuple("Platform").field(value).finish(),
-            Self::SourceChanged(value) => f.debug_tuple("SourceChanged").field(value).finish(),
         }
     }
 }

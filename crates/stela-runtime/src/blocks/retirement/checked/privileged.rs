@@ -216,7 +216,6 @@ impl<'pe> PrivilegedOwner<'pe> {
         system: &SystemState,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
-        bound.recheck()?;
         anyhow::ensure!(
             bound.runtime.profile() == BlockProfile::SystemV1,
             "privileged source ABI differs"
@@ -678,7 +677,6 @@ impl provider::Owner for PrivilegedOwner<'_> {
         _system: &mut SystemState,
         registers: &mut GuestState,
     ) -> anyhow::Result<NativeObservation> {
-        bound.recheck()?;
         self.domain
             .check_execution()
             .map_err(|e| anyhow::anyhow!("actual immediate native domain: {e:?}"))?;
@@ -706,7 +704,6 @@ impl provider::Owner for PrivilegedOwner<'_> {
             .domain
             .check_execution()
             .map_err(|e| anyhow::anyhow!("actual native domain finalization: {e:?}"))
-            .and_then(|()| bound.recheck())
             .and_then(|()| {
                 self.producers
                     .check_registry()

@@ -5,8 +5,6 @@
     any(target_os = "macos", target_os = "linux", target_os = "none")
 ))]
 use crate::execution::context::ContextLoan;
-#[cfg(not(feature = "std"))]
-use alloc::{string::String, string::ToString};
 
 use super::super::source::BoundSource;
 use super::callback::{CallbackFailure, ReadCallback};
@@ -37,7 +35,6 @@ pub(crate) enum M0SessionFailure {
     StorageAfter(crate::execution::NativeStorageError),
     Platform(M0RamReadPlatformError),
     ContextChanged,
-    SourceChanged(String),
     InvalidCompletion,
 }
 
@@ -134,10 +131,6 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
         self.invoked = true;
         if !self.context_before.matches(self.context) {
             report.failure = Some(M0SessionFailure::ContextChanged);
-            return report;
-        }
-        if let Err(error) = self.bound.recheck() {
-            report.failure = Some(M0SessionFailure::SourceChanged(error.to_string()));
             return report;
         }
         if let Err(error) = self.prepared.validate_current() {
@@ -258,10 +251,7 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
         }
         self.prepared
             .validate_current()
-            .map_err(M0SessionFailure::Platform)?;
-        self.bound
-            .recheck()
-            .map_err(|error| M0SessionFailure::SourceChanged(error.to_string()))
+            .map_err(M0SessionFailure::Platform)
     }
 }
 
@@ -283,7 +273,6 @@ impl core::fmt::Debug for M0SessionFailure {
             Self::ContextChanged => f.write_str("ContextChanged"),
             Self::InvalidCompletion => f.write_str("InvalidCompletion"),
             Self::Platform(value) => f.debug_tuple("Platform").field(value).finish(),
-            Self::SourceChanged(value) => f.debug_tuple("SourceChanged").field(value).finish(),
         }
     }
 }

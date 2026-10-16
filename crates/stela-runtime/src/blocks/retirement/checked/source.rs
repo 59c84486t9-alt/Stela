@@ -24,7 +24,19 @@ pub(crate) struct BoundSource<'code> {
     pub(super) entry: EntryBoundary,
     pub(super) source: &'code [u8],
     requirements: Option<MemoryRequirements>,
+    analysis: &'code BlockAnalysis,
+    el1_platform: Option<stela_compiler::block::el1_platform::Intent>,
+    el1_m0: Option<stela_compiler::block::el1_m0::Intent>,
+}
+
+/// What the original plan says about a loaded block's exact source. It is a
+/// pure function of that immutable source, so each block validates it once.
+#[derive(Debug)]
+pub(crate) struct CheckedFacts {
+    requirements: Option<MemoryRequirements>,
     analysis: BlockAnalysis,
+    el1_platform: Option<stela_compiler::block::el1_platform::Intent>,
+    el1_m0: Option<stela_compiler::block::el1_m0::Intent>,
 }
 
 pub(crate) enum Helper {
@@ -56,7 +68,6 @@ impl<'code> BoundSource<'code> {
     pub(super) fn system_instruction(
         &self,
     ) -> anyhow::Result<stela_compiler::block::SystemInstruction> {
-        self.recheck()?;
         anyhow::ensure!(
             self.runtime.profile() == BlockProfile::SystemV1
                 && self.requirements.is_none()
@@ -94,7 +105,6 @@ impl<'code> BoundSource<'code> {
 
     /// Exact typed source-derived direct target; output is intent, not a grant.
     pub(super) fn direct_branch_target(&self) -> anyhow::Result<GuestAddress> {
-        self.recheck()?;
         let analysis = &self.analysis;
         anyhow::ensure!(
             self.runtime.profile() == BlockProfile::El1DirectBranchV1
@@ -128,7 +138,6 @@ impl<'code> BoundSource<'code> {
     /// from the run request. Every association field still matches this exact
     /// retained source/plan/map/RX owner immediately before native invocation.
     pub(super) fn check_descriptor(&self, boundary: &EntryBoundary) -> anyhow::Result<()> {
-        self.recheck()?;
         anyhow::ensure!(
             boundary.address_space() == self.entry.address_space()
                 && boundary.entry() == self.entry.entry()
@@ -205,6 +214,32 @@ impl<'code> BoundSource<'code> {
             region.source.len(),
             word,
         );
+        let facts = match block.checked.get() {
+            Some(facts) => facts,
+            None => {
+                let facts = Self::validate(runtime, block, pc, source)?;
+                block.checked.get_or_init(|| facts)
+            }
+        };
+        Ok(Self {
+            runtime,
+            block,
+            entry,
+            source,
+            requirements: facts.requirements,
+            analysis: &facts.analysis,
+            el1_platform: facts.el1_platform,
+            el1_m0: facts.el1_m0,
+        })
+    }
+
+    /// Check the loaded artifact against the exact source and derive its plan.
+    fn validate(
+        runtime: &BlockRuntime,
+        block: &LoadedBlock,
+        pc: GuestAddress,
+        source: &[u8],
+    ) -> anyhow::Result<CheckedFacts> {
         let manifest = &block.prepared.manifest;
         let identity = &manifest.identity;
         anyhow::ensure!(
@@ -269,26 +304,12 @@ impl<'code> BoundSource<'code> {
             analysis.source_bytes == source.len(),
             "analysis does not consume exact original source"
         );
-        Ok(Self {
-            runtime,
-            block,
-            entry,
-            source,
+        Ok(CheckedFacts {
             requirements,
             analysis,
+            el1_platform: plan.el1_platform_intent(),
+            el1_m0: plan.el1_m0_intent(),
         })
-    }
-
-    pub(super) fn recheck(&self) -> anyhow::Result<()> {
-        let actual = Self::new(self.runtime, self.entry.entry())?;
-        anyhow::ensure!(
-            core::ptr::eq(actual.block, self.block)
-                && actual.source == self.source
-                && actual.entry.generation() == self.entry.generation()
-                && actual.requirements == self.requirements,
-            "retained source association changed"
-        );
-        Ok(())
     }
 
     pub(super) fn validate_return(
@@ -296,7 +317,6 @@ impl<'code> BoundSource<'code> {
         exit: &BlockExit,
         registers: &GuestState,
     ) -> anyhow::Result<ReturnedTerminal> {
-        self.recheck()?;
         let kind = ExitKind::try_from(exit.kind)
             .map_err(|()| anyhow::anyhow!("unknown native exit carrier"))?;
         let next = GuestAddress(exit.next_pc);
@@ -376,7 +396,7 @@ impl<'code> BoundSource<'code> {
                     // BLR may have overwritten X30, so post-body X30 is not an
                     // independent old-target oracle. Fetch validation is next.
                 } else if conditional::validate(
-                    &self.analysis,
+                    self.analysis,
                     self.source,
                     self.entry.entry(),
                     registers,
@@ -420,7 +440,6 @@ impl<'code> BoundSource<'code> {
     }
 
     pub(super) fn validate_fault(&self, fault: &super::OwnedMemoryFault) -> anyhow::Result<()> {
-        self.recheck()?;
         anyhow::ensure!(
             self.block
                 .prepared

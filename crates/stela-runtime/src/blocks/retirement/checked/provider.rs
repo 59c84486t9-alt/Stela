@@ -133,7 +133,6 @@ impl<'pe> CheckedProcessOwner<'pe> {
         registers: &mut GuestState,
         outer: &MemoryExecutionLoan,
     ) -> anyhow::Result<()> {
-        bound.recheck()?;
         self.check_resources()?;
         self.execution
             .check_snapshot(self.controls.identification_snapshot(), system)?;
@@ -625,9 +624,6 @@ impl Dispatcher for ProcessDispatcher<'_, '_> {
         {
             return Err(Failure::WrongAddressSpace);
         }
-        self.bound
-            .recheck()
-            .map_err(|error| Failure::Backend(error.to_string()))?;
         self.controls
             .prepare_profile(
                 boundary,

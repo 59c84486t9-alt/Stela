@@ -2,7 +2,7 @@
 //! None memory metadata is accepted only together with this exact typed plan.
 use super::BoundSource;
 use stela_compiler::{
-    block::{BlockProfile, CompilationPlan, el1_m0::Intent},
+    block::{BlockProfile, el1_m0::Intent},
     context::memory::profile_requirements,
 };
 
@@ -22,24 +22,12 @@ impl BoundSource<'_> {
                 }
             };
         }
-        self.recheck()?;
         anyhow::ensure!(
             self.runtime.profile() == BlockProfile::El1M0IntegerV1,
             "actual source is not the typed EL1 integer profile"
         );
-        let plan = CompilationPlan::new(
-            self.source,
-            self.entry.entry(),
-            self.runtime.profile(),
-            self.runtime.target_cpu(),
-        )?;
-        anyhow::ensure!(
-            plan.source_bytes() == self.source.len()
-                && plan.memory_requirements() == self.requirements,
-            "actual EL1 consumed source/requirements changed"
-        );
-        let intent = plan
-            .el1_m0_intent()
+        let intent = self
+            .el1_m0
             .ok_or_else(|| anyhow::anyhow!("actual typed EL1 intent absent"))?;
         match intent {
             Intent::Registers => anyhow::ensure!(
@@ -88,23 +76,11 @@ impl BoundSource<'_> {
     pub(in crate::blocks::retirement::checked) fn el1_platform_intent(
         &self,
     ) -> anyhow::Result<stela_compiler::block::el1_platform::Intent> {
-        self.recheck()?;
         anyhow::ensure!(
             self.runtime.profile() == BlockProfile::El1PlatformV1,
             "source is not the actual mixed platform profile"
         );
-        let plan = CompilationPlan::new(
-            self.source,
-            self.entry.entry(),
-            self.runtime.profile(),
-            self.runtime.target_cpu(),
-        )?;
-        anyhow::ensure!(
-            plan.source_bytes() == self.source.len()
-                && plan.memory_requirements() == self.requirements,
-            "actual mixed EL1 source/requirements differ"
-        );
-        plan.el1_platform_intent()
+        self.el1_platform
             .ok_or_else(|| anyhow::anyhow!("mixed EL1 source intent absent"))
     }
     pub(in crate::blocks::retirement::checked) fn el1_carrier_intent(

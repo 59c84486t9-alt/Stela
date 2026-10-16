@@ -58,6 +58,7 @@ impl LoadedBlock {
             source_bytes,
             prepared,
             mapping,
+            checked: core::cell::OnceCell::new(),
         })
     }
 }

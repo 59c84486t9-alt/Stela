@@ -36,6 +36,7 @@ pub(crate) use entry_controls::ProcessEntryControls;
 pub(crate) use m0::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
 #[cfg(feature = "std")]
 pub(crate) use provider::CheckedProcessOwner;
+pub(crate) use source::CheckedFacts;
 use source::{BoundSource, ReturnedTerminal};
 use stela_compiler::{
     GuestAddress,
@@ -271,9 +272,6 @@ impl BlockRuntime {
                     Ok(stela_compiler::block::el1_platform::Intent::System(instruction))
                         if instruction.is_el1_context_operation())
             {
-                // End this immutable runtime loan before actual context/source
-                // publication; original Runtime keeps its physical source pin.
-                drop(bound);
                 match active.execute_el1_context(
                     self,
                     &mut accounting,

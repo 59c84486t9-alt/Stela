@@ -281,7 +281,6 @@ impl Owner for M0Owner<'_> {
         outer
             .check_thread_domain(&*self.memory)
             .map_err(|error| anyhow::anyhow!("actual M0 outer domain: {error:?}"))?;
-        bound.recheck()?;
         anyhow::ensure!(
             bound.runtime.profile()
                 == match self.cohort {

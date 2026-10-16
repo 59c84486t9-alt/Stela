@@ -299,7 +299,6 @@ impl M0SourceInput<'_, '_> {
     /// actual CPU/control/physical-space witness. No metadata grants access.
     pub(crate) fn validate_source_current(&self) -> anyhow::Result<()> {
         self.validate_thread_current()?;
-        self.bound.recheck()?;
         anyhow::ensure!(
             self.bound.source.len() == INSTRUCTION_BYTES,
             "M0 source input extent differs"
@@ -469,7 +468,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             .outer
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("M0 outer loan absent"))?;
-        bound.recheck()?;
         anyhow::ensure!(
             bound.source.len() == INSTRUCTION_BYTES,
             "M0 source extent differs"
@@ -647,7 +645,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             }
             let checked = (|| -> anyhow::Result<()> {
                 checks.check(outer)?;
-                bound.recheck()?;
                 retained.require_native(self.attempt)
             })();
             if let Err(error) = checked {

@@ -106,6 +106,5 @@ fn exact_platform_source_keeps_effect_free_and_memory_intent_requirements_distin
             memory
         );
         assert_eq!(accounting.blocks_executed, 0);
-        bound.recheck().unwrap();
     }
 }

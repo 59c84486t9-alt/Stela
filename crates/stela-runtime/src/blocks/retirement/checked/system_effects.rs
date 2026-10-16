@@ -68,7 +68,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("System effect original outer absent"))?;
         let result = (|| -> anyhow::Result<Option<OwnedStop>> {
-            bound.recheck()?;
             anyhow::ensure!(
                 bound.source.len() == size_of::<u32>(),
                 "System effect must be one original instruction"
@@ -194,7 +193,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 .blocks_executed
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("System effect accounting overflow"))?;
-            bound.recheck()?;
             checks.check(outer)?;
             let mut retained = RetainedRamCompletion {
                 authority: &mut *self.pe.authority,
@@ -235,7 +233,6 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             prefixes.push(prefix);
             accounting.blocks_executed = blocks;
             accounting.last_exit = Some((instruction.instruction_pc.0, ExitKind::System as u64));
-            bound.recheck()?;
             checks.post_retirement_el1(outer, &scope, controls, platform, self.pe.system)?;
             retained
                 .authority

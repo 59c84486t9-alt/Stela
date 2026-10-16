@@ -265,6 +265,8 @@ struct LoadedBlock {
     source_bytes: usize,
     prepared: crate::artifact::LoadedArtifact,
     mapping: platform::Mapping,
+    /// Checked-retirement plan facts, derived on first checked dispatch.
+    checked: core::cell::OnceCell<retirement::checked::CheckedFacts>,
 }
 
 /// Services borrowed for one serialized run; absent owners remain explicit stops.
