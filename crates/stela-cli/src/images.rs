@@ -57,6 +57,51 @@ pub(crate) struct FetchAeaKey {
     output: PathBuf,
 }
 
+#[derive(Args)]
+pub(crate) struct DecryptAea {
+    input: PathBuf,
+    /// The PKCS8 PEM key that `fetch-aea-key` saved.
+    #[arg(long)]
+    key: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(Args)]
+pub(crate) struct ExtractGuestFiles {
+    /// A decrypted disk image, such as the OS image from `decrypt-aea`.
+    image: PathBuf,
+    /// A new directory that receives the files at their guest paths.
+    #[arg(long)]
+    output: PathBuf,
+    /// An absolute guest file path; repeat for each file.
+    #[arg(long)]
+    path: Vec<String>,
+    /// A guest file path copied when present.
+    #[arg(long)]
+    optional_path: Vec<String>,
+    /// Also copy every arm64e dyld shared cache file.
+    #[arg(long)]
+    shared_cache: bool,
+    /// The mounted volume to read, when the image has several.
+    #[arg(long)]
+    volume: Option<String>,
+}
+
+impl ExtractGuestFiles {
+    pub(crate) fn run(self) -> Result<()> {
+        let selection = restore::disk::Selection {
+            required: self.path,
+            optional: self.optional_path,
+            shared_cache: self.shared_cache,
+            volume: self.volume,
+        };
+        let receipt = restore::disk::extract(&self.image, &self.output, &selection)?;
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+        Ok(())
+    }
+}
+
 impl ImageManifest {
     pub(crate) fn run(self) -> Result<()> {
         let Self {
@@ -113,6 +158,14 @@ impl FetchAeaKey {
             "{}",
             serde_json::to_string_pretty(&restore::aea::fetch_key(&input, &output)?)?
         );
+        Ok(())
+    }
+}
+
+impl DecryptAea {
+    pub(crate) fn run(self) -> Result<()> {
+        let report = restore::aea::decrypt(&self.input, &self.key, &self.output)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
         Ok(())
     }
 }

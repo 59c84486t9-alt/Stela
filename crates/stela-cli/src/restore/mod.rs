@@ -1,6 +1,7 @@
 //! Read Apple's public macOS IPSW feed and download original images.
 pub mod aea;
 pub mod archive;
+pub mod disk;
 pub mod manifest;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;

@@ -63,6 +63,10 @@ pub(crate) enum Command {
     InspectAea(images::InspectAea),
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
     FetchAeaKey(images::FetchAeaKey),
+    /// Decrypt an AEA1 archive, such as an IPSW disk image, with its fetched key.
+    DecryptAea(images::DecryptAea),
+    /// Copy selected guest files out of a decrypted disk image.
+    ExtractGuestFiles(images::ExtractGuestFiles),
 }
 
 impl Command {
@@ -86,6 +90,8 @@ impl Command {
             Self::ExtractImage(command) => command.run(),
             Self::InspectAea(command) => command.run(),
             Self::FetchAeaKey(command) => command.run(),
+            Self::DecryptAea(command) => command.run(),
+            Self::ExtractGuestFiles(command) => command.run(),
         }
     }
 }

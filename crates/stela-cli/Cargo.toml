@@ -20,10 +20,15 @@ stela-core.workspace = true
 stela-compiler.workspace = true
 stela-runtime.workspace = true
 stela-loader.workspace = true
+base64 = "0.22"
+hpke = { version = "0.13", default-features = false, features = ["alloc", "p256"] }
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 plist = "1"
+zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha1 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate"] }
+
 
 [lints]
 workspace = true
