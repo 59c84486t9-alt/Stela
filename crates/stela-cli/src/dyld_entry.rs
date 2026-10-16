@@ -126,10 +126,10 @@ pub fn probe(
     options: Options,
 ) -> Result<serde_json::Value> {
     let dyld_data = std::fs::read(dyld_path)?;
-    let (dyld_offset, dyld_bytes) = crate::apple_slice(&dyld_data, dyld_path, None)?;
+    let (dyld_offset, dyld_bytes) = crate::macho::select_slice(&dyld_data, dyld_path, None)?;
     let dyld = load_plan::plan_dynamic_linker(dyld_bytes)?;
     let main_data = std::fs::read(executable)?;
-    let (main_offset, main_bytes) = crate::apple_slice(&main_data, executable, None)?;
+    let (main_offset, main_bytes) = crate::macho::select_slice(&main_data, executable, None)?;
     let main = load_plan::plan(main_bytes)?;
     ensure!(
         main.dylinker.as_deref() == Some(dyld.install_name.as_str()),
@@ -173,9 +173,9 @@ pub fn probe(
         .as_deref()
         .map(|path| {
             if options.bootstrap_clock {
-                crate::pauth_context(path, 0x534f524544594c44)
+                crate::input::pauth_context(path, 0x534f524544594c44)
             } else {
-                crate::pauth_context_version(
+                crate::input::pauth_context_version(
                     path,
                     0x534f524544594c44,
                     stela_runtime::pauth::Version::FaultingCombined,
@@ -321,7 +321,7 @@ pub fn probe(
                 stela_compiler::block::CheckedMemoryProfile::SpAlignmentDisabled,
             )
         } else {
-            crate::block_profile(false, false, false)
+            crate::compile::block_profile(false, false, false)
         },
     );
     if let Some(windows) = bootstrap_code {
@@ -342,7 +342,7 @@ pub fn probe(
             ..Default::default()
         },
     };
-    let initial = crate::register_json(&thread.registers);
+    let initial = crate::input::register_json(&thread.registers);
     // SAFETY: hash-reviewed original windows, fixed clock selectors and zero X3
     // bound the executed path to register operations, checked private-stack
     // stores/loads, RO clock loads and validated PAC/clock helpers. Stop precedes
@@ -420,7 +420,7 @@ pub fn probe(
         "entry_pc":entry,"stop_pc":stop,"target_pc":target_pc,"original_prefix_words":words,
         "software_pauth_profile":context.as_ref().map(|context| context.profile_id()),
         "pauth_instruction_executed":context.is_some(),"abi":runtime.profile().abi(),
-        "initial_state":initial,"state":crate::register_json(&thread.registers),"pc":thread.pc.0,
+        "initial_state":initial,"state":crate::input::register_json(&thread.registers),"pc":thread.pc.0,
         "outcome":outcome,"target_instruction":"PACIBSP","target_analysis":target_analysis,
         "target_analysis_profile":"ordinary","selected_profile_target_analysis":selected_profile_target_analysis,
         "fixups_applied":false,"native_executed":true,"complete_binary_verified":false,

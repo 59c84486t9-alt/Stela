@@ -210,6 +210,30 @@ pub fn scan(root: &Path, build: &str) -> Result<Inventory> {
     Ok(inventory)
 }
 
+/// The single arm64/arm64e slice of `data`, optionally narrowed by architecture.
+pub fn select_slice<'a>(
+    data: &'a [u8],
+    path: &std::path::Path,
+    architecture: Option<&str>,
+) -> Result<(u64, &'a [u8])> {
+    let artifacts = inspect(data, &path.display().to_string())?;
+    let slices = split_slices(data)?;
+    let selected: Vec<_> = artifacts
+        .iter()
+        .zip(slices)
+        .filter(|(artifact, _)| {
+            matches!(artifact.architecture.as_str(), "arm64" | "arm64e")
+                && architecture.is_none_or(|wanted| wanted == artifact.architecture)
+        })
+        .collect();
+    ensure!(
+        selected.len() == 1,
+        "expected exactly one matching Apple executable slice, found {}; select --architecture arm64 or arm64e",
+        selected.len()
+    );
+    Ok(selected[0].1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

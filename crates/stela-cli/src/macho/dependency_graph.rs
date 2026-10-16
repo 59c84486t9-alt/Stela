@@ -132,7 +132,7 @@ fn read_input(
         bytes.len() as u64 <= MAX_FILE_BYTES,
         "guest image exceeds discovery input limit"
     );
-    let (slice_offset, slice) = crate::apple_slice(&bytes, path, architecture)?;
+    let (slice_offset, slice) = super::select_slice(&bytes, path, architecture)?;
     let plan = if library {
         load_plan::plan_library(slice)?
     } else {
