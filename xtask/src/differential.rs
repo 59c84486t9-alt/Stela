@@ -19,7 +19,6 @@ use stela_oracle::{
     CODE_PAGE, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome, Scalable, native::Translation,
 };
 
-const RET: u32 = 0xd65f_03c0;
 /// Every leaf ends in RET, so the leaf RET form needs no case of its own.
 const LEAF_TERMINATOR: &str = "RET_64R_branch_reg";
 /// FPCR controls of the reviewed profile that QEMU also implements: AHP, DN,
@@ -185,7 +184,7 @@ struct Lane<'a> {
 
 impl Lane<'_> {
     /// Stela's translation of `code` at the code page under `sample`'s profile,
-    /// or `None` when it needs a service this differential does not provide.
+    /// or `None` when it needs a service the differential does not provide.
     fn translate(&self, code: &[u32], sample: &Value) -> Result<Option<Translation>> {
         match self.mode {
             Mode::Leaf => Translation::leaf(code).map(Some),
@@ -195,14 +194,10 @@ impl Lane<'_> {
                 if let Some(profile) = probe.context_block_profile_if_block()? {
                     return Translation::scalable_block(code, profile).map(Some);
                 }
-                let mut words = code.to_vec();
-                words.push(RET);
-                let compiled = probe.compile(&words)?;
-                let requirements = &compiled.manifest["memory_requirements"];
-                if requirements["required_flags"] != 0 || requirements["required_profile"] != 0 {
-                    return Ok(None);
-                }
-                Translation::context(&compiled.native).map(Some)
+                let profile = probe
+                    .context_leaf_profile()?
+                    .context("scalable leaf profile")?;
+                Translation::scalable_leaf(code, profile)
             }
             Mode::Service => unreachable!("service forms are not compared"),
         }
@@ -221,7 +216,8 @@ impl Lane<'_> {
 impl Differential {
     pub fn run(self) -> Result<()> {
         let mut random = Random(self.seed);
-        let (mut subjects, skipped) = self.subjects(&mut random)?;
+        let mut skipped = 0;
+        let mut subjects = self.subjects(&mut random, &mut skipped)?;
         let cases: Vec<Case> = subjects
             .iter()
             .flat_map(|subject| std::iter::repeat_n(subject, self.states))
@@ -282,7 +278,7 @@ impl Differential {
         }
         println!(
             "{} words, {compared} comparisons, {} mismatches in {} forms, {} forms never \
-             completed, {skipped} samples need services this differential does not provide",
+             completed, {skipped} samples need services the differential does not provide",
             subjects.len(),
             mismatches.len(),
             forms.len(),
@@ -295,10 +291,10 @@ impl Differential {
         Ok(())
     }
 
-    /// Every compared word, and the number of samples skipped for services.
-    fn subjects(&self, random: &mut Random) -> Result<(Vec<Subject>, usize)> {
+    /// Every compared word sequence; samples needing other services count in
+    /// `skipped`.
+    fn subjects(&self, random: &mut Random, skipped: &mut usize) -> Result<Vec<Subject>> {
         let mut subjects = vec![];
-        let mut skipped = 0;
         for (name, mode) in registry::REGISTRIES {
             if mode == Mode::Service {
                 continue;
@@ -327,11 +323,11 @@ impl Differential {
                     for following in sample["following_words"].as_array().into_iter().flatten() {
                         code.push(hex(following)?);
                     }
-                    let translation = lane
+                    let Some(translation) = lane
                         .translate(&code, sample)
-                        .with_context(|| format!("{id} {code:08x?}"))?;
-                    let Some(translation) = translation else {
-                        skipped += 1;
+                        .with_context(|| format!("{id} {code:08x?}"))?
+                    else {
+                        *skipped += 1;
                         continue;
                     };
                     seen.insert(code[0]);
@@ -370,7 +366,7 @@ impl Differential {
             }
         }
         ensure!(!subjects.is_empty(), "no forms selected");
-        Ok((subjects, skipped))
+        Ok(subjects)
     }
 }
 

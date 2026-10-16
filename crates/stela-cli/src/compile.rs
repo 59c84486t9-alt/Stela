@@ -4,7 +4,10 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use clap::Parser;
 use std::path::{Path, PathBuf};
-use stela_compiler::{block::BlockProfile, extended::block::ExtendedBlockProfile};
+use stela_compiler::{
+    block::BlockProfile,
+    extended::{ScalableProfile, block::ExtendedBlockProfile},
+};
 use stela_core::write_json;
 
 mod profile;
@@ -298,29 +301,27 @@ impl PrepareLeaf {
 }
 
 impl CompileLeaf {
+    /// The scalable guest profile, when one is declared.
+    fn profile(&self) -> Result<Option<ScalableProfile>> {
+        compile_scalable_profile(
+            self.guest_profile.as_deref(),
+            self.svl_bytes,
+            self.svcr,
+            &self.guest_feature,
+            self.max_svl_bytes,
+            self.zt0_enabled,
+            self.fpmr_enabled,
+        )
+    }
+
     fn compile(self, source: &[u8]) -> Result<Compiled> {
+        let profile = self.profile()?;
         let Self {
-            input: _,
             cpu_target,
             guest_base,
-            guest_profile,
-            svl_bytes,
-            svcr,
-            guest_feature,
-            max_svl_bytes,
-            zt0_enabled,
             fpmr_enabled,
-            output_dir: _,
+            ..
         } = self;
-        let profile = compile_scalable_profile(
-            guest_profile.as_deref(),
-            svl_bytes,
-            svcr,
-            &guest_feature,
-            max_svl_bytes,
-            zt0_enabled,
-            fpmr_enabled,
-        )?;
         let memory_requirements = profile
             .map(|profile| {
                 stela_compiler::extended::memory_requirements(
@@ -417,6 +418,14 @@ impl Compiled {
         write_json(&output.join("manifest.json"), &self.manifest)?;
         println!("{}", serde_json::to_string_pretty(&self.manifest)?);
         Ok(())
+    }
+}
+
+/// The scalable guest profile a `compile-leaf` command line declares, if any.
+pub fn context_leaf_profile(arguments: &[&str]) -> Result<Option<ScalableProfile>> {
+    match crate::Cli::try_parse_from(arguments)?.command {
+        crate::Command::CompileLeaf(command) => command.profile(),
+        _ => anyhow::bail!("expected compile-leaf"),
     }
 }
 

@@ -4,7 +4,7 @@ use crate::compile::{Compiled, compile};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::path::Path;
-use stela_compiler::extended::block::ExtendedBlockProfile;
+use stela_compiler::extended::{ScalableProfile, block::ExtendedBlockProfile};
 
 /// How a registry's forms compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +109,14 @@ impl Probe {
             return Ok(None);
         }
         crate::compile::context_block_profile(&self.arguments())
+    }
+
+    /// The scalable guest profile of a scalable `compile-leaf` probe.
+    pub fn context_leaf_profile(&self) -> Result<Option<ScalableProfile>> {
+        if self.command != "compile-leaf" {
+            return Ok(None);
+        }
+        crate::compile::context_leaf_profile(&self.arguments())
     }
 
     fn arguments(&self) -> Vec<&str> {
