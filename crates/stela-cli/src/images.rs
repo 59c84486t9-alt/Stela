@@ -37,6 +37,9 @@ pub(crate) struct ImageManifest {
     model: Option<String>,
     #[arg(long)]
     output: PathBuf,
+    /// Also read and hash every component member of the selected identities.
+    #[arg(long)]
+    hash_members: bool,
 }
 
 #[derive(Args)]
@@ -118,12 +121,13 @@ impl ImageManifest {
             image: input,
             model,
             output,
+            hash_members,
         } = self;
         ensure!(
             !output.exists(),
             "report exists; choose a new --output path"
         );
-        let report = restore::archive::manifest(&input, model.as_deref())?;
+        let report = restore::archive::manifest(&input, model.as_deref(), hash_members)?;
         write_json(&output, &report)?;
         eprintln!(
             "macOS {} build {}: {} matching identities; {}",

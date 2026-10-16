@@ -9,11 +9,16 @@ pub struct Component {
     pub path: String,
     pub declared_digest_hex: Option<String>,
     pub declared_hash_method: Option<String>,
+    /// The member's own bytes and hash, when the archive was hashed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member: Option<super::archive::MemberDigest>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Identity {
     pub product_type: Option<String>,
+    pub ap_chip_id: Option<String>,
+    pub ap_board_id: Option<String>,
     pub device_class: String,
     pub variant: String,
     pub components: BTreeMap<String, Component>,
@@ -97,11 +102,20 @@ pub fn inspect(bytes: &[u8], model: Option<&str>) -> Result<RestoreManifest> {
                         .and_then(|i| i.get("HashMethod"))
                         .and_then(Value::as_string)
                         .map(str::to_owned),
+                    member: None,
                 },
             );
         }
+        let text = |key: &str| {
+            identity
+                .get(key)
+                .and_then(Value::as_string)
+                .map(str::to_owned)
+        };
         identities.push(Identity {
             product_type,
+            ap_chip_id: text("ApChipID"),
+            ap_board_id: text("ApBoardID"),
             device_class: required(info, "DeviceClass")?,
             variant: required(info, "Variant")?,
             components,

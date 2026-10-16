@@ -1,22 +1,106 @@
 //! Read the manifest and extract members of a downloaded restore archive.
 use anyhow::{Context, Result, ensure};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{Read, Write},
     path::Path,
 };
 
-pub fn manifest(image: &Path, model: Option<&str>) -> Result<super::manifest::RestoreManifest> {
-    let mut archive = zip::ZipArchive::new(File::open(image)?)?;
-    let member = archive.by_name("BuildManifest.plist")?;
-    let mut bytes = vec![];
-    member.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+const MANIFEST_LIMIT: u64 = 64 * 1024 * 1024;
+/// Members up to this size are also read whole to describe their IM4P header.
+const IM4P_HEADER_LIMIT: u64 = 256 * 1024 * 1024;
+
+type Archive = zip::ZipArchive<File>;
+
+/// A member's actual size and SHA-256, and its IM4P identity when it is one.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemberDigest {
+    pub bytes: u64,
+    pub sha256: String,
+    pub im4p_type: Option<String>,
+    pub im4p_description: Option<String>,
+}
+
+fn read_limited(archive: &mut Archive, name: &str, maximum: u64) -> Result<Vec<u8>> {
     ensure!(
-        bytes.len() <= 64 * 1024 * 1024,
-        "restore manifest exceeds 64 MiB"
+        super::manifest::safe_member(name),
+        "unsafe archive member name"
     );
-    super::manifest::inspect(&bytes, model)
+    let member = archive
+        .by_name(name)
+        .with_context(|| format!("archive has no member {name}"))?;
+    ensure!(
+        member.size() <= maximum,
+        "member {name} exceeds {maximum} bytes"
+    );
+    let mut bytes = Vec::with_capacity(member.size() as usize);
+    member.take(maximum + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= maximum,
+        "member {name} exceeds {maximum} bytes"
+    );
+    Ok(bytes)
+}
+
+fn hash_member(archive: &mut Archive, name: &str) -> Result<MemberDigest> {
+    let size = archive.by_name(name)?.size();
+    if size <= IM4P_HEADER_LIMIT {
+        let bytes = read_limited(archive, name, IM4P_HEADER_LIMIT)?;
+        let im4p = stela_loader::im4p::parse(&bytes).ok();
+        return Ok(MemberDigest {
+            bytes: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            im4p_type: im4p.as_ref().map(|i| i.payload_type.clone()),
+            im4p_description: im4p.map(|i| i.description),
+        });
+    }
+    let mut member = archive.by_name(name)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        let count = member.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+        bytes += count as u64;
+    }
+    ensure!(bytes == size, "member {name} is truncated");
+    Ok(MemberDigest {
+        bytes,
+        sha256: hex::encode(hash.finalize()),
+        im4p_type: None,
+        im4p_description: None,
+    })
+}
+
+/// The manifest for `model`; with `hash_members`, every component member is
+/// also read and hashed once (ZIP CRCs are checked while reading).
+pub fn manifest(
+    image: &Path,
+    model: Option<&str>,
+    hash_members: bool,
+) -> Result<super::manifest::RestoreManifest> {
+    let mut archive = zip::ZipArchive::new(File::open(image)?)?;
+    let bytes = read_limited(&mut archive, "BuildManifest.plist", MANIFEST_LIMIT)?;
+    let mut report = super::manifest::inspect(&bytes, model)?;
+    if hash_members {
+        let mut digests = BTreeMap::new();
+        for identity in &mut report.identities {
+            for component in identity.components.values_mut() {
+                if !digests.contains_key(&component.path) {
+                    let digest = hash_member(&mut archive, &component.path)?;
+                    digests.insert(component.path.clone(), digest);
+                }
+                component.member = digests.get(&component.path).cloned();
+            }
+        }
+    }
+    Ok(report)
 }
 
 pub fn extract(image: &Path, name: &str, output: &Path, maximum: u64) -> Result<serde_json::Value> {
