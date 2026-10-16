@@ -13,6 +13,45 @@ use stela_loader::im4m;
 const MANIFEST_FILE: &str = "bundle.json";
 const KERNEL_LIMIT: u64 = 512 * 1024 * 1024;
 const COMPONENT_LIMIT: u64 = 64 * 1024 * 1024;
+const RAMDISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+const INSTALLED_VARIANT: &str = "macOS Customer";
+const RESTORE_VARIANT: &str = "Customer Erase Install (IPSW)";
+/// The `/osenvironments` child for a restore ramdisk: it turns off the SEP
+/// firmware load and protected data access and selects ephemeral storage.
+const RESTORE_ENVIRONMENT: &str = "darwinos-ramdisk-environment";
+const INSTALLED_BOOT_ARGS: &str = "-v";
+const RESTORE_BOOT_ARGS: &str = "-v rd=md0";
+
+/// The BuildManifest components, and their IM4P types, a boot mode loads.
+struct Roles {
+    kernel: &'static str,
+    device_tree: &'static str,
+    trust_cache: (&'static str, &'static str),
+    sptm: &'static str,
+    txm: &'static str,
+    sep: &'static str,
+    ramdisk: Option<(&'static str, &'static str)>,
+}
+
+const INSTALLED: Roles = Roles {
+    kernel: "KernelCache",
+    device_tree: "DeviceTree",
+    trust_cache: ("StaticTrustCache", "trst"),
+    sptm: "Ap,SecurePageTableMonitor",
+    txm: "Ap,TrustedExecutionMonitor",
+    sep: "SEP",
+    ramdisk: None,
+};
+
+const RESTORE: Roles = Roles {
+    kernel: "RestoreKernelCache",
+    device_tree: "RestoreDeviceTree",
+    trust_cache: ("RestoreTrustCache", "rtsc"),
+    sptm: "Ap,RestoreSecurePageTableMonitor",
+    txm: "Ap,RestoreTrustedExecutionMonitor",
+    sep: "RestoreSEP",
+    ramdisk: Some(("RestoreRamDisk", "rdsk")),
+};
 
 #[derive(Subcommand)]
 pub(crate) enum BootCommand {
@@ -31,9 +70,18 @@ pub(crate) struct Prepare {
     /// A new directory for the bundle.
     #[arg(long)]
     output: PathBuf,
-    /// The restore identity variant; the installed-system identity by default.
-    #[arg(long, default_value = "macOS Customer")]
-    variant: String,
+    /// Boot the restore ramdisk with the identity's restore objects instead
+    /// of the installed system.
+    #[arg(long)]
+    restore: bool,
+    /// The restore identity variant: `macOS Customer` for the installed
+    /// system, `Customer Erase Install (IPSW)` with `--restore`.
+    #[arg(long)]
+    variant: Option<String>,
+    /// The `/osenvironments` child to apply; `darwinos-ramdisk-environment`
+    /// with `--restore`.
+    #[arg(long)]
+    osenvironment: Option<String>,
     /// Guest DRAM base; Apple M1/M2 place DRAM at 0x800000000.
     #[arg(long, value_parser = parse_address, default_value = "0x800000000")]
     dram_base: u64,
@@ -46,8 +94,9 @@ pub(crate) struct Prepare {
     /// Distance of the first region above the physical base.
     #[arg(long, value_parser = parse_address, default_value = "0")]
     load_offset: u64,
-    #[arg(long, default_value = "-v")]
-    boot_args: String,
+    /// The kernel command line; `-v`, or `-v rd=md0` with `--restore`.
+    #[arg(long)]
+    boot_args: Option<String>,
     /// The boot policy expressed to SPTM, TXM and the kernel.
     #[arg(long, value_enum, default_value = "reduced")]
     security: Security,
@@ -213,15 +262,20 @@ impl Prepare {
             "output exists; choose a new --output directory"
         );
         let report = restore::archive::manifest(&self.ipsw, Some(&self.model), false)?;
+        let (roles, default_variant) = match self.restore {
+            true => (RESTORE, RESTORE_VARIANT),
+            false => (INSTALLED, INSTALLED_VARIANT),
+        };
+        let variant = self.variant.as_deref().unwrap_or(default_variant);
         let identity = report
             .identities
             .iter()
-            .find(|i| i.variant == self.variant)
+            .find(|i| i.variant == variant)
             .with_context(|| {
                 let variants: Vec<_> = report.identities.iter().map(|i| &i.variant).collect();
                 format!(
                     "no {} identity {:?}; found {variants:?}",
-                    self.model, self.variant
+                    self.model, variant
                 )
             })?;
         let component = |name: &str, payload_type: Option<&str>, limit: u64| -> Result<Decoded> {
@@ -267,16 +321,21 @@ impl Prepare {
                 declared_digest: entry.declared_digest_hex.clone(),
             })
         };
-        let kernel = component("KernelCache", Some("krnl"), KERNEL_LIMIT)?;
-        let sptm = component("Ap,SecurePageTableMonitor", Some("sptm"), COMPONENT_LIMIT)?;
-        let txm = component("Ap,TrustedExecutionMonitor", Some("trxm"), COMPONENT_LIMIT)?;
-        let device_tree = component("DeviceTree", Some("dtre"), COMPONENT_LIMIT)?;
-        let trust_cache = component("StaticTrustCache", Some("trst"), COMPONENT_LIMIT)?;
+        let kernel = component(roles.kernel, Some("krnl"), KERNEL_LIMIT)?;
+        let sptm = component(roles.sptm, Some("sptm"), COMPONENT_LIMIT)?;
+        let txm = component(roles.txm, Some("trxm"), COMPONENT_LIMIT)?;
+        let device_tree = component(roles.device_tree, Some("dtre"), COMPONENT_LIMIT)?;
+        let (trust_cache_name, trust_cache_type) = roles.trust_cache;
+        let trust_cache = component(trust_cache_name, Some(trust_cache_type), COMPONENT_LIMIT)?;
+        let ramdisk = roles
+            .ramdisk
+            .map(|(name, payload_type)| component(name, Some(payload_type), RAMDISK_LIMIT))
+            .transpose()?;
         let sep = report
             .identities
             .iter()
-            .any(|i| i.components.contains_key("SEP"))
-            .then(|| component("SEP", None, COMPONENT_LIMIT))
+            .any(|i| i.components.contains_key(roles.sep))
+            .then(|| component(roles.sep, None, COMPONENT_LIMIT))
             .transpose()?;
         let global_manifest = |cryptex1: bool| -> Result<Option<Decoded>> {
             let member = manifest_member(cryptex1, &identity.variant, &identity.device_class);
@@ -365,13 +424,23 @@ impl Prepare {
             boot_manifest: boot_manifest.as_ref().map(input),
             cryptex1_manifest: cryptex1_manifest.as_ref().map(input),
             extra_trust_caches: cryptex_trust_caches.iter().map(input).collect(),
+            ramdisk: ramdisk.as_ref().map(input),
         };
         let options = Options {
             dram_base: self.dram_base,
             dram_size: self.dram_size,
             phys_base: self.phys_base.unwrap_or(self.dram_base),
             load_offset: self.load_offset,
-            boot_args: self.boot_args,
+            boot_args: self.boot_args.unwrap_or_else(|| {
+                match self.restore {
+                    true => RESTORE_BOOT_ARGS,
+                    false => INSTALLED_BOOT_ARGS,
+                }
+                .into()
+            }),
+            osenvironment: self
+                .osenvironment
+                .or_else(|| self.restore.then(|| RESTORE_ENVIRONMENT.into())),
             boot_cpu: self.boot_cpu,
             timebase_frequency: self.timebase_frequency,
             syscfg: self.syscfg.into_iter().collect(),

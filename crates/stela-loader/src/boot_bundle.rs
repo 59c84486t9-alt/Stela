@@ -90,6 +90,8 @@ pub struct Inputs<'a> {
     pub cryptex1_manifest: Option<Input<'a>>,
     /// Trust cache modules placed after the static one in `TrustCache`.
     pub extra_trust_caches: Vec<Input<'a>>,
+    /// A restore ramdisk, placed as the `RAMDisk` region.
+    pub ramdisk: Option<Input<'a>>,
 }
 
 /// One DeviceTree value supplied from outside the restore image, such as a
@@ -124,6 +126,9 @@ pub struct Options {
     /// MAC addresses by provider name, such as `wifiaddr` or `ethaddr`.
     pub mac_addresses: BTreeMap<String, Vec<u8>>,
     pub security: SecurityPolicy,
+    /// The `/osenvironments` child whose values apply, such as
+    /// `darwinos-ramdisk-environment` for a restore ramdisk.
+    pub osenvironment: Option<String>,
     /// Applied after every other DeviceTree change.
     pub overlay: Vec<OverlayProperty>,
 }
@@ -321,6 +326,7 @@ const REGION_ORDER: &[&str] = &[
     "TXM-le",
     "BootKC-rw",
     "BootKC-le",
+    "RAMDisk",
     "SEPFW",
     "BootArgs",
 ];
@@ -331,6 +337,7 @@ const TXM_FILE: &str = "txm.img";
 const DEVICE_TREE_FILE: &str = "devicetree.adt";
 const TRUST_CACHE_FILE: &str = "trustcache.bin";
 const SEP_FILE: &str = "sepfw.im4p";
+const RAMDISK_FILE: &str = "ramdisk.img";
 const BOOT_ARGS_FILE: &str = "bootargs.bin";
 
 struct LoadedImage {
@@ -564,6 +571,12 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         cryptex1_manifest.as_ref(),
     )?;
     unresolved.extend(policy_unresolved);
+    let mut security = security;
+    if let Some(environment) = &options.osenvironment {
+        let (decisions, gaps) = boot_policy::apply_environment(&mut tree, environment)?;
+        security.extend(decisions);
+        unresolved.extend(gaps);
+    }
     apply_overlay(&mut tree, &options.overlay)?;
     unresolved.extend(platform_gaps(&tree, inputs));
 
@@ -587,6 +600,17 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
                 bytes: 0,
                 memory_bytes: 0,
                 virtual_address: None,
+            },
+            "RAMDisk" => match &inputs.ramdisk {
+                Some(ramdisk) => Content {
+                    name: (*name).into(),
+                    file: RAMDISK_FILE.into(),
+                    file_offset: 0,
+                    bytes: ramdisk.bytes.len() as u64,
+                    memory_bytes: page_round(ramdisk.bytes.len() as u64),
+                    virtual_address: None,
+                },
+                None => continue,
             },
             "SEPFW" => match &inputs.sep_firmware {
                 Some(sep) => Content {
@@ -795,6 +819,9 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     if let Some(sep) = &inputs.sep_firmware {
         files.push((SEP_FILE.to_owned(), sep.bytes.to_vec()));
     }
+    if let Some(ramdisk) = &inputs.ramdisk {
+        files.push((RAMDISK_FILE.to_owned(), ramdisk.bytes.to_vec()));
+    }
     for region in &mut regions {
         let (_, bytes) = files
             .iter()
@@ -823,6 +850,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
             .chain(&inputs.boot_manifest)
             .chain(&inputs.cryptex1_manifest)
             .chain(&inputs.extra_trust_caches)
+            .chain(&inputs.ramdisk)
             .map(source_of),
     );
     let manifest = Manifest {
@@ -1349,6 +1377,7 @@ mod tests {
             boot_manifest: Some(input(leak(boot_manifest()), "BootManifest")),
             cryptex1_manifest: None,
             extra_trust_caches: vec![],
+            ramdisk: Some(input(leak(vec![0x5a; 100]), "RestoreRamDisk")),
         };
         let options = Options {
             dram_base: 0x8_0000_0000,
@@ -1357,6 +1386,7 @@ mod tests {
             load_offset: 0,
             boot_args: "-v".into(),
             boot_cpu: "cpu0".into(),
+            osenvironment: None,
             timebase_frequency: 24_000_000,
             syscfg: BTreeMap::from([("SwBh".to_owned(), vec![7; 4])]),
             mac_addresses: BTreeMap::from([("wifiaddr".to_owned(), vec![2, 0, 0, 0, 0, 1])]),
@@ -1479,6 +1509,12 @@ mod tests {
             );
         }
         assert!(manifest.unresolved.iter().any(|u| u.starts_with("SEPFW")));
+        let ramdisk = region("RAMDisk");
+        assert_eq!((ramdisk.bytes, ramdisk.memory_bytes), (100, PAGE));
+        assert_eq!(
+            map.property("RAMDisk").unwrap().value,
+            range_value(ramdisk.guest_pa, PAGE)
+        );
         assert!(!manifest.unresolved.iter().any(|u| u.contains("lock-regs")));
         assert!(manifest.unresolved.iter().any(|u| u.contains("lp-spih")));
         assert_eq!(

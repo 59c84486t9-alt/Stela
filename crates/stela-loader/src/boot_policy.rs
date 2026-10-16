@@ -251,6 +251,89 @@ pub fn apply(
     Ok((writer.decisions, unresolved))
 }
 
+const ENVIRONMENTS: &str = "/osenvironments";
+
+fn text_value(bytes: &[u8]) -> Result<String> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    Ok(std::str::from_utf8(&bytes[..end])?.to_owned())
+}
+
+/// Apply one `/osenvironments` child as iBoot does for that OS environment.
+/// Each entry either sets `node_path` `property_name` to `value`, or, with
+/// `node`, `replacement` and `parent`, replaces the `node` child of `parent`
+/// with its `replacement` sibling. An entry whose target is absent from this
+/// tree is reported rather than invented.
+pub fn apply_environment(
+    tree: &mut DeviceTree,
+    name: &str,
+) -> Result<(Vec<Decision>, Vec<String>)> {
+    let path = format!("{ENVIRONMENTS}/{name}");
+    let environment = tree
+        .node(&path)
+        .with_context(|| format!("DeviceTree has no {path}"))?
+        .clone();
+    let mut decisions = vec![];
+    let mut unresolved = vec![];
+    for entry in &environment.children {
+        let label = entry.name().unwrap_or("?").to_owned();
+        let field = |key: &str| entry.property(key).map(|p| p.value.clone());
+        if let (Some(node_path), Some(property), Some(value)) =
+            (field("node_path"), field("property_name"), field("value"))
+        {
+            let target = format!("/{}", text_value(&node_path)?);
+            let property = text_value(&property)?;
+            if tree.node(&target).is_none() {
+                unresolved.push(format!("{path} {label}: no node {target}"));
+                continue;
+            }
+            decisions.push(Decision {
+                path: target.clone(),
+                property: property.clone(),
+                value_hex: hex::encode(&value),
+                source: format!("osenvironment {name}: {label}"),
+            });
+            tree.set_property(&target, &property, value)?;
+        } else if let (Some(node), Some(replacement), Some(parent)) =
+            (field("node"), field("replacement"), field("parent"))
+        {
+            let (node, replacement, parent) = (
+                text_value(&node)?,
+                text_value(&replacement)?,
+                text_value(&parent)?,
+            );
+            let Some(parent_node) = tree.node_mut(&parent) else {
+                unresolved.push(format!("{path} {label}: no node {parent}"));
+                continue;
+            };
+            let Some(index) = parent_node
+                .children
+                .iter()
+                .position(|c| c.name() == Some(replacement.as_str()))
+            else {
+                unresolved.push(format!("{path} {label}: no node {parent}/{replacement}"));
+                continue;
+            };
+            let mut substitute = parent_node.children.remove(index);
+            let mut name_value = node.as_bytes().to_vec();
+            name_value.push(0);
+            substitute.set_property("name", name_value)?;
+            parent_node
+                .children
+                .retain(|c| c.name() != Some(node.as_str()));
+            parent_node.children.push(substitute);
+            decisions.push(Decision {
+                path: format!("{parent}/{node}"),
+                property: "name".into(),
+                value_hex: hex::encode(node.as_bytes()),
+                source: format!("osenvironment {name}: {label} replaced by {replacement}"),
+            });
+        } else {
+            anyhow::bail!("{path} {label} is neither a property nor a node replacement");
+        }
+    }
+    Ok((decisions, unresolved))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +422,68 @@ mod tests {
                 .is_some()
         );
         assert!(decisions.iter().any(|d| d.property == "cs-system-policy"));
+        Ok(())
+    }
+
+    fn environment_entry(tree: &mut DeviceTree, entry: &str, values: &[(&str, &[u8])]) {
+        let path = format!("{ENVIRONMENTS}/darwinos-ramdisk-environment");
+        tree.ensure_child(&path, entry).unwrap();
+        for (property, value) in values {
+            tree.set_property(&format!("{path}/{entry}"), property, value.to_vec())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn environment_overlays_set_properties_and_replace_nodes() -> Result<()> {
+        let mut tree = tree();
+        tree.ensure_child("/", "osenvironments")?;
+        tree.ensure_child(ENVIRONMENTS, "darwinos-ramdisk-environment")?;
+        environment_entry(
+            &mut tree,
+            "no-sepfw-load-at-boot",
+            &[
+                ("node_path", b"chosen\0"),
+                ("property_name", b"sepfw-load-at-boot\0"),
+                ("value", &[0, 0, 0, 0]),
+            ],
+        );
+        environment_entry(
+            &mut tree,
+            "data-volume",
+            &[
+                ("node", b"fstab\0"),
+                ("replacement", b"fstab-ephemeral\0"),
+                ("parent", b"/filesystems\0"),
+            ],
+        );
+        environment_entry(
+            &mut tree,
+            "absent",
+            &[
+                ("node", b"fstab\0"),
+                ("replacement", b"fstab-other\0"),
+                ("parent", b"/nowhere\0"),
+            ],
+        );
+        tree.ensure_child("/", "filesystems")?;
+        tree.ensure_child("/filesystems", "fstab")?;
+        tree.ensure_child("/filesystems", "fstab-ephemeral")?;
+        tree.set_property("/filesystems/fstab-ephemeral", "marker", vec![1])?;
+        tree.set_property("/chosen", "sepfw-load-at-boot", boolean(true))?;
+        let (decisions, unresolved) = apply_environment(&mut tree, "darwinos-ramdisk-environment")?;
+        assert_eq!(
+            tree.property(CHOSEN, "sepfw-load-at-boot").unwrap().value,
+            boolean(false)
+        );
+        assert_eq!(
+            tree.property("/filesystems/fstab", "marker").unwrap().value,
+            vec![1]
+        );
+        assert!(tree.node("/filesystems/fstab-ephemeral").is_none());
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(unresolved.len(), 1);
+        assert!(apply_environment(&mut tree, "missing-environment").is_err());
         Ok(())
     }
 
