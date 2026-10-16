@@ -155,7 +155,10 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
     // QEMU implements FEAT_RPRES, which refines AH=1 estimates; the Apple
     // profile declares it absent.
     let estimate = form.starts_with("FRECPE_") || form.starts_with("FRSQRTE_");
-    (sign_of_nan || estimate) && state.fpcr & FPCR_AH != 0
+    // QEMU leaves predicate-inactive elements of an SME tile-slice load
+    // unchanged; the architecture zeroes them.
+    let tile_slice_load = form.starts_with("ld1") && form.contains("_za_");
+    (sign_of_nan || estimate) && state.fpcr & FPCR_AH != 0 || tile_slice_load
 }
 
 /// Oracle limits: compare FPCR and FPSR only on bits both engines model.
@@ -408,9 +411,23 @@ fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
         }
     }
     if let (Some(a), Some(b)) = (&original.scalable, &translated.scalable) {
-        for (name, x, y) in [("z", &a.z, &b.z), ("p", &a.p, &b.p), ("za", &a.za, &b.za)] {
-            if let Some(offset) = (0..x.len()).find(|&i| x[i] != y[i]) {
-                println!("  {name} differs from byte {offset:#x}");
+        let initial = case.scalable.as_ref().expect("scalable case");
+        for (name, x, y, before) in [
+            ("z", &a.z, &b.z, &initial.z),
+            ("p", &a.p, &b.p, &initial.p),
+            ("za", &a.za, &b.za, &initial.za),
+        ] {
+            let differing: Vec<usize> = (0..x.len()).filter(|&i| x[i] != y[i]).collect();
+            if let (Some(&first), Some(&last)) = (differing.first(), differing.last()) {
+                println!(
+                    "  {name}: {} bytes differ in {first:#x}..={last:#x}; at {first:#x} original \
+                     {:#04x}, native {:#04x}, initial {:#04x} (svl {})",
+                    differing.len(),
+                    x[first],
+                    y[first],
+                    before[first],
+                    initial.svl
+                );
             }
         }
         if a.zt0 != b.zt0 {
