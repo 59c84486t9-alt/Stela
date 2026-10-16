@@ -92,42 +92,17 @@ pub(crate) struct RunBlocks {
     /// Owned data mappings for trusted raw-code execution.
     #[arg(long)]
     memory: Option<PathBuf>,
-    /// Service reviewed Darwin data-only mprotect calls over owned mappings.
-    #[arg(long)]
-    data_vm_services: bool,
-    /// Complete the declared unavailable Darwin cross-architecture service.
-    #[arg(long)]
-    crossarch_services: bool,
-    /// Query the declared absent guest shared-region attachment.
-    #[arg(long)]
-    absent_shared_region_services: bool,
-    /// Supply host kernel entropy through bounded owned-memory copyout.
-    #[arg(long)]
-    entropy_services: bool,
-    /// Service ordinary Mach VM protection using owned current-task data pages.
-    #[arg(long, requires = "memory")]
-    mach_vm_services: bool,
-    /// Allocate anonymous guest data through an owned current-task Mach map call.
-    #[arg(long, requires = "memory")]
-    mach_vm_map_services: bool,
+    /// Darwin services to handle on guest traps, comma separated.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    services: Vec<Service>,
     /// Explicit immutable guest ARM CSR active flags; never inferred from host policy.
     #[arg(long)]
     csr_active_configuration: Option<u32>,
-    /// Own host Mach bootstrap rights behind guest port names (macOS only).
-    #[arg(long)]
-    mach_port_services: bool,
-    /// Own current-host thread identity, Mach bootstrap rights and guest ARM TSD.
-    #[arg(
-        long,
-        requires = "guest_vm_max_address",
-        conflicts_with = "mach_port_services"
-    )]
-    thread_services: bool,
     /// Explicit normal guest process ID, shared by its actual thread/task owner.
-    #[arg(long, requires = "thread_services")]
+    #[arg(long)]
     guest_process_id: Option<u32>,
     /// Explicit guest vm_map_max for ARM TSD sanitization; never inferred from host RAM.
-    #[arg(long, requires = "thread_services", value_parser = parse_address)]
+    #[arg(long, value_parser = parse_address)]
     guest_vm_max_address: Option<u64>,
     /// Map the modern ARM page-size commpage; arm64 user pages stay 16 KiB.
     #[arg(long, value_parser = parse_arm_kernel_page_shift)]
@@ -143,6 +118,27 @@ pub(crate) struct RunBlocks {
     /// Explicit opaque legacy DYLD_FLAGS for a process with hardware TPRO disabled.
     #[arg(long, requires = "clock_snapshot", value_parser = parse_address)]
     opaque_dyld_flags: Option<u64>,
+}
+
+/// Darwin trap services that `run-blocks` can own for the guest.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Service {
+    /// Data-only mprotect over owned mappings.
+    DataVm,
+    /// The declared-unavailable cross-architecture service.
+    Crossarch,
+    /// Queries of the declared-absent shared-region attachment.
+    AbsentSharedRegion,
+    /// Host kernel entropy through owned-memory copyout.
+    Entropy,
+    /// Mach VM protection of owned current-task data pages.
+    MachVm,
+    /// Anonymous guest data allocation through Mach map calls.
+    MachVmMap,
+    /// Host Mach bootstrap rights behind guest port names.
+    MachPorts,
+    /// Current-host thread identity, Mach rights and guest TSD.
+    Thread,
 }
 
 #[derive(Args)]
@@ -456,15 +452,8 @@ impl RunBlocks {
             software_pauth_ib_key,
             software_pauth_keys,
             memory: memory_path,
-            data_vm_services,
-            crossarch_services,
-            absent_shared_region_services,
-            entropy_services,
-            mach_vm_services,
-            mach_vm_map_services,
+            services,
             csr_active_configuration,
-            mach_port_services,
-            thread_services,
             guest_process_id,
             guest_vm_max_address,
             arm_commpage_kernel_page_shift,
@@ -475,6 +464,27 @@ impl RunBlocks {
         } = self;
         use stela_runtime::blocks::{BlockRuntime, ThreadState};
         const ADDRESS_SPACE_ID: u64 = 1;
+        let enabled = |service| services.contains(&service);
+        let data_vm_services = enabled(Service::DataVm);
+        let crossarch_services = enabled(Service::Crossarch);
+        let absent_shared_region_services = enabled(Service::AbsentSharedRegion);
+        let entropy_services = enabled(Service::Entropy);
+        let mach_vm_services = enabled(Service::MachVm);
+        let mach_vm_map_services = enabled(Service::MachVmMap);
+        let mach_port_services = enabled(Service::MachPorts);
+        let thread_services = enabled(Service::Thread);
+        ensure!(
+            !(mach_port_services && thread_services),
+            "thread services own their Mach ports"
+        );
+        ensure!(
+            thread_services || (guest_process_id.is_none() && guest_vm_max_address.is_none()),
+            "guest process ID and VM maximum configure thread services"
+        );
+        ensure!(
+            memory_path.is_some() || !(mach_vm_services || mach_vm_map_services),
+            "Mach VM services require --memory"
+        );
         ensure!(
             block_budget <= 1_000_000,
             "research block budget exceeds 1,000,000"
@@ -582,16 +592,7 @@ impl RunBlocks {
             .map(stela_runtime::darwin::csr::ArmSecurityPolicy::new)
             .transpose()?;
         let service_run = unsafe {
-            if data_vm_services
-                || mach_port_services
-                || thread_services
-                || crossarch_services
-                || absent_shared_region_services
-                || csr_policy.is_some()
-                || mach_vm_services
-                || mach_vm_map_services
-                || entropy_services
-            {
+            if !services.is_empty() || csr_policy.is_some() {
                 stela_runtime::darwin::run_services(
                     &mut runtime,
                     &mut thread,
