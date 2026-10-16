@@ -47,7 +47,7 @@ pub fn qemu() -> Result<PathBuf> {
     if local.exists() {
         return Ok(local);
     }
-    which("qemu-system-x86_64").context("install QEMU or bootstrap .tools/qemu")
+    which("qemu-system-x86_64").context("install QEMU 11 or newer")
 }
 
 pub fn sha256(data: &[u8]) -> String {

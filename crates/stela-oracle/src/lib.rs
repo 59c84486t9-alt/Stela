@@ -207,7 +207,7 @@ impl Oracle {
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
                 .map(|directory| directory.join("qemu-system-aarch64"))
                 .find(|path| path.is_file())
-                .context("install QEMU with qemu-system-aarch64")?
+                .context("install QEMU 11 or newer")?
         };
         Ok(Self { qemu })
     }
