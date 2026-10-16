@@ -6,7 +6,6 @@
 //! runtime helper when software PAuth is enabled.
 
 mod analysis;
-mod clock;
 pub mod el1_m0;
 pub mod el1_platform;
 pub mod loop_budget;
@@ -17,14 +16,12 @@ mod pointer_authentication;
 pub mod scalable;
 pub mod system;
 mod thread;
-mod trap;
 
 pub use analysis::{
     BlockAnalysis, BlockAnalysisError, DynamicEdge, DynamicEdgeKind, StaticSuccessor,
     SuccessorKind, analyze, analyze_with_profile, source_bytes, source_bytes_with_profile,
 };
 use analysis::{ParsedBlock, parse};
-pub use clock::{ClockInstruction, ClockOperation, decode_clock_instruction};
 pub use memory::{
     CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID, CheckedMemoryProfile,
     ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -35,7 +32,6 @@ pub use pointer_authentication::{
 };
 pub use system::{SystemInstruction, decode_system_instruction};
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
-pub use trap::{SynchronousTrap, TrapKind, decode_trap};
 
 use crate::{
     CompileError, GuestAddress, NativeBlock,
@@ -219,6 +215,96 @@ impl TryFrom<u64> for ExitKind {
             _ => Err(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClockOperation {
+    ReadVirtualCounter { destination: u8 },
+    InstructionSynchronization,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ClockInstruction {
+    pub operation: ClockOperation,
+    pub instruction_pc: GuestAddress,
+    pub next_pc: GuestAddress,
+}
+
+/// Only ISB SY and MRS CNTVCT_EL0 (X31 discards). Other counter registers and
+/// barrier options are refused; both need the clock service.
+pub fn decode_clock_instruction(
+    pc: GuestAddress,
+    word: u32,
+) -> Result<Option<ClockInstruction>, CompileError> {
+    if !pc.0.is_multiple_of(4) {
+        return Err(CompileError(
+            "clock instruction PC must be aligned to 4 bytes".into(),
+        ));
+    }
+    let operation = if word == 0xd5033fdf {
+        ClockOperation::InstructionSynchronization
+    } else if word & 0xffffffe0 == 0xd53be040 {
+        ClockOperation::ReadVirtualCounter {
+            destination: (word & 31) as u8,
+        }
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(ClockInstruction {
+        operation,
+        instruction_pc: pc,
+        next_pc: GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
+            CompileError("clock continuation PC overflows guest address range".into())
+        })?),
+    }))
+}
+
+/// Identifies the instruction; the exception itself is raised elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrapKind {
+    SupervisorCall,
+    SoftwareBreakpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SynchronousTrap {
+    pub kind: TrapKind,
+    pub immediate: u16,
+    pub instruction_pc: GuestAddress,
+    /// Architectural preferred return address; the dispatcher still stops at
+    /// instruction_pc. This metadata does not advance or resume guest state.
+    pub exception_return_pc: GuestAddress,
+}
+
+/// Decode only exact SVC/BRK encodings at an aligned guest instruction address.
+/// HVC/SMC/HLT/DCPS and neighboring reserved encodings remain unsupported.
+pub fn decode_trap(pc: GuestAddress, word: u32) -> Result<Option<SynchronousTrap>, CompileError> {
+    if !pc.0.is_multiple_of(4) {
+        return Err(CompileError(
+            "trap instruction PC must be aligned to 4 bytes".into(),
+        ));
+    }
+    // June 2026 official SVC_EX_exception / BRK_EX_exception encodings:
+    // only imm16 at bits 20:5 varies.
+    let kind = match word & 0xffe0001f {
+        0xd4000001 => TrapKind::SupervisorCall,
+        0xd4200000 => TrapKind::SoftwareBreakpoint,
+        _ => return Ok(None),
+    };
+    let exception_return_pc = match kind {
+        TrapKind::SupervisorCall => GuestAddress(pc.0.checked_add(4).ok_or_else(|| {
+            CompileError("SVC exception return PC overflows guest address range".into())
+        })?),
+        TrapKind::SoftwareBreakpoint => pc,
+    };
+    Ok(Some(SynchronousTrap {
+        kind,
+        immediate: ((word >> 5) & 0xffff) as u16,
+        instruction_pc: pc,
+        exception_return_pc,
+    }))
 }
 
 /// The raw kind, validated before the result is converted.
