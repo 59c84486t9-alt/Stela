@@ -6,6 +6,7 @@ use super::{
     mmu::{self, Access, Controls, Outcome as Translated},
     registers::{self, CpuProfile, Environment, Lines, Outcome as RegisterOutcome, Refusal},
 };
+use crate::pauth;
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::fmt;
 use stela_compiler::{
@@ -20,7 +21,8 @@ use stela_compiler::{
         },
     },
     block::{
-        self, BlockProfile, CompilationPlan, ExitKind,
+        self, BlockProfile, CompilationPlan, ExitKind, PointerAuthentication,
+        PointerAuthenticationKey, PointerAuthenticationOperation,
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::{GuardedOperation, SystemOperation},
     },
@@ -795,12 +797,193 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(ExitKind::PointerAuthentication) => {
                 self.cpu.pc = next_pc;
                 let word = self.word(index, next_pc)?;
-                Err(self.unsupported(RequirementKind::Instruction {
-                    word,
-                    detail: "pointer authentication is not wired into the system engine".into(),
-                }))
+                self.pointer_authentication(word)
             }
             _ => Err(self.unsupported(RequirementKind::Native("unknown block exit kind"))),
+        }
+    }
+
+    /// Whether SCTLR_EL1 enables a PAC key (EnIA 31, EnIB 30, EnDA 27, EnDB 13).
+    fn key_enabled(&self, key: PointerAuthenticationKey) -> bool {
+        let bit = match key {
+            PointerAuthenticationKey::Ia => 31,
+            PointerAuthenticationKey::Ib => 30,
+            PointerAuthenticationKey::Da => 27,
+            PointerAuthenticationKey::Db => 13,
+        };
+        self.cpu.system.translation.sctlr & (1 << bit) != 0
+    }
+
+    /// Complete one PAC instruction with the guest's own keys, laid out for
+    /// the current TCR_EL1. The algorithm is the software QARMA5 service in
+    /// its Classic (PAuth1) policy; Apple's hardware algorithm and AppleMode
+    /// diversification are not reproduced, so values are self-consistent
+    /// rather than equal to hardware's.
+    fn pointer_authentication(&mut self, word: u32) -> Step {
+        let pc = self.cpu.pc;
+        let refuse = |machine: &Self, detail: String| {
+            Err(machine.unsupported(RequirementKind::Instruction { word, detail }))
+        };
+        let instruction = match block::decode_pointer_authentication(GuestAddress(pc), word) {
+            Ok(Some(instruction)) => instruction,
+            _ => return refuse(self, "PAC exit at a word that is not PAC".into()),
+        };
+        if let Some(key) = instruction.operation.required_key()
+            && !self.key_enabled(key)
+        {
+            return self.disabled_pointer_authentication(word, instruction);
+        }
+        let keys = &self.cpu.system.keys;
+        let context = pauth::Context::new(
+            0,
+            pauth::Keys::from_words(keys[0], keys[1], keys[2], keys[3]).with_generic_words(keys[4]),
+        )
+        .with_translation_regime(self.cpu.system.translation.tcr);
+        if let PointerAuthenticationOperation::Load(load) = instruction.operation {
+            return self.authenticated_load(word, &context, load);
+        }
+        match crate::blocks::services::complete_pauth_with_memory(
+            &context,
+            &instruction,
+            &mut self.cpu.state,
+            None,
+        ) {
+            Ok((next, _)) => {
+                self.cpu.pc = next.0;
+                Ok(())
+            }
+            Err(error) => refuse(self, format!("{error:#}")),
+        }
+    }
+
+    /// With the key's SCTLR enable clear, AddPAC and Auth return the pointer
+    /// unchanged (Arm ARM `AddPAC`, `Auth`).
+    fn disabled_pointer_authentication(
+        &mut self,
+        word: u32,
+        instruction: PointerAuthentication,
+    ) -> Step {
+        use PointerAuthenticationOperation as Operation;
+        let next = instruction.next_pc.0;
+        match instruction.operation {
+            Operation::Sign1716 { .. }
+            | Operation::Authenticate1716 { .. }
+            | Operation::SignIbSp
+            | Operation::AuthenticateIbSp
+            | Operation::Sign { .. }
+            | Operation::Authenticate { .. } => self.cpu.pc = next,
+            Operation::ReturnIbSp | Operation::ReturnIaSp => self.cpu.pc = self.cpu.state.x[30],
+            Operation::Branch { target, link, .. } => {
+                let destination = if target == 31 {
+                    0
+                } else {
+                    self.cpu.state.x[usize::from(target)]
+                };
+                if link {
+                    self.cpu.state.x[30] = next;
+                }
+                self.cpu.pc = destination;
+            }
+            _ => {
+                return Err(self.unsupported(RequirementKind::Instruction {
+                    word,
+                    detail: "PAC load or LR form with its key disabled".into(),
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// LDRAA/LDRAB: authenticate the base, then read through the guest's
+    /// translation like any data load.
+    fn authenticated_load(
+        &mut self,
+        word: u32,
+        context: &pauth::Context,
+        load: stela_compiler::block::pauth_memory::Load,
+    ) -> Step {
+        let pc = self.cpu.pc;
+        let controls = self.cpu.system.translation;
+        let requester = self.cpu.requester();
+        let sctlr = controls.sctlr;
+        let memory_controls = pauth::memory::Controls {
+            check_sp_alignment: if requester.el == 0 {
+                sctlr & (1 << 4) != 0
+            } else {
+                sctlr & (1 << 3) != 0
+            },
+            privileged: requester.el != 0,
+        };
+        enum LoadStop {
+            Fault(mmu::Fault),
+            Unsupported(mmu::Unsupported),
+            Device(u64),
+        }
+        let host = &mut self.host;
+        let result = pauth::memory::complete(
+            load,
+            memory_controls,
+            &mut self.cpu.state,
+            |key, pointer| {
+                let key = match key {
+                    stela_compiler::block::pauth_memory::DataKey::A => pauth::Key::Da,
+                    stela_compiler::block::pauth_memory::DataKey::B => pauth::Key::Db,
+                };
+                context
+                    .authenticate_operation(key, pointer, 0, true)
+                    .map(|result| result.pointer)
+            },
+            |address| {
+                let translation = match mmu::translate(
+                    &controls,
+                    address,
+                    Access::Read,
+                    requester,
+                    &mut RamTables(host),
+                ) {
+                    Translated::Mapped(translation) => translation,
+                    Translated::Fault(fault) => return Err(LoadStop::Fault(fault)),
+                    Translated::Unsupported(unsupported) => {
+                        return Err(LoadStop::Unsupported(unsupported));
+                    }
+                };
+                let mut bytes = [0; 8];
+                if (address & (FETCH_PAGE - 1)) > FETCH_PAGE - 8 {
+                    return Err(LoadStop::Device(translation.physical));
+                }
+                if !host.read_ram(translation.physical, &mut bytes) {
+                    return Err(LoadStop::Device(translation.physical));
+                }
+                Ok(u64::from_le_bytes(bytes))
+            },
+        );
+        match result {
+            Ok(_) => {
+                self.cpu.pc = pc + INSTRUCTION;
+                Ok(())
+            }
+            Err(pauth::memory::Fault::Read {
+                address,
+                error: LoadStop::Fault(fault),
+            }) => self.data_abort(address, fault, false, false),
+            Err(pauth::memory::Fault::Read {
+                error: LoadStop::Unsupported(unsupported),
+                ..
+            }) => Err(self.unsupported(RequirementKind::Translation(unsupported))),
+            Err(pauth::memory::Fault::StackAlignment { .. }) => {
+                self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
+                Ok(())
+            }
+            Err(other) => Err(self.unsupported(RequirementKind::Instruction {
+                word,
+                detail: match other {
+                    pauth::memory::Fault::Read {
+                        error: LoadStop::Device(physical),
+                        ..
+                    } => format!("LDRA from non-RAM or page-crossing address (PA {physical:#x})"),
+                    _ => "LDRA operands or authentication".into(),
+                },
+            })),
         }
     }
 
@@ -1599,6 +1782,12 @@ mod tests {
         ));
     }
 
+    impl Machine<FakeHost, NoDevices> {
+        fn system_instruction_for_test(&mut self, word: u32) {
+            self.pointer_authentication(word).unwrap();
+        }
+    }
+
     fn machine_with(words: &[u32]) -> Machine<FakeHost, NoDevices> {
         machine(words)
     }
@@ -1737,6 +1926,37 @@ mod tests {
         machine.cpu.pstate = Pstate::RESET_EL1;
         machine.system_instruction(0xd53e_fc85).unwrap(); // mrs x5, APSTS_EL1
         assert_eq!(machine.cpu.state.x[5], 1);
+    }
+
+    #[test]
+    fn pac_uses_the_guest_keys_regime_layout_and_sctlr_enables() {
+        const PACIBSP: u32 = 0xd503_237f;
+        const AUTIBSP: u32 = 0xd503_23ff;
+        let mut machine = machine(&[]);
+        // 39-bit TTBR1 kernel addresses, no TBI.
+        machine.cpu.system.translation.tcr = 25 << 16 | 25;
+        machine.cpu.system.keys[1] = [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210];
+        let pointer = 0xffff_ff80_0000_4000_u64;
+        machine.cpu.state.x[30] = pointer;
+        machine.cpu.state.sp = 0xffff_ff80_0001_0000;
+        // EnIB clear: PACIBSP leaves LR unchanged.
+        machine.system_instruction_for_test(PACIBSP);
+        assert_eq!(machine.cpu.state.x[30], pointer);
+        machine.cpu.system.translation.sctlr |= 1 << 30;
+        machine.system_instruction_for_test(PACIBSP);
+        let signed = machine.cpu.state.x[30];
+        assert_ne!(signed, pointer);
+        assert_eq!(
+            signed & 0x0000_007f_ffff_ffff,
+            pointer & 0x0000_007f_ffff_ffff
+        );
+        machine.system_instruction_for_test(AUTIBSP);
+        assert_eq!(machine.cpu.state.x[30], pointer);
+        // A different SP modifier poisons bits 62:61 (instruction key B).
+        machine.cpu.state.x[30] = signed;
+        machine.cpu.state.sp += 16;
+        machine.system_instruction_for_test(AUTIBSP);
+        assert_eq!(machine.cpu.state.x[30] >> 61 & 3, 2);
     }
 
     #[test]

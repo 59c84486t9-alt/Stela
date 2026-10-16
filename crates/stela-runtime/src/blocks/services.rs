@@ -12,7 +12,7 @@ use stela_compiler::{
 
 /// Services borrowed for one run; a missing service stops execution at the
 /// instruction that needs it.
-pub(super) struct AuthenticatedMemory<'a> {
+pub(crate) struct AuthenticatedMemory<'a> {
     pub(super) reader: &'a mut dyn memory::domain::MemoryReader,
     pub(super) controls: pauth::memory::Controls,
 }
@@ -167,7 +167,7 @@ pub(super) fn complete_pauth(
     complete_pauth_with_memory(context, instruction, registers, None)
 }
 
-pub(super) fn complete_pauth_with_memory(
+pub(crate) fn complete_pauth_with_memory(
     context: &pauth::Context,
     instruction: &PointerAuthentication,
     registers: &mut GuestState,

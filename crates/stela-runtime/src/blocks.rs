@@ -11,7 +11,7 @@ mod outcome;
 mod publication;
 pub(crate) mod retirement;
 pub(crate) mod scalable;
-mod services;
+pub(crate) mod services;
 mod translation;
 mod validate;
 

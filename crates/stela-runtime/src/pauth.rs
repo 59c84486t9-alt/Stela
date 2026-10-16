@@ -115,6 +115,8 @@ pub struct Context {
     address_space: u64,
     keys: Keys,
     version: Version,
+    /// TCR_EL1 of the system-mode regime; `None` keeps the process profile.
+    regime: Option<u64>,
 }
 impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -164,6 +166,35 @@ impl Context {
             address_space,
             keys,
             version,
+            regime: None,
+        }
+    }
+
+    /// Lay PAC fields out for the EL1&0 regime this TCR_EL1 describes, as
+    /// the system-mode engine requires, instead of the fixed process profile.
+    pub fn with_translation_regime(mut self, tcr: u64) -> Self {
+        self.regime = Some(tcr);
+        self
+    }
+
+    fn layout(&self, domain: policy::Domain, pointer: u64) -> policy::Layout {
+        let Some(tcr) = self.regime else {
+            return domain.layout();
+        };
+        // CalculateTBI selects TBI0/TBI1 by bit 55; TBIDn exempts instructions.
+        let upper = pointer & (1 << 55) != 0;
+        let (tbi, tbid) = if upper { (38, 52) } else { (37, 51) };
+        let tbi = tcr & (1 << tbi) != 0
+            && !(domain == policy::Domain::Instruction && tcr & (1 << tbid) != 0);
+        let select = if tbi { 55 } else { 63 };
+        let tnsz = if pointer & (1 << select) != 0 {
+            (tcr >> 16) & 63
+        } else {
+            tcr & 63
+        };
+        policy::Layout {
+            address_bits: 64 - tnsz as u32,
+            top_shift: if tbi { 55 } else { 63 },
         }
     }
     pub fn version(&self) -> Version {
@@ -193,11 +224,11 @@ impl Context {
     /// than the older Unicorn invalid-extension behavior. Enhanced profiles XOR the PAC field.
     pub fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64> {
         let words = self.keys.get(key)?;
-        let domain = key.domain();
-        let input = policy::signing_input(domain, pointer);
+        let layout = self.layout(key.domain(), pointer);
+        let input = policy::signing_input(layout, pointer);
         Ok(policy::sign(
             self.version,
-            domain,
+            layout,
             pointer,
             qarma5(input, modifier, words),
         ))
@@ -219,10 +250,12 @@ impl Context {
             .as_ref()
             .ok_or(AuthenticationError::KeyUnavailable { key })?;
         let domain = key.domain();
-        let input = policy::authentication_input(domain, pointer);
+        let layout = self.layout(domain, pointer);
+        let input = policy::authentication_input(layout, pointer);
         let result = policy::authenticate(
             self.version,
             domain,
+            layout,
             if key.is_b() {
                 policy::Side::B
             } else {
@@ -256,7 +289,10 @@ impl Context {
     /// Ia/Ib select instruction layout, Da/Db tagged-data layout; this succeeds
     /// even when that domain's cryptographic key was not provided.
     pub fn strip(&self, key: Key, pointer: u64) -> Result<u64> {
-        Ok(strip_domain(key, pointer))
+        Ok(policy::authentication_input(
+            self.layout(key.domain(), pointer),
+            pointer,
+        ))
     }
 
     /// Sign with the IB key (the original single-key profile).
@@ -266,10 +302,6 @@ impl Context {
     pub fn authenticate_ib(&self, pointer: u64, modifier: u64) -> Result<AuthResult> {
         self.authenticate(Key::Ib, pointer, modifier)
     }
-}
-
-fn strip_domain(key: Key, pointer: u64) -> u64 {
-    policy::authentication_input(key.domain(), pointer)
 }
 
 const CELL_MASK: u64 = 0x1111_1111_1111_1111;
@@ -956,7 +988,8 @@ mod tests {
                         (tag << 56) | (1 << bit) | 0x1400,
                         (tag << 56) | (DATA_EXTENSION_MASK & !(1 << bit)) | 0x1400,
                     ] {
-                        let canonical = strip_domain(key, pointer);
+                        let canonical =
+                            policy::authentication_input(key.domain().layout(), pointer);
                         let signed = context.sign(key, pointer, 0x2000)?;
                         assert_eq!(signed, context.sign(key, canonical, 0x2000)? ^ (1 << 54));
                         let failed = context.authenticate(key, signed, 0x2000)?;
