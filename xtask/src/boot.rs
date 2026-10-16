@@ -38,6 +38,8 @@ mod disks;
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
 const TIMEOUT_EXIT: u8 = 124;
 const MAX_TIMEOUT_SECONDS: f64 = 120.0;
+/// A real restore payload verifies in tens of minutes under TCG.
+const MAX_USB_TIMEOUT_SECONDS: f64 = 4.0 * 3600.0;
 const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
 const FIRMWARE_VARIABLES: &str = "edk2-i386-vars.fd";
 /// How often an OpenCore run presses Enter in the boot picker.
@@ -149,6 +151,12 @@ pub struct Run {
     /// mount's hashes and every byte of the images.
     #[arg(long)]
     storage_check: bool,
+    /// Boot an existing USB disk image, such as one `stela setup` prepared,
+    /// through its own OpenCore; writes go to a temporary overlay.
+    #[arg(long, conflicts_with_all = [
+        "opencore", "payload", "module", "bundle", "append", "storage_check"
+    ])]
+    usb_image: Option<PathBuf>,
     /// Run install mode on a synthetic restore payload.
     #[arg(long, value_enum, conflicts_with_all = ["opencore", "module", "append"])]
     payload: Option<PayloadMode>,
@@ -211,9 +219,13 @@ fn firmware(qemu: &Path) -> Result<PathBuf> {
 }
 
 fn launch(arguments: Run) -> Result<ExitCode> {
+    let limit = match arguments.usb_image {
+        Some(_) => MAX_USB_TIMEOUT_SECONDS,
+        None => MAX_TIMEOUT_SECONDS,
+    };
     ensure!(
-        arguments.timeout > 0.0 && arguments.timeout <= MAX_TIMEOUT_SECONDS,
-        "timeout must be in (0, {MAX_TIMEOUT_SECONDS}] seconds"
+        arguments.timeout > 0.0 && arguments.timeout <= limit,
+        "timeout must be in (0, {limit}] seconds"
     );
     let image = match arguments.image {
         Some(image) => image,
@@ -294,6 +306,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     };
     let system = options.starts_with("--system");
     match &arguments.opencore {
+        None if arguments.usb_image.is_some() => fs::create_dir_all(&output)?,
         None => {
             fs::create_dir_all(volume.join("EFI/BOOT"))?;
             fs::create_dir_all(volume.join("EFI/stela"))?;
@@ -334,7 +347,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let variables = output.join("variables.fd");
     fs::copy(firmware.join(FIRMWARE_VARIABLES), &variables)?;
     let serial = output.join("serial.txt");
-    let picker = arguments.opencore.is_some();
+    let picker = arguments.opencore.is_some() || arguments.usb_image.is_some();
     let mut command = Process::new(&qemu);
     // OpenCore's picker needs a keyboard and a display adapter, its HFS+
     // driver uses instructions beyond the qemu64 model, and it halts when a
@@ -371,10 +384,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .arg("-drive")
         .arg(format!("if=pflash,format=raw,file={}", variables.display()))
         .arg("-drive")
-        .arg(format!(
-            "if=none,id=volume,format=raw,{access}{}",
-            volume.display()
-        ))
+        .arg(match &arguments.usb_image {
+            Some(usb) => format!(
+                "if=none,id=volume,format=raw,snapshot=on,file={}",
+                usb.display()
+            ),
+            None => format!("if=none,id=volume,format=raw,{access}{}", volume.display()),
+        })
         .args(["-device", "virtio-blk-pci,drive=volume"]);
     for (index, disk) in disks.iter().enumerate() {
         disk.attach(index, &mut command);
@@ -504,7 +520,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "command": command_line,
         "qemu": binding(&qemu)?,
         "image": binding(&image)?,
-        "source": binding(&source)?,
+        "source": source.exists().then(|| binding(&source)).transpose()?,
+        "usb_image": arguments.usb_image,
         "options": options,
         "opencore": arguments.opencore,
         "scenario": verification,
