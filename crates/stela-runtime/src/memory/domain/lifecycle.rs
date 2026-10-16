@@ -64,12 +64,9 @@ impl MemoryExecutionLoan {
         if !Arc::ptr_eq(&self.domain, domain) {
             return Err(MemoryStatus::Domain);
         }
-        let state = self.domain.state.lock().map_err(|_| MemoryStatus::Domain)?;
-        self.domain.check_execution()?;
-        if state.servicing || state.native_loans == 0 {
-            return Err(MemoryStatus::Domain);
-        }
-        Ok(())
+        // This outstanding loan excludes every service loan, so only domain
+        // failure can make it unusable.
+        self.domain.check_execution()
     }
 }
 
@@ -116,9 +113,8 @@ impl MemoryDomain {
 
     /// Current mapping generation. This number is not source authority by itself.
     pub fn generation(&self) -> Result<u64, MemoryStatus> {
-        let state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.check_execution()?;
-        Ok(state.snapshot.generation)
+        Ok(self.generation.load(Ordering::Acquire))
     }
 
     pub fn execution_loan(self: &Arc<Self>) -> Result<MemoryExecutionLoan, MemoryStatus> {
@@ -222,6 +218,9 @@ impl MemoryServiceLoan {
     pub(in crate::memory) fn commit(&self, snapshot: DomainSnapshot) -> Result<(), MemoryStatus> {
         let mut state = self.domain.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.domain.check_execution()?;
+        self.domain
+            .generation
+            .store(snapshot.generation, Ordering::Release);
         state.snapshot = snapshot;
         Ok(())
     }
@@ -403,6 +402,7 @@ mod tests {
         // in this fresh untagged/shareable Normal-WB software address space.
         let domain =
             unsafe { owner.bind_shared_memory(config(Arc::clone(&system), 99), &mut []) }.unwrap();
+        domain.generation.store(u64::MAX, Ordering::Release);
         domain.state.lock().unwrap().snapshot.generation = u64::MAX;
         let view = domain.registered_views()[0].clone();
         let backing = Arc::clone(view.view.backing());

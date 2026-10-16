@@ -217,6 +217,8 @@ enum DomainRole {
 pub struct MemoryDomain {
     role: DomainRole,
     state: Mutex<DomainState>,
+    /// Snapshot generation; written only under `state` by an exclusive service.
+    generation: core::sync::atomic::AtomicU64,
     target: TargetCpu,
     system: Arc<MemorySystem>,
     address_space: Option<u64>,
@@ -312,6 +314,7 @@ impl MemoryDomain {
                 native_loans: 0,
                 servicing: false,
             }),
+            generation: core::sync::atomic::AtomicU64::new(0),
             target,
             system,
             address_space,
@@ -372,6 +375,7 @@ impl MemoryDomain {
         let mut state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.check_execution()?;
         state.snapshot.generation = next_generation;
+        self.generation.store(next_generation, Ordering::Release);
         Ok(())
     }
 
