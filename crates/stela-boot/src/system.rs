@@ -12,7 +12,7 @@ use crate::{
     la57, layout, output, paging,
     tables::{self, Frames, LARGE, NX, PAGE, PRESENT, WRITABLE},
 };
-use alloc::{format, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::{arch::asm, cell::UnsafeCell};
 use uefi::{
     boot::{self, AllocateType, MemoryType},
@@ -187,8 +187,8 @@ fn identity(
     Ok(())
 }
 
-/// Bundle files by name, `bundle.json` first.
-type BundleFiles = Vec<(String, Vec<u8>)>;
+/// Bundle files by name, `bundle.json` first, each in its own pages.
+type BundleFiles = Vec<(String, Region)>;
 
 /// The value after `name` in the options, as text.
 fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
@@ -198,37 +198,16 @@ fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// The guest inputs: `source.bin`, or with `--bundle DIR` the directory's
-/// `bundle.json` and every file it lists, read unchanged.
-fn inputs(options: &[u8], volume: &mut FileSystem) -> Result<(Vec<u8>, BundleFiles), &'static str> {
+/// `bundle.json` and every file it lists, read unchanged into their own
+/// pages. The bundle reader opens the volumes itself, so the configured
+/// volume is closed first.
+fn inputs(options: &[u8], mut volume: FileSystem) -> Result<(Vec<u8>, BundleFiles), &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
     let Some(directory) = option(text, "--bundle") else {
-        return Ok((firmware::source(volume)?, Vec::new()));
+        return Ok((firmware::source(&mut volume)?, Vec::new()));
     };
-    let directory = directory.trim_end_matches('\\');
-    let manifest = firmware::read(volume, &format!("{directory}\\bundle.json"))?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&manifest).map_err(|_| "bundle.json is not JSON")?;
-    let names: Vec<String> = value
-        .get("files")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("bundle.json has no files list")?
-        .iter()
-        .map(|file| {
-            file.get("name")
-                .and_then(serde_json::Value::as_str)
-                .map(String::from)
-                .ok_or("bundle file without a name")
-        })
-        .collect::<Result<_, _>>()?;
-    let mut files = alloc::vec![(String::from("bundle.json"), manifest)];
-    for name in names {
-        if name.contains('\\') || name.contains('/') {
-            return Err("bundle file names must not contain directories");
-        }
-        output::arguments(format_args!("READ {directory}\\{name}\n"));
-        let contents = firmware::read(volume, &format!("{directory}\\{name}"))?;
-        files.push((name, contents));
-    }
+    drop(volume);
+    let files = crate::engine::bundle::read(directory)?;
     if files.len() > MAX_FILES {
         return Err("bundle lists too many files");
     }
@@ -236,10 +215,10 @@ fn inputs(options: &[u8], volume: &mut FileSystem) -> Result<(Vec<u8>, BundleFil
 }
 
 /// Run the engine; never returns.
-pub fn boot(options: Vec<u8>, mut volume: FileSystem) -> ! {
-    let inputs = inputs(&options, &mut volume);
-    // The protocol must be closed before boot services end.
-    drop(volume);
+pub fn boot(options: Vec<u8>, volume: FileSystem) -> ! {
+    // `inputs` closes the volume: protocols must be closed before boot
+    // services end.
+    let inputs = inputs(&options, volume);
     let result = inputs.and_then(|(source, files)| load(options, source, files));
     match result {
         Ok(never) => match never {},
@@ -405,10 +384,7 @@ fn load(
         }
         slot.name[..name.len()].copy_from_slice(name.as_bytes());
         slot.name_bytes = name.len();
-        slot.contents = Region {
-            physical: contents.as_ptr() as u64,
-            bytes: contents.len() as u64,
-        };
+        slot.contents = *contents;
     }
     let file_count = bundle.len();
     // All stay allocated: the engine reads them through the physmap.

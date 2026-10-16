@@ -5,7 +5,15 @@
 //! only the running machine knows; this supplies the machine's side: guest
 //! RAM through the engine's host, RDSEED or RDRAND entropy and the timebase.
 //! The format is `docs/design/runtime.md#kernel-boot-bundle`.
-use crate::{handoff::File, layout, output};
+//!
+//! [`read`] runs before boot services end and reads the files into their own
+//! `LOADER_DATA` pages, so a restore ramdisk does not have to fit the heap.
+use crate::{
+    firmware,
+    handoff::{File, Region},
+    layout, output,
+    paging::PAGE,
+};
 use alloc::{format, string::String, vec::Vec};
 use core::arch::{
     asm,
@@ -14,6 +22,13 @@ use core::arch::{
 use stela_runtime::{
     boot_bundle::{MANIFEST_FILE, Machine, Manifest},
     machine::Host,
+};
+use uefi::{
+    CString16, boot,
+    proto::media::{
+        file::{Directory, File as _, FileAttribute, FileInfo, FileMode, RegularFile},
+        fs::SimpleFileSystem,
+    },
 };
 
 /// The counter frequency the machine presents in CNTFRQ_EL0.
@@ -40,6 +55,76 @@ fn contents(file: &File) -> &'static [u8] {
             file.contents.bytes as usize,
         )
     }
+}
+
+fn open(root: &mut Directory, path: &str) -> Result<RegularFile, &'static str> {
+    let path = CString16::try_from(path).map_err(|_| "bundle path is not UCS-2")?;
+    root.open(&path, FileMode::Read, FileAttribute::empty())
+        .map_err(|_| "cannot open a bundle file")?
+        .into_regular_file()
+        .ok_or("a bundle path is a directory")
+}
+
+/// Read a whole file into fresh `LOADER_DATA` pages, which Stela keeps.
+fn read_file(root: &mut Directory, path: &str) -> Result<Region, &'static str> {
+    let mut file = open(root, path)?;
+    let bytes = file
+        .get_boxed_info::<FileInfo>()
+        .map_err(|_| "cannot read a bundle file's size")?
+        .file_size();
+    let length = usize::try_from(bytes).map_err(|_| "bundle file is too large")?;
+    let physical = firmware::pages(length.div_ceil(PAGE).max(1))?;
+    // SAFETY: fresh pages Stela owns for the whole boot, never freed.
+    let buffer = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, length) };
+    let mut done = 0;
+    while done < length {
+        let count = file
+            .read(&mut buffer[done..])
+            .map_err(|_| "cannot read a bundle file")?;
+        if count == 0 {
+            return Err("a bundle file ended early");
+        }
+        done += count;
+    }
+    Ok(Region {
+        physical: physical as u64,
+        bytes,
+    })
+}
+
+/// Read `bundle.json` from `directory` on the first volume that has it, then
+/// every file it lists, unchanged; `bundle.json` comes first. Run before boot
+/// services end, with no other exclusive opening of the volume.
+pub fn read(directory: &str) -> Result<Vec<(String, Region)>, &'static str> {
+    let directory = directory.trim_end_matches('\\');
+    let manifest_path = format!("{directory}\\{MANIFEST_FILE}");
+    let handles = boot::find_handles::<SimpleFileSystem>().map_err(|_| "no file systems")?;
+    for handle in handles {
+        let Ok(mut volume) = boot::open_protocol_exclusive::<SimpleFileSystem>(handle) else {
+            continue;
+        };
+        let Ok(mut root) = volume.open_volume() else {
+            continue;
+        };
+        let Ok(json) = read_file(&mut root, &manifest_path) else {
+            continue;
+        };
+        // SAFETY: just read into Stela's own pages.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(json.physical as *const u8, json.bytes as usize) };
+        let manifest = Manifest::parse(bytes).map_err(|error| {
+            output::arguments(format_args!("bundle refusal: {error}\n"));
+            "bundle.json is not a boot bundle"
+        })?;
+        let mut files = alloc::vec![(String::from(MANIFEST_FILE), json)];
+        for file in &manifest.files {
+            output::arguments(format_args!("READ {directory}\\{}\n", file.name));
+            let contents = read_file(&mut root, &format!("{directory}\\{}", file.name))?;
+            files.push((file.name.clone(), contents));
+        }
+        return Ok(files);
+    }
+    Err("no volume has the bundle's bundle.json")
 }
 
 /// One 64-bit word from RDSEED or RDRAND, retried while the source is busy.

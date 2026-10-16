@@ -2,7 +2,7 @@
 //! switched to LA57. It never touches identity addresses again; host physical
 //! memory is reached through the physmap.
 mod adt;
-mod bundle;
+pub(crate) mod bundle;
 mod host;
 mod interrupts;
 

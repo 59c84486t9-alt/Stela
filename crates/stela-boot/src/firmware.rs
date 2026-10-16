@@ -115,14 +115,6 @@ pub(crate) fn source(volume: &mut FileSystem) -> Result<Vec<u8>, &'static str> {
         .map_err(|_| "cannot read \\EFI\\stela\\source.bin")
 }
 
-/// Any file of the volume, by its backslash-separated path.
-pub(crate) fn read(volume: &mut FileSystem, path: &str) -> Result<Vec<u8>, &'static str> {
-    let path = uefi::CString16::try_from(path).map_err(|_| "file path is not UCS-2")?;
-    volume
-        .read(path.as_ref())
-        .map_err(|_| "cannot read a configured file")
-}
-
 /// Page rights of Stela's own PE image: code RX, constants R, data RW+NX.
 pub(crate) struct Image {
     pub start: usize,
