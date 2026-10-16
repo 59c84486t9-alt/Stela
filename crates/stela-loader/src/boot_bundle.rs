@@ -1539,6 +1539,43 @@ mod tests {
                 .iter()
                 .any(|d| d.property == "boot-manifest-hash")
         );
+        // The mount's reader accepts the manifest and reproduces the layout.
+        let json = serde_json::to_vec(manifest)?;
+        let consumed = stela_runtime::boot_bundle::Manifest::parse(&json)?;
+        let verified = consumed.verify(&|name| Some(file(name).as_slice()))?;
+        let span = (manifest.top_of_kernel_data - options.dram_base) as usize;
+        let mut ram = vec![0u8; span];
+        let machine = stela_runtime::boot_bundle::Machine {
+            dram_base: options.dram_base,
+            ram_bytes: span as u64,
+            timebase_hz: 24_000_000,
+            framebuffer: None,
+            boot_args: None,
+        };
+        let image = verified.load(
+            &machine,
+            &mut |b| {
+                b.fill(7);
+                Ok(())
+            },
+            &mut |pa, bytes| {
+                let at = (pa - options.dram_base) as usize;
+                ram[at..at + bytes.len()].copy_from_slice(bytes);
+                true
+            },
+        )?;
+        assert_eq!(image.entry_pa, manifest.entry.physical_address);
+        assert_eq!(image.x0, manifest.entry_x0);
+        let tc = region("TrustCache");
+        let at = (tc.guest_pa - options.dram_base) as usize;
+        assert_eq!(
+            &ram[at..at + tc.bytes as usize],
+            file(TRUST_CACHE_FILE).as_slice()
+        );
+        assert!(image.kept.iter().all(|field| field.contains("Video")
+            || field.contains("vram")
+            || field.contains("CommandLine")));
+
         // A manifest for another board is refused.
         let mut other = Inputs { ..inputs };
         other.target.board_id = Some(0x24);
