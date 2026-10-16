@@ -389,6 +389,11 @@ fn logical_mask(width: Width, n: u32, rotation: u32, size: u32) -> Option<u64> {
     Some(mask)
 }
 
+/// Bit 26 is set in every Advanced SIMD and floating-point encoding: the SIMD
+/// and FP data-processing group and V=1 loads and stores. Clear words skip
+/// those decoders.
+const SIMD_FP: u32 = 1 << 26;
+
 impl Lifter for Decoder {
     type Instruction = Instruction;
     fn lift(&self, pc: GuestAddress, word: u32) -> Result<Instruction, UnsupportedReason> {
@@ -414,6 +419,7 @@ impl Lifter for Decoder {
             _ => Shift::Ror,
         };
         let amount = ((word >> 10) & 63) as u8;
+        let simd_fp = word & SIMD_FP != 0;
         let operation = if word == 0xd65f03c0 {
             Operation::Return
         } else if word == 0xd503201f {
@@ -447,7 +453,7 @@ impl Lifter for Decoder {
             Operation::CheckedPointer(decoded)
         } else if let Some(decoded) = flags::decode(word) {
             Operation::Flags(decoded)
-        } else if let Some(decoded) = fp_register::decode(word) {
+        } else if simd_fp && let Some(decoded) = fp_register::decode(word) {
             Operation::FloatingPointRegister(decoded)
         } else if let Some(decoded) = integer_unary::decode(word) {
             Operation::IntegerUnary(decoded)
@@ -457,7 +463,7 @@ impl Lifter for Decoder {
             Operation::TagArithmetic(decoded)
         } else if let Some(decoded) = integer_math::decode(word) {
             Operation::IntegerMath(decoded.map_err(|()| unsupported())?)
-        } else if let Some(decoded) = FloatingPointOperation::decode(word) {
+        } else if simd_fp && let Some(decoded) = FloatingPointOperation::decode(word) {
             Operation::FloatingPoint(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = ordered::decode(word) {
             Operation::Ordered(decoded)
@@ -471,7 +477,7 @@ impl Lifter for Decoder {
             Operation::Prefetch(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = literal::decode(pc, word) {
             Operation::Literal(decoded.map_err(|()| unsupported())?)
-        } else if let Some(decoded) = simd::decode(word) {
+        } else if simd_fp && let Some(decoded) = simd::decode(word) {
             Operation::Simd(decoded.map_err(|()| unsupported())?)
         } else if let Some(decoded) = register_offset::decode(word) {
             Operation::MemoryRegisterOffset(decoded.map_err(|()| unsupported())?)
@@ -716,6 +722,21 @@ impl Lifter for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simd_and_fp_decoders_claim_only_words_with_bit_26() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..200_000 {
+            state = state.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+            let word = (state >> 32) as u32 & !SIMD_FP;
+            assert!(simd::decode(word).is_none(), "{word:#010x}");
+            assert!(fp_register::decode(word).is_none(), "{word:#010x}");
+            assert!(
+                FloatingPointOperation::decode(word).is_none(),
+                "{word:#010x}"
+            );
+        }
+    }
     #[test]
     fn synchronization_admits_only_context_independent_effects() {
         const YIELD_WORD: u32 = 0xd503_203f;
