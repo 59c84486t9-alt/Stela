@@ -1,4 +1,21 @@
 use super::*;
+use crate::{
+    Lifter,
+    aarch64::{
+        Decoder,
+        scalable::{
+            ElementSize, ScalableMode, VectorLength,
+            features::{ScalableFeature, ScalableFeatures},
+            profile::ScalableControls,
+        },
+        sme::{integer_matrix, tables},
+        sve::{
+            dot, integer_arithmetic, integer_bits, integer_products, integer_saturation, shifts,
+            shifts_narrow,
+        },
+    },
+    context::{ExecutionContext, ScalableStateView},
+};
 use alloc::vec;
 use alloc::vec::Vec;
 

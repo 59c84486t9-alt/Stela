@@ -102,7 +102,12 @@ fn canonical_dots_emit_exact_bodies_and_maps() {
                 let native =
                     compile_for_profile(&words(word), GUEST_BASE, profile, target).unwrap();
                 let mut expected = Vec::new();
-                x86_64::sme::integer_dots::emit(&mut expected, &operand, profile.length, target);
+                x86_64::sme::integer_dots::emit(
+                    &mut expected,
+                    &operand,
+                    profile.vector_length(),
+                    target,
+                );
                 assert_eq!(
                     native.source_map,
                     [
