@@ -4,6 +4,7 @@ pub mod archive;
 pub mod disk;
 pub mod manifest;
 pub mod payload;
+pub mod udif;
 use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use reqwest::{Url, blocking::Client, header, redirect::Policy};

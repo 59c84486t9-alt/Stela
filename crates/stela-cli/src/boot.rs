@@ -21,6 +21,11 @@ const RESTORE_VARIANT: &str = "Customer Erase Install (IPSW)";
 const RESTORE_ENVIRONMENT: &str = "darwinos-ramdisk-environment";
 const INSTALLED_BOOT_ARGS: &str = "-v";
 const RESTORE_BOOT_ARGS: &str = "-v rd=md0";
+/// recoveryOS from the installed-system identity: BaseSystem as the ramdisk.
+const RECOVERY_ENVIRONMENT: &str = "recovery-environment";
+const BASE_SYSTEM: &str = "BaseSystem";
+/// The BaseSystem image's APFS partition, which becomes the ramdisk.
+const BASE_SYSTEM_PARTITION: &str = "Apple_APFS";
 
 /// The BuildManifest components, and their IM4P types, a boot mode loads.
 struct Roles {
@@ -30,7 +35,15 @@ struct Roles {
     sptm: &'static str,
     txm: &'static str,
     sep: &'static str,
-    ramdisk: Option<(&'static str, &'static str)>,
+    ramdisk: Option<Ramdisk>,
+}
+
+#[derive(Clone, Copy)]
+enum Ramdisk {
+    /// An IM4P component and its type.
+    Image4(&'static str, &'static str),
+    /// The AEA-encrypted BaseSystem UDIF image's APFS partition.
+    BaseSystem,
 }
 
 const INSTALLED: Roles = Roles {
@@ -50,7 +63,19 @@ const RESTORE: Roles = Roles {
     sptm: "Ap,RestoreSecurePageTableMonitor",
     txm: "Ap,RestoreTrustedExecutionMonitor",
     sep: "RestoreSEP",
-    ramdisk: Some(("RestoreRamDisk", "rdsk")),
+    ramdisk: Some(Ramdisk::Image4("RestoreRamDisk", "rdsk")),
+};
+
+/// recoveryOS: the installed system's kernel, monitors and DeviceTree, the
+/// BaseSystem trust cache, and BaseSystem as the ramdisk root.
+const RECOVERY: Roles = Roles {
+    kernel: "KernelCache",
+    device_tree: "DeviceTree",
+    trust_cache: ("Ap,BaseSystemTrustCache", "bstc"),
+    sptm: "Ap,SecurePageTableMonitor",
+    txm: "Ap,TrustedExecutionMonitor",
+    sep: "SEP",
+    ramdisk: Some(Ramdisk::BaseSystem),
 };
 
 #[derive(Subcommand)]
@@ -72,8 +97,16 @@ pub(crate) struct Prepare {
     output: PathBuf,
     /// Boot the restore ramdisk with the identity's restore objects instead
     /// of the installed system.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "recovery")]
     restore: bool,
+    /// Boot recoveryOS: BaseSystem as a ramdisk with the installed system's
+    /// kernel. Needs `/usr/bin/aea` to decrypt BaseSystem.
+    #[arg(long)]
+    recovery: bool,
+    /// The public AEA key (PKCS8 PEM) for BaseSystem; fetched from Apple's
+    /// key server when omitted.
+    #[arg(long, requires = "recovery")]
+    aea_key: Option<PathBuf>,
     /// The restore identity variant: `macOS Customer` for the installed
     /// system, `Customer Erase Install (IPSW)` with `--restore`.
     #[arg(long)]
@@ -260,6 +293,48 @@ fn check_digests(manifest: &im4m::Manifest, decoded: &[&Decoded]) -> Result<()> 
     Ok(())
 }
 
+/// BaseSystem's APFS partition: the AEA member is copied out, decrypted
+/// with the public key, and its UDIF image's `Apple_APFS` partition read.
+fn base_system(
+    ipsw: &std::path::Path,
+    member: &str,
+    key: Option<&std::path::Path>,
+    declared_digest: Option<String>,
+) -> Result<Decoded> {
+    let work = tempfile::tempdir()?;
+    let encrypted = work.path().join("BaseSystem.dmg.aea");
+    let receipt = restore::archive::extract(ipsw, member, &encrypted, RAMDISK_LIMIT)?;
+    let container_sha256 = receipt["sha256"]
+        .as_str()
+        .context("extraction receipt has no SHA-256")?
+        .to_owned();
+    let key = match key {
+        Some(key) => key.to_path_buf(),
+        None => {
+            let fetched = restore::aea::fetch_public_key(&restore::aea::inspect(&encrypted)?)?;
+            let path = work.path().join("BaseSystem.pem");
+            std::fs::write(&path, &fetched.body)?;
+            path
+        }
+    };
+    let image = work.path().join("BaseSystem.dmg");
+    restore::aea::decrypt(&encrypted, &key, &image)?;
+    let bytes = restore::udif::partition(&image, BASE_SYSTEM_PARTITION, RAMDISK_LIMIT)?;
+    Ok(Decoded {
+        source: Source {
+            component: BASE_SYSTEM.into(),
+            member: member.into(),
+            container_sha256,
+            payload_type: "apfs".into(),
+            description: format!("{BASE_SYSTEM_PARTITION} partition of the decrypted UDIF image"),
+            decoded_bytes: bytes.len(),
+            decoded_sha256: stela_runtime::sha256(&bytes),
+        },
+        bytes,
+        declared_digest,
+    })
+}
+
 fn parse_id(value: Option<&str>) -> Result<Option<u32>> {
     value
         .map(|v| {
@@ -276,9 +351,10 @@ impl Prepare {
             "output exists; choose a new --output directory"
         );
         let report = restore::archive::manifest(&self.ipsw, Some(&self.model), false)?;
-        let (roles, default_variant) = match self.restore {
-            true => (RESTORE, RESTORE_VARIANT),
-            false => (INSTALLED, INSTALLED_VARIANT),
+        let (roles, default_variant) = match (self.restore, self.recovery) {
+            (true, _) => (RESTORE, RESTORE_VARIANT),
+            (false, true) => (RECOVERY, INSTALLED_VARIANT),
+            (false, false) => (INSTALLED, INSTALLED_VARIANT),
         };
         let variant = self.variant.as_deref().unwrap_or(default_variant);
         let identity = report
@@ -341,10 +417,24 @@ impl Prepare {
         let device_tree = component(roles.device_tree, Some("dtre"), COMPONENT_LIMIT)?;
         let (trust_cache_name, trust_cache_type) = roles.trust_cache;
         let trust_cache = component(trust_cache_name, Some(trust_cache_type), COMPONENT_LIMIT)?;
-        let ramdisk = roles
-            .ramdisk
-            .map(|(name, payload_type)| component(name, Some(payload_type), RAMDISK_LIMIT))
-            .transpose()?;
+        let ramdisk = match roles.ramdisk {
+            None => None,
+            Some(Ramdisk::Image4(name, payload_type)) => {
+                Some(component(name, Some(payload_type), RAMDISK_LIMIT)?)
+            }
+            Some(Ramdisk::BaseSystem) => {
+                let entry = identity
+                    .components
+                    .get(BASE_SYSTEM)
+                    .with_context(|| format!("{} lists no {BASE_SYSTEM}", identity.variant))?;
+                Some(base_system(
+                    &self.ipsw,
+                    &entry.path,
+                    self.aea_key.as_deref(),
+                    entry.declared_digest_hex.clone(),
+                )?)
+            }
+        };
         let sep = report
             .identities
             .iter()
@@ -446,15 +536,20 @@ impl Prepare {
             phys_base: self.phys_base.unwrap_or(self.dram_base),
             load_offset: self.load_offset,
             boot_args: self.boot_args.unwrap_or_else(|| {
-                match self.restore {
+                match self.restore || self.recovery {
                     true => RESTORE_BOOT_ARGS,
                     false => INSTALLED_BOOT_ARGS,
                 }
                 .into()
             }),
-            osenvironment: self
-                .osenvironment
-                .or_else(|| self.restore.then(|| RESTORE_ENVIRONMENT.into())),
+            osenvironment: self.osenvironment.or_else(|| {
+                match (self.restore, self.recovery) {
+                    (true, _) => Some(RESTORE_ENVIRONMENT),
+                    (false, true) => Some(RECOVERY_ENVIRONMENT),
+                    (false, false) => None,
+                }
+                .map(Into::into)
+            }),
             boot_cpu: self.boot_cpu,
             timebase_frequency: self.timebase_frequency,
             syscfg: self.syscfg.into_iter().collect(),
