@@ -1,8 +1,8 @@
 //! Canonical X-base LDP metadata. No physical/source/control or PE authority.
 use super::SourceFailure;
 use stela_compiler::{
-    GuestAddress, GuestState, Lifter,
-    aarch64::{AddressMode, Decoder, Instruction, Operation, Register},
+    GuestAddress, GuestState,
+    aarch64::{AddressMode, Instruction, Operation, Register},
     context::memory::{MemoryRequirements, SpAlignmentRequirement, flags, profile_requirements},
 };
 const MEMBER_BYTES: u64 = size_of::<u64>() as u64;
@@ -24,13 +24,6 @@ pub(crate) struct M0ReadPairSource {
 }
 impl M0ReadPairSource {
     pub(crate) fn from_source(instruction: &Instruction, word: u32) -> Result<Self, SourceFailure> {
-        if Decoder
-            .lift(instruction.pc, word)
-            .map_err(|_| SourceFailure::Decode)?
-            != *instruction
-        {
-            return Err(SourceFailure::SourceMismatch);
-        }
         if stela_compiler::block::el1_platform::Read64Pair::from_instruction(instruction).is_none()
         {
             return Err(SourceFailure::UnsupportedShape);

@@ -12,9 +12,10 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(&mut tmp, value)?;
-    tmp.write_all(b"\n")?;
+    tmp.write_all(&bytes)?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }

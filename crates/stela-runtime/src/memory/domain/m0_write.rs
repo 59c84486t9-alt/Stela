@@ -1,7 +1,7 @@
 //! Canonical ordinary X-store metadata. This grants no data/source/PE access.
 use stela_compiler::{
-    GuestAddress, GuestState, Lifter,
-    aarch64::{AddressMode, Decoder, Instruction, MemoryTransfer, Operation, Register},
+    GuestAddress, GuestState,
+    aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register},
     context::memory::{MemoryRequirements, SpAlignmentRequirement, flags, profile_requirements},
 };
 const WORD_BYTES: u8 = size_of::<u64>() as u8;
@@ -19,8 +19,6 @@ pub(crate) enum M0WriteMembers {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceFailure {
-    Decode,
-    SourceMismatch,
     UnsupportedShape,
     ContinuationOverflow,
 }
@@ -37,13 +35,6 @@ pub(crate) struct M0WriteSource {
 }
 impl M0WriteSource {
     pub(crate) fn from_source(instruction: &Instruction, word: u32) -> Result<Self, SourceFailure> {
-        if Decoder
-            .lift(instruction.pc, word)
-            .map_err(|_| SourceFailure::Decode)?
-            != *instruction
-        {
-            return Err(SourceFailure::SourceMismatch);
-        }
         let (data, base, displacement, mode, members) = match instruction.operation {
             Operation::MemoryPair {
                 transfer: MemoryTransfer::Store,

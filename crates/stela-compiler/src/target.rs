@@ -151,6 +151,12 @@ impl TargetCpu {
     /// Freestanding callers supply a positively qualified explicit target.
     #[cfg(any(feature = "std", test))]
     pub fn detect() -> Self {
+        static DETECTED: std::sync::OnceLock<TargetCpu> = std::sync::OnceLock::new();
+        *DETECTED.get_or_init(Self::probe)
+    }
+
+    #[cfg(any(feature = "std", test))]
+    fn probe() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
             let basic = core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES);

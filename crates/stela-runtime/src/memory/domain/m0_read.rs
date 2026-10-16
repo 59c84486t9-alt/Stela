@@ -19,10 +19,8 @@ pub(crate) use pair_ram::{
 
 use crate::memory::stage1;
 use stela_compiler::{
-    GuestAddress, GuestState, Lifter,
-    aarch64::{
-        AddressMode, Decoder, Instruction, MemoryTransfer, Operation, Register, Width, literal,
-    },
+    GuestAddress, GuestState,
+    aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register, Width, literal},
     context::memory::{MemoryRequirements, SpAlignmentRequirement, flags, profile_requirements},
 };
 
@@ -61,7 +59,6 @@ pub(crate) fn check_el1_m0_data_controls(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceFailure {
-    Decode,
     SourceMismatch,
     UnsupportedShape,
     ContinuationOverflow,
@@ -85,15 +82,9 @@ enum ReadAddress {
 }
 
 impl M0ScalarReadSource {
-    /// Recheck against the common decoder; the real registered CodeRegion must
-    /// separately establish that these bytes/PC belong to this actual source.
+    /// `instruction` is the common decoder's lift of `word`; the registered
+    /// CodeRegion separately establishes that these bytes belong to the source.
     pub(crate) fn from_source(instruction: &Instruction, word: u32) -> Result<Self, SourceFailure> {
-        let decoded = Decoder
-            .lift(instruction.pc, word)
-            .map_err(|_| SourceFailure::Decode)?;
-        if decoded != *instruction {
-            return Err(SourceFailure::SourceMismatch);
-        }
         let Operation::Memory {
             transfer:
                 MemoryTransfer::Load {
@@ -137,12 +128,6 @@ impl M0ScalarReadSource {
         instruction: &Instruction,
         word: u32,
     ) -> Result<Self, SourceFailure> {
-        let decoded = Decoder
-            .lift(instruction.pc, word)
-            .map_err(|_| SourceFailure::Decode)?;
-        if decoded != *instruction {
-            return Err(SourceFailure::SourceMismatch);
-        }
         let Operation::Literal(literal::Operand {
             address,
             transfer:
