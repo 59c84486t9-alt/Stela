@@ -21,6 +21,7 @@ mod hash;
 #[cfg(feature = "std")]
 mod json;
 pub mod mach;
+pub mod machine;
 pub mod memory;
 pub mod pauth;
 pub mod payload;
