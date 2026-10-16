@@ -30,7 +30,7 @@ pub use pointer_authentication::{
     PointerAuthentication, PointerAuthenticationKey, PointerAuthenticationModifier,
     PointerAuthenticationOperation, decode_pointer_authentication,
 };
-pub use system::{SystemInstruction, decode_system_instruction};
+pub use system::{SystemInstruction, decode_system_instruction, decode_system_mode_instruction};
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
 
 use crate::{
@@ -63,6 +63,11 @@ pub const CLOCK_THREAD_BLOCK_ABI: &str =
 pub const SYSTEM_BLOCK_ABI: &str = "x86_64-sysv-guest-state-v2-block-exit-system-v1";
 pub const SYSTEM_REGISTER_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-system-registers-v1";
+/// Direct-RAM blocks for the system-mode engine: guest VAs are native
+/// addresses through shadow paging, `GuestState` is exact at every instruction
+/// boundary, and every System-class instruction exits with kind 11.
+pub const SYSTEM_MODE_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v2-block-exit-direct-ram-system-mode-v1";
 pub const EL1_PLATFORM_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v1";
 
@@ -90,6 +95,8 @@ pub enum BlockProfile {
     CheckedMemoryPauthClockThread(CheckedMemoryProfile),
     SystemV1,
     SystemRegistersV1,
+    /// The system-mode engine's profile; see [`SYSTEM_MODE_BLOCK_ABI`].
+    SystemModeV1,
     AppleArm64eSoftwarePauthV1,
     AppleArm64eSoftwarePauthClockV1,
     DarwinArm64ThreadV1,
@@ -109,6 +116,7 @@ impl BlockProfile {
             Self::CheckedMemoryPauthClockThread(profile) => profile.process_helpers_abi(),
             Self::SystemV1 => SYSTEM_BLOCK_ABI,
             Self::SystemRegistersV1 => SYSTEM_REGISTER_BLOCK_ABI,
+            Self::SystemModeV1 => SYSTEM_MODE_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
             Self::DarwinArm64ThreadV1 => THREAD_BLOCK_ABI,
@@ -137,12 +145,15 @@ impl BlockProfile {
     pub const fn supports_system(self) -> bool {
         matches!(
             self,
-            Self::SystemV1 | Self::SystemRegistersV1 | Self::El1PlatformV1
+            Self::SystemV1 | Self::SystemRegistersV1 | Self::El1PlatformV1 | Self::SystemModeV1
         )
     }
 
     pub const fn supports_system_registers(self) -> bool {
-        matches!(self, Self::SystemRegistersV1 | Self::El1PlatformV1)
+        matches!(
+            self,
+            Self::SystemRegistersV1 | Self::El1PlatformV1 | Self::SystemModeV1
+        )
     }
 
     pub const fn supports_pointer_authentication(self) -> bool {
@@ -153,6 +164,7 @@ impl BlockProfile {
                 | Self::AppleArm64eSoftwarePauthThreadV1
                 | Self::AppleArm64eSoftwarePauthClockThreadV1
                 | Self::CheckedMemoryPauthClockThread(_)
+                | Self::SystemModeV1
         )
     }
 
@@ -634,6 +646,87 @@ mod tests {
                 crate::TargetCpu::Baseline
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn system_mode_profile_keeps_ordinary_memory_and_exits_on_system_instructions() {
+        const BASE: GuestAddress = GuestAddress(0x4000);
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const LDR: u32 = 0xf940_0020; // ldr x0, [x1]
+        const STP: u32 = 0xa900_0be1; // stp x1, x2, [sp]
+        const DMB: u32 = 0xd503_3bbf; // dmb ish
+        const YIELD: u32 = 0xd503_203f;
+        const NOP: u32 = 0xd503_201f;
+        let profile = BlockProfile::SystemModeV1;
+        assert_eq!(profile.abi(), SYSTEM_MODE_BLOCK_ABI);
+        assert!(profile.supports_system() && profile.supports_system_registers());
+        assert!(profile.supports_pointer_authentication());
+        assert!(profile.checked_memory().is_none() && !profile.supports_clock());
+        let prefix = [ADD, LDR, STP, DMB, YIELD, NOP];
+        for (word, kind) in [
+            (0xd518_1000_u32, ExitKind::System), // msr sctlr_el1, x0
+            (0xd538_d080, ExitKind::System),     // mrs x0, tpidr_el1
+            (0xd500_43df, ExitKind::System),     // msr daifset, #3
+            (0xd508_8723, ExitKind::System),     // tlbi vae1, x3
+            (0xd50b_7420, ExitKind::System),     // dc zva, x0
+            (0xd50b_7520, ExitKind::System),     // ic ivau, x0
+            (0xd503_3f9f, ExitKind::System),     // dsb sy
+            (0xd503_3fdf, ExitKind::System),     // isb
+            (0xd503_207f, ExitKind::System),     // wfi
+            (0xd503_245f, ExitKind::System),     // bti c
+            (0xd400_0001, ExitKind::System),     // svc #0
+            (0xd400_0002, ExitKind::System),     // hvc #0
+            (0xd69f_03e0, ExitKind::System),     // eret
+            (0x0000_0000, ExitKind::System),     // udf #0
+            (0xd503_237f, ExitKind::PointerAuthentication), // pacibsp
+        ] {
+            let source: Vec<u8> = prefix
+                .iter()
+                .chain([word, ADD].iter())
+                .flat_map(|word| word.to_le_bytes())
+                .collect();
+            let terminal_pc = GuestAddress(BASE.0 + 4 * prefix.len() as u64);
+            let analysis = analyze_with_profile(&source, BASE, profile).unwrap();
+            assert_eq!(analysis.terminator_pc, Some(terminal_pc), "{word:#x}");
+            assert_eq!(analysis.source_bytes, 4 * (prefix.len() + 1));
+            let compiled =
+                compile_for_target(&source, BASE, profile, crate::TargetCpu::Baseline).unwrap();
+            let map = &compiled.native.source_map;
+            assert_eq!(map.len(), prefix.len() + 1, "{word:#x}");
+            assert!(
+                map.iter()
+                    .enumerate()
+                    .all(|(index, (pc, _))| pc.0 == BASE.0 + 4 * index as u64)
+            );
+            let at = map.last().unwrap().1;
+            let mut expected = vec![0x48, 0xb8];
+            expected.extend(terminal_pc.0.to_le_bytes());
+            expected.push(0xba);
+            expected.extend((kind as u32).to_le_bytes());
+            expected.push(0xc3);
+            assert_eq!(&compiled.native.x86_64_code[at..], expected, "{word:#x}");
+        }
+        // Ordinary-only prefixes use the frame-exact emitter, never allocated regions.
+        let ordinary: Vec<u8> = [ADD, LDR, ADD, ADD, ADD, 0x1400_0000]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let parsed = analysis::parse(&ordinary, BASE, profile).unwrap();
+        let expected = crate::x86_64::block::emit_for_target(
+            &parsed.instructions,
+            parsed.terminal.as_ref(),
+            parsed.next_pc,
+            crate::TargetCpu::Baseline,
+        );
+        let compiled =
+            compile_for_target(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();
+        assert_eq!(compiled.native.x86_64_code, expected.x86_64_code);
+        assert_eq!(compiled.native.source_map, expected.source_map);
+        // The trap and system decoders of other profiles do not see SYS.
+        assert!(
+            analyze_with_profile(&0xd508_8723_u32.to_le_bytes(), BASE, BlockProfile::SystemV1)
+                .is_err()
         );
     }
 

@@ -137,6 +137,33 @@ pub fn decode(word: u32) -> Option<RegisterAccess> {
     })
 }
 
+const SYS_INSTRUCTION_MASK: u32 = 0xfff8_0000;
+const SYS_INSTRUCTION: u32 = 0xd508_0000;
+const SYSL_INSTRUCTION: u32 = 0xd528_0000;
+const SYS_OP0: u8 = 0b01;
+
+/// SYS (as a write) and SYSL (as a read), the op0=1 space that holds AT, DC,
+/// IC, TLBI and the prediction-restriction operations. Structure only, as for
+/// [`decode`]: which operations exist is decided by the runtime.
+pub fn decode_sys(word: u32) -> Option<RegisterAccess> {
+    let direction = match word & SYS_INSTRUCTION_MASK {
+        SYS_INSTRUCTION => Direction::Write,
+        SYSL_INSTRUCTION => Direction::Read,
+        _ => return None,
+    };
+    Some(RegisterAccess {
+        direction,
+        encoding: Encoding::new(
+            SYS_OP0,
+            ((word >> WORD_OP1_SHIFT) & u32::from(OP1_MASK)) as u8,
+            ((word >> WORD_CRN_SHIFT) & u32::from(CRN_MASK)) as u8,
+            ((word >> WORD_CRM_SHIFT) & u32::from(CRM_MASK)) as u8,
+            ((word >> WORD_OP2_SHIFT) & u32::from(OP2_MASK)) as u8,
+        ),
+        rt: (word & WORD_REGISTER_MASK) as u8,
+    })
+}
+
 const PSTATE_IMMEDIATE_MASK: u32 = 0xfff8_f01f;
 const PSTATE_IMMEDIATE_CLASS: u32 = 0xd500_401f;
 const PSTATE_OP1_SHIFT: u32 = 16;
@@ -175,6 +202,25 @@ pub const CNTVCT_EL0: Encoding = Encoding::new(3, 3, 14, 0, 2);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sys_and_sysl_keep_every_field_and_exclude_other_classes() {
+        // TLBI VAE1, X3 and DC ZVA, X0: op0=1 fields from the June 2026 tables.
+        let tlbi = decode_sys(0xd508_8723).unwrap();
+        assert_eq!(tlbi.direction(), Direction::Write);
+        assert_eq!(tlbi.encoding(), Encoding::new(1, 0, 8, 7, 1));
+        assert_eq!(tlbi.rt(), 3);
+        let zva = decode_sys(0xd50b_7420).unwrap();
+        assert_eq!(zva.encoding(), Encoding::new(1, 3, 7, 4, 1));
+        assert_eq!(zva.rt(), 0);
+        let sysl = decode_sys(0xd528_0000 | 31).unwrap();
+        assert_eq!(sysl.direction(), Direction::Read);
+        assert_eq!(sysl.rt(), 31);
+        // MRS/MSR, hints and MSR (immediate) are not SYS.
+        for word in [0xd538_1000_u32, 0xd518_1000, 0xd503_201f, 0xd500_401f] {
+            assert_eq!(decode_sys(word), None, "{word:#x}");
+        }
+    }
 
     mod pstate_immediate {
         use super::*;

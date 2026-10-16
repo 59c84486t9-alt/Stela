@@ -246,7 +246,31 @@ pub(super) fn parse(
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
+        if profile == BlockProfile::SystemModeV1 {
+            // PAuth hints share the hint space, so they are matched first.
+            if let Some(decoded) =
+                decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
+                    pc,
+                    detail: error.0,
+                })?
+            {
+                terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
+                break;
+            }
+            if let Some(decoded) =
+                system::decode_system_mode_instruction(pc, word).map_err(|error| {
+                    BlockAnalysisError {
+                        pc,
+                        detail: error.0,
+                    }
+                })?
+            {
+                terminal = Some((pc, Terminator::System(decoded)));
+                break;
+            }
+        }
         if profile.supports_system()
+            && profile != BlockProfile::SystemModeV1
             && let Some(decoded) = (if profile == BlockProfile::El1PlatformV1 {
                 system::decode_el1_system_instruction(pc, word)
             } else {
@@ -382,7 +406,9 @@ pub(super) fn parse(
                 detail: "unadmitted original NOP provenance in checked memory profile".into(),
             });
         }
-        if profile.supports_system() && !crate::extended::ordinary_permitted(&instruction.operation)
+        if profile.supports_system()
+            && profile != BlockProfile::SystemModeV1
+            && !crate::extended::ordinary_permitted(&instruction.operation)
         {
             return Err(BlockAnalysisError {
                 pc,

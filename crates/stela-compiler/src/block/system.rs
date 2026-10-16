@@ -21,6 +21,9 @@ pub enum SystemOperation {
     Synchronization(synchronization::Operation),
     TagMemory(tag_memory::Operand),
     Register(registers::RegisterAccess),
+    /// SYS/SYSL (op0=1): address translation, cache and TLB maintenance.
+    /// Only the system-mode profile produces it.
+    Maintenance(registers::RegisterAccess),
     PstateImmediate(registers::Encoding),
     SendEvent {
         local: bool,
@@ -52,6 +55,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Synchronization(_) => "synchronization",
         SystemOperation::TagMemory(_) => "tag_memory",
         SystemOperation::Register(_) => "system_register",
+        SystemOperation::Maintenance(_) => "maintenance",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
         SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
@@ -140,6 +144,46 @@ pub(super) fn decode_el1_system_instruction(
         operation: SystemOperation::Synchronization(operation),
     }))
 }
+
+/// Decode every instruction the system-mode profile hands to the runtime: the
+/// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
+/// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, BTI, ESB,
+/// TSB and unallocated hints). YIELD, CSDB, SB and DMB stay ordinary; PAuth
+/// hints belong to the PAuth decoder, which the profile consults first.
+pub fn decode_system_mode_instruction(
+    pc: GuestAddress,
+    word: u32,
+) -> Result<Option<SystemInstruction>, CompileError> {
+    if let Some(instruction) = decode_system_instruction(pc, word)? {
+        return Ok(Some(instruction));
+    }
+    let operation = if let Some(access) = registers::decode_sys(word) {
+        SystemOperation::Maintenance(access)
+    } else {
+        match synchronization::decode(word) {
+            Some(
+                operation @ (synchronization::Operation::DataCompletion { .. }
+                | synchronization::Operation::StoreBypassBarrier { .. }
+                | synchronization::Operation::BranchTarget { .. }
+                | synchronization::Operation::ErrorSynchronization
+                | synchronization::Operation::TraceSynchronization
+                | synchronization::Operation::OtherHint { .. }),
+            ) if word != NOP => SystemOperation::Synchronization(operation),
+            _ => return Ok(None),
+        }
+    };
+    let next_pc = GuestAddress(pc.0.checked_add(INSTRUCTION_BYTES).ok_or_else(|| {
+        CompileError("system continuation PC overflows guest address range".into())
+    })?);
+    Ok(Some(SystemInstruction {
+        instruction_pc: pc,
+        next_pc,
+        word,
+        operation,
+    }))
+}
+
+const NOP: u32 = 0xd503_201f;
 
 impl SystemInstruction {
     pub fn is_el1_ram_completion(self) -> bool {
