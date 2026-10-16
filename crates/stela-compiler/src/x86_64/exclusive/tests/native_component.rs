@@ -76,7 +76,7 @@ impl Executable {
             memory: core::ptr::from_mut(view).cast(),
             ..ExecutionContext::default()
         };
-        let entry: unsafe extern "C" fn(*mut GuestState, *const ExecutionContext) -> u32 =
+        let entry: unsafe extern "sysv64" fn(*mut GuestState, *const ExecutionContext) -> u32 =
             unsafe { core::mem::transmute(self.pointer) };
         unsafe { entry(state, &context) }
     }
@@ -97,7 +97,10 @@ struct Observation {
     calls: usize,
 }
 
-unsafe extern "C" fn callback(view: *mut MemoryContextView, request: *const MemoryRequest) -> u32 {
+unsafe extern "sysv64" fn callback(
+    view: *mut MemoryContextView,
+    request: *const MemoryRequest,
+) -> u32 {
     let view = unsafe { &mut *view };
     let request = unsafe { &*request };
     let observation = unsafe { &mut *view.opaque.cast::<Observation>() };

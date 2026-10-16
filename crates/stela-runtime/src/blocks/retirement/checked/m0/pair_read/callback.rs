@@ -96,7 +96,7 @@ impl<'call, 'loan, 'owner> PairReadCallback<'call, 'loan, 'owner> {
 /// `request.data` is writable private 16-byte staging, disjoint from RAM,
 /// architectural state, source and host metadata. The PE's guard holds the
 /// prepared RAM, ordering and source resources from before entry until commit.
-unsafe extern "C" fn reached_pair_read(
+unsafe extern "sysv64" fn reached_pair_read(
     view: *mut MemoryContextView,
     request: *const MemoryRequest,
 ) -> u32 {

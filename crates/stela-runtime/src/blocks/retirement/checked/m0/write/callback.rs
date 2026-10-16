@@ -114,7 +114,7 @@ impl<'call, 'loan, 'owner> WriteCallback<'call, 'loan, 'owner> {
 /// `request.data` is readable private 16-byte staging, disjoint from RAM,
 /// architectural state, source and host metadata. The PE's guard holds the
 /// prepared RAM, ordering and source resources from before entry until commit.
-unsafe extern "C" fn reached_write(
+unsafe extern "sysv64" fn reached_write(
     view: *mut MemoryContextView,
     request: *const MemoryRequest,
 ) -> u32 {

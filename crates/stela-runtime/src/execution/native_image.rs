@@ -66,7 +66,7 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
         state: &mut GuestState,
     ) -> Result<ReachedCall<(), S::Error>, S::Error> {
         self.revalidate()?;
-        let function: unsafe extern "C" fn(*mut GuestState) =
+        let function: unsafe extern "sysv64" fn(*mut GuestState) =
             unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
         unsafe { function(state) };
         Ok(ReachedCall {
@@ -86,8 +86,10 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
         context: &mut ExecutionContext,
     ) -> Result<ReachedCall<BlockExit, S::Error>, S::Error> {
         self.revalidate()?;
-        let function: unsafe extern "C" fn(*mut GuestState, *mut ExecutionContext) -> BlockExit =
-            unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
+        let function: unsafe extern "sysv64" fn(
+            *mut GuestState,
+            *mut ExecutionContext,
+        ) -> BlockExit = unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
         let returned = unsafe { function(state, context) };
         Ok(ReachedCall {
             returned,
@@ -108,7 +110,7 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
         budget: &mut stela_compiler::block::loop_budget::LoopBudget,
     ) -> Result<ReachedCall<BlockExit, S::Error>, S::Error> {
         self.revalidate()?;
-        let function: unsafe extern "C" fn(
+        let function: unsafe extern "sysv64" fn(
             *mut GuestState,
             *mut stela_compiler::block::loop_budget::LoopBudget,
         ) -> BlockExit = unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
@@ -127,7 +129,7 @@ impl<'rx, S: ExecutableStorage + ?Sized> NativeImage<'rx, S> {
         state: &mut GuestState,
     ) -> Result<ReachedCall<BlockExit, S::Error>, S::Error> {
         self.revalidate()?;
-        let function: unsafe extern "C" fn(*mut GuestState) -> BlockExit =
+        let function: unsafe extern "sysv64" fn(*mut GuestState) -> BlockExit =
             unsafe { core::mem::transmute(self.storage.entry().as_ptr()) };
         let returned = unsafe { function(state) };
         Ok(ReachedCall {

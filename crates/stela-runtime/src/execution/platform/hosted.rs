@@ -102,7 +102,7 @@ impl Mapping {
     ) -> Result<()> {
         // SAFETY: The context entry owns the checked source/profile and
         // validates its live borrowed views before this synchronous call.
-        let function: unsafe extern "C" fn(
+        let function: unsafe extern "sysv64" fn(
             *mut GuestState,
             *mut stela_compiler::context::ExecutionContext,
         ) = unsafe { core::mem::transmute(self.pointer.as_ptr()) };

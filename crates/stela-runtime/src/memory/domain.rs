@@ -894,7 +894,7 @@ fn is_guest_fault(status: u32) -> bool {
     .any(|fault| status == fault as u32)
 }
 
-unsafe extern "C" fn dispatch<P: DataPolicy>(
+unsafe extern "sysv64" fn dispatch<P: DataPolicy>(
     view: *mut MemoryContextView,
     request: *const MemoryRequest,
 ) -> u32 {

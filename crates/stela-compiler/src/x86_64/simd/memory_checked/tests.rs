@@ -122,7 +122,10 @@ struct Harness {
 
 /// A test transport, not the production MemorySystem. It deliberately poisons
 /// callback scratch registers and MXCSR after touching the reached prefix.
-unsafe extern "C" fn callback(view: *mut MemoryContextView, request: *const MemoryRequest) -> u32 {
+unsafe extern "sysv64" fn callback(
+    view: *mut MemoryContextView,
+    request: *const MemoryRequest,
+) -> u32 {
     // SAFETY: native test entry borrows these disjoint objects until return.
     let (view, request) = unsafe { (&mut *view, &*request) };
     let harness = unsafe { &mut *view.opaque.cast::<Harness>() };
@@ -242,7 +245,7 @@ impl NativeCode {
             ..ExecutionContext::default()
         };
         // SAFETY: exact generated entry implements this borrowed SystemV ABI.
-        let entry: unsafe extern "C" fn(*mut GuestState, *mut ExecutionContext) -> u32 =
+        let entry: unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) -> u32 =
             unsafe { core::mem::transmute(self.0) };
         let before = mxcsr();
         let status = unsafe { entry(state, &mut context) };

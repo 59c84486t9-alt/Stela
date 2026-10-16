@@ -223,8 +223,10 @@ impl MemoryRequest {
     }
 }
 
-pub type MemoryCallback =
-    unsafe extern "C" fn(context: *mut MemoryContextView, request: *const MemoryRequest) -> u32;
+pub type MemoryCallback = unsafe extern "sysv64" fn(
+    context: *mut MemoryContextView,
+    request: *const MemoryRequest,
+) -> u32;
 
 /// Borrowed dispatch view. Its owner retains resolver, tag and monitor state.
 /// Callback failures preserve a diagnostic record after native stack unwind.

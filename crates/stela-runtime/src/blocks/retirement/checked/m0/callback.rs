@@ -89,7 +89,7 @@ impl<'call, 'loan, 'owner> ReadCallback<'call, 'loan, 'owner> {
 /// width, disjoint from RAM, architectural state, source and host metadata. The
 /// PE's guard holds the prepared RAM, ordering and source resources from before
 /// entry until commit.
-unsafe extern "C" fn reached_read(
+unsafe extern "sysv64" fn reached_read(
     view: *mut MemoryContextView,
     request: *const MemoryRequest,
 ) -> u32 {
