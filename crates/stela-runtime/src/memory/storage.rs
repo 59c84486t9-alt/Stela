@@ -19,7 +19,7 @@ pub(super) enum StorageKind {
 #[derive(Debug)]
 pub(super) struct NativeMapping {
     #[cfg(not(feature = "std"))]
-    _unmounted: core::convert::Infallible,
+    _boot: crate::execution::boot_frames::BootRam,
     base: NonNull<u8>,
     bytes: usize,
     #[cfg(test)]
@@ -67,8 +67,8 @@ unsafe impl Send for NativeMapping {}
 // authority. The mapping remains live until the final retained owner is dropped.
 unsafe impl Sync for NativeMapping {}
 
+#[cfg(feature = "std")]
 impl Drop for NativeMapping {
-    #[cfg(feature = "std")]
     fn drop(&mut self) {
         // SAFETY: adoption transferred the sole obligation for this exact extent.
         #[cfg(not(test))]
@@ -96,10 +96,6 @@ impl Drop for NativeMapping {
                 "mapping retirement recorded twice"
             );
         }
-    }
-    #[cfg(not(feature = "std"))]
-    fn drop(&mut self) {
-        match self._unmounted {}
     }
 }
 
@@ -217,8 +213,16 @@ impl NativeStorage {
         readable: bool,
         writable: bool,
     ) -> Result<Arc<Self>, crate::platform::memory::Error> {
-        let _ = (initial, leading, bytes, readable, writable);
-        Err(crate::platform::memory::Error::Unavailable)
+        let owner = crate::platform::boot::ram(initial, leading, bytes, readable, writable)?;
+        owner.revalidate().map_err(|error| {
+            crate::platform::memory::Error::Boot(crate::platform::boot::MountError::Storage(error))
+        })?;
+        let mapping = NativeMapping {
+            base: owner.base(),
+            bytes: owner.bytes(),
+            _boot: owner,
+        };
+        Ok(Self::anonymous(mapping))
     }
 
     pub(super) fn anonymous(primary: NativeMapping) -> Arc<Self> {

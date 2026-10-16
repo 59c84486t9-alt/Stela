@@ -229,7 +229,8 @@ pub fn host_page_size() -> Result<usize> {
 
 #[cfg(not(feature = "std"))]
 pub fn host_page_size() -> Result<usize> {
-    anyhow::bail!("freestanding physical page allocator is not mounted")
+    crate::platform::boot::ensure_live()?;
+    Ok(4096)
 }
 
 fn page_rounded(bytes: u64, page: u64) -> Result<u64> {

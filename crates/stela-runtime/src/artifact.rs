@@ -20,7 +20,7 @@ pub struct Identity {
     pub memory_specialization_sha256: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Manifest {
     pub identity: Identity,
     pub native_sha256: String,

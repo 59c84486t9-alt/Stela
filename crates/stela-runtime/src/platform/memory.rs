@@ -6,6 +6,7 @@ pub(crate) type Error = std::io::Error;
 #[derive(Debug)]
 pub(crate) enum Error {
     Unavailable,
+    Boot(crate::platform::boot::MountError),
     InvalidLayout(alloc::string::String),
 }
 #[cfg(not(feature = "std"))]
@@ -22,8 +23,16 @@ impl core::fmt::Display for Error {
                 f.write_str("freestanding RAM allocation/protection owner is not mounted")
             }
             Self::InvalidLayout(detail) => f.write_str(detail),
+            Self::Boot(error) => error.fmt(f),
         }
     }
 }
 #[cfg(not(feature = "std"))]
 impl core::error::Error for Error {}
+
+#[cfg(not(feature = "std"))]
+impl From<crate::platform::boot::MountError> for Error {
+    fn from(error: crate::platform::boot::MountError) -> Self {
+        Self::Boot(error)
+    }
+}

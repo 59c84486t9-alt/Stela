@@ -7,9 +7,6 @@ pub(crate) fn admitted(target: stela_compiler::TargetCpu) -> bool {
     }
     #[cfg(not(feature = "std"))]
     {
-        let _ = target;
-        // No freestanding platform has supplied the actual CPU/control owner.
-        // Refuse every target, including baseline, until that owner is mounted.
-        false
+        crate::platform::boot::admitted(target)
     }
 }

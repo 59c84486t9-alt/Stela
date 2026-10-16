@@ -1,7 +1,8 @@
 //! One synchronous typed EL1 register call over original canonical storage/source.
 //! The actual source profile selects the one-argument B or context ABI.
-//! Current concrete Mapping is hosted; protected/none mounting is not inferred.
+//! Reached protected-storage errors remain observations, never success/Ready.
 use super::super::source::BoundSource;
+use crate::execution::NativeStorageError;
 use crate::{
     blocks::InstalledEl1SourceScope,
     memory::domain::{MemoryExecutionLoan, physical::BoundPhysicalInstruction},
@@ -12,21 +13,28 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString};
-use core::convert::Infallible;
 use stela_compiler::{GuestState, context::ExecutionContext};
 
 pub(crate) enum RegisterFailure {
     AlreadyInvoked,
+    StorageBefore(NativeStorageError),
     ContextChanged,
-    #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "none")
+    )))]
     PlatformUnavailable,
     Source(String),
 }
 #[derive(Debug)]
 pub(crate) struct RegisterNativeReport {
     pub(in crate::blocks::retirement::checked) invoked: bool,
+    /// Descriptive post-native bank only; never a commit or PE authority.
+    #[cfg(not(feature = "std"))]
+    pub(in crate::blocks::retirement::checked) observed_registers: Option<GuestState>,
     pub(in crate::blocks::retirement::checked) raw_carrier: Option<(u64, u64)>,
-    pub(in crate::blocks::retirement::checked) storage_after: Option<Result<(), Infallible>>,
+    pub(in crate::blocks::retirement::checked) storage_after:
+        Option<Result<(), NativeStorageError>>,
     pub(in crate::blocks::retirement::checked) failure: Option<RegisterFailure>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -156,6 +164,8 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         let mut report = RegisterNativeReport {
             invoked: false,
             raw_carrier: None,
+            #[cfg(not(feature = "std"))]
+            observed_registers: None,
             storage_after: None,
             failure: None,
         };
@@ -167,10 +177,12 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             report.failure = Some(RegisterFailure::Source(error.to_string()));
             return report;
         }
-        #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            any(target_os = "macos", target_os = "linux", target_os = "none")
+        ))]
         {
             self.invoked = true;
-            report.invoked = true;
             // SAFETY: caller already owns original retained NativeActive and
             // SAME full ThreadState/System/backend/closed-producer/outer. Whole
             // typed source is register-only, with no memory/helper/FP operation;
@@ -188,9 +200,17 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
                 }
             } {
                 Ok(reached) => reached,
-                Err(never) => match never {},
+                Err(error) => {
+                    report.failure = Some(RegisterFailure::StorageBefore(error));
+                    return report;
+                }
             };
+            report.invoked = true;
             let (returned, after) = reached.into_observations();
+            #[cfg(not(feature = "std"))]
+            {
+                report.observed_registers = Some(candidate.clone());
+            }
             // Preserve actual raw bits and actual storage postcheck FIRST.
             report.raw_carrier = Some((returned.next_pc, returned.kind));
             report.storage_after = Some(after);
@@ -200,7 +220,10 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
                 report.failure = Some(RegisterFailure::ContextChanged);
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            any(target_os = "macos", target_os = "linux", target_os = "none")
+        )))]
         {
             let _ = candidate;
             report.failure = Some(RegisterFailure::PlatformUnavailable);
@@ -214,10 +237,11 @@ impl core::fmt::Debug for RegisterFailure {
         match self {
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
+                any(target_os = "macos", target_os = "linux", target_os = "none")
             )))]
             Self::PlatformUnavailable => f.write_str("PlatformUnavailable"),
             Self::AlreadyInvoked => f.write_str("AlreadyInvoked"),
+            Self::StorageBefore(error) => f.debug_tuple("StorageBefore").field(error).finish(),
             Self::ContextChanged => f.write_str("ContextChanged"),
             Self::Source(value) => f.debug_tuple("Source").field(value).finish(),
         }

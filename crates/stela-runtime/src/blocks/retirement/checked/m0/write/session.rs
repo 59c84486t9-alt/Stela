@@ -1,6 +1,9 @@
 //! One actual hosted checked native call, with original context and RAM pin.
 //! Private proposal; registration, type/lifetime review and native gates pending.
-#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux", target_os = "none")
+))]
 use crate::execution::context::ContextLoan;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString};
@@ -33,7 +36,12 @@ pub(crate) struct RawM0WriteMemory {
 
 pub(crate) enum M0WriteSessionFailure {
     AlreadyInvoked,
-    #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
+    StorageBefore(crate::execution::NativeStorageError),
+    StorageAfter(crate::execution::NativeStorageError),
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "none")
+    )))]
     UnsupportedHost,
     Platform(M0RamWritePlatformError),
     ContextChanged,
@@ -46,6 +54,9 @@ pub(crate) enum M0WriteSessionFailure {
 #[derive(Debug)]
 pub(crate) struct M0WriteNativeReport {
     pub(super) invoked: bool,
+    /// Descriptive post-native bank only; never a commit or PE authority.
+    #[cfg(not(feature = "std"))]
+    pub(super) observed_registers: Option<GuestState>,
     pub(super) raw_carrier: Option<(u64, u64)>,
     pub(super) memory: Option<RawM0WriteMemory>,
     pub(super) completed_bytes: u64,
@@ -53,7 +64,7 @@ pub(crate) struct M0WriteNativeReport {
     #[cfg(all(
         test,
         target_arch = "x86_64",
-        any(target_os = "macos", target_os = "linux")
+        any(target_os = "macos", target_os = "linux", target_os = "none")
     ))]
     pub(super) alias_monitor_verified: bool,
     #[cfg(test)]
@@ -135,13 +146,15 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
         let mut report = M0WriteNativeReport {
             invoked: false,
             raw_carrier: None,
+            #[cfg(not(feature = "std"))]
+            observed_registers: None,
             memory: None,
             completed_bytes: self.prepared.progress().completed_bytes,
             progress: self.prepared.progress(),
             #[cfg(all(
                 test,
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
+                any(target_os = "macos", target_os = "linux", target_os = "none")
             ))]
             alias_monitor_verified: false,
             #[cfg(test)]
@@ -168,22 +181,27 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
             report.failure = Some(M0WriteSessionFailure::Platform(error));
             return report;
         }
-        #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            any(target_os = "macos", target_os = "linux", target_os = "none")
+        )))]
         let _ = candidate;
         let mut callback = WriteCallback::new(&mut self.prepared);
         callback.with_view(|view| {
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
+                any(target_os = "macos", target_os = "linux", target_os = "none")
             )))]
             {
                 let _ = view;
                 report.failure = Some(M0WriteSessionFailure::UnsupportedHost);
             }
-            #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+            #[cfg(all(
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux", target_os = "none")
+            ))]
             {
                 let mut context_loan = ContextLoan::memory(self.context, view);
-                report.invoked = true;
                 // SAFETY: exact BoundSource/source/map/requirements/RX and current
                 // context are retained. ORIGINAL RetainedM0Session authority guard
                 // already owns this NO-WRITE physical session before FFI is reached.
@@ -195,9 +213,17 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
                 };
                 let reached = match reached {
                     Ok(reached) => reached,
-                    Err(never) => match never {},
+                    Err(error) => {
+                        report.failure = Some(M0WriteSessionFailure::StorageBefore(error));
+                        return;
+                    }
                 };
+                report.invoked = true;
                 let (returned, storage_after) = reached.into_observations();
+                #[cfg(not(feature = "std"))]
+                {
+                    report.observed_registers = Some(candidate.clone());
+                }
                 // Capture raw carrier and actual service footprint before any
                 // fallible validation/finalizer can erase these observations.
                 report.raw_carrier = Some((returned.next_pc, returned.kind));
@@ -208,19 +234,19 @@ impl<'call, 'owner, 'code> NativeM0WriteSession<'call, 'owner, 'code> {
                     completed_bytes: view.completed_bytes,
                 });
                 report.completed_bytes = view.completed_bytes;
-                // The actual hosted storage owner has Infallible postchecks. This
-                // match retains the same receipt shape as the real storage layer;
-                // a future fallible protected owner requires its typed error here.
+                // Preserve a real protected-storage failure alongside the already
+                // captured raw carrier and reached prefix. Cleanup still runs.
                 match storage_after {
                     Ok(()) => {}
-                    Err(never) => match never {},
+                    Err(error) => report.failure = Some(M0WriteSessionFailure::StorageAfter(error)),
                 }
-                if !context_loan.context().has_supported_header()
+                if (!context_loan.context().has_supported_header()
                     || context_loan.context().memory != core::ptr::from_mut(view).cast()
                     || context_loan.context().scalable != self.context_before.scalable
                     || context_loan.context().system != self.context_before.system
                     || context_loan.context().version != self.context_before.version
-                    || context_loan.context().bytes != self.context_before.bytes
+                    || context_loan.context().bytes != self.context_before.bytes)
+                    && report.failure.is_none()
                 {
                     report.failure = Some(M0WriteSessionFailure::ContextChanged);
                 }
@@ -288,9 +314,11 @@ impl core::fmt::Debug for M0WriteSessionFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::AlreadyInvoked => f.write_str("AlreadyInvoked"),
+            Self::StorageBefore(error) => f.debug_tuple("StorageBefore").field(error).finish(),
+            Self::StorageAfter(error) => f.debug_tuple("StorageAfter").field(error).finish(),
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
+                any(target_os = "macos", target_os = "linux", target_os = "none")
             )))]
             Self::UnsupportedHost => f.write_str("UnsupportedHost"),
             Self::ContextChanged => f.write_str("ContextChanged"),

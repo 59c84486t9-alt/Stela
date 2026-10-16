@@ -21,6 +21,11 @@ pub mod mach;
 pub mod memory;
 pub mod pauth;
 mod platform;
+#[cfg(all(target_arch = "x86_64", target_os = "none", not(feature = "std")))]
+pub mod freestanding {
+    pub use crate::execution::boot_frames::FrameError as BootStorageError;
+    pub use crate::platform::boot::{BootArena, CpuObservation, MountError, install, verify};
+}
 pub mod process;
 pub mod scalable;
 pub mod system;
@@ -52,7 +57,11 @@ fn compiler_source_sha256() -> &'static str {
 
 #[cfg(not(feature = "std"))]
 fn compiler_source_sha256() -> String {
-    sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes())
+    static FINGERPRINT: platform::sync::Mutex<Option<String>> = platform::sync::Mutex::new(None);
+    let mut fingerprint = FINGERPRINT.lock().unwrap();
+    fingerprint
+        .get_or_insert_with(|| sha256(stela_compiler::SOURCE_FINGERPRINT_MATERIAL.as_bytes()))
+        .clone()
 }
 
 #[cfg(feature = "std")]
@@ -289,23 +298,9 @@ fn prepare(
         });
     }
     // Compile before creating an entry. Unsupported code never produces a hit.
-    let NativeBlock {
-        x86_64_code,
-        source_map,
-    } = generate()?;
-    ensure!(
-        !x86_64_code.is_empty() && x86_64_code.len() <= MAX_CACHE_NATIVE_BYTES,
-        "generated code exceeds cache size limit"
-    );
+    let (manifest, x86_64_code) =
+        artifact::prepare::generate(identity.clone(), memory_requirements, generate)?;
     let pending = tempfile::tempdir_in(&root)?;
-    let manifest = Manifest {
-        identity: identity.clone(),
-        native_sha256: sha256(&x86_64_code),
-        native_bytes: x86_64_code.len(),
-        source_map,
-        verified: false,
-        memory_requirements,
-    };
     let path = pending.path().join("native.bin");
     std::fs::write(&path, &x86_64_code)?;
     std::fs::File::open(path)?.sync_all()?;

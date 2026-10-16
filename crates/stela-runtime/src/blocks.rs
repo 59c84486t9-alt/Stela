@@ -46,7 +46,6 @@ use stela_compiler::{
         decode_thread_register_instruction, decode_trap,
     },
 };
-#[cfg(feature = "std")]
 use stela_core::sha256;
 
 #[path = "blocks/memory.rs"]
@@ -55,6 +54,7 @@ mod checked_memory;
 mod publication;
 pub use publication::CodePublicationScope;
 
+#[cfg(feature = "std")]
 const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const INSTRUCTION_BYTES: usize = 4;
 const ZERO_REGISTER_INDEX: u8 = 31;
@@ -372,6 +372,9 @@ pub struct BlockRuntime {
 pub struct PreparedDiscoveryBlock {
     #[serde(skip)]
     artifact_profile: BlockProfile,
+    #[cfg(not(feature = "std"))]
+    #[serde(skip)]
+    native: Vec<u8>,
     pub entry: GuestAddress,
     pub region_base: GuestAddress,
     pub generation: u64,
@@ -582,10 +585,49 @@ impl BlockRuntime {
 
     #[cfg(not(feature = "std"))]
     pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
-        anyhow::bail!(
+        ensure!(pc.0.is_multiple_of(4), "unaligned preparation entry");
+        ensure!(
+            matches!(self.preparation, ArtifactPreparation::InMemory),
             "AOT block unavailable at {:#x}; runtime compilation is unsupported",
             pc.0
-        )
+        );
+        let (base, region) = self.region(pc).context("unmapped preparation entry")?;
+        ensure!(region.end - pc.0 >= 4, "truncated preparation instruction");
+        let offset = usize::try_from(pc.0 - base)?;
+        let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
+        let generation = region.generation;
+        let window = &region.source[offset..offset + available];
+        let analysis = analyze_with_profile(window, pc, self.profile)?;
+        let plan =
+            stela_compiler::block::CompilationPlan::new(window, pc, self.profile, self.target)?
+                .with_resident_loops();
+        let artifact_profile = plan.profile();
+        let source_bytes = plan.source_bytes();
+        ensure!(
+            source_bytes == analysis.source_bytes,
+            "prepared block analysis extent mismatch"
+        );
+        let identity = crate::block_plan_identity(window, pc, self.target, &plan)?;
+        let key = sha256(&serde_json::to_vec(&identity)?);
+        let requirements = plan.memory_requirements();
+        let (manifest, native) =
+            crate::artifact::prepare::generate(identity, requirements, || {
+                plan.compile().map(|block| block.native)
+            })?;
+        validate_source_map(&manifest, pc, source_bytes)?;
+        Ok(PreparedDiscoveryBlock {
+            artifact_profile,
+            native,
+            entry: pc,
+            region_base: GuestAddress(base),
+            generation,
+            analysis,
+            prepared: Prepared {
+                key,
+                cache_hit: false,
+                manifest,
+            },
+        })
     }
 
     /// Follow known static successors only. A call continuation is a candidate,
@@ -705,10 +747,27 @@ impl BlockRuntime {
             return Ok(());
         }
         #[cfg(not(feature = "std"))]
-        anyhow::bail!(
-            "AOT block unavailable at {:#x}; runtime compilation is unsupported",
-            pc.0
-        );
+        {
+            let discovery = self.prepare(pc)?;
+            let profile = discovery.artifact_profile;
+            let generation = discovery.generation;
+            let source_bytes = discovery.analysis.source_bytes;
+            let native = discovery.native;
+            let prepared =
+                crate::artifact::LoadedArtifact::bind(discovery.prepared.manifest, &native)
+                    .context("block native snapshot checksum mismatch")?;
+            let block = LoadedBlock::from_artifact(
+                self.target,
+                profile,
+                base,
+                generation,
+                source_bytes,
+                prepared,
+                &native,
+            )?;
+            self.loaded.insert(pc.0, block);
+            outcome.compiled_blocks += 1;
+        }
         #[cfg(feature = "std")]
         {
             let prepared = self.prepare(pc)?;
@@ -739,7 +798,6 @@ impl BlockRuntime {
             self.loaded.insert(pc.0, block);
         }
 
-        #[cfg(feature = "std")]
         Ok(())
     }
 

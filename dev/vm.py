@@ -110,8 +110,13 @@ def command(paused=True, native=None):
 
 
 class Monitor:
-    def __init__(self):
-        self.socket = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
+    def __init__(self, socket_path=None):
+        if socket_path is None:
+            self.socket = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=5)
+        else:
+            self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.socket.settimeout(5)
+            self.socket.connect(str(socket_path))
         self.stream = self.socket.makefile("rwb")
         json.loads(self.stream.readline())
         self.execute("qmp_capabilities")
@@ -272,6 +277,8 @@ def smoke(native=None, expected=42, expect_memory=(), expect_block_exit=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
+    from boot.run import configure_parser, run as run_mount
+    configure_parser(sub.add_parser("mount", help="run the linked freestanding shared runtime in bounded x86 QEMU"))
     sub.add_parser("build")
     run = sub.add_parser("run", help="start paused; GDB :1234, QMP :4444")
     run.add_argument("--native", type=Path, help="AOT leaf/block native.bin to load at 0x10000")
@@ -287,6 +294,10 @@ def main():
     args = parser.parse_args()
     if args.action == "smoke" and args.expect_block_exit is not None and args.native is None:
         parser.error("--expect-block-exit requires --native")
+    if args.action == "mount":
+        if not 0 < args.timeout <= 120:
+            parser.error("diagnostic timeout must be in (0,120] seconds")
+        raise SystemExit(run_mount(args, Monitor))
     if args.action == "build":
         print(build())
     elif args.action == "run":

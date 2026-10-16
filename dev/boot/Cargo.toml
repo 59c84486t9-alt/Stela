@@ -1,0 +1,28 @@
+[package]
+name = "stela-boot-development"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[workspace]
+
+[dependencies]
+stela-runtime = { path = "../../crates/stela-runtime", default-features = false }
+stela-compiler = { path = "../../crates/stela-compiler", default-features = false }
+stela-core = { path = "../../crates/stela-core", default-features = false }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+# The none target cannot codegen the optional hardware intrinsics in the local
+# LLVM toolchain. Use the crate's real baseline SHA implementation.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "thin"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

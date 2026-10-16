@@ -15,6 +15,8 @@ pub(super) enum ArtifactPreparation {
     #[cfg(feature = "std")]
     HostedCache(PathBuf),
     AheadOfTime,
+    #[cfg(not(feature = "std"))]
+    InMemory,
 }
 
 impl ArtifactPreparation {
@@ -94,6 +96,25 @@ impl BlockRuntime {
             profile,
             target,
             ArtifactPreparation::AheadOfTime,
+        )
+    }
+
+    /// Normal freestanding preparation compiles true misses through the same
+    /// CompilationPlan and original loaded map. Persistent cache acceleration
+    /// is unavailable until a real filesystem adapter is installed. Existing
+    /// standard AOT intake remains available and the strict AOT constructor
+    /// still refuses misses. Availability supplies no source or PE authority.
+    #[cfg(not(feature = "std"))]
+    pub fn new_in_memory_for_target(
+        address_space: u64,
+        profile: BlockProfile,
+        target: stela_compiler::TargetCpu,
+    ) -> Self {
+        Self::with_preparation(
+            address_space,
+            profile,
+            target,
+            ArtifactPreparation::InMemory,
         )
     }
 

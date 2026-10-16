@@ -145,6 +145,9 @@ pub struct SoftwareEl1Report {
     pub context_observation: Option<String>,
     pub platform_identification_sha256: Option<String>,
     pub compiler_source_sha256: String,
+    /// Descriptive standard manifests still resident at shutdown. This is not
+    /// an execution history, source lease, RX handle or PE admission capability.
+    pub resident_artifacts: Vec<crate::Manifest>,
     pub ram: Vec<SoftwareEl1RamObservation>,
 }
 
@@ -452,7 +455,8 @@ impl SoftwareEl1Machine {
             target,
         );
         #[cfg(not(feature = "std"))]
-        let runtime = BlockRuntime::new_aot_for_target(address_space, profile.compiler(), target);
+        let runtime =
+            BlockRuntime::new_in_memory_for_target(address_space, profile.compiler(), target);
         // SAFETY: all physical/source storage was freshly allocated above and
         // is exclusively owned here. No raw alias, DMA, external writer or PE
         // exists. This transfers the sole Initial publication owner once.
@@ -784,10 +788,15 @@ impl SoftwareEl1Machine {
                     })
                     .collect(),
             };
-            Ok((outcome, readbacks, observations))
+            let artifacts = runtime
+                .loaded
+                .values()
+                .map(|block| block.prepared.manifest.clone())
+                .collect();
+            Ok((outcome, readbacks, observations, artifacts))
         };
         let key = ConsumerKey(());
-        let (outcome, translation, ram) = match installed {
+        let (outcome, translation, ram, resident_artifacts) = match installed {
             InstalledSource::El1(owner) => owner.into_executable_scope(&key, &mut operation)??,
             InstalledSource::Read64(owner) => {
                 owner.into_executable_scope(&key, &mut operation)??
@@ -838,6 +847,7 @@ impl SoftwareEl1Machine {
             exception_fixture_probe,
             declared_capacity,
             initialized_ram,
+            resident_artifacts,
             stop: format!("{stop:?}"),
             accounting,
             thread,

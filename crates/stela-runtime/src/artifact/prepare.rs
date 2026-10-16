@@ -8,6 +8,34 @@ use stela_compiler::context::memory::MemoryRequirements;
 pub(crate) const MAX_CACHE_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_CACHE_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 
+/// The one native-generation and standard-manifest path for both hosted cache
+/// misses and freestanding in-memory preparation. It has no filesystem, source
+/// admission, RX mapping or execution authority. Unsupported source is returned
+/// before any persistent cache entry or native mapping can be published.
+pub(crate) fn generate(
+    identity: Identity,
+    memory_requirements: Option<MemoryRequirements>,
+    compile: impl FnOnce() -> Result<stela_compiler::NativeBlock, stela_compiler::CompileError>,
+) -> anyhow::Result<(Manifest, alloc::vec::Vec<u8>)> {
+    let stela_compiler::NativeBlock {
+        x86_64_code,
+        source_map,
+    } = compile()?;
+    anyhow::ensure!(
+        !x86_64_code.is_empty() && x86_64_code.len() <= MAX_CACHE_NATIVE_BYTES,
+        "generated code exceeds cache size limit"
+    );
+    let manifest = Manifest {
+        identity,
+        native_sha256: stela_core::sha256(&x86_64_code),
+        native_bytes: x86_64_code.len(),
+        source_map,
+        verified: false,
+        memory_requirements,
+    };
+    Ok((manifest, x86_64_code))
+}
+
 /// Validate exact serialized manifest bytes before the existing codec decodes
 /// them. This checksum does not associate a separately supplied typed Manifest
 /// with those bytes; the actual byte provider must retain that codec association.
@@ -76,6 +104,52 @@ mod tests {
     use super::*;
     use alloc::{string::ToString, vec};
     use stela_compiler::GuestAddress;
+
+    #[test]
+    fn generated_artifact_preserves_the_original_compilation_plan() -> anyhow::Result<()> {
+        use stela_compiler::{
+            TargetCpu,
+            block::{BlockProfile, CompilationPlan},
+        };
+        let source: alloc::vec::Vec<u8> = [0x9100_1c00u32, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let base = GuestAddress(0x1000);
+        let plan =
+            CompilationPlan::new(&source, base, BlockProfile::Ordinary, TargetCpu::Baseline)?;
+        let identity = crate::block_plan_identity(&source, base, TargetCpu::Baseline, &plan)?;
+        let requirements = plan.memory_requirements();
+        let original =
+            CompilationPlan::new(&source, base, BlockProfile::Ordinary, TargetCpu::Baseline)?
+                .compile()?
+                .native;
+        let calls = core::cell::Cell::new(0);
+        let (manifest, native) = generate(identity.clone(), requirements, || {
+            calls.set(calls.get() + 1);
+            plan.compile().map(|compiled| compiled.native)
+        })?;
+        assert_eq!(calls.get(), 1);
+        assert_eq!(native, original.x86_64_code);
+        assert_eq!(manifest.source_map, original.source_map);
+        assert!(!manifest.verified);
+        validate_preparation_metadata(&manifest, &identity, requirements)?;
+        validate_preparation_native(&manifest, &native)?;
+        validate_preparation_claim(&manifest)?;
+        Ok(())
+    }
+
+    #[test]
+    fn empty_generation_cannot_publish_a_successful_manifest() {
+        let (identity, _, _) = fixture();
+        assert!(
+            generate(identity, None, || Ok(stela_compiler::NativeBlock {
+                x86_64_code: vec![],
+                source_map: vec![],
+            }))
+            .is_err()
+        );
+    }
 
     fn fixture() -> (Identity, Manifest, &'static [u8]) {
         let identity = Identity {

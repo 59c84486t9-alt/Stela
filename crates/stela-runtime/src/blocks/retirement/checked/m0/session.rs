@@ -1,6 +1,9 @@
 //! One actual hosted checked native call, with original context and RAM pin.
 //! Private proposal; registration, type/lifetime review and native gates pending.
-#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux", target_os = "none")
+))]
 use crate::execution::context::ContextLoan;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString};
@@ -30,6 +33,8 @@ pub(crate) struct RawM0Memory {
 
 pub(crate) enum M0SessionFailure {
     AlreadyInvoked,
+    StorageBefore(crate::execution::NativeStorageError),
+    StorageAfter(crate::execution::NativeStorageError),
     Platform(M0RamReadPlatformError),
     ContextChanged,
     SourceChanged(String),
@@ -41,6 +46,9 @@ pub(crate) enum M0SessionFailure {
 #[derive(Debug)]
 pub(crate) struct M0NativeReport {
     pub(super) invoked: bool,
+    /// Descriptive post-native bank only; never a commit or PE authority.
+    #[cfg(not(feature = "std"))]
+    pub(super) observed_registers: Option<GuestState>,
     pub(super) raw_carrier: Option<(u64, u64)>,
     pub(super) memory: Option<RawM0Memory>,
     pub(super) completed_bytes: u64,
@@ -110,6 +118,8 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
         let mut report = M0NativeReport {
             invoked: false,
             raw_carrier: None,
+            #[cfg(not(feature = "std"))]
+            observed_registers: None,
             memory: None,
             completed_bytes: self.prepared.completed_bytes(),
             callback_failure: None,
@@ -134,13 +144,16 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
             report.failure = Some(M0SessionFailure::Platform(error));
             return report;
         }
-        #[cfg(not(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux"))))]
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            any(target_os = "macos", target_os = "linux", target_os = "none")
+        )))]
         let _ = candidate;
         let mut callback = ReadCallback::new(&mut self.prepared);
         callback.with_view(|view| {
             #[cfg(not(all(
                 target_arch = "x86_64",
-                any(target_os = "macos", target_os = "linux")
+                any(target_os = "macos", target_os = "linux", target_os = "none")
             )))]
             {
                 let _ = view;
@@ -148,10 +161,12 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
                     M0RamReadPlatformError::UnsupportedHost,
                 ));
             }
-            #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+            #[cfg(all(
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux", target_os = "none")
+            ))]
             {
                 let mut context_loan = ContextLoan::memory(self.context, view);
-                report.invoked = true;
                 // SAFETY: exact BoundSource/source/map/requirements/RX and current
                 // context are retained. ORIGINAL RetainedM0Session authority guard
                 // already owns this NO-READ physical session before FFI is reached.
@@ -163,9 +178,17 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
                 };
                 let reached = match reached {
                     Ok(reached) => reached,
-                    Err(never) => match never {},
+                    Err(error) => {
+                        report.failure = Some(M0SessionFailure::StorageBefore(error));
+                        return;
+                    }
                 };
+                report.invoked = true;
                 let (returned, storage_after) = reached.into_observations();
+                #[cfg(not(feature = "std"))]
+                {
+                    report.observed_registers = Some(candidate.clone());
+                }
                 // Capture raw carrier and actual service footprint before any
                 // fallible validation/finalizer can erase these observations.
                 report.raw_carrier = Some((returned.next_pc, returned.kind));
@@ -176,19 +199,19 @@ impl<'call, 'owner, 'code> NativeM0Session<'call, 'owner, 'code> {
                     completed_bytes: view.completed_bytes,
                 });
                 report.completed_bytes = view.completed_bytes;
-                // The actual hosted storage owner has Infallible postchecks. This
-                // match retains the same receipt shape as the real storage layer;
-                // a future fallible protected owner requires its typed error here.
+                // Preserve a real protected-storage failure alongside the already
+                // captured raw carrier and reached prefix. Cleanup still runs.
                 match storage_after {
                     Ok(()) => {}
-                    Err(never) => match never {},
+                    Err(error) => report.failure = Some(M0SessionFailure::StorageAfter(error)),
                 }
-                if !context_loan.context().has_supported_header()
+                if (!context_loan.context().has_supported_header()
                     || context_loan.context().memory != core::ptr::from_mut(view).cast()
                     || context_loan.context().scalable != self.context_before.scalable
                     || context_loan.context().system != self.context_before.system
                     || context_loan.context().version != self.context_before.version
-                    || context_loan.context().bytes != self.context_before.bytes
+                    || context_loan.context().bytes != self.context_before.bytes)
+                    && report.failure.is_none()
                 {
                     report.failure = Some(M0SessionFailure::ContextChanged);
                 }
@@ -255,6 +278,8 @@ impl core::fmt::Debug for M0SessionFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::AlreadyInvoked => f.write_str("AlreadyInvoked"),
+            Self::StorageBefore(error) => f.debug_tuple("StorageBefore").field(error).finish(),
+            Self::StorageAfter(error) => f.debug_tuple("StorageAfter").field(error).finish(),
             Self::ContextChanged => f.write_str("ContextChanged"),
             Self::InvalidCompletion => f.write_str("InvalidCompletion"),
             Self::Platform(value) => f.debug_tuple("Platform").field(value).finish(),
