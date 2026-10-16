@@ -8,6 +8,7 @@ pub mod chained_fixups;
 pub mod dependency_graph;
 pub mod dependency_paths;
 pub mod exports;
+pub mod im4m;
 pub mod im4p;
 pub mod inventory;
 pub mod kernel_collection;

@@ -1585,6 +1585,7 @@ dependencies = [
  "object",
  "serde",
  "serde_json",
+ "sha2",
  "stela-compiler",
  "stela-runtime",
  "tempfile",
