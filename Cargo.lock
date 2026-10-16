@@ -1732,6 +1732,7 @@ dependencies = [
  "object",
  "serde_json",
  "sha2",
+ "stela-compiler",
 ]
 
 [[package]]

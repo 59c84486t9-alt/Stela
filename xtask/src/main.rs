@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 mod boot;
 mod check;
+mod progress;
 mod tools;
 
 #[derive(Parser)]
@@ -24,12 +25,19 @@ enum Task {
     /// Build, run and debug the freestanding Multiboot mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
+    /// Merge reviewed instruction registries into the checklist and README.
+    Progress {
+        /// Fail instead of writing when either file is stale.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().task {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
+        Task::Progress { check } => progress::run(check).map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");
