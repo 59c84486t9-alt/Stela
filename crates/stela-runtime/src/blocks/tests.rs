@@ -1,4 +1,14 @@
+#[cfg(target_arch = "x86_64")]
+use super::services::complete_pauth;
 use super::*;
+use stela_compiler::{
+    GuestState,
+    block::{
+        ClockOperation, PointerAuthentication, PointerAuthenticationKey,
+        PointerAuthenticationModifier, decode_clock_instruction, decode_pointer_authentication,
+        decode_trap,
+    },
+};
 
 #[cfg(target_arch = "x86_64")]
 mod basic_pauth;
