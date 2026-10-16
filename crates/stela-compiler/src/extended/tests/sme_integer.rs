@@ -1,7 +1,7 @@
-//! SME integer dot registration and profile limits.
+//! SME integer dot and matrix registration and profile limits.
 use super::*;
 use crate::aarch64::scalable::profile::ScalableControls;
-use crate::aarch64::sme::integer_dots;
+use crate::aarch64::sme::{integer_dots, integer_matrix};
 use alloc::vec::Vec;
 
 const RET_X30: u32 = 0xd65f_03c0;
@@ -65,7 +65,7 @@ const ALLOCATED_WORDS: [u32; 54] = [
     0xc1e1_1410, // udot_za_zzw_4x4 Doubleword
 ];
 
-fn words(word: u32) -> Vec<u8> {
+fn dot_body(word: u32) -> Vec<u8> {
     [word, RET_X30]
         .into_iter()
         .flat_map(u32::to_le_bytes)
@@ -100,7 +100,7 @@ fn canonical_dots_emit_exact_bodies_and_maps() {
             for target in [TargetCpu::Baseline, TargetCpu::Ssse3] {
                 let profile = profile(bytes, ScalableMode::new(true, true), features());
                 let native =
-                    compile_for_profile(&words(word), GUEST_BASE, profile, target).unwrap();
+                    compile_for_profile(&dot_body(word), GUEST_BASE, profile, target).unwrap();
                 let mut expected = Vec::new();
                 x86_64::sme::integer_dots::emit(
                     &mut expected,
@@ -129,7 +129,7 @@ fn canonical_dots_emit_exact_bodies_and_maps() {
                 assert_eq!(native.x86_64_code[native.source_map[1].1..], [RET]);
             }
         }
-        assert!(crate::compile(&words(word), GUEST_BASE).is_err());
+        assert!(crate::compile(&dot_body(word), GUEST_BASE).is_err());
     }
 }
 
@@ -143,7 +143,7 @@ fn dots_require_each_guest_feature_and_both_mode_bits() {
             (DOT_DOUBLEWORD, sme2, "FEAT_SME_I16I64"),
         ] {
             let error = compile_for_profile(
-                &words(word),
+                &dot_body(word),
                 GUEST_BASE,
                 profile(bytes, ScalableMode::new(true, true), available),
                 TargetCpu::Baseline,
@@ -160,7 +160,7 @@ fn dots_require_each_guest_feature_and_both_mode_bits() {
             (true, false, "ZA enable required"),
         ] {
             let error = compile_for_profile(
-                &words(DOT_WORD),
+                &dot_body(DOT_WORD),
                 GUEST_BASE,
                 profile(bytes, ScalableMode::new(streaming, za), features()),
                 TargetCpu::Baseline,
@@ -176,11 +176,12 @@ fn dots_require_each_guest_feature_and_both_mode_bits() {
             ScalableMode::new(true, true),
         );
         assert!(
-            compile_for_profile(&words(DOT_WORD), GUEST_BASE, fixed, TargetCpu::Baseline).is_ok()
+            compile_for_profile(&dot_body(DOT_WORD), GUEST_BASE, fixed, TargetCpu::Baseline)
+                .is_ok()
         );
         assert!(
             compile_for_profile(
-                &words(DOT_DOUBLEWORD),
+                &dot_body(DOT_DOUBLEWORD),
                 GUEST_BASE,
                 fixed,
                 TargetCpu::Baseline
@@ -189,5 +190,90 @@ fn dots_require_each_guest_feature_and_both_mode_bits() {
             .0
             .contains("FEAT_SME_I16I64")
         );
+    }
+}
+
+#[test]
+fn integer_matrix_admission_checks_features_mode_and_source_maps() {
+    const MATRIX_WORDS: [u32; 6] = [
+        0xc1a0_1c10, // ADD ZA.S pair.
+        0xc100_0000, // SMLALL ZA.S indexed byte products.
+        0xc180_0000, // SMLALL ZA.D indexed halfword products.
+        0xa080_0000, // SMOPA ZA.S byte outer products.
+        0xa0c0_0000, // SMOPA ZA.D halfword outer products.
+        0x8080_0008, // BMOPA ZA.S XNOR outer products.
+    ];
+    for word in MATRIX_WORDS {
+        let operand = integer_matrix::decode(word).unwrap();
+        let source = words(&[word, RET_X30]);
+        assert!(crate::compile(&source, GuestAddress(0)).is_err());
+        let legacy = ScalableProfile::new(
+            VectorLength::from_bytes(16).unwrap(),
+            ScalableMode::new(true, true),
+        );
+        let legacy_result =
+            compile_for_profile(&source, GuestAddress(0), legacy, TargetCpu::Baseline);
+        assert_eq!(legacy_result.is_ok(), !operand.requires_i16i64());
+        if operand.requires_i16i64() {
+            assert!(legacy_result.unwrap_err().0.contains("FEAT_SME_I16I64"));
+        }
+        for bytes in [16, 32, 64, 128, 256] {
+            let length = VectorLength::from_bytes(bytes).unwrap();
+            for sme2 in [false, true] {
+                for i16i64 in [false, true] {
+                    let mut features = ScalableFeatures::of(ScalableFeature::Sme);
+                    if sme2 {
+                        features = features.with(ScalableFeature::Sme2);
+                    }
+                    if i16i64 {
+                        features = features.with(ScalableFeature::SmeI16I64);
+                    }
+                    for streaming in [false, true] {
+                        for za in [false, true] {
+                            let profile = ScalableProfile::new_with_features(
+                                length,
+                                ScalableMode::new(streaming, za),
+                                features,
+                                ScalableControls::new(length, false),
+                            )
+                            .unwrap();
+                            let result = compile_for_profile(
+                                &source,
+                                GuestAddress(0),
+                                profile,
+                                TargetCpu::Baseline,
+                            );
+                            let permitted = streaming
+                                && za
+                                && (!operand.requires_sme2() || sme2)
+                                && (!operand.requires_i16i64() || i16i64);
+                            assert_eq!(
+                                result.is_ok(),
+                                permitted,
+                                "word={word:#x} bytes={bytes} sme2={sme2} i16i64={i16i64} sm={streaming} za={za}"
+                            );
+                            if let Ok(native) = result {
+                                let mut body = Vec::new();
+                                x86_64::sme::integer_matrix::emit(
+                                    &mut body,
+                                    &operand,
+                                    length,
+                                    TargetCpu::Baseline,
+                                );
+                                let map = &native.source_map;
+                                assert_eq!(map.len(), 2);
+                                assert_eq!(map[0], (GuestAddress(0), CONTEXT_WRAPPER_BYTES));
+                                assert_eq!(
+                                    map[1],
+                                    (GuestAddress(4), CONTEXT_WRAPPER_BYTES + body.len())
+                                );
+                                assert_eq!(&native.x86_64_code[map[0].1..map[1].1], body);
+                                assert_eq!(&native.x86_64_code[map[1].1..], &[RET]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
