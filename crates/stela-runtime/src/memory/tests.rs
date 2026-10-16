@@ -1,4 +1,5 @@
 use super::*;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 fn spec(address: u64, size: u64) -> MemoryRegionSpec {
