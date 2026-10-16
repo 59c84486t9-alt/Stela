@@ -1,4 +1,4 @@
-//! Private proposal: staged Half precision slots using the one mature pack core.
+//! SVE conversions narrowing to half precision.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

@@ -1,5 +1,4 @@
-//! LUT-extension register tables. The shared boundary owns feature/mode admission.
-//! Halfword LUTI4 uses either 256 bits of one table or 128 bits of two tables.
+//! SVE LUTI2 and LUTI4.
 use crate::aarch64::scalable::ElementSize;
 
 const REGISTER_MASK: u32 = 31;

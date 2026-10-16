@@ -1,5 +1,4 @@
-//! Shared native lane/permutation lowering. All original inputs are read before
-//! committing a vector; baseline fallbacks use native integer gathers, not helpers.
+//! Lane moves and permutes. All inputs are read before the destination is written.
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::{
     TargetCpu,

@@ -1,5 +1,4 @@
-//! Fresh physical region source authority and prefix-only warm RAM reload.
-//! This is storage lifecycle, not an architectural CPU reset or migration.
+//! Writable source regions and reloading their RAM prefix.
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
 use crate::memory::{backing::MemoryBacking, domain::PublicationFault};
 use alloc::{boxed::Box, sync::Arc};

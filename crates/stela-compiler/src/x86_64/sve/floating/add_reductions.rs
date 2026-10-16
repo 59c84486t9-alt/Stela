@@ -1,6 +1,5 @@
-//! Private source-only FADDP/FADDV/FADDQV candidate; no registration or credit.
-//! Exact FPAdd lane semantics use the shared Single/Double native add core.
-//! NaNs/nonzero subnormals and host status other than PE abort the whole stage.
+//! FADDP, FADDV and FADDQV. NaNs, subnormals and any host status other than
+//! inexact take the software path for the whole instruction.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

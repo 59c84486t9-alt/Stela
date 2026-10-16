@@ -1,4 +1,4 @@
-//! Exact admitted source, compiler plan and carrier validation; no public mint.
+//! Validation of the source, compiler plan and native carrier of a block.
 mod conditional;
 mod el1_m0;
 use super::super::super::{

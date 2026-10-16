@@ -1,4 +1,4 @@
-//! Canonical encoding fields shared by system-register access boundaries.
+//! System register encodings for MRS, MSR and MSR (immediate).
 
 const OP0_MASK: u8 = 0b11;
 const OP1_MASK: u8 = 0b111;

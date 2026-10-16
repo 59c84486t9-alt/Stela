@@ -1,4 +1,4 @@
-//! Carryless products of alternating SVE lanes using only integer SIMD.
+//! SVE PMULLB/PMULLT carryless multiplies.
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::sve::integer_products::Selection;

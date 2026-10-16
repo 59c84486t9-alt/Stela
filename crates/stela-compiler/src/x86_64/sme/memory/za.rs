@@ -1,4 +1,4 @@
-//! ZA/ZT staging and physical slice addressing around the shared transfer loop.
+//! ZA and ZT0 staging and slice addressing.
 use super::{
     ADD_RAX_IMM32, SHL_RAX_IMM8, Scratch, Transfer, VALUE_XMM, ZT_BYTES, check_sp, load_guest,
     pointer, stack_load, stack_store, stack_vector, transfer_loop,

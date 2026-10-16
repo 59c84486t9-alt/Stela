@@ -1,5 +1,4 @@
-//! FEAT_RPRES Single estimates under alternative floating-point behavior.
-//! The caller selects this module only for Single + AH + available RPRES.
+//! FEAT_RPRES single-precision estimates, used only when FPCR.AH is set.
 use super::super::{Class, Control, FPCR_FIZ, FPCR_FZ, Format, Outcome, nan, unpack};
 
 const FORMAT: Format = Format::Single;

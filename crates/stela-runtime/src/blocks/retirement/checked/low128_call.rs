@@ -1,5 +1,4 @@
-//! Concrete typed low128 branch. The ordinary Dispatcher/base factory remains
-//! unchanged and continues to refuse ASIMD. No supplied mapping or saved grant.
+//! Native calls of blocks that touch only the low 128 bits of vector registers.
 use super::{NativeObservation, OwnedMemoryFault, RawMemoryObservation, source::BoundSource};
 use crate::{
     execution::{context::ContextLoan, floating_environment::HostFloatingEnvironment},

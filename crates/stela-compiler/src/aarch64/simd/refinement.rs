@@ -1,4 +1,4 @@
-//! Fused reciprocal refinement steps from the pinned Arm A64 2026-06 reference.
+//! FRECPS and FRSQRTS.
 use crate::aarch64::floating::Format;
 
 use super::arithmetic::Shape;

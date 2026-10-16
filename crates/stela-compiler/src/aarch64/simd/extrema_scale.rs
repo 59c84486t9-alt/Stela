@@ -1,7 +1,4 @@
-//! AdvSIMD absolute extrema and integer power-of-two scaling (Arm A64 June 2026).
-//!
-//! FAMIN/MAX require AdvSIMD + FAMINMAX; FSCALE requires FP8. Decoding does
-//! not establish guest feature availability or FP/AdvSIMD access permission.
+//! AdvSIMD FAMIN/FAMAX (FEAT_FAMINMAX) and FSCALE (FEAT_FP8).
 use crate::aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation};
 
 use super::arithmetic::Shape;

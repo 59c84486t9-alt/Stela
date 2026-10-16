@@ -1,4 +1,5 @@
-//! Transactional scalar/vector numerical completion over saved guest state.
+//! Software completion of scalar and AdvSIMD floating-point instructions, applied
+//! to saved guest state as one transaction.
 mod arithmetic;
 mod bfloat16;
 mod comparison;

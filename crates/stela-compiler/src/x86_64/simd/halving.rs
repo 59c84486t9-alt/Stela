@@ -1,4 +1,4 @@
-//! Overflow-safe packed halving and shared narrowing/widening recipes.
+//! Overflow-safe halving arithmetic and narrowing/widening helpers.
 use super::{
     Host, commit, packed,
     products::extend,

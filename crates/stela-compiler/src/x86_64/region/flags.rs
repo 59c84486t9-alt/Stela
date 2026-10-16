@@ -1,5 +1,5 @@
-//! Integer flag residency in nonfaulting scalar spans and self-loops.
-//! Native or packed NZCV settles exactly at each canonical exit.
+//! Keeping NZCV in host flags across non-faulting spans and self-loops; it is
+//! written back at each exit.
 use super::{
     Effects, Emitter, RegionError,
     allocation::{Value, ValueEffects},

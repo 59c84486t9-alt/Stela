@@ -1,5 +1,4 @@
-//! Streaming-SVE integer shifts, shift accumulates, inserts and XOR rotations.
-//! Arm June2026 canonical encodings; no flags or FPSR.QC changes.
+//! SVE shifts, shift-accumulates, shift-inserts and XAR.
 use crate::aarch64::scalable::{ElementSize, Predication};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {

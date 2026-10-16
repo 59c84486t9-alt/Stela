@@ -1,5 +1,4 @@
-//! AdvSIMD single structures: lane LD/ST1..4 and replicate LD1R..4R.
-//! Q selects the lane's high index bit, or the replicate output width.
+//! LD1-4 and ST1-4 (single lane) and LD1R-4R (replicate).
 use super::{Direction, Layout, Operand, decode_addressing};
 
 const SINGLE_STRUCTURE_MASK: u32 = 0xbf00_0000;

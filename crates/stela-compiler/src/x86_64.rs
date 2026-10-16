@@ -1,4 +1,4 @@
-//! Native x86-64 emitter. Guest state pointer remains in RDI throughout.
+//! x86-64 code emission. RDI holds the guest state pointer throughout.
 use crate::{
     Backend, GuestAddress, NativeBlock, UnsupportedReason,
     aarch64::{

@@ -1,4 +1,4 @@
-//! Guarded normal min/max: direct S/D selection and integer-only H ordering.
+//! FP min/max on normal values: direct selection for S/D, integer ordering for H.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, MOVQ_XMM0_XMM0, branch, clear_scalar, exponent_range,

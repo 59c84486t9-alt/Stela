@@ -1,4 +1,4 @@
-//! Focused registration, profile-boundary and source-map checks for ZA movement.
+//! ZA movement registration, profile limits and source maps.
 
 use super::*;
 use crate::aarch64::sme::movement;

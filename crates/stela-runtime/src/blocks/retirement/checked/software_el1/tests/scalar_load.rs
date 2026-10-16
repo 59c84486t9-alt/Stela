@@ -1,5 +1,4 @@
-//! Authored generic scalar-load fixtures through the original software PE.
-//! Complete bank and exact RAM comparisons; no direct native entry or fake loan.
+//! Scalar loads on the software EL1 PE, checked against full register banks and RAM.
 use super::*;
 use crate::system::state::{El1Registers, PSTATE_EL1H};
 use stela_compiler::{GuestState, TargetCpu};

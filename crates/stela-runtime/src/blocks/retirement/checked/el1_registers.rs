@@ -1,6 +1,4 @@
-//! Typed EL1 register-only instructions and terminals under the SAME canonical Active/PE authority.
-//! Original source/controls/full ThreadState/System/backend/outer are retained;
-//! no saved carrier or mode flag can create completion or retry authority.
+//! EL1 register-only instructions and block terminals.
 use super::{
     Active, ConsumerKey, SettledPrefix, provider,
     source::{BoundSource, ReturnedTerminal},

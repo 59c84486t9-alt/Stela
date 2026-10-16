@@ -1,8 +1,4 @@
-//! CPA effects resolved from the original identification/control/debug owners.
-//!
-//! This leaf stores no architectural bank and grants no instruction entry.
-//! The canonical consumer retains the actual PE/System/thread/source/outer and
-//! immutable control/debug owners through native effects and retirement.
+//! FEAT_CPA effects resolved from the identification, control and debug state.
 
 #[cfg(feature = "std")]
 use super::extended_controls::{

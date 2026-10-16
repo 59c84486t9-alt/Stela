@@ -1,9 +1,4 @@
-//! Source access levels and resolved CPA2 address arithmetic specialization.
-//!
-//! These values describe emitted effects, never feature/control authority.
-//! The execution owner must resolve and retain the same actual controls through
-//! invocation and retirement. Unprivileged access EL is resolved from the source
-//! descriptor's privilege rules, including UAO/NV/host state when applicable.
+//! Access levels and resolved FEAT_CPA2 address arithmetic.
 
 use crate::context::pointer::EffectivePointerChecks;
 

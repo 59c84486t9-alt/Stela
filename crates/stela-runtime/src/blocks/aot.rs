@@ -1,6 +1,4 @@
-//! Existing-format AOT intake into the original loaded-block/runtime path.
-//! Bytes/manifest/plan are descriptive; original BoundSource/Active/source and
-//! physical/control/retirement owners still qualify every actual native call.
+//! Loading ahead-of-time compiled blocks into the block runtime.
 
 use super::*;
 use crate::artifact::{LoadedArtifact, prepare};

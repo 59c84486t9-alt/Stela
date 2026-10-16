@@ -1,10 +1,5 @@
-//! Translation-control system-register access decisions, before backend effects.
-//!
-//! Source: Arm A-profile SysReg June 2026 SCTLR_EL1, TCR_EL1, TTBR0/1_EL1,
-//! MAIR_EL1, AMAIR_EL1, PAR_EL1, CONTEXTIDR_EL1 and VBAR_EL1 pages.
-//! Readbacks belong to the architectural backend. This module does not invent
-//! reset values, interpret RES0/RES1 as write-ignore, or simulate an MMU with a
-//! register bank. TCR/TTBR field interpretation needs the selected CPU profile.
+//! Access decisions for the translation-control registers: SCTLR_EL1, TCR_EL1,
+//! TTBR0/1_EL1, MAIR_EL1, AMAIR_EL1, PAR_EL1, CONTEXTIDR_EL1 and VBAR_EL1.
 
 use super::access::{
     AccessKind, Encoding, ExceptionLevel, Profile, Request, Resolution, SecurityState,

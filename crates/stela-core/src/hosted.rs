@@ -1,4 +1,4 @@
-//! Build-pinned inventories and evidence-based translation progress.
+//! Build inventories and translation progress (hosted only).
 use crate::sha256;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};

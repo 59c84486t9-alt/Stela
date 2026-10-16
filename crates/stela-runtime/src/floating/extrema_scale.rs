@@ -1,4 +1,4 @@
-//! Transactional AdvSIMD FAMIN/MAX and FSCALE completion.
+//! Completion of AdvSIMD FAMIN/FAMAX and FSCALE.
 use stela_compiler::{
     GuestState,
     aarch64::{

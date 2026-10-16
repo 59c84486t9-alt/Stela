@@ -1,4 +1,4 @@
-//! Unique retained execution ownership for one actual PE.
+//! Exclusive execution ownership of one PE.
 use super::authority::PeExecutionAuthority;
 use crate::{
     blocks::{

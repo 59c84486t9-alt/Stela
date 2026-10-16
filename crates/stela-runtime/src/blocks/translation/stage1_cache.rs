@@ -1,5 +1,4 @@
-//! Bounded successful stage1 results in the ORIGINAL installed context.
-//! This cache is not an address-access, source, native or retirement authority.
+//! Cache of successful stage-1 translation walks.
 use crate::memory::domain::{MemoryDomain, MemoryExecutionLoan, physical::PhysicalAddressSpace};
 use crate::memory::stage1::{self, Access, Config, PhysicalMemory, Translation, TranslationError};
 use crate::platform::sync::Mutex;

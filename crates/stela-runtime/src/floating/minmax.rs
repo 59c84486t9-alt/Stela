@@ -1,4 +1,4 @@
-//! Transactional elementwise, pairwise and balanced reduction completion.
+//! Completion of elementwise, pairwise and across-lane min/max.
 use stela_compiler::{
     GuestState,
     aarch64::{

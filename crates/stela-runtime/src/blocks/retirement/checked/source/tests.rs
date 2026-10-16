@@ -1,4 +1,4 @@
-//! Canonical descriptor/entry separation, without invoking guest native code.
+//! Source descriptor and entry validation.
 use super::BoundSource;
 use crate::blocks::{BlockRuntime, ThreadState};
 use stela_compiler::{

@@ -1,4 +1,4 @@
-//! Canonical actual Active pair-read consumer. No alternate dispatcher/PE.
+//! Execution of M0 blocks that perform an LDP.
 use super::super::source::{BoundSource, ReturnedTerminal};
 use super::{
     Active, ConsumerKey, INSTRUCTION_BYTES, M0PairReadSourceInput, M0Step, PreparedM0Commit,

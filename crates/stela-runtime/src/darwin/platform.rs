@@ -1,17 +1,7 @@
-//! Pure ARM64 Darwin platform-call ABI for a stopped SVC #0x80.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea:
-//! osfmk/arm64/sleh.c, osfmk/arm64/machine_routines.c (platform_syscall),
-//! osfmk/arm/machdep_call.c and osfmk/arm64/machine_machdep.h.
-//! X16 selects this boundary through its signed low 32 bits; X3 supplies the
-//! unsigned 32-bit subcode. The setter ignores its internal kernel return value
-//! and preserves saved X0 and NZCV. The getter writes only saved X0.
-//!
-//! An external thread service owns TSD storage and address sanitization. Darwin
-//! exposes that base through TPIDRRO_EL0, distinct from TPIDR_EL0. This adapter
-//! performs no memory access, host call, system-register update or EL transition.
-//! Unsupported subcodes remain explicit even where the pinned kernel ignores
-//! them. These public sources do not establish the private macOS 27 contract.
+//! The ARM64 platform call (`SVC #0x80` with W16 = 0x80000000, XNU
+//! `osfmk/arm/machdep_call.c`): get and set the TSD base exposed through
+//! TPIDRRO_EL0. X3 holds the subcode. The setter keeps saved X0 and NZCV; the
+//! getter writes only X0. Unsupported subcodes are errors.
 
 use crate::{
     blocks::ThreadState,

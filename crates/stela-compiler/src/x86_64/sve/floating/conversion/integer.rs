@@ -1,5 +1,4 @@
-//! Predicated integer/FP conversion with whole-instruction staging.
-//! Compute leaves own no environment, architectural access, status commit or exit.
+//! SVE conversions between single/double and integers.
 
 use super::{half_integer, unsigned64};
 use alloc::vec::Vec;

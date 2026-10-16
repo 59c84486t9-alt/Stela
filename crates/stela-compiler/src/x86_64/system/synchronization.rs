@@ -1,4 +1,4 @@
-//! Baseline native mappings for reviewed instruction-execution barriers and hints.
+//! Barriers and hints (ISB, SB, NOP, YIELD, ...).
 use crate::aarch64::system::synchronization::Operation;
 use alloc::vec::Vec;
 

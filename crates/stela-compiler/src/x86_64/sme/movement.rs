@@ -1,8 +1,5 @@
-//! SSE2 mappings for ZA physical vectors and aliased tile slices.
-//!
-//! R8 holds the selected ZA address across shared Z/P helper calls. Those
-//! helpers use RAX/RCX/RDX only. Every memory operand addresses validated state
-//! backing, never guest data RAM. Profile/mode checks belong to native entry.
+//! ZA moves and zeroing. R8 holds the selected ZA address across helper calls,
+//! which clobber only RAX/RCX/RDX.
 
 use super::super::{
     isa::{ShiftOpcode, SimdOpcode as Host},

@@ -1,5 +1,4 @@
-//! Exact normal-Half lane fields, private rounding and compact scratch loop.
-//! Callers own input classification, arithmetic, exception policy and guest commit.
+//! Half-precision lane unpacking, rounding and packing for normal values.
 use alloc::vec::Vec;
 mod kernel;
 use super::numerical::{Condition, RESULT_MINIMUM_EXPONENT, branch, resolve, test_control};

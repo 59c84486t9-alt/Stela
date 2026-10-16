@@ -1,4 +1,4 @@
-//! Focused successor cases for the existing owned contextual block API.
+//! Context-backed blocks with SME completion.
 #![cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use super::*;
 use stela_compiler::{

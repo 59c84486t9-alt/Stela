@@ -1,4 +1,4 @@
-//! PMOV predicate-to-vector packed bitmap operands, including preserving portions.
+//! PMOV between predicates and vector bitmaps.
 use crate::aarch64::scalable::ElementSize;
 
 const DESTINATION_MASK: u32 = 31;

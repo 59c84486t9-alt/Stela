@@ -1,4 +1,4 @@
-//! Direct private-RAM register-offset accesses; guest NZCV is unchanged.
+//! Register-offset loads and stores to private RAM.
 use super::{
     AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, memory_store, offset,
     right_operand,

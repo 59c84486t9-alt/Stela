@@ -1,4 +1,4 @@
-//! Native opt-in dispatch for the authoritative absent-task-region service.
+//! The absent shared-region query.
 
 use super::*;
 use stela_runtime::darwin::{ExecutionServices, ServiceRunOutcome, run_services, shared_region};

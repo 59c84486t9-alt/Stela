@@ -1,7 +1,5 @@
-//! Streaming SVE BF16 arithmetic, dot products and widening multiply-add.
-//! Nonwidening arithmetic rounds to BF16 and reports exceptions; it must not
-//! reuse the classic widening BF multiply-add's alternative-mode suppression.
-//! Predicated forms merge inactive destination lanes without evaluating them.
+//! SVE BF16 arithmetic, dot products and widening multiply-add. Non-widening
+//! arithmetic rounds to BF16 and reports exceptions. Predicated forms merge.
 
 use crate::aarch64::sve::dot::{RightOperand, VectorPart};
 

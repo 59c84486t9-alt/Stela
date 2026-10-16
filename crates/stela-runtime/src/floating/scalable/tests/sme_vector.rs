@@ -1,6 +1,4 @@
-//! Additive tests for the existing full-eight completion driver.
-//! Include this one module only in a prospective owner/IC capsule window.
-//! Prepared source; no test execution or production admission is implied.
+//! SME2 multi-vector floating-point completion.
 
 use crate::{floating::scalable as completion, scalable::ScalableState};
 use stela_compiler::{

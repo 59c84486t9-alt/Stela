@@ -1,5 +1,4 @@
-//! Integer magnitude selection shared by fixed and scalable absolute extrema.
-//! Numeric subnormals, zeros and infinities are exact under every host MXCSR.
+//! Integer magnitude selection for FAMIN/FAMAX, exact under any host MXCSR.
 use crate::{
     TargetCpu,
     aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation},

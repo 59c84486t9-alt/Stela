@@ -1,6 +1,4 @@
-//! AdvSIMD packed-index lookup. Encoding facts: pinned Arm A64 2026-06
-//! luti2_advsimd.xml and luti4_advsimd.xml. Requires enabled AdvSIMD and FEAT_LUT.
-//! All operands, including the wrapping second table, are read before Vd changes.
+//! FEAT_LUT LUTI2 and LUTI4. All sources are read before Vd is written.
 
 const REGISTER_MASK: u32 = 31;
 const TABLE_SHIFT: u32 = 5;

@@ -1,5 +1,4 @@
-//! Fixed VA47/iTBI0/dTBI1 PAuth bit-layout policies, independent of key lifetime.
-//! The caller supplies an exact QARMA result and the effective key-enable policy.
+//! PAC bit layouts for VA47 with instruction TBI off and data TBI on.
 const ADDRESS_BITS: u32 = 47;
 const ADDRESS_MASK: u64 = (1 << ADDRESS_BITS) - 1;
 const REGION_SHIFT: u32 = 55;

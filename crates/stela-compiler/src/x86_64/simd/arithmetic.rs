@@ -1,4 +1,4 @@
-//! Binary numerical blocks: ordered input staging, normal SSE2 and exact fallback.
+//! FP binary arithmetic: SSE2 for normal values, software fallback otherwise.
 use alloc::vec::Vec;
 mod half;
 use super::super::isa::ShiftOpcode;

@@ -1,8 +1,5 @@
-//! Private compute-only SSE2 candidate for S/D <-> unsigned X conversions.
-//!
-//! The caller owns PrivateMxcsr, effective guest rounding, active-lane guards,
-//! source classification, packing, complete-Z staging and status/exit handling.
-//! No environment, guest state, stack, commit or completion exit is emitted here.
+//! SSE2 conversions between single/double and unsigned 64-bit integers. The
+//! caller owns the MXCSR frame, lane guards and staging.
 
 use crate::aarch64::floating::Format;
 use alloc::vec::Vec;

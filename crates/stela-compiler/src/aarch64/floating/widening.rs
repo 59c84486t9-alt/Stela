@@ -1,4 +1,4 @@
-//! Half multiplicands and a Single accumulator with one architectural rounding.
+//! FMLAL/FMLSL: half-precision products into a single accumulator, one rounding.
 use super::{
     Class, Control, FPCR_DN, Format, INPUT_DENORMAL, INVALID, Operand, Outcome, UnsupportedControl,
     fused, negate, unpack,

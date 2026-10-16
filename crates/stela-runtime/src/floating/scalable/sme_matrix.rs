@@ -1,6 +1,5 @@
-//! Transactional ZA floating completion; source banks are never guest outputs.
-//! ZA numerical helpers force default NaNs and suppress numerical FPSR effects
-//! independently of FA64. Only affected physical ZA rows are staged.
+//! Completion of SME floating-point ZA arithmetic. ZA operations use default NaNs
+//! and leave FPSR unchanged; only affected ZA rows are staged.
 
 use anyhow::anyhow;
 use stela_compiler::{

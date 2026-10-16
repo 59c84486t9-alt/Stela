@@ -1,4 +1,4 @@
-//! Canonical actual Active pair-write consumer. No alternate dispatcher/PE.
+//! Execution of M0 blocks that perform an STP.
 use super::super::source::{BoundSource, ReturnedTerminal};
 use super::{
     Active, ConsumerKey, INSTRUCTION_BYTES, M0Step, M0WriteSourceInput, PreparedM0Commit,

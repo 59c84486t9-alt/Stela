@@ -1,4 +1,4 @@
-//! Packed long integer accumulation into independently selected ZA rows.
+//! Long integer accumulation into ZA rows.
 use crate::{
     GuestState, TargetCpu,
     aarch64::{

@@ -1,4 +1,4 @@
-//! Packed predicate bitmap compaction and bit-portion insertion, baseline only.
+//! PMOV between predicates and vector bitmaps.
 use crate::aarch64::sve::integer_predicate_move::Operand;
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{clear_z_upper, load_z_chunk, read_predicate_chunk, store_z_chunk};

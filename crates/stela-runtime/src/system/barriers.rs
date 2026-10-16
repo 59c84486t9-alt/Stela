@@ -1,8 +1,4 @@
-//! Checked DSB/DSBnXS/ISB requests and ordered owner-service execution.
-//!
-//! This leaf supplies no production completion/publication implementation.
-//! A host fence covers only the selected synchronous Normal-WB data profile;
-//! guest maintenance and instruction/context publication need their owners.
+//! DSB, DSBnXS and ISB. A host fence covers synchronous write-back data only.
 
 use super::access::{ExceptionLevel, Profile, Resolution};
 use super::exception::EffectFailure;

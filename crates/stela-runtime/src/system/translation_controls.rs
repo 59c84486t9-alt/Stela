@@ -1,17 +1,8 @@
-//! One mutable per-PE EL1 translation-control authority.
+//! The EL1 translation controls of a PE: SCTLR, TCR, TTBR0, TTBR1 and MAIR.
 //!
-//! Private integration leaf. Five architectural registers are stored exactly
-//! once. Canonical stage1 owns translation; MemorySystem owns physical backing.
-//! Every control change requires a prepared, same-MemorySystem publication.
-//! There is no successful fallback when an effects/fetch owner is unavailable.
-//!
-//! June ISA shared SHA21edeadbc26408a35bcf7315bfbcbb8a69e9e6d86d952c80b153d273f0f2349f;
-//! independent SysReg SHA4795c769085ff9056d9f18abbd9e23d7b0f0a955214cfb2a2121a9698b50d509.
-//! Arm ARM M.c SHA b5f9daa7ec0446777c8f848aa6431c99e5ab6554e5aa171b28b9016771494f8c:
-//! D24.1.2.2 direct-access ordering; K1.2.4 unsynchronized control choices;
-//! B2.6.1 ISB; glossary RES0/RES1. The selected serial implementation observes
-//! current controls eagerly. An ISB is still a real CSE/fetch publication, not
-//! a deferred-register-bank switch or an implicit TLBI.
+//! Each register is stored once; every change publishes through the memory
+//! system. Controls take effect immediately, and an ISB is still a real context
+//! synchronization and fetch publication.
 
 mod branch_address;
 mod context_sync;

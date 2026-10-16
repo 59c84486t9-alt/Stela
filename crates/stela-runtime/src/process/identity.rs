@@ -1,8 +1,4 @@
-//! Immutable identity for one declared guest process lifetime.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea uses signed32 pid_t
-//! and PID_MAX99999. This normal userspace profile accepts1..PID_MAX; it does
-//! not allocate a PID namespace, represent kernel proc0, fork or execute images.
+//! The guest process ID, 1 to PID_MAX (99999) as in XNU.
 
 use anyhow::{Result, ensure};
 use serde::Serialize;

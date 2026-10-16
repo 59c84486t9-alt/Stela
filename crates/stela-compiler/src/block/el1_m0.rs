@@ -1,5 +1,4 @@
-//! Generic EL1 MMU-off integer plans, with a separate attempt per RAM read.
-//! No metadata here grants CPU, translation, physical RAM or native entry.
+//! EL1 blocks with the MMU off, planned one RAM read per attempt.
 use super::{ExitKind, ParsedBlock, Terminator};
 use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu,

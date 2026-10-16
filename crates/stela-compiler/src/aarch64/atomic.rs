@@ -1,4 +1,4 @@
-//! Scalar and pair LSE operations in the declared coherent Normal-WB memory profile.
+//! LSE atomics: LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN, SWP, CAS and CASP.
 use super::{Register, register};
 
 const CAS_MASK: u32 = 0x3fa07c00;

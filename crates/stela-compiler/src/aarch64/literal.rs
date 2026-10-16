@@ -1,4 +1,4 @@
-//! PC-relative literal loads from the pinned Arm 2026-06 reference.
+//! PC-relative literal loads: LDR (literal), LDRSW (literal) and PRFM (literal).
 use super::{Register, Width, register};
 use crate::GuestAddress;
 

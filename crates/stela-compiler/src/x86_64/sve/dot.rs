@@ -1,6 +1,5 @@
-//! Exact packed integer SVE dot arithmetic, one original 128-bit segment at a time.
-//! No floating operations or host status changes are needed. Every source role is
-//! staged before the destructive destination chunk is committed, including aliases.
+//! SVE integer dot products, one 128-bit segment at a time. All sources are
+//! staged before each destination chunk is written.
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength, is_z_register};

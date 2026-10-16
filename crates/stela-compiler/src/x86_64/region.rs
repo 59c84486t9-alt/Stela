@@ -1,7 +1,5 @@
-//! Bounded scalar regions with canonical prefix exits. The default is nonfaulting.
-//! The private clean-load tier uses existing nonalias ordinary direct-RAM memory
-//! emission and settles every dirty value before its faultable access.
-//! Research rows do not provide general asynchronous/native-fault delivery.
+//! Multi-instruction scalar regions that keep guest values in host registers and
+//! settle the full register bank at every exit.
 use alloc::vec;
 use alloc::vec::Vec;
 mod allocation;

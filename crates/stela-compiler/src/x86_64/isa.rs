@@ -1,6 +1,5 @@
-//! Named x86 SIMD output encodings and their minimum feature requirements.
-//! Intel SDM instruction entries define these SSE/VEX forms. Operand fields
-//! (ModRM, displacement and immediates) are supplied separately by the emitter.
+//! x86 SIMD opcodes and their minimum CPU features. ModRM, displacement and
+//! immediates are supplied by the emitter.
 use crate::TargetCpu;
 use alloc::vec::Vec;
 

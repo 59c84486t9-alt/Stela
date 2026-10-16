@@ -1,4 +1,4 @@
-//! Integral rounding: compact integer baseline and checked, nontrapping ROUND.
+//! FRINT*: integer baseline, or SSE4.1 ROUND with exceptions masked.
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod kernel;
 use super::super::isa::ShiftOpcode;

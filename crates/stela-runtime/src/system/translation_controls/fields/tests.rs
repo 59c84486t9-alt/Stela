@@ -1,5 +1,4 @@
-//! Pure policy tests with explicitly synthetic provenance. These establish no
-//! authentic CPU facts, original execution, access admission, or service effects.
+//! Translation-control field storage.
 
 use super::*;
 

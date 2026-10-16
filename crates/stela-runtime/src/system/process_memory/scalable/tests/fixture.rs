@@ -1,5 +1,4 @@
-//! Real prepared native entry for a declared fresh CPU and one retained domain.
-//! These are software-owner acceptance tests, not captured ARM observations.
+//! A software CPU and memory domain for scalable entry tests.
 use super::super::super::{SCTLR_NATIVE_NORMAL_WB, SCTLR_SP_ALIGNMENT_EL0, SourceNormalWbDomain};
 use super::super::*;
 use crate::{

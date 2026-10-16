@@ -1,4 +1,4 @@
-//! Bounded architectural liveness. Every final GPR is live at the exit.
+//! Liveness analysis. Every GPR is live at a region exit.
 use super::location::GPR_SLOTS;
 use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::integer_math::Kind as IntegerMath;

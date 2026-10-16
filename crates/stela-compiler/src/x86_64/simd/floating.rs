@@ -1,4 +1,4 @@
-//! Raw FP selection/sign lowering: integer classification, no MXCSR effects.
+//! FCSEL, FABS and FNEG by integer operations, without MXCSR effects.
 use super::super::isa::ShiftOpcode;
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::aarch64::floating::{FPCR_AH, FPCR_NEP};

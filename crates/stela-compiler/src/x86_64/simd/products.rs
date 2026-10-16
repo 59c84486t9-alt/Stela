@@ -1,4 +1,4 @@
-//! Packed SIMD products, widened arithmetic and exact absolute differences.
+//! Integer multiplies, widening arithmetic and absolute differences.
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
 use crate::{
     TargetCpu,

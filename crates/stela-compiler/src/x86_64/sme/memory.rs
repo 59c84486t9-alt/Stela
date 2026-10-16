@@ -1,7 +1,5 @@
-//! SME transfers through the shared exact-access and reservation-aware service.
-//!
-//! Architectural loads commit only after every reached access succeeds. Stores
-//! submit one active element at a time; the service owns its exact atomic parts.
+//! SME loads and stores through the memory service. Loads commit after every
+//! element succeeds; stores submit one active element at a time.
 use alloc::vec::Vec;
 mod za;
 

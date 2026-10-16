@@ -1,7 +1,5 @@
-//! SME ZA movement and zeroing. Decoding retains mode and debug requirements.
-//!
-//! ZA vectors are physical byte rows. Tile aliases and vertical slices are
-//! interpreted by the shared scalable-state backend, never independent storage.
+//! SME ZA moves and zeroing (MOVA, MOVAZ, ZERO). ZA tiles and slices are views of
+//! the same byte rows.
 
 use crate::aarch64::scalable::{ElementSize, Predication};
 

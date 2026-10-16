@@ -1,5 +1,5 @@
-//! Read-only dependency discovery inside an explicitly supplied guest tree.
-//! Missing images remain reported; no host dylib/shared-cache fallback occurs.
+//! Dependency discovery inside a supplied guest file tree. Missing images are
+//! reported; host libraries are never substituted.
 use super::{
     dependency_paths::{self, PathContext, RPath},
     linked_images::{DependencyLink, ImageInput},

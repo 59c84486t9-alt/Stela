@@ -1,5 +1,4 @@
-//! Scalar bitfield operations using baseline x86-64 shifts and Boolean logic.
-//! Guest NZCV remains memory-backed and untouched by incidental host flags.
+//! Bitfield moves using shifts and masks. Guest NZCV is untouched.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::bitfield::{Kind, Operand};
 use alloc::vec::Vec;

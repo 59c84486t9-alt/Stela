@@ -1,4 +1,4 @@
-//! Baseline scalar leading counts; repair BSR's undefined zero result before use.
+//! Scalar leading-bit counts. BSR's result is undefined for zero and is fixed up.
 use crate::aarch64::scalable::ElementSize;
 use alloc::vec::Vec;
 const CHUNK_BYTES: usize = 16;

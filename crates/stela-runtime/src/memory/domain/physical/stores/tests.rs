@@ -1,5 +1,4 @@
-//! Directed authored inputs/model for the canonical retained software engine.
-//! Genuine fresh RAM and data only: no loan, executor or original oracle claim.
+//! M0 STP stores to fresh RAM.
 use crate::memory::{
     domain::m0_write::{M0WriteMembers, M0WriteSource},
     source_ram::{

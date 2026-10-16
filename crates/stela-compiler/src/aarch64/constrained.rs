@@ -1,8 +1,5 @@
-//! Allocated memory operands with a source-permitted constrained outcome.
-//! Exact June 2026 LDPOVERLAP/WBOVERLAPLD/WBOVERLAPST classification;
-//! The caller selects NOP before operation-level access and writeback. Common
-//! decode-time checks remain its responsibility; the current profile disables
-//! guarded/BTI pages.
+//! Load/store encodings with CONSTRAINED UNPREDICTABLE register overlaps
+//! (LDPOVERLAP, WBOVERLAPLD, WBOVERLAPST) and the outcome Stela selects for each.
 
 const PAIR_FORM_MASK: u32 = 0xffc0_0000;
 const LDPSW_X_OFFSET: u32 = 0x6940_0000;

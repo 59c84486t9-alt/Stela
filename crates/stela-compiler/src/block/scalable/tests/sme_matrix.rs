@@ -1,7 +1,4 @@
-//! Proposed focused tests for the shared full-family admission boundary.
-//! Seven distinct feature predicates come from pinned June facts.
-//! Full canonical110/operand122 facts stay in canonical-forms.json; the existing
-//! 7836-case family decoder corpus owns full encoding/operand verification.
+//! SME matrix family admission and feature requirements.
 use super::*;
 use crate::aarch64::scalable::features::ScalableFeature as Feature;
 use crate::aarch64::scalable::{ScalableMode, VectorLength, profile::ScalableControls};

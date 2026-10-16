@@ -1,9 +1,5 @@
-//! MOVPRFX compatibility supplied by each follower's exact decoded encoding.
-//!
-//! Vector source masks identify shared V/Z storage, excluding the follower's
-//! implicit destructive destination. GPR operands never enter this mask. Source
-//! adjacency, incomplete windows, unsupported followers and exception policy
-//! belong to the caller; this module neither decodes nor executes either word.
+//! MOVPRFX compatibility of each follower encoding: which vector sources the
+//! follower reads besides its destructive destination.
 
 use crate::aarch64::scalable::{ElementSize, Predication, is_predicate_register, is_z_register};
 

@@ -1,4 +1,5 @@
-//! Exact-footprint packed transfers with a source-ordered protection-boundary path.
+//! Structured loads and stores, with an element-by-element path across page
+//! boundaries.
 use super::{commit, vector_offset};
 use crate::TargetCpu;
 use crate::aarch64::simd::structure_memory::{

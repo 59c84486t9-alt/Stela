@@ -1,6 +1,5 @@
-//! Resource-specific System effects under the original canonical retiring owner.
-//! Native carrier finalization precedes preparation; actual source/control/RAM
-//! loans survive the effect, sole PC settlement and post-retirement checks.
+//! System instruction effects, applied after the native block finishes and
+//! before PC is set.
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec::Vec};
 mod commit;

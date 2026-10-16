@@ -1,4 +1,5 @@
-//! Thread-owned scalable register storage; the existing V registers own low Z bits.
+//! SVE/SME register storage of a thread. The low 128 bits of each Z register
+//! are the V registers in `GuestState`.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

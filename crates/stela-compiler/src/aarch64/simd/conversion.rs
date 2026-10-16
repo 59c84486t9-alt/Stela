@@ -1,5 +1,4 @@
-//! Scalar and AdvSIMD H/S/D conversions from the pinned Arm 2026-06 reference.
-//! FP8, BF16 and FPRCVT cross-width scalar encodings remain separate families.
+//! Scalar and AdvSIMD conversions between H/S/D and integers (FCVT*, SCVTF, UCVTF).
 use crate::aarch64::{
     Register,
     floating::{

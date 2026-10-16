@@ -1,4 +1,4 @@
-//! Bounded native execution of raw code, mapped images and original dyld.
+//! Native execution of raw code, mapped images and original dyld.
 use crate::{args::*, compile::block_profile, dyld_entry, input::*};
 use anyhow::{Context, Result, ensure};
 use clap::Args;

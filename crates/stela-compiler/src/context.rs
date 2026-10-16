@@ -1,7 +1,4 @@
-//! Optional execution state for the extended native ABI.
-//!
-//! Ordinary one-argument native entries retain their existing layout and bytes.
-//! These borrowed views grant no ownership or permission to access guest RAM.
+//! Execution context passed to native code using the extended ABI.
 
 pub mod memory;
 pub mod pointer;

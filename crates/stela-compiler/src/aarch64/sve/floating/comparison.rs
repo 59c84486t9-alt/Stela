@@ -1,4 +1,4 @@
-//! Streaming SVE FP predicates from the pinned Arm A64 2026-06 reference.
+//! SVE FCM* and FAC* comparisons into predicates.
 use crate::aarch64::flags::{NZCV_V, NZCV_Z};
 use crate::aarch64::floating::{
     Format, UnsupportedControl,

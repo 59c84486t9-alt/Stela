@@ -1,10 +1,5 @@
-//! Pure guest-path expansion for explicitly rooted Apple dependency discovery.
-//!
-//! Apple dyld Loader.cpp (fd8d0c4d52320ebf64db34f3cb280310d905c5ae,
-//! expandAtLoaderPath/expandAndNormalizeAtExecutablePath/forEachResolvedAtPathVar)
-//! defines the supported token anchors and load-chain order. This module emits
-//! lexical guest paths only; filesystem lookup, symlinks, environment overrides,
-//! platform redirects and host fallback are outside its contract.
+//! Expansion of `@loader_path`, `@executable_path` and `@rpath` into guest paths,
+//! following dyld's `Loader.cpp`. Purely lexical: no filesystem access.
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::collections::BTreeSet;

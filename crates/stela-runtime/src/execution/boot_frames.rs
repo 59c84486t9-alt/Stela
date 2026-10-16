@@ -1,7 +1,4 @@
-//! Concrete boot-reserved storage for the original execution::native_image seam.
-//! No CPU/source/ABI admission, native call, decoder or PC owner lives here.
-//! The loader must retain exclusive root/arena ownership and exclude reentry.
-//! This source epoch is unqualified until the linked mount is inspected and run.
+//! Boot-reserved storage backing native images in the freestanding build.
 #![cfg(all(target_arch = "x86_64", target_os = "none"))]
 
 use super::native_image::ExecutableStorage;

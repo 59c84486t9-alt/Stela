@@ -1,8 +1,5 @@
-//! Signed saturating SVE products. Integer-only recipes preserve FPSR.QC.
-//!
-//! Narrow products widen before rounding or accumulation. Doubleword products
-//! retain both halves of IMUL until their final saturation; no host overflow or
-//! wrapped intermediate substitutes for the architectural result.
+//! SVE signed saturating multiplies. Narrow products widen before rounding;
+//! doubleword products keep both IMUL halves until saturation.
 use super::packed;
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;

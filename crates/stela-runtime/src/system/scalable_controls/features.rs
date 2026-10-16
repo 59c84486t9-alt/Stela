@@ -1,4 +1,4 @@
-//! Exact June ID-field interpretation. Values remain in the borrowed Snapshot.
+//! SVE/SME features from identification-register fields.
 use super::{Error, Snapshot};
 use crate::system::identification::Register;
 use stela_compiler::aarch64::scalable::features::{ScalableFeature as F, ScalableFeatures};

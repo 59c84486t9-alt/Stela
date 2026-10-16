@@ -1,4 +1,4 @@
-//! Exact SVE FP8 conversion allocations. Numerical controls belong to completion.
+//! SVE FP8 conversions.
 
 const REGISTER_MASK: u32 = 31;
 const SOURCE_SHIFT: u32 = 5;

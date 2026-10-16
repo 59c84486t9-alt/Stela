@@ -1,8 +1,4 @@
-//! Owned context-leaf preparation and synchronous checked memory entry.
-//!
-//! Source, generated code and requirements share one immutable identity. This
-//! entry is independent of instruction families and does not interpret RAX as
-//! a block exit or a memory status.
+//! Preparing and running a context-backed leaf with checked memory.
 use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String};

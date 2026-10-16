@@ -1,4 +1,4 @@
-//! Non-saturating alternating-lane products, widening each selected source lane.
+//! SVE widening bottom/top multiplies.
 use super::packed;
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;

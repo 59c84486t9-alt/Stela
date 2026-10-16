@@ -1,5 +1,4 @@
-//! Plain compiler target metadata cannot qualify the actual boot CPU/controls.
-//! The concrete loader CPU admission owner remains an explicit mount dependency.
+//! Boot CPU feature admission (provided by the loader).
 pub(crate) fn admitted(target: stela_compiler::TargetCpu) -> bool {
     #[cfg(feature = "std")]
     {

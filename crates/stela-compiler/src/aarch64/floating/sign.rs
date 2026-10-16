@@ -1,4 +1,4 @@
-//! Raw floating sign transforms, independent of numerical exceptions.
+//! FABS and FNEG sign transforms, which raise no exceptions.
 use super::{Control, Format};
 
 /// FPAbs preserves every NaN bit under AH; otherwise it clears only the sign.

@@ -1,5 +1,4 @@
-//! Actual declared-software debug/CTI producers in the existing PE domain.
-//! No second registry, callback, copied pending bank, or external-hardware claim.
+//! Debug and CTI event sources of a software PE.
 use super::*;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};

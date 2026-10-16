@@ -1,5 +1,4 @@
-//! Staged completion for exactly 42 predicated SVE numerical conversions.
-//! Private proposal; central controls and mature cores own numerical semantics.
+//! Completion of the SVE predicated conversions.
 
 use anyhow::anyhow;
 use stela_compiler::{

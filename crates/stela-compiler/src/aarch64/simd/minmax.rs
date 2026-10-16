@@ -1,4 +1,4 @@
-//! Scalar, AdvSIMD, pairwise and reduction min/max forms (Arm A64 2026-06).
+//! FP min/max: scalar, vector, pairwise and across-lane forms.
 use crate::aarch64::floating::{Format, minmax::MinMaxOperation};
 
 use super::arithmetic::Shape;

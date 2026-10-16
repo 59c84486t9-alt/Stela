@@ -1,4 +1,4 @@
-//! CASP uses exact-width atomic updates, with checked CX8 for ordinary W pairs.
+//! CASP through same-width atomic updates (CMPXCHG8B/CMPXCHG16B).
 use super::{
     DWORD_BYTES, QWORD_BYTES, ValueRegister, XOR_EAX_EAX, XOR_ECX_ECX, commit_rax, input_rax,
     input_rcx, locked_compare_exchange,

@@ -1,8 +1,6 @@
-//! Checked fixed-width SIMD transfers through the shared memory service.
-//!
-//! One request describes the complete source Mem quantity, including both pair
-//! elements. The service owns its exact parts, tags, permissions and monitors.
-//! Guest destinations and base writeback commit only after complete success.
+//! SIMD loads and stores through the memory service. One request covers the whole
+//! access, including both pair elements; destinations and base writeback are
+//! written only after it succeeds.
 
 use super::{commit, read_vector, vector_offset};
 use crate::aarch64::{

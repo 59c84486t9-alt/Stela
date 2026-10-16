@@ -1,8 +1,4 @@
-//! Source-bound immediate completion through the shared PSTATE effect owner.
-//!
-//! The caller holds the actual immutable registered source and current controls.
-//! An unavailable asynchronous boundary owner prevents DAIF mutation; this module
-//! never guesses a pending IRQ or reports a passive field write as completion.
+//! MSR (immediate) to PSTATE fields.
 
 use super::{CommitError, Effect};
 use crate::system::{

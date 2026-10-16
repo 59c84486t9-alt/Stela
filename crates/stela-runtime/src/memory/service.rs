@@ -1,5 +1,4 @@
-//! A serialized guest service over the actual owner, executing thread and domain.
-//! This borrow carries no CPU bank, source authority or execution admission.
+//! A guest service's access to the memory owner, thread and domain.
 
 use super::{
     AllocateDataError, AllocateDataRequest, DataAllocation, MemoryRegion, OwnedMemory,

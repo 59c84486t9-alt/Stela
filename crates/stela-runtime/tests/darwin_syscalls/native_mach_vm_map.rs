@@ -1,4 +1,4 @@
-//! Native anonymous-map service checks using the consolidated Darwin fixtures.
+//! Mach VM anonymous mapping.
 #![cfg(target_os = "macos")]
 
 use super::*;

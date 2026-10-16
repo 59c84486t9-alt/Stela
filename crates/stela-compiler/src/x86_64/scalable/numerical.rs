@@ -1,10 +1,9 @@
-//! Bounded output staging for one guarded scalable numerical instruction.
+//! Output staging frame for one scalable floating-point instruction.
 //!
-//! The extended wrapper CALLs this body with RSP eight bytes from alignment.
-//! Families retain all architectural sources until `finish`, stage every output
-//! byte, and supply guards before any commit. No CALL, nested frame, or mode
-//! change is permitted while this frame is live. RDI/R15 and callee-saved GPRs
-//! survive; mechanics may clobber RAX/RCX/RDX, flags, and the selected XMM.
+//! The body is entered with RSP eight bytes off 16-byte alignment. All sources
+//! stay readable until `finish`, which commits every staged output byte at once.
+//! No CALL or mode change may occur while the frame is live. RDI, R15 and
+//! callee-saved GPRs survive; RAX/RCX/RDX, flags and the chosen XMM are clobbered.
 
 use super::{
     DWORD_BYTES, HALFWORD_BYTES, Host, QWORD_BYTES, clear_z_upper, store_z_chunk,

@@ -1,5 +1,4 @@
-//! Actual byte-write accounting for factory-owned mutable instruction RAM.
-//! Mapping, control and compiled-source generations remain separate owners.
+//! Accounting of writes to mutable instruction RAM.
 use super::{MemoryStatus, MemorySystem};
 use crate::memory::backing::MemoryBacking;
 use crate::platform::sync::{Mutex, MutexGuard};

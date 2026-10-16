@@ -1,4 +1,4 @@
-//! Bind dedicated allocation-tag subaccesses to the shared physical memory domain.
+//! Allocation-tag accesses through the physical memory domain.
 use super::{AllocationTagPolicy, MemoryThread, PhysicalAccess};
 use crate::memory::{
     access,

@@ -1,4 +1,5 @@
-//! Allocation-tag generation and memory operations for the declared MTE profile.
+//! MTE tag generation, loads and stores: IRG, LDG, STG, STZG, ST2G, STZ2G, STGP,
+//! LDGM, STGM and STZGM.
 use super::{AddressMode, Register, register};
 
 const RANDOM_OPCODE_MASK: u32 = 0xffe0_fc00;

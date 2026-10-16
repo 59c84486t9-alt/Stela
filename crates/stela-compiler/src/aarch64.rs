@@ -1,4 +1,4 @@
-//! Decode architectural operand roles, including SP versus the zero register.
+//! A64 instruction decoding into typed operands.
 use crate::{GuestAddress, Lifter, UnsupportedReason};
 pub mod atomic;
 pub mod bitfield;

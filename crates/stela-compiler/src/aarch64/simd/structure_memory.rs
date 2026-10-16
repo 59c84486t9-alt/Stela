@@ -1,5 +1,5 @@
-//! Structured AdvSIMD transfers in source access order, with explicit post-index.
-//! Pinned Arm A64 2026-06 LD/ST multiple, single-lane and replicate forms.
+//! Structured AdvSIMD loads and stores (LD1-4, ST1-4, LD1R-4R), in architectural
+//! access order, with post-index writeback.
 use crate::aarch64::{Register, register};
 
 mod multiple;

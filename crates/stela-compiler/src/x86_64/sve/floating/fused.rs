@@ -1,7 +1,4 @@
-//! Fused streaming arithmetic: checked FMA3 or an exact-product SSE2 domain.
-//!
-//! All inputs are read before the sole instruction-wide destination commit.
-//! Exceptional inputs/results and Half use exact whole-instruction completion.
+//! SVE fused multiply-add: FMA3, or an exact-product SSE2 path.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

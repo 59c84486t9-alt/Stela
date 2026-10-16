@@ -1,4 +1,4 @@
-//! Integer quantization selectors shared by IEEE Half and BF16 mappings.
+//! Rounding selectors shared by the half and BF16 conversions.
 use super::super::shuffle;
 use super::{
     AND_ECX_IMM32, Condition, MOV_ECX_STATE, SHR_ECX_IMM8, TEST_ECX_IMM32, branch, resolve,

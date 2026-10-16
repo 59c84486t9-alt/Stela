@@ -1,4 +1,4 @@
-//! Encode guest FPCR rounding bits for a caller-owned private MXCSR.
+//! Translate FPCR rounding controls into a private MXCSR.
 
 use crate::{GuestState, aarch64::floating::FPCR_ROUNDING_SHIFT};
 use alloc::vec::Vec;

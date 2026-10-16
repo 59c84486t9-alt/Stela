@@ -1,4 +1,4 @@
-//! Native helper/profile boundaries, process key ownership and precise state.
+//! PAuth helpers, profiles, key ownership and state preservation.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use anyhow::Result;
 use std::path::Path;

@@ -1,4 +1,4 @@
-//! Register-only allocation-tag arithmetic for the declared MTE guest profile.
+//! MTE tag arithmetic: ADDG, SUBG, GMI, SUBP and SUBPS.
 use super::{Register, register};
 
 const OFFSET_OPCODE_MASK: u32 = 0xffc0_0000;

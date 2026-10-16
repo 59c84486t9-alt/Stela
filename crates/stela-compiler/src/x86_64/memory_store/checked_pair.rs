@@ -1,10 +1,6 @@
-//! Checked GPR LDP/LDPSW/STP/LDNP/STNP through one source-correct pair request.
-//!
-//! Store inputs and load outputs live in private staging across the callback.
-//! Load destinations and base writeback publish only after whole-pair success.
-//! The memory owner decomposes the combined quantity and publishes reached
-//! writes through the shared physical reservation domain. Legacy direct stores
-//! remain in the parent module and retain their separate private-RAM profile.
+//! Checked LDP/LDPSW/STP/LDNP/STNP as one pair request to the memory service.
+//! Load destinations and base writeback are written only after both elements
+//! succeed.
 
 use crate::{
     aarch64::{AddressMode, MemoryTransfer, Operation, Register, Width, non_temporal::Data},

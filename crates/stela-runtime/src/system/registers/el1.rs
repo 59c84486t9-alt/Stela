@@ -1,6 +1,4 @@
-//! Exact EL0/EL1 access decisions over SystemState's sole exception-register owner.
-//! Feature/access checks precede readbacks or unapplied typed writes. Optional
-//! field policies, EXLOCK delivery and nested memory never become a shadow bank.
+//! EL0/EL1 system-register access decisions over the exception registers.
 pub(crate) mod vbar;
 
 use crate::system::{

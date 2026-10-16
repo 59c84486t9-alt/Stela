@@ -1,5 +1,4 @@
-//! Exact unsigned estimate lookup; no FP environment is consulted.
-//! Literal lookup data is shared by every chunk of one emitted instruction.
+//! SVE URECPE and URSQRTE by table lookup.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

@@ -1,6 +1,5 @@
-//! Bounded inspection of the public IPSW AEA1/profile-1 acquisition envelope.
-//! Metadata is unverified until an authenticated archive decoder accepts it.
-//! Key bodies and wrapped-key metadata are never part of a JSON report.
+//! Inspect and decrypt the AEA1 profile-1 envelope of public IPSW archives.
+//! Key material never appears in reports.
 use anyhow::{Context, Result, ensure};
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use serde::Serialize;

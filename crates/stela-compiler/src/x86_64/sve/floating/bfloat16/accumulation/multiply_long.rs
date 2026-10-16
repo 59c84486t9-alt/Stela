@@ -1,4 +1,4 @@
-//! Selected BF16 fields with exact SSE2 products or independently checked FMA.
+//! BFMLALB/BFMLALT with exact SSE2 products or FMA3.
 use super::{ADDEND, LEFT, RIGHT, shuffle, test_control};
 use crate::{
     TargetCpu,

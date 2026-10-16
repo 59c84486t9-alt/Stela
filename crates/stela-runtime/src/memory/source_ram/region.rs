@@ -1,4 +1,5 @@
-//! Declared physical RAM initialization; file extent and mapped extent differ.
+//! Initialization of a declared physical RAM region; the file extent may be
+//! shorter than the region.
 use super::{PhysicalRamRange, SourceRamBuildError, SourceRamPermissions};
 use alloc::{string::String, vec::Vec};
 

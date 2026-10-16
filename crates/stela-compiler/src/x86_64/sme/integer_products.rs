@@ -1,4 +1,4 @@
-//! Exact packed integer product kernels shared by SME arithmetic families.
+//! Integer product kernels shared by the SME families.
 use crate::{TargetCpu, x86_64::isa::SimdOpcode as Host};
 use alloc::vec::Vec;
 

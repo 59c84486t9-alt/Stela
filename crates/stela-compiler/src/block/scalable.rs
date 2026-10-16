@@ -1,5 +1,4 @@
-//! Typed scalable numerical service boundaries over immutable guest source.
-//! Decoding describes operands; it grants no guest feature or mode permission.
+//! Scalable numerical instructions that exit to a runtime service.
 
 use crate::{
     CompileError, GuestAddress,

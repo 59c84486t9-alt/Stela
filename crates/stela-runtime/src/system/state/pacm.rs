@@ -1,4 +1,4 @@
-//! PACM storage in canonical PSTATE; control/lifecycle authorization is external.
+//! PSTATE.PACM.
 pub const PSTATE_PACM_SHIFT: u32 = 35;
 pub const PSTATE_PACM_MASK: u64 = 1 << PSTATE_PACM_SHIFT;
 

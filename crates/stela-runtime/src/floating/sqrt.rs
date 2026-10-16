@@ -1,4 +1,4 @@
-//! Transactional scalar/vector square-root completion.
+//! Completion of FSQRT.
 use stela_compiler::{
     GuestState,
     aarch64::{

@@ -1,5 +1,4 @@
-//! Four exact SHA256 forms from Arm ISA_A64_xml_A_profile-2026-06.
-//! FEAT_SHA256 and enabled non-streaming FP/AdvSIMD are execution requirements.
+//! SHA256H, SHA256H2, SHA256SU0 and SHA256SU1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Hash,

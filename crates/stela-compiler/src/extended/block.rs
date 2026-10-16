@@ -1,7 +1,5 @@
-//! Context-backed blocks with shared control-flow and numerical boundaries.
-//!
-//! A service exit returns its still-unexecuted guest PC. The caller resolves
-//! that PC against the immutable consumed source and advances only on success.
+//! Blocks compiled with an execution context. A service exit returns the PC of
+//! the instruction still to execute.
 
 use super::{Decoded, INSTRUCTION_BYTES, ScalableProfile, context_wrapper, decode};
 use crate::{

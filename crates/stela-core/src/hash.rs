@@ -1,4 +1,4 @@
-//! Existing SHA-256 identity primitive shared by hosted and freestanding code.
+//! SHA-256, shared by hosted and freestanding code.
 use alloc::string::String;
 use sha2::{Digest, Sha256};
 

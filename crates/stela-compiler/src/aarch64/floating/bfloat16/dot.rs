@@ -1,5 +1,5 @@
-//! Classic BF16 dot stages: fixed flushing, separately rounded Single products
-//! and additions, and no architectural exception or trap effects.
+//! BFDOT: flushed inputs, separately rounded single products and sums, and no
+//! exceptions.
 use super::super::{Control, Format};
 use super::widen;
 use rustc_apfloat::{

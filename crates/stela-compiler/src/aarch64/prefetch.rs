@@ -1,4 +1,4 @@
-//! PRFM/PRFUM address and raw-hint semantics from Arm's pinned 2026-06 reference.
+//! PRFM and PRFUM.
 use super::{Register, register, register_offset::IndexExtend};
 use crate::GuestAddress;
 

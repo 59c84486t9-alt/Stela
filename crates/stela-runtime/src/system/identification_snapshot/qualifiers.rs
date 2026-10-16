@@ -1,5 +1,4 @@
-//! Only the source-reviewed subset needed by the current fixed EL0/EL1 owner.
-//! Unrelated raw ID bits remain opaque. No controls or raw-field copies retained.
+//! Feature checks derived from identification-register fields.
 use super::{Register, Snapshot, Unsupported};
 use crate::system::profile::{
     BaseSpeAbsence, EntryProfile, ScalableEntryAbsence, SystemEntryFeatures,

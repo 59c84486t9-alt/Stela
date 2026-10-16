@@ -1,8 +1,4 @@
-//! Actual synchronous side-effect-free coherent RAM participant completion.
-//!
-//! This covers the original staged Device-RAM service, not MMIO, bus masters or
-//! all DSB obligations. The canonical factory must close its real data and
-//! maintenance participants. No source/PE/retirement authority is created here.
+//! Synchronous completion of the staged Device-RAM accesses (for DSB).
 
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
 use crate::memory::domain::MemoryExecutionLoan;

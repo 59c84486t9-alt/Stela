@@ -1,9 +1,5 @@
-//! Guarded streaming Half dot and widening with one transactional Z/FPSR commit.
-//!
-//! Selected Half inputs must be finite normals; other classes use the existing
-//! exact whole-instruction completion. Single accumulators may also be signed
-//! zero or infinity. Half products are exact Single values, so FDOT's pair add
-//! and accumulator add retain their two distinct architectural roundings.
+//! SVE half-precision FDOT and FMLALB/FMLALT. Half products are exact singles, so
+//! the pair add and accumulator add keep their two separate roundings.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

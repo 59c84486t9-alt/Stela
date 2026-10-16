@@ -1,4 +1,4 @@
-//! Scalable-matrix operands. Mode and feature checks are execution contracts.
+//! SME operands. Callers check streaming mode, ZA state and features.
 
 pub mod extrema_scale;
 pub mod fp8_conversion;

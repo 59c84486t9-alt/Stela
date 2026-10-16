@@ -1,6 +1,4 @@
-//! Selected per-instruction mappings for streaming integer shifts.
-//! The scalar recipes use host flags only as temporary data; guest flags and QC
-//! remain unchanged. Every source chunk is staged before destination publication.
+//! SVE shifts. Scalar recipes use host flags only as scratch.
 use crate::{
     TargetCpu,
     aarch64::{

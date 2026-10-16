@@ -1,5 +1,4 @@
-//! Inactive stacks of the same SystemState. The active stack exists only in
-//! GuestState.sp; its slot must be None, never a stale duplicate architectural value.
+//! Inactive stack pointers. The active one lives only in `GuestState::sp`.
 use super::{StackBank, StateError};
 use stela_compiler::GuestState;
 

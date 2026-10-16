@@ -1,8 +1,4 @@
-//! Qualified scalable entry through the same fixed process-memory authority.
-//!
-//! Source obligations belong to the prepared compiler identity. The scalable
-//! control owner evaluates them while retaining its actual ID/control loan;
-//! this child composes that loan with the existing same-thread policy guard.
+//! Scalable-code entry with checked memory.
 
 use super::{FixedProcessMemoryControls, PolicyLoan, ProcessMemoryError};
 use crate::{

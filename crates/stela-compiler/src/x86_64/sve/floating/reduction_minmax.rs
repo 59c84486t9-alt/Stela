@@ -1,7 +1,5 @@
-//! PRIVATE proposal: eight SVE scalar/QV min/max reductions, no registration.
-//! Shared runtime remains the complete semantic fallback. This candidate admits
-//! only nonzero normal/infinity trees (S/D), with every lane active for NM.
-//! VL128 QV has no FP core call: raw H/S/D leaves and identities are exact.
+//! SVE FMAXV/FMINV/FMAXNMV/FMINNMV and their QV forms. Only trees of nonzero
+//! normals and infinities take the native path.
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{

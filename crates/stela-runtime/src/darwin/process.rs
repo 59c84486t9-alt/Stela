@@ -1,8 +1,4 @@
-//! Current-process identity through the common Darwin BSD-call boundary.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! bsd/kern/kern_prot.c getpid, syscalls.master and ARM systemcalls.c. This
-//! service reads the current thread's shared guest process owner, never host PID.
+//! `getpid`, answered with the guest process ID.
 
 use super::{
     BsdCompletion, BsdPrototype, BsdRequest, BsdReturnType, BsdServiceEvent, PendingBsdCall,

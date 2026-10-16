@@ -1,4 +1,4 @@
-//! Shared scalable operands. Instruction families own allocation and mode checks.
+//! Operands shared by the SVE and SME families.
 
 pub mod execution;
 pub mod features;

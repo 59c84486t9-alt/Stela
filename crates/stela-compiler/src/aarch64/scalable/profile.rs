@@ -1,4 +1,4 @@
-//! Immutable architectural controls for scalable compilation specializations.
+//! Scalable controls that specialize compilation (vector length, streaming mode).
 
 use super::VectorLength;
 

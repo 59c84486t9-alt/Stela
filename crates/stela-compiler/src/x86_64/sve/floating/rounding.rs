@@ -1,4 +1,4 @@
-//! Whole-instruction SVE integral rounding through shared mature chunk kernels.
+//! SVE FRINT*.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

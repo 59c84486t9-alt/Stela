@@ -1,4 +1,4 @@
-//! Versioned PAuth helper completion over actual cached native blocks.
+//! PAuth2/FPAC helpers in cached native blocks.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 
 use anyhow::Result;

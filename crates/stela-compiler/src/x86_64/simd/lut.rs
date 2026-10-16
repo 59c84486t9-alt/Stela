@@ -1,5 +1,4 @@
-//! Fixed AdvSIMD LUT wrapper around the shared constant-time packed-index core.
-//! Read all source vectors before committing the single 128-bit destination.
+//! AdvSIMD LUTI2/LUTI4 on the shared constant-time lookup.
 
 use super::{commit, read_vector};
 use crate::TargetCpu;

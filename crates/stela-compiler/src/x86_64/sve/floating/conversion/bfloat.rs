@@ -1,4 +1,4 @@
-//! Private proposal: BF16 conversion slots using mature integer quantization.
+//! SVE BFCVT and BFCVTNT through integer rounding.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

@@ -1,7 +1,4 @@
-//! SME2 integer dot products into ZA single-vector groups.
-//!
-//! This decoder performs structural decoding only. Execution must check
-//! streaming mode, ZA enablement, SME2, and I16I64 for 64-bit accumulators.
+//! SME2 integer dot products into ZA vector groups.
 
 use crate::aarch64::scalable::ElementSize;
 

@@ -1,4 +1,4 @@
-//! Scalar, vector, indexed and pairwise FP arithmetic (Arm A64 2026-06).
+//! FP arithmetic: scalar, vector, indexed and pairwise FADD/FSUB/FMUL/FDIV/FMULX/FABD.
 use crate::aarch64::floating::{BinaryOperation, Format};
 
 const SCALAR_MASK: u32 = 0xff20_fc00;

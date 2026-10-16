@@ -1,7 +1,4 @@
-//! Private canonical M0 staged consumer. Type/native/production gates pending.
-//! Actual source/control/RAM loans and original PE authority remain live through
-//! one native session and infallible register/PC settlement. No saved observation
-//! is accepted as access or commit authority. Typed exception delivery is absent.
+//! Execution of MMU-off ("M0") EL1 blocks that perform one staged RAM read.
 
 use super::{
     Active, ConsumerKey, SettledPrefix, provider,

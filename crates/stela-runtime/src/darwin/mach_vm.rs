@@ -1,8 +1,5 @@
-//! Owned ordinary-data Mach VM protection for the explicit ARM64 process profile.
-//!
-//! Contract: public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! mach_kernelrpc.c, vm_user.c, vm_sanitize.c and vm_map.c. This is not a
-//! host-port forwarding service or the complete private macOS VM policy.
+//! Mach VM protection of guest data pages (XNU `mach_kernelrpc.c`, `vm_user.c`,
+//! `vm_map.c`).
 
 use crate::{
     blocks::{BlockRuntime, ThreadState},

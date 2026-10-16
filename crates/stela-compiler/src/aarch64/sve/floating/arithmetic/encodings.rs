@@ -1,4 +1,4 @@
-//! Canonical fixed encoding facts and operand layouts (Arm A64 2026-06).
+//! Fixed bits and operand layouts of the SVE floating-point arithmetic forms.
 use super::{
     BinaryOperation, Encoding, Format, FusedOperation, Immediate, Kind, Layout, MinMaxOperation,
     ResultShape, Rotation, estimate, refinement,

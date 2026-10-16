@@ -1,4 +1,4 @@
-//! Sole-PE owner of actual code execution and physical mutation authority.
+//! The owner of code execution and physical memory changes on a PE.
 
 use super::{
     BlockRuntime, profile,

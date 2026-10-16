@@ -1,8 +1,4 @@
-//! Exception-generating and exception-return encodings.
-//!
-//! Decoding preserves the requested operation. The execution context owns
-//! feature availability, privilege checks, routing and architectural entry.
-//! Recognizing an encoding does not authorize execution or confer ISA coverage.
+//! Exception generation and return: SVC, HVC, SMC, BRK, HLT, ERET and variants.
 
 const EXCEPTION_CLASS_MASK: u32 = 0xffe0_001f;
 const SVC_ENCODING: u32 = 0xd400_0001;

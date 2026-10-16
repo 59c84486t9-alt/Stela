@@ -1,4 +1,4 @@
-//! Source-derived S1DisabledOutput for ordinary no-EL2 accesses.
+//! Translation results with stage 1 disabled.
 use super::config::VaRegion;
 use super::{
     Access, AccessKind, AttributeOrigin, Attributes, Config, Fault, FaultKind, MemoryType,

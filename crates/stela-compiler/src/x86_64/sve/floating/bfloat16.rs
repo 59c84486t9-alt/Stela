@@ -1,4 +1,4 @@
-//! BF arithmetic and Single accumulation use distinct native kernel families.
+//! SVE BF16 arithmetic and single-precision accumulation.
 use alloc::vec::Vec;
 mod accumulation;
 mod arithmetic;

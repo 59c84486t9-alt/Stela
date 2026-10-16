@@ -1,4 +1,4 @@
-//! Baseline scalar FlagM/FlagM2 recipes; guest flags live in GuestState.
+//! FlagM/FlagM2 on the in-memory guest NZCV.
 use super::load;
 use crate::{
     GuestState,

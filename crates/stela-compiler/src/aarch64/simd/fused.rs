@@ -1,4 +1,4 @@
-//! Fused scalar and AdvSIMD multiply-add forms from the pinned Arm 2026-06 reference.
+//! FMADD/FMSUB/FNMADD/FNMSUB and AdvSIMD FMLA/FMLS.
 use crate::aarch64::floating::{Format, fused::FusedOperation};
 
 use super::arithmetic::Shape;

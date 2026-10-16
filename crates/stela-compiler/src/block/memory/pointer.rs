@@ -1,4 +1,4 @@
-//! CPA arithmetic in the same immutable checked context plan as ordinary RAM.
+//! FEAT_CPA arithmetic within checked memory plans.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

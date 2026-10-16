@@ -1,21 +1,12 @@
-//! Versioned software pointer authentication for explicit arm64e profiles.
+//! Software pointer authentication (QARMA5) for arm64e.
 //!
-//! The default is a coherent QARMA5/PAuth1 guest profile, not an Apple hardware key or
-//! signature equivalence claim. VA width is 47; instruction TBI is disabled
-//! and data TBI enabled. Both extension regions and every u64 input are modeled.
-//! Invalid-extension signing corrupts the PAC; failed authentication returns
-//! classic A/B poison. Tagged data preserves its top byte, which participates in
-//! authentication. No pointer is dereferenced or normalized for a host access.
-//! Additional profiles enable PAuth2 XOR insertion and FPAC/FPACCOMBINE failures,
-//! with typed failure boundaries. Generic PAC uses its own optional process key.
-//! PAuth_LR, dynamic system controls and exception delivery remain outside these profiles. The caller owns process key lifetime and must
-//! bind this context to the executing address space before changing guest state.
-//!
-//! Algorithm/bit layout: Arm ISA_A64_xml_A_profile-2026-06 shared_pseudocode.xml,
-//! ComputePACQARMA/PACSub/PACInvSub/PACMult/PACCellShuffle/TweakShuffle,
-//! InsertPAC and Authenticate. Round constants and permutations are factual
-//! algorithm parameters; substitution uses parallel Boolean polynomials rather
-//! than secret-indexed lookup tables. No constant-time/security audit is claimed.
+//! The default profile is PAuth1 with a 47-bit VA, instruction TBI off and data
+//! TBI on. Signing a pointer with an invalid extension corrupts the PAC; a failed
+//! authentication returns the classic poisoned pointer. Optional profiles add
+//! PAuth2 XOR insertion and FPAC/FPACCOMBINE faults. The caller owns the keys and
+//! binds the context to its address space. QARMA substitution uses Boolean
+//! polynomials rather than secret-indexed tables (Arm pseudocode
+//! `ComputePACQARMA`, `InsertPAC`, `Authenticate`).
 use anyhow::Result;
 use core::fmt;
 use serde::Serialize;

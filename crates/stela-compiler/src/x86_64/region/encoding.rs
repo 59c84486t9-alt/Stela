@@ -1,5 +1,4 @@
-//! Baseline integer encodings with explicit flag-preserving helpers.
-//! Conditional recipes require caller-owned arithmetic flag provenance.
+//! Integer encodings, including flag-preserving variants.
 use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::{Logical, Shift, Width};
 use alloc::vec;

@@ -1,4 +1,4 @@
-//! Signed and unsigned scalar register/immediate min/max from FEAT_CSSC.
+//! FEAT_CSSC SMAX/SMIN/UMAX/UMIN, register and immediate forms.
 use super::{Register, Width, register};
 
 const REGISTER_OPCODE_MASK: u32 = 0x7fe0_fc00;

@@ -1,4 +1,4 @@
-//! Constant-time packed-index register lookup for LUT-extension instructions.
+//! Constant-time packed-index table lookup shared by the LUTI forms.
 use crate::{
     TargetCpu,
     aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES},

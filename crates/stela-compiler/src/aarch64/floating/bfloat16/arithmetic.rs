@@ -1,5 +1,4 @@
-//! Nonwidening BF arithmetic rounds once at BF precision, independently of
-//! host FP state. Callers own streaming effective controls and status commit.
+//! Non-widening BF16 arithmetic, rounded once at BF16 precision.
 use super::super::{
     self as floating, BinaryOperation, Class, Control, Format, INPUT_DENORMAL, Outcome,
     UnsupportedControl, apply, clamped_overflow, fused as fused_math, minmax as minmax_math,

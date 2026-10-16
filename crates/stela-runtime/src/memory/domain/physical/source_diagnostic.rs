@@ -1,5 +1,4 @@
-//! Fixture-only raw observations of genuine materialized source RAM.
-//! No guest Read right, native execution loan, publisher or authority is minted.
+//! Raw observations of source RAM for tests.
 
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
 use crate::memory::{MAX_IMAGE_MEMORY_BYTES, backing::AccessKind, domain::MemoryServiceLoan};

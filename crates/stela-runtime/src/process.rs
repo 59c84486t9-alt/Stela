@@ -1,9 +1,6 @@
-//! Bounded, declarative Darwin kernel-to-dyld argument arrays.
-//!
-//! The reviewed XNU/dyld contract is [main Mach header, argc, argv..., NULL,
-//! envp..., NULL, apple..., NULL], with apple[0] the executable path. String
-//! ordering/padding here is our deterministic layout, not an exact kernel dump.
-//! This module neither reads the host environment nor creates a running process.
+//! The kernel-to-dyld argument block: main Mach header, argc, argv, NULL, envp,
+//! NULL, apple strings, NULL, with apple[0] the executable path. The host
+//! environment is never read.
 use crate::memory::OwnedMemory;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

@@ -1,4 +1,4 @@
-//! Private source for system::execution::authority. No integration/build claim.
+//! The execution authority of one PE.
 use alloc::sync::Arc;
 
 #[derive(Debug, Clone)]

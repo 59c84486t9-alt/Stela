@@ -1,4 +1,4 @@
-//! Shared loader checks over actual original compiler artifacts; no raw entry.
+//! Loading real compiler artifacts.
 use super::*;
 use stela_compiler::{
     TargetCpu,

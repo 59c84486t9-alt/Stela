@@ -1,4 +1,4 @@
-//! Concrete same-owner preparation, physical fetch and context publication.
+//! Preparation, physical fetch and context publication for one translation.
 
 use super::{BlockRuntime, profile};
 use crate::{

@@ -1,8 +1,4 @@
-//! Fixed partial authority for checked EL0 GPR process-memory entry.
-//!
-//! This is the actual immutable declaration for a fresh software machine, not
-//! a snapshot that freezes another control owner. Dynamic EL/PSTATE/TCO remain
-//! solely in SystemState. MTE-present machines require a separate checked scope.
+//! The fixed controls of checked EL0 memory access.
 
 use super::{
     access::ExceptionLevel,

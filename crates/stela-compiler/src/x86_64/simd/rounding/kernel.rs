@@ -1,4 +1,4 @@
-//! Shared ordinary S/D rounding computation, independent of instruction commit.
+//! Single and double rounding arithmetic shared by the FRINT forms.
 
 use crate::{
     TargetCpu,

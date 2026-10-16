@@ -1,6 +1,5 @@
-//! Boot-private reclaiming heap. Every allocation retains its exact extent in a
-//! header, including alignment gaps and a short tail; deallocation coalesces the
-//! original physical extent. No firmware allocator or success stub is involved.
+//! Boot heap. Each allocation records its full extent, including alignment gaps,
+//! so deallocation can coalesce the original physical range.
 use core::{
     alloc::{GlobalAlloc, Layout},
     cell::UnsafeCell,

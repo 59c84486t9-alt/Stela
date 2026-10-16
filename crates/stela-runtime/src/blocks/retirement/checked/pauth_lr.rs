@@ -1,5 +1,4 @@
-//! Source-qualified LR staging over the existing actual bank and outer loan.
-//! Candidates carry no entry/PC permission. Canonical Active alone commits them.
+//! Staging of FEAT_PAuth_LR effects for commit by the retiring owner.
 use crate::{
     memory::{
         domain::{MemoryExecutionLoan, MemoryThread},

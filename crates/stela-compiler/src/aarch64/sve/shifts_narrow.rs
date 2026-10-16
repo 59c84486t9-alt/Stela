@@ -1,5 +1,4 @@
-//! Unpredicated SVE2 widening and narrowing, including interleaved B/T placement.
-//! Saturation is data-only: these forms never update FPSR.QC or NZCV.
+//! SVE2 unpredicated widening and narrowing shifts with bottom/top placement.
 use crate::aarch64::scalable::ElementSize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

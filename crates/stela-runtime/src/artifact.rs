@@ -1,4 +1,4 @@
-//! Artifact data and byte/map integrity only; no source Execute or PE grant.
+//! Compiled artifact data and its byte and source-map integrity checks.
 pub(crate) mod prepare;
 
 extern crate alloc;

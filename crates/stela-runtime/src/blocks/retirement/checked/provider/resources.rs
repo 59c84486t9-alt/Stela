@@ -1,8 +1,4 @@
-//! Disjoint ORIGINAL backend loans. Contextual hosted join; freestanding mounting remains unverified.
-//!
-//! This type supplies no NativeActive permission. The canonical Active borrows
-//! it once from the same sealed backend, then keeps its actual context separate
-//! from immutable source/control/thread borrows through session settlement.
+//! The disjoint resources a backend lends to one execution.
 use super::super::super::software_async::NoAsyncSources;
 use super::ProcessEntryControls;
 use crate::{

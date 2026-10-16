@@ -1,5 +1,4 @@
-//! Predicated SVE floating sign operations; inactive destination lanes merge.
-//! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06, FABS/FNEG vector forms.
+//! SVE predicated FABS and FNEG.
 
 use crate::aarch64::floating::Format;
 

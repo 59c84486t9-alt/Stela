@@ -1,5 +1,4 @@
-//! Upper-Z effects of accepted legacy V-register writes.
-//! Instruction-family legality and destination selection belong to the caller.
+//! Clearing upper Z bytes after AdvSIMD writes to V registers.
 
 use super::{ADDRESS_RDX, Host, storage_pointer, upper_offset, vector_memory, xmm};
 use crate::{

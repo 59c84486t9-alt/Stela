@@ -1,4 +1,4 @@
-//! Scoped context pointers shared by owned synchronous leaf/block entries.
+//! Execution-context pointers shared by context leaves and blocks.
 
 use stela_compiler::context::{ExecutionContext, ScalableStateView, memory::MemoryContextView};
 

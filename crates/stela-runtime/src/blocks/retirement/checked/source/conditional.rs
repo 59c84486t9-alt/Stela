@@ -1,6 +1,5 @@
-//! Validate a reached conditional carrier against ORIGINAL source and actual
-//! post-prefix state. The terminal branch changes neither its tested GPR nor
-//! NZCV, so the same state determines its architectural predicate after return.
+//! Validating a reached conditional branch terminal. The branch changes neither
+//! its tested register nor NZCV, so the post-prefix state decides it.
 use stela_compiler::{
     GuestAddress, GuestState, Lifter,
     aarch64::{Decoder, Operation, Register, Width, flags::condition_holds},

@@ -1,4 +1,4 @@
-//! Wide RHS preparation: full64 range classification or exact widened pairs.
+//! Wide-element right-hand sides for SVE comparisons.
 use super::{
     AND_EAX_IMMEDIATE, BYTE_BITS, ElementSize, Host, MOV_EAX_R8D, MOV_EDX_EAX, MOVD_XMM_EAX,
     MOVQ_XMM_RAX, MOVZX_EAX_AL, MOVZX_ECX_CL, Operand, QWORD_BYTES, REPEAT_BYTE_IN_DWORD,

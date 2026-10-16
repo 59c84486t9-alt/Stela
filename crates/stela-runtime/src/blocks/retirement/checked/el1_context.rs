@@ -1,6 +1,4 @@
-//! Canonical post-native translation publication and base exception completion.
-//! The runtime's original physical pin survives ending BoundSource; the actual
-//! publisher revalidates that pin and retains its replacement before retirement.
+//! Translation publication after native return and EL1 exception completion.
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec::Vec};
 mod services;

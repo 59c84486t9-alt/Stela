@@ -1,8 +1,5 @@
-//! LUTI register-table lookup using scalar gathers, SSE2 Boolean selection and SSSE3 shuffles.
-//!
-//! Whole-source staging preserves input/output aliases. ZT0 entries always have
-//! 32-bit stride, including Byte/Halfword results. All scratch SIMD operands are
-//! XMM0..7; the private frame contains architectural register storage only.
+//! LUTI2/LUTI4 from ZT0 with scalar gathers, SSE2 selects and SSSE3 shuffles.
+//! ZT0 entries always have a 32-bit stride. Scratch registers are XMM0-7.
 
 use alloc::vec::Vec;
 pub(super) mod lut_v2;

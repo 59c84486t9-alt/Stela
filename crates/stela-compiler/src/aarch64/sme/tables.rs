@@ -1,7 +1,4 @@
-//! Register-only SME2 table lookup, selection, widening and group permutations.
-//!
-//! These operations require streaming mode. Lookup additionally requires ZT0.
-//! Group encodings enforce alignment and do not wrap at Z31.
+//! SME2 LUTI2/LUTI4 (ZT0), SEL, multi-vector unpacks and ZIP/UZP.
 
 use crate::aarch64::scalable::{ElementSize, VECTOR_REGISTER_COUNT};
 

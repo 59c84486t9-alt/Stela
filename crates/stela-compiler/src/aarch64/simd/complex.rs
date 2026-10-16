@@ -1,4 +1,4 @@
-//! Classic complex FP forms from the pinned Arm 2026-06 reference.
+//! FCADD and FCMLA.
 use crate::aarch64::floating::{Format, complex::Rotation};
 
 use super::arithmetic::Shape;

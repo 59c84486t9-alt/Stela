@@ -1,4 +1,4 @@
-//! Predicate generation dispatch, feature boundaries and exact source maps.
+//! Predicate generation dispatch, feature limits and source maps.
 use super::*;
 use crate::aarch64::sve::predicate_generation;
 use alloc::vec::Vec;

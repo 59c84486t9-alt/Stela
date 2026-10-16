@@ -1,8 +1,5 @@
-//! Shared ZA state-bank access for the extended native ABI.
-//!
-//! R15 holds the validated ExecutionContext. The caller owns ZA availability,
-//! row/column selection, modulo arithmetic and bounds. These helpers expose no
-//! guest RAM access and never reinterpret ZA tiles or physical-vector aliases.
+//! ZA storage access for the extended native ABI. R15 holds the
+//! ExecutionContext; callers handle slice selection and bounds.
 
 use super::isa::SimdOpcode as Host;
 use crate::{

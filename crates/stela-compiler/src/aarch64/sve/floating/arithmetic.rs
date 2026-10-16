@@ -1,5 +1,4 @@
-//! Streaming SVE floating arithmetic operands; state and lane execution live separately.
-//! Encoding facts are pinned to Arm A64 2026-06. Feature/mode checks belong to the caller.
+//! SVE floating-point arithmetic operands.
 use crate::aarch64::{
     floating::{
         BinaryOperation, Format, complex::Rotation, fused::FusedOperation, minmax::MinMaxOperation,

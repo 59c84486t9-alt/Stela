@@ -1,6 +1,6 @@
-//! A bounded original-dyld startup probe, not an application launcher.
-//! Reviewed startup prefixes or the original first continuous-clock call run.
-//! Main/dyld, stack and read-only clock mappings stay owned together.
+//! Run original dyld from its entry point up to a bounded startup prefix or its
+//! first continuous-clock call. Main image, dyld, stack and clock pages are
+//! mapped and owned together.
 use anyhow::{Context, Result, ensure};
 use std::path::{Path, PathBuf};
 use stela_compiler::{GuestAddress, GuestState};

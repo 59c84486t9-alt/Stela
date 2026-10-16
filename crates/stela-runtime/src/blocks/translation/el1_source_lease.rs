@@ -1,6 +1,4 @@
-//! Readonly ORIGINAL installed source lease for typed EL1 register and literal plans.
-//! This retains actual Initial allocation/physical/code storage, never copied
-//! descriptors, and grants no PE/native/retirement capability.
+//! Read-only access to installed EL1 source for register and literal blocks.
 use super::{owner::InstalledEl1Sources, profile};
 use crate::{
     memory::{

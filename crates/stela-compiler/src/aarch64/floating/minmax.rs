@@ -1,4 +1,4 @@
-//! Exact same-format min/max outcomes; callers own shape, merging and reduction order.
+//! FMIN/FMAX/FMINNM/FMAXNM lane results. Callers handle shape and reduction order.
 use super::{
     Class, Control, Format, INEXACT, INVALID, Outcome, UNDERFLOW, UnsupportedControl,
     compare_operands, nan, process_denormals, unpack,

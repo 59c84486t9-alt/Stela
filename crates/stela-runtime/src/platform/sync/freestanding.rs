@@ -1,11 +1,5 @@
-//! Actual x86 ring-0 acquire/release locks over canonical metadata.
-//!
-//! The loader must exclude interrupt/NMI/SMI reentry into these resources and
-//! preemption/migration across a guard. SMP peers use the same atomics. No local
-//! IF toggling pretends to establish arbitrary nested guard lifetimes. These
-//! locks grant no guest order or PE admission by themselves.
-//! Fairness is unproven, as for the original hosted mutex. Panic must abort; no
-//! poisoned state can be resumed after a panic and no fake recovery is supplied.
+//! Spin locks for ring 0. The loader must exclude interrupt re-entry and
+//! migration while a guard is held. Panics abort.
 use alloc::rc::Rc;
 use core::{
     cell::UnsafeCell,

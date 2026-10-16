@@ -1,4 +1,4 @@
-//! Classic BF16 multiply-add with guarded SSE2 or independently checked FMA.
+//! BFMLAL with SSE2 or FMA3.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, VZEROUPPER, branch, commit_ah0_inexact, emit_fma,

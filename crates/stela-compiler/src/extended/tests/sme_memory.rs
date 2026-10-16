@@ -1,4 +1,4 @@
-//! SME memory dispatch, guest availability and checked-service requirements.
+//! SME memory dispatch, guest features and memory-service requirements.
 use super::*;
 use crate::aarch64::sme::memory::{self as sme_memory, Operand as SmeMemoryOperand};
 use alloc::vec;

@@ -1,4 +1,4 @@
-//! Classic Arm A64 June 2026 FEAT_I8MM matrix and mixed-sign dot products.
+//! FEAT_I8MM: SMMLA, UMMLA, USMMLA, USDOT and SUDOT.
 use super::arithmetic::Shape;
 
 const REGISTER_MASK: u32 = 31;

@@ -1,4 +1,4 @@
-//! Fixed-width FP8 conversion operands from the pinned June 2026 A64 forms.
+//! AdvSIMD FP8 conversions: F1CVTL/F2CVTL, BF1CVTL/BF2CVTL, FCVTN.
 use crate::aarch64::floating::fp8::ConversionFormat;
 
 const WIDEN_MASK: u32 = 0xbfff_fc00;

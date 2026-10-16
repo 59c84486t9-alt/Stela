@@ -1,4 +1,4 @@
-//! Complex Half arithmetic with exact Double admission and shared lane packing.
+//! Half-precision FCADD/FCMLA through exact double intermediates.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
     ArithmeticOpcode, Condition, MXCSR_INEXACT, Rounding, branch, emit_opcode_to,

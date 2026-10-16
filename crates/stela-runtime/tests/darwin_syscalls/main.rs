@@ -1,5 +1,5 @@
-//! Owned-code integration of native SVC boundaries and explicit BSD completion.
-//! The pipe service below is a test backend, not a Darwin syscall implementation.
+//! Darwin system calls from native SVC exits. The pipe service here is a test
+//! backend.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 
 use anyhow::{Result, bail, ensure};

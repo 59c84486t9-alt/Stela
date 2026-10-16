@@ -1,7 +1,4 @@
-//! Scalar integer load/store register-offset addressing.
-//!
-//! Arm instruction reference: https://documentation-service.arm.com/static/67e40f3398aa3c3b6eea6a85
-//! The ordinary-RAM profile disables tags/PAC; base SP alignment is checked.
+//! Integer loads and stores with register-offset addressing.
 use super::{MemoryTransfer, Register, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

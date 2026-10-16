@@ -1,6 +1,4 @@
-//! Borrowed QARMA5 LR key service, never source/control or instruction authority.
-//! The eventual same-PE owner retains this loan alongside its actual source,
-//! PSTATE/PACM, sole controls and effect loan. No key material or ID bank is copied.
+//! QARMA5 key service for FEAT_PAuth_LR.
 use super::{
     AuthResult, AuthenticationError, Context, Key, TwoModifierError,
     features::LinkRegisterPauthCapability,

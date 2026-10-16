@@ -1,4 +1,4 @@
-//! Arm A64 2026-06 integer SIMD combine, reduce and per-lane bit-count facts.
+//! Integer across-lane reductions, pairwise combines and per-lane bit counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Combine {
     Add,

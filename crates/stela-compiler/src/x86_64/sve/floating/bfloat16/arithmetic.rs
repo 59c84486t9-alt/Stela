@@ -1,4 +1,4 @@
-//! True-BF arithmetic families; shared frame and numerical helpers own effects.
+//! Non-widening BF16 arithmetic.
 use alloc::vec::Vec;
 mod binary;
 mod fused;

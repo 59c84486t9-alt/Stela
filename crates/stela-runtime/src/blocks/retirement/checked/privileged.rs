@@ -1,6 +1,5 @@
-//! Concrete declared-software SystemV1 owner. The existing canonical Active owns
-//! original ThreadState/PC/phase; this backend owns only actual controls, producer
-//! routing and borrowed memory resources. It supplies no raw callback or permit.
+//! The software system backend of a privileged PE: controls, system-register
+//! effects and memory resources. Thread state and PC stay with the retiring owner.
 use super::super::software_async::{CtiRoute, DebugSources};
 use super::{
     NativeObservation, provider,

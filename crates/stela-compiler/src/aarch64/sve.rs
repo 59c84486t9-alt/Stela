@@ -1,5 +1,4 @@
-//! Streaming-SVE operands. Family modules validate their allocated encodings.
-//! Feature, mode and execution-profile checks belong to the shared caller.
+//! SVE operands shared by the SVE instruction families.
 
 pub mod address;
 pub mod dot;

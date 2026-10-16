@@ -1,4 +1,4 @@
-//! Transactional whole-Z FP8 conversion. All aliased inputs precede evaluation.
+//! Completion of SVE FP8 conversions.
 
 use anyhow::anyhow;
 use stela_compiler::{

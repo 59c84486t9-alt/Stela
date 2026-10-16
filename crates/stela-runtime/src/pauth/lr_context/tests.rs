@@ -1,4 +1,4 @@
-//! Configuration/crypto component checks; these observations are not ARM originals.
+//! FEAT_PAuth_LR key configuration and cryptography.
 use super::*;
 use crate::{
     pauth::{Keys, Version},

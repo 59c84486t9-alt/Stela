@@ -1,4 +1,4 @@
-//! Context-backed emission for the generic EL1 MMU-off integer plan.
+//! Emission of EL1 blocks with the MMU off.
 use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu,
     aarch64::{Instruction, Register},

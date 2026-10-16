@@ -1,8 +1,5 @@
-//! Integer-only admission guards for exact native floating-point lanes.
-//!
-//! Callers replace inactive operands with positive zero before classification.
-//! Accepted host operations must preserve complete caller MXCSR and guest FPSR;
-//! these guards do not install an environment or grant any exceptional outcome.
+//! Integer guards selecting which lanes may use native FP. Inactive operands are
+//! replaced with +0 before classification.
 
 use crate::{
     GuestState, TargetCpu,

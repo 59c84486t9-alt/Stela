@@ -1,8 +1,5 @@
-//! Scalar unprivileged integer transfers, retaining their access intent.
-//!
-//! Native lowering currently supports EL0 direct private Normal RAM only.
-//! Guest privilege overrides, MMU permissions and CPA checks require a separate
-//! execution profile; they must not be inferred from the ordinary-RAM mapping.
+//! Unprivileged loads and stores (LDTR*, STTR*). Native code supports EL0 on
+//! directly mapped RAM only.
 use super::{MemoryTransfer, Register, Width, register};
 
 const CLASS_MASK: u32 = 0x3f20_0c00;

@@ -1,4 +1,4 @@
-//! Scalar absolute value and bit counts from FEAT_CSSC.
+//! FEAT_CSSC ABS, CNT and CTZ.
 use super::{Register, Width, register};
 
 const OPCODE_MASK: u32 = 0xffff_fc00;

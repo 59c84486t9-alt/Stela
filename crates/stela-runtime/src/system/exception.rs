@@ -1,9 +1,7 @@
-//! Ordered base A64 NS EL0/EL1 exception effects.
+//! A64 EL0/EL1 exception entry and return.
 //!
-//! Plans are source-state checked before any service call. Service failures
-//! expose the committed prefix; callers must not roll back memory or retry the
-//! whole instruction. The caller establishes fetch/decode and synchronous fault
-//! priority before constructing an event. Fetching the returned PC is subsequent.
+//! A failed service reports the committed prefix; callers must not roll back
+//! memory or retry the instruction.
 
 pub(crate) mod higher_el;
 

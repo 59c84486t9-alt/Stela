@@ -1,8 +1,5 @@
-//! Conservative compile-time facts for nonfaulting scalar sequences.
-//!
-//! Facts are not recovery metadata. A caller must still emit a distinct native
-//! commit and recovery boundary for every guest operation, including a constant
-//! replacement, and start each independently entered region with empty facts.
+//! Compile-time constant facts for non-faulting scalar sequences. Each separately
+//! entered region starts with no facts.
 use crate::aarch64::{Operation, Register, WideMove, Width};
 
 const REGISTER_SLOTS: usize = 32;

@@ -1,5 +1,4 @@
-//! LDNP/STNP integer and SIMD pairs from the pinned Arm 2026-06 reference.
-//! Non-temporal intent remains explicit, independent of the selected RAM recipe.
+//! LDNP and STNP, integer and SIMD.
 use super::{Register, register};
 
 const CLASS_MASK: u32 = 0x3b800000;

@@ -1,4 +1,4 @@
-//! Shared packed-predicate helpers, grouped by architectural responsibility.
+//! Packed predicate helpers.
 use alloc::vec::Vec;
 mod counter;
 mod counter_mask;

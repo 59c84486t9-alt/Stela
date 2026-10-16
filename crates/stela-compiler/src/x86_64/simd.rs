@@ -1,5 +1,4 @@
-//! Baseline SSE2 data movement. Original Arm bytes are never host instructions.
-//! Ordinary private RAM only: no 128-bit atomicity or guest fault delivery claim.
+//! AdvSIMD and FP emission with SSE2.
 use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{memory_address, memory_writeback};

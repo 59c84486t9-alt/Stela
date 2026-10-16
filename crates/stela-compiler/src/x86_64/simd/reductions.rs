@@ -1,4 +1,4 @@
-//! Native packed integer combining, horizontal reductions and bit counts.
+//! Integer pairwise combines, across-lane reductions and bit counts.
 use super::{
     Host, commit, packed, read_vector, rearrange::constant, shifts::logical_shift, shuffle,
 };

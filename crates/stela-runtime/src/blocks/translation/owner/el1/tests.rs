@@ -1,5 +1,4 @@
-//! Genuine original Initial installation + source-RAM walks/fetches. No PE,
-//! native executor, architectural exception delivery or MMU admission is tested.
+//! EL1 source installation and source-RAM fetches.
 use super::super::InstalledCodeSources;
 use crate::{
     blocks::BlockRuntime,

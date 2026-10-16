@@ -1,4 +1,4 @@
-//! Normal Half multiplicands with a Single accumulator and one final rounding.
+//! FMLAL/FMLSL on normal half inputs with one final rounding.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, VZEROUPPER, branch, clear_scalar, commit_inexact,

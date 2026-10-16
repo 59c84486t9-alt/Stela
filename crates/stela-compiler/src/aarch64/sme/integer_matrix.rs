@@ -1,8 +1,4 @@
-//! Integer SME outer products and ZA vector arithmetic.
-//!
-//! Structural decoding is independent of execution controls. The caller checks
-//! streaming mode, ZA enablement and the per-operand feature requirements before
-//! accessing state. None of these operations change NZCV, FPCR/FPSR, Z/P or RAM.
+//! SME integer outer products and ZA vector arithmetic.
 use crate::aarch64::scalable::ElementSize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

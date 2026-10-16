@@ -1,5 +1,4 @@
-//! Exact-footprint lane transfers and scalar-to-vector replication.
-//! The parent proves the complete access fits one protection granule.
+//! LD1-4/ST1-4 (single lane) and LD1R-4R within one page.
 use super::super::{commit, vector_offset};
 use super::{element_load, element_store, scalar_state_transfer};
 use crate::{

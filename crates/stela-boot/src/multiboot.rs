@@ -1,5 +1,4 @@
-//! Bounded trusted-loader transport intake. Original module bytes are borrowed
-//! unchanged; this code is neither an ARM loader nor an execution engine.
+//! Multiboot module intake. Module bytes are borrowed unchanged.
 use core::{ptr, slice};
 const IDENTITY_END: usize = 1 << 30;
 const MAX_COMMAND_BYTES: usize = 4096;

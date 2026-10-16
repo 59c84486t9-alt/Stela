@@ -1,8 +1,5 @@
-//! Explicit, immutable ARM system-integrity policy queries.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! bsd/kern/kern_csr.c, bsd/sys/csr.h and bsd/kern/syscalls.master.
-//! This guest policy neither queries nor changes the host's security policy.
+//! System-integrity (CSR) policy queries against a fixed guest policy
+//! (XNU `bsd/kern/kern_csr.c`). The host's policy is never consulted.
 
 use super::{
     BsdCompletion, BsdPrototype, BsdReturnType, BsdServiceEvent, PendingBsdCall, classify_bsd_call,

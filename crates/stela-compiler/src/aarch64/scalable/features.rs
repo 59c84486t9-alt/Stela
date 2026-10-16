@@ -1,7 +1,5 @@
-//! Explicit guest architectural features, independent of host capabilities.
-//!
-//! Sets preserve declarations exactly: construction does not infer dependencies,
-//! identify Apple hardware, or claim that an instruction mapping is implemented.
+//! Guest SVE/SME feature sets. Construction keeps declarations as given and does
+//! not infer dependencies.
 
 use alloc::string::String;
 use alloc::vec::Vec;

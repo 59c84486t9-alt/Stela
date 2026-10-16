@@ -1,5 +1,4 @@
-//! Integer complex products, reusing exact rounded multiply/accumulate arithmetic.
-//! A chunk's three source snapshots precede every destination component write.
+//! SVE integer complex multiplies with rounding (SQRDCMLAH, ...).
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES};
 use crate::aarch64::sve::integer_products::Kind;

@@ -1,5 +1,4 @@
-//! Invocation-local accounting for the versioned ordinary resident-block ABI.
-//! This counter is not a CPU, memory or asynchronous-delivery permission.
+//! Per-invocation iteration budget for resident blocks.
 
 pub const RESIDENT_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-resident-budget-v1";

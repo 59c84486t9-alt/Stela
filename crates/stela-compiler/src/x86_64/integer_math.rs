@@ -1,4 +1,4 @@
-//! Baseline x86-64 integer math; guest NZCV stays unchanged.
+//! Integer multiply, divide, shifts and bit operations. Guest NZCV is unchanged.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::integer_math::{Kind, Operand};
 use alloc::vec::Vec;

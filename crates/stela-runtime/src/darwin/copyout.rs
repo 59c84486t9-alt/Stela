@@ -1,12 +1,5 @@
-//! Source-ordered copyout for serialized owned ordinary guest memory.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! osfmk/arm64/copyio.c and machine_routines_asm.s BCOPY_IMPL. This explicit
-//! lower-VA47 profile has minimum address zero; it does not infer vm_map_min
-//! from the first mapping or normalize tagged addresses. Successful copies use
-//! OwnedMemory's whole-range fast path. Faults preserve source-defined complete
-//! store prefixes; a fault within a partly writable STP declines before effects.
-//! Shared participating memory requires its separately owned publication adapter.
+//! Copying service results into guest memory in source order (XNU
+//! `osfmk/arm64/copyio.c`). A fault keeps the completed store prefix.
 
 use crate::memory::{DIRECT_RAM_USER_END, OwnedMemory};
 use anyhow::{Result, bail, ensure};

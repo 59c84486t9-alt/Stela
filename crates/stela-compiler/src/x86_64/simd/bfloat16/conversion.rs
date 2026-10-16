@@ -1,4 +1,4 @@
-//! Integer-only Single-to-BF16 quantization with precise exceptional fallback.
+//! BFCVT/BFCVTN by integer rounding, with a software path for special values.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, branch, exponent_range, guard_ah0_exceptions,

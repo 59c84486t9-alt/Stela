@@ -1,4 +1,4 @@
-//! PMOV production dispatch, complete body/maps and feature/mode boundaries.
+//! PMOV dispatch, source maps and feature/mode limits.
 use super::*;
 use crate::aarch64::sve::integer_predicate_move;
 use alloc::vec::Vec;

@@ -1,5 +1,4 @@
-//! Streaming-SVE extension, pair arithmetic and narrowing-high operand decoding.
-//! Feature/mode and MOVPRFX checks belong to the shared scalable boundary.
+//! SVE unpacks, pairwise arithmetic and high-narrowing operations.
 use crate::aarch64::scalable::{ElementSize, Predication};
 
 const SIZE_SHIFT: u32 = 22;

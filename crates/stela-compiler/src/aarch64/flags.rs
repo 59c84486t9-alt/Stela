@@ -1,4 +1,4 @@
-//! Architectural NZCV predicates and scalar FlagM/FlagM2 encodings.
+//! NZCV condition evaluation and FlagM/FlagM2: CFINV, RMIF, SETF8/16, XAFLAG, AXFLAG.
 use super::{Register, register};
 
 pub const NZCV_N: u32 = 1 << 31;

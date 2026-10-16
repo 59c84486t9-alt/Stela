@@ -1,6 +1,5 @@
-//! One synchronous typed EL1 register call over original canonical storage/source.
-//! The actual source profile selects the one-argument B or context ABI.
-//! Reached protected-storage errors remain observations, never success/Ready.
+//! One native call of an EL1 register-only block, through the plain or context
+//! ABI as its profile requires.
 use super::super::source::BoundSource;
 use crate::execution::NativeStorageError;
 use crate::{

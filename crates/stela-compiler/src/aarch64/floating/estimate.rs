@@ -1,5 +1,4 @@
-//! Deterministic standard-precision estimates in the RPRES-disabled A64 profile.
-//! AFP controls are supported; this does not assert a closed Apple hardware profile.
+//! FRECPE and FRSQRTE estimates without FEAT_RPRES.
 pub mod precision;
 
 use super::{

@@ -1,5 +1,4 @@
-//! Four classic SHA512 forms from the pinned Arm A64 2026-06 reference.
-//! Profile: FEAT_SHA512, FP/AdvSIMD enabled, nonstreaming, 128-bit V state.
+//! SHA512H, SHA512H2, SHA512SU0 and SHA512SU1.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

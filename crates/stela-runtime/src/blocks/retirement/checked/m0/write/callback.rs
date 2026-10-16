@@ -1,7 +1,4 @@
-//! One reached request from the exact bound M0 X-store pair native body.
-//!
-//! This owns no PE permission. Only the closed native session may lend this
-//! view while the original authority guard owns the prepared RAM transaction.
+//! Memory-service callback for the M0 STP.
 use crate::memory::domain::physical::{
     M0RamWritePlatformError, M0RamWritePrepared, M0RamWriteProgress,
 };

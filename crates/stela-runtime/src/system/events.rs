@@ -1,8 +1,5 @@
-//! Per-PE event publication and checked cooperative WFx completion.
-//!
-//! This profile never parks or creates pending waits. A future parking service
-//! must supply its own proved combined predicate/wake protocol. PE identity is
-//! the endpoint allocation, independent of host threads and guest processes.
+//! Per-PE events (SEV, SEVL) and WFE/WFI. Waits never park: a WFx completes
+//! once its wake condition is checked.
 
 use super::access::{ExceptionLevel, Profile, SecurityState};
 use crate::platform::sync::Mutex;

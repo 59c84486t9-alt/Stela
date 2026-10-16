@@ -1,8 +1,4 @@
-//! Ordinary low128 FP/AdvSIMD access joined to existing process-memory owners.
-//!
-//! Construct inside Low128FpAccess::with_guest. The actual invocation provider
-//! retains the same PE/source/RX/retirement loan and outer domain execution loan;
-//! this adapter adds no register bank, opcode decoder or permission boolean.
+//! FP/AdvSIMD access combined with checked memory.
 
 use super::{
     EntryBoundary, EventEndpoint, FixedProcessMemoryControls, GuestState, MemoryContextView,

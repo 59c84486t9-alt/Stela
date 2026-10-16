@@ -1,8 +1,4 @@
-//! Exact naturally aligned scalar Device-nGnRnE reads from the canonical physical RAM owner.
-//!
-//! Private, unregistered source. The required scalar M0DataReadLoan and physical
-//! registry port are not replaced by stubs here. No Config, copied translation,
-//! logical-domain address, retirement token or host pointer can mint this loan.
+//! Naturally aligned Device-nGnRnE scalar reads from physical RAM.
 
 use crate::platform::sync::MutexGuard;
 

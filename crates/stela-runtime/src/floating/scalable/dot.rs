@@ -1,6 +1,5 @@
-//! Whole-instruction streaming Half dot and widening numerical completion.
-//! Read roles are snapshotted before evaluation; result and sticky status commit
-//! once, after every lane has completed under the selected effective FP controls.
+//! Completion of SVE half-precision dot and widening multiply-add. The result and
+//! FPSR commit once, after every lane is computed.
 
 use anyhow::anyhow;
 use stela_compiler::{

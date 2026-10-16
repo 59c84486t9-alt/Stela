@@ -1,8 +1,5 @@
-//! Source-derived obligations for a prepared scalable body.
-//!
-//! This metadata describes the architectural source helper, rather than a
-//! cached permission decision. The CPU owner evaluates it against the actual
-//! controls and exclusively borrowed state immediately before native entry.
+//! Requirements of a prepared scalable body, checked against the live controls
+//! immediately before native entry.
 
 use super::{ElementSize, features::FeatureRequirement};
 use crate::GuestAddress;

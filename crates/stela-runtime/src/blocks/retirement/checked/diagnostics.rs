@@ -1,5 +1,4 @@
-//! Descriptive formatting of every retained failure observation.
-//! Formatting borrows the original payloads and grants no execution authority.
+//! Formatting of retained failure observations.
 
 use super::{NativeObservation, OwnedMemoryFault, OwnedStop, RawMemoryObservation};
 use core::fmt;

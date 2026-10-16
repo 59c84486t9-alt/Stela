@@ -1,6 +1,8 @@
-//! Serialized native block dispatch over immutable guest instruction snapshots.
-//! Guest code bytes are fetched from owned regions; data addresses retain the
-//! direct-RAM profile. Replacement invalidates dependent RX copies before return.
+//! Native block dispatch.
+//!
+//! Guest code is fetched from registered regions and translated a block at a
+//! time; data accesses use direct RAM. Replacing code invalidates the dependent
+//! native blocks before returning.
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
 pub(crate) mod retirement;

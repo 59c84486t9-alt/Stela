@@ -1,5 +1,4 @@
-//! Predicated SVE integer reductions to scalar or 128-bit V results.
-//! Streaming permission and scalable register storage belong to the shared core.
+//! SVE predicated integer reductions to a scalar or 128-bit result.
 use super::prefix;
 use crate::aarch64::scalable::ElementSize;
 

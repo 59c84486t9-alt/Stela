@@ -1,4 +1,4 @@
-//! Shared A64 system decisions, authoritative state and checked effect dispatch.
+//! A64 system state, system-instruction decisions and their effects.
 
 pub mod access;
 pub mod barriers;

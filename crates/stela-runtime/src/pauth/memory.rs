@@ -1,8 +1,5 @@
-//! Authenticated-load operand staging and architectural commit ordering.
-//!
-//! Authentication policy, keys and faults belong to the process PAuth context.
-//! The read callback owns data address translation, permissions and RAM effects;
-//! it receives the full tagged effective address, never a silently stripped one.
+//! LDRAA/LDRAB: authentication, then a load through the read callback with the
+//! full tagged address.
 use stela_compiler::{
     GuestState,
     block::pauth_memory::{DataKey, Load},

@@ -1,4 +1,4 @@
-//! Transactional vector complex addition and partial multiply-add completion.
+//! Completion of FCADD and FCMLA.
 use stela_compiler::{
     GuestState,
     aarch64::{

@@ -1,4 +1,4 @@
-//! The canonical checked process consumer and its retained actual owners.
+//! Checked block execution: running native blocks and retiring their effects.
 use super::ThreadState;
 use crate::system::{
     execution::{

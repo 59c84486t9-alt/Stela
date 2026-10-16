@@ -1,8 +1,5 @@
-//! Exact instruction fetch through the existing physical domain and backing.
-//!
-//! This private leaf supplies no virtual translation or cache/control state.
-//! Its caller first performs canonical stage1 Fetch and instruction-address
-//! alignment checks, retaining their architectural provenance.
+//! Physical instruction fetch. Callers perform stage-1 translation and alignment
+//! checks first.
 
 use super::PhysicalAddressSpace;
 use crate::memory::{

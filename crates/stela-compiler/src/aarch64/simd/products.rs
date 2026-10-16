@@ -1,4 +1,4 @@
-//! Arm A64 2026-06 SIMD products and widened integer arithmetic.
+//! Integer multiplies and widening arithmetic (MUL, MLA, SMULL, UADDL, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Accumulate {
     None,

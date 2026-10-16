@@ -1,5 +1,4 @@
-//! Pure system-access requests and decisions, before context/backend mutation.
-//! The caller owns instruction PCs, exception entry and atomic effect commitment.
+//! System-register access requests and decisions, before any effect.
 pub use stela_compiler::aarch64::system::registers::Encoding;
 
 const ZERO_REGISTER: u8 = 31;

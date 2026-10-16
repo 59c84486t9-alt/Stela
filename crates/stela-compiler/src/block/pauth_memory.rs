@@ -1,5 +1,4 @@
-//! Generic-key PAC and authenticated data-load decoding.
-//! Profile controls and process key material belong to the runtime.
+//! PACGA and authenticated loads (LDRAA, LDRAB).
 use serde::Serialize;
 
 const REGISTER_MASK: u32 = 31;

@@ -1,5 +1,5 @@
-//! Match existing fixed-domain QARMA helpers to this retained PE's actual IDs
-//! and SCTLR/TCR bank. No key copies, alternate policy or completion authority.
+//! Selecting the PAC algorithm parameters from the PE's ID registers and
+//! SCTLR/TCR.
 use crate::{
     pauth,
     system::{

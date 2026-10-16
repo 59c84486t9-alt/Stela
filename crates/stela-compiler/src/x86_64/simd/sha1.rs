@@ -1,5 +1,4 @@
-//! SHA1 instructions: scalar integer rounds, SSE2 schedule and checked Intel SHA.
-//! All inputs are consumed before the single vector commit, including aliases.
+//! SHA1: scalar rounds, SSE2 schedule, or Intel SHA when available.
 use super::sha32::{
     HIGH_WORD_BYTE, RESULT, Rotate32, Scalar32, WORD_BITS, WORD_BYTES, WORDS_PER_VECTOR,
     move_to_vector, pack_state, read_scalar_vector,

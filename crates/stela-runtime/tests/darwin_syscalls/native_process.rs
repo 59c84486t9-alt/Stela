@@ -1,4 +1,4 @@
-//! Native process-ID service through the current thread's shared process owner.
+//! `getpid` through the thread's process.
 #![cfg(target_os = "macos")]
 
 use super::*;

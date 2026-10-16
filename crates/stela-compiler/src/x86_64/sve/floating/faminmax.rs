@@ -1,5 +1,5 @@
-//! Integer-only magnitude extrema for every finite H/S/D lane and infinity.
-//! Active NaNs use exact source completion; inactive poison never evaluates.
+//! SVE FAMIN/FAMAX by integer magnitude comparison. Active NaNs use software
+//! completion.
 use super::classify::guard_active_exception_enables;
 use crate::{
     CompileError, GuestAddress, TargetCpu,

@@ -1,7 +1,4 @@
-//! Resolved CPA2 arithmetic effects, supplied by the architectural control owner.
-//!
-//! This value is neither a CPU-feature witness nor an owner/generation lease.
-//! It has no default: context admission must obtain the actual effective controls.
+//! Resolved FEAT_CPA2 arithmetic controls.
 
 const TOP_BYTE_SHIFT: u32 = 56;
 const POINTER_SIGN_BIT: u32 = 55;

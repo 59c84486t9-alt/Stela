@@ -1,6 +1,4 @@
-//! Packed Single/Double square roots with shared transactional MXCSR staging.
-//! Positive normals, +0 and +infinity use hardware SQRT; other active inputs
-//! retain exact shared completion. Inactive operands become +0 before host FP.
+//! SVE FSQRT: SQRTPS/SQRTPD for positive normals, +0 and +infinity.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

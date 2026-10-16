@@ -1,4 +1,4 @@
-//! Three-operand Arm fused arithmetic with one architectural rounding.
+//! Fused multiply-add with a single rounding.
 use super::{
     Class, Control, EXCEPTIONS, FPCR_DN, FPCR_EXCEPTION_ENABLE_SHIFT, Format, INPUT_DENORMAL,
     INVALID, Operand, Outcome, UnsupportedControl, negate, rounded_outcome, unpack, widen,

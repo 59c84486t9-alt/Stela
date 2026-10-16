@@ -1,8 +1,5 @@
-//! Exact normal-domain reciprocal steps with transactional scalable staging.
-//!
-//! FRSQRTS scales a normal multiplicand exactly before its sole rounding.
-//! Baseline multiplication is accepted only when its actual host status proves
-//! the intermediate exact; checked FMA admits inexact products directly.
+//! SVE FRECPS/FRSQRTS on normal values. A baseline multiply is used only when the
+//! host status shows it was exact.
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{

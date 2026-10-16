@@ -1,4 +1,4 @@
-//! Exact scalar baseline for complete-element shifts and data-only saturation.
+//! Scalar element shifts and saturation.
 use crate::aarch64::{
     scalable::ElementSize,
     sve::shifts::{Count, Kind},

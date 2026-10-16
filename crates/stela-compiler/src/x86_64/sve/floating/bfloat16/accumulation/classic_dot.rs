@@ -1,4 +1,4 @@
-//! Existing packed classic BF round-to-odd recipe with shared scalable staging.
+//! Classic BFDOT with round-to-odd intermediates.
 use super::{LEFT, RIGHT};
 use crate::{
     TargetCpu,

@@ -1,4 +1,4 @@
-//! Owned retained-process diagnostics. These copies confer no PE authority.
+//! Owned copies of retained diagnostics.
 use crate::{clock, thread};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

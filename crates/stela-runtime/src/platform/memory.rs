@@ -1,5 +1,4 @@
-//! Host allocation error retains its original API. Freestanding resources come
-//! from the mounted loader frame owner.
+//! Host memory allocation; the freestanding build uses the loader's frames.
 #[cfg(feature = "std")]
 pub(crate) type Error = std::io::Error;
 #[cfg(not(feature = "std"))]

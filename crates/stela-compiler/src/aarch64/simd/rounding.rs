@@ -1,4 +1,4 @@
-//! Scalar and AdvSIMD integral rounding from the pinned Arm A64 2026-06 reference.
+//! Scalar and AdvSIMD FRINT*.
 use crate::aarch64::floating::{Format, rounding::RoundingOperation};
 
 use super::arithmetic::Shape;

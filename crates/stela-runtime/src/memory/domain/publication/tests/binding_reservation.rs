@@ -1,4 +1,4 @@
-//! Runs inside existing domain/publication test privacy, without exposing monitor internals.
+//! Reservation behavior of bound mappings.
 use super::super::super::{MappingAttributes, MemoryDomain, MemorySystem};
 use crate::memory::{
     backing::MemoryView,

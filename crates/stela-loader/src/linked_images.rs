@@ -1,5 +1,5 @@
-//! Explicit Apple image sets with two-level chained binding and shared dispatch.
-//! This is trusted entry research, not dyld or a complete macOS process loader.
+//! A set of images bound to each other through chained fixups and run from an
+//! entry point (not a full dyld or process loader).
 use super::{
     chained_fixups::{self, DecodedFixups, RebaseFixup},
     exports::{self, Export},

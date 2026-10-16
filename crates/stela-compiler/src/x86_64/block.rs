@@ -1,4 +1,4 @@
-//! Guest control transfers return to the native dispatcher with canonical state.
+//! Block control transfers: every branch returns to the dispatcher.
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;

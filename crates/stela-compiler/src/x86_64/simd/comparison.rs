@@ -1,4 +1,4 @@
-//! FP comparisons: exception-free native ordering and precise numerical fallback.
+//! FP comparisons: exception-free native ordering, software path for signaling cases.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     Condition, EXPONENT_VECTOR, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR, branch,

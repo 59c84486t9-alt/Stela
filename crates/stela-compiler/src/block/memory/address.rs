@@ -1,4 +1,4 @@
-//! Composable checked address specialization, separate from actual CPU controls.
+//! Address specializations for checked memory access.
 
 use crate::context::memory::{
     SpAlignmentRequirement,

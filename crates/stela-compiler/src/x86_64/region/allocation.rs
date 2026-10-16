@@ -1,8 +1,5 @@
-//! Value liveness within an owned nonfaulting span.
-//!
-//! Every canonical side exit requires the complete architectural bank. A dead
-//! value here is an older version overwritten before that exit; this analysis
-//! never permits discarding a final output or crossing a faultable boundary.
+//! Value liveness within a non-faulting span. A value is dead only when it is
+//! overwritten before the next exit.
 use super::{Emitter, Resident, analysis::Effects, encoding, flags, location::GPR_SLOTS};
 use crate::aarch64::{Register, Width};
 use alloc::vec;

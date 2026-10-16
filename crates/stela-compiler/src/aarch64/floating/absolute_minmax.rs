@@ -1,4 +1,4 @@
-//! Exact absolute min/max outcomes; callers own lane selection and sticky status.
+//! FAMIN/FAMAX lane results. Callers handle lane selection and FPSR.
 use super::{
     Control, FPCR_AH, FPCR_FIZ, FPCR_FZ, FPCR_FZ16, Format, Outcome, UnsupportedControl, nan,
     unpack,

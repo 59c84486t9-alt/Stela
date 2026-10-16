@@ -1,12 +1,9 @@
-//! Bounded basic-block translation with explicit guest control-flow exits.
+//! Basic-block translation.
 //!
-//! Native entry is System V `BlockExit function(GuestState *state)`. The caller
-//! owns dispatch and fetch validation; emitted code never jumps to a guest PC.
-//! Guest memory uses the ordinary direct-RAM profile. GCS and guarded/BTI pages
-//! are disabled, and architectural exception entry and PSTATE.BTYPE are not
-//! modeled. Ordinary compilation declines PAC; explicit software PAC compilation
-//! requests a runtime helper without authenticating or changing its operand.
-//! SVC/BRK stop at an explicit synchronous-trap boundary.
+//! Native entry is System V `BlockExit function(GuestState *state)`. Emitted code
+//! never jumps to a guest PC: every control-flow change exits to the dispatcher.
+//! SVC and BRK exit at a synchronous-trap boundary. PAC instructions call a
+//! runtime helper when software PAuth is enabled.
 
 use crate::{
     CompileError, GuestAddress, Lifter, NativeBlock,

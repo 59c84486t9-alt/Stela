@@ -1,9 +1,4 @@
-//! Genuine installed-context/source lease for bounded M0 data cohorts.
-//!
-//! Construction accepts only the original private resources created by real
-//! Initial publication over the actual fresh M0 runtime. No Config, copied
-//! snapshot, Arc label or source descriptor can create this lease. The runtime
-//! and its original CodeRegion registry are separate disjoint owner fields.
+//! Access to installed source for M0 data blocks.
 
 use super::{owner::InstalledM0Sources, profile};
 use crate::{

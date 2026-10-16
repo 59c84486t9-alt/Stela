@@ -1,6 +1,4 @@
-//! Owner-sequencing tests with a deliberately synthetic effects observer.
-//! These do not prove real fetch, CSE, cacheability or publication. The concrete
-//! same-MemorySystem/BlockRuntime adapter must supply its own execution evidence.
+//! Translation-control sequencing against a test effects observer.
 use super::*;
 use crate::system::state::{El1Registers, PSTATE_EL1H};
 use std::{cell::Cell, collections::BTreeMap};

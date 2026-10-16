@@ -1,7 +1,4 @@
-//! The sole retained PE's debug registers and instruction gate. This lifecycle
-//! owns no ThreadState, SystemState, scalable storage, control bank of another
-//! owner, or PeExecutionAuthority. Only the canonical consumer mutates it while
-//! the same actual source/control/memory/phase resources remain exclusively held.
+//! The debug registers of a PE and its halted-instruction gate.
 use crate::system::{
     access::{ExceptionLevel, SecurityState},
     identification::Register,

@@ -1,5 +1,4 @@
-//! Architectural register storage shared by hosted and freestanding execution.
-//! The state layout supplies no instruction support or execution permission.
+//! Guest register state shared by hosted and freestanding execution.
 #![no_std]
 
 /// Native code requires the direct ordinary-RAM profile documented in compiler.md.

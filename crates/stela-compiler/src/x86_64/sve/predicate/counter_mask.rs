@@ -1,4 +1,4 @@
-//! Vector expansion of compressed counter masks for registered consumers.
+//! Vector expansion of predicate-as-counter masks.
 use super::{CHUNK_BITS, emit_prepared_counter_chunk};
 use crate::aarch64::scalable::VectorLength;
 use alloc::vec::Vec;

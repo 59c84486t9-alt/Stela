@@ -1,4 +1,4 @@
-//! Predicated merging SVE FRINT operations from Arm A64 2026-06.
+//! SVE predicated FRINT*.
 use crate::aarch64::floating::{Format, rounding::RoundingOperation};
 
 const OPCODE_MASK: u32 = 0xff3f_e000;

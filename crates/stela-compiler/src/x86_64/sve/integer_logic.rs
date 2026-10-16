@@ -1,4 +1,4 @@
-//! Fixed-SVL SSE2 Boolean/copy mappings over shared scalable-state accessors.
+//! SVE Boolean operations and copies with SSE2.
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::integer_logic::{Boolean, CopySource, Kind, Operand, Ternary};

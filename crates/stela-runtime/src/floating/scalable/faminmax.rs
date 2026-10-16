@@ -1,4 +1,4 @@
-//! Transactional predicated absolute extrema; inactive lanes remain raw bits.
+//! Completion of SVE FAMIN/FAMAX; inactive lanes keep their raw bits.
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;

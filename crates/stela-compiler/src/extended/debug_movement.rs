@@ -1,9 +1,4 @@
-//! Single-word MOVT code for a separate actual halted ITR consumer.
-//!
-//! This API prepares code and source obligations only. It cannot certify Halted,
-//! create a debug/PE/ITR loan, authorize SME/FP/ZT0, or perform a guest PC return.
-//! The runtime retains the original queued external EDITR identity, same Snapshot,
-//! actual scalable controls/state and canonical phase through native finalization.
+//! MOVT (vector to ZT0) prepared for execution from the halted-debug ITR.
 use super::{MOV_R15_RSI, POP_R15, PUSH_R15, RET, ScalableProfile};
 use crate::{
     CompileError, GuestAddress,

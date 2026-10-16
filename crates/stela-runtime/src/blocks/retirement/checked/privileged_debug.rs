@@ -1,5 +1,4 @@
-//! Source-bound halted bodies for the concrete privileged owner. Actual Active
-//! alone changes DebugActive/Halted and PC. Prepared bodies grant no authority.
+//! Halted-debug instruction bodies for the privileged PE.
 use super::super::software_async::EditrSource;
 use super::privileged::PrivilegedOwner;
 use crate::{

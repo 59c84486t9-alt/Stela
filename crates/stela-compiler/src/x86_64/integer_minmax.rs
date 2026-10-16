@@ -1,4 +1,4 @@
-//! Scalar min/max selection without guest condition-flag changes.
+//! FEAT_CSSC min/max through CMP and CMOV.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::aarch64::integer_minmax::{Kind, Operand, Right};
 use alloc::vec::Vec;

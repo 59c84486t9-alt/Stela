@@ -1,4 +1,4 @@
-//! Bounded JSON and file inputs: register state, PAuth keys, owned memory and clocks.
+//! JSON and file inputs: register state, PAuth keys, guest memory and clocks.
 use anyhow::{Context, Result, ensure};
 use std::{fs::File, path::PathBuf};
 

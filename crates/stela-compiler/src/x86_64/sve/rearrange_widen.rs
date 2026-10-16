@@ -1,5 +1,5 @@
-//! Fixed-SVL SSE2/checked-SSE mappings for widening and pair arithmetic.
-//! All source chunks are read before their destination chunk is committed.
+//! SVE unpacks and pairwise arithmetic. Sources are read before each destination
+//! chunk is written.
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::integer_arithmetic::Binary;

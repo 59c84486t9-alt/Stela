@@ -1,6 +1,5 @@
-//! Consuming executable lifetime of one fresh declared software privileged PE.
-//! The factory owns original source/control/debug/memory storage. Every request
-//! enters the existing canonical consumer; reports carry no execution authority.
+//! Lifetime of a software privileged PE: it owns its source, controls, debug
+//! state and memory, and runs every request through the checked consumer.
 use super::super::software_async::{CtiRoute, SoftwareAsyncDomain};
 use super::{
     OwnedRunRequest, OwnedStop,

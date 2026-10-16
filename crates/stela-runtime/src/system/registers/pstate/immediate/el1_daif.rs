@@ -1,5 +1,4 @@
-//! Source-bound A64 EL1 DAIF plan; no entry, async, source or retirement grant.
-//! The EL0 UMA/trap decision requires its real access owner and is not inferred.
+//! MSR DAIFSet/DAIFClr at EL1.
 
 use super::{SourceError, request};
 use crate::system::{

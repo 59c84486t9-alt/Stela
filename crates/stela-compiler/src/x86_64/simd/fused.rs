@@ -1,4 +1,4 @@
-//! Fused arithmetic: checked FMA3 or an exact-product guarded SSE2 mapping.
+//! Fused multiply-add: FMA3 when available, otherwise an exact-product SSE2 path.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, RESULT_MINIMUM_EXPONENT,

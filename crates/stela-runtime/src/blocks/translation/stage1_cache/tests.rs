@@ -1,4 +1,4 @@
-//! Mathematical cache/walker fixtures, not source-owner/native admission.
+//! Stage-1 cache and walker behavior.
 use super::*;
 use stage1::{AsidBits, Controls, CpuProfile, Granule, GranuleSupport, PaBits, PhysicalReadError};
 use std::cell::{Cell, RefCell};

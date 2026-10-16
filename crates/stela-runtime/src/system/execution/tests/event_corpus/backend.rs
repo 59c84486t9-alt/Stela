@@ -1,4 +1,4 @@
-//! Narrow source/profile fixture; effects use the actual production event owner.
+//! Test backend for event delivery.
 use crate::memory::{domain::MemoryThread, policy::MemoryControls};
 use crate::system::{
     access::{ExceptionLevel, Profile, SecurityState},

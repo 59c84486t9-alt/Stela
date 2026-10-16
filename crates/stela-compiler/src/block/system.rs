@@ -1,10 +1,7 @@
-//! Exact source-bound requests at the shared system runtime boundary.
+//! System instruction requests returned to the runtime.
 //!
-//! These Rust descriptors never cross the native ABI. Native blocks return only
-//! the original instruction PC and System exit kind. Reports retain the source
-//! word and operation family; runtime recovery must revalidate both typed operands
-//! and source identity before applying architectural effects. Immutable source
-//! extent and generation validation belongs to the registered runtime owner.
+//! Native blocks return only the instruction's PC and exit kind; the runtime
+//! re-decodes the source word before applying the effect.
 
 use crate::{
     CompileError, GuestAddress,

@@ -1,4 +1,4 @@
-//! Preserve the entire native caller MXCSR across preparation, callbacks and cleanup.
+//! Saving and restoring the caller's MXCSR around native code and callbacks.
 pub(crate) struct HostFloatingEnvironment {
     #[cfg(target_arch = "x86_64")]
     mxcsr: u32,

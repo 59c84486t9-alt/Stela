@@ -1,6 +1,5 @@
-//! Fixed-work SSE2 AES transformations and independently gated legacy AES-NI.
-//! All guest sources are read before the sole 128-bit destination commit.
-//! There are no secret-indexed loads, host FP operations or guest memory effects.
+//! AES: constant-time SSE2 circuits, or AES-NI when available. All sources are
+//! read before the destination is written.
 use alloc::vec::Vec;
 mod sbox;
 

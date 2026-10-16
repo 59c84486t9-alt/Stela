@@ -1,8 +1,8 @@
-//! Context-backed native memory execution, with one physical writer domain.
+//! The memory service behind context-backed native code.
 //!
-//! Families submit reached elements and retain their own register staging. This
-//! owner resolves each actually reached atomic part, checks tags and publishes
-//! writes through the shared reservation domain. It does not interpret opcodes.
+//! Instruction families submit each reached element; the domain resolves its
+//! atomic parts, checks tags and publishes writes through the shared reservation
+//! domain.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

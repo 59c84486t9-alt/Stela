@@ -1,6 +1,5 @@
-//! Streaming-SVE saturating, halving and absolute-difference arithmetic.
-//! Saturation does not change FPSR.QC in these SVE forms. All forms preserve NZCV.
-//! Encoding/semantics: Arm ISA_A64_xml_A_profile-2026-06; Apple M4/M5 candidate set.
+//! SVE saturating, halving and absolute-difference arithmetic. Saturation does
+//! not set FPSR.QC.
 
 use crate::aarch64::scalable::{ElementSize, Predication};
 

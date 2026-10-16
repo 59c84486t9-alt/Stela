@@ -1,4 +1,4 @@
-//! Guarded classic/enhanced BF dot and widening multiply-add/subtract, staged once.
+//! BFDOT (classic and FEAT_EBF16) and BFMLAL/BFMLSL.
 use alloc::vec::Vec;
 mod classic_dot;
 mod enhanced_dot;

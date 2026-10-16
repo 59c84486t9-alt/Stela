@@ -1,5 +1,4 @@
-//! 42 predicated SVE conversion descriptors; Arm A64 2026-06.
-//! Numerical evaluation belongs to the runtime completion boundary.
+//! SVE predicated conversions (FCVT, FCVTZS/U, SCVTF/UCVTF, ...).
 
 use crate::aarch64::floating::{
     Format,

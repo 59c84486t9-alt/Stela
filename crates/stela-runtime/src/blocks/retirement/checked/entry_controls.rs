@@ -1,5 +1,4 @@
-//! Actual fresh-software debug controls and distinct retained execution scopes.
-//! LR execution does not manufacture an LR-absent exception-entry token.
+//! Debug controls of a software PE and the execution scopes derived from them.
 #[cfg(feature = "std")]
 use crate::pauth::features::LinkRegisterPauthCapability;
 use crate::system::{

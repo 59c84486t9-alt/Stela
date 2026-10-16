@@ -1,5 +1,4 @@
-//! SIMD/FP register-offset transfers; V31 is data, X31 is SP only as base.
-//! Pinned Arm ISA_A64_xml_A_profile-2026-06/{ldr,str}_reg_fpsimd.xml.
+//! SIMD/FP register-offset loads and stores.
 use super::super::{Register, register, register_offset::IndexExtend};
 
 const REGISTER_OFFSET_MASK: u32 = 0x3f20_0c00;

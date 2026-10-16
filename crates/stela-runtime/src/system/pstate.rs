@@ -1,5 +1,4 @@
-//! Direct-state AArch64 system register access checks and unapplied effects.
-//! June 2026 SysReg XML plus MSR-immediate/CheckDAIFAccess are the source contract.
+//! Access checks of the PSTATE system registers and MSR (immediate).
 
 use super::access::{
     AccessKind, Encoding, ExceptionLevel, Profile, Request, Resolution, StateWrite, Trap,

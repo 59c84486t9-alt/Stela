@@ -1,5 +1,4 @@
-//! Shared baseline checked-pointer result marking, without guest state effects.
-//! The caller retains actual feature/mode authority and original operands.
+//! Result marking shared by the checked pointer arithmetic forms.
 
 use alloc::vec::Vec;
 const TOP_BYTE_SHIFT: u8 = 56;

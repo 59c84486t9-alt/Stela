@@ -1,4 +1,4 @@
-//! First memory group dispatch, source maps and complete-body requirements.
+//! SVE load dispatch, source maps and requirements.
 use super::*;
 use crate::aarch64::sve::memory_load;
 use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_requirements};

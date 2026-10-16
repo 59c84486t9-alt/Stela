@@ -1,6 +1,5 @@
-//! Fixed-load SSE2 Boolean lookup and checked SSSE3 byte-shuffle lookup.
-//! Index staging and table preloads preserve every destination/source alias.
-//! Neither recipe branches or addresses memory using protected index values.
+//! SVE LUTI2/LUTI4: fixed-load SSE2 selection or SSSE3 PSHUFB. Neither path
+//! branches on or addresses memory with index values.
 use crate::{
     TargetCpu,
     aarch64::{

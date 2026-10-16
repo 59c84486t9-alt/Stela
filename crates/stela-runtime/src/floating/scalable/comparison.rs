@@ -1,4 +1,4 @@
-//! Complete one SVE FP comparison with staged vector sources and packed P output.
+//! Completion of SVE FP comparisons into a packed predicate.
 
 use anyhow::anyhow;
 use stela_compiler::{

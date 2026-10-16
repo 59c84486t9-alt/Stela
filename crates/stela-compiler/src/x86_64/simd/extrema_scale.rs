@@ -1,8 +1,4 @@
-//! Baseline SSE2 absolute extrema and exact normal-result exponent scaling.
-//!
-//! The integer FSCALE path admits H/S/D normal inputs and normal outputs. It
-//! changes only exponent bits, performs no host FP operation and raises no
-//! status. Other inputs retain complete transactional numerical completion.
+//! FAMIN/FAMAX and FSCALE. FSCALE on normal values changes only exponent bits.
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{

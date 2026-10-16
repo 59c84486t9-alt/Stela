@@ -1,4 +1,4 @@
-//! Component lifecycle tests; no original debug transport or ISA admission.
+//! Halted-debug lifecycle.
 use super::*;
 use crate::system::state::{El1Registers, PSTATE_EL1H};
 fn ids() -> Arc<Snapshot> {

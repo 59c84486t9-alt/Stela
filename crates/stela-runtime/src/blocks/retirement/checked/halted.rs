@@ -1,5 +1,4 @@
-//! Same canonical Active and original resources for one queued EDITR attempt.
-//! No independent PE permit, finalizer, register bank, interpreter or PC owner.
+//! Executing one instruction queued through EDITR while the PE is halted.
 use super::{
     Active, ConsumerKey, SystemExecutionLoan, accept_retained_loan,
     privileged::PrivilegedOwner,

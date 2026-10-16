@@ -1,10 +1,4 @@
-//! Optional SCTLR2/TCR2 storage in the existing sole fixed-control bank.
-//!
-//! Read loans retain that original bank and a real mapping-exclusion pin. They
-//! prove source-domain currency only, not PE or thread identity: another thread
-//! can share the same domain. The consumer must retain its exact original
-//! ThreadState/SystemState/Context/PE and outer execution object through staging,
-//! effects and PC settlement. No read loan grants native entry or completion.
+//! Optional SCTLR2 and TCR2 storage.
 
 use super::{
     FixedProcessMemoryControls, MemoryStatus, ProcessMemoryError, Register, Snapshot,

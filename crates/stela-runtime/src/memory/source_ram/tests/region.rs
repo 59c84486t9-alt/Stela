@@ -1,4 +1,4 @@
-//! Authored storage/identity lifecycle checks, not firmware acceptance.
+//! RAM region storage and identity.
 use super::*;
 use crate::memory::{
     backing::AccessKind, domain::physical::PhysicalAddressSpace, stage1::PhysicalMemory,

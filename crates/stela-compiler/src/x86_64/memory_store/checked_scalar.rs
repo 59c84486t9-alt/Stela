@@ -1,10 +1,5 @@
-//! Checked GPR scalar transfers; the legacy direct emitter is independent.
-//!
-//! Typed operands come from the existing decoder. Legacy checked CPU profiles
-//! are EL0/little-endian/LSE2 with A=false and CPA2 disabled. The separate staged
-//! M0 read profile admits only one unsigned doubleword load and grants no entry.
-//! Its actual source/control/physical/order owner must qualify the operation;
-//! authoritative GuestState commits follow checked completion outside this body.
+//! Checked scalar loads and stores through the memory service. Guest registers
+//! are written after the access completes.
 use crate::x86_64::{
     load,
     memory_context::{self as service, address},

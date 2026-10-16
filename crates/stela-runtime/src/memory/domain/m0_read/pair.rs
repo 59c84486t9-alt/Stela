@@ -1,4 +1,4 @@
-//! Canonical X-base LDP metadata. No physical/source/control or PE authority.
+//! LDP metadata for the M0 pair read.
 use super::SourceFailure;
 use stela_compiler::{
     GuestAddress, GuestState,

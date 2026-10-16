@@ -1,7 +1,4 @@
-//! Whole reserved quantities over the shared physical memory and monitor owners.
-//!
-//! CPU admission and the live PE loan belong to the checked entry. This child
-//! consumes typed memory operations, never guest registers or instruction words.
+//! Exclusive accesses over the shared memory and monitor.
 
 use super::{AccessKind, Arc, DataPolicy, MemoryThread, SCA_BYTES, access, monitor};
 use stela_compiler::{

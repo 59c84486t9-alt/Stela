@@ -1,10 +1,8 @@
-//! Owned guest mappings with explicit direct-RAM or canonical domain binding.
+//! Guest memory mappings.
 //!
-//! Original Arm instructions are data to the x86 host: a guest executable
-//! region never receives host execute permission. Mapping must succeed at the
-//! requested address without replacing any existing allocation.
-//! Opt-in binding retains actual storage in one canonical physical domain.
-//! Serialized service loans govern snapshots, publication and mapping changes.
+//! Guest code is data to the host: no guest mapping is ever host-executable.
+//! Mappings are placed exactly at the requested address without replacing an
+//! existing allocation, and may be bound into a physical memory domain.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

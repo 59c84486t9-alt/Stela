@@ -1,6 +1,4 @@
-//! Arm A64 2026-06 predicated integer bit operations, merging forms.
-//! SVE/SME feature availability, streaming mode and enable traps belong to the
-//! shared execution boundary. Z31 is an ordinary vector register.
+//! SVE predicated bit operations: CLS, CLZ, CNT, RBIT and REVB/REVH/REVW.
 use crate::aarch64::scalable::{ElementSize, Predication};
 
 const OPCODE_MASK: u32 = 0xff3f_e000;

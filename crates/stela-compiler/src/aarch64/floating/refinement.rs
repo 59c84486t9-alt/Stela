@@ -1,4 +1,4 @@
-//! Fused reciprocal steps, including halving before the only target rounding.
+//! FRECPS and FRSQRTS fused steps, including the halving before rounding.
 use super::{
     Class, Control, FPCR_FIZ, FPCR_FZ, FPCR_ROUNDING_MASK, FPCR_ROUNDING_SHIFT, Format, Outcome,
     UnsupportedControl, nan, negate, precision, unpack, widen,

@@ -1,5 +1,5 @@
-//! Packed saturation with an explicit active-lane FPSR.QC mask in XMM4.
-//! Integer overflow is derived before clamping, including 65-bit mixed sums.
+//! Saturating arithmetic. XMM4 accumulates the per-lane FPSR.QC mask; overflow is
+//! detected before clamping.
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
 use crate::{
     GuestState, TargetCpu,

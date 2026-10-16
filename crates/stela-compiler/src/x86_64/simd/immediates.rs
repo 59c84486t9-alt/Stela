@@ -1,4 +1,4 @@
-//! SSE2 bit construction and shared exact-width lane moves; no host FP arithmetic.
+//! Immediate construction and lane moves.
 use super::{Host, commit, packed, read_vector, rearrange};
 use crate::{
     TargetCpu,

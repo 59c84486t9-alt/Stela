@@ -1,5 +1,4 @@
-//! Synchronization, event and architectural hint descriptors.
-//! Execution profiles own system effects; recognition does not imply a native NOP.
+//! Barriers, events and hints: DSB, ISB, SB, WFE/WFI, SEV, YIELD, NOP and others.
 
 const BARRIER_MASK: u32 = 0xffff_f0ff;
 const DSB_CLASS: u32 = 0xd503_309f;

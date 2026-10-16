@@ -1,6 +1,4 @@
-//! LUTv2 adds two protected index vectors and streaming vector-to-table moves.
-//! Index vectors are staged before any destination commit. All table accesses
-//! have fixed addresses; lookup uses the shared constant-time SSE2/SSSE3 core.
+//! SME_LUTv2: LUTI4 with two index vectors, and MOVT to ZT0.
 
 use super::super::{allocate_frame, release_frame, stage};
 use super::{MOV_R8_CONTEXT_DISP8, MOV_R8_R8_DISP8, XMM0, load_packed_indexes, prepare_planes};

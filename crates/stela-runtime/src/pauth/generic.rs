@@ -1,4 +1,4 @@
-//! PACGA operand staging; process keys and QARMA implementation belong to Context.
+//! PACGA.
 use stela_compiler::{GuestState, block::pauth_memory::GenericCode};
 
 const ZERO_REGISTER_INDEX: u8 = 31;

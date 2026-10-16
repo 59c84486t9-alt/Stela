@@ -1,4 +1,4 @@
-//! Host publication through the machine's existing physical writer domain.
+//! Publishing host writes through the domain's physical writer.
 
 use super::{
     AccessKind, Arc, MemoryBacking, MemoryStatus, MemorySystem, Ordering, access, monitor,

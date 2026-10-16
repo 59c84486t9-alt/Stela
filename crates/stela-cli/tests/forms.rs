@@ -1,5 +1,5 @@
-//! Every reviewed instruction form still compiles from its registry samples, and
-//! every recorded out-of-scope sample is still refused with its stated reason.
+//! Every registered instruction form compiles from its samples, and every
+//! out-of-scope sample is refused with its recorded reason.
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::path::Path;

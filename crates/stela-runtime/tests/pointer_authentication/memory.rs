@@ -1,4 +1,4 @@
-//! Authenticated loads use the real owned memory service and precise fault stops.
+//! Authenticated loads and their fault stops.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 
 use anyhow::Result;

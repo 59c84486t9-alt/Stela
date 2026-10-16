@@ -1,8 +1,5 @@
-//! Checked exclusive transfers through the shared per-thread reservation owner.
-//!
-//! This adapter owns source snapshots and architectural result commits. The
-//! runtime owns the indivisible memory quantity, ordering, translation, faults
-//! and monitor state. No ordinary pair request or direct guest writer is used.
+//! Exclusive loads and stores through the per-thread reservation in the memory
+//! service, which owns the access, ordering, faults and monitor state.
 
 use super::{load, memory_context as memory, store};
 use crate::{

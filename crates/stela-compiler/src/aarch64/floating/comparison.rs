@@ -1,4 +1,4 @@
-//! Exact Arm FP ordering and predicate lanes without host FP effects.
+//! Floating-point comparisons and predicate lanes.
 use core::cmp::Ordering;
 
 use super::{

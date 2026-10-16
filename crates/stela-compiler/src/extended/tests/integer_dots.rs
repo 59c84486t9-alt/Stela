@@ -1,4 +1,4 @@
-//! Production registration and profile-boundary checks for SME integer dots.
+//! SME integer dot registration and profile limits.
 use super::*;
 use crate::aarch64::scalable::profile::ScalableControls;
 use crate::aarch64::sme::integer_dots;

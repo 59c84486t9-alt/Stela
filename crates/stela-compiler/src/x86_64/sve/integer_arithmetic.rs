@@ -1,4 +1,4 @@
-//! Fixed-length SVE arithmetic. Every source chunk is staged before its commit.
+//! SVE integer arithmetic. Each source chunk is staged before it is written.
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_arithmetic::{Binary, Kind, Operand, Source};

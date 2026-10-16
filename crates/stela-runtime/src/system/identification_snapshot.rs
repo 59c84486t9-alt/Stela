@@ -1,5 +1,5 @@
-//! Partial immutable named identification authority shared by MRS and qualifiers.
-//! No control/cache/device state, default CPU, guessed absence or host inference.
+//! An immutable set of identification-register values, shared by MRS and the
+//! feature checks.
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 mod qualifiers;

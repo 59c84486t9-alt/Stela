@@ -1,7 +1,5 @@
-//! Versioned native memory-service ABI shared by scalable and exclusive accesses.
-//!
-//! Requests describe one reached architectural element, never an instruction's
-//! speculative footprint. The runtime splits its exact atomic quantities. Data points to private staging, not guest RAM.
+//! Native memory-service ABI used by scalable and exclusive accesses. Each
+//! request describes one architectural element; data points to private staging.
 
 use core::ffi::c_void;
 

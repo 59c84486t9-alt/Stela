@@ -1,4 +1,4 @@
-//! SME group staging and narrowing layout around shared SVE integer kernels.
+//! SME2 multi-vector integer arithmetic on the shared SVE kernels.
 use crate::{
     TargetCpu,
     aarch64::{

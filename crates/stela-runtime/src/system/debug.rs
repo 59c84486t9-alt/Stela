@@ -1,8 +1,5 @@
-//! Pure access routing for the selected nonsecure AArch64 EL0/EL1 debug profile.
-//! No debug state is represented as ordinary register storage here. A backend
-//! must implement matching, DCC transfers, lock/power transitions, and halts.
-//! `Resolution::NotHandled` is only a family dispatch miss. The caller's complete
-//! allocation table owns the final unallocated versus unsupported distinction.
+//! Access routing for the EL0/EL1 debug registers. A backend implements
+//! breakpoints, DCC transfers, power transitions and halting.
 
 pub(crate) mod drps;
 pub(crate) mod halted;

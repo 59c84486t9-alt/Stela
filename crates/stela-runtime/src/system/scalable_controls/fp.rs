@@ -1,8 +1,4 @@
-//! Sole CPACR_EL1 storage shared by ordinary FP/AdvSIMD and scalable controls.
-//!
-//! This declared EL0/EL1 owner needs no SME, SMCR or vector-length declaration.
-//! A successful check is a component decision; it grants no process/source loan,
-//! exception delivery, native-memory access or instruction retirement authority.
+//! CPACR_EL1 storage shared by FP/AdvSIMD and scalable controls.
 
 use super::{
     A64_FP_ISS, Error, ExceptionLevel, FP_EC, FPEN_SHIFT, Origin, SMEN_SHIFT, Snapshot,

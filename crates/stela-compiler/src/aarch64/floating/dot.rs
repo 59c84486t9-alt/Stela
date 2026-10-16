@@ -1,6 +1,5 @@
-//! Half two-product dot with one Single rounding, followed by a separate add.
-//! This is FPDotAdd, not a three-term fused operation. Callers supply effective
-//! FPCR controls, preserve raw storage and own lane selection/sticky FPSR.
+//! FDOT (half to single): two products summed with one rounding, then a
+//! separate add (FPDotAdd, not a three-term fused operation).
 use super::{
     BinaryOperation, Class, Control, FPCR_AHP, FPCR_DN, Format, INVALID, Operand, Outcome,
     UnsupportedControl, rounded_outcome, unpack,

@@ -1,8 +1,4 @@
-//! SME2 destructive grouped absolute extrema and integer exponent scaling.
-//!
-//! H/S/D groups are aligned pairs/quartets; broadcast scales name Z0..Z15.
-//! Execution requires streaming SVE access, without ZA access. Decode grants no
-//! permission: extrema also require FAMINMAX and scaling requires FP8.
+//! SME2 multi-vector FAMIN/FAMAX and FSCALE on aligned Z groups.
 use crate::aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation};
 
 const SIZE_SHIFT: u32 = 22;

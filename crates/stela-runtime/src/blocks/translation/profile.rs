@@ -1,4 +1,4 @@
-//! Enforced source producer closure for the private control-transition entry.
+//! Which source producers the control-transition entry accepts.
 
 use crate::system::{
     access::ExceptionLevel,

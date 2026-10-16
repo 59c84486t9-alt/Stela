@@ -1,5 +1,4 @@
-//! Scoped test entry retaining the actual CPU owner across repeated calls.
-//! Snapshot and fixed owners remain borrowed; state/control checks run per call.
+//! Repeated scalable entry on one retained CPU.
 use super::fixture::{Fixture, access};
 use crate::{
     memory::{domain::MemoryThread, policy::MemoryControls},

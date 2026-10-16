@@ -1,8 +1,4 @@
-//! CPA2 specialization admitted by the original fixed process/control owner.
-//!
-//! The canonical provider supplies its retained immutable debug owner and exact
-//! bound compiler profile. The token retains those borrows and the original
-//! SystemState; its parent prepared token owns the same-domain execution pin.
+//! FEAT_CPA2 controls for checked memory.
 
 use super::{FixedProcessMemoryControls, ResolvedPointerChecks, SystemState};
 use crate::system::debug::DebugControls;

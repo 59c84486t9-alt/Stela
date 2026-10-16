@@ -1,9 +1,6 @@
-//! Private eleven-form extension of the guarded staged binary arithmetic kernel.
-//!
-//! Half and exceptional results/status retain whole-instruction completion.
-//! With private DAZ=0, normal output plus only precision status excludes active
-//! denormal operands; higher-priority DE suppression cannot pass both guards.
-//! The shared numerical frame owns MXCSR restoration and the only guest commit.
+//! The remaining SVE binary arithmetic forms on the staged arithmetic kernel.
+//! With DAZ clear, a normal output with only inexact status implies no denormal
+//! operand.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

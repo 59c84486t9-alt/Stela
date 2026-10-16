@@ -1,12 +1,8 @@
-//! Physical exclusive-monitor bookkeeping for a participating memory domain.
-//! This owner alone does not establish an executable exclusive-memory profile.
+//! Exclusive-monitor bookkeeping for a memory domain.
 //!
-//! The caller owns backing bytes, permission/translation preflight and stable
-//! mapping pins. Callbacks perform exactly one architectural access/fragment
-//! through an audited native memory boundary, never concurrent Rust `&mut` RAM.
-//! No callback may reenter this domain or drop one of its thread contexts.
-//! Native faults need root's actual resumable cleanup boundary; Rust unwinding
-//! fails the whole execution domain and does not stand in for signal recovery.
+//! Callers own the backing bytes, permission and translation checks, and mapping
+//! pins. Each callback performs exactly one architectural access and must not
+//! re-enter the domain. A Rust panic fails the whole domain.
 
 use crate::platform::sync::{Mutex, MutexGuard};
 use crate::system::events::{EventProducer, MonitorBinding};

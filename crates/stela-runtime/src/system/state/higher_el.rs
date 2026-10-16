@@ -1,5 +1,4 @@
-//! Optional real higher-EL banks of the same SystemState. No CPU or execution
-//! authority is allocated here. Missing storage is never an architectural zero.
+//! Optional EL2/EL3 register banks.
 use super::{El1Registers, StateError};
 use crate::system::{
     access::{ExceptionLevel, SecurityState},

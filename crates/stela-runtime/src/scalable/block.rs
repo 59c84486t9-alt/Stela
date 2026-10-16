@@ -1,5 +1,5 @@
-//! One owned contextual block invocation and explicit numerical completion.
-//! This does not resolve successors, register code regions or persist artifacts.
+//! Running one context-backed block, including software completion of its
+//! numerical exits.
 
 use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]

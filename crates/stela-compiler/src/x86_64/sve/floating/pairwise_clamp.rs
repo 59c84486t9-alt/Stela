@@ -1,4 +1,4 @@
-//! Private pairwise min/max and clamp native candidate; shared staging owns commit.
+//! SVE pairwise min/max and FCLAMP.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

@@ -1,7 +1,4 @@
-//! Byte and metadata validation shared by hosted cache and boot artifact intake.
-//! Inputs are descriptive data. These checks mint no source, PE or RX authority.
-//! Expected identity/requirements still come from the SAME CompilationPlan and
-//! actual source owner. JSON decoding and source-map geometry remain original.
+//! Byte and metadata validation shared by the hosted cache and boot artifacts.
 use super::{ArtifactError, Identity, Manifest, validate_native_snapshot};
 use stela_compiler::context::memory::MemoryRequirements;
 

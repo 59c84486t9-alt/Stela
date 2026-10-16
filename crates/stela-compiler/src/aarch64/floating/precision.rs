@@ -1,4 +1,4 @@
-//! FP-to-FP conversion: distinct source/destination formats and one rounding.
+//! Conversions between floating-point formats, with one rounding.
 use super::{
     Class, Control, EXCEPTIONS, FPCR_AHP, FPCR_DN, FPCR_EXCEPTION_ENABLE_SHIFT, FPCR_FZ16, Format,
     INPUT_DENORMAL, INVALID, Outcome, UnsupportedControl, rounded_outcome, unpack, widen,

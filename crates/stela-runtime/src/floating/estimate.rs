@@ -1,4 +1,4 @@
-//! Transactional scalar/vector estimate completion over saved guest state.
+//! Completion of the estimate instructions.
 use stela_compiler::{
     GuestState,
     aarch64::{

@@ -1,5 +1,5 @@
-//! Enhanced BF16 dot: one rounded two-product sum, then a separate Single add.
-//! BFDotAdd forces default NaNs and suppresses every exception, including traps.
+//! FEAT_EBF16 BFDOT: one rounded two-product sum, then a separate single add.
+//! Default NaNs and no exceptions.
 use super::super::{
     BinaryOperation, Class, Control, FPCR_AHP, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, Format,
     Operand, Outcome, unpack,

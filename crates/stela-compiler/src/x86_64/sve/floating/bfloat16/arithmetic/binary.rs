@@ -1,9 +1,6 @@
-//! Guarded BF binary arithmetic with exact BF quantization and staged commit.
-//!
-//! Normal BF inputs widen exactly to Single. Directed rounding composes, while
-//! a nearest-even first rounding can change a second rounding only at a BF
-//! midpoint. Such a midpoint with host IXC retains exact whole-instruction
-//! completion. BF discarded-bit IXC is accumulated independently of host IXC.
+//! BF16 binary arithmetic. Normal inputs widen exactly to single; a nearest-even
+//! double rounding can differ only at a BF16 midpoint, which with host inexact
+//! takes software completion.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

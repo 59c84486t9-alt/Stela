@@ -1,4 +1,4 @@
-//! Exception-free packed comparisons; exceptional lanes use numerical completion.
+//! SVE FP comparisons without exceptions; signaling cases use software completion.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

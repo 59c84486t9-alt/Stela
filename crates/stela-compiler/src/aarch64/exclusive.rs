@@ -1,4 +1,4 @@
-//! Exclusive scalar/pair transfers and local-monitor clearing.
+//! Exclusive loads and stores (LDXR/STXR, LDAXR/STLXR, pairs) and CLREX.
 use super::{Register, register};
 
 const SCALAR_MASK: u32 = 0x3fa0_0000;

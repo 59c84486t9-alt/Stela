@@ -1,4 +1,4 @@
-//! Exact mature normal-Half pack compute, without frame, stores or commit.
+//! Half-precision pack arithmetic, without frame or stores.
 use super::{
     ADC_RAX_RDX, ADD_RAX_RDX, AND_EAX_IMM32, BT_RAX, BTR_RAX, CMP_EDX_IMM8, Condition, FPCR_AH,
     FPCR_ROUNDING_HIGH, FPCR_ROUNDING_LOW, Format, HALF_DISCARDED_MASK, HALF_NORMAL_EXPONENT_COUNT,

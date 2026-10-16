@@ -1,4 +1,4 @@
-//! Transactional classic BF16 conversion, dot, multiply-add and matrix completion.
+//! Completion of BF16 conversion, dot, multiply-add and matrix multiply.
 use stela_compiler::{
     GuestState,
     aarch64::{

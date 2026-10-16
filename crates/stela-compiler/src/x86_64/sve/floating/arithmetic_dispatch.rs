@@ -1,4 +1,4 @@
-//! Native arithmetic routing retains canonical core identity and exact fallback.
+//! Selection between native and software arithmetic paths.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

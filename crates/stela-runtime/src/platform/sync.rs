@@ -1,4 +1,4 @@
-//! Metadata exclusion. Hosted semantics remain std's original locks.
+//! Locks: std mutexes when hosted.
 #[cfg(feature = "std")]
 pub(crate) use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 

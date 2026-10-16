@@ -1,4 +1,4 @@
-//! One transactional numerical completion boundary for scalable SVE/SME state.
+//! Software completion of SVE and SME floating-point instructions.
 mod arithmetic;
 mod bfloat16;
 mod comparison;

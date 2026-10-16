@@ -1,8 +1,4 @@
-//! Physical instruction identities on the actual serialized source/RX owner.
-//!
-//! Private source-binding seam only. The complete TranslationServices adapter
-//! additionally needs reviewed current-control consumers, canonical fetch and
-//! real post-return runtime entry hooks. No service succeeds from this leaf alone.
+//! Physical instruction fetch for translation.
 
 use super::{BlockRuntime, INSTRUCTION_BYTES};
 use crate::{

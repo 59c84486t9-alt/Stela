@@ -1,4 +1,4 @@
-//! Exact byte dot products and 2x8-by-8x2 matrix accumulation.
+//! Byte dot products and 2x8-by-8x2 matrix multiply-accumulate.
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
     TargetCpu,

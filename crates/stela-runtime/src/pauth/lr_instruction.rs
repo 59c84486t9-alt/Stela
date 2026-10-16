@@ -1,5 +1,4 @@
-//! Pre-state operands/effects for the canonical compiler LR descriptor.
-//! No duplicate encoding table, CPU/key authority, native entry or PC commit.
+//! Operands and effects of the FEAT_PAuth_LR instructions.
 
 #[cfg(test)]
 use stela_compiler::block::pauth_lr::decode;

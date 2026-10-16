@@ -1,5 +1,4 @@
-//! Finite/zero BF min/max and clamp; no host FP environment or status effects.
-//! Guarded exceptional lanes retain the exact whole-instruction service.
+//! BF16 min/max and clamp on finite values and zeros, without FP status.
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{

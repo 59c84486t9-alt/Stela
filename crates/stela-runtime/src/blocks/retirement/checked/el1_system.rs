@@ -1,5 +1,5 @@
-//! System register effects under the original canonical Active and retained PE.
-//! The native carrier finalizes first; staged effects never write PC themselves.
+//! EL1 system-register effects. The native block finishes first; the staged
+//! effect then commits and the retiring owner sets PC.
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec::Vec};
 mod controls;

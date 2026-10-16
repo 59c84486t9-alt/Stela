@@ -1,5 +1,4 @@
-//! AdvSIMD shifts: Arm A64 2026-06 immediate/register shift XML facts.
-//! The semantic operation distinguishes same-width, narrowing and widening lanes.
+//! AdvSIMD shifts by immediate and register: same-width, narrowing and widening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Register {

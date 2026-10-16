@@ -1,8 +1,5 @@
-//! Exact floating estimate table arithmetic over finite normal lanes.
-//!
-//! No host RCP/RSQRT approximation is an architectural result. Integer DIV
-//! implements the Arm midpoint quotient. RSQRT alone uses a privately masked
-//! SQRTSD to obtain its bounded integer root, without committing host status.
+//! SVE FRECPE/FRSQRTE tables on normal values. Host RCP/RSQRT approximations
+//! are never used; integer DIV and a masked SQRTSD compute the exact table values.
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{

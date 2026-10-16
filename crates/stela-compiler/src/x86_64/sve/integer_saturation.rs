@@ -1,5 +1,4 @@
-//! Packed SSE2 mappings for streaming-SVE integer saturation and differences.
-//! The shared accessor owns split V/Z storage and packed-predicate expansion.
+//! SVE saturating arithmetic and absolute differences with SSE2.
 use super::super::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 use crate::TargetCpu;
 use crate::aarch64::{

@@ -1,4 +1,4 @@
-//! Transactional scalar/vector reciprocal refinement completion.
+//! Completion of FRECPS and FRSQRTS.
 use stela_compiler::{
     GuestState,
     aarch64::{

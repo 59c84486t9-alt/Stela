@@ -1,8 +1,4 @@
-//! Owned legacy ARM commpage layout, independent of clock sampling policy.
-//!
-//! XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea:
-//! osfmk/arm/cpu_capabilities.h and osfmk/arm/commpage/commpage.c.
-//! Only explicitly declared fields have ABI meaning; allocation padding does not.
+//! The legacy ARM commpage layout (clock and tracing fields).
 use crate::memory::{MemoryRegion, PublishedReadOnlyRegion};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

@@ -1,10 +1,6 @@
-//! Explicit ARM commpage layouts for bounded Darwin execution.
-//! Modern page-size fields live here; the legacy clock/tracing layout is in `legacy`.
-//!
-//! XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea:
-//! osfmk/arm/cpu_capabilities.h and osfmk/arm/commpage/commpage.c.
-//! Only the declared fields are implemented. Callers of unsafe native execution
-//! must exclude reads of other fields; zero allocation padding has no ABI meaning.
+//! ARM commpage layouts. Page-size fields live here; the legacy clock and
+//! tracing layout is in `legacy`. Only the declared fields are implemented
+//! (XNU `osfmk/arm/cpu_capabilities.h`, `osfmk/arm/commpage/commpage.c`).
 use crate::memory::{MemoryRegion, MemoryRegionSpec, OwnedMemory};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

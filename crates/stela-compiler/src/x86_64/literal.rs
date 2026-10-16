@@ -1,4 +1,4 @@
-//! Exact-width ordinary-RAM literal loads; commit only after a successful access.
+//! Literal loads. The destination is written only after the access succeeds.
 use super::{simd, store};
 use crate::aarch64::{
     Width,

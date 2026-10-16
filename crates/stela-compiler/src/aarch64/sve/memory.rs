@@ -1,4 +1,4 @@
-//! Address descriptors shared by streaming SVE memory instructions.
+//! Address operands shared by the SVE loads and stores.
 
 use crate::aarch64::Register;
 

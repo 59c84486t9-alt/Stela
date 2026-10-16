@@ -1,8 +1,5 @@
-//! Baseline x86-64 CPA arithmetic using owner-resolved effective check effects.
-//!
-//! The entry owner proves FEAT_CPA and validates its control lease before entry.
-//! RDI remains the guest state pointer. Only caller-saved GPRs/host flags change;
-//! no guest flags, floating state, RAM or system registers are touched.
+//! FEAT_CPA checked pointer arithmetic. Clobbers caller-saved GPRs and host flags
+//! only.
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::{
     aarch64::checked_pointer::{Kind, Operand},

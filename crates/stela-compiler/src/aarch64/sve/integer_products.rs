@@ -1,5 +1,4 @@
-//! SVE integer products. Sources are snapshotted before destination writes.
-//! Integer saturation preserves FPSR.QC; these operations never touch NZCV/RAM.
+//! SVE integer multiplies. Saturation does not set FPSR.QC.
 use crate::aarch64::scalable::{ElementSize, Predication};
 
 const REGISTER_MASK: u32 = 31;

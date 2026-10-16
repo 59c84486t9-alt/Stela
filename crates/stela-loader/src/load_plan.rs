@@ -1,5 +1,4 @@
-//! Validated, unslid guest mappings and unresolved loader work for one thin image.
-//! This module neither maps host memory nor resolves imports, fixups or signatures.
+//! The validated, unslid segment mappings and pending loader work of one image.
 use object::{
     LittleEndian, macho,
     read::macho::{LoadCommandData, LoadCommandVariant, MachHeader, Segment},

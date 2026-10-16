@@ -1,4 +1,4 @@
-//! Native, serialized block-dispatch acceptance tests using only owned ARM code.
+//! Native block dispatch.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use anyhow::Result;
 use std::path::{Path, PathBuf};

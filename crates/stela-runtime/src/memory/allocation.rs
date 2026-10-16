@@ -1,7 +1,4 @@
-//! Serialized anonymous data allocation within the existing private owner.
-//!
-//! Platform adapters normalize guest pages and parse guest flags. This leaf
-//! owns native placement, unpublished initialization and atomic metadata commit.
+//! Anonymous guest data allocation.
 
 #[cfg(feature = "std")]
 use super::DIRECT_RAM_USER_END;

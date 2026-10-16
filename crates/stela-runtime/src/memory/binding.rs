@@ -1,4 +1,4 @@
-//! Serialized host writer binding and lifecycle for retained Normal-WB mappings.
+//! Binding host mappings into a memory domain, and their lifecycle.
 
 use super::{
     OwnedMemory, PublishedReadOnlyRegion,

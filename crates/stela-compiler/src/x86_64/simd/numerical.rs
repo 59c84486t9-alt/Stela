@@ -1,4 +1,4 @@
-//! Shared numerical block emission: integer lane classification and private MXCSR.
+//! Shared FP emission: integer lane classification and a private MXCSR.
 use alloc::vec::Vec;
 mod control;
 

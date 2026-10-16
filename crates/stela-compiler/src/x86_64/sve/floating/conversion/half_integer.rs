@@ -1,5 +1,4 @@
-//! IEEE Half/integer conversion compute leaves.
-//! Caller owns scalable access, active enables, one numerical frame, status and commit.
+//! SVE conversions between half precision and integers.
 
 use super::half_widening::{guard_normal_half_fields, normal_half_to_single_fields};
 use crate::{

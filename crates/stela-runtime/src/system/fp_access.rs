@@ -1,10 +1,4 @@
-//! Scoped ordinary FP/AdvSIMD access to the existing GuestState low128 bank.
-//!
-//! The actual process owner must supply its same Snapshot, CPACR owner, system,
-//! scalable and guest state. This leaf cannot authenticate those caller choices.
-//! It proves the bounded FP access facts while retaining their borrows. Memory,
-//! fetched-source identity, reached traps, PE health and PC settlement remain
-//! separate requirements, including ordinary little-endian memory policy.
+//! FP/AdvSIMD access checks (CPACR) for the low 128 bits of the vector registers.
 
 use super::{
     identification::Register,

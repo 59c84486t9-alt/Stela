@@ -1,6 +1,4 @@
-//! SME_LUTv2 register lookup and vector-to-ZT0 move. Both require streaming
-//! SVE and enabled ZT0; ZA content is untouched. Arm A64 2026-06 facts from
-//! luti4_mz4_ztmz2.xml and movt_zt_z.xml. No architectural aliases.
+//! SME_LUTv2 LUTI4 (four registers) and MOVT (vector to ZT0).
 
 use super::tables::VectorGroup;
 use crate::aarch64::scalable::{LOOKUP_TABLE_BYTES, VectorLength};

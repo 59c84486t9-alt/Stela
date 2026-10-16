@@ -1,7 +1,4 @@
-//! Exact normal-to-normal power-of-two scaling through packed integer fields.
-//! Single uses SSE2; Double checks SSE4.2 signed-qword comparison support.
-//! Exceptional inputs, huge signed scales and nonnormal results retain shared
-//! FPScale completion, including its architectural clamp/round/status behavior.
+//! SVE FSCALE on normal values through packed integer exponent arithmetic.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

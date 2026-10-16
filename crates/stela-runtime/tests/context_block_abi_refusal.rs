@@ -1,4 +1,4 @@
-//! Persistent/image-backed/normal-thread paths retain their existing ABI scope.
+//! Persistent, image-backed and normal-thread paths refuse the context ABI.
 use anyhow::Result;
 use std::path::Path;
 use stela_compiler::{GuestAddress, GuestState, TargetCpu, context::CONTEXT_BLOCK_ABI};

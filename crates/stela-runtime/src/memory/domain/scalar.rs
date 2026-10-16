@@ -1,4 +1,4 @@
-//! Scalar reads through the existing native memory-service boundary.
+//! Scalar reads through the memory service.
 
 use super::{
     AllocationTagPolicy, DataPolicy, MemoryRequest, MemoryStatus, MemoryThread, SCA_BYTES, flags,

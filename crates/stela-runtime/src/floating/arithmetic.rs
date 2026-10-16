@@ -1,4 +1,4 @@
-//! Transactional elementwise, indexed and adjacent-pair arithmetic completion.
+//! Completion of elementwise, indexed and pairwise arithmetic.
 use stela_compiler::{
     GuestState,
     aarch64::{

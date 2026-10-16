@@ -1,4 +1,4 @@
-//! Transactional FP8 ZA arithmetic using the common affected-row staging owner.
+//! Completion of SME FP8 ZA arithmetic.
 
 use stela_compiler::{
     GuestState,

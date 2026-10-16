@@ -1,4 +1,4 @@
-//! Unapplied base A64 EL1 DRPS intent, never debug exit or normal PC retirement.
+//! DRPS.
 use super::halted::Status;
 use crate::system::access::ExceptionLevel;
 use crate::system::pstate::{DAIF_MASK, NZCV_MASK};

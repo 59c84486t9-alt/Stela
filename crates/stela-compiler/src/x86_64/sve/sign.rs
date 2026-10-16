@@ -1,5 +1,4 @@
-//! Predicated SVE FP sign operations, using integer SIMD classification only.
-//! The instruction cannot raise numerical exceptions or change caller MXCSR.
+//! SVE predicated FABS and FNEG by integer masking; no FP exceptions.
 use crate::{
     GuestState, TargetCpu,
     aarch64::{

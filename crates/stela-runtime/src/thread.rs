@@ -1,9 +1,5 @@
-//! Serialized native-thread identity, owned Mach rights and guest ARM TSD.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea: thread_info.h,
-//! machine_routines.c platform_syscall and pcb.c machine_thread_set_tsd_base.
-//! One context represents one guest thread on the current host thread. It does
-//! not create threads, schedule them or modify host TLS/FS/GS.
+//! A guest thread on the current host thread: identity, Mach rights and TSD
+//! (XNU `thread_info.h`, `machine_thread_set_tsd_base`).
 use crate::{
     blocks::ThreadState,
     darwin::{

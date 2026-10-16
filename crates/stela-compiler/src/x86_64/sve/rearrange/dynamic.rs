@@ -1,8 +1,7 @@
-//! Fixed-SVL table lookup, predicate hull splicing and integer ramps.
-//! RDI is GuestState, R15 is the validated ExecutionContext. Native scratch is
-//! RAX/RCX/RDX, XMM0..7 and a bounded stack frame. Large SPLICE copies also
-//! use caller-saved R8..R11/RSI; REP restores RDI and assumes SysV entry DF=0.
-//! Every frame is released before returning to the caller. No Rust callbacks or guest data-memory accesses.
+//! SVE TBL, SPLICE and INDEX.
+//!
+//! Scratch: RAX/RCX/RDX, XMM0-7 and a stack frame; large SPLICE copies also use
+//! R8-R11/RSI and REP MOVSB (RDI is restored; SysV guarantees DF=0).
 
 use crate::aarch64::Register;
 use crate::aarch64::scalable::{ElementSize, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES, VectorLength};

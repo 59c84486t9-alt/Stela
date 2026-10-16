@@ -1,5 +1,4 @@
-//! Bitwise SVE floating immediate construction; Arm A64 2026-06.
-//! FCPY merges inactive lanes; FDUP fills every lane. FP controls/status are unchanged.
+//! FCPY (merging) and FDUP.
 
 use crate::aarch64::floating::Format;
 

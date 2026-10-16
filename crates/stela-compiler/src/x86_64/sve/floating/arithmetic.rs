@@ -1,7 +1,5 @@
-//! Guarded normal Single/Double binary arithmetic with instruction-wide staging.
-//!
-//! Exceptional inputs/results and Half retain whole-instruction completion.
-//! The shared numerical frame owns MXCSR restoration and the only guest commit.
+//! SVE single/double binary arithmetic on normal values, staged per instruction.
+//! Half precision and exceptional values use software completion.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

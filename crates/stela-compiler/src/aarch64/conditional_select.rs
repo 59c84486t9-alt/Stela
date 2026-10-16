@@ -1,4 +1,4 @@
-//! Integer conditional selection. All register 31 operands name ZR, never SP.
+//! Conditional select: CSEL, CSINC, CSINV and CSNEG. Register 31 is ZR.
 use super::{Register, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

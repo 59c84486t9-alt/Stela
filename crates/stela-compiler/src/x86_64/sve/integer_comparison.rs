@@ -1,4 +1,4 @@
-//! Streaming integer comparisons and a shared packed FF/00 comparison kernel.
+//! SVE integer comparisons into predicates.
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VectorLength};
 use crate::aarch64::sve::integer_comparison::{Operand, Relation, Right};

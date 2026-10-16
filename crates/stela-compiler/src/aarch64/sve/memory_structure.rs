@@ -1,4 +1,4 @@
-//! Predicated deinterleaving LD2/LD3/LD4 transfers, including 128-bit elements.
+//! SVE LD2, LD3 and LD4, including 128-bit elements.
 use super::memory::{Address, Offset, Scale};
 use crate::aarch64::{
     register,

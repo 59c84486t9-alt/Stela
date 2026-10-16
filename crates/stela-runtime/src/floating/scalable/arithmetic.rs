@@ -1,4 +1,4 @@
-//! Staged streaming numerical completion with complete scalable source snapshots.
+//! Completion of SVE arithmetic from full source snapshots.
 
 use anyhow::anyhow;
 use stela_compiler::{

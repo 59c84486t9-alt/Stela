@@ -1,4 +1,4 @@
-//! Fresh declared component fixtures; no original/native execution claim.
+//! FEAT_CPA2 controls.
 use super::*;
 use crate::{
     memory::{

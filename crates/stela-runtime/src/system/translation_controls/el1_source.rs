@@ -1,5 +1,4 @@
-//! Current ORIGINAL bank/source storage validation for the exact EL1 B cohort.
-//! No independent bank, caller snapshot, CPU permit or native call is created.
+//! Validating EL1 source against the current controls.
 use super::TranslationControls;
 use crate::blocks::InstalledEl1SourceScope;
 

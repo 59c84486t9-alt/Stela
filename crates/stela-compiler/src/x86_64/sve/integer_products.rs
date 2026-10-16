@@ -1,8 +1,5 @@
-//! Baseline SSE2 products over fixed-length scalable-register chunks.
-//!
-//! Sources and accumulators are staged before each destination chunk is stored.
-//! Indexed multipliers select lanes within that same 128-bit chunk, so aliases
-//! never require reading a destination chunk that was committed earlier.
+//! SVE integer multiplies with SSE2. Indexed multipliers select within the same
+//! 128-bit chunk, so aliases never read an already written chunk.
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_products::{Kind, Multiplier, Operand, Selection};

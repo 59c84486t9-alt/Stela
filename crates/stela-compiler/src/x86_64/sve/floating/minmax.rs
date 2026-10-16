@@ -1,8 +1,5 @@
-//! Exact packed Single/Double min/max with instruction-wide guarded staging.
-//!
-//! Active NaNs, subnormals and zero/zero ties retain whole-instruction completion.
-//! Exactly one zero is admitted, including the zero-immediate forms. Integer
-//! masking neutralizes inactive poison before any host floating operation.
+//! SVE single/double min/max. NaNs, subnormals and zero/zero ties use software
+//! completion.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

@@ -1,6 +1,5 @@
-//! Non-temporal pairs in the direct EL0 private ordinary-RAM profile.
-//! Cache allocation is an implementation choice; ordinary transfers preserve
-//! the exact footprint without streaming opcodes' extra alignment requirements.
+//! LDNP/STNP as ordinary accesses with the same footprint (no streaming opcodes,
+//! which would add alignment requirements).
 use super::{AddressMode, MemoryTransfer, Width, memory_pair, simd};
 use crate::aarch64::{
     non_temporal::{Data, Operand},

@@ -1,4 +1,4 @@
-//! Build-pinned inventories, evidence and shared artifact identity hashing.
+//! Shared artifact hashing, build inventories and progress records.
 #![cfg_attr(not(feature = "hosted"), no_std)]
 extern crate alloc;
 mod hash;

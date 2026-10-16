@@ -1,8 +1,7 @@
-//! Ordered Normal-WB scalar accesses and data-memory barriers.
+//! Acquire/release accesses and DMB on write-back memory.
 //!
-//! Release stores use XCHG so a later acquire load cannot bypass them. Checked
-//! loads crossing eight bytes take one read-only aligned 16-byte snapshot; the profile guarantees
-//! uniform page permissions and excludes device memory, tags and debug watches.
+//! Release stores use XCHG so a later acquire load cannot pass them. Checked loads
+//! crossing eight bytes read one aligned 16-byte snapshot.
 use super::atomic::{address_offset, commit_rax, input_rcx, read_rax};
 use crate::{
     TargetCpu,

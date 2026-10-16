@@ -1,5 +1,4 @@
-//! Immutable source recovery and profile admission for scalable numerical exits.
-//! This boundary describes the still-unexecuted instruction; it executes no effects.
+//! Re-decoding and admitting the instruction behind a scalable numerical exit.
 
 use anyhow::{Context, Result};
 use stela_compiler::{

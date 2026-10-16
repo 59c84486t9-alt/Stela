@@ -1,9 +1,5 @@
-//! Lazy resolution of explicitly registered leaf entry points.
-//!
-//! This index does not execute code or discover arbitrary basic blocks. Handles
-//! identify unverified generated artifacts; callers must check their generation
-//! again before a future execution boundary. Invalidation does not interrupt an
-//! executing thread or reclaim executable mappings.
+//! Lazy resolution of registered leaf entry points. Handles must be revalidated
+//! before each execution; invalidation does not interrupt running code.
 
 use crate::{Identity, Prepared, prepare_leaf};
 use alloc::collections::BTreeMap;

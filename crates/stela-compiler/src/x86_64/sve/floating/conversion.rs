@@ -1,4 +1,4 @@
-//! Predicated SVE conversion mappings with whole-instruction completion.
+//! SVE predicated conversions.
 use alloc::vec::Vec;
 mod bfloat;
 mod double_narrowing;

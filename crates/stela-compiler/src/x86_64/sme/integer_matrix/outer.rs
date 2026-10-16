@@ -1,4 +1,4 @@
-//! Packed SME integer outer rows; mode guards precede entry.
+//! SME integer outer products.
 use crate::{
     TargetCpu,
     aarch64::{

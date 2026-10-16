@@ -1,5 +1,4 @@
-//! Owned segment mappings with checked placement and chained pointer rebases.
-//! This preserves pending dyld/process work and does not validate an Apple launch.
+//! Mapping an image's segments and applying its chained rebases.
 use super::{
     chained_fixups::{self, FixupPlan, RebaseFixup},
     load_plan::{self, LoadPlan},

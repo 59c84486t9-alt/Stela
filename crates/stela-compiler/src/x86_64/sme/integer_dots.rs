@@ -1,4 +1,4 @@
-//! SSE2 integer dot-product chunks, including full-width 16-to-64 products.
+//! SME2 integer dot products, including 16-to-64-bit products.
 use crate::{
     GuestState, TargetCpu,
     aarch64::{

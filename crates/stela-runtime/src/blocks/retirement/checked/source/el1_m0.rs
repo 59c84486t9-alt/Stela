@@ -1,5 +1,4 @@
-//! Actual consumed source-plan intent for the generic retained EL1 route.
-//! None memory metadata is accepted only together with this exact typed plan.
+//! The typed source plan of EL1 and M0 blocks.
 use super::BoundSource;
 use stela_compiler::{
     block::{BlockProfile, el1_m0::Intent},

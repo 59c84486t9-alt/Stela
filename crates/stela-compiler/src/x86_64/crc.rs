@@ -1,4 +1,4 @@
-//! Scalar CRC remainder recipes: baseline byte tables or checked SSE4.2.
+//! CRC32/CRC32C: table-driven baseline or SSE4.2 CRC32 (CRC32C only).
 use super::isa::{CrcOpcode, CrcTableInstruction as Table};
 use super::{Register, Shift, Width, load, right_operand, store};
 use crate::{

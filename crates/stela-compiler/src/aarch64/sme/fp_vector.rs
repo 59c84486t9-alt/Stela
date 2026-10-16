@@ -1,7 +1,4 @@
-//! SME2 unpredicated floating-point operations on aligned groups of Z vectors.
-//!
-//! Decoding is independent of execution controls. Callers must check streaming
-//! access and the returned feature requirement before executing any effects.
+//! SME2 unpredicated floating-point operations on aligned Z groups.
 use crate::aarch64::floating::{Format, minmax::MinMaxOperation, rounding::RoundingOperation};
 
 const SIZE_SHIFT: u32 = 22;

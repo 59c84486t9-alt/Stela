@@ -1,4 +1,4 @@
-//! Vector-length arithmetic and predicate population counts.
+//! ADDVL/ADDPL/RDVL and predicate counts (CNTP, INC/DEC by element count).
 use super::super::{Register, register, scalable::ElementSize};
 
 const LENGTH_MASK: u32 = 0xffe0_f800;

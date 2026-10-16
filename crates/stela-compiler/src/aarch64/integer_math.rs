@@ -1,7 +1,5 @@
-//! Apple A64 scalar integer math encodings; register 31 is ZR.
-//!
-//! Semantics and fixed bits follow the pinned Arm 2026-06 MADD/MSUB,
-//! SMADDL/SMSUBL, UMADDL/UMSUBL, SMULH/UMULH, SDIV/UDIV and scalar unary XML.
+//! Integer data processing: MADD/MSUB, SMADDL/SMSUBL/UMADDL/UMSUBL, SMULH/UMULH,
+//! SDIV/UDIV, LSLV/LSRV/ASRV/RORV, EXTR, CLZ, CLS, RBIT and REV*. Register 31 is ZR.
 use super::{Register, Shift, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

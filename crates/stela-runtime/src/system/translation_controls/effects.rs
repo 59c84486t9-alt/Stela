@@ -1,9 +1,4 @@
-//! Required hooks for the real same-machine translation/fetch/publication owner.
-//!
-//! This leaf deliberately supplies no successful implementation. MemorySystem's
-//! existing NormalWB byte-publication API alone is insufficient. The concrete
-//! adapter composes canonical stage1, physical views, source/RX dependencies,
-//! active invocations and the existing code-publication authority.
+//! Hooks the translation-control owner needs from the memory system.
 
 use super::{ControlSnapshot, Register};
 use crate::memory::{domain::MemorySystem, stage1};

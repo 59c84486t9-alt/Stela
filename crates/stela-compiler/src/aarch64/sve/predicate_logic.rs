@@ -1,4 +1,4 @@
-//! Packed predicate Boolean, permutation and counter extraction operands.
+//! Predicate Boolean operations, permutes and predicate-as-counter extraction.
 
 use crate::aarch64::scalable::ElementSize;
 

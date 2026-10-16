@@ -1,8 +1,5 @@
-//! Scalable predicate generation, break propagation and scalar WHILE conditions.
-//!
-//! Decoding is state independent. The caller applies the immutable scalable
-//! profile and architectural streaming checks before execution. PN destinations
-//! alias P8..P15; no instruction here accesses guest RAM or changes FFR/ZA/Z.
+//! Predicate generation: PTRUE, PFALSE, WHILE*, BRK* and PNEXT. PN registers are
+//! P8-P15.
 
 pub use basic::BasicOperand;
 pub use breaks::{Boundary, BreakKind, BreakOperand};

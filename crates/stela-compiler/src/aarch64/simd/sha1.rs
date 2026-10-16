@@ -1,5 +1,4 @@
-//! Six exact SHA1 forms from Arm ISA_A64_xml_A_profile-2026-06.
-//! FEAT_SHA1 and enabled non-streaming FP/AdvSIMD are execution requirements.
+//! SHA1C, SHA1H, SHA1M, SHA1P, SHA1SU0 and SHA1SU1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Choose,

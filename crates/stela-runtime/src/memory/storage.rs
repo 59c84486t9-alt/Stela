@@ -1,7 +1,4 @@
-//! Retained native mapping lifetime, independent of logical guest views.
-//!
-//! These owners expose raw descriptors only. Retaining storage does not pin its
-//! current host rights, admit concurrent execution, or register memory writers.
+//! Lifetime of native mappings, independent of guest views.
 
 use alloc::sync::Arc;
 use core::ptr::NonNull;

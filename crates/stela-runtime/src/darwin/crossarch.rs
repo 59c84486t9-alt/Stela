@@ -1,8 +1,5 @@
-//! Explicit unavailable cross-architecture service from public XNU
-//! f6217f891ac0bb64f3d375211650a4c1ff8ca1ea, bsd/kern/kern_crossarch.c,
-//! bsd/sys/crossarch.h and bsd/kern/syscalls.master. Namespace zero returns
-//! ENOTSUP; larger uint32 namespaces return EINVAL. This profile provides no
-//! cross-architecture execution or host Rosetta access.
+//! The cross-architecture query, answered as unavailable (XNU
+//! `bsd/kern/kern_crossarch.c`): namespace 0 returns ENOTSUP, others EINVAL.
 
 use super::{
     BsdCompletion, BsdPrototype, BsdReturnType, BsdServiceEvent, PendingBsdCall, classify_bsd_call,

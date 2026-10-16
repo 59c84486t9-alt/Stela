@@ -1,7 +1,5 @@
-//! Streaming SVE integer/complex dot, Half dot and widening Half multiply-add.
-//! Decode describes one instruction; callers snapshot all source Z registers
-//! before writing the destructive accumulator. Indexed sources select within
-//! each 128-bit segment, rather than broadcasting from the first segment.
+//! SVE integer and complex dot products, half-precision FDOT and widening
+//! multiply-add. Indexed sources select within each 128-bit segment.
 
 use crate::aarch64::scalable::ElementSize;
 

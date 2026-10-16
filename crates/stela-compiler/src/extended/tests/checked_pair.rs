@@ -1,4 +1,4 @@
-//! Checked store-pair whole-plan routing; native service effects use the family harness.
+//! Checked store-pair routing.
 use super::*;
 use crate::{
     block::{BlockProfile, CheckedMemoryProfile, CompilationPlan},

@@ -1,5 +1,5 @@
-//! Fresh loader-owned RAM with explicit source-physical placements.
-//! Capacity is descriptive; only explicitly initialized/zeroed extents acquire backing.
+//! Loader RAM at fixed physical addresses. Only initialized or zeroed extents
+//! are backed.
 use super::{
     MAX_IMAGE_MEMORY_BYTES,
     backing::{AccessError, AccessPermissions, MemoryBacking, MemoryView},

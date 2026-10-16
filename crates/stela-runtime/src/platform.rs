@@ -1,6 +1,5 @@
-//! Host services are separate from canonical runtime resources.
-//! Freestanding code requires ring 0, aborting panic and a real loader heap.
-//! No service below supplies guest CPU, source or execution admission.
+//! Host services: memory, locks, unwinding and CPU detection. The freestanding
+//! build runs in ring 0 with an aborting panic and a loader-provided heap.
 pub(crate) mod cpu;
 pub(crate) mod memory;
 pub(crate) mod sync;

@@ -1,8 +1,5 @@
-//! SME2 register-only multi-vector integer arithmetic and narrowing.
-//!
-//! SME forms require streaming access; six SVE2.1 pair-narrow forms also permit
-//! non-streaming SVE. ZA is not accessed. Saturation
-//! produces a register result and preserves FPSR.QC, unlike AdvSIMD saturates.
+//! SME2 multi-vector integer arithmetic and narrowing. Saturation does not set
+//! FPSR.QC.
 use crate::aarch64::scalable::{BITS_PER_BYTE, ElementSize, VECTOR_REGISTER_COUNT};
 
 const SIZE_SHIFT: u32 = 22;

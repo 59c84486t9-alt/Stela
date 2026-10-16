@@ -1,4 +1,4 @@
-//! Declared-source component tests; no captured-hardware or native admission.
+//! Identification-dependent process-memory controls.
 use super::*;
 use crate::memory::domain::{MemoryDomain, MemorySystem};
 use stela_compiler::TargetCpu;

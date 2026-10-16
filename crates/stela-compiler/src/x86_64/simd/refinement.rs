@@ -1,4 +1,4 @@
-//! Refinement steps: exact-product/widened SSE2, checked FMA3 and exact widened H.
+//! FRECPS/FRSQRTS: exact-product SSE2, FMA3, or widened arithmetic for half.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,

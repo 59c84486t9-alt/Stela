@@ -1,7 +1,5 @@
-//! Callback candidate for exact reached-element multi-vector memory transfers.
-//!
-//! Private staging keeps every load destination unchanged until the complete
-//! tuple succeeds. Stores submit ascending elements without rolling back RAM.
+//! Multi-vector loads and stores through the memory service. Loads commit after
+//! the whole tuple succeeds; stores submit elements in ascending order.
 use super::super::{isa::SimdOpcode as Host, scalable};
 use super::memory as common;
 use super::predicate::{emit_prepared_counter_chunk, prepare_counter};

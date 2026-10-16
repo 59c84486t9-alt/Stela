@@ -1,4 +1,4 @@
-//! Baseline register-only MTE recipes; guest tag controls are fixed by profile.
+//! MTE tag arithmetic under the fixed guest tag controls.
 use super::{Register, Shift, Width, load, offset, right_operand, store};
 use crate::{
     GuestState,

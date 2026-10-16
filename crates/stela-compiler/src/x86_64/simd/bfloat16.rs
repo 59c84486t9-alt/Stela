@@ -1,4 +1,4 @@
-//! BF16 numerical mappings, grouped by their distinct rounding contracts.
+//! AdvSIMD BF16 instructions.
 use alloc::vec::Vec;
 mod conversion;
 mod dot;

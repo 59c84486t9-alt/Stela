@@ -1,6 +1,4 @@
-//! Resource-specific System effects under the sole canonical retiring consumer.
-//! Preparation retains original resource/source loans without a PE/state borrow
-//! that could obstruct start_retirement. Only the parent constructs this commit.
+//! Preparing and committing a system effect without borrowing the PE state.
 
 use crate::{
     memory::domain::MemoryExecutionLoan,

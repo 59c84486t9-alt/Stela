@@ -1,5 +1,5 @@
-//! Persistent AOT storage and serialized native leaf/basic-block execution.
-//! Full application launch, platform ABI and Mach-O linking remain future work.
+//! Execution of translated ARM64 code: the native code cache, block dispatch,
+//! guest memory, system state and Darwin services.
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::ToOwned, string::String};

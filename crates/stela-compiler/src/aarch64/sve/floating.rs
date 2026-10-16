@@ -1,4 +1,4 @@
-//! Reviewed streaming numerical families share one source-admitted completion boundary.
+//! SVE floating-point families.
 
 pub mod arithmetic;
 pub mod bfloat16;

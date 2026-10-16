@@ -1,6 +1,4 @@
-//! Scalar leaves of scalable length and population-count arithmetic.
-//! Scalable predicate counting and complete-Z access are supplied by the shared
-//! scalable backend; helpers below consume a count in RCX when it is dynamic.
+//! ADDVL/ADDPL/RDVL and predicate counts. A dynamic count arrives in RCX.
 use super::super::{load, store};
 use super::predicate::emit_counter_chunk;
 use crate::TargetCpu;

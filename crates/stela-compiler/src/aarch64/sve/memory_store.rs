@@ -1,7 +1,5 @@
-//! Contiguous and whole scalable stores, and scalar-address prefetch hints.
-//!
-//! Mode/feature checks precede execution. Rm31 is unallocated, base31 is SP,
-//! and structured source tuples wrap modulo the architectural Z register count.
+//! SVE contiguous and whole-register stores, and PRF* hints. Structured source
+//! tuples wrap modulo 32.
 use super::memory::{Address, Offset, Scale};
 use crate::aarch64::{
     register,

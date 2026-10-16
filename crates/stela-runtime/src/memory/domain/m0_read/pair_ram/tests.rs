@@ -1,5 +1,4 @@
-//! Consolidated authored inputs for the actual retained pair-read consumer.
-//! Models/materialized original RAM grant no source/control loan or execution.
+//! M0 pair reads.
 
 use crate::memory::domain::m0_read::pair::M0ReadPairSource;
 use stela_compiler::{

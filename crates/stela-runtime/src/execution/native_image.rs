@@ -1,6 +1,4 @@
-//! Synchronous native ABI calls over a borrowed ORIGINAL executable storage owner.
-//! Storage proves byte lifetime/RX ownership only. No CPU/PE/domain admission,
-//! source association, helper completion, finalization or PC settlement is minted.
+//! Synchronous native ABI calls into borrowed executable storage.
 use core::{convert::Infallible, ptr::NonNull};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
 

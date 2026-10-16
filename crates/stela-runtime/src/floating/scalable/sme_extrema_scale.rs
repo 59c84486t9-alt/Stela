@@ -1,4 +1,4 @@
-//! Transactional H/S/D SME2 absolute extrema and signed exponent scaling.
+//! Completion of SME2 FAMIN/FAMAX and FSCALE.
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
 use stela_compiler::{

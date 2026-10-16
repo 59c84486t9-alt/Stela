@@ -1,4 +1,4 @@
-//! Square root: positive-normal SSE2 mappings with transactional exact fallback.
+//! FSQRT: SSE2 for positive normals, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar, commit_inexact,

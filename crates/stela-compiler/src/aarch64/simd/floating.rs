@@ -1,5 +1,4 @@
-//! Pinned Arm A64 2026-06 FCSEL/FABS/FNEG, including AFP AH/NEP behavior.
-//! FP/AdvSIMD/FP16/AFP enabled; ordinary non-streaming AArch64 execution.
+//! FCSEL, FABS and FNEG, including FPCR.AH/NEP behavior.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignOperation {

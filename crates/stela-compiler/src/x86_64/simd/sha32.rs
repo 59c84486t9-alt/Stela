@@ -1,5 +1,4 @@
-//! Exact 32-bit encoders shared by the classic SHA1/SHA256 recipes.
-//! This is a fixed GuestState/legacy-XMM boundary, not a general assembler.
+//! 32-bit lane encodings shared by the SHA1 and SHA256 recipes.
 use super::{Host, packed, vector_offset};
 use alloc::vec::Vec;
 

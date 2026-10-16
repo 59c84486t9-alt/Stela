@@ -1,7 +1,4 @@
-//! Physical backing and logical mapping identities for native guest memory.
-//!
-//! Resolution validates one architectural access part. It neither performs the
-//! access nor supplies synchronization, tag checks, or exclusive monitors.
+//! Physical backing and mapping identities of guest memory.
 
 use super::tag_store::TagStore;
 use super::tags::AllocationTag;

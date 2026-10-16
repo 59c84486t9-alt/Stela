@@ -1,4 +1,4 @@
-//! AdvSIMD LD/ST1/2/3/4 multiple structures, including post-index forms.
+//! LD1-4 and ST1-4 (multiple structures).
 use super::{Direction, Layout, Operand, decode_addressing};
 
 const CLASS_MASK: u32 = 0xbf20_0000;

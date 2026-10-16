@@ -1,4 +1,4 @@
-//! Allocation-free, lock-free early/fatal UART output for one boot BSP only.
+//! Allocation-free, lock-free UART output for the boot processor.
 use core::{
     arch::asm,
     fmt::{self, Write},

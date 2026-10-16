@@ -1,4 +1,4 @@
-//! Scalar NZCV and scalar/AdvSIMD predicate comparisons (Arm A64 2026-06).
+//! FCMP/FCCMP and AdvSIMD FCMEQ/FCMGE/FCMGT/FACGE/FACGT.
 use crate::aarch64::floating::{Format, comparison::Predicate};
 
 use super::arithmetic::Shape;

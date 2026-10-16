@@ -1,7 +1,4 @@
-//! Actual-bank MMU-disabled ordinary aligned Device read8 qualification.
-//!
-//! Private source component. This is not a PA backing constructor, physical
-//! read, host serialization permit, source mint, PE entry or retirement hook.
+//! Aligned Device reads with the MMU off (M0).
 
 use super::{PanFeatures, Presence, TranslationControls};
 use crate::{

@@ -1,5 +1,4 @@
-//! Source-validated Darwin service settlement on the actual retained thread.
-//! No PC owner, dispatcher, memory alias or host callback is available here.
+//! Darwin service calls completed on the running thread.
 use crate::{darwin, mach, thread};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};

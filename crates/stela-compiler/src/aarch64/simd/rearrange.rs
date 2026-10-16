@@ -1,6 +1,5 @@
-//! Apple candidate AdvSIMD lane movement and byte permutations.
-//! Fixed encodings and reserved operands: Arm A64 2026-06 DUP/INS/SMOV/UMOV,
-//! EXT, REV16/32/64, ZIP/UZP/TRN and TBL/TBX XML. Enabled FP/AdvSIMD profile.
+//! Lane movement and permutes: DUP, INS, SMOV, UMOV, EXT, REV16/32/64,
+//! ZIP/UZP/TRN, TBL and TBX.
 use super::super::{Register, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

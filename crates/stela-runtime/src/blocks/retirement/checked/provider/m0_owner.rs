@@ -1,5 +1,4 @@
-//! Concrete fresh M0 backend. Contextual hosted join; freestanding mounting remains unverified.
-//! The containing provider module alone seals this implementation.
+//! The M0 backend.
 use super::super::super::software_async::NoAsyncSources;
 use super::super::{
     NativeObservation,

@@ -1,7 +1,7 @@
-//! Bounded x86-QEMU development mount of the real shared compiler/runtime.
-//! Original ARM bytes arrive as a loader module; the canonical SoftwareEl1Machine
-//! owns RAM, source, PE, compilation/cache, NativeImage and precise settlement.
-//! A component stop is not installation, intact macOS boot or platform closure.
+//! x86 QEMU boot mount of the shared compiler and runtime.
+//!
+//! The ARM image arrives as a Multiboot module and runs on `SoftwareEl1Machine`,
+//! which owns its RAM, translation cache and native code.
 #![no_std]
 #![no_main]
 extern crate alloc;

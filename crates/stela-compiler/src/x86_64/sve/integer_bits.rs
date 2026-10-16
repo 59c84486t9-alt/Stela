@@ -1,4 +1,4 @@
-//! Packed SSE2/checked-SSSE3 kernels for predicated scalable integer bit operations.
+//! SVE predicated bit operations with SSE2 or SSSE3.
 use crate::{
     TargetCpu,
     aarch64::{

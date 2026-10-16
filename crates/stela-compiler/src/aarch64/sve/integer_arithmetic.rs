@@ -1,5 +1,4 @@
-//! Streaming-SVE ordinary integer arithmetic, widening and carry operations.
-//! Canonical encodings: hash-pinned Arm A64 2026-06 candidate inventory.
+//! SVE integer arithmetic, widening and carry operations.
 use crate::aarch64::scalable::{ElementSize, Predication};
 const REGISTER_MASK: u32 = 31;
 const SOURCE_SHIFT: u32 = 5;

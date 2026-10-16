@@ -1,5 +1,5 @@
-//! Ahead-of-time native translation of supported Apple-silicon ARM64 semantics.
-//! Unsupported instructions are errors; no interpreter fallback is emitted.
+//! Ahead-of-time translation of ARM64 code to native x86-64.
+//! Unsupported instructions are compile errors; there is no interpreter fallback.
 #![no_std]
 
 extern crate alloc;

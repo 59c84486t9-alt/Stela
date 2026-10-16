@@ -1,5 +1,4 @@
-//! Source-resolved ARM memory attributes for one exact domain generation.
-//! Native storage eligibility is validated separately by the existing domain.
+//! Memory attributes of one domain generation.
 
 #[cfg(feature = "std")]
 use crate::memory::domain::MemoryExecutionLoan;

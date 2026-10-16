@@ -1,4 +1,4 @@
-//! Baseline packed predicate operations with bounded source snapshots.
+//! Predicate Boolean operations and permutes.
 use super::super::scalable;
 use super::predicate;
 use crate::{

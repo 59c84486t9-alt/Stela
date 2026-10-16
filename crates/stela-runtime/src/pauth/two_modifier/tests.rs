@@ -1,4 +1,4 @@
-//! Focused source-staged component tests, not original PAuth_LR evidence.
+//! Two-modifier signing and authentication.
 use super::*;
 use crate::pauth::{Keys, TwoModifierError};
 

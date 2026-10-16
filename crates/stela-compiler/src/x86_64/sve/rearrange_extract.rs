@@ -1,4 +1,4 @@
-//! SSE2 extraction/broadcast and checked-SSSE3 insertion recipes.
+//! SVE extraction and broadcast (SSE2) and insertion (SSSE3).
 use crate::{
     TargetCpu,
     aarch64::{

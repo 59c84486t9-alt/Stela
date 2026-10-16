@@ -1,4 +1,4 @@
-//! Branchless selection from the saved guest NZCV, independent of host flags.
+//! Branchless conditional select from the saved guest NZCV.
 use super::{condition, load, nzcv, right_operand, store};
 use crate::aarch64::{
     Shift, Width,

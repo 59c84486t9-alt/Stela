@@ -1,4 +1,4 @@
-//! Explicit guest thread-register reads through the runtime-owned TSD domain.
+//! Thread register reads (TPIDR_EL0, TPIDRRO_EL0) through the runtime TSD.
 use crate::{CompileError, GuestAddress};
 use serde::Serialize;
 

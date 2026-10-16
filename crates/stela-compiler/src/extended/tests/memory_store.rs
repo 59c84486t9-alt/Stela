@@ -1,4 +1,4 @@
-//! Store56 provider routing and complete-body memory requirements.
+//! SVE store routing and requirements.
 use super::*;
 use crate::aarch64::sve::memory_store;
 use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_requirements};

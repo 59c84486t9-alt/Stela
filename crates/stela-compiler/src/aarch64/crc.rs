@@ -1,4 +1,4 @@
-//! Scalar CRC32/CRC32C encodings from the pinned Arm 2026-06 reference.
+//! CRC32 and CRC32C.
 use super::{Register, register};
 
 const CLASS_MASK: u32 = 0x7fe0e000;

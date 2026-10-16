@@ -1,4 +1,4 @@
-//! Scalar CSSC recipes; host arithmetic flags never update guest NZCV.
+//! FEAT_CSSC ABS, CNT and CTZ.
 use super::{Register, Width, load, offset, store};
 use crate::{
     TargetCpu,

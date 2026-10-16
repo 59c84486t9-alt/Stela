@@ -1,8 +1,5 @@
-//! Effective lower-address translation and allocation-tag checks for data RAM.
-//!
-//! The CPU owner supplies resolved controls; this module does not decode system
-//! registers, own RAM, clear reservations or accumulate asynchronous fault state.
-//! The declared profile uses allocation tags with MTX and store-only checking off.
+//! Address translation and allocation-tag checks for data accesses, from
+//! resolved controls. The profile has MTX and store-only tag checking off.
 
 use super::domain::{AllocationTagPolicy, DataAccess, DataPolicy, MappingAttributes};
 use super::tag_store::TagStoreError;

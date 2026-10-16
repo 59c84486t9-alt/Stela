@@ -1,4 +1,4 @@
-//! Private proposal: guarded normal Double-to-Single precision and odd narrowing.
+//! SVE double-to-single FCVT and round-to-odd FCVTX on normal values.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

@@ -1,6 +1,5 @@
-//! Scalar LSE updates: direct locked operations and one return-old retry engine.
-//! RDX contains the checked address. Sources are staged before any guest commit;
-//! only a completed atomic operation may publish its zero-extended old value.
+//! LDADD-family atomics: direct LOCK operations where x86 has them, otherwise a
+//! CMPXCHG retry loop. The old value is written only after the update succeeds.
 use super::{ValueRegister, commit_rax, input_rax, input_rcx, locked_compare_exchange, read_rax};
 use crate::aarch64::{
     Register,

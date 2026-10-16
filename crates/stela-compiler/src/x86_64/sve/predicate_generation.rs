@@ -1,4 +1,4 @@
-//! Packed predicate generation with checked scalar BMI1 recipes; no guest RAM access.
+//! Predicate generation, using BMI1 when available.
 use super::predicate;
 use crate::{
     GuestState, TargetCpu,

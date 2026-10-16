@@ -1,6 +1,5 @@
-//! Reviewed SIMD data movement and integer operations, with FP/AdvSIMD enabled.
-//! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06/{ldr_imm_fpsimd,
-//! str_imm_fpsimd,ldur_fpsimd,stur_fpsimd,movi_advsimd,ldp_fpsimd,stp_fpsimd}.xml.
+//! AdvSIMD and FP: register transfers (LDR/STR/LDUR/STUR/LDP/STP), MOVI and the
+//! shared operand types of the SIMD families.
 use super::{AddressMode, Register, register};
 pub mod aes;
 pub mod arithmetic;

@@ -1,5 +1,4 @@
-//! Exact packed predicate writes and chunk access for registered consumers.
-//! This child is enabled only when an instruction family needs these helpers.
+//! Packed predicate writes and chunk access.
 
 use super::{
     DWORD_BYTES, HALFWORD_BYTES, PREDICATE_CHUNK_BYTES, QWORD_BYTES, predicate_chunk,

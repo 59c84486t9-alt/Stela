@@ -1,9 +1,5 @@
-//! One CPACR_EL1/SMCR_EL1 authority for a declared NS A64 EL0/EL1 machine.
-//!
-//! IDs remain in the same immutable Snapshot; ScalableState alone owns SVCR,
-//! length and register contents. Every checked native entry re-evaluates source
-//! requirements while borrowing this owner through the synchronous callback.
-//! This module neither delivers exceptions nor certifies native memory safety.
+//! CPACR_EL1 and SMCR_EL1 for an EL0/EL1 machine. Every checked native entry
+//! re-evaluates its requirements against them.
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 mod features;

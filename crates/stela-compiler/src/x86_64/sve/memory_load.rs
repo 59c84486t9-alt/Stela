@@ -1,7 +1,5 @@
-//! Callback candidate for SVE loads with a private, fault-atomic destination.
-//!
-//! Guest RAM is accessed only through the versioned memory service. Its exact
-//! element decomposition and writer-domain participation are runtime-owned.
+//! SVE loads through the memory service into a private staging buffer, so a
+//! fault leaves the destination unchanged.
 use super::super::{isa::SimdOpcode as Host, scalable};
 use crate::{
     TargetCpu,

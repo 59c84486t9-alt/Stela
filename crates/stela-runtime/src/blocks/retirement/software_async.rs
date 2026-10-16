@@ -1,7 +1,4 @@
-//! Private real source-registration/pending owner for a declared software PE.
-//! This does not infer the interrupt inventory of Apple hardware or firmware.
-//! No Clone/default or interior-mutable producer aliases exist. All producer
-//! registration/injection requires this same actual domain's exclusive borrow.
+//! Asynchronous event sources (interrupts, debug events) of a software PE.
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;

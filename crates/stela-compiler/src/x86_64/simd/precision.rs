@@ -1,4 +1,4 @@
-//! Precision conversion: guarded SSE2/integer mappings and exact-core fallback.
+//! FCVT between FP formats: SSE2 or integer paths, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR, RESULT_MINIMUM_EXPONENT, Rounding,

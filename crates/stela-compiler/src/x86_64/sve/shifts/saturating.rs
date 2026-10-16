@@ -1,4 +1,4 @@
-//! Packed full signed-count saturation; FPSR.QC is unchanged.
+//! SVE saturating shifts by signed counts.
 use crate::{
     TargetCpu,
     aarch64::{scalable::ElementSize, sve::shifts::Kind},

@@ -1,4 +1,4 @@
-//! Preserve hosted unwind cleanup; freestanding target panics must abort.
+//! Unwinding when hosted; the freestanding build aborts on panic.
 #[cfg(feature = "std")]
 pub(crate) use std::panic::catch_unwind as invoke;
 #[cfg(feature = "std")]

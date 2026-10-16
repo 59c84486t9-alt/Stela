@@ -1,6 +1,4 @@
-//! Classic .16B AES forms from the pinned Arm A64 2026-06 reference.
-//! Profile: FEAT_AES and FP/AdvSIMD enabled, non-streaming, 128-bit vector state.
-//! V31 is ordinary vector data. These forms do not modify NZCV/FPCR/FPSR.
+//! AESE, AESD, AESMC and AESIMC.
 
 const FORM_MASK: u32 = 0xffff_fc00;
 const AESE: u32 = 0x4e28_4800;

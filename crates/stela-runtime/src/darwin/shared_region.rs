@@ -1,8 +1,5 @@
-//! The absent-task-region branch of Darwin's shared-region query.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! bsd/vm/vm_unix.c and osfmk/mach/dyld_pager.h. This profile does not claim
-//! the private macOS 27 kernel contract or model an existing shared region.
+//! The shared-region query when the task has no shared region (XNU
+//! `bsd/vm/vm_unix.c`).
 
 use super::{
     BsdCompletion, BsdPrototype, BsdReturnType, BsdServiceEvent, PendingBsdCall, classify_bsd_call,

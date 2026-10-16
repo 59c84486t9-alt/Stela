@@ -1,4 +1,4 @@
-//! Guarded Half arithmetic with exact normal intermediates.
+//! Half-precision arithmetic through exact single-precision intermediates.
 use alloc::vec::Vec;
 mod product;
 

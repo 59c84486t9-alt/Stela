@@ -1,9 +1,4 @@
-//! Handwritten identification-register access decisions for the pinned June 2026 corpus.
-//!
-//! This module does not invent processor identity, cache geometry, or a feature profile.
-//! Readbacks and implementation-defined choices belong to the caller's explicit CPU
-//! profile. Access controls are effective values after architectural control resolution.
-//! No cache maintenance, MMU operation, or host instruction is performed here.
+//! Identification-register (ID_*) reads. Values come from the guest CPU profile.
 
 use super::access::{
     AccessKind, Encoding, ExceptionLevel, Profile, Request, Resolution, StateWrite, Trap,

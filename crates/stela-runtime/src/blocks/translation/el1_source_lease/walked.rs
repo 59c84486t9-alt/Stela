@@ -1,5 +1,4 @@
-//! Actual enabled EL1 fetch session: same installed source, controls and outer.
-//! No independent provider, copied bank, native profile or permission token.
+//! EL1 instruction fetch with the MMU enabled.
 use super::{INSTRUCTION_BYTES, InstalledEl1SourceScope, SCTLR_M, profile, stage1};
 use crate::{
     memory::domain::{

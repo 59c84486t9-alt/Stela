@@ -1,4 +1,4 @@
-//! Exact-footprint packed multiple-structure transfers within one granule.
+//! LD1-4/ST1-4 (multiple structures) within one page.
 use super::super::{commit, read_vector};
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;

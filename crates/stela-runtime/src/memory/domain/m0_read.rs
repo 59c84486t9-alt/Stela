@@ -1,10 +1,4 @@
-//! Source metadata and typed failures for a proposed M0 read boundary.
-//!
-//! These values grant no source, control, physical RAM, PE, ordering or entry
-//! authority. The canonical parents must retain all those real loans through
-//! translation, actual physical read, checked finalization and once-only commit.
-//! This leaf owns no architectural bank, RAM, callback or monitor and performs
-//! no memory access. It cannot replace PhysicalAddressSpace or read_descriptor.
+//! Source metadata and failures of the M0 read.
 
 pub(crate) mod pair;
 mod pair_ram;

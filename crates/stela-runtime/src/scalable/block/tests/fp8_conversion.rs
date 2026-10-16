@@ -1,4 +1,4 @@
-//! Grouped SME FP8 preparation and descriptor integrity at every length.
+//! SME FP8 conversion preparation at every vector length.
 use super::*;
 use stela_compiler::{
     aarch64::{

@@ -1,6 +1,4 @@
-//! Exact integer FRECPX/FLOGB candidates over guarded Single/Double lanes.
-//! Exceptional inputs retain instruction-wide semantic completion. No host FP
-//! operation or MXCSR access participates in this integer-only route.
+//! SVE FRECPX and FLOGB by integer arithmetic.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

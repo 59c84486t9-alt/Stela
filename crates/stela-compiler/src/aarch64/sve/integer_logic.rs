@@ -1,5 +1,4 @@
-//! Streaming-SVE vector Boolean operations, copies and prefix moves.
-//! Encoding facts: Arm ISA_A64_xml_A_profile-2026-06, canonical vector forms.
+//! SVE vector Boolean operations, copies and prefix moves.
 use super::super::{Register, Width, logical_mask, register};
 use crate::aarch64::scalable::{ElementSize, Predication};
 

@@ -1,7 +1,4 @@
-//! Exact SSE2 interleave/deinterleave networks for complete 128-bit chunks.
-//!
-//! Split narrows only representable values, so PACK saturation cannot change
-//! source bits. These kernels access no architectural state or guest memory.
+//! SSE2 interleave and deinterleave networks for whole 128-bit chunks.
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;

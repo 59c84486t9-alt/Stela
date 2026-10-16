@@ -1,10 +1,5 @@
-//! EL0 direct private Normal-RAM unprivileged scalar transfers.
-//!
-//! At EL0 their access descriptor has the same privilege as ordinary accesses.
-//! The shared path checks incoming SP, retains exact widths and load faults,
-//! and preserves completed store prefixes without writeback. This mapping
-//! assumes disabled tag/PAC/CPA checks; it does not emulate privileged execution
-//! or guest MMU/user-permission checks.
+//! LDTR*/STTR* at EL0, where they behave as ordinary accesses. Checks the
+//! incoming SP and keeps completed store prefixes on a fault.
 use super::{AddressMode, memory};
 use crate::aarch64::unprivileged::Operand;
 use alloc::vec::Vec;

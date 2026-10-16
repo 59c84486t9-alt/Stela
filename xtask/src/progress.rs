@@ -1,8 +1,6 @@
-//! Instruction progress: merge reviewed registries into the Arm checklist and
-//! render the README table.
-//!
-//! Each canonical encoding form counts once at its best reviewed status across
-//! execution profiles. Aliases are excluded and partial forms earn no credit.
+//! Instruction progress: merge the registries into the Arm checklist and render
+//! the README table. Each encoding form counts once, at its best status across
+//! execution profiles; aliases and partial forms are not counted.
 use crate::tools::root;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, to_string as json};

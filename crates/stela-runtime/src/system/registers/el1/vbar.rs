@@ -1,8 +1,4 @@
-//! Source-bound direct VBAR effects; access resolution stays in the shared leaf.
-//!
-//! Staging changes no state and grants no native/source/retirement permission.
-//! The canonical consumer retains the actual context/state/outer/async owners,
-//! binds this exact stage before retirement, and supplies the sealed effect loan.
+//! VBAR_EL1 writes.
 use super::{BackendRequest, Context, Effect, Register, resolve};
 use crate::system::{
     access::{Request, Resolution},

@@ -1,5 +1,4 @@
-//! SVE integer comparison-to-predicate operand decoding.
-//! Mode/feature permission and scalable state ownership belong to the shared core.
+//! SVE integer comparisons into predicates (CMP*).
 use crate::aarch64::scalable::ElementSize;
 
 const SIZE_SHIFT: u32 = 22;

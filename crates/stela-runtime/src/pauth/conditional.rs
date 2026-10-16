@@ -1,6 +1,4 @@
-//! Legacy IA/IB conditional operands from the one canonical PAC descriptor.
-//! Pure pre-state staging; caller retains actual source/control/PACM authority.
-//! Initial profile has BTI absent. Landing/branch effects remain with the owner.
+//! Operands of the IA/IB instructions whose behavior depends on PSTATE.PACM.
 
 use super::lr_instruction::{Action, Key, StageError};
 use crate::system::state::Pacm;

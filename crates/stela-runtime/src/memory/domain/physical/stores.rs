@@ -1,7 +1,4 @@
-//! Source-only consumer draft for qemu's actual typed M0 write loan.
-//!
-//! Deliberately unregistered until the real producer joins. No dummy loan,
-//! generic callback, permissive unsafe capability or architectural bank lives here.
+//! M0 STP stores to physical RAM.
 
 use super::{PhysicalAddressSpace, PhysicalReadPlatformError};
 use crate::platform::sync::MutexGuard;

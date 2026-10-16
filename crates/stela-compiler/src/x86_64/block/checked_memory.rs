@@ -1,4 +1,4 @@
-//! Checked context block emission from the same source-derived decoded plan.
+//! Blocks whose memory accesses go through the checked memory service.
 use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu,
     block::{Terminator, memory::CheckedOperation},

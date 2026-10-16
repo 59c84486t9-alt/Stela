@@ -1,6 +1,4 @@
-//! Classic SHA3 logical forms from Arm A64 2026-06 {eor3,bcax,rax1,xar}_advsimd.
-//! The enabled, nonstreaming FP/AdvSIMD profile writes all 128 destination bits.
-//! These forms neither read nor update FPCR, FPSR or NZCV. V31 is ordinary data.
+//! EOR3, BCAX, RAX1 and XAR.
 const REGISTER_MASK: u32 = 31;
 const DESTINATION_SHIFT: u32 = 0;
 const LEFT_SHIFT: u32 = 5;

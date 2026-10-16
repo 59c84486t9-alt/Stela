@@ -1,4 +1,4 @@
-//! Integer ZA vector arithmetic over the checked extended execution context.
+//! SME integer ZA arithmetic.
 use alloc::vec::Vec;
 mod long;
 mod outer;

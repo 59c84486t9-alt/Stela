@@ -1,4 +1,4 @@
-//! SVE floating immediates are bitwise construction, independent of FP controls.
+//! SVE FCPY and FDUP.
 use crate::{
     TargetCpu,
     aarch64::{

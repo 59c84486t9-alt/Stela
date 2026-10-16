@@ -1,5 +1,4 @@
-//! Authored full-state self-modification fixtures through the genuine machine.
-//! They exercise the existing one-word EL1 lane, not a new dispatcher.
+//! Self-modifying code on the software EL1 PE.
 use super::*;
 use crate::system::state::{El1Registers, PSTATE_EL1H};
 use stela_compiler::{GuestState, TargetCpu};

@@ -1,4 +1,4 @@
-//! The enlarged state remains intact across scalar native execution and reuse.
+//! Guest state survives scalar native execution and block reuse.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use anyhow::Result;
 use stela_compiler::{GuestAddress, GuestState};

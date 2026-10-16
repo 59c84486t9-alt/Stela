@@ -1,5 +1,4 @@
-//! Advisory SSE prefetches in the untagged private ordinary-RAM profile.
-//! No SP checks, guest-data loads, state writes or optional host features.
+//! PRFM as SSE PREFETCH hints.
 use super::{load, offset};
 use crate::aarch64::{
     prefetch::{Address, Hint, Operand},

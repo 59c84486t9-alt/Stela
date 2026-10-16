@@ -1,4 +1,4 @@
-//! Reviewed SME FP8 matrix/conversion admission and typed execution scope.
+//! SME FP8 matrix and conversion admission.
 use super::*;
 use crate::{
     TargetCpu,

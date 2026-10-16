@@ -1,5 +1,4 @@
-//! SME ZA-targeting floating arithmetic decoding, independent of execution state.
-//! Feature availability and streaming/ZA access checks belong to the caller.
+//! SME floating-point outer products and ZA arithmetic.
 
 const VECTOR_SELECT_SHIFT: u32 = 13;
 const VECTOR_SELECT_MASK: u32 = 3;

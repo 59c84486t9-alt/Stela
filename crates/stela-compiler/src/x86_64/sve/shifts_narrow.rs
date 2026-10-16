@@ -1,5 +1,4 @@
-//! SSE2 and checked SSE4.1 mappings for interleaved widening/narrowing.
-//! Saturation is data-only and preserves guest FPSR.QC.
+//! SVE2 widening and narrowing shifts with SSE2 or SSE4.1.
 use crate::{
     TargetCpu,
     aarch64::{

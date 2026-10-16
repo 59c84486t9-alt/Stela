@@ -1,5 +1,4 @@
-//! Source-adjacent MOVPRFX pairs for reviewed total inline followers.
-//! Effectful boundaries remain explicit declines until restart state is carried.
+//! MOVPRFX pairs compiled as one unit with their follower.
 
 use super::{Decoded, INSTRUCTION_BYTES, ScalableProfile, decode_recording_features};
 use crate::{

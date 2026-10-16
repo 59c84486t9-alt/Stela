@@ -1,4 +1,4 @@
-//! SME streaming-length address arithmetic. Mode/feature checks belong to the caller.
+//! ADDSVL, ADDSPL and RDSVL.
 use crate::aarch64::{Register, register};
 
 const ADD_LENGTH_MASK: u32 = 0xffe0_f800;

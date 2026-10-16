@@ -1,4 +1,4 @@
-//! Transactional SME2 floating-point completion for aligned Z-register groups.
+//! Completion of SME2 floating-point operations on aligned Z groups.
 
 use anyhow::anyhow;
 use stela_compiler::{

@@ -1,7 +1,4 @@
-//! Private wire proposal for generic reserved loads, conditional writes and local clear.
-//!
-//! The operation never encodes a guest instruction. Request bytes describe the
-//! guest quantity; request data points to this complete initialized private payload.
+//! Memory-service requests for exclusive loads, conditional stores and CLREX.
 
 use crate::context::memory::MemoryOrder;
 

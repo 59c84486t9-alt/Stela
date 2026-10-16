@@ -1,4 +1,4 @@
-//! Scalable-matrix mappings using immutable streaming-length specialization.
+//! SME emission, specialized to the streaming vector length.
 
 pub(crate) mod extrema_scale;
 pub(crate) mod integer_dots;

@@ -1,5 +1,4 @@
-//! SSE2 packed immediate and native per-lane register shifts, including width
-//! changes. Host flags/MXCSR are never substituted for guest NZCV/FP status.
+//! AdvSIMD shifts by immediate and per-lane register, including width changes.
 use super::{
     Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, vector_offset,
 };

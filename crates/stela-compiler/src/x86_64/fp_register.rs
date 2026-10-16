@@ -1,4 +1,4 @@
-//! Baseline integer-only FPCR/FPSR access; host FP state remains untouched.
+//! FPCR/FPSR reads and writes, using integer instructions only.
 use super::{load, store};
 use crate::{
     GuestState,

@@ -1,4 +1,4 @@
-//! Packed unsigned-count barrel shifts.
+//! Per-lane variable shifts by unsigned counts.
 use crate::x86_64::simd::shifts::{
     logical_shift as shared_logical_shift, right_shift as shared_right_shift,
 };

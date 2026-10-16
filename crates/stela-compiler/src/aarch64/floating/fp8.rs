@@ -1,5 +1,4 @@
-//! Exact OFP8 conversions and fused dot arithmetic, independent of host FP state.
-//! Callers own feature/access admission, effective controls and transactional commit.
+//! OFP8 (E4M3/E5M2) conversions and fused dot products.
 use super::{
     Class, Control, FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_FZ16, Format,
     INEXACT, INVALID, OVERFLOW, Outcome, UNDERFLOW, UnsupportedControl, precision::round_ieee,

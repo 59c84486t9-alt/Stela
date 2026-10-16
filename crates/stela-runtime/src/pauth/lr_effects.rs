@@ -1,9 +1,5 @@
-//! Read-only LR evaluation over the actual borrowed key/control/frame owners.
-//!
-//! Effects are candidates, not execution permits. The canonical Active consumer
-//! validates source/current PC and all applicable state effects, then performs
-//! the single register/PSTATE/PC commit and postchecks. This module owns no bank,
-//! native entry, source lookup, branch fetch, exception entry or finalizer.
+//! Evaluating FEAT_PAuth_LR instructions into effects for the retiring owner
+//! to validate and commit.
 
 use super::{
     AuthenticationError,

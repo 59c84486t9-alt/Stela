@@ -1,5 +1,4 @@
-//! Canonical typed descriptors and decoder for the June PAuth_LR forms.
-//! A decoded descriptor conveys source facts, not execution or key authority.
+//! FEAT_PAuth_LR instructions (PACIASPPC, AUTIASPPC, RETAASPPC, ...).
 
 use serde::Serialize;
 

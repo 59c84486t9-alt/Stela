@@ -1,9 +1,8 @@
-//! Pinned mathematical AES S-box circuits and fixed stack-plane lowering.
-//! SysV leaf/block ABI enters with RSP%16=8. The parent emits no prologue;
-//! every other ordinary instruction restores its own temporary frame. Padding
-//! the complete frame by eight bytes aligns each 16-byte plane for the legacy
-//! PAND/PXOR memory operand. GuestState accesses stay unaligned in the parent.
-//! There is one fallthrough path and the exact frame is restored before commit.
+//! Bitsliced AES S-box circuit over 16-byte planes on the stack.
+//!
+//! The SysV entry has RSP%16 == 8, so the frame is padded by eight bytes to align
+//! each plane for PAND/PXOR memory operands. The frame is restored before the
+//! destination is written.
 use super::{BYTE_BITS, Host, LEFT, MASK, RESULT, Shift, TargetCpu, byte_constant, packed};
 use alloc::vec::Vec;
 

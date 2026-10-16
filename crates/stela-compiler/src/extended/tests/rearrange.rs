@@ -1,4 +1,4 @@
-//! Production-root rearrangement dispatch and exact body/source-map contracts.
+//! SVE permute dispatch, bodies and source maps.
 use super::*;
 use crate::aarch64::sve::rearrange;
 use alloc::vec::Vec;

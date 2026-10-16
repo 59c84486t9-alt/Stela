@@ -1,5 +1,4 @@
-//! Exact normal IEEE Half widening without host FP controls.
-//! The common entry owns availability; exceptional sources take whole-instruction completion.
+//! SVE half-precision widening of normal values, without host FP controls.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

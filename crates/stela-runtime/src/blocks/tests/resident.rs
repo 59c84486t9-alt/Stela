@@ -1,4 +1,4 @@
-//! Original-block accounting, canonical state and cache ownership for resident loops.
+//! Resident loops: block accounting, final state and cache ownership.
 use super::*;
 
 const BASE: GuestAddress = GuestAddress(0x1000);

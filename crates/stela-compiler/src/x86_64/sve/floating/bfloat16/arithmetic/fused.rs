@@ -1,8 +1,5 @@
-//! Exact-Double BF16 fused arithmetic with transactional exceptional fallback.
-//!
-//! Nearby operand exponents make the BF16 product and sum exact in Double.
-//! Integer round-to-odd compression supplies a Single-shaped representation to
-//! the shared BF16 rounding selectors, without a host Double-to-Single rounding.
+//! BF16 fused multiply-add through exact double arithmetic. Close exponents make
+//! the product and sum exact in double; round-to-odd then feeds BF16 rounding.
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

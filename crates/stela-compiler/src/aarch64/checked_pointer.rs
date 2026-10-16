@@ -1,4 +1,4 @@
-//! FEAT_CPA checked-pointer arithmetic encodings; execution availability is separate.
+//! FEAT_CPA checked pointer arithmetic: ADDPT, SUBPT, MADDPT and MSUBPT.
 use super::{Register, register};
 
 const OFFSET_OPCODE_MASK: u32 = 0xffe0_e000;

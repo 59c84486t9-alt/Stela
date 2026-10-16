@@ -1,4 +1,4 @@
-//! Immutable native-storage eligibility, separate from scalable CPU state.
+//! Which native storage a memory profile may use.
 
 use super::{
     AllocationTagPolicy, DataPolicy, MappingAttributes, MemoryThread, MemoryView, SCA_BYTES,

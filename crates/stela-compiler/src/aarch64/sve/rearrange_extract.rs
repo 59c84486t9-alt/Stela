@@ -1,5 +1,4 @@
-//! Register extraction, broadcast and insertion for streaming SVE.
-//! The shared scalable core owns instruction permission and state storage.
+//! SVE element extraction, broadcast and insertion (LAST*, CLAST*, INSR, ...).
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::{Register, register};
 

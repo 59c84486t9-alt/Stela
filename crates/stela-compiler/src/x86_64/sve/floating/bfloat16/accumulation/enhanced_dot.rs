@@ -1,12 +1,9 @@
-//! Guarded SSE2 enhanced BFDOT over one 128-bit architectural chunk.
+//! FEAT_EBF16 BFDOT over one 128-bit chunk.
 //!
-//! Caller owns the shared PrivateMxcsr frame, installs the guest rounding mode
-//! with DAZ/FTZ clear, and stages XMM0 only after this function. This function
-//! performs no calls, frame allocation, state writes, or architectural commits.
-//! Inputs XMM0/XMM1 are eight BF16 values; XMM6 is four Single accumulators.
-//! Output XMM0 is four Singles. XMM1/XMM6 and RDI/R15/callee-saved GPRs survive.
-//! XMM2/3/4/5/7, RAX/RCX and flags are clobbered; RDX survives. Host status is
-//! discarded; caller must not add it to FPSR and must restore original MXCSR.
+//! The caller installs the guest rounding mode with DAZ/FTZ clear in a private
+//! MXCSR and restores it afterwards; host status is discarded. Inputs: XMM0/XMM1
+//! hold eight BF16 values, XMM6 four single accumulators. Output: XMM0 holds four
+//! singles. Clobbers XMM2-5, XMM7, RAX, RCX and flags.
 
 use crate::x86_64::scalable::numerical;
 use alloc::vec::Vec;

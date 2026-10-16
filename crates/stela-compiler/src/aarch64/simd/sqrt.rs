@@ -1,4 +1,4 @@
-//! Scalar and AdvSIMD FSQRT from the pinned Arm A64 2026-06 reference.
+//! Scalar and AdvSIMD FSQRT.
 use crate::aarch64::floating::Format;
 
 use super::arithmetic::Shape;

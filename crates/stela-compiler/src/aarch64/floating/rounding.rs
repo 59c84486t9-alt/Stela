@@ -1,4 +1,4 @@
-//! Same-format integral rounding, including signed bounded FRINT operations.
+//! FRINT* rounding to integral values, including the bounded FRINT32/64 forms.
 use super::{
     Class, Control, FPCR_DN, Format, INEXACT, INVALID, Outcome, UnsupportedControl, unpack,
 };

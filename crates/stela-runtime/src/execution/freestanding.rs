@@ -1,5 +1,4 @@
-//! Only original canonical sessions may call boot native storage. Both pre-FFI
-//! refusal and reached carrier plus fallible postcheck remain typed observations.
+//! Native-image calls in the freestanding build.
 use super::{
     boot_frames::{BootFrames, FrameError},
     native_image::NativeImage,

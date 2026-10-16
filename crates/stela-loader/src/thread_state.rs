@@ -1,4 +1,4 @@
-//! Original Mach-O ARM thread descriptors, without process or firmware policy.
+//! Mach-O ARM thread-state load commands.
 use anyhow::{Result, ensure};
 use object::macho;
 use serde::Serialize;

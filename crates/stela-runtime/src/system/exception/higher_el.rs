@@ -1,9 +1,4 @@
-//! Source-bound HVC/SMC selection for the base A64 higher-EL entry subset.
-//!
-//! This module selects an exception; the canonical exception entry owner alone
-//! commits banks, PSTATE, security and runtime effects. Controls are borrowed
-//! from their authoritative owner, never initialized here or inferred from the
-//! host. Missing controls and unreviewed feature values explicitly decline.
+//! HVC and SMC routing to a higher exception level.
 
 use crate::system::access::{ExceptionLevel, SecurityState};
 use crate::system::identification::Register;

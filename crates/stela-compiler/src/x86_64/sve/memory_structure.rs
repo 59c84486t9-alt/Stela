@@ -1,7 +1,5 @@
-//! Staged structured SVE loads through the architectural memory callback.
-//!
-//! This correctness candidate keeps every destination unchanged until all
-//! reached reads succeed. Runtime owns address resolution and atomic splitting.
+//! SVE LD2/LD3/LD4 through the memory service. Destinations are written after
+//! every element succeeds.
 use super::super::{
     isa::SimdOpcode as Host,
     scalable::{self, memory},

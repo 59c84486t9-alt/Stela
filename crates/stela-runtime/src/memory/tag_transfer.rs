@@ -1,10 +1,5 @@
-//! Allocation-tag memory instruction ordering and architectural register commits.
-//!
-//! The backend owns translation, permissions, backing tags and writer gates.
-//! This helper selects sequential completion of subaccesses on an abort; Arm
-//! permits other outcomes for nonfaulting locations of a multi-access instruction.
-//! It never strips tagged addresses or owns RAM. The initial profile is
-//! little-endian Normal WB with SCA16 and CPA2 off.
+//! Ordering and register commits of MTE tag loads and stores. On an abort the
+//! sub-accesses complete sequentially, one of the outcomes Arm permits.
 use super::tags::{AllocationTag, TAG_GRANULE_BYTES};
 use stela_compiler::{
     GuestState,

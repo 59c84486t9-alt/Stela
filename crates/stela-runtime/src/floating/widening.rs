@@ -1,4 +1,4 @@
-//! Transactional mixed-width FP16 multiply-add completion over saved guest state.
+//! Completion of FMLAL and FMLSL.
 use stela_compiler::{
     GuestState,
     aarch64::{

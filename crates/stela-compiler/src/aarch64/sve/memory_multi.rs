@@ -1,4 +1,4 @@
-//! SME2/SVE2.1 contiguous transfers governed by predicate-as-counter registers.
+//! SME2/SVE2.1 multi-vector loads and stores governed by predicate-as-counter.
 use super::super::{Register, register};
 use super::memory::{Address, Offset, Scale};
 use crate::aarch64::scalable::{

@@ -1,9 +1,6 @@
-//! Serialized anonymous Mach VM mapping over the shared owned-memory allocator.
-//! The pinned XNU trap copies its address in, publishes the mapping, then copies
-//! the resulting address out. Copyout failure preserves the allocation and any
-//! completed byte prefix; it is not an allocation rollback.
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea: mach_kernelrpc.c,
-//! vm_user.c, vm_map.c, vm_sanitize.c, copyio.h and ARM64 copyio assembly.
+//! Anonymous Mach VM allocation. As in XNU, the address is copied in, the
+//! mapping published, then the address copied out; a copyout failure keeps the
+//! allocation.
 
 use super::{
     GUEST_PAGE_MASK, KERN_INVALID_ADDRESS, KERN_INVALID_ARGUMENT, KERN_SUCCESS,

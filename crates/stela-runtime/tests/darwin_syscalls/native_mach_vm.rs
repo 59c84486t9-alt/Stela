@@ -1,4 +1,4 @@
-//! Native service-driver checks, sharing the Darwin family fixture helpers.
+//! Mach VM protection.
 #![cfg(target_os = "macos")]
 
 use super::*;

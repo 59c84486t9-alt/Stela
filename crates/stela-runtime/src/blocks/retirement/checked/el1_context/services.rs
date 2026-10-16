@@ -1,5 +1,4 @@
-//! Actual exception effects borrowed from the original EL1 owner.
-//! No PC, state bank, source cache or execution authority is owned here.
+//! EL1 exception effects borrowed from the EL1 owner.
 use crate::{
     memory::{domain::MemoryThread, policy::MemoryControls},
     system::{

@@ -1,5 +1,4 @@
-//! Private emitted adapter ABI tests with an explicit callback test double.
-//! These tests make no MemoryThread, original ARM or checked-entry claim.
+//! Emitted exclusive-access code run against a test memory-service callback.
 use super::*;
 use crate::{
     GuestState,

@@ -1,4 +1,5 @@
-//! Guarded native mappings for source-admitted streaming numerical families.
+//! SVE floating-point emission: native paths for ordinary values, software
+//! completion for the rest.
 
 use alloc::vec::Vec;
 mod add_reductions;

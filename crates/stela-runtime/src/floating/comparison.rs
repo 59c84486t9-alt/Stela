@@ -1,4 +1,4 @@
-//! Transactional NZCV and scalar/vector predicate comparison completion.
+//! Completion of NZCV and predicate comparisons.
 use stela_compiler::{
     GuestState,
     aarch64::{

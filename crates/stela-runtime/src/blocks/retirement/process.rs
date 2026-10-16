@@ -1,4 +1,4 @@
-//! Existing Darwin protected dispatch retains the sole actual PE until stop.
+//! Protected Darwin process dispatch.
 use super::{
     checked::{CheckedProcessOwner, OwnedRunRequest, ProcessEntryControls},
     software_async::SoftwareAsyncDomain,

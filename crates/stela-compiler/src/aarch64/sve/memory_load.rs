@@ -1,7 +1,5 @@
-//! SVE contiguous, replicated and whole-register loads.
-//!
-//! Loads stage the complete destination before committing it. Memory faults must
-//! preserve the old destination, including the upper scalable register bytes.
+//! SVE contiguous, replicating and whole-register loads. The destination is
+//! staged in full, so a fault leaves it unchanged.
 use super::super::register;
 use super::memory::{Address, Extension, Offset, Scale};
 use crate::aarch64::scalable::ElementSize;

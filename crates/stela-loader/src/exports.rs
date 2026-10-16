@@ -1,9 +1,5 @@
-//! Bounded export-trie decoding for declared Mach-O image mappings.
-//!
-//! The node/payload layout follows Apple dyld's ExportsTrie.cpp and loader.h.
-//! This initial resolver profile supports regular and absolute definitions,
-//! including weak-definition metadata. Reexports, TLV and resolver exports are
-//! explicit errors. No lookup, initializer or native execution is performed.
+//! Export-trie decoding (dyld `ExportsTrie.cpp`). Regular and absolute symbols,
+//! including weak definitions; re-exports, TLV and resolvers are errors.
 use super::load_plan::{LoadPlan, Payload};
 use anyhow::{Context, Result, bail, ensure};
 use object::macho;

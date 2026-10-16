@@ -1,4 +1,4 @@
-//! Source-derived checked GPR memory plans under the existing block parser.
+//! Checked GPR memory access plans.
 use crate::{
     CompileError, GuestAddress, NativeBlock, TargetCpu, context::memory::MemoryRequirements,
 };

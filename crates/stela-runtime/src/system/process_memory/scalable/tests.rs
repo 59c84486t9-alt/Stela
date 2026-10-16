@@ -1,4 +1,4 @@
-//! Source-qualified native acceptance through the actual process-memory owner.
+//! Scalable-code entry with checked memory.
 use super::*;
 use crate::{
     memory::domain::{MemoryDomain, MemorySystem},

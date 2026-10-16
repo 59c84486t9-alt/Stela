@@ -1,4 +1,4 @@
-//! ADR/ADRP form addresses from the instruction's guest PC, never its native PC.
+//! ADR and ADRP, computed from the guest PC.
 use super::{Register, register};
 use crate::GuestAddress;
 

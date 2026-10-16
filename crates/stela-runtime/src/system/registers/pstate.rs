@@ -1,10 +1,5 @@
-//! Direct PSTATE register and immediate effects over the existing state owners.
-//!
-//! Resolution uses fresh effective controls from the executing CPU. This module
-//! stores no architectural state and grants no source, control, or IRQ authority.
-//! Commit follows source validation and access resolution in the same exclusive
-//! borrow. The caller completes PC afterward; later asynchronous arbitration
-//! observes that completed instruction, not the old PSTATE/source PC.
+//! PSTATE register and immediate writes. The caller sets PC afterwards, so a
+//! later interrupt observes the completed instruction.
 
 pub mod immediate;
 

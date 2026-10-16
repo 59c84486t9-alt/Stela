@@ -1,5 +1,4 @@
-//! Immutable architectural numerical capabilities, separate from host features.
-//! ID/control provenance belongs to the selected guest execution profile.
+//! Guest floating-point features, independent of host CPU features.
 
 use serde::Serialize;
 

@@ -1,4 +1,4 @@
-//! Exact Q16 typed dispatch, declared features, modes and source-map boundaries.
+//! SME2.1 dispatch, features, modes and source maps.
 use super::*;
 use crate::aarch64::sve::{rearrange, reductions};
 use alloc::vec::Vec;

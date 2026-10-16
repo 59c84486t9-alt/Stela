@@ -1,10 +1,5 @@
-//! Bounded host entropy for serialized owned guest memory.
-//!
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! bsd/dev/random/randomdev.c and bsd/kern/syscalls.master. The source returns
-//! EINVAL for oversized requests, despite the differing historical man page.
-//! Host-provider failure uses this profile's EIO policy; XNU read_random itself
-//! has no error result. Shared participating memory requires a separate adapter.
+//! `getentropy` from host entropy (XNU `bsd/dev/random/randomdev.c`).
+//! Oversized requests return EINVAL; a host failure returns EIO.
 
 use super::{
     BsdCompletion, BsdPrototype, BsdReturnType, BsdServiceEvent, PendingBsdCall, classify_bsd_call,

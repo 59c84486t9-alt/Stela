@@ -1,9 +1,4 @@
-//! Exact finite indexed Half arithmetic with one shared transactional frame.
-//!
-//! Half products fit exactly in Double. Fused sums must also be exact Double
-//! before the shared integer Half packer performs the sole architectural rounding.
-//! Exceptional inputs, cancellation zero, tiny/overflow outputs and inexact
-//! Double sums retain whole-instruction numerical completion.
+//! SVE indexed half-precision arithmetic through exact double intermediates.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

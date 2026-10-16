@@ -1,4 +1,4 @@
-//! Fresh declared component fixtures; no PE identity, instruction or native credit.
+//! SCTLR2 and TCR2 storage.
 use super::*;
 use crate::{
     blocks::ThreadState,

@@ -1,6 +1,5 @@
-//! ARM64 Mach trap ABI and opt-in host-owned bootstrap port rights.
-//! Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea:
-//! osfmk/arm64/bsd_arm64.c and osfmk/kern/syscall_sw.c. This is not an IPC bridge.
+//! The ARM64 Mach trap ABI and host-backed bootstrap port rights
+//! (XNU `osfmk/arm64/bsd_arm64.c`, `osfmk/kern/syscall_sw.c`).
 use crate::{
     blocks::ThreadState,
     darwin::{SYSCALL_SELECTOR_REGISTER, validate_trap_parts},

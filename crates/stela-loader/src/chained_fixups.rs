@@ -1,9 +1,7 @@
-//! Checked decoding of Apple chained rebases and binds, with explicit PAC metadata.
+//! Decoding of chained rebases and binds, including PAC metadata.
 //!
-//! Layout/stride facts: Apple's include/mach-o/fixup-chains.h. Validation and
-//! address interpretation: common/MachOAnalyzer.cpp, mach_o/ChainedFixups.cpp
-//! and common/MachOLoaded.cpp in apple-oss-distributions/dyld. No Apple source
-//! is copied here. This module never writes mappings or resolves/signs imports.
+//! Layouts follow `mach-o/fixup-chains.h`; validation follows dyld's
+//! `MachOAnalyzer.cpp`, `ChainedFixups.cpp` and `MachOLoaded.cpp`.
 use super::load_plan::LoadPlan;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;

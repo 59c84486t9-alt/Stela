@@ -1,5 +1,4 @@
-//! BranchAddr for the original bounded AArch64 EL1 translation regime.
-//! No instruction fetch, PC write, alignment fault or execution permission.
+//! BranchAddr for the EL1 translation regime.
 use super::{ControlError, Presence, TranslationControls, fields::tcr};
 use crate::system::access::ExceptionLevel;
 

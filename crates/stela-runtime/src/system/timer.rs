@@ -1,6 +1,4 @@
-//! Handwritten June 2026 SysReg timer access planning for AArch64 EL0/EL1.
-//! No host clock, counter frequency, timer state, interrupt, or register value is
-//! fabricated here. Successful plans describe requirements on a future backend.
+//! Generic-timer register access decisions for EL0/EL1.
 
 use super::access::{
     AccessKind, Encoding, ExceptionLevel, Profile, Request, Resolution, SecurityState, Trap,

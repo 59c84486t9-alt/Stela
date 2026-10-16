@@ -1,9 +1,5 @@
-//! Owned guest Mach namespace. Public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! ipc/mach_kernelrpc.c, mach_port.c, ipc_right.c and ipc/port.h.
-//!
-//! This first profile has no send transfer, notifications or external ordinary
-//! aliases. It is not a complete IPC namespace. Effects return as typed data;
-//! only the process owner may copy to guest memory or complete the actual bank.
+//! The guest Mach port namespace (XNU `ipc/mach_port.c`, `ipc_right.c`). No
+//! send-right transfer or notifications.
 use super::{HOST_SELF_TRAP, REPLY_PORT_TRAP, Request, TASK_SELF_TRAP, THREAD_SELF_TRAP};
 use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]

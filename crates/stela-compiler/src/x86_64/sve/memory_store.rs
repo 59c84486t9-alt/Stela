@@ -1,9 +1,5 @@
-//! Context-memory callback candidate for exact scalable store prefixes.
-//!
-//! Sources and loop state live in private stack storage across callback calls.
-//! One request describes one reached Mem element; the runtime owns its exact
-//! single-copy decomposition and physical writer participation. Whole-register
-//! stores retain their specified ascending byte requests.
+//! SVE stores through the memory service, one element per request in ascending
+//! order. Sources and loop state live on the stack across calls.
 use super::memory as shared_address;
 use crate::{
     TargetCpu,

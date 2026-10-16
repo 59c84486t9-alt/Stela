@@ -1,4 +1,4 @@
-//! SEV/SEVL event delivery through the production runtime owners.
+//! SEV/SEVL event delivery.
 mod backend;
 
 use crate::{

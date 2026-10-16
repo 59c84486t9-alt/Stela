@@ -1,4 +1,4 @@
-//! Complex component staging with transactional, guarded numerical mappings.
+//! FCADD and FCMLA.
 use alloc::vec::Vec;
 mod half;
 

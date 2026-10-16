@@ -1,4 +1,4 @@
-//! Scalar CAS uses the host's exact-width locked compare-and-exchange operation.
+//! CAS through a same-width LOCK CMPXCHG.
 use super::{ValueRegister, commit_rax, input_rax, input_rcx, locked_compare_exchange};
 use crate::aarch64::atomic::{Kind, Operand};
 use alloc::vec::Vec;

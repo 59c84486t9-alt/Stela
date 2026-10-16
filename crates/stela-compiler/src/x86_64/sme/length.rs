@@ -1,4 +1,4 @@
-//! SME length arithmetic specialized to the cache-bound streaming vector length.
+//! ADDSVL/ADDSPL/RDSVL with the streaming vector length as a constant.
 use crate::aarch64::Register;
 use crate::aarch64::scalable::VectorLength;
 use crate::aarch64::sme::length::{Kind, Operand, Scale};

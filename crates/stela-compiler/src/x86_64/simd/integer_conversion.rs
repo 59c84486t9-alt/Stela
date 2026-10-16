@@ -1,4 +1,4 @@
-//! Baseline integer/FP conversion with one transactional destination/status commit.
+//! Conversions between FP and integers.
 use super::numerical::{
     ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar,
     commit_inexact, emit_opcode, environment_round, exponent_range, prepare_vector_input_range,

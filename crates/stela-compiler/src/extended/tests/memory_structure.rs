@@ -1,4 +1,4 @@
-//! Structured-load routing, declared features and complete-body requirements.
+//! Structured load routing, features and requirements.
 use super::*;
 use crate::aarch64::sve::memory_structure;
 use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_requirements};

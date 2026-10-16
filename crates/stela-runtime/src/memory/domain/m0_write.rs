@@ -1,4 +1,4 @@
-//! Canonical ordinary X-store metadata. This grants no data/source/PE access.
+//! STP metadata for the M0 write.
 use stela_compiler::{
     GuestAddress, GuestState,
     aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register},

@@ -1,13 +1,8 @@
-//! Explicit LP64 Darwin BSD-call adaptation and bounded native service dispatch.
+//! Darwin BSD system-call ABI and native service dispatch.
 //!
-//! Reference: public XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! bsd/dev/arm/systemcalls.c, bsd/sys/user.h and osfmk/arm64/sleh.c.
-//! This profile does not establish the private macOS 27 kernel contract.
-//! The #0x80 restriction is an initial Stela profile, not an XNU check of
-//! the SVC immediate. No service, host syscall, memory access or exception-level
-//! transition occurs in the ABI adapter itself. Opt-in backends separately own
-//! data protections, cross-architecture failure and Mach/thread services.
-//! Declining a request means leaving its pending state unchanged.
+//! Follows XNU `bsd/dev/arm/systemcalls.c`, `bsd/sys/user.h` and
+//! `osfmk/arm64/sleh.c`. Only `SVC #0x80` is accepted. Each service is enabled
+//! separately; a declined request leaves its pending state unchanged.
 use crate::blocks::ThreadState;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};

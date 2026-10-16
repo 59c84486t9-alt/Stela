@@ -1,5 +1,5 @@
-//! SHA256 instructions: integer rounds, SSE2 schedule, checked Intel SHA.
-//! H/H2 each execute all four rounds and commit only their own selected half.
+//! SHA256: scalar rounds, SSE2 schedule, or Intel SHA when available. SHA256H and
+//! SHA256H2 each run all four rounds and keep their own half.
 use super::sha32::{
     DOUBLE_WORD_BYTES, HIGH_WORD_BYTE, RESULT, Rotate32, Scalar32, WORD_BITS, WORD_BYTES,
     WORDS_PER_VECTOR, pack_state,

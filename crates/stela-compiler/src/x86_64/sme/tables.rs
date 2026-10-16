@@ -1,7 +1,5 @@
-//! SME2 register-group routing specialized to the cache-bound streaming length.
-//!
-//! Whole-source staging preserves aliases across 128-bit chunks. The bounded
-//! private stack frame contains no guest RAM and is restored on the single exit.
+//! SME2 multi-vector permutes, specialized to the streaming vector length.
+//! Sources are staged whole so aliases are preserved across chunks.
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES, VectorLength};

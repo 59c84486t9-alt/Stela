@@ -1,4 +1,4 @@
-//! Streaming-vector mappings using the shared extended execution context.
+//! SVE emission over the extended execution context.
 
 pub(crate) mod address;
 pub(crate) mod dot;

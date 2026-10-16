@@ -1,5 +1,4 @@
-//! Generic integer load metadata from the compiler's one shared scalar operand.
-//! Copied values never grant source, control, RAM or native permission.
+//! Scalar load metadata for the M0 read.
 use super::*;
 use stela_compiler::aarch64::register_offset::IndexExtend;
 use stela_compiler::block::{

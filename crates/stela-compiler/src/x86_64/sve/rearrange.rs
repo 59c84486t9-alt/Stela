@@ -1,5 +1,5 @@
-//! Fixed-SVL rearrangement recipes using baseline SSE2 and checked SSSE3.
-//! Source snapshots are needed only for aliased permutations crossing chunks.
+//! SVE permutes with SSE2 or SSSE3. Sources are snapshotted only for permutes
+//! that cross chunks.
 use alloc::vec::Vec;
 mod dynamic;
 

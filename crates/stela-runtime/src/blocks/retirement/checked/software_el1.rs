@@ -1,5 +1,4 @@
-//! Generic hosted entry for a genuinely new, exclusively owned software EL1 PE.
-//! Owned input values initialize new storage; no hardware PE or live domain is adopted.
+//! A new software EL1 PE with its own RAM, source and controls (hosted).
 use super::super::{ConsumerKey, software_async::SoftwareAsyncDomain};
 use super::{
     OwnedRunOutcome, OwnedRunRequest, ProcessEntryControls, el1_system::El1PlatformControls,

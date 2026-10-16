@@ -1,4 +1,4 @@
-//! Predicated merging SVE integral rounding with staged architectural commit.
+//! Completion of SVE FRINT*.
 
 use anyhow::anyhow;
 use stela_compiler::{

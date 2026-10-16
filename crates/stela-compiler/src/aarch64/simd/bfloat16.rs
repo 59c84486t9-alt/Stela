@@ -1,4 +1,4 @@
-//! Classic BF16 forms from the pinned Arm 2026-06 reference.
+//! AdvSIMD BF16: BFCVT, BFCVTN, BFDOT, BFMMLA and BFMLAL.
 use super::arithmetic::Shape;
 
 const SCALAR_MASK: u32 = 0xffff_fc00;

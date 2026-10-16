@@ -1,10 +1,4 @@
-//! Canonical instruction-PAuth two-modifier primitive over one supplied Context.
-//!
-//! This leaf grants no CPU feature or instruction authority. Callers must bind
-//! original operands/source, address space, keys and actual PAuth_LR controls.
-//! Explicit forms always supply two modifiers; old conditional forms require
-//! the CPU owner's PACM decision. BTI/GCS and all state commits remain outside.
-//! The selected QARMA5 Context retains VA47/instruction-TBI-off pointer policy.
+//! Two-modifier instruction PAuth (FEAT_PAuth_LR forms).
 
 use super::{AuthResult, AuthenticationError, Context, Key, Version};
 

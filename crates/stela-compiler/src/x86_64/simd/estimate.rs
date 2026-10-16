@@ -1,4 +1,4 @@
-//! Standard Arm estimates from bounded exact integer-rounding identities.
+//! FRECPE/FRSQRTE/FRECPX through exact integer arithmetic.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar,

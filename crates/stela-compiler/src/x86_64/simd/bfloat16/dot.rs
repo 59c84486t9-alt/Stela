@@ -1,4 +1,4 @@
-//! Classic BF16 dot stages with fixed round-to-odd and private host status.
+//! BFDOT with fixed round-to-odd intermediates.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
     ArithmeticOpcode, Condition, ENVIRONMENT_STACK_BYTES, MXCSR_INEXACT, Rounding, branch,

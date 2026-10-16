@@ -1,5 +1,4 @@
-//! Streaming SVE lane rearrangement and integer vector generation.
-//! No memory or architectural flags are modified. Sources precede destination commits.
+//! SVE permutes and vector generation (INDEX, DUP, ZIP, UZP, TRN, REV, TBL, ...).
 use crate::aarch64::scalable::ElementSize;
 use crate::aarch64::{Register, Width, logical_mask};
 

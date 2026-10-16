@@ -1,5 +1,4 @@
-//! Individual SHA512 instructions: scalar large sigmas and packed small sigmas.
-//! Integer-only recipes preserve guest NZCV/FPCR/FPSR and caller MXCSR.
+//! SHA512: scalar large sigmas and packed small sigmas.
 use super::{Host, commit, packed, read_vector, shuffle, vector_offset};
 use crate::{
     TargetCpu,

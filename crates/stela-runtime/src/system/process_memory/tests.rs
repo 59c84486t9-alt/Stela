@@ -1,4 +1,4 @@
-//! Declared fresh-machine component fixtures, not original/native observations.
+//! Checked process-memory controls.
 use super::*;
 use crate::memory::domain::{MemoryDomain, MemorySystem};
 use crate::system::state::El1Registers;

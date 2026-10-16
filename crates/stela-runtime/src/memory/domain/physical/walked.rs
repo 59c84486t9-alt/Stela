@@ -1,4 +1,4 @@
-//! Enabled virtual fetch through the SAME genuine physical instruction owner.
+//! Virtual instruction fetch with the MMU enabled.
 use super::{BoundPhysicalInstruction, PhysicalAddressSpace};
 use crate::{blocks::InstalledWalkedSource, system::translation_controls::FetchFailure};
 impl PhysicalAddressSpace {

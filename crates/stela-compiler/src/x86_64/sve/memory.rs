@@ -1,4 +1,4 @@
-//! Shared address and fault-exit lowering for streaming SVE memory families.
+//! Address computation and fault exits shared by the SVE memory families.
 
 use super::super::{load, scalable::memory as service};
 use crate::aarch64::{

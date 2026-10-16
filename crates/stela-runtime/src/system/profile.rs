@@ -1,9 +1,4 @@
-//! Checked capability subsets for fixed EL0/EL1 execution and exception entry.
-//!
-//! This is not a complete guest CPU model. The caller retains feature/control
-//! provenance and separately validates the EL/security/debug regime and state.
-//! Numerical and scalable capability owners remain authoritative for their
-//! domains; an empty bounded scalable set cannot prove base SVE absence.
+//! The feature subsets supported for EL0/EL1 execution and exception entry.
 
 const ID_FIELD_MASK: u64 = 0xf;
 const PFR0_SVE_SHIFT: u32 = 32;

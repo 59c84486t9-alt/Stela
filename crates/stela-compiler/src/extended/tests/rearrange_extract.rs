@@ -1,4 +1,4 @@
-//! Production-root extraction dispatch and exact body/source-map contracts.
+//! SVE extraction dispatch, bodies and source maps.
 use super::*;
 use crate::aarch64::sve::rearrange_extract;
 use alloc::vec::Vec;

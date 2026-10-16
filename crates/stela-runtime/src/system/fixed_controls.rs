@@ -1,9 +1,5 @@
-//! Actual immutable partial control owner for a fresh fixed own-EL1 machine.
-//!
-//! Construction declares this machine's controls; it must not copy another
-//! live mutable CPU bank. A run borrows this owner. No queued control work,
-//! setters, interior mutation, architectural state or optional CPU bank exists
-//! here. This scope admits no control writes, data/MMU/device/cache or IRQ work.
+//! The fixed controls of a software EL1 machine. Control writes are not
+//! supported.
 
 use super::access::{ExceptionLevel, Profile, SecurityState};
 use super::exception::{EntryControls, RequiredEffects, ServiceRequest};

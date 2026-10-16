@@ -1,4 +1,4 @@
-//! Shared atomic staging/guards; RDX initially holds the checked guest address.
+//! LSE atomics. RDX holds the checked guest address on entry.
 use super::{load, offset, store};
 use crate::aarch64::{
     Register,

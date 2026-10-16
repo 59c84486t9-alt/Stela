@@ -1,4 +1,4 @@
-//! Incremental architectural predicate-test flags.
+//! Incremental NZCV for predicate-setting instructions (PTEST semantics).
 
 use super::{CHUNK_BITS, bind, jump};
 use alloc::vec::Vec;

@@ -1,5 +1,4 @@
-//! Source-physical reads from genuinely materialized private loader RAM.
-//! Guest source memory type is not inferred from coherent host storage.
+//! Physical reads of source from loader-provided private RAM.
 pub(crate) mod completion;
 
 use super::{

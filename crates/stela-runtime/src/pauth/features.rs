@@ -1,9 +1,4 @@
-//! Borrowed instruction-PAuth feature authority from the sole CPU-profile owner.
-//!
-//! This leaf owns no ID register bank and declares no hardware feature. The
-//! capability borrows the canonical System identification snapshot. Unrelated
-//! raw integers and Context key presence do not establish that provenance.
-//! Source/control/effect authorization remains with the runtime owners.
+//! Instruction PAuth features, read from the PE's identification registers.
 
 #[cfg(feature = "std")]
 use super::Version;

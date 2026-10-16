@@ -1,4 +1,4 @@
-//! Predicate logic production dispatch, feature boundaries and exact source maps.
+//! Predicate logic dispatch, feature limits and source maps.
 use super::*;
 use crate::aarch64::sve::predicate_logic;
 use alloc::vec::Vec;

@@ -1,5 +1,4 @@
-//! Exact packed Single products with integer Half rounding and private status.
-//! The parent stages and classifies active inputs before entering this module.
+//! Half-precision products: packed single multiplies with integer rounding to half.
 use super::super::super::super::isa::ShiftOpcode;
 use super::super::super::numerical::{
     ArithmeticOpcode, Condition, IntegerRoundingRegister, RESULT_MINIMUM_EXPONENT, branch,

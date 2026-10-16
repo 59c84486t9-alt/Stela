@@ -1,4 +1,4 @@
-//! Acquire/release scalar transfers and data-memory ordering barriers.
+//! Acquire/release loads and stores (LDAR, STLR, LDAPR, ...) and DMB.
 use super::{Register, Width, register};
 
 const TRANSFER_MASK: u32 = 0x3fe0_8000;

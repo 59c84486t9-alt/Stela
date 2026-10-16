@@ -1,4 +1,4 @@
-//! Host requirements, detection and stable generated-code target identities.
+//! Host CPU feature requirements, detection and generated-code target identities.
 
 use alloc::borrow::ToOwned;
 use alloc::format;

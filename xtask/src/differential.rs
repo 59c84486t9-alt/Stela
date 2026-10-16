@@ -1,4 +1,4 @@
-//! Original-versus-native differential over the reviewed instruction forms.
+//! Original-versus-native differential over the instruction forms.
 //!
 //! Each implemented leaf, block and scalable form contributes its registry
 //! samples plus random words over its free encoding bits that Stela accepts.

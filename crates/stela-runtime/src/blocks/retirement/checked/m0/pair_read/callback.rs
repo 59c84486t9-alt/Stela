@@ -1,7 +1,4 @@
-//! One reached request from the exact bound M0 LDP64 native body.
-//!
-//! This owns no PE permission. Only the closed native session may lend this
-//! view while the original authority guard owns the prepared RAM transaction.
+//! Memory-service callback for the M0 LDP.
 use crate::memory::domain::m0_read::{M0RamPairReadPlatformError, M0RamPairReadPrepared};
 use stela_compiler::context::memory::{
     MEMORY_CONTEXT_BYTES, MEMORY_CONTEXT_VERSION, MemoryContextView, MemoryRequest, MemoryStatus,

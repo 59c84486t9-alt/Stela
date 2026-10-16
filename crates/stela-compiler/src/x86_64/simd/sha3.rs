@@ -1,5 +1,4 @@
-//! SSE2 lowering for classic SHA3 logical forms. Source state is read completely
-//! before the single destination commit, including every legal operand alias.
+//! EOR3, BCAX, RAX1 and XAR with SSE2.
 use super::{Host, commit, packed, read_vector};
 use crate::{
     aarch64::simd::sha3::{Kind, Operand},

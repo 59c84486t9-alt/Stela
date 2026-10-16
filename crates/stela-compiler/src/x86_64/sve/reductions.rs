@@ -1,4 +1,4 @@
-//! Integer reductions over fixed streaming lengths, using shared Z/P accessors.
+//! SVE integer reductions.
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::reductions::{Kind, Operand, Output};

@@ -1,4 +1,4 @@
-//! Reciprocal, reciprocal-square-root and exponent estimates (Arm A64 2026-06).
+//! FRECPE, FRSQRTE and FRECPX.
 use crate::aarch64::floating::Format;
 
 use super::arithmetic::Shape;

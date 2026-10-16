@@ -1,4 +1,4 @@
-//! BF16 conversion and Single fused arithmetic in the standard BF16 profile.
+//! BF16 conversion and single-precision fused arithmetic.
 pub mod arithmetic;
 mod dot;
 pub mod extended_dot;

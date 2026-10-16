@@ -1,30 +1,11 @@
-//! AArch64 non-secure EL1 stage-1 translation through physical descriptor reads.
+//! AArch64 EL1 stage-1 translation by reading descriptors from physical memory.
 //!
-//! This resolver owns no architectural register state or TLB. The CPU owner
-//! supplies a validated control snapshot and uses the result with its existing
-//! physical memory/coherence owner. Table reads must never call virtual memory
-//! recursively. Only ordinary accesses, lower/upper 47/48-bit VA, 4KiB/16KiB tables,
-//! at most 48-bit walked PA and little-endian Normal-WB leaves are supported.
-//! MMU-off outputs report source-derived Device/WT/NC attributes without
-//! executing those accesses or inventing page-table metadata.
-//! The caller selects an EL0/EL1 regime with no EL2/EL3, stage 2, permission
-//! indirection/overlays, BBML1 nT behavior, MTE, or additional translation
-//! controls outside `Controls`. It must decline those profiles before access.
-//! Guarded-page metadata is returned to the fetch/BTI owner. This resolver
-//! provides no branch-target, alignment, or allocation-tag instruction checks.
-//!
-//! Semantics: pinned Arm June 2026 `shared_pseudocode.xml`, AArch64.S1Walk,
-//! S1NextWalkState, S1ApplyTablePerms, S1CheckPermissions, S1LeafBase,
-//! NextTableBase and AArch64_ContiguousBit. The source archive SHA-256 is
-//! 63a01a1696483bbe2edfef9e0f0cd053d6c1c619ec0587876cb7a60bb344f354.
-//! June member SHA-256:
-//! 21edeadbc26408a35bcf7315bfbcbb8a69e9e6d86d952c80b153d273f0f2349f.
-//! Atomic/exclusive/ordered Device alignment and constrained MMU-off faults
-//! require their exact access-descriptor/location owner and remain unavailable.
-//! Contiguous descriptors use the architecturally permitted implementation
-//! choice to treat the hint as zero. This module makes no Apple MMU claim.
-//! A fresh walk observes physical descriptors on every invocation; no TLB
-//! invalidation or architectural DSB/ISB effects are synthesized here.
+//! Supports lower and upper 47/48-bit VA ranges, 4 KiB and 16 KiB granules, up to
+//! 48-bit PA, and little-endian Normal write-back tables. No EL2/EL3, stage 2,
+//! permission indirection or overlays; callers decline those configurations.
+//! The contiguous hint is treated as zero, as the architecture permits. Every
+//! walk reads the descriptors afresh; there is no TLB. Follows the Arm
+//! pseudocode `AArch64.S1Walk`, `S1CheckPermissions` and related functions.
 
 mod config;
 mod disabled;

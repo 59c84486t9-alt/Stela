@@ -1,7 +1,6 @@
-//! Exact integer power-of-two adjustment shared by fixed and SME vector lanes.
-//! Inputs are XMM0/1, result XMM0, scratch XMM2..5/RAX/RCX/RDX/flags. Every
-//! failure edge precedes guest writes. Only normal inputs/results are admitted;
-//! callers stage complete instruction outputs and own cold numerical completion.
+//! Integer power-of-two scaling (FSCALE) shared by AdvSIMD and SME.
+//! Inputs XMM0/1, result XMM0; clobbers XMM2-5, RAX/RCX/RDX and flags.
+//! Only normal inputs and results take this path.
 use super::{
     Host,
     numerical::{Condition, branch, prepare_vector_input_range, vector_exponent_range},

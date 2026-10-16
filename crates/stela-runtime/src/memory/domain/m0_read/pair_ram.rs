@@ -1,10 +1,4 @@
-//! Retained two-member aligned Device RAM read, for the actual no-LSE2 M0 PE.
-//!
-//! Unregistered source until the genuine pair source/control producer joins.
-//! The producer must positively prove LSE2 absence from its SAME identification
-//! owner. Missing IDs are not absence. LSE2-contained pairs require a different
-//! whole-quantity translation contract; this module cannot qualify that path.
-//! Guest Device attributes do not turn ordinary host RAM into MMIO.
+//! Aligned two-element Device RAM reads for an M0 PE without FEAT_LSE2.
 
 use crate::platform::sync::MutexGuard;
 

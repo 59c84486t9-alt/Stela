@@ -1,4 +1,4 @@
-//! Serialized mapping publication and native-invocation exclusion in one domain.
+//! Mapping publication and exclusion of native calls within a domain.
 use super::*;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;

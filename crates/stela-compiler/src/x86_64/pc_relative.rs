@@ -1,4 +1,4 @@
-//! Materialized guest addresses require only baseline x86-64 MOV instructions.
+//! ADR and ADRP as MOV of the computed guest address.
 use super::store;
 use crate::aarch64::{Register, pc_relative::Operand};
 use alloc::vec::Vec;

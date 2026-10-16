@@ -1,4 +1,4 @@
-//! Exact same-format square root using an integer radicand and remainder.
+//! FSQRT computed from an integer radicand and remainder.
 use super::{
     Class, Control, Format, INEXACT, INVALID, Outcome, UnsupportedControl, nan, process_denormals,
     unpack,

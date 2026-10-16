@@ -1,5 +1,4 @@
-//! Actual owned block API cases for the single coherent numerical22 gate.
-//! Runtime/compiler owners supply the implementation; this file supplies tests.
+//! Context-backed blocks with numerical exits.
 #![cfg(all(target_os = "macos", target_arch = "x86_64"))]
 
 use super::*;

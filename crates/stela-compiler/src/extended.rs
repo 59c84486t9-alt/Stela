@@ -1,8 +1,4 @@
-//! Context-backed leaf compilation with immutable scalable specialization.
-//!
-//! Declared scalable mappings and existing pure GPR/control mappings are
-//! admitted after guest feature and execution-mode checks. Unsupported
-//! effects remain explicit declines.
+//! Leaf compilation with an execution context and a scalable specialization.
 
 use alloc::boxed::Box;
 use alloc::format;

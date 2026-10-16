@@ -1,4 +1,4 @@
-//! Integer/fixed-point FP conversion outcomes, independent of register commit.
+//! Conversions between floating-point and integer or fixed-point values.
 use super::{
     Class, Control, EXCEPTIONS, FPCR_AHP, FPCR_EXCEPTION_ENABLE_SHIFT, Format, INEXACT, INVALID,
     Outcome, UnsupportedControl, unpack, widen,

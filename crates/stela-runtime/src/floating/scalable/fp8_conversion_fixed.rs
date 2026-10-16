@@ -1,4 +1,4 @@
-//! Transactional fixed-width FP8 conversion using the owned FPMR context.
+//! Completion of fixed-width FP8 conversions using FPMR.
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
 use stela_compiler::{

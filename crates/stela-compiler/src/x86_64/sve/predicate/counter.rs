@@ -1,4 +1,4 @@
-//! Expansion of compressed PN counters into packed predicate chunks.
+//! Expanding predicate-as-counter registers into packed predicate chunks.
 use super::{CHUNK_BITS, bind, jump};
 use crate::aarch64::scalable::VectorLength;
 use alloc::vec::Vec;

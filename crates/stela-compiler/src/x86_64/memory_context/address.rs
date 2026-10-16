@@ -1,7 +1,4 @@
-//! Original-SP checks and modular address arithmetic for checked memory leaves.
-//!
-//! SP callers bind SpAlignmentRequirement::Enabled at complete-body preflight.
-//! These helpers never infer effective CPU controls from register alignment.
+//! SP alignment checks and address arithmetic for checked accesses.
 use super::{fault, patch_branch};
 use crate::x86_64::{load, right_operand};
 use crate::{

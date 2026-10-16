@@ -1,7 +1,4 @@
-//! Completion of the fresh machine's original synchronous RAM participants.
-//! The immutable installed-source loan excludes a simultaneous publication;
-//! the physical loan serializes the actual staged Device-RAM participants.
-//! This is not an arbitrary device, DMA, trace or error completion service.
+//! DSB completion of the software PE's pending RAM writes.
 
 use super::{SystemEffectCommit, SystemEffectCommitError, SystemEffectCommitView};
 use crate::{

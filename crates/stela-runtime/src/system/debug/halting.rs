@@ -1,11 +1,4 @@
-//! Unapplied HLT/DCPS semantic intent. This module owns no architectural state.
-//!
-//! A plan is a recipe, never an execution permit or a successful instruction.
-//! The canonical consumer must bind its exact word to the actual original-source
-//! loan and consume its own one-use PE/phase authority. It alone applies the
-//! ordered steps to the existing SystemState, DebugMachine and InstructionGate,
-//! settles every terminal/prefix, and poisons indeterminate completion. There is
-//! deliberately no generic Owner trait, executor, callback, or success fallback.
+//! HLT and DCPS: the ordered steps of entering debug state.
 
 use super::halted::Status;
 use crate::system::access::{ExceptionLevel, SecurityState};

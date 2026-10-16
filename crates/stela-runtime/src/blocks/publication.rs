@@ -1,8 +1,5 @@
-//! Borrowed source/RX publication authority for fixed EL1 exception execution.
-//!
-//! The actual runtime owns both source boxes and RX mappings. This borrow is
-//! minted after native return and excludes replacement or reclamation until
-//! completion returns; a generation number alone is not that exclusion.
+//! Exclusive access to registered source and native code while an EL1 exception
+//! completes, so neither can be replaced or reclaimed meanwhile.
 
 use super::{BlockRuntime, serialize_instruction_execution, validate_terminal_word};
 use crate::system::{

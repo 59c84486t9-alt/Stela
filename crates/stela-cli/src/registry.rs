@@ -1,4 +1,4 @@
-//! Reviewed instruction registries: compile one form sample under the execution
+//! Instruction-form registries: compile a form's sample under the execution
 //! profile its registry declares.
 use crate::compile::{Compiled, compile};
 use anyhow::{Context, Result, bail, ensure};

@@ -1,8 +1,4 @@
-//! Sparse allocation tags owned by one physical memory backing.
-//!
-//! Virtual aliases share the backing's one store. Address translation, mapping
-//! lifetime, permissions, allocation-tag enable and memory ordering belong to
-//! the execution domain. This module supplies atomic individual tag values.
+//! Sparse allocation-tag storage of one physical backing, shared by its aliases.
 
 use super::tags::AllocationTag;
 use crate::platform::sync::RwLock;

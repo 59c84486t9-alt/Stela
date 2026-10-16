@@ -1,4 +1,4 @@
-//! Multi-Z caller dispatch, source maps and complete-body effect requirements.
+//! Multi-vector load/store dispatch, source maps and requirements.
 use super::*;
 use crate::aarch64::sve::memory_multi;
 use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_requirements};

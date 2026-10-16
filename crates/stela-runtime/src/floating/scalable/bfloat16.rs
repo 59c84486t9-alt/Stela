@@ -1,4 +1,4 @@
-//! Staged streaming BF completion with complete original scalable sources.
+//! Completion of SVE BF16 instructions.
 
 use anyhow::anyhow;
 use stela_compiler::{

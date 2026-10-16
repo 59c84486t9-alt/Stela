@@ -1,7 +1,5 @@
-//! Owned A64 state with explicit optional higher-EL banks, with flags and the active stack in `GuestState`.
-//!
-//! This owner validates storage transitions. Access traps, exception sequencing,
-//! memory permissions and externally visible effects belong to their resolvers.
+//! A64 system state with optional higher-EL banks. NZCV and the active stack
+//! pointer live in `GuestState`.
 
 use super::access::ExceptionLevel;
 use super::pstate::{DAIF_MASK, MteFeature, NZCV_MASK, SP_SELECT_MASK, TCO_MASK};

@@ -1,5 +1,4 @@
-//! Fresh original source/controls envelope for the typed EL1 register and literal plans.
-//! Source creation only: no PE, native invocation or replacement boot firmware.
+//! Installing EL1 source and controls for register and literal blocks.
 use super::{BlockRuntime, InstalledCodeSources, InstalledEl1Sources};
 use crate::{
     memory::domain::physical::{ImmutableCodeBacking, PhysicalAddressSpace},

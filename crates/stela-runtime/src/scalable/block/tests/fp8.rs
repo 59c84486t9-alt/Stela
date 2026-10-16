@@ -1,4 +1,4 @@
-//! Actual owned-context fixed FP8 completion, access and failure boundaries.
+//! Fixed-width FP8 completion, access and failure.
 #![cfg(all(target_os = "macos", target_arch = "x86_64"))]
 use super::*;
 use std::{ffi::c_void, ptr::NonNull};

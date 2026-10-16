@@ -1,7 +1,5 @@
-//! Effective controls passed to numerical helpers during streaming execution.
-//!
-//! Raw FPCR storage is preserved. Arm's FPProcessException suppresses numerical
-//! traps in ordinary SME streaming mode, while cumulative FPSR still updates.
+//! Effective FP controls for streaming execution. Streaming mode suppresses
+//! numerical traps while FPSR still accumulates.
 use crate::aarch64::floating::{FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK};
 
 /// Adapt retained enables to FPProcessException's streaming trap condition.

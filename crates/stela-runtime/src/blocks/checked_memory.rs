@@ -1,7 +1,4 @@
-//! Checked data-memory entry through existing registered BlockRuntime owners.
-//!
-//! No guest opcode, raw native pointer, or caller-selected requirements enters
-//! this helper. The parent supplies one source-derived plan and owned RX mapping.
+//! Entering blocks whose data accesses use the checked memory service.
 use crate::{
     execution::{context::ContextLoan, floating_environment::HostFloatingEnvironment, platform},
     system::execution::{Dispatcher, EntryBoundary, Failure},

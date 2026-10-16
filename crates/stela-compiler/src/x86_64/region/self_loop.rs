@@ -1,6 +1,5 @@
-//! Native value residency for bounded, nonfaulting scalar self-loops.
-//! Every observable exit settles the original bank. No mid-native recovery,
-//! checked-memory or asynchronous-delivery contract is introduced here.
+//! Register residency for non-faulting scalar self-loops. Every exit writes back
+//! the full guest register bank.
 use super::{
     AllocationStats, Effects, Emitter, FRAME_LOCATIONS, GPR_SLOTS, HostGpr, Location,
     MAX_INSTRUCTIONS, OptimizedRegion, POOL, Resident, analysis, constant, encoding, flags,

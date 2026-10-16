@@ -1,15 +1,11 @@
-//! Explicit 1 GHz guest clock profile, backed by a coherent host or replay sample.
+//! The guest's 1 GHz clock, backed by the host clock or a replayed sample.
 //!
-//! `counter` is continuous time; subtracting cumulative sleep gives absolute
-//! (awake) time. Clock publication changes only the declared time fields; the
-//! commpage owner preserves any separately declared static configuration.
-//! This is not a complete commpage, hardware counter, or Darwin service layer.
-//! Publication and translated reads must be serialized by the address-space
-//! owner; the read-only guest alias never grants guest write permission.
+//! `counter` is continuous time; subtracting cumulative sleep gives awake time.
+//! Publishing a sample changes only the time fields of the commpage. Publication
+//! and translated reads must be serialized by the address-space owner.
 //!
-//! Host contract: XNU f6217f891ac0bb64f3d375211650a4c1ff8ca1ea,
-//! osfmk/i386/cpu_capabilities.h and libsyscall/wrappers/mach_continuous_time.c.
-//! The internal x86 commpage contract is validated, not assumed on other hosts.
+//! Host layout: XNU `osfmk/i386/cpu_capabilities.h` and
+//! `libsyscall/wrappers/mach_continuous_time.c`, validated at run time.
 pub use crate::commpage::legacy::{
     CONT_HW_TIMEBASE, CONT_HWCLOCK, CONT_TIMEBASE, GUEST_BASE, GUEST_BYTES, TIMEBASE_OFFSET,
     USER_TIMEBASE,

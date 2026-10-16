@@ -1,4 +1,4 @@
-//! Shared integer BF16 quantization; callers own guards and architectural effects.
+//! Integer rounding of single values to BF16.
 use super::super::super::isa::ShiftOpcode;
 use super::super::{Host, packed};
 use super::quantization::{IntegerRoundingRegister, broadcast_integer_rounding};

@@ -1,7 +1,4 @@
-//! SME FP8 arithmetic into ZA. Decoding is independent of execution state.
-//!
-//! The caller checks SME_F8F16/SME_F8F32 according to `accumulator`, then FPMR
-//! access and streaming/ZA access, in that order. These forms do not update FPSR.
+//! SME FP8 outer products and dot products into ZA (SME_F8F16, SME_F8F32).
 
 use crate::aarch64::{
     floating::Format,

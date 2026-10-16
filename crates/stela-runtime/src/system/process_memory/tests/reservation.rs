@@ -1,5 +1,4 @@
-//! Same-reservation behavioral proof through the actual service callback.
-//! This is a component fixture, not a translated/native-body admission claim.
+//! Exclusive reservations through the memory-service callback.
 use super::*;
 use crate::memory::{
     backing::{AccessPermissions, MemoryBacking, MemoryView},

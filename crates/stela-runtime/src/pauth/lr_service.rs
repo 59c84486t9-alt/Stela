@@ -1,14 +1,5 @@
-//! Read-only LR operand/key service over the canonical owners' original loans.
-//!
-//! The consumed fixed-bank control read loan retains the actual source-domain
-//! pin. Domain identity alone does not prove PE/thread identity: the canonical
-//! consumer must retain the exact original PE/frame/System/outer object.
-//! No constructor creates a PE, Context, key bank, SystemState, guest frame or
-//! controls. This service neither admits an instruction nor changes guest state.
-//! The closed consumer still owns source identity/PC, layout and key-enable
-//! selection, BTI/GCS, PACM, traps, retirement and exception delivery. Its source
-//! descriptor is data, never an entry permit. A crypto result is only a candidate
-//! until those owners have completed their checks and effects in source order.
+//! Read-only FEAT_PAuth_LR operand and key access. Results are applied only by
+//! the retiring owner, after its source, PC and trap checks.
 
 use super::{
     Context,

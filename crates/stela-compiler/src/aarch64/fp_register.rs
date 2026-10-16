@@ -1,4 +1,4 @@
-//! FPCR/FPSR access under the enabled AArch64 FP/FP16/AFP register policy.
+//! FPCR and FPSR reads and writes (MRS/MSR).
 use super::{
     Register,
     floating::{

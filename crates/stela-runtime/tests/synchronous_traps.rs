@@ -1,4 +1,4 @@
-//! Owned native trap exits stop at the original instruction without host delivery.
+//! Trap exits stop at the trapping instruction.
 #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 use anyhow::Result;
 use std::path::Path;

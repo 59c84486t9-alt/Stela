@@ -1,4 +1,4 @@
-//! Shared scoped context views, extracted without semantic change.
+//! Scoped execution-context views.
 use stela_compiler::context::{ExecutionContext, ScalableStateView, memory::MemoryContextView};
 
 pub(crate) struct ContextLoan<'a> {

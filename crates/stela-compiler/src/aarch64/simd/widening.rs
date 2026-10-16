@@ -1,4 +1,4 @@
-//! Widening FP16 multiply-add forms from the pinned Arm 2026-06 reference.
+//! FMLAL and FMLSL (half to single).
 use crate::aarch64::floating::{Format, widening::WideningOperation};
 
 use super::arithmetic::Shape;

@@ -1,4 +1,4 @@
-//! Actual host Mach calls with exclusively private owned names and staging.
+//! Host Mach calls on privately owned port names.
 use super::{KERN_SUCCESS, PortKind, RightKind, RightState};
 use anyhow::{Result, bail, ensure};
 

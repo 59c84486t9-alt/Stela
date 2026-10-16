@@ -1,5 +1,5 @@
-//! Closed checked-memory execution under the retained PE and source owners.
-//! The canonical retirement module alone constructs ConsumerKey/RetainedResources.
+//! Checked execution of a software processing element (PE): source, controls,
+//! memory and retirement, held for the whole run.
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec::Vec};

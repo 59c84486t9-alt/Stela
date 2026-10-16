@@ -1,5 +1,4 @@
-//! Arm A64 2026-06 modified immediates and FP register/constant bit moves.
-//! FEAT_FP/AdvSIMD/FP16 enabled. No numerical FP operations or FPCR-dependent unary.
+//! Modified immediates (MOVI, MVNI, ORR, BIC, FMOV) and FP register moves.
 use super::super::register;
 use super::rearrange::{LaneSource, Operand as LaneMove};
 

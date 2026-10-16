@@ -1,9 +1,8 @@
-//! Shared scalable register access for the extended native ABI.
+//! Scalable register access for the extended native ABI.
 //!
-//! RDI holds GuestState and R15 holds the validated ExecutionContext. Low128 Z
-//! bits remain in GuestState.v; upper tails and packed predicates belong to the
-//! scalable view. Helpers use only caller-saved RAX/RCX/RDX and XMM0..7. They
-//! access architectural state storage, never guest data RAM or monitor metadata.
+//! RDI holds GuestState and R15 the ExecutionContext. The low 128 bits of each Z
+//! register live in `GuestState::v`; the upper bytes and packed predicates live
+//! in the scalable view. Helpers clobber only RAX/RCX/RDX and XMM0-7.
 
 pub(crate) use super::memory_context as memory;
 use alloc::vec::Vec;

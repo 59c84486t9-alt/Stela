@@ -1,4 +1,4 @@
-//! Integer SME2 extrema and normal exponent scaling with whole-group staging.
+//! SME2 FAMIN/FAMAX and FSCALE over whole staged groups.
 use crate::{
     CompileError, GuestAddress, GuestState, TargetCpu,
     aarch64::{

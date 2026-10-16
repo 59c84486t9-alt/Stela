@@ -1,5 +1,4 @@
-//! One actual hosted checked native call, with original context and RAM pin.
-//! Private proposal; registration, type/lifetime review and native gates pending.
+//! One native call of an M0 scalar-read block.
 #[cfg(all(
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux", target_os = "none")

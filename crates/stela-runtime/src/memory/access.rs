@@ -1,9 +1,5 @@
-//! Raw single-copy-atomic parts for the coherent Normal-WB memory profile.
-//!
-//! The caller owns address translation, permission checks, mapping lifetime and
-//! reservation tracking. These helpers never create Rust references into guest
-//! RAM. They implement one part inside an aligned 16-byte SCA quantity; ordinary
-//! accesses split across quantities belong to the caller.
+//! Single-copy-atomic access parts within an aligned 16-byte quantity. Callers
+//! handle translation, permissions, mapping lifetime and reservations.
 
 use stela_compiler::TargetCpu;
 

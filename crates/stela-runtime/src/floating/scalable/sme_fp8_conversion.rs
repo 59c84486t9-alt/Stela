@@ -1,4 +1,4 @@
-//! Transactional SME2 FP8 conversions over complete aligned vector groups.
+//! Completion of SME2 FP8 conversions.
 
 use anyhow::anyhow;
 use stela_compiler::{

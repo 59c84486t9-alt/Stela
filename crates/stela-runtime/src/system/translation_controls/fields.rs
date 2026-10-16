@@ -1,23 +1,7 @@
-//! Source-selected register storage/readback policy, without register authority.
+//! Storage and readback of the translation-control fields.
 //!
-//! The only exported constructor selects the bounded profile below. It does not
-//! accept arbitrary field masks. The CPU owner must establish its actual feature
-//! facts; hashes describe provenance, and do not authenticate a caller's claims.
-//! No reset values, guest access checks, synchronization, or effect services are
-//! supplied here. `effective` means feature-filtered consumer input. Canonical
-//! translation still resolves TCR granule fallback, IPS/PARange, TCR.AS/A1, root
-//! alignment, descriptor geometry and access-dependent controls.
-//!
-//! Sources: June 2026 SysReg archive SHA-256
-//! 4795c769085ff9056d9f18abbd9e23d7b0f0a955214cfb2a2121a9698b50d509;
-//! AArch64-{sctlr,tcr,ttbr0,ttbr1,mair}_el1.xml. Named masks below describe field
-//! locations, not write-ignore permissions. Generic reserved rules are Arm DDI
-//! 0487 M.c, PDF pages 17132–17135, local PDF SHA-256
-//! b5f9daa7ec0446777c8f848aa6431c99e5ab6554e5aa171b28b9016771494f8c.
-//! This software implementation selects writable storage and last-successful
-//! readback for always-reserved bits where that choice is permitted. Conditional
-//! reserved bits likewise retain successful writes. Reserved readback therefore
-//! does not itself establish any active architectural feature.
+//! Reserved bits keep their last written value wherever the architecture allows
+//! that choice, so a readback never implies an active feature.
 
 use super::Register;
 

@@ -1,8 +1,4 @@
-//! Fixed EL1 register/exception execution over immutable owned code/controls.
-//!
-//! This concrete adapter admits no guest data, tag, control, cache, TLBI,
-//! device, trace/error or IRQ producer. It uses actual memory/event owners for
-//! exception return, and requires the runtime's post-return code scope.
+//! EL1 register and exception execution over fixed code and controls.
 
 use super::{
     access::ExceptionLevel,

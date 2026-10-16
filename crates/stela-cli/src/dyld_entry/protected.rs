@@ -1,4 +1,4 @@
-//! Fresh declared software resources for the bounded protected startup route.
+//! Software system resources for the protected dyld startup route.
 use anyhow::Result;
 use std::sync::Arc;
 use stela_compiler::{GuestAddress, context::ExecutionContext};

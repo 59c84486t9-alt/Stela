@@ -1,6 +1,5 @@
-//! Final real supervisor mappings: image RO+X, constants RO+NX, mutable image
-//! data/heap/stack RW+NX, disjoint initially absent native/RAM arenas. The only
-//! executor remains the shared runtime's original protected NativeImage path.
+//! Final supervisor mappings: image RX, constants R, data/heap/stack RW+NX, and
+//! initially unmapped arenas for native code and guest RAM.
 use crate::multiboot::Transport;
 use core::{
     arch::asm,

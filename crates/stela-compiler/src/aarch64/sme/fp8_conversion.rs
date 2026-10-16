@@ -1,4 +1,4 @@
-//! SME2 grouped FP8 conversions. Admission checks FP8, FPMR and streaming access.
+//! SME2 multi-vector FP8 conversions.
 use super::fp_vector::VectorGroup;
 
 const SOURCE_SHIFT: u32 = 5;

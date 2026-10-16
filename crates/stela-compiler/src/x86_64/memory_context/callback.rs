@@ -1,7 +1,6 @@
-//! Shared callback candidate for context-backed architectural memory quantities.
-//!
-//! Families own predicates, addresses and private load staging. The callback
-//! owns translation, exact access decomposition, tags and writer participation.
+//! The shared memory-service call. Instruction families supply predicates,
+//! addresses and load staging; the service performs translation, splitting,
+//! tag checks and writer tracking.
 
 use alloc::vec::Vec;
 use core::mem::offset_of;

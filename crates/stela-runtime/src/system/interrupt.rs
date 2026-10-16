@@ -1,7 +1,4 @@
-//! GICv3 CPU-interface access planning, before interrupt-controller mutation.
-//! AccessKind permission is resolved before producing a backend request. Every accepted access,
-//! including configuration reads and writes, remains backend-owned: masks, banking, running
-//! priority, pending/active transitions and interrupt delivery must not become plain storage.
+//! GICv3 CPU-interface register accesses, routed to an interrupt backend.
 
 use super::access::{
     AccessKind, Encoding, ExceptionLevel, Profile, Request, Resolution, SecurityState, Trap,

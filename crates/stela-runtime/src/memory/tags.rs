@@ -1,7 +1,4 @@
-//! Allocation-tag values and the architectural IRG tag generator.
-//!
-//! Allocation-tag storage belongs to the shared physical-memory owner. These
-//! pure operations neither resolve pointers nor grant access to tagged memory.
+//! Allocation-tag values and the IRG tag generator.
 
 /// Architectural allocation-tag granule size, independent of SCA and ERG.
 pub const TAG_GRANULE_BYTES: usize = 16;

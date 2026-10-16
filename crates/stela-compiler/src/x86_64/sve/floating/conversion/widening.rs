@@ -1,4 +1,4 @@
-//! Exact SSE2 Single-to-Double widening with whole-instruction fallback.
+//! SVE single-to-double widening.
 
 use crate::{
     CompileError, GuestAddress, TargetCpu,

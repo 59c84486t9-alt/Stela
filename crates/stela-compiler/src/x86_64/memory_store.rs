@@ -1,6 +1,5 @@
-//! Ordinary private-RAM stores, including completed prefixes before page faults.
-//! The native protection granule is at least 4 KiB. Smaller boundaries are a
-//! conservative check on hosts with larger pages; MMIO/concurrency are excluded.
+//! Direct stores to private RAM, keeping the completed prefix when a later page
+//! faults. The protection granule is assumed to be at least 4 KiB.
 use alloc::vec::Vec;
 pub(crate) mod checked_pair;
 pub(crate) mod checked_scalar;

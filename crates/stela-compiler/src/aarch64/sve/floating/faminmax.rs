@@ -1,4 +1,4 @@
-//! Destructive predicated absolute extrema from the pinned A64 2026-06 reference.
+//! SVE predicated FAMIN and FAMAX.
 use crate::aarch64::floating::{Format, absolute_minmax::AbsoluteMinMaxOperation};
 
 const FORM_MASK: u32 = 0xff3f_e000;

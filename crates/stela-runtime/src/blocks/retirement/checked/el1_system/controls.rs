@@ -1,5 +1,4 @@
-//! Actual immutable facts and implementation choice of the fresh software PE.
-//! This owns no mutable architectural/control bank and authenticates no hardware.
+//! The fixed identification and implementation choices of a software PE.
 use crate::system::{
     access::{ExceptionLevel, Profile, SecurityState},
     identification::Register,

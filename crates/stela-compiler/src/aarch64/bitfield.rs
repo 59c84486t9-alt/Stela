@@ -1,9 +1,5 @@
-//! Apple-used scalar bitfield moves and their shift/extend/insert aliases.
-//!
-//! Encoding and reserved fields follow Arm 2026-06 SBFM/BFM/UBFM XML and
-//! LLVM 029d9fab2445abc6459ee3cf7f1100e332b7f0ac AArch64InstrFormats.td.
-//! Both register operands use ZR for encoding 31, never SP. BFM additionally
-//! reads its old destination; aliases keep the same architectural operation.
+//! Bitfield moves: SBFM, BFM and UBFM with their shift, extend and insert aliases.
+//! Register 31 is ZR. BFM also reads its old destination.
 use super::{Register, Width, register};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

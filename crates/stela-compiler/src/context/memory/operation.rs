@@ -1,4 +1,4 @@
-//! Shared typed memory-service classes and explicit ordering intent.
+//! Memory-service operation classes and ordering.
 
 /// A CPU owner must opt in before native entry for a typed service class.
 /// This Rust-only category is not a wire discriminator or guest opcode.

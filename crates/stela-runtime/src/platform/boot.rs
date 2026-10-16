@@ -1,6 +1,5 @@
-//! Loader-owned x86 resources for the original runtime. No guest source or PE
-//! permission is manufactured here. Installation is a one-time unsafe ownership
-//! transfer over actual reserved RAM and the active supervisor page-table tree.
+//! Loader-provided x86 resources: reserved RAM and the supervisor page tables.
+//! Installation transfers their ownership once.
 use super::sync::Mutex;
 use crate::execution::boot_frames::{BootFramePool, BootFrames, BootRam, FrameError};
 use alloc::{sync::Arc, vec::Vec};

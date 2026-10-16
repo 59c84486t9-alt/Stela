@@ -1,7 +1,4 @@
-//! Complete validated System exits through the existing state and effect owners.
-//!
-//! These Rust services are called after native return. They introduce neither a
-//! native callback ABI nor a second architectural register/control bank.
+//! Completing system-instruction exits after native return.
 
 #[cfg(not(feature = "std"))]
 use alloc::string::String;

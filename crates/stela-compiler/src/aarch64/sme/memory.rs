@@ -1,4 +1,4 @@
-//! SME memory operands; execution requires the shared streaming-state profile.
+//! SME loads and stores: ZA slices, ZA vectors, ZT0.
 use crate::aarch64::{
     Register, register,
     scalable::{

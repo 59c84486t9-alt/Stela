@@ -1,4 +1,4 @@
-//! Scalar reduction dispatch, allocated widths, exact body maps and admission limits.
+//! SVE reduction dispatch, element sizes, source maps and limits.
 use super::*;
 use crate::aarch64::sve::reductions::{self, Output};
 use alloc::vec::Vec;

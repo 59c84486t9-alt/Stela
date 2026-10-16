@@ -1,4 +1,4 @@
-//! Actual control generation for exception CSE; no PC or architectural-bank write.
+//! Control generation for exception context synchronization.
 use super::{
     ContextSynchronizationCause, ContextSynchronizationRequest, ControlError, FetchedInstruction,
     PreparedPublication, TranslationControls, TranslationServices, check_execution_state,

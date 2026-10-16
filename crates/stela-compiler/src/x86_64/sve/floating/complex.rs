@@ -1,8 +1,4 @@
-//! Guarded complex S/D arithmetic using the shared numerical staging boundary.
-//!
-//! FCADD uses baseline packed ADD. FCMLA requires checked usable AVX/FMA3 and
-//! performs one fused rounding per output component. Half and exceptional
-//! active inputs/results retain exact whole-instruction numerical completion.
+//! SVE FCADD (packed ADD) and FCMLA (FMA3, one rounding per component).
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{

@@ -1,4 +1,4 @@
-//! Packed wrapping complex products; all component arithmetic is modulo lane width.
+//! SVE CMLA (integer, wrapping).
 use super::{multiply_low_for_target, packed};
 use crate::TargetCpu;
 use crate::aarch64::scalable::ElementSize;

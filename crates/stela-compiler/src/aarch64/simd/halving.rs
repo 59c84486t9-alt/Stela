@@ -1,4 +1,4 @@
-//! Arm A64 2026-06 halving arithmetic and narrowing/pairwise-widening facts.
+//! Halving arithmetic (SHADD, URHADD, ...), narrowing and pairwise widening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Half {

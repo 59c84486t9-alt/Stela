@@ -1,8 +1,4 @@
-//! Execute MTE instructions using authoritative CPU controls and owned memory.
-//!
-//! IRG has no memory subaccess and needs no memory domain. The system dispatcher
-//! supplies its current controls and generation state. Dedicated memory operations
-//! retain the checked physical-memory entry and its precise fault/progress record.
+//! Executing MTE instructions with the current controls and guest memory.
 
 use super::{
     domain::{AllocationTagPolicy, MemoryThread},

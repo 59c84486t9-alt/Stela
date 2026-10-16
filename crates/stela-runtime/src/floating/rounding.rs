@@ -1,4 +1,4 @@
-//! Transactional scalar/vector round-to-integral completion.
+//! Completion of FRINT*.
 use stela_compiler::{
     GuestState,
     aarch64::{

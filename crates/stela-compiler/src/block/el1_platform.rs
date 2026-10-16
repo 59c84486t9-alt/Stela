@@ -1,5 +1,4 @@
-//! One immutable EL1 cohort for base integer, qualified RAM and System carriers.
-//! These plans describe effects; the actual retained source/CPU owners admit them.
+//! EL1 platform blocks: integer code, RAM accesses and system instructions.
 use super::{ExitKind, ParsedBlock, Terminator, el1_m0, system};
 use crate::{
     CompileError, GuestAddress, Lifter, NativeBlock, TargetCpu,
