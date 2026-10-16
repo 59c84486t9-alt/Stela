@@ -52,7 +52,10 @@ fn canonical_selectors_and_xzr_are_not_access_bypasses() {
                 for crm in 0..16 {
                     for op2 in 0..8 {
                         let encoding = Encoding::new(op0, op1, crn, crm, op2);
-                        allocated += usize::from(decode(encoding).is_some());
+                        if let Some(register) = decode(encoding) {
+                            assert_eq!(register.encoding(), encoding);
+                            allocated += 1;
+                        }
                     }
                 }
             }

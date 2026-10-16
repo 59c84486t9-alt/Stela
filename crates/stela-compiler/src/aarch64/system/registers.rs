@@ -167,5 +167,10 @@ pub fn decode_pstate_immediate(word: u32) -> Option<Encoding> {
     ))
 }
 
+/// Timer register selectors; availability and access are decided at run time.
+pub const CNTFRQ_EL0: Encoding = Encoding::new(3, 3, 14, 0, 0);
+pub const CNTPCT_EL0: Encoding = Encoding::new(3, 3, 14, 0, 1);
+pub const CNTVCT_EL0: Encoding = Encoding::new(3, 3, 14, 0, 2);
+
 #[cfg(test)]
 mod tests;

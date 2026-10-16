@@ -18,6 +18,20 @@ pub(in crate::blocks) struct InstalledEl1Owner {
     controls: TranslationControls,
 }
 impl InstalledEl1Owner {
+    /// A host RAM service over this owner's physical memory, created before
+    /// the executable scope is consumed. It creates no new domain, thread or
+    /// source registry.
+    pub(in crate::blocks) fn source_ram_publisher(
+        &mut self,
+        source_pa: u64,
+        bytes: usize,
+    ) -> Result<crate::memory::source_ram::SourceRamPublisher> {
+        self.sources
+            .physical
+            .source_ram_publisher(source_pa, bytes)
+            .map_err(|status| anyhow::anyhow!("source RAM publisher: {status:?}"))
+    }
+
     /// # Safety
     /// As for `InstalledM0Owner::new`: every resource belongs to one declared
     /// CPU, and this owner alone publishes, retires and holds the storage for

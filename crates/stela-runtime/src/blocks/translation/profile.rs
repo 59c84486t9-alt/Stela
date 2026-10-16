@@ -67,7 +67,7 @@ pub(super) fn require_legacy_carrier() -> Result<(), &'static str> {
 pub(super) enum LegacyControlOperation {
     Read,
     Write,
-    Isb(Operation),
+    Isb,
 }
 
 pub(super) fn legacy_control_operation(word: u32) -> Option<LegacyControlOperation> {
@@ -95,9 +95,7 @@ pub(super) fn legacy_control_operation(word: u32) -> Option<LegacyControlOperati
         }
     }
     match synchronization::decode(word) {
-        Some(operation @ Operation::InstructionSynchronization { .. }) => {
-            Some(LegacyControlOperation::Isb(operation))
-        }
+        Some(Operation::InstructionSynchronization { .. }) => Some(LegacyControlOperation::Isb),
         _ => None,
     }
 }

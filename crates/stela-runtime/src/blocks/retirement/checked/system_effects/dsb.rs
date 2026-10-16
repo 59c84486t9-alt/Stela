@@ -20,7 +20,10 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString};
-use stela_compiler::{GuestAddress, GuestState};
+use stela_compiler::{
+    GuestAddress, GuestState, aarch64::system::synchronization::Operation,
+    block::system::SystemOperation,
+};
 
 pub(crate) enum RamDsbError {
     Commit(SystemEffectCommitError),
@@ -89,19 +92,46 @@ impl<'loan> PreparedRamDsb<'loan> {
             .context(system)
             .map_err(|error| RamDsbError::Owner(error.to_string()))?
             .profile;
-        let request = match barriers::resolve_ordinary_el2_disabled(instruction.word, profile) {
+        let resolution = if matches!(
+            instruction.operation,
+            SystemOperation::Synchronization(Operation::DataCompletion { nxs: true, .. })
+        ) {
+            let xs = platform
+                .identification()
+                .xs()
+                .map_err(|error| RamDsbError::Owner(error.to_string()))?;
+            barriers::resolve(
+                instruction.word,
+                barriers::Context {
+                    profile,
+                    xs,
+                    // Explicit nXS ignores FnXS, HCRX and BRBE; report unavailable
+                    // readbacks instead of inventing controls.
+                    hcrx: barriers::HcrxAccess::Unreported,
+                    brbe_isb: barriers::BrbeIsb::Unreported,
+                },
+            )
+        } else {
+            barriers::resolve_ordinary_el2_disabled(instruction.word, profile)
+        };
+        let request = match resolution {
             Resolution::BackendRequired(request) => request,
             Resolution::Unsupported(reason) => return Err(RamDsbError::Access(reason)),
-            _ => return Err(RamDsbError::Access("no ordinary DSB completion request")),
+            Resolution::Undefined => {
+                return Err(RamDsbError::Access(
+                    "explicit nXS is undefined without FEAT_XS",
+                ));
+            }
+            _ => return Err(RamDsbError::Access("no DSB completion request")),
         };
         let RequestKind::Data(requirement) = request.kind() else {
             return Err(RamDsbError::Access(
                 "instruction publication has a separate owner",
             ));
         };
-        // Full RAM completion is stronger than a load/store/shareability subset.
-        // No nXS support or unavailable XS readback is inferred here: this pure
-        // EL2-disabled route admits ordinary DSB only, whose FnXS is inapplicable.
+        // Full RAM completion covers the load, store, shareability and nXS
+        // subsets. Explicit nXS requires XS in the identification above;
+        // an ordinary DSB without EL2 does not depend on XS.
         let ram = scope
             .physical_space()
             .prepare_ram_completion(outer)

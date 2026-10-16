@@ -3,6 +3,10 @@ use crate::system::state::{El1Registers, PSTATE_EL1H};
 use stela_compiler::{GuestState, TargetCpu};
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+mod barriers;
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+mod hosted;
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 mod mutable_source;
 #[cfg(target_arch = "x86_64")]
 mod platform;

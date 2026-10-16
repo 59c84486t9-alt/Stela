@@ -24,9 +24,10 @@ pub use outcome::{
 };
 pub use publication::CodePublicationScope;
 pub use retirement::checked::software_el1::{
-    InitializedRamRegion, OwnedRamExtent, PhysicalRamRange, SoftwareEl1Config,
-    SoftwareEl1InitialRam, SoftwareEl1Machine, SoftwareEl1Profile, SoftwareEl1Report,
-    SoftwareEl1Request, SourceRamDeclaration, SourceRamPermissions, ZeroedRamExtent,
+    HostedRamService, HostedRamServiceAttempt, InitializedRamRegion, OwnedRamExtent,
+    PhysicalRamRange, SoftwareEl1Config, SoftwareEl1Declaration, SoftwareEl1InitialRam,
+    SoftwareEl1Machine, SoftwareEl1Profile, SoftwareEl1Report, SoftwareEl1Request,
+    SoftwareEl1Security, SourceRamDeclaration, SourceRamPermissions, ZeroedRamExtent,
 };
 pub use retirement::checked::software_privileged::{
     DeclaredDebugExtendedHaltSyndrome, DeclaredDebugExternalControls, DeclaredDebugInitialization,

@@ -1,5 +1,9 @@
 //! A new software EL1 PE with its own RAM, source and controls (hosted).
-use super::super::{ConsumerKey, software_async::SoftwareAsyncDomain};
+mod declaration;
+pub(super) mod hosted;
+pub use declaration::{SoftwareEl1Declaration, SoftwareEl1Security};
+
+use super::super::ConsumerKey;
 use super::{
     OwnedRunOutcome, OwnedRunRequest, ProcessEntryControls, el1_system::El1PlatformControls,
     provider::M0Owner,
@@ -33,6 +37,8 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::ToOwned, string::String, string::ToString, vec::Vec};
 use anyhow::{Result, ensure};
+use hosted::AsyncInstallation;
+pub use hosted::{HostedRamService, HostedRamServiceAttempt};
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 use stela_compiler::{
@@ -57,6 +63,7 @@ pub enum SoftwareEl1Profile {
     DirectBranchV1,
     IntegerV1,
     PlatformV1,
+    HostedWaitV1,
     Read64V1,
 }
 
@@ -65,7 +72,7 @@ impl SoftwareEl1Profile {
         match self {
             Self::DirectBranchV1 => BlockProfile::El1DirectBranchV1,
             Self::IntegerV1 => BlockProfile::El1M0IntegerV1,
-            Self::PlatformV1 => BlockProfile::El1PlatformV1,
+            Self::PlatformV1 | Self::HostedWaitV1 => BlockProfile::El1PlatformV1,
             Self::Read64V1 => {
                 BlockProfile::CheckedMemory(CheckedMemoryProfile::M0DeviceRamRead64Staged)
             }
@@ -121,7 +128,10 @@ pub struct SoftwareEl1Report {
     pub register_observation: Option<String>,
     pub system_observation: Option<String>,
     pub system_effect_observation: Option<String>,
+    /// Wait outcome of the last native System observation (diagnostic only).
+    pub wait_observation: Option<crate::system::events::Outcome>,
     pub context_observation: Option<String>,
+    pub interrupt_observation: Option<String>,
     pub platform_identification_sha256: Option<String>,
     pub compiler_source_sha256: String,
     /// Descriptive standard manifests still resident at shutdown. This is not
@@ -148,7 +158,7 @@ pub struct SoftwareEl1Machine {
     endpoint: EventEndpoint,
     _events: EventDomain,
     execution: ProcessEntryControls,
-    asynchronous: SoftwareAsyncDomain,
+    asynchronous: AsyncInstallation,
     context: ExecutionContext,
     observed_ranges: Vec<PhysicalRamRange>,
     declared_capacity: Vec<PhysicalRamRange>,
@@ -172,8 +182,8 @@ fn declared_profile(platform: Option<&El1PlatformControls>) -> Result<ControlPro
         bytes[index] = u8::from_str_radix(value, 16)?;
     }
     let evidence = EvidenceBinding {
-        id: if platform.is_some() {
-            "stela-owned-base-el1-platform-v1"
+        id: if let Some(platform) = platform {
+            platform.identification().provenance().source_identity()
         } else {
             "owned-base-el1-m0-software-v1"
         },
@@ -244,6 +254,35 @@ impl SoftwareEl1Machine {
         zeroed: Vec<ZeroedRamExtent>,
         regions: Vec<InitializedRamRegion>,
     ) -> Result<Self> {
+        Self::new_with_regions_and_declaration(config, zeroed, regions, None)
+    }
+
+    /// Create a platform PE whose identification registers come from
+    /// `declaration`. Advertising a feature does not implement it; only the
+    /// fixed platform profile accepts a custom declaration.
+    pub fn new_with_declaration(
+        config: SoftwareEl1Config,
+        zeroed: Vec<ZeroedRamExtent>,
+        declaration: SoftwareEl1Declaration,
+    ) -> Result<Self> {
+        ensure!(
+            config.profile == SoftwareEl1Profile::PlatformV1,
+            "custom declaration requires the fixed EL1 platform profile"
+        );
+        Self::new_with_regions_and_declaration(config, zeroed, Vec::new(), Some(declaration))
+    }
+
+    fn new_with_regions_and_declaration(
+        config: SoftwareEl1Config,
+        zeroed: Vec<ZeroedRamExtent>,
+        regions: Vec<InitializedRamRegion>,
+        declaration: Option<SoftwareEl1Declaration>,
+    ) -> Result<Self> {
+        #[cfg(not(feature = "std"))]
+        ensure!(
+            config.profile != SoftwareEl1Profile::HostedWaitV1,
+            "HostedWaitV1 requires the std clock and thread parking"
+        );
         let SoftwareEl1Config {
             profile,
             #[cfg(feature = "std")]
@@ -287,11 +326,13 @@ impl SoftwareEl1Machine {
             translation,
             target,
             materialized,
+            declaration,
         )
     }
 
     // The production path and the tests share this construction; only the
     // source-RAM factory can provide `MaterializedSourceRam`.
+    #[allow(clippy::too_many_arguments)]
     fn from_materialized(
         profile: SoftwareEl1Profile,
         #[cfg(feature = "std")] cache_directory: PathBuf,
@@ -300,7 +341,12 @@ impl SoftwareEl1Machine {
         translation: RegisterValues,
         target: stela_compiler::TargetCpu,
         materialized: MaterializedSourceRam,
+        declaration: Option<SoftwareEl1Declaration>,
     ) -> Result<Self> {
+        ensure!(
+            declaration.is_none() || profile == SoftwareEl1Profile::PlatformV1,
+            "custom declaration requires the fixed EL1 platform profile"
+        );
         system.check_lower_el_storage().map_err(|error| {
             anyhow::anyhow!("software EL1 requires lower-only storage: {error:?}")
         })?;
@@ -357,10 +403,16 @@ impl SoftwareEl1Machine {
         memory
             .bind_events(&endpoint.producer())
             .map_err(|error| anyhow::anyhow!("software EL1 memory endpoint: {error:?}"))?;
-        let platform = if profile == SoftwareEl1Profile::PlatformV1 {
-            Some(El1PlatformControls::declared_base()?)
+        let platform = if let Some(declaration) = declaration {
+            Some(El1PlatformControls::from_declaration(declaration)?)
         } else {
-            None
+            match profile {
+                SoftwareEl1Profile::PlatformV1 => Some(El1PlatformControls::declared_base()?),
+                SoftwareEl1Profile::HostedWaitV1 => {
+                    Some(El1PlatformControls::declared_hosted_wait()?)
+                }
+                _ => None,
+            }
         };
         let entry = match &platform {
             Some(platform) => platform.entry_profile(),
@@ -415,7 +467,8 @@ impl SoftwareEl1Machine {
             match profile {
                 SoftwareEl1Profile::DirectBranchV1
                 | SoftwareEl1Profile::IntegerV1
-                | SoftwareEl1Profile::PlatformV1 => InstalledSource::El1(InstalledEl1Owner::new(
+                | SoftwareEl1Profile::PlatformV1
+                | SoftwareEl1Profile::HostedWaitV1 => InstalledSource::El1(InstalledEl1Owner::new(
                     runtime,
                     physical,
                     immutable,
@@ -439,7 +492,12 @@ impl SoftwareEl1Machine {
         };
         // SAFETY: this private registry is the complete producer universe of
         // this NEW software PE; there is no external registration/delivery API.
-        let asynchronous = unsafe { SoftwareAsyncDomain::fresh_software_pe() };
+        let asynchronous = unsafe {
+            match profile {
+                SoftwareEl1Profile::HostedWaitV1 => AsyncInstallation::hosted_wait()?,
+                _ => AsyncInstallation::no_sources(),
+            }
+        };
         Ok(Self {
             profile,
             platform,
@@ -459,6 +517,13 @@ impl SoftwareEl1Machine {
         })
     }
 
+    /// Take the machine's external IRQ line, once, before it runs. The
+    /// producer may signal from another thread; the PE drains it into its
+    /// architectural pending state.
+    pub(crate) fn take_hosted_irq(&mut self) -> Result<hosted::HostedIrqProducer> {
+        self.asynchronous.take_irq()
+    }
+
     pub fn run_to_shutdown(self, request: SoftwareEl1Request) -> Result<SoftwareEl1Report> {
         let Self {
             profile,
@@ -468,7 +533,7 @@ impl SoftwareEl1Machine {
             mut thread,
             mut system,
             mut memory,
-            endpoint,
+            mut endpoint,
             _events,
             execution,
             mut asynchronous,
@@ -482,58 +547,88 @@ impl SoftwareEl1Machine {
                              controls: &mut TranslationControls|
          -> Result<_> {
             let outcome = {
-                let pending = asynchronous.lease_no_sources().map_err(|error| {
-                    anyhow::anyhow!("software EL1 complete producer lease: {error:?}")
-                })?;
-                // SAFETY: these are disjoint fields of the one consumed machine,
-                // retained until its single PE shuts down.
-                let mut backend = unsafe {
-                    match profile {
-                        SoftwareEl1Profile::DirectBranchV1 => M0Owner::fresh_el1_branch(
-                            address_space,
-                            sources,
-                            controls,
-                            &execution,
-                            &mut memory,
-                            &endpoint,
-                            &mut context,
-                            pending,
-                        ),
-                        SoftwareEl1Profile::IntegerV1 => M0Owner::fresh_el1_integer(
-                            address_space,
-                            sources,
-                            controls,
-                            &execution,
-                            &mut memory,
-                            &endpoint,
-                            &mut context,
-                            pending,
-                        ),
-                        SoftwareEl1Profile::PlatformV1 => M0Owner::fresh_el1_platform(
-                            address_space,
-                            sources,
-                            controls,
-                            &execution,
-                            &mut memory,
-                            &endpoint,
-                            &mut context,
-                            pending,
-                            platform
-                                .as_ref()
-                                .ok_or_else(|| anyhow::anyhow!("platform identification absent"))?,
-                        ),
-                        SoftwareEl1Profile::Read64V1 => M0Owner::fresh_software(
-                            address_space,
-                            sources,
-                            controls,
-                            &execution,
-                            &mut memory,
-                            &endpoint,
-                            &mut context,
-                            pending,
-                        ),
+                let mut backend = match &mut asynchronous {
+                    AsyncInstallation::NoSources(domain) => {
+                        let pending = domain.lease_no_sources().map_err(|error| {
+                            anyhow::anyhow!("software EL1 complete producer lease: {error:?}")
+                        })?;
+                        // SAFETY: these are disjoint fields of the one consumed
+                        // machine, retained until its single PE shuts down.
+                        unsafe {
+                            match profile {
+                                SoftwareEl1Profile::DirectBranchV1 => M0Owner::fresh_el1_branch(
+                                    address_space,
+                                    sources,
+                                    controls,
+                                    &execution,
+                                    &mut memory,
+                                    &endpoint,
+                                    &mut context,
+                                    pending,
+                                ),
+                                SoftwareEl1Profile::IntegerV1 => M0Owner::fresh_el1_integer(
+                                    address_space,
+                                    sources,
+                                    controls,
+                                    &execution,
+                                    &mut memory,
+                                    &endpoint,
+                                    &mut context,
+                                    pending,
+                                ),
+                                SoftwareEl1Profile::PlatformV1 => M0Owner::fresh_el1_platform(
+                                    address_space,
+                                    sources,
+                                    controls,
+                                    &execution,
+                                    &mut memory,
+                                    &endpoint,
+                                    &mut context,
+                                    pending,
+                                    platform.as_ref().ok_or_else(|| {
+                                        anyhow::anyhow!("platform identification absent")
+                                    })?,
+                                ),
+                                SoftwareEl1Profile::HostedWaitV1 => anyhow::bail!(
+                                    "hosted machine cannot use an empty producer registry"
+                                ),
+                                SoftwareEl1Profile::Read64V1 => M0Owner::fresh_software(
+                                    address_space,
+                                    sources,
+                                    controls,
+                                    &execution,
+                                    &mut memory,
+                                    &endpoint,
+                                    &mut context,
+                                    pending,
+                                ),
+                            }
+                        }?
                     }
-                }?;
+                    AsyncInstallation::HostedWait { installation, .. } => {
+                        ensure!(
+                            profile == SoftwareEl1Profile::HostedWaitV1,
+                            "hosted resources need the HostedWaitV1 profile"
+                        );
+                        let wait = installation.resources(&_events, &mut endpoint)?;
+                        // SAFETY: disjoint fields of the one consumed machine and
+                        // its complete hosted producer lease.
+                        unsafe {
+                            M0Owner::fresh_el1_hosted_wait(
+                                address_space,
+                                sources,
+                                controls,
+                                &execution,
+                                &mut memory,
+                                &mut context,
+                                wait,
+                                platform.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("hosted platform identification absent")
+                                })?,
+                            )?
+                        }
+                    }
+                };
                 // SAFETY: one new PE over this machine's thread, system and
                 // backend; its whole executable lifetime is this scope.
                 let mut owner =
@@ -592,6 +687,7 @@ impl SoftwareEl1Machine {
             last_el1_system_observation,
             last_system_effect_observation,
             last_el1_context_observation,
+            last_interrupt_observation,
             ..
         } = outcome;
         let describe = |value: &dyn core::fmt::Debug| format!("{value:?}");
@@ -611,9 +707,13 @@ impl SoftwareEl1Machine {
                 .as_ref()
                 .map(|v| describe(v)),
             register_observation: last_el1_register_observation.as_ref().map(|v| describe(v)),
+            wait_observation: last_el1_system_observation
+                .as_ref()
+                .and_then(|value| value.wait_outcome),
             system_observation: last_el1_system_observation.as_ref().map(|v| describe(v)),
             system_effect_observation: last_system_effect_observation.as_ref().map(|v| describe(v)),
             context_observation: last_el1_context_observation.as_ref().map(|v| describe(v)),
+            interrupt_observation: last_interrupt_observation.as_ref().map(|v| describe(v)),
             platform_identification_sha256: platform.as_ref().map(|platform| {
                 platform
                     .identification()

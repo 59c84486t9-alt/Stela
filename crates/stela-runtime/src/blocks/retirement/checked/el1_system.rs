@@ -7,7 +7,7 @@ use super::{
     Active, ConsumerKey, OwnedStop, SettledPrefix,
     el1_registers::{RegisterNativeReport, RegisterSession},
     provider,
-    source::BoundSource,
+    source::{BoundSource, RetiredInstructionSource},
 };
 use crate::{
     blocks::RunOutcome,
@@ -25,21 +25,116 @@ use stela_compiler::{
     block::{ExitKind, SystemInstruction, el1_platform::Intent},
 };
 
+/// A retired System instruction that may be followed by IRQ entry. It does
+/// not itself permit entry; the run loop keeps the runtime's physical pin,
+/// the PE and the outer loan while the BoundSource borrow ends.
+pub(super) struct RetiredSystemBoundary {
+    instruction: SystemInstruction,
+    pe: crate::system::execution::authority::PeIdentity,
+    retirement_attempt: u64,
+    // Taken from the BoundSource by the run loop. It records where the
+    // instruction came from; it is not a second physical source pin.
+    source_entry: Option<crate::system::execution::EntryBoundary>,
+    retired_pc: GuestAddress,
+}
+impl RetiredSystemBoundary {
+    pub(super) fn after_retirement(
+        instruction: SystemInstruction,
+        pe: crate::system::execution::authority::PeIdentity,
+        retirement_attempt: u64,
+    ) -> Self {
+        Self {
+            instruction,
+            pe,
+            retirement_attempt,
+            source_entry: None,
+            retired_pc: instruction.next_pc,
+        }
+    }
+
+    pub(super) fn bind_retired_source(mut self, bound: BoundSource<'_>) -> anyhow::Result<Self> {
+        anyhow::ensure!(self.source_entry.is_none(), "retired source already bound");
+        anyhow::ensure!(
+            bound.el1_platform_intent()? == Intent::System(self.instruction)
+                && bound.entry.entry() == self.instruction.instruction_pc
+                && bound.entry.word() == self.instruction.word,
+            "retired boundary differs from source"
+        );
+        self.source_entry = Some(bound.entry);
+        Ok(self)
+    }
+    pub(super) fn after_context_retirement(
+        instruction: SystemInstruction,
+        pe: crate::system::execution::authority::PeIdentity,
+        retirement_attempt: u64,
+        retired_pc: GuestAddress,
+        source_entry: crate::system::execution::EntryBoundary,
+    ) -> Self {
+        Self {
+            instruction,
+            pe,
+            retirement_attempt,
+            retired_pc,
+            source_entry: Some(source_entry),
+        }
+    }
+    pub(super) fn source<'pin>(
+        &'pin self,
+        pin: &'pin crate::memory::domain::physical::BoundPhysicalInstruction,
+    ) -> anyhow::Result<RetiredInstructionSource<'pin>> {
+        RetiredInstructionSource::borrow(
+            &ConsumerKey(()),
+            self.source_entry
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("retired source entry missing"))?,
+            self.instruction,
+            pin,
+        )
+    }
+
+    pub(super) fn instruction(&self) -> SystemInstruction {
+        self.instruction
+    }
+    pub(super) fn retired_pc(&self) -> stela_compiler::GuestAddress {
+        self.retired_pc
+    }
+    pub(super) fn same_pe(&self, actual: &crate::system::execution::authority::PeIdentity) -> bool {
+        self.pe.same_pe(actual)
+    }
+    pub(super) fn retirement_attempt(&self) -> u64 {
+        self.retirement_attempt
+    }
+}
+
+pub(super) enum SystemStep {
+    Retired,
+    Refused(OwnedStop),
+    InterruptBoundary(RetiredSystemBoundary),
+}
+
 const ZERO_REGISTER: u8 = 31;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectBinding {
+    LocalEvent,
     Daif(u64),
     Vbar(u64),
     Register { destination: u8, value: u64 },
 }
+enum DeferredSystem {
+    Wait(SystemInstruction),
+    CounterRead(SystemInstruction),
+}
+
 enum Staged {
+    LocalEvent(SystemInstruction),
     Daif(el1_daif::StagedEl1Daif),
     Vbar(vbar::StagedEl1Vbar),
 }
 impl Staged {
     fn binding(&self) -> EffectBinding {
         match self {
+            Self::LocalEvent(_) => EffectBinding::LocalEvent,
             Self::Daif(stage) => EffectBinding::Daif(stage.value()),
             Self::Vbar(stage) => match stage.kind() {
                 vbar::Kind::Write => EffectBinding::Vbar(stage.value()),
@@ -55,12 +150,18 @@ impl Staged {
     }
     fn instruction(&self) -> SystemInstruction {
         match self {
+            Self::LocalEvent(instruction) => *instruction,
             Self::Daif(stage) => stage.instruction(),
             Self::Vbar(stage) => stage.instruction(),
         }
     }
-    fn apply(self, loan: El1SystemEffectLoan<'_>) -> GuestAddress {
+    fn apply(self, mut loan: El1SystemEffectLoan<'_>) -> GuestAddress {
         match self {
+            Self::LocalEvent(instruction) => {
+                let checks = loan._checks;
+                checks.send_local_event(&mut loan);
+                instruction.next_pc
+            }
             Self::Daif(stage) => stage.apply(loan),
             Self::Vbar(stage) => stage.apply(loan),
         }
@@ -82,6 +183,16 @@ pub(crate) struct El1SystemEffectLoan<'loan> {
     _checks: &'loan provider::M0ExecutionChecks<'loan>,
 }
 impl El1SystemEffectLoan<'_> {
+    /// Only the backend's checks can supply the PE event endpoint.
+    pub(in crate::blocks::retirement::checked) fn send_local_event_authorized(
+        &mut self,
+        checks: &provider::M0ExecutionChecks<'_>,
+        endpoint: &crate::system::events::EventEndpoint,
+    ) {
+        assert_eq!(self.binding, EffectBinding::LocalEvent);
+        assert!(core::ptr::eq(self._checks, checks));
+        endpoint.signal_local();
+    }
     pub(crate) fn write_daif_authorized(&mut self, value: u64) {
         assert_eq!(self.binding, EffectBinding::Daif(value));
         self.system.write_daif(value);
@@ -102,6 +213,7 @@ pub(crate) struct SystemObservation {
     pub instruction: SystemInstruction,
     pub native: RegisterNativeReport,
     staged: Option<EffectBinding>,
+    pub wait_outcome: Option<crate::system::events::Outcome>,
     pub applied: bool,
     pub actual_continuation: Option<GuestAddress>,
     pub failure: Option<String>,
@@ -122,12 +234,12 @@ impl<S> Drop for RetainedSystemSession<'_, S> {
 
 impl<B: provider::Owner> Active<'_, '_, B> {
     pub(super) fn execute_el1_system(
-        mut self,
+        &mut self,
         bound: &BoundSource<'_>,
         accounting: &mut RunOutcome,
         observation: &mut Option<SystemObservation>,
         prefixes: &mut Vec<SettledPrefix>,
-    ) -> anyhow::Result<Option<OwnedStop>> {
+    ) -> anyhow::Result<SystemStep> {
         self.require_native()?;
         let Intent::System(instruction) = bound.el1_platform_intent()? else {
             anyhow::bail!("source is not a mixed System carrier")
@@ -136,6 +248,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             .outer
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("System effect original outer absent"))?;
+        let mut deferred_system = None;
         let result = (|| -> anyhow::Result<Option<OwnedStop>> {
             let provider::El1ExecutionResources {
                 sources,
@@ -167,6 +280,7 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 instruction,
                 native,
                 staged: None,
+                wait_outcome: None,
                 applied: false,
                 actual_continuation: None,
                 failure: None,
@@ -184,7 +298,27 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                     && self.pe.thread.pc == instruction.instruction_pc,
                 "effect-free System carrier changed original architectural state"
             );
-            retained.session.validate_current(self.pe.system)?;
+            let deferred = if matches!(
+                instruction.operation,
+                stela_compiler::block::system::SystemOperation::Wait { .. }
+            ) {
+                Some(DeferredSystem::Wait(instruction))
+            } else if provider::hosted_wait::counter::is_ordinary_counter_read(instruction) {
+                Some(DeferredSystem::CounterRead(instruction))
+            } else {
+                None
+            };
+            if deferred.is_some() {
+                // The transfer re-checks the session and keeps its pin, without
+                // another fetch or source analysis at the deferred completion.
+                self.source_pin = Some(
+                    retained
+                        .session
+                        .take_source_pin(&ConsumerKey(()), self.pe.system)?,
+                );
+            } else {
+                retained.session.validate_current(self.pe.system)?;
+            }
             checks.check(outer)?;
             anyhow::ensure!(
                 retained.authority.native_attempt(self.attempt),
@@ -194,7 +328,27 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 .authority
                 .enter_system(&ConsumerKey(()), self.attempt)
                 .map_err(|()| anyhow::anyhow!("System carrier phase transition failed"))?;
+            if let Some(deferred) = deferred {
+                // The native carrier, context restoration, finalizer, source prefix
+                // and phase are settled. End the backend resource borrows before
+                // wait or counter completion borrows the backend again.
+                let prefix = bound.prefix(Some(instruction.instruction_pc), 0)?;
+                prefixes.try_reserve(1)?;
+                let blocks = accounting
+                    .blocks_executed
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("deferred System accounting overflow"))?;
+                prefixes.push(prefix);
+                accounting.blocks_executed = blocks;
+                accounting.last_exit = carrier;
+                deferred_system = Some(deferred);
+                retained.closed = true;
+                return Ok(None);
+            }
             let staged: Result<Staged, String> = match instruction.operation {
+                stela_compiler::block::system::SystemOperation::SendEvent { local: true } => {
+                    Ok(Staged::LocalEvent(instruction))
+                }
                 stela_compiler::block::system::SystemOperation::PstateImmediate(_) => {
                     el1_daif::PreparedEl1Daif::prepare(
                         instruction,
@@ -294,7 +448,11 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             accounting.last_exit = carrier;
             // Re-check the resources after retirement while the pins are still
             // held.
-            retained.session.validate_current(self.pe.system)?;
+            self.source_pin = Some(
+                retained
+                    .session
+                    .take_source_pin(&ConsumerKey(()), self.pe.system)?,
+            );
             checks.post_retirement_el1(outer, &scope, controls, platform, self.pe.system)?;
             retained
                 .authority
@@ -303,15 +461,81 @@ impl<B: provider::Owner> Active<'_, '_, B> {
             retained.closed = true;
             Ok(None)
         })();
+        if result.is_ok()
+            && let Some(deferred) = deferred_system
+        {
+            // The same SystemActive attempt, after the native session ends.
+            let mut wait_outcome = None;
+            let (instruction, result) = match deferred {
+                DeferredSystem::Wait(instruction) => (
+                    instruction,
+                    self.complete_wait(bound, instruction, &mut wait_outcome),
+                ),
+                DeferredSystem::CounterRead(instruction) => (
+                    instruction,
+                    self.complete_hosted_counter(bound, instruction),
+                ),
+            };
+            return match result {
+                Ok(super::wait::WaitStep::Retired) => {
+                    if let Some(report) = observation {
+                        report.wait_outcome = wait_outcome;
+                        report.applied = true;
+                        report.actual_continuation = Some(instruction.next_pc);
+                    }
+                    Ok(SystemStep::Retired)
+                }
+                Ok(super::wait::WaitStep::InterruptBoundary(boundary)) => {
+                    if let Some(report) = observation {
+                        report.wait_outcome = wait_outcome;
+                        report.applied = true;
+                        report.actual_continuation = Some(instruction.next_pc);
+                    }
+                    Ok(SystemStep::InterruptBoundary(boundary))
+                }
+                Ok(super::wait::WaitStep::IrqPending) => Ok(SystemStep::Refused(
+                    OwnedStop::Indeterminate("WFE IRQ needs its declared wake policy".into()),
+                )),
+                Ok(super::wait::WaitStep::ExceptionPending(outcome)) => Ok(SystemStep::Refused(
+                    OwnedStop::Indeterminate(format!("WFx exception needs CSE entry: {outcome:?}")),
+                )),
+                Err(error) => {
+                    if let Some(report) = observation {
+                        report.failure = Some(error.to_string());
+                    }
+                    Err(error)
+                }
+            };
+        }
         if let Err(error) = &result
             && let Some(report) = observation
         {
             report.failure = Some(error.to_string());
         }
-        if result.is_ok() {
-            self.closed = true;
+        match result? {
+            None => match self.pe.backend.system_retirement(self.pe.system)? {
+                provider::SystemRetirement::Complete => {
+                    self.closed = true;
+                    Ok(SystemStep::Retired)
+                }
+                provider::SystemRetirement::ArbitrateHostedIrq => {
+                    // The DAIF/VBAR effect and the PC store have retired. Keep the PE
+                    // armed before any target fetch; the IRQ resources decide entry.
+                    self.closed = false;
+                    Ok(SystemStep::InterruptBoundary(
+                        RetiredSystemBoundary::after_retirement(
+                            instruction,
+                            self.pe.authority.identity(),
+                            self.attempt,
+                        ),
+                    ))
+                }
+            },
+            Some(stop) => {
+                self.closed = true;
+                Ok(SystemStep::Refused(stop))
+            }
         }
-        result
     }
 }
 
@@ -321,6 +545,7 @@ impl core::fmt::Debug for SystemObservation {
             .field("instruction", &self.instruction)
             .field("native", &self.native)
             .field("staged", &self.staged)
+            .field("wait_outcome", &self.wait_outcome)
             .field("applied", &self.applied)
             .field("actual_continuation", &self.actual_continuation)
             .field("failure", &self.failure)

@@ -19,6 +19,12 @@ pub(super) struct DomainState {
 pub struct MemoryExecutionLoan {
     domain: Arc<MemoryDomain>,
 }
+/// Result of a non-blocking execution-loan request.
+pub enum ExecutionLoanAttempt {
+    Acquired(MemoryExecutionLoan),
+    ServiceBusy,
+}
+
 impl MemoryExecutionLoan {
     /// Whether this mapping-exclusion pin belongs to `domain`.
     pub(crate) fn belongs_to(&self, domain: &Arc<MemoryDomain>) -> bool {
@@ -78,6 +84,12 @@ impl Drop for MemoryExecutionLoan {
 pub(in crate::memory) struct MemoryServiceLoan {
     domain: Arc<MemoryDomain>,
 }
+/// Result of a non-blocking service-loan request.
+pub(in crate::memory) enum ServiceLoanAttempt {
+    Acquired(MemoryServiceLoan),
+    ExecutionBusy,
+    ServiceBusy,
+}
 /// Read-only observations of the executing thread's domain.
 pub struct MemoryObservationLoan {
     service: MemoryServiceLoan,
@@ -113,38 +125,85 @@ impl MemoryDomain {
     }
 
     pub fn execution_loan(self: &Arc<Self>) -> Result<MemoryExecutionLoan, MemoryStatus> {
+        match self.try_execution_loan()? {
+            ExecutionLoanAttempt::Acquired(loan) => Ok(loan),
+            ExecutionLoanAttempt::ServiceBusy => Err(MemoryStatus::Domain),
+        }
+    }
+
+    /// Like `execution_loan`, but report a busy host service without waiting.
+    /// Only `ServiceBusy` may be retried; errors remain failures.
+    pub fn try_execution_loan(self: &Arc<Self>) -> Result<ExecutionLoanAttempt, MemoryStatus> {
         self.check_execution()?;
         let mut state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.check_execution()?;
         if state.servicing {
-            return Err(MemoryStatus::Domain);
+            return Ok(ExecutionLoanAttempt::ServiceBusy);
         }
         state.native_loans = state
             .native_loans
             .checked_add(1)
             .ok_or(MemoryStatus::Domain)?;
-        Ok(MemoryExecutionLoan {
+        Ok(ExecutionLoanAttempt::Acquired(MemoryExecutionLoan {
             domain: Arc::clone(self),
-        })
+        }))
     }
 
     pub(in crate::memory) fn service_loan(
         self: &Arc<Self>,
     ) -> Result<MemoryServiceLoan, MemoryStatus> {
+        match self.try_service_loan()? {
+            ServiceLoanAttempt::Acquired(loan) => Ok(loan),
+            ServiceLoanAttempt::ExecutionBusy | ServiceLoanAttempt::ServiceBusy => {
+                Err(MemoryStatus::Domain)
+            }
+        }
+    }
+
+    pub(in crate::memory) fn try_service_loan(
+        self: &Arc<Self>,
+    ) -> Result<ServiceLoanAttempt, MemoryStatus> {
         self.check_execution()?;
         let mut state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.check_execution()?;
-        if state.servicing || state.native_loans != 0 {
-            return Err(MemoryStatus::Domain);
+        if state.servicing {
+            return Ok(ServiceLoanAttempt::ServiceBusy);
+        }
+        if state.native_loans != 0 {
+            return Ok(ServiceLoanAttempt::ExecutionBusy);
         }
         state.servicing = true;
-        Ok(MemoryServiceLoan {
+        Ok(ServiceLoanAttempt::Acquired(MemoryServiceLoan {
             domain: Arc::clone(self),
-        })
+        }))
     }
 }
 
 impl MemoryServiceLoan {
+    /// Check that `view` is still registered at `generation`, without copying
+    /// the snapshot or exposing storage.
+    pub(in crate::memory) fn check_registered_view(
+        &self,
+        view: &Arc<MemoryView>,
+        generation: u64,
+    ) -> Result<(), MemoryStatus> {
+        let state = self.domain.state.lock().map_err(|_| MemoryStatus::Domain)?;
+        self.domain.check_execution()?;
+        if !state.servicing
+            || state.native_loans != 0
+            || state.snapshot.generation != generation
+            || !view.is_current()
+            || !state
+                .snapshot
+                .views
+                .iter()
+                .any(|registered| Arc::ptr_eq(&registered.view, view))
+        {
+            return Err(MemoryStatus::Domain);
+        }
+        Ok(())
+    }
+
     pub(in crate::memory) fn belongs_to(&self, domain: &Arc<MemoryDomain>) -> bool {
         Arc::ptr_eq(&self.domain, domain)
     }

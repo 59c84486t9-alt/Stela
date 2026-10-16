@@ -27,6 +27,7 @@ pub(crate) use privileged::PrivilegedOwner;
 pub(crate) mod software_el1;
 pub(crate) mod software_privileged;
 mod source;
+mod wait;
 
 use super::{ConsumerKey, RetainedResources, SystemExecutionLoan, accept_retained_loan};
 use crate::{
@@ -37,8 +38,8 @@ pub(crate) use entry_controls::ProcessEntryControls;
 pub(crate) use m0::{M0PairReadSourceInput, M0SourceInput, M0WriteSourceInput};
 #[cfg(feature = "std")]
 pub(crate) use provider::CheckedProcessOwner;
-pub(crate) use source::CheckedFacts;
 use source::{BoundSource, ReturnedTerminal};
+pub(crate) use source::{CheckedFacts, RetiredInstructionSource};
 use stela_compiler::{
     GuestAddress,
     block::{BlockProfile, CheckedMemoryProfile},
@@ -93,6 +94,7 @@ pub(crate) struct OwnedRunOutcome {
     pub last_el1_system_observation: Option<el1_system::SystemObservation>,
     pub last_system_effect_observation: Option<system_effects::SystemEffectObservation>,
     pub last_el1_context_observation: Option<el1_context::ContextObservation>,
+    pub last_interrupt_observation: Option<el1_context::interrupt::InterruptObservation>,
     pub settled_prefixes: Vec<SettledPrefix>,
     pub service_events: darwin_services::TrapServiceEvents,
 }
@@ -161,6 +163,7 @@ impl BlockRuntime {
         let mut last_el1_system_observation = None;
         let mut last_system_effect_observation = None;
         let mut last_el1_context_observation = None;
+        let mut last_interrupt_observation = None;
         let mut settled_prefixes = Vec::new();
         let mut service_events = darwin_services::TrapServiceEvents::default();
         let stop = loop {
@@ -216,9 +219,10 @@ impl BlockRuntime {
                 Ok(attempt) => attempt,
                 Err(()) => break OwnedStop::Indeterminate("begin-native authority failed".into()),
             };
-            let active = Active {
+            let mut active = Active {
                 pe: &mut pe,
                 outer: Some(outer),
+                source_pin: None,
                 attempt,
                 closed: false,
             };
@@ -249,7 +253,19 @@ impl BlockRuntime {
                     &mut last_el1_context_observation,
                     &mut settled_prefixes,
                 ) {
-                    Ok(()) => continue,
+                    Ok(el1_system::SystemStep::Retired) => continue,
+                    Ok(el1_system::SystemStep::Refused(stop)) => break stop,
+                    Ok(el1_system::SystemStep::InterruptBoundary(boundary)) => {
+                        match active.execute_interrupt_boundary(
+                            self,
+                            boundary,
+                            &mut accounting,
+                            &mut last_interrupt_observation,
+                        ) {
+                            Ok(()) => continue,
+                            Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                        }
+                    }
                     Err(error) => break OwnedStop::Indeterminate(error.to_string()),
                 }
             }
@@ -265,8 +281,25 @@ impl BlockRuntime {
                     &mut last_el1_system_observation,
                     &mut settled_prefixes,
                 ) {
-                    Ok(None) => continue,
-                    Ok(Some(stop)) => break stop,
+                    Ok(el1_system::SystemStep::Retired) => continue,
+                    Ok(el1_system::SystemStep::Refused(stop)) => break stop,
+                    Ok(el1_system::SystemStep::InterruptBoundary(boundary)) => {
+                        // The runtime's physical source pin outlives this borrow, and the next
+                        // instruction is not fetched first.
+                        let boundary = match boundary.bind_retired_source(bound) {
+                            Ok(boundary) => boundary,
+                            Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                        };
+                        match active.execute_interrupt_boundary(
+                            self,
+                            boundary,
+                            &mut accounting,
+                            &mut last_interrupt_observation,
+                        ) {
+                            Ok(()) => continue,
+                            Err(error) => break OwnedStop::Indeterminate(error.to_string()),
+                        }
+                    }
                     Err(error) => break OwnedStop::Indeterminate(error.to_string()),
                 }
             }
@@ -452,6 +485,7 @@ impl BlockRuntime {
             last_el1_system_observation,
             last_system_effect_observation,
             last_el1_context_observation,
+            last_interrupt_observation,
             settled_prefixes,
             service_events,
         }
@@ -459,9 +493,11 @@ impl BlockRuntime {
 }
 
 /// Dropping it never repairs state or discards a native or finalizer failure.
-struct Active<'active, 'run, B> {
+struct Active<'active, 'run, B: provider::Owner> {
     pe: &'active mut RetainedResources<'run, B>,
     outer: Option<MemoryExecutionLoan>,
+    // The native source pin, moved here once; Drop poisons the PE before release.
+    source_pin: Option<crate::memory::domain::physical::BoundPhysicalInstruction>,
     attempt: u64,
     closed: bool,
 }
@@ -911,10 +947,11 @@ impl<B: provider::Owner> Active<'_, '_, B> {
     }
 }
 
-impl<B> Drop for Active<'_, '_, B> {
+impl<B: provider::Owner> Drop for Active<'_, '_, B> {
     fn drop(&mut self) {
         if !self.closed {
             self.pe.authority.poison();
+            self.pe.backend.abandon_wait();
         }
         // `outer` is dropped only after successful completion or after the PE
         // is marked failed.

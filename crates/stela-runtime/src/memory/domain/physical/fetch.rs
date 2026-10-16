@@ -120,6 +120,21 @@ impl BoundPhysicalInstruction {
 }
 
 impl PhysicalAddressSpace {
+    /// Re-check a reached physical pin after its instruction retired. Retiring
+    /// the cache entry does not change the pinned storage, view or mutation
+    /// state. This fetches, registers, copies and allocates nothing.
+    pub(crate) fn validate_retired_instruction(
+        &self,
+        execution: &MemoryExecutionLoan,
+        source: &BoundPhysicalInstruction,
+    ) -> Result<(), &'static str> {
+        self.check_execution_loan(execution)
+            .map_err(|_| "retired source lost its physical/outer owner")?;
+        self.check_reached(&source.reached)
+            .map_err(|_| "retired source view is not the physical owner")?;
+        source.validate_owned_writes(self.memory_system(), &[])
+    }
+
     /// Instruction fetch for the control owner, outside the M0 path. The scope
     /// derives the current controls and uses this physical owner.
     pub(crate) fn fetch_control_instruction(
@@ -373,3 +388,6 @@ impl PhysicalAddressSpace {
         Ok(binding)
     }
 }
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests;

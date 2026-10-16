@@ -22,6 +22,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use stela_compiler::{aarch64::system::synchronization::Operation, block::system::SystemOperation};
 
 pub(super) struct InstalledContext {
     pub(super) snapshot: ControlSnapshot,
@@ -44,9 +45,47 @@ pub(crate) struct ControlCodeScope<'run> {
     pub(super) entry_profile: EntryProfile,
     pub(super) context: &'run mut ContextState,
     pub(super) _outer: Option<&'run crate::memory::domain::MemoryExecutionLoan>,
+    pub(super) retired_system:
+        Option<&'run crate::blocks::retirement::checked::RetiredInstructionSource<'run>>,
 }
 
-impl ControlCodeScope<'_> {
+impl<'run> ControlCodeScope<'run> {
+    /// Bind the System instruction that just retired, supplied by Active after
+    /// native retirement. This permits no further instruction, fetch or native
+    /// attempt.
+    pub(in crate::blocks) fn bind_retired_system_source(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        source: &'run crate::blocks::retirement::checked::RetiredInstructionSource<'run>,
+    ) -> Result<(), &'static str> {
+        if self.retired_system.is_some() {
+            return Err("retired System source already bound");
+        }
+        self.check_retired_system_source(source)?;
+        self.retired_system = Some(source);
+        Ok(())
+    }
+
+    fn check_retired_system_source(
+        &self,
+        source: &crate::blocks::retirement::checked::RetiredInstructionSource<'run>,
+    ) -> Result<(), &'static str> {
+        let original = source.entry();
+        if self.runtime.profile() != stela_compiler::block::BlockProfile::El1PlatformV1
+            || self.runtime.address_space() != original.address_space()
+            || !source
+                .instruction()
+                .matches_source(original.entry(), original.word())
+            || source.source_pin().raw_pc() != original.entry().0
+            || source.source_pin().word() != original.word()
+        {
+            return Err("retired System profile/source descriptor changed");
+        }
+        let outer = self._outer.ok_or("retired source outer absent")?;
+        self.physical
+            .validate_retired_instruction(outer, source.source_pin())
+    }
+
     /// Reuse the one initial context allocation after a prepared control commit.
     /// An impossible lost context fails through the existing publication prefix.
     fn replace_current(
@@ -203,7 +242,9 @@ impl ControlCodeScope<'_> {
     }
 
     pub(crate) fn check_source_word(&self, pc: u64, word: u32) -> Result<(), &'static str> {
-        if self.runtime.profile() == stela_compiler::block::BlockProfile::El1PlatformV1 {
+        if self.retired_system.is_some() {
+            Err("retired physical source is not a fresh instruction fetch permit")
+        } else if self.runtime.profile() == stela_compiler::block::BlockProfile::El1PlatformV1 {
             profile::check_context_instruction(pc, word).map(|_| ())
         } else {
             profile::check_instruction(pc, word).map(|_| ())
@@ -252,9 +293,23 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
             cpu,
             state,
             cause,
+            retired_source,
         } = request;
         self.physical.check_fetch_execution()?;
-        if !cause.matches_source(source.word) {
+        if cause == crate::system::translation_controls::ContextSynchronizationCause::InterruptEntry
+        {
+            let original = retired_source.ok_or("IRQ CSE lost its retired source")?;
+            let bound = self
+                .retired_system
+                .ok_or("IRQ CSE lacks the retired source pin")?;
+            if !core::ptr::eq(bound, original) || source != original.physical_fetch() {
+                return Err("IRQ CSE changed the retired physical source");
+            }
+            self.check_retired_system_source(original)?;
+        } else if retired_source.is_some()
+            || self.retired_system.is_some()
+            || !cause.matches_source(source.word)
+        {
             return Err("exception CSE cause differs from source operation");
         }
         if self.current(&before)?.cpu != cpu
@@ -266,14 +321,18 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
             return Err("exception CSE changes controls or original PE authority");
         }
         profile::check_features(self.entry_profile, &after)?;
-        let retained = self.revalidate_source(&before, source, state)?;
+        let retained = if retired_source.is_some() {
+            None
+        } else {
+            Some(self.revalidate_source(&before, source, state)?)
+        };
         Ok(PreparedCodePublication {
             scope: self,
             action: PreparedAction::Synchronize {
                 snapshot: after,
                 cpu,
             },
-            _source: Some(retained),
+            _source: retained,
         })
     }
 
@@ -408,10 +467,16 @@ impl<'run> TranslationServices for ControlCodeScope<'run> {
                 }
                 profile::check_features(self.entry_profile, &after)?;
                 let retained = self.revalidate_source(&before, source, state)?;
-                profile::check_instruction(source.pc, source.word)?;
-                if !matches!(profile::legacy_control_operation(source.word), Some(profile::LegacyControlOperation::Isb(actual)) if actual == operation)
-                {
-                    return Err("ISB operation differs from canonical source");
+                // Check the current System decoder, not the legacy control entry.
+                // The source, profile and PE borrows were re-checked above and are
+                // held through the cache, context and serialization commit.
+                let instruction = profile::check_context_instruction(source.pc, source.word)?;
+                match (instruction.operation, operation) {
+                    (
+                        SystemOperation::InstructionSynchronization { option: actual },
+                        Operation::InstructionSynchronization { option: expected },
+                    ) if actual == expected => {}
+                    _ => return Err("ISB operation differs from source"),
                 }
                 (
                     PreparedAction::Synchronize {
@@ -459,6 +524,9 @@ impl PreparedPublication for PreparedCodePublication<'_, '_> {
         let mut progress = PublicationProgress::None;
         let result = (|| {
             scope.physical.check_fetch_execution()?;
+            if let Some(retired) = scope.retired_system {
+                scope.check_retired_system_source(retired)?;
+            }
             match action {
                 PreparedAction::Read => return Ok(()),
                 PreparedAction::Install(current) => {
@@ -482,6 +550,9 @@ impl PreparedPublication for PreparedCodePublication<'_, '_> {
                         .map_err(|_| "host instruction serialization failed")?;
                     progress = PublicationProgress::InstructionExecutionSerialized;
                 }
+            }
+            if let Some(retired) = scope.retired_system {
+                scope.check_retired_system_source(retired)?;
             }
             scope.physical.check_fetch_execution()
         })();

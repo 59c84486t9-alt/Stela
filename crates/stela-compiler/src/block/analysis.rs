@@ -139,6 +139,7 @@ pub fn analyze_with_profile(
                     | system::SystemOperation::SendEvent { .. }
                     | system::SystemOperation::Register(_)
                     | system::SystemOperation::PstateImmediate(_)
+                    | system::SystemOperation::Wait { .. }
             ) {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }

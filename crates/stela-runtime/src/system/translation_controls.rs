@@ -9,6 +9,7 @@ mod context_sync;
 pub(crate) use context_sync::PreparedContextSynchronization;
 mod effects;
 mod el1_source;
+mod event_context;
 mod fields;
 pub(crate) mod m0_data;
 pub use effects::*;

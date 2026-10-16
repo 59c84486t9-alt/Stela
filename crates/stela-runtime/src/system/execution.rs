@@ -572,6 +572,9 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             SystemOperation::Register(_) | SystemOperation::PstateImmediate(_) => Err(
                 Failure::Unsupported("register operation requires retained authoritative owners"),
             ),
+            SystemOperation::Wait { .. } => Err(Failure::Unsupported(
+                "wait requires the retained hosted wait owner",
+            )),
             SystemOperation::InstructionSynchronization { .. } => Err(Failure::Unsupported(
                 "instruction synchronization requires the source publication owner",
             )),

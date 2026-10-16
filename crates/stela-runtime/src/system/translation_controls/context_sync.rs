@@ -26,9 +26,46 @@ impl TranslationControls {
                 "exception source needs another context service",
             ));
         }
-        services
-            .validate_source(&self.current_snapshot(), fetched.source, state)
-            .map_err(ControlError::Unavailable)?;
+        self.prepare_context_effect(fetched.source, state, cause, None, services)
+    }
+    /// Context synchronization for IRQ entry. The retired instruction's source
+    /// identity is kept, and no further instruction is fetched or run. The
+    /// services hold the pending-controller receipt.
+    pub(crate) fn prepare_interrupt_context<'a, S: TranslationServices>(
+        &'a mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        state: &SystemState,
+        original: &crate::blocks::retirement::checked::RetiredInstructionSource<'_>,
+        services: &'a mut S,
+    ) -> Result<PreparedContextSynchronization<'a, S::Prepared<'a>>, ControlError> {
+        check_execution_state(state)?;
+        self.check_services(services)?;
+        // This is the retired boundary, not a freshly fetched instruction. Its
+        // source cache entry may already have retired during the instruction's
+        // context synchronization; the installed publisher checks the current
+        // controls against the same physical source pin.
+        self.prepare_context_effect(
+            original.physical_fetch(),
+            state,
+            ContextSynchronizationCause::InterruptEntry,
+            Some(original),
+            services,
+        )
+    }
+
+    fn prepare_context_effect<'a, S: TranslationServices>(
+        &'a mut self,
+        source: super::PhysicalFetch,
+        state: &SystemState,
+        cause: ContextSynchronizationCause,
+        retired_source: Option<&crate::blocks::retirement::checked::RetiredInstructionSource<'_>>,
+        services: &'a mut S,
+    ) -> Result<PreparedContextSynchronization<'a, S::Prepared<'a>>, ControlError> {
+        if retired_source.is_none() {
+            services
+                .validate_source(&self.current_snapshot(), source, state)
+                .map_err(ControlError::Unavailable)?;
+        }
         let next_generation = self
             .generation
             .checked_add(1)
@@ -40,10 +77,11 @@ impl TranslationControls {
             .prepare_context_synchronization(ContextSynchronizationRequest {
                 before,
                 after,
-                source: fetched.source,
+                source,
                 cpu: self.profile.cpu,
                 state,
                 cause,
+                retired_source,
             })
             .map_err(ControlError::Unavailable)?;
         Ok(PreparedContextSynchronization {

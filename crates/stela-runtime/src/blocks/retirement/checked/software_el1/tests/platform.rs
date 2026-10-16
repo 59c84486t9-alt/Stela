@@ -4,6 +4,14 @@ const SOURCE_PA: u64 = 0x100000;
 const VECTOR_BASE: u64 = 0x8000;
 const NOP: u32 = 0xd503201f;
 fn machine(cache: PathBuf, words: &[u32], vector_base: u64) -> SoftwareEl1Machine {
+    machine_with_profile(cache, words, vector_base, SoftwareEl1Profile::PlatformV1)
+}
+pub(super) fn machine_with_profile(
+    cache: PathBuf,
+    words: &[u32],
+    vector_base: u64,
+    profile: SoftwareEl1Profile,
+) -> SoftwareEl1Machine {
     let mut registers = stela_compiler::GuestState {
         sp: 0x2f0000,
         nzcv: 0xa0000000,
@@ -18,7 +26,7 @@ fn machine(cache: PathBuf, words: &[u32], vector_base: u64) -> SoftwareEl1Machin
         *value = [0x2222000000000000 | i as u64, 0x3333000000000000 | i as u64];
     }
     SoftwareEl1Machine::new(SoftwareEl1Config {
-        profile: SoftwareEl1Profile::PlatformV1,
+        profile,
         cache_directory: cache,
         ram: SourceRamDeclaration {
             address_space: 91,

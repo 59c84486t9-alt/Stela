@@ -27,9 +27,10 @@ fn declared_pair_profile(mmfr2: Option<u64>) -> El1PlatformControls {
         fields.push((Register::IdAa64Mmfr2El1, value));
     }
     El1PlatformControls {
-        identification: Snapshot::declared("authored-pair-read-negative-identification", &fields)
-            .unwrap(),
-        security: SecurityImplementation::NonSecureOnly,
+        identification: Arc::new(
+            Snapshot::declared("authored-pair-read-negative-identification", &fields).unwrap(),
+        ),
+        security: SoftwareEl1Security::NonSecureOnly,
         // The absence tuple alone is not enough: `context()` re-checks the
         // snapshot.
         entry: base.entry,

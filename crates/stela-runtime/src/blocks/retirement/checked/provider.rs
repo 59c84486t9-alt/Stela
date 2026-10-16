@@ -1,10 +1,13 @@
 //! The EL0 backend: checked memory, PAuth, clock and TSD.
+mod async_resources;
+pub(super) mod hosted_wait;
 mod m0_owner;
 mod resources;
 pub(crate) use m0_owner::M0Owner;
 pub(super) use resources::M0ExecutionChecks;
 pub(crate) use resources::{
-    El1ContextResources, El1ExecutionResources, El1SystemEffectResources, M0ExecutionResources,
+    El1ContextResources, El1ExecutionResources, El1IrqResources, El1SystemEffectResources,
+    M0ExecutionResources,
 };
 
 use super::NativeObservation;
@@ -216,6 +219,13 @@ pub(super) mod sealed {
 #[cfg(feature = "std")]
 impl sealed::Concrete for CheckedProcessOwner<'_> {}
 
+/// What the backend requires after a System instruction retires. It does
+/// not permit IRQ entry.
+pub(crate) enum SystemRetirement {
+    Complete,
+    ArbitrateHostedIrq,
+}
+
 /// Only this module can implement a backend.
 pub(crate) trait Owner: sealed::Concrete {
     fn supports_profile(&self, profile: stela_compiler::block::BlockProfile) -> bool {
@@ -247,6 +257,16 @@ pub(crate) trait Owner: sealed::Concrete {
     }
 
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan>;
+    #[cfg(feature = "std")]
+    fn reacquire_wait_loan(
+        &mut self,
+    ) -> anyhow::Result<crate::memory::domain::ExecutionLoanAttempt> {
+        anyhow::bail!("hosted wait reacquisition resources unavailable")
+    }
+    fn system_retirement(&mut self, _system: &SystemState) -> anyhow::Result<SystemRetirement> {
+        anyhow::bail!("System retirement source owner unavailable")
+    }
+
     fn prepare_source(
         &mut self,
         _runtime: &mut crate::blocks::BlockRuntime,
@@ -285,6 +305,55 @@ pub(crate) trait Owner: sealed::Concrete {
 
     fn split_el1_context_resources(&mut self) -> anyhow::Result<El1ContextResources<'_>> {
         anyhow::bail!("EL1 context resources are unavailable")
+    }
+
+    /// Only the hosted-wait backend overrides these. It keeps the pending wait
+    /// state itself, and no backend borrow survives the release, reacquire and
+    /// re-check sequence.
+    fn prepare_wait(
+        &mut self,
+        _bound: &BoundSource<'_>,
+        _instruction: stela_compiler::block::system::SystemInstruction,
+        _system: &SystemState,
+        _registers: &GuestState,
+        _outer: &MemoryExecutionLoan,
+    ) -> anyhow::Result<hosted_wait::WaitReply> {
+        anyhow::bail!("lifetime-fixed hosted wait resources unavailable")
+    }
+    #[cfg(feature = "std")]
+    fn qualify_wake(
+        &mut self,
+        _bound: &BoundSource<'_>,
+        _system: &SystemState,
+        _registers: &mut GuestState,
+        _outer: &MemoryExecutionLoan,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("active hosted wake resources unavailable")
+    }
+    /// A backend without resources cannot hold a wait. The hosted backend
+    /// poisons its receiver instead of cancelling the wait.
+    fn abandon_wait(&mut self) {}
+    fn split_el1_irq_resources(&mut self) -> anyhow::Result<El1IrqResources<'_>> {
+        anyhow::bail!("hosted IRQ resources unavailable")
+    }
+    fn prepare_hosted_counter(
+        &mut self,
+        _bound: &BoundSource<'_>,
+        _instruction: stela_compiler::block::system::SystemInstruction,
+        _system: &SystemState,
+        _outer: &MemoryExecutionLoan,
+    ) -> anyhow::Result<hosted_wait::HostedCounterRead> {
+        anyhow::bail!("hosted system counter owner unavailable")
+    }
+    #[cfg(feature = "std")]
+    fn poll_wait(&mut self) -> anyhow::Result<hosted_wait::WaitReply> {
+        anyhow::bail!("retained wait transaction unavailable")
+    }
+    fn wait_outcome(&self) -> anyhow::Result<crate::system::events::Outcome> {
+        anyhow::bail!("retained wait receipt unavailable")
+    }
+    fn settle_wait(&mut self) -> anyhow::Result<()> {
+        anyhow::bail!("retained wait settlement unavailable")
     }
 
     fn invoke(

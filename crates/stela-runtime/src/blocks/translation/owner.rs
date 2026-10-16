@@ -79,6 +79,7 @@ impl InstalledCodeSources {
                 entry_profile,
                 context: &mut context,
                 _outer: None,
+                retired_system: None,
             };
             TranslationControls::install(readbacks, control_profile, memory, system, &mut initial)
                 .map_err(|error| anyhow::anyhow!("M0 Initial installation: {error:?}"))?
@@ -197,6 +198,7 @@ impl InstalledCodeSources {
             entry_profile: self.entry_profile,
             context: &mut self.context,
             _outer: Some(outer),
+            retired_system: None,
         })
     }
     pub(super) fn physical_space(&self) -> &PhysicalAddressSpace {

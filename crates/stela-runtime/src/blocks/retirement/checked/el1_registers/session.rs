@@ -64,8 +64,9 @@ pub(in crate::blocks::retirement::checked) struct RegisterSession<'call, 'code> 
     controls: &'call TranslationControls,
     context: &'call mut ExecutionContext,
     before: ContextIdentity,
-    reached: BoundPhysicalInstruction,
+    reached: Option<BoundPhysicalInstruction>,
     invoked: bool,
+    source_pin_finalized: bool,
 }
 impl<'call, 'code> RegisterSession<'call, 'code> {
     pub(in crate::blocks::retirement::checked) fn prepare(
@@ -97,8 +98,9 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             controls,
             before: ContextIdentity::capture(context),
             context,
-            reached,
+            reached: Some(reached),
             invoked: false,
+            source_pin_finalized: false,
         })
     }
     fn check_binding(
@@ -125,6 +127,23 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             )
             .map_err(anyhow::Error::msg)
     }
+    /// Take the pre-effect source pin after finalizer and source validation.
+    /// The consumer keeps it through publication and the PC store; taking it
+    /// prevents another invocation of this session.
+    pub(in crate::blocks::retirement::checked) fn take_source_pin(
+        &mut self,
+        _consumer: &super::super::ConsumerKey,
+        system: &SystemState,
+    ) -> anyhow::Result<BoundPhysicalInstruction> {
+        anyhow::ensure!(
+            self.invoked && self.source_pin_finalized,
+            "native source pin has no successful storage finalizer"
+        );
+        self.validate_current(system)?;
+        self.reached
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("native source pin already moved"))
+    }
     fn context_unchanged(&self) -> bool {
         self.context.has_supported_header() && ContextIdentity::capture(self.context) == self.before
     }
@@ -132,6 +151,10 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
         &self,
         system: &SystemState,
     ) -> anyhow::Result<()> {
+        let original = self
+            .reached
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("native source pin already moved"))?;
         self.bound.el1_carrier_intent()?;
         anyhow::ensure!(self.context_unchanged(), "EL1 register context changed");
         let reached = self
@@ -146,7 +169,7 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             )
             .map_err(|error| anyhow::anyhow!("EL1 register current source fetch: {error:?}"))?;
         anyhow::ensure!(
-            self.reached.same_source(&reached),
+            original.same_source(&reached),
             "EL1 register original physical source changed"
         );
         Self::check_binding(self.bound, self.scope, &reached)
@@ -214,6 +237,8 @@ impl<'call, 'code> RegisterSession<'call, 'code> {
             if !self.context_unchanged() {
                 report.failure = Some(RegisterFailure::ContextChanged);
             }
+            self.source_pin_finalized =
+                report.failure.is_none() && matches!(report.storage_after, Some(Ok(())));
         }
         #[cfg(not(all(
             target_arch = "x86_64",

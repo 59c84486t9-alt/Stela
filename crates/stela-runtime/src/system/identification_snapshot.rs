@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 mod qualifiers;
+mod xs;
 
 use super::identification::{Readback, Readbacks, Register};
 use alloc::sync::Arc;

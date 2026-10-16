@@ -41,11 +41,12 @@ pub(super) enum ExceptionEffect {
     BranchAddress { raw: u64, result: u64 },
 }
 
-pub(super) struct BorrowedExceptionServices<'controls, 'resource, P: PreparedPublication> {
+pub(super) struct BorrowedExceptionServices<'controls, 'resource, 'irq, P: PreparedPublication> {
     publication: Option<PreparedContextSynchronization<'controls, P>>,
     controls: Option<&'controls mut TranslationControls>,
     memory: &'resource mut MemoryThread<MemoryControls>,
     endpoint: &'resource EventEndpoint,
+    irq: Option<&'resource crate::blocks::retirement::software_async::HostedIrqResources<'irq>>,
     expected: ServiceRequest,
     target: u64,
     destination: ExceptionLevel,
@@ -53,8 +54,8 @@ pub(super) struct BorrowedExceptionServices<'controls, 'resource, P: PreparedPub
     pub(super) effects: Vec<ExceptionEffect>,
 }
 
-impl<'controls, 'resource, P: PreparedPublication>
-    BorrowedExceptionServices<'controls, 'resource, P>
+impl<'controls, 'resource, 'irq, P: PreparedPublication>
+    BorrowedExceptionServices<'controls, 'resource, 'irq, P>
 {
     pub(super) fn new(
         publication: PreparedContextSynchronization<'controls, P>,
@@ -69,12 +70,32 @@ impl<'controls, 'resource, P: PreparedPublication>
             controls: None,
             memory,
             endpoint,
+            irq: None,
             expected,
             target,
             destination,
             preflighted: false,
             effects: Vec::new(),
         }
+    }
+    pub(super) fn new_irq(
+        publication: PreparedContextSynchronization<'controls, P>,
+        memory: &'resource mut MemoryThread<MemoryControls>,
+        irq: &'resource crate::blocks::retirement::software_async::HostedIrqResources<'irq>,
+        expected: ServiceRequest,
+        target: u64,
+        destination: ExceptionLevel,
+    ) -> Self {
+        let mut services = Self::new(
+            publication,
+            memory,
+            irq.endpoint(),
+            expected,
+            target,
+            destination,
+        );
+        services.irq = Some(irq);
+        services
     }
 }
 
@@ -96,7 +117,7 @@ fn no_effect(message: impl Into<String>) -> EffectFailure<String> {
     }
 }
 
-impl<P: PreparedPublication> ExceptionServices for BorrowedExceptionServices<'_, '_, P> {
+impl<P: PreparedPublication> ExceptionServices for BorrowedExceptionServices<'_, '_, '_, P> {
     type Permit = ExceptionPermit;
     type Error = String;
 
@@ -105,7 +126,10 @@ impl<P: PreparedPublication> ExceptionServices for BorrowedExceptionServices<'_,
             return Err("exception request differs from the original prepared plan".into());
         }
         if matches!(request.effects, RequiredEffects::Entry { irq: true }) {
-            return Err("IRQ needs its pending-controller receipt".into());
+            self.irq
+                .ok_or_else(|| "IRQ needs its pending-controller receipt".to_string())?
+                .validate_presented()
+                .map_err(|error| format!("IRQ receipt: {error:?}"))?;
         }
         self.memory
             .check_event_endpoint(self.endpoint)
@@ -134,6 +158,12 @@ impl<P: PreparedPublication> ExceptionServices for BorrowedExceptionServices<'_,
             return Err(no_effect(
                 "exception synchronization changed its original request",
             ));
+        }
+        if matches!(self.expected.effects, RequiredEffects::Entry { irq: true }) {
+            self.irq
+                .ok_or_else(|| no_effect("IRQ receipt absent"))?
+                .validate_presented()
+                .map_err(|error| no_effect(format!("IRQ receipt changed: {error:?}")))?;
         }
         let prepared = self
             .publication

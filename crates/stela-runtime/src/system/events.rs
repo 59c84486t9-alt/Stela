@@ -10,6 +10,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use stela_compiler::GuestState;
 use stela_compiler::aarch64::system::synchronization::{self, Operation, WaitKind};
 
+pub(crate) mod hosted;
+
 const INSTRUCTION_BYTES: u64 = 4;
 const ZERO_REGISTER: u8 = 31;
 const ESR_EC_SHIFT: u32 = 26;
@@ -179,8 +181,27 @@ impl EventEndpoint {
         instruction: EventInstruction,
         context: Context,
         pending_interrupt: bool,
-        mut counter: impl FnMut() -> Result<u64, E>,
+        counter: impl FnMut() -> Result<u64, E>,
     ) -> Result<Outcome, Error<E>> {
+        Ok(
+            match self.prepare_wait(domain, instruction, context, pending_interrupt, counter)? {
+                WaitPreparation::Ready(outcome) => outcome,
+                WaitPreparation::Pending(wait) => Outcome::Retired {
+                    next_pc: wait.next_pc,
+                    reason: RetireReason::CooperativeResume,
+                },
+            },
+        )
+    }
+
+    pub(crate) fn prepare_wait<E>(
+        &mut self,
+        domain: &EventDomain,
+        instruction: EventInstruction,
+        context: Context,
+        pending_interrupt: bool,
+        mut counter: impl FnMut() -> Result<u64, E>,
+    ) -> Result<WaitPreparation, Error<E>> {
         if !domain.owns(self) {
             return Err(Error::Domain(DomainError::WrongDomain));
         }
@@ -190,9 +211,9 @@ impl EventEndpoint {
             .filter(|_| instruction.pc.is_multiple_of(INSTRUCTION_BYTES))
             .ok_or(Error::InvalidInstructionPc)?;
         if instruction.deadline.is_some() && !context.wfxt {
-            return Ok(Outcome::Undefined { instruction });
+            return Ok(WaitPreparation::Ready(Outcome::Undefined { instruction }));
         }
-        let retire = |reason| Outcome::Retired { next_pc, reason };
+        let retire = |reason| WaitPreparation::Ready(Outcome::Retired { next_pc, reason });
         match instruction.operation {
             Operation::SendEvent { local: true } => {
                 self.signal_local();
@@ -219,11 +240,11 @@ impl EventEndpoint {
             return Ok(retire(RetireReason::DeadlineExpired));
         }
         if context.traps(event_wait) {
-            return Ok(Outcome::Trap(El1Trap {
+            return Ok(WaitPreparation::Ready(Outcome::Trap(El1Trap {
                 instruction,
                 preferred_return_pc: instruction.pc,
                 esr: instruction.trap_esr(),
-            }));
+            })));
         }
         // WaitForEvent observes a newly set bit without consuming it. This
         // short-circuits its second timeout check, exactly as the source helper.
@@ -235,7 +256,38 @@ impl EventEndpoint {
         {
             return Ok(retire(RetireReason::DeadlineExpired));
         }
-        Ok(retire(RetireReason::CooperativeResume))
+        Ok(WaitPreparation::Pending(WaitRequest {
+            endpoint: Arc::downgrade(&self.event),
+            instruction,
+            next_pc,
+        }))
+    }
+
+    /// Re-check the endpoint after suspension. Unlike the initial WFE check,
+    /// an observed event keeps the bit (the declared policy).
+    pub(crate) fn recheck_wait<E>(
+        &mut self,
+        wait: &WaitRequest,
+        interrupt_wake: bool,
+        mut counter: impl FnMut() -> Result<u64, E>,
+    ) -> Result<Option<Outcome>, Error<E>> {
+        if !Weak::ptr_eq(&wait.endpoint, &Arc::downgrade(&self.event)) {
+            return Err(Error::Domain(DomainError::WrongDomain));
+        }
+        let reason = if wait.instruction.is_event_wait() && self.is_set() {
+            Some(RetireReason::EventObserved)
+        } else if !wait.instruction.is_event_wait() && interrupt_wake {
+            Some(RetireReason::InterruptPending)
+        } else if let Some(deadline) = wait.instruction.deadline {
+            self.timeout_expired(deadline.ticks, &mut counter)?
+                .then_some(RetireReason::DeadlineExpired)
+        } else {
+            None
+        };
+        Ok(reason.map(|reason| Outcome::Retired {
+            next_pc: wait.next_pc,
+            reason,
+        }))
     }
 
     fn timeout_expired<E>(
@@ -476,12 +528,45 @@ impl EventInstruction {
     }
 }
 
+/// A prepared wait bound to its source and endpoint; Active owns suspension
+/// and retirement. Callers cannot construct or retarget it.
+#[derive(Debug)]
+pub(crate) enum WaitPreparation {
+    Ready(Outcome),
+    Pending(WaitRequest),
+}
+
+#[derive(Debug)]
+pub(crate) struct WaitRequest {
+    endpoint: Weak<EventRegister>,
+    instruction: EventInstruction,
+    next_pc: u64,
+}
+impl WaitRequest {
+    /// The decoded instruction; it permits nothing.
+    pub(crate) fn kind(&self) -> WaitKind {
+        let Operation::Wait { kind, .. } = self.instruction.operation else {
+            unreachable!("only wait requests are retained")
+        };
+        kind
+    }
+    pub(crate) fn next_pc(&self) -> u64 {
+        self.next_pc
+    }
+    pub(crate) fn deadline(&self) -> Option<u64> {
+        self.instruction.deadline.map(|deadline| deadline.ticks)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetireReason {
     EventSent,
     EventConsumed,
     EventObserved,
     InterruptPending,
+    /// The hosted implementation resumed because an IRQ was presented; the
+    /// event register keeps its value.
+    PresentedIrqResume,
     DeadlineExpired,
     /// Explicit source-permitted implementation-selected immediate resume.
     CooperativeResume,

@@ -15,6 +15,10 @@ enum Phase {
     Ready,
     NativeActive(u64),
     SystemActive(u64),
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    Suspended(u64),
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    WakeRequalification(u64),
     Halted,
     DebugActive(u64),
     Retiring(u64),
@@ -74,6 +78,8 @@ impl PeExecutionAuthority {
             | Phase::Indeterminate => Ok(()),
             Phase::NativeActive(_)
             | Phase::SystemActive(_)
+            | Phase::Suspended(_)
+            | Phase::WakeRequalification(_)
             | Phase::DebugActive(_)
             | Phase::Retiring(_)
             | Phase::NativeCommitting => Err(()),
@@ -96,6 +102,30 @@ impl PeExecutionAuthority {
         Ok(attempt)
     }
 
+    pub(crate) fn ready_after_retirement(&self, attempt: u64) -> bool {
+        self.ready() && self.sequence == attempt
+    }
+
+    /// The consumer has validated the retired source and PE. IRQ arbitration
+    /// starts after a retirement; this creates no native attempt and runs no
+    /// further guest instruction.
+    pub(crate) fn begin_interrupt(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        retired_attempt: u64,
+    ) -> Result<u64, ()> {
+        if !self.ready() || self.sequence != retired_attempt {
+            return Err(());
+        }
+        let Some(attempt) = self.sequence.checked_add(1) else {
+            self.poison();
+            return Err(());
+        };
+        self.sequence = attempt;
+        self.phase = Phase::SystemActive(attempt);
+        Ok(attempt)
+    }
+
     pub(crate) fn native_attempt(&self, attempt: u64) -> bool {
         self.sequence == attempt && self.phase == Phase::NativeActive(attempt)
     }
@@ -115,6 +145,55 @@ impl PeExecutionAuthority {
 
     pub(crate) fn system_attempt(&self, attempt: u64) -> bool {
         self.sequence == attempt && self.phase == Phase::SystemActive(attempt)
+    }
+
+    /// The consumer keeps the PE, the source and the finalizer receipt. It
+    /// drops its outer memory loan only after this transition and before the
+    /// host thread parks or a device service runs.
+    #[cfg(feature = "std")]
+    pub(crate) fn suspend_system(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        attempt: u64,
+    ) -> Result<(), ()> {
+        if !self.system_attempt(attempt) {
+            self.poison();
+            return Err(());
+        }
+        self.phase = Phase::Suspended(attempt);
+        Ok(())
+    }
+
+    /// A host return is not a wake or retirement. Domain exclusion, source,
+    /// controls and producers must be re-checked.
+    #[cfg(feature = "std")]
+    pub(crate) fn resume_suspended(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        attempt: u64,
+    ) -> Result<(), ()> {
+        if self.sequence != attempt || self.phase != Phase::Suspended(attempt) {
+            self.poison();
+            return Err(());
+        }
+        self.phase = Phase::WakeRequalification(attempt);
+        Ok(())
+    }
+
+    /// Called after the consumer reacquired the domain loan and re-checked the
+    /// source, controls and producer resources.
+    #[cfg(feature = "std")]
+    pub(crate) fn qualify_wake(
+        &mut self,
+        _consumer: &crate::blocks::retirement::ConsumerKey,
+        attempt: u64,
+    ) -> Result<(), ()> {
+        if self.sequence != attempt || self.phase != Phase::WakeRequalification(attempt) {
+            self.poison();
+            return Err(());
+        }
+        self.phase = Phase::SystemActive(attempt);
+        Ok(())
     }
 
     pub(crate) fn halted(&self) -> bool {

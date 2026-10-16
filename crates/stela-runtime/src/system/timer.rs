@@ -180,6 +180,53 @@ const TIMER_VALUE_OP2: u8 = 0;
 const TIMER_CONTROL_OP2: u8 = 1;
 const TIMER_COMPARE_OP2: u8 = 2;
 
+impl Register {
+    /// The register selector; not a profile or access permission.
+    pub const fn encoding(self) -> Encoding {
+        use stela_compiler::aarch64::system::registers::{CNTFRQ_EL0, CNTPCT_EL0, CNTVCT_EL0};
+        match self {
+            Self::CntfrqEl0 => CNTFRQ_EL0,
+            Self::CntpctEl0 => CNTPCT_EL0,
+            Self::CntvctEl0 => CNTVCT_EL0,
+            Self::CntpctssEl0 => Encoding::new(
+                TIMER_OP0,
+                EL0_TIMER_OP1,
+                TIMER_CRN,
+                COUNTER_CRM,
+                PHYSICAL_COUNT_SS_OP2,
+            ),
+            Self::CntvctssEl0 => Encoding::new(
+                TIMER_OP0,
+                EL0_TIMER_OP1,
+                TIMER_CRN,
+                COUNTER_CRM,
+                VIRTUAL_COUNT_SS_OP2,
+            ),
+            Self::CntkctlEl1 => Encoding::new(
+                TIMER_OP0,
+                EL1_TIMER_OP1,
+                TIMER_CRN,
+                KERNEL_CONTROL_CRM,
+                KERNEL_CONTROL_OP2,
+            ),
+            Self::TimerEl0 { kind, field } => Encoding::new(
+                TIMER_OP0,
+                EL0_TIMER_OP1,
+                TIMER_CRN,
+                match kind {
+                    TimerKind::Physical => PHYSICAL_TIMER_CRM,
+                    TimerKind::Virtual => VIRTUAL_TIMER_CRM,
+                },
+                match field {
+                    TimerField::Control => TIMER_CONTROL_OP2,
+                    TimerField::CompareValue => TIMER_COMPARE_OP2,
+                    TimerField::TimerValue => TIMER_VALUE_OP2,
+                },
+            ),
+        }
+    }
+}
+
 pub fn decode(encoding: Encoding) -> Option<Register> {
     if encoding.op0() != TIMER_OP0 || encoding.crn() != TIMER_CRN {
         return None;

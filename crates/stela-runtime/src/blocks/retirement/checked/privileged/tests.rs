@@ -377,6 +377,7 @@ fn refused_debug_input_stays_queued_and_dropped_active_poison_stays_terminal() {
             let active = super::super::Active {
                 pe: &mut resources,
                 outer: Some(outer),
+                source_pin: None,
                 attempt,
                 closed: false,
             };

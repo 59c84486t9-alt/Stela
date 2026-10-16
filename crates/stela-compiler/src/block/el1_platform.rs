@@ -357,9 +357,10 @@ pub(super) fn validate_system(instruction: system::SystemInstruction) -> Result<
         return Ok(());
     }
     match instruction.operation {
-        system::SystemOperation::Register(_) | system::SystemOperation::PstateImmediate(_) => {
-            Ok(())
-        }
+        system::SystemOperation::Register(_)
+        | system::SystemOperation::PstateImmediate(_)
+        | system::SystemOperation::Wait { .. }
+        | system::SystemOperation::SendEvent { local: true } => Ok(()),
         _ => Err(CompileError(
             "EL1 platform System carrier requires a retained register effect owner".into(),
         )),

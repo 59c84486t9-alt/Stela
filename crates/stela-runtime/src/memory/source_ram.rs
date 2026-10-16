@@ -15,6 +15,9 @@ use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 mod region;
 pub use region::InitializedRamRegion;
 
+mod publication;
+pub(crate) use publication::{SourceRamPublication, SourceRamPublisher};
+
 const MAX_SOURCE_RAM_EXTENTS: usize = 4096;
 const MAX_SOURCE_RAM_STRIPES: usize = 4096;
 

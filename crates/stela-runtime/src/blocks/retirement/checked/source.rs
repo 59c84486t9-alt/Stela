@@ -1,12 +1,14 @@
 //! Validation of the source, compiler plan and native carrier of a block.
 mod conditional;
 mod el1_m0;
+mod retired;
 use super::super::super::{
     validate_clock_exit, validate_pauth_exit, validate_source_map, validate_system_exit,
     validate_thread_register_exit, validate_trap_exit,
 };
 use crate::blocks::{BlockRuntime, LoadedBlock};
 use crate::system::execution::EntryBoundary;
+pub(crate) use retired::RetiredInstructionSource;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter,
     aarch64::{Decoder, Operation},
@@ -89,6 +91,43 @@ impl<'code> BoundSource<'code> {
             .profile
             .checked_memory()
             .ok_or_else(|| anyhow::anyhow!("bound source lacks checked memory profile"))
+    }
+
+    /// The WFx terminal of this block, checked against its source bytes.
+    pub(super) fn wait_instruction(
+        &self,
+    ) -> anyhow::Result<stela_compiler::block::system::SystemInstruction> {
+        let instruction = self
+            .analysis
+            .system_instruction
+            .ok_or_else(|| anyhow::anyhow!("source has no System terminal"))?;
+        anyhow::ensure!(
+            matches!(
+                instruction.operation,
+                stela_compiler::block::system::SystemOperation::Wait { .. }
+            ),
+            "System terminal is not WFx"
+        );
+        let offset = usize::try_from(
+            instruction
+                .instruction_pc
+                .0
+                .checked_sub(self.entry.entry().0)
+                .ok_or_else(|| anyhow::anyhow!("wait terminal underflows source"))?,
+        )?;
+        let end = offset
+            .checked_add(size_of::<u32>())
+            .ok_or_else(|| anyhow::anyhow!("wait source extent overflow"))?;
+        let bytes: [u8; size_of::<u32>()] = self
+            .source
+            .get(offset..end)
+            .ok_or_else(|| anyhow::anyhow!("wait terminal outside source"))?
+            .try_into()?;
+        anyhow::ensure!(
+            instruction.matches_source(instruction.instruction_pc, u32::from_le_bytes(bytes)),
+            "wait source operands changed"
+        );
+        Ok(instruction)
     }
 
     #[cfg(feature = "std")]

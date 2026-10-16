@@ -12,6 +12,7 @@ enum SourceClass {
     SError,
     Nmi,
     Debug,
+    WaitDeadline,
 }
 
 struct SourceKey {
@@ -21,8 +22,24 @@ struct SourceKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingKind {
-    Editr { word: u32, sequence: u64 },
-    CrossHalt { sequence: u64 },
+    InterruptLevel {
+        level: bool,
+        wake: bool,
+        generation: u64,
+        sequence: u64,
+    },
+    WaitDeadline {
+        generation: u64,
+        observed_ticks: u64,
+        sequence: u64,
+    },
+    Editr {
+        word: u32,
+        sequence: u64,
+    },
+    CrossHalt {
+        sequence: u64,
+    },
 }
 struct PendingEvent {
     source: u64,
@@ -41,6 +58,8 @@ pub(super) struct SoftwareAsyncDomain {
     next_event: u64,
     cross_halt_sequence: u64,
     cross_halt_outputs: Vec<CrossHaltOutput>,
+    wait_receiver: Option<Arc<()>>,
+    wait_committed: BTreeMap<u64, (u64, u64)>,
     registered: BTreeMap<u64, SourceClass>,
     pending: VecDeque<PendingEvent>,
 }
@@ -54,6 +73,8 @@ pub(super) enum AsyncError {
     Capacity,
     UnsupportedPending,
     SourceChanged,
+    #[cfg(not(feature = "std"))]
+    HostAdapterUnavailable,
 }
 
 impl SoftwareAsyncDomain {
@@ -70,6 +91,8 @@ impl SoftwareAsyncDomain {
             next_event: 0,
             cross_halt_sequence: 0,
             cross_halt_outputs: Vec::new(),
+            wait_receiver: None,
+            wait_committed: BTreeMap::new(),
             registered: BTreeMap::new(),
             pending: VecDeque::new(),
         }
@@ -127,6 +150,7 @@ impl NoAsyncSources<'_> {
             SourceClass::SError,
             SourceClass::Nmi,
             SourceClass::Debug,
+            SourceClass::WaitDeadline,
         ];
         if self
             .domain
@@ -156,3 +180,11 @@ mod tests;
 
 mod debug;
 pub(super) use debug::{CtiRoute, DebugSources, EditrSource};
+
+mod wait;
+#[cfg(feature = "std")]
+pub(super) use wait::WaitSourceKind;
+pub(super) use wait::{
+    HostedIrqResources, HostedWaitCompletion, HostedWaitError, HostedWaitPlatform, LevelProducer,
+    WaitPoll, WaitPreparation, WaitReceiver, WaitSourceKey, WaitSources,
+};

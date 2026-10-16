@@ -1,6 +1,6 @@
 //! The disjoint resources a backend lends to one execution.
-use super::super::super::software_async::NoAsyncSources;
 use super::ProcessEntryControls;
+use super::async_resources::AsyncResources;
 use crate::{
     blocks::InstalledM0Sources,
     memory::{
@@ -10,6 +10,8 @@ use crate::{
     system::{events::EventEndpoint, translation_controls::TranslationControls},
 };
 use stela_compiler::context::ExecutionContext;
+mod irq;
+pub(crate) use irq::El1IrqResources;
 
 /// Every field is borrowed from the M0 owner.
 pub(crate) struct InstalledExecutionResources<'pe> {
@@ -29,13 +31,21 @@ pub(crate) type El1ExecutionResources<'pe> = InstalledExecutionResources<'pe>;
 /// context can stay in the session; the registry stays borrowed.
 pub(in crate::blocks::retirement::checked) struct M0ExecutionChecks<'pe> {
     pub(super) execution: &'pe ProcessEntryControls,
-    pub(super) pending: &'pe NoAsyncSources<'pe>,
+    pub(super) pending: &'pe AsyncResources<'pe>,
     pub(super) memory: &'pe MemoryThread<MemoryControls>,
     pub(super) endpoint: &'pe EventEndpoint,
     pub(super) address_space: u64,
 }
 
 impl M0ExecutionChecks<'_> {
+    /// The event endpoint stays borrowed through retirement; the loan checks
+    /// that these are its own resources before publishing.
+    pub(in crate::blocks::retirement::checked) fn send_local_event(
+        &self,
+        loan: &mut super::super::el1_system::El1SystemEffectLoan<'_>,
+    ) {
+        loan.send_local_event_authorized(self, self.endpoint);
+    }
     pub(in crate::blocks::retirement::checked) fn check(
         &self,
         outer: &MemoryExecutionLoan,
@@ -45,9 +55,7 @@ impl M0ExecutionChecks<'_> {
             "M0 memory namespace differs"
         );
         self.execution.check()?;
-        self.pending
-            .check_registry()
-            .map_err(|error| anyhow::anyhow!("M0 producer registry: {error:?}"))?;
+        self.pending.check_resources()?;
         self.memory
             .check_event_endpoint(self.endpoint)
             .map_err(|error| anyhow::anyhow!("M0 PE monitor: {error:?}"))?;
@@ -84,7 +92,7 @@ pub(crate) struct El1ContextResources<'pe> {
         &'pe super::super::el1_system::El1PlatformControls,
     pub(in crate::blocks::retirement::checked) memory: &'pe mut MemoryThread<MemoryControls>,
     pub(in crate::blocks::retirement::checked) execution: &'pe ProcessEntryControls,
-    pub(in crate::blocks::retirement::checked) pending: &'pe NoAsyncSources<'pe>,
+    pub(in crate::blocks::retirement::checked) pending: &'pe AsyncResources<'pe>,
     pub(in crate::blocks::retirement::checked) endpoint: &'pe EventEndpoint,
     pub(in crate::blocks::retirement::checked) address_space: u64,
 }
@@ -98,9 +106,7 @@ impl El1ContextResources<'_> {
             "context namespace differs"
         );
         self.execution.check()?;
-        self.pending
-            .check_registry()
-            .map_err(|error| anyhow::anyhow!("context producer registry: {error:?}"))?;
+        self.pending.check_resources()?;
         self.memory
             .check_event_endpoint(self.endpoint)
             .map_err(|error| anyhow::anyhow!("context monitor: {error:?}"))?;

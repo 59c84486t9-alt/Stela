@@ -28,6 +28,10 @@ pub enum SystemOperation {
     InstructionSynchronization {
         option: u8,
     },
+    Wait {
+        kind: synchronization::WaitKind,
+        timeout_register: Option<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -51,6 +55,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
         SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
+        SystemOperation::Wait { .. } => "wait",
     })
 }
 
@@ -73,11 +78,22 @@ pub fn decode_system_instruction(
         }
         _ => None,
     };
+    let wait = match synchronization::decode(word) {
+        Some(synchronization::Operation::Wait {
+            kind,
+            timeout_register,
+        }) => Some(SystemOperation::Wait {
+            kind,
+            timeout_register,
+        }),
+        _ => None,
+    };
     let mut operations = [
         exception::decode(word).map(SystemOperation::Exception),
         tag_memory::decode(word).map(SystemOperation::TagMemory),
         event.map(|local| SystemOperation::SendEvent { local }),
         instruction_synchronization,
+        wait,
         registers::decode(word).map(SystemOperation::Register),
         registers::decode_pstate_immediate(word).map(SystemOperation::PstateImmediate),
     ]
@@ -109,7 +125,7 @@ pub(super) fn decode_el1_system_instruction(
     if let Some(instruction) = decode_system_instruction(pc, word)? {
         return Ok(Some(instruction));
     }
-    let Some(operation @ synchronization::Operation::DataCompletion { nxs: false, .. }) =
+    let Some(operation @ synchronization::Operation::DataCompletion { .. }) =
         synchronization::decode(word)
     else {
         return Ok(None);
@@ -129,10 +145,7 @@ impl SystemInstruction {
     pub fn is_el1_ram_completion(self) -> bool {
         matches!(
             self.operation,
-            SystemOperation::Synchronization(synchronization::Operation::DataCompletion {
-                nxs: false,
-                ..
-            })
+            SystemOperation::Synchronization(synchronization::Operation::DataCompletion { .. })
         )
     }
 

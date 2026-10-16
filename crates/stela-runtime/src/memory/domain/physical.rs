@@ -67,6 +67,18 @@ impl PhysicalRamReadPin<'_> {
 }
 
 impl PhysicalAddressSpace {
+    /// Create a host-service writer for one RAM extent. It gives no guest,
+    /// CPU, DMA or execution access.
+    pub(crate) fn source_ram_publisher(
+        &mut self,
+        source_pa: u64,
+        bytes: usize,
+    ) -> Result<crate::memory::source_ram::SourceRamPublisher, MemoryStatus> {
+        self.check_source_binding()
+            .map_err(|_| MemoryStatus::Domain)?;
+        self.binding.publisher(source_pa, bytes)
+    }
+
     pub(crate) fn from_materialized(
         binding: SourcePhysicalRamBinding,
     ) -> Result<Self, PhysicalReadPlatformError> {

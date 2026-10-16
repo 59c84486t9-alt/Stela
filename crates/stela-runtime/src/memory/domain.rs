@@ -18,8 +18,9 @@ mod tag_transfer;
 pub use profile::{CheckedMemoryEntry, MemoryProfile};
 mod lifecycle;
 pub(in crate::memory) use lifecycle::MemoryServiceLoan;
+pub(in crate::memory) use lifecycle::ServiceLoanAttempt;
 use lifecycle::{DomainSnapshot, DomainState};
-pub use lifecycle::{MemoryExecutionLoan, MemoryObservationLoan};
+pub use lifecycle::{ExecutionLoanAttempt, MemoryExecutionLoan, MemoryObservationLoan};
 
 mod exclusive;
 pub(crate) mod m0_read;
@@ -554,6 +555,11 @@ impl<P: DataPolicy> MemoryThread<P> {
 
     pub fn execution_loan(&self) -> Result<MemoryExecutionLoan, MemoryStatus> {
         self.domain.execution_loan()
+    }
+
+    /// Like `execution_loan`, but report a busy host service instead of failing.
+    pub fn try_execution_loan(&self) -> Result<ExecutionLoanAttempt, MemoryStatus> {
+        self.domain.try_execution_loan()
     }
 
     /// Observe the domain under an exclusive read-only service borrow, which

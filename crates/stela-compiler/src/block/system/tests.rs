@@ -71,6 +71,42 @@ fn context_carriers_preserve_exact_operands_without_granting_other_families() {
 }
 
 #[test]
+fn wait_carriers_retain_kind_and_timeout_register_from_decoder() {
+    use synchronization::WaitKind;
+    for (word, kind, timeout_register) in [
+        (WFE, WaitKind::Event, None),
+        (WFI, WaitKind::Interrupt, None),
+        (WFET | 30, WaitKind::Event, Some(30)),
+        (WFIT | 31, WaitKind::Interrupt, Some(31)),
+    ] {
+        let pc = GuestAddress(0x1000);
+        let instruction = decode_system_instruction(pc, word).unwrap().unwrap();
+        assert_eq!(
+            instruction.operation,
+            SystemOperation::Wait {
+                kind,
+                timeout_register
+            }
+        );
+        assert!(instruction.matches_source(pc, word));
+        assert!(!instruction.is_el1_context_operation());
+        let analysis = super::super::analyze_with_profile(
+            &word.to_le_bytes(),
+            pc,
+            super::super::BlockProfile::El1PlatformV1,
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.static_successors,
+            alloc::vec![super::super::StaticSuccessor {
+                kind: super::super::SuccessorKind::Fallthrough,
+                target: instruction.next_pc,
+            }]
+        );
+    }
+}
+
+#[test]
 fn system_requests_preserve_exact_instruction_identity() {
     let pc = GuestAddress(0x1000);
     for word in [SVC, ERET, IRG, LDG, STG, STGP, SEV, SEVL] {
@@ -88,7 +124,7 @@ fn system_requests_preserve_exact_instruction_identity() {
 
 #[test]
 fn unrelated_words_do_not_become_runtime_system_requests() {
-    for word in [NOP, ADD_IMMEDIATE, RET, UNALLOCATED, WFE, WFI, WFET, WFIT] {
+    for word in [NOP, ADD_IMMEDIATE, RET, UNALLOCATED] {
         assert!(
             decode_system_instruction(GuestAddress(0x1000), word)
                 .unwrap()

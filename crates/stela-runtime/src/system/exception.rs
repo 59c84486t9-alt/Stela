@@ -25,6 +25,13 @@ const VECTOR_LOWER_EL_A64: u64 = 0x400;
 const VECTOR_CURRENT_EL_SPX: u64 = 0x200;
 const VECTOR_IRQ: u64 = 0x80;
 const PSTATE_IRQ_MASK: u64 = 1 << 7;
+
+/// Whether PSTATE.I masks IRQs. This says nothing about pending sources and
+/// does not deliver or acknowledge an interrupt.
+pub(crate) fn irq_masked(system: &SystemState) -> bool {
+    system.pstate_misc() & PSTATE_IRQ_MASK != 0
+}
+
 const RETURN_PSTATE_MASK: u64 = NZCV_MASK | DAIF_MASK | PSTATE_IL_MASK | PSTATE_MODE_MASK;
 const MAX_REGISTER_OPERAND: u8 = 31;
 

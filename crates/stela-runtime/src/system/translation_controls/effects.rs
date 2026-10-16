@@ -76,6 +76,9 @@ pub enum PublicationRequest<'a> {
 pub enum ContextSynchronizationCause {
     ExceptionEntry,
     ExceptionReturn,
+    /// IRQ entry after a retired instruction, selected only by the pending-
+    /// receipt consumer.
+    InterruptEntry,
 }
 impl ContextSynchronizationCause {
     pub(crate) fn matches_source(self, word: u32) -> bool {
@@ -108,6 +111,10 @@ pub struct ContextSynchronizationRequest<'state> {
     pub cpu: stage1::CpuProfile,
     pub state: &'state SystemState,
     pub cause: ContextSynchronizationCause,
+    /// The retired source, present only for asynchronous entry. The installed
+    /// publisher borrows its pre-effect physical pin.
+    pub(crate) retired_source:
+        Option<&'state crate::blocks::retirement::checked::RetiredInstructionSource<'state>>,
 }
 
 /// How far the backend got; the control owner reports a committed MSR

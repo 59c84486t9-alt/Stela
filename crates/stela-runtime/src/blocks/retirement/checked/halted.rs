@@ -58,6 +58,7 @@ pub(crate) fn run_halted_owned(
         let active = Active {
             pe: &mut pe,
             outer: Some(outer),
+            source_pin: None,
             attempt,
             closed: false,
         };

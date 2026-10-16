@@ -12,7 +12,7 @@ const fn bits(msb: u32, lsb: u32) -> u64 {
 // SCTLR.SA, for the scalar data-control consumer.
 pub(super) const SCTLR_SA_MASK: u64 = sctlr::SA;
 
-mod sctlr {
+pub(super) mod sctlr {
     use super::bits;
     pub const M: u64 = 1 << 0;
     pub const A: u64 = 1 << 1;

@@ -57,7 +57,12 @@ fn ordinary_dsb_has_one_effectless_carrier_without_stealing_other_hints() {
     const SSBB: u32 = 0xd503_309f;
     const PSSBB: u32 = 0xd503_349f;
     const DSB_NXS: u32 = 0xd503_323f;
-    for word in [DSB_SY, DSB_ISH, DSB_ISHLD, DSB_ISHST] {
+    const NXS_SCOPE_SHIFT: u32 = 10;
+    const NXS_SCOPE_COUNT: u32 = 4;
+    for word in [DSB_SY, DSB_ISH, DSB_ISHLD, DSB_ISHST]
+        .into_iter()
+        .chain((0..NXS_SCOPE_COUNT).map(|scope| DSB_NXS | (scope << NXS_SCOPE_SHIFT)))
+    {
         let plan = CompilationPlan::new(
             &word.to_le_bytes(),
             BASE,
@@ -83,7 +88,7 @@ fn ordinary_dsb_has_one_effectless_carrier_without_stealing_other_hints() {
     )
     .unwrap();
     assert_eq!(nop.el1_platform_intent(), Some(Intent::Registers));
-    for word in [SSBB, PSSBB, DSB_NXS] {
+    for word in [SSBB, PSSBB] {
         assert!(
             super::system::decode_el1_system_instruction(BASE, word)
                 .unwrap()
@@ -152,6 +157,7 @@ fn every_declared_platform_route_reaches_plan_and_shared_emitter() {
         ("pair_read_preindex", 0xa9c00440, 4),
         ("pair_read_postindex", 0xa8c00440, 4),
         ("daif", DAIFSET, 3),
+        ("sevl", 0xd503_20bf, 3),
         ("vbar_write", MSR_VBAR_X10, 3),
         ("vbar_read", 0xd538c00b, 3),
     ] {
@@ -201,7 +207,7 @@ fn every_declared_platform_route_reaches_plan_and_shared_emitter() {
         0xd4000002, // HVC remains unsupported.
         0xd69f0bff, // ERETAA: authenticated owner remains unmounted.
         0xd69f0fff, // ERETAB likewise.
-        0xd503207f,
+        0xd503209f, // SEV-all still requires its existing separate owner.
         0xa9800420,
         0xffffffff,
     ] {
