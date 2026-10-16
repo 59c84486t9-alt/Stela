@@ -11,7 +11,7 @@ use uefi::{
     cstr16,
     fs::FileSystem,
     mem::memory_map::MemoryMap,
-    proto::loaded_image::LoadedImage,
+    proto::{loaded_image::LoadedImage, media::fs::SimpleFileSystem},
 };
 
 /// Mount options, in the format [`crate::Options::parse`] reads.
@@ -49,13 +49,54 @@ fn arenas<const N: usize>() -> Result<[BootArena; N], &'static str> {
     }))
 }
 
+fn configured(volume: &mut FileSystem) -> bool {
+    matches!(volume.try_exists(OPTIONS), Ok(true))
+}
+
+fn boot_volume() -> Option<FileSystem> {
+    boot::get_image_file_system(boot::image_handle())
+        .ok()
+        .map(FileSystem::new)
+}
+
+/// The first file system that has `stela.cfg`.
+fn configured_volume() -> Option<FileSystem> {
+    boot::find_handles::<SimpleFileSystem>()
+        .ok()?
+        .into_iter()
+        .find_map(|handle| {
+            let volume = boot::open_protocol_exclusive::<SimpleFileSystem>(handle).ok()?;
+            let mut volume = FileSystem::new(volume);
+            configured(&mut volume).then_some(volume)
+        })
+}
+
 /// Read the options and ARM image from the volume Stela was loaded from.
+/// When the firmware names no such volume, as for an image a boot manager
+/// starts from memory, or that volume has no `stela.cfg`, the first volume
+/// with one is used instead.
 fn files() -> Result<(Vec<u8>, Vec<u8>), &'static str> {
-    let volume = boot::get_image_file_system(boot::image_handle()).map_err(|_| "no boot volume")?;
-    let mut volume = FileSystem::new(volume);
-    let options = match volume.try_exists(OPTIONS) {
-        Ok(true) => volume.read(OPTIONS).map_err(|_| "cannot read stela.cfg")?,
-        _ => Vec::new(),
+    let own = boot_volume().map(|mut volume| {
+        let configured = configured(&mut volume);
+        (volume, configured)
+    });
+    let mut volume = match own {
+        Some((volume, true)) => volume,
+        Some((volume, false)) => {
+            // Close the boot volume so the scan can open every volume.
+            drop(volume);
+            match configured_volume() {
+                Some(volume) => volume,
+                None => boot_volume().ok_or("cannot reopen the boot volume")?,
+            }
+        }
+        None => configured_volume()
+            .ok_or("no boot volume, and no volume has \\EFI\\stela\\stela.cfg")?,
+    };
+    let options = if configured(&mut volume) {
+        volume.read(OPTIONS).map_err(|_| "cannot read stela.cfg")?
+    } else {
+        Vec::new()
     };
     let source = volume
         .read(SOURCE)
