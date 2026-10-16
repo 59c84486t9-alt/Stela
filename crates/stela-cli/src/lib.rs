@@ -60,6 +60,8 @@ pub(crate) enum Command {
     ImageManifest(images::ImageManifest),
     /// Extract one named ZIP member with a size limit and hash receipt.
     ExtractImage(images::ExtractImage),
+    /// Decode a plaintext IM4P payload, such as a kernelcache or DeviceTree.
+    DecodeIm4p(images::DecodeIm4p),
     /// Inspect AEA1 envelope metadata (never key material).
     InspectAea(images::InspectAea),
     /// Fetch the public Apple FCS recipient key named by AEA1 metadata.
@@ -92,6 +94,7 @@ impl Command {
             Self::Images(command) => command.run(),
             Self::ImageManifest(command) => command.run(),
             Self::ExtractImage(command) => command.run(),
+            Self::DecodeIm4p(command) => command.run(),
             Self::InspectAea(command) => command.run(),
             Self::FetchAeaKey(command) => command.run(),
             Self::DecryptAea(command) => command.run(),

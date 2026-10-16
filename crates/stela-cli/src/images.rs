@@ -2,7 +2,7 @@
 use crate::restore;
 use anyhow::{Result, ensure};
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 use stela_runtime::write_json;
 
 #[derive(Subcommand)]
@@ -47,6 +47,16 @@ pub(crate) struct ExtractImage {
     #[arg(long)]
     output: PathBuf,
     #[arg(long, default_value_t = 16 * 1024 * 1024 * 1024)]
+    max_bytes: u64,
+}
+
+#[derive(Args)]
+pub(crate) struct DecodeIm4p {
+    input: PathBuf,
+    /// A new file for the decoded payload; the receipt goes beside it as `.json`.
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long, default_value_t = 512 * 1024 * 1024)]
     max_bytes: u64,
 }
 
@@ -136,6 +146,32 @@ impl ExtractImage {
         } = self;
         let report = restore::archive::extract(&input, &member, &output, max_bytes)?;
         println!("{}", serde_json::to_string_pretty(&report)?);
+        Ok(())
+    }
+}
+
+impl DecodeIm4p {
+    pub(crate) fn run(self) -> Result<()> {
+        let mut receipt_name = self.output.as_os_str().to_owned();
+        receipt_name.push(".json");
+        let receipt_path = PathBuf::from(receipt_name);
+        ensure!(
+            !self.output.exists() && !receipt_path.exists(),
+            "output or receipt exists; choose a new --output path"
+        );
+        let container = std::fs::read(&self.input)?;
+        let (decoded, receipt) = stela_loader::im4p::decode(&container, self.max_bytes)?;
+        let receipt = serde_json::json!({
+            "input": self.input.canonicalize()?.display().to_string(),
+            "im4p": receipt,
+        });
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.output)?
+            .write_all(&decoded)?;
+        write_json(&receipt_path, &receipt)?;
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
         Ok(())
     }
 }
