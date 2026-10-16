@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 pub mod aarch64;
+pub mod amx;
 pub mod block;
 pub mod context;
 pub mod extended;
