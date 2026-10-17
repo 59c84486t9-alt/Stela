@@ -10,6 +10,9 @@
 //!   it, sets or clears bits and writes it back.
 //!   The reset value is unknown and taken as 0 (inference). No bit has an
 //!   effect here.
+//! - `Scratch`: a register software keeps its own records in, with no
+//!   hardware effect. Reads return the last value written, 0 from cold
+//!   reset (inference).
 //!
 //! The run reports every entry the guest used, so none of these is silent.
 use alloc::collections::BTreeMap;
@@ -19,6 +22,7 @@ use stela_compiler::aarch64::system::registers::Encoding;
 pub enum Class {
     Storage,
     Tuning,
+    Scratch,
 }
 
 pub struct Entry {
@@ -69,7 +73,51 @@ const VM_CONTEXT: &str = "SPTM 26A434 writes it once per CPU at boot (__text+0x1
     26A434 kernel only saves and restores it with a VM's GL12 registers \
     (0xfffffe000bd9eddc, 0xfffffe000bda2bb4)";
 
+const ACC_CFG: &str = "m1n1 cpu_regs.h names it, with the branch-predictor sleep field \
+    ACC_CFG_BP_SLEEP (bits 2-3), which 26A434 XNU sets with read-modify-write \
+    (0xfffffe000bb9c8e0); the engine keeps no predictor state to retain";
+
+const ACC_OVRD: &str = "m1n1 cpu_regs.h names it; XNU xnu-12377.121.6 machine_routines_asm.s \
+    sets its deep-sleep fields (xnu-6153.141.1 arm64_common.h ARM64_REG_ACC_OVRD_*) before a \
+    deep-sleep power-down, which acts only when the cluster powers down, and core power-down \
+    stops (CYC_OVRD)";
+
+const SIQ_CFG: &str = "m1n1 cpu_regs.h names it SIQ_CFG_EL1; 26A434 XNU sets bits 0-1 to a \
+    per-thread mode with read-modify-write at context switch (0xfffffe000bd7c388) and before \
+    a power-down, and clears it elsewhere (0xfffffe000bd70b74); no field is described, and \
+    the HID1 and EHID20 chicken bits m1n1 names after the SIQ tune speculation only";
+
+const XNU_THREAD_KEYS: &str = "26A434 XNU's context switch writes it with the thread's \
+    APIBKey value plus 4 or 5, after APIBKey and APDBKey (0xfffffe000bb9bd38), and reads it \
+    nowhere; the software PAC function, like for the Apple PAC controls, uses only the \
+    architectural keys";
+
+const WATCHDOG_DIAG: &str = "XNU xnu-12377.121.6 debug.c names it WATCHDOG_DIAG0, which the \
+    Apple watchdog logging ORs its flags into (awl_set_scratch_reg_hv_bit)";
+
 pub const TABLE: &[Entry] = &[
+    entry(5, 15, 4, 0, "ACC_CFG", Class::Tuning, ACC_CFG),
+    entry(5, 15, 6, 0, "ACC_OVRD", Class::Tuning, ACC_OVRD),
+    entry(4, 15, 10, 4, "SIQ_CFG_EL1", Class::Tuning, SIQ_CFG),
+    entry(
+        4,
+        15,
+        13,
+        6,
+        "S3_4_C15_C13_6 (unnamed)",
+        Class::Storage,
+        XNU_THREAD_KEYS,
+    ),
+    entry(
+        4,
+        15,
+        13,
+        7,
+        "S3_4_C15_C13_7 (unnamed)",
+        Class::Storage,
+        XNU_THREAD_KEYS,
+    ),
+    entry(5, 15, 2, 6, "WATCHDOG_DIAG0", Class::Scratch, WATCHDOG_DIAG),
     entry(
         4,
         15,
@@ -193,7 +241,7 @@ impl Registers {
         *self.reads.entry(key).or_default() += 1;
         match (self.values.get(&key), entry.class) {
             (Some(value), _) => Some(*value),
-            (None, Class::Tuning) => Some(0),
+            (None, Class::Tuning | Class::Scratch) => Some(0),
             (None, Class::Storage) => None,
         }
     }

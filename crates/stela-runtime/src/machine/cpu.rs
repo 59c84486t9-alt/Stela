@@ -101,6 +101,8 @@ pub struct AppleState {
     /// `S3_4_C15_C12_5` has committed it.
     pub spr_lockdown: Option<u64>,
     pub spr_locked: bool,
+    /// CYC_OVRD (`registers::CYC_OVRD`), 0 from reset (inference).
+    pub cyc_ovrd: u64,
     /// Implementation-defined registers without architectural effect here.
     pub impdef: super::impdef::Registers,
 }
@@ -130,6 +132,7 @@ impl Default for AppleState {
             vm_timer_fiq: VM_TIMER_FIQ_VIRTUAL | VM_TIMER_FIQ_PHYSICAL,
             spr_lockdown: None,
             spr_locked: false,
+            cyc_ovrd: 0,
             impdef: super::impdef::Registers::default(),
         }
     }

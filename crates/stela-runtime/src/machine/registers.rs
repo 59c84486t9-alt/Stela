@@ -150,6 +150,7 @@ pub mod encodings {
         // public name (see `Apple::SprLockdown`).
         SPR_LOCKDOWN_EL2 = 3, 4, 15, 0, 5;
         SPR_LOCKDOWN_COMMIT = 3, 4, 15, 12, 5;
+        CYC_OVRD = 3, 5, 15, 5, 0;
     }
 }
 use encodings::*;
@@ -217,6 +218,45 @@ const SCTLR_UMA: u64 = 1 << 9;
 const APSTS_MKEYVLD: u64 = 1;
 /// CNTKCTL_EL1.EL0VCTEN, at the same bit in CNTHCTL_EL2 with E2H set.
 const EL0VCTEN: u32 = 1;
+
+/// CYC_OVRD fields (m1n1 `cpu_regs.h` `CYC_OVRD_*`; XNU `xnu-6153.141.1`
+/// `arm64_common.h` `ARM64_REG_CYC_OVRD_*`): the FIQ and IRQ modes, of which
+/// XNU uses 0 and 2 (`fiq_disable`, `irq_disable`, set before powering the
+/// core down "to avoid spurious wakeups"); the WFI mode, 2 forcing WFI to
+/// clock gating (`ok2pwrdn_force_up`) and 3 letting it power the core down
+/// (`ok2pwrdn_force_down`); and `disWfiRetn`, which forbids the retention
+/// state. Bits 30 and 31 keep the core from fetching the timebase
+/// (`dsblSnoopTime`) and stop, as does every unnamed bit or mode.
+const CYC_OVRD_RETENTION_DISABLE: u64 = 1;
+const CYC_OVRD_FIQ_SHIFT: u32 = 20;
+const CYC_OVRD_IRQ_SHIFT: u32 = 22;
+const CYC_OVRD_WFI_SHIFT: u32 = 24;
+const CYC_OVRD_DISABLE: u64 = 2;
+const CYC_OVRD_WFI_CLOCK_GATE: u64 = 2;
+pub const CYC_OVRD_WFI_POWER_DOWN: u64 = 3;
+const CYC_OVRD_KNOWN: u64 = CYC_OVRD_RETENTION_DISABLE | 0b11_1111 << CYC_OVRD_FIQ_SHIFT;
+
+/// A two-bit CYC_OVRD field.
+const fn cyc_ovrd_field(value: u64, shift: u32) -> u64 {
+    value >> shift & 0b11
+}
+
+impl Cpu {
+    /// CYC_OVRD's WFI mode.
+    pub fn wfi_mode(&self) -> u64 {
+        cyc_ovrd_field(self.apple.cyc_ovrd, CYC_OVRD_WFI_SHIFT)
+    }
+
+    /// The interrupt lines this core takes and wakes for: CYC_OVRD's FIQ and
+    /// IRQ disable modes keep the core from seeing either.
+    pub fn core_lines(&self, lines: Lines) -> Lines {
+        let enabled = |shift| cyc_ovrd_field(self.apple.cyc_ovrd, shift) != CYC_OVRD_DISABLE;
+        Lines {
+            irq: lines.irq && enabled(CYC_OVRD_IRQ_SHIFT),
+            fiq: lines.fiq && enabled(CYC_OVRD_FIQ_SHIFT),
+        }
+    }
+}
 
 /// VMSA_LOCK_EL1 bits (XNU `xnu-6153.141.1` `arm64_common.h`): each locks
 /// one translation register, and bit 63 locks SCTLR.M.
@@ -295,6 +335,7 @@ enum Apple {
     /// each bit protects is not documented, so the commit makes no other
     /// register read-only here (docs/design/system.md records the gap).
     SprLockdown(bool),
+    CycleOverride,
 }
 
 fn bank_read(bank: &GuardedBank, encoding: Encoding) -> u64 {
@@ -382,6 +423,7 @@ impl Cpu {
             CNTVCT_ALIAS_EL0 => Apple::CountAlias,
             SPR_LOCKDOWN_EL2 => return el2(Apple::SprLockdown(false)),
             SPR_LOCKDOWN_COMMIT => return el2(Apple::SprLockdown(true)),
+            CYC_OVRD => Apple::CycleOverride,
             _ => return None,
         }))
     }
@@ -650,6 +692,7 @@ impl Apple {
                     "read of a lockdown register no software reads",
                 ));
             }
+            Self::CycleOverride => apple.cyc_ovrd,
         })
     }
 
@@ -766,6 +809,26 @@ impl Apple {
                 }
                 apple.spr_locked = value == 1;
             }
+            Self::CycleOverride => {
+                let mode = |shift| cyc_ovrd_field(value, shift);
+                if value & !CYC_OVRD_KNOWN != 0 {
+                    return refuse("CYC_OVRD bit without public description");
+                }
+                if [CYC_OVRD_FIQ_SHIFT, CYC_OVRD_IRQ_SHIFT]
+                    .into_iter()
+                    .any(|shift| !matches!(mode(shift), 0 | CYC_OVRD_DISABLE))
+                {
+                    return refuse("CYC_OVRD FIQ or IRQ mode without public description");
+                }
+                if !matches!(
+                    mode(CYC_OVRD_WFI_SHIFT),
+                    0 | CYC_OVRD_WFI_CLOCK_GATE | CYC_OVRD_WFI_POWER_DOWN
+                ) {
+                    return refuse("CYC_OVRD WFI mode without public description");
+                }
+                apple.cyc_ovrd = value;
+                changes.interrupts = true;
+            }
         }
         Outcome::Written(changes)
     }
@@ -842,6 +905,38 @@ mod tests {
         assert_eq!(write(&mut el1, GXF_CONFIG_EL12, 0), Outcome::Undefined);
         assert!(written(write(&mut el1, GXF_CONFIG_EL1, 1)));
         assert_eq!(el1.apple.gxf_config, [1, 0]);
+    }
+
+    #[test]
+    fn cyc_ovrd_takes_xnus_sleep_and_restart_settings() {
+        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        let mut write = |value| {
+            cpu.state.x[5] = value;
+            cpu.apple_access(msr(5, CYC_OVRD), 0)
+        };
+        let written = |outcome| matches!(outcome, Outcome::Written(_));
+        // `ml_arm_sleep`: IRQ and FIQ disabled, then power-down with
+        // retention disabled.
+        assert!(written(write(0xa0_0000)));
+        assert!(written(write(0x3a0_0001)));
+        for value in [1 << 30, 1 << 20, 3 << 22, 1 << 24, 1 << 5] {
+            assert!(matches!(write(value), Outcome::Refused(_)), "{value:#x}");
+        }
+        assert_eq!(
+            cpu.apple_access(mrs(0, CYC_OVRD), 0),
+            Outcome::Read(0x3a0_0001)
+        );
+        assert_eq!(cpu.wfi_mode(), CYC_OVRD_WFI_POWER_DOWN);
+        let both = Lines {
+            irq: true,
+            fiq: true,
+        };
+        assert_eq!(cpu.core_lines(both), Lines::default());
+        // The restart path clears both modes; `arm64_force_wfi_clock_gate`.
+        cpu.state.x[5] = 0x200_0000;
+        assert!(written(cpu.apple_access(msr(5, CYC_OVRD), 0)));
+        assert_eq!(cpu.core_lines(both), both);
+        assert_eq!(cpu.wfi_mode(), CYC_OVRD_WFI_CLOCK_GATE);
     }
 
     #[test]

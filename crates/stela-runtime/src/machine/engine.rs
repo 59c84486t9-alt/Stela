@@ -726,13 +726,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // A timer signals exactly when the count reaches its deadline, which
         // only System register writes change.
         let deadline = self.timer_deadline();
-        Lines {
+        self.cpu.core_lines(Lines {
             irq: device.irq,
             // Apple cores signal the generic timers and the PMI as FIQ.
             fiq: device.fiq
                 || deadline.is_some_and(|deadline| now >= deadline)
                 || monitor_asserted(&self.cpu, now),
-        }
+        })
     }
 
     /// Bring the running PE's performance monitor up to now and continue
@@ -2691,6 +2691,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc).to(2));
             return Ok(());
         }
+        // CYC_OVRD lets WFI power the core down, losing its state until a
+        // restart; that lifecycle is not modelled.
+        if kind == WaitKind::Interrupt && self.cpu.wfi_mode() == registers::CYC_OVRD_WFI_POWER_DOWN
+        {
+            return Err(self.unsupported(RequirementKind::Native(
+                "WFI with CYC_OVRD's power-down mode (core power-down is not modelled)",
+            )));
+        }
         // The PE waits until the scheduler finds it woken
         // (`processors::Peer::ready`) and completes the instruction.
         self.waiting = Some(Wait { kind, timeout });
@@ -3321,6 +3329,31 @@ mod tests {
             .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
         machine.derived_changed();
         assert_eq!(wait(&mut machine, 0xd503_207f), Err(Stop::Idle));
+    }
+
+    #[test]
+    fn wfi_in_cyc_ovrds_power_down_mode_stops() {
+        const MSR_CYC_OVRD_X0: u32 = 0xd51d_f500;
+        const WFI: u32 = 0xd503_207f;
+        let mut machine = machine(&[]);
+        // Clock gating only: WFI waits as usual.
+        machine.cpu.state.x[0] = 2 << 24;
+        machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
+        machine.cpu.state.x[1] = 1500;
+        machine.system_instruction(0xd51b_e301).unwrap(); // msr cntv_tval_el0, x1
+        machine.cpu.state.x[1] = 1;
+        machine.system_instruction(0xd51b_e321).unwrap(); // msr cntv_ctl_el0, x1
+        wait(&mut machine, WFI).unwrap();
+        assert_eq!(machine.host.now, 2000);
+        // Power-down mode loses the core's state until a restart.
+        machine.cpu.state.x[1] = 0;
+        machine.system_instruction(0xd51b_e321).unwrap(); // msr cntv_ctl_el0, x1
+        machine.cpu.state.x[0] = 3 << 24 | 1;
+        machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
+        assert!(matches!(
+            machine.system_instruction(WFI),
+            Err(Stop::Unsupported(_))
+        ));
     }
 
     #[test]

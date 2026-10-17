@@ -128,13 +128,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let device = self.devices.lines(pe, now);
         let timer = timer::deadline(&parked.cpu).is_some_and(|deadline| now >= deadline)
             || super::monitor_asserted(&parked.cpu, now);
-        interrupt_pending(
-            &parked.cpu,
-            Lines {
-                irq: device.irq,
-                fiq: device.fiq || timer,
-            },
-        )
+        let lines = parked.cpu.core_lines(Lines {
+            irq: device.irq,
+            fiq: device.fiq || timer,
+        });
+        interrupt_pending(&parked.cpu, lines)
     }
 
     /// Complete the wait the running PE woke from. A WFE or WFET that no
