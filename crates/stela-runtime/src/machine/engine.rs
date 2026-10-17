@@ -4665,11 +4665,22 @@ mod tests {
         });
         machine.step().unwrap();
         assert_eq!(machine.cpu.pc, BASE + 8);
-        // MDCR_EL2.TDE routes debug exceptions, BRK included, to EL2.
+        // MDCR_EL2.TDCC (bit 27) traps only DCC accesses: BRK stays at EL1.
         machine
             .cpu
             .registers
             .set(SystemRegister::MDCR_EL2, 0, 1 << 27);
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.derived_changed();
+        machine.cpu.pc = BASE;
+        machine.system_instruction(0xd420_0020).unwrap(); // brk #1
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xf200_0001);
+        assert_eq!(machine.cpu.pstate.el, 1);
+        // MDCR_EL2.TDE (bit 8) routes debug exceptions, BRK included, to EL2.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::MDCR_EL2, 0, 1 << 8);
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.derived_changed();
         machine.cpu.pc = BASE;

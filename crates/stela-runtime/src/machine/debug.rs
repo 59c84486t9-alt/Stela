@@ -23,7 +23,7 @@ pub const WATCHPOINTS: u64 = 4;
 
 /// `DebugAddrTop()` without FEAT_LVA.
 const ADDRESS_TOP: u32 = 48;
-const MDCR_TDE: u32 = 27;
+const MDCR_TDE: u32 = 8;
 const MDSCR_SS: u32 = 0;
 const MDSCR_KDE: u32 = 13;
 const MDSCR_MDE: u32 = 15;
