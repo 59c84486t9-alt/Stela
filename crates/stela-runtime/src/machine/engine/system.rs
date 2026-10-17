@@ -125,6 +125,21 @@ fn translates(register: Register) -> bool {
 }
 
 const SCTLR_A: u64 = 1 << 1;
+const SCTLR_DZE: u32 = 14;
+const HCR_TDZ: u32 = 28;
+const DCZID_DZP: u64 = 1 << 4;
+
+/// Whether DC ZVA traps at the current EL, which DCZID_EL0.DZP reports:
+/// SCTLR_EL1.DZE and HCR_EL2.TDZ at EL0 outside the host, SCTLR_EL2.DZE in
+/// it, and HCR_EL2.TDZ at EL1.
+fn zero_block_prohibited(cpu: &crate::machine::cpu::Cpu) -> bool {
+    match cpu.pstate.el {
+        0 if cpu.in_host() => cpu.field(Register::SCTLR_EL2, SCTLR_DZE, 1) == 0,
+        0 => cpu.field(Register::SCTLR_EL1, SCTLR_DZE, 1) == 0 || cpu.hcr(HCR_TDZ),
+        1 => cpu.hcr(HCR_TDZ),
+        _ => false,
+    }
+}
 const ISR_A: u64 = 1 << 8;
 const ISR_I: u64 = 1 << 7;
 const ISR_F: u64 = 1 << 6;
@@ -258,6 +273,14 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::FPCR => u64::from(cpu.state.fpcr),
             Register::FPSR => u64::from(cpu.state.fpsr),
             Register::ISR_EL1 => self.pending(),
+            Register::DCZID_EL0 => {
+                cpu.registers.get(register, 0) & !DCZID_DZP
+                    | if zero_block_prohibited(cpu) {
+                        DCZID_DZP
+                    } else {
+                        0
+                    }
+            }
             // RXfull and TXfull mirror the debug communications channel.
             Register::MDCCSR_EL0 => cpu.dcc.status(),
             Register::MDSCR_EL1 => cpu.registers.get(register, 0) & !DCC_FULL | cpu.dcc.status(),
@@ -937,6 +960,118 @@ mod tests {
             .system_instruction(access(true, CNTVCT_EL0, 4))
             .unwrap();
         assert_eq!((machine.cpu.state.x[4], machine.cpu.pstate.el), (77, 0));
+    }
+
+    #[test]
+    fn sctlr_el0_controls_trap_to_el1_or_to_el2_in_the_host_and_set_dzp() {
+        const CTR_EL0: Encoding = Encoding::new(3, 3, 0, 0, 1);
+        const DCZID_EL0: Encoding = Encoding::new(3, 3, 0, 0, 7);
+        const DC_CVAC_X0: u32 = 0xd50b_7a20;
+        const IC_IVAU_X0: u32 = 0xd50b_7520;
+        const DC_ZVA_X0: u32 = 0xd50b_7420;
+        const UCT: u64 = 1 << 15;
+        const DZE: u64 = 1 << 14;
+        const UCI: u64 = 1 << 26;
+        const TDZ: u64 = 1 << 28;
+        let mut machine = machine(&[]);
+        let user = Pstate {
+            el: 0,
+            sp: false,
+            daif: 0,
+            ..Pstate::reset(1)
+        };
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        let sctlr = machine.cpu.read(Register::SCTLR_EL1) & !(UCT | DZE | UCI);
+        machine.cpu.registers.set(Register::SCTLR_EL1, 0, sctlr);
+        let run = |machine: &mut TestMachine, pstate: Pstate, word: u32| {
+            machine.cpu.pstate = pstate;
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[0] = BASE + 0x100;
+            machine.system_instruction(word).unwrap();
+            (machine.cpu.pstate.el, machine.cpu.pc)
+        };
+        // With UCT, UCI and DZE clear, EL0 traps to EL1 with EC 0x18 and the
+        // instruction's own Op0, Op2, Op1, CRn, Rt, CRm and direction.
+        for (word, iss) in [
+            (access(true, CTR_EL0, 0), 0x32_c001),
+            (DC_CVAC_X0, 0x12_dc14),
+            (IC_IVAU_X0, 0x12_dc0a),
+            (DC_ZVA_X0, 0x12_dc08),
+        ] {
+            assert_eq!(run(&mut machine, user, word), (1, 0x1_0400), "{word:#x}");
+            assert_eq!(
+                machine.cpu.read(Register::ESR_EL1),
+                0x18 << 26 | 1 << 25 | iss,
+                "{word:#x}"
+            );
+        }
+        // DCZID_EL0.DZP reports the DC ZVA trap; BS is the profile's 4.
+        let dczid = access(true, DCZID_EL0, 1);
+        assert_eq!(run(&mut machine, user, dczid), (0, BASE + 4));
+        assert_eq!(machine.cpu.state.x[1], 0x14);
+        machine
+            .cpu
+            .registers
+            .set(Register::SCTLR_EL1, 0, sctlr | UCT | DZE | UCI);
+        // With UCT set the read reaches CTR_EL0, which this machine's profile
+        // does not give.
+        machine.cpu.pstate = user;
+        assert!(
+            machine
+                .system_instruction(access(true, CTR_EL0, 1))
+                .is_err()
+        );
+        for word in [DC_CVAC_X0, IC_IVAU_X0] {
+            assert_eq!(run(&mut machine, user, word), (0, BASE + 4), "{word:#x}");
+        }
+        machine.host.ram[0x100..0x140].fill(0xaa);
+        assert_eq!(run(&mut machine, user, DC_ZVA_X0), (0, BASE + 4));
+        assert!(machine.host.ram[0x100..0x140].iter().all(|&b| b == 0));
+        run(&mut machine, user, dczid);
+        assert_eq!(machine.cpu.state.x[1], 0x4);
+        // HCR_EL2.TDZ prohibits DC ZVA at EL0 and EL1, trapping to EL2.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, TDZ);
+        for pstate in [user, Pstate::reset(1)] {
+            run(&mut machine, pstate, dczid);
+            assert_eq!(machine.cpu.state.x[1], 0x14);
+            assert_eq!(run(&mut machine, pstate, DC_ZVA_X0), (2, 0x4_0400));
+        }
+        // In the host SCTLR_EL2 governs EL0, trapping to EL2 (WFI and WFE
+        // through nTWI and nTWE), and EL2 is never prohibited DC ZVA.
+        machine
+            .cpu
+            .registers
+            .set(Register::HCR_EL2, 0, 1 << HCR_TGE | 1 << 34);
+        const NTWI: u64 = 1 << 16;
+        const NTWE: u64 = 1 << 18;
+        let sctlr2 = machine.cpu.read(Register::SCTLR_EL2) & !(UCT | DZE | UCI | NTWI | NTWE);
+        machine.cpu.registers.set(Register::SCTLR_EL2, 0, sctlr2);
+        run(&mut machine, user, dczid);
+        assert_eq!(machine.cpu.state.x[1], 0x14);
+        machine.cpu.event = false;
+        for (word, esr) in [
+            (access(true, CTR_EL0, 0), 0x18 << 26 | 1 << 25 | 0x32_c001),
+            (DC_CVAC_X0, 0x18 << 26 | 1 << 25 | 0x12_dc14),
+            (DC_ZVA_X0, 0x18 << 26 | 1 << 25 | 0x12_dc08),
+            (WFI, 0x01 << 26 | 1 << 25 | 1 << 24 | 0xe << 20),
+            (0xd503_205f, 0x01 << 26 | 1 << 25 | 1 << 24 | 0xe << 20 | 1),
+        ] {
+            assert_eq!(run(&mut machine, user, word), (2, 0x4_0400), "{word:#x}");
+            assert_eq!(machine.cpu.read(Register::ESR_EL2), esr, "{word:#x}");
+        }
+        machine
+            .cpu
+            .registers
+            .set(Register::SCTLR_EL2, 0, sctlr2 | UCI | DZE);
+        run(&mut machine, user, dczid);
+        assert_eq!(machine.cpu.state.x[1], 0x4);
+        for word in [DC_CVAC_X0, DC_ZVA_X0] {
+            assert_eq!(run(&mut machine, user, word), (0, BASE + 4), "{word:#x}");
+        }
+        machine.cpu.registers.set(Register::SCTLR_EL2, 0, sctlr2);
+        run(&mut machine, Pstate::reset(2), dczid);
+        assert_eq!(machine.cpu.state.x[1], 0x4);
     }
 
     #[test]

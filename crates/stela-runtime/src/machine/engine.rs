@@ -2867,6 +2867,27 @@ mod tests {
         );
         machine.system_instruction_for_test(AUTIBSP);
         assert_eq!(machine.cpu.state.x[30], pointer);
+        // PACIA, PACIB, PACDA and PACDB x1, x2 follow EnIA, EnIB, EnDA and
+        // EnDB.
+        for (word, enable) in [
+            (0xdac1_0041, 31),
+            (0xdac1_0441, 30),
+            (0xdac1_0841, 27),
+            (0xdac1_0c41, 13),
+        ] {
+            for enabled in [false, true] {
+                let bit = u64::from(enabled) << enable;
+                machine.cpu.registers.set(
+                    SystemRegister::SCTLR_EL1,
+                    0,
+                    sctlr & !(1 << enable) | bit,
+                );
+                machine.cpu.state.x[1] = pointer;
+                machine.cpu.state.x[2] = 0x55;
+                machine.system_instruction_for_test(word);
+                assert_eq!(machine.cpu.state.x[1] != pointer, enabled, "{word:#x}");
+            }
+        }
     }
 
     #[test]
