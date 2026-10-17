@@ -10,7 +10,7 @@
 //! evidence refuses: the M1, M2 and M3 Ultra, the second M3 Max (ApChipID
 //! 0x6034), the A18 Pro and the M5 Pro and Max (no `product-soc-name`), and
 //! the M6's M cores.
-use super::{Chip, registers::Identity};
+use super::{Chip, adt::Node, registers::Identity};
 use alloc::{format, string::String, vec::Vec};
 
 /// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part
@@ -146,9 +146,9 @@ const SOCS: [Soc; 14] = [
     },
 ];
 
-/// What a board's DeviceTree selects.
+/// The chip and PEs a board's SoC row and `/cpus` select.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Board {
+pub struct Cpus {
     pub chip: Chip,
     /// The PEs in `/cpus` order.
     pub processors: Vec<Identity>,
@@ -184,7 +184,7 @@ pub struct Processor {
 /// multiprocessor without multithreading (inferred). A `reg` beyond Aff1's
 /// first eight clusters, as the multi-die boards use, has no public MPIDR
 /// mapping and refuses.
-pub fn board(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Board, String> {
+pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cpus, String> {
     let soc = SOCS
         .iter()
         .find(|soc| soc.chip_id == chip_id)
@@ -225,10 +225,138 @@ pub fn board(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<B
             })
         })
         .collect::<Result<_, String>>()?;
-    Ok(Board {
+    Ok(Cpus {
         chip: soc.chip,
         processors,
         aic2_event: soc.aic2_event,
+    })
+}
+
+/// A device's first `reg` range in guest PA and its AIC input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Device {
+    pub physical: u64,
+    pub bytes: u64,
+    pub irq: u32,
+}
+
+/// The AIC2: its core block's guest PA, its input count and its event
+/// register's offset from the core block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptController {
+    pub physical: u64,
+    pub inputs: u16,
+    pub event: u64,
+}
+
+/// Everything the engine models of a board, from its DeviceTree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Board {
+    pub cpus: Cpus,
+    /// `/arm-io/uart0`, a `uart-1,samsung`.
+    pub uart: Device,
+    /// `/arm-io/wdt`, a `wdt,s5l8960x`.
+    pub watchdog: Device,
+    /// `/arm-io/aic`, an `aic,2`.
+    pub aic: InterruptController,
+}
+
+/// The board a DeviceTree describes, or why the engine cannot model it: its
+/// chip and PEs ([`cpus`], from `/chosen` `chip-id`, `/product`
+/// `product-soc-name` and each `/cpus` node with a `cluster-type`) and the
+/// devices the engine models, each of which must be `compatible` with its
+/// model. An `/arm-io` child's `reg` is translated through `/arm-io`
+/// `ranges`; the AIC's input count is one more than the highest
+/// `interrupts` value of any node whose `interrupt-parent` is its phandle.
+pub fn board(tree: &[u8]) -> Result<Board, String> {
+    let root = Node::root(tree).ok_or("DeviceTree has no root")?;
+    let chip_id = root
+        .child("chosen")
+        .and_then(|chosen| chosen.first_u32("chip-id"))
+        .ok_or("DeviceTree has no /chosen chip-id")?;
+    let soc_name = root
+        .child("product")
+        .and_then(|product| product.property("product-soc-name"))
+        .and_then(|name| core::str::from_utf8(name).ok())
+        .map(|name| name.trim_end_matches('\0'))
+        .ok_or("DeviceTree has no /product product-soc-name")?;
+    let mut found = Vec::new();
+    root.child("cpus")
+        .ok_or("DeviceTree has no /cpus")?
+        .visit(&mut |node| {
+            if let Some(cluster_type) = node.property("cluster-type") {
+                found.push((cluster_type.first().copied(), node.first_u32("reg")));
+            }
+        })
+        .ok_or("DeviceTree walk failed")?;
+    let processors = found
+        .into_iter()
+        .map(|found| match found {
+            (Some(cluster_type), Some(reg)) => Ok(Processor { cluster_type, reg }),
+            _ => Err("a /cpus node has no reg or an empty cluster-type"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cpus = cpus(chip_id, soc_name, &processors)?;
+    let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
+    let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
+    let place = |name: &str, model: &str| -> Result<(Node<'_>, u64, u64), String> {
+        let node = io
+            .child(name)
+            .ok_or_else(|| format!("DeviceTree has no /arm-io/{name}"))?;
+        if !node.compatible(model) {
+            return Err(format!("/arm-io/{name} is not {model}, the modeled device"));
+        }
+        let (offset, bytes) = node
+            .pairs("reg")
+            .and_then(|reg| reg.first().copied())
+            .ok_or_else(|| format!("/arm-io/{name} has no reg"))?;
+        let physical = ranges
+            .iter()
+            .find(|(child, _, size)| (*child..child + size).contains(&offset))
+            .map(|(child, parent, _)| parent + (offset - child))
+            .ok_or_else(|| format!("/arm-io/{name} lies outside /arm-io ranges"))?;
+        Ok((node, physical, bytes))
+    };
+    let device = |name: &str, model: &str| -> Result<Device, String> {
+        let (node, physical, bytes) = place(name, model)?;
+        let irq = node
+            .first_u32("interrupts")
+            .ok_or_else(|| format!("/arm-io/{name} has no interrupts"))?;
+        Ok(Device {
+            physical,
+            bytes,
+            irq,
+        })
+    };
+    let uart = device("uart0", "uart-1,samsung")?;
+    let watchdog = device("wdt", "wdt,s5l8960x")?;
+    let (aic, physical, _) = place("aic", "aic,2")?;
+    let phandle = aic
+        .first_u32("AAPL,phandle")
+        .ok_or("/arm-io/aic has no phandle")?;
+    let mut highest = None;
+    root.visit(&mut |node| {
+        if node.first_u32("interrupt-parent") == Some(phandle)
+            && let Some(cells) = node.cells32("interrupts")
+        {
+            highest = cells.into_iter().chain(highest).max();
+        }
+    })
+    .ok_or("DeviceTree walk failed")?;
+    let highest = highest.ok_or("no node names the AIC as its interrupt parent")?;
+    let inputs = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
+    let event = cpus
+        .aic2_event
+        .ok_or("the SoC's AIC2 event register offset is unknown")?;
+    Ok(Board {
+        cpus,
+        uart,
+        watchdog,
+        aic: InterruptController {
+            physical,
+            inputs,
+            event,
+        },
     })
 }
 
@@ -236,7 +364,7 @@ pub fn board(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<B
 mod tests {
     use super::*;
 
-    fn cpus(layout: &[(u8, u32)]) -> Vec<Processor> {
+    fn layout_of(layout: &[(u8, u32)]) -> Vec<Processor> {
         layout
             .iter()
             .map(|&(cluster_type, reg)| Processor { cluster_type, reg })
@@ -254,12 +382,12 @@ mod tests {
                 )
             })
             .collect();
-        let board_ = board(0x8112, "Apple M2", &cpus(&layout)).unwrap();
+        let found = cpus(0x8112, "Apple M2", &layout_of(&layout)).unwrap();
         assert_eq!(
-            (board_.chip, board_.aic2_event),
+            (found.chip, found.aic2_event),
             (Chip::AppleM2, Some(0x8000))
         );
-        let identities = board_.processors;
+        let identities = found.processors;
         assert_eq!(
             identities[0],
             Identity {
@@ -276,9 +404,9 @@ mod tests {
         );
         // J604AP (Mac16,1): six M4 E cores and four P cores.
         let layout = [(b'E', 0), (b'E', 5), (b'P', 0x100), (b'P', 0x103)];
-        let board_ = board(0x8132, "Apple M4", &cpus(&layout)).unwrap();
-        assert_eq!((board_.chip, board_.aic2_event), (Chip::AppleM4, None));
-        let identities = board_.processors;
+        let found = cpus(0x8132, "Apple M4", &layout_of(&layout)).unwrap();
+        assert_eq!((found.chip, found.aic2_event), (Chip::AppleM4, None));
+        let identities = found.processors;
         assert_eq!(identities[1].midr, 0x611f_0520);
         assert_eq!(
             identities[3],
@@ -289,7 +417,7 @@ mod tests {
         );
         // An M2 Pro's AIC2 has its event register at +0xc000.
         assert_eq!(
-            board(0x6020, "Apple M2 Pro", &cpus(&layout))
+            cpus(0x6020, "Apple M2 Pro", &layout_of(&layout))
                 .unwrap()
                 .aic2_event,
             Some(0xc000)
@@ -309,19 +437,142 @@ mod tests {
 
     #[test]
     fn a_board_without_evidence_refuses() {
-        let one = cpus(&[(b'E', 0)]);
+        let one = layout_of(&[(b'E', 0)]);
         // M2 Ultra: two dies, no public part numbers.
         assert_eq!(
-            board(0x6022, "Apple M2 Ultra", &one),
+            cpus(0x6022, "Apple M2 Ultra", &one),
             Err("ApChipID 0x6022 (Apple M2 Ultra) has no public MIDR part".into())
         );
-        assert!(board(0x8112, "Apple M2 Pro", &one).is_err());
-        assert!(board(0x8112, "Apple M2", &[]).is_err());
+        assert!(cpus(0x8112, "Apple M2 Pro", &one).is_err());
+        assert!(cpus(0x8112, "Apple M2", &[]).is_err());
         // The M6's M cores and a second die's affinity.
         assert_eq!(
-            board(0x8152, "Apple M6", &cpus(&[(b'M', 0)])),
+            cpus(0x8152, "Apple M6", &layout_of(&[(b'M', 0)])),
             Err("Apple M6 cluster type M has no public MIDR part".into())
         );
-        assert!(board(0x6031, "Apple M3 Max", &cpus(&[(b'P', 0x800)])).is_err());
+        assert!(cpus(0x6031, "Apple M3 Max", &layout_of(&[(b'P', 0x800)])).is_err());
+    }
+
+    /// A J473AP-shaped DeviceTree: two PEs, `/arm-io` child 0 at PA
+    /// 0x2_0000_0000, and the UART, watchdog and AIC as `compatibles` names.
+    fn tree(chip_id: u32, soc: &str, compatibles: [&str; 3]) -> Vec<u8> {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let u32s = |cells: &[u32]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let u64s = |cells: &[u64]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let cpu = |name: &str, kind: &[u8], reg: u32| {
+            encode(
+                &[
+                    ("name", &z(name)),
+                    ("cluster-type", kind),
+                    ("reg", &u32s(&[reg])),
+                ],
+                &[],
+            )
+        };
+        let device = |name: &str, compatible: &str, reg: u64, irq: u32| {
+            encode(
+                &[
+                    ("name", &z(name)),
+                    ("compatible", &z(compatible)),
+                    ("reg", &u64s(&[reg, 0x4000])),
+                    ("interrupt-parent", &u32s(&[0x63])),
+                    ("interrupts", &u32s(&[irq])),
+                ],
+                &[],
+            )
+        };
+        let aic = encode(
+            &[
+                ("name", &z("aic")),
+                ("compatible", &z(compatibles[2])),
+                ("reg", &u64s(&[0x3b0c_0000, 0x2_0000])),
+                ("AAPL,phandle", &u32s(&[0x63])),
+            ],
+            &[],
+        );
+        let io = encode(
+            &[
+                ("name", &z("arm-io")),
+                ("ranges", &u64s(&[0, 0x2_0000_0000, 0x1_0000_0000])),
+            ],
+            &[
+                device("uart0", compatibles[0], 0x3520_0000, 739),
+                device("wdt", compatibles[1], 0x3d2b_0000, 379),
+                aic,
+            ],
+        );
+        encode(
+            &[("name", &z("device-tree"))],
+            &[
+                encode(
+                    &[("name", &z("chosen")), ("chip-id", &u32s(&[chip_id]))],
+                    &[],
+                ),
+                encode(
+                    &[("name", &z("product")), ("product-soc-name", &z(soc))],
+                    &[],
+                ),
+                encode(
+                    &[("name", &z("cpus"))],
+                    &[cpu("cpu0", b"E", 0), cpu("cpu1", b"P", 0x100)],
+                ),
+                io,
+            ],
+        )
+    }
+
+    #[test]
+    fn a_device_tree_places_the_board_or_says_why_it_cannot() {
+        const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
+        let found = board(&tree(0x8112, "Apple M2", MODELED)).unwrap();
+        assert_eq!(found.cpus.chip, Chip::AppleM2);
+        assert_eq!(found.cpus.processors[1].mpidr, 0x8000_0100);
+        assert_eq!(
+            found.uart,
+            Device {
+                physical: 0x2_3520_0000,
+                bytes: 0x4000,
+                irq: 739
+            }
+        );
+        assert_eq!(found.watchdog.irq, 379);
+        // The UART's input 739 is the highest that names the AIC.
+        assert_eq!(
+            found.aic,
+            InterruptController {
+                physical: 0x2_3b0c_0000,
+                inputs: 740,
+                event: 0x8000
+            }
+        );
+        assert_eq!(
+            board(&tree(
+                0x8103,
+                "Apple M1",
+                ["uart-1,samsung", "wdt,s5l8960x", "aic,1"]
+            )),
+            Err("/arm-io/aic is not aic,2, the modeled device".into())
+        );
+        assert_eq!(
+            board(&tree(
+                0x8112,
+                "Apple M2",
+                ["uart-2", "wdt,s5l8960x", "aic,2"]
+            )),
+            Err("/arm-io/uart0 is not uart-1,samsung, the modeled device".into())
+        );
+        assert!(board(&tree(0x8122, "Apple M3", MODELED)).is_err());
+        assert!(board(&[0; 4]).is_err());
     }
 }

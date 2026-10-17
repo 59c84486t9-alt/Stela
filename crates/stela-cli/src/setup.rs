@@ -57,8 +57,10 @@ pub(crate) struct Setup {
     /// by default.
     #[arg(long)]
     efi: Option<PathBuf>,
-    /// The Mac model to install.
-    #[arg(long, default_value = PINNED_MODEL, hide = true)]
+    /// The Mac model Stela presents, such as Mac14,2 (MacBook Air M2) or
+    /// Mac14,9 (MacBook Pro M2 Pro); setup refuses one whose SoC the engine
+    /// does not model yet (the M2, M2 Pro and M2 Max Macs are modeled).
+    #[arg(long, default_value = PINNED_MODEL)]
     model: String,
     /// The build `--fetch` downloads.
     #[arg(long, default_value = PINNED_BUILD, hide = true)]
@@ -403,7 +405,10 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     })
 }
 
-/// `stela boot prepare --recovery` for the IPSW and model into `output`.
+/// `stela boot prepare --recovery` for the IPSW and model into `output`,
+/// then the engine's own board check of the prepared DeviceTree
+/// (`machine::soc::board`), so a model the engine cannot run is refused
+/// before the USB changes rather than when the PC boots it.
 fn prepare_recovery(ipsw: &Path, model: &str, output: &Path) -> Result<()> {
     let line: Vec<String> = [
         "--ipsw",
@@ -416,7 +421,11 @@ fn prepare_recovery(ipsw: &Path, model: &str, output: &Path) -> Result<()> {
     ]
     .map(str::to_owned)
     .into();
-    boot::prepare(&line)
+    boot::prepare(&line)?;
+    let tree = fs::read(output.join("devicetree.adt"))?;
+    stela_runtime::machine::soc::board(&tree)
+        .map_err(|reason| anyhow::anyhow!("Stela cannot run {model} yet: {reason}"))?;
+    Ok(())
 }
 
 fn describe(plan: &Plan) -> Result<String> {

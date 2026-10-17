@@ -141,8 +141,66 @@ impl<'a> Node<'a> {
         )
     }
 
+    /// Whether the node's `compatible` list names `model`.
+    pub fn compatible(&self, model: &str) -> bool {
+        self.property("compatible").is_some_and(|list| {
+            list.split(|byte| *byte == 0)
+                .any(|entry| entry == model.as_bytes())
+        })
+    }
+
     /// The first 32-bit cell of a property.
     pub fn first_u32(&self, name: &str) -> Option<u32> {
         u32_at(self.property(name)?, 0)
+    }
+}
+
+/// An ADT image of one node: `properties` as (name, value) and its encoded
+/// children, for tests.
+#[cfg(test)]
+pub(crate) fn encode(properties: &[(&str, &[u8])], children: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend((properties.len() as u32).to_le_bytes());
+    out.extend((children.len() as u32).to_le_bytes());
+    for (name, value) in properties {
+        let mut field = [0u8; 32];
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        out.extend(field);
+        out.extend((value.len() as u32).to_le_bytes());
+        out.extend(*value);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    for child in children {
+        out.extend(child);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nodes_properties_and_compatibles_read_back() {
+        let child = encode(
+            &[
+                ("name", b"uart0\0"),
+                ("compatible", b"uart-1,samsung\0ARM,x\0"),
+            ],
+            &[],
+        );
+        let tree = encode(
+            &[
+                ("name", b"device-tree\0"),
+                ("reg", &[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]),
+            ],
+            &[child],
+        );
+        let root = Node::root(&tree).unwrap();
+        assert_eq!(root.pairs("reg"), Some(vec![(1, 2)]));
+        let uart = root.child("uart0").unwrap();
+        assert!(uart.compatible("uart-1,samsung") && uart.compatible("ARM,x"));
+        assert!(!uart.compatible("uart-1"));
+        assert!(root.child("wdt").is_none());
     }
 }

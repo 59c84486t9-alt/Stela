@@ -3,6 +3,7 @@
 //! and System registers implemented here and the x86 mechanisms supplied by a
 //! [`Host`].
 //! The design is in `docs/design/system.md#system-mode-execution`.
+pub mod adt;
 pub mod amx;
 pub mod apple;
 pub mod chip;

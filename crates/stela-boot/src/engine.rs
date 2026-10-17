@@ -4,7 +4,7 @@
 //! installed, Stela's storage drivers, which address registers and DMA pages
 //! by identity, read the installed system from the disk through the
 //! loader's identity map and its uncached device mappings.
-mod adt;
+
 pub(crate) mod bundle;
 mod host;
 mod interrupts;
@@ -26,7 +26,7 @@ use stela_runtime::machine::{
     apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::DCZID_EL0,
-    soc::{self, Processor},
+    soc,
     system::Register,
 };
 use stela_runtime::pc::storage::Target;
@@ -187,53 +187,24 @@ fn test_profile() -> CpuProfile {
     }
 }
 
-/// The profile of the board the bundle's DeviceTree describes: its chip and
-/// PEs from `/chosen` `chip-id`, `/product` `product-soc-name` and `/cpus`
-/// (`machine::soc`), with cpu0 running with EL2 as a VHE host. The ID_AA64*
-/// and CTR_EL0 registers advertise what this engine implements, capped at the
-/// chip's features (`machine::identification`); MIDR, MPIDR and DCZID are the
-/// board's own values. Every other identification read refuses.
-fn board_profile(tree: &[u8], target: TargetCpu) -> Result<(CpuProfile, soc::Board), String> {
-    let root = adt::Node::root(tree).ok_or("DeviceTree has no root")?;
-    let chip_id = root
-        .child("chosen")
-        .and_then(|chosen| chosen.first_u32("chip-id"))
-        .ok_or("DeviceTree has no /chosen chip-id")?;
-    let soc_name = root
-        .child("product")
-        .and_then(|product| product.property("product-soc-name"))
-        .and_then(|name| core::str::from_utf8(name).ok())
-        .map(|name| name.trim_end_matches('\0'))
-        .ok_or("DeviceTree has no /product product-soc-name")?;
-    let cpus = root.child("cpus").ok_or("DeviceTree has no /cpus")?;
-    // Every node of /cpus with a cluster-type is a PE.
-    let mut found = Vec::new();
-    cpus.visit(&mut |node| {
-        if let Some(cluster_type) = node.property("cluster-type") {
-            found.push((cluster_type.first().copied(), node.first_u32("reg")));
-        }
-    })
-    .ok_or("DeviceTree walk failed")?;
-    let processors = found
-        .into_iter()
-        .map(|found| match found {
-            (Some(cluster_type), Some(reg)) => Ok(Processor { cluster_type, reg }),
-            _ => Err("a /cpus node has no reg or an empty cluster-type"),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let board = soc::board(chip_id, soc_name, &processors)?;
-    let mut fixed = stela_runtime::machine::identification::derive(board.chip, target, true);
+/// The profile of the board the bundle's DeviceTree describes
+/// (`machine::soc::board`), with cpu0 running with EL2 as a VHE host. The
+/// ID_AA64* and CTR_EL0 registers advertise what this engine implements,
+/// capped at the chip's features (`machine::identification`); MIDR, MPIDR and
+/// DCZID are the board's own values. Every other identification read refuses.
+fn board_profile(board: &soc::Board, target: TargetCpu) -> CpuProfile {
+    let chip = board.cpus.chip;
+    let mut fixed = stela_runtime::machine::identification::derive(chip, target, true);
     // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
     // `dc zva` in fixed 64-byte steps.
     fixed.push((DCZID_EL0, 4));
-    let profile = CpuProfile {
-        name: board.chip.name(),
-        chip: board.chip,
+    CpuProfile {
+        name: chip.name(),
+        chip,
         counter_frequency: 24_000_000,
         fixed,
-        processors: board.processors.clone(),
-    };
-    Ok((profile, board))
+        processors: board.cpus.processors.clone(),
+    }
 }
 
 /// The guest's console UART, shown line by line as `GUEST| ...`.
@@ -271,105 +242,38 @@ const J473_AIC: (u64, u16) = (0x3b0c_0000, 1152);
 /// (`machine::soc`).
 const J473_AIC_EVENT: u64 = 0x8000;
 
-/// The AIC's guest PA and NR_IRQ: one more than the highest `interrupts`
-/// value of any node whose `interrupt-parent` is the AIC's phandle.
-fn aic_placement(tree: &[u8]) -> Result<(u64, u16), String> {
-    let root = adt::Node::root(tree).ok_or("DeviceTree has no root")?;
-    let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
-    let aic = io.child("aic").ok_or("DeviceTree has no /arm-io/aic")?;
-    if !compatible(&aic, "aic,2") {
-        return Err("/arm-io/aic is not aic,2, the modeled interrupt controller".into());
-    }
-    let phandle = aic
-        .first_u32("AAPL,phandle")
-        .ok_or("/arm-io/aic has no phandle")?;
-    let (offset, _) = aic
-        .pairs("reg")
-        .and_then(|reg| reg.first().copied())
-        .ok_or("/arm-io/aic has no reg")?;
-    let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
-    let physical = ranges
-        .iter()
-        .find(|(child, _, size)| (*child..child + size).contains(&offset))
-        .map(|(child, parent, _)| parent + (offset - child))
-        .ok_or("/arm-io/aic lies outside /arm-io ranges")?;
-    let mut highest = None;
-    root.visit(&mut |node| {
-        if node.first_u32("interrupt-parent") == Some(phandle)
-            && let Some(cells) = node.cells32("interrupts")
-        {
-            highest = cells.into_iter().chain(highest).max();
-        }
-    })
-    .ok_or("DeviceTree walk failed")?;
-    let highest = highest.ok_or("no node names the AIC as its interrupt parent")?;
-    let count = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
-    Ok((physical, count))
-}
-
-/// Whether a node's `compatible` list names `model`.
-fn compatible(node: &adt::Node, model: &str) -> bool {
-    node.property("compatible").is_some_and(|list| {
-        list.split(|byte| *byte == 0)
-            .any(|entry| entry == model.as_bytes())
-    })
-}
-
-/// A device node's first `reg` range in guest PA and its AIC input, read
-/// from the DeviceTree. The node must be compatible with `model`, the
-/// device the engine models for it.
-fn placement(tree: &[u8], name: &str, model: &str) -> Result<(Range, AicInput), String> {
-    let root = adt::Node::root(tree).ok_or("DeviceTree has no root")?;
-    let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
-    let node = io
-        .child(name)
-        .ok_or_else(|| alloc::format!("DeviceTree has no /arm-io/{name}"))?;
-    if !compatible(&node, model) {
-        return Err(alloc::format!(
-            "/arm-io/{name} is not {model}, the modeled device"
-        ));
-    }
-    let (offset, bytes) = node
-        .pairs("reg")
-        .and_then(|reg| reg.first().copied())
-        .ok_or_else(|| alloc::format!("/arm-io/{name} has no reg"))?;
-    let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
-    let physical = ranges
-        .iter()
-        .find(|(child, _, size)| (*child..child + size).contains(&offset))
-        .map(|(child, parent, _)| parent + (offset - child))
-        .ok_or_else(|| alloc::format!("/arm-io/{name} lies outside /arm-io ranges"))?;
-    let irq = node
-        .first_u32("interrupts")
-        .ok_or_else(|| alloc::format!("/arm-io/{name} has no interrupts"))?;
-    Ok((Range { physical, bytes }, AicInput::new(0, irq as u16)))
-}
-
-/// The modeled board devices: the console UART, the watchdog and the AIC2.
+/// The modeled board devices: the console UART, the watchdog and the AIC2,
+/// placed as the board's DeviceTree places them (`machine::soc::board`).
 /// `aic-timebase` has no public register description and no model, so its
 /// accesses stop explicitly.
-fn devices(tree: Option<(&[u8], &soc::Board)>, now: u64) -> Result<AppleDevices, String> {
-    let fixed = |(offset, bytes, irq): (u64, u64, u32)| {
-        (
-            Range {
-                physical: ARM_IO + offset,
-                bytes,
-            },
-            AicInput::new(0, irq as u16),
-        )
+fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String> {
+    let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
+        physical: ARM_IO + offset,
+        bytes,
+        irq,
     };
-    let (uart, wdt, aic) = match tree {
-        Some((tree, _)) => (
-            placement(tree, "uart0", "uart-1,samsung")?,
-            placement(tree, "wdt", "wdt,s5l8960x")?,
-            aic_placement(tree)?,
-        ),
+    let (uart, wdt, aic) = match board {
+        Some(board) => (board.uart, board.watchdog, board.aic),
         None => (
             fixed(J473_UART),
             fixed(J473_WDT),
-            (ARM_IO + J473_AIC.0, J473_AIC.1),
+            soc::InterruptController {
+                physical: ARM_IO + J473_AIC.0,
+                inputs: J473_AIC.1,
+                event: J473_AIC_EVENT,
+            },
         ),
     };
+    let place = |device: soc::Device| {
+        (
+            Range {
+                physical: device.physical,
+                bytes: device.bytes,
+            },
+            AicInput::new(0, device.irq as u16),
+        )
+    };
+    let (uart, wdt) = (place(uart), place(wdt));
     let mut devices = AppleDevices::new();
     devices
         .add_uart(GuestConsole::default(), &[uart.0], Some(uart.1))
@@ -377,13 +281,7 @@ fn devices(tree: Option<(&[u8], &soc::Board)>, now: u64) -> Result<AppleDevices,
     devices
         .add_watchdog(&[wdt.0], Some(wdt.1), now)
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
-    let event = match tree {
-        Some((_, board)) => board
-            .aic2_event
-            .ok_or("the SoC's AIC2 event register offset is unknown")?,
-        None => J473_AIC_EVENT,
-    };
-    devices.add_aic(aic.0, aic.1, event)?;
+    devices.add_aic(aic.physical, aic.inputs, aic.event)?;
     output::arguments(format_args!(
         "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
          aic-timebase=unplaced\n",
@@ -393,8 +291,8 @@ fn devices(tree: Option<(&[u8], &soc::Board)>, now: u64) -> Result<AppleDevices,
         wdt.0.physical,
         wdt.0.bytes,
         wdt.1.irq,
-        aic.0,
-        aic.1
+        aic.physical,
+        aic.inputs
     ));
     Ok(devices)
 }
@@ -590,15 +488,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Some(Some(tree)) => Some(tree),
         None => None,
     };
-    let (profile, board) = match tree {
-        Some(tree) => match board_profile(tree, target) {
-            Ok((profile, board)) => (profile, Some(board)),
-            Err(error) => {
-                output::arguments(format_args!("board refusal: {error}\n"));
-                output::fatal("the board's processors could not be modeled")
-            }
-        },
-        None => (test_profile(), None),
+    let board = tree.map(|tree| {
+        soc::board(tree).unwrap_or_else(|error| {
+            output::arguments(format_args!("board refusal: {error}\n"));
+            output::fatal("the board could not be modeled")
+        })
+    });
+    let profile = match &board {
+        Some(board) => board_profile(board, target),
+        None => test_profile(),
     };
     // The real kernelcache starts SPTM at EL2: it writes TPIDR_EL2 and keeps
     // its per-CPU pointer in TPIDR_GL2. HCR_EL2.E2H is RES1 on this profile
@@ -625,7 +523,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .set(Register::CNTHCTL_EL2, 0, 1 << 10 | 1 << 11);
     }
     let now = stela_runtime::machine::Host::counter(&mut bare);
-    let devices = match devices(tree.zip(board.as_ref()), now) {
+    let devices = match devices(board.as_ref(), now) {
         Ok(devices) => devices,
         Err(error) => {
             output::arguments(format_args!("device refusal: {error}\n"));
