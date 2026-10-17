@@ -107,10 +107,11 @@ impl Chip {
 }
 
 /// Whether the engine implements a feature that only some chips have: every
-/// feature the M2 has, the M3's FEAT_HCX, FEAT_NV and FEAT_NV2, and the M4's
-/// FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS, the M5's FEAT_CSSC and FEAT_HBC,
-/// and the M6's FEAT_FAMINMAX and FEAT_LUT, which only add instructions the
-/// system-mode compiler admits, and the M5's FEAT_SPECRES2.
+/// feature the M2 has; the M3's FEAT_HCX, FEAT_NV and FEAT_NV2; the M4's
+/// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS); the M5's
+/// FEAT_SPECRES2 and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
+/// instruction-only FEAT_FAMINMAX and FEAT_LUT, whose forms the system-mode
+/// compiler admits.
 const fn engine_implements(feature: Feature) -> bool {
     match feature {
         Feature::FEAT_AMUv1p1
@@ -123,6 +124,7 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_SSBS
         | Feature::FEAT_SSBS2
         | Feature::v8Ap6
+        | Feature::v8Ap7
         | Feature::FEAT_NV
         | Feature::FEAT_NV2
         | Feature::FEAT_HCX
@@ -155,8 +157,7 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_SME_F8F32
         | Feature::FEAT_SME_I16I64
         | Feature::FEAT_SME_LUTv2
-        | Feature::FEAT_SVE_B16B16
-        | Feature::v8Ap7 => false,
+        | Feature::FEAT_SVE_B16B16 => false,
     }
 }
 
