@@ -28,8 +28,8 @@ use stela_runtime::machine::{
     system::Register,
 };
 
-/// The harness's SCTLR_EL1: MMU on, every EL0 trap control clear.
-const SCTLR_VALUE: u64 = 0x30d0_0801 | (1 << 42) | (1 << 60);
+/// The harness's SCTLR_EL1: MMU and caches on, every EL0 trap control clear.
+const SCTLR_VALUE: u64 = 0x30d0_0801 | (1 << 2) | (1 << 12) | (1 << 42) | (1 << 60);
 /// The harness's TCR_EL1: T0SZ=25, 4 KiB granule, TTBR1 walks off, 48-bit PA.
 const TCR_VALUE: u64 = 25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (5 << 32);
 /// MAIR_EL1 attribute 0: Normal write-back.

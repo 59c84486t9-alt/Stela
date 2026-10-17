@@ -6,6 +6,7 @@
 //! translation, descriptors, permissions, attributes, the Access flag and
 //! fault prioritization).
 
+pub mod alignment;
 mod attributes;
 mod geometry;
 mod sprr;
@@ -122,6 +123,9 @@ pub enum FaultKind {
     /// The walk read a descriptor outside RAM: a synchronous external abort
     /// on a translation table walk.
     ExternalOnWalk,
+    /// An access the alignment rules forbid (`mmu::alignment`); it has no
+    /// level.
+    Alignment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +198,7 @@ impl Fault {
         let reported = match self.kind {
             FaultKind::Translation | FaultKind::AccessFlag | FaultKind::AddressSize => true,
             FaultKind::Permission => second_stage.walk,
-            FaultKind::ExternalOnWalk => false,
+            FaultKind::ExternalOnWalk | FaultKind::Alignment => false,
         };
         reported.then_some(second_stage.ipa >> 12 << HPFAR_FIPA_SHIFT)
     }
@@ -208,6 +212,7 @@ impl Fault {
             FaultKind::AccessFlag => 0b00_1000 | level,
             FaultKind::Permission => 0b00_1100 | level,
             FaultKind::ExternalOnWalk => 0b01_0100 | level,
+            FaultKind::Alignment => 0b10_0001,
         }
     }
 }
@@ -240,6 +245,20 @@ pub struct Translation {
     pub asid: u16,
     /// Bytes mapped by the descriptor (page or block size).
     pub size: u64,
+    /// The memory type as the alignment rules see it, over both stages.
+    pub alignment: Alignment,
+}
+
+/// What the alignment rules need from the memory type (pseudocode
+/// AArch64.S1HasAlignmentFaultDueToMemType and
+/// AArch64.S2HasAlignmentFaultDueToMemType).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Alignment {
+    /// Device memory at either stage.
+    pub device: bool,
+    /// Write-Back shareable with the data cache enabled at every stage, so
+    /// exclusive, atomic and ordered accesses may be unaligned.
+    pub relaxed: bool,
 }
 
 /// Physical memory the walker reads descriptors from.
@@ -353,6 +372,7 @@ impl TableMemory for ThroughStage2<'_> {
             stage2::Purpose::Walk,
             false,
             None,
+            None,
             self.memory,
         ) {
             Ok(output) => self.memory.read_descriptor(output.physical),
@@ -377,17 +397,18 @@ fn first_stage(
     address: u64,
     access: Access,
     requester: Requester,
+    shape: Option<alignment::Shape>,
     memory: &mut dyn TableMemory,
 ) -> (Outcome, u8) {
     let Some(stage2) = stage2 else {
-        return stage1::walk(controls, address, access, requester, memory);
+        return stage1::walk(controls, address, access, requester, shape, memory);
     };
     let mut tables = ThroughStage2 {
         stage2,
         memory,
         stop: None,
     };
-    let walked = stage1::walk(controls, address, access, requester, &mut tables);
+    let walked = stage1::walk(controls, address, access, requester, shape, &mut tables);
     match tables.stop {
         Some(stop) => (stop.into(), 0),
         None => walked,
@@ -396,7 +417,8 @@ fn first_stage(
 
 /// Translate `address` for `access` by `requester`: stage 1 of the regime
 /// and, for EL1&0 under HCR_EL2.VM or DC, stage 2 (pseudocode
-/// AArch64.FullTranslate).
+/// AArch64.FullTranslate). Alignment is not checked; see
+/// [`translate_checked`].
 pub fn translate(
     controls: &Controls,
     address: u64,
@@ -404,11 +426,42 @@ pub fn translate(
     requester: Requester,
     memory: &mut dyn TableMemory,
 ) -> Outcome {
+    full(controls, address, access, requester, None, memory)
+}
+
+/// [`translate`] for a data access of `shape`, with Arm's alignment checks
+/// in the pseudocode's order (Mem, AArch64.S1Translate and
+/// AArch64.S2Translate): SCTLR_ELx.A and the exclusive, atomic and ordered
+/// rules before translation, then each stage's memory type ahead of its
+/// permissions. An alignment fault reports DFSC 0b100001.
+pub fn translate_checked(
+    controls: &Controls,
+    address: u64,
+    access: Access,
+    requester: Requester,
+    shape: alignment::Shape,
+    memory: &mut dyn TableMemory,
+) -> Outcome {
+    if alignment::before_translation(controls.sctlr, address, shape) {
+        return Outcome::Fault(Fault::stage1(FaultKind::Alignment, 0));
+    }
+    full(controls, address, access, requester, Some(shape), memory)
+}
+
+fn full(
+    controls: &Controls,
+    address: u64,
+    access: Access,
+    requester: Requester,
+    shape: Option<alignment::Shape>,
+    memory: &mut dyn TableMemory,
+) -> Outcome {
     let stage2 = match second_stage(controls) {
         Ok(stage2) => stage2,
         Err(unsupported) => return Outcome::Unsupported(unsupported),
     };
-    let (outcome, shareability) = first_stage(controls, stage2, address, access, requester, memory);
+    let (outcome, shareability) =
+        first_stage(controls, stage2, address, access, requester, shape, memory);
     let (Some(stage2), Outcome::Mapped(first)) = (stage2, outcome) else {
         return outcome;
     };
@@ -423,6 +476,7 @@ pub fn translate(
         stage2::Purpose::Access(access),
         el0,
         Some(input),
+        shape,
         memory,
     ) {
         Ok(second) => Outcome::Mapped(Translation {
@@ -434,6 +488,10 @@ pub fn translate(
             writable: first.writable && second.writable,
             executable: first.executable && second.executable,
             size: first.size.min(second.size),
+            alignment: Alignment {
+                device: first.alignment.device || second.alignment.device,
+                relaxed: first.alignment.relaxed && second.alignment.relaxed,
+            },
             ..first
         }),
         Err(stop) => stop.into(),
@@ -451,7 +509,7 @@ pub fn translate_stage1(
     memory: &mut dyn TableMemory,
 ) -> Outcome {
     match second_stage(controls) {
-        Ok(stage2) => first_stage(controls, stage2, address, access, requester, memory).0,
+        Ok(stage2) => first_stage(controls, stage2, address, access, requester, None, memory).0,
         Err(unsupported) => Outcome::Unsupported(unsupported),
     }
 }
@@ -474,6 +532,7 @@ mod tests {
             global: true,
             asid: 0,
             size: 1 << 14,
+            alignment: Alignment::default(),
         };
         assert_eq!(
             par(&Outcome::Mapped(translation)),
@@ -548,7 +607,7 @@ mod tests {
             .0
             .insert(0x8000_0000, output | 1 | 1 << 10 | 0b11 << 8);
         let controls = Controls {
-            sctlr: SCTLR_M,
+            sctlr: SCTLR_M | alignment::SCTLR_C,
             tcr: TCR,
             ttbr0: 0x4000_0000,
             mair: 0xff,
@@ -664,6 +723,101 @@ mod tests {
             }
             .vmid(),
             0xab
+        );
+    }
+
+    #[test]
+    fn alignment_is_checked_before_translation_and_ahead_of_permissions() {
+        use alignment::{Kind, Shape};
+        let plain = Shape {
+            kind: Kind::Plain,
+            bytes: 8,
+            pair: false,
+        };
+        let atomic = Shape {
+            kind: Kind::Atomic,
+            ..plain
+        };
+        let alignment_fault = |outcome: Outcome| match outcome {
+            Outcome::Fault(fault) => Some((fault.kind, fault.second_stage.is_some())),
+            _ => None,
+        };
+        let (mut controls, mut tables) = two_stages(0x4000_0000);
+        controls.stage2 = false;
+        controls.second_stage = None;
+        let checked = |controls: &Controls, address, shape, requester, tables: &mut Tables| {
+            translate_checked(controls, address, Access::Read, requester, shape, tables)
+        };
+        // Stage 1 maps VA 0-1 GiB at PA 0x4000_0000 (no stage 2), Normal
+        // Write-Back Inner Shareable, EL1 only.
+        tables
+            .0
+            .insert(0x4000_0000, 0x4000_0000 | 1 | 1 << 10 | 0b11 << 8);
+        controls.ttbr0 = 0x4000_0000;
+        let user = Requester { el: 0, ..KERNEL };
+        assert!(matches!(
+            checked(&controls, 0x1004, plain, KERNEL, &mut tables),
+            Outcome::Mapped(_)
+        ));
+        // SCTLR.A faults before the walk, even where nothing is mapped.
+        controls.sctlr |= alignment::SCTLR_A;
+        assert_eq!(
+            alignment_fault(checked(
+                &controls,
+                0x7fff_ffff_0004,
+                plain,
+                KERNEL,
+                &mut tables
+            )),
+            Some((FaultKind::Alignment, false))
+        );
+        controls.sctlr &= !(alignment::SCTLR_A | alignment::SCTLR_C);
+        // An unaligned atomic needs SCTLR.C on Write-Back shareable memory.
+        assert_eq!(
+            alignment_fault(checked(&controls, 0x1004, atomic, KERNEL, &mut tables)),
+            Some((FaultKind::Alignment, false))
+        );
+        controls.sctlr |= alignment::SCTLR_C;
+        assert!(matches!(
+            checked(&controls, 0x1004, atomic, KERNEL, &mut tables),
+            Outcome::Mapped(_)
+        ));
+        // Device memory (AttrIndx 1, MAIR byte 0) faults an unaligned access
+        // ahead of the Permission fault EL0 would take.
+        controls.mair = 0x00ff;
+        tables
+            .0
+            .insert(0x4000_0000, 0x4000_0000 | 1 | 1 << 10 | 1 << 2);
+        assert_eq!(
+            alignment_fault(checked(&controls, 0x1004, plain, user, &mut tables)),
+            Some((FaultKind::Alignment, false))
+        );
+        assert_eq!(
+            alignment_fault(checked(&controls, 0x1008, plain, user, &mut tables)),
+            Some((FaultKind::Permission, false))
+        );
+
+        // Stage 2 Device memory under Normal stage 1: a stage-2 Alignment
+        // fault, taken to EL2 without HPFAR_EL2.
+        let (controls, mut tables) = two_stages(0x4000_0000);
+        let device = (STAGE2_BLOCK & !(0xf << 2)) | 0b0001 << 2;
+        tables.0.insert(0x10_0008, device);
+        let Outcome::Fault(fault) = checked(&controls, 0x1004, plain, KERNEL, &mut tables) else {
+            panic!("stage-2 alignment")
+        };
+        assert_eq!(fault.kind, FaultKind::Alignment);
+        assert!(fault.to_el2() && fault.hpfar().is_none());
+        assert_eq!(fault.data_syndrome(false, false), 0b10_0001);
+        let Outcome::Mapped(aligned) = checked(&controls, 0x1008, plain, KERNEL, &mut tables)
+        else {
+            panic!("aligned Device access")
+        };
+        assert_eq!(
+            aligned.alignment,
+            Alignment {
+                device: true,
+                relaxed: false
+            }
         );
     }
 

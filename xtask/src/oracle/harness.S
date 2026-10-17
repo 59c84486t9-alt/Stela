@@ -80,10 +80,12 @@
     .equ MAIR_NORMAL_WB,   0xff
     // T0SZ=25, inner/outer WB, inner shareable, 4 KiB granule, TTBR1 off, 48-bit PA.
     .equ TCR_VALUE,        25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (5 << 32)
-    // RES1 bits with the MMU on; caches, alignment and SP alignment checks off.
+    // RES1 bits with the MMU and both caches on (QEMU does not make output
+    // Non-cacheable when SCTLR.C or I is clear, so PAR attributes compare
+    // only with them set); alignment and SP alignment checks off.
     // ATA0 allows EL0 allocation-tag arithmetic; tag checks stay disabled.
     // EnTP2 allows EL0 access to TPIDR2_EL0.
-    .equ SCTLR_VALUE,      0x30d00801 | (1 << 42) | (1 << 60)
+    .equ SCTLR_VALUE,      0x30d00801 | (1 << 2) | (1 << 12) | (1 << 42) | (1 << 60)
     .equ SPSR_EL0T_MASKED, 0x3c0
     .equ NZCV_MASK,        0xf0000000
     .equ SPSR_SS,          1 << 21

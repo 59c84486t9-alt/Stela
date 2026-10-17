@@ -2,8 +2,10 @@
 //! to D8.5; pseudocode AArch64.S1Translate and AArch64.S1Walk).
 
 use super::{
-    Access, Controls, Fault, FaultKind, MemoryType, Outcome, PHYSICAL_ADDRESS_BITS, Regime,
-    Requester, SCTLR_M, SCTLR_WXN, TableMemory, Translation, Unsupported, attributes,
+    Access, Alignment, Controls, Fault, FaultKind, MemoryType, Outcome, PHYSICAL_ADDRESS_BITS,
+    Regime, Requester, SCTLR_M, SCTLR_WXN, TableMemory, Translation, Unsupported,
+    alignment::{self, Shape},
+    attributes,
     geometry::{self, Geometry},
     permits, sprr,
 };
@@ -171,7 +173,12 @@ fn fault(kind: FaultKind, level: i8) -> Outcome {
 /// Stage 1 disabled: the address is the output address, checked against
 /// PARange after any top byte the regime ignores (pseudocode
 /// AArch64.S1DisabledOutput). Returns the outcome and its SH field.
-fn disabled(controls: &Controls, address: u64, access: Access) -> (Outcome, u8) {
+fn disabled(
+    controls: &Controls,
+    address: u64,
+    access: Access,
+    shape: Option<Shape>,
+) -> (Outcome, u8) {
     let upper = two_ranges(controls.regime) && address & (1 << 55) != 0;
     let ignored = range(controls, upper, access).top_byte_ignored;
     let checked = if ignored {
@@ -205,8 +212,26 @@ fn disabled(controls: &Controls, address: u64, access: Access) -> (Outcome, u8) 
         global: true,
         asid: 0,
         size: 1 << 12,
+        alignment: stage_alignment(controls.sctlr, attributes, shareability),
     };
+    if shape
+        .is_some_and(|shape| alignment::after_translation(translation.alignment, address, shape))
+    {
+        return (fault(FaultKind::Alignment, 0), 0);
+    }
     (Outcome::Mapped(translation), shareability)
+}
+
+/// The alignment summary of stage-1 attributes: Device memory, and whether
+/// the memory is Write-Back shareable with SCTLR_ELx.C set, which lets
+/// atomics and ordered accesses be unaligned (pseudocode
+/// AArch64.S1HasAlignmentFaultDueToMemType).
+fn stage_alignment(sctlr: u64, attribute: u8, shareability: u8) -> Alignment {
+    Alignment {
+        device: attributes::memory_type(attribute) == MemoryType::Device,
+        relaxed: attributes::write_back_shareable(attribute, shareability)
+            && sctlr & alignment::SCTLR_C != 0,
+    }
 }
 
 fn default_cacheable(controls: &Controls) -> bool {
@@ -232,21 +257,23 @@ pub fn translate(
     requester: Requester,
     memory: &mut dyn TableMemory,
 ) -> Outcome {
-    walk(controls, address, access, requester, memory).0
+    walk(controls, address, access, requester, None, memory).0
 }
 
 /// The stage-1 outcome, and for a mapping the descriptor's SH field, which a
 /// stage-2 combination uses before Device and Non-cacheable memory make it
-/// Outer Shareable.
+/// Outer Shareable. With `shape`, an access the memory type does not allow
+/// unaligned is an Alignment fault, ahead of a Permission fault.
 pub fn walk(
     controls: &Controls,
     address: u64,
     access: Access,
     requester: Requester,
+    shape: Option<Shape>,
     memory: &mut dyn TableMemory,
 ) -> (Outcome, u8) {
     if controls.sctlr & SCTLR_M == 0 || default_cacheable(controls) {
-        return disabled(controls, address, access);
+        return disabled(controls, address, access, shape);
     }
     let mut shareability = 0;
     let outcome = walk_enabled(
@@ -254,6 +281,7 @@ pub fn walk(
         address,
         access,
         requester,
+        shape,
         memory,
         &mut shareability,
     );
@@ -265,6 +293,7 @@ fn walk_enabled(
     address: u64,
     access: Access,
     requester: Requester,
+    shape: Option<Shape>,
     memory: &mut dyn TableMemory,
     shareability_field: &mut u8,
 ) -> Outcome {
@@ -332,6 +361,13 @@ fn walk_enabled(
         if descriptor & ACCESS_FLAG == 0 {
             return fault(FaultKind::AccessFlag, level);
         }
+        let (mut attributes, mut memory, mut shareability) =
+            attributes::of_descriptor(controls.mair, descriptor);
+        let field = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
+        let alignment = stage_alignment(controls.sctlr, attributes, field);
+        if shape.is_some_and(|shape| alignment::after_translation(alignment, address, shape)) {
+            return fault(FaultKind::Alignment, level);
+        }
         let rights = if controls.sprr.enabled() {
             let sprr_hierarchy = sprr::Hierarchy {
                 no_el0: hierarchy.no_el0,
@@ -349,10 +385,16 @@ fn walk_enabled(
         if !permits(rights, access) {
             return fault(FaultKind::Permission, level);
         }
-        let (attributes, memory, shareability) =
-            attributes::of_descriptor(controls.mair, descriptor);
+        // Caches off (pseudocode AArch64.S1TreatAsNormalNC), after the
+        // alignment check, which sees the descriptor's attributes. Stage 2
+        // still combines the descriptor's SH field.
+        if attributes::stage1_non_cacheable(controls.sctlr, attributes, access == Access::Execute) {
+            attributes = attributes::NORMAL_NON_CACHEABLE;
+            memory = MemoryType::Normal;
+            shareability = attributes::OUTER_SHAREABLE;
+        }
         let global = !two_ranges(controls.regime) || descriptor & NOT_GLOBAL == 0;
-        *shareability_field = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
+        *shareability_field = field;
         return Outcome::Mapped(Translation {
             physical: output | (address & (size - 1)),
             memory,
@@ -365,6 +407,7 @@ fn walk_enabled(
             global,
             asid: if global { 0 } else { asid(controls) },
             size,
+            alignment,
         });
     }
 }
@@ -439,9 +482,12 @@ mod tests {
     const ATTRS: u64 = DESCRIPTOR_VALID | DESCRIPTOR_TABLE | ACCESS_FLAG | (1 << 2);
     const TABLE: u64 = DESCRIPTOR_VALID | DESCRIPTOR_TABLE;
 
+    /// SCTLR_EL1 with the MMU and both caches enabled.
+    const CACHED: u64 = SCTLR_M | (1 << 2) | (1 << 12);
+
     fn controls() -> Controls {
         Controls {
-            sctlr: SCTLR_M,
+            sctlr: CACHED,
             tcr: TCR,
             ttbr0: 0x10_0000 | (5 << 48),
             ttbr1: 0x20_0000,
@@ -519,6 +565,20 @@ mod tests {
             (MemoryType::Normal, 0xff, 0b11)
         );
         assert!(kernel.global && kernel.writable && kernel.size == PAGE);
+        // With SCTLR.I clear a fetch is Normal Non-cacheable, Outer
+        // Shareable; with SCTLR.C clear so is a data access.
+        for (sctlr, access) in [
+            (CACHED & !(1 << 12), Access::Execute),
+            (CACHED & !(1 << 2), Access::Read),
+        ] {
+            let uncached = Controls { sctlr, ..controls };
+            let Outcome::Mapped(output) =
+                translate(&uncached, kernel_va, access, KERNEL, &mut tables)
+            else {
+                panic!("caches off")
+            };
+            assert_eq!((output.attributes, output.shareability), (0x44, 0b10));
+        }
         assert_eq!(
             faults(translate(
                 &controls,

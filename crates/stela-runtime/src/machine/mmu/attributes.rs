@@ -19,6 +19,7 @@ pub const INNER_SHAREABLE: u8 = 0b11;
 /// EL1&0 default with stage 1 disabled and HCR_EL2.DC set.
 pub const NORMAL_WRITE_BACK: u8 = 0xff;
 
+const SCTLR_C: u64 = 1 << 2;
 const SCTLR_I: u64 = 1 << 12;
 const ATTRIBUTE_INDEX_SHIFT: u64 = 2;
 const SHAREABILITY_SHIFT: u64 = 8;
@@ -145,6 +146,16 @@ pub fn forced(first: u8, field: u8) -> u8 {
     }
 }
 
+/// Normal Inner and Outer Write-Back memory that is Inner or Outer
+/// Shareable (pseudocode IsWBShareable); the reserved SH value 0b01 is
+/// taken as Outer Shareable, as in a combination.
+pub fn write_back_shareable(attribute: u8, shareability: u8) -> bool {
+    device(attribute).is_none()
+        && cacheability(attribute >> 4) == Cacheability::WriteBack
+        && cacheability(attribute & 15) == Cacheability::WriteBack
+        && shareability & 3 != NON_SHAREABLE
+}
+
 /// The SH field of a combination: the more shareable of the two (pseudocode
 /// S2CombineS1Shareability). The reserved SH value `0b01` is CONSTRAINED
 /// UNPREDICTABLE; this implementation takes it as Outer Shareable.
@@ -158,6 +169,19 @@ pub fn combine_shareability(first: u8, second: u8) -> u8 {
         0 => NON_SHAREABLE,
         1 => INNER_SHAREABLE,
         _ => OUTER_SHAREABLE,
+    }
+}
+
+/// Stage 1 output is Normal Non-cacheable, Outer Shareable, for a data
+/// access to Normal memory with SCTLR_ELx.C clear and for an instruction
+/// fetch from Device memory or with SCTLR_ELx.I clear (pseudocode
+/// AArch64.S1TreatAsNormalNC).
+pub fn stage1_non_cacheable(sctlr: u64, attribute: u8, execute: bool) -> bool {
+    let device = memory_type(attribute) == MemoryType::Device;
+    if execute {
+        device || sctlr & SCTLR_I == 0
+    } else {
+        !device && sctlr & SCTLR_C == 0
     }
 }
 
@@ -203,6 +227,14 @@ mod tests {
             disabled(0, true),
             (NORMAL_NON_CACHEABLE, MemoryType::Normal)
         );
+        // SCTLR.C and I: Normal data and all fetches become Non-cacheable
+        // when their cache is off; fetches from Device memory always do.
+        assert!(stage1_non_cacheable(SCTLR_I, 0xff, false));
+        assert!(!stage1_non_cacheable(SCTLR_C, 0xff, false));
+        assert!(!stage1_non_cacheable(0, 0x04, false));
+        assert!(stage1_non_cacheable(SCTLR_C, 0xff, true));
+        assert!(!stage1_non_cacheable(SCTLR_I, 0xff, true));
+        assert!(stage1_non_cacheable(SCTLR_I | SCTLR_C, 0x04, true));
     }
 
     #[test]

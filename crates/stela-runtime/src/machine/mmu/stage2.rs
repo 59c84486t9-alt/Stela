@@ -4,7 +4,10 @@
 //! start-level tables, FEAT_XNX execute permissions and FEAT_S2FWB.
 
 use super::{
-    Access, Fault, FaultKind, Outcome, SecondStage, Stage2, TableMemory, Unsupported, attributes,
+    Access, Alignment, Fault, FaultKind, MemoryType, Outcome, SecondStage, Stage2, TableMemory,
+    Unsupported,
+    alignment::{self, Shape},
+    attributes,
     geometry::{self, Geometry},
 };
 
@@ -66,6 +69,8 @@ pub struct Output {
     pub writable: bool,
     pub executable: bool,
     pub size: u64,
+    /// Stage 2's part of the alignment rules.
+    pub alignment: Alignment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +92,7 @@ impl From<Stop> for Outcome {
 /// invalid or inconsistent SL0 (pseudocode AArch64.S2InvalidSL and
 /// AArch64.S2InconsistentSL). T0SZ is forced into range as for stage 1;
 /// TG0 selecting 64 KiB or a reserved value is refused.
-fn shape(vtcr: u64) -> Result<Geometry, Result<(), Unsupported>> {
+fn walk_shape(vtcr: u64) -> Result<Geometry, Result<(), Unsupported>> {
     let granule_bits = match (vtcr >> VTCR_TG0_SHIFT) & 3 {
         0 => 12,
         2 => 14,
@@ -121,13 +126,16 @@ fn shape(vtcr: u64) -> Result<Geometry, Result<(), Unsupported>> {
 
 /// Translate `ipa` for `purpose`. `el0` selects the EL0 execute permission
 /// of FEAT_XNX; `input` is stage 1's attributes (`None` for a walk, whose
-/// attributes nobody observes).
+/// attributes nobody observes). With `shape`, an access stage 2's memory
+/// type does not allow unaligned is an Alignment fault, ahead of a
+/// Permission fault.
 pub fn translate(
     stage2: &Stage2,
     ipa: u64,
     purpose: Purpose,
     el0: bool,
     input: Option<Input>,
+    shape: Option<Shape>,
     memory: &mut dyn TableMemory,
 ) -> Result<Output, Stop> {
     let walk = purpose == Purpose::Walk;
@@ -138,7 +146,7 @@ pub fn translate(
             second_stage: Some(SecondStage { ipa, walk }),
         })
     };
-    let geometry = match shape(stage2.vtcr) {
+    let geometry = match walk_shape(stage2.vtcr) {
         Ok(geometry) => geometry,
         Err(Ok(())) => return Err(fault(FaultKind::Translation, 0)),
         Err(Err(unsupported)) => return Err(Stop::Unsupported(unsupported)),
@@ -193,13 +201,37 @@ pub fn translate(
         (true, false) => false,
         (true, true) => !el0,
     };
+    // Stage 2's own attributes (pseudocode AArch64.S2NextWalkStateLeaf):
+    // MemAttr, or under FWB the override of stage 1's (a walk's are Normal
+    // Write-Back).
     let field = ((descriptor >> MEMATTR_SHIFT) & 0xf) as u8;
     let forced = stage2.hcr & HCR_FWB != 0;
-    let device = if forced {
-        field & 0b0100 == 0
+    let first = input.unwrap_or(Input {
+        attributes: attributes::NORMAL_WRITE_BACK,
+        shareability: attributes::INNER_SHAREABLE,
+    });
+    let (own, own_shareability) = if forced {
+        let own = attributes::forced(first.attributes, field);
+        let shareability = attributes::combine_shareability(
+            first.shareability,
+            descriptor_shareability(descriptor),
+        );
+        (own, attributes::effective_shareability(own, shareability))
     } else {
-        field & 0b1100 == 0
+        match attributes::of_stage2(field) {
+            Some(own) => (own, descriptor_shareability(descriptor)),
+            None => return Err(Stop::Unsupported(Unsupported::Stage2Attributes { field })),
+        }
     };
+    let device = attributes::memory_type(own) == MemoryType::Device;
+    let alignment = Alignment {
+        device,
+        relaxed: attributes::write_back_shareable(own, own_shareability)
+            && stage2.hcr & HCR_CD == 0,
+    };
+    if shape.is_some_and(|shape| alignment::after_translation(alignment, ipa, shape)) {
+        return Err(fault(FaultKind::Alignment, level));
+    }
     let permitted = match purpose {
         // HCR_EL2.PTW: a stage-1 walk into stage-2 Device memory faults.
         Purpose::Walk => readable && !(stage2.hcr & HCR_PTW != 0 && device),
@@ -221,6 +253,7 @@ pub fn translate(
             writable,
             executable,
             size,
+            alignment,
         });
     };
     // Stage 2 treats its output as Normal Non-cacheable for an instruction
@@ -241,14 +274,8 @@ pub fn translate(
         };
         (attribute, attributes::OUTER_SHAREABLE)
     } else if forced {
-        (
-            attributes::forced(input.attributes, field),
-            descriptor_shareability(descriptor),
-        )
+        (own, descriptor_shareability(descriptor))
     } else {
-        let Some(own) = attributes::of_stage2(field) else {
-            return Err(Stop::Unsupported(Unsupported::Stage2Attributes { field }));
-        };
         (
             attributes::combine(input.attributes, own),
             descriptor_shareability(descriptor),
@@ -263,6 +290,7 @@ pub fn translate(
         writable,
         executable,
         size,
+        alignment,
     })
 }
 
@@ -321,6 +349,7 @@ mod tests {
             Purpose::Access(access),
             false,
             Some(KERNEL_DATA),
+            None,
             tables,
         )
     }
@@ -501,6 +530,7 @@ mod tests {
                     Purpose::Access(access),
                     el0,
                     Some(KERNEL_DATA),
+                    None,
                     tables,
                 )
                 .is_ok()
@@ -536,7 +566,7 @@ mod tests {
         // A walk needs read permission, and with HCR_EL2.PTW Normal memory.
         map_4k(&mut tables, ipa, 0x8_0000_0000 | (PAGE & !S2AP_READ));
         let walk = |s2: &Stage2, tables: &mut Tables| {
-            fault(translate(s2, ipa, Purpose::Walk, false, None, tables))
+            fault(translate(s2, ipa, Purpose::Walk, false, None, None, tables))
         };
         assert_eq!(
             walk(&s2, &mut tables),
@@ -576,6 +606,7 @@ mod tests {
                 Purpose::Access(access),
                 false,
                 Some(input),
+                None,
                 &mut tables,
             );
             output.map(|output| (output.attributes, output.shareability))
