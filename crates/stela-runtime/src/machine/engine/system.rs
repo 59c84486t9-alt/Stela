@@ -14,6 +14,7 @@ use super::{
 };
 use crate::machine::{
     cpu::{Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_VF, HCR_VI, HCR_VSE, TranslationRegime},
+    debug::{self, DCC_FULL},
     exception::{Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
     registers::{Lines, Refusal, trap_iss},
     system::{
@@ -87,6 +88,22 @@ pub(super) fn encoding_of(register: Register) -> Option<Encoding> {
     ))
 }
 
+/// DataCacheWatchpointSize: the block a DC IVAC is watched as.
+const DC_WATCH_BYTES: u64 = 64;
+
+/// Writes that change which pages watchpoints keep out of the shadow tables
+/// (`machine::debug::watched`).
+fn watches(register: Register) -> bool {
+    matches!(
+        register,
+        Register::DBGWCR_EL1
+            | Register::DBGWVR_EL1
+            | Register::MDSCR_EL1
+            | Register::MDCR_EL2
+            | Register::OSLSR_EL1
+    )
+}
+
 /// Writes that change translation: shadow roots and fetch translations go.
 fn translates(register: Register) -> bool {
     matches!(
@@ -108,10 +125,6 @@ fn translates(register: Register) -> bool {
 }
 
 const SCTLR_A: u64 = 1 << 1;
-const MDSCR_SS: u64 = 1 << 0;
-const MDSCR_KDE: u64 = 1 << 13;
-const MDSCR_MDE: u64 = 1 << 15;
-const DBG_ENABLE: u64 = 1;
 const ISR_A: u64 = 1 << 8;
 const ISR_I: u64 = 1 << 7;
 const ISR_F: u64 = 1 << 6;
@@ -209,6 +222,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Pstate::SSBS => next.ssbs = bit,
         }
         cpu.set_pstate(next);
+        if field == Pstate::D {
+            // PSTATE.D masks same-EL debug exceptions, watchpoints included.
+            self.regime = true;
+        }
     }
 
     fn x(&self) -> u64 {
@@ -241,6 +258,14 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::FPCR => u64::from(cpu.state.fpcr),
             Register::FPSR => u64::from(cpu.state.fpsr),
             Register::ISR_EL1 => self.pending(),
+            // RXfull and TXfull mirror the debug communications channel.
+            Register::MDCCSR_EL0 => cpu.dcc.status(),
+            Register::MDSCR_EL1 => cpu.registers.get(register, 0) & !DCC_FULL | cpu.dcc.status(),
+            // Every claim tag is implemented; DBGCLAIMCLR reads the claim.
+            Register::DBGCLAIMSET_EL1 => debug::CLAIM_TAGS,
+            Register::DBGCLAIMCLR_EL1 => u64::from(cpu.claim),
+            Register::OSDTRRX_EL1 => u64::from(cpu.dcc.rx),
+            Register::OSDTRTX_EL1 => u64::from(cpu.dcc.tx),
             _ => match Channel::by_control(register) {
                 Some(channel) => channel.read_control(cpu, self.now),
                 None => cpu.registers.get(register, index),
@@ -260,13 +285,34 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::SCTLR_EL1 | Register::SCTLR_EL2 if value & SCTLR_A != 0 => {
                 return Err(Effect::Refused("SCTLR alignment checking"));
             }
-            Register::MDSCR_EL1 if value & (MDSCR_SS | MDSCR_KDE | MDSCR_MDE) != 0 => {
-                return Err(Effect::Refused(
-                    "MDSCR_EL1 software step or debug exceptions",
-                ));
+            // OSLAR_EL1.OSLK locks and unlocks the OS lock (OSLSR_EL1.OSLK).
+            Register::OSLAR_EL1 => {
+                let oslsr = cpu.read(Register::OSLSR_EL1) & !0b10 | (value & 1) << 1;
+                cpu.registers.set_raw(Register::OSLSR_EL1, 0, oslsr);
+                self.regime = true;
+                return Ok(());
             }
-            Register::DBGBCR_EL1 | Register::DBGWCR_EL1 if value & DBG_ENABLE != 0 => {
-                return Err(Effect::Refused("enabled breakpoint or watchpoint"));
+            // RXfull and TXfull are writable only while the OS lock is set,
+            // for saving and restoring the channel.
+            Register::MDSCR_EL1 if cpu.field(Register::OSLSR_EL1, 1, 1) != 0 => {
+                cpu.dcc.tx_full = value >> 29 & 1 != 0;
+                cpu.dcc.rx_full = value >> 30 & 1 != 0;
+            }
+            Register::OSDTRRX_EL1 => {
+                cpu.dcc.rx = value as u32;
+                return Ok(());
+            }
+            Register::DBGCLAIMSET_EL1 => {
+                cpu.claim |= (value & debug::CLAIM_TAGS) as u8;
+                return Ok(());
+            }
+            Register::DBGCLAIMCLR_EL1 => {
+                cpu.claim &= !((value & debug::CLAIM_TAGS) as u8);
+                return Ok(());
+            }
+            Register::OSDTRTX_EL1 => {
+                cpu.dcc.tx = value as u32;
+                return Ok(());
             }
             // Once GXF is enabled HCR_EL2 is writable only from GL2 (m1n1
             // `gxf.c`, `exception_asm.S`); what a write from EL2 does then is
@@ -313,6 +359,9 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         if translates(register) {
             self.translation = true;
         }
+        if watches(register) {
+            self.regime = true;
+        }
         Ok(())
     }
 
@@ -351,7 +400,26 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 // The host is coherent: maintenance by VA only checks that
                 // the address translates, as a write for invalidation.
                 let write = op == CacheOp::Invalidate;
-                self.check_maintenance(operand, write)
+                self.check_maintenance(operand, write)?;
+                // DC IVAC is watched as a write of the DataCacheWatchpointSize
+                // block around it (64 bytes, CTR_EL0's line: Stela's choice).
+                if write && scope == CacheScope::PoC {
+                    let access = debug::Access {
+                        address: operand & !(DC_WATCH_BYTES - 1),
+                        size: DC_WATCH_BYTES,
+                        read: false,
+                        write: false,
+                        maintenance: true,
+                        el: self.machine.cpu.pstate.el,
+                    };
+                    if let Some(exception) = self
+                        .machine
+                        .watchpoint_exception(&access, self.machine.cpu.pc)
+                    {
+                        return Err(Effect::Exception(exception));
+                    }
+                }
+                Ok(())
             }
             Operation::Ic { scope, operand } => {
                 if scope == CacheScope::PoU {
@@ -372,15 +440,13 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         ))
     }
 
-    fn read_dbgdtr(&mut self) -> u64 {
-        self.refuse("the debug communications channel is not modeled");
-        0
+    fn read_dbgdtr(&mut self, width: u32) -> u64 {
+        self.machine.cpu.dcc.read(width)
     }
 
-    fn write_dbgdtr(&mut self, _value: u64) -> Result<(), Effect> {
-        Err(Effect::Refused(
-            "the debug communications channel is not modeled",
-        ))
+    fn write_dbgdtr(&mut self, width: u32, value: u64) -> Result<(), Effect> {
+        self.machine.cpu.dcc.write(width, value);
+        Ok(())
     }
 
     /// The profile has no error records (ERRIDR_EL1.NUM is 0), so the
@@ -489,6 +555,20 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         let requester = self.machine.cpu.requester();
         match self.translate(regime, requester, start, MemoryAccess::Write) {
             Translated::Mapped(translation) => {
+                let access = debug::Access {
+                    address: start,
+                    size: bytes,
+                    read: false,
+                    write: true,
+                    maintenance: false,
+                    el: self.machine.cpu.pstate.el,
+                };
+                if let Some(exception) = self
+                    .machine
+                    .watchpoint_exception(&access, self.machine.cpu.pc)
+                {
+                    return Err(Effect::Exception(exception));
+                }
                 let zero = alloc::vec![0u8; bytes as usize];
                 if self.machine.host.write_ram(translation.physical, &zero) {
                     Ok(())

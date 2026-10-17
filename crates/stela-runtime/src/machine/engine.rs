@@ -3,12 +3,14 @@
 mod amx;
 mod system;
 mod unprivileged;
+mod watch;
 
 use super::{
     cpu::{
         Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
         HCR_VI, HCR_VSE,
     },
+    debug,
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
     registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
@@ -55,6 +57,52 @@ const HFGITR_SVC_EL1: u32 = 53;
 pub struct Regime {
     pub controls: Controls,
     pub requester: mmu::Requester,
+    /// Pages the shadow tables must leave unmapped for watchpoints.
+    pub watch: Watch,
+}
+
+/// The virtual address ranges enabled watchpoints can match: a page that
+/// overlaps one stays out of the shadow tables, so every access to it exits
+/// with [`FaultCause::Watched`], unless it is one of the `pass` pages the
+/// engine lets one instruction through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Watch {
+    /// (first, last) addresses; unused entries are empty (first > last).
+    pub ranges: [(u64, u64); WATCH_RANGES],
+    pub pass: [Option<u64>; 2],
+}
+
+/// Two ranges per watchpoint: the matched bits repeat with either value of
+/// the bits above DebugAddrTop.
+pub const WATCH_RANGES: usize = 2 * debug::WATCHPOINTS as usize;
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self::from_ranges(&[])
+    }
+}
+
+impl Watch {
+    /// Whether the 4 KiB page at `page` must stay unmapped.
+    pub fn blocks(&self, page: u64) -> bool {
+        let last = page | (FETCH_PAGE - 1);
+        !self.pass.contains(&Some(page & !(FETCH_PAGE - 1)))
+            && self
+                .ranges
+                .iter()
+                .any(|&(first, end)| first <= end && first <= last && end >= page)
+    }
+
+    fn from_ranges(ranges: &[(u64, u64)]) -> Self {
+        let mut watch = Self {
+            ranges: [(1, 0); WATCH_RANGES],
+            pass: [None; 2],
+        };
+        for (slot, range) in watch.ranges.iter_mut().zip(ranges) {
+            *slot = *range;
+        }
+        watch
+    }
 }
 
 /// Entry address of installed native code.
@@ -74,6 +122,8 @@ pub enum FaultCause {
     NonCanonical,
     /// An x86 #UD from a native check (16-byte SP alignment).
     InvalidOpcode,
+    /// The access reached a page [`Watch`] keeps unmapped.
+    Watched,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,20 +384,31 @@ struct FetchEntry {
 struct JumpEntry {
     pc: u64,
     physical: u64,
-    fp: bool,
-    stack_check: bool,
+    variant: Variant,
     generation: u64,
     block: usize,
 }
 
-/// Floating-point and SIMD instructions, which CPACR_EL1.FPEN can trap:
-/// SIMD&FP data processing (op0 x111) and SIMD&FP loads/stores (op0 x1x0, V=1).
+/// What a block is compiled for besides its PC and PA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Variant {
+    /// FP/SIMD enabled: otherwise the block ends before the first FP/SIMD
+    /// instruction.
+    fp: bool,
+    /// SP alignment checks (SCTLR_ELx.SA or SA0).
+    stack_check: bool,
+    /// One instruction only, for breakpoints and software step.
+    single: bool,
+}
+
 /// A load or store addressed through Rn (bits 9:5) that names SP; literal
 /// loads have no base register.
 fn stack_based(word: u32) -> bool {
     word & 0x0a00_0000 == 0x0800_0000 && word & 0x3b00_0000 != 0x1800_0000 && (word >> 5) & 31 == 31
 }
 
+/// Floating-point and SIMD instructions, which CPACR_EL1.FPEN can trap:
+/// SIMD&FP data processing (op0 x111) and SIMD&FP loads/stores (op0 x1x0, V=1).
 fn is_floating_point(word: u32) -> bool {
     (word >> 25) & 7 == 7 || word & 0x0a00_0000 == 0x0800_0000 && word & (1 << 26) != 0
 }
@@ -361,7 +422,7 @@ pub struct Machine<H: Host, D: Devices> {
     target: TargetCpu,
     blocks: Vec<Block>,
     /// Blocks by PC, PA, FP enablement and SP alignment checking.
-    index: BTreeMap<(u64, u64, bool, bool), usize>,
+    index: BTreeMap<(u64, u64, Variant), usize>,
     fetch: Vec<Option<FetchEntry>>,
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
@@ -383,6 +444,18 @@ pub struct Machine<H: Host, D: Devices> {
     /// The physical count up to which the event streams have set the event
     /// register; `None` before the first sample.
     event_sample: Option<u64>,
+    /// What self-hosted debug needs of each instruction, while valid.
+    debug: Option<DebugMode>,
+    /// The watched pages the host keeps unmapped.
+    watch: Watch,
+}
+
+/// Breakpoints that can match and an enabled software step make every
+/// block a single instruction checked before it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DebugMode {
+    breakpoints: bool,
+    step: bool,
 }
 
 enum Fetched {
@@ -413,6 +486,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             floating_point: None,
             stack_check: None,
             event_sample: None,
+            debug: None,
+            watch: Watch::default(),
         };
         machine.load_profile();
         machine.sync_regime();
@@ -438,6 +513,40 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.timers = None;
         self.floating_point = None;
         self.stack_check = None;
+        self.debug = None;
+    }
+
+    fn debug_mode(&mut self) -> DebugMode {
+        *self.debug.get_or_insert_with(|| {
+            let cpu = &self.cpu;
+            DebugMode {
+                breakpoints: debug::watching(cpu) && debug::any_breakpoint(cpu),
+                step: debug::enabled(cpu) && cpu.field(SystemRegister::MDSCR_EL1, 0, 1) != 0,
+            }
+        })
+    }
+
+    /// A breakpoint, software step or watchpoint exception: to EL2 from EL2
+    /// and, under HCR_EL2.TGE or MDCR_EL2.TDE, from EL0 and EL1; else to EL1
+    /// (Arm `AArch64_BreakpointException` and the others).
+    fn debug_exception(&self, lower: Class, same: Class, iss: u32, pc: u64) -> Exception {
+        let el = self.cpu.pstate.el;
+        let target = if el == 2 || debug::target(&self.cpu) == 2 {
+            2
+        } else {
+            1
+        };
+        let class = if target > el { lower } else { same };
+        Exception::synchronous(class, iss, pc).to(target)
+    }
+
+    /// Arm `SSAdvance` before SVC, HVC and SMC take their exception, so
+    /// SPSR.SS records the step as complete.
+    fn advance_step(&mut self) {
+        if self.cpu.step_advance {
+            self.cpu.step_advance = false;
+            self.cpu.pstate.ss = false;
+        }
     }
 
     /// Whether loads and stores through SP check its 16-byte alignment (Arm
@@ -453,9 +562,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn sync_regime(&mut self) {
         self.derived_changed();
+        let watch = Watch {
+            pass: self.watch.pass,
+            ..Watch::from_ranges(&debug::watched(&self.cpu))
+        };
+        if watch.ranges != self.watch.ranges {
+            // Newly watched pages must leave the shadow tables.
+            self.translation_generation += 1;
+            self.host.invalidate_translations();
+        }
+        self.watch = watch;
         let regime = Regime {
             controls: self.cpu.controls(self.cpu.regime()),
             requester: self.cpu.requester(),
+            watch,
         };
         self.host.set_regime(&regime);
     }
@@ -614,18 +734,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Ok(());
         }
         let pc = self.cpu.pc;
+        let mode = self.debug_mode();
+        // Active-pending software step comes before every other exception
+        // of the instruction (Arm `CheckSoftwareStep`).
+        if mode.step && !self.cpu.pstate.ss {
+            let exception = self.debug_exception(Class::StepLower, Class::StepSame, 0x22, pc);
+            self.take(exception);
+            return Ok(());
+        }
         if !pc.is_multiple_of(INSTRUCTION) {
             let mut exception = Exception::synchronous(Class::PcAlignment, 0, pc);
             exception.fault_address = Some(pc);
             self.take(exception);
             return Ok(());
         }
-        if self.cpu.pstate.il {
-            return self.illegal_state(pc);
+        if (mode.breakpoints || self.cpu.pstate.il)
+            && let Some(exception) = self.instruction_checks(pc, mode.breakpoints)?
+        {
+            self.take(exception);
+            return Ok(());
         }
-        let index = match self.fetch_block(pc)? {
+        // Active-not-pending: this one instruction advances the step.
+        self.cpu.step_advance = mode.step;
+        let single = mode.breakpoints || mode.step;
+        let index = match self.fetch_block(pc, single)? {
             Fetched::Block(index) => index,
             Fetched::Exception(exception) => {
+                self.cpu.step_advance = false;
                 self.take(exception);
                 return Ok(());
             }
@@ -644,6 +779,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Ok(());
             }
         }
+        let step = self.execute(index);
+        self.advance_step();
+        step
+    }
+
+    /// Run one compiled block and complete its exit or fault.
+    fn execute(&mut self, index: usize) -> Step {
         let code = self.blocks[index].code;
         // SAFETY: installed by this machine since the last discard, for the
         // system-mode block ABI.
@@ -655,18 +797,34 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// With PSTATE.IL set, the instruction at `pc` takes the Illegal
-    /// Execution state exception after any Instruction Abort its fetch raises
-    /// (Arm `AArch64_CheckIllegalState`).
+    /// The checks before an instruction executes, in Arm's priority after PC
+    /// alignment: an Instruction Abort of its fetch, a breakpoint (Arm
+    /// `AArch64_CheckBreakpoint`), then the Illegal Execution state (Arm
+    /// `AArch64_CheckIllegalState`).
     #[cold]
-    fn illegal_state(&mut self, pc: u64) -> Step {
-        let exception = match self.fetch_physical(pc) {
-            Ok(_) => Exception::synchronous(Class::IllegalExecution, 0, pc),
-            Err(Ok(exception)) => exception,
+    fn instruction_checks(
+        &mut self,
+        pc: u64,
+        breakpoints: bool,
+    ) -> Result<Option<Exception>, Stop> {
+        match self.fetch_physical(pc) {
+            Ok(_) => {}
+            Err(Ok(exception)) => return Ok(Some(exception)),
             Err(Err(stop)) => return Err(stop),
-        };
-        self.take(exception);
-        Ok(())
+        }
+        if breakpoints && debug::breakpoint(&self.cpu, pc) {
+            return Ok(Some(self.debug_exception(
+                Class::BreakpointLower,
+                Class::BreakpointSame,
+                0x22,
+                pc,
+            )));
+        }
+        Ok(self
+            .cpu
+            .pstate
+            .il
+            .then(|| Exception::synchronous(Class::IllegalExecution, 0, pc)))
     }
 
     /// Translate a PC for execution at the current EL.
@@ -837,27 +995,29 @@ fn floating_point_trap(cpu: &Cpu) -> Option<u8> {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
-    fn fetch_block(&mut self, pc: u64) -> Result<Fetched, Stop> {
+    fn fetch_block(&mut self, pc: u64, single: bool) -> Result<Fetched, Stop> {
         let physical = match self.fetch_physical(pc) {
             Ok(physical) => physical,
             Err(Ok(exception)) => return Ok(Fetched::Exception(exception)),
             Err(Err(stop)) => return Err(stop),
         };
-        let fp = self.floating_point_enabled();
-        let stack_check = self.stack_alignment_checked();
+        let variant = Variant {
+            fp: self.floating_point_enabled(),
+            stack_check: self.stack_alignment_checked(),
+            single,
+        };
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
             && entry.physical == physical
-            && entry.fp == fp
-            && entry.stack_check == stack_check
+            && entry.variant == variant
             && entry.generation == self.code_generation
         {
             return Ok(Fetched::Block(entry.block));
         }
-        let index = match self.index.get(&(pc, physical, fp, stack_check)) {
+        let index = match self.index.get(&(pc, physical, variant)) {
             Some(&index) => index,
-            None => match self.compile(pc, physical, fp, stack_check)? {
+            None => match self.compile(pc, physical, variant)? {
                 Some(index) => index,
                 None => {
                     // The first instruction is FP/SIMD while CPACR or CPTR
@@ -869,8 +1029,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.jump[slot] = Some(JumpEntry {
             pc,
             physical,
-            fp,
-            stack_check,
+            variant,
             generation: self.code_generation,
             block: index,
         });
@@ -879,14 +1038,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Compile the block at `pc`. `None` when its first instruction is a
     /// trapped FP/SIMD instruction.
-    fn compile(
-        &mut self,
-        pc: u64,
-        physical: u64,
-        fp: bool,
-        stack_check: bool,
-    ) -> Result<Option<usize>, Stop> {
-        let available = (FETCH_PAGE - (pc & (FETCH_PAGE - 1))).min(MAX_BLOCK_BYTES);
+    fn compile(&mut self, pc: u64, physical: u64, variant: Variant) -> Result<Option<usize>, Stop> {
+        let Variant {
+            fp,
+            stack_check,
+            single,
+        } = variant;
+        let available = if single {
+            INSTRUCTION
+        } else {
+            (FETCH_PAGE - (pc & (FETCH_PAGE - 1))).min(MAX_BLOCK_BYTES)
+        };
         let mut source = vec![0u8; available as usize];
         if !self.host.read_ram(physical, &mut source) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
@@ -943,7 +1105,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             stack_check,
         });
         let index = self.blocks.len() - 1;
-        self.index.insert((pc, physical, fp, stack_check), index);
+        self.index.insert((pc, physical, variant), index);
         Ok(Some(index))
     }
 
@@ -1284,6 +1446,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Unsupported(mmu::Unsupported),
             Device(u64),
         }
+        // A RAM read has no side effects: the load is made, then checked
+        // against the watchpoints, and undone if one matches.
+        let before = self.cpu.state.clone();
+        let loaded = core::cell::Cell::new(None);
         let host = &mut self.host;
         let result = pauth::memory::complete(
             load,
@@ -1316,6 +1482,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if (address & (FETCH_PAGE - 1)) > FETCH_PAGE - 8 {
                     return Err(LoadStop::Device(translation.physical));
                 }
+                loaded.set(Some(address));
                 if !host.read_ram(translation.physical, &mut bytes) {
                     return Err(LoadStop::Device(translation.physical));
                 }
@@ -1324,6 +1491,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         );
         match result {
             Ok(_) => {
+                let access = loaded.get().map(|address| debug::Access {
+                    address,
+                    size: 8,
+                    read: true,
+                    write: false,
+                    maintenance: false,
+                    el: requester.el,
+                });
+                if let Some(exception) =
+                    access.and_then(|access| self.watchpoint_exception(&access, pc))
+                {
+                    self.cpu.state = before;
+                    self.take(exception);
+                    return Ok(());
+                }
                 self.cpu.pc = pc;
                 self.next()
             }
@@ -1384,6 +1566,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // Native blocks raise #UD for a misaligned SP base when compiled
             // with the check (SCTLR_ELx.SA or SA0 set), and for an LSE2
             // atomic access crossing its 16-byte granule.
+            FaultCause::Watched => self.watched_access(index, pc),
             FaultCause::InvalidOpcode => {
                 let word = self.word(index, pc)?;
                 if self.blocks[index].stack_check
@@ -1667,6 +1850,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             // To EL1, or to EL2 from EL2 and from EL0 in the host.
             ExceptionOperation::SupervisorCall { immediate } => {
+                self.advance_step();
                 self.take(Exception::synchronous(
                     Class::SupervisorCall,
                     u32::from(immediate),
@@ -1674,12 +1858,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 ));
                 Ok(())
             }
+            // BRK: to EL2 from EL2, or under HCR_EL2.TGE or MDCR_EL2.TDE
+            // (Arm `AArch64_SoftwareBreakpoint`).
             ExceptionOperation::SoftwareBreakpoint { immediate } => {
-                self.take(Exception::synchronous(
+                let exception = self.debug_exception(
+                    Class::Breakpoint,
                     Class::Breakpoint,
                     u32::from(immediate),
                     pc,
-                ));
+                );
+                self.take(exception);
                 Ok(())
             }
             ExceptionOperation::ExceptionReturn { key } => self.exception_return(key),
@@ -1687,6 +1875,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ExceptionOperation::HypervisorCall { immediate }
                 if self.cpu.pstate.el != 0 && !self.cpu.hcr(HCR_HCD) =>
             {
+                self.advance_step();
                 self.take(
                     Exception::synchronous(
                         Class::HypervisorCall,
@@ -1839,6 +2028,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
             RegisterOutcome::Written(changes) => {
+                // PSTATE.D and Apple registers can change what is derived.
+                self.derived_changed();
                 if changes.translation {
                     self.translations_changed();
                 } else if changes.regime {
@@ -2071,6 +2262,9 @@ mod tests {
         regimes: Vec<Regime>,
         invalidations: usize,
         installed: Vec<Vec<u8>>,
+        /// What the next native blocks return, in order: unit tests do not
+        /// run native code.
+        pub(super) exits: Vec<NativeExit>,
     }
 
     impl Host for FakeHost {
@@ -2108,7 +2302,8 @@ mod tests {
             self.installed.clear();
         }
         unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
-            unreachable!("unit tests do not run native code")
+            assert!(!self.exits.is_empty(), "unit tests do not run native code");
+            self.exits.remove(0)
         }
         fn set_regime(&mut self, regime: &Regime) {
             self.regimes.push(*regime);
@@ -2139,6 +2334,7 @@ mod tests {
             regimes: Vec::new(),
             invalidations: 0,
             installed: Vec::new(),
+            exits: Vec::new(),
         };
         let profile = CpuProfile {
             name: "test",
@@ -2158,20 +2354,20 @@ mod tests {
     fn compiles_blocks_through_the_page_and_reports_unsupported_words() {
         // add x0, x0, #1; svc #0
         let mut machine = machine(&[0x9100_0400, 0xd400_0001]);
-        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE) else {
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("block")
         };
         assert_eq!(machine.blocks[index].source_map.len(), 2);
         assert_eq!(machine.statistics.compiled, 1);
-        assert!(matches!(machine.fetch_block(BASE), Ok(Fetched::Block(i)) if i == index));
+        assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == index));
         assert_eq!(machine.statistics.compiled, 1, "cached");
         // An exclusive load is refused at its own PC with its word.
         let mut machine = machine_with(&[0x9100_0400, 0xc85f_7c20]);
-        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE) else {
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("prefix block")
         };
         assert_eq!(machine.blocks[index].source_map.len(), 1);
-        let Err(Stop::Unsupported(requirement)) = machine.fetch_block(BASE + 4) else {
+        let Err(Stop::Unsupported(requirement)) = machine.fetch_block(BASE + 4, false) else {
             panic!("refusal")
         };
         assert_eq!(requirement.pc, BASE + 4);
@@ -2199,7 +2395,7 @@ mod tests {
             .registers
             .set(SystemRegister::SCTLR_EL1, 0, sctlr);
         machine.derived_changed();
-        let Ok(Fetched::Block(checked)) = machine.fetch_block(BASE) else {
+        let Ok(Fetched::Block(checked)) = machine.fetch_block(BASE, false) else {
             panic!("checked block")
         };
         assert!(machine.blocks[checked].stack_check && has_check(&machine, checked));
@@ -2208,7 +2404,7 @@ mod tests {
             .registers
             .set(SystemRegister::SCTLR_EL1, 0, sctlr & !(1 << 3));
         machine.derived_changed();
-        let Ok(Fetched::Block(unchecked)) = machine.fetch_block(BASE) else {
+        let Ok(Fetched::Block(unchecked)) = machine.fetch_block(BASE, false) else {
             panic!("unchecked block")
         };
         assert_ne!(checked, unchecked);
@@ -2373,7 +2569,7 @@ mod tests {
         ] {
             let mut machine = guarded_machine(true);
             machine.host.ram[0x1000..0x1004].copy_from_slice(&word.to_le_bytes());
-            let Ok(Fetched::Block(index)) = machine.fetch_block(0x1000) else {
+            let Ok(Fetched::Block(index)) = machine.fetch_block(0x1000, false) else {
                 panic!("{word:#x} did not compile");
             };
             machine.cpu.pstate.btype = 0b01;
@@ -2964,6 +3160,218 @@ mod tests {
         machine.cpu.pc = BASE;
         machine.system_instruction_for_test(0xd503_24ff);
         assert_eq!(machine.cpu.pc, BASE + 4);
+    }
+
+    /// A machine with the OS lock clear and MDSCR_EL1 `mdscr`.
+    fn debug_machine(mdscr: u64) -> Machine<FakeHost, NoDevices> {
+        let mut machine = machine(&[0xd503_201f, 0xd503_201f, 0xd503_201f]);
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::OSLSR_EL1, 0, 0b1000);
+        registers.set(SystemRegister::MDSCR_EL1, 0, mdscr);
+        registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        registers.set(SystemRegister::VBAR_EL2, 0, 0x4_0000);
+        machine.derived_changed();
+        machine
+    }
+
+    #[test]
+    fn breakpoints_and_brk_follow_kde_pstate_d_and_tde() {
+        const MDE: u64 = 1 << 15;
+        const KDE: u64 = 1 << 13;
+        let mut machine = debug_machine(MDE | KDE);
+        // Breakpoint 0 at BASE + 4 for EL1 (PMC 0b01).
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::DBGBVR_EL1, 0, BASE + 4);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::DBGBCR_EL1, 0, 0b1111 << 5 | 0b01 << 1 | 1);
+        machine.cpu.set_pstate(Pstate {
+            daif: 0,
+            ..Pstate::reset(1)
+        });
+        machine.derived_changed();
+        // The instruction at BASE runs as a single-instruction block.
+        machine.host.exits.push(NativeExit::Exit {
+            next_pc: BASE + 4,
+            kind: ExitKind::Fallthrough as u64,
+        });
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        // The breakpoint is taken before BASE + 4 executes: EC 0x31, IFSC
+        // 0b100010, FAR not written.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::FAR_EL1, 0, 0x1234);
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xc600_0022);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE + 4);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x1234);
+        assert_eq!(machine.cpu.pc, 0x1_0200);
+        // With PSTATE.D set (as on exception entry) the breakpoint is masked.
+        machine.cpu.pc = BASE + 4;
+        machine.host.exits.push(NativeExit::Exit {
+            next_pc: BASE + 8,
+            kind: ExitKind::Fallthrough as u64,
+        });
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 8);
+        // MDCR_EL2.TDE routes debug exceptions, BRK included, to EL2.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::MDCR_EL2, 0, 1 << 27);
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.derived_changed();
+        machine.cpu.pc = BASE;
+        machine.system_instruction(0xd420_0020).unwrap(); // brk #1
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0xf200_0001);
+        assert_eq!(machine.cpu.pstate.el, 2);
+    }
+
+    #[test]
+    fn software_step_runs_one_instruction_then_takes_ec_0x32() {
+        const SS: u64 = 1;
+        let mut machine = debug_machine(SS);
+        // ERET from EL1 (debug disabled there: no KDE) to EL0 with SPSR.SS
+        // set makes the step active-not-pending at EL0.
+        machine.cpu.registers.set(SystemRegister::ELR_EL1, 0, BASE);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SPSR_EL1, 0, 1 << 21);
+        machine.system_instruction(0xd69f_03e0).unwrap();
+        assert!(machine.cpu.pstate.ss && machine.cpu.pstate.el == 0);
+        machine.host.exits.push(NativeExit::Exit {
+            next_pc: BASE + 4,
+            kind: ExitKind::Fallthrough as u64,
+        });
+        machine.step().unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.ss), (BASE + 4, false));
+        // Active-pending: the next instruction takes the step exception to
+        // EL1 (EC 0x32, ISS 0x22) with SPSR.SS clear.
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xca00_0022);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE + 4);
+        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1) & 1 << 21, 0);
+        assert_eq!(machine.cpu.pc, 0x1_0400);
+        // An SVC stepped from EL0 completes the step: SPSR.SS is 0.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SPSR_EL1, 0, 1 << 21);
+        machine.cpu.registers.set(SystemRegister::ELR_EL1, 0, BASE);
+        machine.system_instruction(0xd69f_03e0).unwrap();
+        machine.cpu.step_advance = true;
+        machine.system_instruction(0xd400_0001).unwrap(); // svc #0
+        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1) & 1 << 21, 0);
+    }
+
+    #[test]
+    fn watched_pages_exit_and_matching_accesses_take_ec_0x35() {
+        const MDE: u64 = 1 << 15;
+        const KDE: u64 = 1 << 13;
+        // str x1, [x0]; ldr x2, [x0, #8]
+        let mut machine = machine(&[0xf900_0001, 0xf940_0402]);
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::OSLSR_EL1, 0, 0b1000);
+        registers.set(SystemRegister::MDSCR_EL1, 0, MDE | KDE);
+        registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        // Watchpoint 0: bytes 4..=7 of the doubleword at BASE + 0x100,
+        // stores, EL1.
+        registers.set(SystemRegister::DBGWVR_EL1, 0, BASE + 0x100);
+        registers.set(
+            SystemRegister::DBGWCR_EL1,
+            0,
+            0xf0 << 5 | 0b10 << 3 | 0b01 << 1 | 1,
+        );
+        machine.cpu.set_pstate(Pstate {
+            daif: 0,
+            ..Pstate::reset(1)
+        });
+        machine.sync_regime();
+        let watch = machine.host.regimes.last().unwrap().watch;
+        assert!(watch.blocks(BASE) && !watch.blocks(BASE + 0x1000));
+        machine.cpu.state.x[0] = BASE + 0x100;
+        let watched = |address, write| {
+            NativeExit::Fault(NativeFault {
+                offset: 0,
+                address,
+                write,
+                cause: FaultCause::Watched,
+            })
+        };
+        // The store covers bytes 0..=7: a match at byte 4, EC 0x35 (same
+        // EL), WnR, DFSC 0b100010, FAR the first matching byte.
+        machine.host.exits.push(watched(BASE + 0x100, true));
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xd600_0062);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), BASE + 0x104);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+        // The load at BASE + 4 does not match: it runs once with its page
+        // passed, which then leaves the shadow again.
+        machine.cpu.set_pstate(Pstate {
+            daif: 0,
+            ..Pstate::reset(1)
+        });
+        machine.sync_regime();
+        machine.cpu.pc = BASE + 4;
+        machine.host.exits.push(watched(BASE + 0x108, false));
+        machine.host.exits.push(NativeExit::Exit {
+            next_pc: BASE + 8,
+            kind: ExitKind::Fallthrough as u64,
+        });
+        let invalidations = machine.host.invalidations;
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 8);
+        assert!(machine.host.invalidations > invalidations);
+        assert!(
+            machine
+                .host
+                .regimes
+                .iter()
+                .any(|regime| regime.watch.pass[0] == Some(BASE))
+        );
+        assert_eq!(machine.host.regimes.last().unwrap().watch.pass, [None; 2]);
+        // DC ZVA writes its whole block: the same watchpoint matches.
+        machine.cpu.pc = BASE;
+        machine.cpu.state.x[3] = BASE + 0x120;
+        machine.system_instruction(0xd50b_7423).unwrap(); // dc zva, x3
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xd600_0062);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), BASE + 0x104);
+    }
+
+    #[test]
+    fn os_lock_and_the_debug_communications_channel() {
+        let mut machine = machine(&[]);
+        // The OS lock is set at Cold reset; MSR OSLAR_EL1 clears it.
+        assert_eq!(machine.cpu.read(SystemRegister::OSLSR_EL1) & 0b10, 0b10);
+        machine.cpu.state.x[0] = 0;
+        machine.system_instruction(0xd510_1080).unwrap(); // msr oslar_el1, x0
+        assert_eq!(machine.cpu.read(SystemRegister::OSLSR_EL1) & 0b10, 0);
+        // A DBGDTRTX_EL0 write latches TXfull; nothing fills DTRRX.
+        machine.cpu.state.x[0] = 0x1234_5678;
+        machine.system_instruction(0xd513_0500).unwrap(); // msr dbgdtrtx_el0, x0
+        machine.system_instruction(0xd533_0101).unwrap(); // mrs x1, mdccsr_el0
+        assert_eq!(machine.cpu.state.x[1], 1 << 29);
+        machine.cpu.state.x[2] = 7;
+        machine.system_instruction(0xd533_0502).unwrap(); // mrs x2, dbgdtrrx_el0
+        assert_eq!(machine.cpu.state.x[2], 0);
+        assert_eq!(machine.cpu.dcc.tx, 0x1234_5678);
+        // Claim tags: SET reads every implemented tag, CLR the claim.
+        machine.cpu.state.x[0] = 0b101;
+        machine.system_instruction(0xd510_78c0).unwrap(); // msr dbgclaimset_el1, x0
+        machine.cpu.state.x[0] = 0b1;
+        machine.system_instruction(0xd510_79c0).unwrap(); // msr dbgclaimclr_el1, x0
+        machine.system_instruction(0xd530_79c3).unwrap(); // mrs x3, dbgclaimclr_el1
+        machine.system_instruction(0xd530_78c4).unwrap(); // mrs x4, dbgclaimset_el1
+        assert_eq!(
+            (machine.cpu.state.x[3], machine.cpu.state.x[4]),
+            (0b100, 0xff)
+        );
     }
 
     #[test]

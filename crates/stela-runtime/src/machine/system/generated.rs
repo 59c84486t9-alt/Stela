@@ -14389,7 +14389,7 @@ fn a167(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.read_dbgdtr();
+            let value = c.read_dbgdtr(64);
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -14412,14 +14412,14 @@ fn a167(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.read_dbgdtr();
+            let value = c.read_dbgdtr(64);
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.read_dbgdtr();
+            let value = c.read_dbgdtr(64);
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -14453,7 +14453,7 @@ fn a168(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.write_dbgdtr(value)?;
+            c.write_dbgdtr(64, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -14476,14 +14476,14 @@ fn a168(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.write_dbgdtr(value)?;
+            c.write_dbgdtr(64, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.write_dbgdtr(value)?;
+            c.write_dbgdtr(64, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -14515,7 +14515,7 @@ fn a169(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.read_dbgdtr();
+            let value = c.read_dbgdtr(32);
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -14538,14 +14538,14 @@ fn a169(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.read_dbgdtr();
+            let value = c.read_dbgdtr(32);
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.read_dbgdtr();
+            let value = c.read_dbgdtr(32);
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -14579,7 +14579,7 @@ fn a170(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.write_dbgdtr(value)?;
+            c.write_dbgdtr(32, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -14602,14 +14602,14 @@ fn a170(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.write_dbgdtr(value)?;
+            c.write_dbgdtr(32, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.write_dbgdtr(value)?;
+            c.write_dbgdtr(32, value)?;
         }
         return Ok(Effect::Done);
     }

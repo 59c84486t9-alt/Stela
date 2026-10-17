@@ -516,7 +516,10 @@ impl Generator<'_> {
                     .collect::<Result<_>>()?;
                 (format!("{helper}(c, {})", args.join(", ")), Ty::Bool)
             }
-            "Read_DBGDTR_EL0" => ("c.read_dbgdtr()".into(), Ty::Bits(Some(64))),
+            "Read_DBGDTR_EL0" => {
+                let width = node["parameters"][0]["value"].as_u64().unwrap_or(64);
+                (format!("c.read_dbgdtr({width})"), Ty::Bits(Some(64)))
+            }
             "CNTHCTL_EL2_VHE" => {
                 // The bits it makes UNKNOWN keep their stored value.
                 let (code, _) = self.bits(arguments[0])?;
@@ -659,8 +662,9 @@ impl Generator<'_> {
                     "return c.implementation_defined(false);".to_owned()
                 }
                 "Write_DBGDTR_EL0" => {
+                    let width = node["parameters"][0]["value"].as_u64().unwrap_or(64);
                     let (value, _) = self.bits(arguments[0])?;
-                    format!("{{ let value = {value}; c.write_dbgdtr(value)?; }}")
+                    format!("{{ let value = {value}; c.write_dbgdtr({width}, value)?; }}")
                 }
                 "Halt" => "return Ok(Effect::Refused(\"halting debug\"));".to_owned(),
                 _ => match self.operation(node)? {

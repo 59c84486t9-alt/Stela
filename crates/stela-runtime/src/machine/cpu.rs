@@ -151,6 +151,13 @@ pub struct Cpu {
     pub apple: AppleState,
     /// The local event register (WFE/SEV).
     pub event: bool,
+    /// Arm `ShouldAdvanceSS`: the instruction being stepped advances the
+    /// software step state machine when it completes; ERET cancels that.
+    pub step_advance: bool,
+    /// The debug communications channel.
+    pub dcc: super::debug::Dcc,
+    /// The claim tags (DBGCLAIMSET_EL1, DBGCLAIMCLR_EL1), clear at reset.
+    pub claim: u8,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
 }
@@ -237,6 +244,9 @@ impl Cpu {
             registers,
             apple: AppleState::default(),
             event: false,
+            step_advance: false,
+            dcc: super::debug::Dcc::default(),
+            claim: 0,
             amx: super::amx::Unit::default(),
         }
     }
@@ -576,7 +586,14 @@ impl Cpu {
     pub fn exception_return(&mut self, target: u64) {
         let spsr = self.read(bank(self.pstate.el).spsr);
         let illegal = self.illegal_return(spsr).is_some();
-        let (next, nzcv) = exception::restore(self.pstate, spsr, illegal);
+        let destination = match exception::spsr_target(spsr) {
+            Ok((el, _)) if !illegal => el,
+            _ => self.pstate.el,
+        };
+        let ss = super::debug::return_ss(self, spsr, destination);
+        let (mut next, nzcv) = exception::restore(self.pstate, spsr, illegal);
+        next.ss = ss;
+        self.step_advance = false;
         self.state.nzcv = nzcv;
         self.set_pstate(next);
         self.pc = if illegal && spsr & (1 << 4) != 0 {

@@ -6,6 +6,7 @@
 pub mod amx;
 pub mod apple;
 pub mod cpu;
+pub mod debug;
 pub mod engine;
 pub mod exception;
 pub mod identification;

@@ -308,8 +308,10 @@ pub trait Context {
     fn operation(&mut self, operation: Operation) -> Result<(), Effect>;
     /// The IMPLEMENTATION DEFINED register and System instruction space.
     fn implementation_defined(&mut self, read: bool) -> Result<Effect, Effect>;
-    fn read_dbgdtr(&mut self) -> u64;
-    fn write_dbgdtr(&mut self, value: u64) -> Result<(), Effect>;
+    /// `Read_DBGDTR_EL0{width}`: MRS DBGDTRRX_EL0 (32) or DBGDTR_EL0 (64).
+    fn read_dbgdtr(&mut self, width: u32) -> u64;
+    /// `Write_DBGDTR_EL0{width}`: MSR DBGDTRTX_EL0 (32) or DBGDTR_EL0 (64).
+    fn write_dbgdtr(&mut self, width: u32, value: u64) -> Result<(), Effect>;
     fn error_record(&self, register: ErrorRecord, index: u64) -> u64;
     fn set_error_record(
         &mut self,

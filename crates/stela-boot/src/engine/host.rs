@@ -452,6 +452,11 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
             );
         }
     };
+    // Watchpoints are checked after translation (Arm
+    // `AArch64_TranslateAddress`); the engine checks this access.
+    if regime.watch.blocks(address & !(PAGE - 1)) {
+        return abandon(state, frame, address, write, FaultCause::Watched);
+    }
     let page = translation.physical & !(PAGE - 1);
     let Some(host) = state.host_physical(page) else {
         let physical = translation.physical;

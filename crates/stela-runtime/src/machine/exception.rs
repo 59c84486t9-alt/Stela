@@ -22,6 +22,9 @@ pub struct Pstate {
     /// FEAT_BTI's branch type, which the next instruction is checked against
     /// in a guarded page.
     pub btype: u8,
+    /// The software step bit: set while the step state machine is
+    /// active-not-pending (`machine::debug::Step`).
+    pub ss: bool,
     /// Apple GXF: executing at the guarded level beside `el` (GL1 or GL2).
     /// SPSR does not encode it; the GL bank's ASPSR does.
     pub guarded: bool,
@@ -42,6 +45,7 @@ const SPSR_TCO: u64 = 1 << 25;
 const SPSR_SSBS: u64 = 1 << 12;
 const SPSR_IL: u64 = 1 << 20;
 const SPSR_BTYPE_SHIFT: u32 = 10;
+const SPSR_SS: u64 = 1 << 21;
 const NZCV_MASK: u64 = 0xf000_0000;
 
 impl Pstate {
@@ -58,6 +62,7 @@ impl Pstate {
             tco: false,
             il: false,
             btype: 0,
+            ss: false,
             guarded: false,
         }
     }
@@ -75,6 +80,7 @@ impl Pstate {
             | if self.ssbs { SPSR_SSBS } else { 0 }
             | if self.il { SPSR_IL } else { 0 }
             | u64::from(self.btype) << SPSR_BTYPE_SHIFT
+            | if self.ss { SPSR_SS } else { 0 }
     }
 }
 
@@ -108,6 +114,11 @@ pub fn spsr_target(spsr: u64) -> Result<(u8, bool), IllegalReturn> {
 /// SSBS and BTYPE. An illegal one keeps EL and SPSel and sets IL; UAO, DIT,
 /// SSBS and BTYPE are then ARBITRARY and Stela takes them from SPSR. Both restore NZCV, PAN and
 /// DAIF. PSTATE.SS stays 0 because MDSCR_EL1.SS is never set; TCO is untouched
+/// `SetPSTATEFromPSR`). A legal return restores EL, SPSel, IL, UAO, DIT and
+/// SSBS. An illegal one keeps EL and SPSel and sets IL; UAO, DIT and SSBS are
+/// then ARBITRARY and Stela takes them from SPSR. Both restore NZCV, PAN and
+/// DAIF. PSTATE.SS is 0 here: the caller sets it (Arm
+/// `DebugExceptionReturnSS`, `machine::debug::return_ss`). TCO is untouched
 /// because the profile has no MTE.
 pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
     let (el, sp, il) = match spsr_target(spsr) {
@@ -126,6 +137,7 @@ pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
             tco: current.tco,
             il,
             btype: ((spsr >> SPSR_BTYPE_SHIFT) & 3) as u8,
+            ss: false,
             guarded: illegal && current.guarded,
         },
         (spsr & NZCV_MASK) as u32,
@@ -160,6 +172,15 @@ pub enum Class {
     DataAbortSame = 0x25,
     SpAlignment = 0x26,
     SError = 0x2f,
+    /// Breakpoint, software step and watchpoint exceptions from a lower EL;
+    /// the same EL's class is one more.
+    BreakpointLower = 0x30,
+    BreakpointSame = 0x31,
+    StepLower = 0x32,
+    StepSame = 0x33,
+    WatchpointLower = 0x34,
+    WatchpointSame = 0x35,
+    /// BRK.
     Breakpoint = 0x3c,
     /// Apple's implementation-defined class (XNU "private exception"); its
     /// ISS selects the cause, as for AMX use while disabled (`machine::amx`).
@@ -224,6 +245,7 @@ pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool) -> Psta
         tco: from.tco,
         il: false,
         btype: 0,
+        ss: false,
         guarded: from.guarded,
     }
 }

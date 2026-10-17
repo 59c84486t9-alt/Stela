@@ -266,7 +266,10 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     );
     let mpam = crn == 10 && (crm == 5 || crm == 6 || crm == 4 && (op1 == 4 || op2 == 4));
     let records = crn == 5 && (crm == 3 && op2 == 1 || crm == 4 || crm == 5);
-    let absent_registers = register_access && (mpam || records);
+    // QEMU also leaves DBGAUTHSTATUS_EL1 and DBGPRCR_EL1 UNDEFINED, which
+    // every AArch64 PE implements.
+    let debug = matches!(word & 0xffdf_ffe0, 0xd510_7ec0 | 0xd510_1480);
+    let absent_registers = register_access && (mpam || records) || debug;
     wfi || absent
         || absent_registers
         || sme

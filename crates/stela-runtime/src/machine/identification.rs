@@ -710,13 +710,27 @@ pub const TABLE: &[Row] = &[
         "FEAT_LSE2",
         engine(false, "unaligned single-copy atomicity is not guaranteed"),
     ),
-    // ID_AA64DFR0_EL1
+    // ID_AA64DFR0_EL1: the Armv8.4 debug architecture (FEAT_Debugv8p4,
+    // implied by Armv8.6), and the breakpoint and watchpoint counts of
+    // machine::debug, which are Stela's choice.
+    fixed(ID_AA64DFR0_EL1, 0, 0b1001, "self-hosted debug of Armv8.4"),
     fixed(
         ID_AA64DFR0_EL1,
-        0,
-        6,
-        "the Armv8.0 debug architecture is mandatory; programming a breakpoint or \
-         watchpoint stops explicitly",
+        12,
+        super::debug::BREAKPOINTS - 1,
+        "breakpoints (machine::debug::BREAKPOINTS)",
+    ),
+    fixed(
+        ID_AA64DFR0_EL1,
+        20,
+        super::debug::WATCHPOINTS - 1,
+        "watchpoints (machine::debug::WATCHPOINTS)",
+    ),
+    fixed(
+        ID_AA64DFR0_EL1,
+        28,
+        super::debug::CONTEXT_AWARE - 1,
+        "context-aware breakpoints (machine::debug::CONTEXT_AWARE)",
     ),
     feature(
         ID_AA64DFR0_EL1,
@@ -1008,7 +1022,7 @@ mod tests {
         assert_eq!(value(ID_AA64PFR0_EL1) & 0xffff, 0x0011);
         assert_eq!(value(ID_AA64MMFR0_EL1) & 0xffff_ffff, 0x0f10_0025);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 20 & 0xf, 2);
-        assert_eq!(value(ID_AA64DFR0_EL1) & 0xf, 6);
+        assert_eq!(value(ID_AA64DFR0_EL1) & 0xf0f0_f00f, 0x1030_5009);
         assert_eq!(value(CTR_EL0), 0x9444_c004);
         assert_eq!(value(AIDR_EL1), 1 << 4 | 1 << 16);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
