@@ -2152,8 +2152,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     PointerAuthenticationKey::Ia => pauth::Key::Ia,
                     _ => pauth::Key::Ib,
                 };
-                // A combined authentication: a failure corrupts the pointer
-                // because the profile has no FEAT_FPACCOMBINE.
+                // A combined authentication: a failure corrupts the pointer,
+                // or with FEAT_FPACCOMBINE takes the PAC Fail exception at
+                // the ERETA* (Arm `AuthIA`, `Authenticate`).
                 match self.pointer_context()?.authenticate_operation(
                     runtime_key,
                     target,
@@ -2161,6 +2162,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     true,
                 ) {
                     Ok(result) => target = result.pointer,
+                    Err(pauth::AuthenticationError::Failure { code }) => {
+                        self.take(Exception::synchronous(
+                            Class::PointerAuthenticationFailure,
+                            u32::from(code),
+                            pc,
+                        ));
+                        return Ok(());
+                    }
                     Err(_) => {
                         return Err(self.unsupported(RequirementKind::Native(
                             "ERETAA/ERETAB authentication without its key",
@@ -3696,6 +3705,18 @@ mod tests {
         machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);
         machine.system_instruction(ERETAA).unwrap();
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x2600_0000);
+        // With FEAT_FPACCOMBINE (M6) the failed combined check takes EC 0x1C,
+        // ISS {data=0, key A=0}, at the ERETAA and the return is not made.
+        let mut machine = pac_machine();
+        machine.profile.chip = crate::machine::Chip::AppleM6;
+        machine.cpu.state.sp = 0xffff_ff80_0002_0010;
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::ELR_EL1, 0, signed);
+        registers.set(SystemRegister::SPSR_EL1, 0, 0x3c4);
+        machine.system_instruction(ERETAA).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (0x1_0200, 1));
     }
 
     #[test]
