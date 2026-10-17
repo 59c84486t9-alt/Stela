@@ -373,7 +373,8 @@ mod tests {
         }
         for (register, value) in [
             (SystemRegister::SCTLR_EL1, mmu::SCTLR_M),
-            (SystemRegister::TCR_EL1, 25 | 1 << 23),
+            // T0SZ 25, EPD1, 48-bit IPS.
+            (SystemRegister::TCR_EL1, 25 | 1 << 23 | 5 << 32),
             (SystemRegister::TTBR0_EL1, l1),
             (SystemRegister::MAIR_EL1, 0xff00),
         ] {
