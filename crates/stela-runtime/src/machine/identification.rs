@@ -529,7 +529,15 @@ pub const TABLE: &[Row] = &[
         "FEAT_LUT",
         Basis::Instructions(&[0x4e82_1020, 0x4e42_2020]),
     ),
-    // ID_AA64ISAR3_EL1: famax v0.4s and famin v0.8h, v1, v2.
+    // ID_AA64ISAR3_EL1: addpt, subpt (lsl #3), maddpt and msubpt (FEAT_CPA
+    // without CPA2's checks); famax v0.4s and famin v0.8h, v1, v2.
+    feature(
+        ID_AA64ISAR3_EL1,
+        0,
+        1,
+        "FEAT_CPA",
+        Basis::Instructions(&[0x9a02_2020, 0xda02_2c20, 0x9b62_0c20, 0x9b62_8c20]),
+    ),
     feature(
         ID_AA64ISAR3_EL1,
         4,
@@ -1205,6 +1213,7 @@ mod tests {
             (ID_AA64ISAR2_EL1, 20, Chip::AppleM5),
             (ID_AA64ISAR2_EL1, 56, Chip::AppleM6),
             (ID_AA64ISAR3_EL1, 4, Chip::AppleM6),
+            (ID_AA64ISAR3_EL1, 0, Chip::AppleM6),
         ] {
             for chip in Chip::ALL {
                 let expected = u64::from(chip >= first);

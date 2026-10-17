@@ -576,8 +576,9 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             | SystemOperation::Guarded(_)
             | SystemOperation::DebugStateOnly(_)
             | SystemOperation::Unprivileged(_)
-            | SystemOperation::Exclusive(_) => Err(Failure::Unsupported(
-                "SYS maintenance, GXF, Debug-state-only, unprivileged and exclusive forms \
+            | SystemOperation::Exclusive(_)
+            | SystemOperation::CheckedPointer(_) => Err(Failure::Unsupported(
+                "SYS maintenance, GXF, Debug-state-only, unprivileged, exclusive and CPA forms \
                  belong to the system-mode engine",
             )),
             SystemOperation::Wait { .. } => Err(Failure::Unsupported(

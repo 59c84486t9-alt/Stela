@@ -42,6 +42,10 @@ pub enum SystemOperation {
     Exclusive(
         Result<crate::aarch64::exclusive::Operand, crate::aarch64::exclusive::ConstrainedUndefined>,
     ),
+    /// ADDPT, SUBPT, MADDPT and MSUBPT (FEAT_CPA), which the runtime
+    /// completes once it has admitted the form for its CPU. Only the
+    /// system-mode profile produces it.
+    CheckedPointer(crate::aarch64::checked_pointer::Operand),
     PstateImmediate(registers::Encoding),
     SendEvent {
         local: bool,
@@ -116,6 +120,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::DebugStateOnly(_) => "debug_state_only",
         SystemOperation::Unprivileged(_) => "unprivileged",
         SystemOperation::Exclusive(_) => "exclusive",
+        SystemOperation::CheckedPointer(_) => "checked_pointer",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
         SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
@@ -208,7 +213,8 @@ pub(super) fn decode_el1_system_instruction(
 /// Decode every instruction the system-mode profile hands to the runtime: the
 /// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
 /// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, BTI, ESB,
-/// TSB and unallocated hints), and the Debug-state-only MOVT GPR/ZT0 forms.
+/// TSB and unallocated hints), the Debug-state-only MOVT GPR/ZT0 forms, and
+/// the FEAT_CPA pointer arithmetic.
 /// YIELD, CSDB, SB and DMB stay ordinary; PAuth hints belong to the PAuth
 /// decoder, which the profile consults first.
 pub fn decode_system_mode_instruction(
@@ -226,6 +232,8 @@ pub fn decode_system_mode_instruction(
         SystemOperation::DebugStateOnly(operation)
     } else if let Some(decoded) = crate::aarch64::exclusive::decode(word) {
         SystemOperation::Exclusive(decoded)
+    } else if let Some(operand) = crate::aarch64::checked_pointer::decode(word) {
+        SystemOperation::CheckedPointer(operand)
     } else if let Some(decoded) = crate::aarch64::unprivileged::decode(word) {
         // Reserved sizes and opcodes stay with the ordinary decoder.
         match decoded {
@@ -335,6 +343,45 @@ mod tests {
         for word in [0xc04f_03e0, 0xc04c_83e0, 0xc04c_03c0, 0xc04d_03e0] {
             assert!(decode_system_mode_instruction(pc, word).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn system_mode_claims_cpa_arithmetic_with_its_operands() {
+        use crate::aarch64::{
+            Register,
+            checked_pointer::{Kind, Operand},
+        };
+        let pc = GuestAddress(0x1000);
+        // ADDPT X0, X1, X2, LSL #3; SUBPT SP, SP, X2; MADDPT; MSUBPT.
+        for word in [0x9a02_2c20, 0xda02_23ff, 0x9b62_1023, 0x9b62_9025] {
+            let instruction = decode_system_mode_instruction(pc, word).unwrap().unwrap();
+            assert!(
+                matches!(instruction.operation, SystemOperation::CheckedPointer(_)),
+                "{word:#x}"
+            );
+            assert_eq!(instruction.next_pc, GuestAddress(0x1004));
+        }
+        assert_eq!(
+            decode_system_mode_instruction(pc, 0xda02_23ff)
+                .unwrap()
+                .unwrap()
+                .operation,
+            SystemOperation::CheckedPointer(Operand {
+                destination: Register::Sp,
+                kind: Kind::Offset {
+                    base: Register::Sp,
+                    offset: Register::X(2),
+                    amount: 0,
+                    subtract: true,
+                },
+            })
+        );
+        // Ordinary ADD (shifted register) is not claimed.
+        assert!(
+            decode_system_mode_instruction(pc, 0x8b02_0c20)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

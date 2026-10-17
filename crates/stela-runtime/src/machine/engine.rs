@@ -1729,6 +1729,49 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// ADDPT, SUBPT, MADDPT and MSUBPT (FEAT_CPA), UNDEFINED on a chip
+    /// without it. No Apple chip has FEAT_CPA2, so `EffectiveCPTA` and
+    /// `EffectiveCPTM` are 0 and `PointerAddCheck` and
+    /// `PointerMultiplyAddCheck` return the plain sum.
+    fn checked_pointer(
+        &mut self,
+        operand: stela_compiler::aarch64::checked_pointer::Operand,
+    ) -> Step {
+        use stela_compiler::aarch64::checked_pointer::Kind;
+        match self.profile.chip.implemented(Feature::FEAT_CPA) {
+            Ok(true) => {}
+            Ok(false) => return self.undefined(),
+            Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),
+        }
+        let (base, change, subtract) = match operand.kind {
+            Kind::Offset {
+                base,
+                offset,
+                amount,
+                subtract,
+            } => (base, self.read_register(offset) << amount, subtract),
+            Kind::Product {
+                left,
+                right,
+                base,
+                subtract,
+            } => (
+                base,
+                self.read_register(left)
+                    .wrapping_mul(self.read_register(right)),
+                subtract,
+            ),
+        };
+        let base = self.read_register(base);
+        let result = if subtract {
+            base.wrapping_sub(change)
+        } else {
+            base.wrapping_add(change)
+        };
+        self.write_register(operand.destination, result);
+        self.next()
+    }
+
     fn read_register(&self, register: Register) -> u64 {
         match register {
             Register::X(index) => self.cpu.state.x[usize::from(index)],
@@ -1961,6 +2004,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Unprivileged(operand) => self.unprivileged(operand),
             SystemOperation::Exclusive(Ok(operand)) => self.exclusive(operand),
             SystemOperation::Exclusive(Err(_)) => self.undefined(),
+            SystemOperation::CheckedPointer(operand) => self.checked_pointer(operand),
             SystemOperation::Guarded(GuardedOperation::Enter) => {
                 if self.cpu.guarded_enter().is_err() {
                     return self.undefined();
@@ -3476,6 +3520,48 @@ mod tests {
         let (enhanced, _, taken) = run(crate::machine::Chip::AppleM2);
         assert_ne!(enhanced, classic);
         assert!(taken);
+    }
+
+    #[test]
+    fn cpa_arithmetic_completes_unchecked_on_the_chips_with_feat_cpa() {
+        // addpt x0, x1, x2, lsl #3; subpt sp, sp, x2; maddpt x3, x1, x2, x4;
+        // msubpt x5, x1, x2, x4.
+        const ADDPT: u32 = 0x9a02_2c20;
+        const SUBPT_SP: u32 = 0xda02_23ff;
+        const MADDPT: u32 = 0x9b62_1023;
+        const MSUBPT: u32 = 0x9b62_9025;
+        for (chip, cpa) in [
+            (crate::machine::Chip::AppleM5, false),
+            (crate::machine::Chip::AppleM6, true),
+        ] {
+            let mut machine = machine(&[]);
+            machine.profile.chip = chip;
+            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+            let top = 0xff00_0000_0000_0000_u64;
+            machine.cpu.state.x[1] = top | 0x1000;
+            machine.cpu.state.x[2] = 0x20;
+            machine.cpu.state.x[4] = top | 0x8000;
+            machine.cpu.state.sp = 0x9000;
+            machine.system_instruction(ADDPT).unwrap();
+            if !cpa {
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+                continue;
+            }
+            for word in [SUBPT_SP, MADDPT, MSUBPT] {
+                machine.system_instruction(word).unwrap();
+            }
+            assert_eq!(machine.cpu.pc, BASE + 16);
+            // Without FEAT_CPA2 nothing marks a result whose top byte changes.
+            assert_eq!(machine.cpu.state.x[0], top | 0x1100);
+            assert_eq!(machine.cpu.state.sp, 0x8fe0);
+            let product = (top | 0x1000).wrapping_mul(0x20);
+            assert_eq!(machine.cpu.state.x[3], (top | 0x8000).wrapping_add(product));
+            assert_eq!(machine.cpu.state.x[5], (top | 0x8000).wrapping_sub(product));
+        }
     }
 
     #[test]

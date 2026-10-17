@@ -144,6 +144,7 @@ pub fn analyze_with_profile(
                     | system::SystemOperation::Wait { .. }
                     | system::SystemOperation::Unprivileged(_)
                     | system::SystemOperation::Exclusive(_)
+                    | system::SystemOperation::CheckedPointer(_)
             ) {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }
