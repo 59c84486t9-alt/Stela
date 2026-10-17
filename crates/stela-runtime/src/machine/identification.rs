@@ -479,6 +479,44 @@ pub const TABLE: &[Row] = &[
             "WFET and WFIT complete once the virtual count reaches Xt",
         ),
     ),
+    // bc.ne (FEAT_HBC).
+    feature(
+        ID_AA64ISAR2_EL1,
+        20,
+        1,
+        "FEAT_HBC",
+        Basis::Instructions(&[0x5400_0051]),
+    ),
+    // abs x0, x1; cnt w0, w1; ctz x0, x1; smax x0, x1, #5; umin w0, w1, w2.
+    feature(
+        ID_AA64ISAR2_EL1,
+        52,
+        1,
+        "FEAT_CSSC",
+        Basis::Instructions(&[
+            0xdac0_2020,
+            0x5ac0_1c20,
+            0xdac0_1820,
+            0x91c0_1420,
+            0x1ac2_6c20,
+        ]),
+    ),
+    // luti2 and luti4 v0.16b, {v1.16b}, v2[0].
+    feature(
+        ID_AA64ISAR2_EL1,
+        56,
+        1,
+        "FEAT_LUT",
+        Basis::Instructions(&[0x4e82_1020, 0x4e42_2020]),
+    ),
+    // ID_AA64ISAR3_EL1: famax v0.4s and famin v0.8h, v1, v2.
+    feature(
+        ID_AA64ISAR3_EL1,
+        4,
+        1,
+        "FEAT_FAMINMAX",
+        Basis::Instructions(&[0x4ea2_dc20, 0x6ec2_1c20]),
+    ),
     // ID_AA64MMFR0_EL1
     fixed(ID_AA64MMFR0_EL1, 0, 0b0101, "48-bit physical addresses"),
     fixed(ID_AA64MMFR0_EL1, 4, 0b0010, "16-bit ASIDs"),
@@ -994,10 +1032,19 @@ mod tests {
         let values = derive(Chip::DEFAULT, target, false);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         for row in TABLE {
-            let field = (value(row.register) >> row.shift) & 0xf;
             let Basis::Instructions(samples) = row.basis else {
                 continue;
             };
+            // Each row on the first chip with its feature.
+            let chip = row.feature.map_or(Chip::DEFAULT, |feature| {
+                Chip::ALL
+                    .into_iter()
+                    .find(|chip| has(*chip, feature))
+                    .unwrap()
+            });
+            let chip_values = derive(chip, target, false);
+            let chip_value = |register| chip_values.iter().find(|(r, _)| *r == register).unwrap().1;
+            let field = (chip_value(row.register) >> row.shift) & 0xf;
             let compiles = samples.iter().all(|word| {
                 CompilationPlan::new(
                     &word.to_le_bytes(),
@@ -1013,7 +1060,7 @@ mod tests {
             if compiles {
                 assert!(
                     field == row.level || field > row.level && field != row.absent,
-                    "{:?} field {} reads {field}",
+                    "{chip:?} {:?} field {} reads {field}",
                     row.register,
                     row.shift
                 );
@@ -1129,5 +1176,17 @@ mod tests {
         assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 20), 3);
         assert_eq!(field(Chip::AppleM3, ID_AA64MMFR1_EL1, 44), 0);
         assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 44), 1);
+        // CSSC and HBC came with the M5, LUT and FAMINMAX with the M6.
+        for (register, shift, first) in [
+            (ID_AA64ISAR2_EL1, 52, Chip::AppleM5),
+            (ID_AA64ISAR2_EL1, 20, Chip::AppleM5),
+            (ID_AA64ISAR2_EL1, 56, Chip::AppleM6),
+            (ID_AA64ISAR3_EL1, 4, Chip::AppleM6),
+        ] {
+            for chip in Chip::ALL {
+                let expected = u64::from(chip >= first);
+                assert_eq!(field(chip, register, shift), expected, "{chip:?} {shift}");
+            }
+        }
     }
 }
