@@ -256,9 +256,6 @@ pub struct Translation {
 pub struct Alignment {
     /// Device memory at either stage.
     pub device: bool,
-    /// Write-Back shareable with the data cache enabled at every stage, so
-    /// exclusive, atomic and ordered accesses may be unaligned.
-    pub relaxed: bool,
 }
 
 /// Physical memory the walker reads descriptors from.
@@ -490,7 +487,6 @@ fn full(
             size: first.size.min(second.size),
             alignment: Alignment {
                 device: first.alignment.device || second.alignment.device,
-                relaxed: first.alignment.relaxed && second.alignment.relaxed,
             },
             ..first
         }),
@@ -772,16 +768,15 @@ mod tests {
             Some((FaultKind::Alignment, false))
         );
         controls.sctlr &= !(alignment::SCTLR_A | alignment::SCTLR_C);
-        // An unaligned atomic needs SCTLR.C on Write-Back shareable memory.
-        assert_eq!(
-            alignment_fault(checked(&controls, 0x1004, atomic, KERNEL, &mut tables)),
-            Some((FaultKind::Alignment, false))
-        );
-        controls.sctlr |= alignment::SCTLR_C;
-        assert!(matches!(
-            checked(&controls, 0x1004, atomic, KERNEL, &mut tables),
-            Outcome::Mapped(_)
-        ));
+        // An unaligned atomic inside 16 bytes needs no Write-Back memory or
+        // SCTLR.C (Arm's choice for Unpredictable_LSE2_ALIGNMENT_FAULT).
+        for sctlr in [controls.sctlr, controls.sctlr | alignment::SCTLR_C] {
+            controls.sctlr = sctlr;
+            assert!(matches!(
+                checked(&controls, 0x1004, atomic, KERNEL, &mut tables),
+                Outcome::Mapped(_)
+            ));
+        }
         // Device memory (AttrIndx 1, MAIR byte 0) faults an unaligned access
         // ahead of the Permission fault EL0 would take.
         controls.mair = 0x00ff;
@@ -812,13 +807,7 @@ mod tests {
         else {
             panic!("aligned Device access")
         };
-        assert_eq!(
-            aligned.alignment,
-            Alignment {
-                device: true,
-                relaxed: false
-            }
-        );
+        assert_eq!(aligned.alignment, Alignment { device: true });
     }
 
     #[test]

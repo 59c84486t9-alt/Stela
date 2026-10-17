@@ -7,9 +7,10 @@
 //! - the single-copy-atomic granule ("Aligned quantity for atomic access")
 //!   is 16 bytes, the smallest FEAT_LSE2 allows;
 //! - Device memory does not support unaligned accesses;
-//! - an unaligned exclusive, atomic or ordered access to memory that is not
-//!   Write-Back shareable with the data cache enabled faults
-//!   (Unpredictable_LSE2_ALIGNMENT_FAULT: the fault choice).
+//! - an unaligned exclusive, atomic or ordered access to Normal memory that
+//!   is not Write-Back shareable with the data cache enabled does not fault
+//!   (Unpredictable_LSE2_ALIGNMENT_FAULT: Arm's `ConstrainUnpredictable`
+//!   choice), as native code makes it.
 
 use super::Alignment;
 
@@ -92,15 +93,7 @@ pub fn before_translation(sctlr: u64, address: u64, shape: Shape) -> bool {
 /// summarized by `memory` (pseudocode AArch64.S1HasAlignmentFaultDueToMemType and
 /// AArch64.S2HasAlignmentFaultDueToMemType).
 pub fn after_translation(memory: Alignment, address: u64, shape: Shape) -> bool {
-    let aligned = shape.aligned(address);
-    let ordered_or_atomic = matches!(shape.kind, Kind::Exclusive | Kind::Atomic | Kind::Ordered);
-    if ordered_or_atomic && !aligned && !memory.relaxed {
-        return true;
-    }
-    if !memory.device {
-        return false;
-    }
-    shape.kind == Kind::Zero || !aligned
+    memory.device && (shape.kind == Kind::Zero || !shape.aligned(address))
 }
 
 #[cfg(test)]
@@ -115,8 +108,8 @@ mod tests {
         }
     }
 
-    fn translation(device: bool, relaxed: bool) -> Alignment {
-        Alignment { device, relaxed }
+    fn translation(device: bool) -> Alignment {
+        Alignment { device }
     }
 
     #[test]
@@ -153,19 +146,18 @@ mod tests {
     }
 
     #[test]
-    fn device_memory_and_non_write_back_atomics_decide_after_translation() {
-        let device = translation(true, false);
-        let normal = translation(false, true);
-        let uncached = translation(false, false);
+    fn device_memory_alone_decides_after_translation() {
+        let device = translation(true);
+        let normal = translation(false);
         assert!(after_translation(device, 0x1004, shape(Kind::Plain, 8)));
         assert!(!after_translation(device, 0x1008, shape(Kind::Plain, 8)));
         assert!(!after_translation(normal, 0x1004, shape(Kind::Plain, 8)));
         // DC ZVA to Device memory always faults.
         assert!(after_translation(device, 0x1000, shape(Kind::Zero, 64)));
         assert!(!after_translation(normal, 0x1000, shape(Kind::Zero, 64)));
-        // An unaligned atomic needs Write-Back shareable cached memory.
+        // An unaligned atomic to Normal memory of any cacheability completes;
+        // to Device memory it faults.
         assert!(!after_translation(normal, 0x1004, shape(Kind::Atomic, 8)));
-        assert!(after_translation(uncached, 0x1004, shape(Kind::Atomic, 8)));
-        assert!(!after_translation(uncached, 0x1008, shape(Kind::Atomic, 8)));
+        assert!(after_translation(device, 0x1004, shape(Kind::Atomic, 8)));
     }
 }

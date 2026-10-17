@@ -212,7 +212,7 @@ fn disabled(
         global: true,
         asid: 0,
         size: 1 << 12,
-        alignment: stage_alignment(controls.sctlr, attributes, shareability),
+        alignment: stage_alignment(attributes),
     };
     if shape
         .is_some_and(|shape| alignment::after_translation(translation.alignment, address, shape))
@@ -222,15 +222,11 @@ fn disabled(
     (Outcome::Mapped(translation), shareability)
 }
 
-/// The alignment summary of stage-1 attributes: Device memory, and whether
-/// the memory is Write-Back shareable with SCTLR_ELx.C set, which lets
-/// atomics and ordered accesses be unaligned (pseudocode
-/// AArch64.S1HasAlignmentFaultDueToMemType).
-fn stage_alignment(sctlr: u64, attribute: u8, shareability: u8) -> Alignment {
+/// The alignment summary of stage-1 attributes: whether the memory is
+/// Device (pseudocode AArch64.S1HasAlignmentFaultDueToMemType).
+fn stage_alignment(attribute: u8) -> Alignment {
     Alignment {
         device: attributes::memory_type(attribute) == MemoryType::Device,
-        relaxed: attributes::write_back_shareable(attribute, shareability)
-            && sctlr & alignment::SCTLR_C != 0,
     }
 }
 
@@ -364,7 +360,7 @@ fn walk_enabled(
         let (mut attributes, mut memory, mut shareability) =
             attributes::of_descriptor(controls.mair, descriptor);
         let field = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
-        let alignment = stage_alignment(controls.sctlr, attributes, field);
+        let alignment = stage_alignment(attributes);
         if shape.is_some_and(|shape| alignment::after_translation(alignment, address, shape)) {
             return fault(FaultKind::Alignment, level);
         }

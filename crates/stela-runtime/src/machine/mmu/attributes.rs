@@ -146,16 +146,6 @@ pub fn forced(first: u8, field: u8) -> u8 {
     }
 }
 
-/// Normal Inner and Outer Write-Back memory that is Inner or Outer
-/// Shareable (pseudocode IsWBShareable); the reserved SH value 0b01 is
-/// taken as Outer Shareable, as in a combination.
-pub fn write_back_shareable(attribute: u8, shareability: u8) -> bool {
-    device(attribute).is_none()
-        && cacheability(attribute >> 4) == Cacheability::WriteBack
-        && cacheability(attribute & 15) == Cacheability::WriteBack
-        && shareability & 3 != NON_SHAREABLE
-}
-
 /// The SH field of a combination: the more shareable of the two (pseudocode
 /// S2CombineS1Shareability). The reserved SH value `0b01` is CONSTRAINED
 /// UNPREDICTABLE; this implementation takes it as Outer Shareable.

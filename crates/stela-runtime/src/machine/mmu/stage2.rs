@@ -210,25 +210,16 @@ pub fn translate(
         attributes: attributes::NORMAL_WRITE_BACK,
         shareability: attributes::INNER_SHAREABLE,
     });
-    let (own, own_shareability) = if forced {
-        let own = attributes::forced(first.attributes, field);
-        let shareability = attributes::combine_shareability(
-            first.shareability,
-            descriptor_shareability(descriptor),
-        );
-        (own, attributes::effective_shareability(own, shareability))
+    let own = if forced {
+        attributes::forced(first.attributes, field)
     } else {
         match attributes::of_stage2(field) {
-            Some(own) => (own, descriptor_shareability(descriptor)),
+            Some(own) => own,
             None => return Err(Stop::Unsupported(Unsupported::Stage2Attributes { field })),
         }
     };
     let device = attributes::memory_type(own) == MemoryType::Device;
-    let alignment = Alignment {
-        device,
-        relaxed: attributes::write_back_shareable(own, own_shareability)
-            && stage2.hcr & HCR_CD == 0,
-    };
+    let alignment = Alignment { device };
     if shape.is_some_and(|shape| alignment::after_translation(alignment, ipa, shape)) {
         return Err(fault(FaultKind::Alignment, level));
     }
