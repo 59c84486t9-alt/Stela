@@ -97,6 +97,20 @@ pub struct Inputs<'a> {
     pub root_hash: Option<RootHash<'a>>,
 }
 
+impl Inputs<'_> {
+    /// The guest DRAM base of the target board, from its DeviceTree or its
+    /// SoC (`soc::board_dram_base`); `None` when the target names no chip.
+    pub fn dram_base(&self) -> Result<Option<u64>> {
+        self.target
+            .chip_id
+            .map(|chip_id| {
+                stela_runtime::machine::soc::board_dram_base(self.device_tree.bytes, chip_id)
+                    .map_err(anyhow::Error::msg)
+            })
+            .transpose()
+    }
+}
+
 /// A sealed root volume and its root-hash `IM4P`.
 pub struct RootHash<'a> {
     pub volume: SealedVolume,
@@ -147,17 +161,17 @@ pub struct Options {
 /// generic timer, and Reduced Security with SIP enabled.
 impl Options {
     /// These options with guest DRAM, and the physical base at the same
-    /// distance into it, at the base of the SoC with `chip_id`.
-    pub fn placed_for(&self, chip_id: Option<u32>) -> Result<Self> {
-        let Some(chip_id) = chip_id else {
-            return Ok(self.clone());
+    /// distance into it, at `base` (a board's [`Inputs::dram_base`]); `None`
+    /// keeps them.
+    pub fn placed_at(&self, base: Option<u64>) -> Self {
+        let Some(base) = base else {
+            return self.clone();
         };
-        let base = stela_runtime::machine::soc::dram_base(chip_id).map_err(anyhow::Error::msg)?;
-        Ok(Self {
+        Self {
             dram_base: base,
             phys_base: base + (self.phys_base - self.dram_base),
             ..self.clone()
-        })
+        }
     }
 }
 
@@ -569,8 +583,7 @@ fn source_of(input: &Input) -> Source {
 }
 
 pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
-    if let Some(chip_id) = inputs.target.chip_id {
-        let base = stela_runtime::machine::soc::dram_base(chip_id).map_err(anyhow::Error::msg)?;
+    if let (Some(chip_id), Some(base)) = (inputs.target.chip_id, inputs.dram_base()?) {
         ensure!(
             options.dram_base == base,
             "guest DRAM base {:#x} is not ApChipID {chip_id:#x}'s {base:#x}",
@@ -1479,9 +1492,9 @@ mod tests {
                 value: 1u32.to_le_bytes().to_vec(),
             }],
         };
-        // DRAM must sit at the target SoC's base: an M2 Pro's placement is
-        // refused for the M2, whose own base `placed_for` restores.
-        let elsewhere = options.placed_for(Some(0x6020))?;
+        // DRAM must sit at the target board's base: an M2 Pro's placement is
+        // refused for the M2, whose own base `placed_at` restores.
+        let elsewhere = options.placed_at(Some(0x100_0000_0000));
         assert_eq!(
             (elsewhere.dram_base, elsewhere.phys_base),
             (0x100_0000_0000, 0x100_0000_0000)
@@ -1492,7 +1505,7 @@ mod tests {
             "{refusal}"
         );
         assert_eq!(
-            elsewhere.placed_for(Some(0x8112))?.dram_base,
+            elsewhere.placed_at(inputs.dram_base()?).dram_base,
             options.dram_base
         );
         let bundle = prepare(&inputs, &options)?;

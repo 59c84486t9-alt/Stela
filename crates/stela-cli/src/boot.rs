@@ -550,7 +550,7 @@ impl Prepare {
                 im4p: decoded.as_ref().map(input),
             }),
         };
-        let options = self.options(self.restore || self.recovery, inputs.target.chip_id)?;
+        let options = self.options(self.restore || self.recovery, inputs.dram_base()?)?;
         let bundle = boot_bundle::prepare(&inputs, &options)?;
         let provenance = serde_json::json!({
             "archive": {
@@ -564,14 +564,11 @@ impl Prepare {
 
     /// The bundle options from the command line; `ramdisk_boot` picks the
     /// restore defaults for boot-args and the OS environment.
-    fn options(&self, ramdisk_boot: bool, chip_id: Option<u32>) -> Result<Options> {
-        let dram_base = match (self.dram_base, chip_id) {
-            (Some(base), _) => base,
-            (None, Some(chip_id)) => {
-                stela_runtime::machine::soc::dram_base(chip_id).map_err(anyhow::Error::msg)?
-            }
-            (None, None) => Options::default().dram_base,
-        };
+    fn options(&self, ramdisk_boot: bool, board_dram_base: Option<u64>) -> Result<Options> {
+        let dram_base = self
+            .dram_base
+            .or(board_dram_base)
+            .unwrap_or(Options::default().dram_base);
         Ok(Options {
             dram_base,
             dram_size: self.dram_size,

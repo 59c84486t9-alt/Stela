@@ -21,7 +21,8 @@ use alloc::{format, string::String, vec::Vec};
 /// of the M3 and later have no event offset here. `dram_base` is where the
 /// SoC places DRAM (the `memory@` node of Linux `t8103-jxxx.dtsi`,
 /// `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and `t600x-j375.dtsi`, which the
-/// t602x boards include); the SoCs without a public memory node have none.
+/// t602x boards include); the SoCs without a public memory node have none,
+/// and their boards state it in their DeviceTree ([`board_dram_base`]).
 struct Soc {
     chip_id: u32,
     name: &'static str,
@@ -163,6 +164,30 @@ pub fn dram_base(chip_id: u32) -> Result<u64, String> {
         .find(|soc| soc.chip_id == chip_id)
         .and_then(|soc| soc.dram_base)
         .ok_or_else(|| format!("ApChipID {chip_id:#x} has no public DRAM base"))
+}
+
+/// The guest DRAM base of a board whose SoC is `chip_id`: its DeviceTree's
+/// `/arm-io/mcc` `dram-base`, which the M3 and later boards state, or else
+/// the SoC's public base ([`dram_base`]). Where both exist they must agree.
+pub fn board_dram_base(tree: &[u8], chip_id: u32) -> Result<u64, String> {
+    let root = Node::root(tree).ok_or("DeviceTree has no root")?;
+    let stated = root
+        .child("arm-io")
+        .and_then(|io| io.child("mcc"))
+        .and_then(|mcc| mcc.property("dram-base"))
+        .map(|bytes| {
+            <[u8; 8]>::try_from(bytes)
+                .map(u64::from_le_bytes)
+                .map_err(|_| "/arm-io/mcc dram-base is not 8 bytes")
+        })
+        .transpose()?;
+    match (stated, dram_base(chip_id)) {
+        (Some(stated), Ok(public)) if stated != public => Err(format!(
+            "/arm-io/mcc dram-base {stated:#x} is not ApChipID {chip_id:#x}'s {public:#x}"
+        )),
+        (Some(stated), _) => Ok(stated),
+        (None, public) => public,
+    }
 }
 
 /// One `/cpus` node: its `cluster-type` letter and `reg`.
@@ -530,6 +555,32 @@ mod tests {
                 io,
             ],
         )
+    }
+
+    #[test]
+    fn a_board_states_its_dram_base_or_takes_its_socs() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let with_base = |base: Option<&[u8]>| {
+            let mcc = base.map(|base| encode(&[("name", &z("mcc")), ("dram-base", base)], &[]));
+            encode(
+                &[("name", &z("device-tree"))],
+                &[encode(&[("name", &z("arm-io"))], mcc.as_slice())],
+            )
+        };
+        let m3 = 0x8122;
+        let stated = 0x100_0000_0000_u64.to_le_bytes();
+        // The M3's base is in its DeviceTree only.
+        assert_eq!(
+            board_dram_base(&with_base(Some(&stated)), m3),
+            Ok(0x100_0000_0000)
+        );
+        assert!(board_dram_base(&with_base(None), m3).is_err());
+        // The M2's board states none and takes the public base; a stated base
+        // must agree with it.
+        assert_eq!(board_dram_base(&with_base(None), 0x8112), Ok(0x8_0000_0000));
+        assert!(board_dram_base(&with_base(Some(&stated)), 0x8112).is_err());
+        assert!(board_dram_base(&with_base(Some(&[0; 4])), m3).is_err());
     }
 
     #[test]
