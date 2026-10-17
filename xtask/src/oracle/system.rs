@@ -278,6 +278,7 @@ fn profile(target: TargetCpu, el2: bool) -> CpuProfile {
         },
         counter_frequency: 24_000_000,
         fixed,
+        processors: Vec::new(),
     }
 }
 

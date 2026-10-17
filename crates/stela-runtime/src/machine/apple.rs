@@ -33,7 +33,6 @@ pub struct AppleDevices {
     bus: Bus,
     latch: InterruptLatch,
     aic: Option<DeviceId>,
-    cpu: CpuIndex,
     reset: Option<String>,
 }
 
@@ -57,14 +56,20 @@ fn describe(error: MmioError) -> DeviceError {
     }
 }
 
+impl Default for AppleDevices {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppleDevices {
-    /// Devices of the PE numbered `cpu` (0 is the DeviceTree's running cpu0).
-    pub fn new(cpu: CpuIndex) -> Self {
+    /// The board's devices; PE numbers are the DeviceTree's cpu numbers, 0
+    /// being the running cpu0.
+    pub fn new() -> Self {
         Self {
             bus: Bus::new(),
             latch: InterruptLatch::new(),
             aic: None,
-            cpu,
             reset: None,
         }
     }
@@ -124,8 +129,14 @@ impl AppleDevices {
             .map_err(|error| format!("AIC2 placement: {error:?}"))
     }
 
-    /// Forward queued device wires into the AIC and record a reset request.
-    fn settle(&mut self, now: u64, reset: Option<String>) -> Result<(), DeviceError> {
+    /// Forward queued device wires into the AIC and record a reset request;
+    /// `cpu` is the PE whose access or time step queued them.
+    fn settle(
+        &mut self,
+        cpu: CpuIndex,
+        now: u64,
+        reset: Option<String>,
+    ) -> Result<(), DeviceError> {
         if self.reset.is_none() {
             self.reset = reset;
         }
@@ -140,7 +151,7 @@ impl AppleDevices {
                     inputs[0].0
                 )));
             };
-            let mut access = Access::new(self.cpu, now, &mut self.latch);
+            let mut access = Access::new(cpu, now, &mut self.latch);
             let controller = self
                 .bus
                 .device_mut::<Aic2>(aic)
@@ -169,33 +180,40 @@ fn reset_reason(access: &Access<'_>) -> Option<String> {
 }
 
 impl Devices for AppleDevices {
-    fn read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+    fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
         let width = width(bytes)?;
-        let mut access = Access::new(self.cpu, now, &mut self.latch);
+        let mut access = Access::new(cpu, now, &mut self.latch);
         let value = self
             .bus
             .read(physical, width, &mut access)
             .map_err(describe)?;
         let reset = reset_reason(&access);
-        self.settle(now, reset)?;
+        self.settle(cpu, now, reset)?;
         Ok(value)
     }
 
-    fn write(&mut self, physical: u64, bytes: u8, value: u64, now: u64) -> Result<(), DeviceError> {
+    fn write(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         let width = width(bytes)?;
-        let mut access = Access::new(self.cpu, now, &mut self.latch);
+        let mut access = Access::new(cpu, now, &mut self.latch);
         self.bus
             .write(physical, width, value, &mut access)
             .map_err(describe)?;
         let reset = reset_reason(&access);
-        self.settle(now, reset)
+        self.settle(cpu, now, reset)
     }
 
-    fn lines(&mut self, now: u64) -> Lines {
-        let mut access = Access::new(self.cpu, now, &mut self.latch);
+    fn lines(&mut self, cpu: usize, now: u64) -> Lines {
+        let mut access = Access::new(cpu, now, &mut self.latch);
         let advanced = self.bus.advance(&mut access);
         let reset = reset_reason(&access);
-        let settled = self.settle(now, reset);
+        let settled = self.settle(cpu, now, reset);
         if let Err(error) = advanced.map_err(describe).and(settled)
             && self.reset.is_none()
         {
@@ -203,7 +221,7 @@ impl Devices for AppleDevices {
             // would, with the model's own reason.
             self.reset = Some(format!("device advance refused: {error:?}"));
         }
-        let pins = self.latch.pins(self.cpu);
+        let pins = self.latch.pins(cpu);
         Lines {
             irq: pins.irq,
             fiq: pins.fiq,
@@ -211,7 +229,9 @@ impl Devices for AppleDevices {
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {
-        let mut access = Access::new(self.cpu, now, &mut self.latch);
+        // Time-driven state is the board's, not a PE's: the access names
+        // cpu0.
+        let mut access = Access::new(0, now, &mut self.latch);
         self.bus.advance(&mut access).ok().flatten()
     }
 
@@ -240,7 +260,7 @@ mod tests {
     #[test]
     fn routes_the_console_and_refuses_unmapped_and_unknown_registers() {
         let console = Console::default();
-        let mut devices = AppleDevices::new(0);
+        let mut devices = AppleDevices::new();
         devices
             .add_uart(
                 console.clone(),
@@ -252,26 +272,28 @@ mod tests {
             )
             .unwrap();
         // UTRSTAT reports an empty transmitter; UTXH sends one byte.
-        assert_eq!(devices.read(UART + 0x10, 4, 0).unwrap() & 6, 6);
+        assert_eq!(devices.read(0, UART + 0x10, 4, 0).unwrap() & 6, 6);
         for byte in *b"ok" {
-            devices.write(UART + 0x20, 4, u64::from(byte), 0).unwrap();
+            devices
+                .write(0, UART + 0x20, 4, u64::from(byte), 0)
+                .unwrap();
         }
         assert_eq!(console.0.borrow().as_slice(), b"ok");
         assert_eq!(
-            devices.read(0x2_0000_0000, 4, 0),
+            devices.read(0, 0x2_0000_0000, 4, 0),
             Err(DeviceError::NoDevice)
         );
         assert!(matches!(
-            devices.read(UART + 0x3c, 4, 0),
+            devices.read(0, UART + 0x3c, 4, 0),
             Err(DeviceError::Refused(reason)) if reason.contains("UVER")
         ));
-        assert!(!devices.lines(0).irq);
+        assert!(!devices.lines(0, 0).irq);
         assert_eq!(devices.take_reset(), None);
     }
 
     #[test]
     fn places_an_aic2_with_derived_counts_and_routes_uart_wires_to_it() {
-        let mut devices = AppleDevices::new(0);
+        let mut devices = AppleDevices::new();
         devices
             .add_uart(
                 Console::default(),
@@ -284,7 +306,7 @@ mod tests {
             .unwrap();
         devices.add_aic(0x2_3b0c_0000, 1152, 0x8000).unwrap();
         // CAP0 (offset 4) reports NR_IRQ in bits 15:0.
-        assert_eq!(devices.read(0x2_3b0c_0004, 4, 0).unwrap() & 0xffff, 1152);
+        assert_eq!(devices.read(0, 0x2_3b0c_0004, 4, 0).unwrap() & 0xffff, 1152);
         assert!(devices.add_aic(0x2_3b0c_0000, 1152, 0x10).is_err());
     }
 }

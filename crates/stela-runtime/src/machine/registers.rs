@@ -31,6 +31,18 @@ pub struct CpuProfile {
     pub name: &'static str,
     pub counter_frequency: u64,
     pub fixed: Vec<(Encoding, u64)>,
+    /// The board's PEs, numbered as the devices number them, each with the
+    /// values that differ between PEs. Empty for a uniprocessor described by
+    /// `fixed` alone.
+    pub processors: Vec<Identity>,
+}
+
+/// The identification values one PE does not share with the others; they
+/// replace `fixed` entries of the same registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    pub midr: u64,
+    pub mpidr: u64,
 }
 
 /// Encodings named by the Arm ARM and by m1n1 `cpu_regs.h`.

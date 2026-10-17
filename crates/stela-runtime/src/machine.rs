@@ -21,4 +21,4 @@ pub use engine::{
     DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,
     NativeFault, NoDevices, Regime, Requirement, RequirementKind, Statistics, Stop,
 };
-pub use registers::{CpuProfile, Lines};
+pub use registers::{CpuProfile, Identity, Lines};

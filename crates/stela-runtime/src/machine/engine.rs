@@ -2,6 +2,7 @@
 //! every exit back from native code.
 mod amx;
 mod exclusive;
+mod processors;
 mod system;
 mod unprivileged;
 mod watch;
@@ -186,14 +187,22 @@ pub enum DeviceError {
     Refused(String),
 }
 
-/// The board's devices on the guest physical bus. `now` is the system
-/// counter value (24 MHz ticks) of the access.
+/// The board's devices on the guest physical bus. `cpu` is the number of the
+/// PE making the access, as [`CpuProfile::processors`] numbers it, and `now`
+/// is the system counter value (24 MHz ticks) of the access.
 pub trait Devices {
-    fn read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
-    fn write(&mut self, physical: u64, bytes: u8, value: u64, now: u64) -> Result<(), DeviceError>;
+    fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
+    fn write(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Result<(), DeviceError>;
     /// Bring time-driven state up to `now` and report the interrupt lines
-    /// the devices drive into this PE.
-    fn lines(&mut self, now: u64) -> Lines;
+    /// the devices drive into PE `cpu`.
+    fn lines(&mut self, cpu: usize, now: u64) -> Lines;
     /// The next counter value at which a device changes state by itself.
     fn deadline(&mut self, _now: u64) -> Option<u64> {
         None
@@ -202,19 +211,30 @@ pub trait Devices {
     fn take_reset(&mut self) -> Option<String> {
         None
     }
+    /// A PE the guest released from reset through a device, once.
+    fn take_start(&mut self) -> Option<Start> {
+        None
+    }
+}
+
+/// A powered-off PE leaves reset at `address` (its RVBAR) in EL2h.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Start {
+    pub cpu: usize,
+    pub address: u64,
 }
 
 /// A bus with no devices: every access is [`DeviceError::NoDevice`].
 pub struct NoDevices;
 
 impl Devices for NoDevices {
-    fn read(&mut self, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+    fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
         Err(DeviceError::NoDevice)
     }
-    fn write(&mut self, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+    fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
         Err(DeviceError::NoDevice)
     }
-    fn lines(&mut self, _: u64) -> Lines {
+    fn lines(&mut self, _: usize, _: u64) -> Lines {
         Lines::default()
     }
 }
@@ -342,7 +362,7 @@ impl fmt::Display for Requirement {
 pub enum Stop {
     /// The block budget ran out.
     Budget,
-    /// WFI or WFE with no interrupt able to wake the PE.
+    /// Every PE is off or waits in WFI or WFE with nothing able to wake it.
     Idle,
     /// A device carried out the guest's reset or power-off request.
     Reset(String),
@@ -359,6 +379,8 @@ pub struct Statistics {
     pub device_accesses: u64,
     pub code_discards: u64,
     pub waits: u64,
+    /// Changes of the running PE.
+    pub switches: u64,
 }
 
 struct Block {
@@ -415,6 +437,7 @@ fn is_floating_point(word: u32) -> bool {
 }
 
 pub struct Machine<H: Host, D: Devices> {
+    /// The running PE.
     pub cpu: Cpu,
     pub host: H,
     pub devices: D,
@@ -449,6 +472,14 @@ pub struct Machine<H: Host, D: Devices> {
     debug: Option<DebugMode>,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
+    /// The number of the running PE.
+    current: usize,
+    /// The WFI or WFE the running PE waits in, until it wakes.
+    waiting: Option<WaitKind>,
+    /// Every PE by number; the running one's state is `cpu`.
+    peers: Vec<processors::Peer>,
+    /// The block count at which the running PE's time slice ends.
+    slice_end: u64,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -489,7 +520,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             event_sample: None,
             debug: None,
             watch: Watch::default(),
+            current: 0,
+            waiting: None,
+            peers: Vec::new(),
+            slice_end: processors::QUANTUM,
         };
+        machine.peers = processors::boot(&machine.profile);
         machine.load_profile();
         machine.sync_regime();
         machine
@@ -611,7 +647,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn lines(&mut self) -> Lines {
         let now = self.host.counter();
-        let device = self.devices.lines(now);
+        let device = self.devices.lines(self.current, now);
         // A timer signals exactly when the count reaches its deadline, which
         // only System register writes change.
         let deadline = self.timer_deadline();
@@ -720,7 +756,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if budget != 0 && self.statistics.blocks >= budget {
                 return Stop::Budget;
             }
-            if let Err(stop) = self.step() {
+            if let Err(stop) = self.schedule().and_then(|()| self.step()) {
                 return stop;
             }
         }
@@ -993,6 +1029,22 @@ fn floating_point_trap(cpu: &Cpu) -> Option<u8> {
         0b01 if !(el == 0 && cpu.in_host()) => None,
         _ => Some(2),
     }
+}
+
+/// Arm `AArch64_InterruptPending`: a physical IRQ or FIQ line, or at EL0
+/// and EL1 outside the host a virtual IRQ, FIQ or SError that
+/// HCR_EL2.{IMO,FMO,AMO} route and {VI,VF,VSE} hold, masked or not.
+fn interrupt_pending(cpu: &Cpu, lines: Lines) -> bool {
+    if lines.irq || lines.fiq {
+        return true;
+    }
+    let hcr = cpu.read(SystemRegister::HCR_EL2);
+    let routed = |routing: u32, pending: u32| {
+        hcr & (1 << routing | 1 << pending) == 1 << routing | 1 << pending
+    };
+    cpu.pstate.el != 2
+        && hcr & (1 << HCR_TGE) == 0
+        && (routed(HCR_IMO, HCR_VI) || routed(HCR_FMO, HCR_VF) || routed(HCR_AMO, HCR_VSE))
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
@@ -1670,7 +1722,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return self.alignment_fault(address, false);
             }
             let now = self.host.counter();
-            let raw = match self.devices.read(physical, bytes, now) {
+            let raw = match self.devices.read(self.current, physical, bytes, now) {
                 Ok(value) => value,
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
                 Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
@@ -1706,7 +1758,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let value = self.read_register(store.source_register());
             let now = self.host.counter();
-            match self.devices.write(physical, bytes, value, now) {
+            match self
+                .devices
+                .write(self.current, physical, bytes, value, now)
+            {
                 Ok(()) => {}
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
                 Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
@@ -1784,8 +1839,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 | Synchronization::Yield
                 | Synchronization::ConsumptionBarrier
                 | Synchronization::SpeculationBarrier => {
-                    // One coherent PE without external observers: completion
-                    // and hints have no further effect.
+                    // One PE runs at a time and its accesses complete in
+                    // program order before another runs (`processors`):
+                    // completion and hints have no further effect.
                     self.next()
                 }
                 Synchronization::SendEvent { .. } | Synchronization::Wait { .. } => {
@@ -1793,8 +1849,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 Synchronization::InstructionSynchronization { .. } => self.next(),
             },
-            SystemOperation::SendEvent { .. } => {
-                self.cpu.event = true;
+            SystemOperation::SendEvent { local } => {
+                self.send_event(local);
                 self.next()
             }
             SystemOperation::Wait {
@@ -2106,47 +2162,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc).to(2));
             return Ok(());
         }
-        while !self.interrupt_pending() {
-            let now = self.host.counter();
-            let mut event = None;
-            if kind == WaitKind::Event {
-                self.sample_events(now);
-                if self.cpu.event {
-                    self.cpu.event = false;
-                    break;
-                }
-                event = timer::next_event(&self.cpu, now);
-            }
-            let deadline = [self.timer_deadline(), self.devices.deadline(now), event]
-                .into_iter()
-                .flatten()
-                .min();
-            if deadline.is_none() {
-                return Err(Stop::Idle);
-            }
-            self.statistics.waits += 1;
-            self.host.arm_timer(deadline);
-            self.host.wait_for_interrupt();
-        }
-        self.host.arm_timer(None);
-        self.next()
+        // The PE waits until the scheduler finds it woken
+        // (`processors::Peer::ready`) and completes the instruction.
+        self.waiting = Some(kind);
+        Ok(())
     }
 
-    /// Arm `AArch64_InterruptPending`: a physical IRQ or FIQ line, or at EL0
-    /// and EL1 outside the host a virtual IRQ, FIQ or SError that
-    /// HCR_EL2.{IMO,FMO,AMO} route and {VI,VF,VSE} hold, masked or not.
+    /// Arm `AArch64_InterruptPending` for the running PE.
     fn interrupt_pending(&mut self) -> bool {
         let lines = self.lines();
-        if lines.irq || lines.fiq {
-            return true;
-        }
-        let hcr = self.cpu.read(SystemRegister::HCR_EL2);
-        let routed = |routing: u32, pending: u32| {
-            hcr & (1 << routing | 1 << pending) == 1 << routing | 1 << pending
-        };
-        self.cpu.pstate.el != 2
-            && hcr & (1 << HCR_TGE) == 0
-            && (routed(HCR_IMO, HCR_VI) || routed(HCR_FMO, HCR_VF) || routed(HCR_AMO, HCR_VSE))
+        interrupt_pending(&self.cpu, lines)
     }
 
     /// SYS and SYSL: the generated accessor of an architectural System
@@ -2326,6 +2351,16 @@ mod tests {
     pub(super) const BASE: u64 = 0x8_0000_0000;
 
     pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
+        board(words, NoDevices, Vec::new())
+    }
+
+    /// A machine running `words` at BASE on PE 0 at EL1, with `devices` and
+    /// the PEs of `processors`.
+    pub(super) fn board<D: Devices>(
+        words: &[u32],
+        devices: D,
+        processors: Vec<registers::Identity>,
+    ) -> Machine<FakeHost, D> {
         let mut ram = vec![0u8; 0x10000];
         for (index, word) in words.iter().enumerate() {
             ram[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
@@ -2343,11 +2378,12 @@ mod tests {
             name: "test",
             counter_frequency: 24_000_000,
             fixed: vec![(registers::encodings::DCZID_EL0, 4)],
+            processors,
         };
         Machine::new(
             Cpu::new(BASE, Pstate::reset(1)),
             host,
-            NoDevices,
+            devices,
             profile,
             TargetCpu::Baseline,
         )
@@ -2468,7 +2504,7 @@ mod tests {
         machine.system_instruction(0xd51b_e300).unwrap(); // msr cntv_tval_el0, x0
         machine.cpu.state.x[0] = 1;
         machine.system_instruction(0xd51b_e320).unwrap(); // msr cntv_ctl_el0, x0
-        machine.system_instruction(0xd503_207f).unwrap(); // wfi
+        wait(&mut machine, 0xd503_207f).unwrap(); // wfi
         assert_eq!(machine.host.now, 2000);
         // The FIQ is masked by DAIF until it is cleared.
         assert!(!machine.deliver_interrupts());
@@ -2483,7 +2519,13 @@ mod tests {
             .registers
             .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
         machine.derived_changed();
-        assert_eq!(machine.system_instruction(0xd503_207f), Err(Stop::Idle));
+        assert_eq!(wait(&mut machine, 0xd503_207f), Err(Stop::Idle));
+    }
+
+    /// Execute WFI or WFE and schedule as `Machine::run` does next.
+    fn wait(machine: &mut Machine<FakeHost, NoDevices>, word: u32) -> Step {
+        machine.system_instruction(word)?;
+        machine.schedule()
     }
 
     /// Maps VA 0-1 GiB to BASE, EL1-only read/write and executable, with the
@@ -2612,17 +2654,17 @@ mod tests {
             .cpu
             .registers
             .set(SystemRegister::CNTHCTL_EL2, 0, 1 << 2 | 9 << 4);
-        machine.system_instruction(WFE).unwrap();
+        wait(&mut machine, WFE).unwrap();
         assert!(machine.host.now > start && !machine.cpu.event);
         // An edge since the last sample sets the event register, so WFE
         // completes without waiting.
         machine.host.now += 1024;
         let now = machine.host.now;
-        machine.system_instruction(WFE).unwrap();
+        wait(&mut machine, WFE).unwrap();
         assert_eq!((machine.host.now, machine.cpu.event), (now, false));
         // Without a stream, timer or device, WFE is a terminal idle state.
         machine.cpu.registers.set(SystemRegister::CNTHCTL_EL2, 0, 0);
-        assert_eq!(machine.system_instruction(WFE), Err(Stop::Idle));
+        assert_eq!(wait(&mut machine, WFE), Err(Stop::Idle));
     }
 
     #[test]

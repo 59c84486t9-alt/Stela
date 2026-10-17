@@ -22,10 +22,10 @@ use core::{
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
-    Cpu, CpuProfile, Event, Machine, Stop,
+    Cpu, CpuProfile, Event, Identity, Machine, Stop,
     apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
-    registers::encodings::{DCZID_EL0, MIDR_EL1, MPIDR_EL1},
+    registers::encodings::DCZID_EL0,
     system::Register,
 };
 use stela_runtime::pc::storage::Target;
@@ -175,33 +175,43 @@ fn test_profile() -> CpuProfile {
         name: "stela-test-kernel",
         counter_frequency: 24_000_000,
         fixed: alloc::vec![(DCZID_EL0, 4)],
+        processors: Vec::new(),
     }
 }
 
-/// The M2 Mac mini (J473AP) profile, running as cpu0 with EL2 as a VHE host.
-/// The ID_AA64* and CTR_EL0 registers advertise what this engine implements,
-/// capped at the M2's features (`machine::identification`); MIDR, MPIDR and
-/// DCZID are the board's own values. Every other identification read refuses.
+/// The M2 Mac mini (J473AP) profile: eight PEs, cpu0 running with EL2 as a
+/// VHE host. The ID_AA64* and CTR_EL0 registers advertise what this engine
+/// implements, capped at the M2's features (`machine::identification`);
+/// MIDR, MPIDR and DCZID are the board's own values. Every other
+/// identification read refuses.
 fn j473_profile(target: TargetCpu) -> CpuProfile {
     let mut fixed = stela_runtime::machine::identification::derive(target, true);
-    fixed.extend([
-        // Apple's DeviceTree gives cpu0 `reg` 0 (cpu4 is 0x100: Aff1 is
-        // the cluster), and MPIDR_EL1 bit 31 is RES1. U and MT are 0 for
-        // a multiprocessor without multithreading (inferred).
-        (MPIDR_EL1, 0x8000_0000),
-        // Implementer 0x61 (Apple), architecture 0xF and part 0x032
-        // (m1n1 `midr.h` MIDR_PART_T8112_BLIZZARD, cpu0's `apple,blizzard`).
-        // Variant and revision are unknown and taken as 0 until a
-        // reference capture supplies them.
-        (MIDR_EL1, 0x611f_0320),
-        // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s`
-        // zeroes with `dc zva` in fixed 64-byte steps.
-        (DCZID_EL0, 4),
-    ]);
+    // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
+    // `dc zva` in fixed 64-byte steps.
+    fixed.push((DCZID_EL0, 4));
+    // Apple's DeviceTree gives cpu0-3 `reg` 0-3 and `compatible`
+    // `apple,blizzard`, cpu4-7 `reg` 0x100-0x103 and `apple,avalanche`:
+    // Aff1 is the cluster and Aff0 the core, and MPIDR_EL1 bit 31 is RES1.
+    // U and MT are 0 for a multiprocessor without multithreading (inferred).
+    // MIDR_EL1 is implementer 0x61 (Apple), architecture 0xF and part 0x032
+    // (m1n1 `midr.h` MIDR_PART_T8112_BLIZZARD) or 0x033
+    // (MIDR_PART_T8112_AVALANCHE); variant and revision are unknown and taken
+    // as 0 until a reference capture supplies them. The clusters are taken to
+    // share every other identification value (inferred).
+    let processors = (0..8)
+        .map(|cpu: u64| {
+            let (cluster, core) = (cpu / 4, cpu % 4);
+            Identity {
+                midr: 0x611f_0320 | cluster << 4,
+                mpidr: 0x8000_0000 | cluster << 8 | core,
+            }
+        })
+        .collect();
     CpuProfile {
         name: "apple-j473",
         counter_frequency: 24_000_000,
         fixed,
+        processors,
     }
 }
 
@@ -321,7 +331,7 @@ fn devices(tree: Option<&[u8]>, now: u64) -> Result<AppleDevices, String> {
             (ARM_IO + J473_AIC.0, J473_AIC.1),
         ),
     };
-    let mut devices = AppleDevices::new(0);
+    let mut devices = AppleDevices::new();
     devices
         .add_uart(GuestConsole::default(), &[uart.0], Some(uart.1))
         .map_err(|error| alloc::format!("UART placement: {error:?}"))?;
@@ -616,7 +626,9 @@ fn finish(machine: &Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -
     }
     match stop {
         Stop::Idle => {
-            output::arguments(format_args!("STOP idle: WFI with no wake source\n"));
+            output::arguments(format_args!(
+                "STOP idle: every PE is off or waits with no wake source\n"
+            ));
             output::terminate(0x10)
         }
         Stop::Reset(reason) => {

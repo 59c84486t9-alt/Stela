@@ -13,7 +13,8 @@ use super::{
     mmu::{self, Access as MemoryAccess, Outcome as Translated},
 };
 use crate::machine::{
-    cpu::{Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_VF, HCR_VI, HCR_VSE, TranslationRegime},
+    CpuProfile,
+    cpu::{Cpu, Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_VF, HCR_VI, HCR_VSE, TranslationRegime},
     debug::{self, DCC_FULL},
     exception::{Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
     registers::{Lines, Refusal, trap_iss},
@@ -23,6 +24,7 @@ use crate::machine::{
     },
     timer::Channel,
 };
+use alloc::vec::Vec;
 use core::cell::Cell;
 use stela_compiler::aarch64::system::registers::{Encoding, RegisterAccess};
 
@@ -786,43 +788,65 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
-    /// Fill the identification registers from the CPU profile and hand
-    /// VPIDR_EL2 and VMPIDR_EL2 the physical values, as boot firmware does.
+    /// Fill the identification registers of the running PE from the CPU
+    /// profile.
     pub(super) fn load_profile(&mut self) {
-        self.cpu
-            .registers
-            .set_raw(Register::CNTFRQ_EL0, 0, self.profile.counter_frequency);
-        for register in Register::ALL {
-            if !identification(register) {
-                continue;
-            }
-            let value = encoding_of(register).and_then(|encoding| {
-                self.profile
+        identify(
+            &self.profile,
+            self.current,
+            &mut self.cpu,
+            &mut self.profile_missing,
+        );
+    }
+}
+
+/// Fill `cpu`'s identification registers with the profile's values for PE
+/// number `pe` and hand VPIDR_EL2 and VMPIDR_EL2 the physical values, as boot
+/// firmware does. `missing` collects the registers the profile has no value
+/// for.
+pub(super) fn identify(
+    profile: &CpuProfile,
+    pe: usize,
+    cpu: &mut Cpu,
+    missing: &mut Vec<Register>,
+) {
+    cpu.registers
+        .set_raw(Register::CNTFRQ_EL0, 0, profile.counter_frequency);
+    let own = profile.processors.get(pe);
+    for register in Register::ALL {
+        if !identification(register) {
+            continue;
+        }
+        let value = match (register, own) {
+            (Register::MIDR_EL1, Some(identity)) => Some(identity.midr),
+            (Register::MPIDR_EL1, Some(identity)) => Some(identity.mpidr),
+            _ => encoding_of(register).and_then(|encoding| {
+                profile
                     .fixed
                     .iter()
                     .find(|(candidate, _)| *candidate == encoding)
                     .map(|(_, value)| *value)
-            });
-            match value {
-                Some(value) => self.cpu.registers.set_raw(register, 0, value),
-                // A layout the profile reserves entirely, such as the AArch32
-                // ID registers without FEAT_AA32, has one value.
-                None if register.res0() | register.res1() == u64::MAX => {
-                    self.cpu.registers.set_raw(register, 0, register.res1());
-                }
-                None => self.profile_missing.push(register),
+            }),
+        };
+        match value {
+            Some(value) => cpu.registers.set_raw(register, 0, value),
+            // A layout the profile reserves entirely, such as the AArch32
+            // ID registers without FEAT_AA32, has one value.
+            None if register.res0() | register.res1() == u64::MAX => {
+                cpu.registers.set_raw(register, 0, register.res1());
             }
+            None => missing.push(register),
         }
-        for (virtual_register, physical) in [
-            (Register::VPIDR_EL2, Register::MIDR_EL1),
-            (Register::VMPIDR_EL2, Register::MPIDR_EL1),
-        ] {
-            if self.profile_missing.contains(&physical) {
-                self.profile_missing.push(virtual_register);
-            } else {
-                let value = self.cpu.read(physical);
-                self.cpu.registers.set_raw(virtual_register, 0, value);
-            }
+    }
+    for (virtual_register, physical) in [
+        (Register::VPIDR_EL2, Register::MIDR_EL1),
+        (Register::VMPIDR_EL2, Register::MPIDR_EL1),
+    ] {
+        if missing.contains(&physical) {
+            missing.push(virtual_register);
+        } else {
+            let value = cpu.read(physical);
+            cpu.registers.set_raw(virtual_register, 0, value);
         }
     }
 }

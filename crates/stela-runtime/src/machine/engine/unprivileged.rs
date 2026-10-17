@@ -125,10 +125,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let now = self.host.counter();
             let result = if write {
                 self.devices
-                    .write(translation.physical, operand.bytes, value, now)
+                    .write(
+                        self.current,
+                        translation.physical,
+                        operand.bytes,
+                        value,
+                        now,
+                    )
                     .map(|()| 0)
             } else {
-                self.devices.read(translation.physical, operand.bytes, now)
+                self.devices
+                    .read(self.current, translation.physical, operand.bytes, now)
             };
             match result {
                 Ok(read) => data = read.to_le_bytes(),
