@@ -1268,7 +1268,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 kind,
                 timeout_register,
             } => self.wait(word, kind, timeout_register),
-            SystemOperation::TagMemory(_) => self.undefined(),
+            // No halting debug: Debug-state-only instructions are UNDEFINED.
+            SystemOperation::TagMemory(_) | SystemOperation::DebugStateOnly(_) => self.undefined(),
             SystemOperation::Guarded(GuardedOperation::Enter) => {
                 if self.cpu.guarded_enter().is_err() {
                     return self.undefined();
@@ -1886,6 +1887,16 @@ mod tests {
         machine.system_instruction(0xd508_7802).unwrap(); // at s1e1r, x2
         assert_eq!(machine.cpu.system.par & 0x0000_ffff_ffff_f000, BASE);
         assert_eq!(machine.cpu.system.par & 1, 0);
+    }
+
+    #[test]
+    fn debug_state_only_movt_is_undefined() {
+        for word in [0xc04c_73e5, 0xc04e_03e0] {
+            let mut machine = machine(&[]);
+            machine.system_instruction(word).unwrap();
+            assert_eq!(machine.cpu.system.esr, 0x0200_0000, "{word:#x}");
+            assert_eq!(machine.cpu.system.elr, BASE);
+        }
     }
 
     #[test]

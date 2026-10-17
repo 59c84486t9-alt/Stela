@@ -132,6 +132,7 @@ fn service_flags(profile: &str) -> Result<&'static [&'static str]> {
         "apple-arm64e-software-pauth-clock-v1" => &["--software-pauth", "--software-clock"],
         "system-v1" => &["--system-boundaries", "--cpu-target", BASELINE],
         "el1-platform-v1" => &["--el1-platform", "--cpu-target", BASELINE],
+        "system-mode-v1" => &["--system-mode", "--cpu-target", BASELINE],
         "checked-gpr-memory-sa0-off-normal-wb-v3" => {
             &["--checked-memory-sa0-off", "--cpu-target", BASELINE]
         }

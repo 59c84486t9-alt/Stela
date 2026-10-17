@@ -88,7 +88,10 @@ fn verify(probe: &Probe, sample: &Value, word: u32, compiled: &Compiled) -> Resu
             manifest["source_bytes"]
         );
     }
-    if matches!(probe.profile.as_str(), "system-v1" | "el1-platform-v1") {
+    if matches!(
+        probe.profile.as_str(),
+        "system-v1" | "el1-platform-v1" | "system-mode-v1"
+    ) {
         let mut exit = X86_MOVABS_RAX.to_vec();
         exit.extend(GUEST_BASE.to_le_bytes());
         exit.push(X86_MOV_EDX);

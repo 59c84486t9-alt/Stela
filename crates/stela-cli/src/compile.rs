@@ -66,6 +66,10 @@ pub(crate) struct CompileBlock {
     /// Prepare source-bound System exits without supplying a CPU/service backend.
     #[arg(long, conflicts_with_all = ["software_pauth", "software_clock", "thread_registers"])]
     system_boundaries: bool,
+    /// Compile for the system-mode engine: guest VAs, EL1/EL2 code and an exit
+    /// at every System instruction. No CPU or memory owner is supplied.
+    #[arg(long, conflicts_with_all = ["system_boundaries", "el1_platform", "software_pauth", "software_clock", "thread_registers", "guest_profile", "checked_memory_sa0_off", "checked_process_sa0_off"])]
+    system_mode: bool,
     /// Prepare the typed EL1 platform ABI; no CPU, memory or service owner is supplied.
     #[arg(long, conflicts_with_all = ["system_boundaries", "software_pauth", "software_clock", "thread_registers", "guest_profile", "checked_memory_sa0_off", "checked_process_sa0_off"])]
     el1_platform: bool,
@@ -166,7 +170,9 @@ pub(crate) fn cpu_info() -> Result<()> {
 impl CompileBlock {
     /// The service profile and, for scalable guests, the contextual profile.
     fn profiles(&self) -> Result<(BlockProfile, Option<ExtendedBlockProfile>)> {
-        let services = if self.el1_platform {
+        let services = if self.system_mode {
+            BlockProfile::SystemModeV1
+        } else if self.el1_platform {
             BlockProfile::El1PlatformV1
         } else if self.checked_process_sa0_off {
             BlockProfile::CheckedMemoryPauthClockThread(checked_process(self.checked_pointer_mode)?)

@@ -572,9 +572,11 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             SystemOperation::Register(_) | SystemOperation::PstateImmediate(_) => Err(
                 Failure::Unsupported("register operation requires retained authoritative owners"),
             ),
-            SystemOperation::Maintenance(_) | SystemOperation::Guarded(_) => Err(
-                Failure::Unsupported("SYS maintenance and GXF belong to the system-mode engine"),
-            ),
+            SystemOperation::Maintenance(_)
+            | SystemOperation::Guarded(_)
+            | SystemOperation::DebugStateOnly(_) => Err(Failure::Unsupported(
+                "SYS maintenance, GXF and Debug-state-only forms belong to the system-mode engine",
+            )),
             SystemOperation::Wait { .. } => Err(Failure::Unsupported(
                 "wait requires the retained hosted wait owner",
             )),

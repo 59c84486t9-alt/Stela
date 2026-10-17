@@ -27,6 +27,10 @@ pub enum SystemOperation {
     /// Apple GXF guarded-level transitions. Only the system-mode profile
     /// produces it.
     Guarded(GuardedOperation),
+    /// An instruction that exists only in Debug state, which a PE without
+    /// halting debug never enters: UNDEFINED. Only the system-mode profile
+    /// produces it.
+    DebugStateOnly(DebugStateOperation),
     PstateImmediate(registers::Encoding),
     SendEvent {
         local: bool,
@@ -52,6 +56,29 @@ pub enum GuardedOperation {
     Exit,
 }
 
+/// Debug-state-only instructions outside the exception-generation class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugStateOperation {
+    /// MOVT Xt, ZT0[offs] (SME2), `0xc04c03e0` under `0xffff8fe0`.
+    TableToGeneral,
+    /// MOVT ZT0[offs], Xt (SME2), `0xc04e03e0` under `0xffff8fe0`.
+    GeneralToTable,
+}
+
+const MOVT_GPR_MASK: u32 = 0xffff_8fe0;
+const MOVT_TABLE_TO_GPR: u32 = 0xc04c_03e0;
+const MOVT_GPR_TO_TABLE: u32 = 0xc04e_03e0;
+
+impl DebugStateOperation {
+    pub const fn decode(word: u32) -> Option<Self> {
+        match word & MOVT_GPR_MASK {
+            MOVT_TABLE_TO_GPR => Some(Self::TableToGeneral),
+            MOVT_GPR_TO_TABLE => Some(Self::GeneralToTable),
+            _ => None,
+        }
+    }
+}
+
 pub const GENTER: u32 = 0x0020_1420;
 pub const GEXIT: u32 = 0x0020_1400;
 
@@ -75,6 +102,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Register(_) => "system_register",
         SystemOperation::Maintenance(_) => "maintenance",
         SystemOperation::Guarded(_) => "guarded",
+        SystemOperation::DebugStateOnly(_) => "debug_state_only",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
         SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
@@ -167,8 +195,9 @@ pub(super) fn decode_el1_system_instruction(
 /// Decode every instruction the system-mode profile hands to the runtime: the
 /// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
 /// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, BTI, ESB,
-/// TSB and unallocated hints). YIELD, CSDB, SB and DMB stay ordinary; PAuth
-/// hints belong to the PAuth decoder, which the profile consults first.
+/// TSB and unallocated hints), and the Debug-state-only MOVT GPR/ZT0 forms.
+/// YIELD, CSDB, SB and DMB stay ordinary; PAuth hints belong to the PAuth
+/// decoder, which the profile consults first.
 pub fn decode_system_mode_instruction(
     pc: GuestAddress,
     word: u32,
@@ -180,6 +209,8 @@ pub fn decode_system_mode_instruction(
         SystemOperation::Guarded(GuardedOperation::Enter)
     } else if word == GEXIT {
         SystemOperation::Guarded(GuardedOperation::Exit)
+    } else if let Some(operation) = DebugStateOperation::decode(word) {
+        SystemOperation::DebugStateOnly(operation)
     } else if let Some(access) = registers::decode_sys(word) {
         SystemOperation::Maintenance(access)
     } else {
@@ -262,6 +293,28 @@ mod tests {
     const ADD_IMMEDIATE: u32 = 0x9100_0000;
     const RET: u32 = 0xd65f_03c0;
     const UNALLOCATED: u32 = 0xffff_ffff;
+
+    #[test]
+    fn system_mode_claims_debug_state_only_movt_and_nothing_beside_it() {
+        let pc = GuestAddress(0x1000);
+        for (word, operation) in [
+            (0xc04c_03e0, DebugStateOperation::TableToGeneral),
+            (0xc04c_73fe, DebugStateOperation::TableToGeneral),
+            (0xc04e_03e0, DebugStateOperation::GeneralToTable),
+            (0xc04e_73ff, DebugStateOperation::GeneralToTable),
+        ] {
+            let instruction = decode_system_mode_instruction(pc, word).unwrap().unwrap();
+            assert_eq!(
+                instruction.operation,
+                SystemOperation::DebugStateOnly(operation)
+            );
+            assert!(decode_system_instruction(pc, word).unwrap().is_none());
+        }
+        // MOVT (vector to table), and the fixed bits 15 and 9..5, are not it.
+        for word in [0xc04f_03e0, 0xc04c_83e0, 0xc04c_03c0, 0xc04d_03e0] {
+            assert!(decode_system_mode_instruction(pc, word).unwrap().is_none());
+        }
+    }
 
     #[test]
     fn context_carriers_preserve_exact_operands_without_granting_other_families() {
