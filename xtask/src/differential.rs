@@ -8,11 +8,14 @@
 //! system-mode profile run on the system-mode engine at EL0 instead, and their
 //! exceptions (ESR, ELR and, for aborts, FAR) must match as well.
 //! `--system-matrix` runs the system requirement matrix's rows the same way.
+//! `--el2` runs QEMU with EL2: system-mode words then also run at EL2t, and
+//! every system case runs under a random HCR_EL2 and stage 2, with
+//! exceptions taken to EL2 compared with HPFAR_EL2.
 mod matrix;
 
 use crate::oracle::{
-    CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome,
-    Scalable, native::Translation,
+    CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Hypervisor, Oracle,
+    Outcome, Scalable, native::Translation,
 };
 use crate::tools::root;
 use anyhow::{Context, Result, ensure};
@@ -82,7 +85,25 @@ pub struct Differential {
     /// With --system-matrix: write per-row tallies as JSON here.
     #[arg(long, requires = "system_matrix")]
     report: Option<PathBuf>,
+    /// Run QEMU with EL2 (`virtualization=on`): system-mode words also run
+    /// at EL2t, and system cases run under random HCR_EL2 and stage 2.
+    #[arg(long)]
+    el2: bool,
 }
+
+/// HCR_EL2 controls the EL2 lane adds at random: PTW, DC and FWB. QEMU does
+/// not make stage-2 output Non-cacheable for HCR_EL2.CD or ID (as it does
+/// not for SCTLR_ELx.C or I), so the `machine::mmu` unit tests alone cover
+/// those.
+const HCR_CHOICES: [u64; 3] = [1 << 2, 1 << 12, HCR_FWB];
+const HCR_FWB: u64 = 1 << 46;
+/// Stage-2 MemAttr values that are not reserved with or without FWB.
+const STAGE2_MEMATTR: [u64; 13] = [
+    0x0, 0x1, 0x2, 0x3, 0x5, 0x6, 0x7, 0x9, 0xa, 0xb, 0xd, 0xe, 0xf,
+];
+const STAGE2_ADDRESS: u64 = 0x0000_ffff_ffff_f000;
+const STAGE2_TYPE: u64 = 3;
+const STAGE2_AF: u64 = 1 << 10;
 
 /// SplitMix64: small, fast and reproducible across hosts.
 struct Random(u64);
@@ -143,6 +164,52 @@ impl Random {
         state
     }
 
+    /// The identity stage 2 half the time; otherwise random HCR_EL2
+    /// additions and some descriptors changed at random.
+    fn hypervisor(&mut self) -> Hypervisor {
+        let mut hypervisor = Hypervisor::default();
+        if self.next().is_multiple_of(2) {
+            return hypervisor;
+        }
+        for bit in HCR_CHOICES {
+            if self.next().is_multiple_of(4) {
+                hypervisor.hcr |= bit;
+            }
+        }
+        let fwb = hypervisor.hcr & HCR_FWB != 0;
+        for descriptor in [&mut hypervisor.code, &mut hypervisor.table]
+            .into_iter()
+            .chain(&mut hypervisor.data)
+        {
+            if self.next().is_multiple_of(3) {
+                *descriptor = self.stage2_descriptor(*descriptor);
+            }
+            if fwb {
+                // MemAttr[3] is RES0 under FWB without FEAT_MTE_PERM.
+                *descriptor &= !(0b1000 << 2);
+            }
+        }
+        hypervisor
+    }
+
+    /// `identity` with random attributes and permissions: sometimes invalid
+    /// or without AF, otherwise random S2AP, XN, SH (never the reserved
+    /// 0b01) and an unreserved MemAttr.
+    fn stage2_descriptor(&mut self, identity: u64) -> u64 {
+        let base = identity & (STAGE2_ADDRESS | STAGE2_TYPE);
+        match self.next() % 8 {
+            0 => base & !1,
+            1 => identity & !STAGE2_AF,
+            _ => {
+                let memattr = STAGE2_MEMATTR[(self.next() % STAGE2_MEMATTR.len() as u64) as usize];
+                let s2ap = self.next() & 3;
+                let shareability = [0, 2, 3][(self.next() % 3) as usize];
+                let xn = self.next() & 3;
+                base | STAGE2_AF | memattr << 2 | s2ap << 6 | shareability << 8 | xn << 53
+            }
+        }
+    }
+
     fn scalable(&mut self, svl: usize, svcr: u64) -> Scalable {
         let mut scalable = Scalable::new(svl, svcr);
         scalable.tpidr2 = self.next();
@@ -193,8 +260,11 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
 }
 
 /// Known differences between QEMU's `max` CPU and the engine's M2 profile for
-/// system-mode words at EL0; matching cases are not compared.
-fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> bool {
+/// system-mode words; matching cases are not compared.
+fn system_oracle_limit(form: &str, case: &Case) -> bool {
+    let (word, state) = (case.code[0], &case.state);
+    let el1 = case.el == 1;
+    let el2_machine = case.hypervisor.is_some();
     // Matrix form rows carry the registry form name after a kind prefix.
     let form = form.strip_prefix("form:").unwrap_or(form);
     // QEMU completes WFI at EL0 whenever it has pending work, masked or not,
@@ -218,20 +288,23 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     let speculation = form == "SB_only_barriers" && crm != 0;
     // QEMU's virt machine without EL2 implements PSCI on the HVC conduit, so
     // HVC at EL1 completes as a firmware call instead of being UNDEFINED.
-    let psci = el1 && form == "HVC_EX_exception";
+    // With EL2 it uses the SMC conduit, so SMC at EL1 and EL2 completes as a
+    // firmware call where the profile, without EL3, makes it UNDEFINED.
+    let psci = !el2_machine && el1 && form == "HVC_EX_exception"
+        || el2_machine && case.el != 0 && form == "SMC_EX_exception";
     // QEMU treats XPACLRI as a NOP while SCTLR_EL1 enables no PAC key, as the
     // harness's does; the architecture strips X30 regardless.
     let strip = word == XPACLRI;
     // CNTFRQ_EL0 is writable only at the highest EL: EL2 on the engine's
     // profile, EL1 on QEMU's virt machine without EL2.
-    let frequency = el1 && word & !0x1f == MSR_CNTFRQ_EL0;
+    let frequency = !el2_machine && el1 && word & !0x1f == MSR_CNTFRQ_EL0;
     // QEMU implements FEAT_AFP, so MSR FPCR keeps FIZ, AH and NEP; the M2
     // profile has no FEAT_AFP and the engine holds them RES0.
     let rt = (word & REGISTER_FIELD) as usize;
     let afp = word & !0x1f == MSR_FPCR && rt != ZERO_OR_SP as usize && state.x[rt] & 7 != 0;
     // QEMU swaps Op1 and Op2 in the ISS of a trapped MSR DAIFSet or DAIFClr;
     // Arm `AArch64_SystemAccessTrapSyndrome` takes both from the instruction.
-    let daif_trap = !el1 && word & 0xffff_f0df == MSR_DAIFSET;
+    let daif_trap = case.el == 0 && word & 0xffff_f0df == MSR_DAIFSET;
     // QEMU makes DC IVAC, CVAC, CVAU and CIVAC and IC IVAU NOPs that never
     // translate, so at an address outside the windows they complete where
     // the engine's walk of the same tables may fault. It performs DC CVAP and
@@ -253,7 +326,13 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     // Rt=31 is XZR: address 0.
     let register = (word & REGISTER_FIELD) as usize;
     let address = state.x.get(register).copied().unwrap_or(0);
-    let by_address = word & 0xfff8_0000 == 0xd508_0000 && untranslated && !in_windows(address);
+    // Under a changed stage 2 even the windows may fault.
+    let changed_stage2 = case
+        .hypervisor
+        .is_some_and(|hypervisor| hypervisor != Hypervisor::default());
+    let by_address = word & 0xfff8_0000 == 0xd508_0000
+        && untranslated
+        && (!in_windows(address) || changed_stage2);
     // QEMU's max CPU makes the MPAM registers and RAS's ERRSELR_EL1 and ERX*
     // UNDEFINED; the profile defines them (FEAT_MPAM with PARTID 0 only, and
     // FEAT_RAS with no error records, where they are RAZ/WI).
@@ -269,7 +348,12 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     // QEMU also leaves DBGAUTHSTATUS_EL1 and DBGPRCR_EL1 UNDEFINED, which
     // every AArch64 PE implements.
     let debug = matches!(word & 0xffdf_ffe0, 0xd510_7ec0 | 0xd510_1480);
-    let absent_registers = register_access && (mpam || records) || debug;
+    // At EL2, QEMU lacks the ACTLR_EL12 alias (op1=5, CRn=1, CRm=0, op2=1)
+    // and FEAT_AMUv1, which HAFGRTR_EL2 (op1=4, CRn=3, CRm=1, op2=6) needs;
+    // the profile has both.
+    let el2_absent = case.el == 2
+        && ((op1, crn, crm, op2) == (5, 1, 0, 1) || (op1, crn, crm, op2) == (4, 3, 1, 6));
+    let absent_registers = register_access && (mpam || records || el2_absent) || debug;
     wfi || absent
         || absent_registers
         || sme
@@ -300,19 +384,77 @@ fn in_windows(address: u64) -> bool {
 /// only where the exception defines it, and what MRS read only for registers
 /// the case's state sets: QEMU's other System registers hold the harness's
 /// values and its `max` CPU's identification, not the engine's M2 profile.
-fn comparable(outcome: &Outcome, system_word: Option<u32>) -> Outcome {
+fn comparable(outcome: &Outcome, case: &Case, system_word: Option<u32>) -> Outcome {
     let mut outcome = outcome.clone();
     if let Some(register) = system_word.and_then(unmirrored_read) {
         outcome.state.x[register] = 0;
     }
+    // The same fault reported by AT S12* in PAR_EL1, read by the MRS after
+    // it: F, PTW and a Permission FST.
+    if case.hypervisor.is_some_and(walks_into_device)
+        && let [_, read] = case.code[..]
+        && read & !REGISTER_FIELD == matrix::MRS_PAR
+    {
+        const PAR_F: u64 = 1;
+        const PAR_PTW: u64 = 1 << 8;
+        const PERMISSION_FST: u64 = 0b11_00 << 1;
+        let par = &mut outcome.state.x[(read & REGISTER_FIELD) as usize];
+        if *par & (PAR_F | PAR_PTW) == PAR_F | PAR_PTW && *par & (0x3c << 1) == PERMISSION_FST {
+            *par &= !(3 << 1);
+        }
+    }
     outcome.state.fpcr &= FPCR_MASK;
     outcome.state.fpsr &= FPSR_MASK;
-    if let Some(exception) = &mut outcome.exception
-        && !FAR_CLASSES.contains(&(exception.syndrome >> ESR_CLASS_SHIFT))
-    {
-        exception.fault_address = 0;
+    if let Some(exception) = &mut outcome.exception {
+        if !FAR_CLASSES.contains(&(exception.syndrome >> ESR_CLASS_SHIFT)) {
+            exception.fault_address = 0;
+        }
+        if !hpfar_valid(exception) {
+            exception.hpfar = 0;
+        }
+        // QEMU reports the stage-2 Permission fault of an HCR_EL2.PTW walk
+        // into Device memory at level 0; `AArch64_S2Walk` keeps the level of
+        // the stage-2 descriptor. Only that fault's level is not compared,
+        // here and in PAR_EL1 above.
+        const S1PTW: u64 = 1 << 7;
+        const PERMISSION: u64 = 0b11_00;
+        if case.hypervisor.is_some_and(walks_into_device)
+            && exception.level == 2
+            && exception.syndrome & S1PTW != 0
+            && exception.syndrome & 0x3c == PERMISSION
+        {
+            exception.syndrome &= !3;
+        }
     }
     outcome
+}
+
+/// HCR_EL2.PTW is set and the data window's stage-1 table page is Device
+/// memory at stage 2 (MemAttr[3:2] = 0, or MemAttr[2] = 0 under FWB).
+fn walks_into_device(hypervisor: Hypervisor) -> bool {
+    const PTW: u64 = 1 << 2;
+    const FWB: u64 = 1 << 46;
+    let memattr = (hypervisor.table >> 2) & 0xf;
+    let device = if hypervisor.hcr & FWB != 0 {
+        memattr & 0b100 == 0
+    } else {
+        memattr & 0b1100 == 0
+    };
+    hypervisor.hcr & PTW != 0 && hypervisor.table & 1 != 0 && device
+}
+
+/// Whether HPFAR_EL2 is architecturally valid (pseudocode IPAValid): a
+/// stage-2 Address size, Translation or Access flag fault on an abort from a
+/// lower EL, or a stage-2 Permission fault on a stage-1 walk (S1PTW). The
+/// profile has no FEAT_EAESR, so it is UNKNOWN for other faults.
+fn hpfar_valid(exception: &crate::oracle::Exception) -> bool {
+    const LOWER_ABORTS: [u64; 2] = [0x20, 0x24];
+    const S1PTW: u64 = 1 << 7;
+    let class = exception.syndrome >> ESR_CLASS_SHIFT;
+    let status = exception.syndrome & 0x3f;
+    exception.level == 2
+        && LOWER_ABORTS.contains(&class)
+        && (status < 0b1100 || status < 0b1_0000 && exception.syndrome & S1PTW != 0)
 }
 
 /// The destination of an MRS whose value the lane does not mirror; PSTATE
@@ -363,8 +505,9 @@ struct Subject {
     system: bool,
     /// An unfinished system-mode row: divergences are reported as open.
     draft: bool,
-    /// Run at EL1t instead of stepping at EL0 (system-mode words only).
-    el1: bool,
+    /// 0 steps the code at EL0; 1 and 2 run it at EL1t or EL2t (system-mode
+    /// words only, EL2 in the EL2 lane only).
+    el: u8,
     translation: Translation,
 }
 
@@ -431,13 +574,14 @@ impl Differential {
             Some(qemu) => Oracle::new(qemu)?,
             None => Oracle::locate(&root().join(".tools/qemu/bin"))?,
         };
+        let oracle = if self.el2 { oracle.with_el2() } else { oracle };
         let mut random = Random(self.seed);
         let mut report = Report::default();
         let mut batch = Vec::with_capacity(BATCH_WORDS);
         let mut skipped = 0;
         if self.system_matrix {
             let (rows, subjects) =
-                matrix::subjects(&mut random, self.fields, self.form.as_deref())?;
+                matrix::subjects(&mut random, self.fields, self.form.as_deref(), self.el2)?;
             report.mismatches += rows.refused_implemented.len();
             report
                 .mismatched
@@ -514,7 +658,15 @@ impl Differential {
                 scalable: subject
                     .scalable
                     .map(|(svl, svcr)| random.scalable(svl, svcr)),
-                el1: subject.el1,
+                el: subject.el,
+                // Only the system lane's engine mirrors a changed stage 2.
+                hypervisor: self.el2.then(|| {
+                    if subject.system {
+                        random.hypervisor()
+                    } else {
+                        Hypervisor::default()
+                    }
+                }),
             })
             .collect();
         let originals = oracle.run(&cases)?;
@@ -533,10 +685,9 @@ impl Differential {
             }
             report.covered.insert(subject.form.clone());
             if oracle_limit(&subject.form, &case.state)
-                || subject.system
-                    && system_oracle_limit(&subject.form, case.code[0], case.el1, &case.state)
+                || subject.system && system_oracle_limit(&subject.form, case)
             {
-                if let Some(tally) = report.rows.tally(&subject.form, case.el1) {
+                if let Some(tally) = report.rows.tally(&subject.form, case.el) {
                     tally.limited += 1;
                 }
                 continue;
@@ -548,7 +699,7 @@ impl Differential {
                 // An engine refusal of a registered form is a mismatch.
                 Err(error) if subject.system => {
                     report.compared += 1;
-                    if let Some(tally) = report.rows.tally(&subject.form, case.el1) {
+                    if let Some(tally) = report.rows.tally(&subject.form, case.el) {
                         tally.compared += 1;
                         tally.refused += 1;
                     }
@@ -577,8 +728,9 @@ impl Differential {
             };
             report.compared += 1;
             let system_word = subject.system.then_some(case.code[0]);
-            let matched = comparable(&translated, system_word) == comparable(original, system_word);
-            if let Some(tally) = report.rows.tally(&subject.form, case.el1) {
+            let matched = comparable(&translated, case, system_word)
+                == comparable(original, case, system_word);
+            if let Some(tally) = report.rows.tally(&subject.form, case.el) {
                 tally.compared += 1;
                 if matched {
                     tally.matched += 1;
@@ -663,7 +815,8 @@ impl Differential {
                         continue;
                     };
                     seen.insert(code[0]);
-                    for subject in subjects_for(form, id, lane.scalable(sample), code, translation)?
+                    for subject in
+                        subjects_for(form, id, lane.scalable(sample), code, translation, self.el2)?
                     {
                         each(random, subject)?;
                     }
@@ -686,7 +839,9 @@ impl Differential {
                     if let Some((word, translation)) = found {
                         seen.insert(word);
                         let scalable = lane.scalable(sample);
-                        for subject in subjects_for(form, id, scalable, vec![word], translation)? {
+                        for subject in
+                            subjects_for(form, id, scalable, vec![word], translation, self.el2)?
+                        {
                             each(random, subject)?;
                         }
                     }
@@ -697,30 +852,96 @@ impl Differential {
     }
 }
 
-/// The subject for `code`, and for an admissible system-mode word its EL1 twin.
+/// The subject for `code`, and for an admissible system-mode word its EL1
+/// twin and, in the EL2 lane, its EL2 twin.
 fn subjects_for(
     form: &Value,
     id: &str,
     scalable: Option<(usize, u64)>,
     code: Vec<u32>,
     translation: Translation,
+    el2: bool,
 ) -> Result<Vec<Subject>> {
     let system = is_system_mode(form);
-    let subject = |code: Vec<u32>, translation, el1| Subject {
+    let subject = |code: Vec<u32>, translation, el| Subject {
         form: id.into(),
         scalable,
         system,
         draft: is_draft(form),
-        el1,
+        el,
         code,
         translation,
     };
-    let mut subjects = Vec::with_capacity(2);
-    if system && el1_admissible(code[0]) {
-        subjects.push(subject(code.clone(), Translation::system(&code)?, true));
+    let mut subjects = Vec::with_capacity(3);
+    if system && el2 && el2_admissible(code[0]) {
+        subjects.push(subject(code.clone(), Translation::system(&code)?, 2));
     }
-    subjects.push(subject(code, translation, false));
+    if system && el1_admissible(code[0]) {
+        subjects.push(subject(code.clone(), Translation::system(&code)?, 1));
+    }
+    subjects.push(subject(code, translation, 0));
     Ok(subjects)
+}
+
+/// Whether the EL2 harness can run `word` at EL2t: as at EL1, and it must
+/// not write the EL2 controls the harness and later cases rely on, the
+/// harness's EL1 registers through their *_EL12 names, or SP_EL1. Under
+/// HCR_EL2.E2H the EL1 names of SCTLR, CPACR, VBAR, SMCR and CNTKCTL reach
+/// SCTLR_EL2, CPTR_EL2, VBAR_EL2, SMCR_EL2 and CNTHCTL_EL2.
+fn el2_admissible(word: u32) -> bool {
+    const MSR_REGISTER_MASK: u32 = 0xfff0_0000;
+    const MSR_REGISTER: u32 = 0xd510_0000;
+    // op0:op1:CRn:CRm:op2 selectors.
+    const EL2_HARNESS_REGISTERS: [(u32, u32, u32, u32, u32); 32] = [
+        (3, 4, 1, 1, 0),  // HCR_EL2
+        (3, 4, 1, 2, 2),  // HCRX_EL2
+        (3, 4, 1, 1, 1),  // MDCR_EL2
+        (3, 4, 1, 1, 2),  // CPTR_EL2
+        (3, 4, 14, 1, 0), // CNTHCTL_EL2
+        (3, 4, 1, 0, 0),  // SCTLR_EL2
+        (3, 4, 1, 0, 3),  // SCTLR2_EL2
+        (3, 4, 12, 0, 0), // VBAR_EL2
+        (3, 4, 2, 1, 0),  // VTTBR_EL2
+        (3, 4, 2, 1, 2),  // VTCR_EL2
+        (3, 4, 1, 2, 6),  // SMCR_EL2
+        (3, 4, 1, 2, 0),  // ZCR_EL2
+        (3, 4, 4, 1, 0),  // SP_EL1
+        (3, 4, 1, 1, 4),  // HFGRTR_EL2
+        (3, 4, 1, 1, 5),  // HFGWTR_EL2
+        (3, 4, 1, 1, 6),  // HFGITR_EL2
+        (3, 4, 3, 1, 4),  // HDFGRTR_EL2
+        (3, 4, 3, 1, 5),  // HDFGWTR_EL2
+        (3, 4, 3, 1, 6),  // HAFGRTR_EL2
+        (3, 4, 3, 1, 0),  // HDFGRTR2_EL2
+        (3, 4, 3, 1, 1),  // HDFGWTR2_EL2
+        (3, 4, 3, 1, 2),  // HFGRTR2_EL2
+        (3, 4, 3, 1, 3),  // HFGWTR2_EL2
+        (3, 4, 3, 1, 7),  // HFGITR2_EL2
+        (3, 0, 14, 1, 0), // CNTKCTL_EL1 (CNTHCTL_EL2)
+        (3, 5, 1, 0, 0),  // SCTLR_EL12
+        (3, 5, 1, 0, 2),  // CPACR_EL12
+        (3, 5, 2, 0, 0),  // TTBR0_EL12
+        (3, 5, 2, 0, 1),  // TTBR1_EL12
+        (3, 5, 2, 0, 2),  // TCR_EL12
+        (3, 5, 10, 2, 0), // MAIR_EL12
+        (3, 5, 12, 0, 0), // VBAR_EL12
+    ];
+    const SMCR_EL12: (u32, u32, u32, u32, u32) = (3, 5, 1, 2, 6);
+    if !el1_admissible(word) {
+        return false;
+    }
+    if word & MSR_REGISTER_MASK == MSR_REGISTER {
+        let field = |shift: u32, bits: u32| (word >> shift) & ((1 << bits) - 1);
+        let target = (
+            2 + field(19, 1),
+            field(16, 3),
+            field(12, 4),
+            field(8, 4),
+            field(5, 3),
+        );
+        return !EL2_HARNESS_REGISTERS.contains(&target) && target != SMCR_EL12;
+    }
+    true
 }
 
 /// Whether the harness can run `word` at EL1t and still record its outcome:
@@ -792,8 +1013,8 @@ fn el1_admissible(word: u32) -> bool {
     true
 }
 
-fn level(case: &Case) -> &'static str {
-    if case.el1 { "EL1" } else { "EL0" }
+fn level(case: &Case) -> String {
+    format!("EL{}", case.el)
 }
 
 fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
@@ -879,4 +1100,82 @@ fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
         println!("  data differs from window offset {offset:#x}");
     }
     println!("  initial fpcr {:#x}, nzcv {:#x}", before.fpcr, before.nzcv);
+    if let Some(hypervisor) = &case.hypervisor {
+        println!("  hypervisor {hypervisor:x?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oracle::Exception;
+
+    #[test]
+    fn el2_cases_keep_the_harness_controls() {
+        // MRS HCR_EL2 runs at EL2; MSR HCR_EL2, VBAR_EL2, SP_EL1 and, under
+        // E2H, MSR CNTKCTL_EL1 (CNTHCTL_EL2) do not.
+        assert!(el2_admissible(0xd53c_1100));
+        for word in [0xd51c_1100, 0xd51c_c000, 0xd51c_4100, 0xd518_e100] {
+            assert!(!el2_admissible(word), "{word:08x}");
+        }
+        // Whatever EL1 cannot run, EL2 cannot either.
+        assert!(!el2_admissible(0xd518_1000));
+        // TLBI and AT at EL2 are admissible.
+        assert!(el2_admissible(0xd50c_8700) && el2_admissible(0xd50c_7880));
+    }
+
+    #[test]
+    fn hpfar_compares_where_the_ipa_is_valid() {
+        let abort = |syndrome: u64, level: u8| Exception {
+            syndrome,
+            address: 0,
+            fault_address: 0,
+            level,
+            hpfar: 0x40_1130,
+        };
+        // Stage-2 translation, access flag and address size faults.
+        assert!(hpfar_valid(&abort(0x9200_0007, 2)));
+        assert!(hpfar_valid(&abort(0x8200_000a, 2)));
+        // A permission fault only on a stage-1 walk.
+        assert!(hpfar_valid(&abort(0x9200_018f, 2)));
+        assert!(!hpfar_valid(&abort(0x9200_004f, 2)));
+        // Not at EL1, nor for an EL2 abort or another class.
+        assert!(!hpfar_valid(&abort(0x9200_0007, 1)));
+        assert!(!hpfar_valid(&abort(0x9600_0007, 2)));
+        assert!(!hpfar_valid(&abort(0x0200_0000, 2)));
+    }
+
+    #[test]
+    fn random_stage2_descriptors_stay_well_formed() {
+        let mut random = Random(7);
+        for _ in 0..512 {
+            let hypervisor = random.hypervisor();
+            let fwb = hypervisor.hcr & HCR_FWB != 0;
+            assert_eq!(hypervisor.hcr & !(1 << 2 | 1 << 12 | HCR_FWB), 0);
+            for descriptor in [hypervisor.code, hypervisor.table]
+                .into_iter()
+                .chain(hypervisor.data)
+            {
+                if descriptor & 1 == 0 {
+                    continue;
+                }
+                let memattr = (descriptor >> 2) & 0xf;
+                assert!(STAGE2_MEMATTR.contains(&memattr), "{descriptor:#x}");
+                assert!(!fwb || memattr & 0b1000 == 0, "{descriptor:#x}");
+                assert_ne!((descriptor >> 8) & 3, 1, "{descriptor:#x}");
+            }
+        }
+        // A PTW walk into stage-2 Device memory, with and without FWB.
+        let table = |memattr: u64| crate::oracle::STAGE1_DATA_TABLE | 0x403 | memattr << 2;
+        let ptw = |hcr, memattr| Hypervisor {
+            hcr,
+            table: table(memattr),
+            ..Hypervisor::default()
+        };
+        assert!(walks_into_device(ptw(1 << 2, 0x1)));
+        assert!(!walks_into_device(ptw(1 << 2, 0xf)));
+        assert!(walks_into_device(ptw(1 << 2 | HCR_FWB, 0x3)));
+        assert!(!walks_into_device(ptw(1 << 2 | HCR_FWB, 0x7)));
+        assert!(!walks_into_device(ptw(0, 0x1)));
+    }
 }

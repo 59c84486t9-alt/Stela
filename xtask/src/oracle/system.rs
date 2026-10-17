@@ -10,8 +10,15 @@
 //! control the harness clears (nTWI, nTWE, UCI, UCT, DZE, UMA) is clear here
 //! too, CPACR_EL1 enables FP/SIMD, and the CPU profile is the engine's M2
 //! identification without EL2, like the harness's QEMU machine.
+//!
+//! A case with [`Case::hypervisor`] mirrors the `virtualization=on` harness
+//! instead: the M2 identification with EL2, the harness's HCR_EL2 with the
+//! case's additions, its VTCR_EL2 and VTTBR_EL2, and a copy of its stage-2
+//! tables with the case's descriptors. Exceptions are then read from the EL
+//! they were taken to, with HPFAR_EL2 at EL2, and level-2 cases run at EL2t.
 use super::{
-    CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Exception, Outcome,
+    CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Exception, HCR_BASE,
+    Hypervisor, Outcome, STAGE2_NORMAL,
     native::{Executable, windows},
 };
 use anyhow::{Result, bail};
@@ -43,6 +50,8 @@ const VECTOR_BASE: u64 = 0;
 const MDSCR_SS: u64 = 1;
 /// SPSR_EL1 the harness's ERET consumed: EL1t or EL0t with DAIF masked.
 const SPSR_EL1T_MASKED: u64 = 0x3c4;
+/// SPSR_EL2 of the EL2 harness's entry to an EL2 case: EL2t, DAIF masked.
+const SPSR_EL2T_MASKED: u64 = 0x3c8;
 const SPSR_EL0T_STEPPED: u64 = 0x3c0 | 1 << 21;
 /// ESR_EL1 of UDF #0: EC 0 with IL set.
 const UDF_SYNDROME: u64 = 1 << 25;
@@ -53,7 +62,19 @@ const L1_TABLE: u64 = 0x4011_0000;
 const L2_TABLE: u64 = 0x4011_1000;
 const L3_DATA: u64 = 0x4011_3000;
 const L2_CASE_TABLE: u64 = 0x4011_4000;
-const TABLE_BYTES: usize = 0x5000;
+// The EL2 harness's stage-2 tables (`build_stage2`).
+const S2_L1_TABLE: u64 = 0x4012_0000;
+const S2_L2_RAM: u64 = 0x4012_1000;
+const S2_L3_HARNESS: u64 = 0x4012_2000;
+const S2_L2_CASE: u64 = 0x4012_3000;
+const S2_L3_DATA: u64 = 0x4012_4000;
+/// Both stages' tables, from `L1_TABLE` to the end of `S2_L3_DATA`.
+const TABLE_BYTES: usize = 0x1_5000;
+/// The EL2 harness's controls: VTCR_EL2 (T0SZ=25 from level 1, 4 KiB,
+/// 48-bit PA), SCTLR_EL2 (EL2&0 MMU off, caches on, TSCXT clear) and the E2H
+/// layouts of CPTR_EL2 and CNTHCTL_EL2 the EL1 lane also uses.
+const VTCR_VALUE: u64 = 25 | (1 << 6) | (1 << 8) | (1 << 10) | (3 << 12) | (5 << 16) | (1 << 31);
+const SCTLR_EL2_VALUE: u64 = 0x30c0_0800 | (1 << 2) | (1 << 12);
 const CASE_REGION: u64 = 0x2_0000_0000;
 const CODE_ALIAS: u64 = 0x2_0040_0000;
 const L2_ENTRIES: u64 = 512;
@@ -70,8 +91,9 @@ const DESC_READ_ONLY: u64 = 3 << 6;
 const DESC_PXN: u64 = 1 << 53;
 const DESC_UXN: u64 = 1 << 54;
 
-/// The descriptors `build_tables` writes, as bytes from `L1_TABLE`.
-fn harness_tables() -> Vec<u8> {
+/// The descriptors `build_tables` writes, as bytes from `L1_TABLE`, and
+/// under a hypervisor those of `build_stage2` with the case's descriptors.
+fn harness_tables(hypervisor: Option<&Hypervisor>) -> Vec<u8> {
     let mut tables = vec![0u8; TABLE_BYTES];
     let mut set = |address: u64, descriptor: u64| {
         let offset = (address - L1_TABLE) as usize;
@@ -109,6 +131,34 @@ fn harness_tables() -> Vec<u8> {
             L3_DATA + page * 8,
             address | DESC_NORMAL | DESC_PAGE | DESC_EL0_RW | DESC_PXN | DESC_UXN,
         );
+    }
+    let Some(hypervisor) = hypervisor else {
+        return tables;
+    };
+    set(S2_L1_TABLE + RAM / BLOCK_1G * 8, S2_L2_RAM | DESC_TABLE);
+    set(
+        S2_L1_TABLE + CASE_REGION / BLOCK_1G * 8,
+        S2_L2_CASE | DESC_TABLE,
+    );
+    set(S2_L2_RAM, S2_L3_HARNESS | DESC_TABLE);
+    for entry in 1..L2_ENTRIES {
+        let block = RAM + entry * BLOCK_2M;
+        set(S2_L2_RAM + entry * 8, block | STAGE2_NORMAL | DESC_BLOCK);
+    }
+    for entry in 0..L2_ENTRIES {
+        let page = RAM + entry * PAGE_BYTES;
+        set(S2_L3_HARNESS + entry * 8, page | STAGE2_NORMAL | DESC_PAGE);
+    }
+    set(
+        S2_L3_HARNESS + (L3_DATA - RAM) / PAGE_BYTES * 8,
+        hypervisor.table,
+    );
+    let case = |address: u64| S2_L2_CASE + (address - CASE_REGION) / BLOCK_2M * 8;
+    set(case(CASE_REGION), CASE_REGION | STAGE2_NORMAL | DESC_BLOCK);
+    set(case(CODE_PAGE), hypervisor.code);
+    set(case(DATA_WINDOW), S2_L3_DATA | DESC_TABLE);
+    for (page, descriptor) in hypervisor.data.iter().enumerate() {
+        set(S2_L3_DATA + page as u64 * 8, *descriptor);
     }
     tables
 }
@@ -213,15 +263,19 @@ const HCR_API: u32 = 41;
 const HCR_FIEN: u32 = 47;
 const HCR_ENSCXT: u32 = 53;
 
-/// The engine's M2 profile without EL2, as the oracle machine has none.
-fn profile(target: TargetCpu) -> CpuProfile {
-    let mut fixed = identification::derive(target, false);
+/// The engine's M2 profile, with EL2 only when the oracle machine has it.
+fn profile(target: TargetCpu, el2: bool) -> CpuProfile {
+    let mut fixed = identification::derive(target, el2);
     fixed.push((DCZID_EL0, DCZID));
     // J473AP cpu0's MIDR and MPIDR, as the bundle profile gives them; only
     // the access outcome of an MRS is compared.
     fixed.extend([(MIDR_EL1, 0x611f_0320), (MPIDR_EL1, 0x8000_0000)]);
     CpuProfile {
-        name: "oracle-m2-el0",
+        name: if el2 {
+            "oracle-m2-el2"
+        } else {
+            "oracle-m2-el0"
+        },
         counter_frequency: 24_000_000,
         fixed,
     }
@@ -237,15 +291,17 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     let windows = windows()?.lock().expect("native windows lock");
     // SAFETY: the windows are owned mappings; the code page is installed below.
     unsafe { super::native::install_case(&windows, case)? };
-    let mut pstate = Pstate::reset(if case.el1 { 1 } else { 0 });
-    // EL1 cases run on SP_EL0 (EL1t), as the harness keeps SP_EL1 for itself.
+    let hypervisor = case.hypervisor.as_ref();
+    let mut pstate = Pstate::reset(case.el);
+    // EL1 and EL2 cases run on SP_EL0 (EL1t, EL2t), as the harness keeps
+    // SP_EL1 and SP_EL2 for itself.
     pstate.sp = false;
     let mut cpu = Cpu::new(CODE_PAGE, pstate);
     cpu.state = case.state.clone();
     // The rest of the EL1 state the harness leaves for the case.
     let nzcv = u64::from(case.state.nzcv) & 0xf000_0000;
     let spsr = nzcv
-        | if case.el1 {
+        | if case.el != 0 {
             SPSR_EL1T_MASKED
         } else {
             SPSR_EL0T_STEPPED
@@ -261,30 +317,52 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         (Register::MAIR_EL1, MAIR_VALUE),
         (Register::CPACR_EL1, CPACR_FP),
         (Register::VBAR_EL1, VECTOR_BASE),
-        // The oracle machine has no EL2, so the engine's EL2 stays out of
-        // the way: HVC is UNDEFINED; PAC keys, SCXTNUM and the RAS error
-        // record controls are not trapped (HCR_EL2.APK, API, EnSCXT, FIEN);
-        // and FP/SIMD and the EL1 counter and timer are not trapped to EL2.
+        // Without a hypervisor the oracle machine has no EL2, so the
+        // engine's EL2 stays out of the way: HVC is UNDEFINED; PAC keys,
+        // SCXTNUM and the RAS error record controls are not trapped
+        // (HCR_EL2.APK, API, EnSCXT, FIEN); and FP/SIMD and the EL1 counter
+        // and timer are not trapped to EL2. The EL2 harness sets the same
+        // controls without HCD, with E2H, RW and VM and the case's additions.
         (
             Register::HCR_EL2,
-            1 << HCR_HCD | 1 << HCR_APK | 1 << HCR_API | 1 << HCR_ENSCXT | 1 << HCR_FIEN,
+            match hypervisor {
+                Some(hypervisor) => HCR_BASE | hypervisor.hcr,
+                None => {
+                    1 << HCR_HCD | 1 << HCR_APK | 1 << HCR_API | 1 << HCR_ENSCXT | 1 << HCR_FIEN
+                }
+            },
         ),
         (Register::CPTR_EL2, 0b11 << 20),
         (Register::CNTHCTL_EL2, 1 << 10 | 1 << 11),
     ] {
         cpu.registers.set(register, 0, value);
     }
+    if hypervisor.is_some() {
+        for (register, value) in [
+            (Register::VTCR_EL2, VTCR_VALUE),
+            (Register::VTTBR_EL2, S2_L1_TABLE),
+            (Register::SCTLR_EL2, SCTLR_EL2_VALUE),
+            (Register::VBAR_EL2, VECTOR_BASE),
+            // An EL2 case is entered by the EL2 harness's ERET.
+            (Register::ELR_EL2, CODE_PAGE),
+            (Register::SPSR_EL2, nzcv | SPSR_EL2T_MASKED),
+        ] {
+            cpu.registers.set(register, 0, value);
+        }
+    }
     // The harness enters each case by ERET, which sets the event register.
     cpu.event = true;
     let host = OracleHost {
         code: windows.code_pointer(),
         data: windows.data_pointer(),
-        tables: harness_tables(),
+        tables: harness_tables(hypervisor),
         installed: Vec::new(),
     };
-    let mut machine = Machine::new(cpu, host, NoDevices, profile(target), target);
-    // An EL1 case runs its words, one block each, and the UDF after them.
-    let blocks = if case.el1 {
+    let profile = profile(target, hypervisor.is_some());
+    let mut machine = Machine::new(cpu, host, NoDevices, profile, target);
+    // An EL1 or EL2 case runs its words, one block each, and the UDF after
+    // them.
+    let blocks = if case.el != 0 {
         case.code.len() as u64 + 1
     } else {
         1
@@ -298,7 +376,11 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         }
     }
     super::native::set_mxcsr(saved);
+    // The harness ends a case at its first exception; the engine may run on
+    // to its vector (an exception on fetch takes no budget), which the case
+    // does not include.
     match stop {
+        _ if machine.statistics.exceptions != 0 => {}
         Stop::Budget => {}
         Stop::Unsupported(requirement) => bail!("engine refused: {requirement}"),
         other => bail!("engine stopped: {other:?}"),
@@ -308,21 +390,45 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     // A stepped EL0 case completes after its words, but the engine runs on
     // into the zero words after them: their UDF #0 marks completion.
     let end = CODE_PAGE + 4 * case.code.len() as u64;
-    let fell_through = !case.el1
+    // The exception's registers are those of the EL it was taken to.
+    let level = cpu.pstate.el;
+    let (esr, elr, far, spsr) = if level == 2 {
+        (
+            Register::ESR_EL2,
+            Register::ELR_EL2,
+            Register::FAR_EL2,
+            Register::SPSR_EL2,
+        )
+    } else {
+        (
+            Register::ESR_EL1,
+            Register::ELR_EL1,
+            Register::FAR_EL1,
+            Register::SPSR_EL1,
+        )
+    };
+    let fell_through = case.el == 0
         && machine.statistics.exceptions != 0
-        && cpu.read(Register::ESR_EL1) == UDF_SYNDROME
-        && cpu.read(Register::ELR_EL1) == end;
+        && level == 1
+        && cpu.read(esr) == UDF_SYNDROME
+        && cpu.read(elr) == end;
     let (next_pc, exception) = if fell_through {
         state.sp = cpu.sp(0);
         (end, None)
     } else if machine.statistics.exceptions != 0 {
         state.sp = cpu.sp(0);
         let exception = Exception {
-            syndrome: cpu.read(Register::ESR_EL1),
-            address: cpu.read(Register::ELR_EL1),
-            fault_address: cpu.read(Register::FAR_EL1),
+            syndrome: cpu.read(esr),
+            address: cpu.read(elr),
+            fault_address: cpu.read(far),
+            level,
+            hpfar: if level == 2 {
+                cpu.read(Register::HPFAR_EL2)
+            } else {
+                0
+            },
         };
-        (cpu.read(Register::ELR_EL1), Some(exception))
+        (cpu.read(elr), Some(exception))
     } else {
         (cpu.pc, None)
     };
@@ -334,6 +440,6 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         data,
         scalable: None,
         exception,
-        spsr: case.el1.then_some(cpu.read(Register::SPSR_EL1)),
+        spsr: (case.el != 0).then_some(cpu.read(spsr)),
     })
 }

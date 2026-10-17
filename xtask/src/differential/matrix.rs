@@ -1,11 +1,12 @@
 //! System requirement matrix lane: words for the matrix's System form rows
 //! and concretely encoded accessor rows, run through the system-mode engine
-//! lane against QEMU, with one tally per row and exception level.
+//! lane against QEMU, with one tally per row and exception level; with
+//! `--el2` the rows also run at EL2t and every case under a random stage 2.
 //!
 //! A row whose registry status is "implemented" must match; any other row's
 //! divergences are reported as open. `--report` writes the tallies as JSON for
 //! the matrix owner to cite.
-use super::{Random, Subject, el1_admissible};
+use super::{Random, Subject, el1_admissible, el2_admissible};
 use crate::oracle::native::Translation;
 use crate::system_matrix::MATRIX;
 use crate::tools::root;
@@ -26,7 +27,7 @@ const UDF_MASK: u32 = 0xffff_0000;
 const PSTATE: u32 = 0xd500_401f;
 const REGISTER_FIELD: u32 = 0x1f;
 /// `MRS X0, PAR_EL1`, which follows each AT so its result is compared.
-const MRS_PAR: u32 = 0xd538_7400;
+pub(super) const MRS_PAR: u32 = 0xd538_7400;
 const IMMEDIATE_FIELD: u32 = 0xf;
 
 /// Whether `word` belongs to the system lane: it exits to the engine or runs
@@ -68,6 +69,7 @@ pub(super) struct Row {
     words: Vec<u32>,
     pub el0: Tally,
     pub el1: Option<Tally>,
+    pub el2: Option<Tally>,
     /// The first divergence or refusal, for the report.
     pub first: Option<String>,
 }
@@ -82,12 +84,12 @@ pub(super) struct Rows {
 }
 
 impl Rows {
-    pub fn tally(&mut self, id: &str, el1: bool) -> Option<&mut Tally> {
+    pub fn tally(&mut self, id: &str, el: u8) -> Option<&mut Tally> {
         let row = self.rows.get_mut(id)?;
-        Some(if el1 {
-            row.el1.get_or_insert_default()
-        } else {
-            &mut row.el0
+        Some(match el {
+            0 => &mut row.el0,
+            1 => row.el1.get_or_insert_default(),
+            _ => row.el2.get_or_insert_default(),
         })
     }
 
@@ -121,6 +123,9 @@ impl Rows {
                 });
                 if let Some(el1) = row.el1 {
                     entry["el1"] = el1.json();
+                }
+                if let Some(el2) = row.el2 {
+                    entry["el2"] = el2.json();
                 }
                 if let Some(first) = &row.first {
                     entry["first_difference"] = first.as_str().into();
@@ -249,11 +254,13 @@ fn accessor(name: &str, encoding: &str, m: u32) -> Option<u32> {
 }
 
 /// Sample every lane-eligible matrix row, `1 + fields` distinct words each,
-/// and return the rows with one subject per word and admissible level.
+/// and return the rows with one subject per word and admissible level, EL2
+/// included when `el2`.
 pub(super) fn subjects(
     random: &mut Random,
     fields: usize,
     filter: Option<&str>,
+    el2: bool,
 ) -> Result<(Rows, Vec<Subject>)> {
     let mut rows = Rows::default();
     let mut subjects = Vec::new();
@@ -332,18 +339,25 @@ pub(super) fn subjects(
                 words: words.clone(),
                 el0: Tally::default(),
                 el1: None,
+                el2: None,
                 first: None,
             },
         );
         for word in words {
+            let levels: Vec<u8> = [2, 1, 0]
+                .into_iter()
+                .filter(|&el| match el {
+                    2 => el2 && el2_admissible(word),
+                    1 => el1_admissible(word),
+                    _ => true,
+                })
+                .collect();
             if let Err(error) = Translation::system(&[word]) {
-                // The compiler refuses the word at both levels.
-                for el1 in [false, true] {
-                    if !el1 || el1_admissible(word) {
-                        let tally = rows.tally(id, el1).expect("row inserted above");
-                        tally.compared += 1;
-                        tally.refused += 1;
-                    }
+                // The compiler refuses the word at every level.
+                for &el in &levels {
+                    let tally = rows.tally(id, el).expect("row inserted above");
+                    tally.compared += 1;
+                    tally.refused += 1;
                 }
                 rows.note(id, || format!("{word:08x}: compiler: {error:#}"));
                 if !draft {
@@ -351,34 +365,33 @@ pub(super) fn subjects(
                 }
                 continue;
             }
-            // AT at EL1 is followed by a read of PAR_EL1 into its Rt.
+            // AT at EL1 and EL2 is followed by a read of PAR_EL1 into its Rt.
             if kind == "access"
                 && row["name"]
                     .as_str()
                     .is_some_and(|name| name.starts_with("AT "))
             {
                 let read = MRS_PAR | word & REGISTER_FIELD;
-                subjects.push(Subject {
-                    form: id.into(),
-                    code: vec![word, read],
-                    scalable: None,
-                    system: true,
-                    draft,
-                    el1: true,
-                    translation: Translation::system(&[word, read])?,
-                });
-            }
-            for el1 in [true, false] {
-                if el1 && !el1_admissible(word) {
-                    continue;
+                for &el in levels.iter().filter(|&&el| el != 0) {
+                    subjects.push(Subject {
+                        form: id.into(),
+                        code: vec![word, read],
+                        scalable: None,
+                        system: true,
+                        draft,
+                        el,
+                        translation: Translation::system(&[word, read])?,
+                    });
                 }
+            }
+            for el in levels {
                 subjects.push(Subject {
                     form: id.into(),
                     code: vec![word],
                     scalable: None,
                     system: true,
                     draft,
-                    el1,
+                    el,
                     translation: Translation::system(&[word])?,
                 });
             }

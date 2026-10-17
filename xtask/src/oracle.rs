@@ -7,6 +7,11 @@
 //! [`DATA_WINDOW`] and read the code region; both engines see the same guest
 //! addresses. A case that faults on QEMU is reported but never run natively,
 //! because direct-RAM native code has no fault recovery.
+//!
+//! [`Oracle::with_el2`] starts the machine with `virtualization=on`: the
+//! harness then runs EL1&0 under an identity stage 2 with HCR_EL2.E2H and VM
+//! set, applies each case's [`Hypervisor`] state, records exceptions taken
+//! to EL2 with HPFAR_EL2, and runs [`Case::el`] 2 cases at EL2t.
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
@@ -62,8 +67,13 @@ const CASE_TPIDR2: usize = 32;
 const CASE_FLAGS: usize = 48;
 /// Run the case at EL1t, unstepped, until its first exception.
 const FLAG_EL1: u64 = 2;
+/// Run the case at EL2t, unstepped, until its first exception.
+const FLAG_EL2: u64 = 4;
 const CASE_CODE: usize = 64;
 const CASE_STATE: usize = 512;
+/// The case's [`Hypervisor`] state: HCR_EL2 additions, then the stage-2
+/// descriptors of the code page, the data window's table page and its pages.
+const CASE_EL2: usize = 0xc00;
 const CASE_DATA: usize = 0x1000;
 const CASE_SCALABLE: usize = 0x5000;
 const RESULT_SP: usize = 248;
@@ -76,6 +86,8 @@ const RESULT_FAR: usize = 296;
 const RESULT_V: usize = 320;
 const RESULT_SVCR: usize = 832;
 const RESULT_TPIDR2: usize = 840;
+const RESULT_LEVEL: usize = 856;
+const RESULT_HPFAR: usize = 864;
 const RESULT_DATA: usize = 0x400;
 const RESULT_SCALABLE: usize = 0x4400;
 
@@ -92,8 +104,51 @@ pub struct Case {
     pub state: GuestState,
     pub data: Box<[u8]>,
     pub scalable: Option<Scalable>,
-    /// Run at EL1t until the first exception; the words after `code` are UDF.
-    pub el1: bool,
+    /// The exception level: 0 steps the code; 1 and 2 run it at EL1t or
+    /// EL2t until the first exception, as the words after `code` are UDF.
+    /// Level 2 needs an [`Oracle::with_el2`] machine.
+    pub el: u8,
+    /// HCR_EL2 and stage 2, for an [`Oracle::with_el2`] machine only.
+    pub hypervisor: Option<Hypervisor>,
+}
+
+/// Stage 1 of the harness's EL1&0 regime: the page of the data window's
+/// level-3 table, which the stage-2 [`Hypervisor::table`] descriptor maps.
+pub const STAGE1_DATA_TABLE: u64 = 0x4011_3000;
+/// Stage-2 descriptor attributes of the harness's identity map: AF, Inner
+/// Shareable, S2AP read/write and MemAttr Normal Write-Back.
+pub const STAGE2_NORMAL: u64 = (1 << 10) | (3 << 8) | (3 << 6) | (0xf << 2);
+/// The harness's HCR_EL2 as the engine mirrors it: E2H, RW and VM, with APK,
+/// API, EnSCXT and FIEN. The harness also sets ATA, for QEMU's MTE, which
+/// the profile lacks.
+pub const HCR_BASE: u64 = 1 | (1 << 31) | (1 << 34) | (1 << 40) | (1 << 41) | (1 << 47) | (1 << 53);
+const STAGE2_BLOCK: u64 = 1;
+const STAGE2_PAGE: u64 = 3;
+const DATA_PAGES: usize = DATA_BYTES / 0x1000;
+
+/// One case's HCR_EL2 additions to [`HCR_BASE`] and its stage-2
+/// descriptors: the 2 MiB block of the code page, the page holding the data
+/// window's stage-1 level-3 table, and each data window page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hypervisor {
+    pub hcr: u64,
+    pub code: u64,
+    pub table: u64,
+    pub data: [u64; DATA_PAGES],
+}
+
+impl Default for Hypervisor {
+    /// The identity map with no HCR_EL2 additions.
+    fn default() -> Self {
+        Self {
+            hcr: 0,
+            code: CODE_PAGE | STAGE2_NORMAL | STAGE2_BLOCK,
+            table: STAGE1_DATA_TABLE | STAGE2_NORMAL | STAGE2_PAGE,
+            data: std::array::from_fn(|page| {
+                (DATA_WINDOW + page as u64 * 0x1000) | STAGE2_NORMAL | STAGE2_PAGE
+            }),
+        }
+    }
 }
 
 /// SME state: streaming vector length, SVCR and the register banks.
@@ -179,21 +234,26 @@ pub struct Outcome {
     pub data: Box<[u8]>,
     pub scalable: Option<Scalable>,
     pub exception: Option<Exception>,
-    /// SPSR_EL1 of an EL1 case's exception: PSTATE after its code.
+    /// SPSR of an EL1 or EL2 case's exception: PSTATE after its code.
     pub spsr: Option<u64>,
 }
 
-/// An exception other than the final step; `address` is its ELR.
+/// An exception other than the final step, from the registers of the EL it
+/// was taken to: `address` is its ELR, and `hpfar` HPFAR_EL2 (0 at EL1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exception {
     pub syndrome: u64,
     pub address: u64,
     pub fault_address: u64,
+    pub level: u8,
+    pub hpfar: u64,
 }
 
 /// A QEMU binary able to run the harness.
 pub struct Oracle {
     qemu: PathBuf,
+    /// Start the machine at EL2 (`virtualization=on`).
+    el2: bool,
 }
 
 impl Oracle {
@@ -203,7 +263,13 @@ impl Oracle {
             qemu: qemu
                 .canonicalize()
                 .with_context(|| format!("cannot find {}", qemu.display()))?,
+            el2: false,
         })
+    }
+
+    /// Run the harness with EL2 and stage 2.
+    pub fn with_el2(self) -> Self {
+        Self { el2: true, ..self }
     }
 
     /// `qemu-system-aarch64` from `tools` when present, otherwise from `PATH`.
@@ -217,7 +283,7 @@ impl Oracle {
                 .find(|path| path.is_file())
                 .context("install QEMU 11 or newer")?
         };
-        Ok(Self { qemu })
+        Ok(Self { qemu, el2: false })
     }
 
     /// Run every case on QEMU, in order. Batches share one SVL so their
@@ -240,14 +306,25 @@ impl Oracle {
     }
 
     fn run_batch(&self, cases: &[Case], layout: Layout) -> Result<Vec<Outcome>> {
+        ensure!(
+            cases
+                .iter()
+                .all(|case| case.hypervisor.is_some() == self.el2 && (case.el < 2 || self.el2)),
+            "hypervisor state and EL2 cases need an EL2 machine, and only they"
+        );
         let directory = tempfile::tempdir()?;
         let harness = directory.path().join("harness.bin");
         let batch = directory.path().join("batch.bin");
         fs::write(&harness, HARNESS)?;
         fs::write(&batch, encode(cases, layout)?)?;
+        let machine = if self.el2 {
+            "virt,mte=on,virtualization=on"
+        } else {
+            "virt,mte=on"
+        };
         let output = Command::new(&self.qemu)
             .current_dir(directory.path())
-            .args(["-M", "virt,mte=on", "-cpu", CPU, "-m", "8G", "-smp", "1"])
+            .args(["-M", machine, "-cpu", CPU, "-m", "8G", "-smp", "1"])
             .args(["-nographic", "-monitor", "none", "-serial", "none"])
             .args(["-semihosting-config", "enable=on,target=native"])
             .arg("-device")
@@ -344,7 +421,18 @@ fn encode(cases: &[Case], layout: Layout) -> Result<Vec<u8>> {
         };
         quad(slot, CASE_WORDS, case.code.len() as u64);
         quad(slot, CASE_STEPS, case.steps as u64);
-        quad(slot, CASE_FLAGS, if case.el1 { FLAG_EL1 } else { 0 });
+        let flags = match case.el {
+            0 => 0,
+            1 => FLAG_EL1,
+            2 => FLAG_EL2,
+            el => anyhow::bail!("no harness entry at EL{el}"),
+        };
+        quad(slot, CASE_FLAGS, flags);
+        let hypervisor = case.hypervisor.unwrap_or_default();
+        let block = [hypervisor.hcr, hypervisor.code, hypervisor.table];
+        for (index, value) in block.iter().chain(&hypervisor.data).enumerate() {
+            quad(slot, CASE_EL2 + index * 8, *value);
+        }
         for (word, bytes) in case
             .code
             .iter()
@@ -413,6 +501,8 @@ fn decode(case: &Case, record: &[u8]) -> Result<Outcome> {
         syndrome,
         address: next_pc,
         fault_address: quad(RESULT_FAR),
+        level: quad(RESULT_LEVEL) as u8,
+        hpfar: quad(RESULT_HPFAR),
     });
     Ok(Outcome {
         state,
@@ -420,7 +510,7 @@ fn decode(case: &Case, record: &[u8]) -> Result<Outcome> {
         data: record[RESULT_DATA..][..DATA_BYTES].into(),
         scalable,
         exception,
-        spsr: case.el1.then(|| quad(RESULT_SPSR)),
+        spsr: (case.el != 0).then(|| quad(RESULT_SPSR)),
     })
 }
 

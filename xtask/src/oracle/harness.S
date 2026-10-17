@@ -1,7 +1,14 @@
 // Bare-metal AArch64 oracle harness for QEMU `virt` with `-cpu max`.
 //
 // The host loads this image at HARNESS and a case batch at BATCH, then starts
-// the CPU at EL1. Each case single-steps a declared number of EL0 instructions
+// the CPU at EL1, or at EL2 with `virtualization=on`. At EL2 the harness
+// sets HCR_EL2 (E2H, VM and the controls the engine's lane mirrors), maps
+// stage 2 as an identity and drops to EL1. Before each case EL1 asks EL2
+// (HVC from `el2_call`) to install the case's HCR_EL2 additions and stage-2
+// descriptors for the code page, the stage-1 table of the data window and
+// the window's pages, and restores the defaults after it. Exceptions taken
+// to EL2 are recorded with ESR, ELR, FAR, HPFAR and SPSR_EL2, and a case
+// with FLAG_EL2 runs at EL2t, unstepped, like an EL1 case. Each case single-steps a declared number of EL0 instructions
 // from the code page; the lower-EL vector records full register state after
 // the last step or the first other exception. A case with FLAG_EL1 runs at
 // EL1t with debug masked instead, without stepping: the zero words after its
@@ -29,6 +36,14 @@
     .equ DATA_WINDOW,      0x208000000
     .equ DATA_BYTES,       0x4000
     .equ PAGE_BYTES,       0x1000
+    // Stage-2 tables and the EL2 stack and exception record.
+    .equ S2_L1_TABLE,      0x40120000
+    .equ S2_L2_RAM,        0x40121000
+    .equ S2_L3_HARNESS,    0x40122000
+    .equ S2_L2_CASE,       0x40123000
+    .equ S2_L3_DATA,       0x40124000
+    .equ EL2_STACK,        0x40130000
+    .equ EL2_RECORD,       0x40130000
 
     // Batch header. Case and result strides depend on the batch's largest SVL.
     .equ BATCH_COUNT,      0
@@ -48,6 +63,13 @@
     .equ CASE_FLAGS,       48
     .equ CASE_CODE,        64
     .equ CASE_STATE,       512
+    // HCR_EL2 additions, then the stage-2 descriptors of the code page, the
+    // data window's stage-1 table page and the window's pages.
+    .equ CASE_EL2,         0xc00
+    .equ EL2_HCR,          0
+    .equ EL2_CODE,         8
+    .equ EL2_TABLE,        16
+    .equ EL2_DATA,         24
     .equ CASE_DATA,        0x1000
     .equ CASE_SCALABLE,    0x5000
 
@@ -64,6 +86,8 @@
     .equ RESULT_SVCR,      832
     .equ RESULT_TPIDR2,    840
     .equ RESULT_FPMR,      848
+    .equ RESULT_LEVEL,     856
+    .equ RESULT_HPFAR,     864
     .equ RESULT_DATA,      0x400
     .equ RESULT_SCALABLE,  0x4400
 
@@ -98,7 +122,36 @@
     .equ SVE_GRANULE,      16
     .equ FLAG_FPMR,        1
     .equ FLAG_EL1,         2
+    .equ FLAG_EL2,         4
     .equ SPSR_M_EL1T,      4
+    .equ SPSR_M_MASK,      0xf
+    .equ SPSR_M_EL2T,      8
+    .equ SPSR_EL1H_MASKED, 0x3c5
+    // EL2 controls: E2H, RW and VM, with PAC keys, SCXTNUM and the RAS
+    // records untrapped (APK, API, EnSCXT, FIEN), as the engine's lane sets,
+    // and ATA, so QEMU's MTE registers (which the profile lacks) behave at
+    // EL1 as on the machine without EL2.
+    .equ HCR_BASE,         1 | (1 << 31) | (1 << 34) | (1 << 40) | (1 << 41) | (1 << 47) | (1 << 53) | (1 << 56)
+    // E2H layout: FP/SIMD, SVE and SME untrapped.
+    .equ CPTR_EL2_VALUE,   (3 << 16) | (3 << 20) | (3 << 24)
+    // E2H layout: EL1 physical counter and timer untrapped.
+    .equ CNTHCTL_EL2_VALUE, (1 << 10) | (1 << 11)
+    .equ SMCR_EL2_VALUE,   0xf | (1 << 30)
+    // QEMU implements FEAT_FGT, which the profile lacks. Its negative
+    // controls (n*) reset to trapping without EL3, so set every one: EL1 then
+    // reaches TPIDR2_EL0 and the rest as on the machine without EL2.
+    .equ HFGXTR_EL2_VALUE, 0xfff4000000000000
+    .equ HFGITR_EL2_VALUE, 0x0f80000000000000
+    .equ HDFGRTR_EL2_VALUE, 0x7800000000000000
+    .equ HDFGWTR_EL2_VALUE, 0x7000000000000000
+    // The EL2&0 regime's MMU stays off; caches on. TSCXT (bit 20) is clear:
+    // QEMU applies it to EL1 accesses to SCXTNUM_EL1, which the architecture
+    // traps by HCR_EL2.EnSCXT alone.
+    .equ SCTLR_EL2_VALUE,  0x30c00800 | (1 << 2) | (1 << 12)
+    // T0SZ=25 from level 1 (SL0=1), WB walks, inner shareable, 4 KiB, 48-bit PA.
+    .equ VTCR_VALUE,       25 | (1 << 6) | (1 << 8) | (1 << 10) | (3 << 12) | (5 << 16) | (1 << 31)
+    // AF, inner shareable, S2AP read/write, MemAttr Normal Write-Back.
+    .equ S2_NORMAL,        (1 << 10) | (3 << 8) | (3 << 6) | (0xf << 2)
     .equ ZT0_BYTES,        64
     .equ DESC_TABLE,       3
     .equ DESC_BLOCK,       1
@@ -122,9 +175,74 @@
     .equ EXIT_APPLICATION, 0x20026
     .equ EXIT_HARNESS_FAULT, 0x20023
 
+    // Load the case's general-purpose registers from its state at x30.
+    .macro load_case
+    ldp     x0, x1, [x30, #0]
+    ldp     x2, x3, [x30, #16]
+    ldp     x4, x5, [x30, #32]
+    ldp     x6, x7, [x30, #48]
+    ldp     x8, x9, [x30, #64]
+    ldp     x10, x11, [x30, #80]
+    ldp     x12, x13, [x30, #96]
+    ldp     x14, x15, [x30, #112]
+    ldp     x16, x17, [x30, #128]
+    ldp     x18, x19, [x30, #144]
+    ldp     x20, x21, [x30, #160]
+    ldp     x22, x23, [x30, #176]
+    ldp     x24, x25, [x30, #192]
+    ldp     x26, x27, [x30, #208]
+    ldp     x28, x29, [x30, #224]
+    ldr     x30, [x30, #240]
+    .endm
+
     .text
     .global _start
 _start:
+    mrs     x0, CurrentEL
+    cmp     x0, #(2 << 2)
+    b.ne    el1_start
+    adr     x0, el2_vectors
+    msr     vbar_el2, x0
+    ldr     x0, =EL2_STACK
+    mov     sp, x0
+    ldr     x0, =HCR_BASE
+    msr     hcr_el2, x0
+    isb
+    ldr     x0, =CPTR_EL2_VALUE
+    msr     cptr_el2, x0
+    ldr     x0, =CNTHCTL_EL2_VALUE
+    msr     cnthctl_el2, x0
+    ldr     x0, =SMCR_EL2_VALUE
+    msr     smcr_el2, x0
+    ldr     x0, =HFGXTR_EL2_VALUE
+    msr     hfgrtr_el2, x0
+    msr     hfgwtr_el2, x0
+    ldr     x0, =HFGITR_EL2_VALUE
+    msr     hfgitr_el2, x0
+    ldr     x0, =HDFGRTR_EL2_VALUE
+    msr     hdfgrtr_el2, x0
+    ldr     x0, =HDFGWTR_EL2_VALUE
+    msr     hdfgwtr_el2, x0
+    ldr     x0, =SCTLR_EL2_VALUE
+    msr     sctlr_el2, x0
+    bl      build_stage2
+    ldr     x0, =VTCR_VALUE
+    msr     vtcr_el2, x0
+    ldr     x0, =S2_L1_TABLE
+    msr     vttbr_el2, x0
+    isb
+    tlbi    alle1
+    dsb     ish
+    adr     x0, have_el2
+    mov     x1, #1
+    str     x1, [x0]
+    adr     x0, el1_start
+    msr     elr_el2, x0
+    mov     x0, #SPSR_EL1H_MASKED
+    msr     spsr_el2, x0
+    eret
+
+el1_start:
     adr     x0, vectors
     msr     vbar_el1, x0
     ldr     x0, =CPACR_FP_SVE_SME
@@ -186,6 +304,13 @@ next_case:
     msr     pmuserenr_el0, xzr
     msr     cntp_ctl_el0, xzr
     msr     cntv_ctl_el0, xzr
+    // Under EL2, install the case's HCR_EL2 additions and stage 2.
+    adr     x0, have_el2
+    ldr     x0, [x0]
+    cbz     x0, 7f
+    add     x0, x20, #CASE_EL2
+    bl      el2_call
+7:
 
     // Load the guest state and enter EL0.
     bl      load_scalable
@@ -230,23 +355,16 @@ next_case:
     ldr     x0, =CODE_PAGE
     msr     elr_el1, x0
     mov     sp, x21
-    ldp     x0, x1, [x30, #0]
-    ldp     x2, x3, [x30, #16]
-    ldp     x4, x5, [x30, #32]
-    ldp     x6, x7, [x30, #48]
-    ldp     x8, x9, [x30, #64]
-    ldp     x10, x11, [x30, #80]
-    ldp     x12, x13, [x30, #96]
-    ldp     x14, x15, [x30, #112]
-    ldp     x16, x17, [x30, #128]
-    ldp     x18, x19, [x30, #144]
-    ldp     x20, x21, [x30, #160]
-    ldp     x22, x23, [x30, #176]
-    ldp     x24, x25, [x30, #192]
-    ldp     x26, x27, [x30, #208]
-    ldp     x28, x29, [x30, #224]
-    ldr     x30, [x30, #240]
+    // An EL2 case enters through EL2, which takes ELR_EL1 and SPSR_EL1 at
+    // EL2t.
+    ldr     x1, [x20, #CASE_FLAGS]
+    tbnz    x1, #2, 8f
+    load_case
     eret
+8:  load_case
+    hvc     #0
+enter_return:
+    b       harness_fault
 
     // Lower-EL synchronous exception: SP_EL1 is the case result record and
     // TPIDR_EL1 counts the steps left. Re-arm the step until the last one.
@@ -265,7 +383,10 @@ lower_sync:
     msr     spsr_el1, x0
     ldr     x0, [sp, #0]
     eret
-1:  ldr     x0, [sp, #0]
+1:  mov     x0, #1
+    str     x0, [sp, #RESULT_LEVEL]
+    ldr     x0, [sp, #0]
+save_case:
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -283,16 +404,32 @@ lower_sync:
     stp     x28, x29, [sp, #224]
     str     x30, [sp, #240]
     mrs     x0, sp_el0
-    mrs     x1, spsr_el1
-    stp     x0, x1, [sp, #RESULT_SP]
+    str     x0, [sp, #RESULT_SP]
     mrs     x0, fpcr
     mrs     x1, fpsr
     stp     x0, x1, [sp, #RESULT_FPCR]
+    ldr     x0, [sp, #RESULT_LEVEL]
+    cmp     x0, #2
+    b.eq    2f
+    mrs     x0, spsr_el1
+    str     x0, [sp, #RESULT_SPSR]
     mrs     x0, esr_el1
     mrs     x1, elr_el1
     stp     x0, x1, [sp, #RESULT_ESR]
     mrs     x0, far_el1
     str     x0, [sp, #RESULT_FAR]
+    str     xzr, [sp, #RESULT_HPFAR]
+    b       3f
+    // Taken to EL2: the EL2 handler kept its registers in EL2_RECORD.
+2:  ldr     x2, =EL2_RECORD
+    ldp     x0, x1, [x2, #0]
+    stp     x0, x1, [sp, #RESULT_ESR]
+    ldp     x0, x1, [x2, #16]
+    str     x0, [sp, #RESULT_FAR]
+    str     x1, [sp, #RESULT_HPFAR]
+    ldr     x0, [x2, #32]
+    str     x0, [sp, #RESULT_SPSR]
+3:
     mrs     x0, svcr
     str     x0, [sp, #RESULT_SVCR]
     mrs     x0, tpidr2_el0
@@ -330,7 +467,13 @@ lower_sync:
     sub     x19, x21, x0
     udiv    x19, x19, x25
     madd    x20, x19, x24, x20
-    ldr     x0, =DATA_WINDOW
+    // Under EL2, restore the default stage 2 before reading the window.
+    adr     x0, have_el2
+    ldr     x0, [x0]
+    cbz     x0, 7f
+    adr     x0, default_el2
+    bl      el2_call
+7:  ldr     x0, =DATA_WINDOW
     add     x1, x21, #RESULT_DATA
     mov     x2, #DATA_BYTES
     bl      copy
@@ -507,11 +650,160 @@ build_tables:
     dsb     ish
     ret
 
+    // Ask EL2 to install the HCR_EL2 additions and stage-2 descriptors at x0.
+el2_call:
+    hvc     #0
+install_return:
+    ret
+
+    // EL2 entered from EL1 after a case: record the exception for `save_case`
+    // and return to it at EL1h with the case's registers.
+el2_exit:
+    str     x0, [sp, #0]
+    mov     x0, #2
+    str     x0, [sp, #RESULT_LEVEL]
+    ldr     x0, [sp, #0]
+    b       save_case
+
+    // Lower-EL synchronous exception at EL2: the harness's install and
+    // entry calls, or a case's exception.
+el2_lower_sync:
+    stp     x0, x1, [sp, #-16]!
+    mrs     x0, elr_el2
+    adr     x1, install_return
+    cmp     x0, x1
+    b.eq    el2_install
+    adr     x1, enter_return
+    cmp     x0, x1
+    b.eq    el2_enter
+    // Anything else from the harness's own code is a harness fault.
+    ldr     x1, =HARNESS
+    cmp     x0, x1
+    b.lo    el2_case_exception
+    ldr     x1, =L1_TABLE
+    cmp     x0, x1
+    b.lo    harness_fault
+    b       el2_case_exception
+
+el2_install:
+    stp     x2, x3, [sp, #-16]!
+    str     x30, [sp, #-16]!
+    ldr     x0, [sp, #32]
+    ldr     x1, [x0, #EL2_HCR]
+    ldr     x2, =HCR_BASE
+    orr     x1, x1, x2
+    msr     hcr_el2, x1
+    bl      write_stage2
+    tlbi    vmalls12e1
+    dsb     ish
+    isb
+    ldr     x30, [sp], #16
+    ldp     x2, x3, [sp], #16
+    ldp     x0, x1, [sp], #16
+    eret
+
+    // Enter the case at EL2t with the PSTATE and address EL1 prepared.
+    // Under E2H the EL1 registers are the *_EL12 names.
+el2_enter:
+    mrs     x0, spsr_el12
+    bic     x0, x0, #SPSR_M_MASK
+    orr     x0, x0, #SPSR_M_EL2T
+    msr     spsr_el2, x0
+    mrs     x0, elr_el12
+    msr     elr_el2, x0
+    ldp     x0, x1, [sp], #16
+    eret
+
+    // A case's exception taken to EL2, from a lower EL or from EL2t, with
+    // the case's x0 and x1 on the stack.
+el2_case_exception:
+    ldr     x0, =EL2_RECORD
+    mrs     x1, esr_el2
+    str     x1, [x0, #0]
+    mrs     x1, elr_el2
+    str     x1, [x0, #8]
+    mrs     x1, far_el2
+    str     x1, [x0, #16]
+    mrs     x1, hpfar_el2
+    str     x1, [x0, #24]
+    mrs     x1, spsr_el2
+    str     x1, [x0, #32]
+    adr     x1, el2_exit
+    msr     elr_el2, x1
+    mov     x1, #SPSR_EL1H_MASKED
+    msr     spsr_el2, x1
+    ldp     x0, x1, [sp], #16
+    eret
+
+    // Stage 2 for EL1&0 as an identity map of the RAM gigabyte and the case
+    // region with Normal Write-Back read/write descriptors; the harness's
+    // 2 MiB and the data window have page tables so single pages can change.
+build_stage2:
+    ldr     x0, =S2_L1_TABLE
+    ldr     x1, =S2_L2_RAM | DESC_TABLE
+    str     x1, [x0, #(RAM / BLOCK_1G) * 8]
+    ldr     x1, =S2_L2_CASE | DESC_TABLE
+    str     x1, [x0, #(CASE_REGION / BLOCK_1G) * 8]
+    ldr     x0, =S2_L2_RAM
+    ldr     x1, =S2_L3_HARNESS | DESC_TABLE
+    str     x1, [x0], #8
+    ldr     x1, =(RAM + BLOCK_2M) | S2_NORMAL | DESC_BLOCK
+    mov     x2, #L2_ENTRIES - 1
+1:  str     x1, [x0], #8
+    add     x1, x1, #BLOCK_2M
+    subs    x2, x2, #1
+    b.ne    1b
+    ldr     x0, =S2_L3_HARNESS
+    ldr     x1, =RAM | S2_NORMAL | DESC_PAGE
+    mov     x2, #L2_ENTRIES
+2:  str     x1, [x0], #8
+    add     x1, x1, #PAGE_BYTES
+    subs    x2, x2, #1
+    b.ne    2b
+    ldr     x0, =S2_L2_CASE
+    ldr     x1, =CASE_REGION | S2_NORMAL | DESC_BLOCK
+    str     x1, [x0]
+    ldr     x1, =S2_L3_DATA | DESC_TABLE
+    str     x1, [x0, #((DATA_WINDOW - CASE_REGION) / BLOCK_2M) * 8]
+    adr     x0, default_el2
+    // Fall through to write the default descriptors.
+
+    // Write the stage-2 descriptors of the EL2 block at x0: the code page's
+    // block, the data window's stage-1 table page and the window's pages.
+    // Clobbers x0-x3.
+write_stage2:
+    ldr     x1, [x0, #EL2_CODE]
+    ldr     x2, =S2_L2_CASE + ((CODE_PAGE - CASE_REGION) / BLOCK_2M) * 8
+    str     x1, [x2]
+    ldr     x1, [x0, #EL2_TABLE]
+    ldr     x2, =S2_L3_HARNESS + ((L3_DATA - RAM) / PAGE_BYTES) * 8
+    str     x1, [x2]
+    add     x0, x0, #EL2_DATA
+    ldr     x2, =S2_L3_DATA
+    mov     x3, #DATA_BYTES / PAGE_BYTES
+1:  ldr     x1, [x0], #8
+    str     x1, [x2], #8
+    subs    x3, x3, #1
+    b.ne    1b
+    dsb     ish
+    ret
+
     .ltorg
 
     .balign 16
 params:
     .quad   0, 0, 0
+have_el2:
+    .quad   0
+    // The default EL2 block: no HCR_EL2 additions and identity descriptors.
+default_el2:
+    .quad   0
+    .quad   CODE_PAGE | S2_NORMAL | DESC_BLOCK
+    .quad   L3_DATA | S2_NORMAL | DESC_PAGE
+    .quad   DATA_WINDOW | S2_NORMAL | DESC_PAGE
+    .quad   (DATA_WINDOW + PAGE_BYTES) | S2_NORMAL | DESC_PAGE
+    .quad   (DATA_WINDOW + 2 * PAGE_BYTES) | S2_NORMAL | DESC_PAGE
+    .quad   (DATA_WINDOW + 3 * PAGE_BYTES) | S2_NORMAL | DESC_PAGE
 
     // Only lower-EL synchronous exceptions and, for EL1 cases, current-EL
     // SP0 synchronous exceptions are expected.
@@ -525,6 +817,24 @@ vectors:
     .endr
     .balign 128
     b       lower_sync
+    .rept 7
+    .balign 128
+    b       harness_fault
+    .endr
+
+    // EL2: a case at EL2t takes its exceptions on the current-EL SP0
+    // vector; lower ELs call the harness or take a case's exception.
+    .balign 2048
+el2_vectors:
+    .balign 128
+    stp     x0, x1, [sp, #-16]!
+    b       el2_case_exception
+    .rept 7
+    .balign 128
+    b       harness_fault
+    .endr
+    .balign 128
+    b       el2_lower_sync
     .rept 7
     .balign 128
     b       harness_fault
