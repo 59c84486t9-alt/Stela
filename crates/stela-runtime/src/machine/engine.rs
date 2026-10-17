@@ -4073,6 +4073,72 @@ mod tests {
     }
 
     #[test]
+    fn prediction_restrictions_complete_on_every_chip() {
+        // CFP, DVP and CPP RCTX, X0 (SYS #3, C7, C3, #4, #5 and #7).
+        const RCTX_X0: [u32; 3] = [0xd50b_7380, 0xd50b_73a0, 0xd50b_73e0];
+        // MSR SCTLR_EL1, X0.
+        const MSR_SCTLR_EL1_X0: u32 = 0xd518_1000;
+        const SCTLR_ENRCTX: u64 = 1 << 10;
+        let fresh = |el| {
+            let mut machine = machine(&[]);
+            machine.cpu = Cpu::of(machine.profile.chip, BASE, Pstate::reset(el));
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+            machine
+        };
+        for word in RCTX_X0 {
+            let mut machine = fresh(1);
+            machine.system_instruction(word).unwrap();
+            assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 1));
+            // EnRCTX clear: EL0 traps to EL1 (EC 0x18).
+            let mut machine = fresh(0);
+            machine.system_instruction(word).unwrap();
+            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1) >> 26, 0x18);
+        }
+        // EnRCTX holds through MSR and then lets EL0 restrict predictions.
+        let mut machine = fresh(1);
+        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1);
+        machine.cpu.state.x[0] = sctlr | SCTLR_ENRCTX;
+        machine.system_instruction(MSR_SCTLR_EL1_X0).unwrap();
+        assert_eq!(
+            machine.cpu.read(SystemRegister::SCTLR_EL1) & SCTLR_ENRCTX,
+            SCTLR_ENRCTX
+        );
+        machine.cpu.pstate = Pstate::reset(0);
+        machine.cpu.pc = BASE;
+        machine.derived_changed();
+        machine.system_instruction(RCTX_X0[0]).unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 0));
+        // In the host (E2H and TGE) SCTLR_EL2.EnRCTX governs EL0, trapping
+        // to EL2.
+        const HOST: u64 = 1 << 34 | 1 << 27;
+        let host = |enabled: bool| {
+            let mut machine = fresh(0);
+            let registers = &mut machine.cpu.registers;
+            registers.set(SystemRegister::HCR_EL2, 0, HOST);
+            registers.set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
+            let sctlr = registers.get(SystemRegister::SCTLR_EL2, 0);
+            let sctlr = if enabled {
+                sctlr | SCTLR_ENRCTX
+            } else {
+                sctlr & !SCTLR_ENRCTX
+            };
+            registers.set(SystemRegister::SCTLR_EL2, 0, sctlr);
+            registers.set(SystemRegister::SCTLR_EL1, 0, SCTLR_ENRCTX);
+            machine.derived_changed();
+            machine.system_instruction(RCTX_X0[2]).unwrap();
+            machine
+        };
+        let machine = host(false);
+        assert_eq!(machine.cpu.pstate.el, 2);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2) >> 26, 0x18);
+        let machine = host(true);
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 0));
+    }
+
+    #[test]
     fn cosp_rctx_restricts_nothing_on_the_chips_with_specres2() {
         // COSP RCTX, X0 (SYS #3, C7, C3, #6).
         const COSP_RCTX_X0: u32 = 0xd50b_73c0;

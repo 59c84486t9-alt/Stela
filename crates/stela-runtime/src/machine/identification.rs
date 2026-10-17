@@ -90,6 +90,9 @@ const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
 const STAGE2_HOST: &str = "stage-2 translation of the EL1&0 regime";
 const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
 const NO_GUARANTEE: &str = "translated code gives no such timing or speculation guarantee";
+const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCTX run their \
+     generated accessors, with SCTLR_ELx.EnRCTX and HFGITR_EL2 traps, and complete with no \
+     effect: the engine keeps no prediction state a later context could use";
 
 /// Every ID register the table defines; all their other fields read 0.
 pub const REGISTERS: &[Encoding] = &[
@@ -452,17 +455,14 @@ pub const TABLE: &[Row] = &[
         40,
         1,
         "FEAT_SPECRES",
-        engine(false, "CFP, DVP and CPP RCTX are not modeled"),
+        engine(true, PREDICTION_RESTRICTION),
     ),
     feature(
         ID_AA64ISAR1_EL1,
         40,
         2,
         "FEAT_SPECRES2",
-        engine(
-            false,
-            "withheld with FEAT_SPECRES, which it extends by COSP RCTX",
-        ),
+        engine(true, PREDICTION_RESTRICTION),
     ),
     feature(
         ID_AA64ISAR1_EL1,
@@ -1207,6 +1207,12 @@ mod tests {
         assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 20), 3);
         assert_eq!(field(Chip::AppleM3, ID_AA64MMFR1_EL1, 44), 0);
         assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 44), 1);
+        // Every chip restricts predictions (ISAR1.SPECRES 1); the M5 adds
+        // COSP RCTX (2).
+        for chip in Chip::ALL {
+            let expected = if chip >= Chip::AppleM5 { 2 } else { 1 };
+            assert_eq!(field(chip, ID_AA64ISAR1_EL1, 40), expected, "{chip:?}");
+        }
         // CSSC and HBC came with the M5, LUT and FAMINMAX with the M6.
         for (register, shift, first) in [
             (ID_AA64ISAR2_EL1, 52, Chip::AppleM5),
