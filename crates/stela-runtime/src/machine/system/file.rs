@@ -1,6 +1,7 @@
 //! Storage for the profile's System registers: one 64-bit slot per register
-//! instance. Writes keep the bits that are RES0 at 0 and RES1 at 1 in every
-//! layout the profile allows (`Register::res0`, `Register::res1`).
+//! instance, starting at the reset value. Writes keep the bits that are RES0
+//! at 0 and RES1 at 1 in every layout the profile allows (`Register::res0`,
+//! `Register::res1`).
 use super::Register;
 use alloc::{boxed::Box, vec};
 
@@ -16,12 +17,14 @@ impl Default for File {
 }
 
 impl File {
-    /// Every register at its reset value: RES1 bits set, other bits 0.
+    /// Every register at its Cold reset value (`Register::reset`): the
+    /// architectural field resets under the profile, with RES1 bits set and
+    /// UNKNOWN fields 0.
     pub fn new() -> Self {
         let mut values = vec![0; Register::SLOTS].into_boxed_slice();
         for register in Register::ALL {
             for index in 0..register.instances() {
-                values[register.offset() + index as usize] = register.res1();
+                values[register.offset() + index as usize] = register.reset();
             }
         }
         Self { values }
@@ -66,5 +69,19 @@ mod tests {
         assert_eq!(file.get(Register::DBGBVR_EL1, 3), 0x1234);
         assert_eq!(file.get(Register::DBGBVR_EL1, 2), 0);
         assert_eq!(file.get(Register::DBGBVR_EL1, 99), 0);
+    }
+
+    #[test]
+    fn registers_start_at_their_cold_reset_values() {
+        let file = File::new();
+        // Arm's System register XML, under the profile (highest EL EL2):
+        // OSLSR_EL1.OSLK is set at Cold reset, MPAM2_EL2 traps EL1 and EL0
+        // MPAM register accesses, RMR_EL2.AA64 resets to AArch64, and
+        // SCTLR_EL2.M, C and I reset to 0.
+        assert_eq!(file.get(Register::OSLSR_EL1, 0), 0b10);
+        assert_eq!(file.get(Register::MPAM2_EL2, 0), 0b11 << 48);
+        assert_eq!(file.get(Register::RMR_EL2, 0), 1);
+        assert_eq!(file.get(Register::SCTLR_EL2, 0) & 0b1_0000_0000_0101, 0);
+        assert_eq!(Register::SCTLR_EL2.reset(), Register::SCTLR_EL2.res1());
     }
 }

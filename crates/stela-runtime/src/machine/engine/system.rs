@@ -921,8 +921,11 @@ mod tests {
     #[test]
     fn mpam_ras_lor_and_scxtnum_follow_their_minimal_configurations() {
         let mut machine = machine(&[]);
-        // HCR_EL2.EnSCXT lets EL1 reach SCXTNUM_EL1.
+        // HCR_EL2.EnSCXT lets EL1 reach SCXTNUM_EL1, and clearing the reset
+        // traps of MPAM2_EL2 (TRAPMPAM0EL1, TRAPMPAM1EL1) lets it reach
+        // MPAM1_EL1.
         machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 53);
+        machine.cpu.registers.set(Register::MPAM2_EL2, 0, 0);
         let write = |machine: &mut super::super::Machine<_, _>, encoding, value| {
             machine.cpu.state.x[1] = value;
             machine

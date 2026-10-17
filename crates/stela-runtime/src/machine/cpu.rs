@@ -226,8 +226,10 @@ fn bank(el: u8) -> Bank {
 impl Cpu {
     pub fn new(pc: u64, pstate: Pstate) -> Self {
         let mut registers = File::new();
-        // OSLSR_EL1.OSLK: the OS lock is set at cold reset.
-        registers.set_raw(Register::OSLSR_EL1, 0, 0b1010);
+        // OSLSR_EL1.OSLM = 0b10 (bits 3 and 0): the OS lock is implemented.
+        // OSLK, set at Cold reset, comes with the reset value.
+        let oslsr = registers.get(Register::OSLSR_EL1, 0);
+        registers.set_raw(Register::OSLSR_EL1, 0, oslsr | 0b1000);
         Self {
             state: GuestState::default(),
             pc,

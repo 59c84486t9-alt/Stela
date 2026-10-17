@@ -23,6 +23,7 @@ pub mod assess;
 mod codegen;
 mod expression;
 mod fold;
+mod resets;
 
 pub const MATRIX: &str = "isa/a64-system-requirements.json";
 pub const REGISTRY: &str = "isa/system-platform-registry.json";
@@ -110,6 +111,10 @@ pub struct SystemMatrix {
     /// The pinned AARCHMRS archive (`AARCHMRS_OPENSOURCE_A_profile_FAT-2026-06.tar.gz`).
     #[arg(long)]
     archive: PathBuf,
+    /// The pinned System register XML archive
+    /// (`SysReg_xml_A_profile-2026-06.tar.gz`), the source of reset values.
+    #[arg(long)]
+    sysreg: PathBuf,
 }
 
 impl SystemMatrix {
@@ -130,7 +135,25 @@ impl SystemMatrix {
             .args(MEMBERS)
             .status()?;
         ensure!(status.success(), "cannot extract {MEMBERS:?}");
+        let bytes = fs::read(&self.sysreg)
+            .with_context(|| format!("cannot read {}", self.sysreg.display()))?;
+        ensure!(
+            bytes.len() == resets::BYTES && stela_runtime::sha256(&bytes) == resets::SHA256,
+            "{} is not the pinned {} archive ({})",
+            self.sysreg.display(),
+            resets::DIRECTORY,
+            resets::URI
+        );
+        let status = Command::new("tar")
+            .arg("-xzf")
+            .arg(&self.sysreg)
+            .arg("-C")
+            .arg(directory.path())
+            .arg(resets::DIRECTORY)
+            .status()?;
+        ensure!(status.success(), "cannot extract {}", resets::DIRECTORY);
         let (matrix, registers, profile) = generate(directory.path())?;
+        let resets = resets::read(&directory.path().join(resets::DIRECTORY), &profile)?;
         let previous = fs::read_to_string(root().join(MATRIX)).unwrap_or_default();
         let text = assess::render(&matrix, &assess::registry()?, &previous)?;
         fs::write(root().join(MATRIX), text)?;
@@ -144,7 +167,7 @@ impl SystemMatrix {
         let generated = root().join(access::GENERATED);
         fs::write(
             &generated,
-            access::generate(&registers, &profile, &applicable)?,
+            access::generate(&registers, &profile, &applicable, &resets)?,
         )?;
         let status = Command::new("rustfmt")
             .args(["--edition", "2024"])
