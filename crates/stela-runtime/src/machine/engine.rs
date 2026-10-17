@@ -2665,6 +2665,56 @@ mod tests {
     }
 
     #[test]
+    fn instruction_and_data_aborts_report_their_origin_el() {
+        let mut machine = machine(&[]);
+        // 4 KiB, 39-bit VA: VA 0-1 GiB maps BASE (EL0 read/write), and the
+        // next GiB is unmapped, a level-1 translation fault.
+        let block = BASE | 1 | 1 << 10 | 1 << 6;
+        machine.host.ram[0x4000..0x4008].copy_from_slice(&block.to_le_bytes());
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::TCR_EL1, 0, 25 | 1 << 23 | 5 << 32);
+        registers.set(SystemRegister::TTBR0_EL1, 0, BASE + 0x4000);
+        registers.set(SystemRegister::MAIR_EL1, 0, 0xff);
+        registers.set(SystemRegister::SCTLR_EL1, 0, 1);
+        registers.set(SystemRegister::VBAR_EL1, 0, 0x2_0000);
+        machine.derived_changed();
+        let unmapped = 0x4000_0000;
+        let user = Pstate {
+            el: 0,
+            sp: false,
+            daif: 0,
+            ..Pstate::reset(1)
+        };
+        // Fetches: EC 0x20 from EL0 and 0x21 at EL1, IFSC level-1
+        // translation fault, ELR and FAR the fetched address.
+        for (pstate, ec, vector) in [(user, 0x20, 0x2_0400), (Pstate::reset(1), 0x21, 0x2_0200)] {
+            machine.cpu.set_pstate(pstate);
+            machine.cpu.pc = unmapped;
+            machine.step().unwrap();
+            let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+            assert_eq!(
+                (machine.cpu.pc, esr >> 26, esr & 0x3f),
+                (vector, ec, 0b00_0101)
+            );
+            assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), unmapped);
+            assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), unmapped);
+        }
+        // A load from EL0 (LDTR, which the engine performs): EC 0x24 with
+        // the faulting address in FAR and the load's address in ELR.
+        machine.cpu.set_pstate(user);
+        machine.cpu.pc = 0x1000;
+        machine.cpu.state.x[2] = unmapped + 8;
+        machine.system_instruction(0xf840_0841).unwrap(); // ldtr x1, [x2]
+        let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+        assert_eq!(
+            (machine.cpu.pc, esr >> 26, esr & 0x3f),
+            (0x2_0400, 0x24, 0b00_0101)
+        );
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), unmapped + 8);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), 0x1000);
+    }
+
+    #[test]
     fn stage_two_faults_go_to_el2_with_hpfar_and_at_reports_both_stages() {
         let mut machine = machine(&[]);
         // EL2 host with HCR_EL2.VM: a 40-bit IPA from two concatenated

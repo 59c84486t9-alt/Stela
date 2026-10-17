@@ -961,6 +961,8 @@ mod tests {
             MPAMIDR_EL1,
             ERRIDR_EL1,
             CLIDR_EL1,
+            CCSIDR_EL1,
+            MDRAR_EL1,
             ID_AA64ISAR3_EL1,
         ] {
             assert_eq!(value(register), 0, "{register:?}");
