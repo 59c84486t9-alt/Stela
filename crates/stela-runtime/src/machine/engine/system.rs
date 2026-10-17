@@ -358,8 +358,9 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 cpu.state.fpcr = value as u32 & FPCR_FIELDS;
                 return Ok(());
             }
+            // Without AArch32, FPSR keeps only QC and the cumulative flags.
             Register::FPSR => {
-                cpu.state.fpsr = value as u32;
+                cpu.state.fpsr = (value & !Register::FPSR.res0()) as u32;
                 return Ok(());
             }
             _ => {}
@@ -1075,6 +1076,58 @@ mod tests {
     }
 
     #[test]
+    fn special_purpose_and_coprocessor_registers_keep_only_their_fields() {
+        const NZCV: Encoding = Encoding::new(3, 3, 4, 2, 0);
+        const DAIF: Encoding = Encoding::new(3, 3, 4, 2, 1);
+        const CURRENT_EL: Encoding = Encoding::new(3, 0, 4, 2, 2);
+        const FPSR: Encoding = Encoding::new(3, 3, 4, 4, 1);
+        const CPACR_EL1: Encoding = Encoding::new(3, 0, 1, 0, 2);
+        const CPTR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 2);
+        let mut machine = machine(&[]);
+        let round_trip = |machine: &mut TestMachine, el: u8, encoding: Encoding| {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[0] = u64::MAX;
+            machine
+                .system_instruction(access(false, encoding, 0))
+                .unwrap();
+            machine.cpu.state.x[1] = 0x5a5a;
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            assert_eq!(machine.cpu.pc, BASE + 8);
+            machine.cpu.state.x[1]
+        };
+        // CPTR_EL2 has its E2H layout: FPEN, TAM and TCPAC; CPACR_EL1 keeps
+        // FPEN alone.
+        assert_eq!(round_trip(&mut machine, 2, CPTR_EL2), 0xc030_0000);
+        machine.cpu.registers.set(Register::CPTR_EL2, 0, 0b11 << 20);
+        machine.derived_changed();
+        assert_eq!(round_trip(&mut machine, 1, CPACR_EL1), 0x0030_0000);
+        // NZCV, DAIF and FPSR hold their flags, masks and cumulative bits.
+        assert_eq!(round_trip(&mut machine, 1, NZCV), 0xf000_0000);
+        assert_eq!(machine.cpu.state.nzcv, 0xf000_0000);
+        assert_eq!(round_trip(&mut machine, 1, DAIF), 0x3c0);
+        assert_eq!(machine.cpu.pstate.daif, 0xf);
+        assert_eq!(round_trip(&mut machine, 1, FPSR), 0x0800_009f);
+        // CurrentEL reads the EL at bits 3:2.
+        for el in [1, 2] {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine
+                .system_instruction(access(true, CURRENT_EL, 2))
+                .unwrap();
+            assert_eq!(machine.cpu.state.x[2], u64::from(el) << 2);
+        }
+        // CPTR_EL2.TCPAC traps EL1 CPACR_EL1 accesses to EL2.
+        machine
+            .cpu
+            .registers
+            .set(Register::CPTR_EL2, 0, 1 << 31 | 0b11 << 20);
+        let esr = el2_trap(&mut machine, access(true, CPACR_EL1, 1));
+        assert_eq!(esr >> 26, 0x18);
+    }
+
+    #[test]
     fn aarch32_banked_spsrs_are_res0_at_el2_and_undefined_at_el1() {
         let mut machine = machine(&[]);
         // Without AArch32 at EL1, SPSR_irq, SPSR_abt, SPSR_und and SPSR_fiq
@@ -1392,6 +1445,22 @@ mod tests {
         assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x1_0280));
         // Physical IRQs go to EL2 while IMO is set.
         assert_eq!(machine.cpu.interrupt_target(Vector::Irq), 2);
+        // ISR_EL1 shows the virtual lines while they are routed to EL2: VI,
+        // VF and VSE as I, F and A at bits 7, 6 and 8.
+        const ISR_EL1: Encoding = Encoding::new(3, 0, 12, 1, 0);
+        for (hcr, isr) in [
+            (1 << 4 | 1 << 7, 1 << 7),
+            (1 << 3 | 1 << 6, 1 << 6),
+            (1 << 5 | 1 << 8, 1 << 8),
+            (1 << 4 | 1 << 3 | 1 << 5, 0),
+        ] {
+            machine.cpu.registers.set(Register::HCR_EL2, 0, hcr);
+            machine.cpu.pstate = Pstate::reset(1);
+            machine
+                .system_instruction(access(true, ISR_EL1, 1))
+                .unwrap();
+            assert_eq!(machine.cpu.state.x[1], isr, "{hcr:#x}");
+        }
     }
 
     #[test]
