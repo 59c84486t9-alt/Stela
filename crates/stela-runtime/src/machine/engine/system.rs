@@ -1130,6 +1130,38 @@ mod tests {
     }
 
     #[test]
+    fn el1_reads_vmpidr_el2_as_mpidr_el1_and_el2_the_physical_value() {
+        const MPIDR_EL1: Encoding = Encoding::new(3, 0, 0, 0, 5);
+        const VMPIDR_EL2: Encoding = Encoding::new(3, 4, 0, 0, 5);
+        let mut machine = machine(&[]);
+        let physical = 0x8000_0103;
+        machine.cpu.registers.set(Register::MPIDR_EL1, 0, physical);
+        machine
+            .profile_missing
+            .retain(|register| *register != Register::MPIDR_EL1);
+        let read = |machine: &mut TestMachine, el: u8, encoding: Encoding| {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.state.x[1] = 0x5a5a;
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            machine.cpu.state.x[1]
+        };
+        assert_eq!(read(&mut machine, 2, MPIDR_EL1), physical);
+        // VMPIDR_EL2 keeps Aff3..Aff0, U and MT; bit 31 is RES1 and the
+        // rest RES0.
+        machine.cpu.pstate = Pstate::reset(2);
+        machine.cpu.state.x[0] = u64::MAX;
+        machine
+            .system_instruction(access(false, VMPIDR_EL2, 0))
+            .unwrap();
+        let virtual_mpidr = 0xff_c1ff_ffff;
+        assert_eq!(read(&mut machine, 2, VMPIDR_EL2), virtual_mpidr);
+        assert_eq!(read(&mut machine, 1, MPIDR_EL1), virtual_mpidr);
+        assert_eq!(read(&mut machine, 2, MPIDR_EL1), physical);
+    }
+
+    #[test]
     fn fields_without_aarch32_or_lpa2_are_reserved() {
         const SCTLR_EL2: Encoding = Encoding::new(3, 4, 1, 0, 0);
         const TCR_EL1: Encoding = Encoding::new(3, 0, 2, 0, 2);
