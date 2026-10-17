@@ -161,6 +161,7 @@ pub const REGISTERS: &[Encoding] = &[
     ID_AA64ZFR0_EL1,
     ID_AA64SMFR0_EL1,
     CTR_EL0,
+    AIDR_EL1,
 ];
 
 pub const TABLE: &[Row] = &[
@@ -576,6 +577,69 @@ pub const TABLE: &[Row] = &[
         "IDC: no data clean for instruction coherence",
     ),
     fixed(CTR_EL0, 31, 1, "RES1"),
+    // AIDR_EL1: Apple feature bits, named by m1n1 `cpu_regs.h`. Apple
+    // features have no clang `FEAT_` tag; each bit is an engine property.
+    // Bits m1n1 does not name read 0.
+    fixed(
+        AIDR_EL1,
+        4,
+        1,
+        "AMX: machine::amx executes the AMX instructions",
+    ),
+    fixed(
+        AIDR_EL1,
+        16,
+        1,
+        "GXF: GENTER, GEXIT and the guarded-level banks",
+    ),
+    row(
+        AIDR_EL1,
+        0,
+        1,
+        0,
+        None,
+        engine(false, "MUL53 instructions are not modeled"),
+    ),
+    row(
+        AIDR_EL1,
+        1,
+        1,
+        0,
+        None,
+        engine(false, "WKdm compression instructions are not modeled"),
+    ),
+    row(
+        AIDR_EL1,
+        2,
+        1,
+        0,
+        None,
+        engine(false, "architectural state retention is not modeled"),
+    ),
+    row(
+        AIDR_EL1,
+        9,
+        1,
+        0,
+        None,
+        engine(false, "the ACTLR TSO mode switch is not modeled"),
+    ),
+    row(
+        AIDR_EL1,
+        19,
+        1,
+        0,
+        None,
+        engine(false, "APFLG is not modeled"),
+    ),
+    row(
+        AIDR_EL1,
+        20,
+        1,
+        0,
+        None,
+        engine(false, "PSRV is not modeled"),
+    ),
 ];
 
 fn holds(row: &Row, target: TargetCpu, el2: bool) -> bool {
@@ -729,6 +793,7 @@ mod tests {
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 20 & 0xf, 2);
         assert_eq!(value(ID_AA64DFR0_EL1) & 0xf, 6);
         assert_eq!(value(CTR_EL0), 0x9444_c004);
+        assert_eq!(value(AIDR_EL1), 1 << 4 | 1 << 16);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
         // With EL2: AArch64 EL2 and VHE, and nothing else changes.
         let hosted = derive(TargetCpu::detect(), true);
