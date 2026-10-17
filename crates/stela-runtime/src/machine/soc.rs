@@ -32,6 +32,12 @@ use alloc::{format, string::String, vec::Vec};
 /// `lockdown` is the CONTROL offset of the lockdown registers in each PE's
 /// `cpu-impl-reg` and each cluster's `cpm-impl-reg` (`platform::apple::
 /// lockdown`), on the SoCs whose SPTM shows them: the T8112's 26A434 SPTM.
+/// `clocks` is each cluster type's core clock in Hz, in `parts` order, which
+/// paces the cycle counter of Apple's performance monitor (`machine::pmu`):
+/// the highest operating point of each cluster in Linux
+/// `arch/arm64/boot/dts/apple/t8112.dtsi` (`blizzard_opp`, `avalanche_opp`).
+/// The IPSW DeviceTree leaves its `voltage-states` tables to iBoot, so the
+/// SoCs without that evidence have none.
 struct Soc {
     chip_id: u32,
     name: &'static str,
@@ -40,6 +46,7 @@ struct Soc {
     aic: Option<(&'static str, u64)>,
     dram_base: Option<u64>,
     lockdown: Option<[u64; 2]>,
+    clocks: Option<[u64; 2]>,
 }
 
 const SOCS: [Soc; 14] = [
@@ -51,6 +58,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,1", AIC1_EVENT)),
         dram_base: Some(0x8_0000_0000),
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -60,6 +68,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -69,6 +78,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -78,6 +88,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0x8000)),
         dram_base: Some(0x8_0000_0000),
         lockdown: Some([0x5000, 0x9000]),
+        clocks: Some([2_424_000_000, 3_504_000_000]),
     },
     Soc {
         chip_id: 0x6020,
@@ -87,6 +98,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -96,6 +108,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -105,6 +118,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,3", 0x40000)),
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -114,6 +128,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -123,6 +138,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -132,6 +148,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -141,6 +158,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -150,6 +168,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -159,6 +178,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -168,6 +188,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
+        clocks: None,
     },
 ];
 
@@ -256,11 +277,12 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
     let processors = processors
         .iter()
         .map(|processor| {
-            let part = soc
+            let index = soc
                 .parts
                 .iter()
-                .find(|(cluster_type, _)| *cluster_type == processor.cluster_type)
-                .map(|(_, part)| u64::from(*part))
+                .position(|(cluster_type, _)| *cluster_type == processor.cluster_type);
+            let part = index
+                .map(|index| u64::from(soc.parts[index].1))
                 .ok_or_else(|| {
                     format!(
                         "{} cluster type {} has no public MIDR part",
@@ -279,6 +301,7 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                 mpidr: 0x8000_0000
                     | u64::from(processor.cluster_type == b'P') << 16
                     | u64::from(processor.reg),
+                clock: soc.clocks.zip(index).map(|(clocks, index)| clocks[index]),
             })
         })
         .collect::<Result<_, String>>()?;
@@ -530,14 +553,16 @@ mod tests {
             identities[0],
             Identity {
                 midr: 0x611f_0320,
-                mpidr: 0x8000_0000
+                mpidr: 0x8000_0000,
+                clock: Some(2_424_000_000),
             }
         );
         assert_eq!(
             identities[7],
             Identity {
                 midr: 0x611f_0330,
-                mpidr: 0x8001_0103
+                mpidr: 0x8001_0103,
+                clock: Some(3_504_000_000),
             }
         );
         // J604AP (Mac16,1): six M4 E cores and four P cores.
@@ -550,7 +575,8 @@ mod tests {
             identities[3],
             Identity {
                 midr: 0x611f_0530,
-                mpidr: 0x8001_0103
+                mpidr: 0x8001_0103,
+                clock: None,
             }
         );
         // An M2 Pro's AIC2 has its event register at +0xc000.

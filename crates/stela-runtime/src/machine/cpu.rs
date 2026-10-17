@@ -198,6 +198,11 @@ pub struct Cpu {
     /// FEAT_SME2, and the Z, P and FFR state beyond `state.v`
     /// (`crate::scalable`).
     pub scalable: Option<ScalableState>,
+    /// Apple's core performance monitor (`machine::pmu`), on the PEs whose
+    /// chip and core clock the profile declares.
+    pub pmu: Option<super::pmu::Pmu>,
+    /// The instructions this PE has retired (`machine::pmu`).
+    pub retired: u64,
 }
 
 /// What an exception entry needs beyond the vector kind.
@@ -300,6 +305,8 @@ impl Cpu {
                     .expect("a 512-bit vector length");
                 ScalableState::new(length, Feature::FEAT_SME2.on(chip))
             }),
+            pmu: None,
+            retired: 0,
         }
     }
 

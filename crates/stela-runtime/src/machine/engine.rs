@@ -16,6 +16,7 @@ use super::{
     debug,
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
+    pmu,
     registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
     streaming::{self, Denial},
     system::{Feature, Register as SystemRegister},
@@ -519,6 +520,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.
     pacm_written: bool,
+    /// The instruction the engine is completing, already counted as retired
+    /// (`Machine::completing`).
+    completing: Option<u64>,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -572,6 +576,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             peers: Vec::new(),
             slice_end: processors::QUANTUM,
             pacm_written: false,
+            completing: None,
         };
         machine.peers = processors::boot(&machine.profile);
         machine.load_profile();
@@ -657,6 +662,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn sync_regime(&mut self) {
         self.derived_changed();
+        self.sync_monitor();
         let watch = Watch {
             pass: self.watch.pass,
             ..Watch::from_ranges(&debug::watched(&self.cpu))
@@ -690,6 +696,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn take(&mut self, exception: Exception) {
+        // The instruction being completed traps or faults: it does not
+        // retire. SVC, HVC and SMC return after themselves and retire.
+        if self
+            .completing
+            .take_if(|pc| {
+                exception.vector == Vector::Synchronous && exception.return_address == *pc
+            })
+            .is_some()
+        {
+            self.cpu.retired -= 1;
+        }
         let from_el = self.cpu.pstate.el;
         self.cpu.take(exception);
         self.statistics.exceptions += 1;
@@ -711,9 +728,49 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let deadline = self.timer_deadline();
         Lines {
             irq: device.irq,
-            // Apple cores signal the generic timers as FIQ.
-            fiq: device.fiq || deadline.is_some_and(|deadline| now >= deadline),
+            // Apple cores signal the generic timers and the PMI as FIQ.
+            fiq: device.fiq
+                || deadline.is_some_and(|deadline| now >= deadline)
+                || monitor_asserted(&self.cpu, now),
         }
+    }
+
+    /// Bring the running PE's performance monitor up to now and continue
+    /// counting in its current EL and wait state. Every change of either
+    /// passes here: exception entry and return through `sync_regime`, and
+    /// the start and end of a wait.
+    pub(super) fn sync_monitor(&mut self) {
+        let context = pmu::Context {
+            el: self.cpu.pstate.el,
+            waiting: self.waiting.is_some(),
+        };
+        let retired = self.cpu.retired;
+        let Some(monitor) = self.cpu.pmu.as_mut() else {
+            return;
+        };
+        // Without PMC0 nothing counts time, so the count need not be read.
+        let now = if monitor.timed() {
+            self.host.counter()
+        } else {
+            0
+        };
+        monitor.sync(now, retired, context);
+    }
+
+    /// Complete the instruction at `pc` in the engine, counting it as
+    /// retired unless it takes a synchronous exception at its own address
+    /// (`Machine::take`).
+    fn completing(&mut self, pc: u64, complete: impl FnOnce(&mut Self) -> Step) -> Step {
+        self.cpu.retired += 1;
+        self.completing = Some(pc);
+        let step = complete(self);
+        self.completing = None;
+        step
+    }
+
+    /// Count the instructions of block `index` before `pc` as retired.
+    fn retire_before(&mut self, index: usize, pc: u64) {
+        self.cpu.retired += (pc - self.blocks[index].pc) / INSTRUCTION;
     }
 
     /// Whether an interrupt routed to `target` is taken now: always when it
@@ -1151,6 +1208,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
 /// Arm `AArch64_InterruptPending`: a physical IRQ or FIQ line, or at EL0
 /// and EL1 outside the host a virtual IRQ, FIQ or SError that
 /// HCR_EL2.{IMO,FMO,AMO} route and {VI,VF,VSE} hold, masked or not.
+/// Whether `cpu`'s performance monitor asserts its PMI at count `now`.
+fn monitor_asserted(cpu: &Cpu, now: u64) -> bool {
+    cpu.pmu
+        .as_ref()
+        .is_some_and(|monitor| monitor.asserted(now, cpu.retired))
+}
+
 fn interrupt_pending(cpu: &Cpu, lines: Lines) -> bool {
     if lines.irq || lines.fiq {
         return true;
@@ -1387,17 +1451,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 | ExitKind::Call
                 | ExitKind::Return,
             ) => {
+                // The block's last instruction is the branch that ends it.
+                self.cpu.retired += self.blocks[index].source_map.len() as u64;
                 self.cpu.pstate.btype = self.native_branch_type(index, kind)?;
                 self.cpu.pc = next_pc;
                 Ok(())
             }
             Ok(ExitKind::System) => {
+                self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
                 self.statistics.system_exits += 1;
                 let word = self.word(index, next_pc)?;
-                self.system_instruction(word)
+                self.completing(next_pc, |machine| machine.system_instruction(word))
             }
             Ok(ExitKind::FloatingPoint) => {
+                self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
                 let word = self.word(index, next_pc)?;
                 let Some(Ok(operation)) = FloatingPointOperation::decode(word) else {
@@ -1406,10 +1474,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     )));
                 };
                 match crate::floating::complete(&mut self.cpu.state, &operation) {
-                    Ok(()) => {
-                        self.cpu.pc = next_pc;
-                        self.next()
-                    }
+                    Ok(()) => self.completing(next_pc, Self::next),
                     Err(_) => Err(self.unsupported(RequirementKind::Instruction {
                         word,
                         detail: format!(
@@ -1420,14 +1485,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
             Ok(ExitKind::PointerAuthentication) => {
+                self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
                 let word = self.word(index, next_pc)?;
-                self.pointer_authentication(word)
+                self.completing(next_pc, |machine| machine.pointer_authentication(word))
             }
             Ok(ExitKind::Amx) => {
+                self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
                 let word = self.word(index, next_pc)?;
-                self.amx(word)
+                self.completing(next_pc, |machine| machine.amx(word))
             }
             _ => Err(self.unsupported(RequirementKind::Native("unknown block exit kind"))),
         }
@@ -1957,6 +2024,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn native_fault(&mut self, index: usize, fault: NativeFault) -> Step {
         let pc = self.faulting_pc(index, fault.offset);
+        self.retire_before(index, pc);
         self.cpu.pc = pc;
         if pc != self.blocks[index].pc {
             self.cpu.pstate.btype = 0;
@@ -1965,7 +2033,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             FaultCause::Guest(guest) => self.data_abort(fault.address, guest, fault.write, false),
             FaultCause::Device { physical } => {
                 let word = self.word(index, pc)?;
-                self.device_access(word, fault.address, physical, fault.write)
+                self.completing(pc, |machine| {
+                    machine.device_access(word, fault.address, physical, fault.write)
+                })
             }
             FaultCause::Translation(unsupported) => {
                 Err(self.unsupported(RequirementKind::Translation(unsupported)))
@@ -2624,6 +2694,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // The PE waits until the scheduler finds it woken
         // (`processors::Peer::ready`) and completes the instruction.
         self.waiting = Some(Wait { kind, timeout });
+        self.sync_monitor();
         Ok(())
     }
 
@@ -3148,6 +3219,80 @@ mod tests {
         machine.cpu.registers.set(SystemRegister::SPSR_EL1, 0, 0x5);
         machine.system_instruction(ERET).unwrap();
         assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 0x40, 1));
+    }
+
+    #[test]
+    fn the_m2_performance_monitor_counts_retired_instructions_and_signals_fiq() {
+        const MSR_PMCR1_X1: u32 = 0xd519_f101;
+        const MSR_PMCR1_COPY_X1: u32 = 0xd519_f741;
+        const MSR_PMCR0_X2: u32 = 0xd519_f002;
+        const MSR_PMC1_X6: u32 = 0xd51a_f106;
+        const MRS_X3_PMC1: u32 = 0xd53a_f103;
+        const MRS_X4_HCR_EL2: u32 = 0xd53c_1104;
+        const MRS_X5_PMC1: u32 = 0xd53a_f105;
+        const MRS_X7_PMCR0: u32 = 0xd539_f007;
+        const ADD: u32 = 0x9100_0400;
+        const B_NEXT: u32 = 0x1400_0001;
+        const SVC: u32 = 0xd400_0001;
+        let mut words = vec![
+            MSR_PMCR1_X1,
+            MSR_PMCR1_COPY_X1,
+            MSR_PMCR0_X2,
+            ADD,
+            ADD,
+            B_NEXT,
+            MRS_X3_PMC1,
+            MRS_X4_HCR_EL2,
+        ];
+        // The EL1 vectors at BASE + 0x800: current EL, SPx, synchronous.
+        words.resize(0xa00 / 4, 0);
+        words.extend([MRS_X5_PMC1, SVC]);
+        let identity = registers::Identity {
+            midr: 0x611f_0330,
+            mpidr: 0x8001_0000,
+            clock: Some(3_504_000_000),
+        };
+        let chip = crate::machine::Chip::AppleM2;
+        let mut machine = board_on(chip, &words, NoDevices, vec![identity]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, BASE + 0x800);
+        // XNU's PMCR1_INIT and PMCR0_INIT: PMC0 and PMC1 with their PMIs.
+        machine.cpu.state.x[1] = 0x30300;
+        machine.cpu.state.x[2] = 0x3 | 0x3000 | 0x400;
+        let run = |machine: &mut Machine<FakeHost, NoDevices>, next_pc, kind: ExitKind| {
+            machine.host.exits.push(NativeExit::Exit {
+                next_pc,
+                kind: kind as u64,
+            });
+            machine.step().unwrap();
+        };
+        for pc in [BASE, BASE + 4, BASE + 8] {
+            run(&mut machine, pc, ExitKind::System);
+        }
+        // The two ADDs and the branch, then the MRS, which counts itself.
+        run(&mut machine, BASE + 24, ExitKind::Direct);
+        run(&mut machine, BASE + 24, ExitKind::System);
+        assert_eq!(machine.cpu.state.x[3], 4);
+        // An UNDEFINED MRS does not retire; the vector's MRS does.
+        run(&mut machine, BASE + 28, ExitKind::System);
+        assert_eq!(machine.cpu.pc, BASE + 0xa00);
+        run(&mut machine, BASE + 0xa00, ExitKind::System);
+        assert_eq!(machine.cpu.state.x[5], 5);
+        // SVC retires as it takes its exception.
+        run(&mut machine, BASE + 0xa04, ExitKind::System);
+        run(&mut machine, BASE + 0xa00, ExitKind::System);
+        assert_eq!(machine.cpu.state.x[5], 7);
+        // Two instructions short of overflow, the PMI asserts as FIQ once
+        // they retire, and PMAI reports it.
+        machine.cpu.state.x[6] = (1 << 63) - 2;
+        machine.system_instruction(MSR_PMC1_X6).unwrap();
+        assert!(!machine.lines().fiq);
+        machine.cpu.retired += 2;
+        assert!(machine.lines().fiq);
+        machine.system_instruction(MRS_X7_PMCR0).unwrap();
+        assert_eq!(machine.cpu.state.x[7], 0x3 | 0x3000 | 0x400 | 1 << 11);
     }
 
     #[test]

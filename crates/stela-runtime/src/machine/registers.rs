@@ -3,8 +3,8 @@
 //! Architectural System registers and System instructions go through the
 //! generated AARCHMRS accessors (`machine::system`). This module handles the
 //! op0=3 CRn=15 space Apple uses: SPRR, GXF, the Apple PAC controls,
-//! VMSA_LOCK_EL1, the VM timer FIQ enables, AMX and the `machine::impdef`
-//! table. Every other encoding in that space refuses with its fields.
+//! VMSA_LOCK_EL1, the VM timer FIQ enables, AMX, the performance monitor
+//! (`machine::pmu`) and the `machine::impdef` table. Every other encoding in that space refuses with its fields.
 //!
 //! With EL2 present and HCR_EL2.E2H RES1, Apple's registers follow the VHE
 //! pattern their names show (m1n1 `cpu_regs.h`): at EL2 the `*_EL1` and
@@ -20,6 +20,7 @@ use super::{
     },
     exception::Pstate,
     impdef,
+    pmu::Pmu,
     system::Register,
 };
 use alloc::vec::Vec;
@@ -46,6 +47,9 @@ pub struct CpuProfile {
 pub struct Identity {
     pub midr: u64,
     pub mpidr: u64,
+    /// The core clock in Hz, where the SoC row has evidence of it; it paces
+    /// the cycle counter of Apple's performance monitor (`machine::pmu`).
+    pub clock: Option<u64>,
 }
 
 /// Encodings named by the Arm ARM and by m1n1 `cpu_regs.h`.
@@ -448,6 +452,27 @@ impl Cpu {
             } else {
                 self.amx.write(encoding, el, value).expect("checked")
             };
+        }
+        if let Some(pmu) = self.pmu.as_mut().filter(|_| Pmu::owns(encoding)) {
+            let context = super::pmu::Context {
+                el: self.pstate.el,
+                waiting: false,
+            };
+            let retired = self.retired;
+            let outcome = if read {
+                pmu.read(encoding, physical, retired, context)
+                    .map(Outcome::Read)
+            } else {
+                pmu.write(encoding, value, physical, retired, context)
+                    .map(|()| {
+                        Outcome::Written(Changes {
+                            interrupts: true,
+                            ..Changes::default()
+                        })
+                    })
+            };
+            return outcome
+                .unwrap_or_else(|reason| Outcome::Refused(Refusal::UnsupportedSetting(reason)));
         }
         if let Some(entry) = impdef::lookup(encoding) {
             return if read {

@@ -1,0 +1,495 @@
+//! Apple's core performance monitor (CPMU) of the M2's cores (H14), as
+//! XNU `xnu-12377.121.6` programs it: `osfmk/arm64/cpc_arm64.c`,
+//! `cpc_arm64.h` and `pexpert/arm64/H14.h` (`CPMU_PMC_COUNT 10`,
+//! `CPMU_64BIT_PMCS`, no `CPMU_AIC_PMI`).
+//!
+//! - PMC0 counts cycles and PMC1 retired instructions; PMC2 to PMC9 count
+//!   the events PMESR0 and PMESR1 select. The counters are 64 bits wide and
+//!   bit 63 is the overflow bit (`CPC_CPMU_MAX_COUNT` is 2^63 - 1); PMSR
+//!   reports each counter's overflow.
+//! - PMCR0 enables counting (bits 0-7, 32-33 for PMC8 and PMC9), selects the
+//!   PMI (bits 8-10, 4 for FIQ), reports it (bit 11, PMAI), enables each
+//!   counter's PMI (bits 12-19, 44-45), PC capture for PMC5-7 (bits 24-26)
+//!   and EL0 access (bit 30).
+//! - PMCR1 filters counting by mode: bits 8-15 and 40-41 at EL0, bits 16-23
+//!   and 48-49 in the kernel. XNU, which runs at EL2 on the M2, calls bits
+//!   16 and 17 the EL2 enables, so they count at EL1 and EL2 alike
+//!   (inference); a guarded level counts as its EL (inference).
+//! - With `CONFIG_EXCLAVES || HYPERVISOR` XNU writes PMCR1's value to
+//!   `S3_1_C15_C7_2` as well, before PMCR0. What that register filters is not
+//!   described, so counting while it differs from PMCR1 stops.
+//!
+//! This machine counts cycles at the PE's core clock while it is not waiting
+//! in WFI or WFE, and instructions as the engine retires them: each
+//! instruction that completes, and SVC, HVC and SMC, which complete as they
+//! take their exception; an instruction that faults or traps is not
+//! counted. A PMI is asserted, as FIQ, while PMCR0 selects FIQ and a
+//! counter with its PMI enabled has its overflow bit set; PMAI reads that
+//! assertion (inference: XNU's FIQ handler reads PMAI to recognize a PMI,
+//! then disables the monitor and clears every overflow by rewriting the
+//! counters). The reset values are not documented; they are taken as 0,
+//! under which nothing counts before software programs the monitor.
+//!
+//! Event counting (PMC2-9), PC capture, EL0 access, other PMI modes,
+//! instruction matching (OPMAT, OPMSK) and the PMCR2-4 controls are not
+//! modelled: a write that enables one stops. PMESR0 and PMESR1 store their
+//! selectors, which no counter here uses.
+use super::Chip;
+use stela_compiler::aarch64::system::registers::Encoding;
+
+const fn monitor(op1: u8, crm: u8, op2: u8) -> Encoding {
+    Encoding::new(3, op1, 15, crm, op2)
+}
+
+pub const PMCR0: Encoding = monitor(1, 0, 0);
+pub const PMCR1: Encoding = monitor(1, 1, 0);
+pub const PMCR2: Encoding = monitor(1, 2, 0);
+pub const PMCR3: Encoding = monitor(1, 3, 0);
+pub const PMCR4: Encoding = monitor(1, 4, 0);
+pub const PMESR0: Encoding = monitor(1, 5, 0);
+pub const PMESR1: Encoding = monitor(1, 6, 0);
+pub const OPMAT0: Encoding = monitor(1, 7, 0);
+pub const OPMAT1: Encoding = monitor(1, 8, 0);
+pub const OPMSK0: Encoding = monitor(1, 9, 0);
+pub const OPMSK1: Encoding = monitor(1, 10, 0);
+/// Written with PMCR1's value (`S3_1_C15_C7_2`, no public name).
+pub const PMCR1_ALTERNATE: Encoding = monitor(1, 7, 2);
+pub const PMSR: Encoding = monitor(1, 13, 0);
+/// The PC captured for a PMC5-7 PMI (`S3_1_C15_C14_1`).
+pub const PC_CAPTURE: Encoding = monitor(1, 14, 1);
+/// PMC0 to PMC9: CRm 0-7, then 9 and 10 (H14 lacks
+/// `CPMU_S3_2_C15_C9_09_ADDRESS`).
+pub const PMC: [Encoding; COUNTERS] = [
+    monitor(2, 0, 0),
+    monitor(2, 1, 0),
+    monitor(2, 2, 0),
+    monitor(2, 3, 0),
+    monitor(2, 4, 0),
+    monitor(2, 5, 0),
+    monitor(2, 6, 0),
+    monitor(2, 7, 0),
+    monitor(2, 9, 0),
+    monitor(2, 10, 0),
+];
+/// The registers that store a configuration and accept only 0, which
+/// configures nothing, in [`Pmu::extension`] order.
+const EXTENSION: [Encoding; 7] = [PMCR2, PMCR3, PMCR4, OPMAT0, OPMAT1, OPMSK0, OPMSK1];
+
+pub const COUNTERS: usize = 10;
+const CYCLES: usize = 0;
+const INSTRUCTIONS: usize = 1;
+const OVERFLOW: u64 = 1 << 63;
+
+const PMCR0_COUNT: u64 = 0xff | 0b11 << 32;
+const PMCR0_INTGEN: u64 = 0b111 << 8;
+const PMCR0_INTGEN_FIQ: u64 = 4 << 8;
+const PMCR0_PMAI: u64 = 1 << 11;
+const PMCR0_PMI: u64 = 0xff << 12 | 0b11 << 44;
+const PMCR0_PC_CAPTURE: u64 = 0b111 << 24;
+const PMCR0_USER_ACCESS: u64 = 1 << 30;
+const PMCR0_KNOWN: u64 =
+    PMCR0_COUNT | PMCR0_INTGEN | PMCR0_PMAI | PMCR0_PMI | PMCR0_PC_CAPTURE | PMCR0_USER_ACCESS;
+/// The counters this machine counts for: PMC0 and PMC1.
+const PMCR0_FIXED: u64 = 0b11;
+const PMCR1_KNOWN: u64 = 0xff << 8 | 0xff << 16 | 0b11 << 40 | 0b11 << 48;
+
+/// Bit `n` of a PMCR0 or PMCR1 field whose PMC8 and PMC9 bits sit at
+/// `high` instead of following PMC7's.
+const fn counter_bit(low: u32, high: u32, n: usize) -> u64 {
+    if n < 8 {
+        1 << (low + n as u32)
+    } else {
+        1 << (high + n as u32 - 8)
+    }
+}
+
+/// Where the PE runs, for counting: its EL and whether it waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Context {
+    pub el: u8,
+    pub waiting: bool,
+}
+
+/// One PE's CPMU.
+#[derive(Debug, Clone)]
+pub struct Pmu {
+    /// The core clock, in Hz, and the system counter frequency.
+    clock: u64,
+    frequency: u64,
+    pmcr0: u64,
+    pmcr1: u64,
+    alternate: Option<u64>,
+    pmesr: [Option<u64>; 2],
+    extension: [Option<u64>; 7],
+    /// The counts as of `synced_count` and `synced_retired`.
+    counters: [u64; COUNTERS],
+    synced_count: u64,
+    synced_retired: u64,
+    /// Cycles short of the next one, in 1/`frequency` cycle units.
+    remainder: u64,
+    context: Context,
+    /// The system count and retired instruction count at which the PMI
+    /// asserts, while the context and controls hold.
+    cycle_deadline: Option<u64>,
+    instruction_deadline: Option<u64>,
+    /// The PMI is asserted as of the last synchronization.
+    asserted: bool,
+}
+
+impl Pmu {
+    pub fn new(clock: u64, frequency: u64) -> Self {
+        Self {
+            clock,
+            frequency,
+            pmcr0: 0,
+            pmcr1: 0,
+            alternate: None,
+            pmesr: [None; 2],
+            extension: [None; 7],
+            counters: [0; COUNTERS],
+            synced_count: 0,
+            synced_retired: 0,
+            remainder: 0,
+            context: Context {
+                el: 2,
+                waiting: false,
+            },
+            cycle_deadline: None,
+            instruction_deadline: None,
+            asserted: false,
+        }
+    }
+
+    /// Whether `chip`'s cores have this layout: the M2's (H14).
+    pub fn on(chip: Chip) -> bool {
+        chip == Chip::AppleM2
+    }
+
+    pub fn owns(encoding: Encoding) -> bool {
+        matches!(
+            encoding,
+            PMCR0 | PMCR1 | PMESR0 | PMESR1 | PMCR1_ALTERNATE | PMSR | PC_CAPTURE
+        ) || EXTENSION.contains(&encoding)
+            || PMC.contains(&encoding)
+    }
+
+    /// Whether counter `n` counts in `context`.
+    fn counts(&self, n: usize, context: Context) -> bool {
+        let filter = if context.el == 0 {
+            counter_bit(8, 40, n)
+        } else {
+            counter_bit(16, 48, n)
+        };
+        self.pmcr0 & counter_bit(0, 32, n) != 0
+            && self.pmcr1 & filter != 0
+            && !(n == CYCLES && context.waiting)
+    }
+
+    /// Whether the counts depend on the time: PMC0 is enabled.
+    pub fn timed(&self) -> bool {
+        self.pmcr0 & counter_bit(0, 32, CYCLES) != 0
+    }
+
+    /// Count up to the system count `now` and `retired` instructions in the
+    /// context since the last synchronization.
+    fn advance(&mut self, now: u64, retired: u64) {
+        let ticks = now.saturating_sub(self.synced_count);
+        let instructions = retired.wrapping_sub(self.synced_retired);
+        if self.counts(CYCLES, self.context) {
+            let scaled = u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder);
+            let frequency = u128::from(self.frequency);
+            self.counters[CYCLES] = self.counters[CYCLES].wrapping_add((scaled / frequency) as u64);
+            self.remainder = (scaled % frequency) as u64;
+        }
+        if self.counts(INSTRUCTIONS, self.context) {
+            self.counters[INSTRUCTIONS] = self.counters[INSTRUCTIONS].wrapping_add(instructions);
+        }
+        self.synced_count = self.synced_count.max(now);
+        self.synced_retired = retired;
+    }
+
+    /// Count up to now, then continue in `context`.
+    pub fn sync(&mut self, now: u64, retired: u64, context: Context) {
+        self.advance(now, retired);
+        self.context = context;
+        self.update();
+    }
+
+    /// The PMI of the current counts, and when the counting reaches one.
+    fn update(&mut self) {
+        let fiq = self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ;
+        let armed = |n: usize| fiq && self.pmcr0 & counter_bit(12, 44, n) != 0;
+        self.asserted = (0..COUNTERS).any(|n| armed(n) && self.counters[n] & OVERFLOW != 0);
+        self.cycle_deadline = (armed(CYCLES) && self.counts(CYCLES, self.context))
+            .then(|| {
+                let needed = u128::from(OVERFLOW.wrapping_sub(self.counters[CYCLES]));
+                let scaled = (needed * u128::from(self.frequency))
+                    .saturating_sub(u128::from(self.remainder));
+                let ticks = scaled.div_ceil(u128::from(self.clock));
+                u64::try_from(ticks)
+                    .ok()
+                    .and_then(|ticks| self.synced_count.checked_add(ticks))
+            })
+            .flatten();
+        self.instruction_deadline = (armed(INSTRUCTIONS)
+            && self.counts(INSTRUCTIONS, self.context))
+        .then(|| {
+            self.synced_retired
+                .checked_add(OVERFLOW.wrapping_sub(self.counters[INSTRUCTIONS]))
+        })
+        .flatten();
+    }
+
+    /// Whether the PMI is asserted at system count `now` with `retired`
+    /// instructions retired, the context unchanged since the last
+    /// synchronization.
+    pub fn asserted(&self, now: u64, retired: u64) -> bool {
+        self.asserted
+            || self.cycle_deadline.is_some_and(|deadline| now >= deadline)
+            || self
+                .instruction_deadline
+                .is_some_and(|deadline| retired >= deadline)
+    }
+
+    /// The earliest system count at which the PMI can assert without
+    /// another instruction retiring.
+    pub fn deadline(&self) -> Option<u64> {
+        if self.asserted {
+            Some(self.synced_count)
+        } else {
+            self.cycle_deadline
+        }
+    }
+
+    pub fn read(
+        &mut self,
+        encoding: Encoding,
+        now: u64,
+        retired: u64,
+        context: Context,
+    ) -> Result<u64, &'static str> {
+        self.sync(now, retired, context);
+        let stored = |value: Option<u64>| {
+            value.ok_or("read of a performance monitor control before its first write")
+        };
+        Ok(match encoding {
+            PMCR0 => self.pmcr0 | if self.asserted { PMCR0_PMAI } else { 0 },
+            PMCR1 => self.pmcr1,
+            PMCR1_ALTERNATE => stored(self.alternate)?,
+            PMESR0 => stored(self.pmesr[0])?,
+            PMESR1 => stored(self.pmesr[1])?,
+            PMSR => (0..COUNTERS)
+                .filter(|&n| self.counters[n] & OVERFLOW != 0)
+                .fold(0, |status, n| status | 1 << n),
+            PC_CAPTURE => return Err("PMI PC capture is not modelled"),
+            _ => match PMC.iter().position(|&pmc| pmc == encoding) {
+                Some(n) => self.counters[n],
+                None => {
+                    let index = EXTENSION.iter().position(|&register| register == encoding);
+                    stored(index.and_then(|index| self.extension[index]))?
+                }
+            },
+        })
+    }
+
+    pub fn write(
+        &mut self,
+        encoding: Encoding,
+        value: u64,
+        now: u64,
+        retired: u64,
+        context: Context,
+    ) -> Result<(), &'static str> {
+        self.advance(now, retired);
+        let written = self.store(encoding, value);
+        self.context = context;
+        self.update();
+        written
+    }
+
+    fn store(&mut self, encoding: Encoding, value: u64) -> Result<(), &'static str> {
+        match encoding {
+            PMCR0 => {
+                if value & !PMCR0_KNOWN != 0 {
+                    return Err("PMCR0 bit without public description");
+                }
+                if value & PMCR0_COUNT & !PMCR0_FIXED != 0 {
+                    return Err("PMCR0 enables an event counter (PMC2-9); events are not modelled");
+                }
+                if !matches!(value & PMCR0_INTGEN, 0 | PMCR0_INTGEN_FIQ) {
+                    return Err("PMCR0 PMI generation other than FIQ");
+                }
+                if value & PMCR0_PC_CAPTURE != 0 {
+                    return Err("PMCR0 PMI PC capture is not modelled");
+                }
+                if value & PMCR0_USER_ACCESS != 0 {
+                    return Err("PMCR0 EL0 access to the monitor is not modelled");
+                }
+                if value & PMCR0_COUNT != 0 && self.alternate != Some(self.pmcr1) {
+                    return Err("counting while S3_1_C15_C7_2 differs from PMCR1");
+                }
+                // PMAI reports the PMI; writing it changes nothing.
+                self.pmcr0 = value & !PMCR0_PMAI;
+            }
+            PMCR1 | PMCR1_ALTERNATE => {
+                if value & !PMCR1_KNOWN != 0 {
+                    return Err("PMCR1 bit without public description");
+                }
+                if encoding == PMCR1 {
+                    if self.pmcr0 & PMCR0_COUNT != 0 && self.alternate != Some(value) {
+                        return Err("counting while S3_1_C15_C7_2 differs from PMCR1");
+                    }
+                    self.pmcr1 = value;
+                } else {
+                    self.alternate = Some(value);
+                }
+            }
+            PMESR0 => self.pmesr[0] = Some(value),
+            PMESR1 => self.pmesr[1] = Some(value),
+            PMSR | PC_CAPTURE => return Err("write of a performance monitor status register"),
+            _ => match PMC.iter().position(|&pmc| pmc == encoding) {
+                Some(n) => self.counters[n] = value,
+                None => {
+                    let index = EXTENSION
+                        .iter()
+                        .position(|&register| register == encoding)
+                        .expect("owned");
+                    if value != 0 {
+                        return Err("PMCR2-4, OPMAT and OPMSK settings are not modelled");
+                    }
+                    self.extension[index] = Some(0);
+                }
+            },
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    const KERNEL: Context = Context {
+        el: 2,
+        waiting: false,
+    };
+    const USER: Context = Context {
+        el: 0,
+        waiting: false,
+    };
+    /// XNU's `PMCR0_INIT` and `PMCR1_INIT` without `CPMU_AIC_PMI`.
+    const PMCR0_INIT: u64 = 0x3 | 0x3000 | 0x400;
+    const PMCR1_INIT: u64 = 0x30300;
+    /// The M2's P-core clock and the 24 MHz system counter.
+    const CLOCK: u64 = 3_504_000_000;
+    const FREQUENCY: u64 = 24_000_000;
+
+    fn configured(clock: u64) -> Pmu {
+        let mut pmu = Pmu::new(clock, FREQUENCY);
+        // `_cpc_cpmu_pmcr01_write`: PMCR1, its copy, then PMCR0.
+        pmu.write(PMCR1, PMCR1_INIT, 0, 0, KERNEL).unwrap();
+        pmu.write(PMCR1_ALTERNATE, PMCR1_INIT, 0, 0, KERNEL)
+            .unwrap();
+        pmu.write(PMCR0, PMCR0_INIT, 0, 0, KERNEL).unwrap();
+        pmu
+    }
+
+    #[test]
+    fn xnus_boot_configuration_counts_cycles_and_instructions() {
+        let mut pmu = configured(CLOCK);
+        // 24 ticks of the 24 MHz counter are 1 us: 3504 P-core cycles.
+        assert_eq!(pmu.read(PMC[0], 24, 100, KERNEL), Ok(3504));
+        assert_eq!(pmu.read(PMC[1], 24, 100, KERNEL), Ok(100));
+        assert_eq!(pmu.read(PMC[0], 25, 100, KERNEL), Ok(3650));
+        assert_eq!(pmu.read(PMC[0], 26, 100, KERNEL), Ok(3796));
+        // At 10 MHz a tick is 5/12 of a cycle; the fraction carries over.
+        let mut slow = configured(10_000_000);
+        let reads: Vec<u64> = (1..=3)
+            .map(|tick| slow.read(PMC[0], tick, 0, KERNEL).unwrap())
+            .collect();
+        assert_eq!(reads, [0, 0, 1]);
+        assert_eq!(slow.read(PMC[0], 24, 0, KERNEL), Ok(10));
+        // Cycles stop while the PE waits; both count at EL0.
+        pmu.sync(
+            26,
+            100,
+            Context {
+                el: 2,
+                waiting: true,
+            },
+        );
+        pmu.sync(1000, 100, USER);
+        assert_eq!(pmu.read(PMC[0], 1024, 110, USER), Ok(3796 + 3504));
+        assert_eq!(pmu.read(PMC[1], 1024, 110, USER), Ok(110));
+        // PMCR1's filter: kernel-only counting skips EL0.
+        pmu.write(PMCR1, 0x30000, 1024, 110, USER).unwrap_err();
+        pmu.write(PMCR1_ALTERNATE, 0x30000, 1024, 110, USER)
+            .unwrap();
+        pmu.write(PMCR1, 0x30000, 1024, 110, USER).unwrap();
+        assert_eq!(pmu.read(PMC[1], 2000, 150, USER), Ok(110));
+        assert_eq!(pmu.read(PMSR, 2000, 150, USER), Ok(0));
+        assert_eq!(pmu.read(PMCR0, 2000, 150, USER), Ok(PMCR0_INIT));
+    }
+
+    #[test]
+    fn overflow_asserts_the_pmi_until_software_rewrites_the_counter() {
+        let mut pmu = configured(CLOCK);
+        // A sampling period of 1000 instructions.
+        pmu.write(PMC[1], OVERFLOW - 1000, 0, 0, KERNEL).unwrap();
+        assert!(!pmu.asserted(0, 999));
+        assert!(pmu.asserted(0, 1000));
+        assert_eq!(pmu.read(PMSR, 0, 1000, KERNEL), Ok(1 << 1));
+        assert_eq!(
+            pmu.read(PMCR0, 0, 1000, KERNEL),
+            Ok(PMCR0_INIT | PMCR0_PMAI)
+        );
+        // `_cpc_cpmu_control_disable`, the counter rewrite, re-enable.
+        pmu.write(PMCR0, 0, 0, 1000, KERNEL).unwrap();
+        assert!(!pmu.asserted(0, 1000));
+        pmu.write(PMC[1], 0, 0, 1000, KERNEL).unwrap();
+        pmu.write(PMCR0, PMCR0_INIT, 0, 1000, KERNEL).unwrap();
+        assert_eq!(pmu.read(PMSR, 0, 1000, KERNEL), Ok(0));
+        assert!(!pmu.asserted(0, 1000));
+        // A cycle period reaches its PMI at a system count.
+        pmu.write(PMC[0], OVERFLOW - 3504, 100, 1000, KERNEL)
+            .unwrap();
+        assert_eq!(pmu.deadline(), Some(124));
+        assert!(!pmu.asserted(123, 1000));
+        assert!(pmu.asserted(124, 1000));
+        // Waiting stops the cycles, so no deadline is pending.
+        pmu.sync(
+            110,
+            1000,
+            Context {
+                el: 2,
+                waiting: true,
+            },
+        );
+        assert_eq!(pmu.deadline(), None);
+    }
+
+    #[test]
+    fn undescribed_settings_and_unwritten_controls_refuse() {
+        let mut pmu = Pmu::new(CLOCK, FREQUENCY);
+        assert!(pmu.read(PMESR0, 0, 0, KERNEL).is_err());
+        assert!(pmu.read(PMCR2, 0, 0, KERNEL).is_err());
+        assert!(pmu.write(PMCR0, 1, 0, 0, KERNEL).is_err(), "copy unwritten");
+        pmu.write(PMCR1_ALTERNATE, 0, 0, 0, KERNEL).unwrap();
+        for value in [1 << 2, 1 << 32, 2 << 8, 1 << 24, 1 << 30, 1 << 20] {
+            assert!(pmu.write(PMCR0, value, 0, 0, KERNEL).is_err(), "{value:#x}");
+        }
+        assert!(pmu.write(PMCR1, 1, 0, 0, KERNEL).is_err());
+        assert!(pmu.write(OPMSK0, 1, 0, 0, KERNEL).is_err());
+        pmu.write(OPMSK0, 0, 0, 0, KERNEL).unwrap();
+        assert_eq!(pmu.read(OPMSK0, 0, 0, KERNEL), Ok(0));
+        pmu.write(PMESR1, 0x8c, 0, 0, KERNEL).unwrap();
+        assert_eq!(pmu.read(PMESR1, 0, 0, KERNEL), Ok(0x8c));
+        assert!(pmu.write(PMSR, 0, 0, 0, KERNEL).is_err());
+        assert!(pmu.read(PC_CAPTURE, 0, 0, KERNEL).is_err());
+        // An event counter stores its value; its overflow still reports.
+        pmu.write(PMC[9], OVERFLOW, 0, 0, KERNEL).unwrap();
+        assert_eq!(pmu.read(PMSR, 0, 0, KERNEL), Ok(1 << 9));
+        assert!(Pmu::owns(PMC[8]) && !Pmu::owns(monitor(1, 0, 3)));
+    }
+}

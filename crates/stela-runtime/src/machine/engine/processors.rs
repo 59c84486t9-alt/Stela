@@ -126,7 +126,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         let device = self.devices.lines(pe, now);
-        let timer = timer::deadline(&parked.cpu).is_some_and(|deadline| now >= deadline);
+        let timer = timer::deadline(&parked.cpu).is_some_and(|deadline| now >= deadline)
+            || super::monitor_asserted(&parked.cpu, now);
         interrupt_pending(
             &parked.cpu,
             Lines {
@@ -142,6 +143,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(Wait { kind, .. }) = self.waiting.take() else {
             return Ok(());
         };
+        self.sync_monitor();
         if kind == WaitKind::Event && !self.interrupt_pending() {
             self.cpu.event = false;
         }
@@ -166,13 +168,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             })
         };
-        let mut deadlines = Vec::new();
-        deadlines.push(self.timer_deadline());
-        deadlines.push(streams(&self.cpu, self.waiting));
-        deadlines.push(timeout(self.waiting));
+        let mut deadlines = vec![
+            self.timer_deadline(),
+            self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()),
+            streams(&self.cpu, self.waiting),
+            timeout(self.waiting),
+        ];
         for peer in &self.peers {
             if let Peer::Parked(parked) = peer {
                 deadlines.push(timer::deadline(&parked.cpu));
+                deadlines.push(
+                    parked
+                        .cpu
+                        .pmu
+                        .as_ref()
+                        .and_then(|monitor| monitor.deadline()),
+                );
                 deadlines.push(streams(&parked.cpu, parked.waiting));
                 deadlines.push(timeout(parked.waiting));
             }
@@ -305,6 +316,7 @@ mod tests {
         Identity {
             midr: 0x611f_0320 | cpu << 4,
             mpidr: 0x8000_0000 | cpu << 8,
+            clock: None,
         }
     }
 

@@ -17,6 +17,7 @@ use crate::machine::{
     cpu::{Cpu, Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_VF, HCR_VI, HCR_VSE, TranslationRegime},
     debug::{self, DCC_FULL},
     exception::{self, Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
+    pmu::Pmu,
     registers::{Lines, Refusal, trap_iss},
     system::{
         ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
@@ -924,6 +925,10 @@ pub(super) fn identify(
     cpu.registers
         .set_raw(Register::CNTFRQ_EL0, 0, profile.counter_frequency);
     let own = profile.processors.get(pe);
+    cpu.pmu = own
+        .and_then(|identity| identity.clock)
+        .filter(|_| Pmu::on(profile.chip))
+        .map(|clock| Pmu::new(clock, profile.counter_frequency));
     for register in Register::ALL {
         if !identification(register) {
             continue;
