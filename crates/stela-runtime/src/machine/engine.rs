@@ -2737,9 +2737,17 @@ mod tests {
         // AT S12E1R walks both stages (EL1&0 stage 1 is off); AT S1E1R
         // stops at the IPA; a stage-2 fault reports S=1 in PAR_EL1.
         machine.cpu.state.x[2] = BASE + 0x108;
-        machine.system_instruction(0xd50c_7882).unwrap(); // at s12e1r, x2
-        let par = machine.cpu.read(SystemRegister::PAR_EL1);
-        assert_eq!((par & 1, par & 0x0000_ffff_ffff_f000), (0, BASE));
+        // AT S12E1R, S12E1W, S12E0R and S12E0W, x2.
+        for word in [0xd50c_7882, 0xd50c_78a2, 0xd50c_78c2, 0xd50c_78e2] {
+            machine.cpu.registers.set(SystemRegister::PAR_EL1, 0, 1);
+            machine.system_instruction(word).unwrap();
+            let par = machine.cpu.read(SystemRegister::PAR_EL1);
+            assert_eq!(
+                (par & 1, par & 0x0000_ffff_ffff_f000),
+                (0, BASE),
+                "{word:#x}"
+            );
+        }
         machine.cpu.state.x[2] = unmapped;
         machine.system_instruction(0xd50c_7882).unwrap();
         let fault = 1 << 11 | 1 << 9 | 0b00_0101 << 1 | 1;

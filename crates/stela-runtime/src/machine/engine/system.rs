@@ -1708,6 +1708,38 @@ mod tests {
     }
 
     #[test]
+    fn disr_el1_is_stored_and_reads_vdisr_el2_while_amo_routes_serrors() {
+        const DISR_EL1: Encoding = Encoding::new(3, 0, 12, 1, 1);
+        let mut machine = machine(&[]);
+        let access_at = |machine: &mut TestMachine, el: u8, read: bool, value| {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.state.x[1] = value;
+            machine
+                .system_instruction(access(read, DISR_EL1, 1))
+                .unwrap();
+            machine.cpu.state.x[1]
+        };
+        // A, IDS, AET, EA and DFSC hold what EL2 writes; the rest is RES0.
+        access_at(&mut machine, 2, false, u64::MAX);
+        let disr = access_at(&mut machine, 2, true, 0);
+        assert_eq!(disr, !Register::DISR_EL1.res0());
+        assert_eq!(disr & (1 << 31 | 1 << 24), 1 << 31 | 1 << 24);
+        // With HCR_EL2.AMO, EL1 reads and writes VDISR_EL2 instead.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 5);
+        machine
+            .cpu
+            .registers
+            .set(Register::VDISR_EL2, 0, 0x8000_0011);
+        assert_eq!(access_at(&mut machine, 1, true, 0), 0x8000_0011);
+        access_at(&mut machine, 1, false, 0);
+        assert_eq!(machine.cpu.read(Register::VDISR_EL2), 0);
+        assert_eq!(machine.cpu.read(Register::DISR_EL1), disr);
+        // Without AMO, EL1 reaches DISR_EL1 itself.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
+        assert_eq!(access_at(&mut machine, 1, true, 0), disr);
+    }
+
+    #[test]
     fn mpam_ras_lor_and_scxtnum_follow_their_minimal_configurations() {
         let mut machine = machine(&[]);
         // HCR_EL2.EnSCXT lets EL1 reach SCXTNUM_EL1, and clearing the reset
