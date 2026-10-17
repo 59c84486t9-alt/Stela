@@ -485,11 +485,16 @@ fn register_rows(
         }
     }
     if !system_instruction {
+        // Layouts are ordered alternatives: the first one the profile holds
+        // is the register's layout, and the later ones never apply.
         let mut fields = Vec::new();
         for fieldset in register["fieldsets"].as_array().into_iter().flatten() {
             let truth = profile.truth(&fieldset["condition"]);
             if truth != Truth::False {
                 collect_fields(profile, &fieldset["values"], 0, truth, &mut fields);
+            }
+            if truth == Truth::True {
+                break;
             }
         }
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
@@ -726,4 +731,43 @@ fn form_rows(profile: &Profile) -> Result<Vec<Value>> {
         }));
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPSR_abt's AArch64 shape: RES0 without AArch32 EL1, else the AArch32
+    /// layout.
+    pub(super) fn banked_spsr() -> Value {
+        let aa32el1 = json!({"_type": "AST.Function", "name": "IsFeatureImplemented",
+                             "arguments": [{"_type": "AST.Identifier", "value": "FEAT_AA32EL1"}]});
+        json!({"fieldsets": [
+            {"condition": {"_type": "AST.UnaryOp", "op": "!", "expr": aa32el1},
+             "values": [{"_type": "Fields.Reserved", "value": "RES0",
+                         "rangeset": [{"start": 0, "width": 64}]}]},
+            {"condition": {"_type": "AST.Bool", "value": true},
+             "values": [{"_type": "Fields.Field", "name": "N",
+                         "rangeset": [{"start": 31, "width": 1}]}]},
+        ]})
+    }
+
+    #[test]
+    fn layouts_are_ordered_alternatives() {
+        let profile = |features: &[&str]| Profile {
+            parameters: ["FEAT_AA32EL1"].map(String::from).into(),
+            features: features.iter().map(|f| String::from(*f)).collect(),
+            highest_el: 2,
+        };
+        let fields = |profile: &Profile| -> Vec<String> {
+            register_rows(profile, &banked_spsr(), "SPSR_abt", Truth::True)
+                .unwrap()
+                .iter()
+                .filter(|row| row["kind"] == "field")
+                .map(|row| row["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(fields(&profile(&[])), ["field:SPSR_abt.RES0"]);
+        assert_eq!(fields(&profile(&["FEAT_AA32EL1"])), ["field:SPSR_abt.N"]);
+    }
 }

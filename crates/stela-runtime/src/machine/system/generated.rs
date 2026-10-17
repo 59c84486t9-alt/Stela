@@ -1481,7 +1481,7 @@ impl Register {
             Register::CONTEXTIDR_EL1 => 0xffffffff00000000,
             Register::CONTEXTIDR_EL2 => 0xffffffff00000000,
             Register::CPACR_EL1 => 0xffffffffffcfffff,
-            Register::CPTR_EL2 => 0xffffffff3fcfc800,
+            Register::CPTR_EL2 => 0xffffffff3fcfffff,
             Register::CSSELR_EL1 => 0xfffffffffffffff0,
             Register::CTR_EL0 => 0xffffffff40003ff0,
             Register::CurrentEL => 0xfffffffffffffff3,
@@ -1643,12 +1643,12 @@ impl Register {
             Register::SP_EL1 => 0x0,
             Register::SP_EL2 => 0x0,
             Register::SPSel => 0xfffffffffffffffe,
-            Register::SPSR_abt => 0xffffffff00000000,
+            Register::SPSR_abt => 0xffffffffffffffff,
             Register::SPSR_EL1 => 0xffffffff0e0fe030,
             Register::SPSR_EL2 => 0xffffffff0e0fe030,
-            Register::SPSR_fiq => 0xffffffff00000000,
-            Register::SPSR_irq => 0xffffffff00000000,
-            Register::SPSR_und => 0xffffffff00000000,
+            Register::SPSR_fiq => 0xffffffffffffffff,
+            Register::SPSR_irq => 0xffffffffffffffff,
+            Register::SPSR_und => 0xffffffffffffffff,
             Register::SSBS => 0xffffffffffffefff,
             Register::TCR_EL1 => 0xf667f98800000040,
             Register::TCR_EL2 => 0xf667f98800000040,
@@ -10290,8 +10290,7 @@ fn a79(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10325,8 +10324,7 @@ fn a79(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10370,8 +10368,7 @@ fn a80(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10405,8 +10402,7 @@ fn a80(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10488,8 +10484,7 @@ fn a83(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10523,8 +10518,7 @@ fn a83(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10568,8 +10562,7 @@ fn a84(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10603,8 +10596,7 @@ fn a84(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10697,8 +10689,7 @@ fn a87(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10754,8 +10745,7 @@ fn a87(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10832,8 +10822,7 @@ fn a88(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -10867,8 +10856,7 @@ fn a88(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -11662,8 +11650,7 @@ fn a106(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -11697,8 +11684,7 @@ fn a106(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -11742,8 +11728,7 @@ fn a107(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -11777,8 +11762,7 @@ fn a107(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -11925,8 +11909,7 @@ fn a111(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -11960,8 +11943,7 @@ fn a111(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -12005,8 +11987,7 @@ fn a112(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -12040,8 +12021,7 @@ fn a112(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -12129,8 +12109,7 @@ fn a115(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -12186,8 +12165,7 @@ fn a115(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -12264,8 +12242,7 @@ fn a116(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         {
             return Ok(trap_el1_or_el2(c, 24u64));
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -12299,8 +12276,7 @@ fn a116(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (1) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CNTHCTL_EL2, 0), 1, 1)) & 0x1) == 0x0)
-        {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x0) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -16782,7 +16758,7 @@ fn a225(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -16804,7 +16780,7 @@ fn a225(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -16828,7 +16804,7 @@ fn a225(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -16889,7 +16865,7 @@ fn a226(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -16911,7 +16887,7 @@ fn a226(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -16935,7 +16911,7 @@ fn a226(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -16996,7 +16972,7 @@ fn a227(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -17018,7 +16994,7 @@ fn a227(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -17042,7 +17018,7 @@ fn a227(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -17103,7 +17079,7 @@ fn a228(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -17125,7 +17101,7 @@ fn a228(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 7u64,
             });
         }
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,
@@ -17149,7 +17125,7 @@ fn a228(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (!(is_in_host(c, 2))) && (((bits(c.read(Register::CPTR_EL2, 0), 10, 1)) & 0x1) == 0x1) {
+        if (!(is_in_host(c, 2))) && (((0u64) & 0x1) == 0x1) {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 7u64,

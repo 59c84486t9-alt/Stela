@@ -64,7 +64,9 @@ fn reads_one(kind: &str) -> bool {
     kind.starts_with("RES1") || kind.starts_with("RAO")
 }
 
-/// Field positions and reserved masks of the layouts whose condition holds.
+/// Field positions and reserved masks of the layouts whose condition may
+/// hold, up to the first the profile decides holds: layouts are ordered
+/// alternatives.
 fn layout(
     register: &Value,
     profile: &Profile,
@@ -90,6 +92,9 @@ fn layout(
         res0 &= zeros;
         res1 &= ones;
         any = true;
+        if as_bool(&condition) == Some(true) {
+            break;
+        }
     }
     if any { (res0, res1) } else { (0, 0) }
 }
@@ -370,4 +375,22 @@ pub fn generate(
     writeln!(out, "];\n")?;
     out.push_str(&functions);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_layout_the_profile_holds_decides_the_reserved_bits() {
+        let profile = Profile {
+            parameters: ["FEAT_AA32EL1"].map(String::from).into(),
+            features: Default::default(),
+            highest_el: 2,
+        };
+        let mut fields = BTreeMap::new();
+        let register = crate::system_matrix::tests::banked_spsr();
+        assert_eq!(layout(&register, &profile, &mut fields), (u64::MAX, 0));
+        assert!(fields.is_empty());
+    }
 }

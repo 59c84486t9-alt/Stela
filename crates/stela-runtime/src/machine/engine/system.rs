@@ -1075,6 +1075,31 @@ mod tests {
     }
 
     #[test]
+    fn aarch32_banked_spsrs_are_res0_at_el2_and_undefined_at_el1() {
+        let mut machine = machine(&[]);
+        // Without AArch32 at EL1, SPSR_irq, SPSR_abt, SPSR_und and SPSR_fiq
+        // are RES0 from EL2.
+        for op2 in 0..4 {
+            let spsr = Encoding::new(3, 4, 4, 3, op2);
+            machine.cpu.pstate = Pstate::reset(2);
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[0] = u64::MAX;
+            machine.system_instruction(access(false, spsr, 0)).unwrap();
+            machine.cpu.state.x[1] = u64::MAX;
+            machine.system_instruction(access(true, spsr, 1)).unwrap();
+            assert_eq!(
+                (machine.cpu.state.x[1], machine.cpu.pc),
+                (0, BASE + 8),
+                "{op2}"
+            );
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+            machine.system_instruction(access(true, spsr, 1)).unwrap();
+            assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000, "{op2}");
+        }
+    }
+
+    #[test]
     fn ecv_self_synchronized_counts_and_el1_virtual_counter_traps() {
         const CNTPCTSS_EL0: Encoding = Encoding::new(3, 3, 14, 0, 5);
         const CNTVCTSS_EL0: Encoding = Encoding::new(3, 3, 14, 0, 6);
