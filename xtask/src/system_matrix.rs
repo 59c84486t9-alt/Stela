@@ -153,7 +153,7 @@ impl SystemMatrix {
             .status()?;
         ensure!(status.success(), "cannot extract {}", resets::DIRECTORY);
         let (matrix, registers, profile) = generate(directory.path())?;
-        let resets = resets::read(&directory.path().join(resets::DIRECTORY), &profile)?;
+        let facts = resets::read(&directory.path().join(resets::DIRECTORY), &profile)?;
         let previous = fs::read_to_string(root().join(MATRIX)).unwrap_or_default();
         let text = assess::render(&matrix, &assess::registry()?, &previous)?;
         fs::write(root().join(MATRIX), text)?;
@@ -167,7 +167,7 @@ impl SystemMatrix {
         let generated = root().join(access::GENERATED);
         fs::write(
             &generated,
-            access::generate(&registers, &profile, &applicable, &resets)?,
+            access::generate(&registers, &profile, &applicable, &facts)?,
         )?;
         let status = Command::new("rustfmt")
             .args(["--edition", "2024"])

@@ -1130,6 +1130,42 @@ mod tests {
     }
 
     #[test]
+    fn fields_without_aarch32_or_lpa2_are_reserved() {
+        const SCTLR_EL2: Encoding = Encoding::new(3, 4, 1, 0, 0);
+        const TCR_EL1: Encoding = Encoding::new(3, 0, 2, 0, 2);
+        const TCR_EL2: Encoding = Encoding::new(3, 4, 2, 0, 2);
+        let mut machine = machine(&[]);
+        let round_trip = |machine: &mut TestMachine, encoding: Encoding, value: u64| {
+            machine.cpu.pstate = Pstate::reset(2);
+            machine.cpu.state.x[0] = value;
+            machine
+                .system_instruction(access(false, encoding, 0))
+                .unwrap();
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            machine.cpu.state.x[1]
+        };
+        // With E2H set and no AArch32 at EL0, SCTLR_EL2.SED (bit 8) and bit 7
+        // are RES1 and CP15BEN (bit 5) is RES0, as in SCTLR_EL1.
+        let sed = 1 << 8;
+        let cp15ben = 1 << 5;
+        let res1 = sed | 1 << 7;
+        assert_eq!(
+            round_trip(&mut machine, SCTLR_EL2, cp15ben) & (res1 | cp15ben),
+            res1
+        );
+        assert_eq!(
+            machine.cpu.registers.get(Register::SCTLR_EL2, 0) & cp15ben,
+            0
+        );
+        // Without FEAT_LPA2 the DS bit of either TCR is RES0.
+        for tcr in [TCR_EL1, TCR_EL2] {
+            assert_eq!(round_trip(&mut machine, tcr, 1 << 59 | 0x19), 0x19);
+        }
+    }
+
+    #[test]
     fn special_purpose_and_coprocessor_registers_keep_only_their_fields() {
         const NZCV: Encoding = Encoding::new(3, 3, 4, 2, 0);
         const DAIF: Encoding = Encoding::new(3, 3, 4, 2, 1);

@@ -3,6 +3,7 @@
 use super::codegen::{Accessor, Fields, Generator, accessors, rust_name};
 use super::expression::Profile;
 use super::fold::{as_bool, fold};
+use super::resets::Fixed;
 use anyhow::{Result, bail};
 use serde_json::Value;
 use std::{
@@ -70,25 +71,36 @@ fn reads_one(kind: &str) -> bool {
 fn layout(
     register: &Value,
     profile: &Profile,
+    fixed: &[Fixed],
     fields: &mut BTreeMap<String, (u32, u32)>,
 ) -> (u64, u64) {
     let mut res0 = u64::MAX;
     let mut res1 = u64::MAX;
     let mut any = false;
-    for fieldset in register["fieldsets"].as_array().into_iter().flatten() {
+    for (index, fieldset) in register["fieldsets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         let condition = fold(&fieldset["condition"], profile);
         if as_bool(&condition) == Some(false) {
             continue;
         }
+        let fixed: Vec<Fixed> = fixed
+            .iter()
+            .filter(|field| field.fieldset == index)
+            .copied()
+            .collect();
         let (mut zeros, mut ones) = (0, 0);
-        collect(
-            &fieldset["values"],
-            0,
+        let mut bits = Bits {
             profile,
+            fixed: &fixed,
             fields,
-            &mut zeros,
-            &mut ones,
-        );
+            res0: &mut zeros,
+            res1: &mut ones,
+        };
+        bits.collect(&fieldset["values"], 0, None);
         res0 &= zeros;
         res1 &= ones;
         any = true;
@@ -99,84 +111,91 @@ fn layout(
     if any { (res0, res1) } else { (0, 0) }
 }
 
-/// Fields of `values` at bit `offset`: a conditional field's variants are
-/// relative to its own range, and when no variant applies its bits take the
-/// conditional field's reserved type.
-fn collect(
-    values: &Value,
-    offset: u64,
-    profile: &Profile,
-    fields: &mut BTreeMap<String, (u32, u32)>,
-    res0: &mut u64,
-    res1: &mut u64,
-) {
-    for value in values.as_array().into_iter().flatten() {
-        match value["_type"].as_str().unwrap_or("") {
-            "Fields.ConditionalField" => {
-                let start = value["rangeset"][0]["start"].as_u64().unwrap_or(0) + offset;
-                let mut live = false;
-                for variant in value["fields"].as_array().into_iter().flatten() {
-                    let condition = fold(&variant["condition"], profile);
-                    if as_bool(&condition) == Some(false) {
+/// The reserved masks and field positions of one layout as it is walked.
+struct Bits<'a> {
+    profile: &'a Profile,
+    /// The layout's fields that the XML fixes (`resets::Fixed`).
+    fixed: &'a [Fixed],
+    fields: &'a mut BTreeMap<String, (u32, u32)>,
+    res0: &'a mut u64,
+    res1: &'a mut u64,
+}
+
+impl Bits<'_> {
+    /// Fields of `values` at bit `offset`: a conditional field's variants
+    /// are relative to its own range, and when no variant applies its bits
+    /// take the conditional field's reserved type. `variant` is the
+    /// alternative, counted from 1, that `values` belongs to.
+    fn collect(&mut self, values: &Value, offset: u64, variant: Option<usize>) {
+        for value in values.as_array().into_iter().flatten() {
+            match value["_type"].as_str().unwrap_or("") {
+                "Fields.ConditionalField" => {
+                    let start = value["rangeset"][0]["start"].as_u64().unwrap_or(0) + offset;
+                    let mut live = false;
+                    for (index, alternative) in
+                        value["fields"].as_array().into_iter().flatten().enumerate()
+                    {
+                        let condition = fold(&alternative["condition"], self.profile);
+                        if as_bool(&condition) == Some(false) {
+                            continue;
+                        }
+                        live = true;
+                        self.collect(
+                            &Value::Array(vec![alternative["field"].clone()]),
+                            start,
+                            Some(index + 1),
+                        );
+                        if as_bool(&condition) == Some(true) {
+                            break;
+                        }
+                    }
+                    if !live {
+                        let bits = ranges_mask(value, offset);
+                        self.reserve(
+                            bits,
+                            reads_one(value["reservedtype"].as_str().unwrap_or("RES0")),
+                        );
+                    }
+                }
+                "Fields.Reserved" => {
+                    let mask = ranges_mask(value, offset);
+                    self.reserve(mask, reads_one(value["value"].as_str().unwrap_or("")));
+                }
+                _ => {
+                    let Some(name) = value["name"].as_str() else {
                         continue;
-                    }
-                    live = true;
-                    collect(
-                        &Value::Array(vec![variant["field"].clone()]),
-                        start,
-                        profile,
-                        fields,
-                        res0,
-                        res1,
-                    );
-                    if as_bool(&condition) == Some(true) {
-                        break;
-                    }
-                }
-                if !live {
-                    let bits = ranges_mask(value, offset);
-                    if reads_one(value["reservedtype"].as_str().unwrap_or("RES0")) {
-                        *res1 |= bits;
-                    } else {
-                        *res0 |= bits;
-                    }
-                }
-            }
-            "Fields.Reserved" => {
-                let mask = ranges_mask(value, offset);
-                if reads_one(value["value"].as_str().unwrap_or("")) {
-                    *res1 |= mask;
-                } else {
-                    *res0 |= mask;
-                }
-            }
-            _ => {
-                let Some(name) = value["name"].as_str() else {
-                    continue;
-                };
-                let ranges: Vec<&Value> =
-                    value["rangeset"].as_array().into_iter().flatten().collect();
-                if let [range] = ranges[..] {
-                    let start = (range["start"].as_u64().unwrap_or(0) + offset) as u32;
-                    let width = range["width"].as_u64().unwrap_or(0) as u32;
-                    fields.entry(name.to_owned()).or_insert((start, width));
-                    // A field with one allowed value, and no value range, is a
-                    // constant.
-                    let allowed: Vec<Option<&str>> = value["values"]["values"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|allowed| allowed["value"].as_str())
-                        .collect();
-                    if let [Some(only)] = allowed[..] {
-                        let bits = only.trim_matches('\'');
-                        if !bits.contains('x') && bits.len() as u32 == width {
-                            for (position, bit) in bits.chars().rev().enumerate() {
-                                let mask = 1u64.checked_shl(start + position as u32).unwrap_or(0);
-                                if bit == '1' {
-                                    *res1 |= mask;
-                                } else {
-                                    *res0 |= mask;
+                    };
+                    let ranges: Vec<&Value> =
+                        value["rangeset"].as_array().into_iter().flatten().collect();
+                    if let [range] = ranges[..] {
+                        let start = (range["start"].as_u64().unwrap_or(0) + offset) as u32;
+                        let width = range["width"].as_u64().unwrap_or(0) as u32;
+                        // A field the XML fixes as RES0, RES1, RAZ/WI or
+                        // RAO/WI is reserved.
+                        if let Some(fixed) = self.fixed.iter().find(|fixed| {
+                            fixed.lsb == start
+                                && fixed.msb + 1 == start + width
+                                && fixed.variant == variant
+                        }) {
+                            self.reserve(ranges_mask(value, offset), fixed.ones);
+                            continue;
+                        }
+                        self.fields.entry(name.to_owned()).or_insert((start, width));
+                        // A field with one allowed value, and no value range,
+                        // is a constant.
+                        let allowed: Vec<Option<&str>> = value["values"]["values"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|allowed| allowed["value"].as_str())
+                            .collect();
+                        if let [Some(only)] = allowed[..] {
+                            let bits = only.trim_matches('\'');
+                            if !bits.contains('x') && bits.len() as u32 == width {
+                                for (position, bit) in bits.chars().rev().enumerate() {
+                                    let mask =
+                                        1u64.checked_shl(start + position as u32).unwrap_or(0);
+                                    self.reserve(mask, bit == '1');
                                 }
                             }
                         }
@@ -185,13 +204,21 @@ fn collect(
             }
         }
     }
+
+    fn reserve(&mut self, mask: u64, ones: bool) {
+        if ones {
+            *self.res1 |= mask;
+        } else {
+            *self.res0 |= mask;
+        }
+    }
 }
 
 pub fn generate(
     registers: &Value,
     profile: &Profile,
     applicable: &BTreeSet<String>,
-    resets: &BTreeMap<String, Vec<super::resets::Field>>,
+    facts: &super::resets::Facts,
 ) -> Result<String> {
     let mut fields: Fields = BTreeMap::new();
     let mut layouts = Vec::new();
@@ -205,12 +232,13 @@ pub fn generate(
         let rust = rust_name(name);
         // Field positions of every AArch64 register, for trap controls.
         let mut positions = BTreeMap::new();
-        let (res0, res1) = layout(register, profile, &mut positions);
+        let fixed = facts.fixed.get(&rust).map_or(&[][..], Vec::as_slice);
+        let (res0, res1) = layout(register, profile, fixed, &mut positions);
         let applies = applicable.contains(name) && !is_implementation_defined_space(name);
         let reset = if applies {
             super::resets::value(
                 &rust,
-                resets.get(&rust).map_or(&[][..], Vec::as_slice),
+                facts.resets.get(&rust).map_or(&[][..], Vec::as_slice),
                 &positions,
                 res0,
                 res1,
@@ -390,7 +418,47 @@ mod tests {
         };
         let mut fields = BTreeMap::new();
         let register = crate::system_matrix::tests::banked_spsr();
-        assert_eq!(layout(&register, &profile, &mut fields), (u64::MAX, 0));
+        assert_eq!(layout(&register, &profile, &[], &mut fields), (u64::MAX, 0));
         assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn fields_the_xml_fixes_are_reserved_bits() {
+        let profile = Profile {
+            parameters: Default::default(),
+            features: Default::default(),
+            highest_el: 2,
+        };
+        // SCTLR_EL2.SED's shape: a conditional field whose second variant
+        // is a plain field the XML gives as RES1.
+        let field = |name: &str| {
+            serde_json::json!({"_type": "Fields.Field", "name": name,
+                               "rangeset": [{"start": 0, "width": 1}]})
+        };
+        let register = serde_json::json!({"fieldsets": [{
+            "condition": {"_type": "AST.Bool", "value": true},
+            "values": [{"_type": "Fields.ConditionalField", "rangeset": [{"start": 8, "width": 1}],
+                        "fields": [
+                {"condition": {"_type": "AST.Bool", "value": false}, "field": field("SED")},
+                {"condition": {"_type": "AST.Bool", "value": true}, "field": field("SED")}]}]}]});
+        let fixed = |variant| Fixed {
+            fieldset: 0,
+            msb: 8,
+            lsb: 8,
+            variant: Some(variant),
+            ones: true,
+        };
+        let mut fields = BTreeMap::new();
+        assert_eq!(
+            layout(&register, &profile, &[fixed(2)], &mut fields),
+            (0, 1 << 8)
+        );
+        assert!(fields.is_empty());
+        // Fixing the variant that does not apply leaves a stored field.
+        assert_eq!(
+            layout(&register, &profile, &[fixed(1)], &mut fields),
+            (0, 0)
+        );
+        assert_eq!(fields["SED"], (8, 1));
     }
 }

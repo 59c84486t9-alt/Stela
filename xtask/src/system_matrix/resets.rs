@@ -86,10 +86,33 @@ pub struct Field {
     pub reset: Reset,
 }
 
-/// Every AArch64 register's field resets under `profile`, keyed by the
-/// register name with array placeholders such as `<n>` removed.
-pub fn read(directory: &Path, profile: &Profile) -> Result<BTreeMap<String, Vec<Field>>> {
+/// A field whose XML gives one unconditional access type that fixes its
+/// bits (RES0, RES1, RAZ/WI or RAO/WI), where AARCHMRS gives a plain field
+/// with no values and no access. `fieldset`, `msb`, `lsb` and `variant` come
+/// from the XML field id, `fieldset_<n>-<msb>_<lsb>[-<variant>]`; the variant
+/// counts a conditional field's alternatives from 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fixed {
+    pub fieldset: usize,
+    pub msb: u32,
+    pub lsb: u32,
+    pub variant: Option<usize>,
+    pub ones: bool,
+}
+
+/// The facts the XML adds to AARCHMRS, keyed by the register name with array
+/// placeholders such as `<n>` removed.
+#[derive(Debug, Default)]
+pub struct Facts {
+    pub resets: BTreeMap<String, Vec<Field>>,
+    pub fixed: BTreeMap<String, Vec<Fixed>>,
+}
+
+/// Every AArch64 register's field resets under `profile` and its fields with
+/// a fixed access type.
+pub fn read(directory: &Path, profile: &Profile) -> Result<Facts> {
     let mut registers: BTreeMap<String, Vec<Field>> = BTreeMap::new();
+    let mut fixed: BTreeMap<String, Vec<Fixed>> = BTreeMap::new();
     let mut entries: Vec<_> = fs::read_dir(directory)
         .with_context(|| format!("cannot read {}", directory.display()))?
         .collect::<Result<_, _>>()?;
@@ -108,6 +131,13 @@ pub fn read(directory: &Path, profile: &Profile) -> Result<BTreeMap<String, Vec<
             let Some(name) = register.child("reg_short_name").map(Element::text) else {
                 continue;
             };
+            let fixes = fixed.entry(plain_name(&name)).or_default();
+            fixes.extend(
+                register
+                    .descendants("field")
+                    .into_iter()
+                    .filter_map(fixed_access),
+            );
             let fields = registers.entry(plain_name(&name)).or_default();
             for field in register.descendants("field") {
                 fields.extend(field_resets(field, profile).with_context(|| {
@@ -121,7 +151,71 @@ pub fn read(directory: &Path, profile: &Profile) -> Result<BTreeMap<String, Vec<
             }
         }
     }
-    Ok(registers)
+    Ok(Facts {
+        resets: registers,
+        fixed,
+    })
+}
+
+/// The fixed access type of `field`, when its only access state is one with
+/// no condition.
+fn fixed_access(field: &Element) -> Option<Fixed> {
+    let ones = match field.child("field_access") {
+        Some(access) => reserved_access(access)?,
+        None => reserved_description(field)?,
+    };
+    let id = field.attribute("id")?.strip_prefix("fieldset_")?;
+    let mut parts = id.split('-');
+    let fieldset = parts.next()?.parse().ok()?;
+    let (msb, lsb) = parts.next()?.split_once('_')?;
+    let variant = match parts.next() {
+        Some(variant) => Some(variant.parse().ok()?),
+        None => None,
+    };
+    Some(Fixed {
+        fieldset,
+        msb: msb.parse().ok()?,
+        lsb: lsb.parse().ok()?,
+        variant,
+        ones,
+    })
+}
+
+/// A lone unconditional access type that reserves the field.
+fn reserved_access(access: &Element) -> Option<bool> {
+    let mut states = access.children_named("field_access_state");
+    let state = states.next()?;
+    if states.next().is_some() || state.children_named("field_access_type").count() != 1 {
+        return None;
+    }
+    if state
+        .children
+        .iter()
+        .any(|node| matches!(node, Node::Element(element) if element.name != "field_access_type"))
+    {
+        return None;
+    }
+    match state.child("field_access_type")?.text().trim() {
+        "RES0" | "RAZ/WI" => Some(false),
+        "RES1" | "RAO/WI" => Some(true),
+        _ => None,
+    }
+}
+
+/// A field with no access description that the XML's reserved-field
+/// wording opens, as TCR_EL2.DS's variant without FEAT_LPA2 does.
+fn reserved_description(field: &Element) -> Option<bool> {
+    let before = field
+        .children_named("field_description")
+        .find(|description| description.attribute("order") == Some("before"))?;
+    let text = before.child("para")?.text();
+    if text.starts_with("Reserved, RES0") {
+        Some(false)
+    } else if text.starts_with("Reserved, RES1") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// `DBGBCR<n>_EL1` → `DBGBCR_EL1`, the register file's name.
@@ -600,6 +694,74 @@ mod tests {
             "unrecorded choice"
         );
         assert_eq!(value("SCTLR_EL1", &fields, &positions, 0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_lone_unconditional_reserved_access_fixes_a_field() {
+        let field = |id: &str, state: &str| {
+            let page = parse(&format!(
+                "<field id=\"{id}\"><field_access><field_access_state>{state}\
+                 </field_access_state></field_access></field>"
+            ))
+            .unwrap();
+            fixed_access(page.descendants("field")[0])
+        };
+        let res1 =
+            "<field_access_type><arm-defined-word>RES1</arm-defined-word></field_access_type>";
+        assert_eq!(
+            field("fieldset_0-8_8-2", res1),
+            Some(Fixed {
+                fieldset: 0,
+                msb: 8,
+                lsb: 8,
+                variant: Some(2),
+                ones: true
+            })
+        );
+        assert_eq!(
+            field(
+                "fieldset_1-63_63",
+                "<field_access_type>RAZ/WI</field_access_type>"
+            ),
+            Some(Fixed {
+                fieldset: 1,
+                msb: 63,
+                lsb: 63,
+                variant: None,
+                ones: false
+            })
+        );
+        // A conditional access level or a read/write type fixes nothing.
+        let level = "<field_access_level>When trapping</field_access_level>\
+                     <field_access_type>RAZ/WI</field_access_type>";
+        assert_eq!(field("fieldset_0-15_15", level), None);
+        assert_eq!(
+            field(
+                "fieldset_0-15_15",
+                "<field_access_type>RW</field_access_type>"
+            ),
+            None
+        );
+        // Without an access description, the reserved-field wording decides.
+        let described = |text: &str| {
+            let page = parse(&format!(
+                "<field id=\"fieldset_1-59_59-2\"><field_description order=\"before\">\
+                 <para>{text}</para></field_description></field>"
+            ))
+            .unwrap();
+            fixed_access(page.descendants("field")[0]).map(|fixed| fixed.ones)
+        };
+        assert_eq!(
+            described(
+                "Reserved, <arm-defined-word>RES0</arm-defined-word>, and the Effective value of this bit is 0."
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            described("Reserved, <arm-defined-word>RES1</arm-defined-word>."),
+            Some(true)
+        );
+        assert_eq!(described("Controls the translation granule."), None);
     }
 
     #[test]
