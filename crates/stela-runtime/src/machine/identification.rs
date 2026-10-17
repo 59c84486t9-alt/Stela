@@ -763,7 +763,12 @@ pub const TABLE: &[Row] = &[
         32,
         1,
         "FEAT_LSE2",
-        engine(false, "unaligned single-copy atomicity is not guaranteed"),
+        engine(
+            true,
+            "machine::mmu::alignment applies its alignment rules, and every \
+             access inside its 16-byte granule is single-copy atomic: one PE \
+             runs at a time and nothing else writes guest memory meanwhile",
+        ),
     ),
     // ID_AA64DFR0_EL1: the Armv8.4 debug architecture (FEAT_Debugv8p4,
     // implied by Armv8.6), and the breakpoint and watchpoint counts of
@@ -1207,6 +1212,10 @@ mod tests {
         assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 20), 3);
         assert_eq!(field(Chip::AppleM3, ID_AA64MMFR1_EL1, 44), 0);
         assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 44), 1);
+        // Every chip has FEAT_LSE2 (MMFR2.AT).
+        for chip in Chip::ALL {
+            assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), 1, "{chip:?}");
+        }
         // Every chip restricts predictions (ISAR1.SPECRES 1); the M5 adds
         // COSP RCTX (2).
         for chip in Chip::ALL {
