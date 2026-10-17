@@ -33,6 +33,8 @@ const SHAREABILITY_SHIFT: u64 = 8;
 const S2AP_READ: u64 = 1 << 6;
 const S2AP_WRITE: u64 = 1 << 7;
 const ACCESS_FLAG: u64 = 1 << 10;
+/// FEAT_XS: the output has XS 0.
+const FNXS: u64 = 1 << 11;
 /// FEAT_XNX: XN[0], which with XN[1] selects EL0 and EL1 execution.
 const XNX: u64 = 1 << 53;
 const XN: u64 = 1 << 54;
@@ -210,8 +212,10 @@ pub fn translate(
         attributes: attributes::NORMAL_WRITE_BACK,
         shareability: attributes::INNER_SHAREABLE,
     });
+    // FEAT_XS: FnXS clears the XS attribute of the output.
+    let no_xs = stage2.xs && descriptor & FNXS != 0;
     let own = if forced {
-        attributes::forced(first.attributes, field)
+        attributes::forced(first.attributes, field, no_xs, stage2.xs)
     } else {
         match attributes::of_stage2(field) {
             Some(own) => own,
@@ -259,16 +263,21 @@ pub fn translate(
     };
     let (attributes, shareability) = if non_cacheable {
         let attribute = if forced {
-            attributes::NORMAL_NON_CACHEABLE
+            attributes::non_cacheable(own, stage2.xs)
         } else {
-            attributes::combine(input.attributes, attributes::NORMAL_NON_CACHEABLE)
+            attributes::combine(
+                input.attributes,
+                attributes::NORMAL_NON_CACHEABLE,
+                !no_xs,
+                stage2.xs,
+            )
         };
         (attribute, attributes::OUTER_SHAREABLE)
     } else if forced {
         (own, descriptor_shareability(descriptor))
     } else {
         (
-            attributes::combine(input.attributes, own),
+            attributes::combine(input.attributes, own, !no_xs, stage2.xs),
             descriptor_shareability(descriptor),
         )
     };
@@ -325,6 +334,7 @@ mod tests {
             hcr: 1,
             vtcr,
             vttbr: 0x10_0000 | 7 << 48,
+            xs: false,
         }
     }
 
@@ -666,6 +676,29 @@ mod tests {
         assert_eq!(
             attributes(&fwb, non_shareable, leaf(0b0010, 0), false),
             Ok((0x08, 0b10))
+        );
+        // FEAT_XS: stage-1 Device-nGnRE with XS 1 stays XS 1 unless the
+        // descriptor's FnXS clears it, with and without FWB; without
+        // FEAT_XS bit 11 is ignored.
+        let xs = Stage2 { xs: true, ..s2 };
+        let fwb_xs = Stage2 { xs: true, ..fwb };
+        let device = Input {
+            attributes: 0x04,
+            shareability: 0,
+        };
+        for s2 in [&xs, &fwb_xs] {
+            assert_eq!(
+                attributes(s2, device, leaf(0b0111, 0), false).map(|(a, _)| a),
+                Ok(0x04)
+            );
+            assert_eq!(
+                attributes(s2, device, leaf(0b0111, 0) | FNXS, false).map(|(a, _)| a),
+                Ok(0x05)
+            );
+        }
+        assert_eq!(
+            attributes(&s2, device, leaf(0b0111, 0) | FNXS, false).map(|(a, _)| a),
+            Ok(0x04)
         );
     }
 }

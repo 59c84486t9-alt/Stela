@@ -455,6 +455,16 @@ pub const TABLE: &[Row] = &[
         "FEAT_I8MM",
         Basis::Instructions(&[0x4e82_a420]),
     ),
+    feature(
+        ID_AA64ISAR1_EL1,
+        56,
+        1,
+        "FEAT_XS",
+        engine(
+            true,
+            "DSB and TLBI nXS complete as DSB and TLBI, and translations report XS",
+        ),
+    ),
     // ID_AA64ISAR2_EL1
     feature(
         ID_AA64ISAR2_EL1,

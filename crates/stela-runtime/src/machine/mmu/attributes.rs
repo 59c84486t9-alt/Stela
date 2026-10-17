@@ -1,6 +1,10 @@
 //! Memory attributes of a translation (Arm ARM D8.6): the MAIR byte a
 //! descriptor selects and its shareability, and the defaults with stage 1
-//! disabled.
+//! disabled. Attributes travel as their PAR_EL1.ATTR byte, which on a chip
+//! with FEAT_XS also carries the XS attribute (pseudocode EncodePARAttrs):
+//! bit 0 of a Device byte, and `0x40` and `0xa0` for Non-cacheable and
+//! Write-Through memory with XS 0. Every combination decodes the byte to its
+//! form without XS first.
 
 use super::MemoryType;
 
@@ -24,10 +28,21 @@ const SCTLR_I: u64 = 1 << 12;
 const ATTRIBUTE_INDEX_SHIFT: u64 = 2;
 const SHAREABILITY_SHIFT: u64 = 8;
 
-/// The MAIR attribute byte, memory type and shareability of a descriptor.
-pub fn of_descriptor(mair: u64, descriptor: u64) -> (u8, MemoryType, u8) {
+/// Normal Inner/Outer Non-cacheable and Write-Through Read-Allocate with XS
+/// 0 (FEAT_XS).
+const NON_CACHEABLE_NOT_XS: u8 = 0x40;
+const WRITE_THROUGH_NOT_XS: u8 = 0xa0;
+const DEVICE_NOT_XS: u8 = 0b01;
+
+/// The attribute byte, memory type and shareability of a descriptor. `xs`:
+/// the chip implements FEAT_XS. Without it the XS encodings of MAIR are
+/// reserved, and this implementation gives each the meaning of the encoding
+/// without XS (Unpredictable_RESMAIR maps a reserved value to an allocated
+/// one).
+pub fn of_descriptor(mair: u64, descriptor: u64, xs: bool) -> (u8, MemoryType, u8) {
     let index = (descriptor >> ATTRIBUTE_INDEX_SHIFT) & 7;
-    let attribute = (mair >> (index * 8)) as u8;
+    let (attribute, attribute_xs) = decoded((mair >> (index * 8)) as u8);
+    let attribute = encoded(attribute, attribute_xs, xs);
     let memory = memory_type(attribute);
     let shareability = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
     (
@@ -35,6 +50,52 @@ pub fn of_descriptor(mair: u64, descriptor: u64) -> (u8, MemoryType, u8) {
         memory,
         effective_shareability(attribute, shareability),
     )
+}
+
+/// An attribute byte without its XS encoding, and its XS attribute
+/// (pseudocode S1DecodeMemAttrs): 0 for Device memory with bit 0 set, for
+/// `0x40` and `0xa0`, and for Normal memory Write-Back at both levels.
+pub fn decoded(attribute: u8) -> (u8, bool) {
+    match attribute {
+        NON_CACHEABLE_NOT_XS => (NORMAL_NON_CACHEABLE, false),
+        WRITE_THROUGH_NOT_XS => (NORMAL_WRITE_THROUGH, false),
+        attribute if device(attribute).is_some() => {
+            (attribute & !DEVICE_NOT_XS, attribute & DEVICE_NOT_XS == 0)
+        }
+        attribute => (attribute, !write_back(attribute)),
+    }
+}
+
+/// The attribute byte without XS encoding `attribute` with XS attribute `xs`,
+/// as PAR_EL1.ATTR reports it (pseudocode EncodePARAttrs). `implemented`:
+/// the chip has FEAT_XS; without it no XS encoding is allocated.
+pub fn encoded(attribute: u8, xs: bool, implemented: bool) -> u8 {
+    if !implemented || xs {
+        return attribute;
+    }
+    let inner_write_through = cacheability(attribute & 15) == Cacheability::WriteThrough;
+    match device(attribute) {
+        Some(_) => attribute | DEVICE_NOT_XS,
+        // Outer Write-Through non-transient Read-Allocate, inner
+        // Write-Through.
+        None if attribute >> 4 == 0b1010 && inner_write_through => WRITE_THROUGH_NOT_XS,
+        None if attribute == NORMAL_NON_CACHEABLE => NON_CACHEABLE_NOT_XS,
+        None => attribute,
+    }
+}
+
+/// Normal memory Write-Back at both levels.
+fn write_back(attribute: u8) -> bool {
+    device(attribute).is_none()
+        && cacheability(attribute >> 4) == Cacheability::WriteBack
+        && cacheability(attribute & 15) == Cacheability::WriteBack
+}
+
+/// Normal Non-cacheable memory keeping the XS attribute of `attribute`, the
+/// output with caches off (pseudocode AArch64.S1TreatAsNormalNC and
+/// AArch64.S2TreatAsNormalNC keep the walk's XS).
+pub fn non_cacheable(attribute: u8, implemented: bool) -> u8 {
+    encoded(NORMAL_NON_CACHEABLE, decoded(attribute).1, implemented)
 }
 
 pub fn memory_type(attribute: u8) -> MemoryType {
@@ -48,7 +109,8 @@ pub fn memory_type(attribute: u8) -> MemoryType {
 /// Device memory and Normal memory that is Non-cacheable at both levels are
 /// Outer Shareable whatever SH says.
 pub fn effective_shareability(attribute: u8, shareability: u8) -> u8 {
-    if memory_type(attribute) == MemoryType::Device || attribute == NORMAL_NON_CACHEABLE {
+    if memory_type(attribute) == MemoryType::Device || decoded(attribute).0 == NORMAL_NON_CACHEABLE
+    {
         OUTER_SHAREABLE
     } else {
         shareability
@@ -106,10 +168,20 @@ pub fn of_stage2(field: u8) -> Option<u8> {
     }
 }
 
-/// The stage-1 attribute byte combined with stage 2's (pseudocode
+/// The stage-1 attribute byte combined with stage 2's `second`, without XS
+/// encoding, whose XS attribute is `second_xs` (pseudocode
 /// S2CombineS1MemAttrs): Device beats Normal, the stronger Device type wins,
-/// and Normal memory takes the weaker cacheability at each level.
-pub fn combine(first: u8, second: u8) -> u8 {
+/// and Normal memory takes the weaker cacheability at each level. XS is 0
+/// for Write-Back output and otherwise set only when both stages set it.
+/// `implemented`: the chip has FEAT_XS.
+pub fn combine(first: u8, second: u8, second_xs: bool, implemented: bool) -> u8 {
+    let (first, first_xs) = decoded(first);
+    let attribute = combined(first, second);
+    let xs = !write_back(attribute) && first_xs && second_xs;
+    encoded(attribute, xs, implemented)
+}
+
+fn combined(first: u8, second: u8) -> u8 {
     match (device(first), device(second)) {
         (Some(first), Some(second)) => first.min(second) << 2,
         (Some(_), None) => first,
@@ -123,8 +195,16 @@ pub fn combine(first: u8, second: u8) -> u8 {
 /// The attribute byte with HCR_EL2.FWB set, where the stage-2 MemAttr field
 /// overrides stage 1 (pseudocode AArch64.S2ApplyFWBMemAttrs): `0b0xx`
 /// Device, `0b111` stage 1's attributes, `0b110` Write-Back keeping stage
-/// 1's hints, and otherwise Non-cacheable unless stage 1 is Device.
-pub fn forced(first: u8, field: u8) -> u8 {
+/// 1's hints, and otherwise Non-cacheable unless stage 1 is Device. XS is
+/// stage 1's, except 0 for forced Write-Back and with the descriptor's FnXS
+/// (`no_xs`). `implemented`: the chip has FEAT_XS.
+pub fn forced(first: u8, field: u8, no_xs: bool, implemented: bool) -> u8 {
+    let (first, first_xs) = decoded(first);
+    let xs = first_xs && field & 0b111 != 0b110 && !no_xs;
+    encoded(forced_attribute(first, field), xs, implemented)
+}
+
+fn forced_attribute(first: u8, field: u8) -> u8 {
     if field & 0b0100 == 0 {
         let kind = field & 3;
         return device(first).map_or(kind, |first| first.min(kind)) << 2;
@@ -197,15 +277,15 @@ mod tests {
         let mair = 0x44_ff_04;
         let inner_shareable = 0b11 << 8;
         assert_eq!(
-            of_descriptor(mair, 1 << 2 | inner_shareable),
+            of_descriptor(mair, 1 << 2 | inner_shareable, false),
             (0xff, MemoryType::Normal, 0b11)
         );
         assert_eq!(
-            of_descriptor(mair, inner_shareable),
+            of_descriptor(mair, inner_shareable, false),
             (0x04, MemoryType::Device, OUTER_SHAREABLE)
         );
         assert_eq!(
-            of_descriptor(mair, 2 << 2),
+            of_descriptor(mair, 2 << 2, false),
             (0x44, MemoryType::Normal, OUTER_SHAREABLE)
         );
         assert_eq!(disabled(0, false), (DEVICE_NGNRNE, MemoryType::Device));
@@ -236,24 +316,30 @@ mod tests {
         assert_eq!(of_stage2(0b0101), Some(0x44));
         assert_eq!((of_stage2(0b0100), of_stage2(0b1000)), (None, None));
         // Device beats Normal and the stronger Device type wins.
-        assert_eq!(combine(0xff, 0x08), 0x08);
-        assert_eq!(combine(0x0c, 0xcc), 0x0c);
-        assert_eq!(combine(0x0c, 0x04), 0x04);
+        assert_eq!(combine(0xff, 0x08, true, false), 0x08);
+        assert_eq!(combine(0x0c, 0xcc, true, false), 0x0c);
+        assert_eq!(combine(0x0c, 0x04, true, false), 0x04);
         // Normal: the weaker cacheability with stage 1's hints. WB RA
         // non-transient against WT gives WT RA non-transient; a transient
         // WB RW nibble becomes transient WT; NC wins.
-        assert_eq!(combine(0xee, 0x88), 0xaa);
-        assert_eq!(combine(0x7f, 0xc8), 0x7b);
-        assert_eq!(combine(0xff, 0x4c), 0x4f);
-        assert_eq!(combine(0xaa, 0xcc), 0xaa);
+        assert_eq!(combine(0xee, 0x88, true, false), 0xaa);
+        assert_eq!(combine(0x7f, 0xc8, true, false), 0x7b);
+        assert_eq!(combine(0xff, 0x4c, true, false), 0x4f);
+        assert_eq!(combine(0xaa, 0xcc, true, false), 0xaa);
         // FWB: Device, stage 1's attributes, forced Write-Back keeping
         // stage 1's hints, and Non-cacheable unless stage 1 is Device.
-        assert_eq!(forced(0xff, 0b0010), 0x08);
-        assert_eq!(forced(0x00, 0b0011), 0x00);
-        assert_eq!(forced(0x4a, 0b0111), 0x4a);
-        assert_eq!(forced(0x4a, 0b0110), 0xfe);
-        assert_eq!(forced(0x04, 0b0110), 0xff);
-        assert_eq!((forced(0xff, 0b0101), forced(0x04, 0b0101)), (0x44, 0x04));
+        assert_eq!(forced(0xff, 0b0010, false, false), 0x08);
+        assert_eq!(forced(0x00, 0b0011, false, false), 0x00);
+        assert_eq!(forced(0x4a, 0b0111, false, false), 0x4a);
+        assert_eq!(forced(0x4a, 0b0110, false, false), 0xfe);
+        assert_eq!(forced(0x04, 0b0110, false, false), 0xff);
+        assert_eq!(
+            (
+                forced(0xff, 0b0101, false, false),
+                forced(0x04, 0b0101, false, false)
+            ),
+            (0x44, 0x04)
+        );
         assert_eq!(
             combine_shareability(NON_SHAREABLE, INNER_SHAREABLE),
             INNER_SHAREABLE
@@ -263,5 +349,59 @@ mod tests {
             OUTER_SHAREABLE
         );
         assert_eq!(combine_shareability(NON_SHAREABLE, 0b01), OUTER_SHAREABLE);
+    }
+
+    #[test]
+    fn xs_travels_in_the_attribute_byte_on_chips_with_feat_xs() {
+        // MAIR: 0 Device-nGnRE with XS 0, 1 Normal Non-cacheable with XS 0,
+        // 2 Normal Write-Through with XS 0.
+        let mair = 0xa0_40_05;
+        let inner_shareable = 0b11 << 8;
+        // With FEAT_XS each byte is its own PAR_EL1.ATTR encoding.
+        assert_eq!(
+            of_descriptor(mair, inner_shareable, true),
+            (0x05, MemoryType::Device, OUTER_SHAREABLE)
+        );
+        assert_eq!(
+            of_descriptor(mair, 1 << 2 | inner_shareable, true),
+            (0x40, MemoryType::Normal, OUTER_SHAREABLE)
+        );
+        assert_eq!(
+            of_descriptor(mair, 2 << 2 | inner_shareable, true),
+            (0xa0, MemoryType::Normal, 0b11)
+        );
+        // Without it they are reserved and mean the encodings without XS.
+        assert_eq!(
+            of_descriptor(mair, inner_shareable, false),
+            (0x04, MemoryType::Device, OUTER_SHAREABLE)
+        );
+        assert_eq!(
+            of_descriptor(mair, 1 << 2 | inner_shareable, false),
+            (0x44, MemoryType::Normal, OUTER_SHAREABLE)
+        );
+        assert_eq!(
+            of_descriptor(mair, 2 << 2 | inner_shareable, false),
+            (0xaa, MemoryType::Normal, 0b11)
+        );
+        // Caches off keep XS: Write-Back memory has XS 0.
+        assert_eq!(non_cacheable(0xff, true), 0x40);
+        assert_eq!(non_cacheable(0xaa, true), 0x44);
+        assert_eq!(non_cacheable(0xff, false), 0x44);
+        // Stage 2 sets XS only when both stages do, FnXS clears it, and
+        // Write-Back output has XS 0.
+        assert_eq!(combine(0x05, 0x04, true, true), 0x05);
+        assert_eq!(combine(0x04, 0x04, false, true), 0x05);
+        assert_eq!(combine(0x04, 0x0c, true, true), 0x04);
+        assert_eq!(combine(0xa0, 0xcc, true, true), 0xa0);
+        assert_eq!(combine(0xff, 0x44, true, true), 0x40);
+        assert_eq!(combine(0xaa, 0x44, true, true), 0x44);
+        assert_eq!(combine(0xaa, 0xcc, true, true), 0xaa);
+        // FWB keeps stage 1's XS except for forced Write-Back and FnXS.
+        assert_eq!(forced(0x04, 0b0111, false, true), 0x04);
+        assert_eq!(forced(0x04, 0b0111, true, true), 0x05);
+        assert_eq!(forced(0x40, 0b0110, false, true), 0xff);
+        assert_eq!(forced(0x40, 0b0101, false, true), 0x40);
+        assert_eq!(forced(0x44, 0b0101, false, true), 0x44);
+        assert_eq!(forced(0x05, 0b0010, false, true), 0x05);
     }
 }

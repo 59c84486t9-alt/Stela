@@ -358,7 +358,7 @@ fn walk_enabled(
             return fault(FaultKind::AccessFlag, level);
         }
         let (mut attributes, mut memory, mut shareability) =
-            attributes::of_descriptor(controls.mair, descriptor);
+            attributes::of_descriptor(controls.mair, descriptor, controls.xs);
         let field = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
         let alignment = stage_alignment(attributes);
         if shape.is_some_and(|shape| alignment::after_translation(alignment, address, shape)) {
@@ -385,7 +385,7 @@ fn walk_enabled(
         // alignment check, which sees the descriptor's attributes. Stage 2
         // still combines the descriptor's SH field.
         if attributes::stage1_non_cacheable(controls.sctlr, attributes, access == Access::Execute) {
-            attributes = attributes::NORMAL_NON_CACHEABLE;
+            attributes = attributes::non_cacheable(attributes, controls.xs);
             memory = MemoryType::Normal;
             shareability = attributes::OUTER_SHAREABLE;
         }

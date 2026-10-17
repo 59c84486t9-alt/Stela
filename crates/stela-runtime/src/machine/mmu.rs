@@ -42,6 +42,9 @@ pub struct Controls {
     pub ttbr0: u64,
     pub ttbr1: u64,
     pub mair: u64,
+    /// The chip implements FEAT_XS: MAIR's XS encodings are allocated and
+    /// the attributes report XS (`attributes`).
+    pub xs: bool,
     pub sprr: Sprr,
     pub regime: Regime,
     /// The caller requires stage 2 (HCR_EL2.VM in the EL1&0 regime). Without
@@ -59,6 +62,8 @@ pub struct Stage2 {
     pub hcr: u64,
     pub vtcr: u64,
     pub vttbr: u64,
+    /// The chip implements FEAT_XS: bit 11 of a stage-2 descriptor is FnXS.
+    pub xs: bool,
 }
 
 const HCR_VM: u64 = 1 << 0;
@@ -612,6 +617,7 @@ mod tests {
                 hcr: HCR_VM,
                 vtcr: VTCR,
                 vttbr: 0x10_0000,
+                xs: false,
             }),
             ..Controls::default()
         };

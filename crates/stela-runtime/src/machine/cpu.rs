@@ -401,6 +401,7 @@ impl Cpu {
             ttbr0: self.read(ttbr0),
             ttbr1: self.read(ttbr1),
             mair: self.read(mair),
+            xs: Feature::FEAT_XS.on(self.registers.chip()),
             sprr: Sprr {
                 config: self.apple.sprr_config,
                 el1: self.apple.sprr_perm[kernel],
@@ -412,6 +413,7 @@ impl Cpu {
                 hcr: self.read(Register::HCR_EL2),
                 vtcr: self.read(Register::VTCR_EL2),
                 vttbr: self.read(Register::VTTBR_EL2),
+                xs: Feature::FEAT_XS.on(self.registers.chip()),
             }),
             regime: match regime {
                 TranslationRegime::El10 => mmu::Regime::El10,

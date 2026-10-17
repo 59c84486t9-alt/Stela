@@ -1908,8 +1908,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Maintenance(access) => self.maintenance(word, access),
             SystemOperation::InstructionSynchronization { .. } => self.next(),
             SystemOperation::Synchronization(operation) => match operation {
-                // The profile has no FEAT_XS.
-                Synchronization::DataCompletion { nxs: true, .. } => self.undefined(),
+                // DSB nXS waits for a subset of what DSB waits for (accesses
+                // to memory with XS 0), and is UNDEFINED without FEAT_XS.
+                Synchronization::DataCompletion { nxs: true, .. } => {
+                    match self.profile.chip.implemented(Feature::FEAT_XS) {
+                        Ok(true) => self.next(),
+                        Ok(false) => self.undefined(),
+                        Err(reason) => Err(self.unsupported(RequirementKind::Native(reason))),
+                    }
+                }
                 Synchronization::ErrorSynchronization => self.error_synchronization(),
                 Synchronization::DataCompletion { .. }
                 | Synchronization::StoreBypassBarrier { .. }
@@ -3713,6 +3720,127 @@ mod tests {
         machine.cpu.pc = BASE;
         machine.system_instruction_for_test(0xd503_24ff);
         assert_eq!(machine.cpu.pc, BASE + 4);
+    }
+
+    #[test]
+    fn dsb_nxs_tlbi_nxs_and_the_xs_attribute_follow_feat_xs() {
+        const DSB_ISHNXS: u32 = 0xd503_3a3f;
+        const AT_S1E1R_X2: u32 = 0xd508_7802;
+        // SYS (op0 1) with Xt XZR from an accessor's op0:op1:CRn:CRm:op2.
+        let sys = |accessor: &crate::machine::system::Accessor| {
+            0xd500_001f | u32::from(accessor.value) << 5
+        };
+        for (chip, xs) in [
+            (crate::machine::Chip::AppleM2, false),
+            (crate::machine::Chip::AppleM4, true),
+        ] {
+            let fresh = |el| {
+                let mut machine = machine(&[]);
+                machine.profile.chip = chip;
+                machine.cpu = Cpu::of(chip, BASE, Pstate::reset(el));
+                let registers = &mut machine.cpu.registers;
+                registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+                registers.set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
+                machine
+            };
+            // DSB nXS completes as DSB does with FEAT_XS, and is UNDEFINED
+            // without it.
+            let mut machine = fresh(1);
+            machine.system_instruction(DSB_ISHNXS).unwrap();
+            if xs {
+                assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 1));
+            } else {
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+            }
+            // Every TLBI nXS at EL1 and EL2 behaves as its TLBI with FEAT_XS
+            // (invalidating XS 1 entries too, which a TLB may always drop),
+            // and is UNDEFINED without it.
+            let mut count = 0;
+            for nxs in crate::machine::system::ACCESSORS
+                .iter()
+                .filter(|a| a.kind == "TLBI" && a.name.ends_with("NXS"))
+            {
+                let plain = crate::machine::system::ACCESSORS
+                    .iter()
+                    .find(|a| a.kind == "TLBI" && a.name == nxs.name.trim_end_matches("NXS"))
+                    .unwrap();
+                for el in [1, 2] {
+                    let mut nxs_machine = fresh(el);
+                    nxs_machine.system_instruction(sys(nxs)).unwrap();
+                    let outcome = |machine: &Machine<FakeHost, NoDevices>| {
+                        (
+                            machine.cpu.pc,
+                            machine.cpu.pstate.el,
+                            machine.cpu.read(SystemRegister::ESR_EL1),
+                            machine.cpu.read(SystemRegister::ESR_EL2),
+                        )
+                    };
+                    if xs {
+                        let mut plain_machine = fresh(el);
+                        plain_machine.system_instruction(sys(plain)).unwrap();
+                        assert_eq!(
+                            outcome(&nxs_machine),
+                            outcome(&plain_machine),
+                            "{}",
+                            nxs.name
+                        );
+                    } else {
+                        let esr = if el == 1 {
+                            SystemRegister::ESR_EL1
+                        } else {
+                            SystemRegister::ESR_EL2
+                        };
+                        assert_eq!(nxs_machine.cpu.read(esr), 0x0200_0000, "{} {el}", nxs.name);
+                    }
+                }
+                count += 1;
+            }
+            assert!(count > 50, "{count}");
+            // HCRX_EL2.FnXS makes a TLBI at EL1 behave as its nXS form,
+            // which completes as the TLBI does.
+            if xs {
+                let mut machine = fresh(2);
+                machine.cpu.state.x[0] = 1 << 3;
+                machine.system_instruction(0xd51c_1240).unwrap(); // msr hcrx_el2, x0
+                assert_eq!(machine.cpu.read(SystemRegister::HCRX_EL2) & 1 << 3, 1 << 3);
+                machine.cpu.set_pstate(Pstate::reset(1));
+                machine.cpu.pc = BASE;
+                machine.system_instruction(0xd508_871f).unwrap(); // tlbi vmalle1
+                assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 1));
+            }
+            // MAIR index 0 Device-nGnRE with XS 0, index 1 Normal
+            // Write-Back; level-1 blocks map VA 0 and 1 GiB to BASE.
+            let mut machine = fresh(1);
+            for (entry, index) in [(0x4000, 0u64), (0x4008, 1)] {
+                let block = BASE | 1 | 1 << 10 | 1 << 6 | index << 2;
+                machine.host.ram[entry..entry + 8].copy_from_slice(&block.to_le_bytes());
+            }
+            let registers = &mut machine.cpu.registers;
+            registers.set(SystemRegister::MAIR_EL1, 0, 0xff_05);
+            registers.set(SystemRegister::TCR_EL1, 0, 25 | 1 << 23 | 5 << 32);
+            registers.set(SystemRegister::TTBR0_EL1, 0, BASE + 0x4000);
+            registers.set(SystemRegister::SCTLR_EL1, 0, 1 | 1 << 2);
+            machine.derived_changed();
+            let attribute = |machine: &mut Machine<FakeHost, NoDevices>, address: u64| {
+                machine.cpu.state.x[2] = address;
+                machine.system_instruction(AT_S1E1R_X2).unwrap();
+                machine.cpu.read(SystemRegister::PAR_EL1) >> 56
+            };
+            // With FEAT_XS, PAR_EL1.ATTR reports the Device memory's XS 0;
+            // without it the encoding is reserved and reads as nGnRE.
+            assert_eq!(
+                attribute(&mut machine, 0x1000),
+                if xs { 0x05 } else { 0x04 }
+            );
+            // SCTLR_EL1.C clear makes Write-Back memory Non-cacheable, which
+            // keeps its XS 0.
+            machine.cpu.registers.set(SystemRegister::SCTLR_EL1, 0, 1);
+            machine.derived_changed();
+            assert_eq!(
+                attribute(&mut machine, 0x4000_1000),
+                if xs { 0x40 } else { 0x44 }
+            );
+        }
     }
 
     #[test]
