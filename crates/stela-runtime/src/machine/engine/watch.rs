@@ -8,7 +8,11 @@ use super::{
     Devices, Host, Machine, RequirementKind, Step,
     debug::{self, Access},
 };
-use crate::machine::{cpu::Exception, exception::Class};
+use crate::machine::{
+    cpu::Exception,
+    exception::Class,
+    mmu::alignment::{self, Kind, Shape},
+};
 use alloc::{vec, vec::Vec};
 use stela_compiler::{
     GuestAddress, Lifter,
@@ -43,11 +47,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The data accesses of the instruction `word` at `pc`, in Arm's order,
-    /// for the forms the system-mode profile compiles. Prefetches make none.
-    pub(super) fn data_accesses(&self, pc: u64, word: u32) -> Result<Vec<Access>, &'static str> {
+    /// for the forms the system-mode profile compiles, each with the shape
+    /// its alignment is checked by: the bytes of each element it transfers.
+    /// Prefetches make none.
+    pub(super) fn data_accesses(
+        &self,
+        pc: u64,
+        word: u32,
+    ) -> Result<Vec<(Access, Shape)>, &'static str> {
         let instruction = Decoder
             .lift(GuestAddress(pc), word)
-            .map_err(|_| "a watched access by an instruction the decoder does not lift")?;
+            .map_err(|_| "a data access by an instruction the decoder does not lift")?;
         let el = self.cpu.pstate.el;
         let access = |address: u64, size: u64, read: bool, write: bool| Access {
             address,
@@ -57,11 +67,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
             maintenance: false,
             el,
         };
-        let one = |address, size, load: bool| vec![access(address, size, load, !load)];
+        let shape = |kind, bytes: u64| Shape {
+            kind,
+            bytes,
+            pair: false,
+        };
+        let one = |address, size, load: bool| {
+            vec![(access(address, size, load, !load), shape(Kind::Plain, size))]
+        };
         let pair = |address: u64, size: u64, load: bool| {
             vec![
-                access(address, size, load, !load),
-                access(address.wrapping_add(size), size, load, !load),
+                (access(address, size, load, !load), shape(Kind::Plain, size)),
+                (
+                    access(address.wrapping_add(size), size, load, !load),
+                    shape(Kind::Plain, size),
+                ),
             ]
         };
         let load = |transfer: MemoryTransfer| matches!(transfer, MemoryTransfer::Load { .. });
@@ -102,10 +122,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let address =
                     self.immediate_address(operand.base, operand.displacement, AddressMode::Offset);
                 let load = load(operand.transfer);
-                vec![Access {
-                    el: if el == 1 { 0 } else { el },
-                    ..access(address, u64::from(operand.bytes), load, !load)
-                }]
+                let bytes = u64::from(operand.bytes);
+                vec![(
+                    Access {
+                        el: if el == 1 { 0 } else { el },
+                        ..access(address, bytes, load, !load)
+                    },
+                    shape(Kind::Plain, bytes),
+                )]
             }
             Operation::MemoryNonTemporal(operand) => pair(
                 self.immediate_address(operand.base, operand.displacement, AddressMode::Offset),
@@ -117,7 +141,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     atomic::Kind::CompareExchangePair { .. } => 2 * u64::from(operand.bytes),
                     _ => u64::from(operand.bytes),
                 };
-                vec![access(self.read_register(operand.base), bytes, true, true)]
+                vec![(
+                    access(self.read_register(operand.base), bytes, true, true),
+                    shape(Kind::Atomic, bytes),
+                )]
             }
             Operation::Ordered(ordered::Operand::Transfer {
                 kind,
@@ -125,12 +152,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 base,
                 displacement,
                 ..
-            }) => one(
-                self.read_register(base)
-                    .wrapping_add(displacement as i64 as u64),
-                u64::from(bytes),
-                kind != ordered::Kind::Release,
-            ),
+            }) => {
+                let address = self
+                    .read_register(base)
+                    .wrapping_add(displacement as i64 as u64);
+                let load = kind != ordered::Kind::Release;
+                let bytes = u64::from(bytes);
+                vec![(
+                    access(address, bytes, load, !load),
+                    shape(Kind::Ordered, bytes),
+                )]
+            }
             Operation::Literal(operand) => {
                 let bytes = match operand.transfer {
                     literal::Transfer::Integer { signed: true, .. } => 4,
@@ -172,14 +204,44 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 u64::from(operand.bytes),
                 operand.load,
             ),
-            Operation::Simd(simd::Operand::StructureMemory(operand)) => one(
-                self.read_register(operand.base),
-                u64::from(operand.transferred_bytes()),
-                operand.direction == simd::structure_memory::Direction::Load,
-            ),
+            Operation::Simd(simd::Operand::StructureMemory(operand)) => {
+                let load = operand.direction == simd::structure_memory::Direction::Load;
+                // Every element is checked; they are all aligned when the
+                // first one is.
+                vec![(
+                    access(
+                        self.read_register(operand.base),
+                        u64::from(operand.transferred_bytes()),
+                        load,
+                        !load,
+                    ),
+                    shape(Kind::Plain, u64::from(operand.element_bytes)),
+                )]
+            }
             Operation::Prefetch(_) => Vec::new(),
-            _ => return Err("a watched access by an unexpected instruction class"),
+            _ => return Err("a data access by an unexpected instruction class"),
         })
+    }
+
+    /// A native alignment check in the block at `index` failed at `pc`:
+    /// take the Alignment fault of the first access that has one (Arm
+    /// `AArch64_UnalignedAccessFaults`), which comes before translation.
+    pub(super) fn native_alignment_fault(&mut self, pc: u64, word: u32) -> Step {
+        let accesses = self
+            .data_accesses(pc, word)
+            .map_err(|detail| self.refuse_word(word, detail))?;
+        let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+        match accesses
+            .iter()
+            .find(|(access, shape)| alignment::before_translation(sctlr, access.address, *shape))
+        {
+            // An atomic access reads and writes: its fault is not a write
+            // (Arm `NoFault`).
+            Some((access, _)) => self.alignment_fault(access.address, access.write && !access.read),
+            None => Err(self.unsupported(RequirementKind::Native(
+                "a native alignment check failed where no access faults",
+            ))),
+        }
     }
 
     /// A native access reached a watched page: take the watchpoint exception
@@ -187,9 +249,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// mapped.
     pub(super) fn watched_access(&mut self, index: usize, pc: u64) -> Step {
         let word = self.word(index, pc)?;
-        let accesses = self
+        let accesses: Vec<Access> = self
             .data_accesses(pc, word)
-            .map_err(|detail| self.refuse_word(word, detail))?;
+            .map_err(|detail| self.refuse_word(word, detail))?
+            .into_iter()
+            .map(|(access, _)| access)
+            .collect();
         if let Some(exception) = accesses
             .iter()
             .find_map(|access| self.watchpoint_exception(access, pc))

@@ -255,7 +255,7 @@ pub fn compile_for_profile(
                         None,
                         instruction.next_pc(),
                         target,
-                        x86_64::MemoryChecks::ALL,
+                        x86_64::MemoryChecks::DEFAULT,
                     )
                     .x86_64_code,
                 );
@@ -268,8 +268,14 @@ pub fn compile_for_profile(
             }
         }
         None => code.extend(
-            x86_64::block::emit_for_target(&[], None, next_pc, target, x86_64::MemoryChecks::ALL)
-                .x86_64_code,
+            x86_64::block::emit_for_target(
+                &[],
+                None,
+                next_pc,
+                target,
+                x86_64::MemoryChecks::DEFAULT,
+            )
+            .x86_64_code,
         ),
     }
     Ok(CompiledBlock {

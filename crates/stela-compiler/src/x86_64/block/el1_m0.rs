@@ -69,7 +69,7 @@ pub(crate) fn emit(
                 instruction,
                 &mut fixups,
                 target,
-                x86_64::MemoryChecks::ALL,
+                x86_64::MemoryChecks::DEFAULT,
             );
         }
     }

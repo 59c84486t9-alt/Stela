@@ -259,7 +259,12 @@ pub(super) fn emit_numerical(
 
 #[cfg(test)]
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
-    emit_for_target(code, operand, crate::TargetCpu::Baseline, MemoryChecks::ALL);
+    emit_for_target(
+        code,
+        operand,
+        crate::TargetCpu::Baseline,
+        MemoryChecks::DEFAULT,
+    );
 }
 pub(super) fn emit_for_target(
     code: &mut Vec<u8>,
@@ -440,7 +445,7 @@ pub(super) fn emit_for_target(
             displacement,
             mode,
         } => {
-            memory_address(code, checks, base, displacement, mode);
+            memory_address(code, checks, base, displacement, mode, bytes);
             let aligned = checks.stack_alignment
                 && super::memory_store::aligned_immediate(base, displacement, mode, bytes);
             if load {
@@ -488,7 +493,7 @@ pub(super) fn emit_for_target(
             displacement,
             mode,
         } => {
-            memory_address(code, checks, base, displacement, mode);
+            memory_address(code, checks, base, displacement, mode, bytes);
             memory::transfer(
                 code,
                 load,

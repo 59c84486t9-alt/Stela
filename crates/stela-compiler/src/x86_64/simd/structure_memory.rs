@@ -43,7 +43,15 @@ pub(super) fn emit(
     checks: super::super::MemoryChecks,
 ) {
     // This reuses the incoming-SP check before any guest RAM access.
-    super::super::memory_address(code, checks, operand.base, 0, AddressMode::Offset);
+    // SCTLR_ELx.A checks each element: all are aligned when the first is.
+    super::super::memory_address(
+        code,
+        checks,
+        operand.base,
+        0,
+        AddressMode::Offset,
+        operand.element_bytes,
+    );
     match operand.post_index {
         PostIndex::None => {}
         PostIndex::TransferredBytes => {

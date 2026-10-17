@@ -48,6 +48,60 @@ const SHRD_RAX_R8_CL: &[u8] = &[0x4c, 0x0f, 0xad, 0xc0];
 const SHRD_RAX_R8_IMM8: &[u8] = &[0x4c, 0x0f, 0xac, 0xc0];
 const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
 const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
+const MOV_EAX_EDX: &[u8] = &[0x89, 0xd0];
+const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
+const CMP_AL_IMM8: u8 = 0x3c;
+const JBE_REL8: u8 = 0x76;
+const MOV_STORE: u8 = 0x89;
+const ATOMIC_QUANTITY_MASK: u8 = ATOMIC_QUANTITY_BYTES - 1;
+
+/// Whether an ordered access crosses its 16-byte granule, which it may only
+/// with SCTLR_ELx.nAA set (no granule check).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Crossing {
+    Never,
+    Always,
+    /// Decided at run time from the address.
+    Maybe,
+}
+
+fn crossing(base: Register, bytes: u8, displacement: i32, checks: super::MemoryChecks) -> Crossing {
+    if checks.ordered_granule || bytes == BYTE_BYTES {
+        Crossing::Never
+    } else if base == Register::Sp && checks.stack_alignment {
+        if displacement.rem_euclid(i32::from(ATOMIC_QUANTITY_BYTES))
+            > i32::from(ATOMIC_QUANTITY_BYTES - bytes)
+        {
+            Crossing::Always
+        } else {
+            Crossing::Never
+        }
+    } else {
+        Crossing::Maybe
+    }
+}
+
+/// Jump, by a rel8 the caller patches, when the access at RDX lies inside
+/// its 16-byte granule. EAX is scratch.
+fn branch_within_granule(code: &mut Vec<u8>, bytes: u8) -> usize {
+    code.extend(MOV_EAX_EDX);
+    code.extend(AND_EAX_IMM8);
+    code.push(ATOMIC_QUANTITY_MASK);
+    code.extend([CMP_AL_IMM8, ATOMIC_QUANTITY_BYTES - bytes, JBE_REL8]);
+    code.push(0);
+    code.len() - 1
+}
+
+fn jump_over(code: &mut Vec<u8>) -> usize {
+    code.extend([JMP_REL8, 0]);
+    code.len() - 1
+}
+
+fn patch(code: &mut [u8], at: usize) {
+    code[at] = i8::try_from(code.len() - at - 1)
+        .expect("ordered path fits rel8")
+        .to_le_bytes()[0];
+}
 
 /// Generic wider loads can cross eight bytes. A checked, so aligned, SP makes
 /// the effective residue known; a statically faulting access never needs a
@@ -94,12 +148,42 @@ pub(super) fn emit(
             displacement,
             extension,
         } => {
-            address_offset(code, base, bytes, displacement, checks);
+            address_offset(
+                code,
+                base,
+                bytes,
+                displacement,
+                checks,
+                checks.ordered_granule,
+            );
+            // An access that crosses its granule needs no single-copy
+            // atomicity: it takes a plain load, or a store and a full fence.
+            let crossing = crossing(base, bytes, displacement, checks);
             if kind == Kind::Release {
                 input_rcx(code, bytes, data);
-                release(code, bytes);
+                match crossing {
+                    Crossing::Never => release(code, bytes),
+                    Crossing::Always => crossing_release(code, bytes),
+                    Crossing::Maybe => {
+                        let within = branch_within_granule(code, bytes);
+                        crossing_release(code, bytes);
+                        let done = jump_over(code);
+                        patch(code, within);
+                        release(code, bytes);
+                        patch(code, done);
+                    }
+                }
             } else {
-                if requires_atomic_load16(operand, checks) {
+                let mut done = None;
+                if crossing == Crossing::Maybe {
+                    let within = branch_within_granule(code, bytes);
+                    read_extended(code, bytes, extension);
+                    done = Some(jump_over(code));
+                    patch(code, within);
+                }
+                if crossing == Crossing::Always {
+                    read_extended(code, bytes, extension);
+                } else if requires_atomic_load16(operand, checks) {
                     // The compiler validates this requirement before emission.
                     debug_assert!(target.supports(TargetCpu::AtomicLoad16));
                     if base == Register::Sp && checks.stack_alignment {
@@ -112,11 +196,27 @@ pub(super) fn emit(
                 } else {
                     read_extended(code, bytes, extension);
                 }
+                if let Some(done) = done {
+                    patch(code, done);
+                }
                 // ZR still performs the access, including its acquire order.
                 commit_rax(code, bytes, data);
             }
         }
     }
+}
+
+/// A store-release that crosses its granule: a plain store, which x86 keeps
+/// in order after earlier accesses, and MFENCE, which keeps later
+/// load-acquires after it (RCsc).
+fn crossing_release(code: &mut Vec<u8>, bytes: u8) {
+    if bytes == HALFWORD_BYTES {
+        code.push(OPERAND_SIZE_PREFIX);
+    } else if bytes == QWORD_BYTES {
+        code.push(REX_W_PREFIX);
+    }
+    code.extend([MOV_STORE, RCX_RDX_MEMORY]);
+    code.extend(MFENCE);
 }
 
 fn release(code: &mut Vec<u8>, bytes: u8) {
@@ -218,6 +318,7 @@ mod tests {
 
     const UNCHECKED: MemoryChecks = MemoryChecks {
         stack_alignment: false,
+        ..MemoryChecks::DEFAULT
     };
 
     #[test]
@@ -234,7 +335,7 @@ mod tests {
                         extension: LoadExtension::Zero,
                     };
                     assert_eq!(
-                        requires_atomic_load16(&operand, MemoryChecks::ALL),
+                        requires_atomic_load16(&operand, MemoryChecks::DEFAULT),
                         kind != Kind::Release && bytes != BYTE_BYTES && base != Register::Sp
                     );
                     // An unchecked SP is an ordinary base.
@@ -260,7 +361,7 @@ mod tests {
                 let inside_quantity = effective / 16 == last / 16;
                 let crosses_baseline = effective / 8 != last / 8;
                 assert_eq!(
-                    requires_atomic_load16(&operand, MemoryChecks::ALL),
+                    requires_atomic_load16(&operand, MemoryChecks::DEFAULT),
                     inside_quantity && crosses_baseline
                 );
             }
@@ -270,7 +371,54 @@ mod tests {
                 option: 15,
                 requirement: Barrier::All,
             },
-            MemoryChecks::ALL,
+            MemoryChecks::DEFAULT,
         ));
+    }
+
+    #[test]
+    fn with_naa_set_a_granule_crossing_takes_a_plain_path_instead_of_faulting() {
+        const UD2: [u8; 2] = [0x0f, 0x0b];
+        let relaxed = MemoryChecks {
+            ordered_granule: false,
+            ..MemoryChecks::DEFAULT
+        };
+        let emitted = |kind, base, displacement, checks| {
+            let mut code = Vec::new();
+            let operand = Operand::Transfer {
+                kind,
+                bytes: DWORD_BYTES,
+                data: Register::X(1),
+                base,
+                displacement,
+                extension: LoadExtension::Zero,
+            };
+            emit(&mut code, &operand, TargetCpu::detect(), checks);
+            code
+        };
+        let has =
+            |code: &[u8], bytes: &[u8]| code.windows(bytes.len()).any(|window| window == bytes);
+        // mov eax,edx; and eax,15; cmp al,12; jbe: the run-time granule test.
+        let within = [0x89, 0xd0, 0x83, 0xe0, 0x0f, 0x3c, 12, 0x76];
+        for kind in [Kind::Acquire, Kind::AcquirePc, Kind::Release] {
+            let checked = emitted(kind, Register::X(2), 0, MemoryChecks::DEFAULT);
+            assert!(has(&checked, &UD2) && !has(&checked, &within));
+            let code = emitted(kind, Register::X(2), 0, relaxed);
+            assert!(!has(&code, &UD2) && has(&code, &within));
+            // A crossing store-release is a plain store and a full fence.
+            assert_eq!(
+                kind == Kind::Release,
+                has(&code, &[0x89, 0x0a, 0x0f, 0xae, 0xf0])
+            );
+        }
+        // A checked SP settles the residue: SP+14 always crosses, and with
+        // the granule check it always faults.
+        let crossing = emitted(Kind::Release, Register::Sp, 14, relaxed);
+        assert!(!has(&crossing, &within) && has(&crossing, &[0x89, 0x0a, 0x0f, 0xae, 0xf0]));
+        assert!(has(
+            &emitted(Kind::Release, Register::Sp, 14, MemoryChecks::DEFAULT),
+            &UD2
+        ));
+        let inside = emitted(Kind::Release, Register::Sp, 4, relaxed);
+        assert!(!has(&inside, &within) && !has(&inside, &[0x0f, 0xae, 0xf0]));
     }
 }

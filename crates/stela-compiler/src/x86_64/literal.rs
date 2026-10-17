@@ -26,9 +26,19 @@ impl Opcode {
     }
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
     Opcode::MoveAddress.emit(code);
     code.extend(operand.address.to_le_bytes());
+    let bytes = match operand.transfer {
+        Transfer::Integer {
+            width: Width::X64,
+            signed: false,
+            ..
+        } => 8,
+        Transfer::Integer { .. } => 4,
+        Transfer::Simd { bytes, .. } => bytes,
+    };
+    super::alignment_check(code, checks, bytes);
     match operand.transfer {
         Transfer::Integer {
             destination,
@@ -75,10 +85,38 @@ mod tests {
                         signed,
                     },
                 },
+                crate::x86_64::MemoryChecks::DEFAULT,
             );
             assert_eq!(&code[..2], &[0x48, 0xb8]);
             assert_eq!(&code[2..10], &u64::MAX.to_le_bytes());
             assert_eq!(&code[10..], expected);
+        }
+    }
+
+    #[test]
+    fn sctlr_a_checks_the_literal_address_against_the_access_size() {
+        for (width, signed, unit) in [
+            (Width::W32, false, 4),
+            (Width::X64, false, 8),
+            (Width::X64, true, 4),
+        ] {
+            let mut code = vec![];
+            emit(
+                &mut code,
+                &Operand {
+                    address: 0x1004,
+                    transfer: Transfer::Integer {
+                        destination: Register::X(0),
+                        width,
+                        signed,
+                    },
+                },
+                crate::x86_64::MemoryChecks {
+                    alignment: true,
+                    ..crate::x86_64::MemoryChecks::DEFAULT
+                },
+            );
+            assert_eq!(&code[10..16], &[0xa8, unit - 1, 0x74, 2, 0x0f, 0x0b]);
         }
     }
 
@@ -99,6 +137,7 @@ mod tests {
                         bytes,
                     },
                 },
+                crate::x86_64::MemoryChecks::DEFAULT,
             );
             assert_eq!(&code[10..14], &expected);
             assert_eq!(&code[14..18], &[0xf3, 0x0f, 0x7f, 0x87]);

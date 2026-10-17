@@ -16,7 +16,7 @@ pub(crate) fn validate_target(
     instruction: &Instruction,
     target: crate::TargetCpu,
 ) -> Result<(), UnsupportedReason> {
-    validate_target_with(instruction, target, MemoryChecks::ALL)
+    validate_target_with(instruction, target, MemoryChecks::DEFAULT)
 }
 
 /// [`validate_target`] for code emitted with `checks`.
@@ -142,7 +142,7 @@ fn memory(
     displacement: i32,
     mode: AddressMode,
 ) {
-    memory_address(code, checks, base, displacement, mode);
+    memory_address(code, checks, base, displacement, mode, bytes);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data, Width::X64, Shift::Lsl, 0);
@@ -179,27 +179,50 @@ fn memory(
     memory_writeback(code, base, mode);
 }
 
-/// Guest checks fixed into a block's native memory accesses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Guest checks fixed into a block's native memory accesses. Each failed
+/// check raises a native #UD before the access, which the system-mode engine
+/// turns into the guest's SP alignment or Alignment fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryChecks {
     /// SCTLR_ELx.SA (SA0 at EL0) is set: an access through an SP that is not
-    /// 16-byte aligned raises a native #UD, the SP alignment fault.
+    /// 16-byte aligned faults.
     pub stack_alignment: bool,
+    /// SCTLR_ELx.A is set: a data access not aligned to the size of each
+    /// element it transfers faults (Arm `AlignmentEnforced`).
+    pub alignment: bool,
+    /// SCTLR_ELx.nAA is clear: a load-acquire or store-release that crosses a
+    /// 16-byte granule faults. Atomics always fault there (FEAT_LSE2).
+    pub ordered_granule: bool,
 }
 
 impl MemoryChecks {
-    /// Every check: the process profiles, and SCTLR_ELx.SA set in system mode.
-    pub const ALL: Self = Self {
+    /// The process profiles' checks, and system mode's with SCTLR_ELx.SA set
+    /// and A and nAA clear.
+    pub const DEFAULT: Self = Self {
         stack_alignment: true,
+        alignment: false,
+        ordered_granule: true,
     };
 }
 
+/// SCTLR_ELx.A's check of the effective address in RAX against `unit`, the
+/// bytes of each element the access transfers.
+fn alignment_check(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8) {
+    if checks.alignment && unit > 1 {
+        debug_assert!(unit.is_power_of_two() && unit <= 16);
+        code.extend([0xa8, unit - 1, 0x74, 2, 0x0f, 0x0b]); // test al,unit-1; jz +2; ud2
+    }
+}
+
+/// RAX is the access address and RDX the potential writeback. `unit` is the
+/// bytes of each element the access transfers, which SCTLR_ELx.A checks.
 fn memory_address(
     code: &mut Vec<u8>,
     checks: MemoryChecks,
     base: Register,
     displacement: i32,
     mode: AddressMode,
+    unit: u8,
 ) {
     load(code, base);
     if base == Register::Sp && checks.stack_alignment {
@@ -212,6 +235,7 @@ fn memory_address(
     if mode != AddressMode::PostIndex {
         code.extend([0x48, 0x89, 0xd0]); // mov rax,rdx: effective address
     }
+    alignment_check(code, checks, unit);
 }
 
 fn memory_writeback(code: &mut Vec<u8>, base: Register, mode: AddressMode) {
@@ -239,7 +263,7 @@ fn memory_pair(
     displacement: i32,
     mode: AddressMode,
 ) {
-    memory_address(code, checks, base, displacement, mode);
+    memory_address(code, checks, base, displacement, mode, bytes);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
@@ -416,7 +440,7 @@ pub(crate) fn emit_instruction(
         Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
         Operation::IntegerMinMax(operand) => integer_minmax::emit(code, &operand),
         Operation::IntegerUnary(operand) => integer_unary::emit(code, &operand, target),
-        Operation::Literal(operand) => literal::emit(code, &operand),
+        Operation::Literal(operand) => literal::emit(code, &operand, checks),
         Operation::MemoryPair {
             transfer,
             bytes,
@@ -726,7 +750,13 @@ impl Emitter {
                 });
             }
             block.source_map.push((instruction.pc, code.len()));
-            emit_instruction(code, instruction, &mut fixups, target, MemoryChecks::ALL);
+            emit_instruction(
+                code,
+                instruction,
+                &mut fixups,
+                target,
+                MemoryChecks::DEFAULT,
+            );
         }
         let offsets: alloc::collections::BTreeMap<_, _> = block
             .source_map

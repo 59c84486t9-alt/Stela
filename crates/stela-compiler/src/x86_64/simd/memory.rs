@@ -33,6 +33,7 @@ pub(super) fn emit_register_offset(
         operand.index,
         operand.extend,
         operand.shift,
+        operand.bytes,
     );
     let aligned = checks.stack_alignment
         && super::super::memory_store::aligned_register_offset(

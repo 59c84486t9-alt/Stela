@@ -39,6 +39,7 @@ use stela_compiler::{
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::{GuardedOperation, SystemOperation},
     },
+    x86_64::MemoryChecks,
 };
 
 const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
@@ -389,8 +390,8 @@ struct Block {
     code: NativeCode,
     /// Guest PC and native offset of every instruction, ascending.
     source_map: Vec<(u64, usize)>,
-    /// Compiled with SP alignment checks (SCTLR_ELx.SA or SA0 set).
-    stack_check: bool,
+    /// The memory checks it was compiled with.
+    checks: MemoryChecks,
 }
 
 #[derive(Clone, Copy)]
@@ -418,8 +419,8 @@ struct Variant {
     /// FP/SIMD enabled: otherwise the block ends before the first FP/SIMD
     /// instruction.
     fp: bool,
-    /// SP alignment checks (SCTLR_ELx.SA or SA0).
-    stack_check: bool,
+    /// SP and data alignment checks (SCTLR_ELx.SA or SA0, A and nAA).
+    checks: MemoryChecks,
     /// One instruction only, for breakpoints and software step.
     single: bool,
 }
@@ -463,8 +464,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// The EL FP/SIMD traps to, if any; `None` when a System register write
     /// or an EL change may have changed it.
     floating_point: Option<Option<u8>>,
-    /// SCTLR_ELx.SA, or SA0 at EL0, of the current regime, while valid.
-    stack_check: Option<bool>,
+    /// The memory checks of the current regime's SCTLR_ELx, while valid.
+    memory_checks: Option<MemoryChecks>,
     /// The physical count up to which the event streams have set the event
     /// register; `None` before the first sample.
     event_sample: Option<u64>,
@@ -516,7 +517,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lookup: super::system::Lookup::new(),
             timers: None,
             floating_point: None,
-            stack_check: None,
+            memory_checks: None,
             event_sample: None,
             debug: None,
             watch: Watch::default(),
@@ -549,7 +550,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn derived_changed(&mut self) {
         self.timers = None;
         self.floating_point = None;
-        self.stack_check = None;
+        self.memory_checks = None;
         self.debug = None;
     }
 
@@ -590,10 +591,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `CheckSPAlignment`): SCTLR_ELx.SA0 at EL0 and SA otherwise, of the
     /// current translation regime.
     fn stack_alignment_checked(&mut self) -> bool {
-        *self.stack_check.get_or_insert_with(|| {
+        self.memory_checks().stack_alignment
+    }
+
+    /// The checks native code makes for the current regime's SCTLR_ELx: SP
+    /// alignment, A (Arm `AlignmentEnforced`) and nAA.
+    fn memory_checks(&mut self) -> MemoryChecks {
+        *self.memory_checks.get_or_insert_with(|| {
             let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
             let bit = if self.cpu.pstate.el == 0 { 4 } else { 3 };
-            sctlr & (1 << bit) != 0
+            MemoryChecks {
+                stack_alignment: sctlr & (1 << bit) != 0,
+                alignment: sctlr & mmu::alignment::SCTLR_A != 0,
+                ordered_granule: sctlr & mmu::alignment::SCTLR_NAA == 0,
+            }
         })
     }
 
@@ -1056,7 +1067,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let variant = Variant {
             fp: self.floating_point_enabled(),
-            stack_check: self.stack_alignment_checked(),
+            checks: self.memory_checks(),
             single,
         };
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
@@ -1092,11 +1103,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Compile the block at `pc`. `None` when its first instruction is a
     /// trapped FP/SIMD instruction.
     fn compile(&mut self, pc: u64, physical: u64, variant: Variant) -> Result<Option<usize>, Stop> {
-        let Variant {
-            fp,
-            stack_check,
-            single,
-        } = variant;
+        let Variant { fp, checks, single } = variant;
         let available = if single {
             INSTRUCTION
         } else {
@@ -1132,7 +1139,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
             };
-        let compiled = self.compile_prefix(&source[..consumed], pc, stack_check)?;
+        let compiled = self.compile_prefix(&source[..consumed], pc, checks)?;
         let code = match self.host.install(&compiled.native.x86_64_code) {
             Ok(code) => code,
             Err(InstallError::Full) => {
@@ -1155,7 +1162,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .iter()
                 .map(|(guest, offset)| (guest.0, *offset))
                 .collect(),
-            stack_check,
+            checks,
         });
         let index = self.blocks.len() - 1;
         self.index.insert((pc, physical, variant), index);
@@ -1167,11 +1174,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &self,
         source: &[u8],
         pc: u64,
-        stack_check: bool,
+        checks: MemoryChecks,
     ) -> Result<stela_compiler::block::CompiledBlock, Stop> {
         let attempt = |bytes: &[u8]| {
             CompilationPlan::new(bytes, GuestAddress(pc), PROFILE, self.target)
-                .and_then(|plan| plan.with_stack_alignment_check(stack_check))
+                .and_then(|plan| plan.with_memory_checks(checks))
                 .and_then(CompilationPlan::compile)
         };
         match attempt(source) {
@@ -1495,6 +1502,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             privileged: requester.el != 0,
         };
         enum LoadStop {
+            Alignment,
             Fault(mmu::Fault),
             Unsupported(mmu::Unsupported),
             Device(u64),
@@ -1518,6 +1526,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .map(|result| result.pointer)
             },
             |address| {
+                let shape = mmu::alignment::Shape {
+                    kind: mmu::alignment::Kind::Plain,
+                    bytes: 8,
+                    pair: false,
+                };
+                if mmu::alignment::before_translation(sctlr, address, shape) {
+                    return Err(LoadStop::Alignment);
+                }
                 let translation = match mmu::translate(
                     &controls,
                     address,
@@ -1566,6 +1582,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 address,
                 error: LoadStop::Fault(fault),
             }) => self.data_abort(address, fault, false, false),
+            Err(pauth::memory::Fault::Read {
+                address,
+                error: LoadStop::Alignment,
+            }) => self.alignment_fault(address, false),
             Err(pauth::memory::Fault::Read {
                 error: LoadStop::Unsupported(unsupported),
                 ..
@@ -1617,21 +1637,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Err(Stop::Unsupported(requirement))
             }
             // Native blocks raise #UD for a misaligned SP base when compiled
-            // with the check (SCTLR_ELx.SA or SA0 set), and for an LSE2
-            // atomic access crossing its 16-byte granule.
+            // with the check (SCTLR_ELx.SA or SA0 set), which comes first,
+            // and for an access that has an Alignment fault: unaligned under
+            // SCTLR_ELx.A, or an atomic, or an ordered access with nAA
+            // clear, crossing its 16-byte granule.
             FaultCause::Watched => self.watched_access(index, pc),
             FaultCause::InvalidOpcode => {
                 let word = self.word(index, pc)?;
-                if self.blocks[index].stack_check
+                if self.blocks[index].checks.stack_alignment
                     && stack_based(word)
                     && !self.cpu.state.sp.is_multiple_of(16)
                 {
                     self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
                     Ok(())
                 } else {
-                    Err(self.unsupported(RequirementKind::Native(
-                        "alignment fault of an atomic access crossing its 16-byte granule",
-                    )))
+                    self.native_alignment_fault(pc, word)
                 }
             }
         }
@@ -2447,7 +2467,7 @@ mod tests {
         let Ok(Fetched::Block(checked)) = machine.fetch_block(BASE, false) else {
             panic!("checked block")
         };
-        assert!(machine.blocks[checked].stack_check && has_check(&machine, checked));
+        assert!(machine.blocks[checked].checks.stack_alignment && has_check(&machine, checked));
         machine
             .cpu
             .registers
@@ -2457,9 +2477,95 @@ mod tests {
             panic!("unchecked block")
         };
         assert_ne!(checked, unchecked);
-        assert!(!machine.blocks[unchecked].stack_check && !has_check(&machine, unchecked));
+        assert!(
+            !machine.blocks[unchecked].checks.stack_alignment && !has_check(&machine, unchecked)
+        );
         assert!(stack_based(0xf940_07e0) && !stack_based(0xf940_0020));
         assert!(!stack_based(0x5800_003f), "a literal load has no base");
+    }
+
+    #[test]
+    fn native_alignment_checks_take_the_alignment_fault_of_the_access() {
+        const SCTLR_A: u64 = 1 << 1;
+        const SCTLR_NAA: u64 = 1 << 6;
+        // ldr x0, [x1]; ldp w2, w3, [x1]; ldadd x4, x5, [x1]; stlr w6, [x1];
+        // ld1 {v0.8h}, [x1]
+        let words = [
+            0xf940_0020,
+            0x2940_0c22,
+            0xf824_0025,
+            0x889f_fc26,
+            0x4c40_7420,
+        ];
+        let mut machine = machine(&words);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CPACR_EL1, 0, 0b11 << 20);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CPTR_EL2, 0, 0b11 << 20);
+        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) & !(SCTLR_A | SCTLR_NAA);
+        let ud = NativeExit::Fault(NativeFault {
+            offset: 0,
+            address: 0,
+            write: false,
+            cause: FaultCause::InvalidOpcode,
+        });
+        // Run the word at `index` from X1 = `address` under SCTLR_EL1 bits
+        // `extra`, its native check failing; ESR_EL1 and FAR_EL1 after it.
+        let mut run = |index: u64, address: u64, extra: u64| {
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::SCTLR_EL1, 0, sctlr | extra);
+            machine.cpu.set_pstate(Pstate::reset(1));
+            machine.derived_changed();
+            machine.cpu.pc = BASE + 4 * index;
+            machine.cpu.state.x[1] = address;
+            machine.host.exits.push(ud);
+            let outcome = machine.step();
+            (
+                outcome.map(|()| {
+                    assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE + 4 * index);
+                    (
+                        machine.cpu.read(SystemRegister::ESR_EL1),
+                        machine.cpu.read(SystemRegister::FAR_EL1),
+                    )
+                }),
+                machine.blocks.last().map(|block| block.checks),
+            )
+        };
+        // EC 0x25 with IL and DFSC 0b100001; WnR for a store.
+        let load = 0x9600_0021;
+        let store = load | 1 << 6;
+        // Under SCTLR.A every unaligned access faults at its first element.
+        let (outcome, checks) = run(0, BASE + 0x104, SCTLR_A);
+        assert_eq!(outcome.unwrap(), (load, BASE + 0x104));
+        assert!(checks.unwrap().alignment);
+        assert_eq!(
+            run(1, BASE + 0x102, SCTLR_A).0.unwrap(),
+            (load, BASE + 0x102)
+        );
+        assert_eq!(
+            run(4, BASE + 0x101, SCTLR_A).0.unwrap(),
+            (load, BASE + 0x101)
+        );
+        // An atomic crossing its 16-byte granule faults without SCTLR.A, and
+        // its fault is not a write.
+        assert_eq!(run(2, BASE + 0x10c, 0).0.unwrap(), (load, BASE + 0x10c));
+        // So does an ordered access with nAA clear; a store-release is a write.
+        assert_eq!(run(3, BASE + 0x10e, 0).0.unwrap(), (store, BASE + 0x10e));
+        // With nAA set the access completes natively; a failed check would
+        // have no fault to take, and stops.
+        let (outcome, checks) = run(3, BASE + 0x10e, SCTLR_NAA);
+        assert!(matches!(outcome, Err(Stop::Unsupported(_))));
+        assert!(!checks.unwrap().ordered_granule);
     }
 
     impl Machine<FakeHost, NoDevices> {

@@ -10,7 +10,7 @@ use crate::machine::{
     cpu::Exception,
     debug,
     exception::Class,
-    mmu::{self, Access, MemoryType},
+    mmu::{self, Access, MemoryType, alignment},
 };
 use stela_compiler::aarch64::{
     Register,
@@ -19,9 +19,6 @@ use stela_compiler::aarch64::{
 
 /// CTR_EL0.ERG = 4: sixteen words.
 pub const RESERVATION_GRANULE: u64 = 64;
-/// Single-copy-atomicity granule of FEAT_LSE2: an unaligned exclusive that
-/// stays inside it does not fault.
-const ATOMICITY_GRANULE: u64 = 16;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn exclusive(&mut self, operand: Operand) -> Step {
@@ -49,12 +46,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let size = u64::from(element_bytes) * count;
         let store = matches!(kind, Kind::Store { .. });
         // Arm `AArch64_UnalignedAccessFaults` for exclusives with FEAT_LSE2:
-        // an access crossing a 16-byte granule faults.
+        // with SCTLR_ELx.A clear, only an access crossing a 16-byte granule
+        // faults.
         let aligned = address.is_multiple_of(size);
-        if !aligned && (address % ATOMICITY_GRANULE) + size > ATOMICITY_GRANULE {
+        let controls = self.cpu.controls(self.cpu.regime());
+        let shape = alignment::Shape {
+            kind: alignment::Kind::Exclusive,
+            bytes: size,
+            pair: count == 2,
+        };
+        if alignment::before_translation(controls.sctlr, address, shape) {
             return self.alignment_fault(address, store);
         }
-        let controls = self.cpu.controls(self.cpu.regime());
         let translation = match mmu::translate(
             &controls,
             address,

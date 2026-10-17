@@ -5,9 +5,9 @@
 //!   value stops the read (`RequirementKind::SystemRegister`).
 //! - SP_ELx are the banked stack pointers, CNTx_CTL compute ISTATUS, ISR_EL1
 //!   reports the pending lines, and FPCR/FPSR live in the guest state.
-//! - Writes the engine cannot honor stop: SCTLR alignment checking, debug
-//!   exceptions and breakpoints, and Apple VMSA_LOCK. SCTLR_ELx.EE and E0E
-//!   are RES0 because the profile has no FEAT_MixedEnd.
+//! - Writes the engine cannot honor stop: debug exceptions and breakpoints,
+//!   and Apple VMSA_LOCK. SCTLR_ELx.EE and E0E are RES0 because the profile
+//!   has no FEAT_MixedEnd.
 use super::{
     Devices, Host, Machine, RequirementKind, Step, Stop,
     mmu::{self, Access as MemoryAccess, Outcome as Translated},
@@ -126,7 +126,6 @@ fn translates(register: Register) -> bool {
     )
 }
 
-const SCTLR_A: u64 = 1 << 1;
 /// Whether the LORegion registers are RES0: LORID_EL1.LD (bits 23:16)
 /// reports no LORegion descriptor.
 fn no_lor_descriptors(cpu: &crate::machine::cpu::Cpu) -> bool {
@@ -339,9 +338,6 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             return Ok(());
         }
         match register {
-            Register::SCTLR_EL1 | Register::SCTLR_EL2 if value & SCTLR_A != 0 => {
-                return Err(Effect::Refused("SCTLR alignment checking"));
-            }
             // RMR_EL2.RR requests a Warm reset into the reset vector, which
             // has no profile value (see RVBAR_EL2).
             Register::RMR_EL2 if value & RMR_RR != 0 => {
@@ -1815,17 +1811,19 @@ mod tests {
     }
 
     #[test]
-    fn sctlr_endianness_bits_are_res0_and_alignment_checking_stops() {
+    fn sctlr_endianness_bits_are_res0_and_alignment_checks_follow_a_and_naa() {
         let mut machine = machine(&[]);
         // SCTLR_EL1.EE and E0E are RES0 without FEAT_MixedEnd.
         machine.cpu.state.x[0] = 3 << 24;
         machine.system_instruction(0xd518_1000).unwrap(); // msr sctlr_el1, x0
         assert_eq!(machine.cpu.read(Register::SCTLR_EL1) & 3 << 24, 0);
-        machine.cpu.state.x[0] = 1 << 1;
-        assert!(matches!(
-            machine.system_instruction(0xd518_1000),
-            Err(super::super::Stop::Unsupported(_))
-        ));
+        assert!(!machine.memory_checks().alignment && machine.memory_checks().ordered_granule);
+        // A and nAA select blocks with the matching native checks.
+        machine.cpu.pc = BASE;
+        machine.cpu.state.x[0] = 1 << 1 | 1 << 6;
+        machine.system_instruction(0xd518_1000).unwrap();
+        assert_eq!(machine.cpu.read(Register::SCTLR_EL1) & 0x42, 0x42);
+        assert!(machine.memory_checks().alignment && !machine.memory_checks().ordered_granule);
     }
 
     #[test]

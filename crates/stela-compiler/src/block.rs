@@ -488,26 +488,30 @@ impl CompilationPlan {
             target,
             profile,
             resident,
-            checks: crate::x86_64::MemoryChecks::ALL,
+            checks: crate::x86_64::MemoryChecks::DEFAULT,
         })
     }
 
-    /// Emit SP alignment checks only when `enabled`: the system-mode engine
-    /// compiles separate blocks for SCTLR_ELx.SA (or SA0 at EL0) clear, where
-    /// an access through a misaligned SP proceeds. No other profile admits
-    /// that, and a host without the capability an unchecked SP then needs
-    /// refuses.
-    pub fn with_stack_alignment_check(mut self, enabled: bool) -> Result<Self, CompileError> {
-        let checks = crate::x86_64::MemoryChecks {
-            stack_alignment: enabled,
-        };
-        if !enabled {
-            if self.profile != BlockProfile::SystemModeV1 {
-                return Err(CompileError(format!(
-                    "{:?} always checks SP alignment",
-                    self.profile
-                )));
-            }
+    /// Emit the memory checks of the regime's SCTLR_ELx: the system-mode
+    /// engine compiles separate blocks for SA (or SA0 at EL0) clear, where an
+    /// access through a misaligned SP proceeds; for A set, where any access
+    /// not aligned to its elements faults; and for nAA set, where an ordered
+    /// access may cross its 16-byte granule. No other profile admits checks
+    /// but [`crate::x86_64::MemoryChecks::DEFAULT`], and a host without the
+    /// capability an unchecked SP then needs refuses.
+    pub fn with_memory_checks(
+        mut self,
+        checks: crate::x86_64::MemoryChecks,
+    ) -> Result<Self, CompileError> {
+        if checks != crate::x86_64::MemoryChecks::DEFAULT
+            && self.profile != BlockProfile::SystemModeV1
+        {
+            return Err(CompileError(format!(
+                "{:?} makes only the default memory checks",
+                self.profile
+            )));
+        }
+        if !checks.stack_alignment {
             for instruction in &self.parsed.instructions {
                 crate::x86_64::validate_target_with(instruction, self.target, checks)
                     .map_err(|error| CompileError(format!("{error:?}")))?;
@@ -716,7 +720,12 @@ mod tests {
                 BlockProfile::SystemModeV1,
                 crate::TargetCpu::detect(),
             )
-            .and_then(|plan| plan.with_stack_alignment_check(checked))
+            .and_then(|plan| {
+                plan.with_memory_checks(crate::x86_64::MemoryChecks {
+                    stack_alignment: checked,
+                    ..crate::x86_64::MemoryChecks::DEFAULT
+                })
+            })
             .and_then(CompilationPlan::compile)
             .unwrap()
             .native
@@ -733,9 +742,73 @@ mod tests {
                 BlockProfile::Ordinary,
                 crate::TargetCpu::Baseline
             )
-            .and_then(|plan| plan.with_stack_alignment_check(false))
+            .and_then(|plan| plan.with_memory_checks(crate::x86_64::MemoryChecks {
+                stack_alignment: false,
+                ..crate::x86_64::MemoryChecks::DEFAULT
+            }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn system_mode_blocks_check_sctlr_a_and_the_ordered_granule_when_asked() {
+        // ldr x0, [x1, #8]; ldp w2, w3, [x1]; ldr h0, [x1, x2]; ld1 {v0.4s},
+        // [x1]; ldr x4, <literal>; ldadd x4, x5, [x1]; ldar w6, [x1];
+        // stlr w6, [x1].
+        let words = [
+            0xf940_0420_u32,
+            0x2940_0c22,
+            0x7c62_6820,
+            0x4c40_7820,
+            0x5800_0084,
+            0xf824_0025,
+            0x88df_fc26,
+            0x889f_fc26,
+        ];
+        let source: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let compile = |checks| {
+            CompilationPlan::new(
+                &source,
+                GuestAddress(0x1000),
+                BlockProfile::SystemModeV1,
+                crate::TargetCpu::detect(),
+            )
+            .and_then(|plan| plan.with_memory_checks(checks))
+            .and_then(CompilationPlan::compile)
+            .unwrap()
+            .native
+            .x86_64_code
+        };
+        // test al,unit-1; jz +2; ud2 for each element size.
+        let check = |unit: u8| [0xa8, unit - 1, 0x74, 2, 0x0f, 0x0b];
+        let count = |code: &[u8], unit: u8| {
+            code.windows(6)
+                .filter(|bytes| *bytes == check(unit))
+                .count()
+        };
+        let default = compile(crate::x86_64::MemoryChecks::DEFAULT);
+        assert_eq!([2, 4, 8].map(|unit| count(&default, unit)), [0, 0, 0]);
+        let aligned = compile(crate::x86_64::MemoryChecks {
+            alignment: true,
+            ..crate::x86_64::MemoryChecks::DEFAULT
+        });
+        // LDR H and the halfword vector are 2; LDP W, LD1 .4S, LDAR and STLR
+        // W are 4; LDR X, the literal and LDADD X are 8.
+        assert_eq!([2, 4, 8].map(|unit| count(&aligned, unit)), [1, 4, 3]);
+        // Without the granule check (nAA set) the ordered accesses keep a
+        // crossing path; the atomic keeps its LSE2 granule check.
+        let granule = |code: &[u8]| {
+            code.windows(4)
+                .filter(|bytes| *bytes == [0x80, 0xf9, 16 - 4, 0x76])
+                .count()
+        };
+        let relaxed = compile(crate::x86_64::MemoryChecks {
+            ordered_granule: false,
+            ..crate::x86_64::MemoryChecks::DEFAULT
+        });
+        assert_eq!(granule(&default), 2);
+        assert_eq!(granule(&relaxed), 0);
+        assert_ne!(default, relaxed);
     }
 
     #[test]
@@ -814,7 +887,7 @@ mod tests {
             parsed.terminal.as_ref(),
             parsed.next_pc,
             crate::TargetCpu::Baseline,
-            crate::x86_64::MemoryChecks::ALL,
+            crate::x86_64::MemoryChecks::DEFAULT,
         );
         let compiled =
             compile_for_target(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();

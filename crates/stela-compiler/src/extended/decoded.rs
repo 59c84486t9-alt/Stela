@@ -375,7 +375,7 @@ impl Decoded {
                     instruction,
                     fixups,
                     target,
-                    x86_64::MemoryChecks::ALL,
+                    x86_64::MemoryChecks::DEFAULT,
                 );
             }
             Self::MemoryScalar(operand) => {

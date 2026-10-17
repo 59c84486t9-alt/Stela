@@ -78,18 +78,20 @@ pub(super) fn emit(
 /// SP is checked first. LSE2 accesses must fit the selected aligned 16-byte granule.
 /// RAX/RCX are scratch, RDX receives the address, and guest state is untouched.
 pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8, checks: super::MemoryChecks) {
-    address_offset(code, base, bytes, 0, checks);
+    address_offset(code, base, bytes, 0, checks, true);
 }
 
-/// Check SP before adding the displacement. The single-copy-atomic boundary
-/// applies to the effective address; a known-aligned SP needs no run-time test.
-/// Without the SP alignment check, SP is an ordinary base.
+/// Check SP before adding the displacement. SCTLR_ELx.A and then, with
+/// `granule`, the single-copy-atomic boundary apply to the effective address;
+/// a known-aligned SP needs no run-time boundary test. Without the SP
+/// alignment check, SP is an ordinary base.
 pub(super) fn address_offset(
     code: &mut Vec<u8>,
     base: Register,
     bytes: u8,
     displacement: i32,
     checks: super::MemoryChecks,
+    granule: bool,
 ) {
     load(code, base);
     let aligned_sp = base == Register::Sp && checks.stack_alignment;
@@ -103,7 +105,8 @@ pub(super) fn address_offset(
         code.extend(ADD_RAX_IMM32);
         code.extend(displacement.to_le_bytes());
     }
-    if bytes != BYTE_BYTES {
+    super::alignment_check(code, checks, bytes);
+    if granule && bytes != BYTE_BYTES {
         if !aligned_sp {
             code.extend(MOV_ECX_EAX);
             code.extend(AND_ECX_IMM8);

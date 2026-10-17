@@ -14,12 +14,14 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
         operand.index,
         operand.extend,
         operand.shift,
+        operand.bytes,
     );
     transfer(code, operand, checks);
 }
 
 /// Shared integer/SIMD address calculation, without guest register writeback.
-/// RAX is the result; RCX/RDX and host flags are scratch. SP is checked first.
+/// RAX is the result; RCX/RDX and host flags are scratch. SP is checked first,
+/// and SCTLR_ELx.A checks the result against the access's `bytes`.
 pub(super) fn address(
     code: &mut Vec<u8>,
     checks: super::MemoryChecks,
@@ -27,6 +29,7 @@ pub(super) fn address(
     index: Register,
     extend: IndexExtend,
     shift: u8,
+    bytes: u8,
 ) {
     const MOV_ECX_ECX: &[u8] = &[0x89, 0xc9];
     const MOVSXD_RCX_ECX: &[u8] = &[0x48, 0x63, 0xc9];
@@ -34,7 +37,7 @@ pub(super) fn address(
     const LEA_RAX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x04, 0x08];
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
-    memory_address(code, checks, base, 0, AddressMode::Offset);
+    memory_address(code, checks, base, 0, AddressMode::Offset, 1);
     right_operand(code, index, Width::X64, Shift::Lsl, 0);
     match extend {
         IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
@@ -46,6 +49,7 @@ pub(super) fn address(
         code.push(shift);
     }
     code.extend(LEA_RAX_RAX_RCX); // modulo 2^64
+    super::alignment_check(code, checks, bytes);
 }
 
 fn transfer(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {

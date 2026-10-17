@@ -81,7 +81,7 @@ fn emit_decoded(
                 &instruction,
                 fixups,
                 target,
-                x86_64::MemoryChecks::ALL,
+                x86_64::MemoryChecks::DEFAULT,
             );
         }
         Decoded::IntegerDot(operand) => {

@@ -288,7 +288,7 @@ impl Emitter<'_> {
         let mut raw = vec![];
         super::memory(
             &mut raw,
-            super::MemoryChecks::ALL,
+            super::MemoryChecks::DEFAULT,
             transfer,
             bytes,
             data,
@@ -380,7 +380,7 @@ impl Emitter<'_> {
         let mut raw = vec![];
         super::memory_pair(
             &mut raw,
-            super::MemoryChecks::ALL,
+            super::MemoryChecks::DEFAULT,
             transfer,
             bytes,
             data,
@@ -1423,7 +1423,7 @@ mod tests {
         let mut raw = vec![];
         super::super::memory(
             &mut raw,
-            super::super::MemoryChecks::ALL,
+            super::super::MemoryChecks::DEFAULT,
             MemoryTransfer::Load {
                 signed: false,
                 width: Width::W32,
@@ -1480,7 +1480,7 @@ mod tests {
             let mut raw = vec![];
             super::super::memory(
                 &mut raw,
-                super::super::MemoryChecks::ALL,
+                super::super::MemoryChecks::DEFAULT,
                 MemoryTransfer::Load {
                     signed: false,
                     width: Width::W32,
@@ -1560,7 +1560,7 @@ mod tests {
         let mut raw = vec![];
         super::super::memory_pair(
             &mut raw,
-            super::super::MemoryChecks::ALL,
+            super::super::MemoryChecks::DEFAULT,
             MemoryTransfer::Load {
                 signed: false,
                 width: Width::W32,
@@ -1800,7 +1800,7 @@ mod tests {
             None,
             fallthrough,
             target,
-            super::super::MemoryChecks::ALL,
+            super::super::MemoryChecks::DEFAULT,
         );
         let ordinary =
             super::super::block::emit_ordinary_for_target(&instructions, None, fallthrough, target);
@@ -1812,7 +1812,7 @@ mod tests {
                 instruction,
                 &mut fixups,
                 target,
-                super::super::MemoryChecks::ALL,
+                super::super::MemoryChecks::DEFAULT,
             );
         }
         assert!(fixups.is_empty());

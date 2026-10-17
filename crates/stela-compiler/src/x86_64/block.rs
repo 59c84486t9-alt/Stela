@@ -52,7 +52,7 @@ fn emit(
         terminal,
         fallthrough,
         crate::TargetCpu::Baseline,
-        super::MemoryChecks::ALL,
+        super::MemoryChecks::DEFAULT,
     )
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn emit_ordinary_for_target(
         fallthrough,
         target,
         true,
-        super::MemoryChecks::ALL,
+        super::MemoryChecks::DEFAULT,
     )
 }
 
