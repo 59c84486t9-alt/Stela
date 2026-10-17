@@ -143,6 +143,7 @@ pub fn analyze_with_profile(
                     | system::SystemOperation::PstateImmediate(_)
                     | system::SystemOperation::Wait { .. }
                     | system::SystemOperation::Unprivileged(_)
+                    | system::SystemOperation::Exclusive(_)
             ) {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }

@@ -158,6 +158,9 @@ pub struct Cpu {
     pub dcc: super::debug::Dcc,
     /// The claim tags (DBGCLAIMSET_EL1, DBGCLAIMCLR_EL1), clear at reset.
     pub claim: u8,
+    /// The Exclusives monitor: the physical reservation granule an exclusive
+    /// load marked (`engine::exclusive`).
+    pub monitor: Option<u64>,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
 }
@@ -247,6 +250,7 @@ impl Cpu {
             step_advance: false,
             dcc: super::debug::Dcc::default(),
             claim: 0,
+            monitor: None,
             amx: super::amx::Unit::default(),
         }
     }
@@ -602,6 +606,7 @@ impl Cpu {
             self.branch_address(target)
         };
         // ERET clears the local exclusive monitor and sets the event register.
+        self.monitor = None;
         self.event = true;
     }
 }

@@ -1,6 +1,7 @@
 //! The dispatch loop: fetch translation, block cache, native execution and
 //! every exit back from native code.
 mod amx;
+mod exclusive;
 mod system;
 mod unprivileged;
 mod watch;
@@ -1803,6 +1804,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // No halting debug: Debug-state-only instructions are UNDEFINED.
             SystemOperation::TagMemory(_) | SystemOperation::DebugStateOnly(_) => self.undefined(),
             SystemOperation::Unprivileged(operand) => self.unprivileged(operand),
+            SystemOperation::Exclusive(Ok(operand)) => self.exclusive(operand),
+            SystemOperation::Exclusive(Err(_)) => self.undefined(),
             SystemOperation::Guarded(GuardedOperation::Enter) => {
                 if self.cpu.guarded_enter().is_err() {
                     return self.undefined();
@@ -2361,8 +2364,9 @@ mod tests {
         assert_eq!(machine.statistics.compiled, 1);
         assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == index));
         assert_eq!(machine.statistics.compiled, 1, "cached");
-        // An exclusive load is refused at its own PC with its word.
-        let mut machine = machine_with(&[0x9100_0400, 0xc85f_7c20]);
+        // An SVE instruction (no FEAT_SVE) is refused at its own PC with its
+        // word.
+        let mut machine = machine_with(&[0x9100_0400, 0x04a0_0000]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("prefix block")
         };
@@ -2374,7 +2378,7 @@ mod tests {
         assert!(matches!(
             requirement.kind,
             RequirementKind::Instruction {
-                word: 0xc85f_7c20,
+                word: 0x04a0_0000,
                 ..
             }
         ));
@@ -3436,6 +3440,52 @@ mod tests {
         machine.system_instruction(0xd50b_7423).unwrap(); // dc zva, x3
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xd600_0062);
         assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), BASE + 0x104);
+    }
+
+    #[test]
+    fn exclusives_use_the_monitor_granule_and_lse2_alignment() {
+        let mut machine = machine(&[]);
+        let data = 0x200;
+        machine.host.ram[data..data + 16]
+            .copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        machine.cpu.state.x[2] = BASE + data as u64;
+        // ldxr x1, [x2]; stxr w3, x4, [x2]: passes once.
+        machine.system_instruction(0xc85f_7c41).unwrap();
+        assert_eq!(machine.cpu.state.x[1], 0x0807_0605_0403_0201);
+        assert_eq!(machine.cpu.monitor, Some((BASE + 0x200) & !63));
+        machine.cpu.state.x[4] = 0x1111_2222_3333_4444;
+        machine.system_instruction(0xc803_7c44).unwrap();
+        assert_eq!(machine.cpu.state.x[3], 0);
+        assert_eq!(
+            &machine.host.ram[data..data + 8],
+            &0x1111_2222_3333_4444u64.to_le_bytes()
+        );
+        machine.cpu.state.x[4] = 0;
+        machine.system_instruction(0xc803_7c44).unwrap();
+        assert_eq!(machine.cpu.state.x[3], 1, "the monitor was cleared");
+        // CLREX clears the monitor between the pair.
+        machine.system_instruction(0xc85f_7c41).unwrap();
+        machine.system_instruction(0xd503_305f).unwrap();
+        machine.system_instruction(0xc803_7c44).unwrap();
+        assert_eq!(machine.cpu.state.x[3], 1);
+        // ldxp x1, x5, [x2]; stxp w3, x4, x6, [x2].
+        machine.system_instruction(0xc87f_1441).unwrap();
+        assert_eq!(machine.cpu.state.x[5], 0x100f_0e0d_0c0b_0a09);
+        machine.cpu.state.x[6] = 7;
+        machine.system_instruction(0xc823_1844).unwrap();
+        assert_eq!(machine.cpu.state.x[3], 0);
+        assert_eq!(&machine.host.ram[data + 8..data + 16], &7u64.to_le_bytes());
+        // With the MMU off data is Device memory, where an unaligned exclusive
+        // is an Alignment fault (EC 0x25, DFSC 0b100001) even inside its
+        // 16-byte granule.
+        machine.cpu.state.x[2] = BASE + data as u64 + 2;
+        machine.cpu.pc = BASE;
+        machine.system_instruction(0x885f_7c41).unwrap(); // ldxr w1, [x2]
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x9600_0021);
+        assert_eq!(
+            machine.cpu.read(SystemRegister::FAR_EL1),
+            BASE + data as u64 + 2
+        );
     }
 
     #[test]

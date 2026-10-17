@@ -575,9 +575,10 @@ impl<B: Backend> Dispatcher for Execution<'_, B> {
             SystemOperation::Maintenance(_)
             | SystemOperation::Guarded(_)
             | SystemOperation::DebugStateOnly(_)
-            | SystemOperation::Unprivileged(_) => Err(Failure::Unsupported(
-                "SYS maintenance, GXF, Debug-state-only and unprivileged forms belong to the \
-                 system-mode engine",
+            | SystemOperation::Unprivileged(_)
+            | SystemOperation::Exclusive(_) => Err(Failure::Unsupported(
+                "SYS maintenance, GXF, Debug-state-only, unprivileged and exclusive forms \
+                 belong to the system-mode engine",
             )),
             SystemOperation::Wait { .. } => Err(Failure::Unsupported(
                 "wait requires the retained hosted wait owner",

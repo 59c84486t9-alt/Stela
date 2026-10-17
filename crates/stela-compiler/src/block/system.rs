@@ -35,6 +35,13 @@ pub enum SystemOperation {
     /// access is privileged (Arm `AArch64_IsUnprivAccessPriv`). Only the
     /// system-mode profile produces it.
     Unprivileged(crate::aarch64::unprivileged::Operand),
+    /// LDXR/STXR, their acquire/release and pair forms, and CLREX, which the
+    /// runtime performs against the Exclusives monitors; the CONSTRAINED
+    /// UNPREDICTABLE register overlaps take their UNDEFINED choice. Only the
+    /// system-mode profile produces it.
+    Exclusive(
+        Result<crate::aarch64::exclusive::Operand, crate::aarch64::exclusive::ConstrainedUndefined>,
+    ),
     PstateImmediate(registers::Encoding),
     SendEvent {
         local: bool,
@@ -108,6 +115,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Guarded(_) => "guarded",
         SystemOperation::DebugStateOnly(_) => "debug_state_only",
         SystemOperation::Unprivileged(_) => "unprivileged",
+        SystemOperation::Exclusive(_) => "exclusive",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
         SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
@@ -216,6 +224,8 @@ pub fn decode_system_mode_instruction(
         SystemOperation::Guarded(GuardedOperation::Exit)
     } else if let Some(operation) = DebugStateOperation::decode(word) {
         SystemOperation::DebugStateOnly(operation)
+    } else if let Some(decoded) = crate::aarch64::exclusive::decode(word) {
+        SystemOperation::Exclusive(decoded)
     } else if let Some(decoded) = crate::aarch64::unprivileged::decode(word) {
         // Reserved sizes and opcodes stay with the ordinary decoder.
         match decoded {
@@ -325,6 +335,35 @@ mod tests {
         for word in [0xc04f_03e0, 0xc04c_83e0, 0xc04c_03c0, 0xc04d_03e0] {
             assert!(decode_system_mode_instruction(pc, word).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn system_mode_claims_exclusives_and_their_undefined_overlaps() {
+        use crate::aarch64::exclusive::{ConstrainedUndefined, Operand};
+        let pc = GuestAddress(0x1000);
+        // LDXR X1, [X2]; STXR W3, X1, [X2]; LDAXP X1, X4, [X2]; CLREX.
+        for word in [0xc85f_7c41, 0xc803_7c41, 0xc87f_9041, 0xd503_305f] {
+            let instruction = decode_system_mode_instruction(pc, word).unwrap().unwrap();
+            assert!(
+                matches!(instruction.operation, SystemOperation::Exclusive(Ok(_))),
+                "{word:#x}"
+            );
+        }
+        assert!(matches!(
+            decode_system_mode_instruction(pc, 0xd503_305f)
+                .unwrap()
+                .unwrap()
+                .operation,
+            SystemOperation::Exclusive(Ok(Operand::Clear))
+        ));
+        // STXR W1, X1, [X2]: the status register overlaps the data.
+        assert_eq!(
+            decode_system_mode_instruction(pc, 0xc801_7c41)
+                .unwrap()
+                .unwrap()
+                .operation,
+            SystemOperation::Exclusive(Err(ConstrainedUndefined::StoreStatusData))
+        );
     }
 
     #[test]
