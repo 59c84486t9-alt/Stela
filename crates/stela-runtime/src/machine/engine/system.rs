@@ -82,6 +82,27 @@ pub(super) fn identification(register: Register) -> bool {
 /// stops instead of reading or storing counter values that never count.
 const AMU_REFUSAL: &str = "activity monitors (FEAT_AMUv1) do not count";
 
+/// Registers whose whole contents are IMPLEMENTATION DEFINED. Apple's
+/// ACTLR_EL1 bits that XNU `xnu-12377.121.6` `proc_reg.h` names (USAT, EnTSO,
+/// EnAPFLG, EnAFP, EnPRSV) select features AIDR_EL1 does not advertise here,
+/// and nothing describes the other bits or the other registers' contents.
+/// A value with no bit set completes; any set bit stops. 26A434 XNU only
+/// clears ACTLR_EL1 bits outside its TSO-thread paths.
+fn implementation_defined_contents(register: Register) -> bool {
+    matches!(
+        register,
+        Register::ACTLR_EL1
+            | Register::ACTLR_EL2
+            | Register::AFSR0_EL1
+            | Register::AFSR0_EL2
+            | Register::AFSR1_EL1
+            | Register::AFSR1_EL2
+            | Register::AMAIR_EL1
+            | Register::AMAIR_EL2
+            | Register::HACR_EL2
+    )
+}
+
 fn activity_monitor(register: Register) -> bool {
     let name = register.name();
     name.starts_with("AMC") || name.starts_with("AMEV") || name.starts_with("AMUSERENR")
@@ -420,6 +441,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         }
         if activity_monitor(register) {
             return Err(Effect::Refused(AMU_REFUSAL));
+        }
+        if implementation_defined_contents(register) && value != 0 {
+            return Err(Effect::Refused(
+                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
+            ));
         }
         let value = if register == Register::MPAM1_EL1 {
             value & !MPAMEN
@@ -2406,6 +2432,35 @@ mod tests {
         // Without AMO, EL1 reaches DISR_EL1 itself.
         machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
         assert_eq!(access_at(&mut machine, 1, true, 0), disr);
+    }
+
+    #[test]
+    fn implementation_defined_registers_take_only_values_without_set_bits() {
+        const MSR_ACTLR_EL1_X1: u32 = 0xd518_1021;
+        const MSR_AMAIR_EL1_X1: u32 = 0xd518_a301;
+        const MSR_AFSR0_EL1_X1: u32 = 0xd518_5101;
+        const MSR_HACR_EL2_X1: u32 = 0xd51c_11e1;
+        const MSR_ACTLR_EL12_X1: u32 = 0xd51d_1021;
+        let mut machine = machine(&[]);
+        machine.cpu.set_pstate(Pstate::reset(2));
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 34);
+        for word in [
+            MSR_ACTLR_EL1_X1,
+            MSR_AMAIR_EL1_X1,
+            MSR_AFSR0_EL1_X1,
+            MSR_HACR_EL2_X1,
+            MSR_ACTLR_EL12_X1,
+        ] {
+            // XNU's boot path clears ACTLR_EL1's TSO and alternate bits.
+            machine.cpu.state.x[1] = 0;
+            machine.system_instruction(word).unwrap();
+            machine.cpu.state.x[1] = 1 << 1;
+            assert!(
+                matches!(machine.system_instruction(word), Err(Stop::Unsupported(_))),
+                "{word:#x}"
+            );
+        }
+        assert_eq!(machine.cpu.read(Register::ACTLR_EL1), 0);
     }
 
     #[test]
