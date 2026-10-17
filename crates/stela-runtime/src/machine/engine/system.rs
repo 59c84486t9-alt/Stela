@@ -1186,6 +1186,80 @@ mod tests {
     }
 
     #[test]
+    fn whole_register_state_holds_what_software_writes() {
+        const STATE: &[(u8, Encoding)] = &[
+            (1, Encoding::new(3, 3, 13, 0, 2)), // TPIDR_EL0
+            (1, Encoding::new(3, 3, 13, 0, 3)), // TPIDRRO_EL0
+            (1, Encoding::new(3, 0, 13, 0, 4)), // TPIDR_EL1
+            (2, Encoding::new(3, 4, 13, 0, 2)), // TPIDR_EL2
+            (1, Encoding::new(3, 0, 4, 0, 1)),  // ELR_EL1
+            (2, Encoding::new(3, 4, 4, 0, 1)),  // ELR_EL2
+            (1, Encoding::new(3, 0, 6, 0, 0)),  // FAR_EL1
+            (2, Encoding::new(3, 4, 6, 0, 0)),  // FAR_EL2
+            (1, Encoding::new(3, 0, 4, 1, 0)),  // SP_EL0
+            (2, Encoding::new(3, 4, 4, 1, 0)),  // SP_EL1
+            (2, Encoding::new(3, 3, 13, 0, 7)), // SCXTNUM_EL0
+            (2, Encoding::new(3, 4, 13, 0, 7)), // SCXTNUM_EL2
+        ];
+        let mut machine = machine(&[]);
+        // HCR_EL2.APK lets EL1 reach the keys.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 40);
+        let value = 0xfedc_ba98_7654_3210;
+        // The PAC keys: APIA and APIB (CRm 1), APDA and APDB (CRm 2) and
+        // APGA (CRm 3), Lo then Hi.
+        let keys = [(1, 0..4), (2, 0..4), (3, 0..2)]
+            .into_iter()
+            .flat_map(|(crm, op2s)| op2s.map(move |op2| (1, Encoding::new(3, 0, 2, crm, op2))));
+        for (el, encoding) in STATE.iter().copied().chain(keys) {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[0] = value;
+            machine
+                .system_instruction(access(false, encoding, 0))
+                .unwrap();
+            machine.cpu.state.x[1] = 0;
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            assert_eq!(
+                (machine.cpu.state.x[1], machine.cpu.pc),
+                (value, BASE + 8),
+                "{encoding:?}"
+            );
+        }
+        // HSTR_EL2, which traps AArch32 EL1, is RES0; MVFR0-2, REVIDR_EL1 and
+        // the debug-state DLR_EL0 and DSPSR_EL0 behave as the profile says:
+        // AArch32 media features and revisions read 0, and outside Debug
+        // state DLR and DSPSR are UNDEFINED.
+        machine.cpu.pstate = Pstate::reset(2);
+        machine.cpu.state.x[0] = u64::MAX;
+        let hstr = Encoding::new(3, 4, 1, 1, 3);
+        machine.system_instruction(access(false, hstr, 0)).unwrap();
+        machine.system_instruction(access(true, hstr, 1)).unwrap();
+        assert_eq!(machine.cpu.state.x[1], 0);
+        for op2 in 0..3 {
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.cpu.state.x[1] = 1;
+            machine
+                .system_instruction(access(true, Encoding::new(3, 0, 0, 3, op2), 1))
+                .unwrap();
+            assert_eq!(machine.cpu.state.x[1], 0, "MVFR{op2}_EL1");
+        }
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        for encoding in [Encoding::new(3, 3, 4, 5, 0), Encoding::new(3, 3, 4, 5, 1)] {
+            machine.cpu.pstate = Pstate::reset(1);
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            assert_eq!(
+                machine.cpu.read(Register::ESR_EL1),
+                0x0200_0000,
+                "{encoding:?}"
+            );
+        }
+    }
+
+    #[test]
     fn aarch32_banked_spsrs_are_res0_at_el2_and_undefined_at_el1() {
         let mut machine = machine(&[]);
         // Without AArch32 at EL1, SPSR_irq, SPSR_abt, SPSR_und and SPSR_fiq

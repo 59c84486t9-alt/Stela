@@ -963,6 +963,7 @@ mod tests {
             CLIDR_EL1,
             CCSIDR_EL1,
             MDRAR_EL1,
+            REVIDR_EL1,
             ID_AA64ISAR3_EL1,
         ] {
             assert_eq!(value(register), 0, "{register:?}");
