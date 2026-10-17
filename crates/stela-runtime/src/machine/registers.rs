@@ -59,6 +59,17 @@ pub mod encodings {
         ID_AA64MMFR0_EL1 = 3, 0, 0, 7, 0;
         ID_AA64MMFR1_EL1 = 3, 0, 0, 7, 1;
         ID_AA64MMFR2_EL1 = 3, 0, 0, 7, 2;
+        ID_AA64MMFR3_EL1 = 3, 0, 0, 7, 3;
+        ID_AA64MMFR4_EL1 = 3, 0, 0, 7, 4;
+        ID_AA64PFR2_EL1 = 3, 0, 0, 4, 2;
+        ID_AA64FPFR0_EL1 = 3, 0, 0, 4, 7;
+        ID_AA64DFR2_EL1 = 3, 0, 0, 5, 2;
+        ID_AA64ISAR3_EL1 = 3, 0, 0, 6, 3;
+        LORID_EL1 = 3, 0, 10, 4, 7;
+        MPAMIDR_EL1 = 3, 0, 10, 4, 4;
+        ERRIDR_EL1 = 3, 0, 5, 3, 0;
+        MDRAR_EL1 = 2, 0, 1, 0, 0;
+        DBGAUTHSTATUS_EL1 = 2, 0, 7, 14, 6;
         CCSIDR_EL1 = 3, 1, 0, 0, 0;
         CLIDR_EL1 = 3, 1, 0, 0, 1;
         AIDR_EL1 = 3, 1, 0, 0, 7;

@@ -61,6 +61,16 @@ pub(super) fn identification(register: Register) -> bool {
         )
 }
 
+/// FEAT_AMUv1 is in the declared profile only through Apple clang's Armv8.4
+/// implication, and the engine counts no activity: every AMU register access
+/// stops instead of reading or storing counter values that never count.
+const AMU_REFUSAL: &str = "activity monitors (FEAT_AMUv1) do not count";
+
+fn activity_monitor(register: Register) -> bool {
+    let name = register.name();
+    name.starts_with("AMC") || name.starts_with("AMEV") || name.starts_with("AMUSERENR")
+}
+
 /// The MRS encoding of a register, from its generated accessor.
 pub(super) fn encoding_of(register: Register) -> Option<Encoding> {
     let name = alloc::format!("MRS {}", register.name());
@@ -216,6 +226,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
     fn read(&self, register: Register, index: u64) -> u64 {
         let machine = &*self.machine;
         let cpu = &machine.cpu;
+        if activity_monitor(register) {
+            self.refuse(AMU_REFUSAL);
+            return 0;
+        }
         if machine.profile_missing.contains(&register) {
             self.refuse("identification register without a profile value");
             return 0;
@@ -238,6 +252,9 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         let cpu = &mut self.machine.cpu;
         if let Some(reason) = crate::machine::registers::vmsa_locked(cpu, register, value) {
             return Err(Effect::Refused(reason));
+        }
+        if activity_monitor(register) {
+            return Err(Effect::Refused(AMU_REFUSAL));
         }
         match register {
             Register::SCTLR_EL1 | Register::SCTLR_EL2 if value & SCTLR_A != 0 => {
@@ -628,6 +645,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             });
             match value {
                 Some(value) => self.cpu.registers.set_raw(register, 0, value),
+                // A layout the profile reserves entirely, such as the AArch32
+                // ID registers without FEAT_AA32, has one value.
+                None if register.res0() | register.res1() == u64::MAX => {
+                    self.cpu.registers.set_raw(register, 0, register.res1());
+                }
                 None => self.profile_missing.push(register),
             }
         }
@@ -814,6 +836,18 @@ mod tests {
     #[test]
     fn identification_reads_come_from_the_profile_or_refuse() {
         let mut machine = machine(&[]);
+        // Without FEAT_AA32 the AArch32 ID registers are entirely reserved,
+        // so they read their one value with no profile entry.
+        for (index, encoding) in [Encoding::new(3, 0, 0, 2, 0), Encoding::new(3, 0, 0, 3, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            machine.cpu.state.x[3] = 1;
+            machine
+                .system_instruction(access(true, encoding, 3))
+                .unwrap_or_else(|stop| panic!("{index}: {stop:?}"));
+            assert_eq!(machine.cpu.state.x[3], 0);
+        }
         // The test profile has no MIDR_EL1: the read, through VPIDR_EL2 at
         // EL1, refuses rather than reading zero.
         assert!(matches!(
@@ -866,5 +900,46 @@ mod tests {
             machine.system_instruction(0xd518_1000),
             Err(super::super::Stop::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn mpam_ras_lor_and_scxtnum_follow_their_minimal_configurations() {
+        let mut machine = machine(&[]);
+        // HCR_EL2.EnSCXT lets EL1 reach SCXTNUM_EL1.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 53);
+        let write = |machine: &mut super::super::Machine<_, _>, encoding, value| {
+            machine.cpu.state.x[1] = value;
+            machine
+                .system_instruction(access(false, encoding, 1))
+                .unwrap();
+        };
+        let read = |machine: &mut super::super::Machine<_, _>, encoding| {
+            machine
+                .system_instruction(access(true, encoding, 2))
+                .unwrap();
+            machine.cpu.state.x[2]
+        };
+        // MPAM1_EL1, LORSA_EL1 and SCXTNUM_EL1 hold what EL1 writes.
+        for (encoding, value) in [
+            (Encoding::new(3, 0, 10, 5, 0), 0x0001_0002_0003),
+            (Encoding::new(3, 0, 10, 4, 0), 0x8000_0000),
+            (Encoding::new(3, 0, 13, 0, 7), 0x1234_5678),
+        ] {
+            write(&mut machine, encoding, value);
+            assert_eq!(read(&mut machine, encoding), value, "{encoding:?}");
+        }
+        // No error record: ERX* read 0 and ignore writes, whatever ERRSELR
+        // selects.
+        write(&mut machine, Encoding::new(3, 0, 5, 3, 1), 3);
+        write(&mut machine, Encoding::new(3, 0, 5, 4, 1), u64::MAX);
+        assert_eq!(read(&mut machine, Encoding::new(3, 0, 5, 4, 1)), 0);
+        assert_eq!(read(&mut machine, Encoding::new(3, 0, 5, 4, 2)), 0);
+        // An AMU access stops: its counters would never count.
+        let Err(super::super::Stop::Unsupported(requirement)) =
+            machine.system_instruction(access(true, Encoding::new(3, 3, 13, 2, 0), 2))
+        else {
+            panic!("AMCR_EL0 read")
+        };
+        assert!(format!("{:?}", requirement.kind).contains("activity monitors"));
     }
 }

@@ -21,7 +21,10 @@ use stela_runtime::machine::{
     cpu::HCR_HCD,
     exception::Pstate,
     identification,
-    registers::{CpuProfile, encodings::DCZID_EL0},
+    registers::{
+        CpuProfile,
+        encodings::{DCZID_EL0, MIDR_EL1, MPIDR_EL1},
+    },
     system::Register,
 };
 
@@ -214,6 +217,9 @@ const HCR_ENSCXT: u32 = 53;
 fn profile(target: TargetCpu) -> CpuProfile {
     let mut fixed = identification::derive(target, false);
     fixed.push((DCZID_EL0, DCZID));
+    // J473AP cpu0's MIDR and MPIDR, as the bundle profile gives them; only
+    // the access outcome of an MRS is compared.
+    fixed.extend([(MIDR_EL1, 0x611f_0320), (MPIDR_EL1, 0x8000_0000)]);
     CpuProfile {
         name: "oracle-m2-el0",
         counter_frequency: 24_000_000,

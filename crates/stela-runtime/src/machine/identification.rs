@@ -160,8 +160,30 @@ pub const REGISTERS: &[Encoding] = &[
     ID_AA64AFR1_EL1,
     ID_AA64ZFR0_EL1,
     ID_AA64SMFR0_EL1,
+    ID_AA64PFR2_EL1,
+    ID_AA64FPFR0_EL1,
+    ID_AA64DFR2_EL1,
+    ID_AA64ISAR3_EL1,
+    ID_AA64MMFR3_EL1,
+    ID_AA64MMFR4_EL1,
     CTR_EL0,
     AIDR_EL1,
+    // No caches are visible: memory is coherent and CTR_EL0.IDC holds, so
+    // CLIDR_EL1 reports no cache level and LoC, LoUU and LoUIS 0, and
+    // CCSIDR_EL1 (UNKNOWN for an unimplemented cache) reads 0.
+    CLIDR_EL1,
+    CCSIDR_EL1,
+    // No revision-specific information.
+    REVIDR_EL1,
+    // FEAT_LOR with no LORegions or descriptors (LORID_EL1 LR = LD = 0),
+    // FEAT_MPAM with only PARTID 0 and PMG 0 and no MPAMHCR_EL2 or virtual
+    // PARTID mapping, and FEAT_RAS with no error records (ERRIDR_EL1.NUM 0).
+    LORID_EL1,
+    MPAMIDR_EL1,
+    ERRIDR_EL1,
+    // No external debug ROM table.
+    MDRAR_EL1,
+    DBGAUTHSTATUS_EL1,
 ];
 
 pub const TABLE: &[Row] = &[
@@ -204,7 +226,17 @@ pub const TABLE: &[Row] = &[
         28,
         1,
         "FEAT_RAS",
-        engine(false, "no RAS error records are modeled"),
+        engine(
+            true,
+            "no error records (ERRIDR_EL1.NUM 0, ERX* RAZ/WI); ESB and virtual SErrors",
+        ),
+    ),
+    feature(
+        ID_AA64PFR0_EL1,
+        28,
+        2,
+        "FEAT_RASv1p1",
+        engine(true, "ERXMISC2/3 and ERXPFG* of no error record, RAZ/WI"),
     ),
     feature(
         ID_AA64PFR0_EL1,
@@ -218,7 +250,10 @@ pub const TABLE: &[Row] = &[
         40,
         1,
         "FEAT_MPAM",
-        engine(false, "no MPAM is modeled"),
+        engine(
+            true,
+            "MPAM v1.0 with only PARTID 0 and PMG 0, no MPAMHCR_EL2 or VPM",
+        ),
     ),
     feature(
         ID_AA64PFR0_EL1,
@@ -520,7 +555,9 @@ pub const TABLE: &[Row] = &[
         16,
         1,
         "FEAT_LOR",
-        engine(false, "LORegions are not modeled"),
+        // No LORegions (LORID_EL1 0): LDLAR and STLLR order like LDAR and
+        // STLR, which is always permitted.
+        Basis::Instructions(&[0xc8df_7c20, 0xc89f_7c20]),
     ),
     feature(
         ID_AA64MMFR1_EL1,
@@ -596,6 +633,29 @@ pub const TABLE: &[Row] = &[
         "IDC: no data clean for instruction coherence",
     ),
     fixed(CTR_EL0, 31, 1, "RES1"),
+    // ID_AA64MMFR4_EL1.E2H0 = 0b1110: HCR_EL2.E2H is RES1 (no FEAT_E2H0) and
+    // HCR_EL2.NV1 is RES0 (no FEAT_NV). The M2 itself predates the field.
+    fixed(
+        ID_AA64MMFR4_EL1,
+        24,
+        0b1110,
+        "E2H is RES1 and there is no FEAT_NV1",
+    ),
+    // DBGAUTHSTATUS_EL1: Non-secure invasive and non-invasive debug are
+    // implemented and externally disabled (no external debugger); no Secure,
+    // Realm or Root state.
+    fixed(
+        DBGAUTHSTATUS_EL1,
+        0,
+        0b10,
+        "external invasive debug disabled",
+    ),
+    fixed(
+        DBGAUTHSTATUS_EL1,
+        2,
+        0b10,
+        "external non-invasive debug disabled",
+    ),
     // AIDR_EL1: Apple feature bits, named by m1n1 `cpu_regs.h`. Apple
     // features have no clang `FEAT_` tag; each bit is an engine property.
     // Bits m1n1 does not name read 0.
@@ -754,6 +814,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn minimal_feature_configurations_are_advertised() {
+        let values = derive(TargetCpu::detect(), true);
+        let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
+        let field = |register, shift: u32| (value(register) >> shift) & 0xf;
+        // RASv1p1, MPAM v1.0 and no AMU in ID_AA64PFR0_EL1; LOR in MMFR1.
+        assert_eq!(field(ID_AA64PFR0_EL1, 28), 2);
+        assert_eq!(field(ID_AA64PFR0_EL1, 40), 1);
+        assert_eq!(field(ID_AA64PFR0_EL1, 44), 0);
+        assert_eq!(field(ID_AA64MMFR1_EL1, 16), 1);
+        assert_eq!(field(ID_AA64MMFR4_EL1, 24), 0b1110);
+        for register in [
+            LORID_EL1,
+            MPAMIDR_EL1,
+            ERRIDR_EL1,
+            CLIDR_EL1,
+            ID_AA64ISAR3_EL1,
+        ] {
+            assert_eq!(value(register), 0, "{register:?}");
+        }
+        assert_eq!(value(DBGAUTHSTATUS_EL1), 0b1010);
     }
 
     #[test]

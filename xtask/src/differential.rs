@@ -254,7 +254,21 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     let register = (word & REGISTER_FIELD) as usize;
     let address = state.x.get(register).copied().unwrap_or(0);
     let by_address = word & 0xfff8_0000 == 0xd508_0000 && untranslated && !in_windows(address);
+    // QEMU's max CPU makes the MPAM registers and RAS's ERRSELR_EL1 and ERX*
+    // UNDEFINED; the profile defines them (FEAT_MPAM with PARTID 0 only, and
+    // FEAT_RAS with no error records, where they are RAZ/WI).
+    let register_access = word & 0xffc0_0000 == 0xd500_0000 && (word >> 19) & 3 == 3;
+    let (crn, crm, op1, op2) = (
+        (word >> 12) & 15,
+        (word >> 8) & 15,
+        (word >> 16) & 7,
+        (word >> 5) & 7,
+    );
+    let mpam = crn == 10 && (crm == 5 || crm == 6 || crm == 4 && (op1 == 4 || op2 == 4));
+    let records = crn == 5 && (crm == 3 && op2 == 1 || crm == 4 || crm == 5);
+    let absent_registers = register_access && (mpam || records);
     wfi || absent
+        || absent_registers
         || sme
         || pstate
         || flags
