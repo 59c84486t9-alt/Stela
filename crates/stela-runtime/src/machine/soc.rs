@@ -13,110 +13,131 @@
 use super::{Chip, registers::Identity};
 use alloc::{format, string::String, vec::Vec};
 
-/// One SoC row: ApChipID, `product-soc-name`, chip, and the MIDR_EL1 part
-/// number of each `cluster-type`.
+/// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part
+/// number of each `cluster-type`, and for an `aic,2` interrupt controller the
+/// offset of its event register from the `aic` `reg` (Linux
+/// `arch/arm64/boot/dts/apple`: 0x8000 in `t8112.dtsi`, 0xc000 in
+/// `t600x-die0.dtsi` and `t602x-die0.dtsi`). The M1's `aic,1` and the `aic,3`
+/// of the M3 and later have no event offset here.
 struct Soc {
     chip_id: u32,
     name: &'static str,
     chip: Chip,
-    parts: &'static [(u8, u16)],
-}
-
-const fn soc(chip_id: u32, name: &'static str, chip: Chip, parts: &'static [(u8, u16)]) -> Soc {
-    Soc {
-        chip_id,
-        name,
-        chip,
-        parts,
-    }
+    parts: [(u8, u16); 2],
+    aic2_event: Option<u64>,
 }
 
 const SOCS: [Soc; 14] = [
-    soc(
-        0x8103,
-        "Apple M1",
-        Chip::AppleM1,
-        &[(b'E', 0x022), (b'P', 0x023)],
-    ),
-    soc(
-        0x6000,
-        "Apple M1 Pro",
-        Chip::AppleM1,
-        &[(b'E', 0x024), (b'P', 0x025)],
-    ),
-    soc(
-        0x6001,
-        "Apple M1 Max",
-        Chip::AppleM1,
-        &[(b'E', 0x028), (b'P', 0x029)],
-    ),
-    soc(
-        0x8112,
-        "Apple M2",
-        Chip::AppleM2,
-        &[(b'E', 0x032), (b'P', 0x033)],
-    ),
-    soc(
-        0x6020,
-        "Apple M2 Pro",
-        Chip::AppleM2,
-        &[(b'E', 0x034), (b'P', 0x035)],
-    ),
-    soc(
-        0x6021,
-        "Apple M2 Max",
-        Chip::AppleM2,
-        &[(b'E', 0x038), (b'P', 0x039)],
-    ),
-    soc(
-        0x8122,
-        "Apple M3",
-        Chip::AppleM3,
-        &[(b'E', 0x042), (b'P', 0x043)],
-    ),
-    soc(
-        0x6030,
-        "Apple M3 Pro",
-        Chip::AppleM3,
-        &[(b'E', 0x044), (b'P', 0x045)],
-    ),
-    soc(
-        0x6031,
-        "Apple M3 Max",
-        Chip::AppleM3,
-        &[(b'E', 0x048), (b'P', 0x049)],
-    ),
-    soc(
-        0x8132,
-        "Apple M4",
-        Chip::AppleM4,
-        &[(b'E', 0x052), (b'P', 0x053)],
-    ),
-    soc(
-        0x6040,
-        "Apple M4 Pro",
-        Chip::AppleM4,
-        &[(b'E', 0x054), (b'P', 0x055)],
-    ),
-    soc(
-        0x6041,
-        "Apple M4 Max",
-        Chip::AppleM4,
-        &[(b'E', 0x058), (b'P', 0x059)],
-    ),
-    soc(
-        0x8142,
-        "Apple M5",
-        Chip::AppleM5,
-        &[(b'E', 0x062), (b'P', 0x063)],
-    ),
-    soc(
-        0x8152,
-        "Apple M6",
-        Chip::AppleM6,
-        &[(b'E', 0x072), (b'P', 0x073)],
-    ),
+    Soc {
+        chip_id: 0x8103,
+        name: "Apple M1",
+        chip: Chip::AppleM1,
+        parts: [(b'E', 0x022), (b'P', 0x023)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x6000,
+        name: "Apple M1 Pro",
+        chip: Chip::AppleM1,
+        parts: [(b'E', 0x024), (b'P', 0x025)],
+        aic2_event: Some(0xc000),
+    },
+    Soc {
+        chip_id: 0x6001,
+        name: "Apple M1 Max",
+        chip: Chip::AppleM1,
+        parts: [(b'E', 0x028), (b'P', 0x029)],
+        aic2_event: Some(0xc000),
+    },
+    Soc {
+        chip_id: 0x8112,
+        name: "Apple M2",
+        chip: Chip::AppleM2,
+        parts: [(b'E', 0x032), (b'P', 0x033)],
+        aic2_event: Some(0x8000),
+    },
+    Soc {
+        chip_id: 0x6020,
+        name: "Apple M2 Pro",
+        chip: Chip::AppleM2,
+        parts: [(b'E', 0x034), (b'P', 0x035)],
+        aic2_event: Some(0xc000),
+    },
+    Soc {
+        chip_id: 0x6021,
+        name: "Apple M2 Max",
+        chip: Chip::AppleM2,
+        parts: [(b'E', 0x038), (b'P', 0x039)],
+        aic2_event: Some(0xc000),
+    },
+    Soc {
+        chip_id: 0x8122,
+        name: "Apple M3",
+        chip: Chip::AppleM3,
+        parts: [(b'E', 0x042), (b'P', 0x043)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x6030,
+        name: "Apple M3 Pro",
+        chip: Chip::AppleM3,
+        parts: [(b'E', 0x044), (b'P', 0x045)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x6031,
+        name: "Apple M3 Max",
+        chip: Chip::AppleM3,
+        parts: [(b'E', 0x048), (b'P', 0x049)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x8132,
+        name: "Apple M4",
+        chip: Chip::AppleM4,
+        parts: [(b'E', 0x052), (b'P', 0x053)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x6040,
+        name: "Apple M4 Pro",
+        chip: Chip::AppleM4,
+        parts: [(b'E', 0x054), (b'P', 0x055)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x6041,
+        name: "Apple M4 Max",
+        chip: Chip::AppleM4,
+        parts: [(b'E', 0x058), (b'P', 0x059)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x8142,
+        name: "Apple M5",
+        chip: Chip::AppleM5,
+        parts: [(b'E', 0x062), (b'P', 0x063)],
+        aic2_event: None,
+    },
+    Soc {
+        chip_id: 0x8152,
+        name: "Apple M6",
+        chip: Chip::AppleM6,
+        parts: [(b'E', 0x072), (b'P', 0x073)],
+        aic2_event: None,
+    },
 ];
+
+/// What a board's DeviceTree selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Board {
+    pub chip: Chip,
+    /// The PEs in `/cpus` order.
+    pub processors: Vec<Identity>,
+    /// The AIC2 event register's offset from the `aic` `reg`, on a SoC whose
+    /// interrupt controller is `aic,2`.
+    pub aic2_event: Option<u64>,
+}
 
 /// One `/cpus` node: its `cluster-type` letter and `reg`.
 #[derive(Debug, Clone, Copy)]
@@ -137,11 +158,7 @@ pub struct Processor {
 /// multiprocessor without multithreading (inferred). A `reg` beyond Aff1's
 /// first eight clusters, as the multi-die boards use, has no public MPIDR
 /// mapping and refuses.
-pub fn board(
-    chip_id: u32,
-    soc_name: &str,
-    processors: &[Processor],
-) -> Result<(Chip, Vec<Identity>), String> {
+pub fn board(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Board, String> {
     let soc = SOCS
         .iter()
         .find(|soc| soc.chip_id == chip_id)
@@ -155,7 +172,7 @@ pub fn board(
     if processors.is_empty() {
         return Err("the DeviceTree has no /cpus nodes".into());
     }
-    let identities = processors
+    let processors = processors
         .iter()
         .map(|processor| {
             let part = soc
@@ -182,7 +199,11 @@ pub fn board(
             })
         })
         .collect::<Result<_, String>>()?;
-    Ok((soc.chip, identities))
+    Ok(Board {
+        chip: soc.chip,
+        processors,
+        aic2_event: soc.aic2_event,
+    })
 }
 
 #[cfg(test)]
@@ -207,8 +228,12 @@ mod tests {
                 )
             })
             .collect();
-        let (chip, identities) = board(0x8112, "Apple M2", &cpus(&layout)).unwrap();
-        assert_eq!(chip, Chip::AppleM2);
+        let board_ = board(0x8112, "Apple M2", &cpus(&layout)).unwrap();
+        assert_eq!(
+            (board_.chip, board_.aic2_event),
+            (Chip::AppleM2, Some(0x8000))
+        );
+        let identities = board_.processors;
         assert_eq!(
             identities[0],
             Identity {
@@ -225,8 +250,9 @@ mod tests {
         );
         // J604AP (Mac16,1): six M4 E cores and four P cores.
         let layout = [(b'E', 0), (b'E', 5), (b'P', 0x100), (b'P', 0x103)];
-        let (chip, identities) = board(0x8132, "Apple M4", &cpus(&layout)).unwrap();
-        assert_eq!(chip, Chip::AppleM4);
+        let board_ = board(0x8132, "Apple M4", &cpus(&layout)).unwrap();
+        assert_eq!((board_.chip, board_.aic2_event), (Chip::AppleM4, None));
+        let identities = board_.processors;
         assert_eq!(identities[1].midr, 0x611f_0520);
         assert_eq!(
             identities[3],
@@ -235,14 +261,20 @@ mod tests {
                 mpidr: 0x8000_0103
             }
         );
-        // Every ApChipID appears once, and each chip has an E and a P part.
+        // An M2 Pro's AIC2 has its event register at +0xc000.
+        assert_eq!(
+            board(0x6020, "Apple M2 Pro", &cpus(&layout))
+                .unwrap()
+                .aic2_event,
+            Some(0xc000)
+        );
+        // Every ApChipID appears once.
         for (index, soc) in SOCS.iter().enumerate() {
             assert!(
                 SOCS[index + 1..]
                     .iter()
                     .all(|other| other.chip_id != soc.chip_id)
             );
-            assert_eq!(soc.parts.len(), 2, "{}", soc.name);
         }
     }
 
