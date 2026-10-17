@@ -808,6 +808,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .get_or_insert_with(|| timer::deadline(&self.cpu))
     }
 
+    /// Read `bytes.len()` bytes of RAM at `address` in the running PE's
+    /// current regime, for diagnostics after a stop: a read that does not
+    /// translate or reaches no RAM is `false`, and nothing is faulted or
+    /// changed. The bytes must lie in one fetch page.
+    pub fn read_virtual(&mut self, address: u64, bytes: &mut [u8]) -> bool {
+        let controls = self.cpu.controls(self.cpu.regime());
+        let requester = self.cpu.requester();
+        let last = address.wrapping_add(bytes.len() as u64).wrapping_sub(1);
+        if bytes.is_empty() || address & !(FETCH_PAGE - 1) != last & !(FETCH_PAGE - 1) {
+            return false;
+        }
+        match mmu::translate(
+            &controls,
+            address,
+            Access::Read,
+            requester,
+            &mut RamTables(&mut self.host),
+        ) {
+            Translated::Mapped(translation) => self.host.read_ram(translation.physical, bytes),
+            _ => false,
+        }
+    }
+
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
         loop {

@@ -547,10 +547,50 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let started = host::rdtsc();
     let stop = machine.run(options.budget);
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
-    finish(&machine, stop, seconds)
+    finish(&mut machine, stop, seconds)
 }
 
-fn finish(machine: &Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
+/// The frame records from X29 (each the caller's X29 and the return
+/// address, Arm's AAPCS64 frame chain) and the stack words above SP, read
+/// through the stopped PE's translation, so that a guest's own panic or
+/// wait path can be located.
+fn stack_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    let mut frame = machine.cpu.state.x[29];
+    for depth in 0..16 {
+        let mut record = [0u8; 16];
+        if frame == 0 || !frame.is_multiple_of(8) || !machine.read_virtual(frame, &mut record) {
+            break;
+        }
+        let next = u64::from_le_bytes(record[..8].try_into().expect("8 bytes"));
+        let link = u64::from_le_bytes(record[8..].try_into().expect("8 bytes"));
+        output::arguments(format_args!("FRAME {depth} fp={frame:#x} lr={link:#x}\n"));
+        frame = next;
+    }
+    let sp = machine.cpu.state.sp;
+    for line in 0..32u64 {
+        let mut bytes = [0u8; 16];
+        if !machine.read_virtual(sp + line * 16, &mut bytes) {
+            break;
+        }
+        output::arguments(format_args!("STACK {:#x}:", sp + line * 16));
+        for byte in bytes {
+            output::arguments(format_args!(" {byte:02x}"));
+        }
+        output::arguments(format_args!("  "));
+        for byte in bytes {
+            let shown = if byte.is_ascii_graphic() || byte == b' ' {
+                byte
+            } else {
+                b'.'
+            };
+            output::arguments(format_args!("{}", char::from(shown)));
+        }
+        output::arguments(format_args!("\n"));
+    }
+}
+
+fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
+    stack_report(machine);
     let cpu = &machine.cpu;
     // The exception registers of the EL the run ended at.
     let bank = if cpu.pstate.el == 2 {
