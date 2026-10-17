@@ -11,6 +11,8 @@ use super::{
 };
 
 // TCR_EL1, and TCR_EL2 with E2H set.
+/// FEAT_PAN3: PAN also covers locations EL0 may execute.
+const SCTLR_EPAN: u64 = 1 << 57;
 const TCR_T0SZ_SHIFT: u64 = 0;
 const TCR_EPD0: u64 = 1 << 7;
 const TCR_TG0_SHIFT: u64 = 14;
@@ -440,9 +442,12 @@ fn rights(
     if requester.unprivileged {
         return (el0_readable, el0_writable, privileged_executable);
     }
-    // PAN removes kernel-level data access to EL0-accessible locations; it
-    // never affects execution.
-    let pan = requester.pan && el0_readable;
+    // PAN removes kernel-level data access to EL0-accessible locations, and
+    // with SCTLR_ELx.EPAN (FEAT_PAN3, RES0 without it) to locations EL0 may
+    // execute, before WXN; it never affects execution.
+    let el0_execute_permitted = descriptor & UXN == 0 && !hierarchy.uxn;
+    let enhanced = controls.sctlr & SCTLR_EPAN != 0;
+    let pan = requester.pan && (el0_readable || enhanced && el0_execute_permitted);
     (!pan, !pan && privileged_writable, privileged_executable)
 }
 
@@ -699,6 +704,50 @@ mod tests {
         assert_eq!(
             faults(translate(&controls, va, Access::Read, pan, &mut tables)),
             Some((FaultKind::Permission, 3))
+        );
+    }
+
+    #[test]
+    fn epan_extends_pan_to_locations_el0_may_execute() {
+        let mut controls = controls();
+        let pan = Requester {
+            pan: true,
+            ..KERNEL
+        };
+        let leaf = |controls: &Controls, hierarchy: &Hierarchy, descriptor| {
+            super::rights(controls, pan, hierarchy, descriptor)
+        };
+        let execute_only = ATTRS; // AP[2:1] 00, EL0 execute-only.
+        let read_only_execute_only = ATTRS | AP_READ_ONLY;
+        let none = Hierarchy::default();
+        assert_eq!(leaf(&controls, &none, execute_only), (true, true, true));
+        controls.sctlr |= SCTLR_EPAN;
+        assert_eq!(leaf(&controls, &none, execute_only), (false, false, true));
+        assert_eq!(
+            leaf(&controls, &none, read_only_execute_only),
+            (false, false, true)
+        );
+        // UXN, in the leaf or a table, leaves the location to EL1.
+        assert_eq!(
+            leaf(&controls, &none, execute_only | UXN),
+            (true, true, true)
+        );
+        let uxn_table = Hierarchy {
+            uxn: true,
+            ..Hierarchy::default()
+        };
+        assert_eq!(
+            leaf(&controls, &uxn_table, execute_only),
+            (true, true, true)
+        );
+        // WXN does not remove EL0 execution from EPAN's view.
+        controls.sctlr |= SCTLR_WXN;
+        let el0_writable = ATTRS | AP_EL0;
+        assert_eq!(leaf(&controls, &none, el0_writable), (false, false, false));
+        // Without PSTATE.PAN, EPAN has no effect.
+        assert_eq!(
+            super::rights(&controls, KERNEL, &none, execute_only),
+            (true, true, false)
         );
     }
 

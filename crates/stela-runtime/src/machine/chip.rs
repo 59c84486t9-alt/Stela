@@ -108,7 +108,7 @@ impl Chip {
 
 /// Whether the engine implements a feature that only some chips have: every
 /// feature the M2 has, the M3's FEAT_HCX, FEAT_NV and FEAT_NV2, and the M4's
-/// FEAT_WFxT and FEAT_XS.
+/// FEAT_PAN3, FEAT_WFxT and FEAT_XS.
 const fn engine_implements(feature: Feature) -> bool {
     match feature {
         Feature::FEAT_AMUv1p1
@@ -124,6 +124,7 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_NV
         | Feature::FEAT_NV2
         | Feature::FEAT_HCX
+        | Feature::FEAT_PAN3
         | Feature::FEAT_WFxT
         | Feature::FEAT_XS => true,
         Feature::FEAT_AFP
@@ -138,7 +139,6 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_LUT
         | Feature::FEAT_MTE
         | Feature::FEAT_MTE2
-        | Feature::FEAT_PAN3
         | Feature::FEAT_PAuth_LR
         | Feature::FEAT_RASv2
         | Feature::FEAT_SCTLR2

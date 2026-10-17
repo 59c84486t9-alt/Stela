@@ -4,13 +4,16 @@
 //! chip implements: each field is set from one table row whose architectural
 //! feature must be in the chip's Apple clang feature set ([`Chip::cap`],
 //! `isa/apple-codegen-profiles.json`, from `clang -mcpu=apple-mN
-//! --print-enabled-extensions`) and whose basis must hold here. An
+//! --print-enabled-extensions`), or implied by it under the AARCHMRS
+//! feature constraints (a generated [`Feature`] the chip has, such as the
+//! M4's Armv8.7 FEAT_PAN3, which has no clang extension name), and whose
+//! basis must hold here. An
 //! instruction feature holds when its sample encodings compile for the
 //! system-mode block profile on the host target; any other feature is an
 //! engine property stated with its reason, or holds only when the kernel
 //! level is EL2 as a VHE host. A field with no satisfied row reads its "not
 //! implemented" value.
-use super::{Chip, registers::encodings::*};
+use super::{Chip, registers::encodings::*, system::Feature};
 use alloc::vec::Vec;
 use stela_compiler::{
     GuestAddress, TargetCpu,
@@ -589,6 +592,13 @@ pub const TABLE: &[Row] = &[
         "FEAT_PAN2",
         engine(true, "AT S1E1RP and S1E1WP"),
     ),
+    feature(
+        ID_AA64MMFR1_EL1,
+        20,
+        3,
+        "FEAT_PAN3",
+        engine(true, "SCTLR_ELx.EPAN extends PAN to EL0-executable memory"),
+    ),
     // ID_AA64MMFR2_EL1
     row(
         ID_AA64MMFR2_EL1,
@@ -820,11 +830,16 @@ pub const TABLE: &[Row] = &[
     ),
 ];
 
+/// The chip has `feature`: in its Apple clang feature set, or implied by it.
+fn has(chip: Chip, feature: &str) -> bool {
+    chip.cap().contains(&feature)
+        || Feature::ALL
+            .iter()
+            .any(|implied| implied.name() == feature && implied.on(chip))
+}
+
 fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
-    if row
-        .feature
-        .is_some_and(|feature| !chip.cap().contains(&feature))
-    {
+    if row.feature.is_some_and(|feature| !has(chip, feature)) {
         return false;
     }
     match row.basis {
@@ -874,7 +889,6 @@ pub fn derive(chip: Chip, target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::system::Feature;
     use std::{collections::BTreeSet, path::Path};
 
     fn json(name: &str) -> serde_json::Value {
@@ -913,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn every_row_names_an_apple_clang_feature() {
+    fn every_row_names_an_apple_clang_feature_or_one_it_implies() {
         let profiles = json("apple-codegen-profiles.json");
         let known: BTreeSet<String> = profiles["profiles"]
             .as_object()
@@ -930,8 +944,9 @@ mod tests {
         for row in TABLE {
             if let Some(feature) = row.feature {
                 assert!(
-                    known.contains(feature),
-                    "{feature} is not an Apple clang feature"
+                    known.contains(feature)
+                        || Feature::ALL.iter().any(|implied| implied.name() == feature),
+                    "{feature} is neither an Apple clang feature nor implied by one"
                 );
             }
         }
@@ -1098,5 +1113,9 @@ mod tests {
         // Apple clang drops SSBS from the M4 on (PFR1.SSBS).
         assert_ne!(field(Chip::AppleM3, ID_AA64PFR1_EL1, 4), 0);
         assert_eq!(field(Chip::AppleM4, ID_AA64PFR1_EL1, 4), 0);
+        // Armv8.7 implies FEAT_PAN3 on the M4, though clang names no
+        // extension for it (MMFR1.PAN).
+        assert_eq!(field(Chip::AppleM3, ID_AA64MMFR1_EL1, 20), 2);
+        assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 20), 3);
     }
 }

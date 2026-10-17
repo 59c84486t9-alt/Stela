@@ -3038,6 +3038,44 @@ mod tests {
     }
 
     #[test]
+    fn epan_makes_pan_cover_el0_execute_only_memory_on_the_chips_with_pan3() {
+        const MSR_SCTLR_EL1_X0: u32 = 0xd518_1000;
+        const AT_S1E1RP_X2: u32 = 0xd508_7902;
+        const EPAN: u64 = 1 << 57;
+        for (chip, pan3) in [
+            (crate::machine::Chip::AppleM2, false),
+            (crate::machine::Chip::AppleM4, true),
+        ] {
+            let mut machine = machine(&[]);
+            machine.profile.chip = chip;
+            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+            // A level-1 block maps VA 0-1 GiB at BASE, privileged
+            // read/write and EL0 execute-only (AP 0b00, UXN 0).
+            let block = BASE | 1 | 1 << 10;
+            machine.host.ram[0x4000..0x4008].copy_from_slice(&block.to_le_bytes());
+            let registers = &mut machine.cpu.registers;
+            registers.set(SystemRegister::TCR_EL1, 0, 25 | 1 << 23 | 5 << 32);
+            registers.set(SystemRegister::TTBR0_EL1, 0, BASE + 0x4000);
+            machine.derived_changed();
+            machine.cpu.state.x[0] = 1 | EPAN;
+            machine.system_instruction(MSR_SCTLR_EL1_X0).unwrap();
+            // EPAN holds only where FEAT_PAN3 is implemented.
+            let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1);
+            assert_eq!(sctlr & EPAN != 0, pan3, "{chip:?}");
+            machine.cpu.pstate.pan = true;
+            machine.cpu.state.x[2] = 0x1000;
+            machine.system_instruction(AT_S1E1RP_X2).unwrap();
+            let par = machine.cpu.read(SystemRegister::PAR_EL1);
+            if pan3 {
+                // A level-1 Permission fault.
+                assert_eq!(par, 1 << 11 | 0b00_1101 << 1 | 1);
+            } else {
+                assert_eq!((par & 1, par & 0x0000_ffff_ffff_f000), (0, BASE + 0x1000));
+            }
+        }
+    }
+
+    #[test]
     fn at_s1e1rp_honors_pan_where_s1e1r_ignores_it() {
         let mut machine = machine(&[]);
         // 4 KiB, 39-bit VA from level 1 at BASE + 0x4000, whose first entry
