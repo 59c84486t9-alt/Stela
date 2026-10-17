@@ -133,6 +133,33 @@ pub struct Options {
     pub overlay: Vec<OverlayProperty>,
 }
 
+/// The defaults of `stela boot prepare` for an installed system: 8 GiB of
+/// DRAM at 0x8_0000_0000, verbose boot, `cpu0` booting with a 24 MHz
+/// generic timer, and Reduced Security with SIP enabled.
+impl Default for Options {
+    fn default() -> Self {
+        const DRAM_BASE: u64 = 0x8_0000_0000;
+        Self {
+            dram_base: DRAM_BASE,
+            dram_size: 0x2_0000_0000,
+            phys_base: DRAM_BASE,
+            load_offset: 0,
+            boot_args: "-v".into(),
+            boot_cpu: "cpu0".into(),
+            timebase_frequency: 24_000_000,
+            syscfg: BTreeMap::new(),
+            mac_addresses: BTreeMap::new(),
+            security: SecurityPolicy {
+                mode: boot_policy::SecurityMode::Reduced,
+                sip_bits: 0,
+                sepfw_load_at_boot: None,
+            },
+            osenvironment: None,
+            overlay: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct File {
     pub name: String,
