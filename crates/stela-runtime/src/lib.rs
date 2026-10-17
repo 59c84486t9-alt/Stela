@@ -21,6 +21,7 @@ pub mod dispatch;
 pub mod execution;
 mod floating;
 mod hash;
+pub mod img4;
 #[cfg(feature = "std")]
 mod json;
 pub mod mach;
