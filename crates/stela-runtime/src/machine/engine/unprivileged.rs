@@ -9,6 +9,7 @@ use super::{
 };
 use crate::machine::{
     cpu::Exception,
+    debug,
     exception::Class,
     mmu::{self, Access, MemoryType},
 };
@@ -77,6 +78,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .any(|(translation, _)| translation.memory == MemoryType::Device)
         {
             return self.alignment_fault(address, write);
+        }
+        // Watchpoints match an unprivileged access as one from EL0.
+        let watched = debug::Access {
+            address,
+            size: u64::from(operand.bytes),
+            read: !write,
+            write,
+            maintenance: false,
+            el: if privileged { self.cpu.pstate.el } else { 0 },
+        };
+        if let Some(exception) = self.watchpoint_exception(&watched, self.cpu.pc) {
+            self.take(exception);
+            return Ok(());
         }
         let mut data;
         let ram = pieces.iter().all(|&(translation, length)| {
@@ -257,6 +271,42 @@ mod tests {
         assert_eq!(machine.cpu.pc, 0x2_0200);
         let esr = machine.cpu.read(SystemRegister::ESR_EL1);
         assert_eq!((esr >> 26, esr & 0x3f), (0x25, 0b00_1101));
+        assert_eq!(
+            (
+                machine.cpu.read(SystemRegister::FAR_EL1),
+                machine.cpu.read(SystemRegister::ELR_EL1)
+            ),
+            (0x108, pc)
+        );
+
+        // A watchpoint on EL0 accesses only (PAC 0b10) catches the
+        // unprivileged load at EL1, but not the one UAO makes privileged.
+        let block = BASE | 1 | 1 << 10 | 1 << 6;
+        machine.host.ram[0x4000..0x4008].copy_from_slice(&block.to_le_bytes());
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::OSLSR_EL1, 0, 0b1000);
+        registers.set(SystemRegister::MDSCR_EL1, 0, 1 << 15 | 1 << 13);
+        registers.set(SystemRegister::DBGWVR_EL1, 0, 0x108);
+        registers.set(
+            SystemRegister::DBGWCR_EL1,
+            0,
+            0xff << 5 | 0b11 << 3 | 0b10 << 1 | 1,
+        );
+        machine.derived_changed();
+        machine.cpu.pstate.daif = 0;
+        machine.cpu.pstate.pan = false;
+        machine.cpu.pstate.uao = true;
+        machine.cpu.state.x[1] = 0;
+        machine.system_instruction(LDTR_X1_X2_8).unwrap();
+        assert_eq!(machine.cpu.state.x[1], 0x1122_3344_5566_7788);
+        machine.cpu.pstate.uao = false;
+        let pc = machine.cpu.pc;
+        machine.system_instruction(LDTR_X1_X2_8).unwrap();
+        let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+        assert_eq!(
+            (machine.cpu.pc, esr >> 26, esr & 0x3f),
+            (0x2_0200, 0x35, 0x22)
+        );
         assert_eq!(
             (
                 machine.cpu.read(SystemRegister::FAR_EL1),
