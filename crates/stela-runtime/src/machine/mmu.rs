@@ -233,6 +233,9 @@ pub struct Translation {
     pub readable: bool,
     pub writable: bool,
     pub executable: bool,
+    /// FEAT_BTI: the stage-1 leaf's GP bit for a location executable at the
+    /// requesting EL (Arm `InGuardedPage`).
+    pub guarded: bool,
     pub global: bool,
     pub asid: u16,
     /// Bytes mapped by the descriptor (page or block size).
@@ -467,6 +470,7 @@ mod tests {
             readable: true,
             writable: true,
             executable: false,
+            guarded: false,
             global: true,
             asid: 0,
             size: 1 << 14,

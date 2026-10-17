@@ -283,7 +283,11 @@ pub const TABLE: &[Row] = &[
         0,
         1,
         "FEAT_BTI",
-        engine(false, "BTYPE checking is not modeled"),
+        engine(
+            true,
+            "the engine sets PSTATE.BTYPE at block exits and checks the first \
+             instruction of a guarded-page block against it",
+        ),
     ),
     feature(
         ID_AA64PFR1_EL1,

@@ -324,6 +324,8 @@ struct Block {
 struct FetchEntry {
     page: u64,
     physical: u64,
+    /// FEAT_BTI's guarded page (Arm `InGuardedPage`).
+    guarded: bool,
     el: u8,
     generation: u64,
 }
@@ -628,6 +630,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Ok(());
             }
         };
+        // Arm `BranchTargetCheck`: the Branch Target exception (EC 0x0D)
+        // reports BTYPE in ISS and leaves it set for SPSR.
+        if self.cpu.pstate.btype != 0 && self.fetch_guarded(pc) {
+            let word = self.word(index, pc)?;
+            if !self.branch_target_compatible(word) {
+                let btype = self.cpu.pstate.btype;
+                self.take(Exception::synchronous(
+                    Class::BranchTarget,
+                    u32::from(btype),
+                    pc,
+                ));
+                return Ok(());
+            }
+        }
         let code = self.blocks[index].code;
         // SAFETY: installed by this machine since the last discard, for the
         // system-mode block ABI.
@@ -675,6 +691,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.fetch[slot] = Some(FetchEntry {
                     page,
                     physical,
+                    guarded: translation.guarded,
                     el,
                     generation: self.translation_generation,
                 });
@@ -717,6 +734,61 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.unsupported(RequirementKind::Translation(unsupported))
             )),
         }
+    }
+
+    /// Whether the page of `pc`, which executes at the current EL, is guarded
+    /// (Arm `InGuardedPage`).
+    fn fetch_guarded(&mut self, pc: u64) -> bool {
+        if self.fetch_physical(pc).is_err() {
+            return false;
+        }
+        let page = pc & !(FETCH_PAGE - 1);
+        let slot = (page / FETCH_PAGE) as usize % FETCH_CACHE;
+        self.fetch[slot].is_some_and(|entry| entry.page == page && entry.guarded)
+    }
+
+    /// FEAT_BTI's BTYPE after an indirect branch at `pc` through `register`
+    /// (Arm BR, BLR, BRA* and BLRA*): BLR forms give 0b10; BR forms give
+    /// 0b01 through X16 or X17 or from an unguarded page, else 0b11.
+    fn indirect_branch_type(&mut self, pc: u64, register: u8, link: bool) -> u8 {
+        if link {
+            0b10
+        } else if register == 16 || register == 17 || !self.fetch_guarded(pc) {
+            0b01
+        } else {
+            0b11
+        }
+    }
+
+    /// Whether the first instruction of a guarded-page target is compatible
+    /// with PSTATE.BTYPE (Arm `BTypeCompatible_BTI`, `BTypeCompatible_PAC`):
+    /// BTI with a matching target, PACIASP and PACIBSP unless BTYPE is 0b11
+    /// and SCTLR_ELx.BT0 (EL0) or BT1 forbids it, BRK and HLT.
+    fn branch_target_compatible(&self, word: u32) -> bool {
+        const PACIASP: u32 = 0xd503_233f;
+        const PACIBSP: u32 = 0xd503_237f;
+        const SCTLR_BT0: u64 = 1 << 35;
+        const SCTLR_BT1: u64 = 1 << 36;
+        let btype = self.cpu.pstate.btype;
+        if word & 0xffff_ff3f == 0xd503_241f {
+            return match (word >> 6) & 3 {
+                0b00 => btype == 0,
+                0b01 => btype != 0b11,
+                0b10 => btype != 0b10,
+                _ => true,
+            };
+        }
+        if word == PACIASP || word == PACIBSP {
+            let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+            let forbid = if self.cpu.pstate.el == 0 {
+                SCTLR_BT0
+            } else {
+                SCTLR_BT1
+            };
+            return btype != 0b11 || sctlr & forbid == 0;
+        }
+        // BRK and HLT.
+        matches!(word & 0xffe0_001f, 0xd420_0000 | 0xd440_0000)
     }
 
     /// The EL an FP/SIMD access traps to, if it traps (Arm
@@ -937,7 +1009,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn exit(&mut self, index: usize, next_pc: u64, kind: u64) -> Step {
-        match ExitKind::try_from(kind) {
+        let kind = ExitKind::try_from(kind);
+        // BTYPE belongs to the block's first instruction until it completes;
+        // a branch ending the block gives the next one (Arm `BTypeNext`).
+        if next_pc != self.blocks[index].pc {
+            self.cpu.pstate.btype = 0;
+        }
+        match kind {
             Ok(
                 ExitKind::Fallthrough
                 | ExitKind::Direct
@@ -945,6 +1023,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 | ExitKind::Call
                 | ExitKind::Return,
             ) => {
+                self.cpu.pstate.btype = self.native_branch_type(index, kind)?;
                 self.cpu.pc = next_pc;
                 Ok(())
             }
@@ -964,8 +1043,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 };
                 match crate::floating::complete(&mut self.cpu.state, &operation) {
                     Ok(()) => {
-                        self.cpu.pc = next_pc + INSTRUCTION;
-                        Ok(())
+                        self.cpu.pc = next_pc;
+                        self.next()
                     }
                     Err(_) => Err(self.unsupported(RequirementKind::Instruction {
                         word,
@@ -988,6 +1067,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             _ => Err(self.unsupported(RequirementKind::Native("unknown block exit kind"))),
         }
+    }
+
+    /// BTYPE after a block that a native branch or fallthrough ended: BR and
+    /// BLR set it, every other instruction clears it.
+    fn native_branch_type(&mut self, index: usize, kind: Result<ExitKind, ()>) -> Result<u8, Stop> {
+        const REGISTER_BRANCH: u32 = 0xffff_fc1f;
+        const BR: u32 = 0xd61f_0000;
+        const BLR: u32 = 0xd63f_0000;
+        if !matches!(kind, Ok(ExitKind::Indirect | ExitKind::Call)) {
+            return Ok(0);
+        }
+        let Some(&(terminal, _)) = self.blocks[index].source_map.last() else {
+            return Ok(0);
+        };
+        let word = self.word(index, terminal)?;
+        let register = ((word >> 5) & 31) as u8;
+        Ok(match word & REGISTER_BRANCH {
+            BR => self.indirect_branch_type(terminal, register, false),
+            BLR => self.indirect_branch_type(terminal, register, true),
+            _ => 0,
+        })
     }
 
     /// Whether the current regime's SCTLR enables a PAC key (EnIA 31, EnIB 30,
@@ -1091,6 +1191,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             None,
         ) {
             Ok((next, _)) => {
+                self.cpu.pstate.btype = self.pointer_branch_type(pc, instruction.operation);
                 self.cpu.pc = next.0;
                 Ok(())
             }
@@ -1108,6 +1209,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// BTYPE after a completed PAC instruction at `pc`: BRA* and BLRA* set it
+    /// as BR and BLR do, every other form clears it.
+    fn pointer_branch_type(&mut self, pc: u64, operation: PointerAuthenticationOperation) -> u8 {
+        match operation {
+            PointerAuthenticationOperation::Branch { target, link, .. } => {
+                self.indirect_branch_type(pc, target, link)
+            }
+            _ => 0,
+        }
+    }
+
     /// With the key's SCTLR enable clear, AddPAC and Auth return the pointer
     /// unchanged (Arm ARM `AddPAC`, `Auth`).
     fn disabled_pointer_authentication(
@@ -1117,6 +1229,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) -> Step {
         use PointerAuthenticationOperation as Operation;
         let next = instruction.next_pc.0;
+        self.cpu.pstate.btype = self.pointer_branch_type(self.cpu.pc, instruction.operation);
         match instruction.operation {
             Operation::Sign1716 { .. }
             | Operation::Authenticate1716 { .. }
@@ -1211,8 +1324,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         );
         match result {
             Ok(_) => {
-                self.cpu.pc = pc + INSTRUCTION;
-                Ok(())
+                self.cpu.pc = pc;
+                self.next()
             }
             Err(pauth::memory::Fault::Read {
                 address,
@@ -1249,6 +1362,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn native_fault(&mut self, index: usize, fault: NativeFault) -> Step {
         let pc = self.faulting_pc(index, fault.offset);
         self.cpu.pc = pc;
+        if pc != self.blocks[index].pc {
+            self.cpu.pstate.btype = 0;
+        }
         match fault.cause {
             FaultCause::Guest(guest) => self.data_abort(fault.address, guest, fault.write, false),
             FaultCause::Device { physical } => {
@@ -1420,7 +1536,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 "device access by other than a single-register scalar integer transfer".into(),
             ));
         }
-        self.cpu.pc = pc + INSTRUCTION;
+        self.cpu.pc = pc;
+        self.next()?;
         match self.devices.take_reset() {
             Some(reason) => Err(Stop::Reset(reason)),
             None => Ok(()),
@@ -1440,8 +1557,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
+    /// Complete the current instruction: the PC advances and BTYPE clears.
     fn next(&mut self) -> Step {
         self.cpu.pc += INSTRUCTION;
+        self.cpu.pstate.btype = 0;
         Ok(())
     }
 
@@ -2165,6 +2284,122 @@ mod tests {
             .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
         machine.derived_changed();
         assert_eq!(machine.system_instruction(0xd503_207f), Err(Stop::Idle));
+    }
+
+    /// Maps VA 0-1 GiB to BASE, EL1-only read/write and executable, with the
+    /// stage-1 GP bit when `guarded`.
+    fn guarded_machine(guarded: bool) -> Machine<FakeHost, NoDevices> {
+        let mut machine = machine(&[]);
+        let block = BASE | 1 | 1 << 10 | u64::from(guarded) << 50;
+        machine.host.ram[0x4000..0x4008].copy_from_slice(&block.to_le_bytes());
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::TCR_EL1, 0, 25 | 1 << 23 | 5 << 32);
+        registers.set(SystemRegister::TTBR0_EL1, 0, BASE + 0x4000);
+        registers.set(SystemRegister::MAIR_EL1, 0, 0xff);
+        registers.set(SystemRegister::SCTLR_EL1, 0, 1);
+        registers.set(SystemRegister::VBAR_EL1, 0, 0x2_0000);
+        machine.derived_changed();
+        machine
+    }
+
+    #[test]
+    fn branch_target_compatibility_follows_bti_paciasp_brk_and_hlt() {
+        const BTI: [u32; 4] = [0xd503_241f, 0xd503_245f, 0xd503_249f, 0xd503_24df];
+        const PACIASP: u32 = 0xd503_233f;
+        let mut machine = machine(&[]);
+        // Rows BTYPE 01, 10, 11; columns BTI, BTI c, BTI j, BTI jc.
+        let expected = [
+            [false, true, true, true],
+            [false, true, false, true],
+            [false, false, true, true],
+        ];
+        for (btype, row) in (1..=3).zip(expected) {
+            machine.cpu.pstate.btype = btype;
+            for (word, compatible) in BTI.into_iter().zip(row) {
+                assert_eq!(
+                    machine.branch_target_compatible(word),
+                    compatible,
+                    "{word:#x} {btype}"
+                );
+            }
+            assert!(machine.branch_target_compatible(PACIASP));
+            assert!(machine.branch_target_compatible(0xd420_0000)); // brk #0
+            assert!(machine.branch_target_compatible(0xd440_0000)); // hlt #0
+            assert!(!machine.branch_target_compatible(0xd503_201f)); // nop
+        }
+        // SCTLR_EL1.BT1 makes PACIASP incompatible with BTYPE 0b11 at EL1.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, 1 << 36);
+        machine.derived_changed();
+        assert!(!machine.branch_target_compatible(PACIASP));
+        machine.cpu.pstate.btype = 0b01;
+        assert!(machine.branch_target_compatible(PACIASP));
+        // At EL0 SCTLR_EL1.BT0 decides instead.
+        machine.cpu.pstate.btype = 0b11;
+        machine.cpu.pstate.el = 0;
+        assert!(machine.branch_target_compatible(PACIASP));
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, 1 << 35);
+        machine.derived_changed();
+        assert!(!machine.branch_target_compatible(PACIASP));
+    }
+
+    #[test]
+    fn indirect_branches_set_btype_from_their_page_and_register() {
+        let mut guarded = guarded_machine(true);
+        assert!(guarded.fetch_guarded(0x1000));
+        assert_eq!(guarded.indirect_branch_type(0x1000, 5, false), 0b11);
+        assert_eq!(guarded.indirect_branch_type(0x1000, 16, false), 0b01);
+        assert_eq!(guarded.indirect_branch_type(0x1000, 17, false), 0b01);
+        assert_eq!(guarded.indirect_branch_type(0x1000, 5, true), 0b10);
+        let mut unguarded = guarded_machine(false);
+        assert!(!unguarded.fetch_guarded(0x1000));
+        assert_eq!(unguarded.indirect_branch_type(0x1000, 5, false), 0b01);
+    }
+
+    #[test]
+    fn native_branch_exits_set_btype_from_the_terminal_branch() {
+        const BR_X5: u32 = 0xd61f_00a0;
+        const BLR_X5: u32 = 0xd63f_00a0;
+        const BL: u32 = 0x9400_0010;
+        for (word, kind, btype) in [
+            (BR_X5, ExitKind::Indirect, 0b11),
+            (BLR_X5, ExitKind::Call, 0b10),
+            (BL, ExitKind::Call, 0),
+        ] {
+            let mut machine = guarded_machine(true);
+            machine.host.ram[0x1000..0x1004].copy_from_slice(&word.to_le_bytes());
+            let Ok(Fetched::Block(index)) = machine.fetch_block(0x1000) else {
+                panic!("{word:#x} did not compile");
+            };
+            machine.cpu.pstate.btype = 0b01;
+            machine.exit(index, 0x3000, kind as u64).unwrap();
+            assert_eq!(
+                (machine.cpu.pc, machine.cpu.pstate.btype),
+                (0x3000, btype),
+                "{word:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_incompatible_guarded_target_takes_the_branch_target_exception() {
+        let mut machine = guarded_machine(true);
+        machine.host.ram[0x1000..0x1004].copy_from_slice(&0xd503_201fu32.to_le_bytes()); // nop
+        machine.cpu.pstate.daif = 0;
+        machine.cpu.pstate.btype = 0b11;
+        machine.cpu.pc = 0x1000;
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.pc, 0x2_0200);
+        let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+        assert_eq!((esr >> 26, esr & 0x1ff_ffff), (0x0d, 0b11));
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), 0x1000);
+        assert_eq!((machine.cpu.read(SystemRegister::SPSR_EL1) >> 10) & 3, 0b11);
+        assert_eq!(machine.cpu.pstate.btype, 0);
     }
 
     #[test]

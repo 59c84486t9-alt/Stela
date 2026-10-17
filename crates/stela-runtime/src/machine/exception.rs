@@ -19,6 +19,9 @@ pub struct Pstate {
     pub tco: bool,
     /// The Illegal Execution state bit: the next instruction takes EC 0x0E.
     pub il: bool,
+    /// FEAT_BTI's branch type, which the next instruction is checked against
+    /// in a guarded page.
+    pub btype: u8,
     /// Apple GXF: executing at the guarded level beside `el` (GL1 or GL2).
     /// SPSR does not encode it; the GL bank's ASPSR does.
     pub guarded: bool,
@@ -38,6 +41,7 @@ const SPSR_DIT: u64 = 1 << 24;
 const SPSR_TCO: u64 = 1 << 25;
 const SPSR_SSBS: u64 = 1 << 12;
 const SPSR_IL: u64 = 1 << 20;
+const SPSR_BTYPE_SHIFT: u32 = 10;
 const NZCV_MASK: u64 = 0xf000_0000;
 
 impl Pstate {
@@ -53,6 +57,7 @@ impl Pstate {
             ssbs: false,
             tco: false,
             il: false,
+            btype: 0,
             guarded: false,
         }
     }
@@ -69,6 +74,7 @@ impl Pstate {
             | if self.tco { SPSR_TCO } else { 0 }
             | if self.ssbs { SPSR_SSBS } else { 0 }
             | if self.il { SPSR_IL } else { 0 }
+            | u64::from(self.btype) << SPSR_BTYPE_SHIFT
     }
 }
 
@@ -98,9 +104,9 @@ pub fn spsr_target(spsr: u64) -> Result<(u8, bool), IllegalReturn> {
 }
 
 /// PSTATE and NZCV after an exception return to `spsr` from `current` (Arm
-/// `SetPSTATEFromPSR`). A legal return restores EL, SPSel, IL, UAO, DIT and
-/// SSBS. An illegal one keeps EL and SPSel and sets IL; UAO, DIT and SSBS are
-/// then ARBITRARY and Stela takes them from SPSR. Both restore NZCV, PAN and
+/// `SetPSTATEFromPSR`). A legal return restores EL, SPSel, IL, UAO, DIT,
+/// SSBS and BTYPE. An illegal one keeps EL and SPSel and sets IL; UAO, DIT,
+/// SSBS and BTYPE are then ARBITRARY and Stela takes them from SPSR. Both restore NZCV, PAN and
 /// DAIF. PSTATE.SS stays 0 because MDSCR_EL1.SS is never set; TCO is untouched
 /// because the profile has no MTE.
 pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
@@ -119,6 +125,7 @@ pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
             ssbs: spsr & SPSR_SSBS != 0,
             tco: current.tco,
             il,
+            btype: ((spsr >> SPSR_BTYPE_SHIFT) & 3) as u8,
             guarded: illegal && current.guarded,
         },
         (spsr & NZCV_MASK) as u32,
@@ -138,6 +145,7 @@ pub enum Class {
     WaitTrap = 0x01,
     FloatingPointAccess = 0x07,
     PointerAuthenticationTrap = 0x09,
+    BranchTarget = 0x0d,
     IllegalExecution = 0x0e,
     SupervisorCall = 0x15,
     HypervisorCall = 0x16,
@@ -198,7 +206,7 @@ const SCTLR_SPAN: u64 = 1 << 23;
 const SCTLR_DSSBS: u64 = 1 << 44;
 
 /// PSTATE after taking an exception to `target` (Arm
-/// `AArch64_TakeException`): IL and UAO clear, the target's SCTLR.SPAN clear sets PAN at EL1,
+/// `AArch64_TakeException`): IL, UAO and BTYPE clear, the target's SCTLR.SPAN clear sets PAN at EL1,
 /// and at EL2 while EL0 runs in the host (HCR_EL2.TGE); DSSBS gives SSBS.
 /// TCO is untouched because the profile has no MTE. An exception taken at
 /// the guarded level stays there (m1n1 `gxf_asm.S` handles GL exceptions at
@@ -215,6 +223,7 @@ pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool) -> Psta
         ssbs: sctlr & SCTLR_DSSBS != 0,
         tco: from.tco,
         il: false,
+        btype: 0,
         guarded: from.guarded,
     }
 }
@@ -236,6 +245,7 @@ mod tests {
                     dit: daif & 2 != 0,
                     ssbs: daif & 4 != 0,
                     il: daif == 5,
+                    btype: daif & 3,
                     ..Pstate::reset(2)
                 };
                 let spsr = state.to_spsr(0xa000_0000);
@@ -301,5 +311,12 @@ mod tests {
         // At EL2, SPAN only applies while EL0 is in the host.
         assert!(!entry_pstate(user, 0, 2, false).pan);
         assert!(entry_pstate(user, 0, 2, true).pan);
+        // BTYPE is saved in SPSR and clear in the handler.
+        let branched = Pstate {
+            btype: 0b10,
+            ..user
+        };
+        assert_eq!((branched.to_spsr(0) >> 10) & 3, 0b10);
+        assert_eq!(entry_pstate(branched, 0, 1, false).btype, 0);
     }
 }

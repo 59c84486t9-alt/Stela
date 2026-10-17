@@ -45,6 +45,8 @@ const AP_EL0: u64 = 1 << 6;
 const AP_READ_ONLY: u64 = 1 << 7;
 const ACCESS_FLAG: u64 = 1 << 10;
 const NOT_GLOBAL: u64 = 1 << 11;
+/// FEAT_BTI's Guarded Page bit of a stage-1 leaf.
+const GUARDED: u64 = 1 << 50;
 const SHAREABILITY_SHIFT: u64 = 8;
 const PXN: u64 = 1 << 53;
 /// UXN in a two-privilege regime, XN in EL2.
@@ -199,6 +201,7 @@ fn disabled(controls: &Controls, address: u64, access: Access) -> (Outcome, u8) 
         readable: true,
         writable: true,
         executable: true,
+        guarded: false,
         global: true,
         asid: 0,
         size: 1 << 12,
@@ -358,6 +361,7 @@ fn walk_enabled(
             readable: rights.0,
             writable: rights.1,
             executable: rights.2,
+            guarded: descriptor & GUARDED != 0 && rights.2,
             global,
             asid: if global { 0 } else { asid(controls) },
             size,

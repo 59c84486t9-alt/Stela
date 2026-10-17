@@ -404,7 +404,12 @@ impl Cpu {
         if self.pstate.el == 0 || self.pstate.guarded || !self.guarded_enabled() {
             return Err(GuardedRefusal::Enter);
         }
-        let from = self.pstate;
+        // GENTER completes, returning to the next instruction, so the saved
+        // state and the guarded level both start with BTYPE clear.
+        let from = Pstate {
+            btype: 0,
+            ..self.pstate
+        };
         let level = usize::from(from.el) - 1;
         let spsr = from.to_spsr(self.state.nzcv);
         let bank = &mut self.apple.guarded[level];
