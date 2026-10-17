@@ -24,6 +24,7 @@ mod hash;
 pub mod img4;
 #[cfg(feature = "std")]
 mod json;
+pub mod lzfse;
 pub mod mach;
 pub mod machine;
 pub mod memory;

@@ -1600,6 +1600,7 @@ dependencies = [
  "anyhow",
  "hex",
  "libc",
+ "lzfse_rust",
  "miniz_oxide",
  "serde",
  "serde_json",

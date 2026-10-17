@@ -1,0 +1,956 @@
+//! LZFSE and LZVN decoding in `no_std`, for the compressed payloads of
+//! Image4 files (kernel collections, DeviceTrees, firmware).
+//!
+//! A stream is a sequence of blocks, each starting with a magic: `bvx-`
+//! (stored bytes), `bvxn` (LZVN), `bvx1` (LZFSE with plain frequency
+//! tables), `bvx2` (LZFSE with packed frequency tables), and `bvx$` ending
+//! the stream. LZFSE blocks carry literals and literal/match/distance
+//! triples, each coded with finite-state entropy and read backwards from the
+//! end of their payload. This follows Apple's reference decoder
+//! ([lzfse](https://github.com/lzfse/lzfse) commit `e634ca5`,
+//! `lzfse_decode_base.c`, `lzfse_fse.[ch]`, `lzvn_decode_base.c` and
+//! `lzfse_internal.h`), decoding a whole stream into one buffer.
+//!
+//! Decoding is stricter than the reference where the reference only bounds
+//! writes to its output buffer: every block must produce exactly its
+//! declared raw size, every literal and match must stay inside its block's
+//! literals and the bytes decoded so far, and nothing may follow `bvx$`.
+use alloc::vec::Vec;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LzfseError {
+    /// The stream ends inside a block or before `bvx$`.
+    Truncated,
+    Malformed(&'static str),
+    /// Decoding would produce more than the caller's limit.
+    Limit,
+}
+
+impl core::fmt::Display for LzfseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Truncated => write!(f, "truncated LZFSE stream"),
+            Self::Malformed(what) => write!(f, "malformed LZFSE stream: {what}"),
+            Self::Limit => write!(f, "LZFSE output exceeds the configured limit"),
+        }
+    }
+}
+
+pub type Result<T> = core::result::Result<T, LzfseError>;
+
+const END_OF_STREAM: u32 = u32::from_le_bytes(*b"bvx$");
+const UNCOMPRESSED: u32 = u32::from_le_bytes(*b"bvx-");
+const COMPRESSED_V1: u32 = u32::from_le_bytes(*b"bvx1");
+const COMPRESSED_V2: u32 = u32::from_le_bytes(*b"bvx2");
+const COMPRESSED_LZVN: u32 = u32::from_le_bytes(*b"bvxn");
+
+/// Whether `bytes` starts with an LZFSE block magic.
+pub fn is_lzfse(bytes: &[u8]) -> bool {
+    bytes.get(..4).is_some_and(|magic| {
+        [UNCOMPRESSED, COMPRESSED_V1, COMPRESSED_V2, COMPRESSED_LZVN]
+            .contains(&u32::from_le_bytes(magic.try_into().unwrap()))
+    })
+}
+
+const L_SYMBOLS: usize = 20;
+const M_SYMBOLS: usize = 20;
+const D_SYMBOLS: usize = 64;
+const LITERAL_SYMBOLS: usize = 256;
+const L_STATES: usize = 64;
+const M_STATES: usize = 64;
+const D_STATES: usize = 256;
+const LITERAL_STATES: usize = 1024;
+const MATCHES_PER_BLOCK: u32 = 10_000;
+const LITERALS_PER_BLOCK: u32 = 4 * MATCHES_PER_BLOCK;
+/// `sizeof(lzfse_compressed_block_header_v1)`: 770 bytes of fields padded to
+/// the structure's 4-byte alignment.
+const V1_HEADER_BYTES: usize = 772;
+/// `offsetof(lzfse_compressed_block_header_v2, freq)`.
+const V2_FREQ_OFFSET: usize = 32;
+
+const L_EXTRA_BITS: [u8; L_SYMBOLS] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 5, 8];
+const L_BASE_VALUE: [i32; L_SYMBOLS] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 28, 60,
+];
+const M_EXTRA_BITS: [u8; M_SYMBOLS] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 8, 11];
+const M_BASE_VALUE: [i32; M_SYMBOLS] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 56, 312,
+];
+const D_EXTRA_BITS: [u8; D_SYMBOLS] = [
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7,
+    8, 8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11, 11, 12, 12, 12, 12, 13, 13, 13, 13, 14, 14,
+    14, 14, 15, 15, 15, 15,
+];
+const D_BASE_VALUE: [i32; D_SYMBOLS] = [
+    0, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 28, 36, 44, 52, 60, 76, 92, 108, 124, 156, 188, 220,
+    252, 316, 380, 444, 508, 636, 764, 892, 1020, 1276, 1532, 1788, 2044, 2556, 3068, 3580, 4092,
+    5116, 6140, 7164, 8188, 10236, 12284, 14332, 16380, 20476, 24572, 28668, 32764, 40956, 49148,
+    57340, 65532, 81916, 98300, 114684, 131068, 163836, 196604, 229372,
+];
+
+fn u16_at(bytes: &[u8], at: usize) -> Result<u16> {
+    bytes
+        .get(at..at + 2)
+        .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+        .ok_or(LzfseError::Truncated)
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
+    bytes
+        .get(at..at + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .ok_or(LzfseError::Truncated)
+}
+
+fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
+    bytes
+        .get(at..at + 8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        .ok_or(LzfseError::Truncated)
+}
+
+/// The decoded output, bounded by the caller's limit.
+struct Output {
+    bytes: Vec<u8>,
+    limit: usize,
+    /// Where the current block must end.
+    block_end: usize,
+}
+
+impl Output {
+    fn begin_block(&mut self, raw_bytes: u32) -> Result<()> {
+        let end = self
+            .bytes
+            .len()
+            .checked_add(raw_bytes as usize)
+            .ok_or(LzfseError::Limit)?;
+        if end > self.limit {
+            return Err(LzfseError::Limit);
+        }
+        self.bytes.reserve(raw_bytes as usize);
+        self.block_end = end;
+        Ok(())
+    }
+
+    fn room(&self, bytes: usize) -> Result<()> {
+        if self.bytes.len() + bytes > self.block_end {
+            return Err(LzfseError::Malformed("block decodes past its raw size"));
+        }
+        Ok(())
+    }
+
+    fn literals(&mut self, literals: &[u8]) -> Result<()> {
+        self.room(literals.len())?;
+        self.bytes.extend_from_slice(literals);
+        Ok(())
+    }
+
+    /// Copy `length` bytes from `distance` back, byte by byte so that
+    /// overlapping matches repeat their pattern.
+    fn copy_match(&mut self, distance: usize, length: usize) -> Result<()> {
+        if distance == 0 || distance > self.bytes.len() {
+            return Err(LzfseError::Malformed("match distance"));
+        }
+        self.room(length)?;
+        let start = self.bytes.len() - distance;
+        if distance >= length {
+            self.bytes.extend_from_within(start..start + length);
+        } else {
+            for i in 0..length {
+                let byte = self.bytes[start + i];
+                self.bytes.push(byte);
+            }
+        }
+        Ok(())
+    }
+
+    fn end_block(&self) -> Result<()> {
+        if self.bytes.len() != self.block_end {
+            return Err(LzfseError::Malformed("block decodes short of its raw size"));
+        }
+        Ok(())
+    }
+}
+
+/// Decode a whole LZFSE stream, producing at most `limit` bytes.
+pub fn decode(src: &[u8], limit: usize) -> Result<Vec<u8>> {
+    let mut out = Output {
+        bytes: Vec::new(),
+        limit,
+        block_end: 0,
+    };
+    let mut at = 0;
+    loop {
+        let magic = u32_at(src, at)?;
+        match magic {
+            END_OF_STREAM => {
+                if at + 4 != src.len() {
+                    return Err(LzfseError::Malformed("bytes follow the end of stream"));
+                }
+                return Ok(out.bytes);
+            }
+            UNCOMPRESSED => {
+                let raw = u32_at(src, at + 4)?;
+                out.begin_block(raw)?;
+                let start = at + 8;
+                let bytes = src
+                    .get(start..start + raw as usize)
+                    .ok_or(LzfseError::Truncated)?;
+                out.literals(bytes)?;
+                at = start + raw as usize;
+            }
+            COMPRESSED_LZVN => {
+                let raw = u32_at(src, at + 4)?;
+                let payload = u32_at(src, at + 8)? as usize;
+                let start = at + 12;
+                let bytes = src
+                    .get(start..start + payload)
+                    .ok_or(LzfseError::Truncated)?;
+                out.begin_block(raw)?;
+                lzvn(bytes, &mut out)?;
+                at = start + payload;
+            }
+            COMPRESSED_V1 | COMPRESSED_V2 => {
+                let (header, header_bytes) = if magic == COMPRESSED_V1 {
+                    (
+                        Header::v1(src.get(at..).ok_or(LzfseError::Truncated)?)?,
+                        V1_HEADER_BYTES,
+                    )
+                } else {
+                    Header::v2(src.get(at..).ok_or(LzfseError::Truncated)?)?
+                };
+                header.check()?;
+                let payload_end = at
+                    .checked_add(header_bytes)
+                    .and_then(|n| n.checked_add(header.n_literal_payload_bytes as usize))
+                    .and_then(|n| n.checked_add(header.n_lmd_payload_bytes as usize))
+                    .ok_or(LzfseError::Truncated)?;
+                if payload_end > src.len() {
+                    return Err(LzfseError::Truncated);
+                }
+                out.begin_block(header.n_raw_bytes)?;
+                block(src, at + header_bytes, &header, &mut out)?;
+                at = payload_end;
+            }
+            _ => return Err(LzfseError::Malformed("unknown block magic")),
+        }
+        out.end_block()?;
+    }
+}
+
+/// `lzfse_compressed_block_header_v1`, the form both LZFSE block kinds
+/// decode to.
+struct Header {
+    n_raw_bytes: u32,
+    n_literals: u32,
+    n_matches: u32,
+    n_literal_payload_bytes: u32,
+    n_lmd_payload_bytes: u32,
+    literal_bits: i32,
+    literal_state: [u16; 4],
+    lmd_bits: i32,
+    l_state: u16,
+    m_state: u16,
+    d_state: u16,
+    l_freq: [u16; L_SYMBOLS],
+    m_freq: [u16; M_SYMBOLS],
+    d_freq: [u16; D_SYMBOLS],
+    literal_freq: [u16; LITERAL_SYMBOLS],
+}
+
+/// One frequency of a packed `bvx2` table from the low bits of `bits`, and
+/// how many bits it used (`lzfse_decode_v1_freq_value`).
+fn packed_frequency(bits: u32) -> (u16, u32) {
+    const NBITS: [u8; 32] = [
+        2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3, 2, 14, 2, 3, 2, 5, 2, 3, 2, 8, 2, 3, 2, 5, 2, 3,
+        2, 14,
+    ];
+    const VALUE: [u8; 32] = [
+        0, 2, 1, 4, 0, 3, 1, 0, 0, 2, 1, 5, 0, 3, 1, 0, 0, 2, 1, 6, 0, 3, 1, 0, 0, 2, 1, 7, 0, 3,
+        1, 0,
+    ];
+    let low = (bits & 31) as usize;
+    match NBITS[low] {
+        8 => (8 + ((bits >> 4) & 0xf) as u16, 8),
+        14 => (24 + ((bits >> 4) & 0x3ff) as u16, 14),
+        n => (u16::from(VALUE[low]), u32::from(n)),
+    }
+}
+
+fn field(value: u64, offset: u32, bits: u32) -> u32 {
+    ((value >> offset) & ((1u64 << bits) - 1)) as u32
+}
+
+impl Header {
+    fn v1(block: &[u8]) -> Result<Self> {
+        if block.len() < V1_HEADER_BYTES {
+            return Err(LzfseError::Truncated);
+        }
+        let mut header = Self {
+            n_raw_bytes: u32_at(block, 4)?,
+            n_literals: u32_at(block, 12)?,
+            n_matches: u32_at(block, 16)?,
+            n_literal_payload_bytes: u32_at(block, 20)?,
+            n_lmd_payload_bytes: u32_at(block, 24)?,
+            literal_bits: u32_at(block, 28)? as i32,
+            literal_state: [
+                u16_at(block, 32)?,
+                u16_at(block, 34)?,
+                u16_at(block, 36)?,
+                u16_at(block, 38)?,
+            ],
+            lmd_bits: u32_at(block, 40)? as i32,
+            l_state: u16_at(block, 44)?,
+            m_state: u16_at(block, 46)?,
+            d_state: u16_at(block, 48)?,
+            l_freq: [0; L_SYMBOLS],
+            m_freq: [0; M_SYMBOLS],
+            d_freq: [0; D_SYMBOLS],
+            literal_freq: [0; LITERAL_SYMBOLS],
+        };
+        let mut at = 50;
+        for frequency in header
+            .l_freq
+            .iter_mut()
+            .chain(&mut header.m_freq)
+            .chain(&mut header.d_freq)
+            .chain(&mut header.literal_freq)
+        {
+            *frequency = u16_at(block, at)?;
+            at += 2;
+        }
+        Ok(header)
+    }
+
+    /// The header of a `bvx2` block and its size.
+    fn v2(block: &[u8]) -> Result<(Self, usize)> {
+        let v0 = u64_at(block, 8)?;
+        let v1 = u64_at(block, 16)?;
+        let v2 = u64_at(block, 24)?;
+        let header_bytes = field(v2, 0, 32) as usize;
+        if header_bytes < V2_FREQ_OFFSET {
+            return Err(LzfseError::Malformed("bvx2 header size"));
+        }
+        let tables = block
+            .get(V2_FREQ_OFFSET..header_bytes)
+            .ok_or(LzfseError::Truncated)?;
+        let mut header = Self {
+            n_raw_bytes: u32_at(block, 4)?,
+            n_literals: field(v0, 0, 20),
+            n_literal_payload_bytes: field(v0, 20, 20),
+            n_matches: field(v0, 40, 20),
+            literal_bits: field(v0, 60, 3) as i32 - 7,
+            literal_state: [
+                field(v1, 0, 10) as u16,
+                field(v1, 10, 10) as u16,
+                field(v1, 20, 10) as u16,
+                field(v1, 30, 10) as u16,
+            ],
+            n_lmd_payload_bytes: field(v1, 40, 20),
+            lmd_bits: field(v1, 60, 3) as i32 - 7,
+            l_state: field(v2, 32, 10) as u16,
+            m_state: field(v2, 42, 10) as u16,
+            d_state: field(v2, 52, 10) as u16,
+            l_freq: [0; L_SYMBOLS],
+            m_freq: [0; M_SYMBOLS],
+            d_freq: [0; D_SYMBOLS],
+            literal_freq: [0; LITERAL_SYMBOLS],
+        };
+        // An empty table area means every frequency is zero.
+        if !tables.is_empty() {
+            let mut source = tables.iter();
+            let mut accum = 0u32;
+            let mut accum_bits = 0u32;
+            for frequency in header
+                .l_freq
+                .iter_mut()
+                .chain(&mut header.m_freq)
+                .chain(&mut header.d_freq)
+                .chain(&mut header.literal_freq)
+            {
+                while accum_bits + 8 <= 32 {
+                    let Some(&byte) = source.next() else { break };
+                    accum |= u32::from(byte) << accum_bits;
+                    accum_bits += 8;
+                }
+                let (value, bits) = packed_frequency(accum);
+                if bits > accum_bits {
+                    return Err(LzfseError::Malformed("bvx2 frequency tables"));
+                }
+                *frequency = value;
+                accum >>= bits;
+                accum_bits -= bits;
+            }
+            if accum_bits >= 8 || source.next().is_some() {
+                return Err(LzfseError::Malformed("bvx2 frequency tables"));
+            }
+        }
+        Ok((header, header_bytes))
+    }
+
+    /// `lzfse_check_block_header_v1`.
+    fn check(&self) -> Result<()> {
+        let sums = |freq: &[u16], states: usize| {
+            freq.iter().map(|&f| usize::from(f)).sum::<usize>() <= states
+        };
+        if self.n_literals > LITERALS_PER_BLOCK
+            || self.n_matches > MATCHES_PER_BLOCK
+            || self
+                .literal_state
+                .iter()
+                .any(|&s| usize::from(s) >= LITERAL_STATES)
+            || usize::from(self.l_state) >= L_STATES
+            || usize::from(self.m_state) >= M_STATES
+            || usize::from(self.d_state) >= D_STATES
+            || !sums(&self.l_freq, L_STATES)
+            || !sums(&self.m_freq, M_STATES)
+            || !sums(&self.d_freq, D_STATES)
+            || !sums(&self.literal_freq, LITERAL_STATES)
+        {
+            return Err(LzfseError::Malformed("LZFSE block header"));
+        }
+        Ok(())
+    }
+}
+
+/// A finite-state-entropy bit stream read backwards from the end of its
+/// payload; the accumulator holds 56 to 63 bits after each refill
+/// (`fse_in_stream64`).
+struct BitStream<'a> {
+    src: &'a [u8],
+    /// The lowest byte not yet loaded.
+    position: usize,
+    /// The lowest byte the stream may load.
+    start: usize,
+    accum: u64,
+    accum_bits: u32,
+}
+
+impl<'a> BitStream<'a> {
+    /// `fse_in_checked_init64`: `bits` (in -7..=0) is the number of unused
+    /// bits in the final byte, as a negative count.
+    fn new(src: &'a [u8], start: usize, end: usize, bits: i32) -> Result<Self> {
+        let (take, total) = match bits {
+            0 => (7usize, 56i32),
+            _ => (8, 64 + bits),
+        };
+        if !(56..64).contains(&total) || end < start + take {
+            return Err(LzfseError::Malformed("FSE stream start"));
+        }
+        let position = end - take;
+        let mut word = [0u8; 8];
+        word[..take].copy_from_slice(&src[position..end]);
+        let accum = u64::from_le_bytes(word);
+        let accum_bits = total as u32;
+        if accum >> accum_bits != 0 {
+            return Err(LzfseError::Malformed("FSE stream start"));
+        }
+        Ok(Self {
+            src,
+            position,
+            start,
+            accum,
+            accum_bits,
+        })
+    }
+
+    /// `fse_in_checked_flush64`.
+    fn refill(&mut self) -> Result<()> {
+        let bits = (63 - self.accum_bits) & !7;
+        let bytes = (bits / 8) as usize;
+        if self.position < self.start + bytes {
+            return Err(LzfseError::Malformed("FSE stream underflow"));
+        }
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.position -= bytes;
+        let mut word = [0u8; 8];
+        word[..bytes].copy_from_slice(&self.src[self.position..self.position + bytes]);
+        self.accum = (self.accum << bits) | u64::from_le_bytes(word);
+        self.accum_bits += bits;
+        Ok(())
+    }
+
+    /// `fse_in_pull64`.
+    fn pull(&mut self, bits: u32) -> Result<u64> {
+        if bits > self.accum_bits {
+            return Err(LzfseError::Malformed("FSE stream underflow"));
+        }
+        self.accum_bits -= bits;
+        let value = self.accum >> self.accum_bits;
+        self.accum &= (1u64 << self.accum_bits) - 1;
+        Ok(value)
+    }
+}
+
+/// The shift `k` and threshold `j0` for a symbol of frequency `f` among
+/// `states` states: states `j < j0` read `k` bits, the rest `k - 1`.
+fn spread(states: usize, f: usize) -> (u32, usize) {
+    let k = (f as u32).leading_zeros() - (states as u32).leading_zeros();
+    (k, ((2 * states) >> k) - f)
+}
+
+/// `fse_decoder_entry`: one literal decoder state.
+#[derive(Clone, Copy, Default)]
+struct LiteralEntry {
+    bits: u32,
+    symbol: u8,
+    delta: i32,
+}
+
+/// `fse_init_decoder_table`.
+fn literal_table(freq: &[u16; LITERAL_SYMBOLS]) -> Vec<LiteralEntry> {
+    let mut table = Vec::with_capacity(LITERAL_STATES);
+    for (symbol, &f) in freq.iter().enumerate() {
+        let f = usize::from(f);
+        if f == 0 {
+            continue;
+        }
+        let (k, j0) = spread(LITERAL_STATES, f);
+        for j in 0..f {
+            table.push(if j < j0 {
+                LiteralEntry {
+                    bits: k,
+                    symbol: symbol as u8,
+                    delta: (((f + j) << k) as i32) - LITERAL_STATES as i32,
+                }
+            } else {
+                LiteralEntry {
+                    bits: k - 1,
+                    symbol: symbol as u8,
+                    delta: ((j - j0) << (k - 1)) as i32,
+                }
+            });
+        }
+    }
+    table.resize(LITERAL_STATES, LiteralEntry::default());
+    table
+}
+
+/// `fse_value_decoder_entry`: one L, M or D decoder state.
+#[derive(Clone, Copy, Default)]
+struct ValueEntry {
+    total_bits: u32,
+    value_bits: u32,
+    delta: i32,
+    base: i32,
+}
+
+/// `fse_init_value_decoder_table`.
+fn value_table(states: usize, freq: &[u16], extra_bits: &[u8], base: &[i32]) -> Vec<ValueEntry> {
+    let mut table = Vec::with_capacity(states);
+    for (symbol, &f) in freq.iter().enumerate() {
+        let f = usize::from(f);
+        if f == 0 {
+            continue;
+        }
+        let (k, j0) = spread(states, f);
+        let value_bits = u32::from(extra_bits[symbol]);
+        for j in 0..f {
+            table.push(if j < j0 {
+                ValueEntry {
+                    total_bits: k + value_bits,
+                    value_bits,
+                    delta: (((f + j) << k) as i32) - states as i32,
+                    base: base[symbol],
+                }
+            } else {
+                ValueEntry {
+                    total_bits: k - 1 + value_bits,
+                    value_bits,
+                    delta: ((j - j0) << (k - 1)) as i32,
+                    base: base[symbol],
+                }
+            });
+        }
+    }
+    table.resize(states, ValueEntry::default());
+    table
+}
+
+fn next_state(delta: i32, bits: u64) -> u16 {
+    (delta as u16).wrapping_add(bits as u16)
+}
+
+/// `fse_decode`.
+fn decode_literal(state: &mut u16, table: &[LiteralEntry], input: &mut BitStream) -> Result<u8> {
+    let entry = table
+        .get(usize::from(*state))
+        .ok_or(LzfseError::Malformed("FSE state"))?;
+    *state = next_state(entry.delta, input.pull(entry.bits)?);
+    Ok(entry.symbol)
+}
+
+/// `fse_value_decode`.
+fn decode_value(state: &mut u16, table: &[ValueEntry], input: &mut BitStream) -> Result<i32> {
+    let entry = table
+        .get(usize::from(*state))
+        .ok_or(LzfseError::Malformed("FSE state"))?;
+    let bits = input.pull(entry.total_bits)?;
+    *state = next_state(entry.delta, bits >> entry.value_bits);
+    Ok(entry.base + (bits & ((1u64 << entry.value_bits) - 1)) as i32)
+}
+
+/// Decode the literals and then the L, M, D triples of one LZFSE block whose
+/// payload starts at `payload` (`lzfse_decode` and `lzfse_decode_lmd`).
+fn block(src: &[u8], payload: usize, header: &Header, out: &mut Output) -> Result<()> {
+    let literal_table = literal_table(&header.literal_freq);
+    let l_table = value_table(L_STATES, &header.l_freq, &L_EXTRA_BITS, &L_BASE_VALUE);
+    let m_table = value_table(M_STATES, &header.m_freq, &M_EXTRA_BITS, &M_BASE_VALUE);
+    let d_table = value_table(D_STATES, &header.d_freq, &D_EXTRA_BITS, &D_BASE_VALUE);
+
+    // The literal stream may refill from any earlier byte of the input, as
+    // the reference allows; a valid stream never consumes those bits.
+    let lmd_start = payload + header.n_literal_payload_bytes as usize;
+    let mut input = BitStream::new(src, 0, lmd_start, header.literal_bits)?;
+    let mut literals = Vec::with_capacity((header.n_literals as usize).next_multiple_of(4));
+    let mut states = header.literal_state;
+    for _ in (0..header.n_literals).step_by(4) {
+        input.refill()?;
+        for state in &mut states {
+            literals.push(decode_literal(state, &literal_table, &mut input)?);
+        }
+    }
+
+    let lmd_end = lmd_start + header.n_lmd_payload_bytes as usize;
+    let mut input = BitStream::new(src, lmd_start, lmd_end, header.lmd_bits)?;
+    let (mut l_state, mut m_state, mut d_state) = (header.l_state, header.m_state, header.d_state);
+    let mut literal = 0usize;
+    let mut distance: Option<usize> = None;
+    for _ in 0..header.n_matches {
+        input.refill()?;
+        let l = decode_value(&mut l_state, &l_table, &mut input)? as usize;
+        let m = decode_value(&mut m_state, &m_table, &mut input)? as usize;
+        let d = decode_value(&mut d_state, &d_table, &mut input)? as usize;
+        if d != 0 {
+            distance = Some(d);
+        }
+        let run = literals
+            .get(literal..literal + l)
+            .ok_or(LzfseError::Malformed(
+                "literal run past the block's literals",
+            ))?;
+        out.literals(run)?;
+        literal += l;
+        // The reference checks the distance even for a match of length 0.
+        let distance = distance.ok_or(LzfseError::Malformed("match distance"))?;
+        out.copy_match(distance, m)?;
+    }
+    Ok(())
+}
+
+/// The kinds of LZVN opcode (`lzvn_decode_base.c`'s `opc_tbl`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opcode {
+    SmallDistance,
+    MediumDistance,
+    LargeDistance,
+    PreviousDistance,
+    SmallMatch,
+    LargeMatch,
+    SmallLiteral,
+    LargeLiteral,
+    Nop,
+    EndOfStream,
+    Undefined,
+}
+
+fn opcode(op: u8) -> Opcode {
+    match op {
+        0x06 => Opcode::EndOfStream,
+        0x0e | 0x16 => Opcode::Nop,
+        0x1e | 0x26 | 0x2e | 0x36 | 0x3e => Opcode::Undefined,
+        0x70..=0x7f | 0xd0..=0xdf => Opcode::Undefined,
+        0xa0..=0xbf => Opcode::MediumDistance,
+        0xe0 => Opcode::LargeLiteral,
+        0xe1..=0xef => Opcode::SmallLiteral,
+        0xf0 => Opcode::LargeMatch,
+        0xf1..=0xff => Opcode::SmallMatch,
+        _ => match op & 7 {
+            6 => Opcode::PreviousDistance,
+            7 => Opcode::LargeDistance,
+            _ => Opcode::SmallDistance,
+        },
+    }
+}
+
+/// Decode one LZVN block payload, which must end with its end-of-stream
+/// opcode exactly at the end of the payload.
+fn lzvn(src: &[u8], out: &mut Output) -> Result<()> {
+    let mut at = 0usize;
+    let mut distance = 0usize;
+    // Each opcode needs its operands, its literals and one more byte (the
+    // next opcode) to follow.
+    let need = |at: usize, bytes: usize| {
+        if src.len() - at <= bytes {
+            Err(LzfseError::Truncated)
+        } else {
+            Ok(())
+        }
+    };
+    loop {
+        let op = *src.get(at).ok_or(LzfseError::Truncated)?;
+        let (operands, literals, length) = match opcode(op) {
+            Opcode::EndOfStream => {
+                if src.len() - at != 8 {
+                    return Err(LzfseError::Malformed("LZVN end of stream"));
+                }
+                return Ok(());
+            }
+            Opcode::Nop => {
+                need(at, 1)?;
+                at += 1;
+                continue;
+            }
+            Opcode::Undefined => return Err(LzfseError::Malformed("undefined LZVN opcode")),
+            Opcode::SmallDistance => {
+                let l = usize::from(op >> 6);
+                need(at, 2 + l)?;
+                distance = usize::from(op & 7) << 8 | usize::from(src[at + 1]);
+                (2, l, usize::from((op >> 3) & 7) + 3)
+            }
+            Opcode::MediumDistance => {
+                let l = usize::from((op >> 3) & 3);
+                need(at, 3 + l)?;
+                let operand = usize::from(u16_at(src, at + 1)?);
+                distance = operand >> 2;
+                (3, l, (usize::from(op & 7) << 2 | (operand & 3)) + 3)
+            }
+            Opcode::LargeDistance => {
+                let l = usize::from(op >> 6);
+                need(at, 3 + l)?;
+                distance = usize::from(u16_at(src, at + 1)?);
+                (3, l, usize::from((op >> 3) & 7) + 3)
+            }
+            Opcode::PreviousDistance => {
+                let l = usize::from(op >> 6);
+                need(at, 1 + l)?;
+                (1, l, usize::from((op >> 3) & 7) + 3)
+            }
+            Opcode::SmallMatch => {
+                need(at, 1)?;
+                (1, 0, usize::from(op & 0xf))
+            }
+            Opcode::LargeMatch => {
+                need(at, 2)?;
+                (2, 0, usize::from(src[at + 1]) + 16)
+            }
+            Opcode::SmallLiteral => {
+                let l = usize::from(op & 0xf);
+                need(at, 1 + l)?;
+                (1, l, 0)
+            }
+            Opcode::LargeLiteral => {
+                need(at, 2)?;
+                let l = usize::from(src[at + 1]) + 16;
+                need(at, 2 + l)?;
+                (2, l, 0)
+            }
+        };
+        at += operands;
+        out.literals(&src[at..at + literals])?;
+        at += literals;
+        if length != 0 {
+            out.copy_match(distance, length)?;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    fn stored(raw: &[u8]) -> Vec<u8> {
+        [
+            b"bvx-".as_slice(),
+            &(raw.len() as u32).to_le_bytes(),
+            raw,
+            b"bvx$",
+        ]
+        .concat()
+    }
+
+    fn lzvn_block(raw_bytes: u32, payload: &[u8]) -> Vec<u8> {
+        [
+            b"bvxn".as_slice(),
+            &raw_bytes.to_le_bytes(),
+            &(payload.len() as u32).to_le_bytes(),
+            payload,
+        ]
+        .concat()
+    }
+
+    const LZVN_END: [u8; 8] = [0x06, 0, 0, 0, 0, 0, 0, 0];
+
+    #[test]
+    fn decodes_stored_blocks_and_enforces_the_limit() {
+        assert_eq!(decode(&stored(b"stela"), 5).unwrap(), b"stela");
+        assert_eq!(decode(&stored(b"stela"), 4), Err(LzfseError::Limit));
+        let mut truncated = stored(b"stela");
+        truncated.pop();
+        assert_eq!(decode(&truncated, 64), Err(LzfseError::Truncated));
+        let mut trailing = stored(b"stela");
+        trailing.push(0);
+        assert!(matches!(
+            decode(&trailing, 64),
+            Err(LzfseError::Malformed(_))
+        ));
+        assert!(matches!(
+            decode(b"bvx3\0\0\0\0", 64),
+            Err(LzfseError::Malformed(_))
+        ));
+        assert!(is_lzfse(b"bvx2....") && !is_lzfse(b"bvx$") && !is_lzfse(b"bv"));
+    }
+
+    #[test]
+    fn decodes_each_lzvn_opcode_kind() {
+        let payload = [
+            // Small literal: "abc".
+            &[0xe3, b'a', b'b', b'c'][..],
+            // Small distance, L=1 'd', M=3, D=4: "dabc".
+            &[0b01_000_000, 4, b'd'],
+            // Previous distance, L=1 'e', M=3: "eabc".
+            &[0b01_000_110, b'e'],
+            // Nop.
+            &[0x0e],
+            // Large distance, L=0, M=3, D=1: "ccc".
+            &[0b00_000_111, 1, 0],
+            // Medium distance, L=0, M=3+((1<<2)|1)=8, D=2: "cccccccc".
+            &[0xa1, (2 << 2 | 1) as u8, 0],
+            // Small match, M=2 at the previous distance: "cc".
+            &[0xf2],
+            // Large literal: 16 + 1 bytes of 'x'.
+            &[0xe0, 1],
+            &[b'x'; 17],
+            // Large match, M=16 at D=2 (still 2): 16 more 'x'.
+            &[0xf0, 0],
+            &LZVN_END,
+        ]
+        .concat();
+        let mut expected = b"abcdabceabcccc".to_vec();
+        expected.extend_from_slice(b"cccccccccc");
+        expected.extend_from_slice(&[b'x'; 33]);
+        let stream = [
+            lzvn_block(expected.len() as u32, &payload),
+            b"bvx$".to_vec(),
+        ]
+        .concat();
+        assert_eq!(decode(&stream, 1 << 20).unwrap(), expected);
+
+        let short = [
+            lzvn_block(expected.len() as u32 + 1, &payload),
+            b"bvx$".to_vec(),
+        ]
+        .concat();
+        assert!(matches!(
+            decode(&short, 1 << 20),
+            Err(LzfseError::Malformed(_))
+        ));
+        let far = [&[0xe1, b'a'][..], &[0b00_000_000, 2], &LZVN_END].concat();
+        let far = [lzvn_block(4, &far), b"bvx$".to_vec()].concat();
+        assert_eq!(
+            decode(&far, 64),
+            Err(LzfseError::Malformed("match distance"))
+        );
+        let undefined = [lzvn_block(0, &[0x70, 0, 0]), b"bvx$".to_vec()].concat();
+        assert!(matches!(
+            decode(&undefined, 64),
+            Err(LzfseError::Malformed(_))
+        ));
+    }
+
+    /// Deterministic text-like bytes with repeats at many distances.
+    fn sample(bytes: usize, seed: u64) -> Vec<u8> {
+        let words: [&[u8]; 8] = [
+            b"kernel ",
+            b"collection ",
+            b"device ",
+            b"tree ",
+            b"\0\0\0\0",
+            b"stela ",
+            b"\xff\xfe",
+            b"preboot ",
+        ];
+        let mut state = seed;
+        let mut out = vec![];
+        while out.len() < bytes {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let pick = (state >> 33) as usize;
+            if pick.is_multiple_of(5) {
+                out.push((pick >> 8) as u8);
+            } else {
+                out.extend_from_slice(words[pick % words.len()]);
+            }
+        }
+        out.truncate(bytes);
+        out
+    }
+
+    #[test]
+    fn matches_the_reference_encoder_on_lzfse_and_lzvn_streams() {
+        for (bytes, seed) in [
+            (0usize, 1u64),
+            (100, 2),
+            (3000, 3),
+            (70_000, 4),
+            (400_000, 5),
+        ] {
+            let raw = sample(bytes, seed);
+            let mut encoded = vec![];
+            lzfse_rust::LzfseEncoder::default()
+                .encode_bytes(&raw, &mut encoded)
+                .unwrap();
+            assert_eq!(decode(&encoded, raw.len()).unwrap(), raw, "{bytes} bytes");
+            if !raw.is_empty() {
+                assert_eq!(decode(&encoded, raw.len() - 1), Err(LzfseError::Limit));
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_apple_encoded_fixtures() {
+        // Encoded by macOS `compression_tool -encode -a lzfse` from
+        // `sample(N, 7)`: N = 3000 makes one LZVN block, N = 300000 LZFSE
+        // blocks with packed tables.
+        for (name, bytes, encoded) in [
+            (
+                "lzvn",
+                3000,
+                &include_bytes!("../tests/fixtures/lzfse/sample-3000.lzfse")[..],
+            ),
+            (
+                "lzfse",
+                300_000,
+                &include_bytes!("../tests/fixtures/lzfse/sample-300000.lzfse")[..],
+            ),
+        ] {
+            assert_eq!(decode(encoded, bytes).unwrap(), sample(bytes, 7), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_corrupt_lzfse_blocks() {
+        let raw = sample(70_000, 9);
+        let mut encoded = vec![];
+        lzfse_rust::LzfseEncoder::default()
+            .encode_bytes(&raw, &mut encoded)
+            .unwrap();
+        assert_eq!(&encoded[..4], b"bvx2");
+        for cut in [10, 40, encoded.len() / 2, encoded.len() - 1] {
+            assert!(decode(&encoded[..cut], 1 << 20).is_err(), "cut at {cut}");
+        }
+        for flip in [12, 30, 200, encoded.len() / 2] {
+            let mut corrupt = encoded.clone();
+            corrupt[flip] ^= 0x5a;
+            assert_ne!(
+                decode(&corrupt, 1 << 20).ok(),
+                Some(raw.clone()),
+                "flip at {flip}"
+            );
+        }
+    }
+}

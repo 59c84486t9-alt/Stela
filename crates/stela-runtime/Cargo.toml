@@ -23,3 +23,7 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 # same inflater flate2 and the zip crate already use on the host.
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 stela-compiler = { path = "../stela-compiler", default-features = false }
+
+[dev-dependencies]
+# The reference LZFSE encoder the no_std decoder is checked against.
+lzfse_rust = "0.2"
