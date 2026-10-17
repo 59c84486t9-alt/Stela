@@ -139,6 +139,9 @@ pub mod encodings {
         SPRR_PERM_EL1 = 3, 6, 15, 1, 6;
         SPRR_PERM_EL12 = 3, 6, 15, 15, 7;
         SPRR_PERM_EL02 = 3, 4, 15, 5, 2;
+        // No public name; see `mmu::Sprr::fields`.
+        SPRR_FIELDS_0 = 3, 6, 15, 3, 0;
+        SPRR_FIELDS_1 = 3, 6, 15, 3, 1;
         GXF_STATUS_EL1 = 3, 6, 15, 8, 0;
         GXF_ENTER_EL1 = 3, 6, 15, 8, 1;
         GXF_ABORT_EL1 = 3, 6, 15, 8, 2;
@@ -826,6 +829,8 @@ enum Apple {
     SprrConfig,
     SprrPermEl1,
     SprrPermEl0,
+    /// `S3_6_C15_C3_0` (0) and `S3_6_C15_C3_1` (1).
+    SprrFields(usize),
     GxfConfig,
     GxfStatus,
     GxfEnter,
@@ -848,6 +853,7 @@ impl Apple {
             }
             Self::SprrPermEl1 => sprr.el1,
             Self::SprrPermEl0 => sprr.el0,
+            Self::SprrFields(which) => sprr.fields[which],
             Self::GxfConfig => gl.config,
             Self::GxfStatus => u64::from(cpu.pstate.guarded),
             Self::GxfEnter => gl.enter,
@@ -874,22 +880,30 @@ impl Apple {
 
     fn write(self, cpu: &mut Cpu, value: u64) -> Outcome {
         use super::mmu::{
-            SPRR_CONFIG_EN, SPRR_CONFIG_LOCK_CONFIG, SPRR_CONFIG_LOCK_PERM_EL0,
-            SPRR_CONFIG_LOCK_PERM_EL1,
+            SPRR_CONFIG_LOCK_CONFIG, SPRR_CONFIG_LOCK_PERM_EL0, SPRR_CONFIG_LOCK_PERM_EL1,
+            SPRR_CONFIG_UNDOCUMENTED,
         };
         let mut changes = Changes::default();
+        // The SPRR locks bind outside the guarded level only: SPTM 26A434
+        // rewrites SPRR_CONFIG_EL1 and SPRR_PERM_EL1 from GL2 after setting
+        // every lock (inference from that use).
+        let guarded = cpu.pstate.guarded;
         let sprr = &mut cpu.system.translation.sprr;
+        let locked = |bit: u64| !guarded && sprr.config & bit != 0;
         let refuse = |reason| Outcome::Refused(Refusal::UnsupportedSetting(reason));
+        if matches!(
+            self,
+            Self::SprrPermEl1 | Self::SprrPermEl0 | Self::SprrFields(_)
+        ) && locked(SPRR_CONFIG_UNDOCUMENTED)
+        {
+            return refuse("SPRR register write after an undocumented SPRR_CONFIG lock bit");
+        }
         match self {
             Self::SprrConfig => {
-                if sprr.config & SPRR_CONFIG_LOCK_CONFIG != 0 {
+                if locked(SPRR_CONFIG_LOCK_CONFIG) {
                     return refuse("SPRR_CONFIG_EL1 write after LOCK_CONFIG");
                 }
-                let known = SPRR_CONFIG_EN
-                    | SPRR_CONFIG_LOCK_CONFIG
-                    | SPRR_CONFIG_LOCK_PERM_EL0
-                    | SPRR_CONFIG_LOCK_PERM_EL1;
-                if value & !known != 0 {
+                if value & !0xff != 0 {
                     return refuse("SPRR_CONFIG_EL1 bit without documented meaning");
                 }
                 sprr.config = value;
@@ -899,17 +913,21 @@ impl Apple {
                 return Outcome::Undefined;
             }
             Self::SprrPermEl1 => {
-                if sprr.config & SPRR_CONFIG_LOCK_PERM_EL1 != 0 {
+                if locked(SPRR_CONFIG_LOCK_PERM_EL1) {
                     return refuse("SPRR_PERM_EL1 write after LOCK_KERNEL_PERM");
                 }
                 sprr.el1 = value;
                 changes.translation = true;
             }
             Self::SprrPermEl0 => {
-                if sprr.config & SPRR_CONFIG_LOCK_PERM_EL0 != 0 {
+                if locked(SPRR_CONFIG_LOCK_PERM_EL0) {
                     return refuse("SPRR_PERM_EL0 write after LOCK_PERM");
                 }
                 sprr.el0 = value;
+                changes.translation = true;
+            }
+            Self::SprrFields(which) => {
+                sprr.fields[which] = value;
                 changes.translation = true;
             }
             Self::GxfConfig => {
@@ -949,6 +967,8 @@ impl Cpu {
             SPRR_CONFIG_EL1 => Apple::SprrConfig,
             SPRR_PERM_EL1 => Apple::SprrPermEl1,
             SPRR_PERM_EL0 => Apple::SprrPermEl0,
+            SPRR_FIELDS_0 => Apple::SprrFields(0),
+            SPRR_FIELDS_1 => Apple::SprrFields(1),
             GXF_CONFIG_EL1 => Apple::GxfConfig,
             GXF_STATUS_EL1 => Apple::GxfStatus,
             GXF_ENTER_EL1 => Apple::GxfEnter,
@@ -1223,6 +1243,32 @@ mod tests {
             cpu.access_register(mrs(0, Encoding::new(3, 4, 1, 2, 0)), &environment),
             Outcome::Refused(Refusal::Unimplemented)
         );
+        // SPRR locks bind outside the guarded level; the undocumented
+        // SPRR_CONFIG bits lock the other SPRR registers there too.
+        cpu.pstate.guarded = false;
+        cpu.system.translation.sprr.config = 0xfb;
+        assert!(matches!(
+            write(&mut cpu, SPRR_PERM_EL1, 1),
+            Outcome::Refused(Refusal::UnsupportedSetting(_))
+        ));
+        assert!(matches!(
+            write(&mut cpu, SPRR_FIELDS_0, 1),
+            Outcome::Refused(Refusal::UnsupportedSetting(_))
+        ));
+        cpu.pstate.guarded = true;
+        assert!(matches!(
+            write(&mut cpu, SPRR_PERM_EL1, 1),
+            Outcome::Written(_)
+        ));
+        assert!(matches!(
+            write(&mut cpu, SPRR_CONFIG_EL1, 0xff),
+            Outcome::Written(_)
+        ));
+        assert!(matches!(
+            write(&mut cpu, SPRR_FIELDS_0, 1 << 18),
+            Outcome::Written(_)
+        ));
+        assert_eq!(cpu.system.translation.sprr.fields[0], 1 << 18);
         // Under an EL1 kernel the EL2 names do not exist.
         let mut el1 = Cpu::new(0, Pstate::RESET_EL1);
         for encoding in [HCR_EL2, VBAR_EL12, TPIDR_GL2, SP_EL1] {

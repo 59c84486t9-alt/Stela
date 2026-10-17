@@ -23,18 +23,29 @@ pub struct Controls {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Sprr {
     /// SPRR_CONFIG_EL1: EN bit 0, LOCK_CONFIG bit 1, LOCK_PERM (EL0) bit 4,
-    /// LOCK_KERNEL_PERM bit 5.
+    /// LOCK_KERNEL_PERM bit 5, and bits 2, 3, 6 and 7, whose meaning is
+    /// undocumented (Sven Peter: setting every bit locks the SPRR registers).
     pub config: u64,
-    /// SPRR_PERM_EL1 (EL1 and GL1 permissions).
+    /// SPRR_PERM_EL1 (the kernel level's and its GL's permissions).
     pub el1: u64,
     /// SPRR_PERM_EL0.
     pub el0: u64,
+    /// `S3_6_C15_C3_0` and `S3_6_C15_C3_1`: no public name. Each holds sixteen
+    /// 2-bit fields, field `index` at bits `2*index+1:2*index`, indexed by the
+    /// same SPRR permission index: the 26A434 kernel's pmap reads
+    /// `S3_6_C15_C3_0` that way. SPTM writes `S3_6_C15_C3_1` once at boot and
+    /// `S3_6_C15_C3_0` per thread. What a set field does to an access is
+    /// undocumented, so a translation through such an index stops.
+    pub fields: [u64; 2],
 }
 
 pub const SPRR_CONFIG_EN: u64 = 1 << 0;
 pub const SPRR_CONFIG_LOCK_CONFIG: u64 = 1 << 1;
 pub const SPRR_CONFIG_LOCK_PERM_EL0: u64 = 1 << 4;
 pub const SPRR_CONFIG_LOCK_PERM_EL1: u64 = 1 << 5;
+/// SPRR_CONFIG_EL1 bits 2, 3, 6 and 7: written by SPTM 26A434 (`0xfb`,
+/// `0xff`), meaning undocumented; treated as locks of unknown scope.
+pub const SPRR_CONFIG_UNDOCUMENTED: u64 = 0xcc;
 
 impl Sprr {
     pub fn enabled(self) -> bool {
@@ -423,9 +434,17 @@ fn sprr_leaf(
     address: u64,
 ) -> Outcome {
     let level = leaf.level;
-    if leaf.no_el0 || leaf.read_only || leaf.pxn_table || leaf.uxn_table {
-        return Outcome::Unsupported(Unsupported::Sprr("hierarchical table permissions"));
+    if leaf.no_el0 || leaf.read_only {
+        return Outcome::Unsupported(Unsupported::Sprr("APTable with SPRR"));
     }
+    // The index comes from the leaf alone, as the 26A434 kernel's pmap
+    // computes it from the PTE; PXNTable and UXNTable keep their Arm meaning
+    // and only remove execution (inference: no public description).
+    let table_xn = if requester.el == 0 {
+        leaf.uxn_table
+    } else {
+        leaf.pxn_table
+    };
     if controls.tcr & TCR_HD != 0 && descriptor & DIRTY_BIT_MODIFIER != 0 {
         return Outcome::Unsupported(Unsupported::Sprr("hardware dirty state"));
     }
@@ -433,6 +452,16 @@ fn sprr_leaf(
         | ((descriptor >> 6) & 1) << 2
         | ((descriptor >> 54) & 1) << 1
         | ((descriptor >> 53) & 1);
+    if controls
+        .sprr
+        .fields
+        .iter()
+        .any(|fields| (fields >> (2 * index)) & 3 != 0)
+    {
+        return Outcome::Unsupported(Unsupported::Sprr(
+            "permission index with an S3_6_C15_C3_x field set",
+        ));
+    }
     let as_el0 = requester.el == 0 || requester.unprivileged;
     let (readable, writable, executable) = if as_el0 {
         let nibble = (controls.sprr.el0 >> (4 * index)) & 0xf;
@@ -456,6 +485,7 @@ fn sprr_leaf(
             }
         }
     };
+    let executable = executable && !table_xn;
     let permitted = match access {
         Access::Read => readable,
         Access::Write => writable,
@@ -846,6 +876,7 @@ mod tests {
             config: SPRR_CONFIG_EN,
             el1: 0x2020_a52a_302a_baf5,
             el0: 0,
+            fields: [0; 2],
         };
         let va = 0x4_0000_0000_u64;
         map(&mut tables, &controls, va, 0x8_0000_0000, ATTRS);
@@ -938,6 +969,60 @@ mod tests {
         assert_eq!(
             translate(&controls, va, Access::Read, pan, &mut tables),
             Outcome::Unsupported(Unsupported::Sprr("PAN"))
+        );
+    }
+
+    #[test]
+    fn sprr_table_execute_never_and_per_index_fields() {
+        let mut controls = controls();
+        let mut tables = Tables::default();
+        controls.sprr = Sprr {
+            config: SPRR_CONFIG_EN,
+            el1: 0x2020_a52a_302a_baf5,
+            el0: 0,
+            fields: [0; 2],
+        };
+        // Index 0: EL r-x.
+        let va = 0x4_0000_0000_u64;
+        map(&mut tables, &controls, va, 0x8_0000_0000, ATTRS);
+        let root = controls.ttbr0 & OUTPUT_ADDRESS;
+        let slot = root + ((va >> 36) & 0x7ff) * 8;
+        *tables.0.get_mut(&slot).unwrap() |= PXN_TABLE;
+        // PXNTable removes execution and leaves the index's read right.
+        assert!(matches!(
+            translate(&controls, va, Access::Read, KERNEL, &mut tables),
+            Outcome::Mapped(Translation {
+                readable: true,
+                executable: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            translate(&controls, va, Access::Execute, KERNEL, &mut tables),
+            Outcome::Fault(Fault {
+                kind: FaultKind::Permission,
+                ..
+            })
+        ));
+        // A set S3_6_C15_C3_x field for the index stops; other indexes walk.
+        controls.sprr.fields[1] = 0b01 << (2 * 9);
+        assert!(matches!(
+            translate(&controls, va, Access::Read, KERNEL, &mut tables),
+            Outcome::Mapped(_)
+        ));
+        controls.sprr.fields[0] = 0b10;
+        assert_eq!(
+            translate(&controls, va, Access::Read, KERNEL, &mut tables),
+            Outcome::Unsupported(Unsupported::Sprr(
+                "permission index with an S3_6_C15_C3_x field set"
+            ))
+        );
+        // APTable keeps stopping.
+        controls.sprr.fields = [0; 2];
+        *tables.0.get_mut(&slot).unwrap() |= 1 << 62;
+        assert_eq!(
+            translate(&controls, va, Access::Read, KERNEL, &mut tables),
+            Outcome::Unsupported(Unsupported::Sprr("APTable with SPRR"))
         );
     }
 
