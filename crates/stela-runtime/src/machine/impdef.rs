@@ -61,6 +61,14 @@ const XNU_AMX_CONTEXT: &str = "26A434 XNU CPU initialization writes MPIDR.Aff0 t
 const SPTM_CORE_TUNING: &str = "no public name; SPTM 26A434 clears one bit with \
     read-modify-write at boot, selected by MPIDR core type next to its HID writes";
 
+const SPTM_GXF_MASK: &str = "SPTM 26A434 writes it once per CPU at boot with the value it \
+    writes to S3_1_C15_C8_2 (0x30300 or 0x3_0300_00ff_ff00, __text+0x1bebc) and reads it \
+    nowhere; TXM and the kernel never touch it";
+
+const VM_CONTEXT: &str = "SPTM 26A434 writes it once per CPU at boot (__text+0x1bec8); the \
+    26A434 kernel only saves and restores it with a VM's GL12 registers \
+    (0xfffffe000bd9eddc, 0xfffffe000bda2bb4)";
+
 pub const TABLE: &[Entry] = &[
     entry(
         4,
@@ -146,6 +154,24 @@ pub const TABLE: &[Entry] = &[
         SPTM_KEY_WRITES,
     ),
     entry(4, 15, 5, 0, "AMX_CTX_EL1", Class::Storage, XNU_AMX_CONTEXT),
+    entry(
+        6,
+        15,
+        8,
+        5,
+        "S3_6_C15_C8_5 (unnamed)",
+        Class::Storage,
+        SPTM_GXF_MASK,
+    ),
+    entry(
+        1,
+        15,
+        8,
+        2,
+        "S3_1_C15_C8_2 (unnamed)",
+        Class::Storage,
+        VM_CONTEXT,
+    ),
 ];
 
 pub fn lookup(encoding: Encoding) -> Option<&'static Entry> {
