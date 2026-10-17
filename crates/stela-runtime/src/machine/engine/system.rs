@@ -5,8 +5,9 @@
 //!   value stops the read (`RequirementKind::SystemRegister`).
 //! - SP_ELx are the banked stack pointers, CNTx_CTL compute ISTATUS, ISR_EL1
 //!   reports the pending lines, and FPCR/FPSR live in the guest state.
-//! - Writes the engine cannot honor stop: SCTLR alignment checking and big-
-//!   endian data, debug exceptions and breakpoints, and Apple VMSA_LOCK.
+//! - Writes the engine cannot honor stop: SCTLR alignment checking, debug
+//!   exceptions and breakpoints, and Apple VMSA_LOCK. SCTLR_ELx.EE and E0E
+//!   are RES0 because the profile has no FEAT_MixedEnd.
 use super::{
     Devices, Host, Machine, RequirementKind, Step, Stop,
     mmu::{self, Access as MemoryAccess, Outcome as Translated},
@@ -90,8 +91,6 @@ fn translates(register: Register) -> bool {
 }
 
 const SCTLR_A: u64 = 1 << 1;
-const SCTLR_E0E: u64 = 1 << 24;
-const SCTLR_EE: u64 = 1 << 25;
 const MDSCR_SS: u64 = 1 << 0;
 const MDSCR_KDE: u64 = 1 << 13;
 const MDSCR_MDE: u64 = 1 << 15;
@@ -234,12 +233,8 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             return Err(Effect::Refused(reason));
         }
         match register {
-            Register::SCTLR_EL1 | Register::SCTLR_EL2
-                if value & (SCTLR_A | SCTLR_E0E | SCTLR_EE) != 0 =>
-            {
-                return Err(Effect::Refused(
-                    "SCTLR alignment checking or big-endian data",
-                ));
+            Register::SCTLR_EL1 | Register::SCTLR_EL2 if value & SCTLR_A != 0 => {
+                return Err(Effect::Refused("SCTLR alignment checking"));
             }
             Register::MDSCR_EL1 if value & (MDSCR_SS | MDSCR_KDE | MDSCR_MDE) != 0 => {
                 return Err(Effect::Refused(
@@ -859,5 +854,19 @@ mod tests {
         assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x1_0280));
         // Physical IRQs go to EL2 while IMO is set.
         assert_eq!(machine.cpu.interrupt_target(Vector::Irq), 2);
+    }
+
+    #[test]
+    fn sctlr_endianness_bits_are_res0_and_alignment_checking_stops() {
+        let mut machine = machine(&[]);
+        // SCTLR_EL1.EE and E0E are RES0 without FEAT_MixedEnd.
+        machine.cpu.state.x[0] = 3 << 24;
+        machine.system_instruction(0xd518_1000).unwrap(); // msr sctlr_el1, x0
+        assert_eq!(machine.cpu.read(Register::SCTLR_EL1) & 3 << 24, 0);
+        machine.cpu.state.x[0] = 1 << 1;
+        assert!(matches!(
+            machine.system_instruction(0xd518_1000),
+            Err(super::super::Stop::Unsupported(_))
+        ));
     }
 }
