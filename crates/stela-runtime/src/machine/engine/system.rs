@@ -972,6 +972,66 @@ mod tests {
     }
 
     #[test]
+    fn reserved_and_absent_id_registers_follow_feat_idst() {
+        const RESERVED: Encoding = Encoding::new(3, 0, 0, 4, 3);
+        const GMID_EL1: Encoding = Encoding::new(3, 1, 0, 0, 4);
+        const HCR_TID3: u64 = 1 << 18;
+        let mut machine = machine(&[]);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        let kernel = machine.cpu.pstate;
+        let class = |machine: &super::Machine<_, _>, register| machine.cpu.read(register) >> 26;
+        // RES0 from EL1.
+        machine.cpu.state.x[3] = 1;
+        machine
+            .system_instruction(access(true, RESERVED, 3))
+            .unwrap();
+        assert_eq!((machine.cpu.state.x[3], machine.cpu.pc), (0, BASE + 4));
+        // HCR_EL2.TID3 traps EL1 reads to EL2.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_TID3);
+        machine.cpu.pc = BASE;
+        machine
+            .system_instruction(access(true, RESERVED, 3))
+            .unwrap();
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
+        assert_eq!(class(&machine, Register::ESR_EL2), 0x18);
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
+        // FEAT_IDST: an EL0 read traps to EL1 with EC 0x18.
+        machine.cpu.pstate = Pstate {
+            el: 0,
+            sp: false,
+            ..kernel
+        };
+        machine.cpu.pc = BASE;
+        machine
+            .system_instruction(access(true, RESERVED, 3))
+            .unwrap();
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x1_0400));
+        assert_eq!(class(&machine, Register::ESR_EL1), 0x18);
+        // A write is UNDEFINED.
+        machine.cpu.pstate = kernel;
+        machine.cpu.pc = BASE;
+        machine
+            .system_instruction(access(false, RESERVED, 3))
+            .unwrap();
+        assert_eq!(
+            (machine.cpu.pc, class(&machine, Register::ESR_EL1)),
+            (0x1_0200, 0)
+        );
+        // GMID_EL1 without FEAT_MTE2 is an unimplemented ID register: EC
+        // 0x18 at the current EL.
+        machine.cpu.pstate = kernel;
+        machine.cpu.pc = BASE;
+        machine
+            .system_instruction(access(true, GMID_EL1, 3))
+            .unwrap();
+        assert_eq!(
+            (machine.cpu.pc, class(&machine, Register::ESR_EL1)),
+            (0x1_0200, 0x18)
+        );
+    }
+
+    #[test]
     fn cntfrq_reads_the_profile_counter_frequency() {
         const CNTFRQ_EL0: Encoding = Encoding::new(3, 3, 14, 0, 0);
         let mut machine = machine(&[]);

@@ -648,6 +648,10 @@ impl Generator<'_> {
                     let ec = self.int(arguments[0])?;
                     format!("return Ok(trap_el1_or_el2(c, {ec}));")
                 }
+                "UnimplementedIDRegister" if self.profile.features.contains("FEAT_IDST") => {
+                    "return Ok(unimplemented_id_register(c));".to_owned()
+                }
+                "UnimplementedIDRegister" => "return Ok(Effect::Undefined);".to_owned(),
                 "AArch64_ImpDefSysRegRead" | "AArch64_ImpDefSysInstrWithResult" => {
                     "return c.implementation_defined(true);".to_owned()
                 }

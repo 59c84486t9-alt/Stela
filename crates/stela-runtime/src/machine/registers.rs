@@ -347,8 +347,36 @@ impl Cpu {
     /// IMPLEMENTATION DEFINED space, or UNDEFINED. `physical` is the system
     /// counter, for the count alias. `Read` results are not yet written to
     /// Rt.
+    /// A reserved encoding of the feature ID space (op0 3, op1 0, CRn 0, CRm
+    /// 1-7) without an architectural register. Such an encoding is RES0 from
+    /// EL1 and EL2 (Arm's registers since allocated there were "unnamed and
+    /// reserved, RES0 from EL1, EL2, and EL3"), HCR_EL2.TID3 traps EL1 reads
+    /// of CRm 2-7 to EL2 under FEAT_FGT, EL0 reads trap with EC 0x18 under
+    /// FEAT_IDST, and writes are UNDEFINED.
+    fn reserved_id(&self, access: RegisterAccess) -> Option<Outcome> {
+        const HCR_TID3: u32 = 18;
+        let encoding = access.encoding();
+        if (encoding.op0(), encoding.op1(), encoding.crn()) != (3, 0, 0)
+            || !(1..=7).contains(&encoding.crm())
+        {
+            return None;
+        }
+        Some(if access.direction() != Direction::Read {
+            Outcome::Undefined
+        } else if self.pstate.el == 0 {
+            Outcome::Trapped(None)
+        } else if self.pstate.el == 1 && encoding.crm() >= 2 && self.hcr(HCR_TID3) {
+            Outcome::Trapped(Some(2))
+        } else {
+            Outcome::Read(0)
+        })
+    }
+
     pub fn apple_access(&mut self, access: RegisterAccess, physical: u64) -> Outcome {
         let encoding = access.encoding();
+        if let Some(outcome) = self.reserved_id(access) {
+            return outcome;
+        }
         if encoding.op0() != 3 || !matches!(encoding.crn(), 11 | 15) {
             // Unallocated architectural encodings.
             return Outcome::Undefined;

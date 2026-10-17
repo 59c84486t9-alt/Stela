@@ -2285,7 +2285,7 @@ impl Register {
     }
 }
 
-pub static ACCESSORS: [Accessor; 678] = [
+pub static ACCESSORS: [Accessor; 681] = [
     Accessor {
         name: "MRS ACTLR_EL1",
         kind: "MRS",
@@ -2823,12 +2823,20 @@ pub static ACCESSORS: [Accessor; 678] = [
         run: a66,
     },
     Accessor {
+        name: "MRS CCSIDR2_EL1",
+        kind: "MRS",
+        mask: 0xffff,
+        value: 0xc802,
+        index: &[],
+        run: a67,
+    },
+    Accessor {
         name: "MRS CCSIDR_EL1",
         kind: "MRS",
         mask: 0xffff,
         value: 0xc800,
         index: &[],
-        run: a67,
+        run: a68,
     },
     Accessor {
         name: "CFP RCTX",
@@ -2836,7 +2844,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5b9c,
         index: &[],
-        run: a68,
+        run: a69,
     },
     Accessor {
         name: "MRS CLIDR_EL1",
@@ -2844,7 +2852,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc801,
         index: &[],
-        run: a69,
+        run: a70,
     },
     Accessor {
         name: "MRS CNTFRQ_EL0",
@@ -2852,7 +2860,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf00,
         index: &[],
-        run: a70,
+        run: a71,
     },
     Accessor {
         name: "MSRregister CNTFRQ_EL0",
@@ -2860,7 +2868,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf00,
         index: &[],
-        run: a71,
+        run: a72,
     },
     Accessor {
         name: "MRS CNTHCTL_EL2",
@@ -2868,7 +2876,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe708,
         index: &[],
-        run: a72,
+        run: a73,
     },
     Accessor {
         name: "MSRregister CNTHCTL_EL2",
@@ -2876,7 +2884,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe708,
         index: &[],
-        run: a73,
+        run: a74,
     },
     Accessor {
         name: "MRS CNTKCTL_EL1",
@@ -2884,7 +2892,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc708,
         index: &[],
-        run: a74,
+        run: a75,
     },
     Accessor {
         name: "MSRregister CNTKCTL_EL1",
@@ -2892,7 +2900,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc708,
         index: &[],
-        run: a75,
+        run: a76,
     },
     Accessor {
         name: "MRS CNTHP_CTL_EL2",
@@ -2900,7 +2908,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe711,
         index: &[],
-        run: a76,
+        run: a77,
     },
     Accessor {
         name: "MSRregister CNTHP_CTL_EL2",
@@ -2908,7 +2916,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe711,
         index: &[],
-        run: a77,
+        run: a78,
     },
     Accessor {
         name: "MRS CNTP_CTL_EL0",
@@ -2916,7 +2924,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf11,
         index: &[],
-        run: a78,
+        run: a79,
     },
     Accessor {
         name: "MSRregister CNTP_CTL_EL0",
@@ -2924,7 +2932,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf11,
         index: &[],
-        run: a79,
+        run: a80,
     },
     Accessor {
         name: "MRS CNTHP_CVAL_EL2",
@@ -2932,7 +2940,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe712,
         index: &[],
-        run: a80,
+        run: a81,
     },
     Accessor {
         name: "MSRregister CNTHP_CVAL_EL2",
@@ -2940,7 +2948,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe712,
         index: &[],
-        run: a81,
+        run: a82,
     },
     Accessor {
         name: "MRS CNTP_CVAL_EL0",
@@ -2948,7 +2956,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf12,
         index: &[],
-        run: a82,
+        run: a83,
     },
     Accessor {
         name: "MSRregister CNTP_CVAL_EL0",
@@ -2956,7 +2964,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf12,
         index: &[],
-        run: a83,
+        run: a84,
     },
     Accessor {
         name: "MRS CNTHP_TVAL_EL2",
@@ -2964,7 +2972,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe710,
         index: &[],
-        run: a84,
+        run: a85,
     },
     Accessor {
         name: "MSRregister CNTHP_TVAL_EL2",
@@ -2972,7 +2980,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe710,
         index: &[],
-        run: a85,
+        run: a86,
     },
     Accessor {
         name: "MRS CNTP_TVAL_EL0",
@@ -2980,7 +2988,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf10,
         index: &[],
-        run: a86,
+        run: a87,
     },
     Accessor {
         name: "MSRregister CNTP_TVAL_EL0",
@@ -2988,7 +2996,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf10,
         index: &[],
-        run: a87,
+        run: a88,
     },
     Accessor {
         name: "MRS CNTHV_CTL_EL2",
@@ -2996,7 +3004,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe719,
         index: &[],
-        run: a88,
+        run: a89,
     },
     Accessor {
         name: "MSRregister CNTHV_CTL_EL2",
@@ -3004,7 +3012,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe719,
         index: &[],
-        run: a89,
+        run: a90,
     },
     Accessor {
         name: "MRS CNTV_CTL_EL0",
@@ -3012,7 +3020,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf19,
         index: &[],
-        run: a90,
+        run: a91,
     },
     Accessor {
         name: "MSRregister CNTV_CTL_EL0",
@@ -3020,7 +3028,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf19,
         index: &[],
-        run: a91,
+        run: a92,
     },
     Accessor {
         name: "MRS CNTHV_CVAL_EL2",
@@ -3028,7 +3036,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe71a,
         index: &[],
-        run: a92,
+        run: a93,
     },
     Accessor {
         name: "MSRregister CNTHV_CVAL_EL2",
@@ -3036,7 +3044,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe71a,
         index: &[],
-        run: a93,
+        run: a94,
     },
     Accessor {
         name: "MRS CNTV_CVAL_EL0",
@@ -3044,7 +3052,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf1a,
         index: &[],
-        run: a94,
+        run: a95,
     },
     Accessor {
         name: "MSRregister CNTV_CVAL_EL0",
@@ -3052,7 +3060,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf1a,
         index: &[],
-        run: a95,
+        run: a96,
     },
     Accessor {
         name: "MRS CNTHV_TVAL_EL2",
@@ -3060,7 +3068,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe718,
         index: &[],
-        run: a96,
+        run: a97,
     },
     Accessor {
         name: "MSRregister CNTHV_TVAL_EL2",
@@ -3068,7 +3076,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe718,
         index: &[],
-        run: a97,
+        run: a98,
     },
     Accessor {
         name: "MRS CNTV_TVAL_EL0",
@@ -3076,7 +3084,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf18,
         index: &[],
-        run: a98,
+        run: a99,
     },
     Accessor {
         name: "MSRregister CNTV_TVAL_EL0",
@@ -3084,7 +3092,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf18,
         index: &[],
-        run: a99,
+        run: a100,
     },
     Accessor {
         name: "MRS CNTKCTL_EL1",
@@ -3092,7 +3100,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc708,
         index: &[],
-        run: a100,
+        run: a101,
     },
     Accessor {
         name: "MSRregister CNTKCTL_EL1",
@@ -3100,7 +3108,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc708,
         index: &[],
-        run: a101,
+        run: a102,
     },
     Accessor {
         name: "MRS CNTKCTL_EL12",
@@ -3108,7 +3116,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef08,
         index: &[],
-        run: a102,
+        run: a103,
     },
     Accessor {
         name: "MSRregister CNTKCTL_EL12",
@@ -3116,7 +3124,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef08,
         index: &[],
-        run: a103,
+        run: a104,
     },
     Accessor {
         name: "MRS CNTPCT_EL0",
@@ -3124,7 +3132,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf01,
         index: &[],
-        run: a104,
+        run: a105,
     },
     Accessor {
         name: "MRS CNTP_CTL_EL0",
@@ -3132,7 +3140,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf11,
         index: &[],
-        run: a105,
+        run: a106,
     },
     Accessor {
         name: "MSRregister CNTP_CTL_EL0",
@@ -3140,7 +3148,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf11,
         index: &[],
-        run: a106,
+        run: a107,
     },
     Accessor {
         name: "MRS CNTP_CTL_EL02",
@@ -3148,7 +3156,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef11,
         index: &[],
-        run: a107,
+        run: a108,
     },
     Accessor {
         name: "MSRregister CNTP_CTL_EL02",
@@ -3156,7 +3164,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef11,
         index: &[],
-        run: a108,
+        run: a109,
     },
     Accessor {
         name: "MRS CNTPCTSS_EL0",
@@ -3164,7 +3172,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf05,
         index: &[],
-        run: a109,
+        run: a110,
     },
     Accessor {
         name: "MRS CNTP_CVAL_EL0",
@@ -3172,7 +3180,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf12,
         index: &[],
-        run: a110,
+        run: a111,
     },
     Accessor {
         name: "MSRregister CNTP_CVAL_EL0",
@@ -3180,7 +3188,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf12,
         index: &[],
-        run: a111,
+        run: a112,
     },
     Accessor {
         name: "MRS CNTP_CVAL_EL02",
@@ -3188,7 +3196,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef12,
         index: &[],
-        run: a112,
+        run: a113,
     },
     Accessor {
         name: "MSRregister CNTP_CVAL_EL02",
@@ -3196,7 +3204,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef12,
         index: &[],
-        run: a113,
+        run: a114,
     },
     Accessor {
         name: "MRS CNTP_TVAL_EL0",
@@ -3204,7 +3212,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf10,
         index: &[],
-        run: a114,
+        run: a115,
     },
     Accessor {
         name: "MSRregister CNTP_TVAL_EL0",
@@ -3212,7 +3220,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf10,
         index: &[],
-        run: a115,
+        run: a116,
     },
     Accessor {
         name: "MRS CNTP_TVAL_EL02",
@@ -3220,7 +3228,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef10,
         index: &[],
-        run: a116,
+        run: a117,
     },
     Accessor {
         name: "MSRregister CNTP_TVAL_EL02",
@@ -3228,7 +3236,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef10,
         index: &[],
-        run: a117,
+        run: a118,
     },
     Accessor {
         name: "MRS CNTVCT_EL0",
@@ -3236,7 +3244,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf02,
         index: &[],
-        run: a118,
+        run: a119,
     },
     Accessor {
         name: "MRS CNTV_CTL_EL0",
@@ -3244,7 +3252,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf19,
         index: &[],
-        run: a119,
+        run: a120,
     },
     Accessor {
         name: "MSRregister CNTV_CTL_EL0",
@@ -3252,7 +3260,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf19,
         index: &[],
-        run: a120,
+        run: a121,
     },
     Accessor {
         name: "MRS CNTV_CTL_EL02",
@@ -3260,7 +3268,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef19,
         index: &[],
-        run: a121,
+        run: a122,
     },
     Accessor {
         name: "MSRregister CNTV_CTL_EL02",
@@ -3268,7 +3276,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef19,
         index: &[],
-        run: a122,
+        run: a123,
     },
     Accessor {
         name: "MRS CNTVCTSS_EL0",
@@ -3276,7 +3284,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf06,
         index: &[],
-        run: a123,
+        run: a124,
     },
     Accessor {
         name: "MRS CNTV_CVAL_EL0",
@@ -3284,7 +3292,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf1a,
         index: &[],
-        run: a124,
+        run: a125,
     },
     Accessor {
         name: "MSRregister CNTV_CVAL_EL0",
@@ -3292,7 +3300,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf1a,
         index: &[],
-        run: a125,
+        run: a126,
     },
     Accessor {
         name: "MRS CNTV_CVAL_EL02",
@@ -3300,7 +3308,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef1a,
         index: &[],
-        run: a126,
+        run: a127,
     },
     Accessor {
         name: "MSRregister CNTV_CVAL_EL02",
@@ -3308,7 +3316,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef1a,
         index: &[],
-        run: a127,
+        run: a128,
     },
     Accessor {
         name: "MRS CNTVOFF_EL2",
@@ -3316,7 +3324,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe703,
         index: &[],
-        run: a128,
+        run: a129,
     },
     Accessor {
         name: "MSRregister CNTVOFF_EL2",
@@ -3324,7 +3332,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe703,
         index: &[],
-        run: a129,
+        run: a130,
     },
     Accessor {
         name: "MRS CNTV_TVAL_EL0",
@@ -3332,7 +3340,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf18,
         index: &[],
-        run: a130,
+        run: a131,
     },
     Accessor {
         name: "MSRregister CNTV_TVAL_EL0",
@@ -3340,7 +3348,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xdf18,
         index: &[],
-        run: a131,
+        run: a132,
     },
     Accessor {
         name: "MRS CNTV_TVAL_EL02",
@@ -3348,7 +3356,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef18,
         index: &[],
-        run: a132,
+        run: a133,
     },
     Accessor {
         name: "MSRregister CNTV_TVAL_EL02",
@@ -3356,7 +3364,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xef18,
         index: &[],
-        run: a133,
+        run: a134,
     },
     Accessor {
         name: "MRS CONTEXTIDR_EL1",
@@ -3364,7 +3372,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc681,
         index: &[],
-        run: a134,
+        run: a135,
     },
     Accessor {
         name: "MSRregister CONTEXTIDR_EL1",
@@ -3372,7 +3380,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc681,
         index: &[],
-        run: a135,
+        run: a136,
     },
     Accessor {
         name: "MRS CONTEXTIDR_EL12",
@@ -3380,7 +3388,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xee81,
         index: &[],
-        run: a136,
+        run: a137,
     },
     Accessor {
         name: "MSRregister CONTEXTIDR_EL12",
@@ -3388,7 +3396,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xee81,
         index: &[],
-        run: a137,
+        run: a138,
     },
     Accessor {
         name: "MRS CONTEXTIDR_EL2",
@@ -3396,7 +3404,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe681,
         index: &[],
-        run: a138,
+        run: a139,
     },
     Accessor {
         name: "MSRregister CONTEXTIDR_EL2",
@@ -3404,7 +3412,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe681,
         index: &[],
-        run: a139,
+        run: a140,
     },
     Accessor {
         name: "MRS CONTEXTIDR_EL1",
@@ -3412,7 +3420,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc681,
         index: &[],
-        run: a140,
+        run: a141,
     },
     Accessor {
         name: "MSRregister CONTEXTIDR_EL1",
@@ -3420,7 +3428,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc681,
         index: &[],
-        run: a141,
+        run: a142,
     },
     Accessor {
         name: "MRS CPACR_EL1",
@@ -3428,7 +3436,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc082,
         index: &[],
-        run: a142,
+        run: a143,
     },
     Accessor {
         name: "MSRregister CPACR_EL1",
@@ -3436,7 +3444,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc082,
         index: &[],
-        run: a143,
+        run: a144,
     },
     Accessor {
         name: "MRS CPACR_EL12",
@@ -3444,7 +3452,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe882,
         index: &[],
-        run: a144,
+        run: a145,
     },
     Accessor {
         name: "MSRregister CPACR_EL12",
@@ -3452,7 +3460,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe882,
         index: &[],
-        run: a145,
+        run: a146,
     },
     Accessor {
         name: "CPP RCTX",
@@ -3460,7 +3468,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5b9f,
         index: &[],
-        run: a146,
+        run: a147,
     },
     Accessor {
         name: "MRS CPTR_EL2",
@@ -3468,7 +3476,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08a,
         index: &[],
-        run: a147,
+        run: a148,
     },
     Accessor {
         name: "MSRregister CPTR_EL2",
@@ -3476,7 +3484,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08a,
         index: &[],
-        run: a148,
+        run: a149,
     },
     Accessor {
         name: "MRS CPACR_EL1",
@@ -3484,7 +3492,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc082,
         index: &[],
-        run: a149,
+        run: a150,
     },
     Accessor {
         name: "MSRregister CPACR_EL1",
@@ -3492,7 +3500,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc082,
         index: &[],
-        run: a150,
+        run: a151,
     },
     Accessor {
         name: "MRS CSSELR_EL1",
@@ -3500,7 +3508,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xd000,
         index: &[],
-        run: a151,
+        run: a152,
     },
     Accessor {
         name: "MSRregister CSSELR_EL1",
@@ -3508,7 +3516,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xd000,
         index: &[],
-        run: a152,
+        run: a153,
     },
     Accessor {
         name: "MRS CTR_EL0",
@@ -3516,7 +3524,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xd801,
         index: &[],
-        run: a153,
+        run: a154,
     },
     Accessor {
         name: "MRS CurrentEL",
@@ -3524,7 +3532,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc212,
         index: &[],
-        run: a154,
+        run: a155,
     },
     Accessor {
         name: "MRS DAIF",
@@ -3532,7 +3540,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda11,
         index: &[],
-        run: a155,
+        run: a156,
     },
     Accessor {
         name: "MSRregister DAIF",
@@ -3540,7 +3548,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda11,
         index: &[],
-        run: a156,
+        run: a157,
     },
     Accessor {
         name: "MRS DBGAUTHSTATUS_EL1",
@@ -3548,7 +3556,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x83f6,
         index: &[],
-        run: a157,
+        run: a158,
     },
     Accessor {
         name: "MRS DBGBCR<m>_EL1",
@@ -3556,7 +3564,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8005,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a158,
+        run: a159,
     },
     Accessor {
         name: "MSRregister DBGBCR<m>_EL1",
@@ -3564,7 +3572,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8005,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a159,
+        run: a160,
     },
     Accessor {
         name: "MRS DBGBVR<m>_EL1",
@@ -3572,7 +3580,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8004,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a160,
+        run: a161,
     },
     Accessor {
         name: "MSRregister DBGBVR<m>_EL1",
@@ -3580,7 +3588,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8004,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a161,
+        run: a162,
     },
     Accessor {
         name: "MRS DBGCLAIMCLR_EL1",
@@ -3588,7 +3596,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x83ce,
         index: &[],
-        run: a162,
+        run: a163,
     },
     Accessor {
         name: "MSRregister DBGCLAIMCLR_EL1",
@@ -3596,7 +3604,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x83ce,
         index: &[],
-        run: a163,
+        run: a164,
     },
     Accessor {
         name: "MRS DBGCLAIMSET_EL1",
@@ -3604,7 +3612,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x83c6,
         index: &[],
-        run: a164,
+        run: a165,
     },
     Accessor {
         name: "MSRregister DBGCLAIMSET_EL1",
@@ -3612,7 +3620,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x83c6,
         index: &[],
-        run: a165,
+        run: a166,
     },
     Accessor {
         name: "MRS DBGDTR_EL0",
@@ -3620,7 +3628,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x9820,
         index: &[],
-        run: a166,
+        run: a167,
     },
     Accessor {
         name: "MSRregister DBGDTR_EL0",
@@ -3628,7 +3636,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x9820,
         index: &[],
-        run: a167,
+        run: a168,
     },
     Accessor {
         name: "MRS DBGDTRRX_EL0",
@@ -3636,7 +3644,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x9828,
         index: &[],
-        run: a168,
+        run: a169,
     },
     Accessor {
         name: "MSRregister DBGDTRTX_EL0",
@@ -3644,7 +3652,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x9828,
         index: &[],
-        run: a169,
+        run: a170,
     },
     Accessor {
         name: "MRS DBGPRCR_EL1",
@@ -3652,7 +3660,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x80a4,
         index: &[],
-        run: a170,
+        run: a171,
     },
     Accessor {
         name: "MSRregister DBGPRCR_EL1",
@@ -3660,7 +3668,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x80a4,
         index: &[],
-        run: a171,
+        run: a172,
     },
     Accessor {
         name: "MRS DBGWCR<m>_EL1",
@@ -3668,7 +3676,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8007,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a172,
+        run: a173,
     },
     Accessor {
         name: "MSRregister DBGWCR<m>_EL1",
@@ -3676,7 +3684,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8007,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a173,
+        run: a174,
     },
     Accessor {
         name: "MRS DBGWVR<m>_EL1",
@@ -3684,7 +3692,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8006,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a174,
+        run: a175,
     },
     Accessor {
         name: "MSRregister DBGWVR<m>_EL1",
@@ -3692,7 +3700,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xff87,
         value: 0x8006,
         index: &[(3, 0), (4, 1), (5, 2), (6, 3)],
-        run: a175,
+        run: a176,
     },
     Accessor {
         name: "DC CISW",
@@ -3700,7 +3708,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x43f2,
         index: &[],
-        run: a176,
+        run: a177,
     },
     Accessor {
         name: "DC CIVAC",
@@ -3708,7 +3716,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5bf1,
         index: &[],
-        run: a177,
+        run: a178,
     },
     Accessor {
         name: "DC CSW",
@@ -3716,7 +3724,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x43d2,
         index: &[],
-        run: a178,
+        run: a179,
     },
     Accessor {
         name: "DC CVAC",
@@ -3724,7 +3732,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5bd1,
         index: &[],
-        run: a179,
+        run: a180,
     },
     Accessor {
         name: "DC CVADP",
@@ -3732,7 +3740,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5be9,
         index: &[],
-        run: a180,
+        run: a181,
     },
     Accessor {
         name: "DC CVAP",
@@ -3740,7 +3748,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5be1,
         index: &[],
-        run: a181,
+        run: a182,
     },
     Accessor {
         name: "DC CVAU",
@@ -3748,7 +3756,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5bd9,
         index: &[],
-        run: a182,
+        run: a183,
     },
     Accessor {
         name: "DC ISW",
@@ -3756,7 +3764,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x43b2,
         index: &[],
-        run: a183,
+        run: a184,
     },
     Accessor {
         name: "DC IVAC",
@@ -3764,7 +3772,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x43b1,
         index: &[],
-        run: a184,
+        run: a185,
     },
     Accessor {
         name: "MRS DCZID_EL0",
@@ -3772,7 +3780,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xd807,
         index: &[],
-        run: a185,
+        run: a186,
     },
     Accessor {
         name: "DC ZVA",
@@ -3780,7 +3788,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5ba1,
         index: &[],
-        run: a186,
+        run: a187,
     },
     Accessor {
         name: "MRS DIT",
@@ -3788,7 +3796,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda15,
         index: &[],
-        run: a187,
+        run: a188,
     },
     Accessor {
         name: "MSRregister DIT",
@@ -3796,7 +3804,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda15,
         index: &[],
-        run: a188,
+        run: a189,
     },
     Accessor {
         name: "MRS DLR_EL0",
@@ -3804,7 +3812,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda29,
         index: &[],
-        run: a189,
+        run: a190,
     },
     Accessor {
         name: "MSRregister DLR_EL0",
@@ -3812,7 +3820,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda29,
         index: &[],
-        run: a190,
+        run: a191,
     },
     Accessor {
         name: "MRS DSPSR_EL0",
@@ -3820,7 +3828,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda28,
         index: &[],
-        run: a191,
+        run: a192,
     },
     Accessor {
         name: "MSRregister DSPSR_EL0",
@@ -3828,7 +3836,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda28,
         index: &[],
-        run: a192,
+        run: a193,
     },
     Accessor {
         name: "DVP RCTX",
@@ -3836,7 +3844,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5b9d,
         index: &[],
-        run: a193,
+        run: a194,
     },
     Accessor {
         name: "MRS ELR_EL1",
@@ -3844,7 +3852,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc201,
         index: &[],
-        run: a194,
+        run: a195,
     },
     Accessor {
         name: "MSRregister ELR_EL1",
@@ -3852,7 +3860,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc201,
         index: &[],
-        run: a195,
+        run: a196,
     },
     Accessor {
         name: "MRS ELR_EL12",
@@ -3860,7 +3868,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xea01,
         index: &[],
-        run: a196,
+        run: a197,
     },
     Accessor {
         name: "MSRregister ELR_EL12",
@@ -3868,31 +3876,31 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xea01,
         index: &[],
-        run: a197,
+        run: a198,
     },
     Accessor {
         name: "MRS ELR_EL2",
         kind: "MRS",
-        mask: 0xffff,
-        value: 0xe201,
-        index: &[],
-        run: a198,
-    },
-    Accessor {
-        name: "MSRregister ELR_EL2",
-        kind: "MSRregister",
         mask: 0xffff,
         value: 0xe201,
         index: &[],
         run: a199,
     },
     Accessor {
+        name: "MSRregister ELR_EL2",
+        kind: "MSRregister",
+        mask: 0xffff,
+        value: 0xe201,
+        index: &[],
+        run: a200,
+    },
+    Accessor {
         name: "MRS ELR_EL2",
         kind: "MRS",
         mask: 0xffff,
         value: 0xe201,
         index: &[],
-        run: a200,
+        run: a201,
     },
     Accessor {
         name: "MSRregister ELR_EL2",
@@ -3900,7 +3908,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe201,
         index: &[],
-        run: a201,
+        run: a202,
     },
     Accessor {
         name: "MRS ELR_EL1",
@@ -3908,7 +3916,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc201,
         index: &[],
-        run: a202,
+        run: a203,
     },
     Accessor {
         name: "MSRregister ELR_EL1",
@@ -3916,7 +3924,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc201,
         index: &[],
-        run: a203,
+        run: a204,
     },
     Accessor {
         name: "MRS ESR_EL1",
@@ -3924,7 +3932,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc290,
         index: &[],
-        run: a204,
+        run: a205,
     },
     Accessor {
         name: "MSRregister ESR_EL1",
@@ -3932,7 +3940,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc290,
         index: &[],
-        run: a205,
+        run: a206,
     },
     Accessor {
         name: "MRS ESR_EL12",
@@ -3940,7 +3948,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xea90,
         index: &[],
-        run: a206,
+        run: a207,
     },
     Accessor {
         name: "MSRregister ESR_EL12",
@@ -3948,31 +3956,31 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xea90,
         index: &[],
-        run: a207,
+        run: a208,
     },
     Accessor {
         name: "MRS ESR_EL2",
         kind: "MRS",
-        mask: 0xffff,
-        value: 0xe290,
-        index: &[],
-        run: a208,
-    },
-    Accessor {
-        name: "MSRregister ESR_EL2",
-        kind: "MSRregister",
         mask: 0xffff,
         value: 0xe290,
         index: &[],
         run: a209,
     },
     Accessor {
+        name: "MSRregister ESR_EL2",
+        kind: "MSRregister",
+        mask: 0xffff,
+        value: 0xe290,
+        index: &[],
+        run: a210,
+    },
+    Accessor {
         name: "MRS ESR_EL2",
         kind: "MRS",
         mask: 0xffff,
         value: 0xe290,
         index: &[],
-        run: a210,
+        run: a211,
     },
     Accessor {
         name: "MSRregister ESR_EL2",
@@ -3980,7 +3988,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe290,
         index: &[],
-        run: a211,
+        run: a212,
     },
     Accessor {
         name: "MRS ESR_EL1",
@@ -3988,7 +3996,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc290,
         index: &[],
-        run: a212,
+        run: a213,
     },
     Accessor {
         name: "MSRregister ESR_EL1",
@@ -3996,7 +4004,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc290,
         index: &[],
-        run: a213,
+        run: a214,
     },
     Accessor {
         name: "MRS FAR_EL1",
@@ -4004,7 +4012,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc300,
         index: &[],
-        run: a214,
+        run: a215,
     },
     Accessor {
         name: "MSRregister FAR_EL1",
@@ -4012,7 +4020,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc300,
         index: &[],
-        run: a215,
+        run: a216,
     },
     Accessor {
         name: "MRS FAR_EL12",
@@ -4020,7 +4028,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xeb00,
         index: &[],
-        run: a216,
+        run: a217,
     },
     Accessor {
         name: "MSRregister FAR_EL12",
@@ -4028,31 +4036,31 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xeb00,
         index: &[],
-        run: a217,
+        run: a218,
     },
     Accessor {
         name: "MRS FAR_EL2",
         kind: "MRS",
-        mask: 0xffff,
-        value: 0xe300,
-        index: &[],
-        run: a218,
-    },
-    Accessor {
-        name: "MSRregister FAR_EL2",
-        kind: "MSRregister",
         mask: 0xffff,
         value: 0xe300,
         index: &[],
         run: a219,
     },
     Accessor {
+        name: "MSRregister FAR_EL2",
+        kind: "MSRregister",
+        mask: 0xffff,
+        value: 0xe300,
+        index: &[],
+        run: a220,
+    },
+    Accessor {
         name: "MRS FAR_EL2",
         kind: "MRS",
         mask: 0xffff,
         value: 0xe300,
         index: &[],
-        run: a220,
+        run: a221,
     },
     Accessor {
         name: "MSRregister FAR_EL2",
@@ -4060,7 +4068,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe300,
         index: &[],
-        run: a221,
+        run: a222,
     },
     Accessor {
         name: "MRS FAR_EL1",
@@ -4068,7 +4076,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc300,
         index: &[],
-        run: a222,
+        run: a223,
     },
     Accessor {
         name: "MSRregister FAR_EL1",
@@ -4076,7 +4084,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc300,
         index: &[],
-        run: a223,
+        run: a224,
     },
     Accessor {
         name: "MRS FPCR",
@@ -4084,7 +4092,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda20,
         index: &[],
-        run: a224,
+        run: a225,
     },
     Accessor {
         name: "MSRregister FPCR",
@@ -4092,7 +4100,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda20,
         index: &[],
-        run: a225,
+        run: a226,
     },
     Accessor {
         name: "MRS FPSR",
@@ -4100,7 +4108,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda21,
         index: &[],
-        run: a226,
+        run: a227,
     },
     Accessor {
         name: "MSRregister FPSR",
@@ -4108,7 +4116,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda21,
         index: &[],
-        run: a227,
+        run: a228,
     },
     Accessor {
         name: "MRS HACR_EL2",
@@ -4116,7 +4124,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08f,
         index: &[],
-        run: a228,
+        run: a229,
     },
     Accessor {
         name: "MSRregister HACR_EL2",
@@ -4124,7 +4132,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08f,
         index: &[],
-        run: a229,
+        run: a230,
     },
     Accessor {
         name: "MRS HAFGRTR_EL2",
@@ -4132,7 +4140,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe18e,
         index: &[],
-        run: a230,
+        run: a231,
     },
     Accessor {
         name: "MSRregister HAFGRTR_EL2",
@@ -4140,7 +4148,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe18e,
         index: &[],
-        run: a231,
+        run: a232,
     },
     Accessor {
         name: "MRS HCR_EL2",
@@ -4148,7 +4156,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe088,
         index: &[],
-        run: a232,
+        run: a233,
     },
     Accessor {
         name: "MSRregister HCR_EL2",
@@ -4156,7 +4164,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe088,
         index: &[],
-        run: a233,
+        run: a234,
     },
     Accessor {
         name: "MRS HDFGRTR_EL2",
@@ -4164,7 +4172,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe18c,
         index: &[],
-        run: a234,
+        run: a235,
     },
     Accessor {
         name: "MSRregister HDFGRTR_EL2",
@@ -4172,7 +4180,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe18c,
         index: &[],
-        run: a235,
+        run: a236,
     },
     Accessor {
         name: "MRS HDFGWTR_EL2",
@@ -4180,7 +4188,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe18d,
         index: &[],
-        run: a236,
+        run: a237,
     },
     Accessor {
         name: "MSRregister HDFGWTR_EL2",
@@ -4188,7 +4196,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe18d,
         index: &[],
-        run: a237,
+        run: a238,
     },
     Accessor {
         name: "MRS HFGITR_EL2",
@@ -4196,7 +4204,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08e,
         index: &[],
-        run: a238,
+        run: a239,
     },
     Accessor {
         name: "MSRregister HFGITR_EL2",
@@ -4204,7 +4212,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08e,
         index: &[],
-        run: a239,
+        run: a240,
     },
     Accessor {
         name: "MRS HFGRTR_EL2",
@@ -4212,7 +4220,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08c,
         index: &[],
-        run: a240,
+        run: a241,
     },
     Accessor {
         name: "MSRregister HFGRTR_EL2",
@@ -4220,7 +4228,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08c,
         index: &[],
-        run: a241,
+        run: a242,
     },
     Accessor {
         name: "MRS HFGWTR_EL2",
@@ -4228,7 +4236,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08d,
         index: &[],
-        run: a242,
+        run: a243,
     },
     Accessor {
         name: "MSRregister HFGWTR_EL2",
@@ -4236,7 +4244,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08d,
         index: &[],
-        run: a243,
+        run: a244,
     },
     Accessor {
         name: "MRS HPFAR_EL2",
@@ -4244,7 +4252,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe304,
         index: &[],
-        run: a244,
+        run: a245,
     },
     Accessor {
         name: "MSRregister HPFAR_EL2",
@@ -4252,7 +4260,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe304,
         index: &[],
-        run: a245,
+        run: a246,
     },
     Accessor {
         name: "MRS HSTR_EL2",
@@ -4260,7 +4268,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08b,
         index: &[],
-        run: a246,
+        run: a247,
     },
     Accessor {
         name: "MSRregister HSTR_EL2",
@@ -4268,7 +4276,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe08b,
         index: &[],
-        run: a247,
+        run: a248,
     },
     Accessor {
         name: "MRS ICC_AP0R<m>_EL1",
@@ -4276,7 +4284,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a248,
+        run: a249,
     },
     Accessor {
         name: "MSRregister ICC_AP0R<m>_EL1",
@@ -4284,7 +4292,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a249,
+        run: a250,
     },
     Accessor {
         name: "MRS ICC_AP1R<m>_EL1",
@@ -4292,7 +4300,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a250,
+        run: a251,
     },
     Accessor {
         name: "MSRregister ICC_AP1R<m>_EL1",
@@ -4300,7 +4308,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a251,
+        run: a252,
     },
     Accessor {
         name: "MSRregister ICC_ASGI1R_EL1",
@@ -4308,7 +4316,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc65e,
         index: &[],
-        run: a252,
+        run: a253,
     },
     Accessor {
         name: "MRS ICC_BPR0_EL1",
@@ -4316,7 +4324,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a253,
+        run: a254,
     },
     Accessor {
         name: "MSRregister ICC_BPR0_EL1",
@@ -4324,7 +4332,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a254,
+        run: a255,
     },
     Accessor {
         name: "MRS ICC_BPR1_EL1",
@@ -4332,7 +4340,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a255,
+        run: a256,
     },
     Accessor {
         name: "MSRregister ICC_BPR1_EL1",
@@ -4340,7 +4348,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a256,
+        run: a257,
     },
     Accessor {
         name: "MRS ICC_CTLR_EL1",
@@ -4348,7 +4356,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a257,
+        run: a258,
     },
     Accessor {
         name: "MSRregister ICC_CTLR_EL1",
@@ -4356,7 +4364,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a258,
+        run: a259,
     },
     Accessor {
         name: "MSRregister ICC_DIR_EL1",
@@ -4364,7 +4372,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc659,
         index: &[],
-        run: a259,
+        run: a260,
     },
     Accessor {
         name: "MSRregister ICC_EOIR0_EL1",
@@ -4372,7 +4380,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc641,
         index: &[],
-        run: a260,
+        run: a261,
     },
     Accessor {
         name: "MSRregister ICC_EOIR1_EL1",
@@ -4380,7 +4388,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc661,
         index: &[],
-        run: a261,
+        run: a262,
     },
     Accessor {
         name: "MRS ICC_HPPIR0_EL1",
@@ -4388,7 +4396,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc642,
         index: &[],
-        run: a262,
+        run: a263,
     },
     Accessor {
         name: "MRS ICC_HPPIR1_EL1",
@@ -4396,7 +4404,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc662,
         index: &[],
-        run: a263,
+        run: a264,
     },
     Accessor {
         name: "MRS ICC_IAR0_EL1",
@@ -4404,7 +4412,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc640,
         index: &[],
-        run: a264,
+        run: a265,
     },
     Accessor {
         name: "MRS ICC_IAR1_EL1",
@@ -4412,7 +4420,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc660,
         index: &[],
-        run: a265,
+        run: a266,
     },
     Accessor {
         name: "MRS ICC_IGRPEN0_EL1",
@@ -4420,7 +4428,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a266,
+        run: a267,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN0_EL1",
@@ -4428,7 +4436,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a267,
+        run: a268,
     },
     Accessor {
         name: "MRS ICC_IGRPEN1_EL1",
@@ -4436,7 +4444,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a268,
+        run: a269,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN1_EL1",
@@ -4444,7 +4452,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a269,
+        run: a270,
     },
     Accessor {
         name: "MRS ICC_NMIAR1_EL1",
@@ -4452,7 +4460,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc64d,
         index: &[],
-        run: a270,
+        run: a271,
     },
     Accessor {
         name: "MRS ICC_PMR_EL1",
@@ -4460,7 +4468,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a271,
+        run: a272,
     },
     Accessor {
         name: "MSRregister ICC_PMR_EL1",
@@ -4468,7 +4476,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a272,
+        run: a273,
     },
     Accessor {
         name: "MRS ICC_RPR_EL1",
@@ -4476,7 +4484,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc65b,
         index: &[],
-        run: a273,
+        run: a274,
     },
     Accessor {
         name: "MSRregister ICC_SGI0R_EL1",
@@ -4484,7 +4492,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc65f,
         index: &[],
-        run: a274,
+        run: a275,
     },
     Accessor {
         name: "MSRregister ICC_SGI1R_EL1",
@@ -4492,7 +4500,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc65d,
         index: &[],
-        run: a275,
+        run: a276,
     },
     Accessor {
         name: "MRS ICC_SRE_EL1",
@@ -4500,7 +4508,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc665,
         index: &[],
-        run: a276,
+        run: a277,
     },
     Accessor {
         name: "MSRregister ICC_SRE_EL1",
@@ -4508,7 +4516,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc665,
         index: &[],
-        run: a277,
+        run: a278,
     },
     Accessor {
         name: "MRS ICC_SRE_EL2",
@@ -4516,7 +4524,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe64d,
         index: &[],
-        run: a278,
+        run: a279,
     },
     Accessor {
         name: "MSRregister ICC_SRE_EL2",
@@ -4524,7 +4532,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe64d,
         index: &[],
-        run: a279,
+        run: a280,
     },
     Accessor {
         name: "MRS ICH_AP0R<m>_EL2",
@@ -4532,7 +4540,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xe640,
         index: &[(1, 1), (0, 0)],
-        run: a280,
+        run: a281,
     },
     Accessor {
         name: "MSRregister ICH_AP0R<m>_EL2",
@@ -4540,7 +4548,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xe640,
         index: &[(1, 1), (0, 0)],
-        run: a281,
+        run: a282,
     },
     Accessor {
         name: "MRS ICH_AP1R<m>_EL2",
@@ -4548,7 +4556,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xe648,
         index: &[(1, 1), (0, 0)],
-        run: a282,
+        run: a283,
     },
     Accessor {
         name: "MSRregister ICH_AP1R<m>_EL2",
@@ -4556,7 +4564,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xe648,
         index: &[(1, 1), (0, 0)],
-        run: a283,
+        run: a284,
     },
     Accessor {
         name: "MRS ICH_EISR_EL2",
@@ -4564,7 +4572,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe65b,
         index: &[],
-        run: a284,
+        run: a285,
     },
     Accessor {
         name: "MRS ICH_ELRSR_EL2",
@@ -4572,7 +4580,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe65d,
         index: &[],
-        run: a285,
+        run: a286,
     },
     Accessor {
         name: "MRS ICH_HCR_EL2",
@@ -4580,7 +4588,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe658,
         index: &[],
-        run: a286,
+        run: a287,
     },
     Accessor {
         name: "MSRregister ICH_HCR_EL2",
@@ -4588,7 +4596,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe658,
         index: &[],
-        run: a287,
+        run: a288,
     },
     Accessor {
         name: "MRS ICH_LR<m>_EL2",
@@ -4596,7 +4604,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xe660,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a288,
+        run: a289,
     },
     Accessor {
         name: "MSRregister ICH_LR<m>_EL2",
@@ -4604,7 +4612,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xe660,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a289,
+        run: a290,
     },
     Accessor {
         name: "MRS ICH_MISR_EL2",
@@ -4612,7 +4620,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe65a,
         index: &[],
-        run: a290,
+        run: a291,
     },
     Accessor {
         name: "MRS ICH_VMCR_EL2",
@@ -4620,7 +4628,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe65f,
         index: &[],
-        run: a291,
+        run: a292,
     },
     Accessor {
         name: "MSRregister ICH_VMCR_EL2",
@@ -4628,7 +4636,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe65f,
         index: &[],
-        run: a292,
+        run: a293,
     },
     Accessor {
         name: "MRS ICH_VTR_EL2",
@@ -4636,7 +4644,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe659,
         index: &[],
-        run: a293,
+        run: a294,
     },
     Accessor {
         name: "IC IALLUIS",
@@ -4644,7 +4652,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4388,
         index: &[],
-        run: a294,
+        run: a295,
     },
     Accessor {
         name: "IC IALLU",
@@ -4652,7 +4660,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x43a8,
         index: &[],
-        run: a295,
+        run: a296,
     },
     Accessor {
         name: "IC IVAU",
@@ -4660,7 +4668,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x5ba9,
         index: &[],
-        run: a296,
+        run: a297,
     },
     Accessor {
         name: "MRS ICC_AP0R<m>_EL1",
@@ -4668,7 +4676,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a297,
+        run: a298,
     },
     Accessor {
         name: "MSRregister ICC_AP0R<m>_EL1",
@@ -4676,7 +4684,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc644,
         index: &[(1, 1), (0, 0)],
-        run: a298,
+        run: a299,
     },
     Accessor {
         name: "MRS ICC_AP1R<m>_EL1",
@@ -4684,7 +4692,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a299,
+        run: a300,
     },
     Accessor {
         name: "MSRregister ICC_AP1R<m>_EL1",
@@ -4692,7 +4700,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfffc,
         value: 0xc648,
         index: &[(1, 1), (0, 0)],
-        run: a300,
+        run: a301,
     },
     Accessor {
         name: "MRS ICC_BPR0_EL1",
@@ -4700,7 +4708,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a301,
+        run: a302,
     },
     Accessor {
         name: "MSRregister ICC_BPR0_EL1",
@@ -4708,7 +4716,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc643,
         index: &[],
-        run: a302,
+        run: a303,
     },
     Accessor {
         name: "MRS ICC_BPR1_EL1",
@@ -4716,7 +4724,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a303,
+        run: a304,
     },
     Accessor {
         name: "MSRregister ICC_BPR1_EL1",
@@ -4724,7 +4732,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc663,
         index: &[],
-        run: a304,
+        run: a305,
     },
     Accessor {
         name: "MRS ICC_CTLR_EL1",
@@ -4732,7 +4740,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a305,
+        run: a306,
     },
     Accessor {
         name: "MSRregister ICC_CTLR_EL1",
@@ -4740,7 +4748,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc664,
         index: &[],
-        run: a306,
+        run: a307,
     },
     Accessor {
         name: "MSRregister ICC_DIR_EL1",
@@ -4748,7 +4756,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc659,
         index: &[],
-        run: a307,
+        run: a308,
     },
     Accessor {
         name: "MSRregister ICC_EOIR0_EL1",
@@ -4756,7 +4764,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc641,
         index: &[],
-        run: a308,
+        run: a309,
     },
     Accessor {
         name: "MSRregister ICC_EOIR1_EL1",
@@ -4764,7 +4772,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc661,
         index: &[],
-        run: a309,
+        run: a310,
     },
     Accessor {
         name: "MRS ICC_HPPIR0_EL1",
@@ -4772,7 +4780,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc642,
         index: &[],
-        run: a310,
+        run: a311,
     },
     Accessor {
         name: "MRS ICC_HPPIR1_EL1",
@@ -4780,7 +4788,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc662,
         index: &[],
-        run: a311,
+        run: a312,
     },
     Accessor {
         name: "MRS ICC_IAR0_EL1",
@@ -4788,7 +4796,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc640,
         index: &[],
-        run: a312,
+        run: a313,
     },
     Accessor {
         name: "MRS ICC_IAR1_EL1",
@@ -4796,7 +4804,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc660,
         index: &[],
-        run: a313,
+        run: a314,
     },
     Accessor {
         name: "MRS ICC_IGRPEN0_EL1",
@@ -4804,7 +4812,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a314,
+        run: a315,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN0_EL1",
@@ -4812,7 +4820,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc666,
         index: &[],
-        run: a315,
+        run: a316,
     },
     Accessor {
         name: "MRS ICC_IGRPEN1_EL1",
@@ -4820,7 +4828,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a316,
+        run: a317,
     },
     Accessor {
         name: "MSRregister ICC_IGRPEN1_EL1",
@@ -4828,7 +4836,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc667,
         index: &[],
-        run: a317,
+        run: a318,
     },
     Accessor {
         name: "MRS ICC_NMIAR1_EL1",
@@ -4836,7 +4844,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc64d,
         index: &[],
-        run: a318,
+        run: a319,
     },
     Accessor {
         name: "MRS ICC_PMR_EL1",
@@ -4844,7 +4852,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a319,
+        run: a320,
     },
     Accessor {
         name: "MSRregister ICC_PMR_EL1",
@@ -4852,7 +4860,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc230,
         index: &[],
-        run: a320,
+        run: a321,
     },
     Accessor {
         name: "MRS ICC_RPR_EL1",
@@ -4860,7 +4868,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc65b,
         index: &[],
-        run: a321,
+        run: a322,
     },
     Accessor {
         name: "MRS ID_AA64AFR0_EL1",
@@ -4868,7 +4876,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc02c,
         index: &[],
-        run: a322,
+        run: a323,
     },
     Accessor {
         name: "MRS ID_AA64AFR1_EL1",
@@ -4876,7 +4884,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc02d,
         index: &[],
-        run: a323,
+        run: a324,
     },
     Accessor {
         name: "MRS ID_AA64DFR0_EL1",
@@ -4884,7 +4892,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc028,
         index: &[],
-        run: a324,
+        run: a325,
     },
     Accessor {
         name: "MRS ID_AA64DFR1_EL1",
@@ -4892,7 +4900,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc029,
         index: &[],
-        run: a325,
+        run: a326,
     },
     Accessor {
         name: "MRS ID_AA64DFR2_EL1",
@@ -4900,7 +4908,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc02a,
         index: &[],
-        run: a326,
+        run: a327,
     },
     Accessor {
         name: "MRS ID_AA64FPFR0_EL1",
@@ -4908,7 +4916,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc027,
         index: &[],
-        run: a327,
+        run: a328,
     },
     Accessor {
         name: "MRS ID_AA64ISAR0_EL1",
@@ -4916,7 +4924,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc030,
         index: &[],
-        run: a328,
+        run: a329,
     },
     Accessor {
         name: "MRS ID_AA64ISAR1_EL1",
@@ -4924,7 +4932,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc031,
         index: &[],
-        run: a329,
+        run: a330,
     },
     Accessor {
         name: "MRS ID_AA64ISAR2_EL1",
@@ -4932,7 +4940,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc032,
         index: &[],
-        run: a330,
+        run: a331,
     },
     Accessor {
         name: "MRS ID_AA64ISAR3_EL1",
@@ -4940,7 +4948,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc033,
         index: &[],
-        run: a331,
+        run: a332,
     },
     Accessor {
         name: "MRS ID_AA64MMFR0_EL1",
@@ -4948,7 +4956,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc038,
         index: &[],
-        run: a332,
+        run: a333,
     },
     Accessor {
         name: "MRS ID_AA64MMFR1_EL1",
@@ -4956,7 +4964,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc039,
         index: &[],
-        run: a333,
+        run: a334,
     },
     Accessor {
         name: "MRS ID_AA64MMFR2_EL1",
@@ -4964,7 +4972,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc03a,
         index: &[],
-        run: a334,
+        run: a335,
     },
     Accessor {
         name: "MRS ID_AA64MMFR3_EL1",
@@ -4972,7 +4980,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc03b,
         index: &[],
-        run: a335,
+        run: a336,
     },
     Accessor {
         name: "MRS ID_AA64MMFR4_EL1",
@@ -4980,7 +4988,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc03c,
         index: &[],
-        run: a336,
+        run: a337,
     },
     Accessor {
         name: "MRS ID_AA64PFR0_EL1",
@@ -4988,7 +4996,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc020,
         index: &[],
-        run: a337,
+        run: a338,
     },
     Accessor {
         name: "MRS ID_AA64PFR1_EL1",
@@ -4996,7 +5004,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc021,
         index: &[],
-        run: a338,
+        run: a339,
     },
     Accessor {
         name: "MRS ID_AA64PFR2_EL1",
@@ -5004,7 +5012,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc022,
         index: &[],
-        run: a339,
+        run: a340,
     },
     Accessor {
         name: "MRS ID_AFR0_EL1",
@@ -5012,7 +5020,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc00b,
         index: &[],
-        run: a340,
+        run: a341,
     },
     Accessor {
         name: "MRS ID_DFR0_EL1",
@@ -5020,7 +5028,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc00a,
         index: &[],
-        run: a341,
+        run: a342,
     },
     Accessor {
         name: "MRS ID_DFR1_EL1",
@@ -5028,7 +5036,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc01d,
         index: &[],
-        run: a342,
+        run: a343,
     },
     Accessor {
         name: "MRS ID_ISAR0_EL1",
@@ -5036,7 +5044,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc010,
         index: &[],
-        run: a343,
+        run: a344,
     },
     Accessor {
         name: "MRS ID_ISAR1_EL1",
@@ -5044,7 +5052,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc011,
         index: &[],
-        run: a344,
+        run: a345,
     },
     Accessor {
         name: "MRS ID_ISAR2_EL1",
@@ -5052,7 +5060,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc012,
         index: &[],
-        run: a345,
+        run: a346,
     },
     Accessor {
         name: "MRS ID_ISAR3_EL1",
@@ -5060,7 +5068,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc013,
         index: &[],
-        run: a346,
+        run: a347,
     },
     Accessor {
         name: "MRS ID_ISAR4_EL1",
@@ -5068,7 +5076,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc014,
         index: &[],
-        run: a347,
+        run: a348,
     },
     Accessor {
         name: "MRS ID_ISAR5_EL1",
@@ -5076,7 +5084,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc015,
         index: &[],
-        run: a348,
+        run: a349,
     },
     Accessor {
         name: "MRS ID_ISAR6_EL1",
@@ -5084,7 +5092,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc017,
         index: &[],
-        run: a349,
+        run: a350,
     },
     Accessor {
         name: "MRS ID_MMFR0_EL1",
@@ -5092,7 +5100,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc00c,
         index: &[],
-        run: a350,
+        run: a351,
     },
     Accessor {
         name: "MRS ID_MMFR1_EL1",
@@ -5100,7 +5108,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc00d,
         index: &[],
-        run: a351,
+        run: a352,
     },
     Accessor {
         name: "MRS ID_MMFR2_EL1",
@@ -5108,7 +5116,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc00e,
         index: &[],
-        run: a352,
+        run: a353,
     },
     Accessor {
         name: "MRS ID_MMFR3_EL1",
@@ -5116,7 +5124,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc00f,
         index: &[],
-        run: a353,
+        run: a354,
     },
     Accessor {
         name: "MRS ID_MMFR4_EL1",
@@ -5124,7 +5132,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc016,
         index: &[],
-        run: a354,
+        run: a355,
     },
     Accessor {
         name: "MRS ID_MMFR5_EL1",
@@ -5132,7 +5140,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc01e,
         index: &[],
-        run: a355,
+        run: a356,
     },
     Accessor {
         name: "MRS ID_PFR0_EL1",
@@ -5140,7 +5148,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc008,
         index: &[],
-        run: a356,
+        run: a357,
     },
     Accessor {
         name: "MRS ID_PFR1_EL1",
@@ -5148,7 +5156,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc009,
         index: &[],
-        run: a357,
+        run: a358,
     },
     Accessor {
         name: "MRS ID_PFR2_EL1",
@@ -5156,7 +5164,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc01c,
         index: &[],
-        run: a358,
+        run: a359,
     },
     Accessor {
         name: "MRS ISR_EL1",
@@ -5164,7 +5172,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc608,
         index: &[],
-        run: a359,
+        run: a360,
     },
     Accessor {
         name: "MRS LORC_EL1",
@@ -5172,7 +5180,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc523,
         index: &[],
-        run: a360,
+        run: a361,
     },
     Accessor {
         name: "MSRregister LORC_EL1",
@@ -5180,7 +5188,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc523,
         index: &[],
-        run: a361,
+        run: a362,
     },
     Accessor {
         name: "MRS LOREA_EL1",
@@ -5188,7 +5196,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc521,
         index: &[],
-        run: a362,
+        run: a363,
     },
     Accessor {
         name: "MSRregister LOREA_EL1",
@@ -5196,7 +5204,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc521,
         index: &[],
-        run: a363,
+        run: a364,
     },
     Accessor {
         name: "MRS LORID_EL1",
@@ -5204,7 +5212,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc527,
         index: &[],
-        run: a364,
+        run: a365,
     },
     Accessor {
         name: "MRS LORN_EL1",
@@ -5212,7 +5220,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc522,
         index: &[],
-        run: a365,
+        run: a366,
     },
     Accessor {
         name: "MSRregister LORN_EL1",
@@ -5220,7 +5228,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc522,
         index: &[],
-        run: a366,
+        run: a367,
     },
     Accessor {
         name: "MRS LORSA_EL1",
@@ -5228,7 +5236,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc520,
         index: &[],
-        run: a367,
+        run: a368,
     },
     Accessor {
         name: "MSRregister LORSA_EL1",
@@ -5236,7 +5244,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc520,
         index: &[],
-        run: a368,
+        run: a369,
     },
     Accessor {
         name: "MRS MAIR_EL1",
@@ -5244,7 +5252,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc510,
         index: &[],
-        run: a369,
+        run: a370,
     },
     Accessor {
         name: "MSRregister MAIR_EL1",
@@ -5252,7 +5260,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc510,
         index: &[],
-        run: a370,
+        run: a371,
     },
     Accessor {
         name: "MRS MAIR_EL12",
@@ -5260,7 +5268,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xed10,
         index: &[],
-        run: a371,
+        run: a372,
     },
     Accessor {
         name: "MSRregister MAIR_EL12",
@@ -5268,7 +5276,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xed10,
         index: &[],
-        run: a372,
+        run: a373,
     },
     Accessor {
         name: "MRS MAIR_EL2",
@@ -5276,7 +5284,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe510,
         index: &[],
-        run: a373,
+        run: a374,
     },
     Accessor {
         name: "MSRregister MAIR_EL2",
@@ -5284,7 +5292,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe510,
         index: &[],
-        run: a374,
+        run: a375,
     },
     Accessor {
         name: "MRS MAIR_EL1",
@@ -5292,7 +5300,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc510,
         index: &[],
-        run: a375,
+        run: a376,
     },
     Accessor {
         name: "MSRregister MAIR_EL1",
@@ -5300,7 +5308,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc510,
         index: &[],
-        run: a376,
+        run: a377,
     },
     Accessor {
         name: "MRS MDCCINT_EL1",
@@ -5308,7 +5316,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8010,
         index: &[],
-        run: a377,
+        run: a378,
     },
     Accessor {
         name: "MSRregister MDCCINT_EL1",
@@ -5316,7 +5324,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8010,
         index: &[],
-        run: a378,
+        run: a379,
     },
     Accessor {
         name: "MRS MDCCSR_EL0",
@@ -5324,7 +5332,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x9808,
         index: &[],
-        run: a379,
+        run: a380,
     },
     Accessor {
         name: "MRS MDCR_EL2",
@@ -5332,7 +5340,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe089,
         index: &[],
-        run: a380,
+        run: a381,
     },
     Accessor {
         name: "MSRregister MDCR_EL2",
@@ -5340,7 +5348,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe089,
         index: &[],
-        run: a381,
+        run: a382,
     },
     Accessor {
         name: "MRS MDRAR_EL1",
@@ -5348,7 +5356,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8080,
         index: &[],
-        run: a382,
+        run: a383,
     },
     Accessor {
         name: "MRS MDSCR_EL1",
@@ -5356,7 +5364,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8012,
         index: &[],
-        run: a383,
+        run: a384,
     },
     Accessor {
         name: "MSRregister MDSCR_EL1",
@@ -5364,7 +5372,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8012,
         index: &[],
-        run: a384,
+        run: a385,
     },
     Accessor {
         name: "MRS MIDR_EL1",
@@ -5372,7 +5380,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc000,
         index: &[],
-        run: a385,
+        run: a386,
     },
     Accessor {
         name: "MRS MPIDR_EL1",
@@ -5380,7 +5388,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc005,
         index: &[],
-        run: a386,
+        run: a387,
     },
     Accessor {
         name: "MRS MVFR0_EL1",
@@ -5388,7 +5396,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc018,
         index: &[],
-        run: a387,
+        run: a388,
     },
     Accessor {
         name: "MRS MVFR1_EL1",
@@ -5396,7 +5404,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc019,
         index: &[],
-        run: a388,
+        run: a389,
     },
     Accessor {
         name: "MRS MVFR2_EL1",
@@ -5404,7 +5412,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc01a,
         index: &[],
-        run: a389,
+        run: a390,
     },
     Accessor {
         name: "MRS NZCV",
@@ -5412,7 +5420,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda10,
         index: &[],
-        run: a390,
+        run: a391,
     },
     Accessor {
         name: "MSRregister NZCV",
@@ -5420,7 +5428,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda10,
         index: &[],
-        run: a391,
+        run: a392,
     },
     Accessor {
         name: "MRS OSDLR_EL1",
@@ -5428,7 +5436,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x809c,
         index: &[],
-        run: a392,
+        run: a393,
     },
     Accessor {
         name: "MSRregister OSDLR_EL1",
@@ -5436,7 +5444,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x809c,
         index: &[],
-        run: a393,
+        run: a394,
     },
     Accessor {
         name: "MRS OSDTRRX_EL1",
@@ -5444,7 +5452,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8002,
         index: &[],
-        run: a394,
+        run: a395,
     },
     Accessor {
         name: "MSRregister OSDTRRX_EL1",
@@ -5452,7 +5460,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8002,
         index: &[],
-        run: a395,
+        run: a396,
     },
     Accessor {
         name: "MRS OSDTRTX_EL1",
@@ -5460,7 +5468,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x801a,
         index: &[],
-        run: a396,
+        run: a397,
     },
     Accessor {
         name: "MSRregister OSDTRTX_EL1",
@@ -5468,7 +5476,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x801a,
         index: &[],
-        run: a397,
+        run: a398,
     },
     Accessor {
         name: "MRS OSECCR_EL1",
@@ -5476,7 +5484,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8032,
         index: &[],
-        run: a398,
+        run: a399,
     },
     Accessor {
         name: "MSRregister OSECCR_EL1",
@@ -5484,7 +5492,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8032,
         index: &[],
-        run: a399,
+        run: a400,
     },
     Accessor {
         name: "MSRregister OSLAR_EL1",
@@ -5492,7 +5500,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x8084,
         index: &[],
-        run: a400,
+        run: a401,
     },
     Accessor {
         name: "MRS OSLSR_EL1",
@@ -5500,7 +5508,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x808c,
         index: &[],
-        run: a401,
+        run: a402,
     },
     Accessor {
         name: "MRS PAN",
@@ -5508,7 +5516,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc213,
         index: &[],
-        run: a402,
+        run: a403,
     },
     Accessor {
         name: "MSRregister PAN",
@@ -5516,7 +5524,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc213,
         index: &[],
-        run: a403,
+        run: a404,
     },
     Accessor {
         name: "MRS PAR_EL1",
@@ -5524,7 +5532,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc3a0,
         index: &[],
-        run: a404,
+        run: a405,
     },
     Accessor {
         name: "MSRregister PAR_EL1",
@@ -5532,7 +5540,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc3a0,
         index: &[],
-        run: a405,
+        run: a406,
     },
     Accessor {
         name: "MRS REVIDR_EL1",
@@ -5540,7 +5548,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc006,
         index: &[],
-        run: a406,
+        run: a407,
     },
     Accessor {
         name: "MRS RMR_EL2",
@@ -5548,7 +5556,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe602,
         index: &[],
-        run: a407,
+        run: a408,
     },
     Accessor {
         name: "MSRregister RMR_EL2",
@@ -5556,7 +5564,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe602,
         index: &[],
-        run: a408,
+        run: a409,
     },
     Accessor {
         name: "MRS RVBAR_EL2",
@@ -5564,7 +5572,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe601,
         index: &[],
-        run: a409,
+        run: a410,
     },
     Accessor {
         name: "MRS SCTLR_EL1",
@@ -5572,7 +5580,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc080,
         index: &[],
-        run: a410,
+        run: a411,
     },
     Accessor {
         name: "MSRregister SCTLR_EL1",
@@ -5580,7 +5588,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc080,
         index: &[],
-        run: a411,
+        run: a412,
     },
     Accessor {
         name: "MRS SCTLR_EL12",
@@ -5588,7 +5596,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe880,
         index: &[],
-        run: a412,
+        run: a413,
     },
     Accessor {
         name: "MSRregister SCTLR_EL12",
@@ -5596,7 +5604,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe880,
         index: &[],
-        run: a413,
+        run: a414,
     },
     Accessor {
         name: "MRS SCTLR_EL2",
@@ -5604,7 +5612,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe080,
         index: &[],
-        run: a414,
+        run: a415,
     },
     Accessor {
         name: "MSRregister SCTLR_EL2",
@@ -5612,7 +5620,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe080,
         index: &[],
-        run: a415,
+        run: a416,
     },
     Accessor {
         name: "MRS SCTLR_EL1",
@@ -5620,7 +5628,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc080,
         index: &[],
-        run: a416,
+        run: a417,
     },
     Accessor {
         name: "MSRregister SCTLR_EL1",
@@ -5628,7 +5636,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc080,
         index: &[],
-        run: a417,
+        run: a418,
     },
     Accessor {
         name: "MRS SCXTNUM_EL0",
@@ -5636,7 +5644,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde87,
         index: &[],
-        run: a418,
+        run: a419,
     },
     Accessor {
         name: "MSRregister SCXTNUM_EL0",
@@ -5644,7 +5652,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde87,
         index: &[],
-        run: a419,
+        run: a420,
     },
     Accessor {
         name: "MRS SCXTNUM_EL1",
@@ -5652,7 +5660,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc687,
         index: &[],
-        run: a420,
+        run: a421,
     },
     Accessor {
         name: "MSRregister SCXTNUM_EL1",
@@ -5660,7 +5668,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc687,
         index: &[],
-        run: a421,
+        run: a422,
     },
     Accessor {
         name: "MRS SCXTNUM_EL12",
@@ -5668,7 +5676,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xee87,
         index: &[],
-        run: a422,
+        run: a423,
     },
     Accessor {
         name: "MSRregister SCXTNUM_EL12",
@@ -5676,7 +5684,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xee87,
         index: &[],
-        run: a423,
+        run: a424,
     },
     Accessor {
         name: "MRS SCXTNUM_EL2",
@@ -5684,7 +5692,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe687,
         index: &[],
-        run: a424,
+        run: a425,
     },
     Accessor {
         name: "MSRregister SCXTNUM_EL2",
@@ -5692,7 +5700,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe687,
         index: &[],
-        run: a425,
+        run: a426,
     },
     Accessor {
         name: "MRS SCXTNUM_EL1",
@@ -5700,7 +5708,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc687,
         index: &[],
-        run: a426,
+        run: a427,
     },
     Accessor {
         name: "MSRregister SCXTNUM_EL1",
@@ -5708,7 +5716,15 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc687,
         index: &[],
-        run: a427,
+        run: a428,
+    },
+    Accessor {
+        name: "MRS SMIDR_EL1",
+        kind: "MRS",
+        mask: 0xffff,
+        value: 0xc806,
+        index: &[],
+        run: a429,
     },
     Accessor {
         name: "MRS SP_EL0",
@@ -5716,7 +5732,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc208,
         index: &[],
-        run: a428,
+        run: a430,
     },
     Accessor {
         name: "MSRregister SP_EL0",
@@ -5724,7 +5740,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc208,
         index: &[],
-        run: a429,
+        run: a431,
     },
     Accessor {
         name: "MRS SP_EL1",
@@ -5732,7 +5748,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe208,
         index: &[],
-        run: a430,
+        run: a432,
     },
     Accessor {
         name: "MSRregister SP_EL1",
@@ -5740,7 +5756,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe208,
         index: &[],
-        run: a431,
+        run: a433,
     },
     Accessor {
         name: "MRS SP_EL2",
@@ -5748,7 +5764,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xf208,
         index: &[],
-        run: a432,
+        run: a434,
     },
     Accessor {
         name: "MSRregister SP_EL2",
@@ -5756,7 +5772,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xf208,
         index: &[],
-        run: a433,
+        run: a435,
     },
     Accessor {
         name: "MRS SPSel",
@@ -5764,7 +5780,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc210,
         index: &[],
-        run: a434,
+        run: a436,
     },
     Accessor {
         name: "MSRregister SPSel",
@@ -5772,7 +5788,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc210,
         index: &[],
-        run: a435,
+        run: a437,
     },
     Accessor {
         name: "MRS SPSR_abt",
@@ -5780,7 +5796,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe219,
         index: &[],
-        run: a436,
+        run: a438,
     },
     Accessor {
         name: "MSRregister SPSR_abt",
@@ -5788,7 +5804,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe219,
         index: &[],
-        run: a437,
+        run: a439,
     },
     Accessor {
         name: "MRS SPSR_EL1",
@@ -5796,7 +5812,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc200,
         index: &[],
-        run: a438,
+        run: a440,
     },
     Accessor {
         name: "MSRregister SPSR_EL1",
@@ -5804,7 +5820,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc200,
         index: &[],
-        run: a439,
+        run: a441,
     },
     Accessor {
         name: "MRS SPSR_EL12",
@@ -5812,29 +5828,13 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xea00,
         index: &[],
-        run: a440,
+        run: a442,
     },
     Accessor {
         name: "MSRregister SPSR_EL12",
         kind: "MSRregister",
         mask: 0xffff,
         value: 0xea00,
-        index: &[],
-        run: a441,
-    },
-    Accessor {
-        name: "MRS SPSR_EL2",
-        kind: "MRS",
-        mask: 0xffff,
-        value: 0xe200,
-        index: &[],
-        run: a442,
-    },
-    Accessor {
-        name: "MSRregister SPSR_EL2",
-        kind: "MSRregister",
-        mask: 0xffff,
-        value: 0xe200,
         index: &[],
         run: a443,
     },
@@ -5855,12 +5855,28 @@ pub static ACCESSORS: [Accessor; 678] = [
         run: a445,
     },
     Accessor {
+        name: "MRS SPSR_EL2",
+        kind: "MRS",
+        mask: 0xffff,
+        value: 0xe200,
+        index: &[],
+        run: a446,
+    },
+    Accessor {
+        name: "MSRregister SPSR_EL2",
+        kind: "MSRregister",
+        mask: 0xffff,
+        value: 0xe200,
+        index: &[],
+        run: a447,
+    },
+    Accessor {
         name: "MRS SPSR_EL1",
         kind: "MRS",
         mask: 0xffff,
         value: 0xc200,
         index: &[],
-        run: a446,
+        run: a448,
     },
     Accessor {
         name: "MSRregister SPSR_EL1",
@@ -5868,7 +5884,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc200,
         index: &[],
-        run: a447,
+        run: a449,
     },
     Accessor {
         name: "MRS SPSR_fiq",
@@ -5876,7 +5892,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe21b,
         index: &[],
-        run: a448,
+        run: a450,
     },
     Accessor {
         name: "MSRregister SPSR_fiq",
@@ -5884,7 +5900,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe21b,
         index: &[],
-        run: a449,
+        run: a451,
     },
     Accessor {
         name: "MRS SPSR_irq",
@@ -5892,7 +5908,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe218,
         index: &[],
-        run: a450,
+        run: a452,
     },
     Accessor {
         name: "MSRregister SPSR_irq",
@@ -5900,7 +5916,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe218,
         index: &[],
-        run: a451,
+        run: a453,
     },
     Accessor {
         name: "MRS SPSR_und",
@@ -5908,7 +5924,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe21a,
         index: &[],
-        run: a452,
+        run: a454,
     },
     Accessor {
         name: "MSRregister SPSR_und",
@@ -5916,7 +5932,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe21a,
         index: &[],
-        run: a453,
+        run: a455,
     },
     Accessor {
         name: "MRS SSBS",
@@ -5924,7 +5940,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda16,
         index: &[],
-        run: a454,
+        run: a456,
     },
     Accessor {
         name: "MSRregister SSBS",
@@ -5932,7 +5948,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xda16,
         index: &[],
-        run: a455,
+        run: a457,
     },
     Accessor {
         name: "MRS TCR_EL1",
@@ -5940,7 +5956,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc102,
         index: &[],
-        run: a456,
+        run: a458,
     },
     Accessor {
         name: "MSRregister TCR_EL1",
@@ -5948,7 +5964,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc102,
         index: &[],
-        run: a457,
+        run: a459,
     },
     Accessor {
         name: "MRS TCR_EL12",
@@ -5956,7 +5972,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe902,
         index: &[],
-        run: a458,
+        run: a460,
     },
     Accessor {
         name: "MSRregister TCR_EL12",
@@ -5964,7 +5980,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe902,
         index: &[],
-        run: a459,
+        run: a461,
     },
     Accessor {
         name: "MRS TCR_EL2",
@@ -5972,7 +5988,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe102,
         index: &[],
-        run: a460,
+        run: a462,
     },
     Accessor {
         name: "MSRregister TCR_EL2",
@@ -5980,7 +5996,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe102,
         index: &[],
-        run: a461,
+        run: a463,
     },
     Accessor {
         name: "MRS TCR_EL1",
@@ -5988,7 +6004,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc102,
         index: &[],
-        run: a462,
+        run: a464,
     },
     Accessor {
         name: "MSRregister TCR_EL1",
@@ -5996,7 +6012,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc102,
         index: &[],
-        run: a463,
+        run: a465,
     },
     Accessor {
         name: "TLBI ALLE1IS",
@@ -6004,7 +6020,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x641c,
         index: &[],
-        run: a464,
+        run: a466,
     },
     Accessor {
         name: "TLBI ALLE1",
@@ -6012,7 +6028,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x643c,
         index: &[],
-        run: a465,
+        run: a467,
     },
     Accessor {
         name: "TLBI ALLE1OS",
@@ -6020,7 +6036,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x640c,
         index: &[],
-        run: a466,
+        run: a468,
     },
     Accessor {
         name: "TLBI ALLE2IS",
@@ -6028,7 +6044,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6418,
         index: &[],
-        run: a467,
+        run: a469,
     },
     Accessor {
         name: "TLBI ALLE2",
@@ -6036,7 +6052,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6438,
         index: &[],
-        run: a468,
+        run: a470,
     },
     Accessor {
         name: "TLBI ALLE2OS",
@@ -6044,7 +6060,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6408,
         index: &[],
-        run: a469,
+        run: a471,
     },
     Accessor {
         name: "TLBI ALLE3IS",
@@ -6052,7 +6068,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7418,
         index: &[],
-        run: a470,
+        run: a472,
     },
     Accessor {
         name: "TLBI ALLE3",
@@ -6060,7 +6076,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7438,
         index: &[],
-        run: a471,
+        run: a473,
     },
     Accessor {
         name: "TLBI ALLE3OS",
@@ -6068,7 +6084,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7408,
         index: &[],
-        run: a472,
+        run: a474,
     },
     Accessor {
         name: "TLBI ASIDE1IS",
@@ -6076,7 +6092,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x441a,
         index: &[],
-        run: a473,
+        run: a475,
     },
     Accessor {
         name: "TLBI ASIDE1",
@@ -6084,7 +6100,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x443a,
         index: &[],
-        run: a474,
+        run: a476,
     },
     Accessor {
         name: "TLBI ASIDE1OS",
@@ -6092,7 +6108,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x440a,
         index: &[],
-        run: a475,
+        run: a477,
     },
     Accessor {
         name: "TLBI IPAS2E1IS",
@@ -6100,7 +6116,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6401,
         index: &[],
-        run: a476,
+        run: a478,
     },
     Accessor {
         name: "TLBI IPAS2E1",
@@ -6108,7 +6124,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6421,
         index: &[],
-        run: a477,
+        run: a479,
     },
     Accessor {
         name: "TLBI IPAS2E1OS",
@@ -6116,7 +6132,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6420,
         index: &[],
-        run: a478,
+        run: a480,
     },
     Accessor {
         name: "TLBI IPAS2LE1IS",
@@ -6124,7 +6140,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6405,
         index: &[],
-        run: a479,
+        run: a481,
     },
     Accessor {
         name: "TLBI IPAS2LE1",
@@ -6132,7 +6148,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6425,
         index: &[],
-        run: a480,
+        run: a482,
     },
     Accessor {
         name: "TLBI IPAS2LE1OS",
@@ -6140,7 +6156,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6424,
         index: &[],
-        run: a481,
+        run: a483,
     },
     Accessor {
         name: "TLBI RIPAS2E1IS",
@@ -6148,7 +6164,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6402,
         index: &[],
-        run: a482,
+        run: a484,
     },
     Accessor {
         name: "TLBI RIPAS2E1",
@@ -6156,7 +6172,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6422,
         index: &[],
-        run: a483,
+        run: a485,
     },
     Accessor {
         name: "TLBI RIPAS2E1OS",
@@ -6164,7 +6180,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6423,
         index: &[],
-        run: a484,
+        run: a486,
     },
     Accessor {
         name: "TLBI RIPAS2LE1IS",
@@ -6172,7 +6188,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6406,
         index: &[],
-        run: a485,
+        run: a487,
     },
     Accessor {
         name: "TLBI RIPAS2LE1",
@@ -6180,7 +6196,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6426,
         index: &[],
-        run: a486,
+        run: a488,
     },
     Accessor {
         name: "TLBI RIPAS2LE1OS",
@@ -6188,7 +6204,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6427,
         index: &[],
-        run: a487,
+        run: a489,
     },
     Accessor {
         name: "TLBI RVAAE1IS",
@@ -6196,7 +6212,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4413,
         index: &[],
-        run: a488,
+        run: a490,
     },
     Accessor {
         name: "TLBI RVAAE1",
@@ -6204,7 +6220,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4433,
         index: &[],
-        run: a489,
+        run: a491,
     },
     Accessor {
         name: "TLBI RVAAE1OS",
@@ -6212,7 +6228,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x442b,
         index: &[],
-        run: a490,
+        run: a492,
     },
     Accessor {
         name: "TLBI RVAALE1IS",
@@ -6220,7 +6236,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4417,
         index: &[],
-        run: a491,
+        run: a493,
     },
     Accessor {
         name: "TLBI RVAALE1",
@@ -6228,7 +6244,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4437,
         index: &[],
-        run: a492,
+        run: a494,
     },
     Accessor {
         name: "TLBI RVAALE1OS",
@@ -6236,7 +6252,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x442f,
         index: &[],
-        run: a493,
+        run: a495,
     },
     Accessor {
         name: "TLBI RVAE1IS",
@@ -6244,7 +6260,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4411,
         index: &[],
-        run: a494,
+        run: a496,
     },
     Accessor {
         name: "TLBI RVAE1",
@@ -6252,7 +6268,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4431,
         index: &[],
-        run: a495,
+        run: a497,
     },
     Accessor {
         name: "TLBI RVAE1OS",
@@ -6260,7 +6276,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4429,
         index: &[],
-        run: a496,
+        run: a498,
     },
     Accessor {
         name: "TLBI RVAE2IS",
@@ -6268,7 +6284,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6411,
         index: &[],
-        run: a497,
+        run: a499,
     },
     Accessor {
         name: "TLBI RVAE2",
@@ -6276,7 +6292,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6431,
         index: &[],
-        run: a498,
+        run: a500,
     },
     Accessor {
         name: "TLBI RVAE2OS",
@@ -6284,7 +6300,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6429,
         index: &[],
-        run: a499,
+        run: a501,
     },
     Accessor {
         name: "TLBI RVAE3IS",
@@ -6292,7 +6308,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7411,
         index: &[],
-        run: a500,
+        run: a502,
     },
     Accessor {
         name: "TLBI RVAE3",
@@ -6300,7 +6316,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7431,
         index: &[],
-        run: a501,
+        run: a503,
     },
     Accessor {
         name: "TLBI RVAE3OS",
@@ -6308,7 +6324,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7429,
         index: &[],
-        run: a502,
+        run: a504,
     },
     Accessor {
         name: "TLBI RVALE1IS",
@@ -6316,7 +6332,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4415,
         index: &[],
-        run: a503,
+        run: a505,
     },
     Accessor {
         name: "TLBI RVALE1",
@@ -6324,7 +6340,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4435,
         index: &[],
-        run: a504,
+        run: a506,
     },
     Accessor {
         name: "TLBI RVALE1OS",
@@ -6332,7 +6348,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x442d,
         index: &[],
-        run: a505,
+        run: a507,
     },
     Accessor {
         name: "TLBI RVALE2IS",
@@ -6340,7 +6356,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6415,
         index: &[],
-        run: a506,
+        run: a508,
     },
     Accessor {
         name: "TLBI RVALE2",
@@ -6348,7 +6364,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6435,
         index: &[],
-        run: a507,
+        run: a509,
     },
     Accessor {
         name: "TLBI RVALE2OS",
@@ -6356,7 +6372,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x642d,
         index: &[],
-        run: a508,
+        run: a510,
     },
     Accessor {
         name: "TLBI RVALE3IS",
@@ -6364,7 +6380,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7415,
         index: &[],
-        run: a509,
+        run: a511,
     },
     Accessor {
         name: "TLBI RVALE3",
@@ -6372,7 +6388,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7435,
         index: &[],
-        run: a510,
+        run: a512,
     },
     Accessor {
         name: "TLBI RVALE3OS",
@@ -6380,7 +6396,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x742d,
         index: &[],
-        run: a511,
+        run: a513,
     },
     Accessor {
         name: "TLBI VAAE1IS",
@@ -6388,7 +6404,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x441b,
         index: &[],
-        run: a512,
+        run: a514,
     },
     Accessor {
         name: "TLBI VAAE1",
@@ -6396,7 +6412,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x443b,
         index: &[],
-        run: a513,
+        run: a515,
     },
     Accessor {
         name: "TLBI VAAE1OS",
@@ -6404,7 +6420,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x440b,
         index: &[],
-        run: a514,
+        run: a516,
     },
     Accessor {
         name: "TLBI VAALE1IS",
@@ -6412,7 +6428,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x441f,
         index: &[],
-        run: a515,
+        run: a517,
     },
     Accessor {
         name: "TLBI VAALE1",
@@ -6420,7 +6436,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x443f,
         index: &[],
-        run: a516,
+        run: a518,
     },
     Accessor {
         name: "TLBI VAALE1OS",
@@ -6428,7 +6444,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x440f,
         index: &[],
-        run: a517,
+        run: a519,
     },
     Accessor {
         name: "TLBI VAE1IS",
@@ -6436,7 +6452,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4419,
         index: &[],
-        run: a518,
+        run: a520,
     },
     Accessor {
         name: "TLBI VAE1",
@@ -6444,7 +6460,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4439,
         index: &[],
-        run: a519,
+        run: a521,
     },
     Accessor {
         name: "TLBI VAE1OS",
@@ -6452,7 +6468,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4409,
         index: &[],
-        run: a520,
+        run: a522,
     },
     Accessor {
         name: "TLBI VAE2IS",
@@ -6460,7 +6476,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6419,
         index: &[],
-        run: a521,
+        run: a523,
     },
     Accessor {
         name: "TLBI VAE2",
@@ -6468,7 +6484,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6439,
         index: &[],
-        run: a522,
+        run: a524,
     },
     Accessor {
         name: "TLBI VAE2OS",
@@ -6476,7 +6492,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x6409,
         index: &[],
-        run: a523,
+        run: a525,
     },
     Accessor {
         name: "TLBI VAE3IS",
@@ -6484,7 +6500,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7419,
         index: &[],
-        run: a524,
+        run: a526,
     },
     Accessor {
         name: "TLBI VAE3",
@@ -6492,7 +6508,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7439,
         index: &[],
-        run: a525,
+        run: a527,
     },
     Accessor {
         name: "TLBI VAE3OS",
@@ -6500,7 +6516,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x7409,
         index: &[],
-        run: a526,
+        run: a528,
     },
     Accessor {
         name: "TLBI VALE1IS",
@@ -6508,7 +6524,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x441d,
         index: &[],
-        run: a527,
+        run: a529,
     },
     Accessor {
         name: "TLBI VALE1",
@@ -6516,7 +6532,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x443d,
         index: &[],
-        run: a528,
+        run: a530,
     },
     Accessor {
         name: "TLBI VALE1OS",
@@ -6524,7 +6540,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x440d,
         index: &[],
-        run: a529,
+        run: a531,
     },
     Accessor {
         name: "TLBI VALE2IS",
@@ -6532,7 +6548,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x641d,
         index: &[],
-        run: a530,
+        run: a532,
     },
     Accessor {
         name: "TLBI VALE2",
@@ -6540,7 +6556,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x643d,
         index: &[],
-        run: a531,
+        run: a533,
     },
     Accessor {
         name: "TLBI VALE2OS",
@@ -6548,7 +6564,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x640d,
         index: &[],
-        run: a532,
+        run: a534,
     },
     Accessor {
         name: "TLBI VALE3IS",
@@ -6556,7 +6572,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x741d,
         index: &[],
-        run: a533,
+        run: a535,
     },
     Accessor {
         name: "TLBI VALE3",
@@ -6564,7 +6580,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x743d,
         index: &[],
-        run: a534,
+        run: a536,
     },
     Accessor {
         name: "TLBI VALE3OS",
@@ -6572,7 +6588,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x740d,
         index: &[],
-        run: a535,
+        run: a537,
     },
     Accessor {
         name: "TLBI VMALLE1IS",
@@ -6580,7 +6596,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4418,
         index: &[],
-        run: a536,
+        run: a538,
     },
     Accessor {
         name: "TLBI VMALLE1",
@@ -6588,7 +6604,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4438,
         index: &[],
-        run: a537,
+        run: a539,
     },
     Accessor {
         name: "TLBI VMALLE1OS",
@@ -6596,7 +6612,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x4408,
         index: &[],
-        run: a538,
+        run: a540,
     },
     Accessor {
         name: "TLBI VMALLS12E1IS",
@@ -6604,7 +6620,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x641e,
         index: &[],
-        run: a539,
+        run: a541,
     },
     Accessor {
         name: "TLBI VMALLS12E1",
@@ -6612,7 +6628,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x643e,
         index: &[],
-        run: a540,
+        run: a542,
     },
     Accessor {
         name: "TLBI VMALLS12E1OS",
@@ -6620,7 +6636,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0x640e,
         index: &[],
-        run: a541,
+        run: a543,
     },
     Accessor {
         name: "MRS TPIDR_EL0",
@@ -6628,7 +6644,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde82,
         index: &[],
-        run: a542,
+        run: a544,
     },
     Accessor {
         name: "MSRregister TPIDR_EL0",
@@ -6636,7 +6652,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde82,
         index: &[],
-        run: a543,
+        run: a545,
     },
     Accessor {
         name: "MRS TPIDR_EL1",
@@ -6644,7 +6660,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc684,
         index: &[],
-        run: a544,
+        run: a546,
     },
     Accessor {
         name: "MSRregister TPIDR_EL1",
@@ -6652,7 +6668,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc684,
         index: &[],
-        run: a545,
+        run: a547,
     },
     Accessor {
         name: "MRS TPIDR_EL2",
@@ -6660,7 +6676,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe682,
         index: &[],
-        run: a546,
+        run: a548,
     },
     Accessor {
         name: "MSRregister TPIDR_EL2",
@@ -6668,7 +6684,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe682,
         index: &[],
-        run: a547,
+        run: a549,
     },
     Accessor {
         name: "MRS TPIDRRO_EL0",
@@ -6676,7 +6692,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde83,
         index: &[],
-        run: a548,
+        run: a550,
     },
     Accessor {
         name: "MSRregister TPIDRRO_EL0",
@@ -6684,7 +6700,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde83,
         index: &[],
-        run: a549,
+        run: a551,
     },
     Accessor {
         name: "MRS TTBR0_EL1",
@@ -6692,7 +6708,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc100,
         index: &[],
-        run: a550,
+        run: a552,
     },
     Accessor {
         name: "MSRregister TTBR0_EL1",
@@ -6700,7 +6716,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc100,
         index: &[],
-        run: a551,
+        run: a553,
     },
     Accessor {
         name: "MRS TTBR0_EL12",
@@ -6708,7 +6724,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe900,
         index: &[],
-        run: a552,
+        run: a554,
     },
     Accessor {
         name: "MSRregister TTBR0_EL12",
@@ -6716,7 +6732,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe900,
         index: &[],
-        run: a553,
+        run: a555,
     },
     Accessor {
         name: "MRS TTBR0_EL2",
@@ -6724,7 +6740,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe100,
         index: &[],
-        run: a554,
+        run: a556,
     },
     Accessor {
         name: "MSRregister TTBR0_EL2",
@@ -6732,7 +6748,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe100,
         index: &[],
-        run: a555,
+        run: a557,
     },
     Accessor {
         name: "MRS TTBR0_EL1",
@@ -6740,7 +6756,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc100,
         index: &[],
-        run: a556,
+        run: a558,
     },
     Accessor {
         name: "MSRregister TTBR0_EL1",
@@ -6748,7 +6764,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc100,
         index: &[],
-        run: a557,
+        run: a559,
     },
     Accessor {
         name: "MRS TTBR1_EL1",
@@ -6756,7 +6772,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc101,
         index: &[],
-        run: a558,
+        run: a560,
     },
     Accessor {
         name: "MSRregister TTBR1_EL1",
@@ -6764,7 +6780,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc101,
         index: &[],
-        run: a559,
+        run: a561,
     },
     Accessor {
         name: "MRS TTBR1_EL12",
@@ -6772,7 +6788,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe901,
         index: &[],
-        run: a560,
+        run: a562,
     },
     Accessor {
         name: "MSRregister TTBR1_EL12",
@@ -6780,7 +6796,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe901,
         index: &[],
-        run: a561,
+        run: a563,
     },
     Accessor {
         name: "MRS TTBR1_EL2",
@@ -6788,7 +6804,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe101,
         index: &[],
-        run: a562,
+        run: a564,
     },
     Accessor {
         name: "MSRregister TTBR1_EL2",
@@ -6796,7 +6812,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe101,
         index: &[],
-        run: a563,
+        run: a565,
     },
     Accessor {
         name: "MRS TTBR1_EL1",
@@ -6804,7 +6820,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc101,
         index: &[],
-        run: a564,
+        run: a566,
     },
     Accessor {
         name: "MSRregister TTBR1_EL1",
@@ -6812,7 +6828,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc101,
         index: &[],
-        run: a565,
+        run: a567,
     },
     Accessor {
         name: "MRS UAO",
@@ -6820,7 +6836,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc214,
         index: &[],
-        run: a566,
+        run: a568,
     },
     Accessor {
         name: "MSRregister UAO",
@@ -6828,7 +6844,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc214,
         index: &[],
-        run: a567,
+        run: a569,
     },
     Accessor {
         name: "MRS VBAR_EL1",
@@ -6836,7 +6852,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc600,
         index: &[],
-        run: a568,
+        run: a570,
     },
     Accessor {
         name: "MSRregister VBAR_EL1",
@@ -6844,7 +6860,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc600,
         index: &[],
-        run: a569,
+        run: a571,
     },
     Accessor {
         name: "MRS VBAR_EL12",
@@ -6852,7 +6868,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xee00,
         index: &[],
-        run: a570,
+        run: a572,
     },
     Accessor {
         name: "MSRregister VBAR_EL12",
@@ -6860,7 +6876,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xee00,
         index: &[],
-        run: a571,
+        run: a573,
     },
     Accessor {
         name: "MRS VBAR_EL2",
@@ -6868,7 +6884,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe600,
         index: &[],
-        run: a572,
+        run: a574,
     },
     Accessor {
         name: "MSRregister VBAR_EL2",
@@ -6876,7 +6892,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe600,
         index: &[],
-        run: a573,
+        run: a575,
     },
     Accessor {
         name: "MRS VBAR_EL1",
@@ -6884,7 +6900,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc600,
         index: &[],
-        run: a574,
+        run: a576,
     },
     Accessor {
         name: "MSRregister VBAR_EL1",
@@ -6892,7 +6908,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc600,
         index: &[],
-        run: a575,
+        run: a577,
     },
     Accessor {
         name: "MRS VMPIDR_EL2",
@@ -6900,7 +6916,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe005,
         index: &[],
-        run: a576,
+        run: a578,
     },
     Accessor {
         name: "MSRregister VMPIDR_EL2",
@@ -6908,7 +6924,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe005,
         index: &[],
-        run: a577,
+        run: a579,
     },
     Accessor {
         name: "MRS MPIDR_EL1",
@@ -6916,7 +6932,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc005,
         index: &[],
-        run: a578,
+        run: a580,
     },
     Accessor {
         name: "MRS VPIDR_EL2",
@@ -6924,7 +6940,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe000,
         index: &[],
-        run: a579,
+        run: a581,
     },
     Accessor {
         name: "MSRregister VPIDR_EL2",
@@ -6932,7 +6948,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe000,
         index: &[],
-        run: a580,
+        run: a582,
     },
     Accessor {
         name: "MRS MIDR_EL1",
@@ -6940,7 +6956,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc000,
         index: &[],
-        run: a581,
+        run: a583,
     },
     Accessor {
         name: "MRS VTCR_EL2",
@@ -6948,7 +6964,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe10a,
         index: &[],
-        run: a582,
+        run: a584,
     },
     Accessor {
         name: "MSRregister VTCR_EL2",
@@ -6956,7 +6972,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe10a,
         index: &[],
-        run: a583,
+        run: a585,
     },
     Accessor {
         name: "MRS VTTBR_EL2",
@@ -6964,7 +6980,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe108,
         index: &[],
-        run: a584,
+        run: a586,
     },
     Accessor {
         name: "MSRregister VTTBR_EL2",
@@ -6972,7 +6988,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe108,
         index: &[],
-        run: a585,
+        run: a587,
     },
     Accessor {
         name: "MRS AMCFGR_EL0",
@@ -6980,7 +6996,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde91,
         index: &[],
-        run: a586,
+        run: a588,
     },
     Accessor {
         name: "MRS AMCG1IDR_EL0",
@@ -6988,7 +7004,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde96,
         index: &[],
-        run: a587,
+        run: a589,
     },
     Accessor {
         name: "MRS AMCGCR_EL0",
@@ -6996,7 +7012,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde92,
         index: &[],
-        run: a588,
+        run: a590,
     },
     Accessor {
         name: "MRS AMCNTENCLR0_EL0",
@@ -7004,7 +7020,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde94,
         index: &[],
-        run: a589,
+        run: a591,
     },
     Accessor {
         name: "MSRregister AMCNTENCLR0_EL0",
@@ -7012,7 +7028,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde94,
         index: &[],
-        run: a590,
+        run: a592,
     },
     Accessor {
         name: "MRS AMCNTENCLR1_EL0",
@@ -7020,7 +7036,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde98,
         index: &[],
-        run: a591,
+        run: a593,
     },
     Accessor {
         name: "MSRregister AMCNTENCLR1_EL0",
@@ -7028,7 +7044,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde98,
         index: &[],
-        run: a592,
+        run: a594,
     },
     Accessor {
         name: "MRS AMCNTENSET0_EL0",
@@ -7036,7 +7052,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde95,
         index: &[],
-        run: a593,
+        run: a595,
     },
     Accessor {
         name: "MSRregister AMCNTENSET0_EL0",
@@ -7044,7 +7060,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde95,
         index: &[],
-        run: a594,
+        run: a596,
     },
     Accessor {
         name: "MRS AMCNTENSET1_EL0",
@@ -7052,7 +7068,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde99,
         index: &[],
-        run: a595,
+        run: a597,
     },
     Accessor {
         name: "MSRregister AMCNTENSET1_EL0",
@@ -7060,7 +7076,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde99,
         index: &[],
-        run: a596,
+        run: a598,
     },
     Accessor {
         name: "MRS AMCR_EL0",
@@ -7068,7 +7084,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde90,
         index: &[],
-        run: a597,
+        run: a599,
     },
     Accessor {
         name: "MSRregister AMCR_EL0",
@@ -7076,7 +7092,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde90,
         index: &[],
-        run: a598,
+        run: a600,
     },
     Accessor {
         name: "MRS AMEVCNTR0<m>_EL0",
@@ -7084,7 +7100,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xdea0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a599,
+        run: a601,
     },
     Accessor {
         name: "MSRregister AMEVCNTR0<m>_EL0",
@@ -7092,7 +7108,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xdea0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a600,
+        run: a602,
     },
     Accessor {
         name: "MRS AMEVCNTR1<m>_EL0",
@@ -7100,7 +7116,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xdee0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a601,
+        run: a603,
     },
     Accessor {
         name: "MSRregister AMEVCNTR1<m>_EL0",
@@ -7108,7 +7124,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xdee0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a602,
+        run: a604,
     },
     Accessor {
         name: "MRS AMEVCNTVOFF0<m>_EL2",
@@ -7116,7 +7132,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xe6c0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a603,
+        run: a605,
     },
     Accessor {
         name: "MSRregister AMEVCNTVOFF0<m>_EL2",
@@ -7124,7 +7140,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xe6c0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a604,
+        run: a606,
     },
     Accessor {
         name: "MRS AMEVCNTVOFF1<m>_EL2",
@@ -7132,7 +7148,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xe6d0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a605,
+        run: a607,
     },
     Accessor {
         name: "MSRregister AMEVCNTVOFF1<m>_EL2",
@@ -7140,7 +7156,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xe6d0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a606,
+        run: a608,
     },
     Accessor {
         name: "MRS AMEVTYPER0<m>_EL0",
@@ -7148,7 +7164,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xdeb0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a607,
+        run: a609,
     },
     Accessor {
         name: "MRS AMEVTYPER1<m>_EL0",
@@ -7156,7 +7172,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xdef0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a608,
+        run: a610,
     },
     Accessor {
         name: "MSRregister AMEVTYPER1<m>_EL0",
@@ -7164,7 +7180,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xfff0,
         value: 0xdef0,
         index: &[(3, 3), (0, 0), (1, 1), (2, 2)],
-        run: a609,
+        run: a611,
     },
     Accessor {
         name: "MRS AMUSERENR_EL0",
@@ -7172,7 +7188,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde93,
         index: &[],
-        run: a610,
+        run: a612,
     },
     Accessor {
         name: "MSRregister AMUSERENR_EL0",
@@ -7180,7 +7196,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xde93,
         index: &[],
-        run: a611,
+        run: a613,
     },
     Accessor {
         name: "MRS MPAM0_EL1",
@@ -7188,7 +7204,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc529,
         index: &[],
-        run: a612,
+        run: a614,
     },
     Accessor {
         name: "MSRregister MPAM0_EL1",
@@ -7196,7 +7212,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc529,
         index: &[],
-        run: a613,
+        run: a615,
     },
     Accessor {
         name: "MRS MPAM1_EL1",
@@ -7204,7 +7220,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc528,
         index: &[],
-        run: a614,
+        run: a616,
     },
     Accessor {
         name: "MSRregister MPAM1_EL1",
@@ -7212,7 +7228,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc528,
         index: &[],
-        run: a615,
+        run: a617,
     },
     Accessor {
         name: "MRS MPAM1_EL12",
@@ -7220,7 +7236,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xed28,
         index: &[],
-        run: a616,
+        run: a618,
     },
     Accessor {
         name: "MSRregister MPAM1_EL12",
@@ -7228,7 +7244,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xed28,
         index: &[],
-        run: a617,
+        run: a619,
     },
     Accessor {
         name: "MRS MPAM2_EL2",
@@ -7236,7 +7252,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe528,
         index: &[],
-        run: a618,
+        run: a620,
     },
     Accessor {
         name: "MSRregister MPAM2_EL2",
@@ -7244,7 +7260,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe528,
         index: &[],
-        run: a619,
+        run: a621,
     },
     Accessor {
         name: "MRS MPAM1_EL1",
@@ -7252,7 +7268,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc528,
         index: &[],
-        run: a620,
+        run: a622,
     },
     Accessor {
         name: "MSRregister MPAM1_EL1",
@@ -7260,7 +7276,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc528,
         index: &[],
-        run: a621,
+        run: a623,
     },
     Accessor {
         name: "MRS MPAM3_EL3",
@@ -7268,7 +7284,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xf528,
         index: &[],
-        run: a622,
+        run: a624,
     },
     Accessor {
         name: "MSRregister MPAM3_EL3",
@@ -7276,7 +7292,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xf528,
         index: &[],
-        run: a623,
+        run: a625,
     },
     Accessor {
         name: "MRS MPAMHCR_EL2",
@@ -7284,7 +7300,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe520,
         index: &[],
-        run: a624,
+        run: a626,
     },
     Accessor {
         name: "MSRregister MPAMHCR_EL2",
@@ -7292,7 +7308,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe520,
         index: &[],
-        run: a625,
+        run: a627,
     },
     Accessor {
         name: "MRS MPAMIDR_EL1",
@@ -7300,7 +7316,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc524,
         index: &[],
-        run: a626,
+        run: a628,
     },
     Accessor {
         name: "MRS MPAMVPM0_EL2",
@@ -7308,7 +7324,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe530,
         index: &[],
-        run: a627,
+        run: a629,
     },
     Accessor {
         name: "MSRregister MPAMVPM0_EL2",
@@ -7316,7 +7332,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe530,
         index: &[],
-        run: a628,
+        run: a630,
     },
     Accessor {
         name: "MRS MPAMVPM1_EL2",
@@ -7324,7 +7340,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe531,
         index: &[],
-        run: a629,
+        run: a631,
     },
     Accessor {
         name: "MSRregister MPAMVPM1_EL2",
@@ -7332,7 +7348,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe531,
         index: &[],
-        run: a630,
+        run: a632,
     },
     Accessor {
         name: "MRS MPAMVPM2_EL2",
@@ -7340,7 +7356,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe532,
         index: &[],
-        run: a631,
+        run: a633,
     },
     Accessor {
         name: "MSRregister MPAMVPM2_EL2",
@@ -7348,7 +7364,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe532,
         index: &[],
-        run: a632,
+        run: a634,
     },
     Accessor {
         name: "MRS MPAMVPM3_EL2",
@@ -7356,7 +7372,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe533,
         index: &[],
-        run: a633,
+        run: a635,
     },
     Accessor {
         name: "MSRregister MPAMVPM3_EL2",
@@ -7364,7 +7380,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe533,
         index: &[],
-        run: a634,
+        run: a636,
     },
     Accessor {
         name: "MRS MPAMVPM4_EL2",
@@ -7372,7 +7388,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe534,
         index: &[],
-        run: a635,
+        run: a637,
     },
     Accessor {
         name: "MSRregister MPAMVPM4_EL2",
@@ -7380,7 +7396,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe534,
         index: &[],
-        run: a636,
+        run: a638,
     },
     Accessor {
         name: "MRS MPAMVPM5_EL2",
@@ -7388,7 +7404,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe535,
         index: &[],
-        run: a637,
+        run: a639,
     },
     Accessor {
         name: "MSRregister MPAMVPM5_EL2",
@@ -7396,7 +7412,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe535,
         index: &[],
-        run: a638,
+        run: a640,
     },
     Accessor {
         name: "MRS MPAMVPM6_EL2",
@@ -7404,7 +7420,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe536,
         index: &[],
-        run: a639,
+        run: a641,
     },
     Accessor {
         name: "MSRregister MPAMVPM6_EL2",
@@ -7412,7 +7428,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe536,
         index: &[],
-        run: a640,
+        run: a642,
     },
     Accessor {
         name: "MRS MPAMVPM7_EL2",
@@ -7420,7 +7436,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe537,
         index: &[],
-        run: a641,
+        run: a643,
     },
     Accessor {
         name: "MSRregister MPAMVPM7_EL2",
@@ -7428,7 +7444,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe537,
         index: &[],
-        run: a642,
+        run: a644,
     },
     Accessor {
         name: "MRS MPAMVPMV_EL2",
@@ -7436,7 +7452,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe521,
         index: &[],
-        run: a643,
+        run: a645,
     },
     Accessor {
         name: "MSRregister MPAMVPMV_EL2",
@@ -7444,7 +7460,15 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe521,
         index: &[],
-        run: a644,
+        run: a646,
+    },
+    Accessor {
+        name: "MRS GMID_EL1",
+        kind: "MRS",
+        mask: 0xffff,
+        value: 0xc804,
+        index: &[],
+        run: a647,
     },
     Accessor {
         name: "MRS DISR_EL1",
@@ -7452,7 +7476,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc609,
         index: &[],
-        run: a645,
+        run: a648,
     },
     Accessor {
         name: "MSRregister DISR_EL1",
@@ -7460,7 +7484,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc609,
         index: &[],
-        run: a646,
+        run: a649,
     },
     Accessor {
         name: "MRS ERRIDR_EL1",
@@ -7468,7 +7492,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc298,
         index: &[],
-        run: a647,
+        run: a650,
     },
     Accessor {
         name: "MRS ERRSELR_EL1",
@@ -7476,7 +7500,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc299,
         index: &[],
-        run: a648,
+        run: a651,
     },
     Accessor {
         name: "MSRregister ERRSELR_EL1",
@@ -7484,7 +7508,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc299,
         index: &[],
-        run: a649,
+        run: a652,
     },
     Accessor {
         name: "MRS ERXADDR_EL1",
@@ -7492,7 +7516,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a3,
         index: &[],
-        run: a650,
+        run: a653,
     },
     Accessor {
         name: "MSRregister ERXADDR_EL1",
@@ -7500,7 +7524,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a3,
         index: &[],
-        run: a651,
+        run: a654,
     },
     Accessor {
         name: "MRS ERXCTLR_EL1",
@@ -7508,7 +7532,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a1,
         index: &[],
-        run: a652,
+        run: a655,
     },
     Accessor {
         name: "MSRregister ERXCTLR_EL1",
@@ -7516,7 +7540,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a1,
         index: &[],
-        run: a653,
+        run: a656,
     },
     Accessor {
         name: "MRS ERXFR_EL1",
@@ -7524,7 +7548,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a0,
         index: &[],
-        run: a654,
+        run: a657,
     },
     Accessor {
         name: "MRS ERXMISC0_EL1",
@@ -7532,7 +7556,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a8,
         index: &[],
-        run: a655,
+        run: a658,
     },
     Accessor {
         name: "MSRregister ERXMISC0_EL1",
@@ -7540,7 +7564,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a8,
         index: &[],
-        run: a656,
+        run: a659,
     },
     Accessor {
         name: "MRS ERXMISC1_EL1",
@@ -7548,7 +7572,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a9,
         index: &[],
-        run: a657,
+        run: a660,
     },
     Accessor {
         name: "MSRregister ERXMISC1_EL1",
@@ -7556,7 +7580,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a9,
         index: &[],
-        run: a658,
+        run: a661,
     },
     Accessor {
         name: "MRS ERXMISC2_EL1",
@@ -7564,7 +7588,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2aa,
         index: &[],
-        run: a659,
+        run: a662,
     },
     Accessor {
         name: "MSRregister ERXMISC2_EL1",
@@ -7572,7 +7596,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2aa,
         index: &[],
-        run: a660,
+        run: a663,
     },
     Accessor {
         name: "MRS ERXMISC3_EL1",
@@ -7580,7 +7604,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2ab,
         index: &[],
-        run: a661,
+        run: a664,
     },
     Accessor {
         name: "MSRregister ERXMISC3_EL1",
@@ -7588,7 +7612,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2ab,
         index: &[],
-        run: a662,
+        run: a665,
     },
     Accessor {
         name: "MRS ERXPFGCDN_EL1",
@@ -7596,7 +7620,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a6,
         index: &[],
-        run: a663,
+        run: a666,
     },
     Accessor {
         name: "MSRregister ERXPFGCDN_EL1",
@@ -7604,7 +7628,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a6,
         index: &[],
-        run: a664,
+        run: a667,
     },
     Accessor {
         name: "MRS ERXPFGCTL_EL1",
@@ -7612,7 +7636,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a5,
         index: &[],
-        run: a665,
+        run: a668,
     },
     Accessor {
         name: "MSRregister ERXPFGCTL_EL1",
@@ -7620,7 +7644,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a5,
         index: &[],
-        run: a666,
+        run: a669,
     },
     Accessor {
         name: "MRS ERXPFGF_EL1",
@@ -7628,7 +7652,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a4,
         index: &[],
-        run: a667,
+        run: a670,
     },
     Accessor {
         name: "MRS ERXSTATUS_EL1",
@@ -7636,7 +7660,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a2,
         index: &[],
-        run: a668,
+        run: a671,
     },
     Accessor {
         name: "MSRregister ERXSTATUS_EL1",
@@ -7644,7 +7668,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc2a2,
         index: &[],
-        run: a669,
+        run: a672,
     },
     Accessor {
         name: "MRS VDISR_EL2",
@@ -7652,7 +7676,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe609,
         index: &[],
-        run: a670,
+        run: a673,
     },
     Accessor {
         name: "MSRregister VDISR_EL2",
@@ -7660,7 +7684,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe609,
         index: &[],
-        run: a671,
+        run: a674,
     },
     Accessor {
         name: "MRS DISR_EL1",
@@ -7668,7 +7692,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc609,
         index: &[],
-        run: a672,
+        run: a675,
     },
     Accessor {
         name: "MSRregister DISR_EL1",
@@ -7676,7 +7700,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc609,
         index: &[],
-        run: a673,
+        run: a676,
     },
     Accessor {
         name: "MRS VSESR_EL2",
@@ -7684,7 +7708,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe293,
         index: &[],
-        run: a674,
+        run: a677,
     },
     Accessor {
         name: "MSRregister VSESR_EL2",
@@ -7692,7 +7716,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xe293,
         index: &[],
-        run: a675,
+        run: a678,
     },
     Accessor {
         name: "MRS ID_AA64SMFR0_EL1",
@@ -7700,7 +7724,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc025,
         index: &[],
-        run: a676,
+        run: a679,
     },
     Accessor {
         name: "MRS ID_AA64ZFR0_EL1",
@@ -7708,7 +7732,7 @@ pub static ACCESSORS: [Accessor; 678] = [
         mask: 0xffff,
         value: 0xc024,
         index: &[],
-        run: a677,
+        run: a680,
     },
 ];
 
@@ -9899,8 +9923,14 @@ fn a66(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS CCSIDR_EL1 (CCSIDR_EL1)
+/// MRS CCSIDR2_EL1 (CCSIDR2_EL1)
 fn a67(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    return Ok(unimplemented_id_register(c));
+}
+
+/// MRS CCSIDR_EL1 (CCSIDR_EL1)
+fn a68(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -9941,7 +9971,7 @@ fn a67(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// CFP RCTX (CFP RCTX)
-fn a68(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a69(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::SCTLR_EL1, 0), 10, 1)) & 0x1) == 0x0 {
@@ -10008,7 +10038,7 @@ fn a68(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CLIDR_EL1 (CLIDR_EL1)
-fn a69(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a70(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -10049,7 +10079,7 @@ fn a69(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTFRQ_EL0 (CNTFRQ_EL0)
-fn a70(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a71(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((((((0u64) << 1) | (bits(c.read(Register::CNTKCTL_EL1, 0), 0, 1))) << 1)
@@ -10100,7 +10130,7 @@ fn a70(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTFRQ_EL0 (CNTFRQ_EL0)
-fn a71(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a72(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10116,7 +10146,7 @@ fn a71(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTHCTL_EL2 (CNTHCTL_EL2)
-fn a72(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a73(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10135,7 +10165,7 @@ fn a72(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTHCTL_EL2 (CNTHCTL_EL2)
-fn a73(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a74(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10154,7 +10184,7 @@ fn a73(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTKCTL_EL1 (CNTHCTL_EL2)
-fn a74(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a75(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10184,7 +10214,7 @@ fn a74(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTKCTL_EL1 (CNTHCTL_EL2)
-fn a75(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a76(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10214,7 +10244,7 @@ fn a75(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTHP_CTL_EL2 (CNTHP_CTL_EL2)
-fn a76(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a77(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10233,7 +10263,7 @@ fn a76(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTHP_CTL_EL2 (CNTHP_CTL_EL2)
-fn a77(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a78(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10252,7 +10282,7 @@ fn a77(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_CTL_EL0 (CNTHP_CTL_EL2)
-fn a78(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a79(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -10332,7 +10362,7 @@ fn a78(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_CTL_EL0 (CNTHP_CTL_EL2)
-fn a79(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a80(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -10412,7 +10442,7 @@ fn a79(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTHP_CVAL_EL2 (CNTHP_CVAL_EL2)
-fn a80(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a81(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10431,7 +10461,7 @@ fn a80(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTHP_CVAL_EL2 (CNTHP_CVAL_EL2)
-fn a81(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a82(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10450,7 +10480,7 @@ fn a81(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_CVAL_EL0 (CNTHP_CVAL_EL2)
-fn a82(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a83(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -10530,7 +10560,7 @@ fn a82(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_CVAL_EL0 (CNTHP_CVAL_EL2)
-fn a83(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a84(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -10610,7 +10640,7 @@ fn a83(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTHP_TVAL_EL2 (CNTHP_TVAL_EL2)
-fn a84(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a85(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10640,7 +10670,7 @@ fn a84(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTHP_TVAL_EL2 (CNTHP_TVAL_EL2)
-fn a85(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a86(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10659,7 +10689,7 @@ fn a85(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_TVAL_EL0 (CNTHP_TVAL_EL2)
-fn a86(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a87(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -10794,7 +10824,7 @@ fn a86(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_TVAL_EL0 (CNTHP_TVAL_EL2)
-fn a87(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a88(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -10874,7 +10904,7 @@ fn a87(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTHV_CTL_EL2 (CNTHV_CTL_EL2)
-fn a88(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a89(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10893,7 +10923,7 @@ fn a88(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTHV_CTL_EL2 (CNTHV_CTL_EL2)
-fn a89(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a90(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -10912,7 +10942,7 @@ fn a89(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_CTL_EL0 (CNTHV_CTL_EL2)
-fn a90(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a91(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -10974,7 +11004,7 @@ fn a90(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_CTL_EL0 (CNTHV_CTL_EL2)
-fn a91(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a92(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -11036,7 +11066,7 @@ fn a91(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTHV_CVAL_EL2 (CNTHV_CVAL_EL2)
-fn a92(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a93(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11055,7 +11085,7 @@ fn a92(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTHV_CVAL_EL2 (CNTHV_CVAL_EL2)
-fn a93(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a94(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11074,7 +11104,7 @@ fn a93(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_CVAL_EL0 (CNTHV_CVAL_EL2)
-fn a94(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a95(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -11136,7 +11166,7 @@ fn a94(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_CVAL_EL0 (CNTHV_CVAL_EL2)
-fn a95(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a96(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -11198,7 +11228,7 @@ fn a95(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTHV_TVAL_EL2 (CNTHV_TVAL_EL2)
-fn a96(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a97(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11228,7 +11258,7 @@ fn a96(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTHV_TVAL_EL2 (CNTHV_TVAL_EL2)
-fn a97(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a98(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11247,7 +11277,7 @@ fn a97(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_TVAL_EL0 (CNTHV_TVAL_EL2)
-fn a98(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a99(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -11388,7 +11418,7 @@ fn a98(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_TVAL_EL0 (CNTHV_TVAL_EL2)
-fn a99(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a100(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -11461,7 +11491,7 @@ fn a99(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTKCTL_EL1 (CNTKCTL_EL1)
-fn a100(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a101(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11491,7 +11521,7 @@ fn a100(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTKCTL_EL1 (CNTKCTL_EL1)
-fn a101(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a102(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11521,7 +11551,7 @@ fn a101(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTKCTL_EL12 (CNTKCTL_EL1)
-fn a102(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a103(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11543,7 +11573,7 @@ fn a102(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTKCTL_EL12 (CNTKCTL_EL1)
-fn a103(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a104(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11565,7 +11595,7 @@ fn a103(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTPCT_EL0 (CNTPCT_EL0)
-fn a104(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a105(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -11624,7 +11654,7 @@ fn a104(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_CTL_EL0 (CNTP_CTL_EL0)
-fn a105(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a106(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -11704,7 +11734,7 @@ fn a105(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_CTL_EL0 (CNTP_CTL_EL0)
-fn a106(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a107(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -11784,7 +11814,7 @@ fn a106(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_CTL_EL02 (CNTP_CTL_EL0)
-fn a107(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a108(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11806,7 +11836,7 @@ fn a107(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_CTL_EL02 (CNTP_CTL_EL0)
-fn a108(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a109(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -11828,7 +11858,7 @@ fn a108(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTPCTSS_EL0 (CNTPCTSS_EL0)
-fn a109(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a110(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -11887,7 +11917,7 @@ fn a109(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_CVAL_EL0 (CNTP_CVAL_EL0)
-fn a110(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a111(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -11967,7 +11997,7 @@ fn a110(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_CVAL_EL0 (CNTP_CVAL_EL0)
-fn a111(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a112(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -12047,7 +12077,7 @@ fn a111(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_CVAL_EL02 (CNTP_CVAL_EL0)
-fn a112(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a113(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12069,7 +12099,7 @@ fn a112(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_CVAL_EL02 (CNTP_CVAL_EL0)
-fn a113(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a114(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12091,7 +12121,7 @@ fn a113(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_TVAL_EL0 (CNTP_TVAL_EL0)
-fn a114(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a115(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -12226,7 +12256,7 @@ fn a114(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_TVAL_EL0 (CNTP_TVAL_EL0)
-fn a115(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a116(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -12306,7 +12336,7 @@ fn a115(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTP_TVAL_EL02 (CNTP_TVAL_EL0)
-fn a116(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a117(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12339,7 +12369,7 @@ fn a116(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTP_TVAL_EL02 (CNTP_TVAL_EL0)
-fn a117(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a118(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12361,7 +12391,7 @@ fn a117(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTVCT_EL0 (CNTVCT_EL0)
-fn a118(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a119(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -12427,7 +12457,7 @@ fn a118(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_CTL_EL0 (CNTV_CTL_EL0)
-fn a119(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a120(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -12489,7 +12519,7 @@ fn a119(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_CTL_EL0 (CNTV_CTL_EL0)
-fn a120(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a121(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -12551,7 +12581,7 @@ fn a120(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_CTL_EL02 (CNTV_CTL_EL0)
-fn a121(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a122(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12573,7 +12603,7 @@ fn a121(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_CTL_EL02 (CNTV_CTL_EL0)
-fn a122(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a123(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12595,7 +12625,7 @@ fn a122(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTVCTSS_EL0 (CNTVCTSS_EL0)
-fn a123(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a124(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -12661,7 +12691,7 @@ fn a123(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_CVAL_EL0 (CNTV_CVAL_EL0)
-fn a124(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a125(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -12723,7 +12753,7 @@ fn a124(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_CVAL_EL0 (CNTV_CVAL_EL0)
-fn a125(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a126(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -12785,7 +12815,7 @@ fn a125(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_CVAL_EL02 (CNTV_CVAL_EL0)
-fn a126(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a127(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12807,7 +12837,7 @@ fn a126(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_CVAL_EL02 (CNTV_CVAL_EL0)
-fn a127(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a128(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12829,7 +12859,7 @@ fn a127(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTVOFF_EL2 (CNTVOFF_EL2)
-fn a128(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a129(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12848,7 +12878,7 @@ fn a128(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTVOFF_EL2 (CNTVOFF_EL2)
-fn a129(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a130(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -12867,7 +12897,7 @@ fn a129(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_TVAL_EL0 (CNTV_TVAL_EL0)
-fn a130(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a131(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -13008,7 +13038,7 @@ fn a130(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_TVAL_EL0 (CNTV_TVAL_EL0)
-fn a131(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a132(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::CNTKCTL_EL1, 0), 8, 1)) & 0x1) == 0x0 {
@@ -13081,7 +13111,7 @@ fn a131(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CNTV_TVAL_EL02 (CNTV_TVAL_EL0)
-fn a132(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a133(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13116,7 +13146,7 @@ fn a132(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CNTV_TVAL_EL02 (CNTV_TVAL_EL0)
-fn a133(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a134(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13140,7 +13170,7 @@ fn a133(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CONTEXTIDR_EL1 (CONTEXTIDR_EL1)
-fn a134(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a135(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13182,7 +13212,7 @@ fn a134(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CONTEXTIDR_EL1 (CONTEXTIDR_EL1)
-fn a135(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a136(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13224,7 +13254,7 @@ fn a135(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CONTEXTIDR_EL12 (CONTEXTIDR_EL1)
-fn a136(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a137(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13246,7 +13276,7 @@ fn a136(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CONTEXTIDR_EL12 (CONTEXTIDR_EL1)
-fn a137(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a138(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13268,7 +13298,7 @@ fn a137(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CONTEXTIDR_EL2 (CONTEXTIDR_EL2)
-fn a138(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a139(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13287,7 +13317,7 @@ fn a138(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CONTEXTIDR_EL2 (CONTEXTIDR_EL2)
-fn a139(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a140(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13306,7 +13336,7 @@ fn a139(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CONTEXTIDR_EL1 (CONTEXTIDR_EL2)
-fn a140(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a141(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13348,7 +13378,7 @@ fn a140(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CONTEXTIDR_EL1 (CONTEXTIDR_EL2)
-fn a141(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a142(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13390,7 +13420,7 @@ fn a141(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CPACR_EL1 (CPACR_EL1)
-fn a142(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a143(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13432,7 +13462,7 @@ fn a142(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CPACR_EL1 (CPACR_EL1)
-fn a143(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a144(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13474,7 +13504,7 @@ fn a143(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CPACR_EL12 (CPACR_EL1)
-fn a144(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a145(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13496,7 +13526,7 @@ fn a144(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CPACR_EL12 (CPACR_EL1)
-fn a145(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a146(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13518,7 +13548,7 @@ fn a145(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// CPP RCTX (CPP RCTX)
-fn a146(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a147(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::SCTLR_EL1, 0), 10, 1)) & 0x1) == 0x0 {
@@ -13585,7 +13615,7 @@ fn a146(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CPTR_EL2 (CPTR_EL2)
-fn a147(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a148(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13604,7 +13634,7 @@ fn a147(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CPTR_EL2 (CPTR_EL2)
-fn a148(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a149(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13623,7 +13653,7 @@ fn a148(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CPACR_EL1 (CPTR_EL2)
-fn a149(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a150(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13665,7 +13695,7 @@ fn a149(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CPACR_EL1 (CPTR_EL2)
-fn a150(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a151(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13707,7 +13737,7 @@ fn a150(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CSSELR_EL1 (CSSELR_EL1)
-fn a151(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a152(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13748,7 +13778,7 @@ fn a151(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister CSSELR_EL1 (CSSELR_EL1)
-fn a152(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a153(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13789,7 +13819,7 @@ fn a152(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CTR_EL0 (CTR_EL0)
-fn a153(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a154(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::SCTLR_EL1, 0), 15, 1)) & 0x1) == 0x0 {
@@ -13856,7 +13886,7 @@ fn a153(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS CurrentEL (CurrentEL)
-fn a154(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a155(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -13879,7 +13909,7 @@ fn a154(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DAIF (DAIF)
-fn a155(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a156(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_in_host(c)) || (((bits(c.read(Register::SCTLR_EL1, 0), 9, 1)) & 0x1) == 0x0) {
@@ -13933,7 +13963,7 @@ fn a155(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DAIF (DAIF)
-fn a156(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a157(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_in_host(c)) || (((bits(c.read(Register::SCTLR_EL1, 0), 9, 1)) & 0x1) == 0x0) {
@@ -13972,7 +14002,7 @@ fn a156(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGAUTHSTATUS_EL1 (DBGAUTHSTATUS_EL1)
-fn a157(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a158(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14011,7 +14041,7 @@ fn a157(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGBCR<m>_EL1 (DBGBCR<n>_EL1)
-fn a158(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a159(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Breakpoints)) {
         return Ok(Effect::Undefined);
@@ -14053,7 +14083,7 @@ fn a158(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGBCR<m>_EL1 (DBGBCR<n>_EL1)
-fn a159(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a160(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Breakpoints)) {
         return Ok(Effect::Undefined);
@@ -14095,7 +14125,7 @@ fn a159(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGBVR<m>_EL1 (DBGBVR<n>_EL1)
-fn a160(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a161(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Breakpoints)) {
         return Ok(Effect::Undefined);
@@ -14137,7 +14167,7 @@ fn a160(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGBVR<m>_EL1 (DBGBVR<n>_EL1)
-fn a161(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a162(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Breakpoints)) {
         return Ok(Effect::Undefined);
@@ -14179,7 +14209,7 @@ fn a161(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGCLAIMCLR_EL1 (DBGCLAIMCLR_EL1)
-fn a162(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a163(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14218,7 +14248,7 @@ fn a162(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGCLAIMCLR_EL1 (DBGCLAIMCLR_EL1)
-fn a163(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a164(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14257,7 +14287,7 @@ fn a163(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGCLAIMSET_EL1 (DBGCLAIMSET_EL1)
-fn a164(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a165(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14296,7 +14326,7 @@ fn a164(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGCLAIMSET_EL1 (DBGCLAIMSET_EL1)
-fn a165(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a166(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14335,7 +14365,7 @@ fn a165(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGDTR_EL0 (DBGDTR_EL0)
-fn a166(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a167(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::MDSCR_EL1, 0), 12, 1)) & 0x1) == 0x1 {
@@ -14398,7 +14428,7 @@ fn a166(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGDTR_EL0 (DBGDTR_EL0)
-fn a167(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a168(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::MDSCR_EL1, 0), 12, 1)) & 0x1) == 0x1 {
@@ -14461,7 +14491,7 @@ fn a167(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGDTRRX_EL0 (DBGDTRRX_EL0)
-fn a168(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a169(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::MDSCR_EL1, 0), 12, 1)) & 0x1) == 0x1 {
@@ -14524,7 +14554,7 @@ fn a168(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGDTRTX_EL0 (DBGDTRTX_EL0)
-fn a169(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a170(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::MDSCR_EL1, 0), 12, 1)) & 0x1) == 0x1 {
@@ -14587,7 +14617,7 @@ fn a169(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGPRCR_EL1 (DBGPRCR_EL1)
-fn a170(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a171(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14626,7 +14656,7 @@ fn a170(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGPRCR_EL1 (DBGPRCR_EL1)
-fn a171(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a172(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14665,7 +14695,7 @@ fn a171(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGWCR<m>_EL1 (DBGWCR<n>_EL1)
-fn a172(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a173(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Watchpoints)) {
         return Ok(Effect::Undefined);
@@ -14707,7 +14737,7 @@ fn a172(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGWCR<m>_EL1 (DBGWCR<n>_EL1)
-fn a173(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a174(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Watchpoints)) {
         return Ok(Effect::Undefined);
@@ -14749,7 +14779,7 @@ fn a173(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DBGWVR<m>_EL1 (DBGWVR<n>_EL1)
-fn a174(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a175(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Watchpoints)) {
         return Ok(Effect::Undefined);
@@ -14791,7 +14821,7 @@ fn a174(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DBGWVR<m>_EL1 (DBGWVR<n>_EL1)
-fn a175(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a176(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::Watchpoints)) {
         return Ok(Effect::Undefined);
@@ -14833,7 +14863,7 @@ fn a175(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC CISW (DC CISW)
-fn a176(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a177(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -14878,7 +14908,7 @@ fn a176(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC CIVAC (DC CIVAC)
-fn a177(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a178(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if !(can_trap_dc(
@@ -15029,7 +15059,7 @@ fn a177(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC CSW (DC CSW)
-fn a178(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a179(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -15074,7 +15104,7 @@ fn a178(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC CVAC (DC CVAC)
-fn a179(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a180(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if !(can_trap_dc(c, CacheType::Data, CacheOp::Clean, CacheScope::PoC)) {
@@ -15185,7 +15215,7 @@ fn a179(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC CVADP (DC CVADP)
-fn a180(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a181(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if !(can_trap_dc(c, CacheType::Data, CacheOp::Clean, CacheScope::PoDP)) {
@@ -15296,7 +15326,7 @@ fn a180(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC CVAP (DC CVAP)
-fn a181(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a182(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if !(can_trap_dc(c, CacheType::Data, CacheOp::Clean, CacheScope::PoP)) {
@@ -15407,7 +15437,7 @@ fn a181(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC CVAU (DC CVAU)
-fn a182(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a183(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if !(can_trap_dc(c, CacheType::Data, CacheOp::Clean, CacheScope::PoU)) {
@@ -15530,7 +15560,7 @@ fn a182(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC ISW (DC ISW)
-fn a183(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a184(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -15575,7 +15605,7 @@ fn a183(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC IVAC (DC IVAC)
-fn a184(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a185(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -15632,7 +15662,7 @@ fn a184(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DCZID_EL0 (DCZID_EL0)
-fn a185(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a186(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::HFGRTR_EL2, 0), 15, 1)) & 0x1) == 0x1 {
@@ -15678,7 +15708,7 @@ fn a185(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// DC ZVA (DC ZVA)
-fn a186(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a187(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::SCTLR_EL1, 0), 14, 1)) & 0x1) == 0x0 {
@@ -15757,7 +15787,7 @@ fn a186(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DIT (DIT)
-fn a187(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a188(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         {
@@ -15784,7 +15814,7 @@ fn a187(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DIT (DIT)
-fn a188(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a189(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         {
@@ -15811,31 +15841,31 @@ fn a188(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DLR_EL0 (DLR_EL0)
-fn a189(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister DLR_EL0 (DLR_EL0)
 fn a190(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS DSPSR_EL0 (DSPSR_EL0)
+/// MSRregister DLR_EL0 (DLR_EL0)
 fn a191(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister DSPSR_EL0 (DSPSR_EL0)
+/// MRS DSPSR_EL0 (DSPSR_EL0)
 fn a192(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// DVP RCTX (DVP RCTX)
+/// MSRregister DSPSR_EL0 (DSPSR_EL0)
 fn a193(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    return Ok(Effect::Undefined);
+}
+
+/// DVP RCTX (DVP RCTX)
+fn a194(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::SCTLR_EL1, 0), 10, 1)) & 0x1) == 0x0 {
@@ -15902,7 +15932,7 @@ fn a193(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ELR_EL1 (ELR_EL1)
-fn a194(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a195(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -15932,7 +15962,7 @@ fn a194(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ELR_EL1 (ELR_EL1)
-fn a195(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a196(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -15962,7 +15992,7 @@ fn a195(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ELR_EL12 (ELR_EL1)
-fn a196(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a197(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -15984,7 +16014,7 @@ fn a196(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ELR_EL12 (ELR_EL1)
-fn a197(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a198(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16006,7 +16036,7 @@ fn a197(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ELR_EL2 (ELR_EL1)
-fn a198(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a199(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16025,7 +16055,7 @@ fn a198(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ELR_EL2 (ELR_EL1)
-fn a199(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a200(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16044,7 +16074,7 @@ fn a199(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ELR_EL2 (ELR_EL2)
-fn a200(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a201(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16063,7 +16093,7 @@ fn a200(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ELR_EL2 (ELR_EL2)
-fn a201(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a202(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16082,7 +16112,7 @@ fn a201(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ELR_EL1 (ELR_EL2)
-fn a202(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a203(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16112,7 +16142,7 @@ fn a202(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ELR_EL1 (ELR_EL2)
-fn a203(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a204(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16142,7 +16172,7 @@ fn a203(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ESR_EL1 (ESR_EL1)
-fn a204(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a205(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16184,7 +16214,7 @@ fn a204(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ESR_EL1 (ESR_EL1)
-fn a205(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a206(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16226,7 +16256,7 @@ fn a205(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ESR_EL12 (ESR_EL1)
-fn a206(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a207(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16248,7 +16278,7 @@ fn a206(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ESR_EL12 (ESR_EL1)
-fn a207(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a208(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16270,7 +16300,7 @@ fn a207(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ESR_EL2 (ESR_EL1)
-fn a208(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a209(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16289,7 +16319,7 @@ fn a208(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ESR_EL2 (ESR_EL1)
-fn a209(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a210(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16308,7 +16338,7 @@ fn a209(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ESR_EL2 (ESR_EL2)
-fn a210(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a211(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16327,7 +16357,7 @@ fn a210(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ESR_EL2 (ESR_EL2)
-fn a211(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a212(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16346,7 +16376,7 @@ fn a211(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ESR_EL1 (ESR_EL2)
-fn a212(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a213(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16388,7 +16418,7 @@ fn a212(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ESR_EL1 (ESR_EL2)
-fn a213(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a214(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16430,7 +16460,7 @@ fn a213(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS FAR_EL1 (FAR_EL1)
-fn a214(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a215(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16472,7 +16502,7 @@ fn a214(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister FAR_EL1 (FAR_EL1)
-fn a215(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a216(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16514,7 +16544,7 @@ fn a215(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS FAR_EL12 (FAR_EL1)
-fn a216(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a217(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16536,7 +16566,7 @@ fn a216(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister FAR_EL12 (FAR_EL1)
-fn a217(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a218(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16558,7 +16588,7 @@ fn a217(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS FAR_EL2 (FAR_EL1)
-fn a218(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a219(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16577,7 +16607,7 @@ fn a218(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister FAR_EL2 (FAR_EL1)
-fn a219(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a220(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16596,7 +16626,7 @@ fn a219(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS FAR_EL2 (FAR_EL2)
-fn a220(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a221(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16615,7 +16645,7 @@ fn a220(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister FAR_EL2 (FAR_EL2)
-fn a221(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a222(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16634,7 +16664,7 @@ fn a221(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS FAR_EL1 (FAR_EL2)
-fn a222(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a223(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16676,7 +16706,7 @@ fn a222(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister FAR_EL1 (FAR_EL2)
-fn a223(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a224(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -16718,7 +16748,7 @@ fn a223(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS FPCR (FPCR)
-fn a224(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a225(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -16825,7 +16855,7 @@ fn a224(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister FPCR (FPCR)
-fn a225(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a226(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -16932,7 +16962,7 @@ fn a225(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS FPSR (FPSR)
-fn a226(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a227(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -17039,7 +17069,7 @@ fn a226(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister FPSR (FPSR)
-fn a227(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a228(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -17146,7 +17176,7 @@ fn a227(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HACR_EL2 (HACR_EL2)
-fn a228(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a229(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17165,7 +17195,7 @@ fn a228(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HACR_EL2 (HACR_EL2)
-fn a229(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a230(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17184,7 +17214,7 @@ fn a229(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HAFGRTR_EL2 (HAFGRTR_EL2)
-fn a230(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a231(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17203,7 +17233,7 @@ fn a230(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HAFGRTR_EL2 (HAFGRTR_EL2)
-fn a231(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a232(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17222,7 +17252,7 @@ fn a231(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HCR_EL2 (HCR_EL2)
-fn a232(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a233(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17241,7 +17271,7 @@ fn a232(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HCR_EL2 (HCR_EL2)
-fn a233(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a234(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17260,7 +17290,7 @@ fn a233(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HDFGRTR_EL2 (HDFGRTR_EL2)
-fn a234(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a235(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17279,7 +17309,7 @@ fn a234(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HDFGRTR_EL2 (HDFGRTR_EL2)
-fn a235(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a236(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17298,7 +17328,7 @@ fn a235(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HDFGWTR_EL2 (HDFGWTR_EL2)
-fn a236(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a237(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17317,7 +17347,7 @@ fn a236(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HDFGWTR_EL2 (HDFGWTR_EL2)
-fn a237(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a238(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17336,7 +17366,7 @@ fn a237(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HFGITR_EL2 (HFGITR_EL2)
-fn a238(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a239(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17355,7 +17385,7 @@ fn a238(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HFGITR_EL2 (HFGITR_EL2)
-fn a239(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a240(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17374,7 +17404,7 @@ fn a239(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HFGRTR_EL2 (HFGRTR_EL2)
-fn a240(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a241(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17393,7 +17423,7 @@ fn a240(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HFGRTR_EL2 (HFGRTR_EL2)
-fn a241(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a242(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17412,7 +17442,7 @@ fn a241(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HFGWTR_EL2 (HFGWTR_EL2)
-fn a242(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a243(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17431,7 +17461,7 @@ fn a242(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HFGWTR_EL2 (HFGWTR_EL2)
-fn a243(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a244(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17450,7 +17480,7 @@ fn a243(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HPFAR_EL2 (HPFAR_EL2)
-fn a244(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a245(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17469,7 +17499,7 @@ fn a244(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HPFAR_EL2 (HPFAR_EL2)
-fn a245(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a246(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17488,7 +17518,7 @@ fn a245(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS HSTR_EL2 (HSTR_EL2)
-fn a246(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a247(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17507,7 +17537,7 @@ fn a246(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister HSTR_EL2 (HSTR_EL2)
-fn a247(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a248(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17526,283 +17556,283 @@ fn a247(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ICC_AP0R<m>_EL1 (ICC_AP0R<n>_EL1)
-fn a248(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_AP0R<m>_EL1 (ICC_AP0R<n>_EL1)
 fn a249(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_AP1R<m>_EL1 (ICC_AP1R<n>_EL1)
+/// MSRregister ICC_AP0R<m>_EL1 (ICC_AP0R<n>_EL1)
 fn a250(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_AP1R<m>_EL1 (ICC_AP1R<n>_EL1)
+/// MRS ICC_AP1R<m>_EL1 (ICC_AP1R<n>_EL1)
 fn a251(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_ASGI1R_EL1 (ICC_ASGI1R_EL1)
+/// MSRregister ICC_AP1R<m>_EL1 (ICC_AP1R<n>_EL1)
 fn a252(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_BPR0_EL1 (ICC_BPR0_EL1)
+/// MSRregister ICC_ASGI1R_EL1 (ICC_ASGI1R_EL1)
 fn a253(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_BPR0_EL1 (ICC_BPR0_EL1)
+/// MRS ICC_BPR0_EL1 (ICC_BPR0_EL1)
 fn a254(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_BPR1_EL1 (ICC_BPR1_EL1)
+/// MSRregister ICC_BPR0_EL1 (ICC_BPR0_EL1)
 fn a255(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_BPR1_EL1 (ICC_BPR1_EL1)
+/// MRS ICC_BPR1_EL1 (ICC_BPR1_EL1)
 fn a256(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_CTLR_EL1 (ICC_CTLR_EL1)
+/// MSRregister ICC_BPR1_EL1 (ICC_BPR1_EL1)
 fn a257(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_CTLR_EL1 (ICC_CTLR_EL1)
+/// MRS ICC_CTLR_EL1 (ICC_CTLR_EL1)
 fn a258(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_DIR_EL1 (ICC_DIR_EL1)
+/// MSRregister ICC_CTLR_EL1 (ICC_CTLR_EL1)
 fn a259(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_EOIR0_EL1 (ICC_EOIR0_EL1)
+/// MSRregister ICC_DIR_EL1 (ICC_DIR_EL1)
 fn a260(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_EOIR1_EL1 (ICC_EOIR1_EL1)
+/// MSRregister ICC_EOIR0_EL1 (ICC_EOIR0_EL1)
 fn a261(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_HPPIR0_EL1 (ICC_HPPIR0_EL1)
+/// MSRregister ICC_EOIR1_EL1 (ICC_EOIR1_EL1)
 fn a262(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_HPPIR1_EL1 (ICC_HPPIR1_EL1)
+/// MRS ICC_HPPIR0_EL1 (ICC_HPPIR0_EL1)
 fn a263(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IAR0_EL1 (ICC_IAR0_EL1)
+/// MRS ICC_HPPIR1_EL1 (ICC_HPPIR1_EL1)
 fn a264(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IAR1_EL1 (ICC_IAR1_EL1)
+/// MRS ICC_IAR0_EL1 (ICC_IAR0_EL1)
 fn a265(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IGRPEN0_EL1 (ICC_IGRPEN0_EL1)
+/// MRS ICC_IAR1_EL1 (ICC_IAR1_EL1)
 fn a266(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_IGRPEN0_EL1 (ICC_IGRPEN0_EL1)
+/// MRS ICC_IGRPEN0_EL1 (ICC_IGRPEN0_EL1)
 fn a267(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IGRPEN1_EL1 (ICC_IGRPEN1_EL1)
+/// MSRregister ICC_IGRPEN0_EL1 (ICC_IGRPEN0_EL1)
 fn a268(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_IGRPEN1_EL1 (ICC_IGRPEN1_EL1)
+/// MRS ICC_IGRPEN1_EL1 (ICC_IGRPEN1_EL1)
 fn a269(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_NMIAR1_EL1 (ICC_NMIAR1_EL1)
+/// MSRregister ICC_IGRPEN1_EL1 (ICC_IGRPEN1_EL1)
 fn a270(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_PMR_EL1 (ICC_PMR_EL1)
+/// MRS ICC_NMIAR1_EL1 (ICC_NMIAR1_EL1)
 fn a271(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_PMR_EL1 (ICC_PMR_EL1)
+/// MRS ICC_PMR_EL1 (ICC_PMR_EL1)
 fn a272(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_RPR_EL1 (ICC_RPR_EL1)
+/// MSRregister ICC_PMR_EL1 (ICC_PMR_EL1)
 fn a273(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_SGI0R_EL1 (ICC_SGI0R_EL1)
+/// MRS ICC_RPR_EL1 (ICC_RPR_EL1)
 fn a274(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_SGI1R_EL1 (ICC_SGI1R_EL1)
+/// MSRregister ICC_SGI0R_EL1 (ICC_SGI0R_EL1)
 fn a275(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_SRE_EL1 (ICC_SRE_EL1)
+/// MSRregister ICC_SGI1R_EL1 (ICC_SGI1R_EL1)
 fn a276(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_SRE_EL1 (ICC_SRE_EL1)
+/// MRS ICC_SRE_EL1 (ICC_SRE_EL1)
 fn a277(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_SRE_EL2 (ICC_SRE_EL2)
+/// MSRregister ICC_SRE_EL1 (ICC_SRE_EL1)
 fn a278(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_SRE_EL2 (ICC_SRE_EL2)
+/// MRS ICC_SRE_EL2 (ICC_SRE_EL2)
 fn a279(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_AP0R<m>_EL2 (ICH_AP0R<n>_EL2)
+/// MSRregister ICC_SRE_EL2 (ICC_SRE_EL2)
 fn a280(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICH_AP0R<m>_EL2 (ICH_AP0R<n>_EL2)
+/// MRS ICH_AP0R<m>_EL2 (ICH_AP0R<n>_EL2)
 fn a281(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_AP1R<m>_EL2 (ICH_AP1R<n>_EL2)
+/// MSRregister ICH_AP0R<m>_EL2 (ICH_AP0R<n>_EL2)
 fn a282(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICH_AP1R<m>_EL2 (ICH_AP1R<n>_EL2)
+/// MRS ICH_AP1R<m>_EL2 (ICH_AP1R<n>_EL2)
 fn a283(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_EISR_EL2 (ICH_EISR_EL2)
+/// MSRregister ICH_AP1R<m>_EL2 (ICH_AP1R<n>_EL2)
 fn a284(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_ELRSR_EL2 (ICH_ELRSR_EL2)
+/// MRS ICH_EISR_EL2 (ICH_EISR_EL2)
 fn a285(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_HCR_EL2 (ICH_HCR_EL2)
+/// MRS ICH_ELRSR_EL2 (ICH_ELRSR_EL2)
 fn a286(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICH_HCR_EL2 (ICH_HCR_EL2)
+/// MRS ICH_HCR_EL2 (ICH_HCR_EL2)
 fn a287(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_LR<m>_EL2 (ICH_LR<n>_EL2)
+/// MSRregister ICH_HCR_EL2 (ICH_HCR_EL2)
 fn a288(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICH_LR<m>_EL2 (ICH_LR<n>_EL2)
+/// MRS ICH_LR<m>_EL2 (ICH_LR<n>_EL2)
 fn a289(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_MISR_EL2 (ICH_MISR_EL2)
+/// MSRregister ICH_LR<m>_EL2 (ICH_LR<n>_EL2)
 fn a290(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_VMCR_EL2 (ICH_VMCR_EL2)
+/// MRS ICH_MISR_EL2 (ICH_MISR_EL2)
 fn a291(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICH_VMCR_EL2 (ICH_VMCR_EL2)
+/// MRS ICH_VMCR_EL2 (ICH_VMCR_EL2)
 fn a292(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICH_VTR_EL2 (ICH_VTR_EL2)
+/// MSRregister ICH_VMCR_EL2 (ICH_VMCR_EL2)
 fn a293(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// IC IALLUIS (IC IALLUIS)
+/// MRS ICH_VTR_EL2 (ICH_VTR_EL2)
 fn a294(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    return Ok(Effect::Undefined);
+}
+
+/// IC IALLUIS (IC IALLUIS)
+fn a295(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17881,7 +17911,7 @@ fn a294(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// IC IALLU (IC IALLU)
-fn a295(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a296(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -17960,7 +17990,7 @@ fn a295(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// IC IVAU (IC IVAU)
-fn a296(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a297(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if !(can_trap_ic(
@@ -18115,157 +18145,157 @@ fn a296(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ICC_AP0R<m>_EL1 (ICV_AP0R<n>_EL1)
-fn a297(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    return Ok(Effect::Undefined);
-}
-
-/// MSRregister ICC_AP0R<m>_EL1 (ICV_AP0R<n>_EL1)
 fn a298(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_AP1R<m>_EL1 (ICV_AP1R<n>_EL1)
+/// MSRregister ICC_AP0R<m>_EL1 (ICV_AP0R<n>_EL1)
 fn a299(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_AP1R<m>_EL1 (ICV_AP1R<n>_EL1)
+/// MRS ICC_AP1R<m>_EL1 (ICV_AP1R<n>_EL1)
 fn a300(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_BPR0_EL1 (ICV_BPR0_EL1)
+/// MSRregister ICC_AP1R<m>_EL1 (ICV_AP1R<n>_EL1)
 fn a301(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_BPR0_EL1 (ICV_BPR0_EL1)
+/// MRS ICC_BPR0_EL1 (ICV_BPR0_EL1)
 fn a302(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_BPR1_EL1 (ICV_BPR1_EL1)
+/// MSRregister ICC_BPR0_EL1 (ICV_BPR0_EL1)
 fn a303(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_BPR1_EL1 (ICV_BPR1_EL1)
+/// MRS ICC_BPR1_EL1 (ICV_BPR1_EL1)
 fn a304(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_CTLR_EL1 (ICV_CTLR_EL1)
+/// MSRregister ICC_BPR1_EL1 (ICV_BPR1_EL1)
 fn a305(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_CTLR_EL1 (ICV_CTLR_EL1)
+/// MRS ICC_CTLR_EL1 (ICV_CTLR_EL1)
 fn a306(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_DIR_EL1 (ICV_DIR_EL1)
+/// MSRregister ICC_CTLR_EL1 (ICV_CTLR_EL1)
 fn a307(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_EOIR0_EL1 (ICV_EOIR0_EL1)
+/// MSRregister ICC_DIR_EL1 (ICV_DIR_EL1)
 fn a308(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_EOIR1_EL1 (ICV_EOIR1_EL1)
+/// MSRregister ICC_EOIR0_EL1 (ICV_EOIR0_EL1)
 fn a309(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_HPPIR0_EL1 (ICV_HPPIR0_EL1)
+/// MSRregister ICC_EOIR1_EL1 (ICV_EOIR1_EL1)
 fn a310(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_HPPIR1_EL1 (ICV_HPPIR1_EL1)
+/// MRS ICC_HPPIR0_EL1 (ICV_HPPIR0_EL1)
 fn a311(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IAR0_EL1 (ICV_IAR0_EL1)
+/// MRS ICC_HPPIR1_EL1 (ICV_HPPIR1_EL1)
 fn a312(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IAR1_EL1 (ICV_IAR1_EL1)
+/// MRS ICC_IAR0_EL1 (ICV_IAR0_EL1)
 fn a313(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IGRPEN0_EL1 (ICV_IGRPEN0_EL1)
+/// MRS ICC_IAR1_EL1 (ICV_IAR1_EL1)
 fn a314(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_IGRPEN0_EL1 (ICV_IGRPEN0_EL1)
+/// MRS ICC_IGRPEN0_EL1 (ICV_IGRPEN0_EL1)
 fn a315(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_IGRPEN1_EL1 (ICV_IGRPEN1_EL1)
+/// MSRregister ICC_IGRPEN0_EL1 (ICV_IGRPEN0_EL1)
 fn a316(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_IGRPEN1_EL1 (ICV_IGRPEN1_EL1)
+/// MRS ICC_IGRPEN1_EL1 (ICV_IGRPEN1_EL1)
 fn a317(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_NMIAR1_EL1 (ICV_NMIAR1_EL1)
+/// MSRregister ICC_IGRPEN1_EL1 (ICV_IGRPEN1_EL1)
 fn a318(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_PMR_EL1 (ICV_PMR_EL1)
+/// MRS ICC_NMIAR1_EL1 (ICV_NMIAR1_EL1)
 fn a319(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MSRregister ICC_PMR_EL1 (ICV_PMR_EL1)
+/// MRS ICC_PMR_EL1 (ICV_PMR_EL1)
 fn a320(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ICC_RPR_EL1 (ICV_RPR_EL1)
+/// MSRregister ICC_PMR_EL1 (ICV_PMR_EL1)
 fn a321(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     return Ok(Effect::Undefined);
 }
 
-/// MRS ID_AA64AFR0_EL1 (ID_AA64AFR0_EL1)
+/// MRS ICC_RPR_EL1 (ICV_RPR_EL1)
 fn a322(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    return Ok(Effect::Undefined);
+}
+
+/// MRS ID_AA64AFR0_EL1 (ID_AA64AFR0_EL1)
+fn a323(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18294,7 +18324,7 @@ fn a322(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64AFR1_EL1 (ID_AA64AFR1_EL1)
-fn a323(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a324(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18323,7 +18353,7 @@ fn a323(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64DFR0_EL1 (ID_AA64DFR0_EL1)
-fn a324(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a325(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18352,7 +18382,7 @@ fn a324(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64DFR1_EL1 (ID_AA64DFR1_EL1)
-fn a325(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a326(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18381,7 +18411,7 @@ fn a325(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64DFR2_EL1 (ID_AA64DFR2_EL1)
-fn a326(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a327(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18410,7 +18440,7 @@ fn a326(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64FPFR0_EL1 (ID_AA64FPFR0_EL1)
-fn a327(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a328(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18439,7 +18469,7 @@ fn a327(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64ISAR0_EL1 (ID_AA64ISAR0_EL1)
-fn a328(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a329(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18468,7 +18498,7 @@ fn a328(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64ISAR1_EL1 (ID_AA64ISAR1_EL1)
-fn a329(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a330(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18497,7 +18527,7 @@ fn a329(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64ISAR2_EL1 (ID_AA64ISAR2_EL1)
-fn a330(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a331(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18526,7 +18556,7 @@ fn a330(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64ISAR3_EL1 (ID_AA64ISAR3_EL1)
-fn a331(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a332(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18555,7 +18585,7 @@ fn a331(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64MMFR0_EL1 (ID_AA64MMFR0_EL1)
-fn a332(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a333(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18584,7 +18614,7 @@ fn a332(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64MMFR1_EL1 (ID_AA64MMFR1_EL1)
-fn a333(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a334(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18613,7 +18643,7 @@ fn a333(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64MMFR2_EL1 (ID_AA64MMFR2_EL1)
-fn a334(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a335(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18642,7 +18672,7 @@ fn a334(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64MMFR3_EL1 (ID_AA64MMFR3_EL1)
-fn a335(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a336(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18671,7 +18701,7 @@ fn a335(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64MMFR4_EL1 (ID_AA64MMFR4_EL1)
-fn a336(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a337(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18700,7 +18730,7 @@ fn a336(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64PFR0_EL1 (ID_AA64PFR0_EL1)
-fn a337(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a338(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18729,7 +18759,7 @@ fn a337(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64PFR1_EL1 (ID_AA64PFR1_EL1)
-fn a338(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a339(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18758,7 +18788,7 @@ fn a338(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64PFR2_EL1 (ID_AA64PFR2_EL1)
-fn a339(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a340(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18787,7 +18817,7 @@ fn a339(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AFR0_EL1 (ID_AFR0_EL1)
-fn a340(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a341(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18816,7 +18846,7 @@ fn a340(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_DFR0_EL1 (ID_DFR0_EL1)
-fn a341(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a342(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18845,7 +18875,7 @@ fn a341(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_DFR1_EL1 (ID_DFR1_EL1)
-fn a342(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a343(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18874,7 +18904,7 @@ fn a342(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_ISAR0_EL1 (ID_ISAR0_EL1)
-fn a343(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a344(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18903,7 +18933,7 @@ fn a343(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_ISAR1_EL1 (ID_ISAR1_EL1)
-fn a344(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a345(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18932,7 +18962,7 @@ fn a344(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_ISAR2_EL1 (ID_ISAR2_EL1)
-fn a345(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a346(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18961,7 +18991,7 @@ fn a345(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_ISAR3_EL1 (ID_ISAR3_EL1)
-fn a346(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a347(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -18990,7 +19020,7 @@ fn a346(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_ISAR4_EL1 (ID_ISAR4_EL1)
-fn a347(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a348(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19019,7 +19049,7 @@ fn a347(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_ISAR5_EL1 (ID_ISAR5_EL1)
-fn a348(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a349(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19048,7 +19078,7 @@ fn a348(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_ISAR6_EL1 (ID_ISAR6_EL1)
-fn a349(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a350(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19077,7 +19107,7 @@ fn a349(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_MMFR0_EL1 (ID_MMFR0_EL1)
-fn a350(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a351(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19106,7 +19136,7 @@ fn a350(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_MMFR1_EL1 (ID_MMFR1_EL1)
-fn a351(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a352(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19135,7 +19165,7 @@ fn a351(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_MMFR2_EL1 (ID_MMFR2_EL1)
-fn a352(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a353(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19164,7 +19194,7 @@ fn a352(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_MMFR3_EL1 (ID_MMFR3_EL1)
-fn a353(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a354(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19193,7 +19223,7 @@ fn a353(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_MMFR4_EL1 (ID_MMFR4_EL1)
-fn a354(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a355(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19222,7 +19252,7 @@ fn a354(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_MMFR5_EL1 (ID_MMFR5_EL1)
-fn a355(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a356(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19251,7 +19281,7 @@ fn a355(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_PFR0_EL1 (ID_PFR0_EL1)
-fn a356(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a357(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19280,7 +19310,7 @@ fn a356(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_PFR1_EL1 (ID_PFR1_EL1)
-fn a357(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a358(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19309,7 +19339,7 @@ fn a357(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_PFR2_EL1 (ID_PFR2_EL1)
-fn a358(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a359(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -19338,7 +19368,7 @@ fn a358(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ISR_EL1 (ISR_EL1)
-fn a359(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a360(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19367,7 +19397,7 @@ fn a359(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS LORC_EL1 (LORC_EL1)
-fn a360(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a361(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19402,7 +19432,7 @@ fn a360(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister LORC_EL1 (LORC_EL1)
-fn a361(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a362(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19437,7 +19467,7 @@ fn a361(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS LOREA_EL1 (LOREA_EL1)
-fn a362(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a363(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19472,7 +19502,7 @@ fn a362(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister LOREA_EL1 (LOREA_EL1)
-fn a363(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a364(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19507,7 +19537,7 @@ fn a363(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS LORID_EL1 (LORID_EL1)
-fn a364(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a365(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19542,7 +19572,7 @@ fn a364(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS LORN_EL1 (LORN_EL1)
-fn a365(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a366(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19577,7 +19607,7 @@ fn a365(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister LORN_EL1 (LORN_EL1)
-fn a366(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a367(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19612,7 +19642,7 @@ fn a366(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS LORSA_EL1 (LORSA_EL1)
-fn a367(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a368(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19647,7 +19677,7 @@ fn a367(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister LORSA_EL1 (LORSA_EL1)
-fn a368(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a369(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19682,7 +19712,7 @@ fn a368(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MAIR_EL1 (MAIR_EL1)
-fn a369(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a370(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19724,7 +19754,7 @@ fn a369(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MAIR_EL1 (MAIR_EL1)
-fn a370(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a371(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19766,7 +19796,7 @@ fn a370(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MAIR_EL12 (MAIR_EL1)
-fn a371(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a372(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19788,7 +19818,7 @@ fn a371(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MAIR_EL12 (MAIR_EL1)
-fn a372(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a373(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19810,7 +19840,7 @@ fn a372(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MAIR_EL2 (MAIR_EL2)
-fn a373(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a374(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19829,7 +19859,7 @@ fn a373(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MAIR_EL2 (MAIR_EL2)
-fn a374(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a375(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19848,7 +19878,7 @@ fn a374(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MAIR_EL1 (MAIR_EL2)
-fn a375(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a376(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19890,7 +19920,7 @@ fn a375(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MAIR_EL1 (MAIR_EL2)
-fn a376(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a377(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19932,7 +19962,7 @@ fn a376(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MDCCINT_EL1 (MDCCINT_EL1)
-fn a377(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a378(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -19971,7 +20001,7 @@ fn a377(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MDCCINT_EL1 (MDCCINT_EL1)
-fn a378(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a379(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20010,7 +20040,7 @@ fn a378(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MDCCSR_EL0 (MDCCSR_EL0)
-fn a379(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a380(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::MDSCR_EL1, 0), 12, 1)) & 0x1) == 0x1 {
@@ -20073,7 +20103,7 @@ fn a379(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MDCR_EL2 (MDCR_EL2)
-fn a380(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a381(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20092,7 +20122,7 @@ fn a380(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MDCR_EL2 (MDCR_EL2)
-fn a381(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a382(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20111,7 +20141,7 @@ fn a381(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MDRAR_EL1 (MDRAR_EL1)
-fn a382(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a383(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20144,7 +20174,7 @@ fn a382(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MDSCR_EL1 (MDSCR_EL1)
-fn a383(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a384(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20183,7 +20213,7 @@ fn a383(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MDSCR_EL1 (MDSCR_EL1)
-fn a384(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a385(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20222,7 +20252,7 @@ fn a384(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MIDR_EL1 (MIDR_EL1)
-fn a385(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a386(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -20251,7 +20281,7 @@ fn a385(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPIDR_EL1 (MPIDR_EL1)
-fn a386(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a387(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -20280,7 +20310,7 @@ fn a386(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MVFR0_EL1 (MVFR0_EL1)
-fn a387(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a388(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -20309,7 +20339,7 @@ fn a387(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MVFR1_EL1 (MVFR1_EL1)
-fn a388(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a389(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -20338,7 +20368,7 @@ fn a388(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MVFR2_EL1 (MVFR2_EL1)
-fn a389(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a390(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -20367,7 +20397,7 @@ fn a389(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS NZCV (NZCV)
-fn a390(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a391(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         {
@@ -20418,7 +20448,7 @@ fn a390(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister NZCV (NZCV)
-fn a391(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a392(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         {
@@ -20454,7 +20484,7 @@ fn a391(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS OSDLR_EL1 (OSDLR_EL1)
-fn a392(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a393(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20488,7 +20518,7 @@ fn a392(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister OSDLR_EL1 (OSDLR_EL1)
-fn a393(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a394(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20522,7 +20552,7 @@ fn a393(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS OSDTRRX_EL1 (OSDTRRX_EL1)
-fn a394(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a395(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20561,7 +20591,7 @@ fn a394(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister OSDTRRX_EL1 (OSDTRRX_EL1)
-fn a395(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a396(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20600,7 +20630,7 @@ fn a395(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS OSDTRTX_EL1 (OSDTRTX_EL1)
-fn a396(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a397(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20639,7 +20669,7 @@ fn a396(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister OSDTRTX_EL1 (OSDTRTX_EL1)
-fn a397(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a398(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20678,7 +20708,7 @@ fn a397(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS OSECCR_EL1 (OSECCR_EL1)
-fn a398(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a399(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20731,7 +20761,7 @@ fn a398(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister OSECCR_EL1 (OSECCR_EL1)
-fn a399(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a400(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20776,7 +20806,7 @@ fn a399(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister OSLAR_EL1 (OSLAR_EL1)
-fn a400(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a401(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20815,7 +20845,7 @@ fn a400(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS OSLSR_EL1 (OSLSR_EL1)
-fn a401(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a402(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20854,7 +20884,7 @@ fn a401(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS PAN (PAN)
-fn a402(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a403(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20877,7 +20907,7 @@ fn a402(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister PAN (PAN)
-fn a403(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a404(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20900,7 +20930,7 @@ fn a403(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS PAR_EL1 (PAR_EL1)
-fn a404(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a405(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20929,7 +20959,7 @@ fn a404(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister PAR_EL1 (PAR_EL1)
-fn a405(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a406(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -20958,7 +20988,7 @@ fn a405(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS REVIDR_EL1 (REVIDR_EL1)
-fn a406(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a407(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -20993,7 +21023,7 @@ fn a406(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS RMR_EL2 (RMR_EL2)
-fn a407(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a408(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21009,7 +21039,7 @@ fn a407(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister RMR_EL2 (RMR_EL2)
-fn a408(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a409(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21025,7 +21055,7 @@ fn a408(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS RVBAR_EL2 (RVBAR_EL2)
-fn a409(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a410(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21041,7 +21071,7 @@ fn a409(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCTLR_EL1 (SCTLR_EL1)
-fn a410(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a411(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21083,7 +21113,7 @@ fn a410(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCTLR_EL1 (SCTLR_EL1)
-fn a411(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a412(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21125,7 +21155,7 @@ fn a411(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCTLR_EL12 (SCTLR_EL1)
-fn a412(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a413(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21147,7 +21177,7 @@ fn a412(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCTLR_EL12 (SCTLR_EL1)
-fn a413(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a414(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21169,7 +21199,7 @@ fn a413(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCTLR_EL2 (SCTLR_EL2)
-fn a414(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a415(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21188,7 +21218,7 @@ fn a414(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCTLR_EL2 (SCTLR_EL2)
-fn a415(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a416(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21207,7 +21237,7 @@ fn a415(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCTLR_EL1 (SCTLR_EL2)
-fn a416(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a417(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21249,7 +21279,7 @@ fn a416(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCTLR_EL1 (SCTLR_EL2)
-fn a417(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a418(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21291,7 +21321,7 @@ fn a417(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCXTNUM_EL0 (SCXTNUM_EL0)
-fn a418(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a419(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c)) && (((bits(c.read(Register::SCTLR_EL1, 0), 20, 1)) & 0x1) == 0x1)
@@ -21354,7 +21384,7 @@ fn a418(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCXTNUM_EL0 (SCXTNUM_EL0)
-fn a419(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a420(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c)) && (((bits(c.read(Register::SCTLR_EL1, 0), 20, 1)) & 0x1) == 0x1)
@@ -21417,7 +21447,7 @@ fn a419(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCXTNUM_EL1 (SCXTNUM_EL1)
-fn a420(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a421(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21459,7 +21489,7 @@ fn a420(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCXTNUM_EL1 (SCXTNUM_EL1)
-fn a421(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a422(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21501,7 +21531,7 @@ fn a421(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCXTNUM_EL12 (SCXTNUM_EL1)
-fn a422(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a423(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21523,7 +21553,7 @@ fn a422(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCXTNUM_EL12 (SCXTNUM_EL1)
-fn a423(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a424(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21545,7 +21575,7 @@ fn a423(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCXTNUM_EL2 (SCXTNUM_EL2)
-fn a424(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a425(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21564,7 +21594,7 @@ fn a424(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCXTNUM_EL2 (SCXTNUM_EL2)
-fn a425(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a426(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21583,7 +21613,7 @@ fn a425(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SCXTNUM_EL1 (SCXTNUM_EL2)
-fn a426(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a427(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21625,7 +21655,7 @@ fn a426(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SCXTNUM_EL1 (SCXTNUM_EL2)
-fn a427(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a428(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21666,8 +21696,14 @@ fn a427(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
+/// MRS SMIDR_EL1 (SMIDR_EL1)
+fn a429(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    return Ok(unimplemented_id_register(c));
+}
+
 /// MRS SP_EL0 (SP_EL0)
-fn a428(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a430(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21696,7 +21732,7 @@ fn a428(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SP_EL0 (SP_EL0)
-fn a429(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a431(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21725,7 +21761,7 @@ fn a429(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SP_EL1 (SP_EL1)
-fn a430(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a432(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21744,7 +21780,7 @@ fn a430(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SP_EL1 (SP_EL1)
-fn a431(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a433(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21763,7 +21799,7 @@ fn a431(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SP_EL2 (SP_EL2)
-fn a432(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a434(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21778,7 +21814,7 @@ fn a432(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SP_EL2 (SP_EL2)
-fn a433(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a435(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21793,7 +21829,7 @@ fn a433(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSel (SPSel)
-fn a434(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a436(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21816,7 +21852,7 @@ fn a434(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSel (SPSel)
-fn a435(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a437(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21839,7 +21875,7 @@ fn a435(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSR_abt (SPSR_abt)
-fn a436(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a438(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21858,7 +21894,7 @@ fn a436(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSR_abt (SPSR_abt)
-fn a437(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a439(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21877,7 +21913,7 @@ fn a437(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSR_EL1 (SPSR_EL1)
-fn a438(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a440(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21907,7 +21943,7 @@ fn a438(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSR_EL1 (SPSR_EL1)
-fn a439(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a441(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21937,7 +21973,7 @@ fn a439(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSR_EL12 (SPSR_EL1)
-fn a440(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a442(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21959,7 +21995,7 @@ fn a440(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSR_EL12 (SPSR_EL1)
-fn a441(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a443(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -21981,44 +22017,6 @@ fn a441(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSR_EL2 (SPSR_EL1)
-fn a442(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.read(Register::SPSR_EL2, 0);
-            c.set_x(value);
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MSRregister SPSR_EL2 (SPSR_EL1)
-fn a443(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        {
-            let value = c.x();
-            c.write(Register::SPSR_EL2, 0, value)?;
-        }
-        return Ok(Effect::Done);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// MRS SPSR_EL2 (SPSR_EL2)
 fn a444(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -22037,7 +22035,7 @@ fn a444(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MSRregister SPSR_EL2 (SPSR_EL2)
+/// MSRregister SPSR_EL2 (SPSR_EL1)
 fn a445(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -22056,8 +22054,46 @@ fn a445(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// MRS SPSR_EL1 (SPSR_EL2)
+/// MRS SPSR_EL2 (SPSR_EL2)
 fn a446(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        {
+            let value = c.read(Register::SPSR_EL2, 0);
+            c.set_x(value);
+        }
+        return Ok(Effect::Done);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// MSRregister SPSR_EL2 (SPSR_EL2)
+fn a447(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        {
+            let value = c.x();
+            c.write(Register::SPSR_EL2, 0, value)?;
+        }
+        return Ok(Effect::Done);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// MRS SPSR_EL1 (SPSR_EL2)
+fn a448(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22087,7 +22123,7 @@ fn a446(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSR_EL1 (SPSR_EL2)
-fn a447(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a449(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22117,7 +22153,7 @@ fn a447(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSR_fiq (SPSR_fiq)
-fn a448(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a450(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22136,7 +22172,7 @@ fn a448(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSR_fiq (SPSR_fiq)
-fn a449(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a451(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22155,7 +22191,7 @@ fn a449(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSR_irq (SPSR_irq)
-fn a450(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a452(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22174,7 +22210,7 @@ fn a450(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSR_irq (SPSR_irq)
-fn a451(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a453(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22193,7 +22229,7 @@ fn a451(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SPSR_und (SPSR_und)
-fn a452(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a454(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22212,7 +22248,7 @@ fn a452(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SPSR_und (SPSR_und)
-fn a453(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a455(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22231,7 +22267,7 @@ fn a453(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS SSBS (SSBS)
-fn a454(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a456(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         {
@@ -22258,7 +22294,7 @@ fn a454(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister SSBS (SSBS)
-fn a455(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a457(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         {
@@ -22285,7 +22321,7 @@ fn a455(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TCR_EL1 (TCR_EL1)
-fn a456(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a458(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22327,7 +22363,7 @@ fn a456(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TCR_EL1 (TCR_EL1)
-fn a457(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a459(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22369,7 +22405,7 @@ fn a457(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TCR_EL12 (TCR_EL1)
-fn a458(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a460(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22391,7 +22427,7 @@ fn a458(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TCR_EL12 (TCR_EL1)
-fn a459(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a461(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22413,7 +22449,7 @@ fn a459(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TCR_EL2 (TCR_EL2)
-fn a460(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a462(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22432,7 +22468,7 @@ fn a460(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TCR_EL2 (TCR_EL2)
-fn a461(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a463(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22451,7 +22487,7 @@ fn a461(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TCR_EL1 (TCR_EL2)
-fn a462(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a464(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22493,7 +22529,7 @@ fn a462(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TCR_EL1 (TCR_EL2)
-fn a463(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a465(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22535,7 +22571,7 @@ fn a463(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ALLE1IS (TLBI ALLE1IS)
-fn a464(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a466(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22562,7 +22598,7 @@ fn a464(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ALLE1 (TLBI ALLE1)
-fn a465(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a467(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22589,7 +22625,7 @@ fn a465(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ALLE1OS (TLBI ALLE1OS)
-fn a466(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a468(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22616,7 +22652,7 @@ fn a466(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ALLE2IS (TLBI ALLE2IS)
-fn a467(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a469(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22643,7 +22679,7 @@ fn a467(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ALLE2 (TLBI ALLE2)
-fn a468(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a470(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22670,7 +22706,7 @@ fn a468(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ALLE2OS (TLBI ALLE2OS)
-fn a469(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a471(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22697,36 +22733,6 @@ fn a469(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ALLE3IS (TLBI ALLE3IS)
-fn a470(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI ALLE3 (TLBI ALLE3)
-fn a471(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI ALLE3OS (TLBI ALLE3OS)
 fn a472(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -22741,8 +22747,38 @@ fn a472(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI ASIDE1IS (TLBI ASIDE1IS)
+/// TLBI ALLE3 (TLBI ALLE3)
 fn a473(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI ALLE3OS (TLBI ALLE3OS)
+fn a474(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI ASIDE1IS (TLBI ASIDE1IS)
+fn a475(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22795,7 +22831,7 @@ fn a473(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ASIDE1 (TLBI ASIDE1)
-fn a474(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a476(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22846,7 +22882,7 @@ fn a474(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI ASIDE1OS (TLBI ASIDE1OS)
-fn a475(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a477(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22899,7 +22935,7 @@ fn a475(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI IPAS2E1IS (TLBI IPAS2E1IS)
-fn a476(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a478(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22926,7 +22962,7 @@ fn a476(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI IPAS2E1 (TLBI IPAS2E1)
-fn a477(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a479(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22953,7 +22989,7 @@ fn a477(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI IPAS2E1OS (TLBI IPAS2E1OS)
-fn a478(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a480(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -22980,7 +23016,7 @@ fn a478(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI IPAS2LE1IS (TLBI IPAS2LE1IS)
-fn a479(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a481(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23007,7 +23043,7 @@ fn a479(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI IPAS2LE1 (TLBI IPAS2LE1)
-fn a480(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a482(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23034,7 +23070,7 @@ fn a480(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI IPAS2LE1OS (TLBI IPAS2LE1OS)
-fn a481(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a483(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23061,7 +23097,7 @@ fn a481(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RIPAS2E1IS (TLBI RIPAS2E1IS)
-fn a482(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a484(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23088,7 +23124,7 @@ fn a482(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RIPAS2E1 (TLBI RIPAS2E1)
-fn a483(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a485(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23115,7 +23151,7 @@ fn a483(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RIPAS2E1OS (TLBI RIPAS2E1OS)
-fn a484(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a486(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23142,7 +23178,7 @@ fn a484(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RIPAS2LE1IS (TLBI RIPAS2LE1IS)
-fn a485(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a487(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23169,7 +23205,7 @@ fn a485(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RIPAS2LE1 (TLBI RIPAS2LE1)
-fn a486(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a488(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23196,7 +23232,7 @@ fn a486(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RIPAS2LE1OS (TLBI RIPAS2LE1OS)
-fn a487(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a489(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23223,7 +23259,7 @@ fn a487(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAAE1IS (TLBI RVAAE1IS)
-fn a488(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a490(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23276,7 +23312,7 @@ fn a488(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAAE1 (TLBI RVAAE1)
-fn a489(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a491(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23327,7 +23363,7 @@ fn a489(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAAE1OS (TLBI RVAAE1OS)
-fn a490(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a492(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23380,7 +23416,7 @@ fn a490(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAALE1IS (TLBI RVAALE1IS)
-fn a491(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a493(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23433,7 +23469,7 @@ fn a491(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAALE1 (TLBI RVAALE1)
-fn a492(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a494(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23484,7 +23520,7 @@ fn a492(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAALE1OS (TLBI RVAALE1OS)
-fn a493(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a495(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23537,7 +23573,7 @@ fn a493(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAE1IS (TLBI RVAE1IS)
-fn a494(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a496(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23590,7 +23626,7 @@ fn a494(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAE1 (TLBI RVAE1)
-fn a495(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a497(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23641,7 +23677,7 @@ fn a495(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAE1OS (TLBI RVAE1OS)
-fn a496(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a498(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23694,7 +23730,7 @@ fn a496(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAE2IS (TLBI RVAE2IS)
-fn a497(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a499(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23721,7 +23757,7 @@ fn a497(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAE2 (TLBI RVAE2)
-fn a498(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a500(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23748,7 +23784,7 @@ fn a498(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAE2OS (TLBI RVAE2OS)
-fn a499(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a501(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23775,36 +23811,6 @@ fn a499(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVAE3IS (TLBI RVAE3IS)
-fn a500(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVAE3 (TLBI RVAE3)
-fn a501(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVAE3OS (TLBI RVAE3OS)
 fn a502(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -23819,8 +23825,38 @@ fn a502(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI RVALE1IS (TLBI RVALE1IS)
+/// TLBI RVAE3 (TLBI RVAE3)
 fn a503(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI RVAE3OS (TLBI RVAE3OS)
+fn a504(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI RVALE1IS (TLBI RVALE1IS)
+fn a505(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23873,7 +23909,7 @@ fn a503(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVALE1 (TLBI RVALE1)
-fn a504(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a506(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23924,7 +23960,7 @@ fn a504(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVALE1OS (TLBI RVALE1OS)
-fn a505(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a507(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -23977,7 +24013,7 @@ fn a505(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVALE2IS (TLBI RVALE2IS)
-fn a506(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a508(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24004,7 +24040,7 @@ fn a506(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVALE2 (TLBI RVALE2)
-fn a507(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a509(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24031,7 +24067,7 @@ fn a507(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVALE2OS (TLBI RVALE2OS)
-fn a508(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a510(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24058,36 +24094,6 @@ fn a508(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI RVALE3IS (TLBI RVALE3IS)
-fn a509(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3 (TLBI RVALE3)
-fn a510(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI RVALE3OS (TLBI RVALE3OS)
 fn a511(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -24102,8 +24108,38 @@ fn a511(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI VAAE1IS (TLBI VAAE1IS)
+/// TLBI RVALE3 (TLBI RVALE3)
 fn a512(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI RVALE3OS (TLBI RVALE3OS)
+fn a513(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI VAAE1IS (TLBI VAAE1IS)
+fn a514(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24156,7 +24192,7 @@ fn a512(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAAE1 (TLBI VAAE1)
-fn a513(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a515(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24207,7 +24243,7 @@ fn a513(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAAE1OS (TLBI VAAE1OS)
-fn a514(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a516(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24260,7 +24296,7 @@ fn a514(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAALE1IS (TLBI VAALE1IS)
-fn a515(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a517(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24313,7 +24349,7 @@ fn a515(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAALE1 (TLBI VAALE1)
-fn a516(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a518(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24364,7 +24400,7 @@ fn a516(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAALE1OS (TLBI VAALE1OS)
-fn a517(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a519(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24417,7 +24453,7 @@ fn a517(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAE1IS (TLBI VAE1IS)
-fn a518(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a520(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24470,7 +24506,7 @@ fn a518(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAE1 (TLBI VAE1)
-fn a519(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a521(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24521,7 +24557,7 @@ fn a519(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAE1OS (TLBI VAE1OS)
-fn a520(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a522(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24574,7 +24610,7 @@ fn a520(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAE2IS (TLBI VAE2IS)
-fn a521(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a523(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24601,7 +24637,7 @@ fn a521(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAE2 (TLBI VAE2)
-fn a522(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a524(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24628,7 +24664,7 @@ fn a522(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAE2OS (TLBI VAE2OS)
-fn a523(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a525(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24655,36 +24691,6 @@ fn a523(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VAE3IS (TLBI VAE3IS)
-fn a524(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VAE3 (TLBI VAE3)
-fn a525(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VAE3OS (TLBI VAE3OS)
 fn a526(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -24699,8 +24705,38 @@ fn a526(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI VALE1IS (TLBI VALE1IS)
+/// TLBI VAE3 (TLBI VAE3)
 fn a527(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI VAE3OS (TLBI VAE3OS)
+fn a528(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI VALE1IS (TLBI VALE1IS)
+fn a529(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24753,7 +24789,7 @@ fn a527(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VALE1 (TLBI VALE1)
-fn a528(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a530(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24804,7 +24840,7 @@ fn a528(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VALE1OS (TLBI VALE1OS)
-fn a529(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a531(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24857,7 +24893,7 @@ fn a529(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VALE2IS (TLBI VALE2IS)
-fn a530(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a532(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24884,7 +24920,7 @@ fn a530(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VALE2 (TLBI VALE2)
-fn a531(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a533(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24911,7 +24947,7 @@ fn a531(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VALE2OS (TLBI VALE2OS)
-fn a532(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a534(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -24938,36 +24974,6 @@ fn a532(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VALE3IS (TLBI VALE3IS)
-fn a533(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3 (TLBI VALE3)
-fn a534(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
-    let _ = m;
-    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (1) {
-        return Ok(Effect::Undefined);
-    }
-    if (c.el()) == (2) {
-        return Ok(Effect::Undefined);
-    }
-    Ok(Effect::Refused("no AARCHMRS case applies"))
-}
-
-/// TLBI VALE3OS (TLBI VALE3OS)
 fn a535(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -24982,8 +24988,38 @@ fn a535(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
-/// TLBI VMALLE1IS (TLBI VMALLE1IS)
+/// TLBI VALE3 (TLBI VALE3)
 fn a536(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI VALE3OS (TLBI VALE3OS)
+fn a537(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (1) {
+        return Ok(Effect::Undefined);
+    }
+    if (c.el()) == (2) {
+        return Ok(Effect::Undefined);
+    }
+    Ok(Effect::Refused("no AARCHMRS case applies"))
+}
+
+/// TLBI VMALLE1IS (TLBI VMALLE1IS)
+fn a538(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25036,7 +25072,7 @@ fn a536(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VMALLE1 (TLBI VMALLE1)
-fn a537(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a539(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25087,7 +25123,7 @@ fn a537(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VMALLE1OS (TLBI VMALLE1OS)
-fn a538(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a540(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25140,7 +25176,7 @@ fn a538(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VMALLS12E1IS (TLBI VMALLS12E1IS)
-fn a539(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a541(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25167,7 +25203,7 @@ fn a539(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VMALLS12E1 (TLBI VMALLS12E1)
-fn a540(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a542(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25194,7 +25230,7 @@ fn a540(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// TLBI VMALLS12E1OS (TLBI VMALLS12E1OS)
-fn a541(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a543(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25221,7 +25257,7 @@ fn a541(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TPIDR_EL0 (TPIDR_EL0)
-fn a542(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a544(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -25262,7 +25298,7 @@ fn a542(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TPIDR_EL0 (TPIDR_EL0)
-fn a543(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a545(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if (at_el0_not_in_host(c))
@@ -25303,7 +25339,7 @@ fn a543(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TPIDR_EL1 (TPIDR_EL1)
-fn a544(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a546(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (c.el()) == (0) {
         return Ok(Effect::Undefined);
@@ -25332,7 +25368,7 @@ fn a544(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TPIDR_EL1 (TPIDR_EL1)
-fn a545(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a547(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25361,7 +25397,7 @@ fn a545(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TPIDR_EL2 (TPIDR_EL2)
-fn a546(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a548(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if ((c.el()) == (0)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25380,7 +25416,7 @@ fn a546(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TPIDR_EL2 (TPIDR_EL2)
-fn a547(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a549(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25399,7 +25435,7 @@ fn a547(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TPIDRRO_EL0 (TPIDRRO_EL0)
-fn a548(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a550(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if at_el0_not_in_host(c) {
         if ((bits(c.read(Register::HFGRTR_EL2, 0), 34, 1)) & 0x1) == 0x1 {
@@ -25445,7 +25481,7 @@ fn a548(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TPIDRRO_EL0 (TPIDRRO_EL0)
-fn a549(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a551(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25474,7 +25510,7 @@ fn a549(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR0_EL1 (TTBR0_EL1)
-fn a550(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a552(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25516,7 +25552,7 @@ fn a550(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR0_EL1 (TTBR0_EL1)
-fn a551(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a553(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25558,7 +25594,7 @@ fn a551(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR0_EL12 (TTBR0_EL1)
-fn a552(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a554(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25580,7 +25616,7 @@ fn a552(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR0_EL12 (TTBR0_EL1)
-fn a553(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a555(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25602,7 +25638,7 @@ fn a553(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR0_EL2 (TTBR0_EL2)
-fn a554(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a556(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25621,7 +25657,7 @@ fn a554(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR0_EL2 (TTBR0_EL2)
-fn a555(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a557(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25640,7 +25676,7 @@ fn a555(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR0_EL1 (TTBR0_EL2)
-fn a556(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a558(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25682,7 +25718,7 @@ fn a556(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR0_EL1 (TTBR0_EL2)
-fn a557(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a559(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25724,7 +25760,7 @@ fn a557(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR1_EL1 (TTBR1_EL1)
-fn a558(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a560(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25766,7 +25802,7 @@ fn a558(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR1_EL1 (TTBR1_EL1)
-fn a559(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a561(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25808,7 +25844,7 @@ fn a559(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR1_EL12 (TTBR1_EL1)
-fn a560(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a562(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25830,7 +25866,7 @@ fn a560(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR1_EL12 (TTBR1_EL1)
-fn a561(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a563(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25852,7 +25888,7 @@ fn a561(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR1_EL2 (TTBR1_EL2)
-fn a562(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a564(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25871,7 +25907,7 @@ fn a562(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR1_EL2 (TTBR1_EL2)
-fn a563(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a565(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25890,7 +25926,7 @@ fn a563(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS TTBR1_EL1 (TTBR1_EL2)
-fn a564(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a566(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25932,7 +25968,7 @@ fn a564(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister TTBR1_EL1 (TTBR1_EL2)
-fn a565(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a567(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25974,7 +26010,7 @@ fn a565(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS UAO (UAO)
-fn a566(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a568(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -25997,7 +26033,7 @@ fn a566(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister UAO (UAO)
-fn a567(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a569(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26020,7 +26056,7 @@ fn a567(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VBAR_EL1 (VBAR_EL1)
-fn a568(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a570(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26056,7 +26092,7 @@ fn a568(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VBAR_EL1 (VBAR_EL1)
-fn a569(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a571(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26092,7 +26128,7 @@ fn a569(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VBAR_EL12 (VBAR_EL1)
-fn a570(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a572(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26114,7 +26150,7 @@ fn a570(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VBAR_EL12 (VBAR_EL1)
-fn a571(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a573(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26136,7 +26172,7 @@ fn a571(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VBAR_EL2 (VBAR_EL2)
-fn a572(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a574(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26155,7 +26191,7 @@ fn a572(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VBAR_EL2 (VBAR_EL2)
-fn a573(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a575(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26174,7 +26210,7 @@ fn a573(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VBAR_EL1 (VBAR_EL2)
-fn a574(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a576(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26210,7 +26246,7 @@ fn a574(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VBAR_EL1 (VBAR_EL2)
-fn a575(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a577(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26246,7 +26282,7 @@ fn a575(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VMPIDR_EL2 (VMPIDR_EL2)
-fn a576(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a578(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26265,7 +26301,7 @@ fn a576(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VMPIDR_EL2 (VMPIDR_EL2)
-fn a577(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a579(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26284,7 +26320,7 @@ fn a577(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPIDR_EL1 (VMPIDR_EL2)
-fn a578(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a580(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -26313,7 +26349,7 @@ fn a578(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VPIDR_EL2 (VPIDR_EL2)
-fn a579(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a581(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26332,7 +26368,7 @@ fn a579(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VPIDR_EL2 (VPIDR_EL2)
-fn a580(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a582(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26351,7 +26387,7 @@ fn a580(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MIDR_EL1 (VPIDR_EL2)
-fn a581(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a583(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -26380,7 +26416,7 @@ fn a581(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VTCR_EL2 (VTCR_EL2)
-fn a582(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a584(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26399,7 +26435,7 @@ fn a582(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VTCR_EL2 (VTCR_EL2)
-fn a583(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a585(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26418,7 +26454,7 @@ fn a583(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VTTBR_EL2 (VTTBR_EL2)
-fn a584(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a586(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26437,7 +26473,7 @@ fn a584(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VTTBR_EL2 (VTTBR_EL2)
-fn a585(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a587(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26456,7 +26492,7 @@ fn a585(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCFGR_EL0 (AMCFGR_EL0)
-fn a586(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a588(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26498,7 +26534,7 @@ fn a586(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCG1IDR_EL0 (AMCG1IDR_EL0)
-fn a587(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a589(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26540,7 +26576,7 @@ fn a587(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCGCR_EL0 (AMCGCR_EL0)
-fn a588(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a590(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26582,7 +26618,7 @@ fn a588(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCNTENCLR0_EL0 (AMCNTENCLR0_EL0)
-fn a589(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a591(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26636,7 +26672,7 @@ fn a589(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMCNTENCLR0_EL0 (AMCNTENCLR0_EL0)
-fn a590(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a592(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26652,7 +26688,7 @@ fn a590(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCNTENCLR1_EL0 (AMCNTENCLR1_EL0)
-fn a591(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a593(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26706,7 +26742,7 @@ fn a591(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMCNTENCLR1_EL0 (AMCNTENCLR1_EL0)
-fn a592(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a594(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26722,7 +26758,7 @@ fn a592(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCNTENSET0_EL0 (AMCNTENSET0_EL0)
-fn a593(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a595(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26776,7 +26812,7 @@ fn a593(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMCNTENSET0_EL0 (AMCNTENSET0_EL0)
-fn a594(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a596(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26792,7 +26828,7 @@ fn a594(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCNTENSET1_EL0 (AMCNTENSET1_EL0)
-fn a595(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a597(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26846,7 +26882,7 @@ fn a595(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMCNTENSET1_EL0 (AMCNTENSET1_EL0)
-fn a596(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a598(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26862,7 +26898,7 @@ fn a596(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMCR_EL0 (AMCR_EL0)
-fn a597(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a599(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
@@ -26904,7 +26940,7 @@ fn a597(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMCR_EL0 (AMCR_EL0)
-fn a598(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a600(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -26920,7 +26956,7 @@ fn a598(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMEVCNTR0<m>_EL0 (AMEVCNTR0<n>_EL0)
-fn a599(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a601(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
@@ -26979,7 +27015,7 @@ fn a599(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMEVCNTR0<m>_EL0 (AMEVCNTR0<n>_EL0)
-fn a600(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a602(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
@@ -26998,7 +27034,7 @@ fn a600(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMEVCNTR1<m>_EL0 (AMEVCNTR1<n>_EL0)
-fn a601(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a603(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
@@ -27092,7 +27128,7 @@ fn a601(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMEVCNTR1<m>_EL0 (AMEVCNTR1<n>_EL0)
-fn a602(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a604(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
@@ -27114,7 +27150,7 @@ fn a602(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMEVCNTVOFF0<m>_EL2 (AMEVCNTVOFF0<n>_EL2)
-fn a603(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a605(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
@@ -27142,7 +27178,7 @@ fn a603(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMEVCNTVOFF0<m>_EL2 (AMEVCNTVOFF0<n>_EL2)
-fn a604(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a606(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
@@ -27170,7 +27206,7 @@ fn a604(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMEVCNTVOFF1<m>_EL2 (AMEVCNTVOFF1<n>_EL2)
-fn a605(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a607(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
@@ -27195,7 +27231,7 @@ fn a605(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMEVCNTVOFF1<m>_EL2 (AMEVCNTVOFF1<n>_EL2)
-fn a606(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a608(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
@@ -27220,7 +27256,7 @@ fn a606(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMEVTYPER0<m>_EL0 (AMEVTYPER0<n>_EL0)
-fn a607(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a609(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
@@ -27265,7 +27301,7 @@ fn a607(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMEVTYPER1<m>_EL0 (AMEVTYPER1<n>_EL0)
-fn a608(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a610(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
@@ -27338,7 +27374,7 @@ fn a608(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMEVTYPER1<m>_EL0 (AMEVTYPER1<n>_EL0)
-fn a609(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a611(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
@@ -27360,7 +27396,7 @@ fn a609(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS AMUSERENR_EL0 (AMUSERENR_EL0)
-fn a610(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a612(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::CPTR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
@@ -27399,7 +27435,7 @@ fn a610(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister AMUSERENR_EL0 (AMUSERENR_EL0)
-fn a611(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a613(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27428,7 +27464,7 @@ fn a611(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAM0_EL1 (MPAM0_EL1)
-fn a612(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a614(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27457,7 +27493,7 @@ fn a612(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAM0_EL1 (MPAM0_EL1)
-fn a613(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a615(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27486,7 +27522,7 @@ fn a613(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAM1_EL1 (MPAM1_EL1)
-fn a614(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a616(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27522,7 +27558,7 @@ fn a614(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAM1_EL1 (MPAM1_EL1)
-fn a615(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a617(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27558,7 +27594,7 @@ fn a615(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAM1_EL12 (MPAM1_EL1)
-fn a616(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a618(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27580,7 +27616,7 @@ fn a616(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAM1_EL12 (MPAM1_EL1)
-fn a617(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a619(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27602,7 +27638,7 @@ fn a617(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAM2_EL2 (MPAM2_EL2)
-fn a618(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a620(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27621,7 +27657,7 @@ fn a618(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAM2_EL2 (MPAM2_EL2)
-fn a619(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a621(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27640,7 +27676,7 @@ fn a619(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAM1_EL1 (MPAM2_EL2)
-fn a620(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a622(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27676,7 +27712,7 @@ fn a620(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAM1_EL1 (MPAM2_EL2)
-fn a621(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a623(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27712,7 +27748,7 @@ fn a621(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAM3_EL3 (MPAM3_EL3)
-fn a622(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a624(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27727,7 +27763,7 @@ fn a622(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAM3_EL3 (MPAM3_EL3)
-fn a623(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a625(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27742,7 +27778,7 @@ fn a623(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMHCR_EL2 (MPAMHCR_EL2)
-fn a624(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a626(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1) {
         return Ok(Effect::Undefined);
@@ -27764,7 +27800,7 @@ fn a624(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMHCR_EL2 (MPAMHCR_EL2)
-fn a625(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a627(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1) {
         return Ok(Effect::Undefined);
@@ -27786,7 +27822,7 @@ fn a625(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMIDR_EL1 (MPAMIDR_EL1)
-fn a626(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a628(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -27825,7 +27861,7 @@ fn a626(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM0_EL2 (MPAMVPM0_EL2)
-fn a627(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a629(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1) {
         return Ok(Effect::Undefined);
@@ -27847,7 +27883,7 @@ fn a627(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM0_EL2 (MPAMVPM0_EL2)
-fn a628(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a630(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1) {
         return Ok(Effect::Undefined);
@@ -27869,7 +27905,7 @@ fn a628(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM1_EL2 (MPAMVPM1_EL2)
-fn a629(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a631(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (0u64)))
@@ -27893,7 +27929,7 @@ fn a629(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM1_EL2 (MPAMVPM1_EL2)
-fn a630(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a632(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (0u64)))
@@ -27917,7 +27953,7 @@ fn a630(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM2_EL2 (MPAMVPM2_EL2)
-fn a631(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a633(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (1u64)))
@@ -27941,7 +27977,7 @@ fn a631(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM2_EL2 (MPAMVPM2_EL2)
-fn a632(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a634(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (1u64)))
@@ -27965,7 +28001,7 @@ fn a632(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM3_EL2 (MPAMVPM3_EL2)
-fn a633(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a635(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (2u64)))
@@ -27989,7 +28025,7 @@ fn a633(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM3_EL2 (MPAMVPM3_EL2)
-fn a634(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a636(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (2u64)))
@@ -28013,7 +28049,7 @@ fn a634(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM4_EL2 (MPAMVPM4_EL2)
-fn a635(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a637(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (3u64)))
@@ -28037,7 +28073,7 @@ fn a635(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM4_EL2 (MPAMVPM4_EL2)
-fn a636(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a638(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (3u64)))
@@ -28061,7 +28097,7 @@ fn a636(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM5_EL2 (MPAMVPM5_EL2)
-fn a637(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a639(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (4u64)))
@@ -28085,7 +28121,7 @@ fn a637(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM5_EL2 (MPAMVPM5_EL2)
-fn a638(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a640(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (4u64)))
@@ -28109,7 +28145,7 @@ fn a638(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM6_EL2 (MPAMVPM6_EL2)
-fn a639(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a641(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (5u64)))
@@ -28133,7 +28169,7 @@ fn a639(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM6_EL2 (MPAMVPM6_EL2)
-fn a640(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a642(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) > (5u64)))
@@ -28157,7 +28193,7 @@ fn a640(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPM7_EL2 (MPAMVPM7_EL2)
-fn a641(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a643(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) == (7u64)))
@@ -28181,7 +28217,7 @@ fn a641(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPM7_EL2 (MPAMVPM7_EL2)
-fn a642(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a644(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !((((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1)
         && ((bits(c.read(Register::MPAMIDR_EL1, 0), 18, 3)) == (7u64)))
@@ -28205,7 +28241,7 @@ fn a642(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS MPAMVPMV_EL2 (MPAMVPMV_EL2)
-fn a643(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a645(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1) {
         return Ok(Effect::Undefined);
@@ -28227,7 +28263,7 @@ fn a643(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister MPAMVPMV_EL2 (MPAMVPMV_EL2)
-fn a644(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a646(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if !(((bits(c.read(Register::MPAMIDR_EL1, 0), 17, 1)) & 0x1) == 0x1) {
         return Ok(Effect::Undefined);
@@ -28248,8 +28284,14 @@ fn a644(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     Ok(Effect::Refused("no AARCHMRS case applies"))
 }
 
+/// MRS GMID_EL1 (GMID_EL1)
+fn a647(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+    let _ = m;
+    return Ok(unimplemented_id_register(c));
+}
+
 /// MRS DISR_EL1 (DISR_EL1)
-fn a645(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a648(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28279,7 +28321,7 @@ fn a645(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DISR_EL1 (DISR_EL1)
-fn a646(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a649(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28309,7 +28351,7 @@ fn a646(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERRIDR_EL1 (ERRIDR_EL1)
-fn a647(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a650(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28344,7 +28386,7 @@ fn a647(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERRSELR_EL1 (ERRSELR_EL1)
-fn a648(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a651(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28379,7 +28421,7 @@ fn a648(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERRSELR_EL1 (ERRSELR_EL1)
-fn a649(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a652(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28414,7 +28456,7 @@ fn a649(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXADDR_EL1 (ERXADDR_EL1)
-fn a650(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a653(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28455,7 +28497,7 @@ fn a650(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXADDR_EL1 (ERXADDR_EL1)
-fn a651(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a654(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28498,7 +28540,7 @@ fn a651(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXCTLR_EL1 (ERXCTLR_EL1)
-fn a652(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a655(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28539,7 +28581,7 @@ fn a652(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXCTLR_EL1 (ERXCTLR_EL1)
-fn a653(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a656(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28582,7 +28624,7 @@ fn a653(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXFR_EL1 (ERXFR_EL1)
-fn a654(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a657(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28623,7 +28665,7 @@ fn a654(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXMISC0_EL1 (ERXMISC0_EL1)
-fn a655(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a658(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28664,7 +28706,7 @@ fn a655(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXMISC0_EL1 (ERXMISC0_EL1)
-fn a656(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a659(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28707,7 +28749,7 @@ fn a656(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXMISC1_EL1 (ERXMISC1_EL1)
-fn a657(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a660(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28748,7 +28790,7 @@ fn a657(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXMISC1_EL1 (ERXMISC1_EL1)
-fn a658(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a661(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28791,7 +28833,7 @@ fn a658(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXMISC2_EL1 (ERXMISC2_EL1)
-fn a659(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a662(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28832,7 +28874,7 @@ fn a659(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXMISC2_EL1 (ERXMISC2_EL1)
-fn a660(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a663(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28875,7 +28917,7 @@ fn a660(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXMISC3_EL1 (ERXMISC3_EL1)
-fn a661(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a664(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28916,7 +28958,7 @@ fn a661(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXMISC3_EL1 (ERXMISC3_EL1)
-fn a662(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a665(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -28959,7 +29001,7 @@ fn a662(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXPFGCDN_EL1 (ERXPFGCDN_EL1)
-fn a663(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a666(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29000,7 +29042,7 @@ fn a663(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXPFGCDN_EL1 (ERXPFGCDN_EL1)
-fn a664(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a667(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29043,7 +29085,7 @@ fn a664(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXPFGCTL_EL1 (ERXPFGCTL_EL1)
-fn a665(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a668(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29084,7 +29126,7 @@ fn a665(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXPFGCTL_EL1 (ERXPFGCTL_EL1)
-fn a666(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a669(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29127,7 +29169,7 @@ fn a666(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXPFGF_EL1 (ERXPFGF_EL1)
-fn a667(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a670(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29168,7 +29210,7 @@ fn a667(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ERXSTATUS_EL1 (ERXSTATUS_EL1)
-fn a668(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a671(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29209,7 +29251,7 @@ fn a668(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister ERXSTATUS_EL1 (ERXSTATUS_EL1)
-fn a669(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a672(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29252,7 +29294,7 @@ fn a669(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VDISR_EL2 (VDISR_EL2)
-fn a670(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a673(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29271,7 +29313,7 @@ fn a670(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VDISR_EL2 (VDISR_EL2)
-fn a671(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a674(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29290,7 +29332,7 @@ fn a671(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS DISR_EL1 (VDISR_EL2)
-fn a672(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a675(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29320,7 +29362,7 @@ fn a672(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister DISR_EL1 (VDISR_EL2)
-fn a673(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a676(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29350,7 +29392,7 @@ fn a673(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS VSESR_EL2 (VSESR_EL2)
-fn a674(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a677(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29369,7 +29411,7 @@ fn a674(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MSRregister VSESR_EL2 (VSESR_EL2)
-fn a675(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a678(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
@@ -29388,7 +29430,7 @@ fn a675(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64SMFR0_EL1 (ID_AA64SMFR0_EL1)
-fn a676(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a679(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));
@@ -29417,7 +29459,7 @@ fn a676(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 }
 
 /// MRS ID_AA64ZFR0_EL1 (ID_AA64ZFR0_EL1)
-fn a677(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
+fn a680(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(trap_el1_or_el2(c, 24u64));

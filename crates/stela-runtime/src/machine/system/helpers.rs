@@ -74,6 +74,19 @@ pub fn trap_el1_or_el2(c: &dyn Context, ec: u64) -> Effect {
     }
 }
 
+/// `UnimplementedIDRegister()` with FEAT_IDST: an access to an ID register
+/// encoding the profile does not implement traps with EC 0x18 to the current
+/// EL, or from EL0 to EL1 or, under HCR_EL2.TGE, EL2.
+pub fn unimplemented_id_register(c: &dyn Context) -> Effect {
+    match c.el() {
+        0 => trap_el1_or_el2(c, 0x18),
+        el => Effect::Trap {
+            el: el as u8,
+            ec: 0x18,
+        },
+    }
+}
+
 /// `VMID()`: 8-bit VMIDs (no FEAT_VMID16), from VTTBR_EL2.
 pub fn vmid(c: &dyn Context) -> u64 {
     bits(c.read(Register::VTTBR_EL2, 0), u64::from(VTTBR_VMID), 8)

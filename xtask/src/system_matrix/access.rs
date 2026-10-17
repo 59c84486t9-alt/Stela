@@ -27,6 +27,13 @@ fn is_implementation_defined_space(name: &str) -> bool {
     name.contains("<op1>")
 }
 
+/// Whether an accessor of `register` raises Arm `UnimplementedIDRegister`.
+fn unimplemented_id(register: &Value) -> bool {
+    register["accessors"]
+        .to_string()
+        .contains("\"UnimplementedIDRegister\"")
+}
+
 fn range_mask(range: &Value, offset: u64) -> u64 {
     let start = range["start"].as_u64().unwrap_or(0) + offset;
     let width = range["width"].as_u64().unwrap_or(0);
@@ -207,6 +214,11 @@ pub fn generate(
         };
         fields.entry(rust.clone()).or_default().extend(positions);
         if !applies {
+            // An ID register of a feature outside the profile keeps its
+            // encoding: Arm `UnimplementedIDRegister` traps it under FEAT_IDST.
+            if !is_implementation_defined_space(name) && unimplemented_id(register) {
+                accessor_list.extend(accessors(register, profile)?);
+            }
             continue;
         }
         if !name.contains(' ') {
