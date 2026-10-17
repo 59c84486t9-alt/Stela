@@ -29,7 +29,8 @@
 //! DeviceTree, and chip and board identifiers from the boot manifest.
 use crate::{
     apple_device_tree::DeviceTree,
-    boot_bundle::{self, Bundle, Input, Inputs, Options, Source, Target},
+    boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
+    boot_policy::SealedVolume,
     im4m, im4p,
 };
 use alloc::{format, string::String, vec::Vec};
@@ -439,6 +440,8 @@ pub fn prepare<R: ReadAt>(
     let (device_tree, _) = disk.decode(b"dtre", COMPONENT_LIMIT)?;
     let (trust_cache, _) = disk.decode(b"trst", COMPONENT_LIMIT)?;
     let sep = disk.opaque(SEP_FIRMWARE_TYPE)?;
+    // The evidence already required this object and checked its signature.
+    let root_hash = disk.opaque(ROOT_HASH_TYPE)?;
     let (product_version, product_build) = disk.system_version()?;
     let tree = DeviceTree::parse(&device_tree.bytes)?;
     let product_type = root_string(&tree, "model")?;
@@ -482,6 +485,10 @@ pub fn prepare<R: ReadAt>(
         cryptex1_manifest: None,
         extra_trust_caches: Vec::new(),
         ramdisk: None,
+        root_hash: Some(RootHash {
+            volume: SealedVolume::System,
+            im4p: root_hash.as_ref().map(Decoded::input),
+        }),
     };
     let mut bundle = boot_bundle::prepare(&inputs, options)?;
     bundle.manifest.unresolved.push(format!(

@@ -3,8 +3,10 @@ use crate::{args::parse_address, restore};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
-use stela_loader::boot_bundle::{self, Input, Inputs, Options, OverlayProperty, Source, Target};
-use stela_loader::boot_policy::{SecurityMode, SecurityPolicy};
+use stela_loader::boot_bundle::{
+    self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
+};
+use stela_loader::boot_policy::{SealedVolume, SecurityMode, SecurityPolicy};
 use stela_loader::im4m;
 
 mod disk;
@@ -35,6 +37,8 @@ struct Roles {
     txm: &'static str,
     sep: &'static str,
     ramdisk: Option<Ramdisk>,
+    /// The sealed volume the kernel roots from, by its root-hash component.
+    root_hash: Option<(&'static str, SealedVolume)>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +57,7 @@ const INSTALLED: Roles = Roles {
     txm: "Ap,TrustedExecutionMonitor",
     sep: "SEP",
     ramdisk: None,
+    root_hash: Some(("SystemVolume", SealedVolume::System)),
 };
 
 const RESTORE: Roles = Roles {
@@ -63,6 +68,7 @@ const RESTORE: Roles = Roles {
     txm: "Ap,RestoreTrustedExecutionMonitor",
     sep: "RestoreSEP",
     ramdisk: Some(Ramdisk::Image4("RestoreRamDisk", "rdsk")),
+    root_hash: None,
 };
 
 /// recoveryOS: the installed system's kernel, monitors and DeviceTree, the
@@ -75,6 +81,7 @@ const RECOVERY: Roles = Roles {
     txm: "Ap,TrustedExecutionMonitor",
     sep: "SEP",
     ramdisk: Some(Ramdisk::BaseSystem),
+    root_hash: Some(("BaseSystemVolume", SealedVolume::BaseSystem)),
 };
 
 #[derive(Subcommand)]
@@ -430,6 +437,19 @@ impl Prepare {
                 )?)
             }
         };
+        // The root hash stays an IM4P: iBoot forwards it with its manifest.
+        let root_hash = match roles.root_hash {
+            None => None,
+            Some((name, volume)) => Some((
+                volume,
+                report
+                    .identities
+                    .iter()
+                    .any(|i| i.components.contains_key(name))
+                    .then(|| component(name, None, COMPONENT_LIMIT))
+                    .transpose()?,
+            )),
+        };
         let sep = report
             .identities
             .iter()
@@ -524,6 +544,10 @@ impl Prepare {
             cryptex1_manifest: cryptex1_manifest.as_ref().map(input),
             extra_trust_caches: cryptex_trust_caches.iter().map(input).collect(),
             ramdisk: ramdisk.as_ref().map(input),
+            root_hash: root_hash.as_ref().map(|(volume, decoded)| RootHash {
+                volume: *volume,
+                im4p: decoded.as_ref().map(input),
+            }),
         };
         let options = self.options(self.restore || self.recovery)?;
         let bundle = boot_bundle::prepare(&inputs, &options)?;

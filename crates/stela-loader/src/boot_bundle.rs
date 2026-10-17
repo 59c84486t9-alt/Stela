@@ -12,7 +12,7 @@
 //! `docs/design/runtime.md#kernel-boot-bundle`.
 use crate::apple_device_tree::{DeviceTree, Placeholder};
 use crate::boot_args::{self, BootArgs, Video};
-use crate::boot_policy::{self, Decision, SecurityPolicy};
+use crate::boot_policy::{self, Decision, SealedVolume, SecurityPolicy};
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::trust_cache;
@@ -92,6 +92,15 @@ pub struct Inputs<'a> {
     pub extra_trust_caches: Vec<Input<'a>>,
     /// A restore ramdisk, placed as the `RAMDisk` region.
     pub ramdisk: Option<Input<'a>>,
+    /// The sealed volume the boot roots from, and its root-hash `IM4P` when
+    /// one is available; `None` when it roots from no sealed volume.
+    pub root_hash: Option<RootHash<'a>>,
+}
+
+/// A sealed root volume and its root-hash `IM4P`.
+pub struct RootHash<'a> {
+    pub volume: SealedVolume,
+    pub im4p: Option<Input<'a>>,
 }
 
 /// One DeviceTree value supplied from outside the restore image, such as a
@@ -600,6 +609,21 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     )?;
     unresolved.extend(policy_unresolved);
     let mut security = security;
+    if let Some(root_hash) = &inputs.root_hash {
+        let manifest = inputs
+            .boot_manifest
+            .as_ref()
+            .zip(boot_manifest.as_ref())
+            .map(|(input, manifest)| (input.bytes, manifest));
+        let (decisions, gaps) = boot_policy::apply_root_hash(
+            &mut tree,
+            root_hash.volume,
+            root_hash.im4p.as_ref().map(|input| input.bytes),
+            manifest,
+        )?;
+        security.extend(decisions);
+        unresolved.extend(gaps);
+    }
     if let Some(environment) = &options.osenvironment {
         let (decisions, gaps) = boot_policy::apply_environment(&mut tree, environment)?;
         security.extend(decisions);
@@ -879,6 +903,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
             .chain(&inputs.cryptex1_manifest)
             .chain(&inputs.extra_trust_caches)
             .chain(&inputs.ramdisk)
+            .chain(inputs.root_hash.iter().filter_map(|r| r.im4p.as_ref()))
             .map(source_of),
     );
     let manifest = Manifest {
@@ -1406,6 +1431,7 @@ mod tests {
             cryptex1_manifest: None,
             extra_trust_caches: vec![],
             ramdisk: Some(input(leak(vec![0x5a; 100]), "RestoreRamDisk")),
+            root_hash: None,
         };
         let options = Options {
             dram_base: 0x8_0000_0000,

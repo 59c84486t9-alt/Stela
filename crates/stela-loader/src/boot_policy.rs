@@ -252,6 +252,99 @@ pub fn apply(
     Ok((writer.decisions, unresolved))
 }
 
+/// iBoot forwards the root hash of the sealed volume the kernel roots from
+/// as `/chosen/secure-boot-hashes` data: the APFS kext's
+/// `import_iboot_forwarded_roothash` reads `base-system-volume-auth-blob`
+/// when it boots BaseSystem and `system-volume-auth-blob` otherwise (26A434
+/// `com.apple.filesystems.apfs`). The blob is taken to be the root-hash
+/// Image4 with the manifest that signs it, as the kext extracts "root hash and
+/// manifest" from it and evaluates Image4 trust; its decoding is not traced.
+const SECURE_BOOT_HASHES: &str = "/chosen/secure-boot-hashes";
+
+/// The sealed volume a boot roots from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SealedVolume {
+    /// The installed System volume (`SystemVolume`, IM4P `isys`).
+    System,
+    /// recoveryOS's BaseSystem (`BaseSystemVolume`, IM4P `csys`).
+    BaseSystem,
+}
+
+impl SealedVolume {
+    pub fn payload_type(self) -> &'static str {
+        match self {
+            Self::System => "isys",
+            Self::BaseSystem => "csys",
+        }
+    }
+
+    pub fn property(self) -> &'static str {
+        match self {
+            Self::System => "system-volume-auth-blob",
+            Self::BaseSystem => "base-system-volume-auth-blob",
+        }
+    }
+}
+
+/// Forward `volume`'s root hash: an `IMG4` of its root-hash `IM4P` and the
+/// boot manifest, which must sign it.
+pub fn apply_root_hash(
+    tree: &mut DeviceTree,
+    volume: SealedVolume,
+    im4p: Option<&[u8]>,
+    boot_manifest: Option<(&[u8], &Manifest)>,
+) -> Result<(Vec<Decision>, Vec<String>)> {
+    let property = volume.property();
+    let (im4p, (manifest_bytes, manifest)) = match (im4p, boot_manifest) {
+        (Some(im4p), Some(manifest)) => (im4p, manifest),
+        (None, _) => {
+            return Ok((
+                vec![],
+                vec![format!(
+                    "{SECURE_BOOT_HASHES} {property}: no {} root-hash object",
+                    volume.payload_type()
+                )],
+            ));
+        }
+        (Some(_), None) => {
+            return Ok((
+                vec![],
+                vec![format!(
+                    "{SECURE_BOOT_HASHES} {property}: no boot manifest signs the root hash"
+                )],
+            ));
+        }
+    };
+    let tag = volume.payload_type();
+    let kind = stela_runtime::img4::payload_type(im4p)
+        .map_err(|e| anyhow::anyhow!("the {tag} root hash: {e}"))?;
+    ensure!(
+        kind == tag.as_bytes(),
+        "the {tag} root hash is IM4P type {}",
+        String::from_utf8_lossy(&kind)
+    );
+    let signed = manifest
+        .object(tag)
+        .and_then(|object| object.properties.iter().find(|p| p.name == "DGST"))
+        .map(|p| &p.value);
+    ensure!(
+        matches!(signed, Some(Value::Data(digest)) if digest.as_slice() == crate::im4m::sha384(im4p).as_slice()),
+        "the boot manifest does not sign this {tag} root hash"
+    );
+    tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
+    let mut writer = Writer {
+        tree,
+        decisions: vec![],
+    };
+    writer.set(
+        SECURE_BOOT_HASHES,
+        property,
+        stela_runtime::img4::compose(im4p, manifest_bytes),
+        &format!("IMG4 of the {tag} root hash and the boot manifest that signs it"),
+    )?;
+    Ok((writer.decisions, vec![]))
+}
+
 const ENVIRONMENTS: &str = "/osenvironments";
 
 fn text_value(bytes: &[u8]) -> Result<String> {
@@ -503,6 +596,74 @@ mod tests {
         assert_eq!(
             tree.property(CHOSEN, "boot-manifest-hash").unwrap().value,
             vec![0; 48]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_root_hash_is_forwarded_as_an_img4_the_boot_manifest_signs() -> Result<()> {
+        let im4p = der(
+            &[0x30],
+            &[
+                der(&[0x16], b"IM4P"),
+                der(&[0x16], b"csys"),
+                der(&[0x16], b"root hash"),
+                der(&[0x04], &[0x5a; 208]),
+            ]
+            .concat(),
+        );
+        let signed = manifest(
+            &[entry("SDOM", &der(&[0x02], &[1]))],
+            &[entry(
+                "csys",
+                &der(&[0x31], &entry("DGST", &der(&[0x04], &im4m::sha384(&im4p)))),
+            )],
+        );
+        let parsed = im4m::parse(&signed)?;
+        let mut tree = tree();
+        let (decisions, unresolved) = apply_root_hash(
+            &mut tree,
+            SealedVolume::BaseSystem,
+            Some(&im4p),
+            Some((&signed, &parsed)),
+        )?;
+        assert!(unresolved.is_empty());
+        assert_eq!(decisions.len(), 1);
+        let blob = &tree
+            .property(SECURE_BOOT_HASHES, "base-system-volume-auth-blob")
+            .unwrap()
+            .value;
+        let parts = stela_runtime::img4::parse(blob).unwrap();
+        assert_eq!(parts.payload, im4p.as_slice());
+        assert_eq!(parts.manifest, Some(signed.as_slice()));
+
+        // Without the object the gap is reported; a manifest that does not
+        // sign it, or the wrong payload type, is refused.
+        let (_, unresolved) = apply_root_hash(
+            &mut tree,
+            SealedVolume::System,
+            None,
+            Some((&signed, &parsed)),
+        )?;
+        assert!(unresolved[0].contains("system-volume-auth-blob"));
+        let unsigned = boot_manifest();
+        assert!(
+            apply_root_hash(
+                &mut tree,
+                SealedVolume::BaseSystem,
+                Some(&im4p),
+                Some((&signed, &unsigned))
+            )
+            .is_err()
+        );
+        assert!(
+            apply_root_hash(
+                &mut tree,
+                SealedVolume::System,
+                Some(&im4p),
+                Some((&signed, &parsed))
+            )
+            .is_err()
         );
         Ok(())
     }

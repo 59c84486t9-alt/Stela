@@ -188,6 +188,31 @@ pub fn peek_payload_type(prefix: &[u8]) -> Result<[u8; 4], Img4Error> {
         .map_err(|_| Img4Error::Malformed("IM4P type is not four characters"))
 }
 
+/// A DER length and contents after `tag`.
+fn encode(tag: u8, contents: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec![tag];
+    match contents.len() {
+        length @ 0..0x80 => out.push(length as u8),
+        length => {
+            let digits = (length as u64).to_be_bytes();
+            let skip = digits.iter().take_while(|&&b| b == 0).count();
+            out.push(0x80 | (8 - skip) as u8);
+            out.extend_from_slice(&digits[skip..]);
+        }
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// An `IMG4` of a payload and the manifest that signs it, as iBoot forwards
+/// one.
+pub fn compose(im4p: &[u8], im4m: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut contents = encode(IA5_STRING, b"IMG4");
+    contents.extend_from_slice(im4p);
+    contents.extend(encode(CONTEXT_0, im4m));
+    encode(SEQUENCE, &contents)
+}
+
 /// Where an `IMG4`'s manifest and restore information begin, from the first
 /// bytes of the file; `None` for a bare `IM4P`, which has neither. 64 bytes
 /// always suffice.
@@ -291,6 +316,7 @@ pub(crate) mod tests {
             &[der(IA5_STRING, b"IM4M"), der(0x02, &[0])].concat(),
         );
         let file = img4(&payload, &manifest);
+        assert_eq!(compose(&payload, &manifest), file);
         let parts = parse(&file).unwrap();
         assert_eq!(parts.payload, payload.as_slice());
         assert_eq!(parts.manifest, Some(manifest.as_slice()));
