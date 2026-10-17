@@ -388,8 +388,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     } else {
         ("off", "qemu64", "readonly=on,file=fat:")
     };
+    // A USB image carries the boot bundle that `stela setup` wrote.
+    let bundle = arguments.bundle.is_some() || preboot.is_some() || arguments.usb_image.is_some();
     let memory = arguments.memory.clone().unwrap_or_else(|| {
-        match (arguments.bundle.is_some() || preboot.is_some(), system) {
+        match (bundle, system) {
             (true, _) => "12G",
             (false, true) => "8G",
             (false, false) => "1G",
