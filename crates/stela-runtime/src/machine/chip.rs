@@ -8,6 +8,55 @@ use super::system::generated::{CAPS, CHIPS, Feature};
 
 #[rustfmt::skip]
 mod forms;
+#[rustfmt::skip]
+mod checks;
+
+/// An access check a form's Execute pseudocode makes (Arm
+/// `AArch64_CheckFPEnabled`, `AArch64_CheckFPAdvSIMDEnabled`,
+/// `CheckSVEEnabled`, `CheckNonStreamingSVEEnabled`,
+/// `CheckStreamingSVEEnabled`, `CheckStreamingSVEAndZAEnabled`,
+/// `CheckSMEEnabled`, `CheckSMEAndZAEnabled`, `CheckSMEZT0Enabled` and
+/// `CheckFPMREnabled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    Fp,
+    FpAdvSimd,
+    Sve,
+    NonStreamingSve,
+    StreamingSve,
+    StreamingSveAndZa,
+    Sme,
+    SmeAndZa,
+    SmeZt0,
+    Fpmr,
+}
+
+/// The words a check variant covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordClass {
+    Any,
+    /// imm5 (`checks::IMM5`) has one bit set, or not: SMOV's and UMOV's
+    /// `index == 0`.
+    SingleImm5(bool),
+}
+
+struct CheckVariant {
+    /// Bit `n` set for chip `n`.
+    chips: u8,
+    class: WordClass,
+    checks: &'static [Check],
+}
+
+struct CheckForm {
+    value: u32,
+    variants: &'static [CheckVariant],
+}
+
+/// The forms of one encoding mask, sorted by value.
+struct CheckGroup {
+    mask: u32,
+    forms: &'static [CheckForm],
+}
 
 /// One A64 form some chips lack (`forms::ABSENT`).
 struct AbsentForm {
@@ -86,6 +135,34 @@ impl Chip {
             }
         }
         word
+    }
+
+    /// The access checks `word` makes on this chip, in order; none for a
+    /// word no checked form claims. The most specific encoding wins, as in
+    /// Arm's decode tables.
+    pub fn checks(self, word: u32) -> &'static [Check] {
+        let bit = 1u8 << self as u8;
+        for group in checks::CHECKS {
+            let Ok(index) = group
+                .forms
+                .binary_search_by_key(&(word & group.mask), |form| form.value)
+            else {
+                continue;
+            };
+            let single = ((word & checks::IMM5) >> checks::IMM5.trailing_zeros()).count_ones() == 1;
+            return group.forms[index]
+                .variants
+                .iter()
+                .find(|variant| {
+                    variant.chips & bit != 0
+                        && match variant.class {
+                            WordClass::Any => true,
+                            WordClass::SingleImm5(wanted) => wanted == single,
+                        }
+                })
+                .map_or(&[], |variant| variant.checks);
+        }
+        &[]
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -236,6 +313,34 @@ mod tests {
             Err("FEAT_MTE of the chip is not implemented")
         );
         assert_eq!(Chip::AppleM1.implemented(Feature::FEAT_FGT), Ok(false));
+    }
+
+    #[test]
+    fn each_form_makes_its_pseudocodes_access_checks() {
+        use Check::*;
+        // clang-assembled words.
+        for (word, checks) in [
+            (0x4ea2_8420, &[FpAdvSimd][..]),     // add v0.4s, v1.4s, v2.4s
+            (0x1e22_2820, &[Fp]),                // fadd s0, s1, s2
+            (0x0e01_2c20, &[Fp]),                // smov w0, v1.b[0]: index 0
+            (0x0e03_2c20, &[FpAdvSimd]),         // smov w0, v1.b[1]
+            (0x0e04_3c20, &[Fp]),                // umov w0, v1.s[0]
+            (0x5e22_dc20, &[Fp]),                // fmulx s0, s1, s2: one element
+            (0x4e22_dc20, &[FpAdvSimd]),         // fmulx v0.4s, v1.4s, v2.4s
+            (0x3dc0_0020, &[Fp]),                // ldr q0, [x1]
+            (0x8081_2000, &[StreamingSveAndZa]), // fmopa za0.s, ...
+            (0xe100_0000, &[SmeAndZa]),          // ldr za[w12, 0], [x0]
+            (0xe11f_8000, &[Sme, SmeZt0]),       // ldr zt0, [x0]
+            (0x04bf_5820, &[Sme]),               // rdsvl x0, #1
+            (0x0422_0020, &[Sve]),               // add z0.b, z1.b, z2.b
+            (0xa400_a000, &[Sve]),               // ld1b {z0.b}, p0/z, [x0]
+            (0x8b02_0020, &[]),                  // add x0, x1, x2
+        ] {
+            assert_eq!(Chip::AppleM4.checks(word), checks, "{word:#x}");
+        }
+        // pmullb z0.q, z1.d, z2.d: esize 128, and no Apple chip has
+        // FEAT_SSVE_AES, so it is illegal in streaming mode.
+        assert_eq!(Chip::AppleM4.checks(0x4502_6820), [NonStreamingSve]);
     }
 
     #[test]

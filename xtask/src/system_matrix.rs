@@ -20,6 +20,7 @@ use std::{
 
 mod access;
 pub mod assess;
+mod checks;
 mod codegen;
 mod expression;
 mod fold;
@@ -205,6 +206,11 @@ pub struct SystemMatrix {
     /// (`SysReg_xml_A_profile-2026-06.tar.gz`), the source of reset values.
     #[arg(long)]
     sysreg: PathBuf,
+    /// The pinned A64 instruction XML archive
+    /// (`ISA_A64_xml_A_profile-2026-06.tar.gz`, the checklist's source), the
+    /// source of each form's access checks.
+    #[arg(long)]
+    isa: PathBuf,
 }
 
 impl SystemMatrix {
@@ -272,6 +278,25 @@ impl SystemMatrix {
             .status()?;
         ensure!(status.success(), "rustfmt failed on {}", access::GENERATED);
         println!("wrote {}", access::GENERATED);
+        let status = Command::new("tar")
+            .arg("-xzf")
+            .arg(&self.isa)
+            .arg("-C")
+            .arg(directory.path())
+            .arg(format!("{}/", checks::DIRECTORY))
+            .status()?;
+        ensure!(status.success(), "cannot extract {}", checks::DIRECTORY);
+        let checklist: Value = serde_json::from_str(&fs::read_to_string(root().join(CHECKLIST))?)?;
+        let generated = root().join(checks::GENERATED);
+        fs::write(
+            &generated,
+            checks::render(
+                &directory.path().join(checks::DIRECTORY),
+                &checklist,
+                &profiles.chips,
+            )?,
+        )?;
+        println!("wrote {}", checks::GENERATED);
         Ok(())
     }
 }
