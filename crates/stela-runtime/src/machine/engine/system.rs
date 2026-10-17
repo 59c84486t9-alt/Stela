@@ -20,7 +20,7 @@ use crate::machine::{
     registers::{Lines, Refusal, trap_iss},
     system::{
         ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
-        Limit, Operation, Pstate, Register, Stage, helpers::sign_extend,
+        Feature, Limit, Operation, Pstate, Register, Stage, helpers::sign_extend,
     },
     timer::Channel,
 };
@@ -28,12 +28,23 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 use stela_compiler::aarch64::system::registers::{Encoding, RegisterAccess};
 
-/// The FPCR fields of the profile: AHP, DN, FZ, RMode and FZ16 (FEAT_FP16).
+/// The FPCR fields of every chip: AHP, DN, FZ, RMode and FZ16 (FEAT_FP16).
 /// The trap enables IOE, DZE, OFE, UFE, IXE and IDE are RAZ/WI because the M2
 /// does not trap FP exceptions (inferred: macOS on Apple silicon cannot
-/// enable FP traps); FEAT_AFP, FEAT_EBF16 and AArch32's Len and Stride are not
-/// in the profile.
+/// enable FP traps); FEAT_EBF16 and AArch32's Len and Stride are on no chip.
 const FPCR_FIELDS: u32 = 0x07c8_0000;
+/// FIZ, AH and NEP (FEAT_AFP, M4 and later). The compiled FP operations take
+/// their effects from the stored FPCR.
+const FPCR_ALTERNATE: u32 = 0b111;
+
+/// The FPCR fields `chip` holds.
+fn fpcr_fields(chip: Chip) -> u32 {
+    if Feature::FEAT_AFP.on(chip) {
+        FPCR_FIELDS | FPCR_ALTERNATE
+    } else {
+        FPCR_FIELDS
+    }
+}
 
 /// Registers whose value is the CPU profile's, read-only to software.
 pub(super) fn identification(register: Register) -> bool {
@@ -469,7 +480,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 return Ok(());
             }
             Register::FPCR => {
-                cpu.state.fpcr = value as u32 & FPCR_FIELDS;
+                cpu.state.fpcr = value as u32 & fpcr_fields(cpu.registers.chip());
                 return Ok(());
             }
             // Without AArch32, FPSR keeps only QC and the cumulative flags.

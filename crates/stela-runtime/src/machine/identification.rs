@@ -594,6 +594,16 @@ pub const TABLE: &[Row] = &[
     ),
     feature(
         ID_AA64MMFR1_EL1,
+        44,
+        1,
+        "FEAT_AFP",
+        engine(
+            true,
+            "FPCR holds FIZ, AH and NEP, and the compiled FP operations follow them",
+        ),
+    ),
+    feature(
+        ID_AA64MMFR1_EL1,
         20,
         3,
         "FEAT_PAN3",
@@ -1117,5 +1127,7 @@ mod tests {
         // extension for it (MMFR1.PAN).
         assert_eq!(field(Chip::AppleM3, ID_AA64MMFR1_EL1, 20), 2);
         assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 20), 3);
+        assert_eq!(field(Chip::AppleM3, ID_AA64MMFR1_EL1, 44), 0);
+        assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 44), 1);
     }
 }

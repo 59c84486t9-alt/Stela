@@ -3688,6 +3688,32 @@ mod tests {
     }
 
     #[test]
+    fn fpcr_alternate_controls_hold_on_the_chips_with_afp() {
+        const MSR_FPCR_X0: u32 = 0xd51b_4400;
+        const MRS_X1_FPCR: u32 = 0xd53b_4401;
+        for (chip, afp) in [
+            (crate::machine::Chip::AppleM2, false),
+            (crate::machine::Chip::AppleM4, true),
+        ] {
+            let mut machine = machine(&[]);
+            machine.profile.chip = chip;
+            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+            for register in [SystemRegister::CPACR_EL1, SystemRegister::CPTR_EL2] {
+                machine.cpu.registers.set(register, 0, 0b11 << 20);
+            }
+            machine.derived_changed();
+            // FIZ, AH and NEP hold only where FEAT_AFP is implemented; the
+            // compiled FP operations take their effects from the stored FPCR.
+            machine.cpu.state.x[0] = u64::MAX;
+            machine.system_instruction(MSR_FPCR_X0).unwrap();
+            machine.system_instruction(MRS_X1_FPCR).unwrap();
+            let held = if afp { 0x07c8_0007 } else { 0x07c8_0000 };
+            assert_eq!(machine.cpu.state.x[1], held, "{chip:?}");
+            assert_eq!(machine.cpu.state.fpcr, held as u32, "{chip:?}");
+        }
+    }
+
+    #[test]
     fn msr_immediate_waits_and_absent_features_follow_the_profile() {
         let mut machine = machine(&[]);
         let user = Pstate {
