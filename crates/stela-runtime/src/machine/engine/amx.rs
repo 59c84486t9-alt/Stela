@@ -154,7 +154,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(error) => return self.refuse_amx(word, &error.0),
         };
         let operation = instruction.operation;
-        if !self.cpu.amx.enabled(amx::governing(self.cpu.kernel_el)) {
+        if !self.cpu.amx.enabled(amx::governing(
+            if self.cpu.regime() == crate::machine::cpu::TranslationRegime::El20 {
+                2
+            } else {
+                1
+            },
+        )) {
             if operation == AmxOperation::Unallocated {
                 return self.refuse_amx(
                     word,
@@ -230,6 +236,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 mod tests {
     use super::super::tests::{BASE, machine};
     use super::*;
+    use crate::machine::system::Register as SystemRegister;
     use crate::machine::{
         amx::{AMX_CTL_EL1, AMX_STATE_T, AmxView},
         exception::syndrome,
@@ -259,14 +266,21 @@ mod tests {
     #[test]
     fn disabled_amx_raises_the_implementation_defined_class() {
         let mut machine = machine(&[]);
-        machine.cpu.system.vbar = BASE + 0x4000;
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, BASE + 0x4000);
         machine.amx(LDX).unwrap();
-        assert_eq!(machine.cpu.system.esr, 0xfe00_0003);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xfe00_0003);
         assert_eq!(
-            machine.cpu.system.esr,
+            machine.cpu.read(SystemRegister::ESR_EL1),
             syndrome(Class::ImplementationDefined, DISABLED_ISS)
         );
-        assert_eq!(machine.cpu.system.elr, BASE, "the PC stays on the word");
+        assert_eq!(
+            machine.cpu.read(SystemRegister::ELR_EL1),
+            BASE,
+            "the PC stays on the word"
+        );
         assert_eq!(machine.cpu.pc, BASE + 0x4200);
         assert!(
             machine.amx(0x0020_12e0).is_err(),
@@ -319,7 +333,7 @@ mod tests {
     #[test]
     fn a_vhe_host_kernel_is_governed_by_the_el2_copy() {
         let mut machine = machine(&[]);
-        machine.cpu.kernel_el = 2;
+        machine.cpu.pstate = crate::machine::exception::Pstate::reset(2);
         *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
         assert!(machine.amx(SET).is_ok());
         assert!(!machine.cpu.amx.live(), "the EL1 copy does not enable");
@@ -335,7 +349,10 @@ mod tests {
         let mut machine = machine(&[]);
         *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
         machine.amx(0x0020_13ff).unwrap();
-        assert_eq!(machine.cpu.system.esr, syndrome(Class::Unknown, 0));
+        assert_eq!(
+            machine.cpu.read(SystemRegister::ESR_EL1),
+            syndrome(Class::Unknown, 0)
+        );
     }
 
     #[test]
@@ -354,15 +371,15 @@ mod tests {
         ] {
             assert!(machine.host.write_ram(slot, &descriptor.to_le_bytes()));
         }
-        machine.cpu.system.translation = mmu::Controls {
-            sctlr: mmu::SCTLR_M,
-            tcr: 25 | 1 << 23,
-            ttbr0: l1,
-            ttbr1: 0,
-            mair: 0xff00,
-            sprr: mmu::Sprr::default(),
-        };
-        machine.cpu.system.vbar = 0x0;
+        for (register, value) in [
+            (SystemRegister::SCTLR_EL1, mmu::SCTLR_M),
+            (SystemRegister::TCR_EL1, 25 | 1 << 23),
+            (SystemRegister::TTBR0_EL1, l1),
+            (SystemRegister::MAIR_EL1, 0xff00),
+        ] {
+            machine.cpu.registers.set(register, 0, value);
+        }
+        machine.cpu.registers.set(SystemRegister::VBAR_EL1, 0, 0x0);
         let bytes: Vec<u8> = (0..512).map(|i| (i * 7) as u8).collect();
         assert!(machine.host.write_ram(BASE + 0xf00, &bytes));
         *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
@@ -379,11 +396,11 @@ mod tests {
         machine.cpu.pc = 0x40;
         machine.amx(STZ | 3).unwrap();
         assert_eq!(
-            machine.cpu.system.esr,
+            machine.cpu.read(SystemRegister::ESR_EL1),
             syndrome(Class::DataAbortSame, 0b00_1111 | 1 << 6)
         );
-        assert_eq!(machine.cpu.system.far, 0x1000);
-        assert_eq!(machine.cpu.system.elr, 0x40);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x1000);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), 0x40);
         let mut after = [0u8; 64];
         assert!(machine.host.read_ram(BASE + 0xfe0, &mut after));
         assert_eq!(after, before, "nothing written");
@@ -392,10 +409,10 @@ mod tests {
         machine.cpu.state.x[3] = 0x1fe0;
         machine.amx(LDX | 3).unwrap();
         assert_eq!(
-            machine.cpu.system.esr,
+            machine.cpu.read(SystemRegister::ESR_EL1),
             syndrome(Class::DataAbortSame, 0b00_0111)
         );
-        assert_eq!(machine.cpu.system.far, 0x2000);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x2000);
         let registers = machine.cpu.amx.registers.as_deref().unwrap();
         assert_eq!(registers.x[0][..], bytes[0xe0..0xe0 + 64], "unchanged");
     }

@@ -1,93 +1,42 @@
 //! The architectural state of one PE: `GuestState` for the registers native
-//! blocks use, plus PC, PSTATE, banked stack pointers and the kernel level's
-//! system registers that only the engine touches.
+//! blocks use, plus PC, PSTATE, the System register file and Apple's state.
+//!
+//! EL0, EL1 and EL2 exist; EL2 is a VHE host (HCR_EL2.E2H is RES1). Every
+//! exception is routed to its target EL as Arm's pseudocode routes it, and
+//! entry and return use that EL's ELR, SPSR, ESR, FAR, VBAR and SP (Arm
+//! `AArch64_TakeException`, `AArch64_ExceptionReturn`).
 use super::{
     exception::{self, Class, IllegalReturn, Pstate, Vector},
-    mmu::{self, Controls},
-    timer::Timer,
+    mmu::{self, Controls, Sprr},
+    system::{File, Register, helpers::bits},
 };
 use stela_compiler::GuestState;
 
-/// Pointer-authentication key registers, in APIA, APIB, APDA, APDB, APGA
-/// order, each as (low, high).
-pub type PointerKeys = [[u64; 2]; 5];
+pub const HCR_VM: u32 = 0;
+pub const HCR_FMO: u32 = 3;
+pub const HCR_IMO: u32 = 4;
+pub const HCR_AMO: u32 = 5;
+pub const HCR_VF: u32 = 6;
+pub const HCR_VI: u32 = 7;
+pub const HCR_VSE: u32 = 8;
+pub const HCR_TSC: u32 = 19;
+pub const HCR_TGE: u32 = 27;
+pub const HCR_HCD: u32 = 29;
 
+/// Apple GXF state of one guarded level: GL1 beside EL1, GL2 beside EL2
+/// (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h`, `gxf.c` and `gxf_asm.S`).
 #[derive(Debug, Clone, Default)]
-pub struct SystemRegisters {
-    /// SP_EL0 when it is not the current stack pointer.
-    pub sp_el0: u64,
-    /// SP_EL1 when it is not the current stack pointer.
-    pub sp_el1: u64,
-    pub elr: u64,
-    pub spsr: u64,
-    pub esr: u64,
-    pub far: u64,
-    pub vbar: u64,
-    pub translation: Controls,
-    pub actlr: u64,
-    pub amair: u64,
-    pub afsr0: u64,
-    pub afsr1: u64,
-    pub contextidr: u64,
-    pub cpacr: u64,
-    pub cntkctl: u64,
-    pub csselr: u64,
-    pub mdscr: u64,
-    pub oslsr_locked: bool,
-    pub osdlr: u64,
-    pub par: u64,
-    pub tpidr_el0: u64,
-    pub tpidrro_el0: u64,
-    pub tpidr_el1: u64,
-    pub keys: PointerKeys,
-    pub physical_timer: Timer,
-    pub virtual_timer: Timer,
-    /// The local event register (WFE/SEV).
-    pub event: bool,
-    pub guarded: GuardedRegisters,
-    /// Apple PAC controls (XNU `xnu-6153.141.1` `arm64_common.h`).
-    pub apctl: u64,
-    /// KERNELKEYLO/HI_EL1.
-    pub kernel_key: [u64; 2],
-    /// Implementation-defined registers without architectural effect here.
-    pub impdef: super::impdef::Registers,
-    /// HCR_EL2 when the profile has EL2. Only VHE is modeled, so E2H stays
-    /// set; TGE selects the host configuration.
-    pub hcr: u64,
-    /// TPIDR_EL2 when the profile has EL2.
-    pub tpidr_el2: u64,
-    /// Apple VMSA_LOCK_EL1: locks of the kernel level's translation
-    /// registers.
-    pub vmsa_lock: u64,
-    /// Registers of levels that never execute under a VHE host: EL1 and GL1
-    /// copies reached through `*_EL12`, `*_EL02` and `*_GL12` encodings, and
-    /// EL2 virtualization controls that only act on guests. Values are kept;
-    /// UNKNOWN reset values read as 0.
-    pub inactive: alloc::collections::BTreeMap<u16, u64>,
-}
-
-pub const HCR_FMO: u64 = 1 << 3;
-pub const HCR_IMO: u64 = 1 << 4;
-pub const HCR_TGE: u64 = 1 << 27;
-pub const HCR_HCD: u64 = 1 << 29;
-pub const HCR_E2H: u64 = 1 << 34;
-
-/// Apple GXF state: configuration, entry points and the GL1 bank
-/// (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h` and `gxf_asm.S`).
-#[derive(Debug, Clone, Default)]
-pub struct GuardedRegisters {
-    /// GXF_CONFIG_EL1; bit 0 enables GENTER.
-    pub config: u64,
-    /// GXF_ENTER_EL1: where GENTER continues.
+pub struct GuardedBank {
+    /// GXF_ENTER_ELx: where GENTER continues.
     pub enter: u64,
-    /// GXF_ABORT_EL1.
+    /// GXF_ABORT_ELx.
     pub abort: u64,
-    /// SP_GL1 when it is not the current stack pointer.
+    /// SP_GLx when it is not the current stack pointer.
     pub sp: u64,
     pub tpidr: u64,
     pub vbar: u64,
     pub spsr: u64,
-    /// ASPSR_GL1; bit 0 makes GEXIT return to the guarded level.
+    /// ASPSR_GLx; bit 0 makes GEXIT return to the guarded level.
     pub aspsr: u64,
     pub esr: u64,
     pub elr: u64,
@@ -97,28 +46,95 @@ pub struct GuardedRegisters {
 pub const GXF_CONFIG_EN: u64 = 1;
 pub const ASPSR_GUARDED: u64 = 1;
 
-/// Which stack pointer a PSTATE selects: SP_EL0, the kernel level's own
-/// (SP_EL1, or SP_EL2 for a VHE host), or the guarded level's.
+/// Apple's implementation-defined state (machine::registers dispatches its
+/// encodings).
+#[derive(Debug, Clone)]
+pub struct AppleState {
+    /// SPRR_CONFIG_EL1.
+    pub sprr_config: u64,
+    /// SPRR permissions: EL0 of the EL1&0 regime, EL1, EL0 of the EL2&0
+    /// regime, EL2.
+    pub sprr_perm: [u64; 4],
+    /// `S3_6_C15_C3_0` and `S3_6_C15_C3_1` (`mmu::Sprr::fields`).
+    pub sprr_fields: [u64; 2],
+    /// GXF_CONFIG_EL1.
+    pub gxf_config: u64,
+    /// GL1 and GL2.
+    pub guarded: [GuardedBank; 2],
+    /// APCTL_EL1 and APCTL_EL2.
+    pub apctl: [u64; 2],
+    /// KERNELKEYLO/HI_EL1.
+    pub kernel_key: [u64; 2],
+    /// VMSA_LOCK_EL1 and the EL whose translation registers it locks.
+    pub vmsa_lock: u64,
+    pub vmsa_lock_el: u8,
+    /// VM_TMR_FIQ_ENA_EL2: bit 0 lets the EL1 virtual timer, bit 1 the EL1
+    /// physical timer, signal FIQ.
+    pub vm_timer_fiq: u64,
+    /// Implementation-defined registers without architectural effect here.
+    pub impdef: super::impdef::Registers,
+}
+
+/// SPRR_PERM indexes into [`AppleState::sprr_perm`].
+pub const PERM_EL0_10: usize = 0;
+pub const PERM_EL1: usize = 1;
+pub const PERM_EL0_20: usize = 2;
+pub const PERM_EL2: usize = 3;
+pub const VM_TIMER_FIQ_VIRTUAL: u64 = 1;
+pub const VM_TIMER_FIQ_PHYSICAL: u64 = 2;
+
+impl Default for AppleState {
+    fn default() -> Self {
+        Self {
+            sprr_config: 0,
+            sprr_perm: [0; 4],
+            sprr_fields: [0; 2],
+            gxf_config: 0,
+            guarded: [GuardedBank::default(), GuardedBank::default()],
+            apctl: [0; 2],
+            kernel_key: [0; 2],
+            vmsa_lock: 0,
+            vmsa_lock_el: 1,
+            // Both EL1 timers signal FIQ until EL2 software says otherwise
+            // (inference: m1n1 and SPTM program it explicitly).
+            vm_timer_fiq: VM_TIMER_FIQ_VIRTUAL | VM_TIMER_FIQ_PHYSICAL,
+            impdef: super::impdef::Registers::default(),
+        }
+    }
+}
+
+/// A translation regime of the profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationRegime {
+    /// EL1&0, through stage 1 and, with HCR_EL2.VM, stage 2.
+    El10,
+    /// EL2&0, the VHE host.
+    El20,
+}
+
+/// Which stack pointer a PSTATE selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stack {
     El0,
-    Kernel,
-    Guarded,
+    El1,
+    El2,
+    /// SP_GL1 or SP_GL2.
+    Guarded(usize),
 }
 
 fn stack(pstate: Pstate) -> Stack {
-    match (pstate.el, pstate.sp_el1, pstate.guarded) {
+    match (pstate.el, pstate.sp, pstate.guarded) {
         (0, _, _) | (_, false, _) => Stack::El0,
-        (_, true, true) => Stack::Guarded,
-        (_, true, false) => Stack::Kernel,
+        (el, true, true) => Stack::Guarded(usize::from(el) - 1),
+        (1, true, false) => Stack::El1,
+        (_, true, false) => Stack::El2,
     }
 }
 
 /// Why a GXF instruction cannot run here; each is UNDEFINED.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardedRefusal {
-    /// GENTER outside the kernel level, at the guarded level, or with GXF or
-    /// SPRR disabled.
+    /// GENTER at EL0, at the guarded level, or with GXF or SPRR disabled.
     Enter,
     /// GEXIT outside the guarded level.
     Exit,
@@ -129,11 +145,11 @@ pub struct Cpu {
     pub state: GuestState,
     pub pc: u64,
     pub pstate: Pstate,
-    pub system: SystemRegisters,
-    /// The EL exceptions are taken to: 1, or 2 when the profile has EL2 and
-    /// runs as a VHE host. The `system` registers belong to this level; the
-    /// guarded level beside it is GL1 or GL2.
-    pub kernel_el: u8,
+    /// The architectural System registers.
+    pub registers: File,
+    pub apple: AppleState,
+    /// The local event register (WFE/SEV).
+    pub event: bool,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
 }
@@ -144,8 +160,11 @@ pub struct Exception {
     pub vector: Vector,
     pub syndrome: u64,
     pub fault_address: Option<u64>,
-    /// ELR_EL1: the preferred return address.
+    /// ELR_ELx: the preferred return address.
     pub return_address: u64,
+    /// The EL it is taken to; `None` routes it as an exception that targets
+    /// EL1 by default (to EL2 from EL2, or from EL0 with HCR_EL2.TGE).
+    pub target: Option<u8>,
 }
 
 impl Exception {
@@ -155,34 +174,109 @@ impl Exception {
             syndrome: exception::syndrome(class, iss),
             fault_address: None,
             return_address,
+            target: None,
         }
     }
 
     pub fn undefined(pc: u64) -> Self {
         Self::synchronous(Class::Unknown, 0, pc)
     }
+
+    pub fn to(self, el: u8) -> Self {
+        Self {
+            target: Some(el),
+            ..self
+        }
+    }
+}
+
+/// The banked exception registers of one EL.
+struct Bank {
+    elr: Register,
+    spsr: Register,
+    esr: Register,
+    far: Register,
+    vbar: Register,
+    sctlr: Register,
+}
+
+fn bank(el: u8) -> Bank {
+    if el == 2 {
+        Bank {
+            elr: Register::ELR_EL2,
+            spsr: Register::SPSR_EL2,
+            esr: Register::ESR_EL2,
+            far: Register::FAR_EL2,
+            vbar: Register::VBAR_EL2,
+            sctlr: Register::SCTLR_EL2,
+        }
+    } else {
+        Bank {
+            elr: Register::ELR_EL1,
+            spsr: Register::SPSR_EL1,
+            esr: Register::ESR_EL1,
+            far: Register::FAR_EL1,
+            vbar: Register::VBAR_EL1,
+            sctlr: Register::SCTLR_EL1,
+        }
+    }
 }
 
 impl Cpu {
     pub fn new(pc: u64, pstate: Pstate) -> Self {
+        let mut registers = File::new();
+        // OSLSR_EL1.OSLK: the OS lock is set at cold reset.
+        registers.set_raw(Register::OSLSR_EL1, 0, 0b1010);
         Self {
             state: GuestState::default(),
             pc,
             pstate,
-            system: SystemRegisters {
-                oslsr_locked: true,
-                ..SystemRegisters::default()
-            },
-            kernel_el: pstate.el.max(1),
+            registers,
+            apple: AppleState::default(),
+            event: false,
             amx: super::amx::Unit::default(),
         }
     }
 
-    fn bank(&mut self, which: Stack) -> &mut u64 {
+    pub fn read(&self, register: Register) -> u64 {
+        self.registers.get(register, 0)
+    }
+
+    pub fn field(&self, register: Register, low: u32, width: u32) -> u64 {
+        bits(self.read(register), u64::from(low), u64::from(width))
+    }
+
+    pub fn hcr(&self, bit: u32) -> bool {
+        self.field(Register::HCR_EL2, bit, 1) == 1
+    }
+
+    fn bank_sp(&mut self, which: Stack) -> &mut u64 {
         match which {
-            Stack::El0 => &mut self.system.sp_el0,
-            Stack::Kernel => &mut self.system.sp_el1,
-            Stack::Guarded => &mut self.system.guarded.sp,
+            Stack::Guarded(level) => &mut self.apple.guarded[level].sp,
+            Stack::El0 | Stack::El1 | Stack::El2 => unreachable!("SP_ELx live in the file"),
+        }
+    }
+
+    fn sp_register(which: Stack) -> Option<Register> {
+        match which {
+            Stack::El0 => Some(Register::SP_EL0),
+            Stack::El1 => Some(Register::SP_EL1),
+            Stack::El2 => Some(Register::SP_EL2),
+            Stack::Guarded(_) => None,
+        }
+    }
+
+    fn store_sp(&mut self, which: Stack, value: u64) {
+        match Self::sp_register(which) {
+            Some(register) => self.registers.set_raw(register, 0, value),
+            None => *self.bank_sp(which) = value,
+        }
+    }
+
+    fn load_sp(&mut self, which: Stack) -> u64 {
+        match Self::sp_register(which) {
+            Some(register) => self.registers.get(register, 0),
+            None => *self.bank_sp(which),
         }
     }
 
@@ -192,88 +286,151 @@ impl Cpu {
         let (was, will) = (stack(self.pstate), stack(next));
         if was != will {
             let current = self.state.sp;
-            *self.bank(was) = current;
-            self.state.sp = *self.bank(will);
+            self.store_sp(was, current);
+            self.state.sp = self.load_sp(will);
         }
         self.pstate = next;
     }
 
-    /// SP_EL0 regardless of which stack pointer is current.
-    pub fn sp_el0(&self) -> u64 {
-        if stack(self.pstate) == Stack::El0 {
+    /// A banked stack pointer, current or not.
+    pub fn sp(&self, el: u8) -> u64 {
+        let which = match el {
+            0 => Stack::El0,
+            1 => Stack::El1,
+            _ => Stack::El2,
+        };
+        if stack(self.pstate) == which {
             self.state.sp
         } else {
-            self.system.sp_el0
+            Self::sp_register(which).map_or(0, |register| self.registers.get(register, 0))
         }
     }
 
-    pub fn set_sp_el0(&mut self, value: u64) {
-        if stack(self.pstate) == Stack::El0 {
+    pub fn set_sp(&mut self, el: u8, value: u64) {
+        let which = match el {
+            0 => Stack::El0,
+            1 => Stack::El1,
+            _ => Stack::El2,
+        };
+        if stack(self.pstate) == which {
             self.state.sp = value;
         } else {
-            self.system.sp_el0 = value;
+            self.store_sp(which, value);
         }
+    }
+
+    /// HCR_EL2.TGE: EL0 runs in the EL2&0 host regime.
+    pub fn in_host(&self) -> bool {
+        self.hcr(HCR_TGE)
+    }
+
+    /// The regime the current PSTATE translates in.
+    pub fn regime(&self) -> TranslationRegime {
+        if self.pstate.el == 2 || (self.pstate.el == 0 && self.in_host()) {
+            TranslationRegime::El20
+        } else {
+            TranslationRegime::El10
+        }
+    }
+
+    /// Stage-1 controls of a regime. The EL1&0 regime with HCR_EL2.VM set
+    /// also needs stage 2, which the caller checks with [`Cpu::stage2`].
+    pub fn controls(&self, regime: TranslationRegime) -> Controls {
+        let (sctlr, tcr, ttbr0, ttbr1, mair, kernel, user) = match regime {
+            TranslationRegime::El10 => (
+                Register::SCTLR_EL1,
+                Register::TCR_EL1,
+                Register::TTBR0_EL1,
+                Register::TTBR1_EL1,
+                Register::MAIR_EL1,
+                PERM_EL1,
+                PERM_EL0_10,
+            ),
+            TranslationRegime::El20 => (
+                Register::SCTLR_EL2,
+                Register::TCR_EL2,
+                Register::TTBR0_EL2,
+                Register::TTBR1_EL2,
+                Register::MAIR_EL2,
+                PERM_EL2,
+                PERM_EL0_20,
+            ),
+        };
+        Controls {
+            sctlr: self.read(sctlr),
+            tcr: self.read(tcr),
+            ttbr0: self.read(ttbr0),
+            ttbr1: self.read(ttbr1),
+            mair: self.read(mair),
+            sprr: Sprr {
+                config: self.apple.sprr_config,
+                el1: self.apple.sprr_perm[kernel],
+                el0: self.apple.sprr_perm[user],
+                fields: self.apple.sprr_fields,
+            },
+            stage2: self.stage2(regime),
+        }
+    }
+
+    /// Whether the EL1&0 regime translates through stage 2.
+    pub fn stage2(&self, regime: TranslationRegime) -> bool {
+        regime == TranslationRegime::El10 && self.hcr(HCR_VM)
     }
 
     /// GXF is usable when both SPRR and GXF are enabled (m1n1 `gxf.c`
     /// `gxf_enabled`).
     pub fn guarded_enabled(&self) -> bool {
-        self.system.translation.sprr.enabled() && self.system.guarded.config & GXF_CONFIG_EN != 0
+        self.apple.sprr_config & mmu::SPRR_CONFIG_EN != 0
+            && self.apple.gxf_config & GXF_CONFIG_EN != 0
     }
 
-    /// GENTER at EL1: bank the return state in the GL1 registers and
-    /// continue at GXF_ENTER_EL1 on the GL1 stack with every exception masked.
-    /// Masking follows exception entry; it is an inference, as is the
-    /// SP_GL1 selection (m1n1 sets `sp` after GENTER).
+    /// GENTER at EL1 or EL2: bank the return state in that GL's registers and
+    /// continue at GXF_ENTER_ELx on the GL stack with every exception masked.
+    /// Masking follows exception entry; it is an inference, as is the stack
+    /// selection (m1n1 sets `sp` after GENTER).
     pub fn guarded_enter(&mut self) -> Result<(), GuardedRefusal> {
-        if self.pstate.el != self.kernel_el || self.pstate.guarded || !self.guarded_enabled() {
+        if self.pstate.el == 0 || self.pstate.guarded || !self.guarded_enabled() {
             return Err(GuardedRefusal::Enter);
         }
         let from = self.pstate;
-        self.system.guarded.spsr = from.to_spsr(self.state.nzcv);
-        self.system.guarded.elr = self.pc.wrapping_add(4);
-        self.system.guarded.aspsr = 0;
+        let level = usize::from(from.el) - 1;
+        let spsr = from.to_spsr(self.state.nzcv);
+        let bank = &mut self.apple.guarded[level];
+        bank.spsr = spsr;
+        bank.elr = self.pc.wrapping_add(4);
+        bank.aspsr = 0;
+        let enter = bank.enter;
         self.set_pstate(Pstate {
-            sp_el1: true,
+            sp: true,
             daif: exception::DAIF_ALL,
             guarded: true,
             ..from
         });
-        self.pc = self.system.guarded.enter;
+        self.pc = enter;
         Ok(())
     }
 
-    /// GEXIT at the guarded level: restore PSTATE from SPSR_GL1 and continue
-    /// at ELR_GL1, at GL1 when ASPSR_GL1 says so.
+    /// GEXIT at the guarded level: restore PSTATE from SPSR_GLx and continue
+    /// at ELR_GLx, at the guarded level when ASPSR_GLx says so.
     pub fn guarded_exit(&mut self) -> Result<Result<(), IllegalReturn>, GuardedRefusal> {
         if !self.pstate.guarded {
             return Err(GuardedRefusal::Exit);
         }
-        let (mut next, nzcv) = match exception::from_spsr(self.system.guarded.spsr, self.kernel_el)
-        {
+        let level = usize::from(self.pstate.el) - 1;
+        let bank = &self.apple.guarded[level];
+        let (spsr, elr, aspsr) = (bank.spsr, bank.elr, bank.aspsr);
+        let (mut next, nzcv) = match self.legal_return(spsr) {
             Ok(value) => value,
             Err(illegal) => return Ok(Err(illegal)),
         };
-        next.guarded = self.system.guarded.aspsr & ASPSR_GUARDED != 0;
-        if next.guarded && next.el != self.kernel_el {
+        next.guarded = aspsr & ASPSR_GUARDED != 0;
+        if next.guarded && next.el != self.pstate.el {
             return Ok(Err(IllegalReturn::Mode(0)));
-        }
-        if let Err(illegal) = self.host_regime(next) {
-            return Ok(Err(illegal));
         }
         self.state.nzcv = nzcv;
         self.set_pstate(next);
-        self.pc = self.system.guarded.elr;
+        self.pc = elr;
         Ok(Ok(()))
-    }
-
-    /// EL0 under an EL2 kernel runs in the host's EL2&0 regime only while
-    /// HCR_EL2.TGE is set.
-    fn host_regime(&self, next: Pstate) -> Result<(), IllegalReturn> {
-        if self.kernel_el == 2 && next.el == 0 && self.system.hcr & HCR_TGE == 0 {
-            return Err(IllegalReturn::GuestRegime);
-        }
-        Ok(())
     }
 
     pub fn requester(&self) -> mmu::Requester {
@@ -285,14 +442,41 @@ impl Cpu {
         }
     }
 
-    /// Take an exception to the kernel level and continue at its vector. At
-    /// the guarded level it is taken to that GL through VBAR_GLx and the GL
-    /// bank instead.
+    /// The EL an exception targeting EL1 by default is taken to.
+    pub fn route(&self) -> u8 {
+        match self.pstate.el {
+            2 => 2,
+            0 if self.in_host() => 2,
+            _ => 1,
+        }
+    }
+
+    /// The EL a physical interrupt is routed to (Arm
+    /// `AArch64_TakePhysicalIRQException` and FIQ): EL2 from EL2, or from EL0
+    /// and EL1 with HCR_EL2.TGE or the IMO/FMO routing bit.
+    pub fn interrupt_target(&self, vector: Vector) -> u8 {
+        let routing = match vector {
+            Vector::Irq => HCR_IMO,
+            Vector::Fiq => HCR_FMO,
+            _ => HCR_AMO,
+        };
+        if self.pstate.el == 2 || self.in_host() || self.hcr(routing) {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Take an exception and continue at its vector. At the guarded level it
+    /// stays there, through VBAR_GLx and the GL bank.
     pub fn take(&mut self, exception: Exception) {
         let from = self.pstate;
-        if from.guarded {
-            let bank = &mut self.system.guarded;
-            bank.spsr = from.to_spsr(self.state.nzcv);
+        let target = exception.target.unwrap_or_else(|| self.route());
+        if from.guarded && target == from.el {
+            let level = usize::from(from.el) - 1;
+            let spsr = from.to_spsr(self.state.nzcv);
+            let bank = &mut self.apple.guarded[level];
+            bank.spsr = spsr;
             bank.elr = exception.return_address;
             bank.aspsr = ASPSR_GUARDED;
             if exception.vector == Vector::Synchronous {
@@ -302,45 +486,66 @@ impl Cpu {
                 bank.far = address;
             }
             let vbar = bank.vbar;
-            self.set_pstate(exception::entry_pstate(
-                from,
-                self.system.translation.sctlr,
-                self.kernel_el,
-            ));
-            self.pc = vbar.wrapping_add(exception::vector_offset(from, exception.vector));
+            let sctlr = self.read(bank_sctlr(from.el));
+            let entry = exception::entry_pstate(from, sctlr, from.el, self.in_host());
+            self.set_pstate(Pstate {
+                guarded: true,
+                ..entry
+            });
+            self.pc = vbar.wrapping_add(exception::vector_offset(from, target, exception.vector));
             return;
         }
-        self.system.spsr = from.to_spsr(self.state.nzcv);
-        self.system.elr = exception.return_address;
-        if exception.vector == Vector::Synchronous {
-            self.system.esr = exception.syndrome;
+        let bank = bank(target);
+        self.registers
+            .set_raw(bank.spsr, 0, from.to_spsr(self.state.nzcv));
+        self.registers
+            .set_raw(bank.elr, 0, exception.return_address);
+        if exception.vector == Vector::Synchronous || exception.vector == Vector::SError {
+            self.registers.set_raw(bank.esr, 0, exception.syndrome);
         }
         if let Some(address) = exception.fault_address {
-            self.system.far = address;
+            self.registers.set_raw(bank.far, 0, address);
         }
-        self.set_pstate(exception::entry_pstate(
-            from,
-            self.system.translation.sctlr,
-            self.kernel_el,
-        ));
-        self.pc = self
-            .system
-            .vbar
-            .wrapping_add(exception::vector_offset(from, exception.vector));
+        let sctlr = self.read(bank.sctlr);
+        self.set_pstate(Pstate {
+            guarded: false,
+            ..exception::entry_pstate(from, sctlr, target, self.in_host())
+        });
+        let vbar = self.read(bank.vbar) & !0x7ff;
+        self.pc = vbar.wrapping_add(exception::vector_offset(from, target, exception.vector));
     }
 
-    /// ERET from the kernel level. EL0 ERET is undefined and must not reach
-    /// here.
+    /// Decode an SPSR for a return from the current EL (Arm
+    /// `IllegalExceptionReturn`): a higher EL, EL1 while HCR_EL2.TGE is set,
+    /// AArch32 and an invalid mode are illegal.
+    fn legal_return(&self, spsr: u64) -> Result<(Pstate, u32), IllegalReturn> {
+        let (next, nzcv) = exception::from_spsr(spsr)?;
+        if next.el > self.pstate.el {
+            return Err(IllegalReturn::Mode(next.el << 2));
+        }
+        if next.el == 1 && self.in_host() {
+            return Err(IllegalReturn::Host);
+        }
+        Ok((next, nzcv))
+    }
+
+    /// ERET from EL1 or EL2. EL0 ERET is UNDEFINED and must not reach here.
     pub fn exception_return(&mut self) -> Result<(), IllegalReturn> {
-        let (next, nzcv) = exception::from_spsr(self.system.spsr, self.kernel_el)?;
-        self.host_regime(next)?;
+        let bank = bank(self.pstate.el);
+        let spsr = self.read(bank.spsr);
+        let elr = self.read(bank.elr);
+        let (next, nzcv) = self.legal_return(spsr)?;
         self.state.nzcv = nzcv;
         self.set_pstate(next);
-        self.pc = self.system.elr;
+        self.pc = elr;
         // ERET clears the local exclusive monitor and sets the event register.
-        self.system.event = true;
+        self.event = true;
         Ok(())
     }
+}
+
+fn bank_sctlr(el: u8) -> Register {
+    bank(el).sctlr
 }
 
 #[cfg(test)]
@@ -348,81 +553,89 @@ mod tests {
     use super::*;
     use crate::machine::exception::{DAIF_ALL, DAIF_I};
 
+    const HCR_E2H_TGE: u64 = 1 << 34 | 1 << 27;
+
     #[test]
     fn exception_entry_and_return_bank_stack_pointers() {
         let user = Pstate {
             el: 0,
-            sp_el1: false,
+            sp: false,
             daif: 0,
-            ..Pstate::RESET_EL1
+            ..Pstate::reset(1)
         };
         let mut cpu = Cpu::new(0x4000, user);
         cpu.state.sp = 0x7000;
         cpu.state.nzcv = 0x6000_0000;
-        cpu.system.sp_el1 = 0xffff_0000;
-        cpu.system.vbar = 0xffff_8000;
+        cpu.registers.set_raw(Register::SP_EL1, 0, 0xffff_0000);
+        cpu.registers.set(Register::VBAR_EL1, 0, 0xffff_8000);
         cpu.take(Exception::synchronous(Class::SupervisorCall, 7, 0x4004));
         assert_eq!(cpu.pc, 0xffff_8400);
         assert_eq!(cpu.state.sp, 0xffff_0000);
-        assert_eq!(cpu.sp_el0(), 0x7000);
-        assert_eq!(cpu.system.elr, 0x4004);
-        assert_eq!(cpu.system.spsr, 0x6000_0000);
-        assert_eq!(cpu.system.esr, 0x5600_0007);
+        assert_eq!(cpu.sp(0), 0x7000);
+        assert_eq!(cpu.read(Register::ELR_EL1), 0x4004);
+        assert_eq!(cpu.read(Register::SPSR_EL1), 0x6000_0000);
+        assert_eq!(cpu.read(Register::ESR_EL1), 0x5600_0007);
         assert_eq!(cpu.pstate.daif, DAIF_ALL);
         assert!(cpu.pstate.pan);
         cpu.state.sp = 0xffff_0100;
-        cpu.system.spsr = DAIF_I as u64 * 64; // EL0t with IRQs masked
+        cpu.registers.set(Register::SPSR_EL1, 0, DAIF_I as u64 * 64); // EL0t with IRQs masked
         cpu.exception_return().unwrap();
         assert_eq!(
-            (cpu.pc, cpu.state.sp, cpu.system.sp_el1),
+            (cpu.pc, cpu.state.sp, cpu.sp(1)),
             (0x4004, 0x7000, 0xffff_0100)
         );
         assert_eq!(cpu.pstate.el, 0);
         assert_eq!(cpu.pstate.daif, DAIF_I);
         assert_eq!(cpu.state.nzcv, 0);
-        cpu.system.spsr = 0x9;
-        assert_eq!(cpu.exception_return(), Err(IllegalReturn::Mode(9)));
     }
 
     #[test]
     fn interrupts_from_el1h_use_the_current_el_spx_group() {
-        let mut cpu = Cpu::new(0x8000, Pstate::RESET_EL1);
-        cpu.system.vbar = 0x1_0000;
-        cpu.system.esr = 0x1234;
+        let mut cpu = Cpu::new(0x8000, Pstate::reset(1));
+        cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        cpu.registers.set(Register::ESR_EL1, 0, 0x1234);
         cpu.take(Exception {
             vector: Vector::Fiq,
             syndrome: 0,
             fault_address: None,
             return_address: 0x8000,
+            target: Some(1),
         });
         assert_eq!(cpu.pc, 0x1_0300);
-        assert_eq!(cpu.system.esr, 0x1234, "interrupts leave ESR unchanged");
+        assert_eq!(
+            cpu.read(Register::ESR_EL1),
+            0x1234,
+            "interrupts leave ESR unchanged"
+        );
     }
 
     #[test]
-    fn an_el2_kernel_takes_exceptions_to_el2_and_returns_to_el0_only_with_tge() {
+    fn routing_follows_tge_and_el2_uses_its_own_registers() {
         let mut cpu = Cpu::new(0x8000, Pstate::reset(2));
-        assert_eq!(cpu.kernel_el, 2);
-        cpu.system.hcr = HCR_E2H;
-        cpu.system.vbar = 0x1_0000;
-        cpu.system.sp_el1 = 0xa000;
+        cpu.registers.set(Register::HCR_EL2, 0, HCR_E2H_TGE);
+        cpu.registers.set(Register::VBAR_EL2, 0, 0x1_0000);
         cpu.state.sp = 0xa000;
-        cpu.take(Exception::synchronous(Class::HypervisorCall, 3, 0x8004));
+        cpu.take(Exception::synchronous(Class::HypervisorCall, 3, 0x8004).to(2));
         assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0200, 2));
-        assert_eq!(cpu.system.spsr & 0xf, 0b1001, "EL2h");
-        assert_eq!(cpu.system.esr, 0x5a00_0003);
+        assert_eq!(cpu.read(Register::SPSR_EL2) & 0xf, 0b1001, "EL2h");
+        assert_eq!(cpu.read(Register::ESR_EL2), 0x5a00_0003);
         cpu.exception_return().unwrap();
         assert_eq!((cpu.pc, cpu.pstate.el), (0x8004, 2));
-        // EL0 would run in the guest's EL1&0 regime without TGE.
-        cpu.system.spsr = 0;
-        assert_eq!(cpu.exception_return(), Err(IllegalReturn::GuestRegime));
-        cpu.system.hcr |= HCR_TGE;
+        // EL0 in the host: exceptions go to EL2.
+        cpu.registers.set(Register::SPSR_EL2, 0, 0);
         cpu.exception_return().unwrap();
-        assert_eq!(cpu.pstate.el, 0);
-        // EL1 does not run under a VHE host.
+        assert_eq!((cpu.pstate.el, cpu.regime()), (0, TranslationRegime::El20));
         cpu.take(Exception::synchronous(Class::SupervisorCall, 0, 0x8008));
         assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0400, 2));
-        cpu.system.spsr = 0b0101;
-        assert_eq!(cpu.exception_return(), Err(IllegalReturn::Mode(5)));
+        // A return to EL1 under TGE is illegal; without TGE it enters a guest.
+        cpu.registers.set(Register::SPSR_EL2, 0, 0b0101);
+        assert_eq!(cpu.exception_return(), Err(IllegalReturn::Host));
+        cpu.registers.set(Register::HCR_EL2, 0, 0);
+        cpu.exception_return().unwrap();
+        assert_eq!((cpu.pstate.el, cpu.regime()), (1, TranslationRegime::El10));
+        assert_eq!(cpu.route(), 1);
+        assert_eq!(cpu.interrupt_target(Vector::Irq), 1);
+        cpu.registers.set(Register::HCR_EL2, 0, 1 << HCR_IMO);
+        assert_eq!(cpu.interrupt_target(Vector::Irq), 2);
     }
 }

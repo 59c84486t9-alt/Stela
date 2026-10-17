@@ -1,15 +1,15 @@
-//! AArch64 exception entry and return with one kernel level above EL0: EL1,
-//! or EL2 as a VHE host (HCR_EL2.{E2H,TGE} = {1,1}). Sources: Arm ARM DDI0487 (June 2026) D1.3 (exception entry),
-//! D1.4 (exception return, illegal returns), D17.2.37 (ESR_ELx) and C5.2 (SPSR
-//! and PSTATE fields).
+//! AArch64 PSTATE, SPSR and exception vectors for EL0, EL1 and EL2. Sources:
+//! Arm ARM DDI0487 (June 2026) D1.3 (exception entry), D1.4 (exception return,
+//! illegal returns), D17.2.37 (ESR_ELx) and C5.2 (SPSR and PSTATE fields), and
+//! Arm `AArch64_TakeException`.
 
 /// The parts of PSTATE the engine owns outside `GuestState` (which holds NZCV
 /// and the current SP value).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pstate {
     pub el: u8,
-    /// SPSel: at EL1, true selects SP_EL1.
-    pub sp_el1: bool,
+    /// SPSel: true selects SP_ELx at EL1 and EL2.
+    pub sp: bool,
     /// D, A, I, F as SPSR bits 9:6 (D=bit 3 of this value).
     pub daif: u8,
     pub pan: bool,
@@ -17,8 +17,8 @@ pub struct Pstate {
     pub dit: bool,
     pub ssbs: bool,
     pub tco: bool,
-    /// Apple GXF: executing at the guarded level beside `el` (GL1). SPSR
-    /// does not encode it; the GL bank's ASPSR does.
+    /// Apple GXF: executing at the guarded level beside `el` (GL1 or GL2).
+    /// SPSR does not encode it; the GL bank's ASPSR does.
     pub guarded: bool,
 }
 
@@ -44,26 +44,20 @@ impl Pstate {
     pub const fn reset(el: u8) -> Self {
         Self {
             el,
-            ..Self::RESET_EL1
+            sp: true,
+            daif: DAIF_ALL,
+            pan: false,
+            uao: false,
+            dit: false,
+            ssbs: false,
+            tco: false,
+            guarded: false,
         }
     }
 
-    /// The reset state at EL1h with every exception masked.
-    pub const RESET_EL1: Self = Self {
-        el: 1,
-        sp_el1: true,
-        daif: DAIF_ALL,
-        pan: false,
-        uao: false,
-        dit: false,
-        ssbs: false,
-        tco: false,
-        guarded: false,
-    };
-
-    /// SPSR_EL1 for an exception taken from this state.
+    /// SPSR_ELx for an exception taken from this state.
     pub fn to_spsr(self, nzcv: u32) -> u64 {
-        let mode = (u64::from(self.el) << 2) | u64::from(self.el != 0 && self.sp_el1);
+        let mode = (u64::from(self.el) << 2) | u64::from(self.el != 0 && self.sp);
         (u64::from(nzcv) & NZCV_MASK)
             | mode
             | (u64::from(self.daif) << SPSR_DAIF_SHIFT)
@@ -80,28 +74,24 @@ impl Pstate {
 pub enum IllegalReturn {
     /// SPSR.M names AArch32, which this CPU profile does not implement.
     Aarch32,
-    /// SPSR.M names an EL that does not exist here, EL1 under a VHE host
-    /// (a guest, not modeled), or an invalid mode.
+    /// SPSR.M names a higher EL, EL3, or an invalid mode.
     Mode(u8),
     /// Software step or an illegal-state bit is set; debug state is absent.
     DebugState,
-    /// A return to EL0 from a VHE host with HCR_EL2.TGE clear would run EL0
-    /// in the guest's EL1&0 regime, which is not modeled.
-    GuestRegime,
+    /// A return to EL1 while HCR_EL2.TGE is set.
+    Host,
 }
 
-/// Decode the kernel level's SPSR for ERET. Returns the new PSTATE and NZCV.
-/// `kernel_el` is the EL exceptions are taken to: 1, or 2 for a VHE host
-/// (HCR_EL2.{E2H,TGE} = {1,1}), where EL1 is never used and a return to it
-/// would start a guest, which is not modeled.
-pub fn from_spsr(spsr: u64, kernel_el: u8) -> Result<(Pstate, u32), IllegalReturn> {
+/// Decode an SPSR for ERET: the new PSTATE and NZCV. The caller checks the
+/// target EL against the current one.
+pub fn from_spsr(spsr: u64) -> Result<(Pstate, u32), IllegalReturn> {
     if spsr & SPSR_M_AARCH32 != 0 {
         return Err(IllegalReturn::Aarch32);
     }
     let mode = (spsr & 0xf) as u8;
-    let (el, sp_el1) = match mode {
+    let (el, sp) = match mode {
         0b0000 => (0, false),
-        _ if mode >> 2 == kernel_el && mode & 0b10 == 0 => (kernel_el, mode & 1 != 0),
+        _ if mode >> 2 <= 2 && mode >> 2 != 0 && mode & 0b10 == 0 => (mode >> 2, mode & 1 != 0),
         _ => return Err(IllegalReturn::Mode(mode)),
     };
     if spsr & (SPSR_IL | SPSR_SS) != 0 {
@@ -110,7 +100,7 @@ pub fn from_spsr(spsr: u64, kernel_el: u8) -> Result<(Pstate, u32), IllegalRetur
     Ok((
         Pstate {
             el,
-            sp_el1,
+            sp,
             daif: ((spsr >> SPSR_DAIF_SHIFT) & 15) as u8,
             pan: spsr & SPSR_PAN != 0,
             uao: spsr & SPSR_UAO != 0,
@@ -133,6 +123,7 @@ pub enum Class {
     IllegalExecution = 0x0e,
     SupervisorCall = 0x15,
     HypervisorCall = 0x16,
+    MonitorCall = 0x17,
     SystemRegister = 0x18,
     InstructionAbortLower = 0x20,
     InstructionAbortSame = 0x21,
@@ -168,13 +159,15 @@ pub fn data_abort_iss(status: u32, write: bool) -> u32 {
     status | if write { 1 << 6 } else { 0 }
 }
 
-/// The vector offset from the kernel level's VBAR for an exception taken
-/// from `from`: EL0 is the only lower level.
-pub fn vector_offset(from: Pstate, vector: Vector) -> u64 {
-    let group = match (from.el, from.sp_el1) {
-        (0, _) => 0x400,
-        (_, false) => 0x000,
-        (_, true) => 0x200,
+/// The vector offset from the target EL's VBAR for an exception taken from
+/// `from`: a lower AArch64 EL, or the current EL with SP_EL0 or SP_ELx.
+pub fn vector_offset(from: Pstate, target: u8, vector: Vector) -> u64 {
+    let group = if target > from.el {
+        0x400
+    } else if from.sp {
+        0x200
+    } else {
+        0x000
     };
     group + vector as u64
 }
@@ -182,16 +175,19 @@ pub fn vector_offset(from: Pstate, vector: Vector) -> u64 {
 const SCTLR_SPAN: u64 = 1 << 23;
 const SCTLR_DSSBS: u64 = 1 << 44;
 
-/// PSTATE after taking an exception to EL1: SCTLR_EL1.SPAN clear sets PAN and
-/// DSSBS gives SSBS. TCO is untouched because the profile has no MTE. An
-/// exception taken at the guarded level stays there (m1n1 `gxf_asm.S` handles
-/// GL exceptions at VBAR_GL1 and returns with GEXIT).
-pub fn entry_pstate(from: Pstate, sctlr: u64, kernel_el: u8) -> Pstate {
+/// PSTATE after taking an exception to `target` (Arm
+/// `AArch64_TakeException`): the target's SCTLR.SPAN clear sets PAN at EL1,
+/// and at EL2 while EL0 runs in the host (HCR_EL2.TGE); DSSBS gives SSBS.
+/// TCO is untouched because the profile has no MTE. An exception taken at
+/// the guarded level stays there (m1n1 `gxf_asm.S` handles GL exceptions at
+/// VBAR_GLx and returns with GEXIT); the caller keeps `guarded`.
+pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool) -> Pstate {
+    let span = sctlr & SCTLR_SPAN == 0 && (target == 1 || in_host);
     Pstate {
-        el: kernel_el,
-        sp_el1: true,
+        el: target,
+        sp: true,
         daif: DAIF_ALL,
-        pan: from.pan || sctlr & SCTLR_SPAN == 0,
+        pan: from.pan || span,
         uao: false,
         dit: from.dit,
         ssbs: sctlr & SCTLR_DSSBS != 0,
@@ -206,11 +202,11 @@ mod tests {
 
     #[test]
     fn spsr_round_trips_every_legal_aarch64_mode() {
-        for (el, sp_el1) in [(0, false), (1, false), (1, true)] {
+        for (el, sp) in [(0, false), (1, false), (1, true), (2, false), (2, true)] {
             for daif in 0..=15 {
                 let state = Pstate {
                     el,
-                    sp_el1,
+                    sp,
                     daif,
                     pan: daif & 1 != 0,
                     uao: false,
@@ -220,43 +216,47 @@ mod tests {
                     guarded: false,
                 };
                 let spsr = state.to_spsr(0xa000_0000);
-                assert_eq!(from_spsr(spsr, 1), Ok((state, 0xa000_0000)));
+                assert_eq!(from_spsr(spsr), Ok((state, 0xa000_0000)));
             }
         }
-        assert_eq!(Pstate::RESET_EL1.to_spsr(0), 0x3c5);
-        assert_eq!(from_spsr(0x3c9, 1), Err(IllegalReturn::Mode(9)));
-        // A VHE host returns to EL2h and refuses EL1, which would be a guest.
-        assert_eq!(from_spsr(0x3c9, 2).unwrap().0.el, 2);
-        assert_eq!(from_spsr(0x3c5, 2), Err(IllegalReturn::Mode(5)));
-        assert_eq!(from_spsr(0x10, 1), Err(IllegalReturn::Aarch32));
-        assert_eq!(from_spsr(SPSR_IL | 5, 1), Err(IllegalReturn::DebugState));
+        assert_eq!(Pstate::reset(1).to_spsr(0), 0x3c5);
+        assert_eq!(from_spsr(0x3c9).unwrap().0.el, 2);
+        assert_eq!(from_spsr(0x3cd), Err(IllegalReturn::Mode(0xd)));
+        assert_eq!(from_spsr(0x3c6), Err(IllegalReturn::Mode(6)));
+        assert_eq!(from_spsr(0x10), Err(IllegalReturn::Aarch32));
+        assert_eq!(from_spsr(SPSR_IL | 5), Err(IllegalReturn::DebugState));
     }
 
     #[test]
     fn vectors_syndromes_and_entry_state() {
         let user = Pstate {
             el: 0,
-            sp_el1: false,
+            sp: false,
             daif: 0,
-            ..Pstate::RESET_EL1
+            ..Pstate::reset(1)
         };
-        assert_eq!(vector_offset(user, Vector::Synchronous), 0x400);
-        assert_eq!(vector_offset(Pstate::RESET_EL1, Vector::Fiq), 0x300);
+        assert_eq!(vector_offset(user, 1, Vector::Synchronous), 0x400);
+        assert_eq!(vector_offset(user, 2, Vector::Irq), 0x480);
+        assert_eq!(vector_offset(Pstate::reset(1), 1, Vector::Fiq), 0x300);
+        assert_eq!(vector_offset(Pstate::reset(1), 2, Vector::Fiq), 0x500);
         let el1t = Pstate {
-            sp_el1: false,
-            ..Pstate::RESET_EL1
+            sp: false,
+            ..Pstate::reset(1)
         };
-        assert_eq!(vector_offset(el1t, Vector::Irq), 0x080);
+        assert_eq!(vector_offset(el1t, 1, Vector::Irq), 0x080);
         assert_eq!(syndrome(Class::SupervisorCall, 0x1234), 0x5600_1234);
         assert_eq!(
             syndrome(Class::DataAbortSame, data_abort_iss(0b000111, true)),
             0x9600_0047
         );
-        let entered = entry_pstate(user, 0, 1);
-        assert!(entered.pan && entered.sp_el1 && entered.el == 1);
+        let entered = entry_pstate(user, 0, 1, false);
+        assert!(entered.pan && entered.sp && entered.el == 1);
         assert_eq!(entered.daif, DAIF_ALL);
         assert!(!entered.ssbs);
-        let entered = entry_pstate(user, SCTLR_SPAN | SCTLR_DSSBS, 1);
+        let entered = entry_pstate(user, SCTLR_SPAN | SCTLR_DSSBS, 1, false);
         assert!(!entered.pan && entered.ssbs);
+        // At EL2, SPAN only applies while EL0 is in the host.
+        assert!(!entry_pstate(user, 0, 2, false).pan);
+        assert!(entry_pstate(user, 0, 2, true).pan);
     }
 }

@@ -1,12 +1,15 @@
 //! The dispatch loop: fetch translation, block cache, native execution and
 //! every exit back from native code.
 mod amx;
+mod system;
 
 use super::{
-    cpu::{Cpu, Exception, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE},
-    exception::{Class, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
+    cpu::{Cpu, Exception, HCR_AMO, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TSC, HCR_VF, HCR_VI, HCR_VSE},
+    exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
-    registers::{self, CpuProfile, Environment, Lines, Outcome as RegisterOutcome, Refusal},
+    registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
+    system::Register as SystemRegister,
+    timer,
 };
 use crate::pauth;
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
@@ -18,7 +21,7 @@ use stela_compiler::{
         register_offset::IndexExtend,
         system::{
             exception::Operation as ExceptionOperation,
-            registers::{Direction, Encoding, RegisterAccess},
+            registers::{Direction, RegisterAccess},
             synchronization::{Operation as Synchronization, WaitKind},
         },
     },
@@ -345,6 +348,16 @@ pub struct Machine<H: Host, D: Devices> {
     translation_generation: u64,
     /// Advances when installed code is discarded.
     code_generation: u64,
+    /// Identification registers the CPU profile has no value for.
+    profile_missing: Vec<SystemRegister>,
+    /// Accessors by encoding.
+    lookup: super::system::Lookup,
+    /// The earliest physical count at which a timer signals FIQ; `None` when
+    /// a System register write may have changed it.
+    timers: Option<Option<u64>>,
+    /// The EL FP/SIMD traps to, if any; `None` when a System register write
+    /// or an EL change may have changed it.
+    floating_point: Option<Option<u8>>,
 }
 
 enum Fetched {
@@ -369,7 +382,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
             code_generation: 1,
+            profile_missing: Vec::new(),
+            lookup: super::system::Lookup::new(),
+            timers: None,
+            floating_point: None,
         };
+        machine.load_profile();
         machine.sync_regime();
         machine
     }
@@ -388,9 +406,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Stop::Unsupported(self.requirement(kind))
     }
 
+    /// Forget state derived from System registers and PSTATE.
+    fn derived_changed(&mut self) {
+        self.timers = None;
+        self.floating_point = None;
+    }
+
     fn sync_regime(&mut self) {
+        self.derived_changed();
         let regime = Regime {
-            controls: self.cpu.system.translation,
+            controls: self.cpu.controls(self.cpu.regime()),
             requester: self.cpu.requester(),
         };
         self.host.set_regime(&regime);
@@ -426,51 +451,92 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn lines(&mut self) -> Lines {
         let now = self.host.counter();
-        let system = &self.cpu.system;
-        let timer = system.virtual_timer.asserted(now) || system.physical_timer.asserted(now);
         let device = self.devices.lines(now);
+        // A timer signals exactly when the count reaches its deadline, which
+        // only System register writes change.
+        let deadline = self.timer_deadline();
         Lines {
             irq: device.irq,
             // Apple cores signal the generic timers as FIQ.
-            fiq: device.fiq || timer,
+            fiq: device.fiq || deadline.is_some_and(|deadline| now >= deadline),
         }
     }
 
-    /// Take a pending, unmasked interrupt before the next instruction.
+    /// Whether an interrupt routed to `target` is taken now: always when it
+    /// goes to a higher EL, under its PSTATE mask at the same EL, never when
+    /// it targets a lower EL (Arm ARM D1.3.6).
+    fn taken(&self, target: u8, mask: u8) -> bool {
+        let el = self.cpu.pstate.el;
+        target > el || (target == el && self.cpu.pstate.daif & mask == 0)
+    }
+
+    /// Take a pending interrupt before the next instruction: the physical
+    /// lines routed by HCR_EL2.{TGE,IMO,FMO}, then the virtual IRQ, FIQ and
+    /// SError that HCR_EL2.{VI,VF,VSE} hold for EL1 and EL0 outside the host.
     fn deliver_interrupts(&mut self) -> bool {
         let lines = self.lines();
-        let daif = self.cpu.pstate.daif;
-        // An EL2 kernel takes physical interrupts only while they route to
-        // EL2: with HCR_EL2.TGE, or with FMO/IMO for FIQ/IRQ. Otherwise they
-        // route to EL1, which is not entered from EL2 (Arm ARM D1.3.5).
-        let hcr = self.cpu.system.hcr;
-        let routed = |bit: u64| self.cpu.kernel_el == 1 || hcr & (HCR_TGE | bit) != 0;
-        let vector = if lines.fiq && daif & DAIF_F == 0 && routed(HCR_FMO) {
-            Vector::Fiq
-        } else if lines.irq && daif & DAIF_I == 0 && routed(HCR_IMO) {
-            Vector::Irq
-        } else {
+        let virtual_pending = self.cpu.pstate.el != 2
+            && self.cpu.read(SystemRegister::HCR_EL2) & (1 << HCR_VI | 1 << HCR_VF | 1 << HCR_VSE)
+                != 0;
+        if !lines.irq && !lines.fiq && !virtual_pending {
+            return false;
+        }
+        let mut exception = None;
+        for (vector, pending, mask) in [
+            (Vector::Fiq, lines.fiq, DAIF_F),
+            (Vector::Irq, lines.irq, DAIF_I),
+        ] {
+            let target = self.cpu.interrupt_target(vector);
+            if pending && self.taken(target, mask) {
+                exception = Some((vector, target, 0));
+                break;
+            }
+        }
+        let guest = self.cpu.pstate.el != 2 && !self.cpu.in_host();
+        if exception.is_none() && guest {
+            for (vector, routing, virtual_bit, mask) in [
+                (Vector::Fiq, HCR_FMO, HCR_VF, DAIF_F),
+                (Vector::Irq, HCR_IMO, HCR_VI, DAIF_I),
+                (Vector::SError, HCR_AMO, HCR_VSE, DAIF_A),
+            ] {
+                if self.cpu.hcr(routing)
+                    && self.cpu.hcr(virtual_bit)
+                    && self.cpu.pstate.daif & mask == 0
+                {
+                    let syndrome = if vector == Vector::SError {
+                        // ESR_EL1 takes VSESR_EL2.{IDS,ISS} with EC 0x2F.
+                        (0x2f << 26) | (self.cpu.read(SystemRegister::VSESR_EL2) & 0x01ff_ffff)
+                    } else {
+                        0
+                    };
+                    exception = Some((vector, 1, syndrome));
+                    break;
+                }
+            }
+        }
+        let Some((vector, target, syndrome)) = exception else {
             return false;
         };
+        if vector == Vector::SError {
+            // The virtual SError is taken once: HCR_EL2.VSE clears.
+            let hcr = self.cpu.read(SystemRegister::HCR_EL2) & !(1 << HCR_VSE);
+            self.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
+        }
         self.statistics.interrupts += 1;
         self.take(Exception {
             vector,
-            syndrome: 0,
+            syndrome,
             fault_address: None,
             return_address: self.cpu.pc,
+            target: Some(target),
         });
         true
     }
 
-    fn timer_deadline(&self) -> Option<u64> {
-        let system = &self.cpu.system;
-        match (
-            system.virtual_timer.deadline(),
-            system.physical_timer.deadline(),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+    fn timer_deadline(&mut self) -> Option<u64> {
+        *self
+            .timers
+            .get_or_insert_with(|| timer::deadline(&self.cpu))
     }
 
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
@@ -532,7 +598,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Ok(entry.physical | (pc & (FETCH_PAGE - 1)));
         }
         let requester = self.cpu.requester();
-        let controls = self.cpu.system.translation;
+        let controls = self.cpu.controls(self.cpu.regime());
         let mut tables = RamTables(&mut self.host);
         match mmu::translate(&controls, pc, Access::Execute, requester, &mut tables) {
             Translated::Mapped(translation) => {
@@ -572,7 +638,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 ))))
             }
             Translated::Fault(fault) => {
-                let class = if requester.el == 0 {
+                let class = if self.cpu.route() > self.cpu.pstate.el {
                     Class::InstructionAbortLower
                 } else {
                     Class::InstructionAbortSame
@@ -587,14 +653,52 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    fn floating_point_enabled(&self) -> bool {
-        match (self.cpu.system.cpacr >> 20) & 3 {
-            0b11 => true,
-            0b01 => self.cpu.pstate.el != 0,
-            _ => false,
-        }
+    /// The EL an FP/SIMD access traps to, if it traps (Arm
+    /// `AArch64_CheckFPEnabled`): CPACR_EL1.FPEN at EL0 and EL1 outside the
+    /// host, then CPTR_EL2.FPEN, which has the CPACR layout because
+    /// HCR_EL2.E2H is RES1.
+    fn floating_point_trap(&mut self) -> Option<u8> {
+        *self
+            .floating_point
+            .get_or_insert_with(|| floating_point_trap(&self.cpu))
     }
 
+    fn floating_point_enabled(&mut self) -> bool {
+        self.floating_point_trap().is_none()
+    }
+
+    fn floating_point_exception(&mut self, pc: u64) -> Exception {
+        let exception = Exception::synchronous(Class::FloatingPointAccess, TRAPPED_AARCH64, pc);
+        match self.floating_point_trap() {
+            Some(el) => exception.to(el),
+            None => exception,
+        }
+    }
+}
+
+/// The EL an FP/SIMD access traps to, if it traps (Arm
+/// `AArch64_CheckFPEnabled`): CPACR_EL1.FPEN at EL0 and EL1 outside the
+/// host, then CPTR_EL2.FPEN, which has the CPACR layout because HCR_EL2.E2H
+/// is RES1.
+fn floating_point_trap(cpu: &Cpu) -> Option<u8> {
+    const FPEN: u32 = 20;
+    let el = cpu.pstate.el;
+    let in_host = el == 2 || (el == 0 && cpu.in_host());
+    if el != 2 && !in_host {
+        match cpu.field(SystemRegister::CPACR_EL1, FPEN, 2) {
+            0b11 => {}
+            0b01 if el != 0 => {}
+            _ => return Some(1),
+        }
+    }
+    match cpu.field(SystemRegister::CPTR_EL2, FPEN, 2) {
+        0b11 => None,
+        0b01 if !(el == 0 && cpu.in_host()) => None,
+        _ => Some(2),
+    }
+}
+
+impl<H: Host, D: Devices> Machine<H, D> {
     fn fetch_block(&mut self, pc: u64) -> Result<Fetched, Stop> {
         let physical = match self.fetch_physical(pc) {
             Ok(physical) => physical,
@@ -616,12 +720,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             None => match self.compile(pc, physical, fp)? {
                 Some(index) => index,
                 None => {
-                    // The first instruction is FP/SIMD while CPACR traps it.
-                    return Ok(Fetched::Exception(Exception::synchronous(
-                        Class::FloatingPointAccess,
-                        TRAPPED_AARCH64,
-                        pc,
-                    )));
+                    // The first instruction is FP/SIMD while CPACR or CPTR
+                    // traps it.
+                    return Ok(Fetched::Exception(self.floating_point_exception(pc)));
                 }
             },
         };
@@ -811,7 +912,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// Whether SCTLR_EL1 enables a PAC key (EnIA 31, EnIB 30, EnDA 27, EnDB 13).
+    /// Whether the current regime's SCTLR enables a PAC key (EnIA 31, EnIB 30,
+    /// EnDA 27, EnDB 13).
     fn key_enabled(&self, key: PointerAuthenticationKey) -> bool {
         let bit = match key {
             PointerAuthenticationKey::Ia => 31,
@@ -819,7 +921,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             PointerAuthenticationKey::Da => 27,
             PointerAuthenticationKey::Db => 13,
         };
-        self.cpu.system.translation.sctlr & (1 << bit) != 0
+        self.cpu.controls(self.cpu.regime()).sctlr & (1 << bit) != 0
+    }
+
+    /// The PAC keys as (low, high) words in APIA, APIB, APDA, APDB, APGA order.
+    fn pointer_keys(&self) -> [[u64; 2]; 5] {
+        use SystemRegister as R;
+        let pair = |low, high| [self.cpu.read(low), self.cpu.read(high)];
+        [
+            pair(R::APIAKeyLo_EL1, R::APIAKeyHi_EL1),
+            pair(R::APIBKeyLo_EL1, R::APIBKeyHi_EL1),
+            pair(R::APDAKeyLo_EL1, R::APDAKeyHi_EL1),
+            pair(R::APDBKeyLo_EL1, R::APDBKeyHi_EL1),
+            pair(R::APGAKeyLo_EL1, R::APGAKeyHi_EL1),
+        ]
     }
 
     /// Complete one PAC instruction with the guest's own keys, laid out for
@@ -841,12 +956,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return self.disabled_pointer_authentication(word, instruction);
         }
-        let keys = &self.cpu.system.keys;
+        let keys = self.pointer_keys();
         let context = pauth::Context::new(
             0,
             pauth::Keys::from_words(keys[0], keys[1], keys[2], keys[3]).with_generic_words(keys[4]),
         )
-        .with_translation_regime(self.cpu.system.translation.tcr);
+        .with_translation_regime(self.cpu.controls(self.cpu.regime()).tcr);
         if let PointerAuthenticationOperation::Load(load) = instruction.operation {
             return self.authenticated_load(word, &context, load);
         }
@@ -911,7 +1026,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         load: stela_compiler::block::pauth_memory::Load,
     ) -> Step {
         let pc = self.cpu.pc;
-        let controls = self.cpu.system.translation;
+        let controls = self.cpu.controls(self.cpu.regime());
         let requester = self.cpu.requester();
         let sctlr = controls.sctlr;
         let memory_controls = pauth::memory::Controls {
@@ -1007,7 +1122,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.pc = pc;
         match fault.cause {
             FaultCause::Guest(guest) => {
-                let class = if self.cpu.pstate.el == 0 {
+                let class = if self.cpu.route() > self.cpu.pstate.el {
                     Class::DataAbortLower
                 } else {
                     Class::DataAbortSame
@@ -1036,7 +1151,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Err(Stop::Unsupported(requirement))
             }
             FaultCause::InvalidOpcode => {
-                let sctlr = self.cpu.system.translation.sctlr;
+                let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
                 let checked = if self.cpu.pstate.el == 0 {
                     sctlr & (1 << 4) != 0
                 } else {
@@ -1197,7 +1312,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn alignment_fault(&mut self, address: u64, write: bool) -> Step {
-        let class = if self.cpu.pstate.el == 0 {
+        let class = if self.cpu.route() > self.cpu.pstate.el {
             Class::DataAbortLower
         } else {
             Class::DataAbortSame
@@ -1261,7 +1376,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Synchronization::InstructionSynchronization { .. } => self.next(),
             },
             SystemOperation::SendEvent { .. } => {
-                self.cpu.system.event = true;
+                self.cpu.event = true;
                 self.next()
             }
             SystemOperation::Wait {
@@ -1299,6 +1414,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn exception_instruction(&mut self, word: u32, operation: ExceptionOperation) -> Step {
         let pc = self.cpu.pc;
         match operation {
+            // To EL1, or to EL2 from EL2 and from EL0 in the host.
             ExceptionOperation::SupervisorCall { immediate } => {
                 self.take(Exception::synchronous(
                     Class::SupervisorCall,
@@ -1333,18 +1449,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 word,
                 "ERETAA/ERETAB need pointer authentication in the system engine",
             )),
-            // HVC at an EL2 kernel, unless HCR_EL2.HCD disables it.
+            // HVC from EL1 and EL2 goes to EL2, unless HCR_EL2.HCD disables it.
             ExceptionOperation::HypervisorCall { immediate }
-                if self.cpu.pstate.el == 2 && self.cpu.system.hcr & HCR_HCD == 0 =>
+                if self.cpu.pstate.el != 0 && !self.cpu.hcr(HCR_HCD) =>
             {
-                self.take(Exception::synchronous(
-                    Class::HypervisorCall,
-                    u32::from(immediate),
-                    pc + INSTRUCTION,
-                ));
+                self.take(
+                    Exception::synchronous(
+                        Class::HypervisorCall,
+                        u32::from(immediate),
+                        pc + INSTRUCTION,
+                    )
+                    .to(2),
+                );
                 Ok(())
             }
-            // No EL3, debug state or halting, and HVC elsewhere: all UNDEFINED.
+            // Without EL3, SMC is UNDEFINED, except that HCR_EL2.TSC traps it
+            // from EL1 to EL2, returning to the SMC itself (Arm
+            // `AArch64_CheckForSMCUndefOrTrap`).
+            ExceptionOperation::SecureMonitorCall { immediate }
+                if self.cpu.pstate.el == 1 && self.cpu.hcr(HCR_TSC) =>
+            {
+                self.take(
+                    Exception::synchronous(Class::MonitorCall, u32::from(immediate), pc).to(2),
+                );
+                Ok(())
+            }
+            // No EL3, debug state or halting, and HVC from EL0 or with HCD:
+            // all UNDEFINED.
             ExceptionOperation::HypervisorCall { .. }
             | ExceptionOperation::SecureMonitorCall { .. }
             | ExceptionOperation::Halt { .. }
@@ -1354,25 +1485,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// MRS and MSR: the generated accessor of an architectural register, or
+    /// Apple's implementation-defined dispatch; any other encoding is
+    /// UNDEFINED.
     fn register_instruction(&mut self, word: u32, access: RegisterAccess) -> Step {
         use registers::encodings::{FPCR, FPSR};
         let encoding = access.encoding();
         if matches!(encoding, FPCR | FPSR) && !self.floating_point_enabled() {
-            self.take(Exception::synchronous(
-                Class::FloatingPointAccess,
-                TRAPPED_AARCH64,
-                self.cpu.pc,
-            ));
+            let exception = self.floating_point_exception(self.cpu.pc);
+            self.take(exception);
             return Ok(());
         }
-        let now = self.host.counter();
-        let lines = self.lines();
-        let environment = Environment {
-            profile: &self.profile,
-            now,
-            lines,
-        };
-        let outcome = self.cpu.access_register(access, &environment);
+        if let Some(step) = self.system_access(word, access) {
+            return step;
+        }
+        let physical = self.host.counter();
+        let outcome = self.cpu.apple_access(access, physical);
+        self.derived_changed();
         self.register_outcome(word, Some(access), outcome)
     }
 
@@ -1400,13 +1529,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
             RegisterOutcome::Undefined => return self.undefined(),
-            RegisterOutcome::Trapped => {
+            RegisterOutcome::Trapped(el) => {
                 let iss = access.map_or(0, registers::trap_iss);
-                self.take(Exception::synchronous(
-                    Class::SystemRegister,
-                    iss,
-                    self.cpu.pc,
-                ));
+                let exception = Exception::synchronous(Class::SystemRegister, iss, self.cpu.pc);
+                self.take(match el {
+                    Some(el) => exception.to(el),
+                    None => exception,
+                });
                 return Ok(());
             }
             RegisterOutcome::Refused(refusal) => {
@@ -1422,22 +1551,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.next()
     }
 
-    fn wait(&mut self, word: u32, kind: WaitKind, timeout: Option<u8>) -> Step {
+    /// WFI and WFE (Arm `AArch64_CheckForWFxTrap`): SCTLR_ELx.nTWI/nTWE trap
+    /// them from EL0 to EL1, or to EL2 in the host, and HCR_EL2.TWI/TWE trap
+    /// them from EL0 and EL1 outside the host to EL2. Without FEAT_WFxT the
+    /// timeout forms are UNDEFINED.
+    fn wait(&mut self, _word: u32, kind: WaitKind, timeout: Option<u8>) -> Step {
+        const HCR_TWI: u32 = 13;
+        const HCR_TWE: u32 = 14;
         if timeout.is_some() {
-            return Err(self.refuse_system(word, "WFET/WFIT need FEAT_WFxT in the CPU profile"));
+            return self.undefined();
         }
-        let sctlr = self.cpu.system.translation.sctlr;
-        let (enable_bit, trap_iss) = match kind {
-            WaitKind::Interrupt => (1u64 << 16, 0),
-            WaitKind::Event => (1u64 << 18, 1),
+        let el = self.cpu.pstate.el;
+        let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+        let (enable_bit, hcr_trap, trap_iss) = match kind {
+            WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0),
+            WaitKind::Event => (1u64 << 18, HCR_TWE, 1),
         };
-        if self.cpu.pstate.el == 0 && sctlr & enable_bit == 0 {
-            let iss = TRAPPED_AARCH64 | trap_iss;
+        let iss = TRAPPED_AARCH64 | trap_iss;
+        if el == 0 && sctlr & enable_bit == 0 {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc));
             return Ok(());
         }
-        if kind == WaitKind::Event && self.cpu.system.event {
-            self.cpu.system.event = false;
+        if el != 2 && !self.cpu.in_host() && self.cpu.hcr(hcr_trap) {
+            self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc).to(2));
+            return Ok(());
+        }
+        if kind == WaitKind::Event && self.cpu.event {
+            self.cpu.event = false;
             return self.next();
         }
         loop {
@@ -1461,108 +1601,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.next()
     }
 
+    /// SYS and SYSL: the generated accessor of an architectural System
+    /// instruction. IMPLEMENTATION DEFINED encodings (CRn 11 and 15) stop
+    /// with the paused Apple inventory; every other encoding is UNDEFINED.
     fn maintenance(&mut self, word: u32, access: RegisterAccess) -> Step {
-        let encoding = access.encoding();
-        let el = self.cpu.pstate.el;
-        let operand = if access.rt() == 31 {
-            0
-        } else {
-            self.cpu.state.x[usize::from(access.rt())]
-        };
-        if access.direction() == Direction::Read {
-            return Err(self.refuse_system(word, "SYSL has no implemented operation"));
+        if let Some(step) = self.system_access(word, access) {
+            return step;
         }
-        let sctlr = self.cpu.system.translation.sctlr;
-        let uci = sctlr & (1 << 26) != 0;
-        match (
-            encoding.op1(),
-            encoding.crn(),
-            encoding.crm(),
-            encoding.op2(),
-        ) {
-            // TLBI at the kernel level (op1=0, CRn=8 or 9), and the EL2 forms
-            // (op1=4) at an EL2 kernel. Every form discards all shadow
-            // translations, a superset of what it requires. EL3 forms do not
-            // exist.
-            (0, 8 | 9, _, _) | (4, 8 | 9, _, _) => {
-                if el == 0 || encoding.op1() == 4 && el != 2 {
-                    return self.undefined();
-                }
-                self.translations_changed();
-                self.next()
-            }
-            // IC IALLUIS, IC IALLU.
-            (0, 7, 1 | 5, 0) => {
-                if el == 0 {
-                    return self.undefined();
-                }
-                self.discard_code();
-                self.next()
-            }
-            // IC IVAU.
-            (3, 7, 5, 1) => {
-                if el == 0 && !uci {
-                    return self.trap_system(access);
-                }
-                self.discard_code();
-                self.next()
-            }
-            // DC ZVA.
-            (3, 7, 4, 1) => {
-                if !self.cpu.zva_permitted() {
-                    return self.trap_system(access);
-                }
-                self.zero_block(word, operand)
-            }
-            // DC CVAC, CVAU, CIVAC, CVAP, CVADP: clean by VA; IVAC: invalidate.
-            (3, 7, 10..=14, 1) | (0, 7, 6, 1) => {
-                if el == 0 && !uci {
-                    return self.trap_system(access);
-                }
-                if el == 0 && encoding.op1() == 0 {
-                    return self.undefined();
-                }
-                let write = encoding.op1() == 0;
-                self.cache_maintenance(operand, write)
-            }
-            // DC ISW, CSW, CISW: set/way at EL1 only.
-            (0, 7, 6 | 10 | 14, 2) => {
-                if el == 0 {
-                    return self.undefined();
-                }
-                self.next()
-            }
-            // AT S1E1R/W, S1E0R/W, S1E1RP/WP.
-            (0, 7, 8 | 9, 0..=3) => {
-                if el == 0 {
-                    return self.undefined();
-                }
-                self.address_translation(encoding, operand)
-            }
-            // AT S1E2R/W at an EL2 kernel: the EL2&0 regime, like S1E1R/W
-            // there under E2H.
-            (4, 7, 8, 0 | 1) => {
-                if el != 2 {
-                    return self.undefined();
-                }
-                let privileged = Encoding::new(1, 0, 7, 8, encoding.op2());
-                self.address_translation(privileged, operand)
-            }
-            _ => Err(self.refuse_system(word, "SYS operation without a model")),
+        if matches!(access.encoding().crn(), 11 | 15) {
+            return Err(self.refuse_system(
+                word,
+                "IMPLEMENTATION DEFINED System instruction (Apple inventory paused)",
+            ));
         }
+        self.undefined()
     }
 
-    fn trap_system(&mut self, access: RegisterAccess) -> Step {
-        self.take(Exception::synchronous(
-            Class::SystemRegister,
-            registers::trap_iss(access),
-            self.cpu.pc,
-        ));
-        Ok(())
-    }
-
+    /// Translate a data address for the current EL and regime.
     fn translate_data(&mut self, address: u64, access: Access) -> Translated {
-        let controls = self.cpu.system.translation;
+        let controls = self.cpu.controls(self.cpu.regime());
         let requester = self.cpu.requester();
         mmu::translate(
             &controls,
@@ -1573,8 +1630,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         )
     }
 
-    fn data_abort(&mut self, address: u64, fault: mmu::Fault, write: bool, cache: bool) -> Step {
-        let class = if self.cpu.pstate.el == 0 {
+    /// The data abort a stage-1 fault raises at the current EL.
+    fn data_abort_exception(
+        &self,
+        address: u64,
+        fault: mmu::Fault,
+        write: bool,
+        cache: bool,
+    ) -> Exception {
+        let class = if self.cpu.route() > self.cpu.pstate.el {
             Class::DataAbortLower
         } else {
             Class::DataAbortSame
@@ -1582,90 +1646,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let iss = data_abort_iss(fault.status_code(), write) | if cache { 1 << 8 } else { 0 };
         let mut exception = Exception::synchronous(class, iss, self.cpu.pc);
         exception.fault_address = Some(address);
+        exception
+    }
+
+    fn data_abort(&mut self, address: u64, fault: mmu::Fault, write: bool, cache: bool) -> Step {
+        let exception = self.data_abort_exception(address, fault, write, cache);
         self.take(exception);
         Ok(())
-    }
-
-    fn cache_maintenance(&mut self, address: u64, write: bool) -> Step {
-        let access = if write { Access::Write } else { Access::Read };
-        match self.translate_data(address, access) {
-            Translated::Mapped(_) => self.next(),
-            Translated::Fault(fault) => self.data_abort(address, fault, write, true),
-            Translated::Unsupported(unsupported) => {
-                Err(self.unsupported(RequirementKind::Translation(unsupported)))
-            }
-        }
-    }
-
-    fn zero_block(&mut self, word: u32, address: u64) -> Step {
-        use registers::encodings::DCZID_EL0;
-        let Some(dczid) = self
-            .profile
-            .fixed
-            .iter()
-            .find(|(e, _)| *e == DCZID_EL0)
-            .map(|e| e.1)
-        else {
-            return Err(self.refuse_system(word, "DC ZVA without a profile DCZID_EL0"));
-        };
-        if dczid & 0x10 != 0 {
-            return self.undefined();
-        }
-        let bytes = 4u64 << (dczid & 0xf);
-        let start = address & !(bytes - 1);
-        match self.translate_data(start, Access::Write) {
-            Translated::Mapped(translation) => {
-                let zero = vec![0u8; bytes as usize];
-                if !self.host.write_ram(translation.physical, &zero) {
-                    let physical = translation.physical;
-                    return Err(self.unsupported(RequirementKind::Device {
-                        physical,
-                        write: true,
-                        detail: "DC ZVA outside RAM".into(),
-                    }));
-                }
-                self.next()
-            }
-            Translated::Fault(fault) => self.data_abort(address, fault, true, false),
-            Translated::Unsupported(unsupported) => {
-                Err(self.unsupported(RequirementKind::Translation(unsupported)))
-            }
-        }
-    }
-
-    fn address_translation(&mut self, encoding: Encoding, address: u64) -> Step {
-        let op2 = encoding.op2();
-        let write = op2 & 1 != 0;
-        let mut requester = self.cpu.requester();
-        if encoding.crm() == 8 && op2 >= 2 {
-            requester.unprivileged = true;
-        }
-        if encoding.crm() == 8 && op2 < 2 {
-            requester.pan = false;
-        }
-        let controls = self.cpu.system.translation;
-        let access = if write { Access::Write } else { Access::Read };
-        let outcome = mmu::translate(
-            &controls,
-            address,
-            access,
-            requester,
-            &mut RamTables(&mut self.host),
-        );
-        self.cpu.system.par = match outcome {
-            Translated::Mapped(translation) => {
-                let attribute = match translation.memory {
-                    mmu::MemoryType::Device => 0x00,
-                    mmu::MemoryType::Normal => 0xff,
-                };
-                (attribute << 56) | (translation.physical & 0x0000_ffff_ffff_f000) | (0b11 << 7)
-            }
-            Translated::Fault(fault) => 1 | (u64::from(fault.status_code()) << 1),
-            Translated::Unsupported(unsupported) => {
-                return Err(self.unsupported(RequirementKind::Translation(unsupported)));
-            }
-        };
-        self.next()
     }
 }
 
@@ -1700,7 +1687,7 @@ mod tests {
     pub(super) struct FakeHost {
         ram: Vec<u8>,
         base: u64,
-        now: u64,
+        pub(super) now: u64,
         regimes: Vec<Regime>,
         invalidations: usize,
         installed: Vec<Vec<u8>>,
@@ -1776,7 +1763,7 @@ mod tests {
             fixed: vec![(registers::encodings::DCZID_EL0, 4)],
         };
         Machine::new(
-            Cpu::new(BASE, Pstate::RESET_EL1),
+            Cpu::new(BASE, Pstate::reset(1)),
             host,
             NoDevices,
             profile,
@@ -1827,24 +1814,27 @@ mod tests {
     #[test]
     fn svc_eret_and_system_registers_follow_the_architecture() {
         let mut machine = machine(&[]);
-        machine.cpu.system.vbar = 0xffff_0000_0000_0000;
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, 0xffff_0000_0000_0000);
         // msr vbar_el1, x1 then svc #0x42, both at EL1h.
         machine.cpu.state.x[1] = 0x1_0000;
         machine.system_instruction(0xd518_c001).unwrap();
-        assert_eq!(machine.cpu.system.vbar, 0x1_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::VBAR_EL1), 0x1_0000);
         machine.system_instruction(0xd400_0841).unwrap();
         assert_eq!(machine.cpu.pc, 0x1_0200);
-        assert_eq!(machine.cpu.system.elr, BASE + 8);
-        assert_eq!(machine.cpu.system.esr, 0x5600_0042);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE + 8);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x5600_0042);
         // ERET to EL0t at ELR.
-        machine.cpu.system.spsr = 0;
+        machine.cpu.registers.set(SystemRegister::SPSR_EL1, 0, 0);
         machine.system_instruction(0xd69f_03e0).unwrap();
         assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 8, 0));
         assert_eq!(machine.host.regimes.last().unwrap().requester.el, 0);
         // EL0 cannot read TPIDR_EL1: UNDEFINED to the lower-EL group.
         machine.system_instruction(0xd538_d080).unwrap();
         assert_eq!(machine.cpu.pc, 0x1_0400);
-        assert_eq!(machine.cpu.system.esr, 0x0200_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
         // An Apple IMPDEF register is an explicit refusal.
         let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd53f_f200) else {
             panic!("refusal")
@@ -1869,10 +1859,14 @@ mod tests {
         machine.cpu.pstate.daif = 0;
         let pc = machine.cpu.pc;
         assert!(machine.deliver_interrupts());
-        assert_eq!(machine.cpu.system.elr, pc);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
         assert_eq!(machine.cpu.pc, 0x300);
         // With no timer armed, WFI is a terminal idle state.
-        machine.cpu.system.virtual_timer.write_control(0);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
+        machine.derived_changed();
         assert_eq!(machine.system_instruction(0xd503_207f), Err(Stop::Idle));
     }
 
@@ -1885,8 +1879,11 @@ mod tests {
         assert!(machine.host.ram[0x100..0x140].iter().all(|&b| b == 0));
         assert!(machine.host.ram[0x140..0x180].iter().all(|&b| b == 0xaa));
         machine.system_instruction(0xd508_7802).unwrap(); // at s1e1r, x2
-        assert_eq!(machine.cpu.system.par & 0x0000_ffff_ffff_f000, BASE);
-        assert_eq!(machine.cpu.system.par & 1, 0);
+        assert_eq!(
+            machine.cpu.read(SystemRegister::PAR_EL1) & 0x0000_ffff_ffff_f000,
+            BASE
+        );
+        assert_eq!(machine.cpu.read(SystemRegister::PAR_EL1) & 1, 0);
     }
 
     #[test]
@@ -1894,8 +1891,12 @@ mod tests {
         for word in [0xc04c_73e5, 0xc04e_03e0] {
             let mut machine = machine(&[]);
             machine.system_instruction(word).unwrap();
-            assert_eq!(machine.cpu.system.esr, 0x0200_0000, "{word:#x}");
-            assert_eq!(machine.cpu.system.elr, BASE);
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL1),
+                0x0200_0000,
+                "{word:#x}"
+            );
+            assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
         }
     }
 
@@ -1909,7 +1910,7 @@ mod tests {
         cpu.state.sp = 0x7000;
         // GENTER is UNDEFINED until SPRR and GXF are enabled.
         machine.system_instruction(0x0020_1420).unwrap();
-        assert_eq!(machine.cpu.system.esr, 0x0200_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
         machine.cpu.pc = BASE;
         for word in [
             0xd51e_f100, // msr SPRR_CONFIG_EL1, x0
@@ -1927,45 +1928,46 @@ mod tests {
         machine.system_instruction(0x0020_1420).unwrap();
         assert!(machine.cpu.pstate.guarded);
         assert_eq!(machine.cpu.pc, 0x9000);
-        assert_eq!(machine.cpu.system.guarded.elr, genter_pc + 4);
-        assert_eq!(machine.cpu.system.guarded.aspsr, 0);
+        assert_eq!(machine.cpu.apple.guarded[0].elr, genter_pc + 4);
+        assert_eq!(machine.cpu.apple.guarded[0].aspsr, 0);
         assert!(machine.host.regimes.last().unwrap().requester.guarded);
         // A fresh GL1 stack; EL1's is banked.
-        assert_eq!(
-            (machine.cpu.state.sp, machine.cpu.system.sp_el1),
-            (0, 0x7000)
-        );
+        assert_eq!((machine.cpu.state.sp, machine.cpu.sp(1)), (0, 0x7000));
         machine.cpu.state.sp = 0x8000;
         machine.system_instruction(0xd51e_fa42).unwrap(); // msr VBAR_GL1, x2
         machine.system_instruction(0xd53e_f803).unwrap(); // mrs x3, GXF_STATUS_EL1
         assert_eq!(machine.cpu.state.x[3], 1);
         // An SVC at GL1 is taken at VBAR_GL1 and records a GL return.
         let svc_pc = machine.cpu.pc;
-        let el1_elr = machine.cpu.system.elr;
+        let el1_elr = machine.cpu.read(SystemRegister::ELR_EL1);
         machine.system_instruction(0xd400_0001).unwrap();
         assert_eq!(machine.cpu.pc, 0xa200);
-        assert_eq!(machine.cpu.system.guarded.elr, svc_pc + 4);
-        assert_eq!(machine.cpu.system.guarded.esr, 0x5600_0000);
-        assert_eq!(machine.cpu.system.guarded.aspsr, 1);
-        assert_eq!(machine.cpu.system.elr, el1_elr, "EL1's ELR is untouched");
+        assert_eq!(machine.cpu.apple.guarded[0].elr, svc_pc + 4);
+        assert_eq!(machine.cpu.apple.guarded[0].esr, 0x5600_0000);
+        assert_eq!(machine.cpu.apple.guarded[0].aspsr, 1);
+        assert_eq!(
+            machine.cpu.read(SystemRegister::ELR_EL1),
+            el1_elr,
+            "EL1's ELR is untouched"
+        );
         // GEXIT returns to GL1, then (with ASPSR clear) to EL1.
         machine.system_instruction(0x0020_1400).unwrap();
         assert!(machine.cpu.pstate.guarded);
         assert_eq!(machine.cpu.pc, svc_pc + 4);
-        machine.cpu.system.guarded.aspsr = 0;
-        machine.cpu.system.guarded.elr = genter_pc + 4;
-        machine.cpu.system.guarded.spsr = 0x3c5;
+        machine.cpu.apple.guarded[0].aspsr = 0;
+        machine.cpu.apple.guarded[0].elr = genter_pc + 4;
+        machine.cpu.apple.guarded[0].spsr = 0x3c5;
         machine.system_instruction(0x0020_1400).unwrap();
         assert!(!machine.cpu.pstate.guarded);
         assert_eq!(
             (machine.cpu.pc, machine.cpu.state.sp),
             (genter_pc + 4, 0x7000)
         );
-        assert_eq!(machine.cpu.system.guarded.sp, 0x8000);
+        assert_eq!(machine.cpu.apple.guarded[0].sp, 0x8000);
         // GEXIT outside GL is UNDEFINED; APSTS reports the master key ready.
         machine.system_instruction(0x0020_1400).unwrap();
-        assert_eq!(machine.cpu.system.esr, 0x0200_0000);
-        machine.cpu.pstate = Pstate::RESET_EL1;
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+        machine.cpu.pstate = Pstate::reset(1);
         machine.system_instruction(0xd53e_fc85).unwrap(); // mrs x5, APSTS_EL1
         assert_eq!(machine.cpu.state.x[5], 1);
     }
@@ -1976,15 +1978,29 @@ mod tests {
         const AUTIBSP: u32 = 0xd503_23ff;
         let mut machine = machine(&[]);
         // 39-bit TTBR1 kernel addresses, no TBI.
-        machine.cpu.system.translation.tcr = 25 << 16 | 25;
-        machine.cpu.system.keys[1] = [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210];
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TCR_EL1, 0, 25 << 16 | 25);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::APIBKeyLo_EL1, 0, 0x0123_4567_89ab_cdef);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::APIBKeyHi_EL1, 0, 0xfedc_ba98_7654_3210);
         let pointer = 0xffff_ff80_0000_4000_u64;
         machine.cpu.state.x[30] = pointer;
         machine.cpu.state.sp = 0xffff_ff80_0001_0000;
         // EnIB clear: PACIBSP leaves LR unchanged.
         machine.system_instruction_for_test(PACIBSP);
         assert_eq!(machine.cpu.state.x[30], pointer);
-        machine.cpu.system.translation.sctlr |= 1 << 30;
+        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) | 1 << 30;
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr);
         machine.system_instruction_for_test(PACIBSP);
         let signed = machine.cpu.state.x[30];
         assert_ne!(signed, pointer);

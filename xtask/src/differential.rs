@@ -222,6 +222,9 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     // QEMU treats XPACLRI as a NOP while SCTLR_EL1 enables no PAC key, as the
     // harness's does; the architecture strips X30 regardless.
     let strip = word == XPACLRI;
+    // CNTFRQ_EL0 is writable only at the highest EL: EL2 on the engine's
+    // profile, EL1 on QEMU's virt machine without EL2.
+    let frequency = el1 && word & !0x1f == MSR_CNTFRQ_EL0;
     // Cache maintenance and address translation by VA (SYS with CRn=7) at an
     // address outside the windows: the engine runs with its MMU off and QEMU
     // through the harness's tables, so their faults differ, and QEMU makes
@@ -231,8 +234,19 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
         && (word >> 12) & 15 == 7
         && register != ZERO_OR_SP as usize
         && !in_windows(state.x[register]);
-    wfi || absent || sme || pstate || flags || speculation || psci || strip || by_address
+    wfi || absent
+        || sme
+        || pstate
+        || flags
+        || speculation
+        || psci
+        || strip
+        || frequency
+        || by_address
 }
+
+/// MSR CNTFRQ_EL0, Xt (op0=3, op1=3, CRn=14, CRm=0, op2=0) without Rt.
+const MSR_CNTFRQ_EL0: u32 = 0xd51b_e000;
 
 fn in_windows(address: u64) -> bool {
     (CODE_REGION..CODE_REGION + CODE_REGION_BYTES as u64).contains(&address)

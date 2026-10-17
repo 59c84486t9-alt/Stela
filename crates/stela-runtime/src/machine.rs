@@ -1,6 +1,7 @@
-//! System-mode execution: one ARM PE at EL1/EL0 running native blocks from
-//! the shared compiler, with the MMU, exceptions, generic timers and system
-//! registers implemented here and the x86 mechanisms supplied by a [`Host`].
+//! System-mode execution: one ARM PE with EL0, EL1 and EL2 running native
+//! blocks from the shared compiler, with the MMU, exceptions, generic timers
+//! and System registers implemented here and the x86 mechanisms supplied by a
+//! [`Host`].
 //! The design is in `docs/design/system.md#system-mode-execution`.
 pub mod amx;
 pub mod apple;

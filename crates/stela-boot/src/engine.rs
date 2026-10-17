@@ -21,9 +21,9 @@ use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
     Cpu, CpuProfile, Event, Machine, Stop,
     apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
-    cpu::HCR_E2H,
     exception::Pstate,
     registers::encodings::{DCZID_EL0, MIDR_EL1, MPIDR_EL1},
+    system::Register,
 };
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
@@ -470,11 +470,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         (options.entry, options.x0, test_profile())
     };
     // The real kernelcache starts SPTM at EL2: it writes TPIDR_EL2 and keeps
-    // its per-CPU pointer in TPIDR_GL2. HCR_EL2.E2H is set at hand-off: SPTM
-    // installs its vectors through VBAR_EL1 before it ORs TGE and E2H into
-    // HCR_EL2, which reaches VBAR_EL2 only with E2H already set. The other
-    // HCR_EL2 bits are unknown and taken as 0 (inferred). Stela's test
-    // kernel runs at EL1.
+    // its per-CPU pointer in TPIDR_GL2. HCR_EL2.E2H is RES1 on this profile
+    // (SPTM installs its vectors through VBAR_EL1 before it ORs TGE and E2H
+    // into HCR_EL2, which reaches VBAR_EL2 only with E2H already set); the
+    // other HCR_EL2 bits reset to 0. Stela's test kernel runs at EL1.
     let el = if options.bundle { 2 } else { 1 };
     output::arguments(format_args!(
         "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz}\n",
@@ -483,13 +482,16 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     ));
     let mut cpu = Cpu::new(entry, Pstate::reset(el));
     cpu.state.x[0] = x0;
-    if options.bundle {
-        cpu.system.hcr = HCR_E2H;
-        // The bootloader hands SPTM FP/SIMD enabled: SPTM uses FP/SIMD
-        // before it writes CPTR_EL2 (CPACR_EL1 names it at EL2), and public
-        // XNU `start.s` notes that a monitor sets CPACR up for its client.
-        // Inferred hand-off value.
-        cpu.system.cpacr = 0b11 << 20;
+    // FP/SIMD is not trapped at hand-off (CPTR_EL2.FPEN = 0b11): SPTM uses
+    // FP/SIMD before it writes CPTR_EL2, and public XNU `start.s` notes that
+    // a monitor sets CPACR up for its client. Inferred hand-off value.
+    cpu.registers.set(Register::CPTR_EL2, 0, 0b11 << 20);
+    if el == 1 {
+        // An EL1 entry gets the EL2 state boot firmware leaves for its
+        // client: the physical counter and timer are not trapped
+        // (CNTHCTL_EL2.EL1PCTEN, EL1PTEN with E2H set).
+        cpu.registers
+            .set(Register::CNTHCTL_EL2, 0, 1 << 10 | 1 << 11);
     }
     let tree = options.bundle.then(|| {
         handoff.files[..handoff.file_count]
@@ -527,6 +529,24 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
 
 fn finish(machine: &Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
     let cpu = &machine.cpu;
+    // The exception registers of the EL the run ended at.
+    let bank = if cpu.pstate.el == 2 {
+        [
+            Register::ELR_EL2,
+            Register::SPSR_EL2,
+            Register::ESR_EL2,
+            Register::FAR_EL2,
+            Register::VBAR_EL2,
+        ]
+    } else {
+        [
+            Register::ELR_EL1,
+            Register::SPSR_EL1,
+            Register::ESR_EL1,
+            Register::FAR_EL1,
+            Register::VBAR_EL1,
+        ]
+    };
     let (fills, resets, stray, _) = host::statistics();
     output::arguments(format_args!(
         "STATISTICS {:?} shadow_fills={fills} shadow_resets={resets} stray_interrupts={stray} events={} seconds={seconds:.3}\n",
@@ -540,13 +560,13 @@ fn finish(machine: &Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -
         cpu.state.sp,
         cpu.pstate.daif,
         cpu.state.nzcv,
-        cpu.system.elr,
-        cpu.system.spsr,
-        cpu.system.esr,
-        cpu.system.far,
-        cpu.system.vbar,
+        cpu.read(bank[0]),
+        cpu.read(bank[1]),
+        cpu.read(bank[2]),
+        cpu.read(bank[3]),
+        cpu.read(bank[4]),
     ));
-    for (entry, reads, writes) in cpu.system.impdef.used() {
+    for (entry, reads, writes) in cpu.apple.impdef.used() {
         output::arguments(format_args!(
             "IMPDEF {} {:?} reads={reads} writes={writes}: {}\n",
             entry.name, entry.class, entry.evidence

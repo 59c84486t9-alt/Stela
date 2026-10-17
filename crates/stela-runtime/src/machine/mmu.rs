@@ -1,11 +1,11 @@
-//! VMSAv8-64 stage-1 translation for the EL1&0 regime.
+//! VMSAv8-64 stage-1 translation for the EL1&0 and EL2&0 regimes.
 //!
 //! One software walker serves instruction fetch, shadow-page fills, AT and
 //! fault reporting, so every consumer sees the same translation and the same
 //! fault. Sources: Arm ARM DDI0487 (June 2026) D8.1–D8.4 (VMSAv8-64 translation,
 //! descriptors, permissions, Access flag) and D8.13 (fault prioritization).
 
-/// Translation controls of the EL1&0 regime, as last written by the guest.
+/// Stage-1 translation controls of one regime (`Cpu::controls`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Controls {
     pub sctlr: u64,
@@ -14,6 +14,9 @@ pub struct Controls {
     pub ttbr1: u64,
     pub mair: u64,
     pub sprr: Sprr,
+    /// The EL1&0 regime with HCR_EL2.VM set also translates through stage
+    /// 2, which this walker does not implement yet.
+    pub stage2: bool,
 }
 
 /// Apple SPRR: page permissions indirected through per-index registers
@@ -192,6 +195,8 @@ pub enum Unsupported {
     /// or an EL0 nibble beyond the documented values: their composition
     /// with SPRR is not documented.
     Sprr(&'static str),
+    /// Stage-2 translation (HCR_EL2.VM).
+    Stage2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +303,9 @@ pub fn translate(
     requester: Requester,
     memory: &mut dyn TableMemory,
 ) -> Outcome {
+    if controls.stage2 {
+        return Outcome::Unsupported(Unsupported::Stage2);
+    }
     if controls.sctlr & SCTLR_M == 0 {
         // MMU off: flat, Device for data and Normal for instruction fetch.
         if address >> PHYSICAL_ADDRESS_BITS != 0 {
@@ -664,6 +672,7 @@ mod tests {
             ttbr1: 0x20_0000,
             mair: 0xff00, // index 0 Device-nGnRnE, index 1 Normal WB
             sprr: Sprr::default(),
+            stage2: false,
         }
     }
 

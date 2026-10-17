@@ -17,9 +17,11 @@ use anyhow::{Result, bail};
 use stela_compiler::{GuestState, TargetCpu};
 use stela_runtime::machine::{
     Cpu, Host, InstallError, Machine, NativeCode, NativeExit, NoDevices, Regime, Stop,
+    cpu::HCR_HCD,
     exception::Pstate,
     identification,
     registers::{CpuProfile, encodings::DCZID_EL0},
+    system::Register,
 };
 
 /// The harness's SCTLR_EL1 without M: every EL0 trap control clear.
@@ -133,6 +135,11 @@ impl Host for OracleHost {
     fn wait_for_interrupt(&mut self) {}
 }
 
+const HCR_APK: u32 = 40;
+const HCR_API: u32 = 41;
+const HCR_FIEN: u32 = 47;
+const HCR_ENSCXT: u32 = 53;
+
 /// The engine's M2 profile without EL2, as the oracle machine has none.
 fn profile(target: TargetCpu) -> CpuProfile {
     let mut fixed = identification::derive(target, false);
@@ -156,27 +163,42 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     unsafe { super::native::install_case(&windows, case)? };
     let mut pstate = Pstate::reset(if case.el1 { 1 } else { 0 });
     // EL1 cases run on SP_EL0 (EL1t), as the harness keeps SP_EL1 for itself.
-    pstate.sp_el1 = false;
+    pstate.sp = false;
     let mut cpu = Cpu::new(CODE_PAGE, pstate);
     cpu.state = case.state.clone();
     // The rest of the EL1 state the harness leaves for the case.
     let nzcv = u64::from(case.state.nzcv) & 0xf000_0000;
-    cpu.system.elr = CODE_PAGE;
-    cpu.system.spsr = nzcv
+    let spsr = nzcv
         | if case.el1 {
             SPSR_EL1T_MASKED
         } else {
             SPSR_EL0T_STEPPED
         };
-    cpu.system.tpidr_el1 = case.steps as u64;
-    cpu.system.mdscr = MDSCR_SS;
-    cpu.system.translation.sctlr = SCTLR_VALUE;
-    cpu.system.translation.tcr = TCR_VALUE;
-    cpu.system.translation.mair = MAIR_VALUE;
-    cpu.system.cpacr = CPACR_FP;
-    cpu.system.vbar = VECTOR_BASE;
+    for (register, value) in [
+        (Register::ELR_EL1, CODE_PAGE),
+        (Register::SPSR_EL1, spsr),
+        (Register::TPIDR_EL1, case.steps as u64),
+        (Register::MDSCR_EL1, MDSCR_SS),
+        (Register::SCTLR_EL1, SCTLR_VALUE),
+        (Register::TCR_EL1, TCR_VALUE),
+        (Register::MAIR_EL1, MAIR_VALUE),
+        (Register::CPACR_EL1, CPACR_FP),
+        (Register::VBAR_EL1, VECTOR_BASE),
+        // The oracle machine has no EL2, so the engine's EL2 stays out of
+        // the way: HVC is UNDEFINED; PAC keys, SCXTNUM and the RAS error
+        // record controls are not trapped (HCR_EL2.APK, API, EnSCXT, FIEN);
+        // and FP/SIMD and the EL1 counter and timer are not trapped to EL2.
+        (
+            Register::HCR_EL2,
+            1 << HCR_HCD | 1 << HCR_APK | 1 << HCR_API | 1 << HCR_ENSCXT | 1 << HCR_FIEN,
+        ),
+        (Register::CPTR_EL2, 0b11 << 20),
+        (Register::CNTHCTL_EL2, 1 << 10 | 1 << 11),
+    ] {
+        cpu.registers.set(register, 0, value);
+    }
     // The harness enters each case by ERET, which sets the event register.
-    cpu.system.event = true;
+    cpu.event = true;
     let host = OracleHost {
         code: windows.code_pointer(),
         data: windows.data_pointer(),
@@ -205,19 +227,19 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     let end = CODE_PAGE + 4 * case.code.len() as u64;
     let fell_through = !case.el1
         && machine.statistics.exceptions != 0
-        && cpu.system.esr == UDF_SYNDROME
-        && cpu.system.elr == end;
+        && cpu.read(Register::ESR_EL1) == UDF_SYNDROME
+        && cpu.read(Register::ELR_EL1) == end;
     let (next_pc, exception) = if fell_through {
-        state.sp = cpu.system.sp_el0;
+        state.sp = cpu.sp(0);
         (end, None)
     } else if machine.statistics.exceptions != 0 {
-        state.sp = cpu.system.sp_el0;
+        state.sp = cpu.sp(0);
         let exception = Exception {
-            syndrome: cpu.system.esr,
-            address: cpu.system.elr,
-            fault_address: cpu.system.far,
+            syndrome: cpu.read(Register::ESR_EL1),
+            address: cpu.read(Register::ELR_EL1),
+            fault_address: cpu.read(Register::FAR_EL1),
         };
-        (cpu.system.elr, Some(exception))
+        (cpu.read(Register::ELR_EL1), Some(exception))
     } else {
         (cpu.pc, None)
     };
@@ -229,6 +251,6 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         data,
         scalable: None,
         exception,
-        spsr: case.el1.then_some(cpu.system.spsr),
+        spsr: case.el1.then_some(cpu.read(Register::SPSR_EL1)),
     })
 }
