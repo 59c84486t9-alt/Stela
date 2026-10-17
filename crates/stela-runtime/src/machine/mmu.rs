@@ -162,6 +162,36 @@ pub enum Outcome {
     Unsupported(Unsupported),
 }
 
+const PAR_FAULT: u64 = 1 << 0;
+const PAR_FST_SHIFT: u64 = 1;
+const PAR_SH_SHIFT: u64 = 7;
+/// PAR_EL1.NS is UNKNOWN for a Non-secure regime; this implementation
+/// reports 1, the Non-secure PA space every output is in (as QEMU does).
+const PAR_NS: u64 = 1 << 9;
+/// PAR_EL1 bit 11 is RES1 in the 64-bit format, for both results.
+const PAR_RES1: u64 = 1 << 11;
+const PAR_ATTR_SHIFT: u64 = 56;
+const PAR_ADDRESS: u64 = 0x0000_ffff_ffff_f000;
+
+/// PAR_EL1 after an AT whose stage-1 translation gave `outcome`, or `None`
+/// for a translation this implementation refuses. A fault reports FST with
+/// S=0 and PTW=0 (stage 1); IMPLEMENTATION DEFINED bits read 0.
+pub fn par(outcome: &Outcome) -> Option<u64> {
+    match outcome {
+        Outcome::Mapped(translation) => Some(
+            u64::from(translation.attributes) << PAR_ATTR_SHIFT
+                | translation.physical & PAR_ADDRESS
+                | PAR_RES1
+                | PAR_NS
+                | u64::from(translation.shareability) << PAR_SH_SHIFT,
+        ),
+        Outcome::Fault(fault) => {
+            Some(PAR_RES1 | u64::from(fault.status_code()) << PAR_FST_SHIFT | PAR_FAULT)
+        }
+        Outcome::Unsupported(_) => None,
+    }
+}
+
 /// Whether `access` is permitted by (readable, writable, executable).
 fn permits(rights: (bool, bool, bool), access: Access) -> bool {
     match access {
@@ -188,4 +218,48 @@ pub fn translate(
         return Outcome::Unsupported(Unsupported::Stage2);
     }
     stage1::translate(controls, address, access, requester, memory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn par_reports_the_output_attributes_or_the_fault() {
+        let translation = Translation {
+            physical: 0x8_1234_5678,
+            memory: MemoryType::Normal,
+            attributes: 0xff,
+            shareability: 0b11,
+            readable: true,
+            writable: true,
+            executable: false,
+            global: true,
+            asid: 0,
+            size: 1 << 14,
+        };
+        assert_eq!(
+            par(&Outcome::Mapped(translation)),
+            Some(0xff00_0008_1234_5000 | 1 << 11 | 1 << 9 | 0b11 << 7)
+        );
+        let device = Translation {
+            attributes: 0x04,
+            shareability: 0b10,
+            memory: MemoryType::Device,
+            ..translation
+        };
+        assert_eq!(
+            par(&Outcome::Mapped(device)),
+            Some(0x0400_0008_1234_5000 | 1 << 11 | 1 << 9 | 0b10 << 7)
+        );
+        let fault = Fault {
+            kind: FaultKind::Permission,
+            level: 3,
+        };
+        assert_eq!(
+            par(&Outcome::Fault(fault)),
+            Some(1 << 11 | 0b00_1111 << 1 | 1)
+        );
+        assert_eq!(par(&Outcome::Unsupported(Unsupported::Stage2)), None);
+    }
 }

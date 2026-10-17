@@ -61,7 +61,11 @@ const OUTPUT_ADDRESS: u64 = 0x0000_ffff_ffff_f000;
 /// The walk of the half of the regime an address selects.
 struct Range {
     ttbr: u64,
-    geometry: Geometry,
+    /// 64 - TnSZ.
+    input_bits: u32,
+    /// The granule, resolved only when a walk needs it: a range that EPD or
+    /// E0PD disables faults whatever TGn holds.
+    granule: Result<u32, Unsupported>,
     /// EPDn: a TLB miss in this half faults without a walk.
     disabled: bool,
     /// FEAT_E0PD: EL0 accesses to this half fault without a walk.
@@ -87,21 +91,21 @@ fn two_ranges(regime: Regime) -> bool {
     regime != Regime::El2
 }
 
-fn range(controls: &Controls, upper: bool, access: Access) -> Result<Range, Unsupported> {
+fn range(controls: &Controls, upper: bool, access: Access) -> Range {
     let tcr = controls.tcr;
     let execute = access == Access::Execute;
     if !two_ranges(controls.regime) {
         let tnsz = geometry::forced_tnsz((tcr & TNSZ_MASK) as u32);
-        let granule = granule(tcr >> TCR_TG0_SHIFT, false)?;
-        return Ok(Range {
+        return Range {
             ttbr: controls.ttbr0,
-            geometry: Geometry::stage1(granule, 64 - tnsz),
+            input_bits: 64 - tnsz,
+            granule: granule(tcr >> TCR_TG0_SHIFT, false),
             disabled: false,
             no_el0: false,
             hierarchical: tcr & TCR_EL2_HPD == 0,
             output_bits: geometry::output_bits(tcr >> TCR_EL2_PS_SHIFT),
             top_byte_ignored: tcr & TCR_EL2_TBI != 0 && !(execute && tcr & TCR_EL2_TBID != 0),
-        });
+        };
     }
     let (tnsz_shift, tg_shift, ttbr, epd, e0pd, hpd, tbi, tbid) = if upper {
         (
@@ -127,16 +131,16 @@ fn range(controls: &Controls, upper: bool, access: Access) -> Result<Range, Unsu
         )
     };
     let tnsz = geometry::forced_tnsz(((tcr >> tnsz_shift) & TNSZ_MASK) as u32);
-    let granule = granule(tcr >> tg_shift, upper)?;
-    Ok(Range {
+    Range {
         ttbr,
-        geometry: Geometry::stage1(granule, 64 - tnsz),
+        input_bits: 64 - tnsz,
+        granule: granule(tcr >> tg_shift, upper),
         disabled: tcr & epd != 0,
         no_el0: tcr & e0pd != 0,
         hierarchical: tcr & hpd == 0,
         output_bits: geometry::output_bits(tcr >> TCR_IPS_SHIFT),
         top_byte_ignored: tcr & tbi != 0 && !(execute && tcr & tbid != 0),
-    })
+    }
 }
 
 /// The ASID that tags non-global entries; the EL2 regime has none.
@@ -166,7 +170,7 @@ fn fault(kind: FaultKind, level: i8) -> Outcome {
 /// AArch64.S1DisabledOutput).
 fn disabled(controls: &Controls, address: u64, access: Access) -> Outcome {
     let upper = two_ranges(controls.regime) && address & (1 << 55) != 0;
-    let ignored = range(controls, upper, access).is_ok_and(|range| range.top_byte_ignored);
+    let ignored = range(controls, upper, access).top_byte_ignored;
     let checked = if ignored {
         address & ((1 << 56) - 1)
     } else {
@@ -210,14 +214,10 @@ pub fn translate(
         return disabled(controls, address, access);
     }
     let upper = two_ranges(controls.regime) && address & (1 << 55) != 0;
-    let range = match range(controls, upper, access) {
-        Ok(range) => range,
-        Err(unsupported) => return Outcome::Unsupported(unsupported),
-    };
+    let range = range(controls, upper, access);
     // Every bit above the region must equal bit 55 (zero in the EL2 regime);
     // with TBI the top byte is excluded from that check.
-    let geometry = range.geometry;
-    let input_bits = geometry.input_bits;
+    let input_bits = range.input_bits;
     let checked_top = if range.top_byte_ignored { 56 } else { 64 };
     let extension = (address >> input_bits) & ((1u64 << (checked_top - input_bits)) - 1);
     let expected = if upper {
@@ -229,6 +229,10 @@ pub fn translate(
     if extension != expected || range.disabled || range.no_el0 && as_el0 {
         return fault(FaultKind::Translation, 0);
     }
+    let geometry = match range.granule {
+        Ok(granule) => Geometry::stage1(granule, input_bits),
+        Err(unsupported) => return Outcome::Unsupported(unsupported),
+    };
     let alignment = geometry.start_table_bytes().max(MIN_TABLE_ALIGNMENT);
     let mut table = range.ttbr & TTBR_BADDR & !(alignment - 1);
     if table >> range.output_bits != 0 {
@@ -843,6 +847,18 @@ mod tests {
         assert_eq!(
             translate(&controls, va, Access::Read, KERNEL, &mut tables),
             Outcome::Unsupported(Unsupported::Granule { bits: 0 })
+        );
+        // A range disabled by EPD faults whatever its granule field holds.
+        controls.tcr = (controls.tcr & !(3 << 30)) | TCR_EPD1;
+        assert_eq!(
+            faults(translate(
+                &controls,
+                0xffff_ffff_0000_0000,
+                Access::Read,
+                KERNEL,
+                &mut tables
+            )),
+            Some((FaultKind::Translation, 0))
         );
     }
 

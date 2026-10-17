@@ -514,18 +514,9 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         } else {
             MemoryAccess::Read
         };
-        let par = match self.translate(regime, requester, address, memory) {
-            Translated::Mapped(translation) => {
-                let attribute = match translation.memory {
-                    mmu::MemoryType::Device => 0x00,
-                    mmu::MemoryType::Normal => 0xff,
-                };
-                (attribute << 56) | (translation.physical & 0x0000_ffff_ffff_f000) | (0b11 << 7)
-            }
-            Translated::Fault(fault) => 1 | (u64::from(fault.status_code()) << 1),
-            Translated::Unsupported(_) => {
-                return Err(Effect::Refused("AT needs an unsupported translation"));
-            }
+        let outcome = self.translate(regime, requester, address, memory);
+        let Some(par) = mmu::par(&outcome) else {
+            return Err(Effect::Refused("AT needs an unsupported translation"));
         };
         self.machine.cpu.registers.set(Register::PAR_EL1, 0, par);
         Ok(())
