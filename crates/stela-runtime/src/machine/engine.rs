@@ -3924,6 +3924,51 @@ mod tests {
     }
 
     #[test]
+    fn cosp_rctx_restricts_nothing_on_the_chips_with_specres2() {
+        // COSP RCTX, X0 (SYS #3, C7, C3, #6).
+        const COSP_RCTX_X0: u32 = 0xd50b_73c0;
+        const SCTLR_ENRCTX: u64 = 1 << 10;
+        for (chip, specres2) in [
+            (crate::machine::Chip::AppleM4, false),
+            (crate::machine::Chip::AppleM5, true),
+        ] {
+            let fresh = |el| {
+                let mut machine = machine(&[]);
+                machine.profile.chip = chip;
+                machine.cpu = Cpu::of(chip, BASE, Pstate::reset(el));
+                machine
+                    .cpu
+                    .registers
+                    .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+                machine
+            };
+            // At EL1 it completes with no effect, there being no speculation
+            // to restrict, or is UNDEFINED without FEAT_SPECRES2.
+            let mut machine = fresh(1);
+            machine.system_instruction(COSP_RCTX_X0).unwrap();
+            if specres2 {
+                assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 1));
+            } else {
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+                continue;
+            }
+            // At EL0 SCTLR_EL1.EnRCTX clear traps it to EL1 (EC 0x18).
+            let mut machine = fresh(0);
+            machine.system_instruction(COSP_RCTX_X0).unwrap();
+            assert_eq!(machine.cpu.pstate.el, 1);
+            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1) >> 26, 0x18);
+            let mut machine = fresh(0);
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::SCTLR_EL1, 0, SCTLR_ENRCTX);
+            machine.derived_changed();
+            machine.system_instruction(COSP_RCTX_X0).unwrap();
+            assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 0));
+        }
+    }
+
+    #[test]
     fn sysl_has_no_architectural_accessor_and_refuses_the_implementation_defined_space() {
         let mut machine = machine(&[]);
         machine

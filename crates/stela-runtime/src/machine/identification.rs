@@ -446,6 +446,16 @@ pub const TABLE: &[Row] = &[
     ),
     feature(
         ID_AA64ISAR1_EL1,
+        40,
+        2,
+        "FEAT_SPECRES2",
+        engine(
+            false,
+            "withheld with FEAT_SPECRES, which it extends by COSP RCTX",
+        ),
+    ),
+    feature(
+        ID_AA64ISAR1_EL1,
         44,
         1,
         "FEAT_BF16",
