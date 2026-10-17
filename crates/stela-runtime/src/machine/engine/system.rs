@@ -143,6 +143,8 @@ fn lor_region(register: Register) -> bool {
 /// MPAMn_ELx.MPAMEN. Without EL3, MPAM2_EL2's is read/write and MPAM1_EL1's
 /// reads it and ignores writes.
 const MPAMEN: u64 = 1 << 63;
+/// RMR_EL2.RR, the Warm reset request.
+const RMR_RR: u64 = 1 << 1;
 const SCTLR_DZE: u32 = 14;
 const HCR_TDZ: u32 = 28;
 const DCZID_DZP: u64 = 1 << 4;
@@ -339,6 +341,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         match register {
             Register::SCTLR_EL1 | Register::SCTLR_EL2 if value & SCTLR_A != 0 => {
                 return Err(Effect::Refused("SCTLR alignment checking"));
+            }
+            // RMR_EL2.RR requests a Warm reset into the reset vector, which
+            // has no profile value (see RVBAR_EL2).
+            Register::RMR_EL2 if value & RMR_RR != 0 => {
+                return Err(Effect::Refused("RMR_EL2.RR Warm reset request"));
             }
             // OSLAR_EL1.OSLK locks and unlocks the OS lock (OSLSR_EL1.OSLK).
             Register::OSLAR_EL1 => {
@@ -1127,6 +1134,28 @@ mod tests {
         machine.cpu.registers.set(Register::SCTLR_EL2, 0, sctlr2);
         run(&mut machine, Pstate::reset(2), dczid);
         assert_eq!(machine.cpu.state.x[1], 0x4);
+    }
+
+    #[test]
+    fn rmr_el2_resets_into_aarch64_and_refuses_a_warm_reset_request() {
+        const RMR_EL2: Encoding = Encoding::new(3, 4, 12, 0, 2);
+        let mut machine = machine(&[]);
+        machine.cpu.pstate = Pstate::reset(2);
+        // Without AArch32, AA64 is RAO/WI and bits 63:2 are RES0.
+        machine.cpu.state.x[0] = !0b11;
+        machine
+            .system_instruction(access(false, RMR_EL2, 0))
+            .unwrap();
+        machine
+            .system_instruction(access(true, RMR_EL2, 1))
+            .unwrap();
+        assert_eq!(machine.cpu.state.x[1], 1);
+        machine.cpu.state.x[0] = 0b10;
+        assert!(matches!(
+            machine.system_instruction(access(false, RMR_EL2, 0)),
+            Err(super::Stop::Unsupported(_))
+        ));
+        assert_eq!(machine.cpu.registers.get(Register::RMR_EL2, 0), 1);
     }
 
     #[test]
