@@ -225,6 +225,10 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     // CNTFRQ_EL0 is writable only at the highest EL: EL2 on the engine's
     // profile, EL1 on QEMU's virt machine without EL2.
     let frequency = el1 && word & !0x1f == MSR_CNTFRQ_EL0;
+    // QEMU implements FEAT_AFP, so MSR FPCR keeps FIZ, AH and NEP; the M2
+    // profile has no FEAT_AFP and the engine holds them RES0.
+    let rt = (word & REGISTER_FIELD) as usize;
+    let afp = word & !0x1f == MSR_FPCR && rt != ZERO_OR_SP as usize && state.x[rt] & 7 != 0;
     // Cache maintenance and address translation by VA (SYS with CRn=7) at an
     // address outside the windows: the engine runs with its MMU off and QEMU
     // through the harness's tables, so their faults differ, and QEMU makes
@@ -242,11 +246,14 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
         || psci
         || strip
         || frequency
+        || afp
         || by_address
 }
 
 /// MSR CNTFRQ_EL0, Xt (op0=3, op1=3, CRn=14, CRm=0, op2=0) without Rt.
 const MSR_CNTFRQ_EL0: u32 = 0xd51b_e000;
+/// MSR FPCR, Xt (op0=3, op1=3, CRn=4, CRm=4, op2=0) without Rt.
+const MSR_FPCR: u32 = 0xd51b_4400;
 
 fn in_windows(address: u64) -> bool {
     (CODE_REGION..CODE_REGION + CODE_REGION_BYTES as u64).contains(&address)

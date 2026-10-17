@@ -25,6 +25,13 @@ use crate::machine::{
 use core::cell::Cell;
 use stela_compiler::aarch64::system::registers::{Encoding, RegisterAccess};
 
+/// The FPCR fields of the profile: AHP, DN, FZ, RMode and FZ16 (FEAT_FP16).
+/// The trap enables IOE, DZE, OFE, UFE, IXE and IDE are RAZ/WI because the M2
+/// does not trap FP exceptions (inferred: macOS on Apple silicon cannot
+/// enable FP traps); FEAT_AFP, FEAT_EBF16 and AArch32's Len and Stride are not
+/// in the profile.
+const FPCR_FIELDS: u32 = 0x07c8_0000;
+
 /// Registers whose value is the CPU profile's, read-only to software.
 pub(super) fn identification(register: Register) -> bool {
     let name = register.name();
@@ -262,7 +269,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 return Ok(());
             }
             Register::FPCR => {
-                cpu.state.fpcr = value as u32;
+                cpu.state.fpcr = value as u32 & FPCR_FIELDS;
                 return Ok(());
             }
             Register::FPSR => {

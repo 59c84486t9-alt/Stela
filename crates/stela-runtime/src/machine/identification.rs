@@ -139,7 +139,7 @@ const fn engine(holds: bool, reason: &'static str) -> Basis {
     Basis::Engine(holds, reason)
 }
 
-const NO_GUEST: &str = "EL2 runs only as a VHE host; EL1 never executes";
+const NO_NESTING: &str = "nested virtualization is outside the profile (Apple offers it from M3)";
 const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
 const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
 const NO_GUARANTEE: &str = "translated code gives no such timing or speculation guarantee";
@@ -397,7 +397,10 @@ pub const TABLE: &[Row] = &[
         4,
         4,
         "FEAT_FPAC",
-        engine(false, "AUT failures poison, never fault"),
+        engine(
+            true,
+            "PAuth2 with failed AUT* taking EC 0x1C; combined forms corrupt",
+        ),
     ),
     feature(
         ID_AA64ISAR1_EL1,
@@ -492,7 +495,17 @@ pub const TABLE: &[Row] = &[
     fixed(ID_AA64MMFR0_EL1, 32, 1, "no stage 2"),
     fixed(ID_AA64MMFR0_EL1, 36, 1, "no stage 2"),
     fixed(ID_AA64MMFR0_EL1, 40, 1, "no stage 2"),
-    feature(ID_AA64MMFR0_EL1, 56, 1, "FEAT_FGT", engine(false, NO_GUEST)),
+    feature(
+        ID_AA64MMFR0_EL1,
+        56,
+        1,
+        "FEAT_FGT",
+        engine(
+            true,
+            "the generated accessors apply HFG*TR, HDFG*TR and HAFGRTR; \
+             HFGITR_EL2 also traps ERET and SVC",
+        ),
+    ),
     feature(
         ID_AA64MMFR0_EL1,
         60,
@@ -531,7 +544,13 @@ pub const TABLE: &[Row] = &[
         "FEAT_UAO",
         engine(false, "LDTR/STTR permission checks are not modeled"),
     ),
-    feature(ID_AA64MMFR2_EL1, 24, 1, "FEAT_NV", engine(false, NO_GUEST)),
+    feature(
+        ID_AA64MMFR2_EL1,
+        24,
+        1,
+        "FEAT_NV",
+        engine(false, NO_NESTING),
+    ),
     feature(
         ID_AA64MMFR2_EL1,
         32,

@@ -22,6 +22,7 @@ pub const HCR_VSE: u32 = 8;
 pub const HCR_TSC: u32 = 19;
 pub const HCR_TGE: u32 = 27;
 pub const HCR_HCD: u32 = 29;
+pub const HCR_API: u32 = 41;
 
 /// Apple GXF state of one guarded level: GL1 beside EL1, GL2 beside EL2
 /// (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h`, `gxf.c` and `gxf_asm.S`).
@@ -423,10 +424,10 @@ impl Cpu {
         let level = usize::from(self.pstate.el) - 1;
         let bank = &self.apple.guarded[level];
         let (spsr, elr, aspsr) = (bank.spsr, bank.elr, bank.aspsr);
-        let (mut next, nzcv) = match self.legal_return(spsr) {
-            Ok(value) => value,
-            Err(illegal) => return Ok(Err(illegal)),
-        };
+        if let Some(illegal) = self.illegal_return(spsr) {
+            return Ok(Err(illegal));
+        }
+        let (mut next, nzcv) = exception::restore(self.pstate, spsr, false);
         next.guarded = aspsr & ASPSR_GUARDED != 0;
         if next.guarded && next.el != self.pstate.el {
             return Ok(Err(IllegalReturn::Mode(0)));
@@ -519,32 +520,60 @@ impl Cpu {
         self.pc = vbar.wrapping_add(exception::vector_offset(from, target, exception.vector));
     }
 
-    /// Decode an SPSR for a return from the current EL (Arm
-    /// `IllegalExceptionReturn`): a higher EL, EL1 while HCR_EL2.TGE is set,
-    /// AArch32 and an invalid mode are illegal.
-    fn legal_return(&self, spsr: u64) -> Result<(Pstate, u32), IllegalReturn> {
-        let (next, nzcv) = exception::from_spsr(spsr)?;
-        if next.el > self.pstate.el {
-            return Err(IllegalReturn::Mode(next.el << 2));
+    /// Why a return from the current EL to `spsr` is illegal, if it is
+    /// (Arm `IllegalExceptionReturn`): an invalid or AArch32 mode, a higher
+    /// EL, or EL1 while HCR_EL2.TGE is set.
+    pub fn illegal_return(&self, spsr: u64) -> Option<IllegalReturn> {
+        match exception::spsr_target(spsr) {
+            Err(illegal) => Some(illegal),
+            Ok((el, _)) if el > self.pstate.el => Some(IllegalReturn::Mode(el << 2)),
+            Ok((1, _)) if self.hcr(HCR_TGE) => Some(IllegalReturn::Host),
+            Ok(_) => None,
         }
-        if next.el == 1 && self.in_host() {
-            return Err(IllegalReturn::Host);
-        }
-        Ok((next, nzcv))
     }
 
-    /// ERET from EL1 or EL2. EL0 ERET is UNDEFINED and must not reach here.
-    pub fn exception_return(&mut self) -> Result<(), IllegalReturn> {
-        let bank = bank(self.pstate.el);
-        let spsr = self.read(bank.spsr);
-        let elr = self.read(bank.elr);
-        let (next, nzcv) = self.legal_return(spsr)?;
+    /// ELR_ELx of the current EL.
+    pub fn exception_link(&self) -> u64 {
+        self.read(bank(self.pstate.el).elr)
+    }
+
+    /// An instruction address with its tag removed for the current EL (Arm
+    /// `AArch64_BranchAddr`): with TBI and not TBID for the half that bit 55
+    /// selects, bits 63:56 copy bit 55. Every EL here uses two VA ranges
+    /// (EL1&0, or EL2&0 because HCR_EL2.E2H is RES1), so the address is sign
+    /// extended.
+    pub fn branch_address(&self, address: u64) -> u64 {
+        let tcr = self.controls(self.regime()).tcr;
+        let (tbi, tbid) = if address & (1 << 55) != 0 {
+            (38, 52)
+        } else {
+            (37, 51)
+        };
+        if tcr & (1 << tbi) != 0 && tcr & (1 << tbid) == 0 {
+            exception::sign_extend_55(address)
+        } else {
+            address
+        }
+    }
+
+    /// ERET, ERETAA or ERETAB from EL1 or EL2 to `target`, the current ELR
+    /// after any authentication (Arm `AArch64_ExceptionReturn`). An illegal
+    /// return sets PSTATE.IL instead of changing EL; after one to AArch32 the
+    /// ARBITRARY PC bits 63:32 and 1:0 read 0. EL0 ERET is UNDEFINED and must
+    /// not reach here.
+    pub fn exception_return(&mut self, target: u64) {
+        let spsr = self.read(bank(self.pstate.el).spsr);
+        let illegal = self.illegal_return(spsr).is_some();
+        let (next, nzcv) = exception::restore(self.pstate, spsr, illegal);
         self.state.nzcv = nzcv;
         self.set_pstate(next);
-        self.pc = elr;
+        self.pc = if illegal && spsr & (1 << 4) != 0 {
+            target & 0xffff_fffc
+        } else {
+            self.branch_address(target)
+        };
         // ERET clears the local exclusive monitor and sets the event register.
         self.event = true;
-        Ok(())
     }
 }
 
@@ -583,7 +612,7 @@ mod tests {
         assert!(cpu.pstate.pan);
         cpu.state.sp = 0xffff_0100;
         cpu.registers.set(Register::SPSR_EL1, 0, DAIF_I as u64 * 64); // EL0t with IRQs masked
-        cpu.exception_return().unwrap();
+        cpu.exception_return(cpu.exception_link());
         assert_eq!(
             (cpu.pc, cpu.state.sp, cpu.sp(1)),
             (0x4004, 0x7000, 0xffff_0100)
@@ -623,19 +652,23 @@ mod tests {
         assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0200, 2));
         assert_eq!(cpu.read(Register::SPSR_EL2) & 0xf, 0b1001, "EL2h");
         assert_eq!(cpu.read(Register::ESR_EL2), 0x5a00_0003);
-        cpu.exception_return().unwrap();
+        cpu.exception_return(cpu.exception_link());
         assert_eq!((cpu.pc, cpu.pstate.el), (0x8004, 2));
         // EL0 in the host: exceptions go to EL2.
         cpu.registers.set(Register::SPSR_EL2, 0, 0);
-        cpu.exception_return().unwrap();
+        cpu.exception_return(cpu.exception_link());
         assert_eq!((cpu.pstate.el, cpu.regime()), (0, TranslationRegime::El20));
         cpu.take(Exception::synchronous(Class::SupervisorCall, 0, 0x8008));
         assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0400, 2));
-        // A return to EL1 under TGE is illegal; without TGE it enters a guest.
+        // A return to EL1 under TGE is illegal: EL2 stays and sets IL.
         cpu.registers.set(Register::SPSR_EL2, 0, 0b0101);
-        assert_eq!(cpu.exception_return(), Err(IllegalReturn::Host));
+        assert_eq!(cpu.illegal_return(0b0101), Some(IllegalReturn::Host));
+        cpu.exception_return(0x9000);
+        assert_eq!((cpu.pc, cpu.pstate.el, cpu.pstate.il), (0x9000, 2, true));
+        // Without TGE it enters a guest.
         cpu.registers.set(Register::HCR_EL2, 0, 0);
-        cpu.exception_return().unwrap();
+        cpu.exception_return(cpu.exception_link());
+        assert!(!cpu.pstate.il);
         assert_eq!((cpu.pstate.el, cpu.regime()), (1, TranslationRegime::El10));
         assert_eq!(cpu.route(), 1);
         assert_eq!(cpu.interrupt_target(Vector::Irq), 1);

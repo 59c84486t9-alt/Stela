@@ -4,7 +4,10 @@ mod amx;
 mod system;
 
 use super::{
-    cpu::{Cpu, Exception, HCR_AMO, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TSC, HCR_VF, HCR_VI, HCR_VSE},
+    cpu::{
+        Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
+        HCR_VI, HCR_VSE,
+    },
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
     registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
@@ -20,7 +23,7 @@ use stela_compiler::{
         AddressMode, Decoder, FloatingPointOperation, Register, Width,
         register_offset::IndexExtend,
         system::{
-            exception::Operation as ExceptionOperation,
+            exception::{AuthenticationKey, Operation as ExceptionOperation},
             registers::{Direction, RegisterAccess},
             synchronization::{Operation as Synchronization, WaitKind},
         },
@@ -41,6 +44,10 @@ const FETCH_CACHE: usize = 1024;
 const JUMP_CACHE: usize = 4096;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
+/// HFGITR_EL2 instruction traps (FEAT_FGT).
+const HFGITR_ERET: u32 = 51;
+const HFGITR_SVC_EL0: u32 = 52;
+const HFGITR_SVC_EL1: u32 = 53;
 
 /// The translation regime the host's shadow tables must reflect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,7 +512,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 {
                     let syndrome = if vector == Vector::SError {
                         // ESR_EL1 takes VSESR_EL2.{IDS,ISS} with EC 0x2F.
-                        (0x2f << 26) | (self.cpu.read(SystemRegister::VSESR_EL2) & 0x01ff_ffff)
+                        super::exception::syndrome(
+                            Class::SError,
+                            self.cpu.read(SystemRegister::VSESR_EL2) as u32,
+                        )
                     } else {
                         0
                     };
@@ -566,6 +576,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(exception);
             return Ok(());
         }
+        if self.cpu.pstate.il {
+            return self.illegal_state(pc);
+        }
         let index = match self.fetch_block(pc)? {
             Fetched::Block(index) => index,
             Fetched::Exception(exception) => {
@@ -582,6 +595,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             NativeExit::Exit { next_pc, kind } => self.exit(index, next_pc, kind),
             NativeExit::Fault(fault) => self.native_fault(index, fault),
         }
+    }
+
+    /// With PSTATE.IL set, the instruction at `pc` takes the Illegal
+    /// Execution state exception after any Instruction Abort its fetch raises
+    /// (Arm `AArch64_CheckIllegalState`).
+    #[cold]
+    fn illegal_state(&mut self, pc: u64) -> Step {
+        let exception = match self.fetch_physical(pc) {
+            Ok(_) => Exception::synchronous(Class::IllegalExecution, 0, pc),
+            Err(Ok(exception)) => exception,
+            Err(Err(stop)) => return Err(stop),
+        };
+        self.take(exception);
+        Ok(())
     }
 
     /// Translate a PC for execution at the current EL.
@@ -937,11 +964,40 @@ impl<H: Host, D: Devices> Machine<H, D> {
         ]
     }
 
+    /// The guest's PAC keys and the current regime's TCR layout, as
+    /// FEAT_PAuth2 with FEAT_FPAC.
+    fn pointer_context(&self) -> pauth::Context {
+        let keys = self.pointer_keys();
+        pauth::Context::new_with_version(
+            0,
+            pauth::Keys::from_words(keys[0], keys[1], keys[2], keys[3]).with_generic_words(keys[4]),
+            pauth::Version::Faulting,
+        )
+        .with_translation_regime(self.cpu.controls(self.cpu.regime()).tcr)
+    }
+
+    /// Whether HCR_EL2.API clear traps the use of an enabled key, or PACGA,
+    /// to EL2: from EL1, and from EL0 outside the host (Arm
+    /// `IsAPIAKeyEnabled` and the other key checks, `AddPACGA`).
+    fn pointer_authentication_trapped(&self) -> bool {
+        let el = self.cpu.pstate.el;
+        (el == 1 || (el == 0 && !self.cpu.in_host())) && !self.cpu.hcr(HCR_API)
+    }
+
+    /// Arm `TrapPACUse(EL2)`: EC 0x09 with ISS 0 at the instruction.
+    fn pointer_authentication_trap(&mut self) -> Step {
+        let pc = self.cpu.pc;
+        self.take(Exception::synchronous(Class::PointerAuthenticationTrap, 0, pc).to(2));
+        Ok(())
+    }
+
     /// Complete one PAC instruction with the guest's own keys, laid out for
-    /// the current TCR_EL1. The algorithm is the software QARMA5 service in
-    /// its Classic (PAuth1) policy; Apple's hardware algorithm and AppleMode
+    /// the current TCR. The algorithm is the software QARMA5 service as
+    /// FEAT_PAuth2 with FEAT_FPAC; Apple's hardware algorithm and AppleMode
     /// diversification are not reproduced, so values are self-consistent
-    /// rather than equal to hardware's.
+    /// rather than equal to hardware's. A failed standalone AUT* takes the
+    /// PAC Fail exception (EC 0x1C) to the current EL, or from EL0 to EL1 or
+    /// the host's EL2 (Arm `AArch64_PACFailException`).
     fn pointer_authentication(&mut self, word: u32) -> Step {
         let pc = self.cpu.pc;
         let refuse = |machine: &Self, detail: String| {
@@ -951,17 +1007,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(Some(instruction)) => instruction,
             _ => return refuse(self, "PAC exit at a word that is not PAC".into()),
         };
-        if let Some(key) = instruction.operation.required_key()
-            && !self.key_enabled(key)
-        {
-            return self.disabled_pointer_authentication(word, instruction);
+        let uses_key = match instruction.operation.required_key() {
+            Some(key) if !self.key_enabled(key) => {
+                return self.disabled_pointer_authentication(word, instruction);
+            }
+            Some(_) => true,
+            None => matches!(
+                instruction.operation,
+                PointerAuthenticationOperation::GenericCode(_)
+            ),
+        };
+        if uses_key && self.pointer_authentication_trapped() {
+            return self.pointer_authentication_trap();
         }
-        let keys = self.pointer_keys();
-        let context = pauth::Context::new(
-            0,
-            pauth::Keys::from_words(keys[0], keys[1], keys[2], keys[3]).with_generic_words(keys[4]),
-        )
-        .with_translation_regime(self.cpu.controls(self.cpu.regime()).tcr);
+        let context = self.pointer_context();
         if let PointerAuthenticationOperation::Load(load) = instruction.operation {
             return self.authenticated_load(word, &context, load);
         }
@@ -975,7 +1034,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.cpu.pc = next.0;
                 Ok(())
             }
-            Err(error) => refuse(self, format!("{error:#}")),
+            Err(error) => match error.downcast_ref::<pauth::AuthenticationError>() {
+                Some(&pauth::AuthenticationError::Failure { code }) => {
+                    self.take(Exception::synchronous(
+                        Class::PointerAuthenticationFailure,
+                        u32::from(code),
+                        pc,
+                    ));
+                    Ok(())
+                }
+                _ => refuse(self, format!("{error:#}")),
+            },
         }
     }
 
@@ -1345,7 +1414,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             _ => return Err(self.refuse_system(word, "System exit at a word that is not System")),
         };
         match instruction.operation {
-            SystemOperation::Exception(operation) => self.exception_instruction(word, operation),
+            SystemOperation::Exception(operation) => self.exception_instruction(operation),
             SystemOperation::Register(access) => self.register_instruction(word, access),
             SystemOperation::PstateImmediate(encoding) => {
                 let outcome = self.cpu.write_pstate_field(encoding);
@@ -1357,10 +1426,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Synchronization::DataCompletion { nxs: true, .. } => {
                     Err(self.refuse_system(word, "DSB nXS needs FEAT_XS in the CPU profile"))
                 }
+                Synchronization::ErrorSynchronization => self.error_synchronization(),
                 Synchronization::DataCompletion { .. }
                 | Synchronization::StoreBypassBarrier { .. }
                 | Synchronization::BranchTarget { .. }
-                | Synchronization::ErrorSynchronization
                 | Synchronization::TraceSynchronization
                 | Synchronization::OtherHint { .. }
                 | Synchronization::Yield
@@ -1411,9 +1480,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    fn exception_instruction(&mut self, word: u32, operation: ExceptionOperation) -> Step {
+    fn exception_instruction(&mut self, operation: ExceptionOperation) -> Step {
         let pc = self.cpu.pc;
         match operation {
+            // HFGITR_EL2.SVC_EL1 and SVC_EL0 trap SVC from EL1, and from EL0
+            // outside the host, to EL2 at the SVC itself (Arm
+            // `AArch64_CheckForSVCTrap`).
+            ExceptionOperation::SupervisorCall { immediate }
+                if self.cpu.pstate.el != 2
+                    && self.fine_grained_trap(if self.cpu.pstate.el == 1 {
+                        HFGITR_SVC_EL1
+                    } else {
+                        HFGITR_SVC_EL0
+                    }) =>
+            {
+                self.take(
+                    Exception::synchronous(Class::SupervisorCall, u32::from(immediate), pc).to(2),
+                );
+                Ok(())
+            }
             // To EL1, or to EL2 from EL2 and from EL0 in the host.
             ExceptionOperation::SupervisorCall { immediate } => {
                 self.take(Exception::synchronous(
@@ -1431,24 +1516,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 ));
                 Ok(())
             }
-            ExceptionOperation::ExceptionReturn { key: None } => {
-                if self.cpu.pstate.el == 0 {
-                    return self.undefined();
-                }
-                if let Err(reason) = self.cpu.exception_return() {
-                    return Err(self.unsupported(RequirementKind::IllegalReturn(reason)));
-                }
-                self.host.report(&Event::Return {
-                    to_el: self.cpu.pstate.el,
-                    pc: self.cpu.pc,
-                });
-                self.sync_regime();
-                Ok(())
-            }
-            ExceptionOperation::ExceptionReturn { key: Some(_) } => Err(self.refuse_system(
-                word,
-                "ERETAA/ERETAB need pointer authentication in the system engine",
-            )),
+            ExceptionOperation::ExceptionReturn { key } => self.exception_return(key),
             // HVC from EL1 and EL2 goes to EL2, unless HCR_EL2.HCD disables it.
             ExceptionOperation::HypervisorCall { immediate }
                 if self.cpu.pstate.el != 0 && !self.cpu.hcr(HCR_HCD) =>
@@ -1483,6 +1551,92 @@ impl<H: Host, D: Devices> Machine<H, D> {
             | ExceptionOperation::DebugReturn
             | ExceptionOperation::Undefined { .. } => self.undefined(),
         }
+    }
+
+    /// Whether HFGITR_EL2 bit `bit` traps an instruction from EL1, or from
+    /// EL0 outside the host (FEAT_FGT without EL3, so always enabled).
+    fn fine_grained_trap(&self, bit: u32) -> bool {
+        let el = self.cpu.pstate.el;
+        (el == 1 || (el == 0 && !self.cpu.in_host()))
+            && self.cpu.read(SystemRegister::HFGITR_EL2) & (1 << bit) != 0
+    }
+
+    /// ERET, ERETAA and ERETAB (Arm `AArch64_CheckForERetTrap`, `AuthIA`,
+    /// `AuthIB` and `AArch64_ExceptionReturn`).
+    fn exception_return(&mut self, key: Option<AuthenticationKey>) -> Step {
+        let pc = self.cpu.pc;
+        if self.cpu.pstate.el == 0 {
+            return self.undefined();
+        }
+        if self.fine_grained_trap(HFGITR_ERET) {
+            let iss = match key {
+                None => 0,
+                Some(AuthenticationKey::A) => 0b10,
+                Some(AuthenticationKey::B) => 0b11,
+            };
+            self.take(Exception::synchronous(Class::ExceptionReturnTrap, iss, pc).to(2));
+            return Ok(());
+        }
+        let mut target = self.cpu.exception_link();
+        if let Some(key) = key {
+            let key = match key {
+                AuthenticationKey::A => PointerAuthenticationKey::Ia,
+                AuthenticationKey::B => PointerAuthenticationKey::Ib,
+            };
+            if self.key_enabled(key) {
+                if self.pointer_authentication_trapped() {
+                    return self.pointer_authentication_trap();
+                }
+                let runtime_key = match key {
+                    PointerAuthenticationKey::Ia => pauth::Key::Ia,
+                    _ => pauth::Key::Ib,
+                };
+                // A combined authentication: a failure corrupts the pointer
+                // because the profile has no FEAT_FPACCOMBINE.
+                match self.pointer_context().authenticate_operation(
+                    runtime_key,
+                    target,
+                    self.cpu.state.sp,
+                    true,
+                ) {
+                    Ok(result) => target = result.pointer,
+                    Err(_) => {
+                        return Err(self.unsupported(RequirementKind::Native(
+                            "ERETAA/ERETAB authentication without its key",
+                        )));
+                    }
+                }
+            }
+        }
+        self.cpu.exception_return(target);
+        self.host.report(&Event::Return {
+            to_el: self.cpu.pstate.el,
+            pc: self.cpu.pc,
+        });
+        self.sync_regime();
+        Ok(())
+    }
+
+    /// ESB: at EL0 or EL1 outside the host with HCR_EL2.AMO set, a virtual
+    /// SError pending but masked by PSTATE.A is deferred into VDISR_EL2 (Arm
+    /// `AArch64_vESBOperation`). No physical SError is ever pending.
+    fn error_synchronization(&mut self) -> Step {
+        let hcr = self.cpu.read(SystemRegister::HCR_EL2);
+        let guest = self.cpu.pstate.el != 2 && hcr & (1 << HCR_TGE) == 0;
+        if guest
+            && hcr & (1 << HCR_AMO) != 0
+            && hcr & (1 << HCR_VSE) != 0
+            && self.cpu.pstate.daif & DAIF_A != 0
+        {
+            let syndrome = self.cpu.read(SystemRegister::VSESR_EL2) & 0x01ff_ffff;
+            self.cpu
+                .registers
+                .set(SystemRegister::VDISR_EL2, 0, 1 << 31 | syndrome);
+            self.cpu
+                .registers
+                .set(SystemRegister::HCR_EL2, 0, hcr & !(1 << HCR_VSE));
+        }
+        self.next()
     }
 
     /// MRS and MSR: the generated accessor of an architectural register, or
@@ -1972,31 +2126,44 @@ mod tests {
         assert_eq!(machine.cpu.state.x[5], 1);
     }
 
+    /// A machine at EL1h with SCTLR_EL1.EnIA and EnIB set, HCR_EL2.API set,
+    /// 39-bit TTBR1 addresses without TBI and both instruction keys loaded.
+    fn pac_machine() -> Machine<FakeHost, NoDevices> {
+        let mut machine = machine(&[]);
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::TCR_EL1, 0, 25 << 16 | 25);
+        for (register, value) in [
+            (SystemRegister::APIAKeyLo_EL1, 0x1111_2222_3333_4444),
+            (SystemRegister::APIAKeyHi_EL1, 0x5555_6666_7777_8888),
+            (SystemRegister::APIBKeyLo_EL1, 0x0123_4567_89ab_cdef),
+            (SystemRegister::APIBKeyHi_EL1, 0xfedc_ba98_7654_3210),
+        ] {
+            registers.set(register, 0, value);
+        }
+        let sctlr = registers.get(SystemRegister::SCTLR_EL1, 0) | 1 << 31 | 1 << 30;
+        registers.set(SystemRegister::SCTLR_EL1, 0, sctlr);
+        registers.set(SystemRegister::HCR_EL2, 0, 1 << HCR_API);
+        registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        registers.set(SystemRegister::VBAR_EL2, 0, 0x4_0000);
+        machine
+    }
+
     #[test]
     fn pac_uses_the_guest_keys_regime_layout_and_sctlr_enables() {
         const PACIBSP: u32 = 0xd503_237f;
         const AUTIBSP: u32 = 0xd503_23ff;
-        let mut machine = machine(&[]);
-        // 39-bit TTBR1 kernel addresses, no TBI.
+        let mut machine = pac_machine();
+        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1);
         machine
             .cpu
             .registers
-            .set(SystemRegister::TCR_EL1, 0, 25 << 16 | 25);
-        machine
-            .cpu
-            .registers
-            .set(SystemRegister::APIBKeyLo_EL1, 0, 0x0123_4567_89ab_cdef);
-        machine
-            .cpu
-            .registers
-            .set(SystemRegister::APIBKeyHi_EL1, 0, 0xfedc_ba98_7654_3210);
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr & !(1 << 30));
         let pointer = 0xffff_ff80_0000_4000_u64;
         machine.cpu.state.x[30] = pointer;
         machine.cpu.state.sp = 0xffff_ff80_0001_0000;
         // EnIB clear: PACIBSP leaves LR unchanged.
         machine.system_instruction_for_test(PACIBSP);
         assert_eq!(machine.cpu.state.x[30], pointer);
-        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) | 1 << 30;
         machine
             .cpu
             .registers
@@ -2010,11 +2177,226 @@ mod tests {
         );
         machine.system_instruction_for_test(AUTIBSP);
         assert_eq!(machine.cpu.state.x[30], pointer);
-        // A different SP modifier poisons bits 62:61 (instruction key B).
-        machine.cpu.state.x[30] = signed;
+    }
+
+    #[test]
+    fn pac_use_traps_on_hcr_el2_api_and_failed_aut_takes_ec_0x1c() {
+        const PACIBSP: u32 = 0xd503_237f;
+        const AUTIBSP: u32 = 0xd503_23ff;
+        const XPACLRI: u32 = 0xd503_20ff;
+        let mut machine = pac_machine();
+        machine.cpu.state.x[30] = 0xffff_ff80_0000_4000;
+        machine.cpu.state.sp = 0xffff_ff80_0001_0000;
+        machine.system_instruction_for_test(PACIBSP);
+        let signed = machine.cpu.state.x[30];
+        // A different modifier fails a standalone AUT: EC 0x1C, ISS {data=0,
+        // key B=1}, at the instruction, to the current EL.
         machine.cpu.state.sp += 16;
+        let pc = machine.cpu.pc;
         machine.system_instruction_for_test(AUTIBSP);
-        assert_eq!(machine.cpu.state.x[30] >> 61 & 3, 2);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0001);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
+        assert_eq!(
+            (machine.cpu.pc, machine.cpu.state.x[30]),
+            (0x1_0200, signed)
+        );
+        // HCR_EL2.API clear traps an enabled key's use from EL1 to EL2
+        // (EC 0x09, ISS 0); XPAC uses no key and never traps.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);
+        machine.system_instruction_for_test(XPACLRI);
+        assert_eq!(machine.cpu.state.x[30], 0xffff_ff80_0000_4000);
+        machine.system_instruction_for_test(PACIBSP);
+        assert_eq!(machine.cpu.pstate.el, 2);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x2600_0000);
+        assert_eq!(machine.cpu.pc, 0x4_0400);
+        // A disabled key is not used, so it does not trap.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.registers.set(SystemRegister::SCTLR_EL1, 0, 0);
+        machine.system_instruction_for_test(PACIBSP);
+        assert_eq!(machine.cpu.pstate.el, 1);
+    }
+
+    #[test]
+    fn eret_traps_and_eretaa_authenticates_elr_with_sp() {
+        const ERETAA: u32 = 0xd69f_0bff;
+        const ERETAB: u32 = 0xd69f_0fff;
+        let mut machine = pac_machine();
+        let target = 0xffff_ff80_0000_8000_u64;
+        machine.cpu.state.sp = 0xffff_ff80_0002_0000;
+        let signed = machine
+            .pointer_context()
+            .sign(pauth::Key::Ia, target, machine.cpu.state.sp)
+            .unwrap();
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::ELR_EL1, 0, signed);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SPSR_EL1, 0, 0x3c5);
+        // HFGITR_EL2.ERET traps ERETAA from EL1: EC 0x1A, ISS {PAC, key B}.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HFGITR_EL2, 0, 1 << HFGITR_ERET);
+        machine.system_instruction(ERETAB).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x6a00_0003);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL2), BASE);
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.pc = BASE;
+        machine.cpu.registers.set(SystemRegister::HFGITR_EL2, 0, 0);
+        machine.system_instruction(ERETAA).unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (target, 1));
+        // With another SP the combined check corrupts the target instead of
+        // faulting (no FEAT_FPACCOMBINE).
+        machine.cpu.state.sp += 16;
+        machine.system_instruction(ERETAA).unwrap();
+        assert_ne!(machine.cpu.pc, target);
+        assert_eq!(machine.cpu.pc & 0x7f_ffff_ffff, target & 0x7f_ffff_ffff);
+        // HCR_EL2.API clear traps the enabled key's use to EL2.
+        machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);
+        machine.system_instruction(ERETAA).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x2600_0000);
+    }
+
+    #[test]
+    fn illegal_returns_set_il_and_the_next_instruction_takes_ec_0x0e() {
+        let mut machine = machine(&[]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::ELR_EL1, 0, BASE + 0x10);
+        // ERET from EL1h to EL2h is illegal: EL1h stays, PC is ELR, DAIF and
+        // NZCV come from SPSR and IL is set.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SPSR_EL1, 0, 0x4000_0000 | 0x9);
+        machine.system_instruction(0xd69f_03e0).unwrap();
+        let pstate = machine.cpu.pstate;
+        assert_eq!((pstate.el, pstate.sp, pstate.il), (1, true, true));
+        assert_eq!((pstate.daif, machine.cpu.state.nzcv), (0, 0x4000_0000));
+        assert_eq!(machine.cpu.pc, BASE + 0x10);
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x3a00_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE + 0x10);
+        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1), 0x4010_0005);
+        assert_eq!(machine.cpu.pc, 0x1_0200);
+        assert!(!machine.cpu.pstate.il);
+        // A legal return restores SPSR.IL. ELR keeps its tag only without TBI.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TCR_EL1, 0, 1 << 37);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::ELR_EL1, 0, 0xab00_0000_0000_1000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SPSR_EL1, 0, 1 << 20 | 0x5);
+        machine.system_instruction(0xd69f_03e0).unwrap();
+        assert!(machine.cpu.pstate.il);
+        assert_eq!(machine.cpu.pc, 0x1000);
+        // A PC with bits 1:0 set takes a PC alignment fault with FAR = PC,
+        // before the Illegal Execution state.
+        machine.cpu.pc = BASE + 2;
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x8a00_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), BASE + 2);
+        // EL0 ERET is UNDEFINED.
+        machine.cpu.pstate = Pstate {
+            el: 0,
+            sp: false,
+            ..Pstate::reset(1)
+        };
+        machine.system_instruction(0xd69f_03e0).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+    }
+
+    #[test]
+    fn svc_traps_esb_fp_and_debug_only_instructions_follow_the_profile() {
+        let mut machine = machine(&[]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL2, 0, 0x4_0000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HFGITR_EL2, 0, 1 << HFGITR_SVC_EL1);
+        // HFGITR_EL2.SVC_EL1 sends SVC to EL2 with the SVC's own address.
+        machine.system_instruction(0xd400_0841).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x5600_0042);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL2), BASE);
+        // ESB defers a masked virtual SError into VDISR_EL2.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, 1 << HCR_AMO | 1 << HCR_VSE);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VSESR_EL2, 0, 0x0100_1234);
+        machine.system_instruction(0xd503_221f).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::VDISR_EL2), 0x8100_1234);
+        assert_eq!(machine.cpu.read(SystemRegister::HCR_EL2) & 1 << HCR_VSE, 0);
+        // An unmasked one is taken with EC 0x2F and IL set.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, 1 << HCR_AMO | 1 << HCR_VSE);
+        machine.cpu.pstate.daif = 0;
+        assert!(machine.deliver_interrupts());
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xbf00_1234);
+        // CPACR_EL1.FPEN at reset traps FP/SIMD from EL1: EC 0x07 with CV
+        // and COND.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.pc = BASE;
+        machine.system_instruction(0xd53b_4401).unwrap(); // mrs x1, fpcr
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x1fe0_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+        // BRK is taken at itself with its immediate; HLT (no halting),
+        // DCPS1/2/3 and DRPS (no Debug state) and UDF are UNDEFINED.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.pc = BASE;
+        machine.system_instruction(0xd420_00a0).unwrap(); // brk #5
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xf200_0005);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+        for word in [
+            0xd440_0000,
+            0xd4a0_0001,
+            0xd4a0_0002,
+            0xd4a0_0003,
+            0xd6bf_03e0,
+            0,
+        ] {
+            machine.cpu.set_pstate(Pstate::reset(1));
+            machine.system_instruction(word).unwrap();
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL1),
+                0x0200_0000,
+                "{word:#x}"
+            );
+        }
+        // FPCR's trap enables and fields outside the profile are RAZ/WI.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        for register in [SystemRegister::CPACR_EL1, SystemRegister::CPTR_EL2] {
+            machine.cpu.registers.set(register, 0, 0b11 << 20);
+        }
+        machine.derived_changed();
+        machine.cpu.state.x[0] = u64::MAX;
+        machine.system_instruction(0xd51b_4400).unwrap(); // msr fpcr, x0
+        machine.system_instruction(0xd53b_4401).unwrap(); // mrs x1, fpcr
+        assert_eq!(machine.cpu.state.x[1], 0x07c8_0000);
     }
 
     #[test]
