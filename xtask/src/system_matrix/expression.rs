@@ -1,7 +1,9 @@
 //! AARCHMRS conditions (`AST.*` nodes) evaluated against a fixed feature
-//! profile. Anything the profile does not decide, such as a run-time control
-//! (`EffectiveHCR_EL2_E2H()`) or an ID field value, is `Dynamic`: the
-//! requirement exists in some configuration of the profile.
+//! profile. As in the generated accessors ([`super::fold`]),
+//! `EffectiveHCR_EL2_E2H()` is '1' with FEAT_VHE and without FEAT_E2H0.
+//! Anything the profile does not decide, such as a run-time control
+//! (`HCR_EL2.TGE`) or an ID field value, is `Dynamic`: the requirement exists
+//! in some configuration of the profile.
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -51,6 +53,8 @@ enum Term {
     Truth(Truth),
     Level(u8),
     Integer(i64),
+    /// A bit string without don't-care bits.
+    Bits(String),
     Unknown,
 }
 
@@ -88,6 +92,14 @@ impl Profile {
             },
             "AST.BinaryOp" => self.binary(node),
             "AST.Function" => self.function(node),
+            "Values.Value" => {
+                let bits = node["value"].as_str().unwrap_or("").trim_matches('\'');
+                if !bits.is_empty() && bits.bytes().all(|b| b == b'0' || b == b'1') {
+                    Term::Bits(bits.to_owned())
+                } else {
+                    Term::Unknown
+                }
+            }
             _ => Term::Unknown,
         }
     }
@@ -109,6 +121,7 @@ impl Profile {
                 let equal = match (&left, &right) {
                     (Term::Level(a), Term::Level(b)) => Truth::from_bool(a == b),
                     (Term::Integer(a), Term::Integer(b)) => Truth::from_bool(a == b),
+                    (Term::Bits(a), Term::Bits(b)) => Truth::from_bool(a == b),
                     (Term::Truth(a), Term::Truth(b))
                         if *a != Truth::Dynamic && *b != Truth::Dynamic =>
                     {
@@ -139,6 +152,12 @@ impl Profile {
             },
             // The profile is AArch64-only.
             "ELUsingAArch32" => Term::Truth(Truth::False),
+            // HCR_EL2.E2H is RES1 with VHE and without FEAT_E2H0.
+            "EffectiveHCR_EL2_E2H"
+                if self.features.contains("FEAT_VHE") && !self.features.contains("FEAT_E2H0") =>
+            {
+                Term::Bits("1".to_owned())
+            }
             _ => Term::Unknown,
         }
     }
@@ -214,8 +233,14 @@ mod tests {
         };
         assert_eq!(profile.truth(&have("EL2")), Truth::True);
         assert_eq!(profile.truth(&have("EL3")), Truth::False);
-        let run_time = json!({"_type": "AST.Function", "name": "EffectiveHCR_EL2_E2H",
+        let run_time = json!({"_type": "AST.Function", "name": "EffectiveHCR_EL2_TGE",
                               "arguments": []});
+        // Without FEAT_E2H0, E2H is '1' as the generated accessors fold it.
+        let e2h = json!({"_type": "AST.BinaryOp", "op": "==",
+                         "left": {"_type": "AST.Function", "name": "EffectiveHCR_EL2_E2H",
+                                  "arguments": []},
+                         "right": {"_type": "Values.Value", "value": "'1'"}});
+        assert_eq!(profile.truth(&e2h), Truth::True);
         let and = |left: Value, right: Value| json!({"_type": "AST.BinaryOp", "op": "&&", "left": left, "right": right});
         assert_eq!(
             profile.truth(&and(feature("FEAT_VHE"), run_time.clone())),
