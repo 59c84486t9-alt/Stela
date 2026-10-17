@@ -151,6 +151,9 @@ fn function(node: &Value, profile: &Profile) -> Value {
         "Halted" | "HaltingAllowed" => Some(false),
         "IsCurrentSecurityState" => identifier(first).map(|state| state == "SS_NonSecure"),
         "ValidSecurityStateAtEL" => Some(true),
+        "ImpDefBool" => first["value"]
+            .as_str()
+            .and_then(super::codegen::impdef_choice),
         _ => None,
     };
     if let Some(value) = decided {
@@ -215,4 +218,29 @@ pub fn tree(access: &Value, profile: &Profile) -> Tree {
         return Tree::Leaf(Vec::new());
     }
     Tree::Leaf(vec![fold(access, profile)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recorded_implementation_defined_choices_fold() {
+        let profile = Profile {
+            parameters: Default::default(),
+            features: Default::default(),
+            highest_el: 2,
+        };
+        let impdef = |text: &str| {
+            json!({"_type": "AST.Function", "name": "ImpDefBool",
+                   "arguments": [{"_type": "Types.String", "value": text}]})
+        };
+        let folded = fold(
+            &impdef("Implementation can reset into AArch32 state"),
+            &profile,
+        );
+        assert_eq!(as_bool(&folded), Some(false));
+        let undecided = impdef("Something undecided");
+        assert_eq!(fold(&undecided, &profile), undecided);
+    }
 }

@@ -26,7 +26,7 @@ const ENUMS: [(&str, &str); 10] = [
 ];
 
 /// Decided IMPLEMENTATION DEFINED choices, by the AARCHMRS text.
-const IMPDEF: [(&str, bool, &str); 3] = [
+const IMPDEF: [(&str, bool, &str); 4] = [
     (
         "IMPLEMENTED_ACTLR_ELx accessor behavior",
         true,
@@ -42,7 +42,20 @@ const IMPDEF: [(&str, bool, &str); 3] = [
         false,
         "auxiliary activity monitors count",
     ),
+    (
+        "Implementation can reset into AArch32 state",
+        false,
+        "the profile has no AArch32 Execution state",
+    ),
 ];
+
+/// The recorded choice for an `ImpDefBool` question, if there is one.
+pub fn impdef_choice(text: &str) -> Option<bool> {
+    IMPDEF
+        .iter()
+        .find(|(name, _, _)| *name == text)
+        .map(|(_, value, _)| *value)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Ty {
@@ -490,9 +503,7 @@ impl Generator<'_> {
             ),
             "ImpDefBool" => {
                 let text = arguments[0]["value"].as_str().unwrap_or("");
-                let (_, value, _) = IMPDEF
-                    .iter()
-                    .find(|(name, _, _)| *name == text)
+                let value = impdef_choice(text)
                     .with_context(|| format!("undecided ImpDefBool {text:?}"))?;
                 (value.to_string(), Ty::Bool)
             }

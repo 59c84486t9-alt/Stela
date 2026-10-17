@@ -1915,7 +1915,7 @@ impl Register {
             Register::PAN => 0x0,
             Register::PAR_EL1 => 0x800,
             Register::REVIDR_EL1 => 0x0,
-            Register::RMR_EL2 => 0x0,
+            Register::RMR_EL2 => 0x1,
             Register::RVBAR_EL2 => 0x0,
             Register::SCTLR_EL1 => 0x30400980,
             Register::SCTLR_EL2 => 0x30400980,
@@ -7756,7 +7756,7 @@ fn a0(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (true) && (is_in_host(c, 2)) {
+        if is_in_host(c, 2) {
             {
                 let value = c.read(Register::ACTLR_EL2, 0);
                 c.set_x(value);
@@ -7792,7 +7792,7 @@ fn a1(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (true) && (is_in_host(c, 2)) {
+        if is_in_host(c, 2) {
             {
                 let value = c.x();
                 c.write(Register::ACTLR_EL2, 0, value)?;
@@ -7910,7 +7910,7 @@ fn a6(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (true) && (is_in_host(c, 2)) {
+        if is_in_host(c, 2) {
             {
                 let value = c.read(Register::ACTLR_EL2, 0);
                 c.set_x(value);
@@ -7946,7 +7946,7 @@ fn a7(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
-        if (true) && (is_in_host(c, 2)) {
+        if is_in_host(c, 2) {
             {
                 let value = c.x();
                 c.write(Register::ACTLR_EL2, 0, value)?;
@@ -20466,11 +20466,10 @@ fn a393(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Undefined);
     }
     if (c.el()) == (1) {
-        if (!(((((((0u64) << 1) | (bits(c.read(Register::MDCR_EL2, 0), 8, 1))) << 1)
+        if !(((((((0u64) << 1) | (bits(c.read(Register::MDCR_EL2, 0), 8, 1))) << 1)
             | (bits(c.read(Register::MDCR_EL2, 0), 10, 1)))
             & 0x3)
-            == 0x0))
-            && (true)
+            == 0x0)
         {
             return Ok(Effect::Trap {
                 el: 2 as u8,
@@ -20500,11 +20499,10 @@ fn a394(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         return Ok(Effect::Undefined);
     }
     if (c.el()) == (1) {
-        if (!(((((((0u64) << 1) | (bits(c.read(Register::MDCR_EL2, 0), 8, 1))) << 1)
+        if !(((((((0u64) << 1) | (bits(c.read(Register::MDCR_EL2, 0), 8, 1))) << 1)
             | (bits(c.read(Register::MDCR_EL2, 0), 10, 1)))
             & 0x3)
-            == 0x0))
-            && (true)
+            == 0x0)
         {
             return Ok(Effect::Trap {
                 el: 2 as u8,
@@ -27361,7 +27359,7 @@ fn a611(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
     }
-    if ((c.el()) == 2) && (!(false)) {
+    if (c.el()) == 2 {
         {
             let value = c.x();
             c.write(Register::AMEVTYPER1_EL0, m, value)?;

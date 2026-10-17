@@ -152,6 +152,11 @@ impl Profile {
             },
             // The profile is AArch64-only.
             "ELUsingAArch32" => Term::Truth(Truth::False),
+            // A recorded IMPLEMENTATION DEFINED choice.
+            "ImpDefBool" => node["arguments"][0]["value"]
+                .as_str()
+                .and_then(super::codegen::impdef_choice)
+                .map_or(Term::Unknown, |value| Term::Truth(Truth::from_bool(value))),
             // HCR_EL2.E2H is RES1 with VHE and without FEAT_E2H0.
             "EffectiveHCR_EL2_E2H"
                 if self.features.contains("FEAT_VHE") && !self.features.contains("FEAT_E2H0") =>
@@ -241,6 +246,20 @@ mod tests {
                                   "arguments": []},
                          "right": {"_type": "Values.Value", "value": "'1'"}});
         assert_eq!(profile.truth(&e2h), Truth::True);
+        // A recorded IMPLEMENTATION DEFINED choice decides; any other stays
+        // a run-time question.
+        let impdef = |text: &str| {
+            json!({"_type": "AST.Function", "name": "ImpDefBool",
+                   "arguments": [{"_type": "Types.String", "value": text}]})
+        };
+        assert_eq!(
+            profile.truth(&impdef("Implementation can reset into AArch32 state")),
+            Truth::False
+        );
+        assert_eq!(
+            profile.truth(&impdef("Something undecided")),
+            Truth::Dynamic
+        );
         let and = |left: Value, right: Value| json!({"_type": "AST.BinaryOp", "op": "&&", "left": left, "right": right});
         assert_eq!(
             profile.truth(&and(feature("FEAT_VHE"), run_time.clone())),
