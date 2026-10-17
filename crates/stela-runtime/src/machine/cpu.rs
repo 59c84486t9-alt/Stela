@@ -13,7 +13,11 @@ use super::{
         helpers::{bits, effective_nvx},
     },
 };
-use stela_compiler::GuestState;
+use crate::scalable::ScalableState;
+use stela_compiler::{
+    GuestState,
+    aarch64::scalable::{ScalableMode, VectorLength},
+};
 
 pub const HCR_VM: u32 = 0;
 pub const HCR_FMO: u32 = 3;
@@ -27,6 +31,13 @@ pub const HCR_TGE: u32 = 27;
 pub const HCR_HCD: u32 = 29;
 pub const HCR_TEA: u32 = 37;
 pub const HCR_API: u32 = 41;
+
+/// The streaming vector length of a chip with FEAT_SME: 512 bits, the M4's.
+/// It is the only length implemented (Arm `SupportedPowerTwoSVL`), so
+/// `ImplementedSMEVectorLength` selects it for every SMCR_ELx.LEN.
+pub const STREAMING_VECTOR_BYTES: usize = 64;
+const CPACR_SMEN: u32 = 24;
+const CPTR_SMEN: u32 = 24;
 
 /// Apple GXF state of one guarded level: GL1 beside EL1, GL2 beside EL2
 /// (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h`, `gxf.c` and `gxf_asm.S`).
@@ -167,6 +178,10 @@ pub struct Cpu {
     pub monitor: Option<u64>,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
+    /// On a chip with FEAT_SME: PSTATE.SM and ZA, ZA itself, ZT0 with
+    /// FEAT_SME2, and the Z, P and FFR state beyond `state.v`
+    /// (`crate::scalable`).
+    pub scalable: Option<ScalableState>,
 }
 
 /// What an exception entry needs beyond the vector kind.
@@ -264,7 +279,56 @@ impl Cpu {
             claim: 0,
             monitor: None,
             amx: super::amx::Unit::default(),
+            scalable: (chip.implemented(Feature::FEAT_SME) == Ok(true)).then(|| {
+                let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)
+                    .expect("a 512-bit vector length");
+                ScalableState::new(length, Feature::FEAT_SME2.on(chip))
+            }),
         }
+    }
+
+    /// SVCR: PSTATE.SM at bit 0 and PSTATE.ZA at bit 1.
+    pub fn svcr(&self) -> u64 {
+        self.scalable.as_ref().map_or(0, |scalable| {
+            let mode = scalable.mode();
+            u64::from(mode.streaming()) | u64::from(mode.za_enabled()) << 1
+        })
+    }
+
+    /// Arm `SetPSTATE_SM`, then `SetPSTATE_ZA`: a change of SM resets the
+    /// Z, P and FFR registers, FPSR (to 0x0800009F) and FPMR, and enabling
+    /// ZA zeroes ZA and ZT0. Entering streaming mode is refused until the
+    /// engine runs streaming SVE and traps the AdvSIMD and FP instructions
+    /// streaming mode makes illegal.
+    pub fn set_svcr(&mut self, streaming: bool, za: bool) -> Result<(), &'static str> {
+        let scalable = self
+            .scalable
+            .as_mut()
+            .ok_or("SVCR on a PE without SME state")?;
+        if streaming && !scalable.mode().streaming() {
+            return Err("streaming mode (PSTATE.SM) is not run by the system engine");
+        }
+        scalable
+            .apply_mode(&mut self.state, ScalableMode::new(streaming, za))
+            .map_err(|_| "cannot allocate the SME register state")
+    }
+
+    /// Arm `CheckSMEAccess` without EL3: the EL an SME access trap is taken
+    /// to, if CPACR_EL1.SMEN (at EL0 and EL1 outside the host) or
+    /// CPTR_EL2.SMEN (E2H being RES1) disables it.
+    pub fn sme_access_trap(&self) -> Option<u8> {
+        let el = self.pstate.el;
+        if el <= 1 && !self.in_host() {
+            let smen = self.field(Register::CPACR_EL1, CPACR_SMEN, 2);
+            if smen & 1 == 0 || (smen == 0b01 && el == 0) {
+                return Some(1);
+            }
+        }
+        let smen = self.field(Register::CPTR_EL2, CPTR_SMEN, 2);
+        if smen & 1 == 0 || (smen == 0b01 && el == 0 && self.in_host()) {
+            return Some(2);
+        }
+        None
     }
 
     pub fn read(&self, register: Register) -> u64 {

@@ -169,6 +169,9 @@ pub enum Class {
     MonitorCall = 0x17,
     SystemRegister = 0x18,
     ExceptionReturnTrap = 0x1a,
+    /// SME access traps and illegal streaming-mode instructions; ISS[2:0]
+    /// is the SMTC type (Arm `SMEAccessTrap`).
+    SmeAccess = 0x1d,
     PointerAuthenticationFailure = 0x1c,
     InstructionAbortLower = 0x20,
     InstructionAbortSame = 0x21,

@@ -72,6 +72,7 @@ pub(super) fn identification(register: Register) -> bool {
                 | Register::DBGAUTHSTATUS_EL1
                 | Register::MDRAR_EL1
                 | Register::RVBAR_EL2
+                | Register::SMIDR_EL1
         )
 }
 
@@ -381,6 +382,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::SP_EL2 => cpu.sp(2),
             Register::FPCR => u64::from(cpu.state.fpcr),
             Register::FPSR => u64::from(cpu.state.fpsr),
+            Register::SVCR => cpu.svcr(),
             Register::ISR_EL1 => self.pending(),
             register if lor_region(register) && no_lor_descriptors(cpu) => 0,
             Register::MPAM1_EL1 => {
@@ -469,6 +471,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 return Err(Effect::Refused(
                     "HCR_EL2 write outside GL2 with GXF enabled",
                 ));
+            }
+            Register::SVCR => {
+                return cpu
+                    .set_svcr(value & 1 != 0, value & 2 != 0)
+                    .map_err(Effect::Refused);
             }
             Register::SP_EL0 | Register::SP_EL1 | Register::SP_EL2 => {
                 let el = match register {
@@ -870,10 +877,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Effect::Undefined => self.undefined(),
             Effect::Trap { el, ec } => {
-                let iss = if ec == Class::SystemRegister as u64 {
-                    trap_iss(access)
-                } else {
-                    super::TRAPPED_AARCH64
+                // The generated SME traps are access traps, SMTC 0.
+                let iss = match ec {
+                    ec if ec == Class::SystemRegister as u64 => trap_iss(access),
+                    ec if ec == Class::FloatingPointAccess as u64 => super::TRAPPED_AARCH64,
+                    _ => 0,
                 };
                 let exception = Exception {
                     syndrome: (ec << 26) | (1 << 25) | u64::from(iss),
@@ -959,7 +967,7 @@ pub(super) fn identify(
 mod tests {
     use super::super::tests::{BASE, machine, machine_on};
     use crate::machine::{
-        Chip,
+        Chip, Stop,
         cpu::{HCR_HCD, HCR_TGE, HCR_TSC},
         exception::{Pstate, Vector},
         system::{Feature, Register},
@@ -1114,6 +1122,139 @@ mod tests {
             machine.cpu.read(Register::ESR_EL1) >> 26,
             0,
             "UNDEFINED at EL1"
+        );
+    }
+
+    #[test]
+    fn svcr_smstart_and_the_sme_registers_follow_the_chips_sme() {
+        const SVCR: Encoding = Encoding::new(3, 3, 4, 2, 2);
+        const SMCR_EL1: Encoding = Encoding::new(3, 0, 1, 2, 6);
+        const SMPRI_EL1: Encoding = Encoding::new(3, 0, 1, 2, 4);
+        const TPIDR2_EL0: Encoding = Encoding::new(3, 3, 13, 0, 5);
+        const SMSTART_ZA: u32 = 0xd503_457f;
+        const SMSTOP_ZA: u32 = 0xd503_447f;
+        const SMSTART: u32 = 0xd503_477f;
+        const SME_TRAP: u64 = 0x1d << 26 | 1 << 25;
+        const SMEN: u64 = 0b11 << 24;
+        let mut machine = machine(&[]);
+        let chip = machine.profile.chip;
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x2_0000);
+        machine.derived_changed();
+        let run = |machine: &mut TestMachine, el: u8, word: u32| {
+            machine.cpu.pstate = Pstate {
+                sp: el != 0,
+                ..Pstate::reset(el.max(1))
+            };
+            machine.cpu.pstate.el = el;
+            machine.cpu.pc = BASE;
+            machine.system_instruction(word)
+        };
+        if !Feature::FEAT_SME.on(chip) {
+            for word in [SMSTART_ZA, access(true, SVCR, 0)] {
+                run(&mut machine, 1, word).unwrap();
+                assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+            }
+            return;
+        }
+        // CPACR_EL1.SMEN and CPTR_EL2.SMEN clear trap SME accesses from EL1
+        // with EC 0x1D, SMTC 0: to EL1, then to EL2.
+        machine.cpu.registers.set(Register::CPTR_EL2, 0, SMEN);
+        for word in [SMSTART_ZA, access(true, SVCR, 0)] {
+            run(&mut machine, 1, word).unwrap();
+            assert_eq!(
+                (machine.cpu.pstate.el, machine.cpu.read(Register::ESR_EL1)),
+                (1, SME_TRAP)
+            );
+        }
+        // SMEN 0b01 enables EL1 but traps EL0.
+        machine
+            .cpu
+            .registers
+            .set(Register::CPACR_EL1, 0, 0b01 << 24);
+        run(&mut machine, 0, SMSTART_ZA).unwrap();
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.read(Register::ESR_EL1)),
+            (1, SME_TRAP)
+        );
+        machine.cpu.registers.set(Register::CPTR_EL2, 0, 0);
+        run(&mut machine, 1, SMSTART_ZA).unwrap();
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.read(Register::ESR_EL2)),
+            (2, SME_TRAP)
+        );
+        machine.cpu.registers.set(Register::CPTR_EL2, 0, SMEN);
+        machine.cpu.registers.set(Register::CPACR_EL1, 0, SMEN);
+        // SMSTART ZA and SMSTOP ZA set and clear SVCR.ZA, as MSR SVCR does;
+        // FPSR keeps its value while SM does not change.
+        machine.cpu.state.fpsr = 0x1f;
+        run(&mut machine, 0, SMSTART_ZA).unwrap();
+        run(&mut machine, 0, access(true, SVCR, 2)).unwrap();
+        assert_eq!((machine.cpu.state.x[2], machine.cpu.pc), (0b10, BASE + 4));
+        run(&mut machine, 0, SMSTOP_ZA).unwrap();
+        assert_eq!(machine.cpu.svcr(), 0);
+        machine.cpu.state.x[3] = !1;
+        run(&mut machine, 1, access(false, SVCR, 3)).unwrap();
+        assert_eq!((machine.cpu.svcr(), machine.cpu.state.fpsr), (0b10, 0x1f));
+        // Streaming mode stops explicitly.
+        for word in [SMSTART, access(false, SVCR, 4)] {
+            machine.cpu.state.x[4] = 1;
+            assert!(matches!(
+                run(&mut machine, 1, word),
+                Err(Stop::Unsupported(_))
+            ));
+        }
+        // SMIDR_EL1 has no profile value: reading it stops.
+        const SMIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 6);
+        assert!(matches!(
+            run(&mut machine, 1, access(true, SMIDR_EL1, 9)),
+            Err(Stop::Unsupported(_))
+        ));
+        // SMCR_EL1, SMPRI_EL1 and TPIDR2_EL0 hold the chip's fields, once
+        // HFGRTR_EL2 and HFGWTR_EL2 set nSMPRI_EL1 and nTPIDR2_EL0 and
+        // SCTLR_EL1.EnTP2 lets EL0 reach TPIDR2_EL0.
+        for register in [Register::HFGRTR_EL2, Register::HFGWTR_EL2] {
+            machine.cpu.registers.set(register, 0, 0b11 << 54);
+        }
+        let sctlr = machine.cpu.read(Register::SCTLR_EL1);
+        machine
+            .cpu
+            .registers
+            .set(Register::SCTLR_EL1, 0, sctlr | 1 << 60);
+        for (el, encoding, register) in [
+            (1, SMCR_EL1, Register::SMCR_EL1),
+            (1, SMPRI_EL1, Register::SMPRI_EL1),
+            (0, TPIDR2_EL0, Register::TPIDR2_EL0),
+        ] {
+            machine.cpu.state.x[5] = u64::MAX;
+            run(&mut machine, el, access(false, encoding, 5)).unwrap();
+            run(&mut machine, el, access(true, encoding, 6)).unwrap();
+            assert_eq!(
+                (machine.cpu.state.x[6], machine.cpu.pc),
+                (!register.res0(chip), BASE + 4),
+                "{register:?}"
+            );
+        }
+        // At EL2, SMCR_EL1 names SMCR_EL2 and SMCR_EL12 reaches SMCR_EL1.
+        const SMCR_EL2: Encoding = Encoding::new(3, 4, 1, 2, 6);
+        const SMCR_EL12: Encoding = Encoding::new(3, 5, 1, 2, 6);
+        const SMPRIMAP_EL2: Encoding = Encoding::new(3, 4, 1, 2, 5);
+        for (encoding, length, register) in [
+            (SMCR_EL1, 1, Register::SMCR_EL2),
+            (SMCR_EL12, 2, Register::SMCR_EL1),
+            (SMCR_EL2, 3, Register::SMCR_EL2),
+        ] {
+            machine.cpu.state.x[7] = length;
+            run(&mut machine, 2, access(false, encoding, 7)).unwrap();
+            assert_eq!(machine.cpu.read(register) & 0xf, length, "{encoding:?}");
+            run(&mut machine, 2, access(true, encoding, 8)).unwrap();
+            assert_eq!(machine.cpu.state.x[8] & 0xf, length, "{encoding:?}");
+        }
+        machine.cpu.state.x[7] = u64::MAX;
+        run(&mut machine, 2, access(false, SMPRIMAP_EL2, 7)).unwrap();
+        assert_eq!(
+            machine.cpu.read(Register::SMPRIMAP_EL2),
+            !Register::SMPRIMAP_EL2.res0(chip)
         );
     }
 
@@ -1939,16 +2080,6 @@ mod tests {
             let mut fields = !(register.res0(chip) | register.res1(chip));
             if register == Register::HFGITR_EL2 {
                 fields &= !INSTRUCTIONS;
-            }
-            // nSMPRI_EL1 and nTPIDR2_EL0 control SME registers, which the
-            // engine refuses until it implements FEAT_SME. They are rows of
-            // the M4 to M6 alone, which the M2's entries do not reach, so
-            // they stay open.
-            if matches!(register, Register::HFGRTR_EL2 | Register::HFGWTR_EL2)
-                && Feature::FEAT_SME.on(chip)
-                && chip.implemented(Feature::FEAT_SME) != Ok(true)
-            {
-                fields &= !(0b11 << 54);
             }
             for bit in (0..64).filter(|bit| fields >> bit & 1 != 0) {
                 let traps = el1_traps_to_el2(|machine| {

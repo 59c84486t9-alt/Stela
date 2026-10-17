@@ -2449,6 +2449,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 });
                 return Ok(());
             }
+            RegisterOutcome::SmeTrapped(el) => {
+                let exception = Exception::synchronous(Class::SmeAccess, 0, self.cpu.pc);
+                self.take(exception.to(el));
+                return Ok(());
+            }
             RegisterOutcome::Refused(refusal) => {
                 let mut requirement =
                     self.requirement(RequirementKind::SystemRegister { word, refusal });

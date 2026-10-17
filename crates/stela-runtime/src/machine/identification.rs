@@ -93,6 +93,8 @@ const NO_GUARANTEE: &str = "translated code gives no such timing or speculation 
 const PAUTH_LR: &str = "PACM sets PSTATE.PACM for the next instruction, as IsPACMEnabled \
      allows, and the two-modifier forms and the PACM-modified PAC*SP, AUT*SP, RETA* and \
      *1716 forms compute ComputePAC2QARMA";
+const SME_PENDING: &str = "the engine holds SVCR.ZA and the SME System registers, but \
+     refuses streaming mode and the SME and SVE instructions";
 const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCTX run their \
      generated accessors, with SCTLR_ELx.EnRCTX and HFGITR_EL2 traps, and complete with no \
      effect: the engine keeps no prediction state a later context could use";
@@ -265,6 +267,20 @@ pub const TABLE: &[Row] = &[
         2,
         "FEAT_SSBS2",
         engine(true, "MRS and MSR of SSBS"),
+    ),
+    feature(
+        ID_AA64PFR1_EL1,
+        24,
+        1,
+        "FEAT_SME",
+        engine(false, SME_PENDING),
+    ),
+    feature(
+        ID_AA64PFR1_EL1,
+        24,
+        2,
+        "FEAT_SME2",
+        engine(false, SME_PENDING),
     ),
     // ID_AA64ISAR0_EL1
     feature(

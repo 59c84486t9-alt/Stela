@@ -137,7 +137,10 @@ pub fn test_chip() -> Chip {
 
 /// Whether the engine implements a feature that only some chips have: every
 /// feature the M2 has; the M3's FEAT_HCX, FEAT_NV and FEAT_NV2; the M4's
-/// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS); the M5's
+/// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS) and FEAT_SME with
+/// FEAT_SME2, whose System registers and PSTATE.ZA the engine holds (it
+/// refuses streaming mode, and the compiler refuses the SME and SVE
+/// instructions, explicitly); the M5's
 /// FEAT_SPECRES2 and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
 /// FEAT_FPACCOMBINE, FEAT_CPA (whose arithmetic the engine completes),
 /// FEAT_PAuth_LR with FEAT_SCTLR2 (PACM and the two-modifier PAC forms),
@@ -174,13 +177,13 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_RASv2
         | Feature::FEAT_SPECRES2
         | Feature::FEAT_WFxT
-        | Feature::FEAT_XS => true,
+        | Feature::FEAT_XS
+        | Feature::FEAT_SME
+        | Feature::FEAT_SME2 => true,
         Feature::FEAT_FP8
         | Feature::FEAT_FPMR
         | Feature::FEAT_MTE
         | Feature::FEAT_MTE2
-        | Feature::FEAT_SME
-        | Feature::FEAT_SME2
         | Feature::FEAT_SME2p1
         | Feature::FEAT_SME_B16B16
         | Feature::FEAT_SME_F16F16
@@ -227,9 +230,10 @@ mod tests {
         }
         assert_eq!(Chip::AppleM2.implemented(Feature::FEAT_HCX), Ok(false));
         assert_eq!(Chip::AppleM3.implemented(Feature::FEAT_HCX), Ok(true));
+        assert_eq!(Chip::AppleM4.implemented(Feature::FEAT_SME), Ok(true));
         assert_eq!(
-            Chip::AppleM4.implemented(Feature::FEAT_SME),
-            Err("FEAT_SME of the chip is not implemented")
+            Chip::AppleM5.implemented(Feature::FEAT_MTE),
+            Err("FEAT_MTE of the chip is not implemented")
         );
         assert_eq!(Chip::AppleM1.implemented(Feature::FEAT_FGT), Ok(false));
     }

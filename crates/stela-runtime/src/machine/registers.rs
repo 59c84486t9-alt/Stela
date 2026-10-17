@@ -172,6 +172,8 @@ pub enum Outcome {
     Undefined,
     /// Trapped with EC 0x18, to the given EL or routed by default.
     Trapped(Option<u8>),
+    /// An SME access trap (EC 0x1D, SMTC 0) to the given EL.
+    SmeTrapped(u8),
     Refused(Refusal),
 }
 
@@ -477,9 +479,11 @@ impl Cpu {
 
     /// MSR (immediate), following Arm's `MSR (immediate)` decode for the
     /// profile: SPSel, PAN and UAO from EL1, DAIFSet, DAIFClr, DIT and SSBS
-    /// from EL0. Every other PSTATE field encoding is UNDEFINED, including
-    /// those of features outside the profile (NMI, SME, MTE and the EBEP
-    /// family) and the EL2, EL3 and Secure op1 values. DAIFSet and DAIFClr
+    /// from EL0, and with FEAT_SME SVCRSM, SVCRZA and SVCRSMZA (SMSTART and
+    /// SMSTOP) from EL0 after `CheckSMEAccess`. Every other PSTATE field
+    /// encoding is UNDEFINED, including those of features outside the
+    /// profile (NMI, MTE and the EBEP family) and the EL2, EL3 and Secure
+    /// op1 values. DAIFSet and DAIFClr
     /// at EL0 trap in the host or while SCTLR_EL1.UMA is clear, to EL2 under
     /// HCR_EL2.TGE (Arm `AArch64_CheckDAIFAccess`).
     pub fn write_pstate_field(&mut self, encoding: Encoding) -> Outcome {
@@ -489,6 +493,9 @@ impl Cpu {
         let minimum = match (encoding.op1(), encoding.op2()) {
             (0, 3..=5) => 1,
             (3, 1 | 2 | 6 | 7) => 0,
+            // CRm<3:1> selects SM, ZA or both; 0b000 and 0b1xx are
+            // unallocated.
+            (3, 3) if self.scalable.is_some() && matches!(immediate >> 1, 1..=3) => 0,
             _ => return Outcome::Undefined,
         };
         if self.pstate.el < minimum {
@@ -523,6 +530,22 @@ impl Cpu {
             (0, 4) => {
                 self.pstate.pan = bit;
                 changes.regime = true;
+            }
+            (3, 3) => {
+                if let Some(el) = self.sme_access_trap() {
+                    return Outcome::SmeTrapped(el);
+                }
+                let svcr = self.svcr();
+                let (streaming, za) = (svcr & 1 != 0, svcr & 2 != 0);
+                let streaming = if immediate & 0b0010 != 0 {
+                    bit
+                } else {
+                    streaming
+                };
+                let za = if immediate & 0b0100 != 0 { bit } else { za };
+                if let Err(reason) = self.set_svcr(streaming, za) {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(reason));
+                }
             }
             (0, 3) => self.pstate.uao = bit,
             (3, 2) => self.pstate.dit = bit,
