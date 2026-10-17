@@ -3343,6 +3343,37 @@ mod tests {
     }
 
     #[test]
+    fn sysl_has_no_architectural_accessor_and_refuses_the_implementation_defined_space() {
+        let mut machine = machine(&[]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        // GCSPOPM (SYSL #0, C7, C7, #1) needs FEAT_GCS, and op1 3 CRn 7 has
+        // no SYSL: both are UNDEFINED at EL1 and EL0.
+        for (el, word) in [(1, 0xd528_7720), (1, 0xd52b_7000), (0, 0xd528_7720)] {
+            machine.cpu.set_pstate(Pstate::reset(el));
+            machine.cpu.pc = BASE;
+            machine.system_instruction(word).unwrap();
+            assert_eq!(machine.cpu.pstate.el, 1, "{word:#x}");
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL1) >> 26,
+                0,
+                "{word:#x}"
+            );
+        }
+        // CRn 11 and 15 are the IMPLEMENTATION DEFINED space.
+        for word in [0xd528_b000, 0xd52f_f3e0] {
+            machine.cpu.set_pstate(Pstate::reset(1));
+            machine.cpu.pc = BASE;
+            assert!(
+                matches!(machine.system_instruction(word), Err(Stop::Unsupported(_))),
+                "{word:#x}"
+            );
+        }
+    }
+
+    #[test]
     fn completion_barriers_and_unallocated_hints_only_advance_the_pc() {
         let mut machine = machine(&[]);
         for el in [0, 1, 2] {
