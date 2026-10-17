@@ -253,9 +253,11 @@ mod tests {
         );
         assert!(!event(&cpu, 0, 7) && event(&cpu, 7, 8));
         assert_eq!(next_event(&cpu, 8), Some(16));
-        // EVNTIS adds 8 to EVNTI.
+        // EVNTIS (FEAT_ECV) adds 8 to EVNTI; without it (the M1) the bit is
+        // RES0 and EVNTI 0 signals every count.
         cpu.registers.set(Register::CNTHCTL_EL2, 0, EVNTEN | EVNTIS);
-        assert_eq!(next_event(&cpu, 0), Some(256));
+        let ecv = crate::machine::system::Feature::FEAT_ECV.on(cpu.registers.chip());
+        assert_eq!(next_event(&cpu, 0), Some(if ecv { 256 } else { 1 }));
         // The EL1 stream counts the virtual count and only outside the host.
         cpu.registers.set(Register::CNTHCTL_EL2, 0, 0);
         cpu.registers.set(Register::CNTVOFF_EL2, 0, 1);

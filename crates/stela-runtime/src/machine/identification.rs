@@ -1087,11 +1087,16 @@ mod tests {
 
     #[test]
     fn minimal_feature_configurations_are_advertised() {
-        let values = derive(Chip::DEFAULT, TargetCpu::detect(), true);
+        let values = derive(crate::machine::test_chip(), TargetCpu::detect(), true);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         let field = |register, shift: u32| (value(register) >> shift) & 0xf;
-        // RASv1p1, MPAM v1.0 and no AMU in ID_AA64PFR0_EL1; LOR in MMFR1.
-        assert_eq!(field(ID_AA64PFR0_EL1, 28), 2);
+        // RASv1p1 (RASv2 on the M6), MPAM v1.0 and no AMU in
+        // ID_AA64PFR0_EL1; LOR in MMFR1.
+        let chip = crate::machine::test_chip();
+        assert_eq!(
+            field(ID_AA64PFR0_EL1, 28),
+            if has(chip, "FEAT_RASv2") { 3 } else { 2 }
+        );
         assert_eq!(field(ID_AA64PFR0_EL1, 40), 1);
         assert_eq!(field(ID_AA64PFR0_EL1, 44), 0);
         assert_eq!(field(ID_AA64MMFR1_EL1, 16), 1);
@@ -1104,9 +1109,16 @@ mod tests {
             CCSIDR_EL1,
             MDRAR_EL1,
             REVIDR_EL1,
-            ID_AA64ISAR3_EL1,
         ] {
             assert_eq!(value(register), 0, "{register:?}");
+        }
+        // ID_AA64ISAR3_EL1 describes only the M6's CPA, FAMINMAX, LUT and
+        // PAuth_LR, which the instruction-field test checks.
+        if !["FEAT_CPA", "FEAT_FAMINMAX", "FEAT_LUT", "FEAT_PAuth_LR"]
+            .iter()
+            .any(|feature| has(chip, feature))
+        {
+            assert_eq!(value(ID_AA64ISAR3_EL1), 0);
         }
         assert_eq!(value(DBGAUTHSTATUS_EL1), 0b1010);
     }
@@ -1114,7 +1126,7 @@ mod tests {
     #[test]
     fn advertised_instruction_fields_match_what_the_decoder_compiles() {
         let target = TargetCpu::detect();
-        let values = derive(Chip::DEFAULT, target, false);
+        let values = derive(crate::machine::test_chip(), target, false);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         for row in TABLE {
             let Basis::Instructions(samples) = row.basis else {
@@ -1167,13 +1179,18 @@ mod tests {
 
     #[test]
     fn fixed_and_engine_fields() {
-        let values = derive(Chip::DEFAULT, TargetCpu::detect(), false);
+        let values = derive(crate::machine::test_chip(), TargetCpu::detect(), false);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         // EL0/EL1 AArch64, no EL2/EL3; 48-bit PA, 16-bit ASID, 16K and 4K but
-        // not 64K granules; PAN2; Armv8.0 debug without double lock.
+        // not 64K granules; PAN2, or PAN3 from the M4; Armv8.0 debug without
+        // double lock.
+        let chip = crate::machine::test_chip();
         assert_eq!(value(ID_AA64PFR0_EL1) & 0xffff, 0x0011);
         assert_eq!(value(ID_AA64MMFR0_EL1) & 0xffff_ffff, 0x0f10_0025);
-        assert_eq!(value(ID_AA64MMFR1_EL1) >> 20 & 0xf, 2);
+        assert_eq!(
+            value(ID_AA64MMFR1_EL1) >> 20 & 0xf,
+            if has(chip, "FEAT_PAN3") { 3 } else { 2 }
+        );
         assert_eq!(value(ID_AA64DFR0_EL1) & 0xf0f0_f00f, 0x1030_5009);
         // Every other debug field reads its absent value: no PMU, trace,
         // SPE, BRBE or trace buffer, and no OS Double Lock (0xf). The
@@ -1194,7 +1211,7 @@ mod tests {
             1 << 60 | 1 << 48 | 1
         );
         // With EL2: AArch64 EL2 and VHE.
-        let hosted = derive(Chip::DEFAULT, TargetCpu::detect(), true);
+        let hosted = derive(crate::machine::test_chip(), TargetCpu::detect(), true);
         let host = |register| hosted.iter().find(|(r, _)| *r == register).unwrap().1;
         assert_eq!(host(ID_AA64PFR0_EL1), value(ID_AA64PFR0_EL1) | 0x100);
         // With EL2, stage 2 adds 4 KiB and 16 KiB stage-2 granules, XNX and

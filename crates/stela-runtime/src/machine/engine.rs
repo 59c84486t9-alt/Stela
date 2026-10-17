@@ -2727,13 +2727,32 @@ mod tests {
 
     pub(super) const BASE: u64 = 0x8_0000_0000;
 
+    /// A machine running `words` at BASE on PE 0 at EL1 of the chip the
+    /// tests run on ([`crate::machine::test_chip`]).
     pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
         board(words, NoDevices, Vec::new())
     }
 
-    /// A machine running `words` at BASE on PE 0 at EL1, with `devices` and
-    /// the PEs of `processors`.
+    /// [`machine`] on `chip`, for a test that fixes its chip.
+    pub(super) fn machine_on(
+        chip: crate::machine::Chip,
+        words: &[u32],
+    ) -> Machine<FakeHost, NoDevices> {
+        board_on(chip, words, NoDevices, Vec::new())
+    }
+
+    /// [`machine`] with `devices` and the PEs of `processors`.
     pub(super) fn board<D: Devices>(
+        words: &[u32],
+        devices: D,
+        processors: Vec<registers::Identity>,
+    ) -> Machine<FakeHost, D> {
+        board_on(crate::machine::test_chip(), words, devices, processors)
+    }
+
+    /// [`board`] on `chip`.
+    pub(super) fn board_on<D: Devices>(
+        chip: crate::machine::Chip,
         words: &[u32],
         devices: D,
         processors: Vec<registers::Identity>,
@@ -2753,13 +2772,13 @@ mod tests {
         };
         let profile = CpuProfile {
             name: "test",
-            chip: crate::machine::Chip::DEFAULT,
+            chip,
             counter_frequency: 24_000_000,
             fixed: vec![(registers::encodings::DCZID_EL0, 4)],
             processors,
         };
         Machine::new(
-            Cpu::new(BASE, Pstate::reset(1)),
+            Cpu::of(chip, BASE, Pstate::reset(1)),
             host,
             devices,
             profile,
@@ -2779,16 +2798,15 @@ mod tests {
         assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == index));
         assert_eq!(machine.statistics.compiled, 1, "cached");
         // An SVE instruction compiles as the UDF it is on a chip without SVE
-        // or SME.
-        let mut machine = machine_with(&[0x9100_0400, 0x04a0_0000]);
+        // or SME, such as the M2.
+        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[0x9100_0400, 0x04a0_0000]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("block with UDF")
         };
         assert_eq!(machine.blocks[index].source_map.len(), 2);
         // On the M4, whose SME has it in streaming mode, the engine does not
         // implement it yet, so it is refused at its own PC with its word.
-        let mut machine = machine_with(&[0x9100_0400, 0x04a0_0000]);
-        machine.profile.chip = crate::machine::Chip::AppleM4;
+        let mut machine = machine_on(crate::machine::Chip::AppleM4, &[0x9100_0400, 0x04a0_0000]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("prefix block")
         };
@@ -2931,10 +2949,6 @@ mod tests {
         }
     }
 
-    fn machine_with(words: &[u32]) -> Machine<FakeHost, NoDevices> {
-        machine(words)
-    }
-
     #[test]
     fn svc_eret_and_system_registers_follow_the_architecture() {
         let mut machine = machine(&[]);
@@ -2974,9 +2988,7 @@ mod tests {
         const NV: u64 = 1 << 42;
         const NV2: u64 = 1 << 45;
         let chip = crate::machine::Chip::AppleM3;
-        let mut machine = machine(&[]);
-        machine.profile.chip = chip;
-        machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+        let mut machine = machine_on(chip, &[]);
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
         registers.set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
@@ -3039,7 +3051,7 @@ mod tests {
             Err(Stop::Unsupported(_))
         ));
         // The M2 has no FEAT_NV: the bits are RES0 and ERET returns.
-        let mut machine = super::tests::machine(&[]);
+        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
         machine
             .cpu
             .registers
@@ -3088,9 +3100,7 @@ mod tests {
         const WFET_X2: u32 = 0xd503_1002;
         const HCR_TWI: u64 = 1 << 13;
         let chip = crate::machine::Chip::AppleM4;
-        let mut machine = machine(&[]);
-        machine.profile.chip = chip;
-        machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+        let mut machine = machine_on(chip, &[]);
         machine
             .cpu
             .registers
@@ -3117,7 +3127,7 @@ mod tests {
             0x0600_0000 | 1 << 24 | 0b1110 << 20 | 1 << 5 | 1 << 2 | 0b10
         );
         // The M2 has no FEAT_WFxT: the timeout forms are UNDEFINED.
-        let mut machine = super::tests::machine(&[]);
+        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
         machine
             .cpu
             .registers
@@ -3296,9 +3306,7 @@ mod tests {
             (crate::machine::Chip::AppleM2, false),
             (crate::machine::Chip::AppleM4, true),
         ] {
-            let mut machine = machine(&[]);
-            machine.profile.chip = chip;
-            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+            let mut machine = machine_on(chip, &[]);
             // A level-1 block maps VA 0-1 GiB at BASE, privileged
             // read/write and EL0 execute-only (AP 0b00, UXN 0).
             let block = BASE | 1 | 1 << 10;
@@ -3596,16 +3604,15 @@ mod tests {
     /// A machine at EL1h with SCTLR_EL1.EnIA and EnIB set, HCR_EL2.API set,
     /// 39-bit TTBR1 addresses without TBI and both instruction keys loaded.
     fn pac_machine() -> Machine<FakeHost, NoDevices> {
-        pac_machine_for(crate::machine::Chip::AppleM2, &[])
+        pac_setup(machine(&[]))
     }
 
     /// [`pac_machine`] on `chip`, running `words` at BASE.
     fn pac_machine_for(chip: crate::machine::Chip, words: &[u32]) -> Machine<FakeHost, NoDevices> {
-        let mut machine = machine(words);
-        if chip != machine.profile.chip {
-            machine.profile.chip = chip;
-            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
-        }
+        pac_setup(machine_on(chip, words))
+    }
+
+    fn pac_setup(mut machine: Machine<FakeHost, NoDevices>) -> Machine<FakeHost, NoDevices> {
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::TCR_EL1, 0, 25 << 16 | 25);
         for (register, value) in [
@@ -3851,8 +3858,7 @@ mod tests {
         const AUTIBSP: u32 = 0xd503_23ff;
         let pointer = 0xffff_ff80_0000_4000_u64;
         let run = |chip| {
-            let mut machine = pac_machine();
-            machine.profile.chip = chip;
+            let mut machine = pac_machine_for(chip, &[]);
             machine.cpu.state.x[30] = pointer;
             machine.cpu.state.sp = 0xffff_ff80_0001_0000;
             machine.system_instruction_for_test(PACIBSP);
@@ -3891,9 +3897,7 @@ mod tests {
             (crate::machine::Chip::AppleM5, false),
             (crate::machine::Chip::AppleM6, true),
         ] {
-            let mut machine = machine(&[]);
-            machine.profile.chip = chip;
-            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+            let mut machine = machine_on(chip, &[]);
             machine
                 .cpu
                 .registers
@@ -3932,8 +3936,7 @@ mod tests {
             (crate::machine::Chip::AppleM2, false),
             (crate::machine::Chip::AppleM6, true),
         ] {
-            let mut machine = pac_machine();
-            machine.profile.chip = chip;
+            let mut machine = pac_machine_for(chip, &[]);
             machine.cpu.state.x[30] = pointer;
             machine.cpu.state.sp = 0xffff_ff80_0001_0000;
             machine.system_instruction_for_test(PACIBSP);
@@ -3958,8 +3961,7 @@ mod tests {
             }
         }
         // LDRAA of an unsigned base faults with the data key A (ISS 0b10).
-        let mut machine = pac_machine();
-        machine.profile.chip = crate::machine::Chip::AppleM6;
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::APDAKeyLo_EL1, 0, 0x2468_ace0_1357_9bdf);
         registers.set(SystemRegister::APDAKeyHi_EL1, 0, 0x0f1e_2d3c_4b5a_6978);
@@ -3982,17 +3984,27 @@ mod tests {
         machine.cpu.state.sp = 0xffff_ff80_0001_0000;
         machine.system_instruction_for_test(PACIBSP);
         let signed = machine.cpu.state.x[30];
-        // A different modifier fails a standalone AUT: EC 0x1C, ISS {data=0,
-        // key B=1}, at the instruction, to the current EL.
+        // A different modifier fails a standalone AUT: under FEAT_FPAC EC
+        // 0x1C, ISS {data=0, key B=1}, at the instruction, to the current EL.
+        // Without it (the M1) the AUT writes the key B error code at bits
+        // 62:61 and completes (Arm `Auth`).
         machine.cpu.state.sp += 16;
         let pc = machine.cpu.pc;
         machine.system_instruction_for_test(AUTIBSP);
-        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0001);
-        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
-        assert_eq!(
-            (machine.cpu.pc, machine.cpu.state.x[30]),
-            (0x1_0200, signed)
-        );
+        if Feature::FEAT_FPAC.on(machine.profile.chip) {
+            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0001);
+            assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
+            assert_eq!(
+                (machine.cpu.pc, machine.cpu.state.x[30]),
+                (0x1_0200, signed)
+            );
+        } else {
+            let pointer = 0xffff_ff80_0000_4000_u64;
+            assert_eq!(
+                (machine.cpu.pc, machine.cpu.state.x[30]),
+                (pc + 4, pointer & !(0b11 << 61) | 0b10 << 61)
+            );
+        }
         // HCR_EL2.API clear traps an enabled key's use from EL1 to EL2
         // (EC 0x09, ISS 0); XPAC uses no key and never traps.
         machine.cpu.set_pstate(Pstate::reset(1));
@@ -4044,19 +4056,20 @@ mod tests {
         machine.system_instruction(ERETAA).unwrap();
         assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (target, 1));
         // With another SP the combined check corrupts the target instead of
-        // faulting (no FEAT_FPACCOMBINE).
+        // faulting without FEAT_FPACCOMBINE; the M6's fault is below.
         machine.cpu.state.sp += 16;
-        machine.system_instruction(ERETAA).unwrap();
-        assert_ne!(machine.cpu.pc, target);
-        assert_eq!(machine.cpu.pc & 0x7f_ffff_ffff, target & 0x7f_ffff_ffff);
+        if !Feature::FEAT_FPACCOMBINE.on(machine.profile.chip) {
+            machine.system_instruction(ERETAA).unwrap();
+            assert_ne!(machine.cpu.pc, target);
+            assert_eq!(machine.cpu.pc & 0x7f_ffff_ffff, target & 0x7f_ffff_ffff);
+        }
         // HCR_EL2.API clear traps the enabled key's use to EL2.
         machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);
         machine.system_instruction(ERETAA).unwrap();
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x2600_0000);
         // With FEAT_FPACCOMBINE (M6) the failed combined check takes EC 0x1C,
         // ISS {data=0, key A=0}, at the ERETAA and the return is not made.
-        let mut machine = pac_machine();
-        machine.profile.chip = crate::machine::Chip::AppleM6;
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
         machine.cpu.state.sp = 0xffff_ff80_0002_0010;
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::ELR_EL1, 0, signed);
@@ -4202,7 +4215,13 @@ mod tests {
         machine.cpu.state.x[0] = u64::MAX;
         machine.system_instruction(0xd51b_4400).unwrap(); // msr fpcr, x0
         machine.system_instruction(0xd53b_4401).unwrap(); // mrs x1, fpcr
-        assert_eq!(machine.cpu.state.x[1], 0x07c8_0000);
+        // FEAT_AFP (from the M4) adds FIZ, AH and NEP.
+        let afp = if Feature::FEAT_AFP.on(machine.profile.chip) {
+            0b111
+        } else {
+            0
+        };
+        assert_eq!(machine.cpu.state.x[1], 0x07c8_0000 | afp);
     }
 
     #[test]
@@ -4213,9 +4232,7 @@ mod tests {
             (crate::machine::Chip::AppleM2, false),
             (crate::machine::Chip::AppleM4, true),
         ] {
-            let mut machine = machine(&[]);
-            machine.profile.chip = chip;
-            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+            let mut machine = machine_on(chip, &[]);
             for register in [SystemRegister::CPACR_EL1, SystemRegister::CPTR_EL2] {
                 machine.cpu.registers.set(register, 0, 0b11 << 20);
             }
@@ -4294,10 +4311,16 @@ mod tests {
             machine.system_instruction(word).unwrap();
             assert!(machine.cpu.event, "{word:#x}");
         }
-        // DSB nXS is UNDEFINED without FEAT_XS; PACM (FEAT_PAuth_LR) is a NOP.
+        // DSB nXS is UNDEFINED without FEAT_XS (before the M4); PACM
+        // completes, a NOP without FEAT_PAuth_LR.
         machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.pc = BASE;
         machine.system_instruction(0xd503_323f).unwrap();
-        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+        if Feature::FEAT_XS.on(machine.profile.chip) {
+            assert_eq!(machine.cpu.pc, BASE + 4);
+        } else {
+            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+        }
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.cpu.pc = BASE;
         machine.system_instruction_for_test(0xd503_24ff);
@@ -4317,8 +4340,7 @@ mod tests {
             (crate::machine::Chip::AppleM4, true),
         ] {
             let fresh = |el| {
-                let mut machine = machine(&[]);
-                machine.profile.chip = chip;
+                let mut machine = machine_on(chip, &[]);
                 machine.cpu = Cpu::of(chip, BASE, Pstate::reset(el));
                 let registers = &mut machine.cpu.registers;
                 registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
@@ -4517,8 +4539,7 @@ mod tests {
             (crate::machine::Chip::AppleM5, true),
         ] {
             let fresh = |el| {
-                let mut machine = machine(&[]);
-                machine.profile.chip = chip;
+                let mut machine = machine_on(chip, &[]);
                 machine.cpu = Cpu::of(chip, BASE, Pstate::reset(el));
                 machine
                     .cpu

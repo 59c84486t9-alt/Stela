@@ -1,9 +1,13 @@
 //! Merge the status registry into the system requirement matrix and render
 //! the README line. Registry entries apply in order, the last matching entry
-//! winning on each chip it names (by default the M2 every test has run on);
-//! a row no entry matches on a chip is `open` there and owned by the system
-//! engine.
-use super::{CHIPS, DEFAULT_CHIP, MATRIX, Matrix, REGISTRY};
+//! winning on each chip it names. An entry that names no chips holds on the
+//! default M2, and on another chip for the rows the M2 shares when every test
+//! it cites passed there after consulting that chip (`runs`). A row no entry
+//! matches on a chip is `open` there and owned by the system engine.
+use super::{
+    CHIPS, DEFAULT_CHIP, MATRIX, Matrix, REGISTRY,
+    runs::{self, LEDGER, Runs},
+};
 use crate::tools::root;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, to_string as json};
@@ -63,6 +67,9 @@ pub struct Entry {
     pattern: String,
     /// The chips the entry's tests establish it on.
     chips: Vec<String>,
+    /// Whether the entry names its chips; one that does not also holds where
+    /// the per-chip runs credit its tests.
+    explicit: bool,
     status: String,
     owner: String,
     tests: Vec<String>,
@@ -85,6 +92,7 @@ pub fn registry() -> Result<Vec<Entry>> {
                 .as_str()
                 .context("entry without rows")?
                 .to_owned(),
+            explicit: entry["chips"].is_array(),
             chips: match entry["chips"].as_array() {
                 Some(chips) => chips
                     .iter()
@@ -158,12 +166,28 @@ fn row_chips(row: &Value) -> Vec<String> {
     }
 }
 
-pub fn render(matrix: &Matrix, registry: &[Entry], _previous: &str) -> Result<String> {
+pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str) -> Result<String> {
     for entry in registry {
         for test in &entry.tests {
             check_test(test)?;
         }
     }
+    // The other chips where each implicit entry's every test was credited.
+    let credited: Vec<Vec<&str>> = registry
+        .iter()
+        .map(|entry| {
+            CHIPS
+                .iter()
+                .map(|chip| chip.name)
+                .filter(|chip| *chip != DEFAULT_CHIP)
+                .filter(|chip| {
+                    !entry.explicit
+                        && !entry.tests.is_empty()
+                        && entry.tests.iter().all(|test| runs.credits(chip, test))
+                })
+                .collect()
+        })
+        .collect();
     // Per row, per chip it applies to: the winning entry, if any.
     let mut winners: BTreeMap<String, BTreeMap<String, Option<&Entry>>> = matrix
         .rows
@@ -176,7 +200,7 @@ pub fn render(matrix: &Matrix, registry: &[Entry], _previous: &str) -> Result<St
             (id.clone(), chips)
         })
         .collect();
-    for entry in registry {
+    for (entry, credited) in registry.iter().zip(&credited) {
         let mut matched = 0;
         for (id, chips) in winners.iter_mut() {
             if !matches(&entry.pattern, id) {
@@ -186,6 +210,15 @@ pub fn render(matrix: &Matrix, registry: &[Entry], _previous: &str) -> Result<St
             for chip in &entry.chips {
                 if let Some(winner) = chips.get_mut(chip) {
                     *winner = Some(entry);
+                }
+            }
+            // A credited chip takes the entry only for a row the M2 shares,
+            // which is what the entry's tests established.
+            if chips.contains_key(DEFAULT_CHIP) {
+                for chip in credited {
+                    if let Some(winner) = chips.get_mut(*chip) {
+                        *winner = Some(entry);
+                    }
                 }
             }
         }
@@ -349,7 +382,15 @@ pub fn run(check: bool) -> Result<()> {
     let matrix_text = fs::read_to_string(&matrix_path)?;
     let readme_text = fs::read_to_string(&readme_path)?;
     let matrix = parse(&matrix_text)?;
-    let rendered = render(&matrix, &registry()?, &matrix_text)?;
+    if !check {
+        let ledger_path = root().join(runs::LEDGER);
+        let ledger = runs::run()?;
+        if fs::read_to_string(&ledger_path).unwrap_or_default() != ledger {
+            fs::write(&ledger_path, ledger)?;
+            println!("updated {}", ledger_path.display());
+        }
+    }
+    let rendered = render(&matrix, &registry()?, &runs::read()?, &matrix_text)?;
     let readme = render_readme(&readme_text, &serde_json::from_str(&rendered)?)?;
     for (path, old, new) in [
         (&matrix_path, &matrix_text, &rendered),
@@ -417,8 +458,9 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
     table.push_str(&format!(
         "\nRows are the AArch64 requirements of each Apple CPU profile in Arm AARCHMRS \
          {}; the first table is the Mac14,3 (M2) profile. A row counts on a chip only \
-         when its tests have run on that chip, and partial rows earn no credit. \
-         [System matrix]({MATRIX})\n",
+         when its tests have run on that chip: the M2's tests rerun on every chip \
+         ([runs]({LEDGER})) and a chip's own rows need tests of their own. Partial \
+         rows earn no credit. [System matrix]({MATRIX})\n",
         matrix["source"]["release"].as_str().unwrap_or("?"),
     ));
     let block = format!("{README_START}\n{table}{README_END}");
@@ -452,7 +494,7 @@ mod tests {
     #[test]
     fn matrix_and_readme_are_current() -> Result<()> {
         let text = fs::read_to_string(root().join(MATRIX))?;
-        let rendered = render(&parse(&text)?, &registry()?, &text)?;
+        let rendered = render(&parse(&text)?, &registry()?, &runs::read()?, &text)?;
         assert!(
             rendered == text,
             "{MATRIX} is stale; run `cargo xtask progress`"
@@ -464,11 +506,24 @@ mod tests {
         Entry {
             pattern: pattern.into(),
             chips: chips.iter().map(|chip| String::from(*chip)).collect(),
+            explicit: true,
             status: status.into(),
             owner: DEFAULT_OWNER.into(),
             tests: Vec::new(),
             note: Value::Null,
         }
+    }
+
+    /// A real engine test, for the registry's existence check.
+    const TEST: &str = "crates/stela-runtime/src/machine/engine.rs#compiles_blocks_through_the_page_and_reports_unsupported_words";
+
+    /// Runs that credit [`TEST`] on the M3 alone.
+    fn m3_runs() -> Result<Runs> {
+        runs::parse(
+            r#"{"sources":{"sha256":"d"},"chips":{"apple-m3":{"credited":
+                ["machine::engine::tests::compiles_blocks_through_the_page_and_reports_unsupported_words"]}}}"#,
+            "d",
+        )
     }
 
     #[test]
@@ -482,7 +537,7 @@ mod tests {
             entry("register:*", &[DEFAULT_CHIP], "implemented"),
             entry("register:HCR_EL2", &["apple-m1"], "partial"),
         ];
-        let rendered: Value = serde_json::from_str(&render(&matrix, &registry, "")?)?;
+        let rendered: Value = serde_json::from_str(&render(&matrix, &registry, &m3_runs()?, "")?)?;
         let rows = rendered["rows"].as_array().context("rows")?;
         let row = |id: &str| rows.iter().find(|row| row["id"] == id).cloned().unwrap();
         // HCR_EL2 is on every chip: implemented on the M2, partial on the M1
@@ -498,6 +553,32 @@ mod tests {
         let chips = &rendered["assessment"]["chips"];
         assert_eq!(chips["apple-m2"]["implemented"], 1);
         assert_eq!(chips["apple-m3"]["open"], 2);
+        Ok(())
+    }
+
+    #[test]
+    fn an_implicit_entry_holds_where_its_tests_were_credited_on_shared_rows() -> Result<()> {
+        let text = fs::read_to_string(root().join(MATRIX))?;
+        let mut matrix = parse(&text)?;
+        matrix
+            .rows
+            .retain(|id, _| id == "register:HCR_EL2" || id == "register:HCRX_EL2");
+        let mut implicit = entry("register:*", &[DEFAULT_CHIP], "implemented");
+        implicit.explicit = false;
+        implicit.tests = vec![TEST.into()];
+        let rendered: Value =
+            serde_json::from_str(&render(&matrix, &[implicit], &m3_runs()?, "")?)?;
+        let rows = rendered["rows"].as_array().context("rows")?;
+        let row = |id: &str| rows.iter().find(|row| row["id"] == id).cloned().unwrap();
+        // The M3 run credited the test: HCR_EL2 holds there too, and not on
+        // the uncredited M4.
+        let hcr = row("register:HCR_EL2");
+        assert_eq!(hcr["statuses"]["apple-m3"], "implemented");
+        assert_eq!(hcr["statuses"]["apple-m4"], "open");
+        // HCRX_EL2 is not an M2 row, so the M2's tests do not reach it.
+        let hcrx = row("register:HCRX_EL2");
+        assert_eq!(hcrx["status"], "open");
+        assert!(hcrx["statuses"].is_null(), "open on every chip");
         Ok(())
     }
 }

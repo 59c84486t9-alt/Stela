@@ -298,7 +298,7 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     // EL1 and EL2 cases run on SP_EL0 (EL1t, EL2t), as the harness keeps
     // SP_EL1 and SP_EL2 for itself.
     pstate.sp = false;
-    let mut cpu = Cpu::new(CODE_PAGE, pstate);
+    let mut cpu = Cpu::of(Chip::DEFAULT, CODE_PAGE, pstate);
     cpu.state = case.state.clone();
     // The rest of the EL1 state the harness leaves for the case.
     let nzcv = u64::from(case.state.nzcv) & 0xf000_0000;

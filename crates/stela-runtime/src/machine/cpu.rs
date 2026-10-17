@@ -238,9 +238,10 @@ fn bank(el: u8) -> Bank {
 }
 
 impl Cpu {
-    /// A PE of the default chip.
+    /// A PE of the chip the tests run on ([`super::test_chip`]).
+    #[cfg(test)]
     pub fn new(pc: u64, pstate: Pstate) -> Self {
-        Self::of(super::Chip::DEFAULT, pc, pstate)
+        Self::of(super::test_chip(), pc, pstate)
     }
 
     /// A PE of `chip`, its registers at their Cold reset values under the

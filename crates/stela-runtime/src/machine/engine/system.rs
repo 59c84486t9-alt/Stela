@@ -957,12 +957,12 @@ pub(super) fn identify(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{BASE, machine};
+    use super::super::tests::{BASE, machine, machine_on};
     use crate::machine::{
         Chip,
         cpu::{HCR_HCD, HCR_TGE, HCR_TSC},
         exception::{Pstate, Vector},
-        system::Register,
+        system::{Feature, Register},
     };
     use stela_compiler::aarch64::system::registers::Encoding;
 
@@ -1017,24 +1017,35 @@ mod tests {
         const MDCCINT_EL1: Encoding = Encoding::new(2, 0, 0, 2, 0);
         const TDCC: u64 = 1 << 27;
         let mut machine = machine(&[]);
+        // TDCC is FEAT_FGT's; without it (the M1) the bit is RES0.
+        let fgt = Feature::FEAT_FGT.on(machine.profile.chip);
         machine.cpu.registers.set(Register::MDCR_EL2, 0, TDCC);
         for word in [
             access(true, MDCCSR_EL0, 1),
             access(false, DBGDTR_EL0, 1),
             access(true, MDCCINT_EL1, 1),
         ] {
+            if !fgt {
+                machine.cpu.pc = BASE;
+                machine.cpu.pstate = Pstate::reset(1);
+                machine.system_instruction(word).unwrap();
+                assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, BASE + 4));
+                continue;
+            }
             let esr = el2_trap(&mut machine, word);
             assert_eq!(esr >> 26, 0x18, "{word:#x}");
             assert_eq!(esr & 1, u64::from(word >> 21 & 1), "{word:#x}");
         }
-        // EL0 outside the host traps to EL2 as well, MDSCR_EL1.TDCC clear.
-        machine.cpu.pc = BASE;
-        machine.cpu.pstate = Pstate::reset(0);
-        machine
-            .system_instruction(access(true, DBGDTR_EL0, 1))
-            .unwrap();
-        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
-        assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, 0x18);
+        if fgt {
+            // EL0 outside the host traps to EL2 as well, MDSCR_EL1.TDCC clear.
+            machine.cpu.pc = BASE;
+            machine.cpu.pstate = Pstate::reset(0);
+            machine
+                .system_instruction(access(true, DBGDTR_EL0, 1))
+                .unwrap();
+            assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
+            assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, 0x18);
+        }
         // Without TDCC the EL1 read completes.
         machine.cpu.registers.set(Register::MDCR_EL2, 0, 0);
         machine.cpu.pc = BASE;
@@ -1054,7 +1065,7 @@ mod tests {
         machine
             .system_instruction(access(true, MDCR_EL2, 1))
             .unwrap();
-        assert_eq!(machine.cpu.state.x[1], TDCC | 0xf00);
+        assert_eq!(machine.cpu.state.x[1], if fgt { TDCC } else { 0 } | 0xf00);
     }
 
     #[test]
@@ -1112,9 +1123,7 @@ mod tests {
         const HFGRTR2_NERXGSR: u64 = 1 << 1;
         const HCR_TERR: u64 = 1 << 36;
         let on = |chip| {
-            let mut machine = machine(&[]);
-            machine.profile.chip = chip;
-            machine.cpu = crate::machine::cpu::Cpu::of(chip, BASE, Pstate::reset(1));
+            let mut machine = machine_on(chip, &[]);
             machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
             machine.derived_changed();
             machine
@@ -1165,9 +1174,7 @@ mod tests {
         const ENPACM: u64 = 1 << 7 | 1 << 8;
         const HCRX_SCTLR2EN: u64 = 1 << 15;
         let on = |chip| {
-            let mut machine = machine(&[]);
-            machine.profile.chip = chip;
-            machine.cpu = crate::machine::cpu::Cpu::of(chip, BASE, Pstate::reset(1));
+            let mut machine = machine_on(chip, &[]);
             machine.derived_changed();
             machine
         };
@@ -1513,11 +1520,16 @@ mod tests {
             machine.cpu.state.x[1]
         };
         // CPTR_EL2 has its E2H layout: FPEN, TAM and TCPAC; CPACR_EL1 keeps
-        // FPEN alone.
-        assert_eq!(round_trip(&mut machine, 2, CPTR_EL2), 0xc030_0000);
+        // FPEN alone. With FEAT_SME (from the M4) both also hold SMEN.
+        let smen = if Feature::FEAT_SME.on(machine.profile.chip) {
+            0b11 << 24
+        } else {
+            0
+        };
+        assert_eq!(round_trip(&mut machine, 2, CPTR_EL2), 0xc030_0000 | smen);
         machine.cpu.registers.set(Register::CPTR_EL2, 0, 0b11 << 20);
         machine.derived_changed();
-        assert_eq!(round_trip(&mut machine, 1, CPACR_EL1), 0x0030_0000);
+        assert_eq!(round_trip(&mut machine, 1, CPACR_EL1), 0x0030_0000 | smen);
         // NZCV, DAIF and FPSR hold their flags, masks and cumulative bits.
         assert_eq!(round_trip(&mut machine, 1, NZCV), 0xf000_0000);
         assert_eq!(machine.cpu.state.nzcv, 0xf000_0000);
@@ -1579,8 +1591,15 @@ mod tests {
         assert_eq!(write_read(&mut machine, 1, SPSEL, u64::MAX), 1);
         assert_eq!(write_read(&mut machine, 1, PAN, u64::MAX), 1 << 22);
         assert!(machine.cpu.pstate.pan);
-        assert_eq!(write_read(&mut machine, 1, SSBS, u64::MAX), 1 << 12);
-        assert!(machine.cpu.pstate.ssbs);
+        if Feature::FEAT_SSBS.on(machine.profile.chip) {
+            assert_eq!(write_read(&mut machine, 1, SSBS, u64::MAX), 1 << 12);
+            assert!(machine.cpu.pstate.ssbs);
+        } else {
+            // Apple clang's M4, M5 and M6 have no FEAT_SSBS: UNDEFINED.
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.system_instruction(access(true, SSBS, 1)).unwrap();
+            assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+        }
         // Vector bases are 2 KiB aligned; CONTEXTIDR holds a 32-bit PROCID.
         assert_eq!(write_read(&mut machine, 1, VBAR_EL1, u64::MAX), !0x7ff);
         assert_eq!(write_read(&mut machine, 2, VBAR_EL2, u64::MAX), !0x7ff);
@@ -1723,6 +1742,19 @@ mod tests {
             .registers
             .set(Register::CNTHCTL_EL2, 0, EL1PCTEN);
         machine.host.now = 1000;
+        if !Feature::FEAT_ECV.on(machine.profile.chip) {
+            // Without FEAT_ECV (the M1) the self-synchronized counts are
+            // UNDEFINED.
+            for encoding in [CNTPCTSS_EL0, CNTVCTSS_EL0] {
+                machine.cpu.pstate = kernel;
+                machine.cpu.registers.set(Register::ESR_EL1, 0, 0);
+                machine
+                    .system_instruction(access(true, encoding, 1))
+                    .unwrap();
+                assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+            }
+            return;
+        }
         machine
             .system_instruction(access(true, CNTPCTSS_EL0, 1))
             .unwrap();
@@ -1813,12 +1845,35 @@ mod tests {
             let hcr = machine.cpu.read(Register::HCR_EL2) | HCR_ENABLES;
             machine.cpu.registers.set(Register::HCR_EL2, 0, hcr);
         };
+        let chip = crate::machine::test_chip();
+        if !Feature::FEAT_FGT.on(chip) {
+            // Without FEAT_FGT (the M1) the controls are UNDEFINED at EL2.
+            const HFGRTR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 4);
+            let mut machine = machine(&[]);
+            machine.cpu.pstate = Pstate::reset(2);
+            machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+            machine
+                .system_instruction(access(true, HFGRTR_EL2, 1))
+                .unwrap();
+            assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x0200_0000);
+            return;
+        }
         let baseline = el1_traps_to_el2(enable);
         let mut inert = alloc::vec::Vec::new();
         for register in CONTROLS {
-            let mut fields = !(register.res0(Chip::DEFAULT) | register.res1(Chip::DEFAULT));
+            let mut fields = !(register.res0(chip) | register.res1(chip));
             if register == Register::HFGITR_EL2 {
                 fields &= !INSTRUCTIONS;
+            }
+            // nSMPRI_EL1 and nTPIDR2_EL0 control SME registers, which the
+            // engine refuses until it implements FEAT_SME. They are rows of
+            // the M4 to M6 alone, which the M2's entries do not reach, so
+            // they stay open.
+            if matches!(register, Register::HFGRTR_EL2 | Register::HFGWTR_EL2)
+                && Feature::FEAT_SME.on(chip)
+                && chip.implemented(Feature::FEAT_SME) != Ok(true)
+            {
+                fields &= !(0b11 << 54);
             }
             for bit in (0..64).filter(|bit| fields >> bit & 1 != 0) {
                 let traps = el1_traps_to_el2(|machine| {
@@ -1925,17 +1980,19 @@ mod tests {
             (machine.cpu.pc, class(&machine, Register::ESR_EL1)),
             (0x1_0200, 0)
         );
-        // GMID_EL1 without FEAT_MTE2 is an unimplemented ID register: EC
-        // 0x18 at the current EL.
-        machine.cpu.pstate = kernel;
-        machine.cpu.pc = BASE;
-        machine
-            .system_instruction(access(true, GMID_EL1, 3))
-            .unwrap();
-        assert_eq!(
-            (machine.cpu.pc, class(&machine, Register::ESR_EL1)),
-            (0x1_0200, 0x18)
-        );
+        // GMID_EL1 without FEAT_MTE2 (before the M5) is an unimplemented ID
+        // register: EC 0x18 at the current EL.
+        if !Feature::FEAT_MTE2.on(machine.profile.chip) {
+            machine.cpu.pstate = kernel;
+            machine.cpu.pc = BASE;
+            machine
+                .system_instruction(access(true, GMID_EL1, 3))
+                .unwrap();
+            assert_eq!(
+                (machine.cpu.pc, class(&machine, Register::ESR_EL1)),
+                (0x1_0200, 0x18)
+            );
+        }
     }
 
     #[test]
@@ -2118,7 +2175,7 @@ mod tests {
         // A, IDS, AET, EA and DFSC hold what EL2 writes; the rest is RES0.
         access_at(&mut machine, 2, false, u64::MAX);
         let disr = access_at(&mut machine, 2, true, 0);
-        assert_eq!(disr, !Register::DISR_EL1.res0(Chip::DEFAULT));
+        assert_eq!(disr, !Register::DISR_EL1.res0(machine.profile.chip));
         assert_eq!(disr & (1 << 31 | 1 << 24), 1 << 31 | 1 << 24);
         // With HCR_EL2.AMO, EL1 reads and writes VDISR_EL2 instead.
         machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 5);

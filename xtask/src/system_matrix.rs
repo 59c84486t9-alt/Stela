@@ -24,6 +24,7 @@ mod codegen;
 mod expression;
 mod fold;
 mod resets;
+pub mod runs;
 
 pub const MATRIX: &str = "isa/a64-system-requirements.json";
 pub const REGISTRY: &str = "isa/system-platform-registry.json";
@@ -251,7 +252,7 @@ impl SystemMatrix {
             .map(|(_, chip)| resets::read(&resets_directory, chip))
             .collect::<Result<_>>()?;
         let previous = fs::read_to_string(root().join(MATRIX)).unwrap_or_default();
-        let text = assess::render(&matrix, &assess::registry()?, &previous)?;
+        let text = assess::render(&matrix, &assess::registry()?, &runs::read()?, &previous)?;
         fs::write(root().join(MATRIX), text)?;
         println!("wrote {MATRIX}");
         let applicable: BTreeSet<String> = matrix

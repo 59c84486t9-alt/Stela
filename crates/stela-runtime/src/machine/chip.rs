@@ -106,6 +106,35 @@ impl Chip {
     }
 }
 
+/// The chip the runtime's unit tests build their default CPUs and machines
+/// for: `STELA_TEST_CHIP`, or [`Chip::DEFAULT`]. Each call appends the
+/// running test's name to the file `STELA_TEST_CHIP_LOG` names, so that
+/// `cargo xtask progress`, which runs the tests once per chip, credits a test
+/// on a chip only when it ran there. A test that fixes its chip does not
+/// call it.
+#[cfg(test)]
+pub fn test_chip() -> Chip {
+    extern crate std;
+    use std::io::Write;
+    let chip = std::env::var("STELA_TEST_CHIP").map_or(Chip::DEFAULT, |name| {
+        Chip::from_name(&name).unwrap_or_else(|| panic!("STELA_TEST_CHIP {name} names no chip"))
+    });
+    if let (Ok(log), Some(test)) = (
+        std::env::var("STELA_TEST_CHIP_LOG"),
+        std::thread::current().name(),
+    ) {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap_or_else(|error| panic!("STELA_TEST_CHIP_LOG {log}: {error}"));
+        // One write per line, so the parallel tests' appends never interleave.
+        file.write_all(alloc::format!("{test}\n").as_bytes())
+            .unwrap_or_else(|error| panic!("STELA_TEST_CHIP_LOG {log}: {error}"));
+    }
+    chip
+}
+
 /// Whether the engine implements a feature that only some chips have: every
 /// feature the M2 has; the M3's FEAT_HCX, FEAT_NV and FEAT_NV2; the M4's
 /// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS); the M5's

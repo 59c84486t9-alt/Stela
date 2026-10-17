@@ -20,6 +20,8 @@ pub mod system;
 pub mod timer;
 
 pub use chip::Chip;
+#[cfg(test)]
+pub(crate) use chip::test_chip;
 pub use cpu::{Cpu, Exception};
 pub use engine::{
     DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,
