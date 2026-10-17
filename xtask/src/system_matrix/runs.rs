@@ -4,8 +4,9 @@
 //! that passed after building their CPU or machine for that chip: the
 //! runtime's `machine::test_chip` logs each caller's test name to
 //! `STELA_TEST_CHIP_LOG`. A test that fixes its chip, or builds no machine,
-//! is never credited. The ledger names the digest of the sources it ran, and
-//! a stale ledger is refused.
+//! is never credited. A test of [`CHIP_INDEPENDENT`] code holds on every
+//! chip. The ledger names the digest of the sources it ran, and a stale
+//! ledger is refused.
 use super::{CHIPS, DEFAULT_CHIP};
 use crate::tools::{cargo, root};
 use anyhow::{Context, Result, ensure};
@@ -23,6 +24,15 @@ pub const LEDGER: &str = "isa/system-chip-test-runs.json";
 const TREES: [&str; 2] = ["crates/stela-runtime/src", "crates/stela-compiler/src"];
 /// Only the runtime's tests consult the test chip.
 const RUNTIME_SOURCE: &str = "crates/stela-runtime/src/";
+/// Cited tests whose code cannot name a chip, so that their pass holds on
+/// every chip: the compiler, which depends on no crate that defines one
+/// (the engine replaces a form the chip lacks before compiling it), and the
+/// reset derivation, which reads only the profile that generation builds
+/// for each chip.
+const CHIP_INDEPENDENT: [&str; 2] = [
+    "crates/stela-compiler/src/",
+    "xtask/src/system_matrix/resets.rs#",
+];
 
 /// Each chip's credited tests, by libtest name.
 pub struct Runs {
@@ -33,6 +43,9 @@ impl Runs {
     /// Whether the cited test `path#function` passed on `chip` after
     /// consulting it.
     pub fn credits(&self, chip: &str, test: &str) -> bool {
+        if CHIP_INDEPENDENT.iter().any(|code| test.starts_with(code)) {
+            return self.chips.contains_key(chip);
+        }
         let Some(name) = libtest_name(test) else {
             return false;
         };
@@ -213,6 +226,28 @@ mod tests {
         assert!(!runs.credits("apple-m5", test));
         assert!(!runs.credits("apple-m6", "crates/stela-runtime/src/machine/engine.rs#u"));
         assert!(parse(text, "e").is_err());
+        let compiler = "crates/stela-compiler/src/block/system.rs#h";
+        assert!(runs.credits("apple-m6", compiler));
+        assert!(!runs.credits("apple-m5", compiler), "a chip without a run");
+        assert!(!runs.credits("apple-m6", "xtask/src/system_matrix/assess.rs#t"));
+        Ok(())
+    }
+
+    #[test]
+    fn chip_independent_code_cannot_name_a_chip() -> Result<()> {
+        // The compiler depends on no workspace crate, and the reset
+        // derivation never mentions a chip.
+        let lock = fs::read_to_string(root().join("Cargo.lock"))?;
+        let package = lock
+            .split("[[package]]")
+            .find(|package| package.contains("\nname = \"stela-compiler\"\n"))
+            .context("Cargo.lock has no stela-compiler")?;
+        let dependencies = package
+            .split_once("dependencies = [")
+            .map_or("", |(_, list)| list.split(']').next().unwrap_or_default());
+        assert!(!dependencies.contains("\"stela-"), "{dependencies}");
+        let resets = fs::read_to_string(root().join("xtask/src/system_matrix/resets.rs"))?;
+        assert!(!resets.to_lowercase().contains("chip"));
         Ok(())
     }
 }

@@ -259,9 +259,21 @@ pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool) -> Psta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::system::{Feature, File, Register};
+
+    /// `value` written to `register` of the test chip's register file and
+    /// read back: the fields the chip lacks read 0, as the engine's MSR
+    /// leaves them.
+    fn through_the_chip(register: Register, value: u64) -> u64 {
+        let mut file = File::new(crate::machine::test_chip());
+        file.set(register, 0, value);
+        file.get(register, 0)
+    }
 
     #[test]
     fn spsr_round_trips_every_legal_aarch64_mode() {
+        let chip = crate::machine::test_chip();
+        let has = |feature: Feature| feature.on(chip);
         for (el, sp) in [(0, false), (1, false), (1, true), (2, false), (2, true)] {
             for daif in 0..=15 {
                 let state = Pstate {
@@ -279,6 +291,15 @@ mod tests {
                 };
                 let spsr = state.to_spsr(0xa000_0000);
                 assert_eq!(restore(Pstate::reset(2), spsr, false), (state, 0xa000_0000));
+                // Through the chip's SPSR_EL2, a field its features lack
+                // returns 0. Every chip has PAN, UAO, DIT and BTI.
+                let kept = Pstate {
+                    ssbs: state.ssbs && has(Feature::FEAT_SSBS),
+                    pacm: state.pacm && has(Feature::FEAT_PAuth_LR),
+                    ..state
+                };
+                let spsr = through_the_chip(Register::SPSR_EL2, spsr);
+                assert_eq!(restore(Pstate::reset(2), spsr, false), (kept, 0xa000_0000));
             }
         }
         assert_eq!(Pstate::reset(1).to_spsr(0), 0x3c5);
@@ -296,9 +317,10 @@ mod tests {
             sp: false,
             ..Pstate::reset(1)
         };
-        // To EL2h with D, PAN and NZCV set: only the always-restored fields
-        // change.
-        let spsr = 0x6000_0000 | SPSR_PAN | 0x209;
+        // To EL2h with D, PAN and NZCV set, through the chip's SPSR_EL1:
+        // only the always-restored fields change.
+        let spsr = through_the_chip(Register::SPSR_EL1, 0x6000_0000 | SPSR_PAN | 0x209);
+        assert_eq!(spsr, 0x6000_0000 | SPSR_PAN | 0x209);
         let (next, nzcv) = restore(current, spsr, true);
         assert_eq!((next.el, next.sp, next.il), (1, false, true));
         assert_eq!((next.daif, next.pan, nzcv), (DAIF_D, true, 0x6000_0000));
@@ -337,6 +359,13 @@ mod tests {
         assert!(!entered.ssbs);
         let entered = entry_pstate(user, SCTLR_SPAN | SCTLR_DSSBS, 1, false);
         assert!(!entered.pan && entered.ssbs);
+        // The chip's SCTLR_EL1 keeps SPAN, and DSSBS only with FEAT_SSBS:
+        // without it, entry clears PSTATE.SSBS.
+        let chip = crate::machine::test_chip();
+        let sctlr = through_the_chip(Register::SCTLR_EL1, SCTLR_SPAN | SCTLR_DSSBS);
+        let entered = entry_pstate(user, sctlr, 1, false);
+        assert!(!entered.pan);
+        assert_eq!(entered.ssbs, Feature::FEAT_SSBS.on(chip));
         // At EL2, SPAN only applies while EL0 is in the host.
         assert!(!entry_pstate(user, 0, 2, false).pan);
         assert!(entry_pstate(user, 0, 2, true).pan);

@@ -212,6 +212,21 @@ mod tests {
         assert!(!privileged(1, false, false) && privileged(1, true, false));
         assert!(!privileged(2, false, true) && privileged(2, false, false));
         assert!(privileged(2, true, true));
+        // At EL1 Arm privileges them only for EffectiveHCR_EL2_NVx<1:0>
+        // '11', which no chip reaches: HCR_EL2.NV1 reads 0 where FEAT_NV is
+        // implemented (no FEAT_E2H0), and NVx is '000' without it. E2H is
+        // RES1, so TGE alone puts EL0 in the host.
+        let mut machine = machine(&[]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, 1 << 42 | 1 << 43);
+        assert_ne!(machine.cpu.nested() & 0b11, 0b11);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, 1 << 27);
+        assert!(machine.cpu.in_host());
     }
 
     #[test]

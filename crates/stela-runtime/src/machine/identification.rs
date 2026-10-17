@@ -1315,5 +1315,11 @@ mod tests {
                 assert_eq!(field(chip, register, shift), expected, "{chip:?} {shift}");
             }
         }
+        // The chip the tests run on advertises the prediction restrictions
+        // of its FEAT_SPECRES2 and FEAT_LSE2's alignment.
+        let chip = crate::machine::test_chip();
+        let specres = 1 + u64::from(crate::machine::system::Feature::FEAT_SPECRES2.on(chip));
+        assert_eq!(field(chip, ID_AA64ISAR1_EL1, 40), specres);
+        assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), 1);
     }
 }

@@ -563,6 +563,8 @@ mod tests {
 
     #[test]
     fn par_reports_the_output_attributes_or_the_fault() {
+        // PAR_EL1.PA holds the chip's 48-bit physical address.
+        test_translation_chip();
         let translation = Translation {
             physical: 0x8_1234_5678,
             memory: MemoryType::Normal,
@@ -861,6 +863,8 @@ mod tests {
 
     #[test]
     fn fault_syndromes_and_hpfar_follow_the_stage_and_the_walk() {
+        // HPFAR_EL2.FIPA holds IPA[47:12] of the chip's 48-bit IPA space.
+        test_translation_chip();
         let stage1 = Fault::stage1(FaultKind::Translation, 3);
         assert_eq!(stage1.data_syndrome(true, false), 0b100_0111);
         assert_eq!(stage1.data_syndrome(false, true), 1 << 8 | 1 << 6 | 0b111);
