@@ -1,0 +1,263 @@
+//! Arm's FP, SVE and SME access checks for the running PE, without EL3 and
+//! with HCR_EL2.E2H RES1: `AArch64_CheckFPEnabled`,
+//! `AArch64_CheckFPAdvSIMDEnabled`, `CheckSVEEnabled`,
+//! `CheckNonStreamingSVEEnabled`, `CheckStreamingSVEEnabled`,
+//! `CheckStreamingSVEAndZAEnabled`, `CheckSMEEnabled`, `CheckSMEAndZAEnabled`
+//! and `CheckSMEZT0Enabled`, applied in the order an instruction's pseudocode
+//! calls them ([`Chip::checks`](super::Chip::checks)). No Apple chip has
+//! FEAT_SVE or FEAT_SME_FA64, so streaming mode is what admits SVE, and
+//! there it makes the AdvSIMD and non-streaming SVE forms illegal.
+use super::{chip::Check, cpu::Cpu, system::Register};
+
+/// `SMEExceptionType`, as ISS[2:0] (SMTC) of EC 0x1D.
+pub const SMTC_ACCESS: u32 = 0;
+pub const SMTC_STREAMING: u32 = 1;
+pub const SMTC_NOT_STREAMING: u32 = 2;
+pub const SMTC_INACTIVE_ZA: u32 = 3;
+pub const SMTC_INACCESSIBLE_ZT0: u32 = 4;
+
+const CPACR_FPEN: u32 = 20;
+const SMEN: u32 = 24;
+const SMCR_EZT0: u32 = 30;
+
+/// Why a check denies an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denial {
+    /// `AArch64_AdvSIMDFPAccessTrap` to this EL (EC 0x07).
+    FloatingPoint(u8),
+    /// `SMEAccessTrap` (EC 0x1D) with this SMTC, to this EL.
+    Sme { el: u8, smtc: u32 },
+    /// A check of a feature the engine does not implement.
+    Unimplemented(&'static str),
+}
+
+/// Apply `checks` in order; the first that fails denies.
+pub fn check(cpu: &Cpu, checks: &[Check]) -> Result<(), Denial> {
+    checks.iter().try_for_each(|check| one(cpu, *check))
+}
+
+fn one(cpu: &Cpu, check: Check) -> Result<(), Denial> {
+    let streaming = cpu.svcr() & 1 != 0;
+    // Traps that `SMEAccessTrap` takes at PSTATE.EL: EL0's go to EL1, or to
+    // EL2 under HCR_EL2.TGE.
+    let here = |smtc| Denial::Sme {
+        el: cpu.route(),
+        smtc,
+    };
+    match check {
+        Check::Fp => floating_point(cpu),
+        Check::FpAdvSimd | Check::NonStreamingSve => {
+            if check == Check::FpAdvSimd {
+                floating_point(cpu)?;
+            } else {
+                sve(cpu)?;
+            }
+            if streaming {
+                return Err(here(SMTC_STREAMING));
+            }
+            Ok(())
+        }
+        Check::Sve => sve(cpu),
+        Check::StreamingSve => streaming_sve(cpu),
+        Check::StreamingSveAndZa => {
+            streaming_sve(cpu)?;
+            za(cpu)
+        }
+        Check::Sme => sme(cpu),
+        Check::SmeAndZa => {
+            sme(cpu)?;
+            za(cpu)
+        }
+        Check::SmeZt0 => {
+            za(cpu)?;
+            if cpu.pstate.el <= 1
+                && !cpu.in_host()
+                && cpu.field(Register::SMCR_EL1, SMCR_EZT0, 1) == 0
+            {
+                return Err(Denial::Sme {
+                    el: 1,
+                    smtc: SMTC_INACCESSIBLE_ZT0,
+                });
+            }
+            if cpu.field(Register::SMCR_EL2, SMCR_EZT0, 1) == 0 {
+                return Err(Denial::Sme {
+                    el: 2,
+                    smtc: SMTC_INACCESSIBLE_ZT0,
+                });
+            }
+            Ok(())
+        }
+        Check::Fpmr => Err(Denial::Unimplemented("FPMR (FEAT_FPMR)")),
+    }
+}
+
+fn za(cpu: &Cpu) -> Result<(), Denial> {
+    if cpu.svcr() & 2 == 0 {
+        return Err(Denial::Sme {
+            el: cpu.route(),
+            smtc: SMTC_INACTIVE_ZA,
+        });
+    }
+    Ok(())
+}
+
+/// `CheckSVEEnabled` with FEAT_SME and without FEAT_SVE.
+fn sve(cpu: &Cpu) -> Result<(), Denial> {
+    if cpu.scalable.is_none() {
+        return Err(Denial::Unimplemented("SVE without FEAT_SME (FEAT_SVE)"));
+    }
+    if cpu.svcr() & 1 != 0 {
+        sme(cpu)
+    } else {
+        streaming_sve(cpu)
+    }
+}
+
+fn streaming_sve(cpu: &Cpu) -> Result<(), Denial> {
+    sme(cpu)?;
+    if cpu.svcr() & 1 == 0 {
+        return Err(Denial::Sme {
+            el: cpu.route(),
+            smtc: SMTC_NOT_STREAMING,
+        });
+    }
+    Ok(())
+}
+
+/// The CPACR_EL1 or CPTR_EL2 two-bit enable at `shift`: '11' enables, '01'
+/// enables all but EL0 (in the host, for CPTR_EL2), 'x0' disables.
+fn disabled(cpu: &Cpu, register: Register, shift: u32) -> bool {
+    let enable = cpu.field(register, shift, 2);
+    let el0 = cpu.pstate.el == 0 && (register == Register::CPACR_EL1 || cpu.in_host());
+    enable & 1 == 0 || (enable == 0b01 && el0)
+}
+
+/// `CheckSMEEnabled`: SMEN, then FPEN, of CPACR_EL1 at EL0 and EL1 outside
+/// the host, then of CPTR_EL2.
+fn sme(cpu: &Cpu) -> Result<(), Denial> {
+    if cpu.scalable.is_none() {
+        return Err(Denial::Unimplemented("SME (FEAT_SME)"));
+    }
+    if cpu.pstate.el <= 1 && !cpu.in_host() {
+        if disabled(cpu, Register::CPACR_EL1, SMEN) {
+            return Err(Denial::Sme {
+                el: 1,
+                smtc: SMTC_ACCESS,
+            });
+        }
+        if disabled(cpu, Register::CPACR_EL1, CPACR_FPEN) {
+            return Err(Denial::FloatingPoint(1));
+        }
+    }
+    if disabled(cpu, Register::CPTR_EL2, SMEN) {
+        return Err(Denial::Sme {
+            el: 2,
+            smtc: SMTC_ACCESS,
+        });
+    }
+    if disabled(cpu, Register::CPTR_EL2, CPACR_FPEN) {
+        return Err(Denial::FloatingPoint(2));
+    }
+    Ok(())
+}
+
+/// `AArch64_CheckFPEnabled`.
+fn floating_point(cpu: &Cpu) -> Result<(), Denial> {
+    match cpu.floating_point_trap() {
+        Some(el) => Err(Denial::FloatingPoint(el)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::{Chip, exception::Pstate};
+
+    const ENABLED: u64 = 0b11 << SMEN | 0b11 << CPACR_FPEN;
+
+    fn cpu(chip: Chip, el: u8) -> Cpu {
+        let mut cpu = Cpu::of(chip, 0, Pstate::reset(el.max(1)));
+        cpu.pstate.el = el;
+        cpu.registers.set(Register::CPACR_EL1, 0, ENABLED);
+        cpu.registers.set(Register::CPTR_EL2, 0, ENABLED);
+        cpu
+    }
+
+    #[test]
+    fn streaming_mode_decides_what_sve_sme_and_advsimd_may_do() {
+        let chip = crate::machine::test_chip();
+        let mut cpu = cpu(chip, 1);
+        if cpu.scalable.is_none() {
+            // Without SME the SVE and SME forms are absent; FP is unaffected.
+            assert_eq!(check(&cpu, &[Check::FpAdvSimd]), Ok(()));
+            assert!(matches!(
+                check(&cpu, &[Check::Sme]),
+                Err(Denial::Unimplemented(_))
+            ));
+            return;
+        }
+        let sme = |smtc| Err(Denial::Sme { el: 1, smtc });
+        // Outside streaming mode SVE is NotStreaming and ZA instructions
+        // need PSTATE.ZA, but AdvSIMD runs.
+        assert_eq!(check(&cpu, &[Check::Sve]), sme(SMTC_NOT_STREAMING));
+        assert_eq!(check(&cpu, &[Check::SmeAndZa]), sme(SMTC_INACTIVE_ZA));
+        assert_eq!(check(&cpu, &[Check::Sme]), Ok(()));
+        assert_eq!(check(&cpu, &[Check::FpAdvSimd]), Ok(()));
+        cpu.state.x[0] = 0;
+        cpu.scalable
+            .as_mut()
+            .unwrap()
+            .apply_mode(
+                &mut cpu.state,
+                stela_compiler::aarch64::scalable::ScalableMode::new(true, true),
+            )
+            .unwrap();
+        // In streaming mode the AdvSIMD and non-streaming SVE forms trap,
+        // while SVE, scalar FP and the ZA forms run.
+        assert_eq!(check(&cpu, &[Check::FpAdvSimd]), sme(SMTC_STREAMING));
+        assert_eq!(check(&cpu, &[Check::NonStreamingSve]), sme(SMTC_STREAMING));
+        for checks in [
+            &[Check::Sve][..],
+            &[Check::Fp],
+            &[Check::StreamingSveAndZa],
+            &[Check::SmeAndZa],
+        ] {
+            assert_eq!(check(&cpu, checks), Ok(()), "{checks:?}");
+        }
+        // ZT0 needs SMCR_EL1.EZT0 and SMCR_EL2.EZT0.
+        assert_eq!(
+            check(&cpu, &[Check::Sme, Check::SmeZt0]),
+            sme(SMTC_INACCESSIBLE_ZT0)
+        );
+        cpu.registers.set(Register::SMCR_EL1, 0, 1 << SMCR_EZT0);
+        assert_eq!(
+            check(&cpu, &[Check::SmeZt0]),
+            Err(Denial::Sme {
+                el: 2,
+                smtc: SMTC_INACCESSIBLE_ZT0
+            })
+        );
+        // SMEN before FPEN, CPACR_EL1 before CPTR_EL2.
+        cpu.registers.set(Register::CPACR_EL1, 0, 0b11 << SMEN);
+        assert_eq!(check(&cpu, &[Check::Sme]), Err(Denial::FloatingPoint(1)));
+        cpu.registers.set(Register::CPTR_EL2, 0, 0);
+        assert_eq!(check(&cpu, &[Check::Sme]), Err(Denial::FloatingPoint(1)));
+        cpu.registers.set(Register::CPACR_EL1, 0, ENABLED);
+        assert_eq!(
+            check(&cpu, &[Check::Sme]),
+            Err(Denial::Sme { el: 2, smtc: 0 })
+        );
+        // An EL0 trap at PSTATE.EL goes to EL2 under HCR_EL2.TGE.
+        cpu.registers.set(Register::CPTR_EL2, 0, ENABLED);
+        cpu.registers.set(Register::HCR_EL2, 0, 1 << 27);
+        cpu.pstate.el = 0;
+        assert_eq!(
+            check(&cpu, &[Check::FpAdvSimd]),
+            Err(Denial::Sme {
+                el: 2,
+                smtc: SMTC_STREAMING
+            })
+        );
+    }
+}

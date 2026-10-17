@@ -297,20 +297,38 @@ impl Cpu {
 
     /// Arm `SetPSTATE_SM`, then `SetPSTATE_ZA`: a change of SM resets the
     /// Z, P and FFR registers, FPSR (to 0x0800009F) and FPMR, and enabling
-    /// ZA zeroes ZA and ZT0. Entering streaming mode is refused until the
-    /// engine runs streaming SVE and traps the AdvSIMD and FP instructions
-    /// streaming mode makes illegal.
+    /// ZA zeroes ZA and ZT0. The engine applies the access checks streaming
+    /// mode changes to each instruction ([`super::streaming`]).
     pub fn set_svcr(&mut self, streaming: bool, za: bool) -> Result<(), &'static str> {
         let scalable = self
             .scalable
             .as_mut()
             .ok_or("SVCR on a PE without SME state")?;
-        if streaming && !scalable.mode().streaming() {
-            return Err("streaming mode (PSTATE.SM) is not run by the system engine");
-        }
         scalable
             .apply_mode(&mut self.state, ScalableMode::new(streaming, za))
             .map_err(|_| "cannot allocate the SME register state")
+    }
+
+    /// The EL an FP/SIMD access traps to, if it traps (Arm
+    /// `AArch64_CheckFPEnabled`): CPACR_EL1.FPEN at EL0 and EL1 outside the
+    /// host, then CPTR_EL2.FPEN, which has the CPACR layout because HCR_EL2.E2H
+    /// is RES1.
+    pub fn floating_point_trap(&self) -> Option<u8> {
+        const FPEN: u32 = 20;
+        let el = self.pstate.el;
+        let in_host = el == 2 || (el == 0 && self.in_host());
+        if el != 2 && !in_host {
+            match self.field(Register::CPACR_EL1, FPEN, 2) {
+                0b11 => {}
+                0b01 if el != 0 => {}
+                _ => return Some(1),
+            }
+        }
+        match self.field(Register::CPTR_EL2, FPEN, 2) {
+            0b11 => None,
+            0b01 if !(el == 0 && self.in_host()) => None,
+            _ => Some(2),
+        }
     }
 
     /// Arm `CheckSMEAccess` without EL3: the EL an SME access trap is taken

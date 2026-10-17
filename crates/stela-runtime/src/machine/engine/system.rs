@@ -1134,6 +1134,7 @@ mod tests {
         const SMSTART_ZA: u32 = 0xd503_457f;
         const SMSTOP_ZA: u32 = 0xd503_447f;
         const SMSTART: u32 = 0xd503_477f;
+        const SMSTOP: u32 = 0xd503_467f;
         const SME_TRAP: u64 = 0x1d << 26 | 1 << 25;
         const SMEN: u64 = 0b11 << 24;
         let mut machine = machine(&[]);
@@ -1196,14 +1197,18 @@ mod tests {
         machine.cpu.state.x[3] = !1;
         run(&mut machine, 1, access(false, SVCR, 3)).unwrap();
         assert_eq!((machine.cpu.svcr(), machine.cpu.state.fpsr), (0b10, 0x1f));
-        // Streaming mode stops explicitly.
-        for word in [SMSTART, access(false, SVCR, 4)] {
-            machine.cpu.state.x[4] = 1;
-            assert!(matches!(
-                run(&mut machine, 1, word),
-                Err(Stop::Unsupported(_))
-            ));
-        }
+        // SMSTART enters streaming mode, which resets FPSR; MSR SVCR and
+        // SMSTOP leave it.
+        run(&mut machine, 1, SMSTART).unwrap();
+        assert_eq!(
+            (machine.cpu.svcr(), machine.cpu.state.fpsr),
+            (0b11, 0x0800_009f)
+        );
+        machine.cpu.state.x[4] = 1;
+        run(&mut machine, 1, access(false, SVCR, 4)).unwrap();
+        assert_eq!(machine.cpu.svcr(), 0b01);
+        run(&mut machine, 1, SMSTOP).unwrap();
+        assert_eq!(machine.cpu.svcr(), 0);
         // SMIDR_EL1 has no profile value: reading it stops.
         const SMIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 6);
         assert!(matches!(

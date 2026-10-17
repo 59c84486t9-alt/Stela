@@ -8,6 +8,7 @@ mod unprivileged;
 mod watch;
 
 use super::{
+    chip::Check,
     cpu::{
         Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
         HCR_VI, HCR_VSE,
@@ -16,6 +17,7 @@ use super::{
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
     registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
+    streaming::{self, Denial},
     system::{Feature, Register as SystemRegister},
     timer,
 };
@@ -452,6 +454,10 @@ struct Variant {
     checks: MemoryChecks,
     /// One instruction only, for breakpoints and software step.
     single: bool,
+    /// PE has SME, and PSTATE.SM: the block ends before the first
+    /// instruction an SVE or SME access check (or, in streaming mode, any
+    /// access check) applies to.
+    scalable: Option<bool>,
 }
 
 /// A load or store addressed through Rn (bits 9:5) that names SP; literal
@@ -526,6 +532,9 @@ struct DebugMode {
 enum Fetched {
     Block(usize),
     Exception(Exception),
+    /// The first instruction makes access checks the engine applies before
+    /// it runs (see [`Variant::scalable`]).
+    Checked(u32),
 }
 
 type Step = Result<(), Stop>;
@@ -852,18 +861,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.take(exception);
                 return Ok(());
             }
+            Fetched::Checked(word) => return self.checked_instruction(pc, word),
         };
-        // Arm `BranchTargetCheck`: the Branch Target exception (EC 0x0D)
-        // reports BTYPE in ISS and leaves it set for SPSR.
         if self.cpu.pstate.btype != 0 && self.fetch_guarded(pc) {
             let word = self.word(index, pc)?;
-            if !self.branch_target_compatible(word) {
-                let btype = self.cpu.pstate.btype;
-                self.take(Exception::synchronous(
-                    Class::BranchTarget,
-                    u32::from(btype),
-                    pc,
-                ));
+            if let Some(exception) = self.branch_target_exception(pc, word) {
+                self.take(exception);
                 return Ok(());
             }
         }
@@ -873,6 +876,58 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.advance_step();
         step
+    }
+
+    /// Arm `BranchTargetCheck`: the Branch Target exception (EC 0x0D)
+    /// reports BTYPE in ISS and leaves it set for SPSR.
+    fn branch_target_exception(&self, pc: u64, word: u32) -> Option<Exception> {
+        let btype = self.cpu.pstate.btype;
+        (!self.branch_target_compatible(word))
+            .then(|| Exception::synchronous(Class::BranchTarget, u32::from(btype), pc))
+    }
+
+    /// An instruction whose FP, SVE and SME access checks the engine
+    /// applies before it runs: after a Branch Target exception, the first
+    /// check that fails traps. SVE and SME execution, and scalar FP in
+    /// streaming mode (whose writes zero the upper Z bits), stop explicitly.
+    #[cold]
+    fn checked_instruction(&mut self, pc: u64, word: u32) -> Step {
+        self.cpu.step_advance = false;
+        if self.cpu.pstate.btype != 0
+            && self.fetch_guarded(pc)
+            && let Some(exception) = self.branch_target_exception(pc, word)
+        {
+            self.take(exception);
+            return Ok(());
+        }
+        let checks = self.profile.chip.checks(word);
+        let exception = match streaming::check(&self.cpu, checks) {
+            Err(Denial::FloatingPoint(el)) => {
+                Exception::synchronous(Class::FloatingPointAccess, TRAPPED_AARCH64, pc).to(el)
+            }
+            Err(Denial::Sme { el, smtc }) => {
+                Exception::synchronous(Class::SmeAccess, smtc, pc).to(el)
+            }
+            Err(Denial::Unimplemented(feature)) => {
+                return Err(self.unsupported(RequirementKind::Instruction {
+                    word,
+                    detail: format!("its access check needs {feature}, which the engine lacks"),
+                }));
+            }
+            Ok(()) => {
+                let detail = if checks.iter().all(|check| *check == Check::Fp) {
+                    "scalar FP in streaming mode, which zeroes the upper Z bits it writes, is not run by the system engine"
+                } else {
+                    "SVE and SME instructions are not run by the system engine"
+                };
+                return Err(self.unsupported(RequirementKind::Instruction {
+                    word,
+                    detail: detail.into(),
+                }));
+            }
+        };
+        self.take(exception);
+        Ok(())
     }
 
     /// Run one compiled block and complete its exit or fault.
@@ -1054,7 +1109,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn floating_point_trap(&mut self) -> Option<u8> {
         *self
             .floating_point
-            .get_or_insert_with(|| floating_point_trap(&self.cpu))
+            .get_or_insert_with(|| self.cpu.floating_point_trap())
     }
 
     fn floating_point_enabled(&mut self) -> bool {
@@ -1067,28 +1122,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Some(el) => exception.to(el),
             None => exception,
         }
-    }
-}
-
-/// The EL an FP/SIMD access traps to, if it traps (Arm
-/// `AArch64_CheckFPEnabled`): CPACR_EL1.FPEN at EL0 and EL1 outside the
-/// host, then CPTR_EL2.FPEN, which has the CPACR layout because HCR_EL2.E2H
-/// is RES1.
-fn floating_point_trap(cpu: &Cpu) -> Option<u8> {
-    const FPEN: u32 = 20;
-    let el = cpu.pstate.el;
-    let in_host = el == 2 || (el == 0 && cpu.in_host());
-    if el != 2 && !in_host {
-        match cpu.field(SystemRegister::CPACR_EL1, FPEN, 2) {
-            0b11 => {}
-            0b01 if el != 0 => {}
-            _ => return Some(1),
-        }
-    }
-    match cpu.field(SystemRegister::CPTR_EL2, FPEN, 2) {
-        0b11 => None,
-        0b01 if !(el == 0 && cpu.in_host()) => None,
-        _ => Some(2),
     }
 }
 
@@ -1119,6 +1152,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fp: self.floating_point_enabled(),
             checks: self.memory_checks(),
             single,
+            scalable: self
+                .cpu
+                .scalable
+                .is_some()
+                .then(|| self.cpu.svcr() & 1 != 0),
         };
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
@@ -1132,12 +1170,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let index = match self.index.get(&(pc, physical, variant)) {
             Some(&index) => index,
             None => match self.compile(pc, physical, variant)? {
-                Some(index) => index,
-                None => {
-                    // The first instruction is FP/SIMD while CPACR or CPTR
-                    // traps it.
-                    return Ok(Fetched::Exception(self.floating_point_exception(pc)));
-                }
+                Fetched::Block(index) => index,
+                other => return Ok(other),
             },
         };
         self.jump[slot] = Some(JumpEntry {
@@ -1150,10 +1184,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(Fetched::Block(index))
     }
 
-    /// Compile the block at `pc`. `None` when its first instruction is a
-    /// trapped FP/SIMD instruction.
-    fn compile(&mut self, pc: u64, physical: u64, variant: Variant) -> Result<Option<usize>, Stop> {
-        let Variant { fp, checks, single } = variant;
+    /// Compile the block at `pc`, unless its first instruction is a
+    /// trapped FP/SIMD instruction or one whose access checks the engine
+    /// applies.
+    fn compile(&mut self, pc: u64, physical: u64, variant: Variant) -> Result<Fetched, Stop> {
+        let Variant {
+            fp,
+            checks,
+            single,
+            scalable,
+        } = variant;
         let available = if single {
             INSTRUCTION
         } else {
@@ -1176,7 +1216,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .iter()
                 .position(|word| is_floating_point(u32::from_le_bytes(*word)));
             match first {
-                Some(0) => return Ok(None),
+                Some(0) => return Ok(Fetched::Exception(self.floating_point_exception(pc))),
+                Some(index) => length = index * 4,
+                None => {}
+            }
+        }
+        if let Some(streaming) = scalable {
+            let first = source.as_chunks::<4>().0[..length / 4]
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
+                .position(|word| {
+                    let checks = chip.checks(word);
+                    if streaming {
+                        !checks.is_empty()
+                    } else {
+                        checks
+                            .iter()
+                            .any(|check| !matches!(check, Check::Fp | Check::FpAdvSimd))
+                    }
+                });
+            match first {
+                Some(0) => {
+                    let word = u32::from_le_bytes(source[..4].try_into().expect("a word"));
+                    return Ok(Fetched::Checked(word));
+                }
                 Some(index) => length = index * 4,
                 None => {}
             }
@@ -1221,7 +1284,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
         let index = self.blocks.len() - 1;
         self.index.insert((pc, physical, variant), index);
-        Ok(Some(index))
+        Ok(Fetched::Block(index))
     }
 
     /// Compile the longest prefix the host target can emit.
@@ -2809,23 +2872,16 @@ mod tests {
             panic!("block with UDF")
         };
         assert_eq!(machine.blocks[index].source_map.len(), 2);
-        // On the M4, whose SME has it in streaming mode, the engine does not
-        // implement it yet, so it is refused at its own PC with its word.
+        // On the M4, whose SME has it in streaming mode, the block ends
+        // before it, and the engine applies its access checks on its own.
         let mut machine = machine_on(crate::machine::Chip::AppleM4, &[0x9100_0400, 0x04a0_0000]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("prefix block")
         };
         assert_eq!(machine.blocks[index].source_map.len(), 1);
-        let Err(Stop::Unsupported(requirement)) = machine.fetch_block(BASE + 4, false) else {
-            panic!("refusal")
-        };
-        assert_eq!(requirement.pc, BASE + 4);
         assert!(matches!(
-            requirement.kind,
-            RequirementKind::Instruction {
-                word: 0x04a0_0000,
-                ..
-            }
+            machine.fetch_block(BASE + 4, false),
+            Ok(Fetched::Checked(0x04a0_0000))
         ));
     }
 
@@ -4227,6 +4283,68 @@ mod tests {
             0
         };
         assert_eq!(machine.cpu.state.x[1], 0x07c8_0000 | afp);
+    }
+
+    #[test]
+    fn sve_sme_and_streaming_checks_trap_before_the_instruction_runs() {
+        const ADD_V: u32 = 0x4ea2_8420; // add v0.4s, v1.4s, v2.4s
+        const ADD_Z: u32 = 0x0422_0020; // add z0.b, z1.b, z2.b
+        const LDR_ZA: u32 = 0xe100_0000; // ldr za[w12, 0], [x0]
+        const FADD_S: u32 = 0x1e22_2820; // fadd s0, s1, s2
+        const SME_TRAP: u64 = 0x1d << 26 | 1 << 25;
+        let mut machine = machine(&[ADD_V, ADD_Z, LDR_ZA, FADD_S]);
+        let chip = machine.profile.chip;
+        if machine.cpu.scalable.is_none() {
+            // Without SME the SVE and SME forms are UNDEFINED and check
+            // nothing.
+            for word in [ADD_Z, LDR_ZA] {
+                assert_eq!(chip.checks(chip.admit(word)), &[]);
+            }
+            return;
+        }
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        for register in [SystemRegister::CPACR_EL1, SystemRegister::CPTR_EL2] {
+            machine
+                .cpu
+                .registers
+                .set(register, 0, 0b11 << 24 | 0b11 << 20);
+        }
+        machine.derived_changed();
+        let run = |machine: &mut Machine<FakeHost, NoDevices>, index: u64| {
+            machine.cpu.set_pstate(Pstate::reset(1));
+            machine.cpu.pc = BASE + 4 * index;
+            let step = machine.step();
+            (step, machine.cpu.read(SystemRegister::ESR_EL1))
+        };
+        let trapped = |index: u64, smtc: u64| (Ok(()), SME_TRAP | smtc, BASE + 4 * index);
+        let taken = |machine: &mut Machine<FakeHost, NoDevices>, index| {
+            let (step, esr) = run(machine, index);
+            (step, esr, machine.cpu.read(SystemRegister::ELR_EL1))
+        };
+        // Outside streaming mode SVE traps as not streaming and a ZA load
+        // as ZA inactive, at the instruction.
+        assert_eq!(taken(&mut machine, 1), trapped(1, 2));
+        assert_eq!(taken(&mut machine, 2), trapped(2, 3));
+        // In streaming mode AdvSIMD traps as streaming; SVE, the ZA load and
+        // scalar FP pass their checks and stop explicitly.
+        machine.cpu.set_svcr(true, true).unwrap();
+        assert_eq!(taken(&mut machine, 0), trapped(0, 1));
+        for index in 1..4 {
+            assert!(
+                matches!(run(&mut machine, index).0, Err(Stop::Unsupported(_))),
+                "{index}"
+            );
+        }
+        // CPACR_EL1.SMEN clear traps SVE with SMTC 0 before anything else.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CPACR_EL1, 0, 0b11 << 20);
+        machine.derived_changed();
+        assert_eq!(taken(&mut machine, 1), trapped(1, 0));
     }
 
     #[test]

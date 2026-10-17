@@ -305,6 +305,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.take(exception);
                 Ok(())
             }
+            Ok(super::Fetched::Checked(word)) => self.checked_instruction(pc, word),
             Err(stop) => Err(stop),
         };
         self.watch.pass = [None; 2];
