@@ -1107,6 +1107,57 @@ mod tests {
     }
 
     #[test]
+    fn the_m6_error_record_group_status_reads_zero_and_fgt2_traps_it() {
+        const ERXGSR_EL1: Encoding = Encoding::new(3, 0, 5, 3, 2);
+        const HFGRTR2_NERXGSR: u64 = 1 << 1;
+        const HCR_TERR: u64 = 1 << 36;
+        let on = |chip| {
+            let mut machine = machine(&[]);
+            machine.profile.chip = chip;
+            machine.cpu = crate::machine::cpu::Cpu::of(chip, BASE, Pstate::reset(1));
+            machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+            machine.derived_changed();
+            machine
+        };
+        let mut machine = on(Chip::AppleM6);
+        // HFGRTR2_EL2.nERXGSR_EL1 clear traps EL1's read to EL2 (EC 0x18).
+        let esr = el2_trap(&mut machine, access(true, ERXGSR_EL1, 3));
+        assert_eq!(esr >> 26, 0x18);
+        // Set, the read returns 0: there is no error record group.
+        machine
+            .cpu
+            .registers
+            .set(Register::HFGRTR2_EL2, 0, HFGRTR2_NERXGSR);
+        assert_eq!(machine.cpu.read(Register::HFGRTR2_EL2), HFGRTR2_NERXGSR);
+        machine.cpu.pc = BASE;
+        machine.cpu.pstate = Pstate::reset(1);
+        machine.cpu.state.x[3] = u64::MAX;
+        machine
+            .system_instruction(access(true, ERXGSR_EL1, 3))
+            .unwrap();
+        assert_eq!((machine.cpu.state.x[3], machine.cpu.pc), (0, BASE + 4));
+        // DISR_EL1 holds RASv2's WU (17:16), WnRV (14) and WnR (13) as
+        // written.
+        const DISR_EL1: Encoding = Encoding::new(3, 0, 12, 1, 1);
+        const DISR_WRITE_FIELDS: u64 = 0b11 << 16 | 1 << 14 | 1 << 13;
+        machine.cpu.state.x[4] = DISR_WRITE_FIELDS;
+        machine
+            .system_instruction(access(false, DISR_EL1, 4))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::DISR_EL1), DISR_WRITE_FIELDS);
+        // HCR_EL2.TERR traps it all the same.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_TERR);
+        let esr = el2_trap(&mut machine, access(true, ERXGSR_EL1, 3));
+        assert_eq!(esr >> 26, 0x18);
+        // Without FEAT_RASv2 (the M5) it is UNDEFINED.
+        let mut machine = on(Chip::AppleM5);
+        machine
+            .system_instruction(access(true, ERXGSR_EL1, 3))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+    }
+
+    #[test]
     fn sctlr2_holds_the_m6_pacm_enables_under_hcrx_el2_sctlr2en() {
         const SCTLR2_EL1: Encoding = Encoding::new(3, 0, 1, 0, 3);
         const SCTLR2_EL12: Encoding = Encoding::new(3, 5, 1, 0, 3);

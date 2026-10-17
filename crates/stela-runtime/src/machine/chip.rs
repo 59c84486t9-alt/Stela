@@ -111,7 +111,8 @@ impl Chip {
 /// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS); the M5's
 /// FEAT_SPECRES2 and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
 /// FEAT_FPACCOMBINE, FEAT_CPA (whose arithmetic the engine completes),
-/// FEAT_PAuth_LR with FEAT_SCTLR2 (PACM and the two-modifier PAC forms) and
+/// FEAT_PAuth_LR with FEAT_SCTLR2 (PACM and the two-modifier PAC forms),
+/// FEAT_RASv2 with FEAT_FGT2 (the error record group status and its trap) and
 /// the instruction-only FEAT_FAMINMAX and FEAT_LUT, whose forms the
 /// system-mode compiler admits.
 const fn engine_implements(feature: Feature) -> bool {
@@ -140,15 +141,15 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_PAN3
         | Feature::FEAT_PAuth_LR
         | Feature::FEAT_SCTLR2
+        | Feature::FEAT_FGT2
+        | Feature::FEAT_RASv2
         | Feature::FEAT_SPECRES2
         | Feature::FEAT_WFxT
         | Feature::FEAT_XS => true,
-        Feature::FEAT_FGT2
-        | Feature::FEAT_FP8
+        Feature::FEAT_FP8
         | Feature::FEAT_FPMR
         | Feature::FEAT_MTE
         | Feature::FEAT_MTE2
-        | Feature::FEAT_RASv2
         | Feature::FEAT_SME
         | Feature::FEAT_SME2
         | Feature::FEAT_SME2p1

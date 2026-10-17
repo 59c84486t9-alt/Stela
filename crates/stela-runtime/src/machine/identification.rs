@@ -193,6 +193,17 @@ pub const TABLE: &[Row] = &[
     ),
     feature(
         ID_AA64PFR0_EL1,
+        28,
+        3,
+        "FEAT_RASv2",
+        engine(
+            true,
+            "ERXGSR_EL1 of no error record group reads 0; ESB defers a virtual \
+             SError as before",
+        ),
+    ),
+    feature(
+        ID_AA64PFR0_EL1,
         36,
         1,
         "FEAT_SEL2",
@@ -617,6 +628,17 @@ pub const TABLE: &[Row] = &[
             true,
             "the generated accessors apply HFG*TR, HDFG*TR and HAFGRTR; \
              HFGITR_EL2 also traps ERET and SVC",
+        ),
+    ),
+    feature(
+        ID_AA64MMFR0_EL1,
+        56,
+        2,
+        "FEAT_FGT2",
+        engine(
+            true,
+            "the generated accessors also apply HFG*TR2 and HDFG*TR2, whose one \
+             control on the M6 is HFGRTR2_EL2.nERXGSR_EL1",
         ),
     ),
     feature(
@@ -1230,6 +1252,11 @@ mod tests {
         // whose PACs the engine computes that way.
         assert_eq!(field(Chip::AppleM2, ID_AA64ISAR1_EL1, 4), 4);
         assert_eq!(field(Chip::AppleM1, ID_AA64ISAR1_EL1, 4), 1);
+        // The M6 has FGT2 (MMFR0.FGT 2) and RASv2 (PFR0.RAS 3).
+        assert_eq!(field(Chip::AppleM5, ID_AA64MMFR0_EL1, 56), 1);
+        assert_eq!(field(Chip::AppleM6, ID_AA64MMFR0_EL1, 56), 2);
+        assert_eq!(field(Chip::AppleM5, ID_AA64PFR0_EL1, 28), 2);
+        assert_eq!(field(Chip::AppleM6, ID_AA64PFR0_EL1, 28), 3);
         // The M6's FEAT_PAuth_LR (APA 6, with ISAR3.PACM 2 for a full
         // PSTATE.PACM) needs FEAT_SCTLR2 (MMFR3.SCTLRX).
         assert_eq!(field(Chip::AppleM5, ID_AA64ISAR1_EL1, 4), 4);
