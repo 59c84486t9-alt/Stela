@@ -49,12 +49,22 @@ const IMPDEF: [(&str, bool, &str); 4] = [
     ),
 ];
 
+/// `<ID register> trapped by HCR_EL2.TID3`, asked of the ID registers that
+/// later architecture versions allocated: trapped, as Arm requires on the
+/// chips with FEAT_FGT, so that every Apple profile traps the ID space alike.
+const TID3_SUFFIX: &str = " trapped by HCR_EL2.TID3";
+
 /// The recorded choice for an `ImpDefBool` question, if there is one.
 pub fn impdef_choice(text: &str) -> Option<bool> {
     IMPDEF
         .iter()
         .find(|(name, _, _)| *name == text)
         .map(|(_, value, _)| *value)
+        .or_else(|| {
+            text.strip_suffix(TID3_SUFFIX)
+                .is_some_and(|register| register.starts_with("ID_"))
+                .then_some(true)
+        })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -183,6 +193,15 @@ pub struct Generator<'a> {
     pub registers: &'a BTreeSet<String>,
     pub unknown: BTreeSet<String>,
     pub profile: &'a Profile,
+}
+
+/// The run-time check of a feature only some chips have.
+fn implemented(profile: &Profile, feature: &str) -> Result<(String, Ty)> {
+    ensure!(
+        profile.varying.contains(feature),
+        "{feature} reaches the generated code but every chip decides it"
+    );
+    Ok((format!("c.implemented(Feature::{feature})?"), Ty::Bool))
 }
 
 fn pattern(value: &str) -> (u64, u64, u32) {
@@ -349,6 +368,8 @@ impl Generator<'_> {
                 } else {
                     ""
                 };
+                // CacheType_Data_Tag becomes CacheType::DataTag.
+                let variant = variant.replace('_', "");
                 return Ok((format!("{enumeration}::{separator}{variant}"), Ty::Enum));
             }
         }
@@ -469,10 +490,22 @@ impl Generator<'_> {
         };
         Ok(match name {
             "X" => ("c.x()".into(), Ty::Bits(Some(64))),
+            "IsFeatureImplemented" => {
+                let feature = arguments[0]["value"]
+                    .as_str()
+                    .with_context(|| format!("feature test {}", super::render(node)))?;
+                implemented(self.profile, feature)?
+            }
+            // Arm: FEAT_HCX, SCR_EL3.HXEn when EL3 exists, and EL2Enabled();
+            // the profile has EL2 and no EL3.
+            "IsHCRXEL2Enabled" => {
+                ensure!(self.profile.highest_el == 2, "IsHCRXEL2Enabled with EL3");
+                implemented(self.profile, "FEAT_HCX")?
+            }
             "EffectivelyAtEL0InHost" => ("at_el0_in_host(c)".into(), Ty::Bool),
             "EffectivelyAtEL0NotInHost" => ("at_el0_not_in_host(c)".into(), Ty::Bool),
             "ELIsInHost" => (format!("is_in_host(c, {})", level(arguments[0])), Ty::Bool),
-            "EffectiveHCR_EL2_NVx" => ("hcr_nvx(c)".into(), Ty::Bits(Some(3))),
+            "EffectiveHCR_EL2_NVx" => ("hcr_nvx(c)?".into(), Ty::Bits(Some(3))),
             "EffectiveTGEforEL0Traps" => ("tge_for_el0_traps(c)".into(), Ty::Bits(Some(1))),
             "IsHighestEL" => {
                 let (code, _) = self.bits(arguments[0])?;
@@ -812,6 +845,7 @@ fn error_record(name: &str) -> Option<&'static str> {
         "ERRADDR" => "Addr",
         "ERRCTLR" => "Ctlr",
         "ERRFR" => "Fr",
+        "ERRGSR" => "Gsr",
         "ERRMISC0" => "Misc0",
         "ERRMISC1" => "Misc1",
         "ERRMISC2" => "Misc2",

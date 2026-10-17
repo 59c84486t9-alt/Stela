@@ -38,10 +38,56 @@ const ARCHIVE_SHA256: &str = "fe458c521745cc2d07244c416106add69ae8faa12fa3da8aad
 const ARCHIVE_BYTES: usize = 5_696_585;
 const MEMBERS: [&str; 2] = ["Registers.json", "Features.json"];
 
-/// The architecture version of the Apple M2 (`-mcpu=apple-m2` is Armv8.6-A)
-/// and the exception levels and granules every Mac14,3 profile has.
-const BASE: [(&str, &str); 11] = [
-    ("v8Ap6", "Apple clang -mcpu=apple-m2 is Armv8.6-A"),
+/// An Apple CPU of the platform: Apple clang's name for it and its Arm
+/// architecture version, with the evidence for the version.
+pub struct Chip {
+    pub name: &'static str,
+    version: &'static str,
+    evidence: &'static str,
+}
+
+/// The Apple CPUs whose Macs the platform profiles cover. Each one's feature
+/// cap is its Apple clang export (`isa/apple-codegen-profiles.json`).
+pub const CHIPS: [Chip; 6] = [
+    Chip {
+        name: "apple-m1",
+        version: "v8Ap5",
+        evidence: "Apple clang -mcpu=apple-m1 defines __ARM_ARCH_8_5__",
+    },
+    Chip {
+        name: "apple-m2",
+        version: "v8Ap6",
+        evidence: "Apple clang -mcpu=apple-m2 defines __ARM_ARCH_8_6__",
+    },
+    Chip {
+        name: "apple-m3",
+        version: "v8Ap6",
+        evidence: "Apple clang -mcpu=apple-m3 defines __ARM_ARCH_8_6__",
+    },
+    Chip {
+        name: "apple-m4",
+        version: "v8Ap7",
+        evidence: "Apple clang -mcpu=apple-m4 defines __ARM_ARCH_8_7__",
+    },
+    Chip {
+        name: "apple-m5",
+        version: "v8Ap7",
+        evidence: "FEAT_CSSC and FEAT_HBC need Armv8.7-A, and without FEAT_MOPS the \
+                   CPU is not Armv8.8-A",
+    },
+    Chip {
+        name: "apple-m6",
+        version: "v8Ap7",
+        evidence: "FEAT_CSSC and FEAT_HBC need Armv8.7-A, and without FEAT_MOPS the \
+                   CPU is not Armv8.8-A",
+    },
+];
+
+/// The default CPU: the Mac14,3 (J473AP) M2 Mac mini.
+pub const DEFAULT_CHIP: &str = "apple-m2";
+
+/// The exception levels and granules every Apple CPU profile has.
+const BASE: [(&str, &str); 10] = [
     ("FEAT_AA64", "AArch64"),
     ("FEAT_EL0", "EL0"),
     ("FEAT_EL1", "EL1"),
@@ -60,39 +106,82 @@ const CHOICES: [(&str, &str); 1] = [(
     "FEAT_MPAM needs a version; v1.0 is the Armv8.4 base version",
 )];
 
-/// Features the profile does not have, with the reason. Features implied only
-/// by these are excluded with them.
-const EXCLUDED: [(&str, &str); 18] = [
-    ("FEAT_EL3", "the profile has no EL3"),
-    ("FEAT_AA64EL3", "the profile has no EL3"),
-    ("FEAT_SEL2", "Secure EL2 needs EL3"),
-    ("FEAT_AA32", "Apple cores are AArch64-only"),
-    ("FEAT_AA32EL0", "Apple cores are AArch64-only"),
-    ("FEAT_AA32EL1", "Apple cores are AArch64-only"),
-    ("FEAT_AA32EL2", "Apple cores are AArch64-only"),
-    ("FEAT_AA32EL3", "Apple cores are AArch64-only"),
+/// Every chip.
+const ALL: &[&str] = &[];
+
+/// Features a profile does not have, the chips it applies to (`ALL` for
+/// every one) and the reason. Features implied only by these are excluded
+/// with them.
+const EXCLUDED: [(&str, &[&str], &str); 18] = [
+    ("FEAT_EL3", ALL, "the profile has no EL3"),
+    ("FEAT_AA64EL3", ALL, "the profile has no EL3"),
+    ("FEAT_SEL2", ALL, "Secure EL2 needs EL3"),
+    ("FEAT_AA32", ALL, "Apple cores are AArch64-only"),
+    ("FEAT_AA32EL0", ALL, "Apple cores are AArch64-only"),
+    ("FEAT_AA32EL1", ALL, "Apple cores are AArch64-only"),
+    ("FEAT_AA32EL2", ALL, "Apple cores are AArch64-only"),
+    ("FEAT_AA32EL3", ALL, "Apple cores are AArch64-only"),
     (
         "FEAT_PMUv3",
+        ALL,
         "Apple's PMU is implementation-defined (Linux apple_m1_cpu_pmu)",
     ),
-    ("FEAT_PMUv3p1", "no PMUv3"),
-    ("FEAT_PMUv3p4", "no PMUv3"),
-    ("FEAT_PMUv3p5", "no PMUv3"),
+    ("FEAT_PMUv3p1", ALL, "no PMUv3"),
+    ("FEAT_PMUv3p4", ALL, "no PMUv3"),
+    ("FEAT_PMUv3p5", ALL, "no PMUv3"),
     (
         "FEAT_TRF",
+        ALL,
         "no Arm trace unit (inference: SPTM, TXM and the 26A434 kernel touch no \
          trace register); clang lists TRF as an Armv8.4 default",
     ),
-    ("FEAT_TRC_SR", "no Arm trace unit"),
-    ("FEAT_ETMv4", "no Arm trace unit"),
-    ("FEAT_ETE", "no Arm trace unit"),
+    ("FEAT_TRC_SR", ALL, "no Arm trace unit"),
+    ("FEAT_ETMv4", ALL, "no Arm trace unit"),
+    ("FEAT_ETE", ALL, "no Arm trace unit"),
     (
         "FEAT_NV",
+        &["apple-m1", "apple-m2"],
         "Apple's Virtualization framework offers nested virtualization only on \
          M3 and later (VZGenericPlatformConfiguration.isNestedVirtualizationSupported)",
     ),
-    ("FEAT_NV2", "no FEAT_NV"),
+    ("FEAT_NV2", &["apple-m1", "apple-m2"], "no FEAT_NV"),
 ];
+
+/// AARCHMRS constraints an Apple CPU profile does not meet, as rendered, the
+/// chips it applies to and why. Any other violated constraint is an error.
+const DEVIATIONS: [(&str, &[&str], &str); 19] = [
+    ("(FEAT_SME ==> v9Ap2)", LATER, SME_WITHOUT_SVE),
+    ("(FEAT_SME2 ==> v9Ap2)", LATER, SME_WITHOUT_SVE),
+    ("(FEAT_SME_F64F64 ==> v9Ap2)", LATER, SME_WITHOUT_SVE),
+    ("(FEAT_SME_I16I64 ==> v9Ap2)", LATER, SME_WITHOUT_SVE),
+    ("(FEAT_SME2p1 ==> v9Ap2)", M5_ON, SME_WITHOUT_SVE),
+    ("(FEAT_SME_F16F16 ==> v9Ap2)", M5_ON, SME_WITHOUT_SVE),
+    ("(FEAT_SME_B16B16 ==> v9Ap2)", M5_ON, SME_WITHOUT_SVE),
+    ("(FEAT_SVE_B16B16 ==> v9Ap2)", M5_ON, SME_WITHOUT_SVE),
+    ("(FEAT_SME_LUTv2 ==> v9Ap2)", M6, SME_WITHOUT_SVE),
+    ("(FEAT_SME_F8F16 ==> v9Ap2)", M6, SME_WITHOUT_SVE),
+    ("(FEAT_SME_F8F32 ==> v9Ap2)", M6, SME_WITHOUT_SVE),
+    ("(FEAT_LUT ==> v9Ap2)", M6, LATER_FEATURES),
+    ("(FEAT_FAMINMAX ==> v9Ap2)", M6, LATER_FEATURES),
+    ("(FEAT_FPMR ==> v9Ap2)", M6, LATER_FEATURES),
+    ("(FEAT_FP8 ==> v9Ap2)", M6, LATER_FEATURES),
+    ("(FEAT_CPA ==> v9Ap4)", M6, LATER_FEATURES),
+    ("(FEAT_PAuth_LR ==> v9Ap4)", M6, LATER_FEATURES),
+    ("(FEAT_RASv2 ==> v8Ap8)", M6, LATER_FEATURES),
+    ("(FEAT_FGT2 ==> v8Ap8)", M6, LATER_FEATURES),
+];
+
+const M6: &[&str] = &["apple-m6"];
+const LATER_FEATURES: &str = "Apple clang enables these later-version features on a \
+    core that has neither FEAT_MOPS (Armv8.8-A) nor FEAT_SVE2 (Armv9.0-A)";
+
+/// The chips from M5 on.
+const M5_ON: &[&str] = &["apple-m5", "apple-m6"];
+
+/// The chips from M4 on, which have SME.
+const LATER: &[&str] = &["apple-m4", "apple-m5", "apple-m6"];
+const SME_WITHOUT_SVE: &str = "Apple implements SME on an Armv8.7-A core: Apple clang \
+    enables FEAT_SME but not FEAT_SVE, and Armv9.0-A requires FEAT_SVE2";
 
 /// A64 mnemonics whose semantics belong to the system platform: exception
 /// generation and return, hints and waits, barriers, System register and
@@ -152,8 +241,15 @@ impl SystemMatrix {
             .arg(resets::DIRECTORY)
             .status()?;
         ensure!(status.success(), "cannot extract {}", resets::DIRECTORY);
-        let (matrix, registers, profile) = generate(directory.path())?;
-        let facts = resets::read(&directory.path().join(resets::DIRECTORY), &profile)?;
+        let (matrix, registers, profiles) = generate(directory.path())?;
+        let profile = &profiles.union;
+        let resets_directory = directory.path().join(resets::DIRECTORY);
+        let facts = resets::read(&resets_directory, profile)?;
+        let chip_facts: Vec<resets::Facts> = profiles
+            .chips
+            .iter()
+            .map(|(_, chip)| resets::read(&resets_directory, chip))
+            .collect::<Result<_>>()?;
         let previous = fs::read_to_string(root().join(MATRIX)).unwrap_or_default();
         let text = assess::render(&matrix, &assess::registry()?, &previous)?;
         fs::write(root().join(MATRIX), text)?;
@@ -167,7 +263,7 @@ impl SystemMatrix {
         let generated = root().join(access::GENERATED);
         fs::write(
             &generated,
-            access::generate(&registers, &profile, &applicable, &facts)?,
+            access::generate(&registers, &profiles, &applicable, &facts, &chip_facts)?,
         )?;
         let status = Command::new("rustfmt")
             .args(["--edition", "2024"])
@@ -185,7 +281,7 @@ pub struct Matrix {
     pub rows: BTreeMap<String, Value>,
 }
 
-fn generate(directory: &Path) -> Result<(Matrix, Value, Profile)> {
+fn generate(directory: &Path) -> Result<(Matrix, Value, Profiles)> {
     let read = |name: &str| -> Result<(Value, String)> {
         let bytes = fs::read(directory.join(name))?;
         let digest = stela_runtime::sha256(&bytes);
@@ -193,49 +289,54 @@ fn generate(directory: &Path) -> Result<(Matrix, Value, Profile)> {
     };
     let (registers, registers_sha256) = read("Registers.json")?;
     let (features, features_sha256) = read("Features.json")?;
-    let (profile, decisions) = profile(&features)?;
-    let mut rows = BTreeMap::new();
-    let mut insert = |row: Value| -> Result<()> {
-        let id = row["id"].as_str().context("row without id")?.to_owned();
-        ensure!(rows.insert(id.clone(), row).is_none(), "duplicate row {id}");
-        Ok(())
-    };
-    for register in registers
-        .as_array()
-        .context("Registers.json is not a list")?
-    {
-        if register["state"] != "AArch64"
-            || !matches!(
-                register["_type"].as_str(),
-                Some("Register" | "RegisterArray")
-            )
-        {
-            continue;
-        }
-        let applicability = profile.truth(&register["condition"]);
-        if applicability == Truth::False {
-            continue;
-        }
-        let name = register["name"].as_str().context("register without name")?;
-        for row in register_rows(&profile, register, name, applicability)? {
-            insert(row)?;
+    let (profiles, decisions) = profiles(&features)?;
+    let mut rows = requirement_rows(&profiles.union, &registers)?;
+    let chips: Vec<(&str, BTreeMap<String, Value>)> = profiles
+        .chips
+        .iter()
+        .map(|(name, profile)| {
+            let rows = requirement_rows(profile, &registers)?;
+            Ok((
+                *name,
+                rows.into_values().map(|row| (key(&row), row)).collect(),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let union_keys: BTreeSet<String> = rows.values().map(key).collect();
+    for (name, chip_rows) in &chips {
+        if let Some(missing) = chip_rows.keys().find(|key| !union_keys.contains(*key)) {
+            bail!("{name} has {missing}, which the union profile lacks");
         }
     }
-    for row in exception_rows(&profile, &registers)? {
-        insert(row)?;
-    }
-    for feature in &profile.features {
-        if !feature.starts_with("FEAT_") {
-            continue;
+    rows.retain(|_, row| {
+        let key = key(row);
+        let present: Vec<(&str, &Value)> = chips
+            .iter()
+            .filter_map(|(name, chip_rows)| chip_rows.get(&key).map(|chip_row| (*name, chip_row)))
+            .collect();
+        if present.is_empty() {
+            return false;
         }
-        insert(
-            json!({"id": format!("feature:{feature}"), "kind": "feature",
-                      "name": feature}),
-        )?;
-    }
-    for row in form_rows(&profile)? {
-        insert(row)?;
-    }
+        if row.get("applicability").is_some() {
+            let everywhere = present
+                .iter()
+                .all(|(_, chip_row)| chip_row["applicability"] == "profile");
+            row["applicability"] = applicability(if everywhere {
+                Truth::True
+            } else {
+                Truth::Dynamic
+            })
+            .into();
+        }
+        if present.len() < chips.len() {
+            row["chips"] = present
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .into();
+        }
+        true
+    });
     let mut header = Map::new();
     header.insert("schema_version".into(), 1.into());
     header.insert("kind".into(), "system_platform_requirement_matrix".into());
@@ -264,18 +365,90 @@ fn generate(directory: &Path) -> Result<(Matrix, Value, Profile)> {
     );
     header.insert(
         "applicability".into(),
-        "A row's AARCHMRS condition is evaluated against the profile: `profile` rows \
-         always exist; `dynamic` rows exist under a run-time control or an ID field \
-         value of the profile."
+        "A row's AARCHMRS condition is evaluated against each chip's profile: a row \
+         exists when it holds on some chip, and `chips` lists them unless it holds on \
+         every chip. `profile` rows always exist on their chips; `dynamic` rows exist \
+         under a run-time control or an ID field value."
             .into(),
     );
     header.insert("profile".into(), decisions);
-    Ok((Matrix { header, rows }, registers, profile))
+    Ok((Matrix { header, rows }, registers, profiles))
 }
 
-/// The declared Mac14,3 profile: the Apple clang `apple-m2` cap plus the base,
-/// closed under the AARCHMRS feature implications, minus the exclusions.
-fn profile(features: &Value) -> Result<(Profile, Value)> {
+/// The requirement rows of `profile`, keyed by id.
+fn requirement_rows(profile: &Profile, registers: &Value) -> Result<BTreeMap<String, Value>> {
+    let mut rows = BTreeMap::new();
+    let mut insert = |row: Value| -> Result<()> {
+        let id = row["id"].as_str().context("row without id")?.to_owned();
+        ensure!(rows.insert(id.clone(), row).is_none(), "duplicate row {id}");
+        Ok(())
+    };
+    for register in registers
+        .as_array()
+        .context("Registers.json is not a list")?
+    {
+        if register["state"] != "AArch64"
+            || !matches!(
+                register["_type"].as_str(),
+                Some("Register" | "RegisterArray")
+            )
+        {
+            continue;
+        }
+        let applicability = profile.truth(&register["condition"]);
+        if applicability == Truth::False {
+            continue;
+        }
+        let name = register["name"].as_str().context("register without name")?;
+        for row in register_rows(profile, register, name, applicability)? {
+            insert(row)?;
+        }
+    }
+    for row in exception_rows(profile, registers)? {
+        insert(row)?;
+    }
+    for feature in &profile.features {
+        if !feature.starts_with("FEAT_") {
+            continue;
+        }
+        insert(
+            json!({"id": format!("feature:{feature}"), "kind": "feature",
+                      "name": feature}),
+        )?;
+    }
+    for row in form_rows(profile)? {
+        insert(row)?;
+    }
+    Ok(rows)
+}
+
+/// What identifies a row across profiles: a field by its register, name and
+/// bits, since its id carries the bits only when the name repeats.
+fn key(row: &Value) -> String {
+    if row["kind"] == "field" {
+        format!(
+            "field:{}.{}@{}",
+            row["register"].as_str().unwrap_or("?"),
+            row["name"].as_str().unwrap_or("?"),
+            row["bits"].as_str().unwrap_or("?")
+        )
+    } else {
+        row["id"].as_str().unwrap_or("?").to_owned()
+    }
+}
+
+/// The platform's CPU profiles, each closed as [`chip_profile`] describes,
+/// and their union, in which a feature only some chips have varies.
+pub struct Profiles {
+    pub union: Profile,
+    pub chips: Vec<(&'static str, Profile)>,
+}
+
+fn applies(chips: &[&str], chip: &str) -> bool {
+    chips.is_empty() || chips.contains(&chip)
+}
+
+fn profiles(features: &Value) -> Result<(Profiles, Value)> {
     let parameters: BTreeSet<String> = features["parameters"]
         .as_array()
         .context("Features.json has no parameters")?
@@ -291,56 +464,167 @@ fn profile(features: &Value) -> Result<(Profile, Value)> {
         constraints.extend(parameter["constraints"].as_array().into_iter().flatten());
     }
     let apple = serde_json::from_str::<Value>(&fs::read_to_string(root().join(APPLE_PROFILES))?)?;
-    let cap: Vec<String> = apple["profiles"]["apple-m2"]["architectural_features"]
-        .as_array()
-        .context("no apple-m2 profile")?
+    for (name, _) in BASE.iter().chain(&CHOICES) {
+        ensure!(
+            parameters.contains(*name),
+            "{name} is not an AARCHMRS feature"
+        );
+    }
+    for (name, _, _) in &EXCLUDED {
+        ensure!(
+            parameters.contains(*name),
+            "{name} is not an AARCHMRS feature"
+        );
+    }
+    let mut chips = Vec::new();
+    let mut decisions = Vec::new();
+    let mut used = BTreeSet::new();
+    for chip in &CHIPS {
+        let cap: Vec<String> = apple["profiles"][chip.name]["architectural_features"]
+            .as_array()
+            .with_context(|| format!("no {} profile", chip.name))?
+            .iter()
+            .filter_map(|feature| feature.as_str().map(str::to_owned))
+            .collect();
+        let (profile, implied, deviations) = chip_profile(&parameters, &constraints, chip, &cap)?;
+        used.extend(deviations.iter().cloned());
+        let deviations: Vec<Value> = deviations
+            .iter()
+            .map(|text| {
+                let reason = DEVIATIONS
+                    .iter()
+                    .find(|(known, _, _)| known == text)
+                    .map_or("", |(_, _, reason)| *reason);
+                json!({"constraint": text, "reason": reason})
+            })
+            .collect();
+        let excluded: Vec<Value> = EXCLUDED
+            .iter()
+            .filter(|(_, chips, _)| applies(chips, chip.name))
+            .map(|(name, _, reason)| json!({"feature": name, "reason": reason}))
+            .collect();
+        decisions.push(json!({
+            "chip": chip.name,
+            "cap": format!("{APPLE_PROFILES} {} architectural_features", chip.name),
+            "version": chip.version,
+            "version_evidence": chip.evidence,
+            "excluded": excluded,
+            "deviations": deviations,
+            "implied": implied.iter().collect::<Vec<_>>(),
+            "features": profile.features.iter().collect::<Vec<_>>(),
+        }));
+        chips.push((chip.name, profile));
+    }
+    for (constraint, _, _) in &DEVIATIONS {
+        ensure!(
+            used.contains(*constraint),
+            "deviation {constraint} is not violated by any chip"
+        );
+    }
+    let features: BTreeSet<String> = chips
         .iter()
-        .filter_map(|feature| feature.as_str().map(str::to_owned))
+        .flat_map(|(_, profile)| profile.features.iter().cloned())
         .collect();
-    let excluded: BTreeSet<&str> = EXCLUDED.iter().map(|(name, _)| *name).collect();
+    let varying = features
+        .iter()
+        .filter(|feature| {
+            !chips
+                .iter()
+                .all(|(_, profile)| profile.features.contains(*feature))
+        })
+        .cloned()
+        .collect();
+    let union = Profile {
+        parameters,
+        features,
+        varying,
+        highest_el: 2,
+    };
+    let named = |list: &[(&str, &str)]| -> Value {
+        list.iter()
+            .map(|(name, reason)| json!({"feature": name, "reason": reason}))
+            .collect()
+    };
+    let decisions = json!({
+        "default": DEFAULT_CHIP,
+        "exception_levels": "EL0, EL1 and EL2 with VHE; no EL3, no Secure state",
+        "base": named(&BASE),
+        "choices": named(&CHOICES),
+        "varying": union.varying.iter().collect::<Vec<_>>(),
+        "chips": decisions,
+    });
+    Ok((Profiles { union, chips }, decisions))
+}
+
+/// Whether `name` is an architecture version parameter such as `v8Ap6`.
+fn is_version(name: &str) -> bool {
+    name.strip_prefix("v8Ap")
+        .or_else(|| name.strip_prefix("v9Ap"))
+        .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// One chip's profile: its Apple clang cap, its architecture version and
+/// the base, closed under the AARCHMRS feature implications, minus its
+/// exclusions. It must meet every AARCHMRS constraint except its recorded
+/// deviations, which are returned with the implied features.
+fn chip_profile(
+    parameters: &BTreeSet<String>,
+    constraints: &[&Value],
+    chip: &Chip,
+    cap: &[String],
+) -> Result<(Profile, BTreeSet<String>, Vec<String>)> {
+    let excluded: BTreeSet<&str> = EXCLUDED
+        .iter()
+        .filter(|(_, chips, _)| applies(chips, chip.name))
+        .map(|(name, _, _)| *name)
+        .collect();
+    for name in cap.iter().map(String::as_str).chain([chip.version]) {
+        ensure!(
+            parameters.contains(name),
+            "{name} of {} is not an AARCHMRS feature",
+            chip.name
+        );
+    }
     let mut features: BTreeSet<String> = cap
         .iter()
         .map(String::as_str)
+        .chain([chip.version])
         .chain(BASE.iter().map(|(name, _)| *name))
         .chain(CHOICES.iter().map(|(name, _)| *name))
         .filter(|name| !excluded.contains(name))
         .map(str::to_owned)
         .collect();
-    let listed = [&BASE[..], &CHOICES, &EXCLUDED].concat();
-    let declared = cap
-        .iter()
-        .map(String::as_str)
-        .chain(listed.iter().map(|(name, _)| *name));
-    for name in declared {
-        ensure!(
-            parameters.contains(name),
-            "{name} is not an AARCHMRS feature"
-        );
-    }
     let mut implied = BTreeSet::new();
     loop {
         let profile = Profile {
             parameters: parameters.clone(),
             features: features.clone(),
             highest_el: 2,
+            ..Profile::default()
         };
         let mut added = false;
-        for constraint in &constraints {
+        for constraint in constraints {
             if constraint["op"] != "==>" || constraint["right"]["_type"] != "AST.Identifier" {
                 continue;
             }
             let Some(consequent) = constraint["right"]["value"].as_str() else {
                 continue;
             };
+            // Versions follow the declared one: a feature that needs a later
+            // version is a deviation, not a version change.
+            let version_chain = !is_version(consequent)
+                || constraint["left"]["value"].as_str().is_some_and(is_version);
             if !parameters.contains(consequent)
                 || features.contains(consequent)
+                || !version_chain
                 || profile.truth(&constraint["left"]) != Truth::True
             {
                 continue;
             }
             ensure!(
                 !excluded.contains(consequent),
-                "the profile implies excluded {consequent}: {}",
+                "{} implies excluded {consequent}: {}",
+                chip.name,
                 render(constraint)
             );
             features.insert(consequent.to_owned());
@@ -352,37 +636,35 @@ fn profile(features: &Value) -> Result<(Profile, Value)> {
         }
     }
     let profile = Profile {
-        parameters,
+        parameters: parameters.clone(),
         features,
         highest_el: 2,
+        ..Profile::default()
     };
-    let violated: Vec<String> = constraints
-        .iter()
-        .filter(|constraint| profile.truth(constraint) == Truth::False)
-        .map(|constraint| render(constraint))
-        .collect();
+    let mut deviations = Vec::new();
+    let mut violated = Vec::new();
+    for constraint in constraints {
+        if profile.truth(constraint) != Truth::False {
+            continue;
+        }
+        let text = render(constraint);
+        if DEVIATIONS
+            .iter()
+            .any(|(known, chips, _)| *known == text && applies(chips, chip.name))
+        {
+            deviations.push(text);
+        } else {
+            violated.push(text);
+        }
+    }
     if !violated.is_empty() {
         bail!(
-            "the profile violates AARCHMRS constraints:\n{}",
+            "{} violates AARCHMRS constraints:\n{}",
+            chip.name,
             violated.join("\n")
         );
     }
-    let named = |list: &[(&str, &str)]| -> Value {
-        list.iter()
-            .map(|(name, reason)| json!({"feature": name, "reason": reason}))
-            .collect()
-    };
-    let decisions = json!({
-        "name": "Mac14,3 (J473AP, Apple M2)",
-        "exception_levels": "EL0, EL1 and EL2 with VHE; no EL3, no Secure state",
-        "cap": format!("{APPLE_PROFILES} apple-m2 architectural_features"),
-        "base": named(&BASE),
-        "choices": named(&CHOICES),
-        "excluded": named(&EXCLUDED),
-        "implied": implied.iter().collect::<Vec<_>>(),
-        "features": profile.features.iter().collect::<Vec<_>>(),
-    });
-    Ok((profile, decisions))
+    Ok((profile, implied, deviations))
 }
 
 fn applicability(truth: Truth) -> &'static str {
@@ -758,6 +1040,7 @@ mod tests {
             parameters: ["FEAT_AA32EL1"].map(String::from).into(),
             features: features.iter().map(|f| String::from(*f)).collect(),
             highest_el: 2,
+            varying: Default::default(),
         };
         let fields = |profile: &Profile| -> Vec<String> {
             register_rows(profile, &banked_spsr(), "SPSR_abt", Truth::True)
@@ -769,5 +1052,80 @@ mod tests {
         };
         assert_eq!(fields(&profile(&[])), ["field:SPSR_abt.RES0"]);
         assert_eq!(fields(&profile(&["FEAT_AA32EL1"])), ["field:SPSR_abt.N"]);
+    }
+
+    fn identifier(name: &str) -> Value {
+        json!({"_type": "AST.Identifier", "value": name})
+    }
+
+    fn implies(left: &str, right: &str) -> Value {
+        json!({"_type": "AST.BinaryOp", "op": "==>", "left": identifier(left),
+               "right": identifier(right)})
+    }
+
+    #[test]
+    fn a_chip_keeps_its_declared_version_and_reports_later_version_features() {
+        let parameters: BTreeSet<String> = [
+            "v8Ap6",
+            "v8Ap7",
+            "v9Ap2",
+            "FEAT_SME",
+            "FEAT_WFxT",
+            "FEAT_ECV",
+        ]
+        .into_iter()
+        .chain(BASE.iter().map(|(name, _)| *name))
+        .chain(CHOICES.iter().map(|(name, _)| *name))
+        .map(String::from)
+        .collect();
+        let constraints = [
+            implies("v8Ap7", "v8Ap6"),
+            implies("v8Ap7", "FEAT_WFxT"),
+            implies("v8Ap6", "FEAT_ECV"),
+            implies("FEAT_SME", "v9Ap2"),
+        ];
+        let constraints: Vec<&Value> = constraints.iter().collect();
+        let chip = |name: &'static str| Chip {
+            name,
+            version: "v8Ap7",
+            evidence: "",
+        };
+        // The version chain and its mandatory features are implied.
+        let (profile, implied, deviations) =
+            chip_profile(&parameters, &constraints, &chip("apple-m3"), &[]).unwrap();
+        assert!(implied.contains("v8Ap6") && implied.contains("FEAT_WFxT"));
+        assert!(implied.contains("FEAT_ECV") && deviations.is_empty());
+        assert!(!profile.features.contains("v9Ap2"));
+        // A feature that needs a later version does not raise the version:
+        // the violated constraint is an error unless it is a recorded
+        // deviation for the chip.
+        let sme = ["FEAT_SME".to_owned()];
+        let error = chip_profile(&parameters, &constraints, &chip("apple-m3"), &sme)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("(FEAT_SME ==> v9Ap2)"), "{error}");
+        let (profile, _, deviations) =
+            chip_profile(&parameters, &constraints, &chip("apple-m4"), &sme).unwrap();
+        assert_eq!(deviations, ["(FEAT_SME ==> v9Ap2)"]);
+        assert!(!profile.features.contains("v9Ap2"));
+    }
+
+    #[test]
+    fn version_parameters_are_recognized() {
+        assert!(is_version("v8Ap7") && is_version("v9Ap4") && is_version("v8Ap10"));
+        assert!(!is_version("v8Ap") && !is_version("FEAT_V8") && !is_version("v7Ap1"));
+    }
+
+    #[test]
+    fn rows_match_across_profiles_by_register_name_and_bits() {
+        let field = json!({"id": "field:R.F@3:0", "kind": "field", "register": "R",
+                           "name": "F", "bits": "3:0"});
+        let same = json!({"id": "field:R.F", "kind": "field", "register": "R",
+                          "name": "F", "bits": "3:0"});
+        assert_eq!(key(&field), key(&same));
+        assert_eq!(
+            key(&json!({"id": "register:R", "kind": "register"})),
+            "register:R"
+        );
     }
 }

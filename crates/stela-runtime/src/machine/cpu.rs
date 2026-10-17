@@ -235,8 +235,15 @@ fn bank(el: u8) -> Bank {
 }
 
 impl Cpu {
+    /// A PE of the default chip.
     pub fn new(pc: u64, pstate: Pstate) -> Self {
-        let mut registers = File::new();
+        Self::of(super::Chip::DEFAULT, pc, pstate)
+    }
+
+    /// A PE of `chip`, its registers at their Cold reset values under the
+    /// chip's profile.
+    pub fn of(chip: super::Chip, pc: u64, pstate: Pstate) -> Self {
+        let mut registers = File::new(chip);
         // OSLSR_EL1.OSLM = 0b10 (bits 3 and 0): the OS lock is implemented.
         // OSLK, set at Cold reset, comes with the reset value.
         let oslsr = registers.get(Register::OSLSR_EL1, 0);

@@ -19,8 +19,8 @@ use crate::machine::{
     exception::{Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
     registers::{Lines, Refusal, trap_iss},
     system::{
-        ACCESSORS, AtAccess, CacheOp, CacheScope, Context, Effect, ErrorRecord, Limit, Operation,
-        Pstate, Register, Stage,
+        ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
+        Limit, Operation, Pstate, Register, Stage,
     },
     timer::Channel,
 };
@@ -185,7 +185,17 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
     }
 }
 
+/// Every PSTATE.TCO accessor first tests FEAT_MTE, which stops on a chip
+/// that has it until the engine implements it.
+/// Allocation tag maintenance needs FEAT_MTE2, which no chip implements yet.
+const TAG_MAINTENANCE: &str = "allocation tag cache maintenance needs FEAT_MTE2";
+const TCO_UNREACHABLE: &str = "PSTATE.TCO is reached only through an implemented FEAT_MTE";
+
 impl<H: Host, D: Devices> Context for Access<'_, H, D> {
+    fn chip(&self) -> Chip {
+        self.machine.cpu.registers.chip()
+    }
+
     fn el(&self) -> u64 {
         u64::from(self.machine.cpu.pstate.el)
     }
@@ -209,6 +219,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Pstate::UAO => u64::from(state.uao),
             Pstate::DIT => u64::from(state.dit),
             Pstate::SSBS => u64::from(state.ssbs),
+            Pstate::TCO => unreachable!("{TCO_UNREACHABLE}"),
         }
     }
 
@@ -254,6 +265,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Pstate::UAO => next.uao = bit,
             Pstate::DIT => next.dit = bit,
             Pstate::SSBS => next.ssbs = bit,
+            Pstate::TCO => unreachable!("{TCO_UNREACHABLE}"),
         }
         cpu.set_pstate(next);
         if field == Pstate::D {
@@ -395,7 +407,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             }
             // Without AArch32, FPSR keeps only QC and the cumulative flags.
             Register::FPSR => {
-                cpu.state.fpsr = (value & !Register::FPSR.res0()) as u32;
+                cpu.state.fpsr = (value & !cpu.registers.res0(Register::FPSR)) as u32;
                 return Ok(());
             }
             _ => {}
@@ -450,6 +462,14 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 access,
                 address,
             } => self.address_translation(stage, el, access, address),
+            Operation::Dc {
+                kind: CacheType::Tag | CacheType::DataTag,
+                ..
+            }
+            | Operation::ZeroBlock {
+                kind: CacheType::Tag | CacheType::DataTag,
+                ..
+            } => Err(Effect::Refused(TAG_MAINTENANCE)),
             Operation::Dc {
                 op, scope, operand, ..
             } => {
@@ -835,8 +855,9 @@ pub(super) fn identify(
             Some(value) => cpu.registers.set_raw(register, 0, value),
             // A layout the profile reserves entirely, such as the AArch32
             // ID registers without FEAT_AA32, has one value.
-            None if register.res0() | register.res1() == u64::MAX => {
-                cpu.registers.set_raw(register, 0, register.res1());
+            None if cpu.registers.res0(register) | cpu.registers.res1(register) == u64::MAX => {
+                let res1 = cpu.registers.res1(register);
+                cpu.registers.set_raw(register, 0, res1);
             }
             None => missing.push(register),
         }
@@ -858,6 +879,7 @@ pub(super) fn identify(
 mod tests {
     use super::super::tests::{BASE, machine};
     use crate::machine::{
+        Chip,
         cpu::{HCR_HCD, HCR_TGE, HCR_TSC},
         exception::{Pstate, Vector},
         system::Register,
@@ -1607,7 +1629,7 @@ mod tests {
         let baseline = el1_traps_to_el2(enable);
         let mut inert = alloc::vec::Vec::new();
         for register in CONTROLS {
-            let mut fields = !(register.res0() | register.res1());
+            let mut fields = !(register.res0(Chip::DEFAULT) | register.res1(Chip::DEFAULT));
             if register == Register::HFGITR_EL2 {
                 fields &= !INSTRUCTIONS;
             }
@@ -1909,7 +1931,7 @@ mod tests {
         // A, IDS, AET, EA and DFSC hold what EL2 writes; the rest is RES0.
         access_at(&mut machine, 2, false, u64::MAX);
         let disr = access_at(&mut machine, 2, true, 0);
-        assert_eq!(disr, !Register::DISR_EL1.res0());
+        assert_eq!(disr, !Register::DISR_EL1.res0(Chip::DEFAULT));
         assert_eq!(disr & (1 << 31 | 1 << 24), 1 << 31 | 1 << 24);
         // With HCR_EL2.AMO, EL1 reads and writes VDISR_EL2 instead.
         machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 5);

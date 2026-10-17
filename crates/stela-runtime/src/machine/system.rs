@@ -1,7 +1,8 @@
 //! Architectural System register and System instruction access.
 //!
-//! `generated` holds every accessor of the declared Mac14,3 profile as its
-//! AARCHMRS permission tree folded against the profile
+//! `generated` holds every accessor of the Apple CPU profiles as its
+//! AARCHMRS permission tree folded against them, a feature only some chips
+//! have decided by [`Context::implemented`] for the PE's [`Chip`]
 //! (`cargo xtask system-matrix`): which EL gets UNDEFINED, which trap goes to
 //! which EL, which register a name reaches under VHE or NV2, and which
 //! operation runs. This module supplies the vocabulary those trees use:
@@ -13,8 +14,9 @@ pub mod file;
 pub mod generated;
 pub mod helpers;
 
+pub use super::chip::Chip;
 pub use file::File;
-pub use generated::{ACCESSORS, Register};
+pub use generated::{ACCESSORS, Feature, Register};
 
 /// How an access ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +127,8 @@ pub enum Pstate {
     UAO,
     DIT,
     SSBS,
+    /// FEAT_MTE tag check override.
+    TCO,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -186,6 +190,10 @@ pub struct Tlbi {
 pub enum CacheType {
     Data,
     Instruction,
+    /// Allocation tags alone (FEAT_MTE2 `DC *GVA*`, `DC GZVA`).
+    Tag,
+    /// Data and allocation tags (FEAT_MTE2 `DC *GDVA*`).
+    DataTag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +234,8 @@ pub enum Restrict {
     DataValue,
     ControlFlow,
     CachePrefetch,
+    /// `COSP RCTX` (FEAT_SPECRES2).
+    Other,
 }
 
 /// The operations System instructions perform.
@@ -277,6 +287,8 @@ pub enum ErrorRecord {
     Addr,
     Ctlr,
     Fr,
+    /// ERRGSR (FEAT_RASv2), the error group status.
+    Gsr,
     Misc0,
     Misc1,
     Misc2,
@@ -290,6 +302,13 @@ pub enum ErrorRecord {
 /// One PE's state, memory and operations, as the generated accessors see
 /// them.
 pub trait Context {
+    /// The PE's chip.
+    fn chip(&self) -> Chip;
+    /// Arm `IsFeatureImplemented` for a feature only some chips have; a
+    /// feature the chip has and the engine does not implement stops.
+    fn implemented(&self, feature: Feature) -> Result<bool, Effect> {
+        self.chip().implemented(feature).map_err(Effect::Refused)
+    }
     /// PSTATE.EL.
     fn el(&self) -> u64;
     fn pstate(&self, field: Pstate) -> u64;

@@ -1,33 +1,48 @@
 //! Storage for the profile's System registers: one 64-bit slot per register
 //! instance, starting at the reset value. Writes keep the bits that are RES0
-//! at 0 and RES1 at 1 in every layout the profile allows (`Register::res0`,
-//! `Register::res1`).
-use super::Register;
+//! at 0 and RES1 at 1 in every layout the chip's profile allows
+//! (`Register::res0`, `Register::res1`).
+use super::{Chip, Register};
 use alloc::{boxed::Box, vec};
 
 #[derive(Debug, Clone)]
 pub struct File {
+    chip: Chip,
     values: Box<[u64]>,
 }
 
 impl Default for File {
     fn default() -> Self {
-        Self::new()
+        Self::new(Chip::DEFAULT)
     }
 }
 
 impl File {
     /// Every register at its Cold reset value (`Register::reset`): the
-    /// architectural field resets under the profile, with RES1 bits set and
-    /// UNKNOWN fields 0.
-    pub fn new() -> Self {
+    /// architectural field resets under `chip`'s profile, with RES1 bits set
+    /// and UNKNOWN fields 0.
+    pub fn new(chip: Chip) -> Self {
         let mut values = vec![0; Register::SLOTS].into_boxed_slice();
         for register in Register::ALL {
             for index in 0..register.instances() {
-                values[register.offset() + index as usize] = register.reset();
+                values[register.offset() + index as usize] = register.reset(chip);
             }
         }
-        Self { values }
+        Self { chip, values }
+    }
+
+    pub fn chip(&self) -> Chip {
+        self.chip
+    }
+
+    /// The bits of `register` that are RES0 under the chip's profile.
+    pub fn res0(&self, register: Register) -> u64 {
+        register.res0(self.chip)
+    }
+
+    /// The bits of `register` that are RES1 under the chip's profile.
+    pub fn res1(&self, register: Register) -> u64 {
+        register.res1(self.chip)
     }
 
     fn slot(register: Register, index: u64) -> Option<usize> {
@@ -42,7 +57,8 @@ impl File {
     /// Store with the reserved bits forced; an out-of-range index is ignored.
     pub fn set(&mut self, register: Register, index: u64, value: u64) {
         if let Some(slot) = Self::slot(register, index) {
-            self.values[slot] = (value & !register.res0() & !register.res1()) | register.res1();
+            let (res0, res1) = (self.res0(register), self.res1(register));
+            self.values[slot] = (value & !res0 & !res1) | res1;
         }
     }
 
@@ -60,7 +76,7 @@ mod tests {
 
     #[test]
     fn reserved_bits_and_arrays() {
-        let mut file = File::new();
+        let mut file = File::default();
         // HCR_EL2.E2H is RES1 without FEAT_E2H0.
         assert_eq!(file.get(Register::HCR_EL2, 0) >> 34 & 1, 1);
         file.set(Register::HCR_EL2, 0, 0);
@@ -73,7 +89,7 @@ mod tests {
 
     #[test]
     fn registers_start_at_their_cold_reset_values() {
-        let file = File::new();
+        let file = File::default();
         // Arm's System register XML, under the profile (highest EL EL2):
         // OSLSR_EL1.OSLK is set at Cold reset, MPAM2_EL2 traps EL1 and EL0
         // MPAM register accesses, RMR_EL2.AA64 resets to AArch64, and
@@ -82,6 +98,9 @@ mod tests {
         assert_eq!(file.get(Register::MPAM2_EL2, 0), 0b11 << 48);
         assert_eq!(file.get(Register::RMR_EL2, 0), 1);
         assert_eq!(file.get(Register::SCTLR_EL2, 0) & 0b1_0000_0000_0101, 0);
-        assert_eq!(Register::SCTLR_EL2.reset(), Register::SCTLR_EL2.res1());
+        assert_eq!(
+            file.get(Register::SCTLR_EL2, 0),
+            file.res1(Register::SCTLR_EL2)
+        );
     }
 }

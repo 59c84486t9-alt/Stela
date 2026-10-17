@@ -5,6 +5,7 @@
 //! The design is in `docs/design/system.md#system-mode-execution`.
 pub mod amx;
 pub mod apple;
+pub mod chip;
 pub mod cpu;
 pub mod debug;
 pub mod engine;
@@ -16,6 +17,7 @@ pub mod registers;
 pub mod system;
 pub mod timer;
 
+pub use chip::Chip;
 pub use cpu::{Cpu, Exception};
 pub use engine::{
     DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,

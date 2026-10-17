@@ -41,10 +41,14 @@ impl Truth {
 }
 
 /// The declared profile: implemented features and exception levels.
+#[derive(Debug, Default)]
 pub struct Profile {
     /// Every Boolean parameter of `Features.json`.
     pub parameters: BTreeSet<String>,
     pub features: BTreeSet<String>,
+    /// Features of `features` that only some of the profile's CPUs have: a
+    /// condition on one is `Dynamic`, decided by the CPU at run time.
+    pub varying: BTreeSet<String>,
     /// The highest implemented EL.
     pub highest_el: u8,
 }
@@ -67,9 +71,13 @@ impl Profile {
     }
 
     fn feature(&self, name: &str) -> Option<Truth> {
-        self.parameters
-            .contains(name)
-            .then(|| Truth::from_bool(self.features.contains(name)))
+        self.parameters.contains(name).then(|| {
+            if self.varying.contains(name) {
+                Truth::Dynamic
+            } else {
+                Truth::from_bool(self.features.contains(name))
+            }
+        })
     }
 
     fn term(&self, node: &Value) -> Term {
@@ -229,6 +237,7 @@ mod tests {
             parameters: ["FEAT_VHE", "FEAT_XS"].map(String::from).into(),
             features: ["FEAT_VHE"].map(String::from).into(),
             highest_el: 2,
+            ..Profile::default()
         };
         assert_eq!(profile.truth(&feature("FEAT_VHE")), Truth::True);
         assert_eq!(profile.truth(&feature("FEAT_XS")), Truth::False);

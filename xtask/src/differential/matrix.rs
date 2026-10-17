@@ -8,7 +8,7 @@
 //! the matrix owner to cite.
 use super::{Random, Subject, el1_admissible, el2_admissible};
 use crate::oracle::native::Translation;
-use crate::system_matrix::MATRIX;
+use crate::system_matrix::{DEFAULT_CHIP, MATRIX};
 use crate::tools::root;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -272,6 +272,13 @@ pub(super) fn subjects(
         if !matches!(kind, "form" | "access") || filter.is_some_and(|filter| !id.contains(filter)) {
             continue;
         }
+        // The lane runs the engine as the default chip.
+        let chips = row["chips"].as_array();
+        if chips.is_some_and(|chips| !chips.iter().any(|chip| chip == DEFAULT_CHIP)) {
+            rows.unsampled
+                .push((id.into(), format!("not a requirement of {DEFAULT_CHIP}")));
+            continue;
+        }
         let encoding = row["encoding"].as_str().unwrap_or_default();
         let words: Vec<u32> = if kind == "form" {
             let Some((value, mask)) = encoding.split_once('/').and_then(|(value, mask)| {
@@ -330,7 +337,11 @@ pub(super) fn subjects(
             }
             words
         };
-        let status = row["status"].as_str().unwrap_or("open").to_owned();
+        let status = row["statuses"][DEFAULT_CHIP]
+            .as_str()
+            .or_else(|| row["status"].as_str())
+            .unwrap_or("open")
+            .to_owned();
         let draft = status != "implemented";
         rows.rows.insert(
             id.into(),

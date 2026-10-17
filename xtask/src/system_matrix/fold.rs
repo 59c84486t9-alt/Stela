@@ -42,7 +42,7 @@ pub fn fold(node: &Value, profile: &Profile) -> Value {
         "AST.Function" => function(node, profile),
         "AST.Identifier" => {
             let name = identifier(node).unwrap_or("");
-            if profile.parameters.contains(name) {
+            if profile.parameters.contains(name) && !profile.varying.contains(name) {
                 boolean(profile.features.contains(name))
             } else {
                 node.clone()
@@ -140,9 +140,11 @@ fn function(node: &Value, profile: &Profile) -> Value {
     let arguments = &node["arguments"];
     let first = &arguments[0];
     let decided = match name {
-        "IsFeatureImplemented" => {
-            identifier(first).map(|feature| profile.features.contains(feature))
-        }
+        // A feature only some of the profile's CPUs have stays a run-time
+        // question.
+        "IsFeatureImplemented" => identifier(first)
+            .filter(|feature| !profile.varying.contains(*feature))
+            .map(|feature| profile.features.contains(feature)),
         "HaveEL" => level(first).map(|el| el <= profile.highest_el),
         "IsHighestEL" => level(first).map(|el| el == profile.highest_el),
         "ELUsingAArch32" => Some(false),
@@ -230,6 +232,7 @@ mod tests {
             parameters: Default::default(),
             features: Default::default(),
             highest_el: 2,
+            varying: Default::default(),
         };
         let impdef = |text: &str| {
             json!({"_type": "AST.Function", "name": "ImpDefBool",

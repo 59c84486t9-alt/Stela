@@ -1,8 +1,8 @@
 //! Arm shared pseudocode functions the generated accessors call, written from
 //! the ASL of `ISA_A64_xml_A_profile-2026-06` `shared_pseudocode.xml` for the
-//! profile: EL2 is implemented and enabled (no EL3, Non-secure only), FEAT_VHE
-//! without FEAT_E2H0 (HCR_EL2.E2H is RES1) and no FEAT_NV.
-use super::{CacheOp, CacheScope, CacheType, Context, Effect, Register};
+//! profile: EL2 is implemented and enabled (no EL3, Non-secure only) and
+//! FEAT_VHE without FEAT_E2H0 (HCR_EL2.E2H is RES1).
+use super::{CacheOp, CacheScope, CacheType, Context, Effect, Feature, Register};
 
 pub const HCR_TGE: u32 = 27;
 pub const VTTBR_VMID: u32 = 48;
@@ -34,6 +34,16 @@ pub fn insert(old: u64, low: u64, width: u64, value: u64) -> u64 {
 pub fn sign_extend(value: u64, width: u64) -> u64 {
     let shift = 64 - width;
     (((value << shift) as i64) >> shift) as u64
+}
+
+/// Arm `EffectiveHCR_EL2_NVx`: HCR_EL2.{NV2, NV1, NV} in effect, '000'
+/// without FEAT_NV. No chip's FEAT_NV is implemented yet, so a chip that
+/// has it stops in `Context::implemented`.
+pub fn hcr_nvx(c: &mut dyn Context) -> Result<u64, Effect> {
+    if c.implemented(Feature::FEAT_NV)? {
+        return Err(Effect::Refused(Feature::FEAT_NV.unimplemented()));
+    }
+    Ok(0)
 }
 
 fn tge(c: &dyn Context) -> bool {

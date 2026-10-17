@@ -1,7 +1,9 @@
 //! Merge the status registry into the system requirement matrix and render
 //! the README line. Registry entries apply in order, the last matching entry
-//! winning; a row no entry matches is `open` and owned by the system engine.
-use super::{MATRIX, Matrix, REGISTRY};
+//! winning on each chip it names (by default the M2 every test has run on);
+//! a row no entry matches on a chip is `open` there and owned by the system
+//! engine.
+use super::{CHIPS, DEFAULT_CHIP, MATRIX, Matrix, REGISTRY};
 use crate::tools::root;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, to_string as json};
@@ -21,7 +23,7 @@ const HEADER_KEYS: [&str; 9] = [
     "assessment",
     "registry",
 ];
-const ROW_KEYS: [&str; 16] = [
+const ROW_KEYS: [&str; 18] = [
     "id",
     "kind",
     "name",
@@ -32,8 +34,10 @@ const ROW_KEYS: [&str; 16] = [
     "instances",
     "accessors",
     "condition",
+    "chips",
     "applicability",
     "status",
+    "statuses",
     "owner",
     "tests",
     "note",
@@ -57,6 +61,8 @@ const KINDS: [(&str, &str); 7] = [
 
 pub struct Entry {
     pattern: String,
+    /// The chips the entry's tests establish it on.
+    chips: Vec<String>,
     status: String,
     owner: String,
     tests: Vec<String>,
@@ -79,6 +85,20 @@ pub fn registry() -> Result<Vec<Entry>> {
                 .as_str()
                 .context("entry without rows")?
                 .to_owned(),
+            chips: match entry["chips"].as_array() {
+                Some(chips) => chips
+                    .iter()
+                    .map(|chip| {
+                        let chip = chip.as_str().context("chip is not a string")?;
+                        ensure!(
+                            CHIPS.iter().any(|known| known.name == chip),
+                            "unknown chip {chip}"
+                        );
+                        Ok(chip.to_owned())
+                    })
+                    .collect::<Result<_>>()?,
+                None => vec![DEFAULT_CHIP.to_owned()],
+            },
             status: status.to_owned(),
             owner: entry["owner"].as_str().unwrap_or(DEFAULT_OWNER).to_owned(),
             tests: entry["tests"]
@@ -127,28 +147,75 @@ fn check_test(test: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn render(matrix: &Matrix, registry: &[Entry], _previous: &str) -> Result<String> {
-    let mut rows = matrix.rows.clone();
-    for row in rows.values_mut() {
-        row["status"] = "open".into();
-        row["owner"] = DEFAULT_OWNER.into();
+/// The chips a row applies to: its `chips`, or every chip.
+fn row_chips(row: &Value) -> Vec<String> {
+    match row["chips"].as_array() {
+        Some(chips) => chips
+            .iter()
+            .filter_map(|chip| chip.as_str().map(str::to_owned))
+            .collect(),
+        None => CHIPS.iter().map(|chip| chip.name.to_owned()).collect(),
     }
+}
+
+pub fn render(matrix: &Matrix, registry: &[Entry], _previous: &str) -> Result<String> {
     for entry in registry {
         for test in &entry.tests {
             check_test(test)?;
         }
+    }
+    // Per row, per chip it applies to: the winning entry, if any.
+    let mut winners: BTreeMap<String, BTreeMap<String, Option<&Entry>>> = matrix
+        .rows
+        .iter()
+        .map(|(id, row)| {
+            let chips = row_chips(row)
+                .into_iter()
+                .map(|chip| (chip, None))
+                .collect();
+            (id.clone(), chips)
+        })
+        .collect();
+    for entry in registry {
         let mut matched = 0;
-        for (id, row) in rows.iter_mut() {
+        for (id, chips) in winners.iter_mut() {
             if !matches(&entry.pattern, id) {
                 continue;
             }
             matched += 1;
-            row["status"] = entry.status.clone().into();
-            row["owner"] = entry.owner.clone().into();
-            row["tests"] = entry.tests.clone().into();
-            row["note"] = entry.note.clone();
+            for chip in &entry.chips {
+                if let Some(winner) = chips.get_mut(chip) {
+                    *winner = Some(entry);
+                }
+            }
         }
         ensure!(matched > 0, "{REGISTRY}: {} matches no row", entry.pattern);
+    }
+    let mut rows = matrix.rows.clone();
+    for (id, row) in rows.iter_mut() {
+        let chips = &winners[id];
+        fn status<'a>(entry: &Option<&'a Entry>) -> &'a str {
+            entry.map_or("open", |entry| entry.status.as_str())
+        }
+        // The row speaks for the default chip when it applies there.
+        let (_, shown) = chips
+            .iter()
+            .find(|(chip, _)| chip.as_str() == DEFAULT_CHIP)
+            .or_else(|| chips.iter().next())
+            .context("row on no chip")?;
+        row["status"] = status(shown).into();
+        row["owner"] = shown
+            .map_or(DEFAULT_OWNER, |entry| entry.owner.as_str())
+            .into();
+        row["tests"] = shown.map_or(Vec::new(), |entry| entry.tests.clone()).into();
+        row["note"] = shown.map_or(Value::Null, |entry| entry.note.clone());
+        if chips.values().any(|entry| status(entry) != status(shown)) {
+            let statuses: Map<String, Value> = chips
+                .iter()
+                .map(|(chip, entry)| (chip.clone(), status(entry).into()))
+                .collect();
+            row["statuses"] = Value::Object(statuses);
+        }
     }
     let mut header = matrix.header.clone();
     header.insert("assessment".into(), assessment(&rows));
@@ -191,12 +258,40 @@ fn row_line(row: &Value) -> Result<String> {
     Ok(format!("    {{{}}}", fields.join(",")))
 }
 
+/// A row's status on `chip`, or `None` when it does not apply there.
+fn status_on(row: &Value, chip: &str) -> Option<String> {
+    if !row_chips(row).iter().any(|name| name == chip) {
+        return None;
+    }
+    Some(
+        row["statuses"][chip]
+            .as_str()
+            .or_else(|| row["status"].as_str())
+            .unwrap_or("open")
+            .to_owned(),
+    )
+}
+
+/// Per-kind counts on the default chip, and each chip's totals.
 fn assessment(rows: &BTreeMap<String, Value>) -> Value {
     let mut kinds: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     let mut total: Map<String, Value> = Map::new();
+    let mut chips: Map<String, Value> = Map::new();
+    for chip in &CHIPS {
+        let mut counts = Map::new();
+        for status in rows.values().filter_map(|row| status_on(row, chip.name)) {
+            for key in [status.as_str(), "total"] {
+                let count = counts.entry(key.to_owned()).or_insert(0.into());
+                *count = (count.as_u64().unwrap_or(0) + 1).into();
+            }
+        }
+        chips.insert(chip.name.to_owned(), sorted(counts));
+    }
     for row in rows.values() {
         let kind = row["kind"].as_str().unwrap_or("?").to_owned();
-        let status = row["status"].as_str().unwrap_or("open").to_owned();
+        let Some(status) = status_on(row, DEFAULT_CHIP) else {
+            continue;
+        };
         for counts in [kinds.entry(kind).or_default(), &mut total] {
             let count = counts.entry(status.clone()).or_insert(0.into());
             *count = (count.as_u64().unwrap_or(0) + 1).into();
@@ -209,6 +304,7 @@ fn assessment(rows: &BTreeMap<String, Value>) -> Value {
     for (kind, counts) in kinds {
         out.insert(kind, sorted(counts));
     }
+    out.insert("chips".into(), Value::Object(chips));
     Value::Object(out)
 }
 
@@ -236,7 +332,7 @@ fn parse(text: &str) -> Result<Matrix> {
     for row in rows_value.as_array().context("rows is not a list")? {
         let mut row = row.clone();
         let object = row.as_object_mut().context("row is not an object")?;
-        for key in ["status", "owner", "tests", "note"] {
+        for key in ["status", "statuses", "owner", "tests", "note"] {
             object.remove(key);
         }
         let id = row["id"].as_str().context("row without id")?.to_owned();
@@ -294,11 +390,35 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
     let done = count("total", "implemented");
     let partial = count("total", "partial");
     table.push_str(&format!(
-        "| **All** | **{done} / {total} ({:.1}%)** | {partial} | {} | {total} |\n\n\
-         Rows are the AArch64 requirements of the declared Mac14,3 profile in Arm \
-         AARCHMRS {}, partial rows earning no credit. [System matrix]({MATRIX})\n",
+        "| **All** | **{done} / {total} ({:.1}%)** | {partial} | {} | {total} |\n\n",
         100.0 * done as f64 / total.max(1) as f64,
         total - done - partial,
+    ));
+    table.push_str(
+        "| Apple CPU profile | Implemented | Partial | Open, refused or paused | Total |\n\
+         | --- | --- | --- | --- | --- |\n",
+    );
+    for chip in &CHIPS {
+        let counts = &assessment["chips"][chip.name];
+        let count = |status: &str| counts[status].as_u64().unwrap_or(0);
+        let (done, partial, total) = (count("implemented"), count("partial"), count("total"));
+        let name = chip.name.replace("apple-m", "Apple M");
+        let marker = if chip.name == DEFAULT_CHIP {
+            " (Mac14,3, above)"
+        } else {
+            ""
+        };
+        table.push_str(&format!(
+            "| {name}{marker} | {done} / {total} ({:.1}%) | {partial} | {} | {total} |\n",
+            100.0 * done as f64 / total.max(1) as f64,
+            total - done - partial,
+        ));
+    }
+    table.push_str(&format!(
+        "\nRows are the AArch64 requirements of each Apple CPU profile in Arm AARCHMRS \
+         {}; the first table is the Mac14,3 (M2) profile. A row counts on a chip only \
+         when its tests have run on that chip, and partial rows earn no credit. \
+         [System matrix]({MATRIX})\n",
         matrix["source"]["release"].as_str().unwrap_or("?"),
     ));
     let block = format!("{README_START}\n{table}{README_END}");
@@ -337,6 +457,47 @@ mod tests {
             rendered == text,
             "{MATRIX} is stale; run `cargo xtask progress`"
         );
+        Ok(())
+    }
+
+    fn entry(pattern: &str, chips: &[&str], status: &str) -> Entry {
+        Entry {
+            pattern: pattern.into(),
+            chips: chips.iter().map(|chip| String::from(*chip)).collect(),
+            status: status.into(),
+            owner: DEFAULT_OWNER.into(),
+            tests: Vec::new(),
+            note: Value::Null,
+        }
+    }
+
+    #[test]
+    fn an_entry_holds_only_on_the_chips_it_names() -> Result<()> {
+        let text = fs::read_to_string(root().join(MATRIX))?;
+        let mut matrix = parse(&text)?;
+        matrix
+            .rows
+            .retain(|id, _| id == "register:HCR_EL2" || id == "register:HCRX_EL2");
+        let registry = [
+            entry("register:*", &[DEFAULT_CHIP], "implemented"),
+            entry("register:HCR_EL2", &["apple-m1"], "partial"),
+        ];
+        let rendered: Value = serde_json::from_str(&render(&matrix, &registry, "")?)?;
+        let rows = rendered["rows"].as_array().context("rows")?;
+        let row = |id: &str| rows.iter().find(|row| row["id"] == id).cloned().unwrap();
+        // HCR_EL2 is on every chip: implemented on the M2, partial on the M1
+        // and open on the chips no entry names.
+        let hcr = row("register:HCR_EL2");
+        assert_eq!(hcr["status"], "implemented");
+        assert_eq!(hcr["statuses"]["apple-m1"], "partial");
+        assert_eq!(hcr["statuses"]["apple-m3"], "open");
+        // HCRX_EL2 needs FEAT_HCX (M3 on): the M2 entry cannot reach it.
+        let hcrx = row("register:HCRX_EL2");
+        assert_eq!(hcrx["status"], "open");
+        assert!(hcrx["statuses"].is_null());
+        let chips = &rendered["assessment"]["chips"];
+        assert_eq!(chips["apple-m2"]["implemented"], 1);
+        assert_eq!(chips["apple-m3"]["open"], 2);
         Ok(())
     }
 }

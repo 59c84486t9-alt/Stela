@@ -649,6 +649,7 @@ mod tests {
             parameters: BTreeSet::new(),
             features: BTreeSet::new(),
             highest_el: 2,
+            varying: Default::default(),
         }
     }
 
