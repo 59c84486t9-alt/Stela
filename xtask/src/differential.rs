@@ -44,6 +44,7 @@ const ZERO_OR_SP: u32 = 31;
 /// The service profile whose forms the system-mode engine completes.
 const SYSTEM_MODE_PROFILE: &str = "system-mode-v1";
 const WFI: u32 = 0xd503_207f;
+const XPACLRI: u32 = 0xd503_20ff;
 /// Exception classes whose FAR is architecturally valid: instruction and data
 /// aborts, PC alignment and watchpoints.
 const FAR_CLASSES: [u64; 7] = [0x20, 0x21, 0x22, 0x24, 0x25, 0x34, 0x35];
@@ -182,7 +183,7 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
 
 /// Known differences between QEMU's `max` CPU and the engine's M2 profile for
 /// system-mode words at EL0; matching cases are not compared.
-fn system_oracle_limit(form: &str, word: u32) -> bool {
+fn system_oracle_limit(form: &str, word: u32, el1: bool) -> bool {
     // QEMU completes WFI at EL0 whenever it has pending work, masked or not,
     // instead of taking the nTWI trap; the engine has no pending wake-up.
     let wfi = word == WFI;
@@ -200,7 +201,20 @@ fn system_oracle_limit(form: &str, word: u32) -> bool {
     // CRm are CONSTRAINED UNPREDICTABLE: QEMU raises UNDEFINED, Stela ignores
     // the bits. They are FlagM forms, outside this one.
     let flags = form == "MSR_SI_pstate" && op1 == 0 && op2 <= 2 && crm != 0;
-    wfi || absent || sme || pstate || flags
+    // QEMU's virt machine without EL2 implements PSCI on the HVC conduit, so
+    // HVC at EL1 completes as a firmware call instead of being UNDEFINED.
+    let psci = el1 && form == "HVC_EX_exception";
+    // QEMU treats XPACLRI as a NOP while SCTLR_EL1 enables no PAC key, as the
+    // harness's does; the architecture strips X30 regardless.
+    let strip = word == XPACLRI;
+    // Identification registers read at EL1 report QEMU's `max` CPU, not the
+    // M2 profile (op0=3, op1 in {0, 1, 3}, CRn=0).
+    let identification = el1
+        && word & 0xfff0_0000 == 0xd530_0000
+        && (word >> 19) & 3 == 3
+        && matches!((word >> 16) & 7, 0 | 1 | 3)
+        && (word >> 12) & 15 == 0;
+    wfi || absent || sme || pstate || flags || psci || strip || identification
 }
 
 /// Oracle limits: compare FPCR and FPSR only on bits both engines model, and
@@ -237,6 +251,8 @@ struct Subject {
     system: bool,
     /// An unfinished system-mode row: divergences are reported as open.
     draft: bool,
+    /// Run at EL1t instead of stepping at EL0 (system-mode words only).
+    el1: bool,
     translation: Translation,
 }
 
@@ -363,6 +379,7 @@ impl Differential {
                 scalable: subject
                     .scalable
                     .map(|(svl, svcr)| random.scalable(svl, svcr)),
+                el1: subject.el1,
             })
             .collect();
         let originals = oracle.run(&cases)?;
@@ -381,7 +398,7 @@ impl Differential {
             }
             report.covered.insert(subject.form.clone());
             if oracle_limit(&subject.form, &case.state)
-                || subject.system && system_oracle_limit(&subject.form, case.code[0])
+                || subject.system && system_oracle_limit(&subject.form, case.code[0], case.el1)
             {
                 continue;
             }
@@ -400,7 +417,8 @@ impl Differential {
                     }
                     if report.shown < self.show {
                         report.shown += 1;
-                        println!("{} {:08x?}: {error:#}", subject.form, case.code);
+                        let el = if case.el1 { "EL1" } else { "EL0" };
+                        println!("{} {:08x?} at {el}: {error:#}", subject.form, case.code);
                         println!("  original exception {:x?}", original.exception);
                     }
                     continue;
@@ -417,7 +435,8 @@ impl Differential {
                 }
                 if report.shown < self.show {
                     report.shown += 1;
-                    println!("{} {:08x?}:", subject.form, case.code);
+                    let el = if case.el1 { "EL1" } else { "EL0" };
+                    println!("{} {:08x?} at {el}:", subject.form, case.code);
                     print_difference(case, original, &translated);
                 }
             }
@@ -473,17 +492,10 @@ impl Differential {
                         continue;
                     };
                     seen.insert(code[0]);
-                    each(
-                        random,
-                        Subject {
-                            form: id.into(),
-                            scalable: lane.scalable(sample),
-                            system: is_system_mode(form),
-                            draft: is_draft(form),
-                            code,
-                            translation,
-                        },
-                    )?;
+                    for subject in subjects_for(form, id, lane.scalable(sample), code, translation)?
+                    {
+                        each(random, subject)?;
+                    }
                 }
                 // Random field words reuse the first sample's profile.
                 let Some(sample) = samples.first() else {
@@ -502,23 +514,101 @@ impl Differential {
                     });
                     if let Some((word, translation)) = found {
                         seen.insert(word);
-                        each(
-                            random,
-                            Subject {
-                                form: id.into(),
-                                scalable: lane.scalable(sample),
-                                system: is_system_mode(form),
-                                draft: is_draft(form),
-                                code: vec![word],
-                                translation,
-                            },
-                        )?;
+                        let scalable = lane.scalable(sample);
+                        for subject in subjects_for(form, id, scalable, vec![word], translation)? {
+                            each(random, subject)?;
+                        }
                     }
                 }
             }
         }
         Ok(())
     }
+}
+
+/// The subject for `code`, and for an admissible system-mode word its EL1 twin.
+fn subjects_for(
+    form: &Value,
+    id: &str,
+    scalable: Option<(usize, u64)>,
+    code: Vec<u32>,
+    translation: Translation,
+) -> Result<Vec<Subject>> {
+    let system = is_system_mode(form);
+    let subject = |code: Vec<u32>, translation, el1| Subject {
+        form: id.into(),
+        scalable,
+        system,
+        draft: is_draft(form),
+        el1,
+        code,
+        translation,
+    };
+    let mut subjects = Vec::with_capacity(2);
+    if system && el1_admissible(code[0]) {
+        subjects.push(subject(code.clone(), Translation::system(&code)?, true));
+    }
+    subjects.push(subject(code, translation, false));
+    Ok(subjects)
+}
+
+/// Whether the harness can run `word` at EL1t and still record its outcome:
+/// it must not wait, return, take over the harness's translation, vectors,
+/// FP access, stepping or stack selection, enable PAN or streaming mode (the
+/// recording handler reads the EL0-accessible data window and FP state), zero
+/// memory at a random address, or make a semihosting call.
+fn el1_admissible(word: u32) -> bool {
+    const WFE: u32 = 0xd503_205f;
+    const WFX_TIMEOUT_MASK: u32 = 0xffff_ffc0;
+    const WFX_TIMEOUT: u32 = 0xd503_1000;
+    // ERET, ERETAA and ERETAB.
+    const RETURNS: [u32; 3] = [0xd69f_03e0, 0xd69f_0bff, 0xd69f_0fff];
+    const MSR_REGISTER_MASK: u32 = 0xfff0_0000;
+    const MSR_REGISTER: u32 = 0xd510_0000;
+    const PSTATE_MASK: u32 = 0xfff8_f01f;
+    const PSTATE: u32 = 0xd500_401f;
+    const SYS_MASK: u32 = 0xfff8_0000;
+    const SYS: u32 = 0xd508_0000;
+    const HLT_SEMIHOSTING: u32 = 0xd45e_0000;
+    // MSR targets as op0:op1:CRn:CRm:op2 selectors (bits 19..5).
+    const HARNESS_REGISTERS: [(u32, u32, u32, u32, u32); 9] = [
+        (3, 0, 12, 0, 0), // VBAR_EL1
+        (3, 0, 1, 0, 0),  // SCTLR_EL1
+        (3, 0, 1, 0, 2),  // CPACR_EL1
+        (3, 0, 1, 2, 6),  // SMCR_EL1
+        (3, 0, 2, 0, 0),  // TTBR0_EL1
+        (3, 0, 2, 0, 1),  // TTBR1_EL1
+        (3, 0, 2, 0, 2),  // TCR_EL1
+        (3, 0, 10, 2, 0), // MAIR_EL1
+        (2, 0, 0, 2, 2),  // MDSCR_EL1
+    ];
+    let field = |shift: u32, bits: u32| (word >> shift) & ((1 << bits) - 1);
+    if RETURNS.contains(&word)
+        || matches!(word, WFE | WFI)
+        || word & WFX_TIMEOUT_MASK == WFX_TIMEOUT
+        || word & 0xffff_ffe0 == HLT_SEMIHOSTING
+    {
+        return false;
+    }
+    if word & MSR_REGISTER_MASK == MSR_REGISTER {
+        let target = (
+            2 + field(19, 1),
+            field(16, 3),
+            field(12, 4),
+            field(8, 4),
+            field(5, 3),
+        );
+        return !HARNESS_REGISTERS.contains(&target);
+    }
+    if word & PSTATE_MASK == PSTATE {
+        // SPSel (op1=0, op2=5), PAN (op1=0, op2=4) and SVCR (op1=3, op2=3).
+        return !matches!((field(16, 3), field(5, 3)), (0, 5) | (0, 4) | (3, 3));
+    }
+    if word & SYS_MASK == SYS {
+        // DC ZVA, GVA and GZVA (op1=3, CRn=7, CRm=4).
+        return !(field(16, 3) == 3 && field(12, 4) == 7 && field(8, 4) == 4);
+    }
+    true
 }
 
 fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
@@ -587,6 +677,12 @@ fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
                 a.svcr, a.tpidr2, b.svcr, b.tpidr2
             );
         }
+    }
+    if original.spsr != translated.spsr {
+        println!(
+            "  spsr: original {:x?}, native {:x?}",
+            original.spsr, translated.spsr
+        );
     }
     if original.exception != translated.exception {
         println!(

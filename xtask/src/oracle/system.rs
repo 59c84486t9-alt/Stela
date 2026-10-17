@@ -1,6 +1,8 @@
 //! System-mode engine lane: run a case's words on `stela_runtime::machine` at
 //! EL0 under the harness's EL1 controls, so exception outcomes (ESR, ELR, FAR)
-//! compare with QEMU as well as completions.
+//! compare with QEMU as well as completions. EL1 cases run at EL1t with every
+//! exception masked until their first exception, as the harness runs them:
+//! the zero words after the case are UDF, and SPSR then holds PSTATE.
 //!
 //! The engine runs with its MMU off: EL0 sees the code region and data window
 //! at their own addresses, as the harness maps them. Every SCTLR_EL1 trap
@@ -31,6 +33,14 @@ const CPACR_FP: u64 = 3 << 20;
 /// DCZID_EL0 of the Apple profile: 64-byte blocks.
 const DCZID: u64 = 4;
 const VECTOR_BASE: u64 = 0;
+/// MDSCR_EL1.SS, which the harness sets for stepping EL0 cases.
+const MDSCR_SS: u64 = 1;
+/// SPSR_EL1 the harness's ERET consumed: EL1t or EL0t with DAIF masked.
+const SPSR_EL1T_MASKED: u64 = 0x3c4;
+const SPSR_EL0T_STEPPED: u64 = 0x3c0 | 1 << 21;
+/// Blocks an EL1 case may run before its first exception: the case word and
+/// the UDF after it.
+const EL1_BLOCKS: u64 = 2;
 
 /// The native block exit in RAX:RDX.
 #[repr(C)]
@@ -142,8 +152,22 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     let windows = windows()?.lock().expect("native windows lock");
     // SAFETY: the windows are owned mappings; the code page is installed below.
     unsafe { super::native::install_case(&windows, case)? };
-    let mut cpu = Cpu::new(CODE_PAGE, Pstate::reset(0));
+    let mut pstate = Pstate::reset(if case.el1 { 1 } else { 0 });
+    // EL1 cases run on SP_EL0 (EL1t), as the harness keeps SP_EL1 for itself.
+    pstate.sp_el1 = false;
+    let mut cpu = Cpu::new(CODE_PAGE, pstate);
     cpu.state = case.state.clone();
+    // The rest of the EL1 state the harness leaves for the case.
+    let nzcv = u64::from(case.state.nzcv) & 0xf000_0000;
+    cpu.system.elr = CODE_PAGE;
+    cpu.system.spsr = nzcv
+        | if case.el1 {
+            SPSR_EL1T_MASKED
+        } else {
+            SPSR_EL0T_STEPPED
+        };
+    cpu.system.tpidr_el1 = case.steps as u64;
+    cpu.system.mdscr = MDSCR_SS;
     cpu.system.translation.sctlr = SCTLR_VALUE;
     cpu.system.translation.tcr = TCR_VALUE;
     cpu.system.translation.mair = MAIR_VALUE;
@@ -157,8 +181,15 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         installed: Vec::new(),
     };
     let mut machine = Machine::new(cpu, host, NoDevices, profile(target), target);
+    let blocks = if case.el1 { EL1_BLOCKS } else { 1 };
     let saved = super::native::mxcsr();
-    let stop = machine.run(1);
+    let mut stop = Stop::Budget;
+    for budget in 1..=blocks {
+        stop = machine.run(budget);
+        if machine.statistics.exceptions != 0 {
+            break;
+        }
+    }
     super::native::set_mxcsr(saved);
     match stop {
         Stop::Budget => {}
@@ -186,5 +217,6 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         data,
         scalable: None,
         exception,
+        spsr: case.el1.then_some(cpu.system.spsr),
     })
 }

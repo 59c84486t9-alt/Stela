@@ -323,6 +323,7 @@ impl Translation {
             data,
             scalable: scalable_result,
             exception: None,
+            spsr: None,
         })
     }
 }

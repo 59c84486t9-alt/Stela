@@ -3,7 +3,10 @@
 // The host loads this image at HARNESS and a case batch at BATCH, then starts
 // the CPU at EL1. Each case single-steps a declared number of EL0 instructions
 // from the code page; the lower-EL vector records full register state after
-// the last step or the first other exception. Results are written to the host
+// the last step or the first other exception. A case with FLAG_EL1 runs at
+// EL1t with debug masked instead, without stepping: the zero words after its
+// code are UDF, so it ends at its first exception, recorded by the
+// current-EL SP0 vector with the same handler. Results are written to the host
 // file named in the batch header through semihosting, and QEMU exits with the
 // harness status.
 //
@@ -92,6 +95,8 @@
     .equ SMCR_EZT0,        1 << 30
     .equ SVE_GRANULE,      16
     .equ FLAG_FPMR,        1
+    .equ FLAG_EL1,         2
+    .equ SPSR_M_EL1T,      4
     .equ ZT0_BYTES,        64
     .equ DESC_TABLE,       3
     .equ DESC_BLOCK,       1
@@ -207,8 +212,12 @@ next_case:
     ldr     w0, [x30, #STATE_NZCV]
     and     x0, x0, #NZCV_MASK
     orr     x0, x0, #SPSR_EL0T_MASKED
+    ldr     x1, [x20, #CASE_FLAGS]
+    tbnz    x1, #1, 5f
     orr     x0, x0, #SPSR_SS
-    msr     spsr_el1, x0
+    b       6f
+5:  orr     x0, x0, #SPSR_M_EL1T
+6:  msr     spsr_el1, x0
     ldr     x0, =CODE_PAGE
     msr     elr_el1, x0
     mov     sp, x21
@@ -472,7 +481,8 @@ build_tables:
     ldr     x0, =L2_CASE_TABLE
     ldr     x1, =CASE_REGION | DESC_NORMAL | DESC_BLOCK | DESC_READ_ONLY | DESC_PXN | DESC_UXN
     str     x1, [x0]
-    ldr     x1, =CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_READ_ONLY | DESC_PXN
+    // EL0 and EL1 cases both execute the code page.
+    ldr     x1, =CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_READ_ONLY
     str     x1, [x0, #((CODE_PAGE - CASE_REGION) / BLOCK_2M) * 8]
     ldr     x1, =CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_PXN | DESC_UXN
     str     x1, [x0, #((CODE_ALIAS - CASE_REGION) / BLOCK_2M) * 8]
@@ -494,10 +504,13 @@ build_tables:
 params:
     .quad   0, 0, 0
 
-    // Only lower-EL synchronous exceptions are expected.
+    // Only lower-EL synchronous exceptions and, for EL1 cases, current-EL
+    // SP0 synchronous exceptions are expected.
     .balign 2048
 vectors:
-    .rept 8
+    .balign 128
+    b       lower_sync
+    .rept 7
     .balign 128
     b       harness_fault
     .endr

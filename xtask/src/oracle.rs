@@ -59,6 +59,9 @@ const CASE_STEPS: usize = 8;
 const CASE_SVL: usize = 16;
 const CASE_SVCR: usize = 24;
 const CASE_TPIDR2: usize = 32;
+const CASE_FLAGS: usize = 48;
+/// Run the case at EL1t, unstepped, until its first exception.
+const FLAG_EL1: u64 = 2;
 const CASE_CODE: usize = 64;
 const CASE_STATE: usize = 512;
 const CASE_DATA: usize = 0x1000;
@@ -89,6 +92,8 @@ pub struct Case {
     pub state: GuestState,
     pub data: Box<[u8]>,
     pub scalable: Option<Scalable>,
+    /// Run at EL1t until the first exception; the words after `code` are UDF.
+    pub el1: bool,
 }
 
 /// SME state: streaming vector length, SVCR and the register banks.
@@ -174,6 +179,8 @@ pub struct Outcome {
     pub data: Box<[u8]>,
     pub scalable: Option<Scalable>,
     pub exception: Option<Exception>,
+    /// SPSR_EL1 of an EL1 case's exception: PSTATE after its code.
+    pub spsr: Option<u64>,
 }
 
 /// An exception other than the final step; `address` is its ELR.
@@ -337,6 +344,7 @@ fn encode(cases: &[Case], layout: Layout) -> Result<Vec<u8>> {
         };
         quad(slot, CASE_WORDS, case.code.len() as u64);
         quad(slot, CASE_STEPS, case.steps as u64);
+        quad(slot, CASE_FLAGS, if case.el1 { FLAG_EL1 } else { 0 });
         for (word, bytes) in case
             .code
             .iter()
@@ -412,6 +420,7 @@ fn decode(case: &Case, record: &[u8]) -> Result<Outcome> {
         data: record[RESULT_DATA..][..DATA_BYTES].into(),
         scalable,
         exception,
+        spsr: case.el1.then(|| quad(RESULT_SPSR)),
     })
 }
 
