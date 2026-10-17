@@ -1128,6 +1128,64 @@ mod tests {
     }
 
     #[test]
+    fn pstate_fields_vector_bases_and_context_ids_keep_only_their_bits() {
+        const SPSEL: Encoding = Encoding::new(3, 0, 4, 2, 0);
+        const PAN: Encoding = Encoding::new(3, 0, 4, 2, 3);
+        const SSBS: Encoding = Encoding::new(3, 3, 4, 2, 6);
+        const VBAR_EL1: Encoding = Encoding::new(3, 0, 12, 0, 0);
+        const VBAR_EL2: Encoding = Encoding::new(3, 4, 12, 0, 0);
+        const CONTEXTIDR_EL1: Encoding = Encoding::new(3, 0, 13, 0, 1);
+        const CONTEXTIDR_EL2: Encoding = Encoding::new(3, 4, 13, 0, 1);
+        const SCTLR_EL2: Encoding = Encoding::new(3, 4, 1, 0, 0);
+        let mut machine = machine(&[]);
+        let write_read = |machine: &mut TestMachine, el: u8, encoding: Encoding, value: u64| {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[0] = value;
+            machine
+                .system_instruction(access(false, encoding, 0))
+                .unwrap();
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            assert_eq!(machine.cpu.pc, BASE + 8, "{encoding:?}");
+            machine.cpu.state.x[1]
+        };
+        // PSTATE.SP, PAN and SSBS at bits 0, 22 and 12.
+        assert_eq!(write_read(&mut machine, 1, SPSEL, u64::MAX), 1);
+        assert_eq!(write_read(&mut machine, 1, PAN, u64::MAX), 1 << 22);
+        assert!(machine.cpu.pstate.pan);
+        assert_eq!(write_read(&mut machine, 1, SSBS, u64::MAX), 1 << 12);
+        assert!(machine.cpu.pstate.ssbs);
+        // Vector bases are 2 KiB aligned; CONTEXTIDR holds a 32-bit PROCID.
+        assert_eq!(write_read(&mut machine, 1, VBAR_EL1, u64::MAX), !0x7ff);
+        assert_eq!(write_read(&mut machine, 2, VBAR_EL2, u64::MAX), !0x7ff);
+        assert_eq!(
+            write_read(&mut machine, 1, CONTEXTIDR_EL1, u64::MAX),
+            0xffff_ffff
+        );
+        assert_eq!(
+            write_read(&mut machine, 2, CONTEXTIDR_EL2, u64::MAX),
+            0xffff_ffff
+        );
+        // SCTLR bits 17, 24, 25 and 53:50 are RES0 in both registers.
+        let reserved = 1 << 17 | 3 << 24 | 0xf << 50;
+        assert_eq!(
+            write_read(&mut machine, 1, SCTLR_EL1, reserved) & reserved,
+            0
+        );
+        assert_eq!(
+            write_read(&mut machine, 2, SCTLR_EL2, reserved) & reserved,
+            0
+        );
+        // HCR_EL2.TWE traps EL1 WFE to EL2 when no event is pending.
+        machine.cpu.event = false;
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 14);
+        let esr = el2_trap(&mut machine, 0xd503_205f);
+        assert_eq!(esr, 0x01 << 26 | 1 << 25 | 1 << 24 | 0xe << 20 | 1);
+    }
+
+    #[test]
     fn aarch32_banked_spsrs_are_res0_at_el2_and_undefined_at_el1() {
         let mut machine = machine(&[]);
         // Without AArch32 at EL1, SPSR_irq, SPSR_abt, SPSR_und and SPSR_fiq

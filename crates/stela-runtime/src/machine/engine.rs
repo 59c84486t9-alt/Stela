@@ -2919,23 +2919,38 @@ mod tests {
         assert_eq!(machine.cpu.state.x[30], pointer);
         // PACIA, PACIB, PACDA and PACDB x1, x2 follow EnIA, EnIB, EnDA and
         // EnDB.
-        for (word, enable) in [
-            (0xdac1_0041, 31),
-            (0xdac1_0441, 30),
-            (0xdac1_0841, 27),
-            (0xdac1_0c41, 13),
+        // At EL2 the EL2&0 regime's SCTLR_EL2 and TCR_EL2 govern instead.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TCR_EL2, 0, 25 << 16 | 25);
+        let sctlr2 = machine.cpu.read(SystemRegister::SCTLR_EL2);
+        for (el, register, base) in [
+            (1, SystemRegister::SCTLR_EL1, sctlr),
+            (2, SystemRegister::SCTLR_EL2, sctlr2),
         ] {
-            for enabled in [false, true] {
-                let bit = u64::from(enabled) << enable;
-                machine.cpu.registers.set(
-                    SystemRegister::SCTLR_EL1,
-                    0,
-                    sctlr & !(1 << enable) | bit,
-                );
-                machine.cpu.state.x[1] = pointer;
-                machine.cpu.state.x[2] = 0x55;
-                machine.system_instruction_for_test(word);
-                assert_eq!(machine.cpu.state.x[1] != pointer, enabled, "{word:#x}");
+            machine.cpu.set_pstate(Pstate::reset(el));
+            for (word, enable) in [
+                (0xdac1_0041, 31),
+                (0xdac1_0441, 30),
+                (0xdac1_0841, 27),
+                (0xdac1_0c41, 13),
+            ] {
+                for enabled in [false, true] {
+                    let bit = u64::from(enabled) << enable;
+                    machine
+                        .cpu
+                        .registers
+                        .set(register, 0, base & !(1 << enable) | bit);
+                    machine.cpu.state.x[1] = pointer;
+                    machine.cpu.state.x[2] = 0x55;
+                    machine.system_instruction_for_test(word);
+                    assert_eq!(
+                        machine.cpu.state.x[1] != pointer,
+                        enabled,
+                        "EL{el} {word:#x}"
+                    );
+                }
             }
         }
     }
