@@ -64,7 +64,13 @@ pub(crate) fn emit(
         if let Some(read) = read {
             literal(&mut block.x86_64_code, read);
         } else {
-            x86_64::emit_instruction(&mut block.x86_64_code, instruction, &mut fixups, target);
+            x86_64::emit_instruction(
+                &mut block.x86_64_code,
+                instruction,
+                &mut fixups,
+                target,
+                x86_64::MemoryChecks::ALL,
+            );
         }
     }
     if !fixups.is_empty() {

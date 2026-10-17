@@ -36,9 +36,14 @@ const JNZ_REL32: &[u8] = &[0x0f, 0x85];
 const JMP_REL32: u8 = 0xe9;
 const MOV_ZERO_QWORD_STATE: &[u8] = &[0x48, 0xc7, 0x87];
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
-    // This reuses the existing incoming-SP check before any guest RAM access.
-    super::super::memory_address(code, operand.base, 0, AddressMode::Offset);
+pub(super) fn emit(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    target: TargetCpu,
+    checks: super::super::MemoryChecks,
+) {
+    // This reuses the incoming-SP check before any guest RAM access.
+    super::super::memory_address(code, checks, operand.base, 0, AddressMode::Offset);
     match operand.post_index {
         PostIndex::None => {}
         PostIndex::TransferredBytes => {
@@ -55,8 +60,10 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             code.extend(ADD_RDX_RCX);
         }
     }
+    // A checked SP is 16-byte aligned; an unchecked one is an ordinary base.
+    let aligned_sp = operand.base == Register::Sp && checks.stack_alignment;
     if operand.transferred_bytes() == BYTE_BYTES
-        || (operand.base == Register::Sp && operand.transferred_bytes() <= STACK_ALIGNMENT_BYTES)
+        || (aligned_sp && operand.transferred_bytes() <= STACK_ALIGNMENT_BYTES)
     {
         packed(code, operand, target);
     } else {
@@ -73,7 +80,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         code.push(JMP_REL32);
         let complete_jump = branch_placeholder(code);
         patch_jump(code, crossing_jump);
-        ordered(code, operand);
+        ordered(code, operand, aligned_sp);
         patch_jump(code, complete_jump);
     }
     if operand.post_index != PostIndex::None {
@@ -90,10 +97,10 @@ fn packed(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
 
 /// Source-width accesses and immediate successful assignments. RDX/RDI survive;
 /// RAX advances through the footprint, RCX/R10/XMM0 are scratch.
-fn ordered(code: &mut Vec<u8>, operand: &Operand) {
+fn ordered(code: &mut Vec<u8>, operand: &Operand, aligned_sp: bool) {
     let count = operand.transferred_bytes() / operand.element_bytes;
     for (ordinal, access) in operand.accesses().enumerate() {
-        transfer_access(code, operand, access, 0, false);
+        transfer_access(code, operand, access, 0, false, aligned_sp);
         if ordinal + 1 != usize::from(count) {
             code.extend(ADD_RAX_IMM8);
             code.push(operand.element_bytes);
@@ -105,7 +112,7 @@ fn ordered(code: &mut Vec<u8>, operand: &Operand) {
 /// displacements without per-element store guards.
 fn ordered_in_granule(code: &mut Vec<u8>, operand: &Operand) {
     for access in operand.accesses() {
-        transfer_access(code, operand, access, access.byte_offset, true);
+        transfer_access(code, operand, access, access.byte_offset, true, false);
     }
 }
 
@@ -115,6 +122,7 @@ fn transfer_access(
     access: Access,
     displacement: u8,
     in_granule: bool,
+    aligned_sp: bool,
 ) {
     match (operand.direction, access.commit) {
         (Direction::Load, LoadCommit::Lane { index, clear_upper }) => {
@@ -151,7 +159,7 @@ fn transfer_access(
                     operand.element_bytes,
                     0,
                     super::super::memory_store::Source::Rcx,
-                    operand.base == Register::Sp,
+                    aligned_sp,
                 );
             }
         }

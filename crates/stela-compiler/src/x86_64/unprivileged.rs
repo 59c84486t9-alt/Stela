@@ -4,9 +4,10 @@ use super::{AddressMode, memory};
 use crate::aarch64::unprivileged::Operand;
 use alloc::vec::Vec;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
     memory(
         code,
+        checks,
         operand.transfer,
         operand.bytes,
         operand.data,

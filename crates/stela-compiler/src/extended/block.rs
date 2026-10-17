@@ -250,8 +250,14 @@ pub fn compile_for_profile(
                 // The guarded family mapping owns the exact-PC cold exit.
                 // Only its committed fast path reaches the continuation.
                 code.extend(
-                    x86_64::block::emit_for_target(&[], None, instruction.next_pc(), target)
-                        .x86_64_code,
+                    x86_64::block::emit_for_target(
+                        &[],
+                        None,
+                        instruction.next_pc(),
+                        target,
+                        x86_64::MemoryChecks::ALL,
+                    )
+                    .x86_64_code,
                 );
             } else {
                 code.extend(MOV_RAX_IMMEDIATE);
@@ -261,7 +267,10 @@ pub fn compile_for_profile(
                 code.push(RETURN);
             }
         }
-        None => code.extend(x86_64::block::emit_for_target(&[], None, next_pc, target).x86_64_code),
+        None => code.extend(
+            x86_64::block::emit_for_target(&[], None, next_pc, target, x86_64::MemoryChecks::ALL)
+                .x86_64_code,
+        ),
     }
     Ok(CompiledBlock {
         native: NativeBlock {

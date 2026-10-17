@@ -52,6 +52,7 @@ fn emit(
         terminal,
         fallthrough,
         crate::TargetCpu::Baseline,
+        super::MemoryChecks::ALL,
     )
 }
 
@@ -61,7 +62,14 @@ pub(crate) fn emit_ordinary_for_target(
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
 ) -> NativeBlock {
-    emit_selected(instructions, terminal, fallthrough, target, true)
+    emit_selected(
+        instructions,
+        terminal,
+        fallthrough,
+        target,
+        true,
+        super::MemoryChecks::ALL,
+    )
 }
 
 /// Every artifact in this profile accepts the same invocation-local budget ABI.
@@ -85,8 +93,9 @@ pub(crate) fn emit_for_target(
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
+    checks: super::MemoryChecks,
 ) -> NativeBlock {
-    emit_selected(instructions, terminal, fallthrough, target, false)
+    emit_selected(instructions, terminal, fallthrough, target, false, checks)
 }
 
 fn emit_selected(
@@ -95,6 +104,7 @@ fn emit_selected(
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
     optimize_regions: bool,
+    checks: super::MemoryChecks,
 ) -> NativeBlock {
     let mut block = NativeBlock {
         x86_64_code: vec![],
@@ -113,7 +123,13 @@ fn emit_selected(
             let mut baseline = vec![];
             let mut candidate_fixups = vec![];
             for instruction in &instructions[cursor..cursor + count] {
-                super::emit_instruction(&mut baseline, instruction, &mut candidate_fixups, target);
+                super::emit_instruction(
+                    &mut baseline,
+                    instruction,
+                    &mut candidate_fixups,
+                    target,
+                    checks,
+                );
             }
             if candidate_fixups.is_empty() && super::region::admits_allocated(&region, &baseline) {
                 let offset = code.len();
@@ -140,6 +156,7 @@ fn emit_selected(
                     instruction,
                     &mut baseline_fixups,
                     target,
+                    checks,
                 );
             }
             debug_assert!(baseline_fixups.is_empty());
@@ -167,7 +184,7 @@ fn emit_selected(
         if let Operation::FloatingPoint(operand) = &instruction.operation {
             super::simd::emit_numerical(code, operand, instruction.pc, target);
         } else {
-            super::emit_instruction(code, instruction, &mut fixups, target);
+            super::emit_instruction(code, instruction, &mut fixups, target, checks);
         }
         cursor += 1;
     }

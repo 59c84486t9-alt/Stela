@@ -21,20 +21,26 @@ const MOVZX_ECX_WORD_AT_RAX: [u8; 3] = [0x0f, 0xb7, 0x08];
 const MOVD_XMM0_ECX: [u8; 4] = [0x66, 0x0f, 0x6e, 0xc1];
 const MOV_RCX_STATE_DISP32: [u8; 3] = [0x48, 0x8b, 0x8f];
 
-pub(super) fn emit_register_offset(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit_register_offset(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    checks: super::super::MemoryChecks,
+) {
     super::super::register_offset::address(
         code,
+        checks,
         operand.base,
         operand.index,
         operand.extend,
         operand.shift,
     );
-    let aligned = super::super::memory_store::aligned_register_offset(
-        operand.base,
-        operand.index,
-        operand.shift,
-        operand.bytes,
-    );
+    let aligned = checks.stack_alignment
+        && super::super::memory_store::aligned_register_offset(
+            operand.base,
+            operand.index,
+            operand.shift,
+            operand.bytes,
+        );
     transfer(code, operand.load, operand.bytes, operand.vector, aligned);
 }
 

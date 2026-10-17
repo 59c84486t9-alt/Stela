@@ -16,6 +16,15 @@ pub(crate) fn validate_target(
     instruction: &Instruction,
     target: crate::TargetCpu,
 ) -> Result<(), UnsupportedReason> {
+    validate_target_with(instruction, target, MemoryChecks::ALL)
+}
+
+/// [`validate_target`] for code emitted with `checks`.
+pub(crate) fn validate_target_with(
+    instruction: &Instruction,
+    target: crate::TargetCpu,
+    checks: MemoryChecks,
+) -> Result<(), UnsupportedReason> {
     if matches!(
         instruction.operation,
         Operation::Exclusive(_) | Operation::CheckedPointer(_)
@@ -37,7 +46,7 @@ pub(crate) fn validate_target(
         });
     }
     if let Operation::Ordered(operand) = &instruction.operation
-        && ordered::requires_atomic_load16(operand)
+        && ordered::requires_atomic_load16(operand, checks)
         && !target.supports(crate::TargetCpu::AtomicLoad16)
     {
         return Err(UnsupportedReason::HostCapabilityRequired {
@@ -122,8 +131,10 @@ fn store(code: &mut Vec<u8>, register: Register) {
 
 /// Direct ordinary-RAM profile. Guest virtual addresses equal native addresses;
 /// the caller keeps code/state separate from guest mappings. Guest NZCV is untouched.
+#[allow(clippy::too_many_arguments)]
 fn memory(
     code: &mut Vec<u8>,
+    checks: MemoryChecks,
     transfer: MemoryTransfer,
     bytes: u8,
     data: Register,
@@ -131,7 +142,7 @@ fn memory(
     displacement: i32,
     mode: AddressMode,
 ) {
-    memory_address(code, base, displacement, mode);
+    memory_address(code, checks, base, displacement, mode);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data, Width::X64, Shift::Lsl, 0);
@@ -140,7 +151,8 @@ fn memory(
                 bytes,
                 0,
                 memory_store::Source::Rcx,
-                memory_store::aligned_immediate(base, displacement, mode, bytes),
+                checks.stack_alignment
+                    && memory_store::aligned_immediate(base, displacement, mode, bytes),
             );
         }
         MemoryTransfer::Load { signed, width } => {
@@ -167,11 +179,32 @@ fn memory(
     memory_writeback(code, base, mode);
 }
 
-fn memory_address(code: &mut Vec<u8>, base: Register, displacement: i32, mode: AddressMode) {
+/// Guest checks fixed into a block's native memory accesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryChecks {
+    /// SCTLR_ELx.SA (SA0 at EL0) is set: an access through an SP that is not
+    /// 16-byte aligned raises a native #UD, the SP alignment fault.
+    pub stack_alignment: bool,
+}
+
+impl MemoryChecks {
+    /// Every check: the process profiles, and SCTLR_ELx.SA set in system mode.
+    pub const ALL: Self = Self {
+        stack_alignment: true,
+    };
+}
+
+fn memory_address(
+    code: &mut Vec<u8>,
+    checks: MemoryChecks,
+    base: Register,
+    displacement: i32,
+    mode: AddressMode,
+) {
     load(code, base);
-    if base == Register::Sp {
-        // The profile enables ARM SP alignment checks, before address addition.
-        // A native UD2 is a mapped fault boundary, not guest exception delivery.
+    if base == Register::Sp && checks.stack_alignment {
+        // Arm checks SP alignment before address addition. A native UD2 is a
+        // mapped fault boundary, not guest exception delivery.
         code.extend([0xa8, 15, 0x74, 2, 0x0f, 0x0b]); // test al,15; jz +2; ud2
     }
     code.extend([0x48, 0x8d, 0x90]); // lea rdx,[rax+disp32]: potential writeback
@@ -195,8 +228,10 @@ fn memory_writeback(code: &mut Vec<u8>, base: Register, mode: AddressMode) {
 /// Pair loads stage both values before committing either guest destination.
 /// Pair stores expose completed first-element writes if the second access faults.
 /// Concurrent/128-bit single-copy atomic semantics are outside this RAM profile.
+#[allow(clippy::too_many_arguments)]
 fn memory_pair(
     code: &mut Vec<u8>,
+    checks: MemoryChecks,
     transfer: MemoryTransfer,
     bytes: u8,
     data: [Register; 2],
@@ -204,7 +239,7 @@ fn memory_pair(
     displacement: i32,
     mode: AddressMode,
 ) {
-    memory_address(code, base, displacement, mode);
+    memory_address(code, checks, base, displacement, mode);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
@@ -214,7 +249,8 @@ fn memory_pair(
             } else {
                 code.extend([0x45, 0x31, 0xc0]); // xor r8d,r8d
             }
-            let aligned = memory_store::aligned_immediate(base, displacement, mode, bytes);
+            let aligned = checks.stack_alignment
+                && memory_store::aligned_immediate(base, displacement, mode, bytes);
             memory_store::emit(code, bytes, 0, memory_store::Source::Rcx, aligned);
             memory_store::emit(code, bytes, bytes, memory_store::Source::R8, aligned);
         }
@@ -361,13 +397,14 @@ pub(crate) fn emit_instruction(
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
     target: crate::TargetCpu,
+    checks: MemoryChecks,
 ) {
     match instruction.operation {
         Operation::FloatingPoint(_) => {
             unreachable!("numerical instructions require block emission")
         }
         Operation::FloatingPointRegister(operand) => fp_register::emit(code, &operand),
-        Operation::Simd(operand) => simd::emit_for_target(code, &operand, target),
+        Operation::Simd(operand) => simd::emit_for_target(code, &operand, target, checks),
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
@@ -388,7 +425,16 @@ pub(crate) fn emit_instruction(
             displacement,
             mode,
         } => {
-            memory_pair(code, transfer, bytes, data, base, displacement, mode);
+            memory_pair(
+                code,
+                checks,
+                transfer,
+                bytes,
+                data,
+                base,
+                displacement,
+                mode,
+            );
         }
         Operation::Memory {
             transfer,
@@ -398,7 +444,16 @@ pub(crate) fn emit_instruction(
             displacement,
             mode,
         } => {
-            memory(code, transfer, bytes, data, base, displacement, mode);
+            memory(
+                code,
+                checks,
+                transfer,
+                bytes,
+                data,
+                base,
+                displacement,
+                mode,
+            );
         }
         Operation::Branch { target } => jump(code, None, instruction.pc, target, fixups),
         Operation::BranchCondition {
@@ -524,12 +579,12 @@ pub(crate) fn emit_instruction(
                 nzcv(code, subtract);
             }
         }
-        Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand),
-        Operation::MemoryNonTemporal(operand) => non_temporal::emit(code, &operand),
-        Operation::MemoryUnprivileged(operand) => unprivileged::emit(code, &operand),
+        Operation::MemoryRegisterOffset(operand) => register_offset::emit(code, &operand, checks),
+        Operation::MemoryNonTemporal(operand) => non_temporal::emit(code, &operand, checks),
+        Operation::MemoryUnprivileged(operand) => unprivileged::emit(code, &operand, checks),
         Operation::TagArithmetic(operand) => tag_arithmetic::emit(code, &operand),
-        Operation::Atomic(operand) => atomic::emit(code, &operand, target),
-        Operation::Ordered(operand) => ordered::emit(code, &operand, target),
+        Operation::Atomic(operand) => atomic::emit(code, &operand, target, checks),
+        Operation::Ordered(operand) => ordered::emit(code, &operand, target, checks),
         Operation::Prefetch(operand) => prefetch::emit(code, &operand),
         Operation::LogicalImmediate {
             width,
@@ -671,7 +726,7 @@ impl Emitter {
                 });
             }
             block.source_map.push((instruction.pc, code.len()));
-            emit_instruction(code, instruction, &mut fixups, target);
+            emit_instruction(code, instruction, &mut fixups, target, MemoryChecks::ALL);
         }
         let offsets: alloc::collections::BTreeMap<_, _> = block
             .source_map

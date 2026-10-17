@@ -76,7 +76,13 @@ fn emit_decoded(
             x86_64::sve::address::emit(code, &operand, profile.vector_length(), target);
         }
         Decoded::Ordinary(instruction) => {
-            x86_64::emit_instruction(code, &instruction, fixups, target);
+            x86_64::emit_instruction(
+                code,
+                &instruction,
+                fixups,
+                target,
+                x86_64::MemoryChecks::ALL,
+            );
         }
         Decoded::IntegerDot(operand) => {
             if !x86_64::sve::dot::emit_integer(code, &operand, profile.vector_length(), target) {

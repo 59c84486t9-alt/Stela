@@ -315,6 +315,8 @@ struct Block {
     code: NativeCode,
     /// Guest PC and native offset of every instruction, ascending.
     source_map: Vec<(u64, usize)>,
+    /// Compiled with SP alignment checks (SCTLR_ELx.SA or SA0 set).
+    stack_check: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -330,12 +332,19 @@ struct JumpEntry {
     pc: u64,
     physical: u64,
     fp: bool,
+    stack_check: bool,
     generation: u64,
     block: usize,
 }
 
 /// Floating-point and SIMD instructions, which CPACR_EL1.FPEN can trap:
 /// SIMD&FP data processing (op0 x111) and SIMD&FP loads/stores (op0 x1x0, V=1).
+/// A load or store addressed through Rn (bits 9:5) that names SP; literal
+/// loads have no base register.
+fn stack_based(word: u32) -> bool {
+    word & 0x0a00_0000 == 0x0800_0000 && word & 0x3b00_0000 != 0x1800_0000 && (word >> 5) & 31 == 31
+}
+
 fn is_floating_point(word: u32) -> bool {
     (word >> 25) & 7 == 7 || word & 0x0a00_0000 == 0x0800_0000 && word & (1 << 26) != 0
 }
@@ -348,7 +357,8 @@ pub struct Machine<H: Host, D: Devices> {
     pub statistics: Statistics,
     target: TargetCpu,
     blocks: Vec<Block>,
-    index: BTreeMap<(u64, u64, bool), usize>,
+    /// Blocks by PC, PA, FP enablement and SP alignment checking.
+    index: BTreeMap<(u64, u64, bool, bool), usize>,
     fetch: Vec<Option<FetchEntry>>,
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
@@ -365,6 +375,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// The EL FP/SIMD traps to, if any; `None` when a System register write
     /// or an EL change may have changed it.
     floating_point: Option<Option<u8>>,
+    /// SCTLR_ELx.SA, or SA0 at EL0, of the current regime, while valid.
+    stack_check: Option<bool>,
 }
 
 enum Fetched {
@@ -393,6 +405,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lookup: super::system::Lookup::new(),
             timers: None,
             floating_point: None,
+            stack_check: None,
         };
         machine.load_profile();
         machine.sync_regime();
@@ -417,6 +430,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn derived_changed(&mut self) {
         self.timers = None;
         self.floating_point = None;
+        self.stack_check = None;
+    }
+
+    /// Whether loads and stores through SP check its 16-byte alignment (Arm
+    /// `CheckSPAlignment`): SCTLR_ELx.SA0 at EL0 and SA otherwise, of the
+    /// current translation regime.
+    fn stack_alignment_checked(&mut self) -> bool {
+        *self.stack_check.get_or_insert_with(|| {
+            let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+            let bit = if self.cpu.pstate.el == 0 { 4 } else { 3 };
+            sctlr & (1 << bit) != 0
+        })
     }
 
     fn sync_regime(&mut self) {
@@ -733,18 +758,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(Err(stop)) => return Err(stop),
         };
         let fp = self.floating_point_enabled();
+        let stack_check = self.stack_alignment_checked();
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
             && entry.physical == physical
             && entry.fp == fp
+            && entry.stack_check == stack_check
             && entry.generation == self.code_generation
         {
             return Ok(Fetched::Block(entry.block));
         }
-        let index = match self.index.get(&(pc, physical, fp)) {
+        let index = match self.index.get(&(pc, physical, fp, stack_check)) {
             Some(&index) => index,
-            None => match self.compile(pc, physical, fp)? {
+            None => match self.compile(pc, physical, fp, stack_check)? {
                 Some(index) => index,
                 None => {
                     // The first instruction is FP/SIMD while CPACR or CPTR
@@ -757,6 +784,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc,
             physical,
             fp,
+            stack_check,
             generation: self.code_generation,
             block: index,
         });
@@ -765,7 +793,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Compile the block at `pc`. `None` when its first instruction is a
     /// trapped FP/SIMD instruction.
-    fn compile(&mut self, pc: u64, physical: u64, fp: bool) -> Result<Option<usize>, Stop> {
+    fn compile(
+        &mut self,
+        pc: u64,
+        physical: u64,
+        fp: bool,
+        stack_check: bool,
+    ) -> Result<Option<usize>, Stop> {
         let available = (FETCH_PAGE - (pc & (FETCH_PAGE - 1))).min(MAX_BLOCK_BYTES);
         let mut source = vec![0u8; available as usize];
         if !self.host.read_ram(physical, &mut source) {
@@ -797,7 +831,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
             };
-        let compiled = self.compile_prefix(&source[..consumed], pc)?;
+        let compiled = self.compile_prefix(&source[..consumed], pc, stack_check)?;
         let code = match self.host.install(&compiled.native.x86_64_code) {
             Ok(code) => code,
             Err(InstallError::Full) => {
@@ -820,9 +854,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .iter()
                 .map(|(guest, offset)| (guest.0, *offset))
                 .collect(),
+            stack_check,
         });
         let index = self.blocks.len() - 1;
-        self.index.insert((pc, physical, fp), index);
+        self.index.insert((pc, physical, fp, stack_check), index);
         Ok(Some(index))
     }
 
@@ -831,9 +866,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &self,
         source: &[u8],
         pc: u64,
+        stack_check: bool,
     ) -> Result<stela_compiler::block::CompiledBlock, Stop> {
         let attempt = |bytes: &[u8]| {
             CompilationPlan::new(bytes, GuestAddress(pc), PROFILE, self.target)
+                .and_then(|plan| plan.with_stack_alignment_check(stack_check))
                 .and_then(CompilationPlan::compile)
         };
         match attempt(source) {
@@ -1228,19 +1265,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 requirement.address = Some(fault.address);
                 Err(Stop::Unsupported(requirement))
             }
+            // Native blocks raise #UD for a misaligned SP base when compiled
+            // with the check (SCTLR_ELx.SA or SA0 set), and for an LSE2
+            // atomic access crossing its 16-byte granule.
             FaultCause::InvalidOpcode => {
-                let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
-                let checked = if self.cpu.pstate.el == 0 {
-                    sctlr & (1 << 4) != 0
-                } else {
-                    sctlr & (1 << 3) != 0
-                };
-                if checked {
+                let word = self.word(index, pc)?;
+                if self.blocks[index].stack_check
+                    && stack_based(word)
+                    && !self.cpu.state.sp.is_multiple_of(16)
+                {
                     self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
                     Ok(())
                 } else {
                     Err(self.unsupported(RequirementKind::Native(
-                        "misaligned SP with SCTLR_EL1.SA/SA0 clear",
+                        "alignment fault of an atomic access crossing its 16-byte granule",
                     )))
                 }
             }
@@ -1980,6 +2018,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn sctlr_sa_selects_blocks_with_or_without_the_sp_alignment_check() {
+        const SP_CHECK: [u8; 6] = [0xa8, 15, 0x74, 2, 0x0f, 0x0b];
+        // ldr x0, [sp, #8]; svc #0
+        let mut machine = machine(&[0xf940_07e0, 0xd400_0001]);
+        let has_check = |machine: &Machine<FakeHost, NoDevices>, index: usize| {
+            let code = &machine.host.installed[machine.blocks[index].code.0 - 1];
+            code.windows(SP_CHECK.len()).any(|bytes| bytes == SP_CHECK)
+        };
+        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) | 1 << 3;
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr);
+        machine.derived_changed();
+        let Ok(Fetched::Block(checked)) = machine.fetch_block(BASE) else {
+            panic!("checked block")
+        };
+        assert!(machine.blocks[checked].stack_check && has_check(&machine, checked));
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr & !(1 << 3));
+        machine.derived_changed();
+        let Ok(Fetched::Block(unchecked)) = machine.fetch_block(BASE) else {
+            panic!("unchecked block")
+        };
+        assert_ne!(checked, unchecked);
+        assert!(!machine.blocks[unchecked].stack_check && !has_check(&machine, unchecked));
+        assert!(stack_based(0xf940_07e0) && !stack_based(0xf940_0020));
+        assert!(!stack_based(0x5800_003f), "a literal load has no base");
     }
 
     impl Machine<FakeHost, NoDevices> {

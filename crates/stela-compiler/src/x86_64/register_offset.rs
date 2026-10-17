@@ -6,21 +6,23 @@ use super::{
 use crate::aarch64::register_offset::{IndexExtend, Operand};
 use alloc::vec::Vec;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
     address(
         code,
+        checks,
         operand.base,
         operand.index,
         operand.extend,
         operand.shift,
     );
-    transfer(code, operand);
+    transfer(code, operand, checks);
 }
 
 /// Shared integer/SIMD address calculation, without guest register writeback.
 /// RAX is the result; RCX/RDX and host flags are scratch. SP is checked first.
 pub(super) fn address(
     code: &mut Vec<u8>,
+    checks: super::MemoryChecks,
     base: Register,
     index: Register,
     extend: IndexExtend,
@@ -32,7 +34,7 @@ pub(super) fn address(
     const LEA_RAX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x04, 0x08];
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
-    memory_address(code, base, 0, AddressMode::Offset);
+    memory_address(code, checks, base, 0, AddressMode::Offset);
     right_operand(code, index, Width::X64, Shift::Lsl, 0);
     match extend {
         IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
@@ -46,7 +48,7 @@ pub(super) fn address(
     code.extend(LEA_RAX_RAX_RCX); // modulo 2^64
 }
 
-fn transfer(code: &mut Vec<u8>, operand: &Operand) {
+fn transfer(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
     match operand.transfer {
         MemoryTransfer::Store => {
             right_operand(code, operand.data, Width::X64, Shift::Lsl, 0);
@@ -55,12 +57,13 @@ fn transfer(code: &mut Vec<u8>, operand: &Operand) {
                 operand.bytes,
                 0,
                 memory_store::Source::Rcx,
-                memory_store::aligned_register_offset(
-                    operand.base,
-                    operand.index,
-                    operand.shift,
-                    operand.bytes,
-                ),
+                checks.stack_alignment
+                    && memory_store::aligned_register_offset(
+                        operand.base,
+                        operand.index,
+                        operand.shift,
+                        operand.bytes,
+                    ),
             );
         }
         MemoryTransfer::Load { signed, width } => {

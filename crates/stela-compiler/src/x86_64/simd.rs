@@ -1,7 +1,7 @@
 //! AdvSIMD and FP emission with SSE2.
 use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
-use super::{memory_address, memory_writeback};
+use super::{MemoryChecks, memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod absolute_selection;
@@ -259,9 +259,14 @@ pub(super) fn emit_numerical(
 
 #[cfg(test)]
 pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
-    emit_for_target(code, operand, crate::TargetCpu::Baseline);
+    emit_for_target(code, operand, crate::TargetCpu::Baseline, MemoryChecks::ALL);
 }
-pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
+pub(super) fn emit_for_target(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    target: crate::TargetCpu,
+    checks: MemoryChecks,
+) {
     match *operand {
         Operand::Lut(ref operand) => lut::emit(code, operand, target),
         Operand::Aes(ref operand) => aes::emit(code, operand, target),
@@ -271,8 +276,12 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
         Operand::Sha3(ref operand) => sha3::emit(code, operand),
         Operand::Sha512(ref operand) => sha512::emit(code, operand, target),
         Operand::Floating(ref operand) => floating::emit(code, operand, target),
-        Operand::MemoryRegisterOffset(ref operand) => memory::emit_register_offset(code, operand),
-        Operand::StructureMemory(ref operand) => structure_memory::emit(code, operand, target),
+        Operand::MemoryRegisterOffset(ref operand) => {
+            memory::emit_register_offset(code, operand, checks)
+        }
+        Operand::StructureMemory(ref operand) => {
+            structure_memory::emit(code, operand, target, checks)
+        }
         Operand::Immediate(ref operand) => immediates::emit(code, operand, target),
         Operand::Halving(ref operand) => halving::emit(code, operand, target),
         Operand::Product(ref operand) => products::emit(code, operand, target),
@@ -431,8 +440,9 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
             displacement,
             mode,
         } => {
-            memory_address(code, base, displacement, mode);
-            let aligned = super::memory_store::aligned_immediate(base, displacement, mode, bytes);
+            memory_address(code, checks, base, displacement, mode);
+            let aligned = checks.stack_alignment
+                && super::memory_store::aligned_immediate(base, displacement, mode, bytes);
             if load {
                 memory::wide_transfer(code, true, bytes, 0, 0, aligned);
                 memory::wide_transfer(code, true, bytes, 1, bytes, aligned);
@@ -478,13 +488,14 @@ pub(super) fn emit_for_target(code: &mut Vec<u8>, operand: &Operand, target: cra
             displacement,
             mode,
         } => {
-            memory_address(code, base, displacement, mode);
+            memory_address(code, checks, base, displacement, mode);
             memory::transfer(
                 code,
                 load,
                 bytes,
                 vector,
-                super::memory_store::aligned_immediate(base, displacement, mode, bytes),
+                checks.stack_alignment
+                    && super::memory_store::aligned_immediate(base, displacement, mode, bytes),
             );
             // RDX retains the potential writeback across all SSE/GPR staging.
             memory_writeback(code, base, mode);

@@ -286,7 +286,16 @@ impl Emitter<'_> {
         // Obtain the real existing raw-memory emission before mutating output.
         // If its selected form changes, decline this whole candidate prefix.
         let mut raw = vec![];
-        super::memory(&mut raw, transfer, bytes, data, base, displacement, mode);
+        super::memory(
+            &mut raw,
+            super::MemoryChecks::ALL,
+            transfer,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode,
+        );
         let ends = encoding::ordinary_load_ends(
             &raw,
             bytes,
@@ -369,7 +378,16 @@ impl Emitter<'_> {
         mode: AddressMode,
     ) -> Result<(), RegionError> {
         let mut raw = vec![];
-        super::memory_pair(&mut raw, transfer, bytes, data, base, displacement, mode);
+        super::memory_pair(
+            &mut raw,
+            super::MemoryChecks::ALL,
+            transfer,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode,
+        );
         let ends = encoding::ordinary_pair_load_ends(
             &raw,
             slot(base).expect("eligible X base"),
@@ -1405,6 +1423,7 @@ mod tests {
         let mut raw = vec![];
         super::super::memory(
             &mut raw,
+            super::super::MemoryChecks::ALL,
             MemoryTransfer::Load {
                 signed: false,
                 width: Width::W32,
@@ -1461,6 +1480,7 @@ mod tests {
             let mut raw = vec![];
             super::super::memory(
                 &mut raw,
+                super::super::MemoryChecks::ALL,
                 MemoryTransfer::Load {
                     signed: false,
                     width: Width::W32,
@@ -1540,6 +1560,7 @@ mod tests {
         let mut raw = vec![];
         super::super::memory_pair(
             &mut raw,
+            super::super::MemoryChecks::ALL,
             MemoryTransfer::Load {
                 signed: false,
                 width: Width::W32,
@@ -1774,14 +1795,25 @@ mod tests {
         let legacy = emit_clean_load_prefix(&instructions).unwrap();
         let target = crate::TargetCpu::Baseline;
         let fallthrough = GuestAddress(0x100c);
-        let baseline =
-            super::super::block::emit_for_target(&instructions, None, fallthrough, target);
+        let baseline = super::super::block::emit_for_target(
+            &instructions,
+            None,
+            fallthrough,
+            target,
+            super::super::MemoryChecks::ALL,
+        );
         let ordinary =
             super::super::block::emit_ordinary_for_target(&instructions, None, fallthrough, target);
         let mut baseline_prefix = vec![];
         let mut fixups = vec![];
         for instruction in &instructions {
-            super::super::emit_instruction(&mut baseline_prefix, instruction, &mut fixups, target);
+            super::super::emit_instruction(
+                &mut baseline_prefix,
+                instruction,
+                &mut fixups,
+                target,
+                super::super::MemoryChecks::ALL,
+            );
         }
         assert!(fixups.is_empty());
         if admits_ordinary(&legacy, &baseline_prefix) {

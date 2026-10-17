@@ -434,6 +434,7 @@ pub struct CompilationPlan {
     target: crate::TargetCpu,
     profile: BlockProfile,
     resident: Option<crate::x86_64::block::ResidentLoopPlan>,
+    checks: crate::x86_64::MemoryChecks,
 }
 impl CompilationPlan {
     pub fn new(
@@ -487,7 +488,33 @@ impl CompilationPlan {
             target,
             profile,
             resident,
+            checks: crate::x86_64::MemoryChecks::ALL,
         })
+    }
+
+    /// Emit SP alignment checks only when `enabled`: the system-mode engine
+    /// compiles separate blocks for SCTLR_ELx.SA (or SA0 at EL0) clear, where
+    /// an access through a misaligned SP proceeds. No other profile admits
+    /// that, and a host without the capability an unchecked SP then needs
+    /// refuses.
+    pub fn with_stack_alignment_check(mut self, enabled: bool) -> Result<Self, CompileError> {
+        let checks = crate::x86_64::MemoryChecks {
+            stack_alignment: enabled,
+        };
+        if !enabled {
+            if self.profile != BlockProfile::SystemModeV1 {
+                return Err(CompileError(format!(
+                    "{:?} always checks SP alignment",
+                    self.profile
+                )));
+            }
+            for instruction in &self.parsed.instructions {
+                crate::x86_64::validate_target_with(instruction, self.target, checks)
+                    .map_err(|error| CompileError(format!("{error:?}")))?;
+            }
+        }
+        self.checks = checks;
+        Ok(self)
     }
     /// Allow the ordinary runtime to retain eligible internal loop edges. Other
     /// service profiles keep their existing admission and call contracts.
@@ -563,6 +590,7 @@ impl CompilationPlan {
                 self.parsed.terminal.as_ref(),
                 self.parsed.next_pc,
                 self.target,
+                self.checks,
             )
         };
         Ok(CompiledBlock {
@@ -667,6 +695,50 @@ mod tests {
     }
 
     #[test]
+    fn system_mode_blocks_can_omit_the_sp_alignment_check() {
+        const SP_CHECK: [u8; 6] = [0xa8, 15, 0x74, 2, 0x0f, 0x0b];
+        // ldr x0, [sp, #8]; stp x0, x1, [sp, #-16]!; ldr q0, [sp, x2];
+        // ldar x3, [sp]; ldadd x4, x5, [sp]
+        let source: Vec<u8> = [
+            0xf940_07e0_u32,
+            0xa9bf_07e0,
+            0x3ce2_6be0,
+            0xc8df_ffe3,
+            0xf824_03e5,
+        ]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+        let compile = |checked| {
+            CompilationPlan::new(
+                &source,
+                GuestAddress(0x1000),
+                BlockProfile::SystemModeV1,
+                crate::TargetCpu::detect(),
+            )
+            .and_then(|plan| plan.with_stack_alignment_check(checked))
+            .and_then(CompilationPlan::compile)
+            .unwrap()
+            .native
+            .x86_64_code
+        };
+        let has_check = |code: &[u8]| code.windows(SP_CHECK.len()).any(|bytes| bytes == SP_CHECK);
+        assert!(has_check(&compile(true)));
+        assert!(!has_check(&compile(false)));
+        // Only the system-mode profile admits it.
+        assert!(
+            CompilationPlan::new(
+                &source[..4],
+                GuestAddress(0x1000),
+                BlockProfile::Ordinary,
+                crate::TargetCpu::Baseline
+            )
+            .and_then(|plan| plan.with_stack_alignment_check(false))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn system_mode_profile_keeps_ordinary_memory_and_exits_on_system_instructions() {
         const BASE: GuestAddress = GuestAddress(0x4000);
         const ADD: u32 = 0x9100_0400; // add x0, x0, #1
@@ -742,6 +814,7 @@ mod tests {
             parsed.terminal.as_ref(),
             parsed.next_pc,
             crate::TargetCpu::Baseline,
+            crate::x86_64::MemoryChecks::ALL,
         );
         let compiled =
             compile_for_target(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();

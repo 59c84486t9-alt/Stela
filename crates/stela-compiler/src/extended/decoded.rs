@@ -370,7 +370,13 @@ impl Decoded {
                 if instruction.pc != pc {
                     return Err(CompileError("checked instruction PC differs".into()));
                 }
-                x86_64::emit_instruction(code, instruction, fixups, target);
+                x86_64::emit_instruction(
+                    code,
+                    instruction,
+                    fixups,
+                    target,
+                    x86_64::MemoryChecks::ALL,
+                );
             }
             Self::MemoryScalar(operand) => {
                 crate::x86_64::memory_store::checked_scalar::emit_context(code, operand, pc.0)

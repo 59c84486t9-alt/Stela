@@ -49,9 +49,10 @@ const SHRD_RAX_R8_IMM8: &[u8] = &[0x4c, 0x0f, 0xac, 0xc0];
 const MOVZX_EAX_AX: &[u8] = &[0x0f, 0xb7, 0xc0];
 const MOV_EAX_EAX: &[u8] = &[0x89, 0xc0];
 
-/// Generic wider loads can cross eight bytes. Aligned SP makes the effective
-/// residue known; a statically faulting access never needs a snapshot capability.
-pub(super) fn requires_atomic_load16(operand: &Operand) -> bool {
+/// Generic wider loads can cross eight bytes. A checked, so aligned, SP makes
+/// the effective residue known; a statically faulting access never needs a
+/// snapshot capability.
+pub(super) fn requires_atomic_load16(operand: &Operand, checks: super::MemoryChecks) -> bool {
     let Operand::Transfer {
         kind: Kind::Acquire | Kind::AcquirePc,
         bytes: bytes @ (HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES),
@@ -63,13 +64,19 @@ pub(super) fn requires_atomic_load16(operand: &Operand) -> bool {
         return false;
     };
     base != Register::Sp
+        || !checks.stack_alignment
         || (displacement.rem_euclid(i32::from(ATOMIC_QUANTITY_BYTES))
             <= i32::from(ATOMIC_QUANTITY_BYTES - bytes)
             && displacement.rem_euclid(i32::from(BASELINE_ATOMIC_BYTES))
                 > i32::from(BASELINE_ATOMIC_BYTES - bytes))
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    target: TargetCpu,
+    checks: super::MemoryChecks,
+) {
     match *operand {
         Operand::Barrier { requirement, .. } => {
             // Cached ordinary WB accesses already preserve reads→reads/writes
@@ -87,15 +94,15 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             displacement,
             extension,
         } => {
-            address_offset(code, base, bytes, displacement);
+            address_offset(code, base, bytes, displacement, checks);
             if kind == Kind::Release {
                 input_rcx(code, bytes, data);
                 release(code, bytes);
             } else {
-                if requires_atomic_load16(operand) {
+                if requires_atomic_load16(operand, checks) {
                     // The compiler validates this requirement before emission.
                     debug_assert!(target.supports(TargetCpu::AtomicLoad16));
-                    if base == Register::Sp {
+                    if base == Register::Sp && checks.stack_alignment {
                         let offset =
                             displacement.rem_euclid(i32::from(BASELINE_ATOMIC_BYTES)) as u8;
                         snapshot_value(code, bytes, extension, Some(offset << BITS_PER_BYTE_SHIFT));
@@ -207,6 +214,11 @@ fn snapshot_value(code: &mut Vec<u8>, bytes: u8, extension: LoadExtension, shift
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::x86_64::MemoryChecks;
+
+    const UNCHECKED: MemoryChecks = MemoryChecks {
+        stack_alignment: false,
+    };
 
     #[test]
     fn only_potentially_crossing_loads_require_atomic_load16() {
@@ -222,8 +234,13 @@ mod tests {
                         extension: LoadExtension::Zero,
                     };
                     assert_eq!(
-                        requires_atomic_load16(&operand),
+                        requires_atomic_load16(&operand, MemoryChecks::ALL),
                         kind != Kind::Release && bytes != BYTE_BYTES && base != Register::Sp
+                    );
+                    // An unchecked SP is an ordinary base.
+                    assert_eq!(
+                        requires_atomic_load16(&operand, UNCHECKED),
+                        kind != Kind::Release && bytes != BYTE_BYTES
                     );
                 }
             }
@@ -243,14 +260,17 @@ mod tests {
                 let inside_quantity = effective / 16 == last / 16;
                 let crosses_baseline = effective / 8 != last / 8;
                 assert_eq!(
-                    requires_atomic_load16(&operand),
+                    requires_atomic_load16(&operand, MemoryChecks::ALL),
                     inside_quantity && crosses_baseline
                 );
             }
         }
-        assert!(!requires_atomic_load16(&Operand::Barrier {
-            option: 15,
-            requirement: Barrier::All,
-        }));
+        assert!(!requires_atomic_load16(
+            &Operand::Barrier {
+                option: 15,
+                requirement: Barrier::All,
+            },
+            MemoryChecks::ALL,
+        ));
     }
 }

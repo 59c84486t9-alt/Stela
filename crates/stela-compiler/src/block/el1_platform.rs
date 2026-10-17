@@ -485,12 +485,14 @@ impl Plan {
                 terminal.as_ref(),
                 fallthrough,
                 target,
+                crate::x86_64::MemoryChecks::ALL,
             )),
             Body::System(instruction) => Ok(crate::x86_64::block::emit_for_target(
                 &[],
                 Some(&(instruction.instruction_pc, Terminator::System(instruction))),
                 instruction.next_pc,
                 target,
+                crate::x86_64::MemoryChecks::ALL,
             )),
         }
     }

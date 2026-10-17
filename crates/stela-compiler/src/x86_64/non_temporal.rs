@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 const DWORD_BYTES: u8 = 4;
 const QWORD_BYTES: u8 = 8;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {
     match operand.data {
         Data::Integer(data) => {
             let transfer = if operand.load {
@@ -27,6 +27,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
             };
             memory_pair(
                 code,
+                checks,
                 transfer,
                 operand.bytes,
                 data,
@@ -47,6 +48,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
                     mode: AddressMode::Offset,
                 },
                 crate::TargetCpu::Baseline,
+                checks,
             );
         }
     }

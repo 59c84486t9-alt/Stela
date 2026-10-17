@@ -61,8 +61,13 @@ pub(super) fn requires_cx16(operand: &Operand) -> bool {
         && operand.bytes == DOUBLEWORD_PAIR_BYTES
 }
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetCpu) {
-    address(code, operand.base, operand.bytes);
+pub(super) fn emit(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    target: crate::TargetCpu,
+    checks: super::MemoryChecks,
+) {
+    address(code, operand.base, operand.bytes, checks);
     match operand.kind {
         Kind::CompareExchange { .. } => compare_exchange::emit(code, operand),
         Kind::CompareExchangePair { .. } => compare_exchange_pair::emit(code, operand, target),
@@ -72,15 +77,23 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: crate::TargetC
 
 /// SP is checked first. LSE2 accesses must fit the selected aligned 16-byte granule.
 /// RAX/RCX are scratch, RDX receives the address, and guest state is untouched.
-pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8) {
-    address_offset(code, base, bytes, 0);
+pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8, checks: super::MemoryChecks) {
+    address_offset(code, base, bytes, 0, checks);
 }
 
 /// Check SP before adding the displacement. The single-copy-atomic boundary
 /// applies to the effective address; a known-aligned SP needs no run-time test.
-pub(super) fn address_offset(code: &mut Vec<u8>, base: Register, bytes: u8, displacement: i32) {
+/// Without the SP alignment check, SP is an ordinary base.
+pub(super) fn address_offset(
+    code: &mut Vec<u8>,
+    base: Register,
+    bytes: u8,
+    displacement: i32,
+    checks: super::MemoryChecks,
+) {
     load(code, base);
-    if base == Register::Sp {
+    let aligned_sp = base == Register::Sp && checks.stack_alignment;
+    if aligned_sp {
         code.extend(TEST_AL_IMM8);
         code.push(ATOMIC_GRANULE_MASK);
         code.extend([JE_REL8, UD2.len() as u8]);
@@ -91,7 +104,7 @@ pub(super) fn address_offset(code: &mut Vec<u8>, base: Register, bytes: u8, disp
         code.extend(displacement.to_le_bytes());
     }
     if bytes != BYTE_BYTES {
-        if base != Register::Sp {
+        if !aligned_sp {
             code.extend(MOV_ECX_EAX);
             code.extend(AND_ECX_IMM8);
             code.push(ATOMIC_GRANULE_MASK);
