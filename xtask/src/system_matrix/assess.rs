@@ -275,8 +275,8 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
     let assessment = &matrix["assessment"];
     let count = |kind: &str, status: &str| assessment[kind][status].as_u64().unwrap_or(0);
     let mut table = String::from(
-        "| System platform requirement | Implemented | Open, refused or paused | Total |\n\
-         | --- | --- | --- | --- |\n",
+        "| System platform requirement | Implemented | Partial | Open, refused or paused | Total |\n\
+         | --- | --- | --- | --- | --- |\n",
     );
     for (kind, title) in KINDS {
         let total = count(kind, "total");
@@ -284,19 +284,21 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
             continue;
         }
         let done = count(kind, "implemented");
+        let partial = count(kind, "partial");
         table.push_str(&format!(
-            "| {title} | {done} | {} | {total} |\n",
-            total - done
+            "| {title} | {done} | {partial} | {} | {total} |\n",
+            total - done - partial
         ));
     }
     let total = count("total", "total");
     let done = count("total", "implemented");
+    let partial = count("total", "partial");
     table.push_str(&format!(
-        "| **All** | **{done} / {total} ({:.1}%)** | {} | {total} |\n\n\
+        "| **All** | **{done} / {total} ({:.1}%)** | {partial} | {} | {total} |\n\n\
          Rows are the AArch64 requirements of the declared Mac14,3 profile in Arm \
          AARCHMRS {}, partial rows earning no credit. [System matrix]({MATRIX})\n",
         100.0 * done as f64 / total.max(1) as f64,
-        total - done,
+        total - done - partial,
         matrix["source"]["release"].as_str().unwrap_or("?"),
     ));
     let block = format!("{README_START}\n{table}{README_END}");

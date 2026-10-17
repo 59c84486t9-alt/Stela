@@ -18,8 +18,11 @@ use std::{
     process::Command,
 };
 
+mod access;
 pub mod assess;
+mod codegen;
 mod expression;
+mod fold;
 
 pub const MATRIX: &str = "isa/a64-system-requirements.json";
 pub const REGISTRY: &str = "isa/system-platform-registry.json";
@@ -58,7 +61,7 @@ const CHOICES: [(&str, &str); 1] = [(
 
 /// Features the profile does not have, with the reason. Features implied only
 /// by these are excluded with them.
-const EXCLUDED: [(&str, &str); 16] = [
+const EXCLUDED: [(&str, &str); 18] = [
     ("FEAT_EL3", "the profile has no EL3"),
     ("FEAT_AA64EL3", "the profile has no EL3"),
     ("FEAT_SEL2", "Secure EL2 needs EL3"),
@@ -82,6 +85,12 @@ const EXCLUDED: [(&str, &str); 16] = [
     ("FEAT_TRC_SR", "no Arm trace unit"),
     ("FEAT_ETMv4", "no Arm trace unit"),
     ("FEAT_ETE", "no Arm trace unit"),
+    (
+        "FEAT_NV",
+        "Apple's Virtualization framework offers nested virtualization only on \
+         M3 and later (VZGenericPlatformConfiguration.isNestedVirtualizationSupported)",
+    ),
+    ("FEAT_NV2", "no FEAT_NV"),
 ];
 
 /// A64 mnemonics whose semantics belong to the system platform: exception
@@ -121,11 +130,28 @@ impl SystemMatrix {
             .args(MEMBERS)
             .status()?;
         ensure!(status.success(), "cannot extract {MEMBERS:?}");
-        let matrix = generate(directory.path())?;
+        let (matrix, registers, profile) = generate(directory.path())?;
         let previous = fs::read_to_string(root().join(MATRIX)).unwrap_or_default();
         let text = assess::render(&matrix, &assess::registry()?, &previous)?;
         fs::write(root().join(MATRIX), text)?;
         println!("wrote {MATRIX}");
+        let applicable: BTreeSet<String> = matrix
+            .rows
+            .values()
+            .filter(|row| matches!(row["kind"].as_str(), Some("register" | "instruction")))
+            .filter_map(|row| row["name"].as_str().map(str::to_owned))
+            .collect();
+        let generated = root().join(access::GENERATED);
+        fs::write(
+            &generated,
+            access::generate(&registers, &profile, &applicable)?,
+        )?;
+        let status = Command::new("rustfmt")
+            .args(["--edition", "2024"])
+            .arg(&generated)
+            .status()?;
+        ensure!(status.success(), "rustfmt failed on {}", access::GENERATED);
+        println!("wrote {}", access::GENERATED);
         Ok(())
     }
 }
@@ -136,7 +162,7 @@ pub struct Matrix {
     pub rows: BTreeMap<String, Value>,
 }
 
-fn generate(directory: &Path) -> Result<Matrix> {
+fn generate(directory: &Path) -> Result<(Matrix, Value, Profile)> {
     let read = |name: &str| -> Result<(Value, String)> {
         let bytes = fs::read(directory.join(name))?;
         let digest = stela_runtime::sha256(&bytes);
@@ -221,7 +247,7 @@ fn generate(directory: &Path) -> Result<Matrix> {
             .into(),
     );
     header.insert("profile".into(), decisions);
-    Ok(Matrix { header, rows })
+    Ok((Matrix { header, rows }, registers, profile))
 }
 
 /// The declared Mac14,3 profile: the Apple clang `apple-m2` cap plus the base,
@@ -440,7 +466,7 @@ fn register_rows(
         for fieldset in register["fieldsets"].as_array().into_iter().flatten() {
             let truth = profile.truth(&fieldset["condition"]);
             if truth != Truth::False {
-                collect_fields(profile, &fieldset["values"], truth, &mut fields);
+                collect_fields(profile, &fieldset["values"], 0, truth, &mut fields);
             }
         }
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
@@ -504,10 +530,18 @@ struct Field {
     truth: Truth,
 }
 
-fn collect_fields(profile: &Profile, values: &Value, truth: Truth, out: &mut Vec<Field>) {
+fn collect_fields(
+    profile: &Profile,
+    values: &Value,
+    offset: u64,
+    truth: Truth,
+    out: &mut Vec<Field>,
+) {
     for value in values.as_array().into_iter().flatten() {
         let kind = value["_type"].as_str().unwrap_or("?");
         if kind == "Fields.ConditionalField" {
+            // Variants are relative to the conditional field's own range.
+            let start = value["rangeset"][0]["start"].as_u64().unwrap_or(0) + offset;
             for variant in value["fields"].as_array().into_iter().flatten() {
                 let variant_truth = profile.truth(&variant["condition"]);
                 if variant_truth == Truth::False {
@@ -522,6 +556,7 @@ fn collect_fields(profile: &Profile, values: &Value, truth: Truth, out: &mut Vec
                 collect_fields(
                     profile,
                     &Value::Array(vec![variant["field"].clone()]),
+                    start,
                     combined,
                     out,
                 );
@@ -539,7 +574,7 @@ fn collect_fields(profile: &Profile, values: &Value, truth: Truth, out: &mut Vec
                 ranges
                     .iter()
                     .map(|range| {
-                        let start = range["start"].as_u64().unwrap_or(0);
+                        let start = range["start"].as_u64().unwrap_or(0) + offset;
                         let width = range["width"].as_u64().unwrap_or(1);
                         if width == 1 {
                             start.to_string()

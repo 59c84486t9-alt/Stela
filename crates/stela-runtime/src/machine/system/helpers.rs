@@ -1,0 +1,118 @@
+//! Arm shared pseudocode functions the generated accessors call, written from
+//! the ASL of `ISA_A64_xml_A_profile-2026-06` `shared_pseudocode.xml` for the
+//! profile: EL2 is implemented and enabled (no EL3, Non-secure only), FEAT_VHE
+//! without FEAT_E2H0 (HCR_EL2.E2H is RES1) and no FEAT_NV.
+use super::{CacheOp, CacheScope, CacheType, Context, Effect, Register};
+
+pub const HCR_TGE: u32 = 27;
+pub const VTTBR_VMID: u32 = 48;
+
+/// `value[low + width - 1 : low]`.
+pub fn bits(value: u64, low: u64, width: u64) -> u64 {
+    if low >= 64 {
+        return 0;
+    }
+    let shifted = value >> low;
+    if width >= 64 {
+        shifted
+    } else {
+        shifted & ((1u64 << width) - 1)
+    }
+}
+
+/// `old` with `old[low + width - 1 : low] = value`.
+pub fn insert(old: u64, low: u64, width: u64, value: u64) -> u64 {
+    let mask = if width >= 64 {
+        u64::MAX
+    } else {
+        ((1u64 << width) - 1) << low
+    };
+    (old & !mask) | ((value << low) & mask)
+}
+
+/// `SignExtend{64}(value)` of a `width`-bit value.
+pub fn sign_extend(value: u64, width: u64) -> u64 {
+    let shift = 64 - width;
+    (((value << shift) as i64) >> shift) as u64
+}
+
+fn tge(c: &dyn Context) -> bool {
+    bits(c.read(Register::HCR_EL2, 0), u64::from(HCR_TGE), 1) == 1
+}
+
+/// `ELIsInHost(el)`: EL2 is always in host (E2H RES1); EL0 is in host while
+/// HCR_EL2.TGE is 1; EL1 never is.
+pub fn is_in_host(c: &dyn Context, el: u64) -> bool {
+    match el {
+        2 => true,
+        0 => tge(c),
+        _ => false,
+    }
+}
+
+/// `EffectivelyAtEL0InHost()`.
+pub fn at_el0_in_host(c: &dyn Context) -> bool {
+    c.el() == 0 && is_in_host(c, 0)
+}
+
+/// `EffectivelyAtEL0NotInHost()`.
+pub fn at_el0_not_in_host(c: &dyn Context) -> bool {
+    c.el() == 0 && !is_in_host(c, 0)
+}
+
+/// `EffectiveTGEforEL0Traps()`: HCR_EL2.TGE, EL2 being enabled.
+pub fn tge_for_el0_traps(c: &dyn Context) -> u64 {
+    u64::from(tge(c))
+}
+
+/// `AArch64_SystemAccessTraptoEL1orEL2(ec)`: an EL0 trap goes to EL2 when
+/// HCR_EL2.TGE is 1, else to EL1.
+pub fn trap_el1_or_el2(c: &dyn Context, ec: u64) -> Effect {
+    Effect::Trap {
+        el: if tge(c) { 2 } else { 1 },
+        ec,
+    }
+}
+
+/// `VMID()`: 8-bit VMIDs (no FEAT_VMID16), from VTTBR_EL2.
+pub fn vmid(c: &dyn Context) -> u64 {
+    bits(c.read(Register::VTTBR_EL2, 0), u64::from(VTTBR_VMID), 8)
+}
+
+/// `AArch64_TreatDCAsNOP()`. The IMPLEMENTATION DEFINED NOP choices are all
+/// FALSE: cache maintenance is always performed (and trappable).
+pub fn treat_dc_as_nop(c: &dyn Context, kind: CacheType, op: CacheOp, scope: CacheScope) -> bool {
+    let _ = (c, kind, op, scope);
+    false
+}
+
+/// `AArch64_CanTrapDC()`.
+pub fn can_trap_dc(c: &dyn Context, kind: CacheType, op: CacheOp, scope: CacheScope) -> bool {
+    !treat_dc_as_nop(c, kind, op, scope)
+}
+
+/// `AArch64_TreatICAsNOP()`: only with CTR_EL0.DIC set, and the choice is
+/// FALSE.
+pub fn treat_ic_as_nop(c: &dyn Context, kind: CacheType, op: CacheOp, scope: CacheScope) -> bool {
+    let _ = (c, kind, op, scope);
+    false
+}
+
+/// `AArch64_CanTrapIC()`.
+pub fn can_trap_ic(c: &dyn Context, kind: CacheType, op: CacheOp, scope: CacheScope) -> bool {
+    !treat_ic_as_nop(c, kind, op, scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bit_fields_insert_and_extend() {
+        assert_eq!(bits(0xf0, 4, 4), 0xf);
+        assert_eq!(bits(u64::MAX, 0, 64), u64::MAX);
+        assert_eq!(insert(0, 4, 4, 0xff), 0xf0);
+        assert_eq!(sign_extend(0x8000_0000, 32), 0xffff_ffff_8000_0000);
+        assert_eq!(sign_extend(0x7fff_ffff, 32), 0x7fff_ffff);
+    }
+}

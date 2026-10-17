@@ -11,6 +11,7 @@ pub mod identification;
 pub mod impdef;
 pub mod mmu;
 pub mod registers;
+pub mod system;
 pub mod timer;
 
 pub use cpu::{Cpu, Exception};
