@@ -125,6 +125,22 @@ fn translates(register: Register) -> bool {
 }
 
 const SCTLR_A: u64 = 1 << 1;
+/// Whether the LORegion registers are RES0: LORID_EL1.LD (bits 23:16)
+/// reports no LORegion descriptor.
+fn no_lor_descriptors(cpu: &crate::machine::cpu::Cpu) -> bool {
+    cpu.field(Register::LORID_EL1, 16, 8) == 0
+}
+
+fn lor_region(register: Register) -> bool {
+    matches!(
+        register,
+        Register::LORC_EL1 | Register::LORSA_EL1 | Register::LOREA_EL1 | Register::LORN_EL1
+    )
+}
+
+/// MPAMn_ELx.MPAMEN. Without EL3, MPAM2_EL2's is read/write and MPAM1_EL1's
+/// reads it and ignores writes.
+const MPAMEN: u64 = 1 << 63;
 const SCTLR_DZE: u32 = 14;
 const HCR_TDZ: u32 = 28;
 const DCZID_DZP: u64 = 1 << 4;
@@ -273,6 +289,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::FPCR => u64::from(cpu.state.fpcr),
             Register::FPSR => u64::from(cpu.state.fpsr),
             Register::ISR_EL1 => self.pending(),
+            register if lor_region(register) && no_lor_descriptors(cpu) => 0,
+            Register::MPAM1_EL1 => {
+                cpu.registers.get(register, 0) & !MPAMEN
+                    | cpu.registers.get(Register::MPAM2_EL2, 0) & MPAMEN
+            }
             Register::DCZID_EL0 => {
                 cpu.registers.get(register, 0) & !DCZID_DZP
                     | if zero_block_prohibited(cpu) {
@@ -303,6 +324,15 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         }
         if activity_monitor(register) {
             return Err(Effect::Refused(AMU_REFUSAL));
+        }
+        let value = if register == Register::MPAM1_EL1 {
+            value & !MPAMEN
+        } else {
+            value
+        };
+        // Without LORegion descriptors the LORegion registers are RAZ/WI.
+        if lor_region(register) && no_lor_descriptors(cpu) {
+            return Ok(());
         }
         match register {
             Register::SCTLR_EL1 | Register::SCTLR_EL2 if value & SCTLR_A != 0 => {
@@ -1610,6 +1640,74 @@ mod tests {
     }
 
     #[test]
+    fn mpam_enable_is_mpam2s_and_the_vpm_and_el3_registers_are_undefined() {
+        const MPAM0_EL1: Encoding = Encoding::new(3, 0, 10, 5, 1);
+        const MPAM1_EL1: Encoding = Encoding::new(3, 0, 10, 5, 0);
+        const MPAM2_EL2: Encoding = Encoding::new(3, 4, 10, 5, 0);
+        let mut machine = machine(&[]);
+        // The profile's MPAMIDR_EL1: PARTID 0 and PMG 0 only, no HCR.
+        machine
+            .profile_missing
+            .retain(|register| *register != Register::MPAMIDR_EL1);
+        machine.cpu.registers.set(Register::MPAMIDR_EL1, 0, 0);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        let access_at = |machine: &mut TestMachine, el: u8, read: bool, encoding, value| {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[1] = value;
+            machine
+                .system_instruction(access(read, encoding, 1))
+                .unwrap();
+            (machine.cpu.pc, machine.cpu.state.x[1])
+        };
+        // EL2 sets MPAMEN and clears the reset traps on MPAM0_EL1 and
+        // MPAM1_EL1; without EL3, MPAM1_EL1.MPAMEN reads MPAM2_EL2's and
+        // ignores writes.
+        let partitions = 0x0000_0506_0007_0008;
+        for (enable, expected) in [(1u64 << 63, 1u64 << 63), (0, 0)] {
+            access_at(&mut machine, 2, false, MPAM2_EL2, enable | partitions);
+            assert_eq!(
+                access_at(&mut machine, 2, true, MPAM2_EL2, 0),
+                (BASE + 4, enable | partitions)
+            );
+            access_at(
+                &mut machine,
+                1,
+                false,
+                MPAM1_EL1,
+                !enable & 1 << 63 | partitions,
+            );
+            assert_eq!(
+                access_at(&mut machine, 1, true, MPAM1_EL1, 0),
+                (BASE + 4, expected | partitions)
+            );
+        }
+        // MPAM0_EL1 has no MPAMEN.
+        access_at(&mut machine, 1, false, MPAM0_EL1, u64::MAX);
+        assert_eq!(
+            access_at(&mut machine, 1, true, MPAM0_EL1, 0).1,
+            0x0000_ffff_ffff_ffff
+        );
+        // MPAMIDR_EL1.HAS_HCR is 0, so MPAMHCR_EL2, MPAMVPM<n>_EL2 and
+        // MPAMVPMV_EL2 are UNDEFINED; without EL3 so is MPAM3_EL3.
+        for encoding in [
+            Encoding::new(3, 4, 10, 4, 0),
+            Encoding::new(3, 4, 10, 6, 0),
+            Encoding::new(3, 4, 10, 6, 7),
+            Encoding::new(3, 4, 10, 4, 1),
+            Encoding::new(3, 6, 10, 5, 0),
+        ] {
+            assert_eq!(
+                access_at(&mut machine, 2, true, encoding, 0).0,
+                0x4_0200,
+                "{encoding:?}"
+            );
+            assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x0200_0000);
+        }
+    }
+
+    #[test]
     fn mpam_ras_lor_and_scxtnum_follow_their_minimal_configurations() {
         let mut machine = machine(&[]);
         // HCR_EL2.EnSCXT lets EL1 reach SCXTNUM_EL1, and clearing the reset
@@ -1629,14 +1727,24 @@ mod tests {
                 .unwrap();
             machine.cpu.state.x[2]
         };
-        // MPAM1_EL1, LORSA_EL1 and SCXTNUM_EL1 hold what EL1 writes.
+        // MPAM1_EL1 and SCXTNUM_EL1 hold what EL1 writes.
         for (encoding, value) in [
             (Encoding::new(3, 0, 10, 5, 0), 0x0001_0002_0003),
-            (Encoding::new(3, 0, 10, 4, 0), 0x8000_0000),
             (Encoding::new(3, 0, 13, 0, 7), 0x1234_5678),
         ] {
             write(&mut machine, encoding, value);
             assert_eq!(read(&mut machine, encoding), value, "{encoding:?}");
+        }
+        // With no LORegion descriptor (LORID_EL1 0), LORSA_EL1, LOREA_EL1,
+        // LORN_EL1 and LORC_EL1 are RES0: RAZ/WI.
+        machine
+            .profile_missing
+            .retain(|register| *register != Register::LORID_EL1);
+        machine.cpu.registers.set(Register::LORID_EL1, 0, 0);
+        for op2 in 0..4 {
+            let encoding = Encoding::new(3, 0, 10, 4, op2);
+            write(&mut machine, encoding, 0x8000_0001);
+            assert_eq!(read(&mut machine, encoding), 0, "{encoding:?}");
         }
         // No error record: ERX* read 0 and ignore writes, whatever ERRSELR
         // selects.
