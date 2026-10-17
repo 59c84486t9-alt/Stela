@@ -22,10 +22,11 @@ use core::{
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
-    Chip, Cpu, CpuProfile, Event, Identity, Machine, Stop,
+    Chip, Cpu, CpuProfile, Event, Machine, Stop,
     apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::DCZID_EL0,
+    soc::{self, Processor},
     system::Register,
 };
 use stela_runtime::pc::storage::Target;
@@ -180,41 +181,52 @@ fn test_profile() -> CpuProfile {
     }
 }
 
-/// The M2 Mac mini (J473AP) profile: eight PEs, cpu0 running with EL2 as a
-/// VHE host. The ID_AA64* and CTR_EL0 registers advertise what this engine
-/// implements, capped at the M2's features (`machine::identification`);
-/// MIDR, MPIDR and DCZID are the board's own values. Every other
-/// identification read refuses.
-fn j473_profile(target: TargetCpu) -> CpuProfile {
-    let mut fixed = stela_runtime::machine::identification::derive(Chip::AppleM2, target, true);
+/// The profile of the board the bundle's DeviceTree describes: its chip and
+/// PEs from `/chosen` `chip-id`, `/product` `product-soc-name` and `/cpus`
+/// (`machine::soc`), with cpu0 running with EL2 as a VHE host. The ID_AA64*
+/// and CTR_EL0 registers advertise what this engine implements, capped at the
+/// chip's features (`machine::identification`); MIDR, MPIDR and DCZID are the
+/// board's own values. Every other identification read refuses.
+fn board_profile(tree: &[u8], target: TargetCpu) -> Result<CpuProfile, String> {
+    let root = adt::Node::root(tree).ok_or("DeviceTree has no root")?;
+    let chip_id = root
+        .child("chosen")
+        .and_then(|chosen| chosen.first_u32("chip-id"))
+        .ok_or("DeviceTree has no /chosen chip-id")?;
+    let soc_name = root
+        .child("product")
+        .and_then(|product| product.property("product-soc-name"))
+        .and_then(|name| core::str::from_utf8(name).ok())
+        .map(|name| name.trim_end_matches('\0'))
+        .ok_or("DeviceTree has no /product product-soc-name")?;
+    let cpus = root.child("cpus").ok_or("DeviceTree has no /cpus")?;
+    // Every node of /cpus with a cluster-type is a PE.
+    let mut found = Vec::new();
+    cpus.visit(&mut |node| {
+        if let Some(cluster_type) = node.property("cluster-type") {
+            found.push((cluster_type.first().copied(), node.first_u32("reg")));
+        }
+    })
+    .ok_or("DeviceTree walk failed")?;
+    let processors = found
+        .into_iter()
+        .map(|found| match found {
+            (Some(cluster_type), Some(reg)) => Ok(Processor { cluster_type, reg }),
+            _ => Err("a /cpus node has no reg or an empty cluster-type"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (chip, processors) = soc::board(chip_id, soc_name, &processors)?;
+    let mut fixed = stela_runtime::machine::identification::derive(chip, target, true);
     // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
     // `dc zva` in fixed 64-byte steps.
     fixed.push((DCZID_EL0, 4));
-    // Apple's DeviceTree gives cpu0-3 `reg` 0-3 and `compatible`
-    // `apple,blizzard`, cpu4-7 `reg` 0x100-0x103 and `apple,avalanche`:
-    // Aff1 is the cluster and Aff0 the core, and MPIDR_EL1 bit 31 is RES1.
-    // U and MT are 0 for a multiprocessor without multithreading (inferred).
-    // MIDR_EL1 is implementer 0x61 (Apple), architecture 0xF and part 0x032
-    // (m1n1 `midr.h` MIDR_PART_T8112_BLIZZARD) or 0x033
-    // (MIDR_PART_T8112_AVALANCHE); variant and revision are unknown and taken
-    // as 0 until a reference capture supplies them. The clusters are taken to
-    // share every other identification value (inferred).
-    let processors = (0..8)
-        .map(|cpu: u64| {
-            let (cluster, core) = (cpu / 4, cpu % 4);
-            Identity {
-                midr: 0x611f_0320 | cluster << 4,
-                mpidr: 0x8000_0000 | cluster << 8 | core,
-            }
-        })
-        .collect();
-    CpuProfile {
-        name: "apple-j473",
-        chip: Chip::AppleM2,
+    Ok(CpuProfile {
+        name: chip.name(),
+        chip,
         counter_frequency: 24_000_000,
         fixed,
         processors,
-    }
+    })
 }
 
 /// The guest's console UART, shown line by line as `GUEST| ...`.
@@ -473,7 +485,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let (_, _, _, apic_hz) = host::statistics();
     let mut bare = BareHost;
     let target = target();
-    let (entry, x0, profile) = if options.bundle {
+    let (entry, x0) = if options.bundle {
         let files = &handoff.files[..handoff.file_count];
         let loaded = match &built {
             Some(built) => {
@@ -492,7 +504,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             "BUNDLE regions={} patched={} kept={:?} dram_base={:#x}\n",
             loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
         ));
-        (loaded.pc, loaded.x0, j473_profile(target))
+        (loaded.pc, loaded.x0)
     } else {
         // SAFETY: the guest image was left allocated by the loader.
         let source = unsafe {
@@ -510,7 +522,40 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             source.len(),
             stela_runtime::sha256(source),
         ));
-        (options.entry, options.x0, test_profile())
+        (options.entry, options.x0)
+    };
+    let tree = options.bundle.then(|| match &built {
+        Some(built) => built
+            .iter()
+            .find(|(name, _)| name == "devicetree.adt")
+            .map(|(_, bytes)| bytes.as_slice()),
+        None => handoff.files[..handoff.file_count]
+            .iter()
+            .find(|file| file.name() == "devicetree.adt")
+            .map(|file| {
+                // SAFETY: the loader left every bundle file allocated.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        layout::physical(file.contents.physical) as *const u8,
+                        file.contents.bytes as usize,
+                    )
+                }
+            }),
+    });
+    let tree = match tree {
+        Some(None) => output::fatal("the boot bundle has no devicetree.adt"),
+        Some(Some(tree)) => Some(tree),
+        None => None,
+    };
+    let profile = match tree {
+        Some(tree) => match board_profile(tree, target) {
+            Ok(profile) => profile,
+            Err(error) => {
+                output::arguments(format_args!("board refusal: {error}\n"));
+                output::fatal("the board's processors could not be modeled")
+            }
+        },
+        None => test_profile(),
     };
     // The real kernelcache starts SPTM at EL2: it writes TPIDR_EL2 and keeps
     // its per-CPU pointer in TPIDR_GL2. HCR_EL2.E2H is RES1 on this profile
@@ -536,29 +581,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         cpu.registers
             .set(Register::CNTHCTL_EL2, 0, 1 << 10 | 1 << 11);
     }
-    let tree = options.bundle.then(|| match &built {
-        Some(built) => built
-            .iter()
-            .find(|(name, _)| name == "devicetree.adt")
-            .map(|(_, bytes)| bytes.as_slice()),
-        None => handoff.files[..handoff.file_count]
-            .iter()
-            .find(|file| file.name() == "devicetree.adt")
-            .map(|file| {
-                // SAFETY: the loader left every bundle file allocated.
-                unsafe {
-                    core::slice::from_raw_parts(
-                        layout::physical(file.contents.physical) as *const u8,
-                        file.contents.bytes as usize,
-                    )
-                }
-            }),
-    });
-    let tree = match tree {
-        Some(None) => output::fatal("the boot bundle has no devicetree.adt"),
-        Some(Some(tree)) => Some(tree),
-        None => None,
-    };
     let now = stela_runtime::machine::Host::counter(&mut bare);
     let devices = match devices(tree, now) {
         Ok(devices) => devices,

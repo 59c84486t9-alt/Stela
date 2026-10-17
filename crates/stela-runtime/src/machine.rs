@@ -14,6 +14,7 @@ pub mod identification;
 pub mod impdef;
 pub mod mmu;
 pub mod registers;
+pub mod soc;
 pub mod system;
 pub mod timer;
 
