@@ -295,6 +295,16 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             }
             _ => {}
         }
+        if matches!(
+            register,
+            Register::CNTKCTL_EL1
+                | Register::CNTHCTL_EL2
+                | Register::CNTVOFF_EL2
+                | Register::HCR_EL2
+        ) {
+            self.machine.sample_events(self.now);
+        }
+        let cpu = &mut self.machine.cpu;
         cpu.registers.set(register, index, value);
         self.machine.derived_changed();
         self.machine
@@ -847,6 +857,62 @@ mod tests {
             .system_instruction(access(true, CNTVCT_EL0, 4))
             .unwrap();
         assert_eq!((machine.cpu.state.x[4], machine.cpu.pstate.el), (77, 0));
+    }
+
+    #[test]
+    fn ecv_self_synchronized_counts_and_el1_virtual_counter_traps() {
+        const CNTPCTSS_EL0: Encoding = Encoding::new(3, 3, 14, 0, 5);
+        const CNTVCTSS_EL0: Encoding = Encoding::new(3, 3, 14, 0, 6);
+        const CNTV_CTL_EL0: Encoding = Encoding::new(3, 3, 14, 3, 1);
+        const EL1PCTEN: u64 = 1 << 10;
+        let mut machine = machine(&[]);
+        let kernel = machine.cpu.pstate;
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        machine.cpu.registers.set(Register::CNTVOFF_EL2, 0, 100);
+        machine
+            .cpu
+            .registers
+            .set(Register::CNTHCTL_EL2, 0, EL1PCTEN);
+        machine.host.now = 1000;
+        machine
+            .system_instruction(access(true, CNTPCTSS_EL0, 1))
+            .unwrap();
+        machine
+            .system_instruction(access(true, CNTVCTSS_EL0, 2))
+            .unwrap();
+        assert_eq!(
+            (machine.cpu.state.x[1], machine.cpu.state.x[2]),
+            (1000, 900)
+        );
+        // CNTHCTL_EL2.EL1TVCT traps EL1 reads of the virtual count and
+        // EL1TVT the virtual timer registers to EL2 with EC 0x18.
+        for (bit, encoding) in [(14, CNTVCTSS_EL0), (14, CNTVCT_EL0), (13, CNTV_CTL_EL0)] {
+            machine
+                .cpu
+                .registers
+                .set(Register::CNTHCTL_EL2, 0, EL1PCTEN | 1 << bit);
+            machine.cpu.pstate = kernel;
+            machine.cpu.pc = BASE;
+            machine
+                .system_instruction(access(true, encoding, 3))
+                .unwrap();
+            assert_eq!(
+                (machine.cpu.pstate.el, machine.cpu.pc),
+                (2, 0x4_0400),
+                "{encoding:?}"
+            );
+            assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, 0x18);
+        }
+    }
+
+    #[test]
+    fn cntfrq_reads_the_profile_counter_frequency() {
+        const CNTFRQ_EL0: Encoding = Encoding::new(3, 3, 14, 0, 0);
+        let mut machine = machine(&[]);
+        machine
+            .system_instruction(access(true, CNTFRQ_EL0, 5))
+            .unwrap();
+        assert_eq!(machine.cpu.state.x[5], machine.profile.counter_frequency);
     }
 
     #[test]

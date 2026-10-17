@@ -377,6 +377,9 @@ pub struct Machine<H: Host, D: Devices> {
     floating_point: Option<Option<u8>>,
     /// SCTLR_ELx.SA, or SA0 at EL0, of the current regime, while valid.
     stack_check: Option<bool>,
+    /// The physical count up to which the event streams have set the event
+    /// register; `None` before the first sample.
+    event_sample: Option<u64>,
 }
 
 enum Fetched {
@@ -406,6 +409,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             timers: None,
             floating_point: None,
             stack_check: None,
+            event_sample: None,
         };
         machine.load_profile();
         machine.sync_regime();
@@ -566,6 +570,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             target: Some(target),
         });
         true
+    }
+
+    /// Apply Arm `GenericCounterTick`'s event-stream tests to the counts since
+    /// the last sample. Sampling before the event register is read and before
+    /// every write that changes a stream gives each tick the controls it had.
+    pub(crate) fn sample_events(&mut self, now: u64) {
+        if let Some(previous) = self.event_sample
+            && timer::event(&self.cpu, previous, now)
+        {
+            self.cpu.event = true;
+        }
+        self.event_sample = Some(now);
     }
 
     fn timer_deadline(&mut self) -> Option<u64> {
@@ -1739,7 +1755,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// an interrupt pending, masked or not, completes; neither then traps.
     /// Otherwise SCTLR_ELx.nTWI/nTWE trap them from EL0 to EL1, or to EL2 in
     /// the host, and HCR_EL2.TWI/TWE trap them from EL0 and EL1 outside the
-    /// host to EL2. Without FEAT_WFxT the timeout forms are UNDEFINED.
+    /// host to EL2. Without FEAT_WFxT the timeout forms are UNDEFINED. An
+    /// event stream event wakes WFE and, by this implementation's choice of
+    /// Arm's IMPLEMENTATION DEFINED option, clears the event register.
     fn wait(&mut self, _word: u32, kind: WaitKind, timeout: Option<u8>) -> Step {
         const HCR_TWI: u32 = 13;
         const HCR_TWE: u32 = 14;
@@ -1753,6 +1771,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             WaitKind::Event => (1u64 << 18, HCR_TWE, 1),
         };
         let iss = TRAPPED_AARCH64 | trap_iss;
+        if kind == WaitKind::Event {
+            let now = self.host.counter();
+            self.sample_events(now);
+        }
         match kind {
             WaitKind::Event if self.cpu.event => {
                 self.cpu.event = false;
@@ -1771,10 +1793,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         while !self.interrupt_pending() {
             let now = self.host.counter();
-            let deadline = match (self.timer_deadline(), self.devices.deadline(now)) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let mut event = None;
+            if kind == WaitKind::Event {
+                self.sample_events(now);
+                if self.cpu.event {
+                    self.cpu.event = false;
+                    break;
+                }
+                event = timer::next_event(&self.cpu, now);
+            }
+            let deadline = [self.timer_deadline(), self.devices.deadline(now), event]
+                .into_iter()
+                .flatten()
+                .min();
             if deadline.is_none() {
                 return Err(Stop::Idle);
             }
@@ -2129,6 +2160,29 @@ mod tests {
             .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
         machine.derived_changed();
         assert_eq!(machine.system_instruction(0xd503_207f), Err(Stop::Idle));
+    }
+
+    #[test]
+    fn wfe_wakes_on_an_event_stream_edge() {
+        const WFE: u32 = 0xd503_205f;
+        let mut machine = machine(&[]);
+        let start = machine.host.now;
+        // CNTHCTL_EL2.EVNTEN with EVNTI 9: rising edges 1024 counts apart.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTHCTL_EL2, 0, 1 << 2 | 9 << 4);
+        machine.system_instruction(WFE).unwrap();
+        assert!(machine.host.now > start && !machine.cpu.event);
+        // An edge since the last sample sets the event register, so WFE
+        // completes without waiting.
+        machine.host.now += 1024;
+        let now = machine.host.now;
+        machine.system_instruction(WFE).unwrap();
+        assert_eq!((machine.host.now, machine.cpu.event), (now, false));
+        // Without a stream, timer or device, WFE is a terminal idle state.
+        machine.cpu.registers.set(SystemRegister::CNTHCTL_EL2, 0, 0);
+        assert_eq!(machine.system_instruction(WFE), Err(Stop::Idle));
     }
 
     #[test]

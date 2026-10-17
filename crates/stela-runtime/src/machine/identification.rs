@@ -557,7 +557,12 @@ pub const TABLE: &[Row] = &[
         60,
         1,
         "FEAT_ECV",
-        engine(false, "the CNTKCTL event stream is not modeled"),
+        engine(
+            true,
+            "CNTPCTSS_EL0 and CNTVCTSS_EL0, EVNTIS on both event streams and \
+             the EL1TVT and EL1TVCT traps; CNTPOFF_EL2 is FEAT_ECV_POFF, \
+             outside the profile",
+        ),
     ),
     // ID_AA64MMFR1_EL1
     feature(ID_AA64MMFR1_EL1, 8, 1, "FEAT_VHE", Basis::Host(VHE_HOST)),
