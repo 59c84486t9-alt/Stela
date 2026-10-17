@@ -1026,6 +1026,13 @@ mod tests {
         assert_eq!(value(ID_AA64MMFR0_EL1) & 0xffff_ffff, 0x0f10_0025);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 20 & 0xf, 2);
         assert_eq!(value(ID_AA64DFR0_EL1) & 0xf0f0_f00f, 0x1030_5009);
+        // Every other debug field reads its absent value: no PMU, trace,
+        // SPE, BRBE or trace buffer, and no OS Double Lock (0xf). The
+        // extended counts of ID_AA64DFR1_EL1 defer to ID_AA64DFR0_EL1, and
+        // ID_AA64DFR2_EL1 describes only absent features.
+        assert_eq!(value(ID_AA64DFR0_EL1), 0xf0_1030_5009);
+        assert_eq!(value(ID_AA64DFR1_EL1), 0);
+        assert_eq!(value(ID_AA64DFR2_EL1), 0);
         assert_eq!(value(CTR_EL0), 0x9444_c004);
         assert_eq!(value(AIDR_EL1), 1 << 4 | 1 << 16);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
