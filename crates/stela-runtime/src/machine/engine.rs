@@ -3845,6 +3845,22 @@ mod tests {
                 machine.cpu.pc = BASE;
                 machine.system_instruction(0xd508_871f).unwrap(); // tlbi vmalle1
                 assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 1));
+                // HFGITR_EL2.TLBIVMALLE1 traps TLBI VMALLE1NXS from EL1 to
+                // EL2 unless HCRX_EL2.FGTnXS exempts the nXS forms.
+                const TLBI_VMALLE1NXS: u32 = 0xd508_971f;
+                for (hcrx, trapped) in [(0, true), (1 << 4, false)] {
+                    let mut machine = fresh(1);
+                    let registers = &mut machine.cpu.registers;
+                    registers.set(SystemRegister::HFGITR_EL2, 0, 1 << 42);
+                    registers.set(SystemRegister::HCRX_EL2, 0, hcrx);
+                    machine.system_instruction(TLBI_VMALLE1NXS).unwrap();
+                    if trapped {
+                        assert_eq!(machine.cpu.pstate.el, 2);
+                        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2) >> 26, 0x18);
+                    } else {
+                        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 4, 1));
+                    }
+                }
             }
             // MAIR index 0 Device-nGnRE with XS 0, index 1 Normal
             // Write-Back; level-1 blocks map VA 0 and 1 GiB to BASE.
