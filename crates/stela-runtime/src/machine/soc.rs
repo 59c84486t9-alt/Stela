@@ -18,13 +18,17 @@ use alloc::{format, string::String, vec::Vec};
 /// offset of its event register from the `aic` `reg` (Linux
 /// `arch/arm64/boot/dts/apple`: 0x8000 in `t8112.dtsi`, 0xc000 in
 /// `t600x-die0.dtsi` and `t602x-die0.dtsi`). The M1's `aic,1` and the `aic,3`
-/// of the M3 and later have no event offset here.
+/// of the M3 and later have no event offset here. `dram_base` is where the
+/// SoC places DRAM (the `memory@` node of Linux `t8103-jxxx.dtsi`,
+/// `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and `t600x-j375.dtsi`, which the
+/// t602x boards include); the SoCs without a public memory node have none.
 struct Soc {
     chip_id: u32,
     name: &'static str,
     chip: Chip,
     parts: [(u8, u16); 2],
     aic2_event: Option<u64>,
+    dram_base: Option<u64>,
 }
 
 const SOCS: [Soc; 14] = [
@@ -34,6 +38,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM1,
         parts: [(b'E', 0x022), (b'P', 0x023)],
         aic2_event: None,
+        dram_base: Some(0x8_0000_0000),
     },
     Soc {
         chip_id: 0x6000,
@@ -41,6 +46,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM1,
         parts: [(b'E', 0x024), (b'P', 0x025)],
         aic2_event: Some(0xc000),
+        dram_base: Some(0x100_0000_0000),
     },
     Soc {
         chip_id: 0x6001,
@@ -48,6 +54,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM1,
         parts: [(b'E', 0x028), (b'P', 0x029)],
         aic2_event: Some(0xc000),
+        dram_base: Some(0x100_0000_0000),
     },
     Soc {
         chip_id: 0x8112,
@@ -55,6 +62,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM2,
         parts: [(b'E', 0x032), (b'P', 0x033)],
         aic2_event: Some(0x8000),
+        dram_base: Some(0x8_0000_0000),
     },
     Soc {
         chip_id: 0x6020,
@@ -62,6 +70,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM2,
         parts: [(b'E', 0x034), (b'P', 0x035)],
         aic2_event: Some(0xc000),
+        dram_base: Some(0x100_0000_0000),
     },
     Soc {
         chip_id: 0x6021,
@@ -69,6 +78,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM2,
         parts: [(b'E', 0x038), (b'P', 0x039)],
         aic2_event: Some(0xc000),
+        dram_base: Some(0x100_0000_0000),
     },
     Soc {
         chip_id: 0x8122,
@@ -76,6 +86,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM3,
         parts: [(b'E', 0x042), (b'P', 0x043)],
         aic2_event: None,
+        dram_base: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -83,6 +94,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM3,
         parts: [(b'E', 0x044), (b'P', 0x045)],
         aic2_event: None,
+        dram_base: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -90,6 +102,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM3,
         parts: [(b'E', 0x048), (b'P', 0x049)],
         aic2_event: None,
+        dram_base: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -97,6 +110,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM4,
         parts: [(b'E', 0x052), (b'P', 0x053)],
         aic2_event: None,
+        dram_base: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -104,6 +118,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM4,
         parts: [(b'E', 0x054), (b'P', 0x055)],
         aic2_event: None,
+        dram_base: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -111,6 +126,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM4,
         parts: [(b'E', 0x058), (b'P', 0x059)],
         aic2_event: None,
+        dram_base: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -118,6 +134,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM5,
         parts: [(b'E', 0x062), (b'P', 0x063)],
         aic2_event: None,
+        dram_base: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -125,6 +142,7 @@ const SOCS: [Soc; 14] = [
         chip: Chip::AppleM6,
         parts: [(b'E', 0x072), (b'P', 0x073)],
         aic2_event: None,
+        dram_base: None,
     },
 ];
 
@@ -137,6 +155,14 @@ pub struct Board {
     /// The AIC2 event register's offset from the `aic` `reg`, on a SoC whose
     /// interrupt controller is `aic,2`.
     pub aic2_event: Option<u64>,
+}
+
+/// The guest DRAM base of the SoC with `chip_id`.
+pub fn dram_base(chip_id: u32) -> Result<u64, String> {
+    SOCS.iter()
+        .find(|soc| soc.chip_id == chip_id)
+        .and_then(|soc| soc.dram_base)
+        .ok_or_else(|| format!("ApChipID {chip_id:#x} has no public DRAM base"))
 }
 
 /// One `/cpus` node: its `cluster-type` letter and `reg`.
@@ -268,6 +294,9 @@ mod tests {
                 .aic2_event,
             Some(0xc000)
         );
+        assert_eq!(dram_base(0x8112), Ok(0x8_0000_0000));
+        assert_eq!(dram_base(0x6021), Ok(0x100_0000_0000));
+        assert!(dram_base(0x8132).is_err());
         // Every ApChipID appears once.
         for (index, soc) in SOCS.iter().enumerate() {
             assert!(

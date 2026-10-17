@@ -257,6 +257,24 @@ fn entropy(buffer: &mut [u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The guest DRAM base the bundle was prepared for (`bundle.json`), from
+/// the files the loader read or a bundle built in the heap.
+pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<u64, String> {
+    let json = match built {
+        Some(built) => built
+            .iter()
+            .find(|(name, _)| name == MANIFEST_FILE)
+            .map(|(_, bytes)| bytes.as_slice()),
+        None => files
+            .iter()
+            .find(|file| file.name() == MANIFEST_FILE)
+            .map(contents),
+    }
+    .ok_or("bundle.json was not read")?;
+    let manifest = Manifest::parse(json).map_err(|e| format!("{e}"))?;
+    Ok(manifest.options.dram_base)
+}
+
 /// Load the bundle the loader read into guest DRAM `[dram_base, dram_base +
 /// ram_bytes)`.
 pub fn load(

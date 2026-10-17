@@ -128,9 +128,10 @@ pub(crate) struct Prepare {
     /// with `--restore`.
     #[arg(long)]
     osenvironment: Option<String>,
-    /// Guest DRAM base; Apple M1/M2 place DRAM at 0x800000000.
-    #[arg(long, value_parser = parse_address, default_value = "0x800000000")]
-    dram_base: u64,
+    /// Guest DRAM base; the target SoC's by default (0x800000000 on the M1
+    /// and M2, 0x10000000000 on their Pro and Max).
+    #[arg(long, value_parser = parse_address)]
+    dram_base: Option<u64>,
     /// Guest DRAM size assumed until the mount patches it at boot.
     #[arg(long, value_parser = parse_address, default_value = "0x200000000")]
     dram_size: u64,
@@ -549,7 +550,7 @@ impl Prepare {
                 im4p: decoded.as_ref().map(input),
             }),
         };
-        let options = self.options(self.restore || self.recovery)?;
+        let options = self.options(self.restore || self.recovery, inputs.target.chip_id)?;
         let bundle = boot_bundle::prepare(&inputs, &options)?;
         let provenance = serde_json::json!({
             "archive": {
@@ -563,11 +564,18 @@ impl Prepare {
 
     /// The bundle options from the command line; `ramdisk_boot` picks the
     /// restore defaults for boot-args and the OS environment.
-    fn options(&self, ramdisk_boot: bool) -> Result<Options> {
+    fn options(&self, ramdisk_boot: bool, chip_id: Option<u32>) -> Result<Options> {
+        let dram_base = match (self.dram_base, chip_id) {
+            (Some(base), _) => base,
+            (None, Some(chip_id)) => {
+                stela_runtime::machine::soc::dram_base(chip_id).map_err(anyhow::Error::msg)?
+            }
+            (None, None) => Options::default().dram_base,
+        };
         Ok(Options {
-            dram_base: self.dram_base,
+            dram_base,
             dram_size: self.dram_size,
-            phys_base: self.phys_base.unwrap_or(self.dram_base),
+            phys_base: self.phys_base.unwrap_or(dram_base),
             load_offset: self.load_offset,
             boot_args: self.boot_args.clone().unwrap_or_else(|| {
                 match ramdisk_boot {

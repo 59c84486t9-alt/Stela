@@ -42,6 +42,8 @@ const REPORTED_INTERRUPTS: u64 = 64;
 
 struct Options {
     dram_base: u64,
+    /// `--dram-base` was given; otherwise a bundle's own base applies.
+    dram_explicit: bool,
     ram_bytes: u64,
     load: u64,
     entry: u64,
@@ -66,6 +68,7 @@ impl Options {
     fn parse(text: &str) -> Result<Self, &'static str> {
         let mut options = Self {
             dram_base: DRAM_BASE,
+            dram_explicit: false,
             ram_bytes: DEFAULT_RAM,
             load: DRAM_BASE,
             entry: DRAM_BASE,
@@ -92,7 +95,10 @@ impl Options {
             }
             let value = number(words.next().ok_or("missing system option value")?)?;
             match name {
-                "--dram-base" => options.dram_base = value,
+                "--dram-base" => {
+                    options.dram_base = value;
+                    options.dram_explicit = true;
+                }
                 "--ram-bytes" => options.ram_bytes = value,
                 "--load" => options.load = value,
                 "--entry" => options.entry = value,
@@ -465,7 +471,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             handoff.options.bytes as usize,
         )
     };
-    let options = match core::str::from_utf8(text)
+    let mut options = match core::str::from_utf8(text)
         .map_err(|_| "stela.cfg is not UTF-8")
         .and_then(Options::parse)
     {
@@ -483,6 +489,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("no boot bundle could be built from the Preboot volume")
         })
     });
+    // A bundle runs at the DRAM base it was prepared for, its SoC's.
+    if options.bundle && !options.dram_explicit {
+        let files = &handoff.files[..handoff.file_count];
+        options.dram_base = match bundle::dram_base(files, built.as_deref()) {
+            Ok(base) if base.is_multiple_of(LARGE) => base,
+            Ok(_) => output::fatal("the bundle's DRAM base is not 2 MiB aligned"),
+            Err(error) => {
+                output::arguments(format_args!("bundle refusal: {error}\n"));
+                output::fatal("the boot bundle's DRAM base could not be read")
+            }
+        };
+    }
     let ram = match guest_ram(handoff, &options) {
         Ok(ram) => ram,
         Err(error) => output::fatal(error),

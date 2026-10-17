@@ -145,6 +145,22 @@ pub struct Options {
 /// The defaults of `stela boot prepare` for an installed system: 8 GiB of
 /// DRAM at 0x8_0000_0000, verbose boot, `cpu0` booting with a 24 MHz
 /// generic timer, and Reduced Security with SIP enabled.
+impl Options {
+    /// These options with guest DRAM, and the physical base at the same
+    /// distance into it, at the base of the SoC with `chip_id`.
+    pub fn placed_for(&self, chip_id: Option<u32>) -> Result<Self> {
+        let Some(chip_id) = chip_id else {
+            return Ok(self.clone());
+        };
+        let base = stela_runtime::machine::soc::dram_base(chip_id).map_err(anyhow::Error::msg)?;
+        Ok(Self {
+            dram_base: base,
+            phys_base: base + (self.phys_base - self.dram_base),
+            ..self.clone()
+        })
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         const DRAM_BASE: u64 = 0x8_0000_0000;
@@ -553,6 +569,14 @@ fn source_of(input: &Input) -> Source {
 }
 
 pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
+    if let Some(chip_id) = inputs.target.chip_id {
+        let base = stela_runtime::machine::soc::dram_base(chip_id).map_err(anyhow::Error::msg)?;
+        ensure!(
+            options.dram_base == base,
+            "guest DRAM base {:#x} is not ApChipID {chip_id:#x}'s {base:#x}",
+            options.dram_base
+        );
+    }
     ensure!(
         options.phys_base >= options.dram_base
             && options.phys_base.is_multiple_of(PAGE_BYTES)
@@ -1455,6 +1479,22 @@ mod tests {
                 value: 1u32.to_le_bytes().to_vec(),
             }],
         };
+        // DRAM must sit at the target SoC's base: an M2 Pro's placement is
+        // refused for the M2, whose own base `placed_for` restores.
+        let elsewhere = options.placed_for(Some(0x6020))?;
+        assert_eq!(
+            (elsewhere.dram_base, elsewhere.phys_base),
+            (0x100_0000_0000, 0x100_0000_0000)
+        );
+        let refusal = prepare(&inputs, &elsewhere).err().unwrap().to_string();
+        assert!(
+            refusal.contains("is not ApChipID 0x8112's 0x800000000"),
+            "{refusal}"
+        );
+        assert_eq!(
+            elsewhere.placed_for(Some(0x8112))?.dram_base,
+            options.dram_base
+        );
         let bundle = prepare(&inputs, &options)?;
         let manifest = &bundle.manifest;
         let names: Vec<_> = manifest.regions.iter().map(|r| r.name.as_str()).collect();

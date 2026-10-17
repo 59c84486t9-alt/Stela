@@ -490,7 +490,8 @@ pub fn prepare<R: ReadAt>(
             im4p: root_hash.as_ref().map(Decoded::input),
         }),
     };
-    let mut bundle = boot_bundle::prepare(&inputs, options)?;
+    let options = options.placed_for(inputs.target.chip_id)?;
+    let mut bundle = boot_bundle::prepare(&inputs, &options)?;
     bundle.manifest.unresolved.push(format!(
         "paused: the SEP-signed LocalPolicy is not read, so neither its nsih nor its other \
          hashes are inputs; {} was chosen by evidence (its manifest's SHA-384, its isys \
