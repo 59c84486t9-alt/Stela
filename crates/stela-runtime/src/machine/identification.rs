@@ -655,7 +655,11 @@ pub const TABLE: &[Row] = &[
         4,
         1,
         "FEAT_UAO",
-        engine(false, "LDTR/STTR permission checks are not modeled"),
+        engine(
+            true,
+            "the engine performs LDTR/STTR with EL0 permissions unless \
+             PSTATE.UAO makes them privileged",
+        ),
     ),
     feature(
         ID_AA64MMFR2_EL1,

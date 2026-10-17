@@ -142,6 +142,7 @@ pub fn analyze_with_profile(
                     | system::SystemOperation::Register(_)
                     | system::SystemOperation::PstateImmediate(_)
                     | system::SystemOperation::Wait { .. }
+                    | system::SystemOperation::Unprivileged(_)
             ) {
                 add(SuccessorKind::Fallthrough, value.next_pc);
             }

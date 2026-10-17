@@ -31,6 +31,10 @@ pub enum SystemOperation {
     /// halting debug never enters: UNDEFINED. Only the system-mode profile
     /// produces it.
     DebugStateOnly(DebugStateOperation),
+    /// LDTR*/STTR*, which the runtime checks with EL0 permissions unless the
+    /// access is privileged (Arm `AArch64_IsUnprivAccessPriv`). Only the
+    /// system-mode profile produces it.
+    Unprivileged(crate::aarch64::unprivileged::Operand),
     PstateImmediate(registers::Encoding),
     SendEvent {
         local: bool,
@@ -103,6 +107,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Maintenance(_) => "maintenance",
         SystemOperation::Guarded(_) => "guarded",
         SystemOperation::DebugStateOnly(_) => "debug_state_only",
+        SystemOperation::Unprivileged(_) => "unprivileged",
         SystemOperation::PstateImmediate(_) => "pstate_immediate",
         SystemOperation::SendEvent { .. } => "event",
         SystemOperation::InstructionSynchronization { .. } => "instruction_synchronization",
@@ -211,6 +216,12 @@ pub fn decode_system_mode_instruction(
         SystemOperation::Guarded(GuardedOperation::Exit)
     } else if let Some(operation) = DebugStateOperation::decode(word) {
         SystemOperation::DebugStateOnly(operation)
+    } else if let Some(decoded) = crate::aarch64::unprivileged::decode(word) {
+        // Reserved sizes and opcodes stay with the ordinary decoder.
+        match decoded {
+            Ok(operand) => SystemOperation::Unprivileged(operand),
+            Err(()) => return Ok(None),
+        }
     } else if let Some(access) = registers::decode_sys(word) {
         SystemOperation::Maintenance(access)
     } else {
@@ -312,6 +323,24 @@ mod tests {
         }
         // MOVT (vector to table), and the fixed bits 15 and 9..5, are not it.
         for word in [0xc04f_03e0, 0xc04c_83e0, 0xc04c_03c0, 0xc04d_03e0] {
+            assert!(decode_system_mode_instruction(pc, word).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn system_mode_claims_unprivileged_transfers_but_not_reserved_forms() {
+        let pc = GuestAddress(0x1000);
+        // LDTR X1, [X2, #8]; STTR W1, [X2]; LDTRSB W3, [X2].
+        for word in [0xf840_8841, 0xb800_0841, 0x38c0_0843] {
+            let instruction = decode_system_mode_instruction(pc, word).unwrap().unwrap();
+            assert!(
+                matches!(instruction.operation, SystemOperation::Unprivileged(_)),
+                "{word:#x}"
+            );
+            assert!(decode_system_instruction(pc, word).unwrap().is_none());
+        }
+        // LDTRSW into W and LDTRSB/H/W into X from a doubleword are reserved.
+        for word in [0xb8c0_0843, 0xf880_0843] {
             assert!(decode_system_mode_instruction(pc, word).unwrap().is_none());
         }
     }

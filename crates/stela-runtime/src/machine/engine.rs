@@ -2,6 +2,7 @@
 //! every exit back from native code.
 mod amx;
 mod system;
+mod unprivileged;
 
 use super::{
     cpu::{
@@ -1499,6 +1500,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             } => self.wait(word, kind, timeout_register),
             // No halting debug: Debug-state-only instructions are UNDEFINED.
             SystemOperation::TagMemory(_) | SystemOperation::DebugStateOnly(_) => self.undefined(),
+            SystemOperation::Unprivileged(operand) => self.unprivileged(operand),
             SystemOperation::Guarded(GuardedOperation::Enter) => {
                 if self.cpu.guarded_enter().is_err() {
                     return self.undefined();
@@ -1944,7 +1946,7 @@ mod tests {
     use crate::machine::exception::Pstate;
 
     pub(super) struct FakeHost {
-        ram: Vec<u8>,
+        pub(super) ram: Vec<u8>,
         base: u64,
         pub(super) now: u64,
         regimes: Vec<Regime>,
