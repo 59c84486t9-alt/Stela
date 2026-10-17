@@ -155,14 +155,15 @@ fn collect(
                     let start = (range["start"].as_u64().unwrap_or(0) + offset) as u32;
                     let width = range["width"].as_u64().unwrap_or(0) as u32;
                     fields.entry(name.to_owned()).or_insert((start, width));
-                    // A field with one allowed value is a constant.
-                    let allowed: Vec<&str> = value["values"]["values"]
+                    // A field with one allowed value, and no value range, is a
+                    // constant.
+                    let allowed: Vec<Option<&str>> = value["values"]["values"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter_map(|allowed| allowed["value"].as_str())
+                        .map(|allowed| allowed["value"].as_str())
                         .collect();
-                    if let [only] = allowed[..] {
+                    if let [Some(only)] = allowed[..] {
                         let bits = only.trim_matches('\'');
                         if !bits.contains('x') && bits.len() as u32 == width {
                             for (position, bit) in bits.chars().rev().enumerate() {

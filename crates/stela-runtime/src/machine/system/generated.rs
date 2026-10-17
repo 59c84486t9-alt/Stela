@@ -1495,7 +1495,7 @@ impl Register {
             Register::DBGDTRRX_EL0 => 0xffffffff00000000,
             Register::DBGDTRTX_EL0 => 0xffffffff00000000,
             Register::DBGPRCR_EL1 => 0xfffffffffffffffe,
-            Register::DBGWCR_EL1 => 0xffffffffffe00000,
+            Register::DBGWCR_EL1 => 0xffffffffe0e00000,
             Register::DBGWVR_EL1 => 0x3,
             Register::DCZID_EL0 => 0xffffffffffffffe0,
             Register::DIT => 0xfffffffffeffffff,
