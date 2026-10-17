@@ -442,6 +442,8 @@ fn key(row: &Value) -> String {
 pub struct Profiles {
     pub union: Profile,
     pub chips: Vec<(&'static str, Profile)>,
+    /// Each chip's Apple clang cap, before the base and the implications.
+    pub caps: Vec<Vec<String>>,
 }
 
 fn applies(chips: &[&str], chip: &str) -> bool {
@@ -477,6 +479,7 @@ fn profiles(features: &Value) -> Result<(Profiles, Value)> {
         );
     }
     let mut chips = Vec::new();
+    let mut caps = Vec::new();
     let mut decisions = Vec::new();
     let mut used = BTreeSet::new();
     for chip in &CHIPS {
@@ -514,6 +517,7 @@ fn profiles(features: &Value) -> Result<(Profiles, Value)> {
             "features": profile.features.iter().collect::<Vec<_>>(),
         }));
         chips.push((chip.name, profile));
+        caps.push(cap);
     }
     for (constraint, _, _) in &DEVIATIONS {
         ensure!(
@@ -553,7 +557,7 @@ fn profiles(features: &Value) -> Result<(Profiles, Value)> {
         "varying": union.varying.iter().collect::<Vec<_>>(),
         "chips": decisions,
     });
-    Ok((Profiles { union, chips }, decisions))
+    Ok((Profiles { union, chips, caps }, decisions))
 }
 
 /// Whether `name` is an architecture version parameter such as `v8Ap6`.

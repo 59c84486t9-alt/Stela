@@ -24,7 +24,7 @@ use super::{
 use anyhow::{Result, bail};
 use stela_compiler::{GuestState, TargetCpu};
 use stela_runtime::machine::{
-    Cpu, Host, InstallError, Machine, NativeCode, NativeExit, NoDevices, Regime, Stop,
+    Chip, Cpu, Host, InstallError, Machine, NativeCode, NativeExit, NoDevices, Regime, Stop,
     cpu::HCR_HCD,
     exception::Pstate,
     identification,
@@ -265,12 +265,13 @@ const HCR_ENSCXT: u32 = 53;
 
 /// The engine's M2 profile, with EL2 only when the oracle machine has it.
 fn profile(target: TargetCpu, el2: bool) -> CpuProfile {
-    let mut fixed = identification::derive(target, el2);
+    let mut fixed = identification::derive(Chip::DEFAULT, target, el2);
     fixed.push((DCZID_EL0, DCZID));
     // J473AP cpu0's MIDR and MPIDR, as the bundle profile gives them; only
     // the access outcome of an MRS is compared.
     fixed.extend([(MIDR_EL1, 0x611f_0320), (MPIDR_EL1, 0x8000_0000)]);
     CpuProfile {
+        chip: Chip::DEFAULT,
         name: if el2 {
             "oracle-m2-el2"
         } else {

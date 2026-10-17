@@ -449,6 +449,20 @@ fn write_features(out: &mut String, profiles: &Profiles) -> Result<()> {
         chips.len(),
         chips.join(", ")
     )?;
+    writeln!(
+        out,
+        "/// Each chip's Apple clang architectural features, as exported."
+    )?;
+    writeln!(
+        out,
+        "pub const CAPS: [&[&str]; {}] = [",
+        profiles.caps.len()
+    )?;
+    for cap in &profiles.caps {
+        let names: Vec<String> = cap.iter().map(|name| format!("{name:?}")).collect();
+        writeln!(out, "    &[{}],", names.join(", "))?;
+    }
+    writeln!(out, "];\n")?;
     writeln!(out, "/// The features only some chips have.")?;
     writeln!(
         out,

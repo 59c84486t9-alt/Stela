@@ -500,6 +500,11 @@ type Step = Result<(), Stop>;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub fn new(cpu: Cpu, host: H, devices: D, profile: CpuProfile, target: TargetCpu) -> Self {
+        assert_eq!(
+            cpu.registers.chip(),
+            profile.chip,
+            "the boot PE is not the profile's chip"
+        );
         let mut machine = Self {
             cpu,
             host,
@@ -2405,6 +2410,7 @@ mod tests {
         };
         let profile = CpuProfile {
             name: "test",
+            chip: crate::machine::Chip::DEFAULT,
             counter_frequency: 24_000_000,
             fixed: vec![(registers::encodings::DCZID_EL0, 4)],
             processors,

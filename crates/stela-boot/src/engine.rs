@@ -22,7 +22,7 @@ use core::{
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
-    Cpu, CpuProfile, Event, Identity, Machine, Stop,
+    Chip, Cpu, CpuProfile, Event, Identity, Machine, Stop,
     apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::DCZID_EL0,
@@ -173,6 +173,7 @@ fn guest_ram(handoff: &Handoff, options: &Options) -> Result<Vec<RamRange>, &'st
 fn test_profile() -> CpuProfile {
     CpuProfile {
         name: "stela-test-kernel",
+        chip: Chip::DEFAULT,
         counter_frequency: 24_000_000,
         fixed: alloc::vec![(DCZID_EL0, 4)],
         processors: Vec::new(),
@@ -185,7 +186,7 @@ fn test_profile() -> CpuProfile {
 /// MIDR, MPIDR and DCZID are the board's own values. Every other
 /// identification read refuses.
 fn j473_profile(target: TargetCpu) -> CpuProfile {
-    let mut fixed = stela_runtime::machine::identification::derive(target, true);
+    let mut fixed = stela_runtime::machine::identification::derive(Chip::AppleM2, target, true);
     // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
     // `dc zva` in fixed 64-byte steps.
     fixed.push((DCZID_EL0, 4));
@@ -209,6 +210,7 @@ fn j473_profile(target: TargetCpu) -> CpuProfile {
         .collect();
     CpuProfile {
         name: "apple-j473",
+        chip: Chip::AppleM2,
         counter_frequency: 24_000_000,
         fixed,
         processors,
@@ -521,7 +523,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         profile.name,
         target.id(),
     ));
-    let mut cpu = Cpu::new(entry, Pstate::reset(el));
+    let mut cpu = Cpu::of(profile.chip, entry, Pstate::reset(el));
     cpu.state.x[0] = x0;
     // FP/SIMD is not trapped at hand-off (CPTR_EL2.FPEN = 0b11): SPTM uses
     // FP/SIMD before it writes CPTR_EL2, and public XNU `start.s` notes that

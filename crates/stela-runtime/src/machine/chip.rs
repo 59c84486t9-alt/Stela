@@ -3,7 +3,7 @@
 //! under the AARCHMRS implications by `cargo xtask system-matrix`; the
 //! generated accessors decide a feature only some chips have through
 //! [`Chip::implemented`].
-use super::system::generated::{CHIPS, Feature};
+use super::system::generated::{CAPS, CHIPS, Feature};
 
 /// An Apple CPU, in the order of the generated per-chip tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +32,12 @@ impl Chip {
     /// Apple clang's `-mcpu` name.
     pub const fn name(self) -> &'static str {
         CHIPS[self as usize]
+    }
+
+    /// Apple clang's architectural features for the chip
+    /// (`isa/apple-codegen-profiles.json`), the cap of what it advertises.
+    pub fn cap(self) -> &'static [&'static str] {
+        CAPS[self as usize]
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -120,7 +126,13 @@ mod tests {
         let profiles: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         for chip in Chip::ALL {
-            assert!(profiles["profiles"][chip.name()].is_object(), "{chip:?}");
+            let cap: Vec<&str> = profiles["profiles"][chip.name()]["architectural_features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|feature| feature.as_str().unwrap())
+                .collect();
+            assert_eq!(chip.cap(), cap, "{chip:?}");
         }
         // The default chip implements every feature it has, as before any
         // other chip was modeled; a later chip's addition stops explicitly.

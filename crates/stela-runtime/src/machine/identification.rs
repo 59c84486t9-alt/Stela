@@ -1,80 +1,22 @@
 //! The AArch64 identification registers the system engine presents.
 //!
 //! They advertise exactly what this engine implements, never more than the
-//! M2 implements: each field is set from one table row whose architectural
-//! feature must be in Apple clang's `apple-m2` feature set
-//! (`isa/apple-codegen-profiles.json`, from `clang -mcpu=apple-m2
+//! chip implements: each field is set from one table row whose architectural
+//! feature must be in the chip's Apple clang feature set ([`Chip::cap`],
+//! `isa/apple-codegen-profiles.json`, from `clang -mcpu=apple-mN
 //! --print-enabled-extensions`) and whose basis must hold here. An
 //! instruction feature holds when its sample encodings compile for the
 //! system-mode block profile on the host target; any other feature is an
 //! engine property stated with its reason, or holds only when the kernel
 //! level is EL2 as a VHE host. A field with no satisfied row reads its "not
 //! implemented" value.
-use super::registers::encodings::*;
+use super::{Chip, registers::encodings::*};
 use alloc::vec::Vec;
 use stela_compiler::{
     GuestAddress, TargetCpu,
     aarch64::system::registers::Encoding,
     block::{BlockProfile, CompilationPlan},
 };
-
-/// Apple clang 2100.3.34.2 `-mcpu=apple-m2` architectural features.
-pub const APPLE_M2_FEATURES: &[&str] = &[
-    "FEAT_AES",
-    "FEAT_AMUv1",
-    "FEAT_AMUv1p1",
-    "FEAT_AdvSIMD",
-    "FEAT_BF16",
-    "FEAT_BTI",
-    "FEAT_CRC32",
-    "FEAT_CSV2_2",
-    "FEAT_DIT",
-    "FEAT_DPB",
-    "FEAT_DPB2",
-    "FEAT_DotProd",
-    "FEAT_ECV",
-    "FEAT_FCMA",
-    "FEAT_FGT",
-    "FEAT_FHM",
-    "FEAT_FP",
-    "FEAT_FP16",
-    "FEAT_FPAC",
-    "FEAT_FRINTTS",
-    "FEAT_FlagM",
-    "FEAT_FlagM2",
-    "FEAT_I8MM",
-    "FEAT_JSCVT",
-    "FEAT_LOR",
-    "FEAT_LRCPC",
-    "FEAT_LRCPC2",
-    "FEAT_LSE",
-    "FEAT_LSE2",
-    "FEAT_MPAM",
-    "FEAT_NV",
-    "FEAT_NV2",
-    "FEAT_PAN",
-    "FEAT_PAN2",
-    "FEAT_PAuth",
-    "FEAT_PMULL",
-    "FEAT_PMUv3",
-    "FEAT_RAS",
-    "FEAT_RASv1p1",
-    "FEAT_RDM",
-    "FEAT_SB",
-    "FEAT_SEL2",
-    "FEAT_SHA1",
-    "FEAT_SHA256",
-    "FEAT_SHA3",
-    "FEAT_SHA512",
-    "FEAT_SPECRES",
-    "FEAT_SSBS",
-    "FEAT_SSBS2",
-    "FEAT_TLBIOS",
-    "FEAT_TLBIRANGE",
-    "FEAT_TRF",
-    "FEAT_UAO",
-    "FEAT_VHE",
-];
 
 /// Why a row's level holds on this engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +39,7 @@ pub struct Row {
     pub shift: u8,
     pub level: u64,
     pub absent: u64,
-    /// The `FEAT_` tag the M2 must have; `None` for fields the architecture
+    /// The `FEAT_` tag the chip must have; `None` for fields the architecture
     /// fixes for any AArch64 PE.
     pub feature: Option<&'static str>,
     pub basis: Basis,
@@ -850,10 +792,10 @@ pub const TABLE: &[Row] = &[
     ),
 ];
 
-fn holds(row: &Row, target: TargetCpu, el2: bool) -> bool {
+fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
     if row
         .feature
-        .is_some_and(|feature| !APPLE_M2_FEATURES.contains(&feature))
+        .is_some_and(|feature| !chip.cap().contains(&feature))
     {
         return false;
     }
@@ -873,9 +815,9 @@ fn holds(row: &Row, target: TargetCpu, el2: bool) -> bool {
     }
 }
 
-/// Every register of [`REGISTERS`] with its value for this host target, with
-/// or without EL2.
-pub fn derive(target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> {
+/// Every register of [`REGISTERS`] with its value for `chip` on this host
+/// target, with or without EL2.
+pub fn derive(chip: Chip, target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> {
     REGISTERS
         .iter()
         .map(|&register| {
@@ -889,7 +831,7 @@ pub fn derive(target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> {
                         fields.last_mut().expect("just pushed")
                     }
                 };
-                if holds(row, target, el2) {
+                if holds(row, chip, target, el2) {
                     current.1 = row.level;
                 }
             }
@@ -914,15 +856,8 @@ mod tests {
     }
 
     #[test]
-    fn the_cap_is_apple_clangs_m2_feature_set_and_every_row_names_a_known_feature() {
+    fn every_row_names_an_apple_clang_feature() {
         let profiles = json("apple-codegen-profiles.json");
-        let m2: BTreeSet<&str> = profiles["profiles"]["apple-m2"]["architectural_features"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|feature| feature.as_str().unwrap())
-            .collect();
-        assert_eq!(m2, APPLE_M2_FEATURES.iter().copied().collect());
         let known: BTreeSet<String> = profiles["profiles"]
             .as_object()
             .unwrap()
@@ -947,7 +882,7 @@ mod tests {
 
     #[test]
     fn minimal_feature_configurations_are_advertised() {
-        let values = derive(TargetCpu::detect(), true);
+        let values = derive(Chip::DEFAULT, TargetCpu::detect(), true);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         let field = |register, shift: u32| (value(register) >> shift) & 0xf;
         // RASv1p1, MPAM v1.0 and no AMU in ID_AA64PFR0_EL1; LOR in MMFR1.
@@ -974,7 +909,7 @@ mod tests {
     #[test]
     fn advertised_instruction_fields_match_what_the_decoder_compiles() {
         let target = TargetCpu::detect();
-        let values = derive(target, false);
+        let values = derive(Chip::DEFAULT, target, false);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         for row in TABLE {
             let field = (value(row.register) >> row.shift) & 0xf;
@@ -1018,7 +953,7 @@ mod tests {
 
     #[test]
     fn fixed_and_engine_fields() {
-        let values = derive(TargetCpu::detect(), false);
+        let values = derive(Chip::DEFAULT, TargetCpu::detect(), false);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         // EL0/EL1 AArch64, no EL2/EL3; 48-bit PA, 16-bit ASID, 16K and 4K but
         // not 64K granules; PAN2; Armv8.0 debug without double lock.
@@ -1045,7 +980,7 @@ mod tests {
             1 << 60 | 1 << 48 | 1
         );
         // With EL2: AArch64 EL2 and VHE.
-        let hosted = derive(TargetCpu::detect(), true);
+        let hosted = derive(Chip::DEFAULT, TargetCpu::detect(), true);
         let host = |register| hosted.iter().find(|(r, _)| *r == register).unwrap().1;
         assert_eq!(host(ID_AA64PFR0_EL1), value(ID_AA64PFR0_EL1) | 0x100);
         // With EL2, stage 2 adds 4 KiB and 16 KiB stage-2 granules, XNX and
@@ -1072,5 +1007,38 @@ mod tests {
                 assert_eq!(host(register), value(register));
             }
         }
+    }
+
+    #[test]
+    fn each_chip_advertises_only_its_own_features() {
+        let field = |chip: Chip, register, shift: u32| {
+            let values = derive(chip, TargetCpu::detect(), true);
+            let value = values.iter().find(|(r, _)| *r == register).unwrap().1;
+            (value >> shift) & 0xf
+        };
+        // FGT and ECV (MMFR0), BF16 and I8MM (ISAR1) came with the M2.
+        for (register, shift) in [
+            (ID_AA64MMFR0_EL1, 56),
+            (ID_AA64MMFR0_EL1, 60),
+            (ID_AA64ISAR1_EL1, 44),
+            (ID_AA64ISAR1_EL1, 52),
+        ] {
+            assert_eq!(
+                field(Chip::AppleM1, register, shift),
+                0,
+                "{register:?} {shift}"
+            );
+            assert_ne!(
+                field(Chip::AppleM2, register, shift),
+                0,
+                "{register:?} {shift}"
+            );
+        }
+        // The M2's FPAC (APA 4 in ISAR1) reads as PAuth alone on the M1.
+        assert_eq!(field(Chip::AppleM2, ID_AA64ISAR1_EL1, 4), 4);
+        assert!(field(Chip::AppleM1, ID_AA64ISAR1_EL1, 4) < 4);
+        // Apple clang drops SSBS from the M4 on (PFR1.SSBS).
+        assert_ne!(field(Chip::AppleM3, ID_AA64PFR1_EL1, 4), 0);
+        assert_eq!(field(Chip::AppleM4, ID_AA64PFR1_EL1, 4), 0);
     }
 }

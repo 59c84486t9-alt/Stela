@@ -29,6 +29,8 @@ use stela_compiler::aarch64::system::registers::{Direction, Encoding, RegisterAc
 #[derive(Debug, Clone)]
 pub struct CpuProfile {
     pub name: &'static str,
+    /// The Apple CPU every PE of the profile is.
+    pub chip: super::Chip,
     pub counter_frequency: u64,
     pub fixed: Vec<(Encoding, u64)>,
     /// The board's PEs, numbered as the devices number them, each with the

@@ -230,7 +230,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 )));
             }
         }
-        let mut cpu = Cpu::new(start.address, Pstate::reset(2));
+        let mut cpu = Cpu::of(self.profile.chip, start.address, Pstate::reset(2));
         // Every PE has the registers of PE 0, the profile's missing ones
         // included.
         system::identify(&self.profile, start.cpu, &mut cpu, &mut Vec::new());
