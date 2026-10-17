@@ -14,6 +14,7 @@ path = "src/main.rs"
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
 font8x8 = { version = "0.3", default-features = false }
 stela-runtime = { path = "../stela-runtime", default-features = false }
+stela-loader = { path = "../stela-loader", default-features = false }
 stela-compiler = { path = "../stela-compiler", default-features = false }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 # The soft-float UEFI target cannot codegen the optional hardware intrinsics in the local

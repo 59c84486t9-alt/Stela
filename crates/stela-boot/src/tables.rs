@@ -8,6 +8,8 @@ pub const PRESENT: u64 = 1;
 pub const WRITABLE: u64 = 1 << 1;
 const HUGE: u64 = 1 << 7;
 pub const NX: u64 = 1 << 63;
+/// PWT and PCD: uncached, for device registers.
+pub const UNCACHED: u64 = 1 << 3 | 1 << 4;
 pub const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 const ENTRIES: u64 = 512;
 

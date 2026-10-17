@@ -69,6 +69,17 @@ pub fn prepare(options: &[u8]) -> Result<Option<Prepared>, &'static str> {
     if open.is_empty() && check.is_empty() {
         return Ok(None);
     }
+    Ok(Some(Prepared {
+        handoff: discover()?,
+        open,
+        check,
+    }))
+}
+
+/// What the storage drivers need after ExitBootServices: the ECAM windows,
+/// DMA pages below 4 GiB, the TSC rate and every range to map uncached.
+/// Runs before ExitBootServices.
+pub fn discover() -> Result<Handoff, &'static str> {
     let rsdp = rsdp().ok_or("firmware has no ACPI tables")?;
     // SAFETY: the firmware's RSDP, its tables mapped while boot services last.
     let mcfg = unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| "no valid ACPI MCFG table")?;
@@ -105,18 +116,14 @@ pub fn prepare(options: &[u8]) -> Result<Option<Prepared>, &'static str> {
             }
         }
     }
-    Ok(Some(Prepared {
-        handoff: Handoff {
-            ecam,
-            mapped,
-            dma: dma..dma + (DMA_PAGES * crate::paging::PAGE) as u64,
-            clock: Clock {
-                ticks_per_microsecond: (ticks / 10_000).max(1),
-            },
+    Ok(Handoff {
+        ecam,
+        mapped,
+        dma: dma..dma + (DMA_PAGES * crate::paging::PAGE) as u64,
+        clock: Clock {
+            ticks_per_microsecond: (ticks / 10_000).max(1),
         },
-        open,
-        check,
-    }))
+    })
 }
 
 impl Prepared {

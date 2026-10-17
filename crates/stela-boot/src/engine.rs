@@ -1,6 +1,9 @@
 //! System mode, engine phase: runs in the Stela window after the loader has
-//! switched to LA57. It never touches identity addresses again; host physical
-//! memory is reached through the physmap.
+//! switched to LA57. Host physical memory is reached through the physmap.
+//! The one use of identity addresses is `--preboot`: before the host is
+//! installed, Stela's storage drivers, which address registers and DMA pages
+//! by identity, read the installed system from the disk through the
+//! loader's identity map and its uncached device mappings.
 mod adt;
 pub(crate) mod bundle;
 mod host;
@@ -25,6 +28,7 @@ use stela_runtime::machine::{
     registers::encodings::{DCZID_EL0, MIDR_EL1, MPIDR_EL1},
     system::Register,
 };
+use stela_runtime::pc::storage::Target;
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
@@ -44,6 +48,9 @@ struct Options {
     budget: u64,
     /// Load the boot bundle the loader read instead of `source.bin`.
     bundle: bool,
+    /// Build the boot bundle from the installed system on this APFS
+    /// partition instead (`SERIAL:GUID`).
+    preboot: Option<Target>,
 }
 
 fn number(value: &str) -> Result<u64, &'static str> {
@@ -64,6 +71,7 @@ impl Options {
             x0: 0,
             budget: 0,
             bundle: false,
+            preboot: None,
         };
         let mut words = text.split_ascii_whitespace();
         if words.next() != Some("--system") {
@@ -72,6 +80,12 @@ impl Options {
         while let Some(name) = words.next() {
             if name == "--bundle" {
                 words.next().ok_or("missing bundle directory")?;
+                options.bundle = true;
+                continue;
+            }
+            if name == "--preboot" {
+                let target = words.next().ok_or("missing Preboot disk")?;
+                options.preboot = Some(target.parse()?);
                 options.bundle = true;
                 continue;
             }
@@ -409,6 +423,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Ok(options) => options,
         Err(error) => output::fatal(error),
     };
+    // Before the host is installed, while the loader's identity map is live.
+    let built = options.preboot.as_ref().map(|target| {
+        let storage = handoff
+            .storage
+            .handoff()
+            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+        bundle::from_disk(&storage, target).unwrap_or_else(|error| {
+            output::arguments(format_args!("preboot refusal: {error}\n"));
+            output::fatal("no boot bundle could be built from the Preboot volume")
+        })
+    });
     let ram = match guest_ram(handoff, &options) {
         Ok(ram) => ram,
         Err(error) => output::fatal(error),
@@ -438,7 +463,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let target = target();
     let (entry, x0, profile) = if options.bundle {
         let files = &handoff.files[..handoff.file_count];
-        let loaded = match bundle::load(&mut bare, files, options.dram_base, options.ram_bytes) {
+        let loaded = match &built {
+            Some(built) => {
+                bundle::load_built(&mut bare, built, options.dram_base, options.ram_bytes)
+            }
+            None => bundle::load(&mut bare, files, options.dram_base, options.ram_bytes),
+        };
+        let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 output::arguments(format_args!("bundle refusal: {error}\n"));
@@ -493,8 +524,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         cpu.registers
             .set(Register::CNTHCTL_EL2, 0, 1 << 10 | 1 << 11);
     }
-    let tree = options.bundle.then(|| {
-        handoff.files[..handoff.file_count]
+    let tree = options.bundle.then(|| match &built {
+        Some(built) => built
+            .iter()
+            .find(|(name, _)| name == "devicetree.adt")
+            .map(|(_, bytes)| bytes.as_slice()),
+        None => handoff.files[..handoff.file_count]
             .iter()
             .find(|file| file.name() == "devicetree.adt")
             .map(|file| {
@@ -505,7 +540,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                         file.contents.bytes as usize,
                     )
                 }
-            })
+            }),
     });
     let tree = match tree {
         Some(None) => output::fatal("the boot bundle has no devicetree.adt"),

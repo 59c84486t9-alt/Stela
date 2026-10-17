@@ -8,12 +8,13 @@
 use crate::{
     console::Framebuffer,
     firmware,
-    handoff::{File, Handoff, MAGIC, MAX_FILES, MAX_GUEST_RANGES, MAX_NAME, Region},
-    la57, layout, output, paging,
-    tables::{self, Frames, LARGE, NX, PAGE, PRESENT, WRITABLE},
+    handoff::{File, Handoff, MAGIC, MAX_FILES, MAX_GUEST_RANGES, MAX_NAME, Region, Storage},
+    la57, layout, output, paging, storage,
+    tables::{self, Frames, LARGE, NX, PAGE, PRESENT, UNCACHED, WRITABLE},
 };
 use alloc::{string::String, vec::Vec};
-use core::{arch::asm, cell::UnsafeCell};
+use core::{arch::asm, cell::UnsafeCell, ops::Range};
+use stela_runtime::pc;
 use uefi::{
     boot::{self, AllocateType, MemoryType},
     fs::FileSystem,
@@ -200,18 +201,53 @@ fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
 /// The guest inputs: `source.bin`, or with `--bundle DIR` the directory's
 /// `bundle.json` and every file it lists, read unchanged into their own
 /// pages. The bundle reader opens the volumes itself, so the configured
-/// volume is closed first.
-fn inputs(options: &[u8], mut volume: FileSystem) -> Result<(Vec<u8>, BundleFiles), &'static str> {
+/// volume is closed first. With `--preboot SERIAL:GUID` nothing is read: the
+/// engine builds the bundle from that disk with the host storage drivers,
+/// whose ranges are found here.
+fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+    if option(text, "--preboot").is_some() {
+        drop(volume);
+        return Ok((Vec::new(), Vec::new(), Some(storage::discover()?)));
+    }
     let Some(directory) = option(text, "--bundle") else {
-        return Ok((firmware::source(&mut volume)?, Vec::new()));
+        return Ok((firmware::source(&mut volume)?, Vec::new(), None));
     };
     drop(volume);
     let files = crate::engine::bundle::read(directory)?;
     if files.len() > MAX_FILES {
         return Err("bundle lists too many files");
     }
-    Ok((Vec::new(), files))
+    Ok((Vec::new(), files, None))
+}
+
+/// `source.bin`, the bundle files, and the storage drivers' ranges.
+type Inputs = (Vec<u8>, BundleFiles, Option<pc::Handoff>);
+
+/// Identity-map the storage controllers' registers uncached; none may
+/// overlap RAM.
+fn map_devices(
+    frames: &mut dyn Frames,
+    root: u64,
+    ram: &[(usize, usize)],
+    ranges: &[Range<u64>],
+) -> Result<(), &'static str> {
+    for range in ranges {
+        let start = range.start & !(PAGE - 1);
+        let end = range.end.next_multiple_of(PAGE);
+        if ram.iter().any(|r| (r.0 as u64) < end && start < r.1 as u64) {
+            return Err("storage registers overlap RAM");
+        }
+        tables::map_range(
+            frames,
+            root,
+            start,
+            start,
+            end - start,
+            PRESENT | WRITABLE | NX | UNCACHED,
+        )?;
+    }
+    Ok(())
 }
 
 /// Run the engine; never returns.
@@ -219,7 +255,7 @@ pub fn boot(options: Vec<u8>, volume: FileSystem) -> ! {
     // `inputs` closes the volume: protocols must be closed before boot
     // services end.
     let inputs = inputs(&options, volume);
-    let result = inputs.and_then(|(source, files)| load(options, source, files));
+    let result = inputs.and_then(|(source, files, storage)| load(options, source, files, storage));
     match result {
         Ok(never) => match never {},
         Err(error) => output::fatal(error),
@@ -230,6 +266,7 @@ fn load(
     options: Vec<u8>,
     source: Vec<u8>,
     bundle: BundleFiles,
+    storage: Option<pc::Handoff>,
 ) -> Result<core::convert::Infallible, &'static str> {
     let leaf7 = core::arch::x86_64::__cpuid_count(7, 0);
     if leaf7.ecx & CPUID_LA57 == 0 {
@@ -285,6 +322,13 @@ fn load(
         .chain(core::iter::once((trampoline, trampoline + PAGE, PRESENT)))
         .collect();
     identity(&mut frames, root, &ram, &image_rights)?;
+    if let Some(storage) = &storage {
+        map_devices(&mut frames, root, &ram, &storage.mapped)?;
+    }
+    let storage = match &storage {
+        Some(storage) => Storage::new(storage)?,
+        None => Storage::absent(),
+    };
     if let Some(screen) = &screen {
         let start = screen.base as u64 & !(PAGE - 1);
         let end = (screen.base + screen.bytes) as u64;
@@ -444,6 +488,7 @@ fn load(
             apic_base,
             guest,
             guest_count: count,
+            storage,
         });
     }
     // SAFETY: boot services are over, interrupts go off now, and the new
