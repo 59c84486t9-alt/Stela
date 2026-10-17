@@ -5,6 +5,7 @@
 //! that restore images use for kernels, DeviceTrees, trust caches and
 //! firmware ([blacktop/ipsw img4 payload](https://github.com/blacktop/ipsw/blob/master/pkg/img4/payload.go)).
 //! This is not an IMG4 signature validator and never decrypts keybag payloads.
+use alloc::{string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
@@ -91,7 +92,7 @@ impl<'a> Der<'a> {
 
 fn text(bytes: &[u8]) -> Result<String> {
     ensure!(bytes.is_ascii(), "IM4P IA5 string is not ASCII");
-    Ok(std::str::from_utf8(bytes)?.into())
+    Ok(core::str::from_utf8(bytes)?.into())
 }
 
 fn integer(bytes: &[u8]) -> Result<u64> {

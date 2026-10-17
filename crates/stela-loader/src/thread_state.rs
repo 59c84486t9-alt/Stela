@@ -1,11 +1,12 @@
 //! Mach-O ARM thread-state load commands.
+use alloc::string::String;
 use anyhow::{Result, ensure};
 use object::macho;
 use serde::Serialize;
 use stela_runtime::sha256;
 
-const WORD_BYTES: usize = std::mem::size_of::<u32>();
-const REGISTER_BYTES: usize = std::mem::size_of::<u64>();
+const WORD_BYTES: usize = core::mem::size_of::<u32>();
+const REGISTER_BYTES: usize = core::mem::size_of::<u64>();
 const ARM64_GPR_COUNT: usize = 31;
 const ARM_THREAD_STATE64_FLAVOR: u32 = 6;
 const ARM_THREAD_STATE64_WORDS: u32 = 68;
@@ -61,7 +62,7 @@ pub(super) fn unix_thread(raw: &[u8]) -> Result<Arm64UnixThread> {
     let register =
         |offset| u64::from_le_bytes(raw[offset..offset + REGISTER_BYTES].try_into().unwrap());
     Ok(Arm64UnixThread {
-        x: std::array::from_fn(|index| register(STATE_OFFSET + index * REGISTER_BYTES)),
+        x: core::array::from_fn(|index| register(STATE_OFFSET + index * REGISTER_BYTES)),
         sp: register(SP_OFFSET),
         pc: register(PC_OFFSET),
         cpsr: word(CPSR_OFFSET),

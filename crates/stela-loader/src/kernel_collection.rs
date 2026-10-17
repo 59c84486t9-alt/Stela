@@ -7,6 +7,7 @@
 //! `load base + (vmaddr - lowest vmaddr)` and zero-fills the rest of
 //! `vmsize`, as Asahi m1n1 `proxyclient/m1n1/macho.py` `prepare_image` does.
 use super::thread_state::{Arm64UnixThread, unix_thread};
+use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use object::macho;
 use serde::Serialize;
@@ -80,7 +81,7 @@ fn quad(bytes: &[u8], offset: usize) -> Result<u64> {
 
 fn fixed_name(bytes: &[u8]) -> Result<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    Ok(std::str::from_utf8(&bytes[..end])?.to_owned())
+    Ok(core::str::from_utf8(&bytes[..end])?.to_owned())
 }
 
 impl KernelCollection {
@@ -249,7 +250,7 @@ impl KernelCollection {
     }
 
     /// Byte range from the load base covering `first` through `last`.
-    pub fn span(&self, first: &str, last: &str) -> Result<std::ops::Range<u64>> {
+    pub fn span(&self, first: &str, last: &str) -> Result<core::ops::Range<u64>> {
         let start = self
             .segment(first)
             .with_context(|| format!("image has no segment {first}"))?;
@@ -291,7 +292,7 @@ fn fileset_entry(raw: &[u8]) -> Result<FilesetEntry> {
         .next()
         .context("fileset entry id is not terminated")?;
     Ok(FilesetEntry {
-        id: std::str::from_utf8(id)?.to_owned(),
+        id: core::str::from_utf8(id)?.to_owned(),
         vm_address: quad(raw, 8)?,
         file_offset: quad(raw, 16)?,
     })

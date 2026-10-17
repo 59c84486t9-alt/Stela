@@ -6,6 +6,7 @@
 //! revisions 1 and 2 only; Asahi m1n1 `proxyclient/m1n1/tgtypes.py` records
 //! that iBoot for macOS 12 and later reports revision 3 with this same
 //! 1024-byte command line, so that is the revision emitted here.
+use alloc::string::String;
 use anyhow::{Result, ensure};
 use serde::Serialize;
 

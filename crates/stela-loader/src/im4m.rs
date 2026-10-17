@@ -9,6 +9,7 @@
 //! properties and every other entry describes one boot object
 //! ([blacktop/ipsw img4 manifest](https://github.com/blacktop/ipsw/blob/master/pkg/img4/manifest.go)).
 //! The signature and certificates are kept but not evaluated.
+use alloc::{string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha384};

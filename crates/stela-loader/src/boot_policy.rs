@@ -14,6 +14,7 @@
 //! not have; Reduced Security admits Apple's global manifests in the IPSW.
 use crate::apple_device_tree::DeviceTree;
 use crate::im4m::{Manifest, Value};
+use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
@@ -255,7 +256,7 @@ const ENVIRONMENTS: &str = "/osenvironments";
 
 fn text_value(bytes: &[u8]) -> Result<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    Ok(std::str::from_utf8(&bytes[..end])?.to_owned())
+    Ok(core::str::from_utf8(&bytes[..end])?.to_owned())
 }
 
 /// Apply one `/osenvironments` child as iBoot does for that OS environment.

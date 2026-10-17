@@ -1,29 +1,49 @@
 //! Mach-O loading: slice selection, load plans, chained fixups, exports,
 //! dependency discovery and image mappings, plus the restore-image formats
 //! the kernel boot hand-off consumes.
+//!
+//! Without the default `std` feature only the kernel boot-bundle builder and
+//! the formats it reads are built, so `stela.efi` can prepare a bundle.
+#![cfg_attr(not(feature = "std"), no_std)]
+extern crate alloc;
+
 pub mod apple_device_tree;
 pub mod boot_args;
 pub mod boot_bundle;
 pub mod boot_policy;
+#[cfg(feature = "std")]
 pub mod chained_fixups;
+#[cfg(feature = "std")]
 pub mod dependency_graph;
+#[cfg(feature = "std")]
 pub mod dependency_paths;
+#[cfg(feature = "std")]
 pub mod exports;
 pub mod im4m;
 pub mod im4p;
+#[cfg(feature = "std")]
 pub mod inventory;
 pub mod kernel_collection;
+#[cfg(feature = "std")]
 pub mod linked_images;
+#[cfg(feature = "std")]
 pub mod load_plan;
+#[cfg(feature = "std")]
 pub mod mapped_image;
 mod thread_state;
 pub mod trust_cache;
+#[cfg(feature = "std")]
 use anyhow::{Context, Result, ensure};
+#[cfg(feature = "std")]
 use inventory::{Artifact, Inventory, ScanIssue};
+#[cfg(feature = "std")]
 use object::{Object, ObjectSection};
+#[cfg(feature = "std")]
 use std::{fs::File, io::Read, path::Path};
+#[cfg(feature = "std")]
 use stela_runtime::sha256;
 
+#[cfg(feature = "std")]
 fn slice(data: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
     let start = usize::try_from(offset)?;
     let end = usize::try_from(offset.checked_add(size).context("slice range overflow")?)?;
@@ -31,6 +51,7 @@ fn slice(data: &[u8], offset: u64, size: u64) -> Result<&[u8]> {
         .context("Mach-O slice is out of bounds")
 }
 
+#[cfg(feature = "std")]
 fn integer(data: &[u8], start: usize, width: usize, little: bool) -> Result<u64> {
     let bytes = data
         .get(start..start + width)
@@ -45,6 +66,7 @@ fn integer(data: &[u8], start: usize, width: usize, little: bool) -> Result<u64>
     }
 }
 
+#[cfg(feature = "std")]
 fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
     let file = object::File::parse(data)?;
     ensure!(
@@ -84,6 +106,7 @@ fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
     })
 }
 
+#[cfg(feature = "std")]
 fn is_macho(data: &[u8]) -> bool {
     matches!(
         data.get(..4),
@@ -100,6 +123,7 @@ fn is_macho(data: &[u8]) -> bool {
     )
 }
 
+#[cfg(feature = "std")]
 pub fn split_slices(data: &[u8]) -> Result<Vec<(u64, &[u8])>> {
     let magic = data
         .get(..4)
@@ -144,6 +168,7 @@ pub fn split_slices(data: &[u8]) -> Result<Vec<(u64, &[u8])>> {
     Ok(slices)
 }
 
+#[cfg(feature = "std")]
 pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
     split_slices(data)?
         .into_iter()
@@ -151,6 +176,7 @@ pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
         .collect()
 }
 
+#[cfg(feature = "std")]
 pub fn scan(root: &Path, build: &str) -> Result<Inventory> {
     ensure!(
         root.is_dir(),
@@ -222,6 +248,7 @@ pub fn scan(root: &Path, build: &str) -> Result<Inventory> {
     Ok(inventory)
 }
 
+#[cfg(feature = "std")]
 /// The single arm64/arm64e slice of `data`, optionally narrowed by architecture.
 pub fn select_slice<'a>(
     data: &'a [u8],

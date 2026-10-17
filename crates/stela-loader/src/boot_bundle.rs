@@ -16,9 +16,9 @@ use crate::boot_policy::{self, Decision, SecurityPolicy};
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::trust_cache;
+use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
-use std::collections::BTreeMap;
 use stela_runtime::sha256;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -270,6 +270,7 @@ const fn split(suffix: &'static str, start: Mark, end: Mark) -> Split {
 }
 
 use Mark::{ImageEnd, ImageStart, SegmentEnd, SegmentStart};
+use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 
 /// m1n1 `load_macos_sptm` image splits.
 const KERNEL_SPLITS: &[Split] = &[
@@ -346,7 +347,7 @@ struct LoadedImage {
     collection: KernelCollection,
     memory: Vec<u8>,
     /// `(region name, image offset range)` in split order.
-    pieces: Vec<(String, std::ops::Range<u64>)>,
+    pieces: Vec<(String, core::ops::Range<u64>)>,
 }
 
 fn resolve(collection: &KernelCollection, mark: Mark) -> Result<u64> {
@@ -543,7 +544,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         inputs.txm.bytes,
         TXM_SPLITS,
     )?;
-    let modules: Vec<&[u8]> = std::iter::once(inputs.static_trust_cache.bytes)
+    let modules: Vec<&[u8]> = core::iter::once(inputs.static_trust_cache.bytes)
         .chain(inputs.extra_trust_caches.iter().map(|input| input.bytes))
         .collect();
     let trust_cache = trust_cache::compose(&modules)?;

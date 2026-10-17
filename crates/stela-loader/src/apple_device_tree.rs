@@ -9,6 +9,7 @@
 //! such as `syscfg/WMac/6`); Asahi's m1n1 `proxyclient/m1n1/adt.py` reads the
 //! same flag. Parsing rejects anything that would not serialize back to the
 //! same bytes, so `serialize(parse(bytes)) == bytes` for every accepted tree.
+use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
@@ -60,7 +61,7 @@ impl Property {
     /// The value as a NUL-terminated string, without the terminator.
     pub fn as_str(&self) -> Option<&str> {
         let end = self.value.iter().position(|&b| b == 0)?;
-        std::str::from_utf8(&self.value[..end]).ok()
+        core::str::from_utf8(&self.value[..end]).ok()
     }
 
     pub fn as_u32(&self) -> Option<u32> {
@@ -215,7 +216,7 @@ impl Reader<'_> {
             raw_name[end..].iter().all(|&b| b == 0),
             "property name at {at:#x} has bytes after its terminator"
         );
-        let name = std::str::from_utf8(&raw_name[..end])
+        let name = core::str::from_utf8(&raw_name[..end])
             .with_context(|| format!("property name at {at:#x} is not UTF-8"))?
             .to_owned();
         ensure!(!name.is_empty(), "empty property name at {at:#x}");

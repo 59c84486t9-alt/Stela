@@ -6,6 +6,7 @@
 //! `bsd/kern/kern_trustcache.c` `load_static_trust_cache` loads module 0 as
 //! the static trust cache. A module is the plaintext payload of a `trst`
 //! IM4P: `u32 version`, a 16-byte UUID, `u32 count` and fixed-size entries.
+use alloc::{string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
