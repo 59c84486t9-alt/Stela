@@ -654,8 +654,9 @@ pub const TABLE: &[Row] = &[
             "TCR_ELx.E0PD0 and E0PD1 fault EL0 accesses at level 0",
         ),
     ),
-    // FEAT_IDST (Armv8.4) is mandatory in the Armv8.6 profile, without an
-    // Apple clang feature name.
+    // FEAT_IDST (Armv8.4) and FEAT_EVT (Armv8.5), with the profile's
+    // FEAT_EVT2, are mandatory in the Armv8.6 profile, without an Apple clang
+    // feature name.
     row(
         ID_AA64MMFR2_EL1,
         36,
@@ -667,6 +668,22 @@ pub const TABLE: &[Row] = &[
             "EL0 reads of the ID space and accesses to unimplemented ID \
              registers trap with EC 0x18",
         ),
+    ),
+    row(
+        ID_AA64MMFR2_EL1,
+        56,
+        1,
+        0,
+        None,
+        Basis::Host("HCR_EL2.TID4, TICAB and TOCU trap through the generated accessors"),
+    ),
+    row(
+        ID_AA64MMFR2_EL1,
+        56,
+        2,
+        0,
+        None,
+        Basis::Host("HCR_EL2.TTLBIS and TTLBOS trap the Inner and Outer Shareable TLBIs"),
     ),
     feature(
         ID_AA64MMFR2_EL1,
@@ -1017,7 +1034,11 @@ mod tests {
             host(ID_AA64MMFR0_EL1),
             value(ID_AA64MMFR0_EL1) + (1 << 32) + (1 << 40)
         );
-        assert_eq!(host(ID_AA64MMFR2_EL1), value(ID_AA64MMFR2_EL1) | 1 << 40);
+        // FWB and FEAT_EVT2's HCR_EL2 traps; IDST without EL2.
+        assert_eq!(
+            host(ID_AA64MMFR2_EL1),
+            value(ID_AA64MMFR2_EL1) | 1 << 40 | 2 << 56
+        );
         assert_eq!(value(ID_AA64MMFR2_EL1) >> 36 & 0xf, 1);
         for &register in REGISTERS {
             if !matches!(

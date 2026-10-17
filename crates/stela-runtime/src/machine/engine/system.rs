@@ -905,15 +905,53 @@ mod tests {
         }
     }
 
+    /// For every generated accessor at every index, run at EL1 on a fresh
+    /// machine that `configure` prepares, whether it traps to EL2 with EC
+    /// 0x18.
+    fn el1_traps_to_el2(
+        configure: impl FnOnce(
+            &mut super::Machine<super::super::tests::FakeHost, super::super::NoDevices>,
+        ),
+    ) -> alloc::vec::Vec<bool> {
+        use super::{ACCESSORS, Access, Cell, Effect, Host};
+        let mut machine = machine(&[]);
+        configure(&mut machine);
+        ACCESSORS
+            .iter()
+            .flat_map(|accessor| (0..1u64 << accessor.index.len()).map(move |m| (accessor, m)))
+            .map(|(accessor, m)| {
+                let lines = machine.lines();
+                let now = machine.host.counter();
+                let mut context = Access {
+                    machine: &mut machine,
+                    rt: 0,
+                    lines,
+                    now,
+                    result: None,
+                    translation: false,
+                    regime: false,
+                    code: false,
+                    refusal: Cell::new(None),
+                };
+                let effect = match (accessor.run)(&mut context, m) {
+                    Ok(effect) | Err(effect) => effect,
+                };
+                matches!(effect, Effect::Trap { el: 2, ec: 0x18 })
+            })
+            .collect()
+    }
+
+    /// HCR_EL2's APK, FIEN and EnSCXT set, so that their coarse traps do not
+    /// pre-empt the controls under test.
+    const HCR_ENABLES: u64 = 1 << 40 | 1 << 47 | 1 << 53;
+
     /// Every FEAT_FGT control the profile implements changes whether some
-    /// EL1 access traps to EL2 with EC 0x18, with HCR_EL2's APK, FIEN and
-    /// EnSCXT set so their coarse traps do not pre-empt the fine-grained
-    /// ones. HFGITR_EL2.ERET, SVC_EL0 and SVC_EL1 trap instructions without
-    /// accessors and are tested in engine.rs. HAFGRTR_EL2 is left out: every
-    /// activity monitor access is refused.
+    /// EL1 access traps to EL2 with EC 0x18. HFGITR_EL2.ERET, SVC_EL0 and
+    /// SVC_EL1 trap instructions without accessors and are tested in
+    /// engine.rs. HAFGRTR_EL2 is left out: every activity monitor access is
+    /// refused.
     #[test]
     fn every_fine_grained_trap_control_traps_an_el1_access() {
-        use super::{ACCESSORS, Access, Cell, Effect, Host};
         const CONTROLS: [Register; 5] = [
             Register::HFGRTR_EL2,
             Register::HFGWTR_EL2,
@@ -922,52 +960,72 @@ mod tests {
             Register::HDFGWTR_EL2,
         ];
         const INSTRUCTIONS: u64 = 0b111 << 51;
-        const ENABLES: u64 = 1 << 40 | 1 << 47 | 1 << 53;
-        let traps = |control: Option<(Register, u32)>| -> Vec<bool> {
-            let mut machine = machine(&[]);
-            let hcr = machine.cpu.read(Register::HCR_EL2) | ENABLES;
+        let enable = |machine: &mut super::Machine<_, _>| {
+            let hcr = machine.cpu.read(Register::HCR_EL2) | HCR_ENABLES;
             machine.cpu.registers.set(Register::HCR_EL2, 0, hcr);
-            if let Some((register, bit)) = control {
-                let value = machine.cpu.read(register) ^ 1 << bit;
-                machine.cpu.registers.set(register, 0, value);
-            }
-            ACCESSORS
-                .iter()
-                .flat_map(|accessor| (0..1u64 << accessor.index.len()).map(move |m| (accessor, m)))
-                .map(|(accessor, m)| {
-                    let lines = machine.lines();
-                    let now = machine.host.counter();
-                    let mut context = Access {
-                        machine: &mut machine,
-                        rt: 0,
-                        lines,
-                        now,
-                        result: None,
-                        translation: false,
-                        regime: false,
-                        code: false,
-                        refusal: Cell::new(None),
-                    };
-                    let effect = match (accessor.run)(&mut context, m) {
-                        Ok(effect) | Err(effect) => effect,
-                    };
-                    matches!(effect, Effect::Trap { el: 2, ec: 0x18 })
-                })
-                .collect()
         };
-        let baseline = traps(None);
-        let mut inert = Vec::new();
+        let baseline = el1_traps_to_el2(enable);
+        let mut inert = alloc::vec::Vec::new();
         for register in CONTROLS {
             let mut fields = !(register.res0() | register.res1());
             if register == Register::HFGITR_EL2 {
                 fields &= !INSTRUCTIONS;
             }
             for bit in (0..64).filter(|bit| fields >> bit & 1 != 0) {
-                if traps(Some((register, bit))) == baseline {
+                let traps = el1_traps_to_el2(|machine| {
+                    enable(machine);
+                    let value = machine.cpu.read(register) ^ 1 << bit;
+                    machine.cpu.registers.set(register, 0, value);
+                });
+                if traps == baseline {
                     inert.push(alloc::format!("{}[{bit}]", register.name()));
                 }
             }
         }
+        assert!(inert.is_empty(), "controls that trap nothing: {inert:?}");
+    }
+
+    /// Every HCR_EL2 control that traps System register and System
+    /// instruction accesses changes whether some EL1 access traps to EL2:
+    /// TID1-4, TACR, TSW, TPCP, TPU, TTLB, TVM, TRVM, TDZ, TLOR and TERR,
+    /// FEAT_EVT's TICAB and TOCU, FEAT_EVT2's TTLBIS and TTLBOS, and APK,
+    /// FIEN and EnSCXT, which trap while clear.
+    #[test]
+    fn every_hcr_el2_access_trap_control_traps_an_el1_access() {
+        const CONTROLS: [(&str, u32); 21] = [
+            ("TID1", 16),
+            ("TID2", 17),
+            ("TID3", 18),
+            ("TACR", 21),
+            ("TSW", 22),
+            ("TPCP", 23),
+            ("TPU", 24),
+            ("TTLB", 25),
+            ("TVM", 26),
+            ("TDZ", 28),
+            ("TRVM", 30),
+            ("TLOR", 35),
+            ("TERR", 36),
+            ("APK", 40),
+            ("FIEN", 47),
+            ("TID4", 49),
+            ("TICAB", 50),
+            ("TOCU", 52),
+            ("EnSCXT", 53),
+            ("TTLBIS", 54),
+            ("TTLBOS", 55),
+        ];
+        let hcr = |value: u64| {
+            move |machine: &mut super::Machine<_, _>| {
+                machine.cpu.registers.set(Register::HCR_EL2, 0, value);
+            }
+        };
+        let baseline = el1_traps_to_el2(hcr(HCR_ENABLES));
+        let inert: alloc::vec::Vec<_> = CONTROLS
+            .into_iter()
+            .filter(|&(_, bit)| el1_traps_to_el2(hcr(HCR_ENABLES ^ 1 << bit)) == baseline)
+            .map(|(name, _)| name)
+            .collect();
         assert!(inert.is_empty(), "controls that trap nothing: {inert:?}");
     }
 
