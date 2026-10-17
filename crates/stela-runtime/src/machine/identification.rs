@@ -141,6 +141,7 @@ const fn engine(holds: bool, reason: &'static str) -> Basis {
 
 const NO_NESTING: &str = "nested virtualization is outside the profile (Apple offers it from M3)";
 const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
+const STAGE2_HOST: &str = "stage-2 translation of the EL1&0 regime";
 const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
 const NO_GUARANTEE: &str = "translated code gives no such timing or speculation guarantee";
 
@@ -527,9 +528,19 @@ pub const TABLE: &[Row] = &[
         None,
         engine(true, "4 KiB stage-1 granule"),
     ),
-    fixed(ID_AA64MMFR0_EL1, 32, 1, "no stage 2"),
-    fixed(ID_AA64MMFR0_EL1, 36, 1, "no stage 2"),
-    fixed(ID_AA64MMFR0_EL1, 40, 1, "no stage 2"),
+    // TGran16_2, TGran64_2 and TGran4_2: 0b0001 (not supported) without
+    // EL2; with it, machine::mmu's stage 2 takes 16 KiB and 4 KiB granules
+    // (0b0010) and refuses 64 KiB.
+    fixed(ID_AA64MMFR0_EL1, 32, 1, "no stage 2 without EL2"),
+    row(ID_AA64MMFR0_EL1, 32, 2, 1, None, Basis::Host(STAGE2_HOST)),
+    fixed(
+        ID_AA64MMFR0_EL1,
+        36,
+        1,
+        "the walker refuses 64 KiB stage-2 granules",
+    ),
+    fixed(ID_AA64MMFR0_EL1, 40, 1, "no stage 2 without EL2"),
+    row(ID_AA64MMFR0_EL1, 40, 2, 1, None, Basis::Host(STAGE2_HOST)),
     feature(
         ID_AA64MMFR0_EL1,
         56,
@@ -550,6 +561,28 @@ pub const TABLE: &[Row] = &[
     ),
     // ID_AA64MMFR1_EL1
     feature(ID_AA64MMFR1_EL1, 8, 1, "FEAT_VHE", Basis::Host(VHE_HOST)),
+    // FEAT_HPDS (Armv8.1), FEAT_XNX, FEAT_TTCNP (Armv8.2), FEAT_S2FWB,
+    // FEAT_TTL (Armv8.4) and FEAT_E0PD (Armv8.5) are mandatory in the
+    // Armv8.6 profile, without an Apple clang feature name.
+    row(
+        ID_AA64MMFR1_EL1,
+        12,
+        1,
+        0,
+        None,
+        engine(
+            true,
+            "TCR_ELx.HPD0 and HPD1 disable hierarchical permissions",
+        ),
+    ),
+    row(
+        ID_AA64MMFR1_EL1,
+        28,
+        1,
+        0,
+        None,
+        Basis::Host("stage-2 XN[1:0] selects EL0 and EL1 execution"),
+    ),
     feature(
         ID_AA64MMFR1_EL1,
         16,
@@ -574,6 +607,44 @@ pub const TABLE: &[Row] = &[
         engine(true, "AT S1E1RP and S1E1WP"),
     ),
     // ID_AA64MMFR2_EL1
+    row(
+        ID_AA64MMFR2_EL1,
+        0,
+        1,
+        0,
+        None,
+        engine(
+            true,
+            "CnP is a hint for TLBs that PEs share, and one PE shares none",
+        ),
+    ),
+    row(
+        ID_AA64MMFR2_EL1,
+        40,
+        1,
+        0,
+        None,
+        Basis::Host("HCR_EL2.FWB lets stage 2 override stage-1 attributes"),
+    ),
+    row(
+        ID_AA64MMFR2_EL1,
+        48,
+        1,
+        0,
+        None,
+        engine(true, "TTL hints narrow the TLBI scope (machine::mmu::tlbi)"),
+    ),
+    row(
+        ID_AA64MMFR2_EL1,
+        60,
+        1,
+        0,
+        None,
+        engine(
+            true,
+            "TCR_ELx.E0PD0 and E0PD1 fault EL0 accesses at level 0",
+        ),
+    ),
     feature(
         ID_AA64MMFR2_EL1,
         4,
@@ -897,13 +968,34 @@ mod tests {
         assert_eq!(value(CTR_EL0), 0x9444_c004);
         assert_eq!(value(AIDR_EL1), 1 << 4 | 1 << 16);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
-        // With EL2: AArch64 EL2 and VHE, and nothing else changes.
+        // No stage 2 without EL2; HPDS; CnP, TTL and E0PD.
+        assert_eq!(value(ID_AA64MMFR0_EL1) >> 32 & 0xfff, 0x111);
+        assert_eq!(value(ID_AA64MMFR1_EL1) >> 12 & 0xf, 1);
+        assert_eq!(value(ID_AA64MMFR1_EL1) >> 28 & 0xf, 0);
+        assert_eq!(
+            value(ID_AA64MMFR2_EL1) & (0xf << 60 | 0xf << 48 | 0xf << 40 | 0xf),
+            1 << 60 | 1 << 48 | 1
+        );
+        // With EL2: AArch64 EL2 and VHE.
         let hosted = derive(TargetCpu::detect(), true);
         let host = |register| hosted.iter().find(|(r, _)| *r == register).unwrap().1;
         assert_eq!(host(ID_AA64PFR0_EL1), value(ID_AA64PFR0_EL1) | 0x100);
-        assert_eq!(host(ID_AA64MMFR1_EL1), value(ID_AA64MMFR1_EL1) | 0x100);
+        // With EL2, stage 2 adds 4 KiB and 16 KiB stage-2 granules, XNX and
+        // FWB.
+        assert_eq!(
+            host(ID_AA64MMFR1_EL1),
+            value(ID_AA64MMFR1_EL1) | 0x100 | 1 << 28
+        );
+        assert_eq!(
+            host(ID_AA64MMFR0_EL1),
+            value(ID_AA64MMFR0_EL1) + (1 << 32) + (1 << 40)
+        );
+        assert_eq!(host(ID_AA64MMFR2_EL1), value(ID_AA64MMFR2_EL1) | 1 << 40);
         for &register in REGISTERS {
-            if !matches!(register, ID_AA64PFR0_EL1 | ID_AA64MMFR1_EL1) {
+            if !matches!(
+                register,
+                ID_AA64PFR0_EL1 | ID_AA64MMFR0_EL1 | ID_AA64MMFR1_EL1 | ID_AA64MMFR2_EL1
+            ) {
                 assert_eq!(host(register), value(register));
             }
         }

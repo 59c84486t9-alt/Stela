@@ -2148,6 +2148,33 @@ mod tests {
     }
 
     #[test]
+    fn at_s1e1rp_honors_pan_where_s1e1r_ignores_it() {
+        let mut machine = machine(&[]);
+        // 4 KiB, 39-bit VA from level 1 at BASE + 0x4000, whose first entry
+        // maps VA 0-1 GiB at BASE, EL0 read/write (AP 0b01).
+        let block = BASE | 1 | 1 << 10 | 1 << 6;
+        machine.host.ram[0x4000..0x4008].copy_from_slice(&block.to_le_bytes());
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::TCR_EL1, 0, 25 | 1 << 23 | 5 << 32);
+        registers.set(SystemRegister::TTBR0_EL1, 0, BASE + 0x4000);
+        registers.set(SystemRegister::SCTLR_EL1, 0, 1);
+        machine.derived_changed();
+        machine.cpu.pstate.pan = true;
+        machine.cpu.state.x[2] = 0x1000;
+        machine.system_instruction(0xd508_7802).unwrap(); // at s1e1r, x2
+        let par = machine.cpu.read(SystemRegister::PAR_EL1);
+        assert_eq!((par & 1, par & 0x0000_ffff_ffff_f000), (0, BASE + 0x1000));
+        machine.system_instruction(0xd508_7902).unwrap(); // at s1e1rp, x2
+        assert_eq!(
+            machine.cpu.read(SystemRegister::PAR_EL1),
+            1 << 11 | 0b00_1101 << 1 | 1
+        );
+        machine.cpu.pstate.pan = false;
+        machine.system_instruction(0xd508_7902).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::PAR_EL1) & 1, 0);
+    }
+
+    #[test]
     fn stage_two_faults_go_to_el2_with_hpfar_and_at_reports_both_stages() {
         let mut machine = machine(&[]);
         // EL2 host with HCR_EL2.VM: a 40-bit IPA from two concatenated
