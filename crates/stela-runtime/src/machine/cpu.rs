@@ -22,6 +22,7 @@ pub const HCR_VSE: u32 = 8;
 pub const HCR_TSC: u32 = 19;
 pub const HCR_TGE: u32 = 27;
 pub const HCR_HCD: u32 = 29;
+pub const HCR_TEA: u32 = 37;
 pub const HCR_API: u32 = 41;
 
 /// Apple GXF state of one guarded level: GL1 beside EL1, GL2 beside EL2

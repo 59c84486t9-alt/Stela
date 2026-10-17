@@ -2232,7 +2232,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         address: u64,
         return_address: u64,
     ) -> Exception {
-        let target = if fault.to_el2() { 2 } else { self.cpu.route() };
+        // A synchronous external abort from EL0 or EL1 goes to EL2 under
+        // HCR_EL2.TEA (Arm SyncExternalAbortTarget).
+        let external = fault.kind == mmu::FaultKind::ExternalOnWalk;
+        let target = if fault.to_el2()
+            || external && self.cpu.pstate.el < 2 && self.cpu.hcr(crate::machine::cpu::HCR_TEA)
+        {
+            2
+        } else {
+            self.cpu.route()
+        };
         let class = if target > self.cpu.pstate.el {
             classes[0]
         } else {
@@ -2758,6 +2767,37 @@ mod tests {
         );
         assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), unmapped + 8);
         assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), 0x1000);
+        // A level-1 table outside RAM: a synchronous external abort on the
+        // walk (DFSC 0b010101), taken at EL1, or at EL2 under HCR_EL2.TEA.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TTBR0_EL1, 0, 0x10_0000_0000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL2, 0, 0x4_0000);
+        machine.derived_changed();
+        for (hcr, el, vector, esr) in [
+            (0, 1, 0x2_0200, SystemRegister::ESR_EL1),
+            (1 << 37, 2, 0x4_0400, SystemRegister::ESR_EL2),
+        ] {
+            machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
+            machine.cpu.set_pstate(Pstate::reset(1));
+            machine.cpu.state.x[2] = 0x108;
+            machine.system_instruction(0xf840_0841).unwrap(); // ldtr x1, [x2]
+            let syndrome = machine.cpu.read(esr);
+            let ec = if el == 2 { 0x24 } else { 0x25 };
+            assert_eq!(
+                (
+                    machine.cpu.pstate.el,
+                    machine.cpu.pc,
+                    syndrome >> 26,
+                    syndrome & 0x3f
+                ),
+                (el, vector, ec, 0b01_0101)
+            );
+        }
     }
 
     #[test]

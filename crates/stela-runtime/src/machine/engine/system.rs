@@ -1138,6 +1138,17 @@ mod tests {
         const CPACR_EL1: Encoding = Encoding::new(3, 0, 1, 0, 2);
         const CPTR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 2);
         let mut machine = machine(&[]);
+        let round_trip_value = |machine: &mut TestMachine, encoding: Encoding, value: u64| {
+            machine.cpu.pstate = Pstate::reset(2);
+            machine.cpu.state.x[0] = value;
+            machine
+                .system_instruction(access(false, encoding, 0))
+                .unwrap();
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            machine.cpu.state.x[1]
+        };
         let round_trip = |machine: &mut TestMachine, el: u8, encoding: Encoding| {
             machine.cpu.pstate = Pstate::reset(el);
             machine.cpu.pc = BASE;
@@ -1172,6 +1183,16 @@ mod tests {
                 .unwrap();
             assert_eq!(machine.cpu.state.x[2], u64::from(el) << 2);
         }
+        // HCR_EL2.BSU and SWIO are stored (one PE runs at a time and no cache
+        // is visible, so neither has an effect); bits 39:38 are RES0 and RW
+        // reads as one.
+        const HCR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 0);
+        let hcr = 0b11 << 10 | 1 << 1 | 1 << 34;
+        assert_eq!(
+            round_trip_value(&mut machine, HCR_EL2, hcr | 0b11 << 38),
+            hcr | 1 << 31
+        );
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 34);
         // CPTR_EL2.TCPAC traps EL1 CPACR_EL1 accesses to EL2.
         machine
             .cpu
