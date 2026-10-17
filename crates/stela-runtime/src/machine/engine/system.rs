@@ -913,6 +913,53 @@ mod tests {
     }
 
     #[test]
+    fn mdcr_el2_tdcc_traps_el0_and_el1_dcc_accesses_to_el2() {
+        const MDCCSR_EL0: Encoding = Encoding::new(2, 3, 0, 1, 0);
+        const DBGDTR_EL0: Encoding = Encoding::new(2, 3, 0, 4, 0);
+        const MDCCINT_EL1: Encoding = Encoding::new(2, 0, 0, 2, 0);
+        const TDCC: u64 = 1 << 27;
+        let mut machine = machine(&[]);
+        machine.cpu.registers.set(Register::MDCR_EL2, 0, TDCC);
+        for word in [
+            access(true, MDCCSR_EL0, 1),
+            access(false, DBGDTR_EL0, 1),
+            access(true, MDCCINT_EL1, 1),
+        ] {
+            let esr = el2_trap(&mut machine, word);
+            assert_eq!(esr >> 26, 0x18, "{word:#x}");
+            assert_eq!(esr & 1, u64::from(word >> 21 & 1), "{word:#x}");
+        }
+        // EL0 outside the host traps to EL2 as well, MDSCR_EL1.TDCC clear.
+        machine.cpu.pc = BASE;
+        machine.cpu.pstate = Pstate::reset(0);
+        machine
+            .system_instruction(access(true, DBGDTR_EL0, 1))
+            .unwrap();
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
+        assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, 0x18);
+        // Without TDCC the EL1 read completes.
+        machine.cpu.registers.set(Register::MDCR_EL2, 0, 0);
+        machine.cpu.pc = BASE;
+        machine.cpu.pstate = Pstate::reset(1);
+        machine
+            .system_instruction(access(true, MDCCSR_EL0, 1))
+            .unwrap();
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, BASE + 4));
+        // MDCR_EL2 keeps TDE, TDA, TDOSA, TDRA and TDCC: without a PMU, SPE,
+        // TRBE or MPAM debug the other fields are RES0.
+        const MDCR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 1);
+        machine.cpu.pstate = Pstate::reset(2);
+        machine.cpu.state.x[0] = u64::MAX;
+        machine
+            .system_instruction(access(false, MDCR_EL2, 0))
+            .unwrap();
+        machine
+            .system_instruction(access(true, MDCR_EL2, 1))
+            .unwrap();
+        assert_eq!(machine.cpu.state.x[1], TDCC | 0xf00);
+    }
+
+    #[test]
     fn hcr_el2_traps_route_el1_accesses_to_el2_with_their_syndromes() {
         let mut machine = machine(&[]);
         for (hcr, word) in [
