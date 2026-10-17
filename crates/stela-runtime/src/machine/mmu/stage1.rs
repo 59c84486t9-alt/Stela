@@ -2,8 +2,8 @@
 //! to D8.5; pseudocode AArch64.S1Translate and AArch64.S1Walk).
 
 use super::{
-    Access, Controls, Fault, FaultKind, Outcome, PHYSICAL_ADDRESS_BITS, Regime, Requester, SCTLR_M,
-    SCTLR_WXN, TableMemory, Translation, Unsupported, attributes,
+    Access, Controls, Fault, FaultKind, MemoryType, Outcome, PHYSICAL_ADDRESS_BITS, Regime,
+    Requester, SCTLR_M, SCTLR_WXN, TableMemory, Translation, Unsupported, attributes,
     geometry::{self, Geometry},
     permits, sprr,
 };
@@ -45,6 +45,7 @@ const AP_EL0: u64 = 1 << 6;
 const AP_READ_ONLY: u64 = 1 << 7;
 const ACCESS_FLAG: u64 = 1 << 10;
 const NOT_GLOBAL: u64 = 1 << 11;
+const SHAREABILITY_SHIFT: u64 = 8;
 const PXN: u64 = 1 << 53;
 /// UXN in a two-privilege regime, XN in EL2.
 const UXN: u64 = 1 << 54;
@@ -162,13 +163,13 @@ pub fn asid(controls: &Controls) -> u16 {
 }
 
 fn fault(kind: FaultKind, level: i8) -> Outcome {
-    Outcome::Fault(Fault { kind, level })
+    Outcome::Fault(Fault::stage1(kind, level))
 }
 
 /// Stage 1 disabled: the address is the output address, checked against
 /// PARange after any top byte the regime ignores (pseudocode
-/// AArch64.S1DisabledOutput).
-fn disabled(controls: &Controls, address: u64, access: Access) -> Outcome {
+/// AArch64.S1DisabledOutput). Returns the outcome and its SH field.
+fn disabled(controls: &Controls, address: u64, access: Access) -> (Outcome, u8) {
     let upper = two_ranges(controls.regime) && address & (1 << 55) != 0;
     let ignored = range(controls, upper, access).top_byte_ignored;
     let checked = if ignored {
@@ -177,21 +178,38 @@ fn disabled(controls: &Controls, address: u64, access: Access) -> Outcome {
         address
     };
     if checked >> PHYSICAL_ADDRESS_BITS != 0 {
-        return fault(FaultKind::AddressSize, 0);
+        return (fault(FaultKind::AddressSize, 0), 0);
     }
-    let (attributes, memory) = attributes::disabled(controls.sctlr, access == Access::Execute);
-    Outcome::Mapped(Translation {
+    // HCR_EL2.DC makes EL1&0 output Normal Write-Back, Non-shareable.
+    let (attributes, memory, shareability) = if default_cacheable(controls) {
+        (
+            attributes::NORMAL_WRITE_BACK,
+            MemoryType::Normal,
+            attributes::NON_SHAREABLE,
+        )
+    } else {
+        let (attributes, memory) = attributes::disabled(controls.sctlr, access == Access::Execute);
+        (attributes, memory, attributes::OUTER_SHAREABLE)
+    };
+    let translation = Translation {
         physical: checked,
         memory,
         attributes,
-        shareability: attributes::OUTER_SHAREABLE,
+        shareability,
         readable: true,
         writable: true,
         executable: true,
         global: true,
         asid: 0,
         size: 1 << 12,
-    })
+    };
+    (Outcome::Mapped(translation), shareability)
+}
+
+fn default_cacheable(controls: &Controls) -> bool {
+    controls
+        .second_stage
+        .is_some_and(|stage2| stage2.default_cacheable(controls.regime))
 }
 
 /// Permission limits collected from table descriptors.
@@ -203,6 +221,7 @@ struct Hierarchy {
     uxn: bool,
 }
 
+#[cfg(test)]
 pub fn translate(
     controls: &Controls,
     address: u64,
@@ -210,9 +229,42 @@ pub fn translate(
     requester: Requester,
     memory: &mut dyn TableMemory,
 ) -> Outcome {
-    if controls.sctlr & SCTLR_M == 0 {
+    walk(controls, address, access, requester, memory).0
+}
+
+/// The stage-1 outcome, and for a mapping the descriptor's SH field, which a
+/// stage-2 combination uses before Device and Non-cacheable memory make it
+/// Outer Shareable.
+pub fn walk(
+    controls: &Controls,
+    address: u64,
+    access: Access,
+    requester: Requester,
+    memory: &mut dyn TableMemory,
+) -> (Outcome, u8) {
+    if controls.sctlr & SCTLR_M == 0 || default_cacheable(controls) {
         return disabled(controls, address, access);
     }
+    let mut shareability = 0;
+    let outcome = walk_enabled(
+        controls,
+        address,
+        access,
+        requester,
+        memory,
+        &mut shareability,
+    );
+    (outcome, shareability)
+}
+
+fn walk_enabled(
+    controls: &Controls,
+    address: u64,
+    access: Access,
+    requester: Requester,
+    memory: &mut dyn TableMemory,
+    shareability_field: &mut u8,
+) -> Outcome {
     let upper = two_ranges(controls.regime) && address & (1 << 55) != 0;
     let range = range(controls, upper, access);
     // Every bit above the region must equal bit 55 (zero in the EL2 regime);
@@ -297,6 +349,7 @@ pub fn translate(
         let (attributes, memory, shareability) =
             attributes::of_descriptor(controls.mair, descriptor);
         let global = !two_ranges(controls.regime) || descriptor & NOT_GLOBAL == 0;
+        *shareability_field = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
         return Outcome::Mapped(Translation {
             physical: output | (address & (size - 1)),
             memory,
@@ -631,11 +684,7 @@ mod tests {
             Some((FaultKind::AccessFlag, 3))
         );
         assert_eq!(
-            Fault {
-                kind: FaultKind::AccessFlag,
-                level: 3
-            }
-            .status_code(),
+            Fault::stage1(FaultKind::AccessFlag, 3).status_code(),
             0b00_1011
         );
         // An output address above a 36-bit IPS is an Address size fault at

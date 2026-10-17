@@ -370,6 +370,7 @@ impl Cpu {
                 fields: self.apple.sprr_fields,
             },
             stage2: self.stage2(regime),
+            second_stage: None,
             regime: match regime {
                 TranslationRegime::El10 => mmu::Regime::El10,
                 TranslationRegime::El20 => mmu::Regime::El20,
