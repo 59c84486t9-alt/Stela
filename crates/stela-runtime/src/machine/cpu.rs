@@ -363,6 +363,36 @@ impl Cpu {
         self.hcr(HCR_TGE)
     }
 
+    /// Arm `IsPACMEnabled` for the current PSTATE: PACM sets PSTATE.PACM
+    /// only on a chip with FEAT_PAuth_LR, with HCRX_EL2.PACMEn set for EL0
+    /// and EL1 outside the host, and with the regime's SCTLR2_ELx.EnPACM
+    /// (EnPACM0 at EL0), SCTLR2_EL1 counting only under HCRX_EL2.SCTLR2En
+    /// (`IsSCTLR2EL1Enabled`; EL2 is always enabled and there is no EL3).
+    /// The PE's PACM is not trivial.
+    pub fn pacm_enabled(&self) -> bool {
+        const HCRX_SCTLR2EN: u32 = 15;
+        const HCRX_PACMEN: u32 = 24;
+        const SCTLR2_ENPACM: u32 = 7;
+        const SCTLR2_ENPACM0: u32 = 8;
+        if !Feature::FEAT_PAuth_LR.on(self.registers.chip()) {
+            return false;
+        }
+        let hcrx = |bit| bits(self.read(Register::HCRX_EL2), u64::from(bit), 1) == 1;
+        let el = self.pstate.el;
+        let host = self.in_host();
+        if el < 2 && !host && !hcrx(HCRX_PACMEN) {
+            return false;
+        }
+        let sctlr2 = |register, bit: u32| bits(self.read(register), u64::from(bit), 1) == 1;
+        let el1 = |bit| hcrx(HCRX_SCTLR2EN) && sctlr2(Register::SCTLR2_EL1, bit);
+        match el {
+            2 => sctlr2(Register::SCTLR2_EL2, SCTLR2_ENPACM),
+            1 => el1(SCTLR2_ENPACM),
+            _ if host => sctlr2(Register::SCTLR2_EL2, SCTLR2_ENPACM0),
+            _ => el1(SCTLR2_ENPACM0),
+        }
+    }
+
     /// The regime the current PSTATE translates in.
     pub fn regime(&self) -> TranslationRegime {
         if self.pstate.el == 2 || (self.pstate.el == 0 && self.in_host()) {
@@ -484,6 +514,7 @@ impl Cpu {
         }
         self.state.nzcv = nzcv;
         self.set_pstate(next);
+        self.pstate.pacm &= self.pacm_enabled();
         self.pc = elr;
         Ok(Ok(()))
     }
@@ -630,6 +661,8 @@ impl Cpu {
         self.step_advance = false;
         self.state.nzcv = nzcv;
         self.set_pstate(next);
+        // SetPSTATEFromPSR: IsPACMEnabled at the EL returned to.
+        self.pstate.pacm &= self.pacm_enabled();
         self.pc = if illegal && spsr & (1 << 4) != 0 {
             target & 0xffff_fffc
         } else {

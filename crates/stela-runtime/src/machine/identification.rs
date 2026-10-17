@@ -90,6 +90,9 @@ const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
 const STAGE2_HOST: &str = "stage-2 translation of the EL1&0 regime";
 const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
 const NO_GUARANTEE: &str = "translated code gives no such timing or speculation guarantee";
+const PAUTH_LR: &str = "PACM sets PSTATE.PACM for the next instruction, as IsPACMEnabled \
+     allows, and the two-modifier forms and the PACM-modified PAC*SP, AUT*SP, RETA* and \
+     *1716 forms compute ComputePAC2QARMA";
 const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCTX run their \
      generated accessors, with SCTLR_ELx.EnRCTX and HFGITR_EL2 traps, and complete with no \
      effect: the engine keeps no prediction state a later context could use";
@@ -403,6 +406,13 @@ pub const TABLE: &[Row] = &[
     ),
     feature(
         ID_AA64ISAR1_EL1,
+        4,
+        6,
+        "FEAT_PAuth_LR",
+        engine(true, PAUTH_LR),
+    ),
+    feature(
+        ID_AA64ISAR1_EL1,
         12,
         1,
         "FEAT_JSCVT",
@@ -544,6 +554,26 @@ pub const TABLE: &[Row] = &[
         1,
         "FEAT_FAMINMAX",
         Basis::Instructions(&[0x4ea2_dc20, 0x6ec2_1c20]),
+    ),
+    // PACM: 0b0010, a full PSTATE.PACM implementation.
+    feature(
+        ID_AA64ISAR3_EL1,
+        12,
+        2,
+        "FEAT_PAuth_LR",
+        engine(true, PAUTH_LR),
+    ),
+    // ID_AA64MMFR3_EL1
+    feature(
+        ID_AA64MMFR3_EL1,
+        4,
+        1,
+        "FEAT_SCTLR2",
+        engine(
+            true,
+            "SCTLR2_EL1 and SCTLR2_EL2 hold the fields the chip's features give \
+             them, EnPACM and EnPACM0 on the M6, under HCRX_EL2.SCTLR2En",
+        ),
     ),
     // ID_AA64MMFR0_EL1
     fixed(ID_AA64MMFR0_EL1, 0, 0b0101, "48-bit physical addresses"),
@@ -1200,9 +1230,15 @@ mod tests {
         // whose PACs the engine computes that way.
         assert_eq!(field(Chip::AppleM2, ID_AA64ISAR1_EL1, 4), 4);
         assert_eq!(field(Chip::AppleM1, ID_AA64ISAR1_EL1, 4), 1);
-        // FEAT_PAuth_LR implies FEAT_FPACCOMBINE (APA 5) on the M6.
+        // The M6's FEAT_PAuth_LR (APA 6, with ISAR3.PACM 2 for a full
+        // PSTATE.PACM) needs FEAT_SCTLR2 (MMFR3.SCTLRX).
         assert_eq!(field(Chip::AppleM5, ID_AA64ISAR1_EL1, 4), 4);
-        assert_eq!(field(Chip::AppleM6, ID_AA64ISAR1_EL1, 4), 5);
+        assert_eq!(field(Chip::AppleM6, ID_AA64ISAR1_EL1, 4), 6);
+        for chip in Chip::ALL {
+            let m6 = chip == Chip::AppleM6;
+            assert_eq!(field(chip, ID_AA64ISAR3_EL1, 12), 2 * u64::from(m6));
+            assert_eq!(field(chip, ID_AA64MMFR3_EL1, 4), u64::from(m6));
+        }
         // Apple clang drops SSBS from the M4 on (PFR1.SSBS).
         assert_ne!(field(Chip::AppleM3, ID_AA64PFR1_EL1, 4), 0);
         assert_eq!(field(Chip::AppleM4, ID_AA64PFR1_EL1, 4), 0);

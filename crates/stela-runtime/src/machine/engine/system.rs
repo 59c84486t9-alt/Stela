@@ -1107,6 +1107,62 @@ mod tests {
     }
 
     #[test]
+    fn sctlr2_holds_the_m6_pacm_enables_under_hcrx_el2_sctlr2en() {
+        const SCTLR2_EL1: Encoding = Encoding::new(3, 0, 1, 0, 3);
+        const SCTLR2_EL12: Encoding = Encoding::new(3, 5, 1, 0, 3);
+        const SCTLR2_EL3: Encoding = Encoding::new(3, 6, 1, 0, 3);
+        const ENPACM: u64 = 1 << 7 | 1 << 8;
+        const HCRX_SCTLR2EN: u64 = 1 << 15;
+        let on = |chip| {
+            let mut machine = machine(&[]);
+            machine.profile.chip = chip;
+            machine.cpu = crate::machine::cpu::Cpu::of(chip, BASE, Pstate::reset(1));
+            machine.derived_changed();
+            machine
+        };
+        let mut machine = on(Chip::AppleM6);
+        // HCRX_EL2.SCTLR2En clear traps EL1's access to EL2 (EC 0x18).
+        machine.cpu.state.x[1] = u64::MAX;
+        let esr = el2_trap(&mut machine, access(false, SCTLR2_EL1, 1));
+        assert_eq!(esr >> 26, 0x18);
+        // Set, the write holds EnPACM and EnPACM0; every other bit is RES0.
+        machine
+            .cpu
+            .registers
+            .set(Register::HCRX_EL2, 0, HCRX_SCTLR2EN);
+        machine.cpu.pstate = Pstate::reset(1);
+        machine
+            .system_instruction(access(false, SCTLR2_EL1, 1))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::SCTLR2_EL1), ENPACM);
+        // In the host SCTLR2_EL1 names SCTLR2_EL2 and SCTLR2_EL12 reaches
+        // SCTLR2_EL1.
+        machine.cpu.pstate = Pstate::reset(2);
+        machine.cpu.state.x[2] = 1 << 7;
+        machine
+            .system_instruction(access(false, SCTLR2_EL1, 2))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::SCTLR2_EL2), 1 << 7);
+        machine
+            .system_instruction(access(true, SCTLR2_EL12, 3))
+            .unwrap();
+        assert_eq!(machine.cpu.state.x[3], ENPACM);
+        // SCTLR2_EL3 is UNDEFINED, there being no EL3.
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        machine
+            .system_instruction(access(true, SCTLR2_EL3, 3))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x0200_0000);
+        // Without FEAT_SCTLR2 (the M5) SCTLR2_EL1 is UNDEFINED.
+        let mut machine = on(Chip::AppleM5);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine
+            .system_instruction(access(true, SCTLR2_EL1, 3))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+    }
+
+    #[test]
     fn a_vhe_host_redirects_el1_names_and_reaches_el1_through_el12() {
         let mut machine = machine(&[]);
         machine.cpu.pstate = Pstate::reset(2);

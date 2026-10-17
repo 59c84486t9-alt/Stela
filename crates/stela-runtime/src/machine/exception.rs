@@ -25,6 +25,10 @@ pub struct Pstate {
     /// The software step bit: set while the step state machine is
     /// active-not-pending (`machine::debug::Step`).
     pub ss: bool,
+    /// FEAT_PAuth_LR's PAC modifier: set by PACM, it makes the next
+    /// instruction's PAC*SP, AUT*SP, RETA* or *1716 form take a second
+    /// modifier.
+    pub pacm: bool,
     /// Apple GXF: executing at the guarded level beside `el` (GL1 or GL2).
     /// SPSR does not encode it; the GL bank's ASPSR does.
     pub guarded: bool,
@@ -46,6 +50,7 @@ const SPSR_SSBS: u64 = 1 << 12;
 const SPSR_IL: u64 = 1 << 20;
 const SPSR_BTYPE_SHIFT: u32 = 10;
 const SPSR_SS: u64 = 1 << 21;
+const SPSR_PACM: u64 = 1 << 35;
 const NZCV_MASK: u64 = 0xf000_0000;
 
 impl Pstate {
@@ -63,6 +68,7 @@ impl Pstate {
             il: false,
             btype: 0,
             ss: false,
+            pacm: false,
             guarded: false,
         }
     }
@@ -81,6 +87,7 @@ impl Pstate {
             | if self.il { SPSR_IL } else { 0 }
             | u64::from(self.btype) << SPSR_BTYPE_SHIFT
             | if self.ss { SPSR_SS } else { 0 }
+            | if self.pacm { SPSR_PACM } else { 0 }
     }
 }
 
@@ -111,15 +118,12 @@ pub fn spsr_target(spsr: u64) -> Result<(u8, bool), IllegalReturn> {
 
 /// PSTATE and NZCV after an exception return to `spsr` from `current` (Arm
 /// `SetPSTATEFromPSR`). A legal return restores EL, SPSel, IL, UAO, DIT,
-/// SSBS and BTYPE. An illegal one keeps EL and SPSel and sets IL; UAO, DIT,
-/// SSBS and BTYPE are then ARBITRARY and Stela takes them from SPSR. Both restore NZCV, PAN and
-/// DAIF. PSTATE.SS stays 0 because MDSCR_EL1.SS is never set; TCO is untouched
-/// `SetPSTATEFromPSR`). A legal return restores EL, SPSel, IL, UAO, DIT and
-/// SSBS. An illegal one keeps EL and SPSel and sets IL; UAO, DIT and SSBS are
-/// then ARBITRARY and Stela takes them from SPSR. Both restore NZCV, PAN and
-/// DAIF. PSTATE.SS is 0 here: the caller sets it (Arm
-/// `DebugExceptionReturnSS`, `machine::debug::return_ss`). TCO is untouched
-/// because the profile has no MTE.
+/// SSBS, BTYPE and PACM. An illegal one keeps EL and SPSel and sets IL; UAO,
+/// DIT, SSBS, BTYPE and PACM are then ARBITRARY and Stela takes them from
+/// SPSR. Both restore NZCV, PAN and DAIF. PSTATE.SS is 0 here: the caller
+/// sets it (Arm `DebugExceptionReturnSS`, `machine::debug::return_ss`), and
+/// the caller clears PACM where IsPACMEnabled is false at the new EL. TCO is
+/// untouched because the profile has no MTE.
 pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
     let (el, sp, il) = match spsr_target(spsr) {
         Ok((el, sp)) if !illegal => (el, sp, spsr & SPSR_IL != 0),
@@ -138,6 +142,7 @@ pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
             il,
             btype: ((spsr >> SPSR_BTYPE_SHIFT) & 3) as u8,
             ss: false,
+            pacm: spsr & SPSR_PACM != 0,
             guarded: illegal && current.guarded,
         },
         (spsr & NZCV_MASK) as u32,
@@ -227,7 +232,7 @@ const SCTLR_SPAN: u64 = 1 << 23;
 const SCTLR_DSSBS: u64 = 1 << 44;
 
 /// PSTATE after taking an exception to `target` (Arm
-/// `AArch64_TakeException`): IL, UAO and BTYPE clear, the target's SCTLR.SPAN clear sets PAN at EL1,
+/// `AArch64_TakeException`): IL, UAO, BTYPE and PACM clear, the target's SCTLR.SPAN clear sets PAN at EL1,
 /// and at EL2 while EL0 runs in the host (HCR_EL2.TGE); DSSBS gives SSBS.
 /// TCO is untouched because the profile has no MTE. An exception taken at
 /// the guarded level stays there (m1n1 `gxf_asm.S` handles GL exceptions at
@@ -246,6 +251,7 @@ pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool) -> Psta
         il: false,
         btype: 0,
         ss: false,
+        pacm: false,
         guarded: from.guarded,
     }
 }
@@ -268,6 +274,7 @@ mod tests {
                     ssbs: daif & 4 != 0,
                     il: daif == 5,
                     btype: daif & 3,
+                    pacm: daif & 8 == 0,
                     ..Pstate::reset(2)
                 };
                 let spsr = state.to_spsr(0xa000_0000);

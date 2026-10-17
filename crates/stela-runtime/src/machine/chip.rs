@@ -110,9 +110,10 @@ impl Chip {
 /// feature the M2 has; the M3's FEAT_HCX, FEAT_NV and FEAT_NV2; the M4's
 /// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS); the M5's
 /// FEAT_SPECRES2 and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
-/// FEAT_FPACCOMBINE, FEAT_CPA (whose arithmetic the engine completes) and the
-/// instruction-only FEAT_FAMINMAX and FEAT_LUT, whose forms the system-mode
-/// compiler admits.
+/// FEAT_FPACCOMBINE, FEAT_CPA (whose arithmetic the engine completes),
+/// FEAT_PAuth_LR with FEAT_SCTLR2 (PACM and the two-modifier PAC forms) and
+/// the instruction-only FEAT_FAMINMAX and FEAT_LUT, whose forms the
+/// system-mode compiler admits.
 const fn engine_implements(feature: Feature) -> bool {
     match feature {
         Feature::FEAT_AMUv1p1
@@ -137,6 +138,8 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_FPACCOMBINE
         | Feature::FEAT_LUT
         | Feature::FEAT_PAN3
+        | Feature::FEAT_PAuth_LR
+        | Feature::FEAT_SCTLR2
         | Feature::FEAT_SPECRES2
         | Feature::FEAT_WFxT
         | Feature::FEAT_XS => true,
@@ -145,9 +148,7 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_FPMR
         | Feature::FEAT_MTE
         | Feature::FEAT_MTE2
-        | Feature::FEAT_PAuth_LR
         | Feature::FEAT_RASv2
-        | Feature::FEAT_SCTLR2
         | Feature::FEAT_SME
         | Feature::FEAT_SME2
         | Feature::FEAT_SME2p1

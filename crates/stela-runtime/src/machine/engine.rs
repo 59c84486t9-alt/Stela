@@ -35,7 +35,7 @@ use stela_compiler::{
     },
     block::{
         self, BlockProfile, CompilationPlan, ExitKind, PointerAuthentication,
-        PointerAuthenticationKey, PointerAuthenticationOperation,
+        PointerAuthenticationKey, PointerAuthenticationModifier, PointerAuthenticationOperation,
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::{GuardedOperation, SystemOperation},
     },
@@ -510,6 +510,9 @@ pub struct Machine<H: Host, D: Devices> {
     peers: Vec<processors::Peer>,
     /// The block count at which the running PE's time slice ends.
     slice_end: u64,
+    /// The instruction just completed wrote PSTATE.PACM (PACM, or an
+    /// exception return), so it does not lapse.
+    pacm_written: bool,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -559,6 +562,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             waiting: None,
             peers: Vec::new(),
             slice_end: processors::QUANTUM,
+            pacm_written: false,
         };
         machine.peers = processors::boot(&machine.profile);
         machine.load_profile();
@@ -838,7 +842,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         // Active-not-pending: this one instruction advances the step.
         self.cpu.step_advance = mode.step;
-        let single = mode.breakpoints || mode.step;
+        // PSTATE.PACM applies to the one instruction after PACM.
+        let pacm = self.cpu.pstate.pacm;
+        let single = mode.breakpoints || mode.step || pacm;
         let index = match self.fetch_block(pc, single)? {
             Fetched::Block(index) => index,
             Fetched::Exception(exception) => {
@@ -862,6 +868,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         let step = self.execute(index);
+        if !core::mem::take(&mut self.pacm_written) && pacm {
+            self.cpu.pstate.pacm = false;
+        }
         self.advance_step();
         step
     }
@@ -1018,7 +1027,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 _ => true,
             };
         }
-        if word == PACIASP || word == PACIBSP {
+        let sppc = matches!(
+            block::pauth_lr::decode(word),
+            Some(block::pauth_lr::Instruction::SignSpPc {
+                implicit_bti: true,
+                ..
+            })
+        );
+        if word == PACIASP || word == PACIBSP || sppc {
             let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
             let forbid = if self.cpu.pstate.el == 0 {
                 SCTLR_BT0
@@ -1440,14 +1456,44 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(Some(instruction)) => instruction,
             _ => return refuse(self, "PAC exit at a word that is not PAC".into()),
         };
-        // The profile has no FEAT_PAuth_LR: its hint-space form (PACM) is a
-        // NOP and the others are UNDEFINED.
-        if let PointerAuthenticationOperation::LinkRegister(_) = instruction.operation {
-            return if word & 0xffff_f01f == 0xd503_201f {
-                self.next()
-            } else {
-                self.undefined()
+        let link_register = self
+            .profile
+            .chip
+            .implemented(Feature::FEAT_PAuth_LR)
+            .map_err(|reason| self.unsupported(RequirementKind::Native(reason)))?;
+        // Without FEAT_PAuth_LR its hint-space form (PACM) is a NOP and the
+        // others are UNDEFINED.
+        if let PointerAuthenticationOperation::LinkRegister(form) = instruction.operation {
+            if !link_register {
+                return if word & 0xffff_f01f == 0xd503_201f {
+                    self.next()
+                } else {
+                    self.undefined()
+                };
+            }
+            if form == block::pauth_lr::Instruction::Pacm {
+                self.cpu.pstate.pacm = self.cpu.pacm_enabled();
+                self.pacm_written = true;
+                return self.next();
+            }
+            let staged = pauth::lr_instruction::stage(
+                form,
+                pc,
+                self.cpu.state.x[..31].try_into().expect("31 registers"),
+                self.cpu.state.sp,
+            );
+            return match staged {
+                Ok(pauth::lr_instruction::Staged::Pointer(operands)) => {
+                    self.two_modifier_authentication(word, instruction, operands)
+                }
+                _ => refuse(self, "FEAT_PAuth_LR operands".into()),
             };
+        }
+        if link_register
+            && self.cpu.pstate.pacm
+            && let Some(operands) = self.pacm_operands(instruction)
+        {
+            return self.two_modifier_authentication(word, instruction, operands);
         }
         let uses_key = match instruction.operation.required_key() {
             Some(key) if !self.key_enabled(key) => {
@@ -1491,6 +1537,139 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// The two-modifier operation PSTATE.PACM makes of a PAC*SP, AUT*SP,
+    /// RETA* or HINT-space *1716 instruction (Arm PACIA, AUTIA and RETAA
+    /// under FEAT_PAuth_LR): the signing forms take the instruction's PC as
+    /// the second modifier, the authenticating forms X16, and the *1716
+    /// forms X15.
+    fn pacm_operands(
+        &self,
+        instruction: PointerAuthentication,
+    ) -> Option<pauth::lr_instruction::Operands> {
+        use PointerAuthenticationModifier::StackPointer;
+        use PointerAuthenticationOperation as Operation;
+        use pauth::lr_instruction::{Action, Key};
+        let x = &self.cpu.state.x;
+        let (sp, pc) = (self.cpu.state.sp, instruction.instruction_pc.0);
+        let key = |key| match key {
+            PointerAuthenticationKey::Ia => Some(Key::Ia),
+            PointerAuthenticationKey::Ib => Some(Key::Ib),
+            _ => None,
+        };
+        let register = |index: u8| {
+            if index == 31 {
+                0
+            } else {
+                x[usize::from(index)]
+            }
+        };
+        let (key, action, destination, modifiers) = match instruction.operation {
+            Operation::Sign {
+                key: k,
+                destination,
+                modifier: StackPointer,
+            } => (key(k)?, Action::Sign, Some(destination), (sp, pc)),
+            Operation::SignIbSp => (Key::Ib, Action::Sign, Some(30), (sp, pc)),
+            Operation::Sign1716 { key: k } => (key(k)?, Action::Sign, Some(17), (x[16], x[15])),
+            Operation::Authenticate {
+                key: k,
+                destination,
+                modifier: StackPointer,
+            } => (
+                key(k)?,
+                Action::Authenticate,
+                Some(destination),
+                (sp, x[16]),
+            ),
+            Operation::AuthenticateIbSp => (Key::Ib, Action::Authenticate, Some(30), (sp, x[16])),
+            Operation::Authenticate1716 { key: k } => {
+                (key(k)?, Action::Authenticate, Some(17), (x[16], x[15]))
+            }
+            Operation::ReturnIaSp => (Key::Ia, Action::Return, None, (sp, x[16])),
+            Operation::ReturnIbSp => (Key::Ib, Action::Return, None, (sp, x[16])),
+            _ => return None,
+        };
+        let pointer = match destination {
+            Some(destination) => register(destination),
+            None => x[30],
+        };
+        Some(pauth::lr_instruction::Operands {
+            key,
+            action,
+            pointer,
+            modifier1: modifiers.0,
+            modifier2: modifiers.1,
+            destination,
+            implicit_bti: false,
+            instruction_pc: pc,
+        })
+    }
+
+    /// Arm AddPACIA2, AddPACIB2, AuthIA2 and AuthIB2 with the guest's keys:
+    /// with the key's SCTLR enable clear the pointer is unchanged, HCR_EL2.API
+    /// clear traps the use, a failed AUT* takes the PAC Fail exception
+    /// (FEAT_FPAC) and so does a failed RETA* (FEAT_FPACCOMBINE).
+    fn two_modifier_authentication(
+        &mut self,
+        word: u32,
+        instruction: PointerAuthentication,
+        operands: pauth::lr_instruction::Operands,
+    ) -> Step {
+        use pauth::lr_instruction::{Action, Key};
+        let pc = self.cpu.pc;
+        let (key, runtime_key) = match operands.key {
+            Key::Ia => (PointerAuthenticationKey::Ia, pauth::Key::Ia),
+            Key::Ib => (PointerAuthenticationKey::Ib, pauth::Key::Ib),
+        };
+        if !self.key_enabled(key) {
+            return self.disabled_pointer_authentication(word, instruction);
+        }
+        if self.pointer_authentication_trapped() {
+            return self.pointer_authentication_trap();
+        }
+        let context = self.pointer_context()?;
+        let refuse = |machine: &Self, detail: String| {
+            Err(machine.unsupported(RequirementKind::Instruction { word, detail }))
+        };
+        let (pointer, m1, m2) = (operands.pointer, operands.modifier1, operands.modifier2);
+        let result = match operands.action {
+            Action::Sign => match context.sign_two_modifiers(runtime_key, pointer, m1, m2) {
+                Ok(signed) => Ok(signed),
+                Err(error) => return refuse(self, format!("{error:?}")),
+            },
+            Action::Authenticate | Action::Return => {
+                let combined = operands.action == Action::Return;
+                match context.authenticate_two_modifiers(runtime_key, pointer, m1, m2, combined) {
+                    Ok(Ok(result)) => Ok(result.pointer),
+                    Ok(Err(pauth::AuthenticationError::Failure { code })) => Err(code),
+                    Ok(Err(error)) => return refuse(self, format!("{error:?}")),
+                    Err(error) => return refuse(self, format!("{error:?}")),
+                }
+            }
+        };
+        let value = match result {
+            Ok(value) => value,
+            Err(code) => {
+                self.take(Exception::synchronous(
+                    Class::PointerAuthenticationFailure,
+                    u32::from(code),
+                    pc,
+                ));
+                return Ok(());
+            }
+        };
+        self.cpu.pstate.btype = 0;
+        match operands.destination {
+            Some(31) => self.cpu.pc = instruction.next_pc.0,
+            Some(destination) => {
+                self.cpu.state.x[usize::from(destination)] = value;
+                self.cpu.pc = instruction.next_pc.0;
+            }
+            None => self.cpu.pc = value,
+        }
+        Ok(())
+    }
+
     /// BTYPE after a completed PAC instruction at `pc`: BRA* and BLRA* set it
     /// as BR and BLR do, every other form clears it.
     fn pointer_branch_type(&mut self, pc: u64, operation: PointerAuthenticationOperation) -> u8 {
@@ -1520,6 +1699,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             | Operation::Sign { .. }
             | Operation::Authenticate { .. } => self.cpu.pc = next,
             Operation::ReturnIbSp | Operation::ReturnIaSp => self.cpu.pc = self.cpu.state.x[30],
+            Operation::LinkRegister(form) if form.is_return() => {
+                self.cpu.pc = self.cpu.state.x[30];
+            }
+            Operation::LinkRegister(_) => self.cpu.pc = next,
             Operation::Branch { target, link, .. } => {
                 let destination = if target == 31 {
                     0
@@ -2020,6 +2203,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Err(_) => self.undefined(),
                 Ok(Err(reason)) => Err(self.unsupported(RequirementKind::IllegalReturn(reason))),
                 Ok(Ok(())) => {
+                    self.pacm_written = true;
                     self.host.report(&Event::Guarded {
                         entered: self.cpu.pstate.guarded,
                         pc: self.cpu.pc,
@@ -2179,6 +2363,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         self.cpu.exception_return(target);
+        self.pacm_written = true;
         self.host.report(&Event::Return {
             to_el: self.cpu.pstate.el,
             pc: self.cpu.pc,
@@ -3411,7 +3596,16 @@ mod tests {
     /// A machine at EL1h with SCTLR_EL1.EnIA and EnIB set, HCR_EL2.API set,
     /// 39-bit TTBR1 addresses without TBI and both instruction keys loaded.
     fn pac_machine() -> Machine<FakeHost, NoDevices> {
-        let mut machine = machine(&[]);
+        pac_machine_for(crate::machine::Chip::AppleM2, &[])
+    }
+
+    /// [`pac_machine`] on `chip`, running `words` at BASE.
+    fn pac_machine_for(chip: crate::machine::Chip, words: &[u32]) -> Machine<FakeHost, NoDevices> {
+        let mut machine = machine(words);
+        if chip != machine.profile.chip {
+            machine.profile.chip = chip;
+            machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+        }
         let registers = &mut machine.cpu.registers;
         registers.set(SystemRegister::TCR_EL1, 0, 25 << 16 | 25);
         for (register, value) in [
@@ -3427,7 +3621,161 @@ mod tests {
         registers.set(SystemRegister::HCR_EL2, 0, 1 << HCR_API);
         registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
         registers.set(SystemRegister::VBAR_EL2, 0, 0x4_0000);
+        machine.derived_changed();
         machine
+    }
+
+    const PACM: u32 = 0xd503_24ff;
+    /// HCRX_EL2.SCTLR2En and PACMEn, and SCTLR2_EL1.EnPACM.
+    fn enable_pacm(machine: &mut Machine<FakeHost, NoDevices>) {
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::HCRX_EL2, 0, 1 << 24 | 1 << 15);
+        registers.set(SystemRegister::SCTLR2_EL1, 0, 1 << 7);
+    }
+
+    #[test]
+    fn pacm_gives_the_next_pac_instruction_a_second_modifier_on_the_m6() {
+        const PACIASP: u32 = 0xd503_233f;
+        const AUTIASP: u32 = 0xd503_23bf;
+        const NOP: u32 = 0xd503_201f;
+        let code = [PACM, PACIASP, PACM, AUTIASP, PACM, NOP, PACIASP];
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &code);
+        let pointer = 0xffff_ff80_0000_4000_u64;
+        let sp = 0xffff_ff80_0001_0000_u64;
+        machine.cpu.state.x[30] = pointer;
+        machine.cpu.state.sp = sp;
+        let pac = |machine: &mut Machine<FakeHost, NoDevices>, at: u64| {
+            assert_eq!(machine.cpu.pc, at);
+            machine.host.exits.push(NativeExit::Exit {
+                next_pc: at,
+                kind: ExitKind::PointerAuthentication as u64,
+            });
+            machine.step().unwrap();
+        };
+        // HCRX_EL2.PACMEn clear makes PACM leave PSTATE.PACM clear.
+        pac(&mut machine, BASE);
+        assert!(!machine.cpu.pstate.pacm);
+        machine.cpu.pc = BASE;
+        enable_pacm(&mut machine);
+        pac(&mut machine, BASE);
+        assert!(machine.cpu.pstate.pacm);
+        // PACIASP signs with SP and its own PC, then PACM lapses.
+        pac(&mut machine, BASE + 4);
+        let context = machine.pointer_context().unwrap();
+        let signed = context
+            .sign_two_modifiers(pauth::Key::Ia, pointer, sp, BASE + 4)
+            .unwrap();
+        assert_eq!(machine.cpu.state.x[30], signed);
+        assert!(!machine.cpu.pstate.pacm);
+        // AUTIASP takes X16, the signing PACIASP's address, as the second.
+        machine.cpu.state.x[16] = BASE + 4;
+        pac(&mut machine, BASE + 8);
+        pac(&mut machine, BASE + 12);
+        assert_eq!(machine.cpu.state.x[30], pointer);
+        // Any other instruction lapses PACM: the PACIASP after the NOP signs
+        // with SP alone.
+        pac(&mut machine, BASE + 16);
+        machine.host.exits.push(NativeExit::Exit {
+            next_pc: BASE + 24,
+            kind: ExitKind::Fallthrough as u64,
+        });
+        machine.step().unwrap();
+        assert!(!machine.cpu.pstate.pacm);
+        pac(&mut machine, BASE + 24);
+        assert_eq!(
+            machine.cpu.state.x[30],
+            context.sign(pauth::Key::Ia, pointer, sp).unwrap()
+        );
+    }
+
+    #[test]
+    fn exceptions_save_pacm_in_spsr_and_returns_restore_it_where_enabled() {
+        const PACIASP: u32 = 0xd503_233f;
+        const ERET: u32 = 0xd69f_03e0;
+        const SPSR_PACM: u64 = 1 << 35;
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        enable_pacm(&mut machine);
+        machine.system_instruction_for_test(PACM);
+        assert!(machine.cpu.pstate.pacm);
+        // HCR_EL2.API clear traps the PACIASP to EL2, which saves PACM and
+        // clears it.
+        machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);
+        let pc = machine.cpu.pc;
+        machine.system_instruction_for_test(PACIASP);
+        assert_eq!(machine.cpu.pstate.el, 2);
+        assert_ne!(machine.cpu.read(SystemRegister::SPSR_EL2) & SPSR_PACM, 0);
+        assert!(!machine.cpu.pstate.pacm);
+        // The return restores it for the re-executed PACIASP.
+        machine.system_instruction(ERET).unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (pc, 1));
+        assert!(machine.cpu.pstate.pacm);
+        // Where IsPACMEnabled is false at the EL returned to it reads 0.
+        machine.cpu.set_pstate(Pstate::reset(2));
+        machine.cpu.registers.set(SystemRegister::SCTLR2_EL1, 0, 0);
+        machine.system_instruction(ERET).unwrap();
+        assert!(!machine.cpu.pstate.pacm);
+    }
+
+    #[test]
+    fn pauth_lr_forms_use_two_modifiers_and_fault_when_they_fail() {
+        const PACIASPPC: u32 = 0xdac1_a3fe;
+        const PACIA171615: u32 = 0xdac1_8bfe;
+        const AUTIA171615: u32 = 0xdac1_bbfe;
+        // AUTIASPPC and RETAASPPC with imm16 n: the label is PC - 4n.
+        let autiasppc = |n: u32| 0xf380_001f | n << 5;
+        let retaasppc = |n: u32| 0x5500_001f | n << 5;
+        let pointer = 0xffff_ff80_0000_4000_u64;
+        let sp = 0xffff_ff80_0001_0000_u64;
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        let context = machine.pointer_context().unwrap();
+        let at = |machine: &mut Machine<FakeHost, NoDevices>, pc: u64, word: u32| {
+            machine.cpu.pc = pc;
+            machine.system_instruction_for_test(word);
+        };
+        machine.cpu.state.sp = sp;
+        machine.cpu.state.x[30] = pointer;
+        at(&mut machine, BASE, PACIASPPC);
+        let signed = context
+            .sign_two_modifiers(pauth::Key::Ia, pointer, sp, BASE)
+            .unwrap();
+        assert_eq!(
+            (machine.cpu.state.x[30], machine.cpu.pc),
+            (signed, BASE + 4)
+        );
+        // AUTIASPPC names the PACIASPPC 8 bytes back.
+        at(&mut machine, BASE + 8, autiasppc(2));
+        assert_eq!(machine.cpu.state.x[30], pointer);
+        // RETAASPPC authenticates and returns.
+        machine.cpu.state.x[30] = signed;
+        at(&mut machine, BASE + 12, retaasppc(3));
+        assert_eq!(machine.cpu.pc, pointer);
+        // A wrong label fails: EC 0x1C, ISS {instruction key A}. The
+        // modifier takes the label's bits 36:5, so this one is 0x40 away.
+        machine.cpu.state.x[30] = signed;
+        at(&mut machine, BASE + 0x48, autiasppc(2));
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0000);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE + 0x48);
+        // The *171615 forms sign X17 with X16 and X15.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        let state = &mut machine.cpu.state;
+        (state.x[17], state.x[16], state.x[15]) = (pointer, 0x1234, 0x5678);
+        at(&mut machine, BASE, PACIA171615);
+        assert_eq!(
+            machine.cpu.state.x[17],
+            context
+                .sign_two_modifiers(pauth::Key::Ia, pointer, 0x1234, 0x5678)
+                .unwrap()
+        );
+        at(&mut machine, BASE + 4, AUTIA171615);
+        assert_eq!(machine.cpu.state.x[17], pointer);
+        // PACIASPPC is a landing pad as PACIASP is; PACNBIASPPC is not.
+        machine.cpu.pstate.btype = 0b01;
+        assert!(machine.branch_target_compatible(PACIASPPC));
+        assert!(!machine.branch_target_compatible(0xdac1_83fe));
+        // Without FEAT_PAuth_LR (the M5) they are UNDEFINED.
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM5, &[]);
+        at(&mut machine, BASE, PACIASPPC);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
     }
 
     #[test]

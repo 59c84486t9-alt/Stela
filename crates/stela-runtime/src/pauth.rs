@@ -447,13 +447,11 @@ pub use features::UnsupportedInstructionProfile;
 #[cfg(feature = "std")]
 pub(crate) mod lr_context;
 
-#[cfg(feature = "std")]
 pub(crate) mod lr_instruction;
 
 #[cfg(feature = "std")]
 pub(crate) mod lr_service;
 
-#[cfg(feature = "std")]
 mod two_modifier;
 
 #[cfg(feature = "std")]
