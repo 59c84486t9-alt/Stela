@@ -490,6 +490,34 @@ mod tests {
     }
 
     #[test]
+    fn system_mode_claims_completion_barriers_and_unallocated_hints_only() {
+        let pc = GuestAddress(0x1000);
+        // DSB SY, DSB ISHST, ISB, SSBB, PSSBB and the unallocated HINT #0x54
+        // and #0x7f exit to the engine.
+        for word in [
+            0xd503_3f9f,
+            0xd503_3a9f,
+            0xd503_3fdf,
+            0xd503_309f,
+            0xd503_349f,
+            0xd503_2a9f,
+            0xd503_2fff,
+        ] {
+            assert!(
+                decode_system_mode_instruction(pc, word).unwrap().is_some(),
+                "{word:#x}"
+            );
+        }
+        // DMB ISH, NOP, YIELD, CSDB and SB stay with the ordinary decoder.
+        for word in [0xd503_3bbf, NOP, 0xd503_203f, 0xd503_229f, 0xd503_30ff] {
+            assert!(
+                decode_system_mode_instruction(pc, word).unwrap().is_none(),
+                "{word:#x}"
+            );
+        }
+    }
+
+    #[test]
     fn unrelated_words_do_not_become_runtime_system_requests() {
         for word in [NOP, ADD_IMMEDIATE, RET, UNALLOCATED] {
             assert!(

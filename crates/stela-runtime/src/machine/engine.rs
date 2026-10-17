@@ -3342,6 +3342,31 @@ mod tests {
         assert_eq!(machine.cpu.pc, BASE + 4);
     }
 
+    #[test]
+    fn completion_barriers_and_unallocated_hints_only_advance_the_pc() {
+        let mut machine = machine(&[]);
+        for el in [0, 1, 2] {
+            // DSB SY, DSB OSHLD, ISB, SSBB, PSSBB, HINT #0x54 and #0x7f.
+            for word in [
+                0xd503_3f9f,
+                0xd503_319f,
+                0xd503_3fdf,
+                0xd503_309f,
+                0xd503_349f,
+                0xd503_2a9f,
+                0xd503_2fff,
+            ] {
+                machine.cpu.set_pstate(Pstate::reset(el));
+                machine.cpu.pc = BASE;
+                let before = machine.cpu.state.clone();
+                machine.system_instruction(word).unwrap();
+                assert_eq!(machine.cpu.pc, BASE + 4, "{word:#x} at EL{el}");
+                assert_eq!(machine.cpu.pstate.el, el);
+                assert_eq!(machine.cpu.state, before, "{word:#x} at EL{el}");
+            }
+        }
+    }
+
     /// A machine with the OS lock clear and MDSCR_EL1 `mdscr`.
     fn debug_machine(mdscr: u64) -> Machine<FakeHost, NoDevices> {
         let mut machine = machine(&[0xd503_201f, 0xd503_201f, 0xd503_201f]);
