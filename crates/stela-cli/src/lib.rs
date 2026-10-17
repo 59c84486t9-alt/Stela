@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod apfs;
 mod args;
 mod boot;
 pub mod compile;
@@ -72,6 +73,9 @@ pub(crate) enum Command {
     DecryptAea(images::DecryptAea),
     /// Copy selected guest files out of a decrypted disk image.
     ExtractGuestFiles(images::ExtractGuestFiles),
+    /// Inspect APFS images with Stela's own reader.
+    #[command(subcommand)]
+    Apfs(apfs::ApfsCommand),
     /// Prepare the kernel boot bundle that the UEFI mount loads.
     #[command(subcommand)]
     Boot(boot::BootCommand),
@@ -106,6 +110,7 @@ impl Command {
             Self::FetchAeaKey(command) => command.run(),
             Self::DecryptAea(command) => command.run(),
             Self::ExtractGuestFiles(command) => command.run(),
+            Self::Apfs(command) => command.run(),
             Self::Boot(command) => command.run(),
             Self::Setup(command) => command.run(),
             Self::Efi(command) => command.run(),
