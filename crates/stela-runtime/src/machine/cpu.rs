@@ -56,6 +56,9 @@ pub struct SystemRegisters {
     pub hcr: u64,
     /// TPIDR_EL2 when the profile has EL2.
     pub tpidr_el2: u64,
+    /// Apple VMSA_LOCK_EL1: locks of the kernel level's translation
+    /// registers.
+    pub vmsa_lock: u64,
     /// Registers of levels that never execute under a VHE host: EL1 and GL1
     /// copies reached through `*_EL12`, `*_EL02` and `*_GL12` encodings, and
     /// EL2 virtualization controls that only act on guests. Values are kept;

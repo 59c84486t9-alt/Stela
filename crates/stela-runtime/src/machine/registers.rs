@@ -157,6 +157,8 @@ pub mod encodings {
         FAR_GL1 = 3, 6, 15, 10, 7;
         // Apple PAC (XNU `xnu-6153.141.1` `pexpert/pexpert/arm64/arm64_common.h`).
         APCTL_EL1 = 3, 4, 15, 0, 4;
+        // XNU `xnu-6153.141.1` `arm64_common.h` (HAS_VMSA_LOCK).
+        VMSA_LOCK_EL1 = 3, 4, 15, 1, 2;
         APSTS_EL1 = 3, 6, 15, 12, 4;
         KERNELKEYLO_EL1 = 3, 4, 15, 1, 0;
         KERNELKEYHI_EL1 = 3, 4, 15, 1, 1;
@@ -392,6 +394,15 @@ const INACTIVE: [Encoding; 44] = [
     APCTL_EL12,
     VM_TMR_FIQ_ENA_EL2,
 ];
+/// VMSA_LOCK_EL1 bits (XNU `xnu-6153.141.1` `arm64_common.h`): each locks
+/// one translation register, and bit 63 locks SCTLR.M.
+const VMSA_LOCK_VBAR: u64 = 1 << 0;
+const VMSA_LOCK_SCTLR: u64 = 1 << 1;
+const VMSA_LOCK_TCR: u64 = 1 << 2;
+const VMSA_LOCK_TTBR0: u64 = 1 << 3;
+const VMSA_LOCK_TTBR1: u64 = 1 << 4;
+const VMSA_LOCK_SCTLR_M: u64 = 1 << 63;
+const VMSA_LOCK_KNOWN: u64 = 0x1f | VMSA_LOCK_SCTLR_M;
 /// CNTx_CTL.ENABLE.
 const TIMER_ENABLE: u64 = 1;
 const CNTKCTL_EL0PCTEN: u64 = 1 << 0;
@@ -585,6 +596,7 @@ impl Cpu {
             APGAKEYHI_EL1 => system.keys[4][1],
             HCR_EL2 => system.hcr,
             TPIDR_EL2 => system.tpidr_el2,
+            VMSA_LOCK_EL1 => system.vmsa_lock,
             encoding if self.apple(encoding).is_some() => {
                 return self.apple(encoding).expect("checked").read(self);
             }
@@ -615,6 +627,9 @@ impl Cpu {
     }
 
     fn write(&mut self, encoding: Encoding, value: u64, now: u64) -> Outcome {
+        if let Some(reason) = self.vmsa_locked(encoding, value) {
+            return Outcome::Refused(Refusal::UnsupportedSetting(reason));
+        }
         let mut changes = Changes::default();
         let pstate = self.pstate;
         let system = &mut self.system;
@@ -753,6 +768,20 @@ impl Cpu {
                 changes.interrupts = true;
             }
             TPIDR_EL2 => system.tpidr_el2 = value,
+            VMSA_LOCK_EL1 => {
+                if value & !VMSA_LOCK_KNOWN != 0 {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(
+                        "VMSA_LOCK_EL1 bit without documented meaning",
+                    ));
+                }
+                // A lock is not documented to be releasable.
+                if system.vmsa_lock & !value != 0 {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(
+                        "VMSA_LOCK_EL1 write clearing a lock bit",
+                    ));
+                }
+                system.vmsa_lock = value;
+            }
             encoding if self.apple(encoding).is_some() => {
                 return self.apple(encoding).expect("checked").write(self, value);
             }
@@ -775,6 +804,26 @@ impl Cpu {
             _ => return Outcome::Refused(Refusal::Unimplemented),
         }
         Outcome::Written(changes)
+    }
+
+    /// A write VMSA_LOCK_EL1 forbids. What hardware does with it is not
+    /// documented (XNU checks the lock in software before writing TTBR1 and
+    /// panics), so it stops.
+    fn vmsa_locked(&self, encoding: Encoding, value: u64) -> Option<&'static str> {
+        let lock = self.system.vmsa_lock;
+        let sctlr = self.system.translation.sctlr;
+        let locked = |bit: u64| lock & bit != 0;
+        match encoding {
+            VBAR_EL1 if locked(VMSA_LOCK_VBAR) => Some("VBAR write under VMSA_LOCK_EL1"),
+            SCTLR_EL1 if locked(VMSA_LOCK_SCTLR) => Some("SCTLR write under VMSA_LOCK_EL1"),
+            SCTLR_EL1 if locked(VMSA_LOCK_SCTLR_M) && (value ^ sctlr) & 1 != 0 => {
+                Some("SCTLR.M change under VMSA_LOCK_EL1")
+            }
+            TCR_EL1 if locked(VMSA_LOCK_TCR) => Some("TCR write under VMSA_LOCK_EL1"),
+            TTBR0_EL1 if locked(VMSA_LOCK_TTBR0) => Some("TTBR0 write under VMSA_LOCK_EL1"),
+            TTBR1_EL1 if locked(VMSA_LOCK_TTBR1) => Some("TTBR1 write under VMSA_LOCK_EL1"),
+            _ => None,
+        }
     }
 
     /// MSR (immediate). `encoding` is the decoded op1/CRm/op2 form.
@@ -1243,6 +1292,28 @@ mod tests {
             cpu.access_register(mrs(0, Encoding::new(3, 4, 1, 2, 0)), &environment),
             Outcome::Refused(Refusal::Unimplemented)
         );
+        // VMSA_LOCK_EL1 locks TTBR1 and SCTLR.M; locks are not released.
+        write(&mut cpu, TTBR1_EL1, 0x4000);
+        assert!(matches!(
+            write(&mut cpu, VMSA_LOCK_EL1, VMSA_LOCK_TTBR1 | VMSA_LOCK_SCTLR_M),
+            Outcome::Written(_)
+        ));
+        assert!(matches!(
+            write(&mut cpu, TTBR1_EL1, 0x8000),
+            Outcome::Refused(Refusal::UnsupportedSetting(_))
+        ));
+        assert!(matches!(
+            write(&mut cpu, TTBR0_EL1, 0x8000),
+            Outcome::Written(_)
+        ));
+        assert!(matches!(
+            write(&mut cpu, SCTLR_EL1, 1),
+            Outcome::Refused(Refusal::UnsupportedSetting(_))
+        ));
+        assert!(matches!(
+            write(&mut cpu, VMSA_LOCK_EL1, 0),
+            Outcome::Refused(Refusal::UnsupportedSetting(_))
+        ));
         // SPRR locks bind outside the guarded level; the undocumented
         // SPRR_CONFIG bits lock the other SPRR registers there too.
         cpu.pstate.guarded = false;
