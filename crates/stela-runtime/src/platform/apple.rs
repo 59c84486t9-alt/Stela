@@ -14,6 +14,7 @@ pub mod bus;
 pub mod counter;
 pub mod interrupt;
 pub mod ipi;
+pub mod lockdown;
 pub mod pmgr;
 pub mod timer;
 pub mod uart;

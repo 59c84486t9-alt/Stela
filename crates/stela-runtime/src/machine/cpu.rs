@@ -60,6 +60,16 @@ pub struct GuardedBank {
 }
 
 pub const GXF_CONFIG_EN: u64 = 1;
+/// GXF_CONFIG bits without public meaning that SPTM 26A434 sets in EL2's
+/// configuration once its GL2 entry, abort and vector addresses are in
+/// place (`__text+0xbf6c` to `__text+0xbf9c`): bits 1, 2, 3 and 5 always,
+/// and bit 6 when it also clears EL1's configuration, entry and abort
+/// (`GXF_CONFIG_EL12`, `GXF_ENTER_EL12`, `GXF_ABORT_EL12`). As with
+/// SPRR_CONFIG's undocumented bits, they are taken as locks that bind
+/// outside the guarded level: bits 1 to 5 of EL2's own GXF registers, which
+/// only SPTM writes, and bit 6 of EL1's enable (inference).
+pub const GXF_CONFIG_LOCKS: u64 = 0b10_1110;
+pub const GXF_CONFIG_EL1_LOCK: u64 = 1 << 6;
 pub const ASPSR_GUARDED: u64 = 1;
 
 /// Apple's implementation-defined state (machine::registers dispatches its
@@ -73,8 +83,8 @@ pub struct AppleState {
     pub sprr_perm: [u64; 4],
     /// `S3_6_C15_C3_0` and `S3_6_C15_C3_1` (`mmu::Sprr::fields`).
     pub sprr_fields: [u64; 2],
-    /// GXF_CONFIG_EL1.
-    pub gxf_config: u64,
+    /// GXF_CONFIG of EL1 and EL2.
+    pub gxf_config: [u64; 2],
     /// GL1 and GL2.
     pub guarded: [GuardedBank; 2],
     /// APCTL_EL1 and APCTL_EL2.
@@ -87,6 +97,10 @@ pub struct AppleState {
     /// VM_TMR_FIQ_ENA_EL2: bit 0 lets the EL1 virtual timer, bit 1 the EL1
     /// physical timer, signal FIQ.
     pub vm_timer_fiq: u64,
+    /// SPR_LOCKDOWN_EL2, unknown until written, and whether
+    /// `S3_4_C15_C12_5` has committed it.
+    pub spr_lockdown: Option<u64>,
+    pub spr_locked: bool,
     /// Implementation-defined registers without architectural effect here.
     pub impdef: super::impdef::Registers,
 }
@@ -105,7 +119,7 @@ impl Default for AppleState {
             sprr_config: 0,
             sprr_perm: [0; 4],
             sprr_fields: [0; 2],
-            gxf_config: 0,
+            gxf_config: [0; 2],
             guarded: [GuardedBank::default(), GuardedBank::default()],
             apctl: [0; 2],
             kernel_key: [0; 2],
@@ -114,6 +128,8 @@ impl Default for AppleState {
             // Both EL1 timers signal FIQ until EL2 software says otherwise
             // (inference: m1n1 and SPTM program it explicitly).
             vm_timer_fiq: VM_TIMER_FIQ_VIRTUAL | VM_TIMER_FIQ_PHYSICAL,
+            spr_lockdown: None,
+            spr_locked: false,
             impdef: super::impdef::Registers::default(),
         }
     }
@@ -540,11 +556,12 @@ impl Cpu {
         regime == TranslationRegime::El10 && self.hcr(HCR_VM)
     }
 
-    /// GXF is usable when both SPRR and GXF are enabled (m1n1 `gxf.c`
-    /// `gxf_enabled`).
+    /// GXF is usable when both SPRR and the current EL's GXF are enabled
+    /// (m1n1 `gxf.c` `gxf_enabled`).
     pub fn guarded_enabled(&self) -> bool {
+        let level = usize::from(self.pstate.el.max(1)) - 1;
         self.apple.sprr_config & mmu::SPRR_CONFIG_EN != 0
-            && self.apple.gxf_config & GXF_CONFIG_EN != 0
+            && self.apple.gxf_config[level] & GXF_CONFIG_EN != 0
     }
 
     /// GENTER at EL1 or EL2: bank the return state in that GL's registers and

@@ -12,6 +12,7 @@ use crate::platform::apple::{
     aic1::Aic1,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     interrupt::{CpuIndex, InterruptLatch},
+    lockdown::Lockdown,
     uart::S5lUart,
     wdt::AppleWdt,
 };
@@ -102,6 +103,18 @@ impl AppleDevices {
     ) -> Result<(), MapError> {
         let device = self.bus.add(Box::new(S5lUart::new(console, irq)));
         self.map(device, ranges)
+    }
+
+    /// The lockdown registers of a CPU implementation block named `name`
+    /// at `range`, with CONTROL `control` bytes from its start.
+    pub fn add_lockdown(
+        &mut self,
+        name: &'static str,
+        control: u64,
+        range: Range,
+    ) -> Result<(), MapError> {
+        let device = self.bus.add(Box::new(Lockdown::new(name, control)));
+        self.map(device, &[range])
     }
 
     /// The SoC watchdog; `now` is the counter value its timers start from.

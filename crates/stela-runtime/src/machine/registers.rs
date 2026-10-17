@@ -14,8 +14,9 @@
 //! IMPLEMENTATION DEFINED space from EL1 to EL2.
 use super::{
     cpu::{
-        Cpu, GXF_CONFIG_EN, GuardedBank, PERM_EL0_10, PERM_EL0_20, PERM_EL1, PERM_EL2,
-        TranslationRegime, VM_TIMER_FIQ_PHYSICAL, VM_TIMER_FIQ_VIRTUAL,
+        Cpu, GXF_CONFIG_EL1_LOCK, GXF_CONFIG_EN, GXF_CONFIG_LOCKS, GuardedBank, PERM_EL0_10,
+        PERM_EL0_20, PERM_EL1, PERM_EL2, TranslationRegime, VM_TIMER_FIQ_PHYSICAL,
+        VM_TIMER_FIQ_VIRTUAL,
     },
     exception::Pstate,
     impdef,
@@ -106,6 +107,11 @@ pub mod encodings {
         GXF_ABORT_EL1 = 3, 6, 15, 8, 2;
         GXF_ENTER_EL12 = 3, 6, 15, 15, 2;
         GXF_ABORT_EL12 = 3, 6, 15, 15, 3;
+        // No public name: EL1's GXF_CONFIG from EL2. SPTM 26A434 clears it
+        // with GXF_ENTER_EL12 and GXF_ABORT_EL12 (`__text+0xbf8c`) and later
+        // clears its bit 0 alone (`__text+0x59e7c`); the kernel saves and
+        // restores it with a VM's GL12 registers (0xfffffe000bda2b5c).
+        GXF_CONFIG_EL12 = 3, 6, 15, 15, 1;
         SP_GL12 = 3, 6, 15, 10, 0;
         TPIDR_GL1 = 3, 6, 15, 10, 1;
         VBAR_GL1 = 3, 6, 15, 10, 2;
@@ -136,6 +142,10 @@ pub mod encodings {
         // KERNEL_CNTVCTSS_EL0: "S3_4_C15_C10_6 and ACNTVCT_EL0 have identical
         // encodings"; m1n1 CNTVCT_ALIAS_EL0).
         CNTVCT_ALIAS_EL0 = 3, 4, 15, 10, 6;
+        // m1n1 `cpu_regs.h` "Lockdown registers"; the commit register has no
+        // public name (see `Apple::SprLockdown`).
+        SPR_LOCKDOWN_EL2 = 3, 4, 15, 0, 5;
+        SPR_LOCKDOWN_COMMIT = 3, 4, 15, 12, 5;
     }
 }
 use encodings::*;
@@ -256,7 +266,8 @@ enum Apple {
     SprrPerm(usize),
     /// `S3_6_C15_C3_0` (0) and `S3_6_C15_C3_1` (1).
     SprrFields(usize),
-    GxfConfig,
+    /// GXF_CONFIG of EL1 (0) or EL2 (1).
+    GxfConfig(usize),
     GxfStatus,
     /// GXF_ENTER (true) or GXF_ABORT of a guarded level.
     GxfEntry(usize, bool),
@@ -271,6 +282,15 @@ enum Apple {
     VmsaLock,
     VmTimerFiq,
     CountAlias,
+    /// SPR_LOCKDOWN_EL2 (`false`) and `S3_4_C15_C12_5` (`true`). SPTM 26A434
+    /// writes SPR_LOCKDOWN_EL2 once per PE, with every bit except 4, 27 and
+    /// 63, after its MMIO lockdown (`__text+0x181a4`), then writes 1 to
+    /// `S3_4_C15_C12_5` (`__text+0x181bc`); neither is read. Inferred from
+    /// that order: the first selects what is locked and bit 0 of the second
+    /// commits it. Once committed, a write that changes either stops. What
+    /// each bit protects is not documented, so the commit makes no other
+    /// register read-only here (docs/design/system.md records the gap).
+    SprLockdown(bool),
 }
 
 fn bank_read(bank: &GuardedBank, encoding: Encoding) -> u64 {
@@ -332,7 +352,8 @@ impl Cpu {
             SPRR_PERM_EL02 => return el2(Apple::SprrPerm(PERM_EL0_10)),
             SPRR_FIELDS_0 => Apple::SprrFields(0),
             SPRR_FIELDS_1 => Apple::SprrFields(1),
-            GXF_CONFIG_EL1 => Apple::GxfConfig,
+            GXF_CONFIG_EL1 => Apple::GxfConfig(level),
+            GXF_CONFIG_EL12 => return el2(Apple::GxfConfig(0)),
             GXF_STATUS_EL1 => Apple::GxfStatus,
             GXF_ENTER_EL1 => Apple::GxfEntry(level, true),
             GXF_ABORT_EL1 => Apple::GxfEntry(level, false),
@@ -355,6 +376,8 @@ impl Cpu {
             VMSA_LOCK_EL1 => Apple::VmsaLock,
             VM_TMR_FIQ_ENA_EL2 => return el2(Apple::VmTimerFiq),
             CNTVCT_ALIAS_EL0 => Apple::CountAlias,
+            SPR_LOCKDOWN_EL2 => return el2(Apple::SprLockdown(false)),
+            SPR_LOCKDOWN_COMMIT => return el2(Apple::SprLockdown(true)),
             _ => return None,
         }))
     }
@@ -579,7 +602,7 @@ impl Apple {
             Self::SprrPerm(_) if !sprr_enabled => return Outcome::Undefined,
             Self::SprrPerm(index) => apple.sprr_perm[index],
             Self::SprrFields(which) => apple.sprr_fields[which],
-            Self::GxfConfig => apple.gxf_config,
+            Self::GxfConfig(level) => apple.gxf_config[level],
             Self::GxfStatus => u64::from(cpu.pstate.guarded),
             Self::GxfEntry(level, true) => apple.guarded[level].enter,
             Self::GxfEntry(level, false) => apple.guarded[level].abort,
@@ -597,6 +620,11 @@ impl Apple {
             Self::VmsaLock => apple.vmsa_lock,
             Self::VmTimerFiq => apple.vm_timer_fiq,
             Self::CountAlias => unreachable!("the caller completes the count alias"),
+            Self::SprLockdown(_) => {
+                return Outcome::Refused(Refusal::UnsupportedSetting(
+                    "read of a lockdown register no software reads",
+                ));
+            }
         })
     }
 
@@ -619,6 +647,12 @@ impl Apple {
             && locked(SPRR_CONFIG_UNDOCUMENTED)
         {
             return refuse("SPRR register write after an undocumented SPRR_CONFIG lock bit");
+        }
+        if matches!(self, Self::GxfConfig(1) | Self::GxfEntry(1, _))
+            && !guarded
+            && apple.gxf_config[1] & GXF_CONFIG_LOCKS != 0
+        {
+            return refuse("EL2 GXF register write after an undocumented GXF_CONFIG lock bit");
         }
         match self {
             Self::SprrConfig => {
@@ -648,11 +682,18 @@ impl Apple {
                 apple.sprr_fields[which] = value;
                 changes.translation = true;
             }
-            Self::GxfConfig => {
-                if value & !GXF_CONFIG_EN != 0 {
-                    return refuse("GXF_CONFIG_EL1 bit without documented meaning");
+            Self::GxfConfig(level) => {
+                if value & !(GXF_CONFIG_EN | GXF_CONFIG_LOCKS | GXF_CONFIG_EL1_LOCK) != 0 {
+                    return refuse("GXF_CONFIG bit without documented or observed meaning");
                 }
-                apple.gxf_config = value;
+                if level == 0
+                    && !guarded
+                    && value & GXF_CONFIG_EN != 0
+                    && apple.gxf_config[1] & GXF_CONFIG_EL1_LOCK != 0
+                {
+                    return refuse("EL1 GXF enable after GXF_CONFIG bit 6");
+                }
+                apple.gxf_config[level] = value;
             }
             Self::GxfStatus | Self::ApStatus | Self::CountAlias => return Outcome::Undefined,
             Self::GxfEntry(level, true) => apple.guarded[level].enter = value,
@@ -684,6 +725,21 @@ impl Apple {
                 }
                 apple.vm_timer_fiq = value;
                 changes.interrupts = true;
+            }
+            Self::SprLockdown(false) => {
+                if apple.spr_locked && apple.spr_lockdown != Some(value) {
+                    return refuse("SPR_LOCKDOWN_EL2 change after its commit");
+                }
+                apple.spr_lockdown = Some(value);
+            }
+            Self::SprLockdown(true) => {
+                if value & !1 != 0 {
+                    return refuse("S3_4_C15_C12_5 bit without documented meaning");
+                }
+                if apple.spr_locked && value == 0 {
+                    return refuse("S3_4_C15_C12_5 write releasing the SPR lockdown");
+                }
+                apple.spr_locked = value == 1;
             }
         }
         Outcome::Written(changes)
@@ -721,6 +777,84 @@ mod tests {
                 | u32::from(read.rt()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn sptms_gxf_finalization_locks_el2s_gxf_and_el1s_enable() {
+        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        let write = |cpu: &mut Cpu, encoding, value| {
+            cpu.state.x[5] = value;
+            cpu.apple_access(msr(5, encoding), 0)
+        };
+        let written = |outcome| matches!(outcome, Outcome::Written(_));
+        let refused = |outcome| matches!(outcome, Outcome::Refused(_));
+        // SPTM enables GXF at EL2 and enters GL2.
+        assert!(written(write(&mut cpu, SPRR_CONFIG_EL1, 1)));
+        assert!(written(write(&mut cpu, GXF_CONFIG_EL1, 1)));
+        assert!(cpu.guarded_enabled());
+        cpu.pstate.guarded = true;
+        // At GL2 it clears EL1's GXF and sets the undocumented bits.
+        for encoding in [GXF_CONFIG_EL12, GXF_ENTER_EL12, GXF_ABORT_EL12] {
+            assert!(written(write(&mut cpu, encoding, 0)));
+        }
+        assert!(written(write(&mut cpu, GXF_CONFIG_EL1, 0x6f)));
+        assert_eq!(cpu.apple.gxf_config, [0, 0x6f]);
+        assert_eq!(
+            cpu.apple_access(mrs(0, GXF_CONFIG_EL1), 0),
+            Outcome::Read(0x6f)
+        );
+        // Outside GL2, EL2's GXF registers and EL1's enable are locked, but
+        // EL1's entry points are not.
+        cpu.pstate.guarded = false;
+        assert!(refused(write(&mut cpu, GXF_ENTER_EL1, 0x1000)));
+        assert!(refused(write(&mut cpu, GXF_CONFIG_EL1, 0x6f)));
+        assert!(refused(write(&mut cpu, GXF_CONFIG_EL12, 1)));
+        assert!(written(write(&mut cpu, GXF_ENTER_EL12, 0x2000)));
+        // Bits nobody sets refuse; EL1 reaches only its own configuration.
+        let mut fresh = Cpu::new(0, Pstate::reset(2));
+        assert!(refused(write(&mut fresh, GXF_CONFIG_EL1, 1 << 7)));
+        let mut el1 = Cpu::new(0, Pstate::reset(1));
+        assert_eq!(write(&mut el1, GXF_CONFIG_EL12, 0), Outcome::Undefined);
+        assert!(written(write(&mut el1, GXF_CONFIG_EL1, 1)));
+        assert_eq!(el1.apple.gxf_config, [1, 0]);
+    }
+
+    #[test]
+    fn sptms_spr_lockdown_commits_at_el2_and_then_holds() {
+        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        let write = |cpu: &mut Cpu, encoding, value| {
+            cpu.state.x[5] = value;
+            cpu.apple_access(msr(5, encoding), 0)
+        };
+        let written = |outcome| matches!(outcome, Outcome::Written(_));
+        const MASK: u64 = 0x7fff_f7ff_ffff_ffef;
+        assert!(written(write(&mut cpu, SPR_LOCKDOWN_EL2, MASK)));
+        assert!(written(write(&mut cpu, SPR_LOCKDOWN_COMMIT, 1)));
+        assert_eq!(
+            (cpu.apple.spr_lockdown, cpu.apple.spr_locked),
+            (Some(MASK), true)
+        );
+        // The same values again complete; a change or a release stops.
+        assert!(written(write(&mut cpu, SPR_LOCKDOWN_EL2, MASK)));
+        assert!(written(write(&mut cpu, SPR_LOCKDOWN_COMMIT, 1)));
+        for (encoding, value) in [(SPR_LOCKDOWN_EL2, u64::MAX), (SPR_LOCKDOWN_COMMIT, 0)] {
+            assert!(matches!(
+                write(&mut cpu, encoding, value),
+                Outcome::Refused(_)
+            ));
+        }
+        // Undocumented bits and reads refuse; both are UNDEFINED below EL2.
+        let mut fresh = Cpu::new(0, Pstate::reset(2));
+        assert!(matches!(
+            write(&mut fresh, SPR_LOCKDOWN_COMMIT, 2),
+            Outcome::Refused(_)
+        ));
+        assert!(matches!(
+            fresh.apple_access(mrs(0, SPR_LOCKDOWN_EL2), 0),
+            Outcome::Refused(_)
+        ));
+        let mut el1 = Cpu::new(0, Pstate::reset(1));
+        assert_eq!(write(&mut el1, SPR_LOCKDOWN_EL2, MASK), Outcome::Undefined);
     }
 
     #[test]

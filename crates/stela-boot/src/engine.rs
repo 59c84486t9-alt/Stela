@@ -285,9 +285,18 @@ fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String>
         .add_watchdog(&[wdt.0], Some(wdt.1), now)
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
     devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
+    for block in board.map_or(&[][..], |board| &board.lockdown) {
+        let range = Range {
+            physical: block.physical,
+            bytes: block.bytes,
+        };
+        devices
+            .add_lockdown(block.name, block.control, range)
+            .map_err(|error| alloc::format!("{} placement: {error:?}", block.name))?;
+    }
     output::arguments(format_args!(
         "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
-         aic-timebase=unplaced\n",
+         lockdown-blocks={} aic-timebase=unplaced\n",
         uart.0.physical,
         uart.0.bytes,
         uart.1.irq,
@@ -295,7 +304,8 @@ fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String>
         wdt.0.bytes,
         wdt.1.irq,
         aic.physical,
-        aic.inputs
+        aic.inputs,
+        board.map_or(0, |board| board.lockdown.len())
     ));
     Ok(devices)
 }

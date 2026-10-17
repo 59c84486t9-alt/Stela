@@ -29,6 +29,9 @@ use alloc::{format, string::String, vec::Vec};
 /// `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and `t600x-j375.dtsi`, which the
 /// t602x boards include); the SoCs without a public memory node have none,
 /// and their boards state it in their DeviceTree ([`board_dram_base`]).
+/// `lockdown` is the CONTROL offset of the lockdown registers in each PE's
+/// `cpu-impl-reg` and each cluster's `cpm-impl-reg` (`platform::apple::
+/// lockdown`), on the SoCs whose SPTM shows them: the T8112's 26A434 SPTM.
 struct Soc {
     chip_id: u32,
     name: &'static str,
@@ -36,6 +39,7 @@ struct Soc {
     parts: [(u8, u16); 2],
     aic: Option<(&'static str, u64)>,
     dram_base: Option<u64>,
+    lockdown: Option<[u64; 2]>,
 }
 
 const SOCS: [Soc; 14] = [
@@ -46,6 +50,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x022), (b'P', 0x023)],
         aic: Some(("aic,1", AIC1_EVENT)),
         dram_base: Some(0x8_0000_0000),
+        lockdown: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -54,6 +59,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x024), (b'P', 0x025)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
+        lockdown: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -62,6 +68,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x028), (b'P', 0x029)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
+        lockdown: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -70,6 +77,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x032), (b'P', 0x033)],
         aic: Some(("aic,2", 0x8000)),
         dram_base: Some(0x8_0000_0000),
+        lockdown: Some([0x5000, 0x9000]),
     },
     Soc {
         chip_id: 0x6020,
@@ -78,6 +86,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x034), (b'P', 0x035)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
+        lockdown: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -86,6 +95,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x038), (b'P', 0x039)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
+        lockdown: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -94,6 +104,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x042), (b'P', 0x043)],
         aic: Some(("aic,3", 0x40000)),
         dram_base: None,
+        lockdown: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -102,6 +113,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x044), (b'P', 0x045)],
         aic: None,
         dram_base: None,
+        lockdown: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -110,6 +122,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x048), (b'P', 0x049)],
         aic: None,
         dram_base: None,
+        lockdown: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -118,6 +131,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x052), (b'P', 0x053)],
         aic: None,
         dram_base: None,
+        lockdown: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -126,6 +140,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x054), (b'P', 0x055)],
         aic: None,
         dram_base: None,
+        lockdown: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -134,6 +149,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x058), (b'P', 0x059)],
         aic: None,
         dram_base: None,
+        lockdown: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -142,6 +158,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x062), (b'P', 0x063)],
         aic: None,
         dram_base: None,
+        lockdown: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -150,6 +167,7 @@ const SOCS: [Soc; 14] = [
         parts: [(b'E', 0x072), (b'P', 0x073)],
         aic: None,
         dram_base: None,
+        lockdown: None,
     },
 ];
 
@@ -162,6 +180,9 @@ pub struct Cpus {
     /// The `aic` node's `compatible` and its event register's offset from its
     /// `reg`, on a SoC whose AIC a public DeviceTree places.
     pub aic: Option<(&'static str, u64)>,
+    /// The SoC's lockdown CONTROL offsets in `cpu-impl-reg` and
+    /// `cpm-impl-reg`, where known.
+    pub lockdown: Option<[u64; 2]>,
 }
 
 /// The guest DRAM base of the SoC with `chip_id`.
@@ -262,6 +283,7 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
         })
         .collect::<Result<_, String>>()?;
     Ok(Cpus {
+        lockdown: soc.lockdown,
         chip: soc.chip,
         processors,
         aic: soc.aic,
@@ -274,6 +296,17 @@ pub struct Device {
     pub physical: u64,
     pub bytes: u64,
     pub irq: u32,
+}
+
+/// The lockdown registers of one CPU implementation block: the ADT `/cpus`
+/// property naming the block, its guest PA and size, and the offset of its
+/// lockdown CONTROL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockdownBlock {
+    pub name: &'static str,
+    pub physical: u64,
+    pub bytes: u64,
+    pub control: u64,
 }
 
 /// The AIC: its core block's guest PA, its input count and its layout.
@@ -335,6 +368,9 @@ pub struct Board {
     pub watchdog: Device,
     /// `/arm-io/aic`, an `aic,1`, `aic,2` or `aic,3`.
     pub aic: InterruptController,
+    /// Every PE's `cpu-impl-reg` and every cluster's `cpm-impl-reg`, once
+    /// each, on a SoC whose lockdown offsets are known; none otherwise.
+    pub lockdown: Vec<LockdownBlock>,
 }
 
 /// The board a DeviceTree describes, or why the engine cannot model it: its
@@ -357,11 +393,15 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         .map(|name| name.trim_end_matches('\0'))
         .ok_or("DeviceTree has no /product product-soc-name")?;
     let mut found = Vec::new();
+    let mut blocks = Vec::new();
     root.child("cpus")
         .ok_or("DeviceTree has no /cpus")?
         .visit(&mut |node| {
             if let Some(cluster_type) = node.property("cluster-type") {
                 found.push((cluster_type.first().copied(), node.first_u32("reg")));
+                for (index, name) in ["cpu-impl-reg", "cpm-impl-reg"].into_iter().enumerate() {
+                    blocks.push((index, name, node.pairs(name)));
+                }
             }
         })
         .ok_or("DeviceTree walk failed")?;
@@ -373,6 +413,24 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let cpus = cpus(chip_id, soc_name, &processors)?;
+    let mut lockdown: Vec<LockdownBlock> = Vec::new();
+    for (index, name, pairs) in blocks.into_iter().filter(|_| cpus.lockdown.is_some()) {
+        let (physical, bytes) = pairs
+            .and_then(|pairs| pairs.first().copied())
+            .ok_or_else(|| format!("a /cpus node has no {name}"))?;
+        let control = cpus.lockdown.expect("filtered")[index];
+        if control + 16 > bytes {
+            return Err(format!("{name} at {physical:#x} has no lockdown registers"));
+        }
+        if !lockdown.iter().any(|block| block.physical == physical) {
+            lockdown.push(LockdownBlock {
+                name,
+                physical,
+                bytes,
+                control,
+            });
+        }
+    }
     let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
     let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
     let place = |name: &str, model: Option<&str>| -> Result<(Node<'_>, u64, u64), String> {
@@ -431,6 +489,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         cpus,
         uart,
         watchdog,
+        lockdown,
         aic: InterruptController {
             physical,
             inputs,
@@ -563,12 +622,17 @@ mod tests {
                 .flat_map(|c| c.to_le_bytes())
                 .collect::<Vec<_>>()
         };
+        // The J473AP's blocks: cpu0's and cpu4's `cpu-impl-reg`, and their
+        // clusters' `cpm-impl-reg`.
         let cpu = |name: &str, kind: &[u8], reg: u32| {
+            let cluster = 0x100_0000 * u64::from(reg >> 8);
             encode(
                 &[
                     ("name", &z(name)),
                     ("cluster-type", kind),
                     ("reg", &u32s(&[reg])),
+                    ("cpu-impl-reg", &u64s(&[0x2_1005_0000 + cluster, 0x9010])),
+                    ("cpm-impl-reg", &u64s(&[0x2_10e4_0000 + cluster, 0x9010])),
                 ],
                 &[],
             )
@@ -678,6 +742,22 @@ mod tests {
             }
         );
         assert_eq!(found.watchdog.irq, 379);
+        // Each PE's cpu-impl-reg and each cluster's cpm-impl-reg, once.
+        let block = |name, physical, control| LockdownBlock {
+            name,
+            physical,
+            bytes: 0x9010,
+            control,
+        };
+        assert_eq!(
+            found.lockdown,
+            [
+                block("cpu-impl-reg", 0x2_1005_0000, 0x5000),
+                block("cpm-impl-reg", 0x2_10e4_0000, 0x9000),
+                block("cpu-impl-reg", 0x2_1105_0000, 0x5000),
+                block("cpm-impl-reg", 0x2_11e4_0000, 0x9000),
+            ]
+        );
         // The UART's input 739 is the highest that names the AIC.
         assert_eq!(
             found.aic,
@@ -701,6 +781,8 @@ mod tests {
             (m1.cpus.chip, m1.aic.layout),
             (Chip::AppleM1, AicLayout::V1)
         );
+        // No SPTM shows the M1's lockdown registers.
+        assert!(m1.lockdown.is_empty());
         assert_eq!(
             board(&tree(0x8103, "Apple M1", MODELED)),
             Err("/arm-io/aic is not aic,1, the modeled device".into())
