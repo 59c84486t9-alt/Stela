@@ -1118,6 +1118,81 @@ mod tests {
     }
 
     #[test]
+    fn hcrx_and_vncr_hold_their_fields_at_el2_where_the_chip_has_hcx_and_nv2() {
+        const HCRX_EL2: Encoding = Encoding::new(3, 4, 1, 2, 2);
+        const VNCR_EL2: Encoding = Encoding::new(3, 4, 2, 2, 0);
+        const HCR_NV: u64 = 1 << 42;
+        let mut machine = machine(&[]);
+        let chip = machine.profile.chip;
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x2_0000);
+        machine.derived_changed();
+        for (encoding, register, feature) in [
+            (HCRX_EL2, Register::HCRX_EL2, Feature::FEAT_HCX),
+            (VNCR_EL2, Register::VNCR_EL2, Feature::FEAT_NV2),
+        ] {
+            // At EL2, MSR then MRS of every bit returns the chip's fields
+            // (HCRX_EL2 has none on the M3, FNB being RES0 without
+            // FEAT_TLBID); without the feature both are UNDEFINED.
+            machine.cpu.pstate = Pstate::reset(2);
+            machine.cpu.pc = BASE;
+            machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
+            machine.cpu.state.x[0] = u64::MAX;
+            machine
+                .system_instruction(access(false, encoding, 0))
+                .unwrap();
+            machine.cpu.state.x[1] = 1;
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            if feature.on(chip) {
+                assert_eq!(
+                    (machine.cpu.state.x[1], machine.cpu.pc),
+                    (!register.res0(chip), BASE + 8),
+                    "{register:?}"
+                );
+            } else {
+                assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x0200_0000);
+                assert_eq!(machine.cpu.state.x[1], 1, "{register:?}");
+            }
+            // At EL1 it is UNDEFINED, or under HCR_EL2.NV traps to EL2
+            // (EC 0x18).
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.cpu.pc = BASE;
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+            if Feature::FEAT_NV.on(chip) {
+                machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_NV);
+                let esr = el2_trap(&mut machine, access(true, encoding, 1));
+                assert_eq!(esr >> 26, 0x18, "{register:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hcr_el2_at_traps_el1_address_translation_where_the_chip_has_nv() {
+        const AT_S1E1R_X0: u32 = 0xd508_7800;
+        const HCR_AT: u64 = 1 << 44;
+        let mut machine = machine(&[]);
+        let chip = machine.profile.chip;
+        machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_AT);
+        if Feature::FEAT_NV.on(chip) {
+            assert_eq!(machine.cpu.read(Register::HCR_EL2) & HCR_AT, HCR_AT);
+            let esr = el2_trap(&mut machine, AT_S1E1R_X0);
+            assert_eq!(esr >> 26, 0x18);
+        } else {
+            // RES0 without FEAT_NV: AT completes at EL1.
+            assert_eq!(machine.cpu.read(Register::HCR_EL2) & HCR_AT, 0);
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.cpu.pc = BASE;
+            machine.system_instruction(AT_S1E1R_X0).unwrap();
+            assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, BASE + 4));
+        }
+    }
+
+    #[test]
     fn the_m6_error_record_group_status_reads_zero_and_fgt2_traps_it() {
         const ERXGSR_EL1: Encoding = Encoding::new(3, 0, 5, 3, 2);
         const HFGRTR2_NERXGSR: u64 = 1 << 1;
