@@ -104,7 +104,7 @@ impl Disk {
         let id = format!("disk{index}");
         command.arg("-drive").arg(format!(
             "if=none,id={id},format=raw,file={}",
-            self.path.display()
+            super::option_path(&self.path)
         ));
         let bus = if self.device == "ide-hd" {
             command.args(["-device", "ahci,id=ahci"]);

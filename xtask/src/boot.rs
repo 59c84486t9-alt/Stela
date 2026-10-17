@@ -196,6 +196,13 @@ enum Display {
     Cocoa,
 }
 
+/// A path inside a QEMU option list, where a comma separates options and a
+/// literal comma is written twice (QEMU `docs/system/invocation`), so a
+/// directory such as `bundles/Mac14,2` stays one value.
+pub(crate) fn option_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace(',', ",,")
+}
+
 pub fn run(command: Command) -> Result<ExitCode> {
     match command {
         Command::Build { release } => {
@@ -409,22 +416,28 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .arg("-drive")
         .arg(format!(
             "if=pflash,format=raw,readonly=on,file={}",
-            firmware.join(FIRMWARE_CODE).display()
+            option_path(&firmware.join(FIRMWARE_CODE))
         ))
         .arg("-drive")
-        .arg(format!("if=pflash,format=raw,file={}", variables.display()))
+        .arg(format!(
+            "if=pflash,format=raw,file={}",
+            option_path(&variables)
+        ))
         .arg("-drive")
         .arg(match &arguments.usb_image {
             Some(usb) => format!(
                 "if=none,id=volume,format=raw,snapshot=on,file={}",
-                usb.display()
+                option_path(usb)
             ),
             None => match &fat {
                 Some(image) => format!(
                     "if=none,id=volume,format=raw,readonly=on,file={}",
-                    image.display()
+                    option_path(image)
                 ),
-                None => format!("if=none,id=volume,format=raw,{access}{}", volume.display()),
+                None => format!(
+                    "if=none,id=volume,format=raw,{access}{}",
+                    option_path(&volume)
+                ),
             },
         })
         .args(["-device", "virtio-blk-pci,drive=volume"]);
@@ -439,7 +452,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .arg("-drive")
             .arg(format!(
                 "if=none,id=target,format=raw,file={}",
-                target.display()
+                option_path(&target)
             ))
             .arg("-device")
             .arg(match arguments.payload {
@@ -461,7 +474,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .args(["-display", "cocoa", "-chardev"])
             .arg(format!(
                 "vc,id=uart,cols=132,rows=50,logfile={}",
-                serial.display()
+                option_path(&serial)
             ))
             .args(["-serial", "chardev:uart"]),
     };
@@ -839,4 +852,15 @@ fn disable_drivers(volume: &Path, paths: &[String]) -> Result<()> {
     }
     root.to_file_xml(&config)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_paths_double_their_commas() {
+        let path = std::path::Path::new("/tmp/bundles/Mac14,2/variables.fd");
+        assert_eq!(option_path(path), "/tmp/bundles/Mac14,,2/variables.fd");
+    }
 }

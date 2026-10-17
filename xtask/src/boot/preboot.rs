@@ -114,7 +114,7 @@ impl Preboot {
             .arg("-drive")
             .arg(format!(
                 "if=none,id=preboot,format=raw,snapshot=on,file={}",
-                self.path.display()
+                super::option_path(&self.path)
             ))
             .arg("-device")
             .arg(format!("nvme,drive=preboot,serial={SERIAL}"));
