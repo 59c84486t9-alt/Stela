@@ -192,6 +192,10 @@ impl Context {
         } else {
             tcr & 63
         };
+        // CalculateBottomPACBit: an out-of-range TnSZ is CONSTRAINED
+        // UNPREDICTABLE, FORCE or NONE; FORCE to 16..=39 (no FEAT_TTST or
+        // 52-bit VAs), the range the system engine's walker admits.
+        let tnsz = tnsz.clamp(MIN_TNSZ, MAX_TNSZ);
         policy::Layout {
             address_bits: 64 - tnsz as u32,
             top_shift: if tbi { 55 } else { 63 },
@@ -303,6 +307,10 @@ impl Context {
         self.authenticate(Key::Ib, pointer, modifier)
     }
 }
+
+/// TnSZ limits of the PAC field without FEAT_TTST or 52-bit VAs.
+const MIN_TNSZ: u64 = 16;
+const MAX_TNSZ: u64 = 39;
 
 const CELL_MASK: u64 = 0x1111_1111_1111_1111;
 const SHUFFLE: [u8; 16] = [13, 6, 11, 0, 7, 12, 1, 10, 8, 3, 14, 5, 2, 9, 4, 15];
@@ -460,6 +468,26 @@ pub(crate) mod conditional;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn out_of_range_tnsz_is_forced_into_the_architectural_range() {
+        // TTBR1 walks disabled with T1SZ=0, as a TTBR0-only EL1 leaves it.
+        let tcr = 25 | 1 << 23;
+        let context = Context::new(1, all_keys()).with_translation_regime(tcr);
+        let upper = context.layout(policy::Domain::Data, 0xffff_0000_0000_1000);
+        assert_eq!(upper.address_bits, 64 - MIN_TNSZ as u32);
+        assert_eq!(
+            context.layout(policy::Domain::Data, 0x1000).address_bits,
+            39
+        );
+        let wide = Context::new(1, all_keys()).with_translation_regime(48);
+        assert_eq!(
+            wide.layout(policy::Domain::Data, 0x1000).address_bits,
+            64 - MAX_TNSZ as u32
+        );
+        // Signing an upper pointer no longer overflows.
+        assert!(context.sign(Key::Da, 0xffff_0000_0000_1000, 0).is_ok());
+    }
 
     // PACIBSP/AUTIBSP vectors recorded from Unicorn 2.1.4 (CPU max, QARMA5, PAuth1,
     // VA47, instruction TBI off) with public test keys.
