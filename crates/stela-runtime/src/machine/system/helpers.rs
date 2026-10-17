@@ -36,14 +36,27 @@ pub fn sign_extend(value: u64, width: u64) -> u64 {
     (((value << shift) as i64) >> shift) as u64
 }
 
-/// Arm `EffectiveHCR_EL2_NVx`: HCR_EL2.{NV2, NV1, NV} in effect, '000'
-/// without FEAT_NV. No chip's FEAT_NV is implemented yet, so a chip that
-/// has it stops in `Context::implemented`.
-pub fn hcr_nvx(c: &mut dyn Context) -> Result<u64, Effect> {
-    if c.implemented(Feature::FEAT_NV)? {
-        return Err(Effect::Refused(Feature::FEAT_NV.unimplemented()));
+pub const HCR_NV: u32 = 42;
+pub const HCR_NV2: u32 = 45;
+
+/// Arm `EffectiveHCR_EL2_NVx` of an HCR_EL2 value: HCR_EL2.{NV2, NV1, NV}
+/// in effect, EL2 being enabled. NV1 is RAZ (the IMPLEMENTATION DEFINED
+/// choice "HCR_EL2.NV1 is implemented as RAZ", `cargo xtask system-matrix`
+/// IMPDEF), so NV = 0 gives '000' and NV1 reads 0; NV2 takes effect only when
+/// it is set (the choice that '10' does not behave as '11').
+pub fn effective_nvx(hcr: u64, nv: bool, nv2: bool) -> u64 {
+    if !nv || bits(hcr, u64::from(HCR_NV), 1) == 0 {
+        return 0;
     }
-    Ok(0)
+    let nv2 = nv2 && bits(hcr, u64::from(HCR_NV2), 1) == 1;
+    u64::from(nv2) << 2 | 1
+}
+
+/// [`effective_nvx`] for the PE in `c`: '000' without FEAT_NV.
+pub fn hcr_nvx(c: &mut dyn Context) -> Result<u64, Effect> {
+    let nv = c.implemented(Feature::FEAT_NV)?;
+    let nv2 = nv && c.implemented(Feature::FEAT_NV2)?;
+    Ok(effective_nvx(c.read(Register::HCR_EL2, 0), nv, nv2))
 }
 
 fn tge(c: &dyn Context) -> bool {
@@ -129,6 +142,16 @@ pub fn can_trap_ic(c: &dyn Context, kind: CacheType, op: CacheOp, scope: CacheSc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_virtualization_controls_take_effect_only_with_nv() {
+        let (nv, nv1, nv2) = (1u64 << HCR_NV, 1u64 << 43, 1u64 << HCR_NV2);
+        assert_eq!(effective_nvx(nv | nv2, false, false), 0);
+        assert_eq!(effective_nvx(nv1 | nv2, true, true), 0);
+        assert_eq!(effective_nvx(nv | nv1, true, true), 0b001);
+        assert_eq!(effective_nvx(nv | nv2, true, true), 0b101);
+        assert_eq!(effective_nvx(nv | nv2, true, false), 0b001);
+    }
 
     #[test]
     fn bit_fields_insert_and_extend() {

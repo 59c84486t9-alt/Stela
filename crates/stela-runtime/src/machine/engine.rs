@@ -2033,7 +2033,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.cpu.pstate.el == 0 {
             return self.undefined();
         }
-        if self.fine_grained_trap(HFGITR_ERET) {
+        // HFGITR_EL2.ERET, or HCR_EL2.NV in effect (no FEAT_NV3), traps an
+        // EL1 ERET to EL2 (Arm `AArch64_CheckForERetTrap`).
+        if self.fine_grained_trap(HFGITR_ERET)
+            || self.cpu.pstate.el == 1 && self.cpu.nested() & 1 != 0
+        {
             let iss = match key {
                 None => 0,
                 Some(AuthenticationKey::A) => 0b10,
@@ -2647,6 +2651,94 @@ mod tests {
             panic!("refusal")
         };
         assert_eq!(requirement.syndrome, Some(0x6231_fc05));
+    }
+
+    #[test]
+    fn a_guest_hypervisor_under_nv_traps_eret_sees_el2_and_reaches_vncr_memory() {
+        const ERET: u32 = 0xd69f_03e0;
+        const SVC: u32 = 0xd400_0001;
+        const MRS_X0_HCRX_EL2: u32 = 0xd53c_1240;
+        const NV: u64 = 1 << 42;
+        const NV2: u64 = 1 << 45;
+        let chip = crate::machine::Chip::AppleM3;
+        let mut machine = machine(&[]);
+        machine.profile.chip = chip;
+        machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        registers.set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
+        registers.set(SystemRegister::HCR_EL2, 0, NV | 1 << 43);
+        // NV1 is RAZ/WI on the chips with FEAT_NV.
+        let nested = NV | 1 << 43 | NV2;
+        assert_eq!(machine.cpu.read(SystemRegister::HCR_EL2) & nested, NV);
+        // ERET at EL1 traps to EL2: EC 0x1A, ISS 0.
+        machine.system_instruction(ERET).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x6a00_0000);
+        assert_eq!(machine.cpu.pstate.el, 2);
+        // An SVC taken from EL1 to EL1 records EL2h in SPSR_EL1.M.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.system_instruction(SVC).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1) & 0xf, 0b1001);
+        // With NV2, MRS HCRX_EL2 at EL1 loads VNCR_EL2 + 0xA0 instead, here
+        // through the flat EL2&0 regime.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, NV | NV2);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VNCR_EL2, 0, BASE + 0x1000);
+        assert!(
+            machine
+                .host
+                .write_ram(BASE + 0x10a0, &0x1234_u64.to_le_bytes())
+        );
+        machine.system_instruction(MRS_X0_HCRX_EL2).unwrap();
+        assert_eq!(machine.cpu.state.x[0], 0x1234);
+        // A translation fault on it is an NV2 Data Abort to EL2: EC 0x25 with
+        // ISS.VNCR, FAR_EL2 the VNCR address.
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::TCR_EL2, 0, 25);
+        registers.set(SystemRegister::TTBR0_EL2, 0, BASE + 0x8000);
+        let sctlr = registers.get(SystemRegister::SCTLR_EL2, 0);
+        registers.set(SystemRegister::SCTLR_EL2, 0, sctlr | 1);
+        machine.derived_changed();
+        machine.system_instruction(MRS_X0_HCRX_EL2).unwrap();
+        let esr = machine.cpu.read(SystemRegister::ESR_EL2);
+        assert_eq!((esr >> 26, esr & 1 << 13 != 0), (0x25, true));
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL2), BASE + 0x10a0);
+        assert_eq!(machine.cpu.pstate.el, 2);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL2, 0, sctlr);
+        machine.derived_changed();
+        machine.cpu.set_pstate(Pstate::reset(1));
+        // Outside RAM the access stops explicitly.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VNCR_EL2, 0, 0x4000_0000);
+        assert!(matches!(
+            machine.system_instruction(MRS_X0_HCRX_EL2),
+            Err(Stop::Unsupported(_))
+        ));
+        // The M2 has no FEAT_NV: the bits are RES0 and ERET returns.
+        let mut machine = super::tests::machine(&[]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, NV | NV2);
+        assert_eq!(machine.cpu.read(SystemRegister::HCR_EL2) & (NV | NV2), 0);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::ELR_EL1, 0, BASE + 0x40);
+        machine.cpu.registers.set(SystemRegister::SPSR_EL1, 0, 0x5);
+        machine.system_instruction(ERET).unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (BASE + 0x40, 1));
     }
 
     #[test]

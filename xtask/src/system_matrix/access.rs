@@ -281,7 +281,7 @@ pub fn generate(
                     zeros,
                     ones,
                 )?);
-                res0.push(zeros);
+                res0.push(zeros | super::codegen::raz_by_choice(&rust));
                 res1.push(ones);
             }
             layouts.push(Layout {

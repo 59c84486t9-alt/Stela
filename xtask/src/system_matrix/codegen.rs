@@ -26,7 +26,7 @@ const ENUMS: [(&str, &str); 10] = [
 ];
 
 /// Decided IMPLEMENTATION DEFINED choices, by the AARCHMRS text.
-const IMPDEF: [(&str, bool, &str); 4] = [
+const IMPDEF: [(&str, bool, &str); 6] = [
     (
         "IMPLEMENTED_ACTLR_ELx accessor behavior",
         true,
@@ -47,7 +47,33 @@ const IMPDEF: [(&str, bool, &str); 4] = [
         false,
         "the profile has no AArch32 Execution state",
     ),
+    (
+        "HCR_EL2.NV1 is implemented as RAZ",
+        true,
+        "Arm permits it without FEAT_E2H0, and ID_AA64MMFR4_EL1.E2H0 reads 0b1110 \
+         (HCR_EL2.E2H RES1 and NV1 RES0); Apple's NV1 behavior on the chips with \
+         FEAT_NV has no public evidence (Linux `has_nv1` treats the M2's as unusable)",
+    ),
+    (
+        "Programming HCR_EL2.<NV,NV2> to '10' behaves as '11'",
+        false,
+        "HCR_EL2.NV2 takes effect only when it is set (inferred)",
+    ),
 ];
+
+/// Fields an IMPLEMENTATION DEFINED choice makes RAZ/WI, as (register, bit,
+/// the choice's text): reserved in every layout while the choice is TRUE.
+pub const RAZ_BY_CHOICE: [(&str, u32, &str); 1] =
+    [("HCR_EL2", 43, "HCR_EL2.NV1 is implemented as RAZ")];
+
+/// The bits of `register` that a decided IMPLEMENTATION DEFINED choice makes
+/// RAZ/WI.
+pub fn raz_by_choice(register: &str) -> u64 {
+    RAZ_BY_CHOICE
+        .iter()
+        .filter(|(name, _, text)| *name == register && impdef_choice(text) == Some(true))
+        .fold(0, |mask, (_, bit, _)| mask | 1 << bit)
+}
 
 /// `<ID register> trapped by HCR_EL2.TID3`, asked of the ID registers that
 /// later architecture versions allocated: trapped, as Arm requires on the

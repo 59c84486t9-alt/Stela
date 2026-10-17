@@ -1720,10 +1720,10 @@ impl Register {
             Register::HCR_EL2 => [
                 0xff093cc000008000,
                 0xff013cc000008000,
-                0xff0100c000008000,
-                0xff0100c000008000,
-                0xf80100c000008000,
-                0xf80100c000008000,
+                0xff0108c000008000,
+                0xff0108c000008000,
+                0xf80108c000008000,
+                0xf80108c000008000,
             ][chip as usize],
             Register::HCRX_EL2 => [
                 0xffffffffffffffff,

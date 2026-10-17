@@ -81,7 +81,8 @@ const fn engine(holds: bool, reason: &'static str) -> Basis {
     Basis::Engine(holds, reason)
 }
 
-const NO_NESTING: &str = "nested virtualization is outside the profile (Apple offers it from M3)";
+const NESTING: &str = "HCR_EL2.NV traps and reports EL2 to a guest hypervisor at EL1, and \
+     NV2 redirects its register accesses to VNCR_EL2 memory (NV1 is RAZ)";
 const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
 const STAGE2_HOST: &str = "stage-2 translation of the EL1&0 regime";
 const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
@@ -512,6 +513,16 @@ pub const TABLE: &[Row] = &[
     ),
     // ID_AA64MMFR1_EL1
     feature(ID_AA64MMFR1_EL1, 8, 1, "FEAT_VHE", Basis::Host(VHE_HOST)),
+    feature(
+        ID_AA64MMFR1_EL1,
+        40,
+        1,
+        "FEAT_HCX",
+        engine(
+            true,
+            "HCRX_EL2 with its traps; its fields belong to features the chip has",
+        ),
+    ),
     // FEAT_HPDS (Armv8.1), FEAT_XNX, FEAT_TTCNP (Armv8.2), FEAT_S2FWB,
     // FEAT_TTL (Armv8.4) and FEAT_E0PD (Armv8.5) are mandatory in the
     // Armv8.6 profile, without an Apple clang feature name.
@@ -638,13 +649,8 @@ pub const TABLE: &[Row] = &[
              PSTATE.UAO makes them privileged",
         ),
     ),
-    feature(
-        ID_AA64MMFR2_EL1,
-        24,
-        1,
-        "FEAT_NV",
-        engine(false, NO_NESTING),
-    ),
+    feature(ID_AA64MMFR2_EL1, 24, 1, "FEAT_NV", engine(true, NESTING)),
+    feature(ID_AA64MMFR2_EL1, 24, 2, "FEAT_NV2", engine(true, NESTING)),
     feature(
         ID_AA64MMFR2_EL1,
         32,
@@ -705,7 +711,8 @@ pub const TABLE: &[Row] = &[
     ),
     fixed(CTR_EL0, 31, 1, "RES1"),
     // ID_AA64MMFR4_EL1.E2H0 = 0b1110: HCR_EL2.E2H is RES1 (no FEAT_E2H0) and
-    // HCR_EL2.NV1 is RES0 (no FEAT_NV). The M2 itself predates the field.
+    // HCR_EL2.NV1 is RES0 (RAZ where FEAT_NV is, an IMPLEMENTATION DEFINED
+    // choice). The M2 itself predates the field.
     fixed(
         ID_AA64MMFR4_EL1,
         24,
@@ -846,6 +853,7 @@ pub fn derive(chip: Chip, target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::system::Feature;
     use std::{collections::BTreeSet, path::Path};
 
     fn json(name: &str) -> serde_json::Value {
@@ -853,6 +861,34 @@ mod tests {
             .join("../../isa")
             .join(name);
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn every_implemented_feature_that_varies_by_chip_is_identified() {
+        // The varying features with no ID field level of their own.
+        const NO_FIELD: [(&str, &str); 4] = [
+            ("v8Ap6", "an architecture version, not a field"),
+            ("v8Ap7", "an architecture version, not a field"),
+            (
+                "FEAT_PAuth2",
+                "APA 3, below the FEAT_FPAC level 4 of every chip with it",
+            ),
+            ("FEAT_AMUv1p1", "the AMU is withheld, so no AMU level shows"),
+        ];
+        for feature in Feature::ALL {
+            if !Chip::ALL
+                .iter()
+                .any(|chip| chip.implemented(feature) == Ok(true))
+            {
+                continue;
+            }
+            let name = feature.name();
+            assert!(
+                TABLE.iter().any(|row| row.feature == Some(name))
+                    || NO_FIELD.iter().any(|(field, _)| *field == name),
+                "{name} is implemented but has no identification row"
+            );
+        }
     }
 
     #[test]

@@ -8,7 +8,10 @@
 use super::{
     exception::{self, Class, IllegalReturn, Pstate, Vector},
     mmu::{self, Controls, Sprr},
-    system::{File, Register, helpers::bits},
+    system::{
+        Feature, File, Register,
+        helpers::{bits, effective_nvx},
+    },
 };
 use stela_compiler::GuestState;
 
@@ -275,6 +278,17 @@ impl Cpu {
         self.field(Register::HCR_EL2, bit, 1) == 1
     }
 
+    /// Arm `EffectiveHCR_EL2_NVx` (`helpers::effective_nvx`): '000' on a chip
+    /// without FEAT_NV.
+    pub fn nested(&self) -> u64 {
+        let chip = self.registers.chip();
+        effective_nvx(
+            self.read(Register::HCR_EL2),
+            Feature::FEAT_NV.on(chip),
+            Feature::FEAT_NV2.on(chip),
+        )
+    }
+
     fn bank_sp(&mut self, which: Stack) -> &mut u64 {
         match which {
             Stack::Guarded(level) => &mut self.apple.guarded[level].sp,
@@ -535,8 +549,14 @@ impl Cpu {
             return;
         }
         let bank = bank(target);
-        self.registers
-            .set_raw(bank.spsr, 0, from.to_spsr(self.state.nzcv));
+        let mut spsr = from.to_spsr(self.state.nzcv);
+        // From EL1 to EL1 under HCR_EL2.NV (with NV1 RAZ, NVx 'x01'),
+        // SPSR_EL1.M[3:2] records EL2, the level the guest hypervisor
+        // believes it runs at (Arm `AArch64_TakeException`).
+        if from.el == 1 && target == 1 && self.nested() & 0b011 == 0b001 {
+            spsr = spsr & !0b1100 | 0b1000;
+        }
+        self.registers.set_raw(bank.spsr, 0, spsr);
         self.registers
             .set_raw(bank.elr, 0, exception.return_address);
         if exception.vector == Vector::Synchronous || exception.vector == Vector::SError {

@@ -16,11 +16,11 @@ use crate::machine::{
     CpuProfile,
     cpu::{Cpu, Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_VF, HCR_VI, HCR_VSE, TranslationRegime},
     debug::{self, DCC_FULL},
-    exception::{Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
+    exception::{self, Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
     registers::{Lines, Refusal, trap_iss},
     system::{
         ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
-        Limit, Operation, Pstate, Register, Stage,
+        Limit, Operation, Pstate, Register, Stage, helpers::sign_extend,
     },
     timer::Channel,
 };
@@ -181,6 +181,73 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
     fn refuse(&self, reason: &'static str) {
         if self.refusal.get().is_none() {
             self.refusal.set(Some(reason));
+        }
+    }
+
+    /// Arm `NVMem`: the 64-bit load or store that a register access at EL1
+    /// becomes under HCR_EL2.NV2, at `SignExtend(VNCR_EL2.BADDR :: Zeros(12))
+    /// + offset`. `EffectiveBADDR` makes bits 63:49 copy bit 48 (no
+    /// FEAT_LVA; the RESS constraint). It is an EL2 access without PAN
+    /// through the EL2&0 regime (`CreateAccDescNV2`). A translation fault is
+    /// an NV2 Data Abort and a watchpoint an NV2 Watchpoint: the same-EL
+    /// classes with ISS.VNCR (bit 13) set, taken to EL2 (Arm
+    /// `AArch64_DataAbort`, `AArch64_FaultSyndrome`).
+    fn nested_access(
+        &mut self,
+        offset: u64,
+        write: bool,
+        bytes: &mut [u8; 8],
+    ) -> Result<(), Effect> {
+        const VNCR: u32 = 1 << 13;
+        let base = self.machine.cpu.read(Register::VNCR_EL2) & !0xfff;
+        let address = sign_extend(base, 49).wrapping_add(offset);
+        let pc = self.machine.cpu.pc;
+        let watched = debug::Access {
+            address,
+            size: 8,
+            read: !write,
+            write,
+            maintenance: false,
+            el: 2,
+        };
+        if let Some(mut exception) = self.machine.watchpoint_exception(&watched, pc) {
+            let iss = exception.syndrome as u32 & 0x01ff_ffff | VNCR;
+            exception.syndrome = exception::syndrome(Class::WatchpointSame, iss);
+            return Err(Effect::Exception(exception.to(2)));
+        }
+        let requester = mmu::Requester {
+            el: 2,
+            pan: false,
+            unprivileged: false,
+            guarded: false,
+        };
+        let access = if write {
+            MemoryAccess::Write
+        } else {
+            MemoryAccess::Read
+        };
+        match self.translate(TranslationRegime::El20, requester, address, access) {
+            Translated::Mapped(translation) => {
+                let done = if write {
+                    self.machine.host.write_ram(translation.physical, bytes)
+                } else {
+                    self.machine.host.read_ram(translation.physical, bytes)
+                };
+                if done {
+                    Ok(())
+                } else {
+                    Err(Effect::Refused("a VNCR_EL2 access outside RAM"))
+                }
+            }
+            Translated::Fault(fault) => {
+                let iss = fault.data_syndrome(write, false) | VNCR;
+                let mut exception = Exception::synchronous(Class::DataAbortSame, iss, pc).to(2);
+                exception.fault_address = Some(address);
+                Err(Effect::Exception(exception))
+            }
+            Translated::Unsupported(_) => Err(Effect::Refused(
+                "a VNCR_EL2 access needs an unsupported translation",
+            )),
         }
     }
 }
@@ -440,12 +507,14 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         self.now
     }
 
-    fn nv_mem(&mut self, _offset: u64) -> Result<u64, Effect> {
-        Err(Effect::Refused("FEAT_NV2 is not in the profile"))
+    fn nv_mem(&mut self, offset: u64) -> Result<u64, Effect> {
+        let mut bytes = [0; 8];
+        self.nested_access(offset, false, &mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
     }
 
-    fn set_nv_mem(&mut self, _offset: u64, _value: u64) -> Result<(), Effect> {
-        Err(Effect::Refused("FEAT_NV2 is not in the profile"))
+    fn set_nv_mem(&mut self, offset: u64, value: u64) -> Result<(), Effect> {
+        self.nested_access(offset, true, &mut value.to_le_bytes())
     }
 
     fn operation(&mut self, operation: Operation) -> Result<(), Effect> {
