@@ -177,6 +177,13 @@ next_case:
     ic      iallu
     dsb     ish
     isb
+    // An EL1 case's writes persist into later cases: restore the EL0 timer
+    // and PMU access controls the engine lane starts each case with, and
+    // stop the timers it may have started.
+    msr     cntkctl_el1, xzr
+    msr     pmuserenr_el0, xzr
+    msr     cntp_ctl_el0, xzr
+    msr     cntv_ctl_el0, xzr
 
     // Load the guest state and enter EL0.
     bl      load_scalable

@@ -38,6 +38,8 @@ const MDSCR_SS: u64 = 1;
 /// SPSR_EL1 the harness's ERET consumed: EL1t or EL0t with DAIF masked.
 const SPSR_EL1T_MASKED: u64 = 0x3c4;
 const SPSR_EL0T_STEPPED: u64 = 0x3c0 | 1 << 21;
+/// ESR_EL1 of UDF #0: EC 0 with IL set.
+const UDF_SYNDROME: u64 = 1 << 25;
 /// Blocks an EL1 case may run before its first exception: the case word and
 /// the UDF after it.
 const EL1_BLOCKS: u64 = 2;
@@ -198,7 +200,17 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     }
     let cpu = &machine.cpu;
     let mut state = cpu.state.clone();
-    let (next_pc, exception) = if machine.statistics.exceptions != 0 {
+    // A stepped EL0 case completes after its words, but the engine runs on
+    // into the zero words after them: their UDF #0 marks completion.
+    let end = CODE_PAGE + 4 * case.code.len() as u64;
+    let fell_through = !case.el1
+        && machine.statistics.exceptions != 0
+        && cpu.system.esr == UDF_SYNDROME
+        && cpu.system.elr == end;
+    let (next_pc, exception) = if fell_through {
+        state.sp = cpu.system.sp_el0;
+        (end, None)
+    } else if machine.statistics.exceptions != 0 {
         state.sp = cpu.system.sp_el0;
         let exception = Exception {
             syndrome: cpu.system.esr,

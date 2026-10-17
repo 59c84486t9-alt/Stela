@@ -7,8 +7,12 @@
 //! window must match whenever the original completes. Service forms of the
 //! system-mode profile run on the system-mode engine at EL0 instead, and their
 //! exceptions (ESR, ELR and, for aborts, FAR) must match as well.
+//! `--system-matrix` runs the system requirement matrix's rows the same way.
+mod matrix;
+
 use crate::oracle::{
-    CODE_PAGE, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome, Scalable, native::Translation,
+    CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome,
+    Scalable, native::Translation,
 };
 use crate::tools::root;
 use anyhow::{Context, Result, ensure};
@@ -71,6 +75,13 @@ pub struct Differential {
     /// Mismatches to print in full.
     #[arg(long, default_value_t = 20)]
     show: usize,
+    /// Run the System form and accessor rows of the system requirement
+    /// matrix instead of the registries.
+    #[arg(long)]
+    system_matrix: bool,
+    /// With --system-matrix: write per-row tallies as JSON here.
+    #[arg(long, requires = "system_matrix")]
+    report: Option<PathBuf>,
 }
 
 /// SplitMix64: small, fast and reproducible across hosts.
@@ -183,7 +194,9 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
 
 /// Known differences between QEMU's `max` CPU and the engine's M2 profile for
 /// system-mode words at EL0; matching cases are not compared.
-fn system_oracle_limit(form: &str, word: u32, el1: bool) -> bool {
+fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> bool {
+    // Matrix form rows carry the registry form name after a kind prefix.
+    let form = form.strip_prefix("form:").unwrap_or(form);
     // QEMU completes WFI at EL0 whenever it has pending work, masked or not,
     // instead of taking the nTWI trap; the engine has no pending wake-up.
     let wfi = word == WFI;
@@ -201,26 +214,40 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool) -> bool {
     // CRm are CONSTRAINED UNPREDICTABLE: QEMU raises UNDEFINED, Stela ignores
     // the bits. They are FlagM forms, outside this one.
     let flags = form == "MSR_SI_pstate" && op1 == 0 && op2 <= 2 && crm != 0;
+    // So is SB with nonzero should-be-zero CRm.
+    let speculation = form == "SB_only_barriers" && crm != 0;
     // QEMU's virt machine without EL2 implements PSCI on the HVC conduit, so
     // HVC at EL1 completes as a firmware call instead of being UNDEFINED.
     let psci = el1 && form == "HVC_EX_exception";
     // QEMU treats XPACLRI as a NOP while SCTLR_EL1 enables no PAC key, as the
     // harness's does; the architecture strips X30 regardless.
     let strip = word == XPACLRI;
-    // Identification registers read at EL1 report QEMU's `max` CPU, not the
-    // M2 profile (op0=3, op1 in {0, 1, 3}, CRn=0).
-    let identification = el1
-        && word & 0xfff0_0000 == 0xd530_0000
-        && (word >> 19) & 3 == 3
-        && matches!((word >> 16) & 7, 0 | 1 | 3)
-        && (word >> 12) & 15 == 0;
-    wfi || absent || sme || pstate || flags || psci || strip || identification
+    // Cache maintenance and address translation by VA (SYS with CRn=7) at an
+    // address outside the windows: the engine runs with its MMU off and QEMU
+    // through the harness's tables, so their faults differ, and QEMU makes
+    // DC IVAC, CVAC, CVAU and CIVAC NOPs that never translate.
+    let register = (word & REGISTER_FIELD) as usize;
+    let by_address = word & 0xfff8_0000 == 0xd508_0000
+        && (word >> 12) & 15 == 7
+        && register != ZERO_OR_SP as usize
+        && !in_windows(state.x[register]);
+    wfi || absent || sme || pstate || flags || speculation || psci || strip || by_address
 }
 
-/// Oracle limits: compare FPCR and FPSR only on bits both engines model, and
-/// FAR only where the exception defines it.
-fn comparable(outcome: &Outcome) -> Outcome {
+fn in_windows(address: u64) -> bool {
+    (CODE_REGION..CODE_REGION + CODE_REGION_BYTES as u64).contains(&address)
+        || (DATA_WINDOW..DATA_WINDOW + DATA_BYTES as u64).contains(&address)
+}
+
+/// Oracle limits: compare FPCR and FPSR only on bits both engines model, FAR
+/// only where the exception defines it, and what MRS read only for registers
+/// the case's state sets: QEMU's other System registers hold the harness's
+/// values and its `max` CPU's identification, not the engine's M2 profile.
+fn comparable(outcome: &Outcome, system_word: Option<u32>) -> Outcome {
     let mut outcome = outcome.clone();
+    if let Some(register) = system_word.and_then(unmirrored_read) {
+        outcome.state.x[register] = 0;
+    }
     outcome.state.fpcr &= FPCR_MASK;
     outcome.state.fpsr &= FPSR_MASK;
     if let Some(exception) = &mut outcome.exception
@@ -229,6 +256,34 @@ fn comparable(outcome: &Outcome) -> Outcome {
         exception.fault_address = 0;
     }
     outcome
+}
+
+/// The destination of an MRS whose value the lane does not mirror; PSTATE
+/// fields, FPCR and FPSR are the case's own state.
+fn unmirrored_read(word: u32) -> Option<usize> {
+    const MRS_MASK: u32 = 0xfff0_0000;
+    const MRS: u32 = 0xd530_0000;
+    // NZCV, DAIF, DIT, SSBS, FPCR and FPSR (op1=3); SPSel, CurrentEL, PAN
+    // and UAO (op1=0); as op1:CRn:CRm:op2.
+    const MIRRORED: [(u32, u32, u32, u32); 10] = [
+        (3, 4, 2, 0),
+        (3, 4, 2, 1),
+        (3, 4, 2, 5),
+        (3, 4, 2, 6),
+        (3, 4, 4, 0),
+        (3, 4, 4, 1),
+        (0, 4, 2, 0),
+        (0, 4, 2, 2),
+        (0, 4, 2, 3),
+        (0, 4, 2, 4),
+    ];
+    let field = |shift: u32, bits: u32| (word >> shift) & ((1 << bits) - 1);
+    let register = field(0, 5);
+    let selector = (field(16, 3), field(12, 4), field(8, 4), field(5, 3));
+    (word & MRS_MASK == MRS
+        && register != ZERO_OR_SP
+        && !(field(19, 1) == 1 && MIRRORED.contains(&selector)))
+    .then_some(register as usize)
 }
 
 fn is_system_mode(form: &Value) -> bool {
@@ -309,6 +364,8 @@ struct Report {
     covered: BTreeSet<String>,
     /// Original exception classes per form, kept for forms that never complete.
     uncovered: BTreeMap<String, BTreeMap<u64, usize>>,
+    /// Per-row tallies of a --system-matrix run.
+    rows: matrix::Rows,
 }
 
 impl Differential {
@@ -321,14 +378,35 @@ impl Differential {
         let mut report = Report::default();
         let mut batch = Vec::with_capacity(BATCH_WORDS);
         let mut skipped = 0;
-        self.subjects(&mut random, &mut skipped, |random, subject| {
-            batch.push(subject);
-            if batch.len() == BATCH_WORDS {
-                self.compare(&oracle, random, &mut batch, &mut report)?;
+        if self.system_matrix {
+            let (rows, subjects) =
+                matrix::subjects(&mut random, self.fields, self.form.as_deref())?;
+            report.mismatches += rows.refused_implemented.len();
+            report
+                .mismatched
+                .extend(rows.refused_implemented.iter().cloned());
+            report.rows = rows;
+            for subject in subjects {
+                batch.push(subject);
+                if batch.len() == BATCH_WORDS {
+                    self.compare(&oracle, &mut random, &mut batch, &mut report)?;
+                }
             }
-            Ok(())
-        })?;
+        } else {
+            self.subjects(&mut random, &mut skipped, |random, subject| {
+                batch.push(subject);
+                if batch.len() == BATCH_WORDS {
+                    self.compare(&oracle, random, &mut batch, &mut report)?;
+                }
+                Ok(())
+            })?;
+        }
         self.compare(&oracle, &mut random, &mut batch, &mut report)?;
+        if let Some(path) = &self.report {
+            report
+                .rows
+                .write(path, self.seed, self.states, self.fields)?;
+        }
         report
             .uncovered
             .retain(|form, _| !report.covered.contains(form));
@@ -398,8 +476,12 @@ impl Differential {
             }
             report.covered.insert(subject.form.clone());
             if oracle_limit(&subject.form, &case.state)
-                || subject.system && system_oracle_limit(&subject.form, case.code[0], case.el1)
+                || subject.system
+                    && system_oracle_limit(&subject.form, case.code[0], case.el1, &case.state)
             {
+                if let Some(tally) = report.rows.tally(&subject.form, case.el1) {
+                    tally.limited += 1;
+                }
                 continue;
             }
             // SAFETY: the original completed, so every access stays in the
@@ -409,6 +491,13 @@ impl Differential {
                 // An engine refusal of a registered form is a mismatch.
                 Err(error) if subject.system => {
                     report.compared += 1;
+                    if let Some(tally) = report.rows.tally(&subject.form, case.el1) {
+                        tally.compared += 1;
+                        tally.refused += 1;
+                    }
+                    report.rows.note(&subject.form, || {
+                        format!("{:08x} at {}: {error:#}", case.code[0], level(case))
+                    });
                     if subject.draft {
                         *report.open.entry(subject.form.clone()).or_default() += 1;
                     } else {
@@ -417,8 +506,12 @@ impl Differential {
                     }
                     if report.shown < self.show {
                         report.shown += 1;
-                        let el = if case.el1 { "EL1" } else { "EL0" };
-                        println!("{} {:08x?} at {el}: {error:#}", subject.form, case.code);
+                        println!(
+                            "{} {:08x?} at {}: {error:#}",
+                            subject.form,
+                            case.code,
+                            level(case)
+                        );
                         println!("  original exception {:x?}", original.exception);
                     }
                     continue;
@@ -426,7 +519,29 @@ impl Differential {
                 Err(error) => return Err(error),
             };
             report.compared += 1;
-            if comparable(&translated) != comparable(original) {
+            let system_word = subject.system.then_some(case.code[0]);
+            let matched = comparable(&translated, system_word) == comparable(original, system_word);
+            if let Some(tally) = report.rows.tally(&subject.form, case.el1) {
+                tally.compared += 1;
+                if matched {
+                    tally.matched += 1;
+                } else {
+                    tally.diverged += 1;
+                }
+            }
+            if !matched {
+                report.rows.note(&subject.form, || {
+                    format!(
+                        "{:08x} at {}: original next pc {:#x} exception {:x?}, \
+                         engine next pc {:#x} exception {:x?}",
+                        case.code[0],
+                        level(case),
+                        original.next_pc,
+                        original.exception,
+                        translated.next_pc,
+                        translated.exception
+                    )
+                });
                 if subject.draft {
                     *report.open.entry(subject.form.clone()).or_default() += 1;
                 } else {
@@ -435,8 +550,7 @@ impl Differential {
                 }
                 if report.shown < self.show {
                     report.shown += 1;
-                    let el = if case.el1 { "EL1" } else { "EL0" };
-                    println!("{} {:08x?} at {el}:", subject.form, case.code);
+                    println!("{} {:08x?} at {}:", subject.form, case.code, level(case));
                     print_difference(case, original, &translated);
                 }
             }
@@ -570,8 +684,11 @@ fn el1_admissible(word: u32) -> bool {
     const SYS_MASK: u32 = 0xfff8_0000;
     const SYS: u32 = 0xd508_0000;
     const HLT_SEMIHOSTING: u32 = 0xd45e_0000;
-    // MSR targets as op0:op1:CRn:CRm:op2 selectors (bits 19..5).
-    const HARNESS_REGISTERS: [(u32, u32, u32, u32, u32); 9] = [
+    // MSR targets as op0:op1:CRn:CRm:op2 selectors (bits 19..5): the
+    // harness's controls, its step count in TPIDR_EL1, the OS lock and
+    // double lock that stepping needs, MTE's GCR_EL1, and the register forms
+    // of SPSel, PAN and SVCR.
+    const HARNESS_REGISTERS: [(u32, u32, u32, u32, u32); 16] = [
         (3, 0, 12, 0, 0), // VBAR_EL1
         (3, 0, 1, 0, 0),  // SCTLR_EL1
         (3, 0, 1, 0, 2),  // CPACR_EL1
@@ -581,6 +698,13 @@ fn el1_admissible(word: u32) -> bool {
         (3, 0, 2, 0, 2),  // TCR_EL1
         (3, 0, 10, 2, 0), // MAIR_EL1
         (2, 0, 0, 2, 2),  // MDSCR_EL1
+        (3, 0, 13, 0, 4), // TPIDR_EL1
+        (2, 0, 1, 0, 4),  // OSLAR_EL1
+        (2, 0, 1, 3, 4),  // OSDLR_EL1
+        (3, 0, 1, 0, 6),  // GCR_EL1
+        (3, 0, 4, 2, 0),  // SPSel
+        (3, 0, 4, 2, 3),  // PAN
+        (3, 3, 4, 2, 2),  // SVCR
     ];
     let field = |shift: u32, bits: u32| (word >> shift) & ((1 << bits) - 1);
     if RETURNS.contains(&word)
@@ -609,6 +733,10 @@ fn el1_admissible(word: u32) -> bool {
         return !(field(16, 3) == 3 && field(12, 4) == 7 && field(8, 4) == 4);
     }
     true
+}
+
+fn level(case: &Case) -> &'static str {
+    if case.el1 { "EL1" } else { "EL0" }
 }
 
 fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
