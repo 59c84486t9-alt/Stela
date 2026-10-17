@@ -172,18 +172,19 @@ pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str)
             check_test(test)?;
         }
     }
-    // The other chips where each implicit entry's every test was credited.
-    let credited: Vec<Vec<&str>> = registry
+    // Whether an implicit entry's every test was credited on each other
+    // chip.
+    let credited: Vec<BTreeMap<&str, bool>> = registry
         .iter()
         .map(|entry| {
             CHIPS
                 .iter()
                 .map(|chip| chip.name)
-                .filter(|chip| *chip != DEFAULT_CHIP)
-                .filter(|chip| {
-                    !entry.explicit
-                        && !entry.tests.is_empty()
-                        && entry.tests.iter().all(|test| runs.credits(chip, test))
+                .filter(|chip| *chip != DEFAULT_CHIP && !entry.explicit)
+                .map(|chip| {
+                    let holds = !entry.tests.is_empty()
+                        && entry.tests.iter().all(|test| runs.credits(chip, test));
+                    (chip, holds)
                 })
                 .collect()
         })
@@ -212,12 +213,14 @@ pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str)
                     *winner = Some(entry);
                 }
             }
-            // A credited chip takes the entry only for a row the M2 shares,
-            // which is what the entry's tests established.
+            // On a row the M2 shares, an implicit entry speaks for every
+            // chip, as the last match: an implemented one only where its
+            // tests were credited, leaving the row open elsewhere, and any
+            // other status, which claims nothing, everywhere.
             if chips.contains_key(DEFAULT_CHIP) {
-                for chip in credited {
+                for (chip, holds) in credited {
                     if let Some(winner) = chips.get_mut(*chip) {
-                        *winner = Some(entry);
+                        *winner = (*holds || entry.status != "implemented").then_some(entry);
                     }
                 }
             }
@@ -579,6 +582,42 @@ mod tests {
         let hcrx = row("register:HCRX_EL2");
         assert_eq!(hcrx["status"], "open");
         assert!(hcrx["statuses"].is_null(), "open on every chip");
+        Ok(())
+    }
+
+    #[test]
+    fn a_later_implicit_entry_overrides_earlier_ones_on_every_chip() -> Result<()> {
+        let text = fs::read_to_string(root().join(MATRIX))?;
+        let mut matrix = parse(&text)?;
+        matrix.rows.retain(|id, _| id == "register:HCR_EL2");
+        let mut implemented = entry("register:*", &[DEFAULT_CHIP], "implemented");
+        implemented.explicit = false;
+        implemented.tests = vec![TEST.into()];
+        let mut refused = entry("register:HCR_EL2", &[DEFAULT_CHIP], "refused");
+        refused.explicit = false;
+        let render = |registry: &[Entry]| -> Result<Value> {
+            Ok(serde_json::from_str(&render(
+                &matrix,
+                registry,
+                &m3_runs()?,
+                "",
+            )?)?)
+        };
+        // A refusal for the M2 holds on every chip, though an earlier entry
+        // was credited on the M3.
+        let mut first = entry("register:*", &[DEFAULT_CHIP], "implemented");
+        first.explicit = false;
+        first.tests = vec![TEST.into()];
+        let rendered = render(&[first, refused])?;
+        assert_eq!(rendered["rows"][0]["status"], "refused");
+        assert!(rendered["rows"][0]["statuses"].is_null());
+        // An uncredited implemented entry leaves the row open on the M3
+        // instead of falling back to an earlier credited one.
+        let mut later = entry("register:HCR_EL2", &[DEFAULT_CHIP], "implemented");
+        later.explicit = false;
+        later.tests = vec!["crates/stela-runtime/src/machine/engine.rs#illegal_returns_set_il_and_the_next_instruction_takes_ec_0x0e".into()];
+        let rendered = render(&[implemented, later])?;
+        assert_eq!(rendered["rows"][0]["statuses"]["apple-m3"], "open");
         Ok(())
     }
 }
