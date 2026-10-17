@@ -1582,7 +1582,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hex",
- "lzfse_rust",
  "object",
  "serde",
  "serde_json",

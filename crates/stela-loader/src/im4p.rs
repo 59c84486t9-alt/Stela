@@ -7,11 +7,9 @@
 //! This is not an IMG4 signature validator and never decrypts keybag payloads.
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
-use std::io::{self, Write};
 
 /// IM4P compression algorithm 1 is LZFSE, with a `bvx*` block stream.
 const COMPRESSION_LZFSE: u64 = 1;
-const LZFSE_BLOCK_MAGICS: [&[u8; 4]; 4] = [b"bvx2", b"bvx1", b"bvx-", b"bvxn"];
 
 const DER_SEQUENCE: u8 = 0x30;
 const DER_IA5_STRING: u8 = 0x16;
@@ -185,28 +183,6 @@ pub fn parse(bytes: &[u8]) -> Result<Im4p<'_>> {
     })
 }
 
-struct BoundedWriter<'a> {
-    inner: &'a mut Vec<u8>,
-    maximum: u64,
-}
-
-impl Write for BoundedWriter<'_> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        let end = (self.inner.len() as u64)
-            .checked_add(buffer.len() as u64)
-            .ok_or_else(|| io::Error::other("output length overflow"))?;
-        if end > self.maximum {
-            return Err(io::Error::other("decoded output exceeds configured limit"));
-        }
-        self.inner.extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Identities of one decoded IM4P; the payload remains Apple's bytes.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodeReceipt {
@@ -237,26 +213,15 @@ pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
         "declared output exceeds configured limit"
     );
     let mut decoded = vec![];
-    let compression = if im4p
-        .payload
-        .get(..4)
-        .is_some_and(|magic| LZFSE_BLOCK_MAGICS.iter().any(|m| m.as_slice() == magic))
-    {
+    let compression = if stela_runtime::lzfse::is_lzfse(im4p.payload) {
         ensure!(
             im4p.compression_algorithm
                 .is_none_or(|n| n == COMPRESSION_LZFSE),
             "compression record disagrees with LZFSE marker"
         );
-        let mut writer = BoundedWriter {
-            inner: &mut decoded,
-            maximum,
-        };
-        let (consumed, produced) = lzfse_rust::LzfseRingDecoder::default()
-            .decode(&mut io::Cursor::new(im4p.payload), &mut writer)?;
-        ensure!(
-            consumed == im4p.payload.len() as u64 && produced == decoded.len() as u64,
-            "LZFSE stream extent mismatch"
-        );
+        let limit = usize::try_from(maximum).unwrap_or(usize::MAX);
+        decoded = stela_runtime::lzfse::decode(im4p.payload, limit)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         "lzfse"
     } else {
         ensure!(
