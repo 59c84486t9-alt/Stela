@@ -11,7 +11,7 @@
 //! exclusive may then fail spuriously, as the architecture permits, while a
 //! load/store exclusive loop shorter than a time slice still completes.
 use super::{
-    Devices, Host, Machine, RequirementKind, Start, Step, Stop, WaitKind, interrupt_pending,
+    Devices, Host, Machine, RequirementKind, Start, Step, Stop, Wait, WaitKind, interrupt_pending,
     system, timer,
 };
 use crate::machine::{cpu::Cpu, exception::Pstate, registers::CpuProfile, registers::Lines};
@@ -31,7 +31,7 @@ pub(super) enum Peer {
 pub(super) struct Parked {
     cpu: Cpu,
     event_sample: Option<u64>,
-    waiting: Option<WaitKind>,
+    waiting: Option<Wait>,
 }
 
 /// PE 0 runs; the others are off. A profile without processors has one PE.
@@ -90,25 +90,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Whether PE `pe` can run: it is running or preempted, or a WFI it waits
     /// in sees an interrupt pending (Arm `AArch64_InterruptPending`, masked or
     /// not), or a WFE sees that or its event register set, including by an
-    /// event stream edge.
+    /// event stream edge, or the local timeout of a WFIT or WFET expired.
     fn ready(&mut self, pe: usize, now: u64) -> bool {
         if pe == self.current {
             return match self.waiting {
                 None => true,
-                Some(kind) => {
+                Some(Wait { kind, timeout }) => {
                     if kind == WaitKind::Event {
                         self.sample_events(now);
                     }
-                    (kind == WaitKind::Event && self.cpu.event) || self.interrupt_pending()
+                    (kind == WaitKind::Event && self.cpu.event)
+                        || timeout.is_some_and(|timeout| timeout.expired(now))
+                        || self.interrupt_pending()
                 }
             };
         }
         let Peer::Parked(parked) = &mut self.peers[pe] else {
             return false;
         };
-        let Some(kind) = parked.waiting else {
+        let Some(Wait { kind, timeout }) = parked.waiting else {
             return true;
         };
+        if timeout.is_some_and(|timeout| timeout.expired(now)) {
+            return true;
+        }
         if kind == WaitKind::Event {
             if let Some(previous) = parked.event_sample
                 && timer::event(&parked.cpu, previous, now)
@@ -131,10 +136,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         )
     }
 
-    /// Complete the WFI or WFE the running PE woke from. A WFE that no
+    /// Complete the wait the running PE woke from. A WFE or WFET that no
     /// interrupt woke consumes the event register (`Machine::wait`).
     fn wake(&mut self) -> Step {
-        let Some(kind) = self.waiting.take() else {
+        let Some(Wait { kind, .. }) = self.waiting.take() else {
             return Ok(());
         };
         if kind == WaitKind::Event && !self.interrupt_pending() {
@@ -144,20 +149,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The earliest counter value at which a waiting PE's timer fires, its
-    /// event stream sets its event register, or a device changes state.
+    /// event stream sets its event register, its local timeout expires, or a
+    /// device changes state.
     fn next_deadline(&mut self, now: u64) -> Option<u64> {
-        let streams = |cpu: &Cpu, waiting: Option<WaitKind>| {
-            (waiting == Some(WaitKind::Event))
+        let streams = |cpu: &Cpu, waiting: Option<Wait>| {
+            (waiting.map(|wait| wait.kind) == Some(WaitKind::Event))
                 .then(|| timer::next_event(cpu, now))
                 .flatten()
+        };
+        let timeout = |waiting: Option<Wait>| {
+            waiting.and_then(|wait| wait.timeout).map(|timeout| {
+                if timeout.expired(now) {
+                    now
+                } else {
+                    timeout.deadline(now)
+                }
+            })
         };
         let mut deadlines = Vec::new();
         deadlines.push(self.timer_deadline());
         deadlines.push(streams(&self.cpu, self.waiting));
+        deadlines.push(timeout(self.waiting));
         for peer in &self.peers {
             if let Peer::Parked(parked) = peer {
                 deadlines.push(timer::deadline(&parked.cpu));
                 deadlines.push(streams(&parked.cpu, parked.waiting));
+                deadlines.push(timeout(parked.waiting));
             }
         }
         deadlines.push(self.devices.deadline(now));

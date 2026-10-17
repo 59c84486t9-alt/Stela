@@ -50,6 +50,35 @@ const FETCH_CACHE: usize = 1024;
 const JUMP_CACHE: usize = 4096;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
+
+/// A WFI, WFE, WFIT or WFET a PE waits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wait {
+    kind: WaitKind,
+    /// WFIT and WFET only.
+    timeout: Option<Timeout>,
+}
+
+/// The local timeout of WFIT and WFET (Arm `LocalTimeoutEvent`): it expires
+/// once the virtual count, the physical count minus `offset`, reaches
+/// `limit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Timeout {
+    limit: u64,
+    /// CNTVOFF_EL2 outside the host, 0 in it (Arm `VirtualCounterTimer`).
+    offset: u64,
+}
+
+impl Timeout {
+    fn expired(self, physical: u64) -> bool {
+        physical.wrapping_sub(self.offset) >= self.limit
+    }
+
+    /// The physical count at which it expires, from a count `now` before it.
+    fn deadline(self, now: u64) -> u64 {
+        now.saturating_add(self.limit - now.wrapping_sub(self.offset))
+    }
+}
 /// HFGITR_EL2 instruction traps (FEAT_FGT).
 const HFGITR_ERET: u32 = 51;
 const HFGITR_SVC_EL0: u32 = 52;
@@ -475,8 +504,8 @@ pub struct Machine<H: Host, D: Devices> {
     watch: Watch,
     /// The number of the running PE.
     current: usize,
-    /// The WFI or WFE the running PE waits in, until it wakes.
-    waiting: Option<WaitKind>,
+    /// The WFI, WFE, WFIT or WFET the running PE waits in, until it wakes.
+    waiting: Option<Wait>,
     /// Every PE by number; the running one's state is `cpu`.
     peers: Vec<processors::Peer>,
     /// The block count at which the running PE's time slice ends.
@@ -2179,26 +2208,45 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// WFI and WFE (Arm `Hint_WFI`, `Hint_WFE` and `AArch64_CheckForWFxTrap`).
     /// WFE with the event register set clears it and completes, and WFI with
     /// an interrupt pending, masked or not, completes; neither then traps.
+    /// WFET and WFIT (FEAT_WFxT) also complete once their local timeout has
+    /// expired: the virtual count reaches Xt (Arm `Hint_WFET`, `Hint_WFIT`).
     /// Otherwise SCTLR_ELx.nTWI/nTWE trap them from EL0 to EL1, or to EL2 in
     /// the host, and HCR_EL2.TWI/TWE trap them from EL0 and EL1 outside the
-    /// host to EL2. Without FEAT_WFxT the timeout forms are UNDEFINED. An
-    /// event stream event wakes WFE and, by this implementation's choice of
-    /// Arm's IMPLEMENTATION DEFINED option, clears the event register.
-    fn wait(&mut self, _word: u32, kind: WaitKind, timeout: Option<u8>) -> Step {
+    /// host to EL2, with ISS.TI the form and, for the timeout forms, RV set
+    /// and the register in ISS[9:5] (Arm `AArch64_WFxTrap`). On a chip
+    /// without FEAT_WFxT the timeout forms are UNDEFINED. An event stream
+    /// event wakes WFE and, by this implementation's choice of Arm's
+    /// IMPLEMENTATION DEFINED option, clears the event register.
+    fn wait(&mut self, _word: u32, kind: WaitKind, register: Option<u8>) -> Step {
         const HCR_TWI: u32 = 13;
         const HCR_TWE: u32 = 14;
-        if timeout.is_some() {
-            return self.undefined();
+        if register.is_some() {
+            match self.profile.chip.implemented(Feature::FEAT_WFxT) {
+                Ok(true) => {}
+                Ok(false) => return self.undefined(),
+                Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),
+            }
         }
+        let timeout = register.map(|register| Timeout {
+            limit: if register == 31 {
+                0
+            } else {
+                self.cpu.state.x[usize::from(register)]
+            },
+            offset: if self.cpu.regime() == crate::machine::cpu::TranslationRegime::El20 {
+                0
+            } else {
+                self.cpu.read(SystemRegister::CNTVOFF_EL2)
+            },
+        });
         let el = self.cpu.pstate.el;
         let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
-        let (enable_bit, hcr_trap, trap_iss) = match kind {
-            WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0),
-            WaitKind::Event => (1u64 << 18, HCR_TWE, 1),
+        let (enable_bit, hcr_trap, form) = match kind {
+            WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0b00),
+            WaitKind::Event => (1u64 << 18, HCR_TWE, 0b01),
         };
-        let iss = TRAPPED_AARCH64 | trap_iss;
+        let now = self.host.counter();
         if kind == WaitKind::Event {
-            let now = self.host.counter();
             self.sample_events(now);
         }
         match kind {
@@ -2209,6 +2257,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             WaitKind::Interrupt if self.interrupt_pending() => return self.next(),
             _ => {}
         }
+        if timeout.is_some_and(|timeout| timeout.expired(now)) {
+            return self.next();
+        }
+        // ISS.TI: 0b00 WFI, 0b01 WFE, 0b10 WFIT, 0b11 WFET; RV and the
+        // register for the timeout forms.
+        let iss = TRAPPED_AARCH64
+            | form
+            | register.map_or(0, |register| 0b10 | 1 << 2 | u32::from(register) << 5);
         if el == 0 && sctlr & enable_bit == 0 {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc));
             return Ok(());
@@ -2219,7 +2275,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         // The PE waits until the scheduler finds it woken
         // (`processors::Peer::ready`) and completes the instruction.
-        self.waiting = Some(kind);
+        self.waiting = Some(Wait { kind, timeout });
         Ok(())
     }
 
@@ -2767,6 +2823,50 @@ mod tests {
             .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
         machine.derived_changed();
         assert_eq!(wait(&mut machine, 0xd503_207f), Err(Stop::Idle));
+    }
+
+    #[test]
+    fn wfit_and_wfet_wait_until_their_timeout_and_trap_with_the_register() {
+        const WFIT_X1: u32 = 0xd503_1021;
+        const WFET_X2: u32 = 0xd503_1002;
+        const HCR_TWI: u64 = 1 << 13;
+        let chip = crate::machine::Chip::AppleM4;
+        let mut machine = machine(&[]);
+        machine.profile.chip = chip;
+        machine.cpu = Cpu::of(chip, BASE, Pstate::reset(1));
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
+        // An expired timeout completes at once; WFET also needs no event.
+        machine.cpu.state.x[2] = 0;
+        machine.system_instruction(WFET_X2).unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        // A later one waits, and the host's next tick (FakeHost adds 1000)
+        // passes it: WFIT completes without any timer or interrupt, where a
+        // WFI would be idle.
+        machine.cpu.state.x[1] = 500;
+        wait(&mut machine, WFIT_X1).unwrap();
+        assert_eq!((machine.cpu.pc, machine.statistics.waits), (BASE + 8, 1));
+        // HCR_EL2.TWI traps it to EL2: ISS.TI 0b10, RV and Rt 1, CV and COND.
+        machine.cpu.state.x[1] = u64::MAX;
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_TWI);
+        machine.system_instruction(WFIT_X1).unwrap();
+        assert_eq!(
+            machine.cpu.read(SystemRegister::ESR_EL2),
+            0x0600_0000 | 1 << 24 | 0b1110 << 20 | 1 << 5 | 1 << 2 | 0b10
+        );
+        // The M2 has no FEAT_WFxT: the timeout forms are UNDEFINED.
+        let mut machine = super::tests::machine(&[]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        machine.system_instruction(WFIT_X1).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
     }
 
     /// Execute WFI or WFE and schedule as `Machine::run` does next.

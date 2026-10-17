@@ -455,6 +455,17 @@ pub const TABLE: &[Row] = &[
         "FEAT_I8MM",
         Basis::Instructions(&[0x4e82_a420]),
     ),
+    // ID_AA64ISAR2_EL1
+    feature(
+        ID_AA64ISAR2_EL1,
+        0,
+        0b0010,
+        "FEAT_WFxT",
+        engine(
+            true,
+            "WFET and WFIT complete once the virtual count reaches Xt",
+        ),
+    ),
     // ID_AA64MMFR0_EL1
     fixed(ID_AA64MMFR0_EL1, 0, 0b0101, "48-bit physical addresses"),
     fixed(ID_AA64MMFR0_EL1, 4, 0b0010, "16-bit ASIDs"),

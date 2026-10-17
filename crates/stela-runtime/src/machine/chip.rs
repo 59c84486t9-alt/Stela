@@ -107,7 +107,8 @@ impl Chip {
 }
 
 /// Whether the engine implements a feature that only some chips have: every
-/// feature the M2 has, and the M3's FEAT_HCX, FEAT_NV and FEAT_NV2.
+/// feature the M2 has, the M3's FEAT_HCX, FEAT_NV and FEAT_NV2, and the M4's
+/// FEAT_WFxT.
 const fn engine_implements(feature: Feature) -> bool {
     match feature {
         Feature::FEAT_AMUv1p1
@@ -122,7 +123,8 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::v8Ap6
         | Feature::FEAT_NV
         | Feature::FEAT_NV2
-        | Feature::FEAT_HCX => true,
+        | Feature::FEAT_HCX
+        | Feature::FEAT_WFxT => true,
         Feature::FEAT_AFP
         | Feature::FEAT_CPA
         | Feature::FEAT_CSSC
@@ -151,7 +153,6 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_SME_LUTv2
         | Feature::FEAT_SPECRES2
         | Feature::FEAT_SVE_B16B16
-        | Feature::FEAT_WFxT
         | Feature::FEAT_XS
         | Feature::v8Ap7 => false,
     }
@@ -192,8 +193,8 @@ mod tests {
         assert_eq!(Chip::AppleM2.implemented(Feature::FEAT_HCX), Ok(false));
         assert_eq!(Chip::AppleM3.implemented(Feature::FEAT_HCX), Ok(true));
         assert_eq!(
-            Chip::AppleM4.implemented(Feature::FEAT_WFxT),
-            Err("FEAT_WFxT of the chip is not implemented")
+            Chip::AppleM4.implemented(Feature::FEAT_SME),
+            Err("FEAT_SME of the chip is not implemented")
         );
         assert_eq!(Chip::AppleM1.implemented(Feature::FEAT_FGT), Ok(false));
     }
