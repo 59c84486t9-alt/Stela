@@ -1118,6 +1118,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !self.host.read_ram(physical, &mut source) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
+        // A form the chip lacks compiles as the UDF or NOP it executes as.
+        let chip = self.profile.chip;
+        for bytes in source.as_chunks_mut::<4>().0 {
+            *bytes = chip.admit(u32::from_le_bytes(*bytes)).to_le_bytes();
+        }
         let mut length = source.len();
         if !fp {
             let first = source
@@ -1224,7 +1229,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
-    /// The original word of an instruction inside a compiled block.
+    /// The word an instruction inside a compiled block executes as: its
+    /// original word, or the UDF or NOP of a form the chip lacks.
     fn word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
         let block = &self.blocks[index];
         let physical = block.physical + (pc - block.pc);
@@ -1232,7 +1238,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !self.host.read_ram(physical, &mut bytes) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
-        Ok(u32::from_le_bytes(bytes))
+        Ok(self.profile.chip.admit(u32::from_le_bytes(bytes)))
     }
 
     fn exit(&mut self, index: usize, next_pc: u64, kind: u64) -> Step {
@@ -2435,9 +2441,17 @@ mod tests {
         assert_eq!(machine.statistics.compiled, 1);
         assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == index));
         assert_eq!(machine.statistics.compiled, 1, "cached");
-        // An SVE instruction (no FEAT_SVE) is refused at its own PC with its
-        // word.
+        // An SVE instruction compiles as the UDF it is on a chip without SVE
+        // or SME.
         let mut machine = machine_with(&[0x9100_0400, 0x04a0_0000]);
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+            panic!("block with UDF")
+        };
+        assert_eq!(machine.blocks[index].source_map.len(), 2);
+        // On the M4, whose SME has it in streaming mode, the engine does not
+        // implement it yet, so it is refused at its own PC with its word.
+        let mut machine = machine_with(&[0x9100_0400, 0x04a0_0000]);
+        machine.profile.chip = crate::machine::Chip::AppleM4;
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("prefix block")
         };

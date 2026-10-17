@@ -2,8 +2,33 @@
 //! Apple clang's export for it (`isa/apple-codegen-profiles.json`), closed
 //! under the AARCHMRS implications by `cargo xtask system-matrix`; the
 //! generated accessors decide a feature only some chips have through
-//! [`Chip::implemented`].
+//! [`Chip::implemented`], and [`Chip::admit`] makes an instruction form the
+//! chip lacks UNDEFINED (or a NOP, where Arm decodes it so).
 use super::system::generated::{CAPS, CHIPS, Feature};
+
+#[rustfmt::skip]
+mod forms;
+
+/// One A64 form some chips lack (`forms::ABSENT`).
+struct AbsentForm {
+    value: u32,
+    /// Bit `n` set when chip `n` lacks the form.
+    chips: u8,
+    /// Arm decodes the form as NOP, not UNDEFINED, without its feature.
+    nop: bool,
+    /// (mask, value, chips): forms those chips have that keep their words.
+    unless: &'static [(u32, u32, u8)],
+}
+
+/// The absent forms of one encoding mask, sorted by value.
+struct AbsentGroup {
+    mask: u32,
+    forms: &'static [AbsentForm],
+}
+
+/// `UDF #0`: an absent form's word is UNDEFINED as UDF is (EC 0x00, ISS 0).
+const UDF: u32 = 0;
+const NOP: u32 = 0xd503_201f;
 
 /// An Apple CPU, in the order of the generated per-chip tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -38,6 +63,29 @@ impl Chip {
     /// (`isa/apple-codegen-profiles.json`), the cap of what it advertises.
     pub fn cap(self) -> &'static [&'static str] {
         CAPS[self as usize]
+    }
+
+    /// The word the chip executes for `word`: the word itself, `UDF #0` for a
+    /// form the chip lacks, or NOP for an absent form Arm decodes as NOP.
+    pub fn admit(self, word: u32) -> u32 {
+        let bit = 1u8 << self as u8;
+        for group in forms::ABSENT {
+            let Ok(index) = group
+                .forms
+                .binary_search_by_key(&(word & group.mask), |form| form.value)
+            else {
+                continue;
+            };
+            let form = &group.forms[index];
+            let kept = form
+                .unless
+                .iter()
+                .any(|(mask, value, chips)| chips & bit != 0 && word & mask == *value);
+            if form.chips & bit != 0 && !kept {
+                return if form.nop { NOP } else { UDF };
+            }
+        }
+        word
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -148,5 +196,31 @@ mod tests {
             Err("FEAT_HCX of the chip is not implemented")
         );
         assert_eq!(Chip::AppleM1.implemented(Feature::FEAT_FGT), Ok(false));
+    }
+
+    #[test]
+    fn a_form_the_chip_lacks_is_undefined_or_its_nop() {
+        // bfcvt h0, s1 (FEAT_BF16, from the M2) and abs x0, x1 (FEAT_CSSC,
+        // from the M5).
+        for (word, first) in [(0x1e63_4020, Chip::AppleM2), (0xdac0_2020, Chip::AppleM5)] {
+            for chip in Chip::ALL {
+                let expected = if chip < first { UDF } else { word };
+                assert_eq!(chip.admit(word), expected, "{word:#x} {chip:?}");
+            }
+        }
+        // PACM (FEAT_PAuth_LR, M6) is a NOP without its feature, as Arm
+        // decodes it, though the HINT space it sits in is on every chip.
+        assert_eq!(Chip::AppleM2.admit(0xd503_24ff), NOP);
+        assert_eq!(Chip::AppleM6.admit(0xd503_24ff), 0xd503_24ff);
+        // RETAASPPCR (FEAT_PAuth_LR) is UNDEFINED before the M6, except for
+        // the RETAA encoding it overlaps.
+        assert_eq!(Chip::AppleM2.admit(0xd65f_0be2), UDF);
+        assert_eq!(Chip::AppleM2.admit(0xd65f_0bff), 0xd65f_0bff);
+        // Forms every chip has, and words no form claims, pass unchanged.
+        for word in [0x8b02_0020, 0xd503_201f, 0xd503_3f9f, 0x0020_1420] {
+            for chip in Chip::ALL {
+                assert_eq!(chip.admit(word), word, "{word:#x} {chip:?}");
+            }
+        }
     }
 }

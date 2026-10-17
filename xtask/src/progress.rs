@@ -6,6 +6,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, to_string as json};
 use std::{collections::BTreeMap, fs};
 
+mod forms;
+
 const CHECKLIST: &str = "isa/a64-documented-checklist.json";
 const APPLE_PROFILES: &str = "isa/apple-codegen-profiles.json";
 const APPLE_EXTENSIONS: &str = "isa/apple-specific-extensions.json";
@@ -60,10 +62,14 @@ pub fn run(check: bool) -> Result<()> {
     assess(&mut forms)?;
     let checklist = render_checklist(&checklist_text, &forms)?;
     let readme = render_readme(&readme_text, &forms)?;
+    let absent_path = root().join(forms::GENERATED);
+    let absent_text = fs::read_to_string(&absent_path).unwrap_or_default();
+    let absent = forms::render(&forms, &read_json(APPLE_PROFILES)?)?;
 
     for (path, old, new) in [
         (&checklist_path, &checklist_text, &checklist),
         (&readme_path, &readme_text, &readme),
+        (&absent_path, &absent_text, &absent),
     ] {
         if old == new {
             continue;
