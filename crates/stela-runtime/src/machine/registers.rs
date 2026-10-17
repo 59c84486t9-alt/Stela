@@ -422,48 +422,76 @@ impl Cpu {
         }
     }
 
-    /// MSR (immediate). `encoding` is the decoded op1/CRm/op2 form. DAIFSet
-    /// and DAIFClr at EL0 trap unless SCTLR_ELx.UMA allows them; PAN, UAO
-    /// and SPSel are UNDEFINED at EL0.
+    /// MSR (immediate), following Arm's `MSR (immediate)` decode for the
+    /// profile: SPSel, PAN and UAO from EL1, DAIFSet, DAIFClr, DIT and SSBS
+    /// from EL0. Every other PSTATE field encoding is UNDEFINED, including
+    /// those of features outside the profile (NMI, SME, MTE and the EBEP
+    /// family) and the EL2, EL3 and Secure op1 values. DAIFSet and DAIFClr
+    /// at EL0 trap in the host or while SCTLR_EL1.UMA is clear, to EL2 under
+    /// HCR_EL2.TGE (Arm `AArch64_CheckDAIFAccess`).
     pub fn write_pstate_field(&mut self, encoding: Encoding) -> Outcome {
         let immediate = encoding.crm();
+        let bit = immediate & 1 != 0;
         let mut changes = Changes::default();
-        let sctlr = self.controls(self.regime()).sctlr;
+        let minimum = match (encoding.op1(), encoding.op2()) {
+            (0, 3..=5) => 1,
+            (3, 1 | 2 | 6 | 7) => 0,
+            _ => return Outcome::Undefined,
+        };
+        if self.pstate.el < minimum {
+            return Outcome::Undefined;
+        }
         match (encoding.op1(), encoding.op2()) {
-            (3, 6) | (3, 7) => {
-                if self.pstate.el == 0 && sctlr & SCTLR_UMA == 0 {
-                    return Outcome::Trapped(None);
+            (3, op2 @ (6 | 7)) => {
+                if self.pstate.el == 0
+                    && (self.in_host()
+                        || self.registers.get(Register::SCTLR_EL1, 0) & SCTLR_UMA == 0)
+                {
+                    return Outcome::Trapped(Some(if self.hcr(super::cpu::HCR_TGE) {
+                        2
+                    } else {
+                        1
+                    }));
                 }
-                if encoding.op2() == 6 {
+                if op2 == 6 {
                     self.pstate.daif |= immediate;
                 } else {
                     self.pstate.daif &= !immediate;
                 }
                 changes.interrupts = true;
             }
-            _ if self.pstate.el == 0 => match (encoding.op1(), encoding.op2()) {
-                (3, 2) => self.pstate.dit = immediate & 1 != 0,
-                (3, 1) => self.pstate.ssbs = immediate & 1 != 0,
-                _ => return Outcome::Undefined,
-            },
             (0, 5) => {
                 self.set_pstate(Pstate {
-                    sp: immediate & 1 != 0,
+                    sp: bit,
                     ..self.pstate
                 });
                 changes.regime = true;
             }
             (0, 4) => {
-                self.pstate.pan = immediate & 1 != 0;
+                self.pstate.pan = bit;
                 changes.regime = true;
             }
-            (0, 3) => self.pstate.uao = immediate & 1 != 0,
-            (3, 2) => self.pstate.dit = immediate & 1 != 0,
-            (3, 1) => self.pstate.ssbs = immediate & 1 != 0,
-            _ => return Outcome::Refused(Refusal::Unimplemented),
+            (0, 3) => self.pstate.uao = bit,
+            (3, 2) => self.pstate.dit = bit,
+            _ => self.pstate.ssbs = bit,
         }
         Outcome::Written(changes)
     }
+}
+
+/// ESR ISS of a trapped MSR, MRS, SYS or SYSL word (Arm
+/// `AArch64_SystemAccessTrapSyndrome`, EC 0x18): Op0, Op2, Op1, CRn, Rt, CRm
+/// and the direction straight from the instruction. MSR (immediate) reports
+/// Op0 0 and Rt 31.
+pub fn word_trap_iss(word: u32) -> u32 {
+    let field = |shift: u32, bits: u32| (word >> shift) & ((1 << bits) - 1);
+    field(19, 2) << 20
+        | field(5, 3) << 17
+        | field(16, 3) << 14
+        | field(12, 4) << 10
+        | field(0, 5) << 5
+        | field(8, 4) << 1
+        | field(21, 1)
 }
 
 impl Apple {

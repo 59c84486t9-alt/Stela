@@ -1007,6 +1007,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(Some(instruction)) => instruction,
             _ => return refuse(self, "PAC exit at a word that is not PAC".into()),
         };
+        // The profile has no FEAT_PAuth_LR: its hint-space form (PACM) is a
+        // NOP and the others are UNDEFINED.
+        if let PointerAuthenticationOperation::LinkRegister(_) = instruction.operation {
+            return if word & 0xffff_f01f == 0xd503_201f {
+                self.next()
+            } else {
+                self.undefined()
+            };
+        }
         let uses_key = match instruction.operation.required_key() {
             Some(key) if !self.key_enabled(key) => {
                 return self.disabled_pointer_authentication(word, instruction);
@@ -1423,9 +1432,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Maintenance(access) => self.maintenance(word, access),
             SystemOperation::InstructionSynchronization { .. } => self.next(),
             SystemOperation::Synchronization(operation) => match operation {
-                Synchronization::DataCompletion { nxs: true, .. } => {
-                    Err(self.refuse_system(word, "DSB nXS needs FEAT_XS in the CPU profile"))
-                }
+                // The profile has no FEAT_XS.
+                Synchronization::DataCompletion { nxs: true, .. } => self.undefined(),
                 Synchronization::ErrorSynchronization => self.error_synchronization(),
                 Synchronization::DataCompletion { .. }
                 | Synchronization::StoreBypassBarrier { .. }
@@ -1684,7 +1692,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             RegisterOutcome::Undefined => return self.undefined(),
             RegisterOutcome::Trapped(el) => {
-                let iss = access.map_or(0, registers::trap_iss);
+                let iss = registers::word_trap_iss(word);
                 let exception = Exception::synchronous(Class::SystemRegister, iss, self.cpu.pc);
                 self.take(match el {
                     Some(el) => exception.to(el),
@@ -1705,10 +1713,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.next()
     }
 
-    /// WFI and WFE (Arm `AArch64_CheckForWFxTrap`): SCTLR_ELx.nTWI/nTWE trap
-    /// them from EL0 to EL1, or to EL2 in the host, and HCR_EL2.TWI/TWE trap
-    /// them from EL0 and EL1 outside the host to EL2. Without FEAT_WFxT the
-    /// timeout forms are UNDEFINED.
+    /// WFI and WFE (Arm `Hint_WFI`, `Hint_WFE` and `AArch64_CheckForWFxTrap`).
+    /// WFE with the event register set clears it and completes, and WFI with
+    /// an interrupt pending, masked or not, completes; neither then traps.
+    /// Otherwise SCTLR_ELx.nTWI/nTWE trap them from EL0 to EL1, or to EL2 in
+    /// the host, and HCR_EL2.TWI/TWE trap them from EL0 and EL1 outside the
+    /// host to EL2. Without FEAT_WFxT the timeout forms are UNDEFINED.
     fn wait(&mut self, _word: u32, kind: WaitKind, timeout: Option<u8>) -> Step {
         const HCR_TWI: u32 = 13;
         const HCR_TWE: u32 = 14;
@@ -1722,6 +1732,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             WaitKind::Event => (1u64 << 18, HCR_TWE, 1),
         };
         let iss = TRAPPED_AARCH64 | trap_iss;
+        match kind {
+            WaitKind::Event if self.cpu.event => {
+                self.cpu.event = false;
+                return self.next();
+            }
+            WaitKind::Interrupt if self.interrupt_pending() => return self.next(),
+            _ => {}
+        }
         if el == 0 && sctlr & enable_bit == 0 {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc));
             return Ok(());
@@ -1730,15 +1748,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc).to(2));
             return Ok(());
         }
-        if kind == WaitKind::Event && self.cpu.event {
-            self.cpu.event = false;
-            return self.next();
-        }
-        loop {
-            let lines = self.lines();
-            if lines.irq || lines.fiq {
-                break;
-            }
+        while !self.interrupt_pending() {
             let now = self.host.counter();
             let deadline = match (self.timer_deadline(), self.devices.deadline(now)) {
                 (Some(a), Some(b)) => Some(a.min(b)),
@@ -1753,6 +1763,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.host.arm_timer(None);
         self.next()
+    }
+
+    /// Arm `AArch64_InterruptPending`: a physical IRQ or FIQ line, or at EL0
+    /// and EL1 outside the host a virtual IRQ, FIQ or SError that
+    /// HCR_EL2.{IMO,FMO,AMO} route and {VI,VF,VSE} hold, masked or not.
+    fn interrupt_pending(&mut self) -> bool {
+        let lines = self.lines();
+        if lines.irq || lines.fiq {
+            return true;
+        }
+        let hcr = self.cpu.read(SystemRegister::HCR_EL2);
+        let routed = |routing: u32, pending: u32| {
+            hcr & (1 << routing | 1 << pending) == 1 << routing | 1 << pending
+        };
+        self.cpu.pstate.el != 2
+            && hcr & (1 << HCR_TGE) == 0
+            && (routed(HCR_IMO, HCR_VI) || routed(HCR_FMO, HCR_VF) || routed(HCR_AMO, HCR_VSE))
     }
 
     /// SYS and SYSL: the generated accessor of an architectural System
@@ -2397,6 +2424,79 @@ mod tests {
         machine.system_instruction(0xd51b_4400).unwrap(); // msr fpcr, x0
         machine.system_instruction(0xd53b_4401).unwrap(); // mrs x1, fpcr
         assert_eq!(machine.cpu.state.x[1], 0x07c8_0000);
+    }
+
+    #[test]
+    fn msr_immediate_waits_and_absent_features_follow_the_profile() {
+        let mut machine = machine(&[]);
+        let user = Pstate {
+            el: 0,
+            sp: false,
+            daif: 0,
+            ..Pstate::reset(1)
+        };
+        // MSR DAIFSet, #3 at EL0 with SCTLR_EL1.UMA clear traps with the
+        // instruction's own Op0/Op2/Op1/CRn/Rt/CRm (Op0 0, Rt 31).
+        machine.cpu.set_pstate(user);
+        machine.system_instruction(0xd503_43df).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x620c_d3e6);
+        // PAN is EL1-only and op1=3 op2=5 is unallocated: UNDEFINED.
+        for (pstate, word) in [(user, 0xd500_419f), (Pstate::reset(1), 0xd503_42bf)] {
+            machine.cpu.set_pstate(pstate);
+            machine.system_instruction(word).unwrap();
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL1),
+                0x0200_0000,
+                "{word:#x}"
+            );
+        }
+        // With UMA set, EL0 may mask interrupts.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr | 1 << 9);
+        machine.cpu.set_pstate(user);
+        machine.cpu.pc = BASE;
+        machine.system_instruction(0xd503_43df).unwrap();
+        assert_eq!((machine.cpu.pstate.daif, machine.cpu.pc), (3, BASE + 4));
+        // WFE with the event register set completes before the nTWE trap,
+        // then traps; WFI with an interrupt pending completes before nTWI.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr & !(1 << 16 | 1 << 18));
+        machine.cpu.set_pstate(user);
+        machine.cpu.pc = BASE;
+        machine.cpu.event = true;
+        machine.system_instruction(0xd503_205f).unwrap();
+        assert_eq!((machine.cpu.pc, machine.cpu.event), (BASE + 4, false));
+        machine.system_instruction(0xd503_205f).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x07e0_0001);
+        machine.cpu.set_pstate(user);
+        machine.cpu.pc = BASE;
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, 1 << HCR_IMO | 1 << HCR_VI);
+        machine.system_instruction(0xd503_207f).unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        // SEV and SEVL set the event register.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        for word in [0xd503_209f, 0xd503_20bf] {
+            machine.cpu.event = false;
+            machine.system_instruction(word).unwrap();
+            assert!(machine.cpu.event, "{word:#x}");
+        }
+        // DSB nXS is UNDEFINED without FEAT_XS; PACM (FEAT_PAuth_LR) is a NOP.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.system_instruction(0xd503_323f).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.pc = BASE;
+        machine.system_instruction_for_test(0xd503_24ff);
+        assert_eq!(machine.cpu.pc, BASE + 4);
     }
 
     #[test]
