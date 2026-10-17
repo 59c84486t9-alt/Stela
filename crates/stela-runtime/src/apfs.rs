@@ -264,6 +264,13 @@ pub(crate) mod tests {
         Memory(gunzip(compressed))
     }
 
+    /// A volume sealed by Apple's `apfs_prepare_cryptex`
+    /// (`tests/fixtures/apfs/make-sealed.sh`).
+    pub(crate) fn sealed_fixture() -> Memory {
+        let compressed = include_bytes!("../tests/fixtures/apfs/sealed.img.gz");
+        Memory(gunzip(compressed))
+    }
+
     fn gunzip(data: &[u8]) -> Vec<u8> {
         // RFC 1952: a 10-byte header (no optional fields from gzip -n),
         // a raw deflate stream, then CRC-32 and size.

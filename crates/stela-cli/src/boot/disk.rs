@@ -38,6 +38,7 @@ impl Prepare {
                     "preboot_volume": installed.preboot.name,
                     "preboot_uuid": apfs::uuid_text(&installed.preboot.uuid),
                     "boot_directory": installed.set.directory(),
+                    "evidence": installed.evidence,
                     "objects": installed.set.objects.iter().map(|o| serde_json::json!({
                         "path": o.path,
                         "payload_type": String::from_utf8_lossy(&o.payload_type),

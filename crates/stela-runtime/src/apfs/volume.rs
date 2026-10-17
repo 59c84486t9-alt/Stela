@@ -166,6 +166,9 @@ pub struct Volume {
     pub fs_flags: u64,
     pub encrypted: bool,
     pub sealed: bool,
+    /// `apfs_root_to_xid`: the transaction of the snapshot the volume roots
+    /// from, or zero to root from the live file system.
+    pub root_to_xid: u64,
     omap: Omap,
     root_tree_type: u32,
     root_tree_oid: u64,
@@ -236,6 +239,7 @@ impl Volume {
             fs_flags,
             encrypted: fs_flags & APFS_FS_UNENCRYPTED == 0,
             sealed: incompatible_features & APFS_INCOMPAT_SEALED_VOLUME != 0,
+            root_to_xid: u64_at(&block, 968)?,
             omap,
             root_tree_type: u32_at(&block, 116)?,
             root_tree_oid: u64_at(&block, 136)?,
@@ -260,7 +264,7 @@ impl Volume {
 
     /// A sealed volume's `integrity_meta_phys_t`: its hash type and the
     /// hash of the file-system tree's root node. A broken seal is refused.
-    fn seal<R: ReadAt>(&self, device: &mut Device<R>) -> Result<Option<Seal>> {
+    pub fn seal<R: ReadAt>(&self, device: &mut Device<R>) -> Result<Option<Seal>> {
         if !self.sealed {
             return Ok(None);
         }
@@ -664,6 +668,23 @@ impl Volume {
         Ok(snapshots)
     }
 
+    /// The seal of the file system the volume roots from: the snapshot
+    /// `apfs_root_to_xid` names, or the live volume when it is zero. `None`
+    /// when that file system is not sealed.
+    pub fn root_seal<R: ReadAt>(&self, device: &mut Device<R>) -> Result<Option<Seal>> {
+        if self.root_to_xid == 0 {
+            return self.seal(device);
+        }
+        let snapshot = self
+            .snapshots(device)?
+            .into_iter()
+            .find(|snapshot| snapshot.xid == self.root_to_xid)
+            .ok_or(ApfsError::Malformed(
+                "no snapshot has the volume's root_to_xid",
+            ))?;
+        self.snapshot(device, &snapshot)?.seal(device)
+    }
+
     /// The volume as it was when `snapshot` was taken.
     pub fn snapshot<R: ReadAt>(&self, device: &mut Device<R>, snapshot: &Snapshot) -> Result<Self> {
         let mut volume = Self::open(device, snapshot.superblock)?;
@@ -675,7 +696,10 @@ impl Volume {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apfs::{Container, tests::fixture};
+    use crate::apfs::{
+        Container,
+        tests::{fixture, sealed_fixture},
+    };
 
     const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";
 
@@ -746,6 +770,33 @@ mod tests {
         assert_eq!(
             volume.lookup(&mut container.device, "empty", true),
             Err(ApfsError::Encrypted)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_root_seal_is_the_hash_apples_sealer_recorded() -> Result<()> {
+        // The 208-byte record: version 2, 0, hash type, hash length, hash.
+        let record = include_bytes!("../../tests/fixtures/apfs/sealed.root_hash");
+        let mut container = Container::open(sealed_fixture(), 0)?;
+        let [volume] = &container.volumes()?[..] else {
+            panic!("one volume expected");
+        };
+        assert!(volume.sealed);
+        assert_eq!(volume.root_to_xid, 0);
+        let seal = volume.root_seal(&mut container.device)?.expect("a seal");
+        assert_eq!(u32::from_le_bytes(record[8..12].try_into().unwrap()), 1);
+        assert_eq!(seal.hash, Hash::Sha256);
+        assert_eq!(seal.root, record[16..48]);
+        // Every file system object still reads under the seal's checks.
+        let inode = volume.lookup(
+            &mut container.device,
+            "System/Library/CoreServices/stela.txt",
+            false,
+        )?;
+        assert_eq!(
+            volume.read(&mut container.device, &inode)?,
+            b"sealed by apfs_prepare_cryptex\n"
         );
         Ok(())
     }

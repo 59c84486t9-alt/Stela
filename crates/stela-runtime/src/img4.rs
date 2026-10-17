@@ -188,6 +188,57 @@ pub fn peek_payload_type(prefix: &[u8]) -> Result<[u8; 4], Img4Error> {
         .map_err(|_| Img4Error::Malformed("IM4P type is not four characters"))
 }
 
+/// Where an `IMG4`'s manifest and restore information begin, from the first
+/// bytes of the file; `None` for a bare `IM4P`, which has neither. 64 bytes
+/// always suffice.
+pub fn tail_offset(prefix: &[u8]) -> Result<Option<usize>, Img4Error> {
+    let (tag, offset, _) = header(prefix)?;
+    if tag != SEQUENCE {
+        return Err(Img4Error::NotImage4);
+    }
+    let (tag, label_offset, label_length) =
+        header(prefix.get(offset..).ok_or(Img4Error::NotImage4)?)?;
+    let label = prefix
+        .get(offset + label_offset..offset + label_offset + label_length)
+        .ok_or(Img4Error::Malformed("truncated prefix"))?;
+    if tag != IA5_STRING {
+        return Err(Img4Error::NotImage4);
+    }
+    match label {
+        b"IM4P" => Ok(None),
+        b"IMG4" => {
+            let at = offset + label_offset + label_length;
+            let (tag, payload_offset, payload_length) =
+                header(prefix.get(at..).ok_or(Img4Error::NotImage4)?)?;
+            if tag != SEQUENCE {
+                return Err(Img4Error::Malformed("IMG4 without an IM4P"));
+            }
+            Ok(Some(at + payload_offset + payload_length))
+        }
+        _ => Err(Img4Error::NotImage4),
+    }
+}
+
+/// The `IM4M` among an `IMG4`'s trailing fields (the bytes from
+/// [`tail_offset`] to the end of the file).
+pub fn tail_manifest(mut tail: &[u8]) -> Result<Option<&[u8]>, Img4Error> {
+    let mut manifest = None;
+    while !tail.is_empty() {
+        let (tag, contents, whole) = element(tail)?;
+        match tag {
+            CONTEXT_0 => {
+                labeled(contents, b"IM4M")
+                    .map_err(|_| Img4Error::Malformed("[0] is not an IM4M"))?;
+                manifest = Some(contents);
+            }
+            CONTEXT_1 => {}
+            _ => return Err(Img4Error::Malformed("unknown IMG4 field")),
+        }
+        tail = &tail[whole.len()..];
+    }
+    Ok(manifest)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -246,6 +297,12 @@ pub(crate) mod tests {
         assert_eq!(payload_type(parts.payload).unwrap(), *b"krnl");
         assert_eq!(peek_payload_type(&file[..64]).unwrap(), *b"krnl");
         assert_eq!(peek_payload_type(&payload[..64]).unwrap(), *b"krnl");
+        let tail = tail_offset(&file[..64]).unwrap().unwrap();
+        assert_eq!(
+            tail_manifest(&file[tail..]).unwrap(),
+            Some(manifest.as_slice())
+        );
+        assert_eq!(tail_offset(&payload[..64]).unwrap(), None);
         assert_eq!(peek_payload_type(&manifest), Err(Img4Error::NotImage4));
         let bare = parse(&payload).unwrap();
         assert_eq!(bare.manifest, None);

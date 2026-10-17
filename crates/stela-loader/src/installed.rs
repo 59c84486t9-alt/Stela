@@ -2,6 +2,25 @@
 //! container's Preboot volume (`stela_runtime::preboot`), in `no_std` so
 //! `stela.efi` builds the same bundle `stela boot prepare --disk` writes.
 //!
+//! The boot directory is chosen by evidence, since the LocalPolicy that
+//! names it (`nsih`) is paused. A candidate `<volume-group>/boot/<hash>/`
+//! qualifies when all three hold, and exactly one candidate must:
+//!
+//! - its Image4 objects carry one manifest whose SHA-384 is the directory's
+//!   name: `nsih` is the SHA-384 of the next stage's Image4 manifest (Apple
+//!   Platform Security, "Contents of a LocalPolicy file");
+//! - its `isys` object, the System volume's root hash, has the digest that
+//!   manifest records for `isys` (SHA-384 of the `IM4P`, as the 26A434
+//!   BuildManifest's `SystemVolume` digest is of its `.root_hash` file);
+//! - the hash in that object equals the seal of the file system the volume
+//!   group's System volume roots from (`apfs_root_to_xid`). The payload is
+//!   the 208-byte metadata-hash record `apfs_prepare_cryptex -M` writes:
+//!   `u32` version 2, `u32` 0, `u32` hash type (`apfs_hash_type_t`), `u32`
+//!   hash length, then the hash; it matches the APFS seal for the IPSW's
+//!   sealed AppCryptex and for volumes sealed by that tool.
+//!
+//! Otherwise every candidate is refused with what failed.
+//!
 //! The boot objects are the Image4 files of the boot directory, chosen by
 //! payload type; each is split into its payload, decoded unchanged, and its
 //! personalized manifest. The kernel collection's manifest is the boot
@@ -16,7 +35,7 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use stela_runtime::{
-    apfs::{Container, Volume},
+    apfs::{Container, Volume, btree::Hash},
     img4,
     payload::ReadAt,
     preboot::{self, BootSet, SYSTEM_VERSION},
@@ -28,12 +47,227 @@ pub const INSTALLED_SYSTEM: &str = "installed system (Preboot)";
 pub const KERNEL_LIMIT: u64 = 512 * 1024 * 1024;
 pub const COMPONENT_LIMIT: u64 = 64 * 1024 * 1024;
 const SEP_FIRMWARE_TYPE: &[u8; 4] = b"sepi";
+/// The System volume's root hash, as an Image4 object.
+const ROOT_HASH_TYPE: &[u8; 4] = b"isys";
+const ROOT_HASH_RECORD_VERSION: u32 = 2;
+/// The record's header: version, reserved, hash type and hash length.
+const ROOT_HASH_HEADER_BYTES: usize = 16;
+
+/// Why a boot directory is, or is not, the installed system's.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Evidence {
+    pub directory: String,
+    /// SHA-384 of the manifest the directory's objects carry.
+    pub manifest_sha384: Option<String>,
+    /// The root hash its `isys` object records.
+    pub root_hash: Option<String>,
+    /// The seal root of its System volume's root file system.
+    pub system_seal: Option<String>,
+    /// Every requirement that failed; empty when the directory qualifies.
+    pub problems: Vec<String>,
+}
+
+/// The hash type and hash of an `isys` root-hash record.
+fn root_hash_record(payload: &[u8]) -> Result<(Hash, &[u8])> {
+    let word = |at: usize| -> Result<u32> {
+        Ok(u32::from_le_bytes(
+            payload
+                .get(at..at + 4)
+                .context("truncated root-hash record")?
+                .try_into()
+                .unwrap(),
+        ))
+    };
+    ensure!(
+        word(0)? == ROOT_HASH_RECORD_VERSION,
+        "root-hash record version {} is not {ROOT_HASH_RECORD_VERSION}",
+        word(0)?
+    );
+    let hash = Hash::from_type(word(8)?).map_err(|e| anyhow!("{e}"))?;
+    let length = word(12)? as usize;
+    ensure!(
+        length == hash.size(),
+        "root-hash record holds {length} bytes for a {hash:?} hash"
+    );
+    let bytes = payload
+        .get(ROOT_HASH_HEADER_BYTES..ROOT_HASH_HEADER_BYTES + length)
+        .context("truncated root-hash record")?;
+    Ok((hash, bytes))
+}
+
+fn evaluate<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    set: &BootSet,
+) -> Result<Evidence> {
+    let mut evidence = Evidence {
+        directory: set.directory(),
+        manifest_sha384: None,
+        root_hash: None,
+        system_seal: None,
+        problems: Vec::new(),
+    };
+    let mut manifests: Vec<Vec<u8>> = Vec::new();
+    for object in &set.objects {
+        if let Some(manifest) =
+            preboot::manifest(container, preboot, object).map_err(|e| anyhow!("{e}"))?
+            && !manifests.contains(&manifest)
+        {
+            manifests.push(manifest);
+        }
+    }
+    let manifest = match &manifests[..] {
+        [manifest] => {
+            let digest = hex::encode_upper(im4m::sha384(manifest));
+            if !digest.eq_ignore_ascii_case(&set.boot_hash) {
+                evidence.problems.push(format!(
+                    "its name is not the SHA-384 of its objects' manifest ({digest})"
+                ));
+            }
+            evidence.manifest_sha384 = Some(digest);
+            Some(im4m::parse(manifest)?)
+        }
+        [] => {
+            evidence
+                .problems
+                .push("no object carries a manifest".into());
+            None
+        }
+        _ => {
+            evidence.problems.push(format!(
+                "its objects carry {} different manifests",
+                manifests.len()
+            ));
+            None
+        }
+    };
+    let root_hash = match set.object(ROOT_HASH_TYPE) {
+        Ok(Some(object)) => Some(object.clone()),
+        Ok(None) => {
+            evidence
+                .problems
+                .push("it has no isys root-hash object".into());
+            None
+        }
+        Err(error) => {
+            evidence.problems.push(format!("{error}"));
+            None
+        }
+    };
+    let record = match root_hash {
+        Some(object) => {
+            let file = preboot::read(container, preboot, &object).map_err(|e| anyhow!("{e}"))?;
+            let parts = img4::parse(&file).map_err(|e| anyhow!("{}: {e}", object.path))?;
+            let digest = manifest
+                .as_ref()
+                .and_then(|m| m.object("isys"))
+                .and_then(|o| o.properties.iter().find(|p| p.name == "DGST"))
+                .map(|p| &p.value);
+            match digest {
+                Some(im4m::Value::Data(digest))
+                    if digest.as_slice() == im4m::sha384(parts.payload).as_slice() => {}
+                Some(_) => evidence
+                    .problems
+                    .push("its manifest's isys digest is not the root-hash object's".into()),
+                None if manifest.is_some() => evidence
+                    .problems
+                    .push("its manifest records no isys digest".into()),
+                None => {}
+            }
+            let im4p = im4p::parse(parts.payload)?;
+            ensure!(
+                im4p.compression_algorithm.is_none(),
+                "{}: a compressed root-hash object",
+                object.path
+            );
+            let (hash, bytes) =
+                root_hash_record(im4p.payload).with_context(|| object.path.clone())?;
+            evidence.root_hash = Some(hex::encode(bytes));
+            Some((hash, bytes.to_vec()))
+        }
+        None => None,
+    };
+    match preboot::system_seal(container, &set.volume_group) {
+        Ok(Some(seal)) => {
+            evidence.system_seal = Some(hex::encode(&seal.root));
+            if let Some((hash, bytes)) = &record
+                && (*hash != seal.hash || *bytes != seal.root)
+            {
+                evidence.problems.push(
+                    "its root hash is not the seal of the System volume's root file system".into(),
+                );
+            }
+        }
+        Ok(None) => evidence
+            .problems
+            .push("its System volume's root file system is not sealed".into()),
+        Err(error) => evidence.problems.push(format!("{error}")),
+    }
+    Ok(evidence)
+}
+
+/// The boot directory the evidence shows to be the installed system's; with
+/// `boot_hash`, only that directory is considered.
+pub fn select<R: ReadAt>(
+    container: &mut Container<R>,
+    boot_hash: Option<&str>,
+) -> Result<(Volume, BootSet, Evidence)> {
+    let (preboot, sets) = preboot::candidates(container).map_err(|e| anyhow!("{e}"))?;
+    let named: Vec<BootSet> = sets
+        .iter()
+        .filter(|set| boot_hash.is_none_or(|hash| set.boot_hash.eq_ignore_ascii_case(hash)))
+        .cloned()
+        .collect();
+    ensure!(
+        !named.is_empty(),
+        "no boot directory is named {}; the candidates are {}",
+        boot_hash.unwrap_or_default(),
+        sets.iter()
+            .map(BootSet::directory)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut qualified = Vec::new();
+    let mut refused = Vec::new();
+    for set in named {
+        let evidence = evaluate(container, &preboot, &set)?;
+        if evidence.problems.is_empty() {
+            qualified.push((set, evidence));
+        } else {
+            refused.push(format!(
+                "{}: {}",
+                evidence.directory,
+                evidence.problems.join("; ")
+            ));
+        }
+    }
+    match qualified.len() {
+        1 => {
+            let (set, evidence) = qualified.remove(0);
+            Ok((preboot, set, evidence))
+        }
+        0 => bail!(
+            "no boot directory is shown to be the installed system's ({})",
+            refused.join(" | ")
+        ),
+        count => bail!(
+            "{count} boot directories ({}) each match their System volume; choosing one needs \
+             the LocalPolicy nsih, which is paused",
+            qualified
+                .iter()
+                .map(|(set, _)| set.directory())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
 
 /// A bundle and where on the container its objects came from.
 pub struct Installed {
     pub bundle: Bundle,
     pub preboot: Volume,
     pub set: BootSet,
+    pub evidence: Evidence,
 }
 
 struct Decoded {
@@ -193,7 +427,7 @@ pub fn prepare<R: ReadAt>(
     model: Option<&str>,
     options: &Options,
 ) -> Result<Installed> {
-    let (preboot, set) = preboot::boot_set(container, boot_hash).map_err(|e| anyhow!("{e}"))?;
+    let (preboot, set, evidence) = select(container, boot_hash)?;
     let mut disk = Disk {
         container,
         preboot,
@@ -249,17 +483,42 @@ pub fn prepare<R: ReadAt>(
         extra_trust_caches: Vec::new(),
         ramdisk: None,
     };
-    let bundle = boot_bundle::prepare(&inputs, options)?;
+    let mut bundle = boot_bundle::prepare(&inputs, options)?;
+    bundle.manifest.unresolved.push(format!(
+        "paused: the SEP-signed LocalPolicy is not read, so neither its nsih nor its other \
+         hashes are inputs; {} was chosen by evidence (its manifest's SHA-384, its isys \
+         digest and its System volume's seal)",
+        disk.set.directory()
+    ));
     Ok(Installed {
         bundle,
         preboot: disk.preboot,
         set: disk.set,
+        evidence,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_root_hash_records_as_apfs_prepare_cryptex_writes_them() {
+        let hash: Vec<u8> = (0..32).collect();
+        let mut record = vec![0u8; 208];
+        for (at, word) in [(0, 2u32), (8, 1), (12, 32)] {
+            record[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        record[16..48].copy_from_slice(&hash);
+        let (kind, bytes) = root_hash_record(&record).unwrap();
+        assert_eq!((kind, bytes), (Hash::Sha256, hash.as_slice()));
+        let mut wrong = record.clone();
+        wrong[0] = 3;
+        assert!(root_hash_record(&wrong).is_err());
+        let mut short = record;
+        short[12] = 48;
+        assert!(root_hash_record(&short).is_err());
+    }
 
     #[test]
     fn reads_strings_from_xml_property_lists() {

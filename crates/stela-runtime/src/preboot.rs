@@ -6,15 +6,18 @@
 //! and the kernel collection under
 //! `System/Library/Caches/com.apple.kernelcaches/` (Asahi Linux docs
 //! `fw/boot.md` and asahi-installer `src/osenum.py`, commits `0d1f891` and
-//! `e93743d`). Reading the LocalPolicy is paused, so a boot directory is
-//! taken only when it is the only one or the caller names it.
+//! `e93743d`). Reading the LocalPolicy is paused, so this module lists every
+//! candidate directory with its objects and the seal of its volume group's
+//! System volume; `stela_loader::installed` chooses among them by evidence.
 //!
-//! Inside the boot directory, objects are identified by their Image4
-//! payload type (`krnl`, `dtre`, `sptm`, `trxm`, `trst`, …) rather than by
+//! Inside a boot directory, objects are identified by their Image4 payload
+//! type (`krnl`, `dtre`, `sptm`, `trxm`, `trst`, `isys`, …) rather than by
 //! file name, so no undocumented name is assumed.
 use crate::{
     apfs::{
-        ApfsError, Container, FileKind, Volume, uuid_text,
+        ApfsError, Container, FileKind, Volume,
+        btree::Seal,
+        uuid_text,
         volume::{APFS_VOL_ROLE_PREBOOT, APFS_VOL_ROLE_SYSTEM, Inode},
     },
     img4,
@@ -24,7 +27,7 @@ use alloc::{format, string::String, vec, vec::Vec};
 
 /// Directories of a boot directory that hold boot objects.
 pub const OBJECT_DIRECTORIES: [&str; 2] = [
-    "usr/standalone/firmware",
+    "usr/standalone",
     "System/Library/Caches/com.apple.kernelcaches",
 ];
 /// `System/Library/CoreServices/SystemVersion.plist` under the volume
@@ -40,10 +43,10 @@ pub enum PrebootError {
     Apfs(ApfsError),
     /// No installed system's boot directory exists.
     NoBootDirectory,
-    /// Several boot directories exist; choosing needs the LocalPolicy.
-    Ambiguous(Vec<String>),
     /// A required boot object is missing or appears more than once.
     Object(String),
+    /// The volume group has no System volume, or several.
+    System(String),
 }
 
 impl core::fmt::Display for PrebootError {
@@ -51,13 +54,7 @@ impl core::fmt::Display for PrebootError {
         match self {
             Self::Apfs(error) => write!(f, "{error}"),
             Self::NoBootDirectory => write!(f, "no Preboot volume group has a boot directory"),
-            Self::Ambiguous(found) => write!(
-                f,
-                "{} boot directories ({}); choosing one needs the LocalPolicy nsih, which is paused",
-                found.len(),
-                found.join(", ")
-            ),
-            Self::Object(what) => write!(f, "{what}"),
+            Self::Object(what) | Self::System(what) => write!(f, "{what}"),
         }
     }
 }
@@ -187,61 +184,88 @@ fn collect<R: ReadAt>(
     Ok(())
 }
 
-/// The boot directory to use and its objects. `boot_hash` names one
-/// explicitly; otherwise there must be exactly one.
-pub fn boot_set<R: ReadAt>(
-    container: &mut Container<R>,
-    boot_hash: Option<&str>,
-) -> Result<(Volume, BootSet)> {
+/// Every boot directory of the Preboot volume's System volume groups, with
+/// its objects, and the Preboot volume itself.
+pub fn candidates<R: ReadAt>(container: &mut Container<R>) -> Result<(Volume, Vec<BootSet>)> {
     let preboot = container.volume_with_role(APFS_VOL_ROLE_PREBOOT)?;
-    let mut candidates = Vec::new();
+    let mut sets = Vec::new();
     for group in volume_groups(container, &preboot)? {
         let device = &mut container.device;
         let boot = preboot.lookup(device, &format!("{group}/boot"), true)?;
         for entry in preboot.entries(device, boot.oid)? {
-            if entry.kind == FileKind::Directory && is_boot_hash(&entry.name) {
-                candidates.push((group.clone(), entry.name));
+            if entry.kind != FileKind::Directory || !is_boot_hash(&entry.name) {
+                continue;
             }
+            let mut objects = Vec::new();
+            for directory in OBJECT_DIRECTORIES {
+                let path = format!("{group}/boot/{}/{directory}", entry.name);
+                let Ok(inode) = preboot.lookup(device, &path, true) else {
+                    continue;
+                };
+                if inode.kind == FileKind::Directory {
+                    collect(&preboot, device, &inode, &path, 0, &mut objects)?;
+                }
+            }
+            sets.push(BootSet {
+                volume_group: group.clone(),
+                boot_hash: entry.name,
+                objects,
+            });
         }
     }
-    let chosen = match boot_hash {
-        Some(hash) => candidates
-            .into_iter()
-            .find(|(_, name)| name.eq_ignore_ascii_case(hash))
-            .ok_or(PrebootError::NoBootDirectory)?,
-        None => match candidates.len() {
-            0 => return Err(PrebootError::NoBootDirectory),
-            1 => candidates.remove(0),
-            _ => {
-                return Err(PrebootError::Ambiguous(
-                    candidates
-                        .iter()
-                        .map(|(g, h)| format!("{g}/boot/{h}"))
-                        .collect(),
-                ));
-            }
-        },
-    };
-    let (volume_group, boot_hash) = chosen;
+    if sets.is_empty() {
+        return Err(PrebootError::NoBootDirectory);
+    }
+    Ok((preboot, sets))
+}
+
+/// The seal of the file system the volume group's System volume roots from
+/// (`apfs_root_to_xid`); `None` when it is not sealed.
+pub fn system_seal<R: ReadAt>(container: &mut Container<R>, group: &str) -> Result<Option<Seal>> {
+    let systems: Vec<Volume> = container
+        .volumes()?
+        .into_iter()
+        .filter(|v| {
+            v.role == APFS_VOL_ROLE_SYSTEM && uuid_text(&v.volume_group).eq_ignore_ascii_case(group)
+        })
+        .collect();
+    match &systems[..] {
+        [system] => Ok(system.root_seal(&mut container.device)?),
+        [] => Err(PrebootError::System(format!(
+            "volume group {group} has no System volume"
+        ))),
+        _ => Err(PrebootError::System(format!(
+            "volume group {group} has {} System volumes",
+            systems.len()
+        ))),
+    }
+}
+
+/// The `IM4M` an `IMG4` object carries, read without its payload; `None`
+/// for a bare `IM4P` or an `IMG4` without one.
+pub fn manifest<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    object: &Object,
+) -> Result<Option<Vec<u8>>> {
     let device = &mut container.device;
-    let mut objects = Vec::new();
-    for directory in OBJECT_DIRECTORIES {
-        let path = format!("{volume_group}/boot/{boot_hash}/{directory}");
-        let Ok(inode) = preboot.lookup(device, &path, true) else {
-            continue;
-        };
-        if inode.kind == FileKind::Directory {
-            collect(&preboot, device, &inode, &path, 0, &mut objects)?;
-        }
-    }
-    Ok((
-        preboot,
-        BootSet {
-            volume_group,
-            boot_hash,
-            objects,
-        },
-    ))
+    let inode = preboot.inode(device, object.oid)?;
+    let mut prefix = [0u8; PEEK_BYTES];
+    preboot.read_at(device, &inode, 0, &mut prefix)?;
+    let malformed = |e: img4::Img4Error| PrebootError::Object(format!("{}: {e}", object.path));
+    let Some(tail) = img4::tail_offset(&prefix).map_err(malformed)? else {
+        return Ok(None);
+    };
+    let bytes = inode
+        .size
+        .checked_sub(tail as u64)
+        .ok_or_else(|| PrebootError::Object(format!("{}: truncated IMG4", object.path)))?;
+    let mut rest =
+        vec![0u8; usize::try_from(bytes).map_err(|_| ApfsError::Malformed("object size"))?];
+    preboot.read_at(device, &inode, tail as u64, &mut rest)?;
+    Ok(img4::tail_manifest(&rest)
+        .map_err(malformed)?
+        .map(<[u8]>::to_vec))
 }
 
 /// Read a whole boot object.
@@ -263,9 +287,12 @@ mod tests {
     use crate::apfs::tests::fixture;
 
     #[test]
-    fn resolves_the_fixture_boot_directory_by_payload_type() -> Result<()> {
+    fn lists_the_fixture_boot_directory_and_its_objects_by_payload_type() -> Result<()> {
         let mut container = Container::open(fixture(), 0)?;
-        let (preboot, set) = boot_set(&mut container, None)?;
+        let (preboot, sets) = candidates(&mut container)?;
+        let [set] = &sets[..] else {
+            panic!("one boot directory expected, got {sets:?}");
+        };
         assert_eq!(set.volume_group, "A304C51B-D22F-4CDD-829D-3E30CB5BD87B");
         assert_eq!(set.boot_hash.len(), 96);
         let kernel = set.require(b"krnl")?;
@@ -276,11 +303,15 @@ mod tests {
         assert_eq!(set.object(b"rdsk")?, None);
         let bytes = read(&mut container, &preboot, kernel)?;
         let parts = img4::parse(&bytes).expect("an IMG4");
-        assert!(parts.manifest.is_some());
         assert_eq!(img4::payload_type(parts.payload).unwrap(), *b"krnl");
+        assert_eq!(
+            manifest(&mut container, &preboot, kernel)?.as_deref(),
+            parts.manifest
+        );
+        // The fixture has a Preboot volume only.
         assert!(matches!(
-            boot_set(&mut container, Some(&"0".repeat(96))),
-            Err(PrebootError::NoBootDirectory)
+            system_seal(&mut container, &set.volume_group),
+            Err(PrebootError::System(_))
         ));
         Ok(())
     }
