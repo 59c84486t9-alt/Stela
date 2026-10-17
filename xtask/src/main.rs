@@ -8,6 +8,7 @@ mod check;
 mod differential;
 mod oracle;
 mod progress;
+mod system_matrix;
 mod tools;
 
 #[derive(Parser)]
@@ -34,7 +35,10 @@ enum Task {
     AmxReference(amx::AmxReference),
     /// Disassemble, size and time the native AMX kernels against the model.
     AmxKernels(amx::kernels::AmxKernels),
-    /// Merge the instruction registries into the checklist and the README.
+    /// Derive the system platform requirement matrix from the pinned AARCHMRS.
+    SystemMatrix(system_matrix::SystemMatrix),
+    /// Merge the instruction and system registries into their matrices and
+    /// the README.
     Progress {
         /// Fail instead of writing when either file is stale.
         #[arg(long)]
@@ -49,7 +53,10 @@ fn main() -> ExitCode {
         Task::Differential(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
-        Task::Progress { check } => progress::run(check).map(|()| ExitCode::SUCCESS),
+        Task::SystemMatrix(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::Progress { check } => progress::run(check)
+            .and_then(|()| system_matrix::assess::run(check))
+            .map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {
         eprintln!("error: {error:#}");
