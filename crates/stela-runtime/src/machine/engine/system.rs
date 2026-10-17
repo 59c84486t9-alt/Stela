@@ -905,6 +905,72 @@ mod tests {
         }
     }
 
+    /// Every FEAT_FGT control the profile implements changes whether some
+    /// EL1 access traps to EL2 with EC 0x18, with HCR_EL2's APK, FIEN and
+    /// EnSCXT set so their coarse traps do not pre-empt the fine-grained
+    /// ones. HFGITR_EL2.ERET, SVC_EL0 and SVC_EL1 trap instructions without
+    /// accessors and are tested in engine.rs. HAFGRTR_EL2 is left out: every
+    /// activity monitor access is refused.
+    #[test]
+    fn every_fine_grained_trap_control_traps_an_el1_access() {
+        use super::{ACCESSORS, Access, Cell, Effect, Host};
+        const CONTROLS: [Register; 5] = [
+            Register::HFGRTR_EL2,
+            Register::HFGWTR_EL2,
+            Register::HFGITR_EL2,
+            Register::HDFGRTR_EL2,
+            Register::HDFGWTR_EL2,
+        ];
+        const INSTRUCTIONS: u64 = 0b111 << 51;
+        const ENABLES: u64 = 1 << 40 | 1 << 47 | 1 << 53;
+        let traps = |control: Option<(Register, u32)>| -> Vec<bool> {
+            let mut machine = machine(&[]);
+            let hcr = machine.cpu.read(Register::HCR_EL2) | ENABLES;
+            machine.cpu.registers.set(Register::HCR_EL2, 0, hcr);
+            if let Some((register, bit)) = control {
+                let value = machine.cpu.read(register) ^ 1 << bit;
+                machine.cpu.registers.set(register, 0, value);
+            }
+            ACCESSORS
+                .iter()
+                .flat_map(|accessor| (0..1u64 << accessor.index.len()).map(move |m| (accessor, m)))
+                .map(|(accessor, m)| {
+                    let lines = machine.lines();
+                    let now = machine.host.counter();
+                    let mut context = Access {
+                        machine: &mut machine,
+                        rt: 0,
+                        lines,
+                        now,
+                        result: None,
+                        translation: false,
+                        regime: false,
+                        code: false,
+                        refusal: Cell::new(None),
+                    };
+                    let effect = match (accessor.run)(&mut context, m) {
+                        Ok(effect) | Err(effect) => effect,
+                    };
+                    matches!(effect, Effect::Trap { el: 2, ec: 0x18 })
+                })
+                .collect()
+        };
+        let baseline = traps(None);
+        let mut inert = Vec::new();
+        for register in CONTROLS {
+            let mut fields = !(register.res0() | register.res1());
+            if register == Register::HFGITR_EL2 {
+                fields &= !INSTRUCTIONS;
+            }
+            for bit in (0..64).filter(|bit| fields >> bit & 1 != 0) {
+                if traps(Some((register, bit))) == baseline {
+                    inert.push(alloc::format!("{}[{bit}]", register.name()));
+                }
+            }
+        }
+        assert!(inert.is_empty(), "controls that trap nothing: {inert:?}");
+    }
+
     #[test]
     fn cntfrq_reads_the_profile_counter_frequency() {
         const CNTFRQ_EL0: Encoding = Encoding::new(3, 3, 14, 0, 0);

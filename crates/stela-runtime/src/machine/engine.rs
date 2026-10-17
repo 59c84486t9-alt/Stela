@@ -1967,7 +1967,10 @@ mod tests {
             }
         }
         fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool {
-            let offset = (physical - self.base) as usize;
+            let Some(offset) = physical.checked_sub(self.base) else {
+                return false;
+            };
+            let offset = offset as usize;
             match self.ram.get_mut(offset..offset + data.len()) {
                 Some(bytes) => {
                     bytes.copy_from_slice(data);
