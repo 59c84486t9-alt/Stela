@@ -9,6 +9,7 @@ use super::{
 };
 use crate::platform::apple::{
     aic::{Aic2, Aic2Config},
+    aic1::Aic1,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     interrupt::{CpuIndex, InterruptLatch},
     uart::S5lUart,
@@ -17,7 +18,8 @@ use crate::platform::apple::{
 use alloc::{boxed::Box, format, string::String};
 
 pub use crate::platform::apple::{
-    aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG},
+    aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
+    aic1::AIC1_EVENT,
     interrupt::AicInput,
     uart::{ConsoleBusy, ConsoleSink},
 };
@@ -33,8 +35,15 @@ pub struct Range {
 pub struct AppleDevices {
     bus: Bus,
     latch: InterruptLatch,
-    aic: Option<DeviceId>,
+    aic: Option<Controller>,
     reset: Option<String>,
+}
+
+/// The mapped AIC and which model it is.
+#[derive(Debug, Clone, Copy)]
+enum Controller {
+    V1(DeviceId),
+    V2(DeviceId),
 }
 
 fn describe(error: MmioError) -> DeviceError {
@@ -106,36 +115,43 @@ impl AppleDevices {
         self.map(device, ranges)
     }
 
-    /// The AIC2 at `physical`, routing every IRQ to this PE. NR_IRQ is the
-    /// number of inputs the board wires (one more than the highest DeviceTree
-    /// `interrupts` value under the AIC) and MAX_IRQ rounds it up to a whole
-    /// 32-bit mask word; the model reports both in its CAP0/MAXNUMIRQ
-    /// registers (m1n1 `aic.c`, Linux `irq-apple-aic.c`). `irq_config` is
-    /// where the per-die arrays start (0x2000 on AICv2, 0x10000 on AICv3) and
-    /// `event_offset` the event register's distance from the core block.
-    pub fn add_aic(
-        &mut self,
-        physical: u64,
-        nr_irq: u16,
-        irq_config: u64,
-        event_offset: u64,
-    ) -> Result<(), String> {
-        let config = Aic2Config {
-            nr_irq,
-            max_irq: nr_irq.div_ceil(32) * 32,
-            irq_config,
-            event_offset,
-            cpus: 1,
-            default_cpus: 1,
-            target_groups: [None; 4],
+    /// The AIC at `physical`, serving this PE. NR_IRQ is the number of
+    /// inputs the board wires (one more than the highest DeviceTree
+    /// `interrupts` value under the AIC), which the model reports in its INFO
+    /// or CAP0 register (m1n1 `aic.c`, Linux `irq-apple-aic.c`). An AICv2's
+    /// MAX_IRQ rounds it up to a whole 32-bit mask word and its `layout`
+    /// says where its per-die arrays and event register are; an AICv1's are
+    /// fixed.
+    pub fn add_aic(&mut self, physical: u64, nr_irq: u16, layout: AicLayout) -> Result<(), String> {
+        let (device, span) = match layout {
+            AicLayout::V1 => {
+                let aic = Aic1::new(nr_irq, 1)
+                    .map_err(|error| format!("AIC1 configuration: {error:?}"))?;
+                let device = self.bus.add(Box::new(aic));
+                (Controller::V1(device), Aic1::span())
+            }
+            AicLayout::V2 { irq_config, event } => {
+                let config = Aic2Config {
+                    nr_irq,
+                    max_irq: nr_irq.div_ceil(32) * 32,
+                    irq_config,
+                    event_offset: event,
+                    cpus: 1,
+                    default_cpus: 1,
+                    target_groups: [None; 4],
+                };
+                let aic =
+                    Aic2::new(config).map_err(|error| format!("AIC2 configuration: {error:?}"))?;
+                let span = aic.span();
+                let device = self.bus.add(Box::new(aic));
+                (Controller::V2(device), span)
+            }
         };
-        let aic = Aic2::new(config).map_err(|error| format!("AIC2 configuration: {error:?}"))?;
-        let span = aic.span();
-        let device = self.bus.add(Box::new(aic));
         self.aic = Some(device);
+        let (Controller::V1(id) | Controller::V2(id)) = device;
         self.bus
-            .map(device, physical, span, 0)
-            .map_err(|error| format!("AIC2 placement: {error:?}"))
+            .map(id, physical, span, 0)
+            .map_err(|error| format!("AIC placement: {error:?}"))
     }
 
     /// Forward queued device wires into the AIC and record a reset request;
@@ -161,14 +177,22 @@ impl AppleDevices {
                 )));
             };
             let mut access = Access::new(cpu, now, &mut self.latch);
-            let controller = self
-                .bus
-                .device_mut::<Aic2>(aic)
-                .expect("the AIC id names an Aic2");
             for (input, level) in inputs {
-                controller
-                    .set_input(input, level, &mut access)
-                    .map_err(|error| DeviceError::Refused(format!("AIC input: {error:?}")))?;
+                let result = match aic {
+                    Controller::V1(id) => self
+                        .bus
+                        .device_mut::<Aic1>(id)
+                        .expect("the AIC id names an Aic1")
+                        .set_input(input, level, &mut access)
+                        .map_err(|error| format!("{error:?}")),
+                    Controller::V2(id) => self
+                        .bus
+                        .device_mut::<Aic2>(id)
+                        .expect("the AIC id names an Aic2")
+                        .set_input(input, level, &mut access)
+                        .map_err(|error| format!("{error:?}")),
+                };
+                result.map_err(|error| DeviceError::Refused(format!("AIC input: {error}")))?;
             }
         }
     }
@@ -313,15 +337,61 @@ mod tests {
                 Some(AicInput::new(0, 739)),
             )
             .unwrap();
-        devices
-            .add_aic(0x2_3b0c_0000, 1152, AIC2_IRQ_CFG, 0x8000)
-            .unwrap();
+        let v2 = |event| AicLayout::V2 {
+            irq_config: AIC2_IRQ_CFG,
+            event,
+        };
+        devices.add_aic(0x2_3b0c_0000, 1152, v2(0x8000)).unwrap();
         // CAP0 (offset 4) reports NR_IRQ in bits 15:0.
         assert_eq!(devices.read(0, 0x2_3b0c_0004, 4, 0).unwrap() & 0xffff, 1152);
-        assert!(
-            devices
-                .add_aic(0x2_3b0c_0000, 1152, AIC2_IRQ_CFG, 0x10)
-                .is_err()
+        assert!(devices.add_aic(0x2_3b0c_0000, 1152, v2(0x10)).is_err());
+    }
+
+    /// J274AP (M1): `aic,1` at 0x2_3b10_0000 with 896 inputs, the UART on 605.
+    #[test]
+    fn places_an_aic1_and_routes_uart_wires_to_it() {
+        const AIC: u64 = 0x2_3b10_0000;
+        let mut devices = AppleDevices::new();
+        devices
+            .add_uart(
+                Console::default(),
+                &[Range {
+                    physical: UART,
+                    bytes: 0x4000,
+                }],
+                Some(AicInput::new(0, 605)),
+            )
+            .unwrap();
+        devices.add_aic(AIC, 896, AicLayout::V1).unwrap();
+        // INFO (offset 4) reports NR_IRQ in bits 15:0, and WHOAMI cpu0.
+        assert_eq!(devices.read(0, AIC + 0x4, 4, 0).unwrap() & 0xffff, 896);
+        assert_eq!(devices.read(0, AIC + 0x2000, 4, 0).unwrap(), 0);
+        // Target the UART line at cpu0 and unmask it.
+        devices.write(0, AIC + 0x3000 + 4 * 605, 4, 1, 0).unwrap();
+        devices
+            .write(0, AIC + 0x4180 + 4 * (605 / 32), 4, 1 << (605 % 32), 0)
+            .unwrap();
+        // XNU `apple_uart_enable_irq`: with the TX trigger at 0 and UCON's
+        // TX threshold interrupt enabled, sending a byte raises input 605.
+        let ufcon = devices.read(0, UART + 0x8, 4, 0).unwrap();
+        devices
+            .write(0, UART + 0x8, 4, ufcon & !(0b11 << 6), 0)
+            .unwrap();
+        let ucon = devices.read(0, UART + 0x4, 4, 0).unwrap();
+        devices.write(0, UART + 0x4, 4, ucon | 1 << 13, 0).unwrap();
+        assert!(!devices.lines(0, 0).irq);
+        devices
+            .write(0, UART + 0x20, 4, u64::from(b'x'), 0)
+            .unwrap();
+        assert!(devices.lines(0, 0).irq);
+        assert_eq!(
+            devices.read(0, AIC + AIC1_EVENT, 4, 0).unwrap(),
+            1 << 16 | 605
         );
+        assert!(!devices.lines(0, 0).irq, "the event read masked the IRQ");
+        assert!(matches!(
+            devices.read(0, AIC + 0x5008, 4, 0),
+            Err(DeviceError::Refused(reason)) if reason.contains("per-CPU")
+        ));
     }
 }

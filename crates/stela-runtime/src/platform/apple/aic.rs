@@ -51,6 +51,16 @@ const IRQ_CFG_DELAY_IDX: u32 = 0b111 << 5;
 const EVENT_TYPE_IRQ: u32 = 1 << 16;
 const TARGET_GROUPS: usize = 4;
 
+/// Which AIC a board has: an AICv1 (`aic1`), whose event register is in its
+/// core block, or an AICv2 or AICv3 with its per-die arrays at `irq_config`
+/// ([`AIC2_IRQ_CFG`] or [`AIC3_IRQ_CFG`]) and its event register `event`
+/// bytes from the core block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AicLayout {
+    V1,
+    V2 { irq_config: u64, event: u64 },
+}
+
 /// Hardware facts of one AICv2 instance. NR_IRQ and MAX_IRQ come from the
 /// controller, not the ADT; the board profile must record them from the
 /// real machine (m1n1 prints them as "AIC: AIC2 with 1/1 dies, N/M IRQs").
