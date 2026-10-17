@@ -2,13 +2,12 @@
 use crate::{args::parse_address, restore};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
-use serde::Serialize;
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
-use stela_loader::boot_bundle::{
-    self, Input, Inputs, Manifest, Options, OverlayProperty, Source, Target,
-};
+use stela_loader::boot_bundle::{self, Input, Inputs, Options, OverlayProperty, Source, Target};
 use stela_loader::boot_policy::{SecurityMode, SecurityPolicy};
 use stela_loader::im4m;
+
+mod disk;
 
 const MANIFEST_FILE: &str = "bundle.json";
 const KERNEL_LIMIT: u64 = 512 * 1024 * 1024;
@@ -87,11 +86,18 @@ pub(crate) enum BootCommand {
 
 #[derive(Args)]
 pub(crate) struct Prepare {
-    #[arg(long)]
-    ipsw: PathBuf,
+    #[arg(long, required_unless_present = "disk", conflicts_with = "disk")]
+    ipsw: Option<PathBuf>,
     /// The `Ap,ProductType`, such as Mac14,3.
-    #[arg(long)]
-    model: String,
+    #[arg(long, required_unless_present = "disk")]
+    model: Option<String>,
+    /// Build the bundle from an installed system's Preboot volume on this
+    /// disk image instead of an IPSW.
+    #[arg(long, conflicts_with_all = ["restore", "recovery", "variant", "cryptex_trust_caches"])]
+    disk: Option<PathBuf>,
+    /// The `boot/<hash>` directory to use when the Preboot volume has several.
+    #[arg(long, requires = "disk")]
+    boot_hash: Option<String>,
     /// A new directory for the bundle.
     #[arg(long)]
     output: PathBuf,
@@ -192,19 +198,6 @@ impl BootCommand {
             Self::Prepare(command) => command.run(),
         }
     }
-}
-
-#[derive(Serialize)]
-struct ArchiveIdentity {
-    path: String,
-    build_manifest_sha256: String,
-}
-
-#[derive(Serialize)]
-struct Written<'a> {
-    archive: ArchiveIdentity,
-    #[serde(flatten)]
-    bundle: &'a Manifest,
 }
 
 struct Decoded {
@@ -350,7 +343,12 @@ impl Prepare {
             !self.output.exists(),
             "output exists; choose a new --output directory"
         );
-        let report = restore::archive::manifest(&self.ipsw, Some(&self.model), false)?;
+        if let Some(disk) = &self.disk {
+            return self.run_disk(disk);
+        }
+        let ipsw = self.ipsw.clone().context("--ipsw is required")?;
+        let model = self.model.clone().context("--model is required")?;
+        let report = restore::archive::manifest(&ipsw, Some(&model), false)?;
         let (roles, default_variant) = match (self.restore, self.recovery) {
             (true, _) => (RESTORE, RESTORE_VARIANT),
             (false, true) => (RECOVERY, INSTALLED_VARIANT),
@@ -363,10 +361,7 @@ impl Prepare {
             .find(|i| i.variant == variant)
             .with_context(|| {
                 let variants: Vec<_> = report.identities.iter().map(|i| &i.variant).collect();
-                format!(
-                    "no {} identity {:?}; found {variants:?}",
-                    self.model, variant
-                )
+                format!("no {} identity {:?}; found {variants:?}", model, variant)
             })?;
         let component = |name: &str, payload_type: Option<&str>, limit: u64| -> Result<Decoded> {
             // A component absent from the selected identity is taken from
@@ -374,8 +369,8 @@ impl Prepare {
             let (owner, entry) = std::iter::once(identity)
                 .chain(report.identities.iter())
                 .find_map(|i| i.components.get(name).map(|c| (i, c)))
-                .with_context(|| format!("no {} identity lists {name}", self.model))?;
-            let container = restore::archive::read_member(&self.ipsw, &entry.path, limit)?;
+                .with_context(|| format!("no {model} identity lists {name}"))?;
+            let container = restore::archive::read_member(&ipsw, &entry.path, limit)?;
             let label = if owner.variant == identity.variant {
                 name.to_owned()
             } else {
@@ -428,7 +423,7 @@ impl Prepare {
                     .get(BASE_SYSTEM)
                     .with_context(|| format!("{} lists no {BASE_SYSTEM}", identity.variant))?;
                 Some(base_system(
-                    &self.ipsw,
+                    &ipsw,
                     &entry.path,
                     self.aea_key.as_deref(),
                     entry.declared_digest_hex.clone(),
@@ -443,10 +438,10 @@ impl Prepare {
             .transpose()?;
         let global_manifest = |cryptex1: bool| -> Result<Option<Decoded>> {
             let member = manifest_member(cryptex1, &identity.variant, &identity.device_class);
-            if !restore::archive::has_member(&self.ipsw, &member)? {
+            if !restore::archive::has_member(&ipsw, &member)? {
                 return Ok(None);
             }
-            let bytes = restore::archive::read_member(&self.ipsw, &member, COMPONENT_LIMIT)?;
+            let bytes = restore::archive::read_member(&ipsw, &member, COMPONENT_LIMIT)?;
             let source = Source {
                 component: if cryptex1 {
                     "Cryptex1 manifest"
@@ -511,7 +506,7 @@ impl Prepare {
         }
         let inputs = Inputs {
             target: Target {
-                product_type: self.model.clone(),
+                product_type: model.clone(),
                 device_class: identity.device_class.clone(),
                 product_version: report.product_version.clone(),
                 product_build: report.product_build.clone(),
@@ -530,19 +525,34 @@ impl Prepare {
             extra_trust_caches: cryptex_trust_caches.iter().map(input).collect(),
             ramdisk: ramdisk.as_ref().map(input),
         };
-        let options = Options {
+        let options = self.options(self.restore || self.recovery)?;
+        let bundle = boot_bundle::prepare(&inputs, &options)?;
+        let provenance = serde_json::json!({
+            "archive": {
+                "path": ipsw.canonicalize()?.display().to_string(),
+                "build_manifest_sha256": report.manifest_sha256,
+            }
+        });
+        self.write(&bundle, provenance)?;
+        Ok(())
+    }
+
+    /// The bundle options from the command line; `ramdisk_boot` picks the
+    /// restore defaults for boot-args and the OS environment.
+    fn options(&self, ramdisk_boot: bool) -> Result<Options> {
+        Ok(Options {
             dram_base: self.dram_base,
             dram_size: self.dram_size,
             phys_base: self.phys_base.unwrap_or(self.dram_base),
             load_offset: self.load_offset,
-            boot_args: self.boot_args.unwrap_or_else(|| {
-                match self.restore || self.recovery {
+            boot_args: self.boot_args.clone().unwrap_or_else(|| {
+                match ramdisk_boot {
                     true => RESTORE_BOOT_ARGS,
                     false => INSTALLED_BOOT_ARGS,
                 }
                 .into()
             }),
-            osenvironment: self.osenvironment.or_else(|| {
+            osenvironment: self.osenvironment.clone().or_else(|| {
                 match (self.restore, self.recovery) {
                     (true, _) => Some(RESTORE_ENVIRONMENT),
                     (false, true) => Some(RECOVERY_ENVIRONMENT),
@@ -550,10 +560,10 @@ impl Prepare {
                 }
                 .map(Into::into)
             }),
-            boot_cpu: self.boot_cpu,
+            boot_cpu: self.boot_cpu.clone(),
             timebase_frequency: self.timebase_frequency,
-            syscfg: self.syscfg.into_iter().collect(),
-            mac_addresses: self.mac_addresses.into_iter().collect(),
+            syscfg: self.syscfg.iter().cloned().collect(),
+            mac_addresses: self.mac_addresses.iter().cloned().collect(),
             security: SecurityPolicy {
                 mode: match self.security {
                     Security::Reduced => SecurityMode::Reduced,
@@ -568,8 +578,12 @@ impl Prepare {
                 .map(read_overlay)
                 .transpose()?
                 .unwrap_or_default(),
-        };
-        let bundle = boot_bundle::prepare(&inputs, &options)?;
+        })
+    }
+
+    /// Write the bundle files and `bundle.json`, with `provenance` naming
+    /// where the inputs came from.
+    fn write(&self, bundle: &boot_bundle::Bundle, provenance: serde_json::Value) -> Result<()> {
         std::fs::create_dir_all(&self.output)?;
         for (name, bytes) in &bundle.files {
             OpenOptions::new()
@@ -578,13 +592,12 @@ impl Prepare {
                 .open(self.output.join(name))?
                 .write_all(bytes)?;
         }
-        let written = Written {
-            archive: ArchiveIdentity {
-                path: self.ipsw.canonicalize()?.display().to_string(),
-                build_manifest_sha256: report.manifest_sha256.clone(),
-            },
-            bundle: &bundle.manifest,
-        };
+        let mut written = serde_json::to_value(&bundle.manifest)?;
+        if let (Some(object), serde_json::Value::Object(extra)) =
+            (written.as_object_mut(), provenance)
+        {
+            object.extend(extra);
+        }
         stela_runtime::write_json(&self.output.join(MANIFEST_FILE), &written)?;
         let manifest = &bundle.manifest;
         eprintln!(

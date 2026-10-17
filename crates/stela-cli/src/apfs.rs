@@ -16,7 +16,7 @@ use stela_runtime::{
 };
 
 /// An image file as a reader source.
-struct Image {
+pub(crate) struct Image {
     file: File,
     bytes: u64,
 }
@@ -31,7 +31,7 @@ impl ReadAt for Image {
     }
 }
 
-fn open_image(path: &Path) -> Result<Image> {
+pub(crate) fn open_image(path: &Path) -> Result<Image> {
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let bytes = file.metadata()?.len();
     Ok(Image { file, bytes })
