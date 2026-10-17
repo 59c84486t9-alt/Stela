@@ -25,6 +25,8 @@ const UDF_MASK: u32 = 0xffff_0000;
 /// MSR (immediate) with Rt=31 and CRn=4.
 const PSTATE: u32 = 0xd500_401f;
 const REGISTER_FIELD: u32 = 0x1f;
+/// `MRS X0, PAR_EL1`, which follows each AT so its result is compared.
+const MRS_PAR: u32 = 0xd538_7400;
 const IMMEDIATE_FIELD: u32 = 0xf;
 
 /// Whether `word` belongs to the system lane: it exits to the engine or runs
@@ -348,6 +350,23 @@ pub(super) fn subjects(
                     rows.refused_implemented.push(id.into());
                 }
                 continue;
+            }
+            // AT at EL1 is followed by a read of PAR_EL1 into its Rt.
+            if kind == "access"
+                && row["name"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("AT "))
+            {
+                let read = MRS_PAR | word & REGISTER_FIELD;
+                subjects.push(Subject {
+                    form: id.into(),
+                    code: vec![word, read],
+                    scalable: None,
+                    system: true,
+                    draft,
+                    el1: true,
+                    translation: Translation::system(&[word, read])?,
+                });
             }
             for el1 in [true, false] {
                 if el1 && !el1_admissible(word) {

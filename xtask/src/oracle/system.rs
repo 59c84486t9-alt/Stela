@@ -4,8 +4,9 @@
 //! exception masked until their first exception, as the harness runs them:
 //! the zero words after the case are UDF, and SPSR then holds PSTATE.
 //!
-//! The engine runs with its MMU off: EL0 sees the code region and data window
-//! at their own addresses, as the harness maps them. Every SCTLR_EL1 trap
+//! The engine translates through a copy of the harness's own tables
+//! (`build_tables` in `harness.S`), so instruction fetch, AT, cache
+//! maintenance and their faults walk what QEMU walks. Every SCTLR_EL1 trap
 //! control the harness clears (nTWI, nTWE, UCI, UCT, DZE, UMA) is clear here
 //! too, CPACR_EL1 enables FP/SIMD, and the CPU profile is the engine's M2
 //! identification without EL2, like the harness's QEMU machine.
@@ -24,8 +25,8 @@ use stela_runtime::machine::{
     system::Register,
 };
 
-/// The harness's SCTLR_EL1 without M: every EL0 trap control clear.
-const SCTLR_VALUE: u64 = (0x30d0_0801 | (1 << 42) | (1 << 60)) & !1;
+/// The harness's SCTLR_EL1: MMU on, every EL0 trap control clear.
+const SCTLR_VALUE: u64 = 0x30d0_0801 | (1 << 42) | (1 << 60);
 /// The harness's TCR_EL1: T0SZ=25, 4 KiB granule, TTBR1 walks off, 48-bit PA.
 const TCR_VALUE: u64 = 25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (5 << 32);
 /// MAIR_EL1 attribute 0: Normal write-back.
@@ -42,9 +43,72 @@ const SPSR_EL1T_MASKED: u64 = 0x3c4;
 const SPSR_EL0T_STEPPED: u64 = 0x3c0 | 1 << 21;
 /// ESR_EL1 of UDF #0: EC 0 with IL set.
 const UDF_SYNDROME: u64 = 1 << 25;
-/// Blocks an EL1 case may run before its first exception: the case word and
-/// the UDF after it.
-const EL1_BLOCKS: u64 = 2;
+
+// The harness's translation tables and the memory they map.
+const RAM: u64 = 0x4000_0000;
+const L1_TABLE: u64 = 0x4011_0000;
+const L2_TABLE: u64 = 0x4011_1000;
+const L3_DATA: u64 = 0x4011_3000;
+const L2_CASE_TABLE: u64 = 0x4011_4000;
+const TABLE_BYTES: usize = 0x5000;
+const CASE_REGION: u64 = 0x2_0000_0000;
+const CODE_ALIAS: u64 = 0x2_0040_0000;
+const L2_ENTRIES: u64 = 512;
+const BLOCK_1G: u64 = 0x4000_0000;
+const BLOCK_2M: u64 = 0x20_0000;
+const PAGE_BYTES: u64 = 0x1000;
+const DESC_TABLE: u64 = 3;
+const DESC_BLOCK: u64 = 1;
+const DESC_PAGE: u64 = 3;
+/// AF, Inner Shareable, AttrIndx 0.
+const DESC_NORMAL: u64 = (1 << 10) | (3 << 8);
+const DESC_EL0_RW: u64 = 1 << 6;
+const DESC_READ_ONLY: u64 = 3 << 6;
+const DESC_PXN: u64 = 1 << 53;
+const DESC_UXN: u64 = 1 << 54;
+
+/// The descriptors `build_tables` writes, as bytes from `L1_TABLE`.
+fn harness_tables() -> Vec<u8> {
+    let mut tables = vec![0u8; TABLE_BYTES];
+    let mut set = |address: u64, descriptor: u64| {
+        let offset = (address - L1_TABLE) as usize;
+        tables[offset..offset + 8].copy_from_slice(&descriptor.to_le_bytes());
+    };
+    set(L1_TABLE + RAM / BLOCK_1G * 8, L2_TABLE | DESC_TABLE);
+    set(
+        L1_TABLE + CASE_REGION / BLOCK_1G * 8,
+        L2_CASE_TABLE | DESC_TABLE,
+    );
+    for entry in 0..L2_ENTRIES {
+        let block = RAM + entry * BLOCK_2M;
+        set(
+            L2_TABLE + entry * 8,
+            block | DESC_NORMAL | DESC_BLOCK | DESC_UXN,
+        );
+    }
+    let case = |address: u64| L2_CASE_TABLE + (address - CASE_REGION) / BLOCK_2M * 8;
+    set(
+        case(CASE_REGION),
+        CASE_REGION | DESC_NORMAL | DESC_BLOCK | DESC_READ_ONLY | DESC_PXN | DESC_UXN,
+    );
+    set(
+        case(CODE_PAGE),
+        CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_READ_ONLY,
+    );
+    set(
+        case(CODE_ALIAS),
+        CODE_PAGE | DESC_NORMAL | DESC_BLOCK | DESC_PXN | DESC_UXN,
+    );
+    set(case(DATA_WINDOW), L3_DATA | DESC_TABLE);
+    for page in 0..DATA_BYTES as u64 / PAGE_BYTES {
+        let address = DATA_WINDOW + page * PAGE_BYTES;
+        set(
+            L3_DATA + page * 8,
+            address | DESC_NORMAL | DESC_PAGE | DESC_EL0_RW | DESC_PXN | DESC_UXN,
+        );
+    }
+    tables
+}
 
 /// The native block exit in RAX:RDX.
 #[repr(C)]
@@ -58,6 +122,8 @@ struct BlockExit {
 struct OracleHost {
     code: *const u8,
     data: *mut u8,
+    /// The harness's translation tables, read-only.
+    tables: Vec<u8>,
     installed: Vec<Executable>,
 }
 
@@ -73,6 +139,10 @@ impl OracleHost {
             // SAFETY: inside the owned data mapping.
             let pointer = unsafe { self.data.add((physical - DATA_WINDOW) as usize) };
             return Some((pointer, true));
+        }
+        if physical >= L1_TABLE && end <= L1_TABLE + TABLE_BYTES as u64 {
+            let pointer = self.tables[(physical - L1_TABLE) as usize..].as_ptr();
+            return Some((pointer.cast_mut(), false));
         }
         None
     }
@@ -181,6 +251,7 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         (Register::MDSCR_EL1, MDSCR_SS),
         (Register::SCTLR_EL1, SCTLR_VALUE),
         (Register::TCR_EL1, TCR_VALUE),
+        (Register::TTBR0_EL1, L1_TABLE),
         (Register::MAIR_EL1, MAIR_VALUE),
         (Register::CPACR_EL1, CPACR_FP),
         (Register::VBAR_EL1, VECTOR_BASE),
@@ -202,10 +273,16 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     let host = OracleHost {
         code: windows.code_pointer(),
         data: windows.data_pointer(),
+        tables: harness_tables(),
         installed: Vec::new(),
     };
     let mut machine = Machine::new(cpu, host, NoDevices, profile(target), target);
-    let blocks = if case.el1 { EL1_BLOCKS } else { 1 };
+    // An EL1 case runs its words, one block each, and the UDF after them.
+    let blocks = if case.el1 {
+        case.code.len() as u64 + 1
+    } else {
+        1
+    };
     let saved = super::native::mxcsr();
     let mut stop = Stop::Budget;
     for budget in 1..=blocks {

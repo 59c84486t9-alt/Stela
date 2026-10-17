@@ -252,8 +252,8 @@ impl Translation {
         )
         .map_err(|error| anyhow::anyhow!(error))?;
         ensure!(
-            compiled.native.source_map.len() == 1 && words.len() == 1,
-            "system lane cases are one System word"
+            compiled.native.source_map.len() == 1,
+            "system lane cases start with a System word that ends its block"
         );
         Ok(Self::System)
     }

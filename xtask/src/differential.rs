@@ -232,15 +232,28 @@ fn system_oracle_limit(form: &str, word: u32, el1: bool, state: &GuestState) -> 
     // QEMU swaps Op1 and Op2 in the ISS of a trapped MSR DAIFSet or DAIFClr;
     // Arm `AArch64_SystemAccessTrapSyndrome` takes both from the instruction.
     let daif_trap = !el1 && word & 0xffff_f0df == MSR_DAIFSET;
-    // Cache maintenance and address translation by VA (SYS with CRn=7) at an
-    // address outside the windows: the engine runs with its MMU off and QEMU
-    // through the harness's tables, so their faults differ, and QEMU makes
-    // DC IVAC, CVAC, CVAU and CIVAC NOPs that never translate.
+    // QEMU makes DC IVAC, CVAC, CVAU and CIVAC and IC IVAU NOPs that never
+    // translate, so at an address outside the windows they complete where
+    // the engine's walk of the same tables may fault. It performs DC CVAP and
+    // CVADP as a load of the aligned line, so their faults report CM=0,
+    // WnR=0 and the line address, where the architecture reports CM=1,
+    // WnR=1 and the operand.
+    let selector = (word >> 5) & 0x3fff;
+    let untranslated = [
+        (0, 7, 6, 1),
+        (3, 7, 10, 1),
+        (3, 7, 11, 1),
+        (3, 7, 14, 1),
+        (3, 7, 5, 1),
+        (3, 7, 12, 1),
+        (3, 7, 13, 1),
+    ]
+    .iter()
+    .any(|&(op1, crn, crm, op2)| selector == op1 << 11 | crn << 7 | crm << 3 | op2);
+    // Rt=31 is XZR: address 0.
     let register = (word & REGISTER_FIELD) as usize;
-    let by_address = word & 0xfff8_0000 == 0xd508_0000
-        && (word >> 12) & 15 == 7
-        && register != ZERO_OR_SP as usize
-        && !in_windows(state.x[register]);
+    let address = state.x.get(register).copied().unwrap_or(0);
+    let by_address = word & 0xfff8_0000 == 0xd508_0000 && untranslated && !in_windows(address);
     wfi || absent
         || sme
         || pstate
