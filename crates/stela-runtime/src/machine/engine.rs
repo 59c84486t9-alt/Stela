@@ -689,16 +689,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     "kernel-level fetch of guarded-only code (GXF abort entry)",
                 ))))
             }
-            Translated::Fault(fault) => {
-                let class = if self.cpu.route() > self.cpu.pstate.el {
-                    Class::InstructionAbortLower
-                } else {
-                    Class::InstructionAbortSame
-                };
-                let mut exception = Exception::synchronous(class, fault.status_code(), pc);
-                exception.fault_address = Some(pc);
-                Err(Ok(exception))
-            }
+            Translated::Fault(fault) => Err(Ok(self.abort(
+                fault,
+                [Class::InstructionAbortLower, Class::InstructionAbortSame],
+                fault.instruction_syndrome(),
+                pc,
+                pc,
+            ))),
             Translated::Unsupported(unsupported) => Err(Err(
                 self.unsupported(RequirementKind::Translation(unsupported))
             )),
@@ -1236,21 +1233,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let pc = self.faulting_pc(index, fault.offset);
         self.cpu.pc = pc;
         match fault.cause {
-            FaultCause::Guest(guest) => {
-                let class = if self.cpu.route() > self.cpu.pstate.el {
-                    Class::DataAbortLower
-                } else {
-                    Class::DataAbortSame
-                };
-                let mut exception = Exception::synchronous(
-                    class,
-                    data_abort_iss(guest.status_code(), fault.write),
-                    pc,
-                );
-                exception.fault_address = Some(fault.address);
-                self.take(exception);
-                Ok(())
-            }
+            FaultCause::Guest(guest) => self.data_abort(fault.address, guest, fault.write, false),
             FaultCause::Device { physical } => {
                 let word = self.word(index, pc)?;
                 self.device_access(word, fault.address, physical, fault.write)
@@ -1851,19 +1834,45 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The data abort a stage-1 fault raises at the current EL.
     fn data_abort_exception(
-        &self,
+        &mut self,
         address: u64,
         fault: mmu::Fault,
         write: bool,
         cache: bool,
     ) -> Exception {
-        let class = if self.cpu.route() > self.cpu.pstate.el {
-            Class::DataAbortLower
+        self.abort(
+            fault,
+            [Class::DataAbortLower, Class::DataAbortSame],
+            fault.data_syndrome(write, cache),
+            address,
+            self.cpu.pc,
+        )
+    }
+
+    /// The abort for a translation fault (Arm `AArch64_Abort` and
+    /// `AArch64_ReportException`): a stage-2 fault goes to EL2 whatever the
+    /// routing, and records HPFAR_EL2 when its IPA is valid; `classes` are
+    /// the lower-EL and same-EL classes, chosen by the target.
+    fn abort(
+        &mut self,
+        fault: mmu::Fault,
+        classes: [Class; 2],
+        iss: u32,
+        address: u64,
+        return_address: u64,
+    ) -> Exception {
+        let target = if fault.to_el2() { 2 } else { self.cpu.route() };
+        let class = if target > self.cpu.pstate.el {
+            classes[0]
         } else {
-            Class::DataAbortSame
+            classes[1]
         };
-        let iss = data_abort_iss(fault.status_code(), write) | if cache { 1 << 8 } else { 0 };
-        let mut exception = Exception::synchronous(class, iss, self.cpu.pc);
+        if let Some(hpfar) = fault.hpfar() {
+            self.cpu
+                .registers
+                .set_raw(SystemRegister::HPFAR_EL2, 0, hpfar);
+        }
+        let mut exception = Exception::synchronous(class, iss, return_address).to(target);
         exception.fault_address = Some(address);
         exception
     }
@@ -2136,6 +2145,72 @@ mod tests {
             BASE
         );
         assert_eq!(machine.cpu.read(SystemRegister::PAR_EL1) & 1, 0);
+    }
+
+    #[test]
+    fn stage_two_faults_go_to_el2_with_hpfar_and_at_reports_both_stages() {
+        let mut machine = machine(&[]);
+        // EL2 host with HCR_EL2.VM: a 40-bit IPA from two concatenated
+        // level-1 tables at BASE + 0x4000, whose entry for IPA BASE maps that
+        // GiB to itself, Normal Write-Back, read/write.
+        let vtcr = 24 | 1 << 6 | 5 << 16 | 1 << 31;
+        let tables = BASE + 0x4000;
+        let block = BASE | 1 | 1 << 10 | 0b11 << 6 | 0b1111 << 2 | 0b11 << 8;
+        let slot = (tables - BASE + (BASE >> 30) * 8) as usize;
+        machine.host.ram[slot..slot + 8].copy_from_slice(&block.to_le_bytes());
+        machine.cpu.set_pstate(Pstate::reset(2));
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::HCR_EL2, 0, 1 << 34 | 1);
+        registers.set(SystemRegister::VTCR_EL2, 0, vtcr);
+        registers.set(SystemRegister::VTTBR_EL2, 0, tables);
+        registers.set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
+        let unmapped = 0x1_0000_0000;
+        let hpfar = (unmapped >> 12) << 4;
+
+        // AT S12E1R walks both stages (EL1&0 stage 1 is off); AT S1E1R
+        // stops at the IPA; a stage-2 fault reports S=1 in PAR_EL1.
+        machine.cpu.state.x[2] = BASE + 0x108;
+        machine.system_instruction(0xd50c_7882).unwrap(); // at s12e1r, x2
+        let par = machine.cpu.read(SystemRegister::PAR_EL1);
+        assert_eq!((par & 1, par & 0x0000_ffff_ffff_f000), (0, BASE));
+        machine.cpu.state.x[2] = unmapped;
+        machine.system_instruction(0xd50c_7882).unwrap();
+        let fault = 1 << 11 | 1 << 9 | 0b00_0101 << 1 | 1;
+        assert_eq!(machine.cpu.read(SystemRegister::PAR_EL1), fault);
+        machine.system_instruction(0xd508_7802).unwrap(); // at s1e1r, x2
+        let par = machine.cpu.read(SystemRegister::PAR_EL1);
+        assert_eq!((par & 1, par & 0x0000_ffff_ffff_f000), (0, unmapped));
+
+        // At EL1, DC ZVA to an IPA stage 2 does not map is a Data Abort
+        // taken to EL2 from the lower EL, with FAR and HPFAR.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        let pc = machine.cpu.pc;
+        machine.system_instruction(0xd50b_7422).unwrap(); // dc zva, x2
+        assert_eq!(machine.cpu.pstate.el, 2);
+        assert_eq!(machine.cpu.pc, 0x2_0400);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x9200_0045);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL2), pc);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL2), unmapped);
+        assert_eq!(machine.cpu.read(SystemRegister::HPFAR_EL2), hpfar);
+
+        // AT S1E1R at EL1 whose stage-1 table is at an unmapped IPA: the
+        // stage-2 fault on the walk is taken to EL2 with S1PTW, CM and WnR.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::HPFAR_EL2, 0, 0);
+        registers.set(SystemRegister::SCTLR_EL1, 0, 1);
+        registers.set(SystemRegister::TCR_EL1, 0, 25 | 1 << 23 | 5 << 32);
+        registers.set(SystemRegister::TTBR0_EL1, 0, unmapped);
+        machine.derived_changed();
+        machine.cpu.state.x[2] = 0x1000;
+        machine.system_instruction(0xd508_7802).unwrap(); // at s1e1r, x2
+        assert_eq!(machine.cpu.pstate.el, 2);
+        assert_eq!(
+            machine.cpu.read(SystemRegister::ESR_EL2),
+            0x9200_0000 | 1 << 8 | 1 << 7 | 1 << 6 | 0b00_0101
+        );
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL2), 0x1000);
+        assert_eq!(machine.cpu.read(SystemRegister::HPFAR_EL2), hpfar);
     }
 
     #[test]

@@ -334,8 +334,8 @@ impl Cpu {
         }
     }
 
-    /// Stage-1 controls of a regime. The EL1&0 regime with HCR_EL2.VM set
-    /// also needs stage 2, which the caller checks with [`Cpu::stage2`].
+    /// Translation controls of a regime: its stage-1 registers and, for
+    /// EL1&0, the stage-2 registers that `mmu` applies under HCR_EL2.VM or DC.
     pub fn controls(&self, regime: TranslationRegime) -> Controls {
         let (sctlr, tcr, ttbr0, ttbr1, mair, kernel, user) = match regime {
             TranslationRegime::El10 => (
@@ -370,7 +370,11 @@ impl Cpu {
                 fields: self.apple.sprr_fields,
             },
             stage2: self.stage2(regime),
-            second_stage: None,
+            second_stage: (regime == TranslationRegime::El10).then(|| mmu::Stage2 {
+                hcr: self.read(Register::HCR_EL2),
+                vtcr: self.read(Register::VTCR_EL2),
+                vttbr: self.read(Register::VTTBR_EL2),
+            }),
             regime: match regime {
                 TranslationRegime::El10 => mmu::Regime::El10,
                 TranslationRegime::El20 => mmu::Regime::El20,

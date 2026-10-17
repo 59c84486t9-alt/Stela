@@ -497,8 +497,11 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
     }
 
     /// `AArch64_AT`: S1E1 from the host becomes S1E2; S1E0 translates as
-    /// unprivileged and S1E1R/W ignore PAN, S1E1RP/WP honor it. PAR_EL1 takes
-    /// the result.
+    /// unprivileged and S1E1R/W ignore PAN, S1E1RP/WP honor it. S1E* stops at
+    /// the IPA, though its walk goes through stage 2; S12E* translates both
+    /// stages. PAR_EL1 takes the result, except that an external abort, or a
+    /// stage-2 fault on the walk of an AT executed at EL1, is taken as a
+    /// Data Abort with CM set.
     fn address_translation(
         &mut self,
         stage: Stage,
@@ -506,9 +509,6 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         access: AtAccess,
         address: u64,
     ) -> Result<(), Effect> {
-        if stage == Stage::S12 && self.machine.cpu.stage2(TranslationRegime::El10) {
-            return Err(Effect::Refused("AT S12 with stage 2 enabled"));
-        }
         let cpu = &self.machine.cpu;
         let el = if el == 1 && cpu.in_host() && stage == Stage::S1 {
             2
@@ -531,7 +531,23 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         } else {
             MemoryAccess::Read
         };
-        let outcome = self.translate(regime, requester, address, memory);
+        let controls = self.machine.cpu.controls(regime);
+        let tables = &mut super::RamTables(&mut self.machine.host);
+        let outcome = match stage {
+            Stage::S1 => mmu::translate_stage1(&controls, address, memory, requester, tables),
+            Stage::S12 => mmu::translate(&controls, address, memory, requester, tables),
+        };
+        if let Translated::Fault(fault) = outcome {
+            let walk = fault.second_stage.is_some_and(|second| second.walk);
+            if fault.kind == mmu::FaultKind::ExternalOnWalk
+                || walk && self.machine.cpu.pstate.el == 1
+            {
+                return Err(Effect::Exception(
+                    self.machine
+                        .data_abort_exception(address, fault, true, true),
+                ));
+            }
+        }
         let Some(par) = mmu::par(&outcome) else {
             return Err(Effect::Refused("AT needs an unsupported translation"));
         };
