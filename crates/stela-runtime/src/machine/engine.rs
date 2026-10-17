@@ -1654,6 +1654,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
                 Ok(())
             }
+            // FEAT_FPACCOMBINE: a failed authentication of the base faults
+            // as a standalone AUT does.
+            Err(pauth::memory::Fault::Authentication(pauth::AuthenticationError::Failure {
+                code,
+            })) => {
+                self.take(Exception::synchronous(
+                    Class::PointerAuthenticationFailure,
+                    u32::from(code),
+                    pc,
+                ));
+                Ok(())
+            }
             Err(other) => Err(self.unsupported(RequirementKind::Instruction {
                 word,
                 detail: match other {
@@ -3464,6 +3476,57 @@ mod tests {
         let (enhanced, _, taken) = run(crate::machine::Chip::AppleM2);
         assert_ne!(enhanced, classic);
         assert!(taken);
+    }
+
+    #[test]
+    fn combined_pac_instructions_fault_only_with_fpaccombine() {
+        const PACIBSP: u32 = 0xd503_237f;
+        const RETAB: u32 = 0xd65f_0fff;
+        // ldraa x0, [x1]
+        const LDRAA_X0_X1: u32 = 0xf820_0420;
+        let pointer = 0xffff_ff80_0000_4000_u64;
+        for (chip, faults) in [
+            (crate::machine::Chip::AppleM2, false),
+            (crate::machine::Chip::AppleM6, true),
+        ] {
+            let mut machine = pac_machine();
+            machine.profile.chip = chip;
+            machine.cpu.state.x[30] = pointer;
+            machine.cpu.state.sp = 0xffff_ff80_0001_0000;
+            machine.system_instruction_for_test(PACIBSP);
+            // A different modifier fails the RETAB's authentication.
+            machine.cpu.state.sp += 16;
+            let pc = machine.cpu.pc;
+            machine.system_instruction_for_test(RETAB);
+            if faults {
+                // EC 0x1C, ISS {data=0, key B=1}, at the RETAB.
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0001);
+                assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
+                assert_eq!(machine.cpu.pc, 0x1_0200);
+            } else {
+                // FEAT_FPAC alone faults only standalone AUTs: RETAB branches
+                // to the pointer with its error code.
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0);
+                assert_ne!(machine.cpu.pc, pointer);
+                assert_eq!(
+                    machine.cpu.pc & 0x0000_007f_ffff_ffff,
+                    pointer & 0x0000_007f_ffff_ffff
+                );
+            }
+        }
+        // LDRAA of an unsigned base faults with the data key A (ISS 0b10).
+        let mut machine = pac_machine();
+        machine.profile.chip = crate::machine::Chip::AppleM6;
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::APDAKeyLo_EL1, 0, 0x2468_ace0_1357_9bdf);
+        registers.set(SystemRegister::APDAKeyHi_EL1, 0, 0x0f1e_2d3c_4b5a_6978);
+        let sctlr = registers.get(SystemRegister::SCTLR_EL1, 0) | 1 << 27;
+        registers.set(SystemRegister::SCTLR_EL1, 0, sctlr);
+        machine.cpu.state.x[1] = 0xffff_ff80_0000_8000;
+        let pc = machine.cpu.pc;
+        machine.system_instruction_for_test(LDRAA_X0_X1);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0002);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
     }
 
     #[test]

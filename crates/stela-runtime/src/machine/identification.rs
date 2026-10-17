@@ -390,6 +390,16 @@ pub const TABLE: &[Row] = &[
     ),
     feature(
         ID_AA64ISAR1_EL1,
+        4,
+        5,
+        "FEAT_FPACCOMBINE",
+        engine(
+            true,
+            "failed combined authentications (RETA*, BRA*, ERETA*, LDRA*) also take EC 0x1C",
+        ),
+    ),
+    feature(
+        ID_AA64ISAR1_EL1,
         12,
         1,
         "FEAT_JSCVT",
@@ -1177,6 +1187,9 @@ mod tests {
         // whose PACs the engine computes that way.
         assert_eq!(field(Chip::AppleM2, ID_AA64ISAR1_EL1, 4), 4);
         assert_eq!(field(Chip::AppleM1, ID_AA64ISAR1_EL1, 4), 1);
+        // FEAT_PAuth_LR implies FEAT_FPACCOMBINE (APA 5) on the M6.
+        assert_eq!(field(Chip::AppleM5, ID_AA64ISAR1_EL1, 4), 4);
+        assert_eq!(field(Chip::AppleM6, ID_AA64ISAR1_EL1, 4), 5);
         // Apple clang drops SSBS from the M4 on (PFR1.SSBS).
         assert_ne!(field(Chip::AppleM3, ID_AA64PFR1_EL1, 4), 0);
         assert_eq!(field(Chip::AppleM4, ID_AA64PFR1_EL1, 4), 0);

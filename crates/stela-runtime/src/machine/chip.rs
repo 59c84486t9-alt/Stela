@@ -110,8 +110,8 @@ impl Chip {
 /// feature the M2 has; the M3's FEAT_HCX, FEAT_NV and FEAT_NV2; the M4's
 /// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS); the M5's
 /// FEAT_SPECRES2 and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
-/// instruction-only FEAT_FAMINMAX and FEAT_LUT, whose forms the system-mode
-/// compiler admits.
+/// FEAT_FPACCOMBINE and instruction-only FEAT_FAMINMAX and FEAT_LUT, whose
+/// forms the system-mode compiler admits.
 const fn engine_implements(feature: Feature) -> bool {
     match feature {
         Feature::FEAT_AMUv1p1
@@ -132,6 +132,7 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_CSSC
         | Feature::FEAT_FAMINMAX
         | Feature::FEAT_HBC
+        | Feature::FEAT_FPACCOMBINE
         | Feature::FEAT_LUT
         | Feature::FEAT_PAN3
         | Feature::FEAT_SPECRES2
@@ -140,7 +141,6 @@ const fn engine_implements(feature: Feature) -> bool {
         Feature::FEAT_CPA
         | Feature::FEAT_FGT2
         | Feature::FEAT_FP8
-        | Feature::FEAT_FPACCOMBINE
         | Feature::FEAT_FPMR
         | Feature::FEAT_MTE
         | Feature::FEAT_MTE2
