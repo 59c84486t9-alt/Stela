@@ -1,13 +1,15 @@
 //! Apple Interrupt Controller v2 (`apple,t8112-aic`, `apple,aic2`; ADT
-//! `aic,2`), the T8112 controller for peripheral IRQs. Fast IPIs and timer
-//! FIQs bypass it (see `ipi` and `timer`).
+//! `aic,2`), the T8112 controller for peripheral IRQs, and v3
+//! (`apple,t8122-aic3`; ADT `aic,3`), which is v2 with its per-die arrays at
+//! 0x10000 (Linux `AIC3_IRQ_CFG`; ADT `extint-baseaddress`). Fast IPIs and
+//! timer FIQs bypass it (see `ipi` and `timer`).
 //!
 //! Documented by Linux `drivers/irqchip/irq-apple-aic.c` and m1n1
 //! `src/aic.c` / `src/aic_regs.h`:
 //! - `INFO1` (`CAP0`, 0x4) holds NR_IRQ [15:0] and LAST_DIE [27:24]; `INFO3`
 //!   (`MAXNUMIRQ`, 0xc) holds MAX_IRQ [15:0] and MAX_DIE [27:24]; `CONFIG`
 //!   (0x14) bit 0 enables the controller.
-//! - From 0x2000 each die has `IRQ_CFG[MAX_IRQ]` (TARGET [3:0], DELAY_IDX
+//! - From 0x2000 (v3: 0x10000) each die has `IRQ_CFG[MAX_IRQ]` (TARGET [3:0], DELAY_IDX
 //!   [7:5]), then `SW_SET`, `SW_CLR`, `MASK_SET`, `MASK_CLR` and `HW_STATE`,
 //!   each `MAX_IRQ / 32` words.
 //! - The event register is a separate block (`aic-iack-offset`; DT `reg[1]`).
@@ -37,7 +39,10 @@ const INFO2: u64 = 0x0008;
 const INFO3: u64 = 0x000c;
 const RESET: u64 = 0x0010;
 const CONFIG: u64 = 0x0014;
-const IRQ_CFG: u64 = 0x2000;
+/// Where AICv2's per-die arrays start (Linux `AIC2_IRQ_CFG`).
+pub const AIC2_IRQ_CFG: u64 = 0x2000;
+/// Where AICv3's per-die arrays start (Linux `AIC3_IRQ_CFG`).
+pub const AIC3_IRQ_CFG: u64 = 0x10000;
 
 const INFO_DIE_SHIFT: u32 = 24;
 const CONFIG_ENABLE: u32 = 1;
@@ -54,6 +59,9 @@ pub struct Aic2Config {
     pub nr_irq: u16,
     /// A multiple of 32.
     pub max_irq: u16,
+    /// Offset of the first die's `IRQ_CFG` array: [`AIC2_IRQ_CFG`] or
+    /// [`AIC3_IRQ_CFG`].
+    pub irq_config: u64,
     /// Offset of the event register from the core block: ADT
     /// `aic-iack-offset`, or DT `reg[1] - reg[0]` (0x8000 on T8112).
     pub event_offset: u64,
@@ -119,8 +127,11 @@ impl Aic2 {
         {
             return invalid("a CPU set names a CPU beyond the CPU count");
         }
+        if config.irq_config <= CONFIG || !config.irq_config.is_multiple_of(4) {
+            return invalid("the IRQ_CFG array must be a word after CONFIG");
+        }
         let words = usize::from(config.max_irq / 32);
-        let end = IRQ_CFG + 4 * u64::from(config.max_irq) + 4 * 5 * words as u64;
+        let end = config.irq_config + 4 * u64::from(config.max_irq) + 4 * 5 * words as u64;
         if config.event_offset < end || !config.event_offset.is_multiple_of(4) {
             return invalid("the event register must follow the per-die arrays");
         }
@@ -230,15 +241,16 @@ impl Aic2 {
     }
     fn decode(&self, offset: u64) -> Option<Register> {
         let words = self.software.len() as u64;
-        let configs = IRQ_CFG + 4 * u64::from(self.config.max_irq);
+        let irq_config = self.config.irq_config;
+        let configs = irq_config + 4 * u64::from(self.config.max_irq);
         let used_words = usize::from(self.config.nr_irq).div_ceil(32) as u64;
         Some(match offset {
             INFO1 => Register::Info1,
             INFO3 => Register::Info3,
             CONFIG => Register::Config,
             offset if offset == self.config.event_offset => Register::Event,
-            offset if (IRQ_CFG..configs).contains(&offset) => {
-                let irq = (offset - IRQ_CFG) / 4;
+            offset if (irq_config..configs).contains(&offset) => {
+                let irq = (offset - irq_config) / 4;
                 if irq >= u64::from(self.config.nr_irq) {
                     return None;
                 }
@@ -394,6 +406,7 @@ mod tests {
 
     const NR_IRQ: u16 = 0x3a0;
     const MAX_IRQ: u16 = 0x400;
+    const IRQ_CFG: u64 = AIC2_IRQ_CFG;
     const MASK_SET: u64 = IRQ_CFG + 4 * MAX_IRQ as u64 + 2 * 4 * (MAX_IRQ as u64 / 32);
     const MASK_CLR: u64 = MASK_SET + 4 * (MAX_IRQ as u64 / 32);
     const SW_SET: u64 = IRQ_CFG + 4 * MAX_IRQ as u64;
@@ -405,6 +418,7 @@ mod tests {
         Aic2::new(Aic2Config {
             nr_irq: NR_IRQ,
             max_irq: MAX_IRQ,
+            irq_config: IRQ_CFG,
             event_offset: EVENT,
             cpus,
             default_cpus: 1,
@@ -553,5 +567,48 @@ mod tests {
             aic.set_input(AicInput::new(0, NR_IRQ), true, &mut access)
                 .is_err()
         );
+    }
+
+    /// AICv3 (Linux `aic3_info`, `t8122.dtsi`): the same registers with the
+    /// per-die arrays at 0x10000 and, on T8122, the event register at
+    /// +0x40000.
+    #[test]
+    fn aic3_moves_the_per_die_arrays() {
+        let v3 = |irq_config, event_offset| {
+            Aic2::new(Aic2Config {
+                nr_irq: NR_IRQ,
+                max_irq: MAX_IRQ,
+                irq_config,
+                event_offset,
+                cpus: 1,
+                default_cpus: 1,
+                target_groups: [None; 4],
+            })
+        };
+        let mut aic = v3(AIC3_IRQ_CFG, 0x40000).unwrap();
+        assert_eq!(aic.span(), 0x40004);
+        let mut latch = InterruptLatch::new();
+        let mask_clear = AIC3_IRQ_CFG + 4 * u64::from(MAX_IRQ) + 3 * 4 * u64::from(MAX_IRQ / 32);
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        write(&mut aic, &mut latch, mask_clear, 1 << 3);
+        write(&mut aic, &mut latch, AIC3_IRQ_CFG + 4 * 3, 0);
+        aic.set_input(
+            AicInput::new(0, 3),
+            true,
+            &mut Access::new(0, 0, &mut latch),
+        )
+        .unwrap();
+        assert_eq!(read(&mut aic, &mut latch, 0, 0x40000), 1 << 16 | 3);
+        let mut access = Access::new(0, 0, &mut latch);
+        assert!(
+            aic.read(AIC2_IRQ_CFG, Width::Word, &mut access).is_err(),
+            "AICv2's array offset is unallocated"
+        );
+        assert!(
+            v3(AIC3_IRQ_CFG, EVENT).is_err(),
+            "the event overlaps the arrays"
+        );
+        assert!(v3(CONFIG, 0x40000).is_err());
+        assert!(v3(AIC3_IRQ_CFG + 2, 0x40000).is_err());
     }
 }

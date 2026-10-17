@@ -23,7 +23,7 @@ use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Machine, Stop,
-    apple::{AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
+    apple::{AIC2_IRQ_CFG, AicInput, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::DCZID_EL0,
     soc,
@@ -260,6 +260,7 @@ fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String>
             soc::InterruptController {
                 physical: ARM_IO + J473_AIC.0,
                 inputs: J473_AIC.1,
+                irq_config: AIC2_IRQ_CFG,
                 event: J473_AIC_EVENT,
             },
         ),
@@ -281,7 +282,7 @@ fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String>
     devices
         .add_watchdog(&[wdt.0], Some(wdt.1), now)
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
-    devices.add_aic(aic.physical, aic.inputs, aic.event)?;
+    devices.add_aic(aic.physical, aic.inputs, aic.irq_config, aic.event)?;
     output::arguments(format_args!(
         "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
          aic-timebase=unplaced\n",

@@ -11,14 +11,16 @@
 //! 0x6034), the A18 Pro and the M5 Pro and Max (no `product-soc-name`), and
 //! the M6's M cores.
 use super::{Chip, adt::Node, registers::Identity};
+use crate::platform::apple::aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG};
 use alloc::{format, string::String, vec::Vec};
 
 /// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part
-/// number of each `cluster-type`, and for an `aic,2` interrupt controller the
-/// offset of its event register from the `aic` `reg` (Linux
+/// number of each `cluster-type`, and for an `aic,2` or `aic,3` interrupt
+/// controller the offset of its event register from the `aic` `reg` (Linux
 /// `arch/arm64/boot/dts/apple`: 0x8000 in `t8112.dtsi`, 0xc000 in
-/// `t600x-die0.dtsi` and `t602x-die0.dtsi`). The M1's `aic,1` and the `aic,3`
-/// of the M3 and later have no event offset here. `dram_base` is where the
+/// `t600x-die0.dtsi` and `t602x-die0.dtsi`, 0x40000 in `t8122.dtsi`). The
+/// M1's `aic,1` and the SoCs whose AIC no public DeviceTree places have no
+/// event offset here. `dram_base` is where the
 /// SoC places DRAM (the `memory@` node of Linux `t8103-jxxx.dtsi`,
 /// `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and `t600x-j375.dtsi`, which the
 /// t602x boards include); the SoCs without a public memory node have none,
@@ -28,7 +30,7 @@ struct Soc {
     name: &'static str,
     chip: Chip,
     parts: [(u8, u16); 2],
-    aic2_event: Option<u64>,
+    aic: Option<(&'static str, u64)>,
     dram_base: Option<u64>,
 }
 
@@ -38,7 +40,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M1",
         chip: Chip::AppleM1,
         parts: [(b'E', 0x022), (b'P', 0x023)],
-        aic2_event: None,
+        aic: None,
         dram_base: Some(0x8_0000_0000),
     },
     Soc {
@@ -46,7 +48,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M1 Pro",
         chip: Chip::AppleM1,
         parts: [(b'E', 0x024), (b'P', 0x025)],
-        aic2_event: Some(0xc000),
+        aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
     },
     Soc {
@@ -54,7 +56,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M1 Max",
         chip: Chip::AppleM1,
         parts: [(b'E', 0x028), (b'P', 0x029)],
-        aic2_event: Some(0xc000),
+        aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
     },
     Soc {
@@ -62,7 +64,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M2",
         chip: Chip::AppleM2,
         parts: [(b'E', 0x032), (b'P', 0x033)],
-        aic2_event: Some(0x8000),
+        aic: Some(("aic,2", 0x8000)),
         dram_base: Some(0x8_0000_0000),
     },
     Soc {
@@ -70,7 +72,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M2 Pro",
         chip: Chip::AppleM2,
         parts: [(b'E', 0x034), (b'P', 0x035)],
-        aic2_event: Some(0xc000),
+        aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
     },
     Soc {
@@ -78,7 +80,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M2 Max",
         chip: Chip::AppleM2,
         parts: [(b'E', 0x038), (b'P', 0x039)],
-        aic2_event: Some(0xc000),
+        aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
     },
     Soc {
@@ -86,7 +88,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M3",
         chip: Chip::AppleM3,
         parts: [(b'E', 0x042), (b'P', 0x043)],
-        aic2_event: None,
+        aic: Some(("aic,3", 0x40000)),
         dram_base: None,
     },
     Soc {
@@ -94,7 +96,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M3 Pro",
         chip: Chip::AppleM3,
         parts: [(b'E', 0x044), (b'P', 0x045)],
-        aic2_event: None,
+        aic: None,
         dram_base: None,
     },
     Soc {
@@ -102,7 +104,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M3 Max",
         chip: Chip::AppleM3,
         parts: [(b'E', 0x048), (b'P', 0x049)],
-        aic2_event: None,
+        aic: None,
         dram_base: None,
     },
     Soc {
@@ -110,7 +112,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M4",
         chip: Chip::AppleM4,
         parts: [(b'E', 0x052), (b'P', 0x053)],
-        aic2_event: None,
+        aic: None,
         dram_base: None,
     },
     Soc {
@@ -118,7 +120,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M4 Pro",
         chip: Chip::AppleM4,
         parts: [(b'E', 0x054), (b'P', 0x055)],
-        aic2_event: None,
+        aic: None,
         dram_base: None,
     },
     Soc {
@@ -126,7 +128,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M4 Max",
         chip: Chip::AppleM4,
         parts: [(b'E', 0x058), (b'P', 0x059)],
-        aic2_event: None,
+        aic: None,
         dram_base: None,
     },
     Soc {
@@ -134,7 +136,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M5",
         chip: Chip::AppleM5,
         parts: [(b'E', 0x062), (b'P', 0x063)],
-        aic2_event: None,
+        aic: None,
         dram_base: None,
     },
     Soc {
@@ -142,7 +144,7 @@ const SOCS: [Soc; 14] = [
         name: "Apple M6",
         chip: Chip::AppleM6,
         parts: [(b'E', 0x072), (b'P', 0x073)],
-        aic2_event: None,
+        aic: None,
         dram_base: None,
     },
 ];
@@ -153,9 +155,9 @@ pub struct Cpus {
     pub chip: Chip,
     /// The PEs in `/cpus` order.
     pub processors: Vec<Identity>,
-    /// The AIC2 event register's offset from the `aic` `reg`, on a SoC whose
-    /// interrupt controller is `aic,2`.
-    pub aic2_event: Option<u64>,
+    /// The `aic` node's `compatible` and its event register's offset from its
+    /// `reg`, on a SoC whose `aic,2` or `aic,3` a public DeviceTree places.
+    pub aic: Option<(&'static str, u64)>,
 }
 
 /// The guest DRAM base of the SoC with `chip_id`.
@@ -258,7 +260,7 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
     Ok(Cpus {
         chip: soc.chip,
         processors,
-        aic2_event: soc.aic2_event,
+        aic: soc.aic,
     })
 }
 
@@ -270,13 +272,45 @@ pub struct Device {
     pub irq: u32,
 }
 
-/// The AIC2: its core block's guest PA, its input count and its event
-/// register's offset from the core block.
+/// The AICv2 or AICv3: its core block's guest PA, its input count, where its
+/// per-die arrays start and its event register's offset from the core block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterruptController {
     pub physical: u64,
     pub inputs: u16,
+    pub irq_config: u64,
     pub event: u64,
+}
+
+/// The register offsets an `aic,3` node states, as m1n1 `aic.c` reads them,
+/// and the AICv2 layout they must match (Linux `aic3_info` hard-codes them
+/// for the M3 through the M5).
+const AIC3_OFFSETS: [(&str, u32); 5] = [
+    ("rev-offset", 0),
+    ("cap0-offset", 0x4),
+    ("maxnumirq-offset", 0xc),
+    ("aicglbcfg-offset", 0x14),
+    ("extint-baseaddress", AIC3_IRQ_CFG as u32),
+];
+
+/// Where the per-die arrays of an `/arm-io/aic` node compatible with
+/// `version` start: the AICv2's, or the AICv3's once its stated offsets match
+/// the modeled layout.
+fn aic_irq_config(aic: &Node<'_>, version: &str) -> Result<u64, String> {
+    if version == "aic,2" {
+        return Ok(AIC2_IRQ_CFG);
+    }
+    for (name, expected) in AIC3_OFFSETS {
+        let found = aic
+            .first_u32(name)
+            .ok_or_else(|| format!("/arm-io/aic has no {name}"))?;
+        if found != expected {
+            return Err(format!(
+                "/arm-io/aic {name} is {found:#x}, not the modeled {expected:#x}"
+            ));
+        }
+    }
+    Ok(AIC3_IRQ_CFG)
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
@@ -287,7 +321,7 @@ pub struct Board {
     pub uart: Device,
     /// `/arm-io/wdt`, a `wdt,s5l8960x`.
     pub watchdog: Device,
-    /// `/arm-io/aic`, an `aic,2`.
+    /// `/arm-io/aic`, an `aic,2` or `aic,3`.
     pub aic: InterruptController,
 }
 
@@ -329,11 +363,13 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let cpus = cpus(chip_id, soc_name, &processors)?;
     let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
     let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
-    let place = |name: &str, model: &str| -> Result<(Node<'_>, u64, u64), String> {
+    let place = |name: &str, model: Option<&str>| -> Result<(Node<'_>, u64, u64), String> {
         let node = io
             .child(name)
             .ok_or_else(|| format!("DeviceTree has no /arm-io/{name}"))?;
-        if !node.compatible(model) {
+        if let Some(model) = model
+            && !node.compatible(model)
+        {
             return Err(format!("/arm-io/{name} is not {model}, the modeled device"));
         }
         let (offset, bytes) = node
@@ -348,7 +384,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         Ok((node, physical, bytes))
     };
     let device = |name: &str, model: &str| -> Result<Device, String> {
-        let (node, physical, bytes) = place(name, model)?;
+        let (node, physical, bytes) = place(name, Some(model))?;
         let irq = node
             .first_u32("interrupts")
             .ok_or_else(|| format!("/arm-io/{name} has no interrupts"))?;
@@ -360,7 +396,11 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     };
     let uart = device("uart0", "uart-1,samsung")?;
     let watchdog = device("wdt", "wdt,s5l8960x")?;
-    let (aic, physical, _) = place("aic", "aic,2")?;
+    let (version, event) = cpus
+        .aic
+        .ok_or("the SoC's AIC event register offset is unknown")?;
+    let (aic, physical, _) = place("aic", Some(version))?;
+    let irq_config = aic_irq_config(&aic, version)?;
     let phandle = aic
         .first_u32("AAPL,phandle")
         .ok_or("/arm-io/aic has no phandle")?;
@@ -375,9 +415,6 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     .ok_or("DeviceTree walk failed")?;
     let highest = highest.ok_or("no node names the AIC as its interrupt parent")?;
     let inputs = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
-    let event = cpus
-        .aic2_event
-        .ok_or("the SoC's AIC2 event register offset is unknown")?;
     Ok(Board {
         cpus,
         uart,
@@ -385,6 +422,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         aic: InterruptController {
             physical,
             inputs,
+            irq_config,
             event,
         },
     })
@@ -414,8 +452,8 @@ mod tests {
             .collect();
         let found = cpus(0x8112, "Apple M2", &layout_of(&layout)).unwrap();
         assert_eq!(
-            (found.chip, found.aic2_event),
-            (Chip::AppleM2, Some(0x8000))
+            (found.chip, found.aic),
+            (Chip::AppleM2, Some(("aic,2", 0x8000)))
         );
         let identities = found.processors;
         assert_eq!(
@@ -435,7 +473,7 @@ mod tests {
         // J604AP (Mac16,1): six M4 E cores and four P cores.
         let layout = [(b'E', 0), (b'E', 5), (b'P', 0x100), (b'P', 0x103)];
         let found = cpus(0x8132, "Apple M4", &layout_of(&layout)).unwrap();
-        assert_eq!((found.chip, found.aic2_event), (Chip::AppleM4, None));
+        assert_eq!((found.chip, found.aic), (Chip::AppleM4, None));
         let identities = found.processors;
         assert_eq!(identities[1].midr, 0x611f_0520);
         assert_eq!(
@@ -449,8 +487,13 @@ mod tests {
         assert_eq!(
             cpus(0x6020, "Apple M2 Pro", &layout_of(&layout))
                 .unwrap()
-                .aic2_event,
-            Some(0xc000)
+                .aic,
+            Some(("aic,2", 0xc000))
+        );
+        // The M3's AICv3 has it at +0x40000.
+        assert_eq!(
+            cpus(0x8122, "Apple M3", &layout_of(&layout)).unwrap().aic,
+            Some(("aic,3", 0x40000))
         );
         assert_eq!(dram_base(0x8112), Ok(0x8_0000_0000));
         assert_eq!(dram_base(0x6021), Ok(0x100_0000_0000));
@@ -486,6 +529,15 @@ mod tests {
     /// A J473AP-shaped DeviceTree: two PEs, `/arm-io` child 0 at PA
     /// 0x2_0000_0000, and the UART, watchdog and AIC as `compatibles` names.
     fn tree(chip_id: u32, soc: &str, compatibles: [&str; 3]) -> Vec<u8> {
+        tree_with(chip_id, soc, compatibles, &[])
+    }
+    /// [`tree`] with more `/arm-io/aic` properties.
+    fn tree_with(
+        chip_id: u32,
+        soc: &str,
+        compatibles: [&str; 3],
+        aic_properties: &[(&str, u32)],
+    ) -> Vec<u8> {
         use crate::machine::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let u32s = |cells: &[u32]| {
@@ -522,15 +574,27 @@ mod tests {
                 &[],
             )
         };
-        let aic = encode(
-            &[
-                ("name", &z("aic")),
-                ("compatible", &z(compatibles[2])),
-                ("reg", &u64s(&[0x3b0c_0000, 0x2_0000])),
-                ("AAPL,phandle", &u32s(&[0x63])),
-            ],
-            &[],
-        );
+        let (name, compatible) = (z("aic"), z(compatibles[2]));
+        let (reg, phandle) = (u64s(&[0x3b0c_0000, 0x2_0000]), u32s(&[0x63]));
+        let values: Vec<_> = aic_properties
+            .iter()
+            .map(|(_, value)| u32s(&[*value]))
+            .collect();
+        let properties: Vec<(&str, &[u8])> = [
+            ("name", name.as_slice()),
+            ("compatible", &compatible),
+            ("reg", &reg),
+            ("AAPL,phandle", &phandle),
+        ]
+        .into_iter()
+        .chain(
+            aic_properties
+                .iter()
+                .zip(&values)
+                .map(|((name, _), value)| (*name, value.as_slice())),
+        )
+        .collect();
+        let aic = encode(&properties, &[]);
         let io = encode(
             &[
                 ("name", &z("arm-io")),
@@ -609,6 +673,7 @@ mod tests {
             InterruptController {
                 physical: 0x2_3b0c_0000,
                 inputs: 740,
+                irq_config: AIC2_IRQ_CFG,
                 event: 0x8000
             }
         );
@@ -618,7 +683,7 @@ mod tests {
                 "Apple M1",
                 ["uart-1,samsung", "wdt,s5l8960x", "aic,1"]
             )),
-            Err("/arm-io/aic is not aic,2, the modeled device".into())
+            Err("the SoC's AIC event register offset is unknown".into())
         );
         assert_eq!(
             board(&tree(
@@ -628,7 +693,35 @@ mod tests {
             )),
             Err("/arm-io/uart0 is not uart-1,samsung, the modeled device".into())
         );
-        assert!(board(&tree(0x8122, "Apple M3", MODELED)).is_err());
+        assert_eq!(
+            board(&tree(0x8122, "Apple M3", MODELED)),
+            Err("/arm-io/aic is not aic,3, the modeled device".into())
+        );
         assert!(board(&[0; 4]).is_err());
+    }
+
+    #[test]
+    fn an_aic3_board_states_the_modeled_offsets() {
+        const M3: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,3"];
+        let found = board(&tree_with(0x8122, "Apple M3", M3, &AIC3_OFFSETS)).unwrap();
+        assert_eq!(
+            (found.cpus.chip, found.aic.irq_config, found.aic.event),
+            (Chip::AppleM3, AIC3_IRQ_CFG, 0x40000)
+        );
+        assert_eq!(
+            board(&tree_with(0x8122, "Apple M3", M3, &AIC3_OFFSETS[1..])),
+            Err("/arm-io/aic has no rev-offset".into())
+        );
+        let mut moved = AIC3_OFFSETS;
+        moved[4].1 = 0x20000;
+        assert_eq!(
+            board(&tree_with(0x8122, "Apple M3", M3, &moved)),
+            Err("/arm-io/aic extint-baseaddress is 0x20000, not the modeled 0x10000".into())
+        );
+        // The M4's AICv3 event register has no public placement.
+        assert_eq!(
+            board(&tree_with(0x8132, "Apple M4", M3, &AIC3_OFFSETS)),
+            Err("the SoC's AIC event register offset is unknown".into())
+        );
     }
 }

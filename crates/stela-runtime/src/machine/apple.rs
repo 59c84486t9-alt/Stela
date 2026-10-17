@@ -17,6 +17,7 @@ use crate::platform::apple::{
 use alloc::{boxed::Box, format, string::String};
 
 pub use crate::platform::apple::{
+    aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG},
     interrupt::AicInput,
     uart::{ConsoleBusy, ConsoleSink},
 };
@@ -109,12 +110,20 @@ impl AppleDevices {
     /// number of inputs the board wires (one more than the highest DeviceTree
     /// `interrupts` value under the AIC) and MAX_IRQ rounds it up to a whole
     /// 32-bit mask word; the model reports both in its CAP0/MAXNUMIRQ
-    /// registers (m1n1 `aic.c`, Linux `irq-apple-aic.c`). `event_offset` is the
-    /// event register's distance from the core block.
-    pub fn add_aic(&mut self, physical: u64, nr_irq: u16, event_offset: u64) -> Result<(), String> {
+    /// registers (m1n1 `aic.c`, Linux `irq-apple-aic.c`). `irq_config` is
+    /// where the per-die arrays start (0x2000 on AICv2, 0x10000 on AICv3) and
+    /// `event_offset` the event register's distance from the core block.
+    pub fn add_aic(
+        &mut self,
+        physical: u64,
+        nr_irq: u16,
+        irq_config: u64,
+        event_offset: u64,
+    ) -> Result<(), String> {
         let config = Aic2Config {
             nr_irq,
             max_irq: nr_irq.div_ceil(32) * 32,
+            irq_config,
             event_offset,
             cpus: 1,
             default_cpus: 1,
@@ -304,9 +313,15 @@ mod tests {
                 Some(AicInput::new(0, 739)),
             )
             .unwrap();
-        devices.add_aic(0x2_3b0c_0000, 1152, 0x8000).unwrap();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AIC2_IRQ_CFG, 0x8000)
+            .unwrap();
         // CAP0 (offset 4) reports NR_IRQ in bits 15:0.
         assert_eq!(devices.read(0, 0x2_3b0c_0004, 4, 0).unwrap() & 0xffff, 1152);
-        assert!(devices.add_aic(0x2_3b0c_0000, 1152, 0x10).is_err());
+        assert!(
+            devices
+                .add_aic(0x2_3b0c_0000, 1152, AIC2_IRQ_CFG, 0x10)
+                .is_err()
+        );
     }
 }
