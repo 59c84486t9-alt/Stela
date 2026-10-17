@@ -322,36 +322,15 @@ pub fn inventory(image: &Path, model: &str, key_dir: Option<&Path>) -> Result<se
     }))
 }
 
-/// A payload's size before anything is hashed or written, from the ZIP
-/// directory alone.
-pub struct Size {
-    pub product_build: String,
-    pub product_version: String,
-    /// The model's members, as split slices hold them.
-    pub member_bytes: u64,
-    /// The whole IPSW, as the archive layout holds it.
-    pub ipsw_bytes: u64,
-    pub aea_members: usize,
-}
-
-pub fn size(image: &Path, model: &str) -> Result<Size> {
+/// The product version and build of an IPSW's restore identity for
+/// `model`, from its ZIP directory and `Restore.plist` alone.
+pub fn identity(image: &Path, model: &str) -> Result<(String, String)> {
     let mut archive = ZipArchive::new(File::open(image)?)?;
     let selection = select(&mut archive, model)?;
-    let mut member_bytes = 0u64;
-    for name in &selection.names {
-        member_bytes += archive.by_name(name)?.size();
-    }
-    Ok(Size {
-        product_build: selection.restore.product_build,
-        product_version: selection.restore.product_version,
-        member_bytes,
-        ipsw_bytes: fs::metadata(image)?.len(),
-        aea_members: selection
-            .names
-            .iter()
-            .filter(|n| n.ends_with(".aea"))
-            .count(),
-    })
+    Ok((
+        selection.restore.product_version,
+        selection.restore.product_build,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

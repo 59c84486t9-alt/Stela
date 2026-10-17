@@ -1,6 +1,6 @@
 //! What `stela setup` reads from the computer it runs on: each volume's file
-//! system and free space, and the disks with their serial numbers. Nothing
-//! here writes; macOS answers through `diskutil` and `ioreg`.
+//! system and free space, and the disks with their partitions. Nothing here
+//! writes; macOS answers through `diskutil`.
 use anyhow::{Context, Result, bail};
 use plist::Value;
 use std::{
@@ -50,23 +50,10 @@ pub(crate) struct Partition {
 pub(crate) struct Disk {
     pub(crate) identifier: String,
     pub(crate) name: String,
-    pub(crate) bytes: u64,
-    pub(crate) serial: Option<String>,
     pub(crate) internal: bool,
-    pub(crate) protocol: String,
     /// It holds the volume this computer runs from.
     pub(crate) system: bool,
     pub(crate) partitions: Vec<Partition>,
-}
-
-impl Disk {
-    /// Partitions that `stela.efi` would refuse to stage beside.
-    pub(crate) fn foreign_partitions(&self) -> Vec<&Partition> {
-        self.partitions
-            .iter()
-            .filter(|p| !matches!(p.content.as_str(), "EFI" | ""))
-            .collect()
-    }
 }
 
 pub(crate) trait Host {
@@ -186,7 +173,6 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
 
 fn mac_disks() -> Result<Vec<Disk>> {
     let list = plist(Command::new("diskutil").args(["list", "-plist"]))?;
-    let serials = mac_serials().unwrap_or_default();
     // Physical disks that hold the running system's APFS container.
     let mut system_disks = Vec::new();
     for entry in array(&list, "AllDisksAndPartitions") {
@@ -227,56 +213,13 @@ fn mac_disks() -> Result<Vec<Disk>> {
             .collect();
         disks.push(Disk {
             name: text(&info, "MediaName"),
-            bytes: info
-                .as_dictionary()
-                .and_then(|d| d.get("Size"))
-                .and_then(Value::as_unsigned_integer)
-                .unwrap_or(0),
-            serial: serials
-                .iter()
-                .find(|(disk, _)| *disk == identifier)
-                .map(|(_, serial)| serial.clone()),
             internal: flag("Internal"),
-            protocol: text(&info, "BusProtocol"),
             system: system_disks.contains(&identifier),
             partitions,
             identifier,
         });
     }
     Ok(disks)
-}
-
-/// Whole-disk BSD names and serial numbers from the I/O Registry.
-fn mac_serials() -> Result<Vec<(String, String)>> {
-    let tree = plist(Command::new("ioreg").args(["-a", "-r", "-c", "IOBlockStorageDevice", "-l"]))?;
-    fn bsd(node: &Value) -> Option<String> {
-        let dict = node.as_dictionary()?;
-        if dict.get("Whole").and_then(Value::as_boolean) == Some(true)
-            && let Some(name) = dict.get("BSD Name").and_then(Value::as_string)
-        {
-            return Some(name.into());
-        }
-        dict.get("IORegistryEntryChildren")?
-            .as_array()?
-            .iter()
-            .find_map(bsd)
-    }
-    Ok(tree
-        .as_array()
-        .map_or(&[][..], Vec::as_slice)
-        .iter()
-        .filter_map(|device| {
-            let serial = device
-                .as_dictionary()?
-                .get("Device Characteristics")?
-                .as_dictionary()?
-                .get("Serial Number")?
-                .as_string()?
-                .trim()
-                .to_owned();
-            Some((bsd(device)?, serial)).filter(|(_, s)| !s.is_empty())
-        })
-        .collect())
 }
 
 #[cfg(test)]
@@ -289,34 +232,5 @@ mod tests {
         assert_eq!(whole_disk("disk3s1s1"), "disk3");
         assert_eq!(whole_disk("disk12"), "disk12");
         assert_eq!(whole_disk("disk12s3"), "disk12");
-    }
-
-    #[test]
-    fn only_esps_and_empty_slots_count_as_free_of_another_system() {
-        let disk = |contents: &[&str]| Disk {
-            identifier: "disk9".into(),
-            name: "Test".into(),
-            bytes: 1,
-            serial: None,
-            internal: true,
-            protocol: "PCI-Express".into(),
-            system: false,
-            partitions: contents
-                .iter()
-                .map(|c| Partition {
-                    identifier: "disk9s1".into(),
-                    content: (*c).into(),
-                    mount: None,
-                })
-                .collect(),
-        };
-        assert!(disk(&[]).foreign_partitions().is_empty());
-        assert!(disk(&["EFI"]).foreign_partitions().is_empty());
-        assert_eq!(
-            disk(&["EFI", "Microsoft Basic Data"])
-                .foreign_partitions()
-                .len(),
-            1
-        );
     }
 }

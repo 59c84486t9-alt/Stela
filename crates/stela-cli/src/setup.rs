@@ -1,20 +1,18 @@
-//! `stela setup`: prepare a user's own OpenCore USB to install macOS 27.
+//! `stela setup`: prepare a user's own OpenCore USB to boot macOS 27's
+//! recoveryOS, from which macOS is installed as on a Mac (Disk Utility, then
+//! Reinstall macOS).
 //!
-//! One command checks the USB, the restore image and the target disk
-//! without writing anything, then writes the restore payload and boot
-//! bundles to the USB, adds `stela.efi` to OpenCore's boot picker with an
-//! install-mode `stela.cfg`, and records what it wrote in
+//! One command checks the USB and the restore image without writing
+//! anything, prepares the recoveryOS boot bundle (`stela boot prepare
+//! --recovery`) on this computer, then copies it to a volume of the USB that
+//! OpenCore can read, adds `stela.efi` to OpenCore's boot picker with a
+//! `stela.cfg` that boots that bundle, and records what it wrote in
 //! `EFI/stela/setup.json`. `--dry-run` stops after the checks; `--uninstall`
-//! removes everything the record names. Setup never writes the target disk:
-//! `stela.efi` does, at boot, and only the disk `--target` names.
+//! removes everything the record names. Setup writes no disk but the USB.
 mod host;
 mod usb;
 
-use crate::{
-    boot,
-    efi::{self, PayloadLayout},
-    restore,
-};
+use crate::{boot, efi, restore};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use host::{FileSystem, Host};
@@ -24,7 +22,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use stela_runtime::payload::{MAX_SLICE_BYTES, gpt::Guid, images_directory};
+use stela_loader::boot_bundle::Options as BundleOptions;
 
 /// The pinned system target.
 const PINNED_BUILD: &str = "26A434";
@@ -33,9 +31,9 @@ const RECORD: &str = "EFI/stela/setup.json";
 /// A margin so no volume is filled to its last byte.
 const MARGIN: u64 = 64 * 1024 * 1024;
 
-/// The boot bundles setup prepares, each a `boot prepare` run: the
-/// installed system, and the restore ramdisk that performs the installation.
-const BUNDLES: &[(&str, &[&str])] = &[("installed", &[]), ("restore", &["--restore"])];
+/// The bundle setup prepares: recoveryOS, the installed system's kernel with
+/// BaseSystem as its ramdisk.
+const RECOVERY: &str = "recovery";
 
 #[derive(Args)]
 pub(crate) struct Setup {
@@ -51,23 +49,10 @@ pub(crate) struct Setup {
     /// Where `--fetch` keeps the image.
     #[arg(long)]
     download_dir: Option<PathBuf>,
-    /// The disk to install on: its serial number, or `guid:` and its GPT
-    /// disk GUID. Run without it to list this computer's disks. Not used
-    /// with `--verify-only`, which writes no disk.
+    /// A volume of the USB for the recoveryOS bundle, when the EFI partition
+    /// is too small.
     #[arg(long)]
-    target: Option<String>,
-    /// A volume of the USB for the payload, when the EFI partition is small.
-    #[arg(long)]
-    payload_volume: Option<PathBuf>,
-    /// Translation cache partition size, such as 16G.
-    #[arg(long, value_parser = parse_bytes, default_value = "16G")]
-    cache_size: u64,
-    /// Smallest Apple region (the macOS disk) Stela accepts, such as 64G.
-    #[arg(long, value_parser = parse_bytes, default_value = "64G")]
-    min_macos_size: u64,
-    /// Only verify the payload at boot; never write the target.
-    #[arg(long, conflicts_with = "target")]
-    verify_only: bool,
+    volume: Option<PathBuf>,
     /// The `stela.efi` to install; found beside `stela` or in the build tree
     /// by default.
     #[arg(long)]
@@ -82,89 +67,24 @@ pub(crate) struct Setup {
     #[arg(long)]
     dry_run: bool,
     /// Remove everything a previous setup wrote to this USB.
-    #[arg(long, conflicts_with_all = ["ipsw", "fetch", "target", "payload_volume"])]
+    #[arg(long, conflicts_with_all = ["ipsw", "fetch", "volume"])]
     uninstall: bool,
 }
 
-/// Parse a size: bytes, or a number with K, M, G or T (binary units).
-fn parse_bytes(text: &str) -> Result<u64, String> {
-    let text = text.trim();
-    let (digits, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
-        Some((at, _)) => text.split_at(at),
-        None => (text, ""),
-    };
-    let shift = match unit
-        .trim()
-        .to_ascii_uppercase()
-        .trim_end_matches(['B', 'I'])
-    {
-        "" => 0,
-        "K" => 10,
-        "M" => 20,
-        "G" => 30,
-        "T" => 40,
-        _ => return Err(format!("unknown size unit {unit:?}; use K, M, G or T")),
-    };
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(1 << shift))
-        .ok_or_else(|| format!("invalid size {text:?}"))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TargetId {
-    Serial(String),
-    Guid(Guid),
-}
-
-fn parse_target(text: &str) -> Result<TargetId> {
-    if let Some(guid) = text.strip_prefix("guid:") {
-        return Guid::parse(guid)
-            .map(TargetId::Guid)
-            .with_context(|| format!("{guid} is not a GUID"));
-    }
-    if let Some(guid) = Guid::parse(text) {
-        return Ok(TargetId::Guid(guid));
-    }
-    let serial = text.strip_prefix("serial:").unwrap_or(text);
-    ensure!(
-        !serial.is_empty() && serial.len() <= 40 && serial.bytes().all(|b| b.is_ascii_graphic()),
-        "--target {text:?} is neither a disk serial number (printable, no spaces, at most 40 \
-         characters) nor a GPT disk GUID"
-    );
-    Ok(TargetId::Serial(serial.into()))
-}
-
-impl TargetId {
-    fn option(&self) -> String {
-        match self {
-            Self::Serial(serial) => format!("--install-target-serial {serial}"),
-            Self::Guid(guid) => format!("--install-target-guid {guid}"),
-        }
-    }
-}
-
-impl std::fmt::Display for TargetId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Serial(serial) => write!(f, "the disk with serial number {serial}"),
-            Self::Guid(guid) => write!(f, "the disk with GPT disk GUID {guid}"),
-        }
-    }
-}
-
 /// What setup writes, recorded on the ESP so `--uninstall` can remove it.
+/// Schema 1 setups also wrote a restore payload and named a target disk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Record {
     schema_version: u32,
     kind: String,
     build: String,
     model: String,
-    target: String,
     esp: PathBuf,
-    payload_volume: PathBuf,
-    payload_directory: PathBuf,
+    #[serde(alias = "payload_volume")]
+    volume: PathBuf,
+    /// A schema 1 setup's restore payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload_directory: Option<PathBuf>,
     bundle_directory: PathBuf,
     /// Directories setup created on the payload volume, deepest first.
     created_directories: Vec<PathBuf>,
@@ -173,6 +93,7 @@ struct Record {
 }
 
 const RECORD_KIND: &str = "stela_setup";
+const RECORD_SCHEMA: u32 = 2;
 
 /// The checks' result: everything setup will write, and where.
 #[derive(Debug)]
@@ -182,43 +103,38 @@ struct Plan {
     product_version: String,
     build: String,
     model: String,
-    /// None in verify-only mode, which writes no disk.
-    target: Option<TargetId>,
-    payload_volume: PathBuf,
-    layout: PayloadLayout,
-    payload_bytes: u64,
-    /// The prepared bundles, in a host directory until setup copies them.
-    bundles: tempfile::TempDir,
-    bundle_sizes: Vec<(String, u64)>,
+    volume: PathBuf,
+    /// The prepared bundle, in a host directory until setup copies it.
+    bundle: tempfile::TempDir,
+    bundle_bytes: u64,
     options: String,
     efi_image: PathBuf,
     notes: Vec<String>,
 }
 
 impl Plan {
-    fn payload_directory(&self) -> PathBuf {
-        self.payload_volume.join(images_directory(&self.build))
-    }
-
+    /// `EFI/stela/boot/<build>` on the chosen volume.
     fn bundle_directory(&self) -> PathBuf {
-        self.payload_volume
-            .join(format!("EFI/stela/boot/{}", self.build))
+        self.volume.join(format!("EFI/stela/boot/{}", self.build))
     }
 }
+
+/// Writes the recoveryOS bundle for an IPSW and model into a directory.
+type Prepare = dyn Fn(&Path, &str, &Path) -> Result<()>;
 
 /// Inputs that the command line fixes and tests replace.
 struct Environment<'a> {
     host: &'a dyn Host,
-    /// Whether to prepare boot bundles; tests use synthetic IPSWs, which
-    /// have no kernel to prepare.
-    bundles: bool,
+    /// `stela boot prepare --recovery`; tests use synthetic IPSWs, which
+    /// have no kernel, and write a stand-in.
+    prepare: &'a Prepare,
 }
 
 impl Setup {
     pub(crate) fn run(self) -> Result<()> {
         let environment = Environment {
             host: &host::System,
-            bundles: true,
+            prepare: &prepare_recovery,
         };
         let report = if self.uninstall {
             uninstall(&environment, &self.usb, self.dry_run)?
@@ -284,115 +200,18 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
     Ok(esp)
 }
 
-fn candidates(host: &dyn Host, usb_disk: Option<&str>) -> Result<String> {
-    let disks = host.disks()?;
-    let mut text = String::new();
-    if disks.is_empty() {
-        text.push_str(
-            "This computer cannot list its disks for setup. Name the target by its serial \
-             number (on the label, or in the firmware setup) or by `guid:` and its GPT disk \
-             GUID.\n",
-        );
-        return Ok(text);
-    }
-    writeln!(text, "Disks on this computer:")?;
-    for disk in &disks {
-        let mut notes = Vec::new();
-        if Some(disk.identifier.as_str()) == usb_disk {
-            notes.push("this USB".to_owned());
-        }
-        if disk.system {
-            notes.push("runs this computer".into());
-        }
-        let foreign = disk.foreign_partitions();
-        if !foreign.is_empty() {
-            let kinds: Vec<_> = foreign.iter().map(|p| p.content.as_str()).collect();
-            notes.push(format!("has data: {}", kinds.join(", ")));
-        }
-        writeln!(
-            text,
-            "  {:<8} {:>7.1} GB  {:<12} serial {:<22} {}{}",
-            disk.identifier,
-            disk.bytes as f64 / 1e9,
-            disk.protocol,
-            disk.serial.as_deref().unwrap_or("(none)"),
-            disk.name,
-            if notes.is_empty() {
-                String::new()
-            } else {
-                format!("  [{}]", notes.join("; "))
-            }
-        )?;
-    }
-    writeln!(
-        text,
-        "Pass --target with the serial number of an empty disk, or one with only an EFI \
-         partition. stela.efi refuses any other disk when it boots. A disk in another \
-         computer can be named the same way."
-    )?;
-    Ok(text)
-}
-
-/// Check the target against this computer's disks, where it can see them.
-fn check_target(host: &dyn Host, target: &TargetId, usb_disk: Option<&str>) -> Result<String> {
-    let TargetId::Serial(serial) = target else {
-        return Ok(format!(
-            "Setup cannot read GPT disk GUIDs here; stela.efi finds {target} at boot and \
-             refuses it if it holds the USB or another system's partitions."
-        ));
-    };
-    let disks = host.disks()?;
-    let Some(disk) = disks.iter().find(|d| d.serial.as_deref() == Some(serial)) else {
-        return Ok(format!(
-            "{target} is not attached to this computer; stela.efi looks for it at boot."
-        ));
-    };
-    ensure!(
-        Some(disk.identifier.as_str()) != usb_disk,
-        "{target} is this USB ({}); the target must be another disk",
-        disk.identifier
-    );
-    ensure!(
-        !disk.system,
-        "{target} ({}, {}) runs this computer; choose an empty disk",
-        disk.identifier,
-        disk.name
-    );
-    let foreign = disk.foreign_partitions();
-    ensure!(
-        foreign.is_empty(),
-        "{target} ({}, {}) holds {}. stela.efi installs only onto an empty disk or one with \
-         just an EFI partition, and never touches another system's data; erase the disk \
-         first, or choose another.",
-        disk.identifier,
-        disk.name,
-        foreign
-            .iter()
-            .map(|p| format!("{} ({})", p.identifier, p.content))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    Ok(format!(
-        "{target} is {} ({}, {:.1} GB) on this computer.",
-        disk.identifier,
-        disk.name,
-        disk.bytes as f64 / 1e9
-    ))
-}
-
-/// Whether `stela.efi` can read a payload on this file system through
-/// OpenCore, and in which layout.
-fn layout_for(filesystem: &FileSystem, drivers: &[String]) -> Result<PayloadLayout, String> {
+/// Whether `stela.efi` can read files on this file system through OpenCore.
+fn readable(filesystem: &FileSystem, drivers: &[String]) -> Result<(), String> {
     let has = |name: &str| drivers.iter().any(|d| d.contains(name));
     match filesystem {
-        FileSystem::Fat => Ok(PayloadLayout::Split),
-        FileSystem::Hfs if has("hfsplus") => Ok(PayloadLayout::Archive),
+        FileSystem::Fat => Ok(()),
+        FileSystem::Hfs if has("hfsplus") => Ok(()),
         FileSystem::Hfs => Err(
             "is HFS+, but OpenCore loads no OpenHfsPlus.efi or HfsPlus.efi \
              driver to read it"
                 .into(),
         ),
-        FileSystem::Ntfs if has("openntfsdxe") => Ok(PayloadLayout::Archive),
+        FileSystem::Ntfs if has("openntfsdxe") => Ok(()),
         FileSystem::Ntfs => Err("is NTFS, but OpenCore loads no OpenNtfsDxe.efi driver".into()),
         FileSystem::ExFat => Err("is exFAT, which OpenCore cannot read; use FAT32 or HFS+".into()),
         FileSystem::Apfs => Err("is APFS, which stela.efi cannot read; use FAT32 or HFS+".into()),
@@ -402,15 +221,15 @@ fn layout_for(filesystem: &FileSystem, drivers: &[String]) -> Result<PayloadLayo
     }
 }
 
-/// The first volume of the USB the payload fits on.
-fn choose_payload_volume(
+/// The first volume of the USB that OpenCore can read and the bundle fits
+/// on.
+fn choose_volume(
     host: &dyn Host,
     esp: &Path,
     usb: &Path,
     explicit: Option<&Path>,
-    size: &restore::payload::Size,
     bundle_bytes: u64,
-) -> Result<(PathBuf, PayloadLayout, u64)> {
+) -> Result<PathBuf> {
     let drivers = usb::opencore_drivers(esp);
     let esp_disk = host.volume(esp)?.disk;
     let mut volumes: Vec<PathBuf> = match explicit {
@@ -430,6 +249,7 @@ fn choose_payload_volume(
     };
     let mut seen = std::collections::BTreeSet::new();
     volumes.retain(|volume| seen.insert(volume.clone()));
+    let need = bundle_bytes + MARGIN;
     let mut reasons = String::new();
     for volume in volumes {
         let info = host.volume(&volume)?;
@@ -440,22 +260,14 @@ fn choose_payload_volume(
                 esp.display()
             );
         }
-        let layout = match layout_for(&info.filesystem, &drivers) {
-            Ok(layout) => layout,
-            Err(reason) => {
-                writeln!(reasons, "  {} {reason}", volume.display())?;
-                continue;
-            }
-        };
-        let need = match layout {
-            PayloadLayout::Split => size.member_bytes,
-            PayloadLayout::Archive => size.ipsw_bytes,
-        } + bundle_bytes
-            + MARGIN;
+        if let Err(reason) = readable(&info.filesystem, &drivers) {
+            writeln!(reasons, "  {} {reason}", volume.display())?;
+            continue;
+        }
         if info.free_bytes < need {
             writeln!(
                 reasons,
-                "  {} ({}) has {:.1} GB free; the payload needs {:.1} GB",
+                "  {} ({}) has {:.1} GB free; the recoveryOS bundle needs {:.1} GB",
                 volume.display(),
                 info.filesystem,
                 info.free_bytes as f64 / 1e9,
@@ -463,12 +275,12 @@ fn choose_payload_volume(
             )?;
             continue;
         }
-        return Ok((volume, layout, need));
+        return Ok(volume);
     }
     bail!(
-        "No volume of the USB can hold the payload:\n{reasons}Use a USB of at least 64 GB \
-         with a FAT32 or HFS+ data partition beside the EFI partition (HFS+ needs OpenCore's \
-         OpenHfsPlus.efi driver), then pass it with --payload-volume."
+        "No volume of the USB can hold the recoveryOS bundle:\n{reasons}Add a FAT32 or HFS+ \
+         data partition of at least 4 GB beside the EFI partition (HFS+ needs OpenCore's \
+         OpenHfsPlus.efi driver), then pass it with --volume."
     )
 }
 
@@ -529,29 +341,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         esp.join(RECORD).display(),
         command.usb.display()
     );
-    let usb_disk = host.volume(&esp)?.disk;
-    let (target, mut notes) = match (&command.target, command.verify_only) {
-        (Some(_), true) => bail!("--verify-only writes no disk, so it takes no --target"),
-        (None, true) => (None, Vec::new()),
-        (None, false) => bail!(
-            "Choose the disk to install on with --target, or pass --verify-only to check \
-             the payload without one.\n{}",
-            candidates(host, usb_disk.as_deref())?
-        ),
-        (Some(target), false) => {
-            let target = parse_target(target)?;
-            let note = check_target(host, &target, usb_disk.as_deref())?;
-            (Some(target), vec![note])
-        }
-    };
-    let size = restore::payload::size(&ipsw, &command.model)?;
-    if size.aea_members > 0 {
-        notes.push(format!(
-            "The {} encrypted members' public keys are fetched from Apple now, so the \
-             installation itself needs no network.",
-            size.aea_members
-        ));
-    }
+    let (product_version, build) = restore::payload::identity(&ipsw, &command.model)?;
     let efi_image = match &command.efi {
         Some(path) => path.clone(),
         None => default_efi_image().context(
@@ -566,80 +356,67 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         "{} is not a UEFI application",
         efi_image.display()
     );
-    // Bundles are prepared on this computer before the USB changes, which
-    // also measures them for the space check.
-    let bundles = tempfile::tempdir()?;
-    let bundle_sizes = if environment.bundles {
-        prepare_bundles(&ipsw, &command.model, bundles.path())?
-    } else {
-        Vec::new()
-    };
-    let (payload_volume, layout, payload_bytes) = choose_payload_volume(
+    // The bundle is prepared on this computer before the USB changes, which
+    // also measures it for the space check.
+    let bundle = tempfile::tempdir()?;
+    (environment.prepare)(&ipsw, &command.model, &bundle.path().join(RECOVERY))
+        .context("preparing the recoveryOS boot bundle")?;
+    let mut bundle_bytes = 0;
+    for file in fs::read_dir(bundle.path().join(RECOVERY))? {
+        bundle_bytes += file?.metadata()?.len();
+    }
+    let volume = choose_volume(
         host,
         &esp,
         &command.usb,
-        command.payload_volume.as_deref(),
-        &size,
-        bundle_sizes.iter().map(|(_, bytes)| bytes).sum(),
+        command.volume.as_deref(),
+        bundle_bytes,
     )?;
-    // Verify mode reads only the payload; the target and storage sizes are
-    // for staging.
-    let options = match &target {
-        None => format!(
-            "--install-mode verify --install-build {}\n",
-            size.product_build
+    let dram_bytes = BundleOptions::default().dram_size;
+    let options = format!(
+        "--system --bundle \\EFI\\stela\\boot\\{}\\{RECOVERY} --ram-bytes {dram_bytes:#x}\n",
+        build
+    );
+    let notes = vec![
+        format!(
+            "recoveryOS runs in {} GiB of guest memory, so the PC needs more RAM than that \
+             free when it boots the entry.",
+            dram_bytes >> 30
         ),
-        Some(target) => format!(
-            "--install-mode stage --install-build {} {} --install-cache-bytes {} \
-             --install-min-apple-bytes {}\n",
-            size.product_build,
-            target.option(),
-            command.cache_size,
-            command.min_macos_size
-        ),
-    };
+        "Paused: Disk Utility and Reinstall macOS reach the PC's disks and keyboard only \
+         through PCIe/DART passthrough; the installer's personalization and the Secure Enclave \
+         are not modeled."
+            .into(),
+    ];
     Ok(Plan {
         esp,
         ipsw,
-        product_version: size.product_version,
-        build: size.product_build,
+        product_version,
+        build,
         model: command.model.clone(),
-        target,
-        payload_volume,
-        layout,
-        payload_bytes,
-        bundles,
-        bundle_sizes,
+        volume,
+        bundle,
+        bundle_bytes,
         options,
         efi_image,
         notes,
     })
 }
 
-/// Run `boot prepare` for each bundle into `directory`; return their sizes.
-fn prepare_bundles(ipsw: &Path, model: &str, directory: &Path) -> Result<Vec<(String, u64)>> {
-    let mut sizes = Vec::new();
-    for (name, arguments) in BUNDLES {
-        let output = directory.join(name);
-        let mut line: Vec<String> = [
-            "--ipsw",
-            ipsw.to_str().context("IPSW path is not UTF-8")?,
-            "--model",
-            model,
-            "--output",
-            output.to_str().context("temporary path is not UTF-8")?,
-        ]
-        .map(str::to_owned)
-        .into();
-        line.extend(arguments.iter().map(|a| (*a).to_owned()));
-        boot::prepare(&line).with_context(|| format!("preparing the {name} boot bundle"))?;
-        let mut bytes = 0;
-        for file in fs::read_dir(&output)? {
-            bytes += file?.metadata()?.len();
-        }
-        sizes.push(((*name).to_owned(), bytes));
-    }
-    Ok(sizes)
+/// `stela boot prepare --recovery` for the IPSW and model into `output`.
+fn prepare_recovery(ipsw: &Path, model: &str, output: &Path) -> Result<()> {
+    let line: Vec<String> = [
+        "--ipsw",
+        ipsw.to_str().context("IPSW path is not UTF-8")?,
+        "--model",
+        model,
+        "--recovery",
+        "--output",
+        output.to_str().context("temporary path is not UTF-8")?,
+    ]
+    .map(str::to_owned)
+    .into();
+    boot::prepare(&line)
 }
 
 fn describe(plan: &Plan) -> Result<String> {
@@ -653,22 +430,10 @@ fn describe(plan: &Plan) -> Result<String> {
     writeln!(text, "  OpenCore ESP   {}", plan.esp.display())?;
     writeln!(
         text,
-        "  payload        {} ({}, about {:.1} GB)",
-        plan.payload_directory().display(),
-        match plan.layout {
-            PayloadLayout::Split => "FAT32 slices",
-            PayloadLayout::Archive => "the whole IPSW",
-        },
-        plan.payload_bytes as f64 / 1e9
+        "  recoveryOS     {} ({:.1} GB)",
+        plan.bundle_directory().join(RECOVERY).display(),
+        plan.bundle_bytes as f64 / 1e9
     )?;
-    writeln!(
-        text,
-        "  boot bundles   {}",
-        plan.bundle_directory().display()
-    )?;
-    for (name, bytes) in &plan.bundle_sizes {
-        writeln!(text, "    {name:<12} {:.1} MB", *bytes as f64 / 1e6)?;
-    }
     writeln!(
         text,
         "  OpenCore       adds the \"{}\" tool entry; keeps the old config.plist as {}",
@@ -677,16 +442,10 @@ fn describe(plan: &Plan) -> Result<String> {
     )?;
     writeln!(
         text,
-        "  stela.cfg      {}",
+        "  stela.cfg      {}: boots recoveryOS",
         plan.esp.join("EFI/stela/stela.cfg").display()
     )?;
-    match &plan.target {
-        Some(target) => writeln!(text, "  target         {target}")?,
-        None => writeln!(
-            text,
-            "  target         none: verify only, no disk is written"
-        )?,
-    }
+    writeln!(text, "  disks          none are written but this USB")?;
     for note in &plan.notes {
         writeln!(text, "  note           {note}")?;
     }
@@ -714,15 +473,11 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
     apply(&plan)?;
     writeln!(
         report,
-        "Done. Boot the PC from this USB, choose \"{}\" in OpenCore's picker, and stela.efi \
-         {}. macOS 27 does not boot under Stela yet; this stages the installation.\nUndo with: \
+        "Done. Boot the PC from this USB and choose \"{}\" in OpenCore's picker: stela.efi \
+         starts recoveryOS, where Disk Utility prepares a disk and Reinstall macOS installs \
+         onto it, as on a Mac. Stela does not run recoveryOS to its window yet.\nUndo with: \
          stela setup --uninstall --usb {}",
         efi::NAME,
-        if command.verify_only {
-            "verifies the payload and stops"
-        } else {
-            "verifies the payload and copies it to the target disk"
-        },
         command.usb.display()
     )?;
     Ok(report)
@@ -748,25 +503,16 @@ fn write_record(esp: &Path, record: &Record) -> Result<()> {
 }
 
 fn apply(plan: &Plan) -> Result<()> {
-    let mut created = missing_directories(&plan.payload_volume, &plan.payload_directory());
-    created.extend(missing_directories(
-        &plan.payload_volume,
-        &plan.bundle_directory(),
-    ));
+    let mut created = missing_directories(&plan.volume, &plan.bundle_directory());
     created.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    created.dedup();
     let mut record = Record {
-        schema_version: 1,
+        schema_version: RECORD_SCHEMA,
         kind: RECORD_KIND.into(),
         build: plan.build.clone(),
         model: plan.model.clone(),
-        target: plan
-            .target
-            .as_ref()
-            .map_or_else(|| "none (verify only)".into(), ToString::to_string),
         esp: plan.esp.clone(),
-        payload_volume: plan.payload_volume.clone(),
-        payload_directory: plan.payload_directory(),
+        volume: plan.volume.clone(),
+        payload_directory: None,
         bundle_directory: plan.bundle_directory(),
         created_directories: created,
         options: plan.options.clone(),
@@ -774,22 +520,11 @@ fn apply(plan: &Plan) -> Result<()> {
     };
     // Recorded before the first write, so an interrupted setup can be undone.
     write_record(&plan.esp, &record)?;
-    restore::payload::write(&restore::payload::WriteOptions {
-        image: &plan.ipsw,
-        model: &plan.model,
-        root: &plan.payload_volume,
-        layout: plan.layout,
-        slice_bytes: MAX_SLICE_BYTES,
-        fetch_keys: true,
-    })?;
-    for entry in fs::read_dir(plan.bundles.path())? {
-        let entry = entry?;
-        let destination = plan.bundle_directory().join(entry.file_name());
-        fs::create_dir_all(&destination)?;
-        for file in fs::read_dir(entry.path())? {
-            let file = file?;
-            fs::copy(file.path(), destination.join(file.file_name()))?;
-        }
+    let destination = plan.bundle_directory().join(RECOVERY);
+    fs::create_dir_all(&destination)?;
+    for file in fs::read_dir(plan.bundle.path().join(RECOVERY))? {
+        let file = file?;
+        fs::copy(file.path(), destination.join(file.file_name()))?;
     }
     efi::add_mount(&plan.esp, &plan.efi_image, None, Some(&plan.options))?;
     record.complete = true;
@@ -808,13 +543,17 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
     let mut removals: Vec<PathBuf> = Vec::new();
     if let Some(record) = &record {
         ensure!(
-            record.kind == RECORD_KIND && record.schema_version == 1,
+            record.kind == RECORD_KIND && (1..=RECORD_SCHEMA).contains(&record.schema_version),
             "{} is not a setup record this version understands",
             esp.join(RECORD).display()
         );
-        for directory in [&record.payload_directory, &record.bundle_directory] {
+        for directory in record
+            .payload_directory
+            .iter()
+            .chain([&record.bundle_directory])
+        {
             ensure!(
-                directory.starts_with(&record.payload_volume) && directory.ends_with(&record.build),
+                directory.starts_with(&record.volume) && directory.ends_with(&record.build),
                 "the setup record names an unexpected directory {}",
                 directory.display()
             );
@@ -882,7 +621,6 @@ mod tests {
     use super::*;
     use host::{Disk, Partition, Volume};
     use std::collections::BTreeMap;
-    use stela_runtime::payload::gpt::{DEFAULT_CACHE_BYTES, DEFAULT_MIN_APPLE_BYTES};
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -917,14 +655,11 @@ mod tests {
         }
     }
 
-    fn disk(id: &str, serial: &str, contents: &[(&str, Option<&Path>)]) -> Disk {
+    fn disk(id: &str, contents: &[(&str, Option<&Path>)]) -> Disk {
         Disk {
             identifier: id.into(),
             name: format!("Disk {id}"),
-            bytes: 500 * GIB,
-            serial: Some(serial.into()),
             internal: id != "disk5",
-            protocol: "PCI-Express".into(),
             system: id == "disk0",
             partitions: contents
                 .iter()
@@ -938,9 +673,8 @@ mod tests {
         }
     }
 
-    /// A USB (disk5) with an OpenCore ESP and an HFS+ data volume, this
-    /// computer's system disk (disk0), an empty target (disk2) and a disk
-    /// with another system (disk3).
+    /// A USB (disk5) with an OpenCore ESP and an HFS+ data volume, and this
+    /// computer's system disk (disk0).
     struct Fixture {
         _dir: tempfile::TempDir,
         esp: PathBuf,
@@ -977,18 +711,8 @@ mod tests {
             ]
             .into(),
             disks: vec![
-                disk("disk0", "SYSTEM0", &[("EFI", None), ("Apple_APFS", None)]),
-                disk("disk2", "EMPTY2", &[]),
-                disk(
-                    "disk3",
-                    "WINDOWS3",
-                    &[("EFI", None), ("Microsoft Basic Data", None)],
-                ),
-                disk(
-                    "disk5",
-                    "USB5",
-                    &[("EFI", Some(&esp)), ("Apple_HFS", Some(&data))],
-                ),
+                disk("disk0", &[("EFI", None), ("Apple_APFS", None)]),
+                disk("disk5", &[("EFI", Some(&esp)), ("Apple_HFS", Some(&data))]),
             ],
         };
         Fixture {
@@ -1001,17 +725,13 @@ mod tests {
         }
     }
 
-    fn command(f: &Fixture, usb: &Path, target: Option<&str>) -> Setup {
+    fn command(f: &Fixture, usb: &Path) -> Setup {
         Setup {
             usb: usb.to_path_buf(),
             ipsw: Some(f.ipsw.clone()),
             fetch: false,
             download_dir: None,
-            target: target.map(str::to_owned),
-            payload_volume: None,
-            cache_size: DEFAULT_CACHE_BYTES,
-            min_macos_size: DEFAULT_MIN_APPLE_BYTES,
-            verify_only: false,
+            volume: None,
             efi: Some(f.efi.clone()),
             model: restore::payload::SYNTHETIC_MODEL.into(),
             build: PINNED_BUILD.into(),
@@ -1020,10 +740,19 @@ mod tests {
         }
     }
 
+    /// A stand-in for `boot prepare --recovery`: the synthetic IPSW has no
+    /// kernel to prepare.
+    fn fake_prepare(_: &Path, _: &str, output: &Path) -> Result<()> {
+        fs::create_dir_all(output)?;
+        fs::write(output.join("bundle.json"), b"{}")?;
+        fs::write(output.join("ramdisk.img"), vec![0x5a; 4096])?;
+        Ok(())
+    }
+
     fn environment(host: &FakeHost) -> Environment<'_> {
         Environment {
             host,
-            bundles: false,
+            prepare: &fake_prepare,
         }
     }
 
@@ -1044,29 +773,42 @@ mod tests {
         files
     }
 
+    fn bundle(volume: &Path) -> PathBuf {
+        volume.join(format!(
+            "EFI/stela/boot/{}/{RECOVERY}",
+            restore::payload::SYNTHETIC_BUILD
+        ))
+    }
+
     #[test]
-    fn setup_writes_the_payload_entry_and_options_and_uninstall_restores_the_usb() {
+    fn setup_boots_recovery_from_the_entry_and_uninstall_restores_the_usb() {
         let f = fixture(64 * GIB, false);
         let before = (snapshot(&f.esp), snapshot(&f.data));
         let host = &f.host;
 
-        let mut dry = command(&f, &f.esp, Some("EMPTY2"));
+        let mut dry = command(&f, &f.esp);
         dry.dry_run = true;
         let plan = setup(&environment(host), dry).unwrap();
         assert!(plan.contains("Dry run: nothing was changed."), "{plan}");
-        assert!(plan.contains("serial number EMPTY2"));
+        assert!(plan.contains("boots recoveryOS"), "{plan}");
+        assert!(plan.contains("Paused"), "{plan}");
         assert_eq!((snapshot(&f.esp), snapshot(&f.data)), before);
 
-        let report = setup(&environment(host), command(&f, &f.esp, Some("EMPTY2"))).unwrap();
+        let report = setup(&environment(host), command(&f, &f.esp)).unwrap();
         assert!(report.contains("stela setup --uninstall"), "{report}");
-        let options = fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
-        assert!(options.contains("--install-mode stage"));
-        assert!(options.contains(&format!(
-            "--install-build {}",
-            restore::payload::SYNTHETIC_BUILD
-        )));
-        assert!(options.contains("--install-target-serial EMPTY2"));
-        assert!(options.contains(&format!("--install-cache-bytes {DEFAULT_CACHE_BYTES}")));
+        assert!(report.contains("Reinstall macOS"), "{report}");
+        assert_eq!(
+            fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
+            format!(
+                "--system --bundle \\EFI\\stela\\boot\\{}\\recovery --ram-bytes 0x200000000\n",
+                restore::payload::SYNTHETIC_BUILD
+            )
+        );
+        assert_eq!(
+            fs::read(bundle(&f.esp).join("ramdisk.img")).unwrap(),
+            vec![0x5a; 4096]
+        );
+        assert!(bundle(&f.esp).join("bundle.json").is_file());
         assert!(!f.esp.join("EFI/stela/source.bin").exists());
         assert_eq!(
             fs::read(f.esp.join("EFI/OC/Tools/Stela.efi")).unwrap(),
@@ -1074,98 +816,39 @@ mod tests {
         );
         let config = fs::read_to_string(f.esp.join("EFI/OC/config.plist")).unwrap();
         assert!(config.contains("Stela.efi"));
-        // The small FAT ESP holds the split payload.
-        let payload = f
-            .esp
-            .join(images_directory(restore::payload::SYNTHETIC_BUILD))
-            .join("payload.json");
-        assert!(payload.is_file());
         let record: Record = stela_runtime::read_json(&f.esp.join(RECORD)).unwrap();
         assert!(record.complete);
+        assert_eq!(record.schema_version, RECORD_SCHEMA);
         // A second setup is refused until the first is undone.
-        let again = setup(&environment(host), command(&f, &f.esp, Some("EMPTY2")));
+        let again = setup(&environment(host), command(&f, &f.esp));
         assert!(again.unwrap_err().to_string().contains("--uninstall"));
 
-        let mut dry = uninstall(&environment(host), &f.esp, true).unwrap();
+        let dry = uninstall(&environment(host), &f.esp, true).unwrap();
         assert!(dry.contains("Dry run"));
-        assert!(payload.is_file());
-        dry = uninstall(&environment(host), &f.esp, false).unwrap();
-        assert!(dry.contains("Done."));
+        assert!(bundle(&f.esp).is_dir());
+        let done = uninstall(&environment(host), &f.esp, false).unwrap();
+        assert!(done.contains("Done."));
         assert_eq!((snapshot(&f.esp), snapshot(&f.data)), before);
     }
 
     #[test]
-    fn a_small_esp_sends_the_payload_to_a_readable_data_volume_of_the_same_usb() {
+    fn a_small_esp_sends_the_bundle_to_a_readable_data_volume_of_the_same_usb() {
         // No HFS+ driver: the data volume is unreadable and nothing fits.
         let f = fixture(GIB / 32, false);
-        let error = setup(&environment(&f.host), command(&f, &f.data, Some("EMPTY2")))
+        let error = setup(&environment(&f.host), command(&f, &f.data))
             .unwrap_err()
             .to_string();
         assert!(error.contains("OpenHfsPlus"), "{error}");
-        assert!(error.contains("payload needs"), "{error}");
-        // With the driver, the HFS+ volume takes the whole IPSW.
+        assert!(error.contains("recoveryOS bundle needs"), "{error}");
+        // With the driver, the HFS+ volume holds the bundle; the ESP keeps
+        // only the entry, the tool and stela.cfg.
         let f = fixture(GIB / 32, true);
-        setup(&environment(&f.host), command(&f, &f.data, Some("EMPTY2"))).unwrap();
-        let directory = f
-            .data
-            .join(images_directory(restore::payload::SYNTHETIC_BUILD));
-        assert!(directory.join("Synthetic.ipsw").is_file());
-        assert!(
-            !f.esp
-                .join(images_directory(restore::payload::SYNTHETIC_BUILD))
-                .exists()
-        );
+        setup(&environment(&f.host), command(&f, &f.data)).unwrap();
+        assert!(bundle(&f.data).join("ramdisk.img").is_file());
+        assert!(!f.esp.join("EFI/stela/boot").exists());
         assert!(f.esp.join("EFI/OC/Tools/Stela.efi").is_file());
         uninstall(&environment(&f.host), &f.data, false).unwrap();
         assert!(!f.data.join("EFI").exists());
-    }
-
-    #[test]
-    fn targets_are_explicit_and_never_the_usb_the_system_or_another_systems_disk() {
-        let f = fixture(64 * GIB, false);
-        let host = &f.host;
-        let run = |target: Option<&str>| {
-            setup(&environment(host), command(&f, &f.esp, target)).map_err(|e| e.to_string())
-        };
-        let listed = run(None).unwrap_err();
-        assert!(listed.contains("--target"), "{listed}");
-        assert!(
-            listed.contains("EMPTY2") && listed.contains("this USB"),
-            "{listed}"
-        );
-        assert!(listed.contains("runs this computer"), "{listed}");
-        assert!(run(Some("USB5")).unwrap_err().contains("is this USB"));
-        assert!(
-            run(Some("SYSTEM0"))
-                .unwrap_err()
-                .contains("runs this computer")
-        );
-        assert!(
-            run(Some("WINDOWS3"))
-                .unwrap_err()
-                .contains("Microsoft Basic Data")
-        );
-        assert!(run(Some("has space")).unwrap_err().contains("serial"));
-        assert!(
-            snapshot(&f.esp)
-                .keys()
-                .all(|p| !p.starts_with(f.esp.join("EFI/stela")))
-        );
-        // A disk elsewhere, or a GPT GUID, is checked by stela.efi at boot.
-        let mut dry = command(
-            &f,
-            &f.esp,
-            Some("guid:C12A7328-F81F-11D2-BA4B-00A0C93EC93B"),
-        );
-        dry.dry_run = true;
-        assert!(setup(&environment(host), dry).unwrap().contains("at boot"));
-        let mut dry = command(&f, &f.esp, Some("ELSEWHERE9"));
-        dry.dry_run = true;
-        assert!(
-            setup(&environment(host), dry)
-                .unwrap()
-                .contains("not attached")
-        );
     }
 
     #[test]
@@ -1185,7 +868,7 @@ mod tests {
             host.volumes
                 .insert(dir.path().to_path_buf(), (FileSystem::Fat, GIB, None));
             let before = snapshot(dir.path());
-            let error = setup(&environment(&host), command(&f, dir.path(), Some("EMPTY2")))
+            let error = setup(&environment(&host), command(&f, dir.path()))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{error}");
@@ -1199,54 +882,42 @@ mod tests {
         };
         host.volumes
             .insert(f.esp.clone(), (FileSystem::Fat, 64 * GIB, Some("disk0")));
-        let error = setup(&environment(&host), command(&f, &f.esp, Some("EMPTY2")))
+        let error = setup(&environment(&host), command(&f, &f.esp))
             .unwrap_err()
             .to_string();
         assert!(error.contains("internal disk"), "{error}");
     }
 
     #[test]
-    fn verify_only_needs_no_target_and_names_none_in_stela_cfg() {
+    fn a_schema_1_setup_with_a_payload_and_target_is_still_undone() {
         let f = fixture(64 * GIB, false);
-        let mut verify = command(&f, &f.esp, None);
-        verify.verify_only = true;
-        let report = setup(&environment(&f.host), verify).unwrap();
-        assert!(report.contains("no disk is written"), "{report}");
-        let options = fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
-        assert!(options.starts_with("--install-mode verify --install-build"));
-        assert!(
-            !options.contains("target") && !options.contains("cache"),
-            "{options}"
-        );
+        let before = snapshot(&f.esp);
+        efi::add_mount(&f.esp, &f.efi, None, Some("--install-mode verify\n")).unwrap();
+        let payload = f.esp.join("EFI/stela/images/26A434");
+        let bundles = f.esp.join("EFI/stela/boot/26A434");
+        for directory in [&payload, &bundles] {
+            fs::create_dir_all(directory).unwrap();
+            fs::write(directory.join("file"), b"x").unwrap();
+        }
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "kind": RECORD_KIND,
+            "build": "26A434",
+            "model": "Mac14,3",
+            "target": "the disk with serial number EMPTY2",
+            "esp": f.esp,
+            "payload_volume": f.esp,
+            "payload_directory": payload,
+            "bundle_directory": bundles,
+            "created_directories": [
+                f.esp.join("EFI/stela/images"),
+                f.esp.join("EFI/stela/boot"),
+            ],
+            "options": "--install-mode verify\n",
+            "complete": true,
+        });
+        stela_runtime::write_json(&f.esp.join(RECORD), &record).unwrap();
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
-        let mut both = command(&f, &f.esp, Some("EMPTY2"));
-        both.verify_only = true;
-        let error = setup(&environment(&f.host), both).unwrap_err().to_string();
-        assert!(error.contains("takes no --target"), "{error}");
-    }
-
-    #[test]
-    fn sizes_and_targets_parse_in_the_forms_users_write() {
-        // The command line's defaults are the staging planner's.
-        assert_eq!(parse_bytes("16G"), Ok(DEFAULT_CACHE_BYTES));
-        assert_eq!(parse_bytes("64G"), Ok(DEFAULT_MIN_APPLE_BYTES));
-        assert_eq!(parse_bytes("64GiB"), Ok(64 * GIB));
-        assert_eq!(parse_bytes("512M"), Ok(512 << 20));
-        assert_eq!(parse_bytes("4096"), Ok(4096));
-        assert!(parse_bytes("12Q").is_err());
-        assert_eq!(
-            parse_target("S765NJ0X316978M").unwrap(),
-            TargetId::Serial("S765NJ0X316978M".into())
-        );
-        assert_eq!(
-            parse_target("serial:ABC").unwrap(),
-            TargetId::Serial("ABC".into())
-        );
-        assert!(matches!(
-            parse_target("C12A7328-F81F-11D2-BA4B-00A0C93EC93B").unwrap(),
-            TargetId::Guid(_)
-        ));
-        assert!(parse_target("guid:nope").is_err());
-        assert!(parse_target("").is_err());
+        assert_eq!(snapshot(&f.esp), before);
     }
 }
