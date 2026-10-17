@@ -2,11 +2,16 @@
 //!
 //! `install` copies `stela.efi` to `EFI/OC/Tools/Stela.efi`, writes the
 //! mount's `EFI/stela/stela.cfg` and `EFI/stela/source.bin`, and adds one
-//! `Misc.Tools` entry to `EFI/OC/config.plist`. The configuration from before
-//! the first install is kept as `EFI/stela/config.plist.backup`; a reinstall
-//! leaves that backup alone. Every other key keeps its value
-//! and order; only the XML layout is rewritten. `uninstall` removes the entry
-//! and those files.
+//! `Misc.Tools` entry to `EFI/OC/config.plist`. That entry is the only change
+//! to the configuration: it is inserted into the file's text (see
+//! [`config`]), so every other byte stays as it was, and nothing outside
+//! `Misc.Tools` (`ACPI`, `Kernel`, `NVRAM`, `PlatformInfo`, `UEFI` and the
+//! rest) is touched. The configuration is validated first and refused with a
+//! reason, never echoed, when it cannot be edited exactly. Files are replaced
+//! atomically. The configuration from before the first install is kept as
+//! `EFI/stela/config.plist.backup`; a reinstall leaves that backup alone.
+//! `uninstall` removes the entry and those files and restores the
+//! configuration byte for byte.
 //!
 //! With `--ipsw`, `install` also writes a restore payload for `stela.efi`
 //! under `EFI/stela/images/<build>/` on the ESP or another volume of the
@@ -26,6 +31,8 @@ use std::{
     io::{Cursor, Write},
     path::{Path, PathBuf},
 };
+
+mod config;
 use stela_runtime::payload::MAX_SLICE_BYTES;
 
 /// The tool's file name under `EFI/OC/Tools`, which identifies the entry.
@@ -98,21 +105,56 @@ pub(crate) struct Uninstall {
     esp: PathBuf,
 }
 
-/// The `Misc.Tools` entry. OpenCore starts a tool from a memory buffer
-/// unless `RealPath` is set, and the mount then has no boot volume to read.
+/// A value of the `Misc.Tools` entry.
+enum Field {
+    Text(&'static str),
+    Flag(bool),
+}
+
+/// The `Misc.Tools` entry, its keys in alphabetical order as in OpenCore's
+/// sample. OpenCore starts a tool from a memory buffer unless `RealPath` is
+/// set, and the mount then has no boot volume to read.
+const ENTRY: [(&str, Field); 10] = [
+    ("Arguments", Field::Text("")),
+    ("Auxiliary", Field::Flag(false)),
+    ("Comment", Field::Text("Stela ARM macOS mount")),
+    ("Enabled", Field::Flag(true)),
+    ("Flavour", Field::Text("Auto")),
+    ("FullNvramAccess", Field::Flag(false)),
+    ("Name", Field::Text(NAME)),
+    ("Path", Field::Text(TOOL)),
+    ("RealPath", Field::Flag(true)),
+    ("TextMode", Field::Flag(false)),
+];
+
 fn entry() -> Value {
     let mut entry = Dictionary::new();
-    entry.insert("Arguments".into(), "".into());
-    entry.insert("Auxiliary".into(), false.into());
-    entry.insert("Comment".into(), "Stela ARM macOS mount".into());
-    entry.insert("Enabled".into(), true.into());
-    entry.insert("Flavour".into(), "Auto".into());
-    entry.insert("FullNvramAccess".into(), false.into());
-    entry.insert("Name".into(), NAME.into());
-    entry.insert("Path".into(), TOOL.into());
-    entry.insert("RealPath".into(), true.into());
-    entry.insert("TextMode".into(), false.into());
+    for (key, field) in &ENTRY {
+        let value = match field {
+            Field::Text(text) => Value::from(*text),
+            Field::Flag(flag) => Value::from(*flag),
+        };
+        entry.insert((*key).into(), value);
+    }
     entry.into()
+}
+
+/// The entry as XML lines at `indent`, each ending in `newline`. None of its
+/// strings needs escaping.
+fn entry_text(indent: &str, unit: &str, newline: &str) -> String {
+    let mut text = format!("{indent}<dict>{newline}");
+    for (key, field) in &ENTRY {
+        let value = match field {
+            Field::Text(value) => format!("<string>{value}</string>"),
+            Field::Flag(true) => "<true/>".into(),
+            Field::Flag(false) => "<false/>".into(),
+        };
+        text.push_str(&format!(
+            "{indent}{unit}<key>{key}</key>{newline}{indent}{unit}{value}{newline}"
+        ));
+    }
+    text.push_str(&format!("{indent}</dict>{newline}"));
+    text
 }
 
 fn is_stela(entry: &Value) -> bool {
@@ -123,23 +165,56 @@ fn is_stela(entry: &Value) -> bool {
         .is_some_and(|path| path.eq_ignore_ascii_case(TOOL))
 }
 
-/// A parsed `config.plist` with its original bytes.
+/// Replace `path` through a sibling temporary file, so a failed write leaves
+/// the old file in place; with `fresh`, only when nothing is there yet.
+fn write_atomic(path: &Path, bytes: &[u8], fresh: bool) -> Result<()> {
+    let parent = path.parent().context("a file without a parent directory")?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    match fresh {
+        true => file.persist_noclobber(path).map_err(|error| error.error)?,
+        false => file.persist(path).map_err(|error| error.error)?,
+    };
+    // FAT may refuse to sync a directory; the file itself is already synced.
+    let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+    Ok(())
+}
+
+/// `config.plist`: its bytes, its text and its parsed value.
 struct Config {
     path: PathBuf,
     bytes: Vec<u8>,
+    text: String,
     root: Value,
 }
 
 impl Config {
+    /// Read and validate the configuration; the reasons never quote it.
     fn read(esp: &Path) -> Result<Self> {
         let path = esp.join(CONFIG);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let refuse =
+            |reason: &str| anyhow::anyhow!("{} cannot be changed safely: {reason}", path.display());
+        if bytes.starts_with(b"bplist") {
+            return Err(refuse("it is a binary property list; OpenCore reads XML"));
+        }
+        let text = String::from_utf8(bytes.clone()).map_err(|_| refuse("it is not UTF-8 text"))?;
         let root = Value::from_reader(Cursor::new(&bytes))
-            .with_context(|| format!("{} is not a property list", path.display()))?;
-        let config = Self { path, bytes, root };
+            .map_err(|_| refuse("it is not a valid property list"))?;
+        let misc = root
+            .as_dictionary()
+            .and_then(|root| root.get("Misc"))
+            .and_then(Value::as_dictionary)
+            .ok_or_else(|| refuse("it has no Misc dictionary"))?;
+        if !misc
+            .get("Tools")
+            .is_some_and(|tools| tools.as_array().is_some())
+        {
+            return Err(refuse("it has no Misc.Tools array"));
+        }
         // A vault signs config.plist; an edit would stop OpenCore booting.
-        let vault = config
-            .misc()?
+        let vault = misc
             .get("Security")
             .and_then(Value::as_dictionary)
             .and_then(|security| security.get("Vault"))
@@ -150,54 +225,113 @@ impl Config {
             "Misc.Security.Vault is {vault}; changing config.plist would break the vault, so \
              set Vault to Optional or regenerate the vault after installing"
         );
-        Ok(config)
+        config::tools(&text)
+            .map_err(|error| refuse(&format!("its XML cannot be edited exactly ({error})")))?;
+        Ok(Self {
+            path,
+            bytes,
+            text,
+            root,
+        })
     }
 
-    fn misc(&self) -> Result<&Dictionary> {
-        self.root
-            .as_dictionary()
-            .and_then(|root| root.get("Misc"))
-            .and_then(Value::as_dictionary)
-            .with_context(|| format!("{} has no Misc dictionary", self.path.display()))
-    }
-
-    fn tools(&mut self) -> Result<&mut Vec<Value>> {
-        let path = &self.path;
-        self.root
+    /// The parsed configuration with the Stela entries removed, and with
+    /// `entry()` inserted at `insert` when given.
+    fn expected(&self, insert: Option<usize>) -> Value {
+        let mut root = self.root.clone();
+        let tools = root
             .as_dictionary_mut()
             .and_then(|root| root.get_mut("Misc"))
             .and_then(Value::as_dictionary_mut)
             .and_then(|misc| misc.get_mut("Tools"))
             .and_then(Value::as_array_mut)
-            .with_context(|| format!("{} has no Misc.Tools array", path.display()))
-    }
-
-    /// Remove every Stela entry; return how many there were and where the
-    /// first one was.
-    fn remove_stela(&mut self) -> Result<(usize, Option<usize>)> {
-        let tools = self.tools()?;
-        let first = tools.iter().position(is_stela);
-        let before = tools.len();
+            .expect("checked when read");
         tools.retain(|entry| !is_stela(entry));
-        Ok((before - tools.len(), first))
+        if let Some(index) = insert {
+            tools.insert(index, entry());
+        }
+        root
     }
 
-    /// Replace the file through a sibling temporary, so a failed write leaves
-    /// the old configuration in place.
-    fn write(&self) -> Result<()> {
-        let mut xml = Vec::new();
-        self.root.to_writer_xml(&mut xml)?;
-        xml.push(b'\n');
-        self.restore(&xml)
+    /// Indices of the Stela entries in `Misc.Tools`.
+    fn stela_entries(&self, tools: &config::Tools) -> Result<Vec<usize>> {
+        let mut found = Vec::new();
+        for (index, child) in tools.array.children.iter().enumerate() {
+            if child.name == "dict"
+                && config::string(&self.text, child, "Path")?
+                    .is_some_and(|path| path.eq_ignore_ascii_case(TOOL))
+            {
+                found.push(index);
+            }
+        }
+        Ok(found)
     }
 
-    fn restore(&self, bytes: &[u8]) -> Result<()> {
-        let parent = self.path.parent().expect("config.plist has a parent");
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(bytes)?;
-        file.as_file().sync_all()?;
-        file.persist(&self.path).map_err(|error| error.error)?;
-        Ok(())
+    /// Check an edited text against the structure it must have.
+    fn checked(&self, text: String, expected: &Value) -> Result<Vec<u8>> {
+        let edited = Value::from_reader(Cursor::new(text.as_bytes()))
+            .context("the edited config.plist does not parse; nothing was written")?;
+        ensure!(
+            &edited == expected,
+            "the edit would change more than the Stela entry; nothing was written"
+        );
+        Ok(text.into_bytes())
+    }
+
+    /// The text with one Stela entry: an existing one replaced in place and
+    /// any others removed, or a new one first in the array. Returns the new
+    /// bytes, the entry's index and how many entries it replaced.
+    fn with_entry(&self) -> Result<(Vec<u8>, usize, usize)> {
+        let tools = config::tools(&self.text)?;
+        let stela = self.stela_entries(&tools)?;
+        let newline = config::newline(&self.text);
+        let block = entry_text(&tools.entry_indent, &tools.unit, newline);
+        let mut text = self.text.clone();
+        let index = match stela.first() {
+            Some(&first) => {
+                for &index in stela.iter().rev() {
+                    let range = config::lines(&self.text, &tools.array.children[index]);
+                    let replacement = if index == first { block.as_str() } else { "" };
+                    text.replace_range(range, replacement);
+                }
+                first
+            }
+            None if tools.array.content.is_empty() => {
+                // `<array/>` or `<array></array>`: open it onto its own lines.
+                let outer = tools
+                    .entry_indent
+                    .strip_suffix(tools.unit.as_str())
+                    .unwrap_or_default();
+                text.replace_range(
+                    tools.array.start..tools.array.end,
+                    &format!("<array>{newline}{block}{outer}</array>"),
+                );
+                0
+            }
+            None => {
+                let mut at = tools.array.content.start;
+                if self.text[at..].starts_with(newline) {
+                    at += newline.len();
+                    text.insert_str(at, &block);
+                } else {
+                    text.insert_str(at, &format!("{newline}{block}"));
+                }
+                0
+            }
+        };
+        let bytes = self.checked(text, &self.expected(Some(index)))?;
+        Ok((bytes, index, stela.len()))
+    }
+
+    /// The text without any Stela entry, and how many there were.
+    fn without_entries(&self) -> Result<(Vec<u8>, usize)> {
+        let tools = config::tools(&self.text)?;
+        let stela = self.stela_entries(&tools)?;
+        let mut text = self.text.clone();
+        for &index in stela.iter().rev() {
+            text.replace_range(config::lines(&self.text, &tools.array.children[index]), "");
+        }
+        Ok((self.checked(text, &self.expected(None))?, stela.len()))
     }
 }
 
@@ -246,7 +380,7 @@ pub(crate) fn add_mount(
     source: Option<&[u8]>,
     options: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let mut config = Config::read(esp)?;
+    let config = Config::read(esp)?;
     let image =
         fs::read(image_path).with_context(|| format!("cannot read {}", image_path.display()))?;
     ensure!(
@@ -254,25 +388,26 @@ pub(crate) fn add_mount(
         "{} is not a PE image",
         image_path.display()
     );
-    let (replaced, first) = config.remove_stela()?;
-    let index = first.unwrap_or(0);
-    config.tools()?.insert(index, entry());
+    // Prepare and check the edit before anything is written.
+    let (edited, index, replaced) = config.with_entry()?;
 
     fs::create_dir_all(esp.join(MOUNT))?;
     fs::create_dir_all(esp.join(TOOLS))?;
     // Keep the configuration from before Stela, not a previous install's.
-    if !esp.join(BACKUP).is_file() {
-        fs::write(esp.join(BACKUP), &config.bytes)?;
+    if !esp.join(BACKUP).is_file() && replaced == 0 {
+        write_atomic(&esp.join(BACKUP), &config.bytes, true)?;
     }
-    fs::write(esp.join(TOOLS).join(TOOL), &image)?;
+    write_atomic(&esp.join(TOOLS).join(TOOL), &image, false)?;
     if let Some(source) = source {
-        fs::write(esp.join(SOURCE), source)?;
+        write_atomic(&esp.join(SOURCE), source, false)?;
     }
     if let Some(options) = options {
-        fs::write(esp.join(OPTIONS), options)?;
+        write_atomic(&esp.join(OPTIONS), options.as_bytes(), false)?;
     }
     // The entry goes in last, so OpenCore never lists a missing tool.
-    config.write()?;
+    if edited != config.bytes {
+        write_atomic(&config.path, &edited, false)?;
+    }
     Ok(json!({
         "config": config.path,
         "backup": esp.join(BACKUP),
@@ -294,25 +429,33 @@ pub(crate) fn check_config(esp: &Path) -> Result<()> {
 
 /// Remove the entry and the files `install` wrote, and return a report.
 pub fn uninstall(esp: &Path) -> Result<serde_json::Value> {
-    let mut config = Config::read(esp)?;
-    let (removed, _) = config.remove_stela()?;
-    // When the entry was the only change, the backup's own bytes go back.
-    let backup = fs::read(esp.join(BACKUP)).ok().filter(|bytes| {
-        Value::from_reader(Cursor::new(bytes)).is_ok_and(|backup| backup == config.root)
+    let config = Config::read(esp)?;
+    let (without, removed) = config.without_entries()?;
+    // When the entry is the only change since the first install, the
+    // backup's own bytes go back; otherwise only the entry's lines leave and
+    // the backup stays for the user.
+    let backup = fs::read(esp.join(BACKUP)).ok();
+    let restores = backup.as_ref().is_some_and(|bytes| {
+        Value::from_reader(Cursor::new(bytes)).is_ok_and(|backup| backup == config.expected(None))
     });
-    match backup {
-        Some(bytes) if bytes != config.bytes => config.restore(&bytes)?,
-        Some(_) => {}
-        None if removed > 0 => config.write()?,
-        None => {}
+    let restored = match (&backup, restores) {
+        (Some(bytes), true) => bytes.clone(),
+        _ => without,
+    };
+    if restored != config.bytes {
+        write_atomic(&config.path, &restored, false)?;
     }
+    let kept_backup = backup.is_some() && !restores;
     let mut files = Vec::new();
-    for file in [
+    let mut remove = vec![
         esp.join(TOOLS).join(TOOL),
         esp.join(OPTIONS),
         esp.join(SOURCE),
-        esp.join(BACKUP),
-    ] {
+    ];
+    if !kept_backup {
+        remove.push(esp.join(BACKUP));
+    }
+    for file in remove {
         if file.is_file() {
             fs::remove_file(&file)?;
             files.push(file);
@@ -324,7 +467,13 @@ pub fn uninstall(esp: &Path) -> Result<serde_json::Value> {
             fs::remove_dir(&directory)?;
         }
     }
-    Ok(json!({ "config": config.path, "entries": removed, "files": files }))
+    Ok(json!({
+        "config": config.path,
+        "entries": removed,
+        "restored_backup": restores,
+        "kept_backup": kept_backup.then(|| esp.join(BACKUP)),
+        "files": files,
+    }))
 }
 
 #[cfg(test)]

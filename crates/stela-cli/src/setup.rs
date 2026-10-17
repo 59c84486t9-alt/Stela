@@ -865,7 +865,14 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
         }
         fs::remove_file(esp.join(RECORD))?;
     }
-    efi::uninstall(&esp)?;
+    let report = efi::uninstall(&esp)?;
+    if let Some(backup) = report["kept_backup"].as_str() {
+        writeln!(
+            text,
+            "  kept     {backup}: config.plist changed since install, so only the entry was \
+             removed; the backup holds the configuration from before Stela"
+        )?;
+    }
     text.push_str("Done.\n");
     Ok(text)
 }
