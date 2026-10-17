@@ -3600,9 +3600,22 @@ mod tests {
         let mut machine = machine(&[]);
         // The OS lock is set at Cold reset; MSR OSLAR_EL1 clears it.
         assert_eq!(machine.cpu.read(SystemRegister::OSLSR_EL1) & 0b10, 0b10);
+        // While it is set, OSECCR_EL1 saves and restores EDECCR (bits 31:0;
+        // bits 63:32 are RES0). No external debugger reads it.
+        machine.cpu.state.x[0] = 0xffff_ffff_1234_5678;
+        machine.system_instruction(0xd510_0640).unwrap(); // msr oseccr_el1, x0
+        machine.system_instruction(0xd530_0645).unwrap(); // mrs x5, oseccr_el1
+        assert_eq!(machine.cpu.state.x[5], 0x1234_5678);
         machine.cpu.state.x[0] = 0;
         machine.system_instruction(0xd510_1080).unwrap(); // msr oslar_el1, x0
         assert_eq!(machine.cpu.read(SystemRegister::OSLSR_EL1) & 0b10, 0);
+        // Unlocked, writes are ignored and reads are UNKNOWN (0 here).
+        machine.cpu.state.x[0] = 0x9;
+        machine.system_instruction(0xd510_0640).unwrap(); // msr oseccr_el1, x0
+        machine.system_instruction(0xd530_0645).unwrap(); // mrs x5, oseccr_el1
+        assert_eq!(machine.cpu.state.x[5], 0);
+        assert_eq!(machine.cpu.read(SystemRegister::OSECCR_EL1), 0x1234_5678);
+        machine.cpu.state.x[0] = 0;
         // A DBGDTRTX_EL0 write latches TXfull; nothing fills DTRRX.
         machine.cpu.state.x[0] = 0x1234_5678;
         machine.system_instruction(0xd513_0500).unwrap(); // msr dbgdtrtx_el0, x0
