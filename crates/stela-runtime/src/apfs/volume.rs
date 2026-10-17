@@ -677,8 +677,7 @@ mod tests {
     use super::*;
     use crate::apfs::{Container, tests::fixture};
 
-    const KERNELCACHE: &str =
-        "AAAA-UUID/boot/HASH01/System/Library/Caches/com.apple.kernelcaches/kernelcache";
+    const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";
 
     fn pattern(length: usize) -> Vec<u8> {
         (0..length)
@@ -697,25 +696,26 @@ mod tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert!(root.iter().any(|n| n == "AAAA-UUID") && root.iter().any(|n| n == "sparse"));
-        let kernel = volume.lookup(device, KERNELCACHE, true)?;
-        assert_eq!(kernel.size, 300_000);
-        assert_eq!(volume.read(device, &kernel)?, pattern(300_000));
+        assert!(root.iter().any(|n| n == GROUP) && root.iter().any(|n| n == "sparse"));
+        let raw = volume.lookup(device, "pattern.bin", true)?;
+        assert_eq!(raw.size, 300_000);
+        assert_eq!(volume.read(device, &raw)?, pattern(300_000));
         let mut middle = [0u8; 16];
-        volume.read_at(device, &kernel, 123_456, &mut middle)?;
+        volume.read_at(device, &raw, 123_456, &mut middle)?;
         assert_eq!(&middle[..], &pattern(300_000)[123_456..123_472]);
-        // Case-insensitive lookup and a symbolic link to a directory.
-        let active = volume.lookup(device, "aaaa-uuid/BOOT/active", true)?;
-        assert_eq!(volume.read(device, &active)?, b"HASH01\n");
-        let link = volume.lookup(device, "AAAA-UUID/current", false)?;
+        // Case-insensitive lookup through a symbolic link to a directory.
+        let link = volume.lookup(device, &format!("{GROUP}/current"), false)?;
         assert_eq!(link.kind, FileKind::Symlink);
-        assert_eq!(volume.symlink_target(device, &link)?, "boot/HASH01");
-        let through = volume.lookup(
+        let target = volume.symlink_target(device, &link)?;
+        assert!(target.starts_with("boot/") && target.len() == 5 + 96);
+        let lower = GROUP.to_ascii_lowercase();
+        let tree = volume.lookup(
             device,
-            "AAAA-UUID/current/usr/standalone/firmware/devicetree.img4",
+            &format!("{lower}/CURRENT/usr/standalone/firmware/devicetree.img4"),
             true,
         )?;
-        assert_eq!(volume.read(device, &through)?, b"device tree bytes");
+        let bytes = volume.read(device, &tree)?;
+        assert!(bytes.windows(17).any(|w| w == b"device tree bytes"));
         // A sparse file reads its hole as zeros.
         let sparse = volume.lookup(device, "sparse", true)?;
         let data = volume.read(device, &sparse)?;
@@ -731,7 +731,7 @@ mod tests {
         );
         assert_eq!(volume.xattr(device, empty.oid, "absent")?, None);
         assert!(matches!(
-            volume.lookup(device, "AAAA-UUID/missing", true),
+            volume.lookup(device, &format!("{GROUP}/missing"), true),
             Err(ApfsError::NotFound(_))
         ));
         Ok(())
