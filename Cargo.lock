@@ -2124,6 +2124,7 @@ dependencies = [
  "serde_json",
  "stela-cli",
  "stela-compiler",
+ "stela-loader",
  "stela-runtime",
  "tempfile",
 ]

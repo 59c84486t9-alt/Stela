@@ -13,6 +13,11 @@
 //! `stage-path`
 //! also partitions a blank second disk and copies them into staging, which
 //! the run then reads back on the host.
+//!
+//! `--preboot-disk IMAGE` attaches a disk image holding an installed
+//! system's APFS Preboot volume; the mount builds the boot bundle from it at
+//! boot and enters it, and the run checks the result against the bundle the
+//! host builds from the same image.
 use crate::{
     check::{BOOT_MANIFEST, BOOT_TARGET, BOOT_TARGET_DIR},
     tools::{binding, cargo, exec, qemu, root, stop, wait},
@@ -34,6 +39,7 @@ use stela_runtime::payload::{
 };
 
 mod disks;
+mod preboot;
 
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
 const TIMEOUT_EXIT: u8 = 124;
@@ -125,6 +131,12 @@ pub struct Run {
     /// on the system-mode engine; it is copied to `\EFI\stela\bundle`.
     #[arg(long, conflicts_with_all = ["module", "opencore"])]
     bundle: Option<PathBuf>,
+    /// A GPT disk image whose APFS container holds an installed system's
+    /// Preboot volume, attached over NVMe through a snapshot: the mount
+    /// builds the boot bundle from it with its own storage drivers and
+    /// starts it on the system-mode engine.
+    #[arg(long, conflicts_with_all = ["module", "opencore", "bundle", "append", "payload"])]
+    preboot_disk: Option<PathBuf>,
     /// Fresh directory for the boot volume, serial log and run report.
     #[arg(long)]
     output: PathBuf,
@@ -156,7 +168,7 @@ pub struct Run {
     /// Boot an existing USB disk image, such as one `stela setup` prepared,
     /// through its own OpenCore; writes go to a temporary overlay.
     #[arg(long, conflicts_with_all = [
-        "opencore", "payload", "module", "bundle", "append", "storage_check"
+        "opencore", "payload", "module", "bundle", "append", "storage_check", "preboot_disk"
     ])]
     usb_image: Option<PathBuf>,
     /// Run install mode on a synthetic restore payload.
@@ -239,7 +251,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     let volume = output.join("volume");
     let source = volume.join("EFI/stela/source.bin");
+    let preboot = arguments
+        .preboot_disk
+        .as_deref()
+        .map(preboot::prepare)
+        .transpose()?;
     let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
+        _ if preboot.is_some() => (Vec::new(), preboot.as_ref().unwrap().options()),
         _ if arguments.bundle.is_some() => (
             Vec::new(),
             arguments.append.unwrap_or_else(|| BUNDLE_OPTIONS.into()),
@@ -371,7 +389,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         ("off", "qemu64", "readonly=on,file=fat:")
     };
     let memory = arguments.memory.clone().unwrap_or_else(|| {
-        match (arguments.bundle.is_some(), system) {
+        match (arguments.bundle.is_some() || preboot.is_some(), system) {
             (true, _) => "12G",
             (false, true) => "8G",
             (false, false) => "1G",
@@ -410,6 +428,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .args(["-device", "virtio-blk-pci,drive=volume"]);
     for (index, disk) in disks.iter().enumerate() {
         disk.attach(index, &mut command);
+    }
+    if let Some(preboot) = &preboot {
+        preboot.attach(&mut command);
     }
     if target.exists() {
         command
@@ -506,7 +527,17 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .lines()
         .find_map(|line| line.strip_prefix("STOP UNSUPPORTED "))
         .map(String::from);
-    let verification = if arguments.bundle.is_none()
+    // The installed-system scenario ends at the bundle's entry: what the
+    // engine meets after it is reported but does not fail the run.
+    let mut entered = false;
+    let verification = if let Some(preboot) = &preboot {
+        let checked = preboot.verify(&serial_text);
+        entered = checked.is_ok();
+        Some(
+            checked
+                .unwrap_or_else(|error| json!({ "passed": false, "reason": format!("{error:#}") })),
+        )
+    } else if arguments.bundle.is_none()
         && arguments.module.is_none()
         && arguments.scenario == Scenario::SystemKernel
     {
@@ -542,6 +573,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "opencore": arguments.opencore,
         "scenario": verification,
         "bundle": arguments.bundle,
+        "preboot_disk": arguments.preboot_disk,
         "first_unsupported": unsupported,
         "returncode": code,
         "payload": arguments.payload.map(|mode| {
@@ -561,7 +593,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if let Some(Err(error)) = storage {
         return Err(error.context("host storage check failed"));
     }
-    Ok(ExitCode::from(code))
+    Ok(ExitCode::from(match (preboot.is_some(), entered) {
+        (true, true) => 0,
+        (true, false) => FAILED_EXIT,
+        (false, _) => code,
+    }))
 }
 
 /// Copy `bundle.json` and every file it lists.
