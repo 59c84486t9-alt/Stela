@@ -66,6 +66,48 @@ pub struct Stage2 {
     pub xs: bool,
 }
 
+/// Whether the chip the tests run on implements FEAT_XS, as
+/// `Cpu::controls` states it in [`Controls::xs`] and [`Stage2::xs`].
+#[cfg(test)]
+pub(crate) fn test_xs() -> bool {
+    super::system::Feature::FEAT_XS.on(super::test_chip())
+}
+
+/// The chip the tests run on, after checking that its identification
+/// advertises the translation profile the walker implements: a 48-bit
+/// PARange, 16-bit ASIDs, 4 KiB and 16 KiB granules but not 64 KiB (so no
+/// FEAT_LPA or FEAT_LPA2), no FEAT_LVA or FEAT_TTST, FEAT_LSE2's alignment
+/// and the TLBI range and Outer Shareable forms.
+#[cfg(test)]
+pub(crate) fn test_translation_chip() -> super::Chip {
+    use super::registers::encodings::{ID_AA64ISAR0_EL1, ID_AA64MMFR0_EL1, ID_AA64MMFR2_EL1};
+    let chip = super::test_chip();
+    let values = super::identification::derive(chip, stela_compiler::TargetCpu::Baseline, true);
+    let value = |register| {
+        values
+            .iter()
+            .find(|(found, _)| *found == register)
+            .map_or(0, |(_, value)| *value)
+    };
+    let field = |register, shift: u32| value(register) >> shift & 0xf;
+    assert_eq!(
+        value(ID_AA64MMFR0_EL1) & 0xffff_ffff,
+        0x0f10_0025,
+        "{chip:?}"
+    );
+    assert_eq!(
+        (
+            field(ID_AA64MMFR2_EL1, 16),
+            field(ID_AA64MMFR2_EL1, 28),
+            field(ID_AA64MMFR2_EL1, 32)
+        ),
+        (0, 0, 1),
+        "{chip:?} VARange, ST and AT"
+    );
+    assert_eq!(field(ID_AA64ISAR0_EL1, 56), 2, "{chip:?} TLB");
+    chip
+}
+
 const HCR_VM: u64 = 1 << 0;
 const HCR_DC: u64 = 1 << 12;
 const HCR_TGE: u64 = 1 << 27;
@@ -617,8 +659,9 @@ mod tests {
                 hcr: HCR_VM,
                 vtcr: VTCR,
                 vttbr: 0x10_0000,
-                xs: false,
+                xs: test_xs(),
             }),
+            xs: test_xs(),
             ..Controls::default()
         };
         (controls, tables)

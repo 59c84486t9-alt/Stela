@@ -273,19 +273,21 @@ mod tests {
 
     #[test]
     fn mair_selects_the_byte_and_shareability_follows_the_type() {
+        // These encodings decode alike with and without FEAT_XS.
+        let xs = super::super::test_xs();
         // Index 0 Device-nGnRE, 1 Normal write-back, 2 Normal Non-cacheable.
         let mair = 0x44_ff_04;
         let inner_shareable = 0b11 << 8;
         assert_eq!(
-            of_descriptor(mair, 1 << 2 | inner_shareable, false),
+            of_descriptor(mair, 1 << 2 | inner_shareable, xs),
             (0xff, MemoryType::Normal, 0b11)
         );
         assert_eq!(
-            of_descriptor(mair, inner_shareable, false),
+            of_descriptor(mair, inner_shareable, xs),
             (0x04, MemoryType::Device, OUTER_SHAREABLE)
         );
         assert_eq!(
-            of_descriptor(mair, 2 << 2, false),
+            of_descriptor(mair, 2 << 2, xs),
             (0x44, MemoryType::Normal, OUTER_SHAREABLE)
         );
         assert_eq!(disabled(0, false), (DEVICE_NGNRNE, MemoryType::Device));
@@ -309,36 +311,45 @@ mod tests {
 
     #[test]
     fn stage_two_combines_type_cacheability_hints_and_shareability() {
+        let xs = super::super::test_xs();
         // MemAttr: Device-nGnRE, Normal outer WT inner WB, Normal NC, and
         // the reserved encodings.
         assert_eq!(of_stage2(0b0001), Some(0x04));
         assert_eq!(of_stage2(0b1011), Some(0x8c));
         assert_eq!(of_stage2(0b0101), Some(0x44));
         assert_eq!((of_stage2(0b0100), of_stage2(0b1000)), (None, None));
-        // Device beats Normal and the stronger Device type wins.
-        assert_eq!(combine(0xff, 0x08, true, false), 0x08);
-        assert_eq!(combine(0x0c, 0xcc, true, false), 0x0c);
-        assert_eq!(combine(0x0c, 0x04, true, false), 0x04);
+        // Device beats Normal and the stronger Device type wins. XS is set
+        // only when both stages set it, and Write-Back's is 0.
+        assert_eq!(combine(0xff, 0x08, true, xs), if xs { 0x09 } else { 0x08 });
+        assert_eq!(combine(0x0c, 0xcc, true, xs), 0x0c);
+        assert_eq!(combine(0x0c, 0x04, true, xs), 0x04);
         // Normal: the weaker cacheability with stage 1's hints. WB RA
-        // non-transient against WT gives WT RA non-transient; a transient
-        // WB RW nibble becomes transient WT; NC wins.
-        assert_eq!(combine(0xee, 0x88, true, false), 0xaa);
-        assert_eq!(combine(0x7f, 0xc8, true, false), 0x7b);
-        assert_eq!(combine(0xff, 0x4c, true, false), 0x4f);
-        assert_eq!(combine(0xaa, 0xcc, true, false), 0xaa);
+        // non-transient against WT gives WT RA non-transient (with the
+        // Write-Back's XS of 0, 0xa0 under FEAT_XS); a transient WB RW nibble
+        // becomes transient WT; NC wins.
+        assert_eq!(combine(0xee, 0x88, true, xs), if xs { 0xa0 } else { 0xaa });
+        assert_eq!(combine(0x7f, 0xc8, true, xs), 0x7b);
+        assert_eq!(combine(0xff, 0x4c, true, xs), 0x4f);
+        assert_eq!(combine(0xaa, 0xcc, true, xs), 0xaa);
         // FWB: Device, stage 1's attributes, forced Write-Back keeping
-        // stage 1's hints, and Non-cacheable unless stage 1 is Device.
-        assert_eq!(forced(0xff, 0b0010, false, false), 0x08);
-        assert_eq!(forced(0x00, 0b0011, false, false), 0x00);
-        assert_eq!(forced(0x4a, 0b0111, false, false), 0x4a);
-        assert_eq!(forced(0x4a, 0b0110, false, false), 0xfe);
-        assert_eq!(forced(0x04, 0b0110, false, false), 0xff);
+        // stage 1's hints, and Non-cacheable unless stage 1 is Device. The
+        // XS of stage 1's Write-Back is 0, so under FEAT_XS the forced
+        // Device-nGRE reports its XS-0 encoding.
+        assert_eq!(
+            forced(0xff, 0b0010, false, xs),
+            if xs { 0x09 } else { 0x08 }
+        );
+        assert_eq!(forced(0x00, 0b0011, false, xs), 0x00);
+        assert_eq!(forced(0x4a, 0b0111, false, xs), 0x4a);
+        assert_eq!(forced(0x4a, 0b0110, false, xs), 0xfe);
+        assert_eq!(forced(0x04, 0b0110, false, xs), 0xff);
         assert_eq!(
             (
-                forced(0xff, 0b0101, false, false),
-                forced(0x04, 0b0101, false, false)
+                forced(0xff, 0b0101, false, xs),
+                forced(0x04, 0b0101, false, xs)
             ),
-            (0x44, 0x04)
+            // The Write-Back's Non-cacheable output keeps its XS of 0.
+            (if xs { 0x40 } else { 0x44 }, 0x04)
         );
         assert_eq!(
             combine_shareability(NON_SHAREABLE, INNER_SHAREABLE),

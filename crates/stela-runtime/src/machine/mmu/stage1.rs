@@ -493,6 +493,7 @@ mod tests {
             ttbr0: 0x10_0000 | (5 << 48),
             ttbr1: 0x20_0000,
             mair: 0xff00, // index 0 Device-nGnRnE, index 1 Normal WB
+            xs: super::super::test_xs(),
             ..Controls::default()
         }
     }
@@ -578,7 +579,12 @@ mod tests {
             else {
                 panic!("caches off")
             };
-            assert_eq!((output.attributes, output.shareability), (0x44, 0b10));
+            // Under FEAT_XS it keeps the Write-Back's XS of 0: 0x40.
+            let non_cacheable = if super::super::test_xs() { 0x40 } else { 0x44 };
+            assert_eq!(
+                (output.attributes, output.shareability),
+                (non_cacheable, 0b10)
+            );
         }
         assert_eq!(
             faults(translate(

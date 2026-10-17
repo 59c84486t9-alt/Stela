@@ -114,6 +114,7 @@ mod tests {
 
     #[test]
     fn sctlr_a_lse2_granules_and_naa_decide_before_translation() {
+        super::super::test_translation_chip();
         let plain = shape(Kind::Plain, 8);
         assert!(!before_translation(0, 0x1004, plain));
         assert!(before_translation(SCTLR_A, 0x1004, plain));
@@ -147,6 +148,7 @@ mod tests {
 
     #[test]
     fn device_memory_alone_decides_after_translation() {
+        super::super::test_translation_chip();
         let device = translation(true);
         let normal = translation(false);
         assert!(after_translation(device, 0x1004, shape(Kind::Plain, 8)));

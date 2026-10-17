@@ -334,7 +334,7 @@ mod tests {
             hcr: 1,
             vtcr,
             vttbr: 0x10_0000 | 7 << 48,
-            xs: false,
+            xs: super::super::test_xs(),
         }
     }
 
@@ -621,10 +621,12 @@ mod tests {
             attributes(&s2, non_shareable, leaf(0b1010, 0b11), false),
             Ok((0xbb, 0b11))
         );
-        // Stage 2 Device-nGnRE: Device, Outer Shareable.
+        // Stage 2 Device-nGnRE: Device, Outer Shareable, with stage 1's
+        // Write-Back XS of 0 under FEAT_XS.
+        let device = if super::super::test_xs() { 0x05 } else { 0x04 };
         assert_eq!(
             attributes(&s2, non_shareable, leaf(0b0001, 0), false),
-            Ok((0x04, 0b10))
+            Ok((device, 0b10))
         );
         // Reserved MemAttr refuses.
         assert_eq!(
@@ -634,18 +636,20 @@ mod tests {
             }))
         );
         // HCR_EL2.CD makes Normal data Non-cacheable; HCR_EL2.ID and Device
-        // memory make instruction fetch Non-cacheable.
+        // memory make instruction fetch Non-cacheable, keeping stage 1's
+        // Write-Back XS of 0 under FEAT_XS.
+        let nc = if super::super::test_xs() { 0x40 } else { 0x44 };
         let cd = Stage2 {
             hcr: s2.hcr | HCR_CD,
             ..s2
         };
         assert_eq!(
             attributes(&cd, non_shareable, leaf(0b1111, 0b11), false),
-            Ok((0x44, 0b10))
+            Ok((nc, 0b10))
         );
         assert_eq!(
             attributes(&s2, non_shareable, leaf(0b0000, 0), true),
-            Ok((0x44, 0b10))
+            Ok((nc, 0b10))
         );
         let id = Stage2 {
             hcr: s2.hcr | HCR_ID,
@@ -653,7 +657,7 @@ mod tests {
         };
         assert_eq!(
             attributes(&id, non_shareable, leaf(0b1111, 0b11), true),
-            Ok((0x44, 0b10))
+            Ok((nc, 0b10))
         );
         // FWB: 0b110 forces Write-Back over stage-1 Device, and the SH
         // fields still combine.
@@ -661,6 +665,7 @@ mod tests {
             hcr: s2.hcr | HCR_FWB,
             ..s2
         };
+        let device_ngre = if super::super::test_xs() { 0x09 } else { 0x08 };
         let device = Input {
             attributes: 0x00,
             shareability: 0,
@@ -675,7 +680,7 @@ mod tests {
         );
         assert_eq!(
             attributes(&fwb, non_shareable, leaf(0b0010, 0), false),
-            Ok((0x08, 0b10))
+            Ok((device_ngre, 0b10))
         );
         // FEAT_XS: stage-1 Device-nGnRE with XS 1 stays XS 1 unless the
         // descriptor's FnXS clears it, with and without FWB; without
@@ -696,8 +701,9 @@ mod tests {
                 Ok(0x05)
             );
         }
+        let no_xs = Stage2 { xs: false, ..s2 };
         assert_eq!(
-            attributes(&s2, device, leaf(0b0111, 0) | FNXS, false).map(|(a, _)| a),
+            attributes(&no_xs, device, leaf(0b0111, 0) | FNXS, false).map(|(a, _)| a),
             Ok(0x04)
         );
     }

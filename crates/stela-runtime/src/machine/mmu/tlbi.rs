@@ -336,6 +336,7 @@ mod tests {
 
     #[test]
     fn va_forms_match_address_asid_level_and_ttl() {
+        super::super::test_translation_chip();
         let va = 0x1_2345_c000_u64;
         let entry = page(va);
         let vae1 = |asid: u64, ttl: u64, va: u64, level| {
@@ -426,6 +427,7 @@ mod tests {
 
     #[test]
     fn host_forms_name_the_el2_and_0_regime_without_a_vmid() {
+        super::super::test_translation_chip();
         let host_entry = Entry {
             regime: Regime::El20,
             vmid: None,
@@ -463,6 +465,7 @@ mod tests {
 
     #[test]
     fn all_and_vmall_forms_follow_regime_and_vmid() {
+        super::super::test_translation_chip();
         let entry = page(0x4000);
         let stage2_only = Entry {
             stage1: false,
@@ -523,6 +526,7 @@ mod tests {
 
     #[test]
     fn range_forms_decode_tg_scale_num_and_ttl() {
+        super::super::test_translation_chip();
         // RVAE1 over 16 KiB pages: BaseADDR in 16 KiB units, NUM 1, SCALE 0:
         // (1 + 1) * 2^1 = 4 pages from VA 0x10_0000.
         let base = 0x10_0000_u64 >> 14;
@@ -572,6 +576,7 @@ mod tests {
 
     #[test]
     fn ipa_forms_remove_only_stage_two_entries_and_fb_broadcasts() {
+        super::super::test_translation_chip();
         let stage2_only = Entry {
             stage1: false,
             asid: None,

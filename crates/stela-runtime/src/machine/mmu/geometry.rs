@@ -96,6 +96,7 @@ mod tests {
 
     #[test]
     fn levels_index_bits_and_blocks_follow_the_granule() {
+        super::super::test_translation_chip();
         // 4 KiB, 48-bit: levels 0..3 with 9 bits each, blocks of 1 GiB and 2 MiB.
         let four = Geometry::stage1(12, 48);
         assert_eq!(four.start_level, 0);
@@ -126,6 +127,7 @@ mod tests {
 
     #[test]
     fn region_and_output_sizes_are_forced_into_the_profile() {
+        super::super::test_translation_chip();
         assert_eq!(
             (forced_tnsz(0), forced_tnsz(25), forced_tnsz(48)),
             (16, 25, 39)

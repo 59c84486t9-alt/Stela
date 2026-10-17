@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn reserved_bits_and_arrays() {
-        let mut file = File::default();
+        let mut file = File::new(crate::machine::test_chip());
         // HCR_EL2.E2H is RES1 without FEAT_E2H0.
         assert_eq!(file.get(Register::HCR_EL2, 0) >> 34 & 1, 1);
         file.set(Register::HCR_EL2, 0, 0);
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn registers_start_at_their_cold_reset_values() {
-        let file = File::default();
+        let file = File::new(crate::machine::test_chip());
         // Arm's System register XML, under the profile (highest EL EL2):
         // OSLSR_EL1.OSLK is set at Cold reset, MPAM2_EL2 traps EL1 and EL0
         // MPAM register accesses, RMR_EL2.AA64 resets to AArch64, and
