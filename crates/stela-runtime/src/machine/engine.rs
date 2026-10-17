@@ -16,7 +16,7 @@ use super::{
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
     registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
-    system::Register as SystemRegister,
+    system::{Feature, Register as SystemRegister},
     timer,
 };
 use crate::pauth;
@@ -1348,16 +1348,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
         ]
     }
 
-    /// The guest's PAC keys and the current regime's TCR layout, as
-    /// FEAT_PAuth2 with FEAT_FPAC.
-    fn pointer_context(&self) -> pauth::Context {
+    /// The PAC algorithm version of the profile's chip: FEAT_FPACCOMBINE,
+    /// FEAT_FPAC, FEAT_PAuth2 or the classic FEAT_PAuth insertion and error
+    /// code (the M1). A chip feature the engine does not implement yet stops.
+    fn pointer_version(&self) -> Result<pauth::Version, Stop> {
+        let chip = self.profile.chip;
+        let has = |feature| {
+            chip.implemented(feature)
+                .map_err(|reason| self.unsupported(RequirementKind::Native(reason)))
+        };
+        Ok(if has(Feature::FEAT_FPACCOMBINE)? {
+            pauth::Version::FaultingCombined
+        } else if has(Feature::FEAT_FPAC)? {
+            pauth::Version::Faulting
+        } else if has(Feature::FEAT_PAuth2)? {
+            pauth::Version::Enhanced
+        } else {
+            pauth::Version::Classic
+        })
+    }
+
+    /// The guest's PAC keys and the current regime's TCR layout, with the
+    /// chip's PAC version.
+    fn pointer_context(&self) -> Result<pauth::Context, Stop> {
         let keys = self.pointer_keys();
-        pauth::Context::new_with_version(
+        Ok(pauth::Context::new_with_version(
             0,
             pauth::Keys::from_words(keys[0], keys[1], keys[2], keys[3]).with_generic_words(keys[4]),
-            pauth::Version::Faulting,
+            self.pointer_version()?,
         )
-        .with_translation_regime(self.cpu.controls(self.cpu.regime()).tcr)
+        .with_translation_regime(self.cpu.controls(self.cpu.regime()).tcr))
     }
 
     /// Whether HCR_EL2.API clear traps the use of an enabled key, or PACGA,
@@ -1413,7 +1433,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if uses_key && self.pointer_authentication_trapped() {
             return self.pointer_authentication_trap();
         }
-        let context = self.pointer_context();
+        let context = self.pointer_context()?;
         if let PointerAuthenticationOperation::Load(load) = instruction.operation {
             return self.authenticated_load(word, &context, load);
         }
@@ -2038,7 +2058,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 };
                 // A combined authentication: a failure corrupts the pointer
                 // because the profile has no FEAT_FPACCOMBINE.
-                match self.pointer_context().authenticate_operation(
+                match self.pointer_context()?.authenticate_operation(
                     runtime_key,
                     target,
                     self.cpu.state.sp,
@@ -3176,6 +3196,40 @@ mod tests {
     }
 
     #[test]
+    fn pac_follows_the_chips_version() {
+        const PACIBSP: u32 = 0xd503_237f;
+        const AUTIBSP: u32 = 0xd503_23ff;
+        let pointer = 0xffff_ff80_0000_4000_u64;
+        let run = |chip| {
+            let mut machine = pac_machine();
+            machine.profile.chip = chip;
+            machine.cpu.state.x[30] = pointer;
+            machine.cpu.state.sp = 0xffff_ff80_0001_0000;
+            machine.system_instruction_for_test(PACIBSP);
+            let signed = machine.cpu.state.x[30];
+            // A different modifier fails the AUT.
+            machine.cpu.state.sp += 16;
+            let pc = machine.cpu.pc;
+            machine.system_instruction_for_test(AUTIBSP);
+            (signed, machine.cpu.state.x[30], machine.cpu.pc != pc + 4)
+        };
+        // The M1 (no PAuth2 or FPAC) replaces the extension bits with the PAC
+        // and a failed AUT writes the key B error code without an exception,
+        // at bits 62:61 without TBI (Arm `Auth`); the M2 XORs the PAC in and
+        // faults.
+        let (classic, failed, taken) = run(crate::machine::Chip::AppleM1);
+        assert_eq!(
+            classic & 0x0000_007f_ffff_ffff,
+            pointer & 0x0000_007f_ffff_ffff
+        );
+        assert!(!taken);
+        assert_eq!(failed, pointer & !(0b11 << 61) | 0b10 << 61);
+        let (enhanced, _, taken) = run(crate::machine::Chip::AppleM2);
+        assert_ne!(enhanced, classic);
+        assert!(taken);
+    }
+
+    #[test]
     fn pac_use_traps_on_hcr_el2_api_and_failed_aut_takes_ec_0x1c() {
         const PACIBSP: u32 = 0xd503_237f;
         const AUTIBSP: u32 = 0xd503_23ff;
@@ -3222,6 +3276,7 @@ mod tests {
         machine.cpu.state.sp = 0xffff_ff80_0002_0000;
         let signed = machine
             .pointer_context()
+            .unwrap()
             .sign(pauth::Key::Ia, target, machine.cpu.state.sp)
             .unwrap();
         machine

@@ -1034,9 +1034,10 @@ mod tests {
                 "{register:?} {shift}"
             );
         }
-        // The M2's FPAC (APA 4 in ISAR1) reads as PAuth alone on the M1.
+        // The M2's FPAC (APA 4 in ISAR1) reads as classic PAuth on the M1,
+        // whose PACs the engine computes that way.
         assert_eq!(field(Chip::AppleM2, ID_AA64ISAR1_EL1, 4), 4);
-        assert!(field(Chip::AppleM1, ID_AA64ISAR1_EL1, 4) < 4);
+        assert_eq!(field(Chip::AppleM1, ID_AA64ISAR1_EL1, 4), 1);
         // Apple clang drops SSBS from the M4 on (PFR1.SSBS).
         assert_ne!(field(Chip::AppleM3, ID_AA64PFR1_EL1, 4), 0);
         assert_eq!(field(Chip::AppleM4, ID_AA64PFR1_EL1, 4), 0);
