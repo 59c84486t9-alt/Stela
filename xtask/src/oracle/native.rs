@@ -43,16 +43,26 @@ const ADDRESS_BITS: u8 = 39;
 
 /// Host mappings at the guest code region and data window. One process-wide
 /// instance exists; the lock serializes every native case.
-struct Windows {
+pub(super) struct Windows {
     code: NonNull<u8>,
     data: NonNull<u8>,
+}
+
+impl Windows {
+    pub(super) fn code_pointer(&self) -> *const u8 {
+        self.code.as_ptr()
+    }
+
+    pub(super) fn data_pointer(&self) -> *mut u8 {
+        self.data.as_ptr()
+    }
 }
 
 // SAFETY: the mappings live for the whole process and are only touched while
 // the surrounding mutex is held.
 unsafe impl Send for Windows {}
 
-fn windows() -> Result<&'static Mutex<Windows>> {
+pub(super) fn windows() -> Result<&'static Mutex<Windows>> {
     static WINDOWS: OnceLock<Mutex<Windows>> = OnceLock::new();
     if let Some(windows) = WINDOWS.get() {
         return Ok(windows);
@@ -105,7 +115,11 @@ pub struct Executable {
 }
 
 impl Executable {
-    fn new(code: &[u8]) -> Result<Self> {
+    pub(super) fn address(&self) -> usize {
+        self.pointer.as_ptr() as usize
+    }
+
+    pub(super) fn new(code: &[u8]) -> Result<Self> {
         ensure!(!code.is_empty(), "empty native code");
         let bytes = code.len().next_multiple_of(PAGE_BYTES);
         // SAFETY: fresh anonymous RW memory, checked before use.
@@ -143,14 +157,14 @@ impl Drop for Executable {
     }
 }
 
-fn mxcsr() -> u32 {
+pub(super) fn mxcsr() -> u32 {
     let mut value = 0;
     // SAFETY: STMXCSR stores the 32-bit control register to a valid location.
     unsafe { std::arch::asm!("stmxcsr [{}]", in(reg) &mut value, options(nostack)) };
     value
 }
 
-fn set_mxcsr(value: u32) {
+pub(super) fn set_mxcsr(value: u32) {
     // SAFETY: restores a value previously read from MXCSR.
     unsafe { std::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack)) };
 }
@@ -168,6 +182,8 @@ pub enum Translation {
     ScalableLeaf(PreparedScalableLeaf, ScalableProfile),
     /// A contextual scalable block whose numerical exits the runtime completes.
     ScalableBlock(PreparedScalableBlock, ExtendedBlockProfile),
+    /// One System word run by the system-mode engine at EL0.
+    System,
 }
 
 impl Translation {
@@ -225,6 +241,23 @@ impl Translation {
         Ok(admitted.then_some(Self::ScalableLeaf(leaf, profile)))
     }
 
+    /// Admit a System word the system-mode profile exits on at once.
+    pub fn system(words: &[u32]) -> Result<Self> {
+        let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let compiled = stela_compiler::block::compile_for_target(
+            &source,
+            GuestAddress(CODE_PAGE),
+            BlockProfile::SystemModeV1,
+            target(),
+        )
+        .map_err(|error| anyhow::anyhow!(error))?;
+        ensure!(
+            compiled.native.source_map.len() == 1 && words.len() == 1,
+            "system lane cases are one System word"
+        );
+        Ok(Self::System)
+    }
+
     /// Prepare `words` as one contextual scalable block under `profile`.
     pub fn scalable_block(words: &[u32], profile: ExtendedBlockProfile) -> Result<Self> {
         let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
@@ -239,24 +272,13 @@ impl Translation {
     /// The case must have completed on the oracle, so every access stays inside
     /// the windows.
     pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
-        let windows = windows()?.lock().expect("native windows lock");
-        // SAFETY: both windows are owned and sized as copied here; the code page
-        // is writable only while its code is installed.
-        unsafe {
-            let page = windows
-                .code
-                .as_ptr()
-                .add((CODE_PAGE - CODE_REGION) as usize);
-            protect(page, libc::PROT_READ | libc::PROT_WRITE)?;
-            let code = std::slice::from_raw_parts_mut(page, PAGE_BYTES);
-            code.fill(0);
-            for (word, bytes) in case.code.iter().zip(code.as_chunks_mut::<4>().0) {
-                bytes.copy_from_slice(&word.to_le_bytes());
-            }
-            protect(page, libc::PROT_READ)?;
-            std::slice::from_raw_parts_mut(windows.data.as_ptr(), DATA_BYTES)
-                .copy_from_slice(&case.data);
+        if let Self::System = self {
+            // SAFETY: `system` admitted only words that exit at once.
+            return unsafe { super::system::run(case, target()) };
         }
+        let windows = windows()?.lock().expect("native windows lock");
+        // SAFETY: both windows are owned and sized as copied here.
+        unsafe { install_case(&windows, case)? };
         let saved = mxcsr();
         let mut scalable_result = None;
         let result = match self {
@@ -289,6 +311,7 @@ impl Translation {
                 unsafe { runtime.run(&mut thread, None, case.steps) }
                     .map(|_| (thread.registers, thread.pc.0))
             }
+            Self::System => unreachable!("System cases run above"),
         };
         set_mxcsr(saved);
         let (state, next_pc) = result?;
@@ -302,6 +325,31 @@ impl Translation {
             exception: None,
         })
     }
+}
+
+/// Copy `case`'s code to the code page and its data to the data window.
+///
+/// # Safety
+/// `windows` must be the locked process mappings.
+pub(super) unsafe fn install_case(windows: &Windows, case: &Case) -> Result<()> {
+    // SAFETY: both windows are owned and sized as copied here; the code page
+    // is writable only while its code is installed.
+    unsafe {
+        let page = windows
+            .code
+            .as_ptr()
+            .add((CODE_PAGE - CODE_REGION) as usize);
+        protect(page, libc::PROT_READ | libc::PROT_WRITE)?;
+        let code = std::slice::from_raw_parts_mut(page, PAGE_BYTES);
+        code.fill(0);
+        for (word, bytes) in case.code.iter().zip(code.as_chunks_mut::<4>().0) {
+            bytes.copy_from_slice(&word.to_le_bytes());
+        }
+        protect(page, libc::PROT_READ)?;
+        std::slice::from_raw_parts_mut(windows.data.as_ptr(), DATA_BYTES)
+            .copy_from_slice(&case.data);
+    }
+    Ok(())
 }
 
 /// Runtime-owned state for a scalable case under `profile`.

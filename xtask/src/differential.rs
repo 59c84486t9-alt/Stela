@@ -4,7 +4,9 @@
 //! samples plus random words over its free encoding bits that Stela accepts.
 //! Every word runs from seeded random states on the QEMU oracle and as Stela's
 //! native translation; registers, scalable banks, the next PC and the data
-//! window must match whenever the original completes.
+//! window must match whenever the original completes. Service forms of the
+//! system-mode profile run on the system-mode engine at EL0 instead, and their
+//! exceptions (ESR, ELR and, for aborts, FAR) must match as well.
 use crate::oracle::{
     CODE_PAGE, Case, DATA_BYTES, DATA_WINDOW, Oracle, Outcome, Scalable, native::Translation,
 };
@@ -39,6 +41,12 @@ const REGISTER_FIELD: u32 = 0x1f;
 /// Words compared per oracle run; bounds memory on large runs.
 const BATCH_WORDS: usize = 1024;
 const ZERO_OR_SP: u32 = 31;
+/// The service profile whose forms the system-mode engine completes.
+const SYSTEM_MODE_PROFILE: &str = "system-mode-v1";
+const WFI: u32 = 0xd503_207f;
+/// Exception classes whose FAR is architecturally valid: instruction and data
+/// aborts, PC alignment and watchpoints.
+const FAR_CLASSES: [u64; 7] = [0x20, 0x21, 0x22, 0x24, 0x25, 0x34, 0x35];
 
 #[derive(Args)]
 pub struct Differential {
@@ -53,6 +61,9 @@ pub struct Differential {
     /// Only forms whose id contains this text.
     #[arg(long)]
     form: Option<String>,
+    /// Only forms registered under this execution profile.
+    #[arg(long)]
+    profile: Option<String>,
     /// QEMU binary; defaults to `.tools/qemu/bin` or `PATH`.
     #[arg(long)]
     qemu: Option<PathBuf>,
@@ -169,12 +180,51 @@ fn oracle_limit(form: &str, state: &GuestState) -> bool {
     (sign_of_nan || estimate) && state.fpcr & FPCR_AH != 0 || tile_slice_load
 }
 
-/// Oracle limits: compare FPCR and FPSR only on bits both engines model.
+/// Known differences between QEMU's `max` CPU and the engine's M2 profile for
+/// system-mode words at EL0; matching cases are not compared.
+fn system_oracle_limit(form: &str, word: u32) -> bool {
+    // QEMU completes WFI at EL0 whenever it has pending work, masked or not,
+    // instead of taking the nTWI trap; the engine has no pending wake-up.
+    let wfi = word == WFI;
+    // QEMU implements FEAT_WFxT and FEAT_XS; the M2 identification does not.
+    let absent =
+        form.starts_with("WFET_") || form.starts_with("WFIT_") || form.starts_with("DSB_BOn_");
+    // QEMU implements SME2 and runs MOVT GPR/ZT0 outside Debug state; the M2
+    // identification has no SME.
+    let sme = form.starts_with("movt_");
+    // MSR SVCR* (op1=3, CRn=4, op2=3) and MSR TCO (op1=3, op2=4) need SME and
+    // MTE, which QEMU implements and the M2 identification does not.
+    let (op1, op2, crm) = ((word >> 16) & 7, (word >> 5) & 7, (word >> 8) & 15);
+    let pstate = form == "MSR_SI_pstate" && op1 == 3 && matches!(op2, 3 | 4);
+    // CFINV, XAFLAG and AXFLAG (op1=0, op2=0..2) with nonzero should-be-zero
+    // CRm are CONSTRAINED UNPREDICTABLE: QEMU raises UNDEFINED, Stela ignores
+    // the bits. They are FlagM forms, outside this one.
+    let flags = form == "MSR_SI_pstate" && op1 == 0 && op2 <= 2 && crm != 0;
+    wfi || absent || sme || pstate || flags
+}
+
+/// Oracle limits: compare FPCR and FPSR only on bits both engines model, and
+/// FAR only where the exception defines it.
 fn comparable(outcome: &Outcome) -> Outcome {
     let mut outcome = outcome.clone();
     outcome.state.fpcr &= FPCR_MASK;
     outcome.state.fpsr &= FPSR_MASK;
+    if let Some(exception) = &mut outcome.exception
+        && !FAR_CLASSES.contains(&(exception.syndrome >> ESR_CLASS_SHIFT))
+    {
+        exception.fault_address = 0;
+    }
     outcome
+}
+
+fn is_system_mode(form: &Value) -> bool {
+    form["profile"] == SYSTEM_MODE_PROFILE
+}
+
+/// System-mode rows below "implemented", drafts included, are compared for
+/// information only.
+fn is_draft(form: &Value) -> bool {
+    is_system_mode(form) && form["status"] != "implemented"
 }
 
 /// One word sequence with its native translation and the state it runs under.
@@ -183,6 +233,10 @@ struct Subject {
     code: Vec<u32>,
     /// Streaming vector length and SVCR of scalable forms.
     scalable: Option<(usize, u64)>,
+    /// Run on the system-mode engine; exceptions are compared too.
+    system: bool,
+    /// An unfinished system-mode row: divergences are reported as open.
+    draft: bool,
     translation: Translation,
 }
 
@@ -210,7 +264,8 @@ impl Lane<'_> {
                     .context("scalable leaf profile")?;
                 Translation::scalable_leaf(code, profile)
             }
-            Mode::Service => unreachable!("service forms are not compared"),
+            Mode::Service if is_system_mode(self.form) => Translation::system(code).map(Some),
+            Mode::Service => unreachable!("only system-mode service forms are compared"),
         }
     }
 
@@ -233,6 +288,8 @@ struct Report {
     shown: usize,
     skipped: usize,
     mismatched: BTreeSet<String>,
+    /// Partial system-mode forms that still diverge, with divergent cases.
+    open: BTreeMap<String, usize>,
     covered: BTreeSet<String>,
     /// Original exception classes per form, kept for forms that never complete.
     uncovered: BTreeMap<String, BTreeMap<u64, usize>>,
@@ -262,6 +319,9 @@ impl Differential {
 
         for form in &report.mismatched {
             println!("mismatch: {form}");
+        }
+        for (form, cases) in &report.open {
+            println!("open: {form}, {cases} divergent cases (unfinished system-mode row)");
         }
         for (form, classes) in &report.uncovered {
             println!("uncovered: {form}, exception classes {classes:x?}");
@@ -308,7 +368,9 @@ impl Differential {
         let originals = oracle.run(&cases)?;
         for (index, (case, original)) in cases.iter().zip(&originals).enumerate() {
             let subject = &mut batch[index / self.states];
-            if let Some(exception) = original.exception {
+            if let Some(exception) = original.exception
+                && !subject.system
+            {
                 *report
                     .uncovered
                     .entry(subject.form.clone())
@@ -318,15 +380,41 @@ impl Differential {
                 continue;
             }
             report.covered.insert(subject.form.clone());
-            if oracle_limit(&subject.form, &case.state) {
+            if oracle_limit(&subject.form, &case.state)
+                || subject.system && system_oracle_limit(&subject.form, case.code[0])
+            {
                 continue;
             }
-            // SAFETY: the original completed, so every access stays in the windows.
-            let translated = unsafe { subject.translation.run(case)? };
+            // SAFETY: the original completed, so every access stays in the
+            // windows; system-mode words exit before any access.
+            let translated = match unsafe { subject.translation.run(case) } {
+                Ok(translated) => translated,
+                // An engine refusal of a registered form is a mismatch.
+                Err(error) if subject.system => {
+                    report.compared += 1;
+                    if subject.draft {
+                        *report.open.entry(subject.form.clone()).or_default() += 1;
+                    } else {
+                        report.mismatches += 1;
+                        report.mismatched.insert(subject.form.clone());
+                    }
+                    if report.shown < self.show {
+                        report.shown += 1;
+                        println!("{} {:08x?}: {error:#}", subject.form, case.code);
+                        println!("  original exception {:x?}", original.exception);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             report.compared += 1;
             if comparable(&translated) != comparable(original) {
-                report.mismatches += 1;
-                report.mismatched.insert(subject.form.clone());
+                if subject.draft {
+                    *report.open.entry(subject.form.clone()).or_default() += 1;
+                } else {
+                    report.mismatches += 1;
+                    report.mismatched.insert(subject.form.clone());
+                }
                 if report.shown < self.show {
                     report.shown += 1;
                     println!("{} {:08x?}:", subject.form, case.code);
@@ -348,18 +436,20 @@ impl Differential {
         mut each: impl FnMut(&mut Random, Subject) -> Result<()>,
     ) -> Result<()> {
         for (name, mode) in registry::REGISTRIES {
-            if mode == Mode::Service {
-                continue;
-            }
             let registry = registry::load(root(), name)?;
             for form in registry["forms"].as_array().context("forms")? {
                 let id = form["id"].as_str().context("form id")?;
-                if form["status"] == "unsupported"
+                if mode == Mode::Service && !is_system_mode(form)
+                    || form["status"] == "unsupported" && !is_system_mode(form)
                     || mode == Mode::Leaf && id == LEAF_TERMINATOR
                     || self
                         .form
                         .as_ref()
                         .is_some_and(|filter| !id.contains(filter.as_str()))
+                    || self
+                        .profile
+                        .as_ref()
+                        .is_some_and(|profile| form["profile"] != profile.as_str())
                 {
                     continue;
                 }
@@ -388,6 +478,8 @@ impl Differential {
                         Subject {
                             form: id.into(),
                             scalable: lane.scalable(sample),
+                            system: is_system_mode(form),
+                            draft: is_draft(form),
                             code,
                             translation,
                         },
@@ -415,6 +507,8 @@ impl Differential {
                             Subject {
                                 form: id.into(),
                                 scalable: lane.scalable(sample),
+                                system: is_system_mode(form),
+                                draft: is_draft(form),
                                 code: vec![word],
                                 translation,
                             },
@@ -493,6 +587,12 @@ fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
                 a.svcr, a.tpidr2, b.svcr, b.tpidr2
             );
         }
+    }
+    if original.exception != translated.exception {
+        println!(
+            "  exception: original {:x?}, native {:x?}",
+            original.exception, translated.exception
+        );
     }
     if let Some(offset) = (0..DATA_BYTES).find(|&i| original.data[i] != translated.data[i]) {
         println!("  data differs from window offset {offset:#x}");

@@ -16,6 +16,7 @@ use std::{
 use stela_compiler::GuestState;
 
 pub mod native;
+pub mod system;
 
 /// Guest address of the page that holds each case's code. The zero-filled,
 /// read-only [`CODE_REGION_BYTES`] starting at [`CODE_REGION`] surround it, so
