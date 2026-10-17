@@ -139,6 +139,14 @@ impl ApfsCommand {
                             Ok(list) => json!(list.iter().map(snapshot_json).collect::<Vec<_>>()),
                             Err(error) => json!({"error": error.to_string()}),
                         };
+                        let seal = match volume.seal(&mut container.device) {
+                            Ok(Some(seal)) => json!({
+                                "hash": format!("{:?}", seal.hash),
+                                "root": hex::encode(&seal.root),
+                            }),
+                            Ok(None) => json!(null),
+                            Err(error) => json!({"error": error.to_string()}),
+                        };
                         volumes.push(json!({
                             "name": volume.name,
                             "role": role_name(volume.role),
@@ -146,6 +154,7 @@ impl ApfsCommand {
                             "volume_group": uuid_text(&volume.volume_group),
                             "encrypted": volume.encrypted,
                             "sealed": volume.sealed,
+                            "seal": seal,
                             "xid": volume.xid,
                             "snapshots": snapshots,
                         }));
