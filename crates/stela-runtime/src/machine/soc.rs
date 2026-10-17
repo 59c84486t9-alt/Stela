@@ -203,12 +203,15 @@ pub struct Processor {
 /// MIDR_EL1 is implementer 0x61 (Apple), variant 1, architecture 0xF, the
 /// cluster type's part and revision 0, the values the J473AP profile has
 /// always used; variant and revision are inferred until a reference capture
-/// supplies them. MPIDR_EL1 is `reg` with bit 31 RES1:
+/// supplies them. MPIDR_EL1 is `reg` with bit 31 RES1 and Aff2 1 on a P core:
 /// `reg` is Aff1 (cluster) and Aff0 (core) on every single-die board (the
-/// J473AP's cpu0-3 are 0-3 and cpu4-7 0x100-0x103), and U and MT are 0 for a
-/// multiprocessor without multithreading (inferred). A `reg` beyond Aff1's
-/// first eight clusters, as the multi-die boards use, has no public MPIDR
-/// mapping and refuses.
+/// J473AP's cpu0-3 are 0-3 and cpu4-7 0x100-0x103), the cores of P clusters
+/// have Aff2 1 (the `cpu@` `reg` of Linux `t8103.dtsi`, `t8112.dtsi`,
+/// `t600x-common.dtsi` and `t602x-common.dtsi` and `t8122.dtsi`, which XNU
+/// masks off in `ml_get_cpu_number`; inferred for the later SoCs), and U and
+/// MT are 0 for a multiprocessor without multithreading (inferred). A `reg`
+/// beyond Aff1's first eight clusters, as the multi-die boards use, has no
+/// public MPIDR mapping and refuses.
 pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cpus, String> {
     let soc = SOCS
         .iter()
@@ -246,7 +249,9 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
             }
             Ok(Identity {
                 midr: 0x61 << 24 | 1 << 20 | 0xf << 16 | part << 4,
-                mpidr: 0x8000_0000 | u64::from(processor.reg),
+                mpidr: 0x8000_0000
+                    | u64::from(processor.cluster_type == b'P') << 16
+                    | u64::from(processor.reg),
             })
         })
         .collect::<Result<_, String>>()?;
@@ -424,7 +429,7 @@ mod tests {
             identities[7],
             Identity {
                 midr: 0x611f_0330,
-                mpidr: 0x8000_0103
+                mpidr: 0x8001_0103
             }
         );
         // J604AP (Mac16,1): six M4 E cores and four P cores.
@@ -437,7 +442,7 @@ mod tests {
             identities[3],
             Identity {
                 midr: 0x611f_0530,
-                mpidr: 0x8000_0103
+                mpidr: 0x8001_0103
             }
         );
         // An M2 Pro's AIC2 has its event register at +0xc000.
@@ -588,7 +593,7 @@ mod tests {
         const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
         let found = board(&tree(0x8112, "Apple M2", MODELED)).unwrap();
         assert_eq!(found.cpus.chip, Chip::AppleM2);
-        assert_eq!(found.cpus.processors[1].mpidr, 0x8000_0100);
+        assert_eq!(found.cpus.processors[1].mpidr, 0x8001_0100);
         assert_eq!(
             found.uart,
             Device {
