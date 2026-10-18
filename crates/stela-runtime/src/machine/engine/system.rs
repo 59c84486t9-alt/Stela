@@ -193,6 +193,9 @@ fn zero_block_prohibited(cpu: &crate::machine::cpu::Cpu) -> bool {
         _ => false,
     }
 }
+/// DCZID_EL0.BS: log2 of the DC ZVA block in words, at most 9 (2 KiB).
+const DCZID_BS: u64 = 0xf;
+static ZEROES: [u8; 2048] = [0; 2048];
 const ISR_A: u64 = 1 << 8;
 const ISR_I: u64 = 1 << 7;
 const ISR_F: u64 = 1 << 6;
@@ -742,7 +745,10 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         if self.machine.profile_missing.contains(&Register::DCZID_EL0) {
             return Err(Effect::Refused("DC ZVA without a profile DCZID_EL0"));
         }
-        let bytes = 4u64 << (dczid & 0xf);
+        let bytes = 4u64 << (dczid & DCZID_BS);
+        if bytes > ZEROES.len() as u64 {
+            return Err(Effect::Refused("DCZID_EL0.BS above Arm's 2 KiB maximum"));
+        }
         let start = address & !(bytes - 1);
         let regime = self.machine.cpu.regime();
         let requester = self.machine.cpu.requester();
@@ -762,8 +768,11 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
                 {
                     return Err(Effect::Exception(exception));
                 }
-                let zero = alloc::vec![0u8; bytes as usize];
-                if self.machine.host.write_ram(translation.physical, &zero) {
+                if self
+                    .machine
+                    .host
+                    .write_ram(translation.physical, &ZEROES[..bytes as usize])
+                {
                     Ok(())
                 } else {
                     Err(Effect::Refused("DC ZVA outside RAM"))
