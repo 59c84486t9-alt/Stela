@@ -19,8 +19,14 @@
 //! View 1 is the core event block. `configureUSB2` sets its
 //! `AUSBC_CORE_EVT_BLK_C0_USB2_CTL` LOAD_CNT (bit 3) and EVT_EN (bit 0) bits
 //! (0x3149ad8 and 0x3149c40, named by the driver's own log strings). They are
-//! retained; no event count is read or delivered by any observed consumer,
-//! so none is modeled, and the block's other words refuse.
+//! retained. After ungating the USB2 PHY clocks it reads
+//! `C0_UTMI_CLK_ACTIVE.EVT_CNT` at +0x20 (0x314a1f4) and only logs "EVT_CNT
+//! is 0" when it is zero; both outcomes continue identically. Inferred: the
+//! UTMI clock runs while the PHY is out of RESET and SIDDQ with its reference
+//! clock ungated (Linux MISCTUNE bit 30, REFCLK_GATE_OFF), and setting
+//! LOAD_CNT restarts the count. The model has no UTMI cycle clock, so the
+//! count reports one event once the clock has been active with EVT_EN set,
+//! not elapsed cycles. The block's other words refuse.
 use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
     regfile::Held,
@@ -34,6 +40,8 @@ pub const EVENTS: u64 = 0x30_0000;
 const USB2_EVENTS: u64 = EVENTS;
 const EVENT_ENABLE: u32 = 1;
 const LOAD_COUNT: u32 = 1 << 3;
+const UTMI_CLOCK_EVENTS: u64 = EVENTS + 0x20;
+const REFCLK_GATE_OFF: u32 = 1 << 30;
 pub const CORE_BYTES: u64 = 0x4c000;
 pub const WINDOW_BYTES: u64 = 0x4000;
 const USBCTL: u64 = USB2;
@@ -79,6 +87,8 @@ const MUX_DATA: u32 = 7;
 
 pub struct AtcPhy {
     held: Held,
+    /// The UTMI clock has been active with EVT_EN since the last LOAD_CNT.
+    utmi_clock_event: bool,
 }
 impl Default for AtcPhy {
     fn default() -> Self {
@@ -92,7 +102,17 @@ impl AtcPhy {
         held.set(CTL, u64::from(RESET | PORT_RESET | SIDDQ));
         held.set(POWER_CTRL, u64::from(CLAMP));
         held.set(AON, u64::from(FORCE_CLAMP));
-        Self { held }
+        Self {
+            held,
+            utmi_clock_event: false,
+        }
+    }
+    fn sample_utmi_clock(&mut self) {
+        let active =
+            self.word(CTL) & (RESET | SIDDQ) == 0 && self.word(MISCTUNE) & REFCLK_GATE_OFF == 0;
+        if active && self.word(USB2_EVENTS) & EVENT_ENABLE != 0 {
+            self.utmi_clock_event = true;
+        }
     }
     fn word(&self, offset: u64) -> u32 {
         self.held.get(offset) as u32
@@ -152,6 +172,10 @@ impl MmioDevice for AtcPhy {
             POWER_STAT => self.word(POWER_CTRL) & (SMALL | BIG),
             COMMAND_READY => u32::from(self.core_ready()),
             LOCK_ACK => self.word(LOCK_REQ) & LOCK,
+            UTMI_CLOCK_EVENTS => {
+                self.sample_utmi_clock();
+                u32::from(self.utmi_clock_event)
+            }
             PLL => {
                 self.word(PLL) & !ACK
                     | if self.word(PLL) & REQUEST != 0 && self.core_ready() {
@@ -196,11 +220,15 @@ impl MmioDevice for AtcPhy {
         {
             return Err(err("reserved pipehandler clock/data mux selection"));
         }
+        if offset == USB2_EVENTS && value & !self.word(offset) & LOAD_COUNT != 0 {
+            self.utmi_clock_event = false;
+        }
         // ACK is a hardware response even when included by a guest RMW.
         self.held.set(
             offset,
             u64::from(if offset == PLL { value & !ACK } else { value }),
         );
+        self.sample_utmi_clock();
         Ok(())
     }
 }
@@ -236,11 +264,28 @@ mod tests {
         assert!(!p.usb2_ready());
         wr(&mut p, &mut a, MISCTUNE, 0x12345678);
         assert_eq!(rd(&mut p, &mut a, MISCTUNE), 0x12345678);
-        // configureUSB2 loads and enables the USB2 core event counter.
+        // configureUSB2 loads and enables the USB2 core event counter. The
+        // UTMI clock is stopped in PHY reset, gated...
+        wr(&mut p, &mut a, CTL, APB_RESET_N | RESET);
         assert_eq!(rd(&mut p, &mut a, USB2_EVENTS), 0);
         wr(&mut p, &mut a, USB2_EVENTS, LOAD_COUNT);
         wr(&mut p, &mut a, USB2_EVENTS, LOAD_COUNT | EVENT_ENABLE);
         assert_eq!(rd(&mut p, &mut a, USB2_EVENTS), 9);
+        assert_eq!(rd(&mut p, &mut a, UTMI_CLOCK_EVENTS), 0);
+        // ...by REFCLK_GATE_OFF (bit 30 of 0x12345678 is clear)...
+        wr(&mut p, &mut a, MISCTUNE, 0x12345678 | REFCLK_GATE_OFF);
+        wr(&mut p, &mut a, CTL, APB_RESET_N | PORT_RESET);
+        assert_eq!(rd(&mut p, &mut a, UTMI_CLOCK_EVENTS), 0);
+        // ...and runs once ungated, port reset aside.
+        wr(&mut p, &mut a, MISCTUNE, 0x12345678);
+        assert_eq!(rd(&mut p, &mut a, UTMI_CLOCK_EVENTS), 1);
+        // A clock event persists until LOAD_CNT restarts the count.
+        wr(&mut p, &mut a, CTL, APB_RESET_N | SIDDQ);
+        assert_eq!(rd(&mut p, &mut a, UTMI_CLOCK_EVENTS), 1);
+        wr(&mut p, &mut a, USB2_EVENTS, 0);
+        wr(&mut p, &mut a, USB2_EVENTS, LOAD_COUNT);
+        assert_eq!(rd(&mut p, &mut a, UTMI_CLOCK_EVENTS), 0);
+        assert!(p.write(UTMI_CLOCK_EVENTS, Width::Word, 0, &mut a).is_err());
         assert!(p.write(USB2_EVENTS, Width::Word, 2, &mut a).is_err());
         assert!(p.read(EVENTS + 4, Width::Word, &mut a).is_err());
     }
