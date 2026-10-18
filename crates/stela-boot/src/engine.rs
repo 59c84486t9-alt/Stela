@@ -636,6 +636,7 @@ fn run(
     // how many of those were at EL0.
     let mut samples: Vec<[u64; CHAIN]> = Vec::new();
     let mut user = 0;
+    let mut beats = 0u64;
     loop {
         let slice = machine.statistics.blocks + SLICE;
         let limit = if budget == 0 {
@@ -655,7 +656,8 @@ fn run(
         if !sliced {
             return stop;
         }
-        samples.push(call_chain(machine));
+        let (pc, frame) = (machine.cpu.pc, machine.cpu.state.x[29]);
+        samples.push(call_chain(machine, pc, frame));
         user += u32::from(machine.cpu.pstate.el == 0);
         if now - beat.0 >= BEAT_SECONDS * tsc_hz {
             let (native, blocks) = (host::native_ticks(), machine.statistics.blocks);
@@ -693,6 +695,10 @@ fn run(
             sample_report(&mut samples, user);
             timer_report(machine);
             user = 0;
+            beats += 1;
+            if beats.is_multiple_of(SUSPENSION_BEATS) {
+                suspension_report(machine);
+            }
         }
     }
 }
@@ -700,12 +706,15 @@ fn run(
 /// The PC and return addresses a call chain sample keeps.
 const CHAIN: usize = 6;
 
-/// The PC and the return addresses of the frame records from X29, without
-/// their PACs; zero past the chain's end.
-fn call_chain(machine: &mut Machine<BareHost, AppleDevices>) -> [u64; CHAIN] {
-    let mut chain = [0; CHAIN];
-    chain[0] = machine.cpu.pc;
-    let mut frame = machine.cpu.state.x[29];
+/// `pc` and the return addresses of the frame records from `frame`,
+/// without their PACs; zero past the chain's end.
+fn call_chain<const N: usize>(
+    machine: &mut Machine<BareHost, AppleDevices>,
+    pc: u64,
+    mut frame: u64,
+) -> [u64; N] {
+    let mut chain = [0; N];
+    chain[0] = pc;
     for slot in &mut chain[1..] {
         let mut record = [0u8; 16];
         if frame == 0 || !frame.is_multiple_of(8) || !machine.read_virtual(frame, &mut record) {
@@ -716,6 +725,59 @@ fn call_chain(machine: &mut Machine<BareHost, AppleDevices>) -> [u64; CHAIN] {
         frame = u64::from_le_bytes(record[..8].try_into().expect("8 bytes"));
     }
     chain
+}
+
+/// Heartbeats between reports of the suspended guest threads.
+const SUSPENSION_BEATS: u64 = 6;
+
+/// The return addresses a suspended thread's chain keeps.
+const SUSPENSION_CHAIN: usize = 12;
+
+/// The suspended guest threads grouped by where they wait: each distinct
+/// chain of the link register and the frame records, with its thread count
+/// and the seconds since the most recent of them stopped. A guest that idles
+/// without progress shows here the wait it never leaves.
+fn suspension_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    const SHOWN: usize = 32;
+    use stela_runtime::machine::engine::Host;
+    let now = machine.host.counter();
+    let frequency = machine.cpu.read(Register::CNTFRQ_EL0).max(1);
+    let suspended: Vec<_> = machine.suspended().values().copied().collect();
+    let mut chains: Vec<([u64; SUSPENSION_CHAIN], u64)> = suspended
+        .iter()
+        .map(|suspension| {
+            let link = machine.strip_instruction_pointer(suspension.link);
+            (call_chain(machine, link, suspension.frame), suspension.at)
+        })
+        .collect();
+    chains.sort_unstable();
+    // Each chain's thread count and the latest suspension among them.
+    let mut groups: Vec<(u64, usize, [u64; SUSPENSION_CHAIN])> = chains
+        .chunk_by(|a, b| a.0 == b.0)
+        .map(|run| {
+            (
+                run.iter().map(|&(_, at)| at).max().unwrap_or(0),
+                run.len(),
+                run[0].0,
+            )
+        })
+        .collect();
+    groups.sort_unstable_by(|a, b| b.cmp(a));
+    output::arguments(format_args!(
+        "SUSPENDED threads={} chains={}\n",
+        suspended.len(),
+        groups.len()
+    ));
+    for (at, count, chain) in groups.into_iter().take(SHOWN) {
+        output::arguments(format_args!(
+            "SUSPENSION x{count} age={}s",
+            now.saturating_sub(at) / frequency
+        ));
+        for address in chain.into_iter().take_while(|&address| address != 0) {
+            output::arguments(format_args!(" {address:#x}"));
+        }
+        output::arguments(format_args!("\n"));
+    }
 }
 
 /// The share of the heartbeat's slice-end samples at EL0 and the call

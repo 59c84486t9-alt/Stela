@@ -546,6 +546,9 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         ) {
             self.machine.sample_events(self.now);
         }
+        if register == Register::TPIDR_EL1 {
+            self.machine.switch_thread(value, self.now);
+        }
         let cpu = &mut self.machine.cpu;
         cpu.registers.set(register, index, value);
         self.machine.derived_changed();
@@ -1977,6 +1980,38 @@ mod tests {
                 "{encoding:?}"
             );
         }
+    }
+
+    #[test]
+    fn replacing_the_thread_pointer_suspends_the_thread_it_named() {
+        const TPIDR_EL1: Encoding = Encoding::new(3, 0, 13, 0, 4);
+        let mut machine = machine(&[]);
+        let switch = |machine: &mut TestMachine, next: u64, frame: u64| {
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[0] = next;
+            machine.cpu.state.x[29] = frame;
+            machine.cpu.state.x[30] = frame + 4;
+            machine
+                .system_instruction(access(false, TPIDR_EL1, 0))
+                .unwrap();
+        };
+        // The first thread pointer suspends nothing; rewriting it neither.
+        switch(&mut machine, 0x100, 0);
+        switch(&mut machine, 0x100, 0);
+        assert!(machine.suspended().is_empty());
+        switch(&mut machine, 0x200, 0x8000);
+        let suspension = machine.suspended()[&0x100];
+        assert_eq!(
+            (suspension.pc, suspension.frame, suspension.link),
+            (BASE, 0x8000, 0x8004)
+        );
+        // Running again ends its suspension.
+        switch(&mut machine, 0x100, 0x9000);
+        assert_eq!(
+            machine.suspended().keys().copied().collect::<Vec<_>>(),
+            [0x200]
+        );
     }
 
     #[test]

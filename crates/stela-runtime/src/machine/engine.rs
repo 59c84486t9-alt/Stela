@@ -434,6 +434,22 @@ pub enum Stop {
     Unsupported(Requirement),
 }
 
+/// Where a guest thread stopped running: the PE's PC, frame pointer and
+/// link register, and the physical count, when software replaced the thread
+/// pointer naming it (TPIDR_EL1). While the thread stays suspended its stack
+/// still holds the frame records `frame` starts, so diagnostics can walk
+/// where it waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Suspension {
+    pub at: u64,
+    pub pc: u64,
+    pub frame: u64,
+    pub link: u64,
+}
+
+/// The suspended threads [`Machine`] remembers at most.
+const SUSPENSIONS: usize = 1 << 14;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Statistics {
     pub blocks: u64,
@@ -622,6 +638,8 @@ pub struct Machine<H: Host, D: Devices> {
     chain: alloc::boxed::Box<ChainControl>,
     /// The block count at which `run` stops.
     block_limit: u64,
+    /// Suspended guest threads by thread pointer (see [`Suspension`]).
+    suspended: BTreeMap<u64, Suspension>,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -686,6 +704,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             completing: None,
             chain: alloc::boxed::Box::default(),
             block_limit: u64::MAX,
+            suspended: BTreeMap::new(),
         };
         machine.peers = processors::boot(&machine.profile);
         machine.load_profile();
@@ -1036,6 +1055,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .ok()
             .and_then(|context| context.strip(pauth::Key::Ia, pointer).ok())
             .unwrap_or(pointer)
+    }
+
+    /// Guest threads by thread pointer, with where each stopped running,
+    /// while they stay suspended.
+    pub fn suspended(&self) -> &BTreeMap<u64, Suspension> {
+        &self.suspended
+    }
+
+    /// Record that software at `now` replaces the running thread pointer
+    /// (TPIDR_EL1) with `next`: the thread it named is suspended where the
+    /// PE stands, and `next` runs.
+    fn switch_thread(&mut self, next: u64, now: u64) {
+        let previous = self.cpu.read(SystemRegister::TPIDR_EL1);
+        if previous == next {
+            return;
+        }
+        self.suspended.remove(&next);
+        if previous != 0 && self.suspended.len() < SUSPENSIONS {
+            let state = &self.cpu.state;
+            let suspension = Suspension {
+                at: now,
+                pc: self.cpu.pc,
+                frame: state.x[29],
+                link: state.x[30],
+            };
+            self.suspended.insert(previous, suspension);
+        }
     }
 
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
