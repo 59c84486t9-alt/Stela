@@ -9,7 +9,17 @@
 //! The shifter runs eagerly on accesses until a FIFO stalls: no host I/O or
 //! transfer-time guarantee. The boot stage leaves it stopped, CS inactive,
 //! FIFOs/counts/configuration zero (Stela boot-chain choices). Only byte,
-//! MSB-first PIO is supported; DMA, wider words and v2 timing registers refuse.
+//! MSB-first PIO is supported; DMA and wider words refuse.
+//!
+//! Linux `spi-apple.c` (the same M1-family controller) also names SHIFTCFG
+//! 0x150 and DELAY_PRE/POST 0x160/0x168, which 26A434
+//! `AppleSPIMCController::_configureHardwareDelay` (file 0x2dbcf34) uses: its
+//! software-delay branch clears SHIFTCFG.OVERRIDE_CS (bit 24) and both delay
+//! enables by RMW. The boot stage leaves all three zero (Linux's own init
+//! state). Delays only change timing, which the eager shifter never
+//! guarantees, so their words are retained. Only OVERRIDE_CS may change in
+//! SHIFTCFG, and only while an external GPIO drives the chip select, since
+//! the internal CS output is then disconnected from the attached device.
 use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
@@ -30,6 +40,10 @@ const RXCNT: u64 = 0x34;
 const DELAY: u64 = 0x38;
 const TXCNT: u64 = 0x4c;
 const FIFOSTAT: u64 = 0x10c;
+const SHIFTCFG: u64 = 0x150;
+const DELAY_PRE: u64 = 0x160;
+const DELAY_POST: u64 = 0x168;
+const OVERRIDE_CS: u32 = 1 << 24;
 const RUN: u32 = 1;
 const TX_RESET: u32 = 1 << 2;
 const RX_RESET: u32 = 1 << 3;
@@ -54,6 +68,8 @@ pub struct Spi {
     pin: u32,
     divider: u32,
     delay: u32,
+    shift: u32,
+    cs_delays: [u32; 2],
     status: u32,
     tx_count: u32,
     rx_count: u32,
@@ -72,6 +88,8 @@ impl Spi {
             pin: CS_HIGH,
             divider: 0,
             delay: 0,
+            shift: 0,
+            cs_delays: [0; 2],
             status: 0,
             tx_count: 0,
             rx_count: 0,
@@ -191,6 +209,9 @@ impl MmioDevice for Spi {
             PIN => self.pin,
             CLKDIV => self.divider,
             DELAY => self.delay,
+            SHIFTCFG => self.shift,
+            DELAY_PRE => self.cs_delays[0],
+            DELAY_POST => self.cs_delays[1],
             TXCNT => self.tx_count,
             RXCNT => self.rx_count,
             FIFOSTAT => {
@@ -297,6 +318,19 @@ impl MmioDevice for Spi {
                 }
                 self.delay = value;
             }
+            SHIFTCFG => {
+                if (value ^ self.shift) & !OVERRIDE_CS != 0 {
+                    return Err(error("SPI shifter configuration is not modeled"));
+                }
+                if value & OVERRIDE_CS != 0 && !self.external_cs {
+                    return Err(error(
+                        "shifter-driven internal SPI chip select is not modeled",
+                    ));
+                }
+                self.shift = value;
+            }
+            DELAY_PRE => self.cs_delays[0] = value,
+            DELAY_POST => self.cs_delays[1] = value,
             TXCNT => {
                 self.tx_count = value;
                 self.status &= !TX_COMPLETE;
@@ -451,5 +485,40 @@ mod tests {
         assert_eq!(spi.tx.len(), FIFO_DEPTH);
         assert!(spi.read(0x134, Width::Word, &mut a).is_err());
         assert!(spi.write(CTRL, Width::Double, 1, &mut a).is_err());
+    }
+    #[test]
+    fn shifter_cs_override_and_delays_are_retained_configuration() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut external = Spi::new(Image::fresh(), AicInput::new(0, 1), true);
+        assert_eq!(external.read(SHIFTCFG, Width::Word, &mut access), Ok(0));
+        external
+            .write(SHIFTCFG, Width::Word, OVERRIDE_CS.into(), &mut access)
+            .unwrap();
+        external
+            .write(SHIFTCFG, Width::Word, 0, &mut access)
+            .unwrap();
+        assert!(
+            external
+                .write(SHIFTCFG, Width::Word, 1, &mut access)
+                .is_err()
+        );
+        external
+            .write(DELAY_PRE, Width::Word, 0x823 | 9 << 16, &mut access)
+            .unwrap();
+        assert_eq!(
+            external.read(DELAY_PRE, Width::Word, &mut access),
+            Ok(0x823 | 9 << 16)
+        );
+        external
+            .write(DELAY_POST, Width::Word, 0, &mut access)
+            .unwrap();
+        let mut internal = Spi::new(Image::fresh(), AicInput::new(0, 1), false);
+        assert!(
+            internal
+                .write(SHIFTCFG, Width::Word, OVERRIDE_CS.into(), &mut access)
+                .is_err()
+        );
+        assert_eq!(internal.read(SHIFTCFG, Width::Word, &mut access), Ok(0));
     }
 }
