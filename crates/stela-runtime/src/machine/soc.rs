@@ -711,9 +711,9 @@ pub const DART: &str = "dart,t8110";
 /// The `compatible` of a DART child naming one client's stream (its `reg`),
 /// which XNU's IODARTMapper binds and clients name as `iommu-parent`.
 pub const IOMMU_MAPPER: &str = "iommu-mapper";
-/// The `compatible` of the PMGR whose power-state registers
-/// `platform::apple::pmgr` models. The engine places them when a tree shows
-/// it; until the rest of the PMGR is modeled, bundles hide it.
+/// The `compatible` of the PMGR whose registers `platform::apple::pmgr` and
+/// the PMGR family models place (power states, clusters, CPU start, energy,
+/// performance counters, wake masks, voltage, DPE, fabric bridges).
 pub const PMGR: &str = "pmgr1,t8112";
 /// The `compatible` of the AES engine the engine models
 /// (`platform::apple::aes`).
@@ -725,7 +725,7 @@ pub const MCC: &str = "mcc,t8112";
 /// Whether the engine models a device `compatible` with `name`: the devices a
 /// [`Board`] places. A boot bundle presents no other device to the guest.
 pub fn models(name: &str) -> bool {
-    [UART, WATCHDOG, DART, IOMMU_MAPPER, AES, MCC].contains(&name) || AICS.contains(&name)
+    [UART, WATCHDOG, DART, IOMMU_MAPPER, AES, MCC, PMGR].contains(&name) || AICS.contains(&name)
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
