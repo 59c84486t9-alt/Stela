@@ -31,6 +31,10 @@
 //! that keeps it completes and one that changes it stops.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 
+/// CONTROL and MASK.
+pub const BYTES: u64 = 16;
+/// The RVBAR of a PE's block.
+pub const RVBAR_BYTES: u64 = 8;
 const LOCK: u64 = 1;
 const RVBAR: u64 = 0;
 const RVBAR_ADDRESS: u64 = 0x0000_ffff_ffff_f000;

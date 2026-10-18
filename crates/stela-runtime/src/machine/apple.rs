@@ -21,7 +21,7 @@ use crate::platform::apple::{
     fuse::{self, AonFuses},
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
-    lockdown::Lockdown,
+    lockdown::{self, Lockdown},
     perf::PerfCounters,
     pmgr::{ACTIVE, Pmgr, PowerState},
     ptd::{self, Ptd},
@@ -167,6 +167,8 @@ impl AppleDevices {
     /// The lockdown registers of a CPU implementation block named `name`,
     /// with CONTROL at `control`, at `range`; a PE's `cpu-impl-reg` also
     /// holds that PE's RVBAR, which the boot firmware locked on `reset`.
+    /// Only those registers are mapped: the block also holds the PE's or
+    /// cluster's energy accumulators (`platform::apple::energy`).
     pub fn add_lockdown(
         &mut self,
         name: &'static str,
@@ -185,7 +187,14 @@ impl AppleDevices {
             }
             self.reset_vectors[pe] = Some(device);
         }
-        self.map(device, &[range])
+        // The board checked that CONTROL and MASK lie inside the block.
+        self.bus
+            .map(device, range.physical + control, lockdown::BYTES, control)?;
+        if reset.is_some() {
+            self.bus
+                .map(device, range.physical, lockdown::RVBAR_BYTES, 0)?;
+        }
+        Ok(())
     }
 
     /// The PMGR's CPU start registers for `clusters` clusters at `physical`,
@@ -834,6 +843,35 @@ mod tests {
         assert_eq!(devices.take_start(), None);
         // A core the board does not have refuses.
         assert!(devices.write(0, START + 0xc, 4, 1 << 2, 0).is_err());
+    }
+
+    #[test]
+    fn lockdown_maps_only_its_registers_beside_the_energy_accumulators() {
+        // J473AP cpu0's `cpu-impl-reg` and cluster 0's `cpm-impl-reg`, with
+        // their accumulators at +0x9000 and +0x8000.
+        let (cpu, cpm) = (0x2_1005_0000, 0x2_10e4_0000);
+        let mut devices = AppleDevices::new();
+        for (name, physical, control, reset) in [
+            ("cpu-impl-reg", cpu, 0x5000, Some((0, 0x8_0300_c388))),
+            ("cpm-impl-reg", cpm, 0x9000, None),
+        ] {
+            let range = Range {
+                physical,
+                bytes: 0x9010,
+            };
+            devices.add_lockdown(name, control, range, reset).unwrap();
+        }
+        devices
+            .add_cpu_energy(cpu + energy::CORE_OFFSET, false)
+            .unwrap();
+        devices.add_cpu_energy(cpm + 0x8000, true).unwrap();
+        assert_eq!(devices.read(0, cpu, 8, 0), Ok(0x8_0300_c001));
+        assert_eq!(devices.read(0, cpu + 0x5008, 8, 0), Ok(0));
+        assert_eq!(devices.read(0, cpm + 0x9000, 8, 0), Ok(0));
+        assert_eq!(devices.read(0, cpu + 0x9008, 8, 0), Ok(0));
+        // The rest of each block reaches no model.
+        assert!(devices.read(0, cpu + 0x100, 8, 0).is_err());
+        assert!(devices.read(0, cpm, 8, 0).is_err());
     }
 
     #[test]
