@@ -474,6 +474,29 @@ pub struct Suspension {
 /// The suspended threads [`Machine`] remembers at most.
 const SUSPENSIONS: usize = 1 << 14;
 
+/// One device register a survey answered in place of its model: where it
+/// was first reached, how often, the last value written to it, and the
+/// device layer's reason for refusing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Surveyed {
+    pub physical: u64,
+    pub bytes: u8,
+    pub write: bool,
+    pub pc: u64,
+    /// The link register then, which names the caller of an accessor.
+    pub link: u64,
+    pub count: u64,
+    pub value: u64,
+    pub detail: String,
+}
+
+/// A survey's records by register and direction, and those not yet taken.
+#[derive(Default)]
+struct Survey {
+    records: BTreeMap<(u64, bool), Surveyed>,
+    fresh: Vec<(u64, bool)>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Statistics {
     pub blocks: u64,
@@ -691,6 +714,8 @@ pub struct Machine<H: Host, D: Devices> {
     block_limit: u64,
     /// Suspended guest threads by thread pointer (see [`Suspension`]).
     suspended: BTreeMap<u64, Suspension>,
+    /// Device accesses answered without a model ([`Self::begin_survey`]).
+    survey: Option<Survey>,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -759,6 +784,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             chain: alloc::boxed::Box::default(),
             block_limit: u64::MAX,
             suspended: BTreeMap::new(),
+            survey: None,
         };
         machine.peers = processors::boot(&machine.profile);
         machine.load_profile();
@@ -1110,6 +1136,63 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .ok()
             .and_then(|context| context.strip(pauth::Key::Ia, pointer).ok())
             .unwrap_or(pointer)
+    }
+
+    /// Research only: from now on a device access the devices refuse, or
+    /// that reaches no device, completes as a zero read or a discarded
+    /// write and is recorded instead of stopping the machine. The values
+    /// are invented, so a surveyed run proves nothing about the guest; it
+    /// lists every register a driver needs in one run.
+    pub fn begin_survey(&mut self) {
+        self.survey = Some(Survey::default());
+    }
+
+    /// The registers the survey answered first since the last call, with
+    /// their counts so far.
+    pub fn take_survey(&mut self) -> Vec<Surveyed> {
+        let Some(survey) = self.survey.as_mut() else {
+            return Vec::new();
+        };
+        let fresh = core::mem::take(&mut survey.fresh);
+        fresh
+            .into_iter()
+            .filter_map(|key| survey.records.get(&key).cloned())
+            .collect()
+    }
+
+    /// Whether a survey answered the refused access; `value` is a write's.
+    fn surveyed(
+        &mut self,
+        physical: u64,
+        bytes: u8,
+        write: Option<u64>,
+        error: &DeviceError,
+    ) -> bool {
+        let pc = self.cpu.pc;
+        let link = self.strip_instruction_pointer(self.cpu.state.x[30]);
+        let Some(survey) = self.survey.as_mut() else {
+            return false;
+        };
+        let key = (physical, write.is_some());
+        let record = survey.records.entry(key).or_insert_with(|| {
+            survey.fresh.push(key);
+            Surveyed {
+                physical,
+                bytes,
+                write: write.is_some(),
+                pc,
+                link,
+                count: 0,
+                value: 0,
+                detail: match error {
+                    DeviceError::NoDevice => "no device model".into(),
+                    DeviceError::Refused(detail) => detail.clone(),
+                },
+            }
+        });
+        record.count += 1;
+        record.value = write.unwrap_or(0);
+        true
     }
 
     /// Guest threads by thread pointer, with where each stopped running,
@@ -2906,6 +2989,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let now = self.host.counter();
             let raw = match self.devices.read(self.current, physical, bytes, now) {
                 Ok(value) => value,
+                Err(error) if self.surveyed(physical, bytes, None, &error) => 0,
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
                 Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
             };
@@ -2949,6 +3033,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 });
             match written {
                 Ok(()) => {}
+                Err(error) if self.surveyed(physical, bytes, Some(value), &error) => {}
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
                 Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
             }

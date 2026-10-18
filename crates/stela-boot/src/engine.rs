@@ -60,6 +60,9 @@ struct Options {
     /// Build the boot bundle from the installed system on this APFS
     /// partition instead (`SERIAL:GUID`).
     preboot: Option<Target>,
+    /// Answer device accesses no model implements and list them
+    /// (`Machine::begin_survey`): research runs only.
+    survey: bool,
 }
 
 fn number(value: &str) -> Result<u64, &'static str> {
@@ -82,6 +85,7 @@ impl Options {
             budget: 0,
             bundle: false,
             preboot: None,
+            survey: false,
         };
         let mut words = text.split_ascii_whitespace();
         if words.next() != Some("--system") {
@@ -91,6 +95,10 @@ impl Options {
             if name == "--bundle" {
                 words.next().ok_or("missing bundle directory")?;
                 options.bundle = true;
+                continue;
+            }
+            if name == "--survey" {
+                options.survey = true;
                 continue;
             }
             if name == "--preboot" {
@@ -630,6 +638,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
     };
     let mut machine = Machine::new(cpu, bare, devices, profile, target);
+    if options.survey {
+        output::arguments(format_args!(
+            "SURVEY RUN: device accesses without a model read 0 and drop writes; \
+             the guest's behavior is unverified\n"
+        ));
+        machine.begin_survey();
+    }
     let started = host::rdtsc();
     let stop = run(
         &mut machine,
@@ -735,6 +750,7 @@ fn run(
             beat = (now, native, blocks, compiled, chained, events);
             sample_report(&mut samples, user);
             timer_report(machine);
+            survey_report(machine);
             user = 0;
             beats += 1;
             if beats.is_multiple_of(SUSPENSION_BEATS) {
@@ -945,7 +961,27 @@ fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
     }
 }
 
+/// Each device register a survey answered for the first time since the last
+/// report: guest PA, width, direction, the PC and link register that first
+/// reached it, its count so far, the last value written and the refusal it replaced.
+fn survey_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    for record in machine.take_survey() {
+        output::arguments(format_args!(
+            "SURVEY pa={:#x} bytes={} {} pc={:#x} lr={:#x} count={} value={:#x}: {}\n",
+            record.physical,
+            record.bytes,
+            if record.write { "write" } else { "read" },
+            record.pc,
+            record.link,
+            record.count,
+            record.value,
+            record.detail
+        ));
+    }
+}
+
 fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
+    survey_report(machine);
     stack_report(machine);
     let cpu = &machine.cpu;
     // The exception registers of the EL the run ended at.
