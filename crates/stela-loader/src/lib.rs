@@ -15,6 +15,7 @@ pub mod boot_policy;
 pub mod carveouts;
 #[cfg(feature = "std")]
 pub mod chained_fixups;
+pub mod darts;
 #[cfg(feature = "std")]
 pub mod dependency_graph;
 #[cfg(feature = "std")]

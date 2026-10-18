@@ -15,6 +15,7 @@ use crate::apple_device_tree::{DeviceTree, Placeholder};
 use crate::boot_args::{self, BootArgs, Video};
 use crate::boot_policy::{self, Decision, SealedVolume, SecurityPolicy};
 use crate::carveouts::{self, Placed};
+use crate::darts;
 use crate::devices;
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
@@ -715,6 +716,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     if let Some(controller) = memory_controller {
         lock_regs::publish(&mut tree, controller)?;
     }
+    darts::publish(&mut tree)?;
     let hidden_devices = devices::hide_unmodeled(&mut tree);
     if !hidden_devices.is_empty() {
         unresolved.push(format!(
