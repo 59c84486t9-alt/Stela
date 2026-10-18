@@ -415,6 +415,9 @@ fn devices(
             blocks.len()
         ));
     }
+    if let Some(bank) = board.and_then(|board| board.wake_masks.as_ref()) {
+        devices.add_wake_masks(bank.physical, bank.valid)?;
+    }
     for bank in board.map_or(&[][..], |board| &board.performance) {
         devices.add_performance_counters(bank.physical, &bank.selectors)?;
     }

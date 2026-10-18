@@ -26,6 +26,7 @@ use crate::platform::apple::{
     pmgr::{ACTIVE, Pmgr, PowerState},
     ptd::{self, Ptd},
     uart::S5lUart,
+    wake::{self, WakeMasks},
     wdt::AppleWdt,
 };
 use crate::platform::dma::Port;
@@ -381,6 +382,18 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// The eight active-low AOP wake masks at the board's `reg` bank +8.
+    pub fn add_wake_masks(
+        &mut self,
+        physical: u64,
+        valid: [u32; wake::WORDS],
+    ) -> Result<(), String> {
+        let device = self.bus.add(Box::new(WakeMasks::new(valid)));
+        self.bus
+            .map(device, physical, wake::BYTES, 0)
+            .map_err(|error| format!("AOP wake mask placement: {error:?}"))
+    }
+
     /// One version-1 PMGR performance bank, at its `perf-regs` global word.
     pub fn add_performance_counters(
         &mut self,
@@ -732,6 +745,23 @@ mod tests {
         assert!(devices.read(0, base + 0x124, 4, 0).is_err());
         assert!(devices.read(0, base + 0x130, 4, 0).is_err());
         assert!(devices.read(0, base + 0x128, 8, 0).is_err());
+    }
+
+    #[test]
+    fn aop_masks_route_at_the_bank_plus_eight() {
+        let mut devices = AppleDevices::new();
+        let base = 0x2_3d00_4008;
+        let mut valid = [u32::MAX; wake::WORDS];
+        valid[7] = 0x7fff_ffff;
+        devices.add_wake_masks(base, valid).unwrap();
+        for (word, &mask) in valid.iter().enumerate() {
+            let physical = base + word as u64 * 4;
+            assert_eq!(devices.read(0, physical, 4, 0), Ok(u64::from(mask)));
+            devices.write(0, physical, 4, u64::from(mask), 0).unwrap();
+            assert_eq!(devices.read(0, physical, 4, 0), Ok(u64::from(mask)));
+        }
+        assert!(devices.read(0, base - 4, 4, 0).is_err());
+        assert!(devices.read(0, base + wake::BYTES, 4, 0).is_err());
     }
 
     #[derive(Clone, Default)]

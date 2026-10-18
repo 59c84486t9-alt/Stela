@@ -19,7 +19,7 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, cluster, cpustart, dart, energy, fuse, ptd,
+    amcc, cluster, cpustart, dart, energy, fuse, ptd, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -70,6 +70,13 @@ struct Soc {
     aon_fuses: Option<usize>,
     cpu_start: Option<u64>,
     caches: Option<[CoreCaches; 2]>,
+    wake_masks: Option<WakeLayout>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WakeLayout {
+    reg: usize,
+    valid: [u32; wake::WORDS],
 }
 
 /// A cluster type's level 1 caches and its level 2's associativity; the
@@ -173,6 +180,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -188,6 +196,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -203,6 +212,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -224,6 +234,22 @@ const SOCS: [Soc; 14] = [
         aon_fuses: Some(36),
         cpu_start: Some(0x34000),
         caches: Some(T8112_CACHES),
+        // setAPWakeupSources: RegMap 0x42 -> reg[4], kernel file
+        // 0x2fa31bc..0x2fa3620. Compiled valid masks at 0x7957ec;
+        // the DeviceTree does not carry this capability bitmap.
+        wake_masks: Some(WakeLayout {
+            reg: 4,
+            valid: [
+                u32::MAX,
+                u32::MAX,
+                u32::MAX,
+                u32::MAX,
+                u32::MAX,
+                u32::MAX,
+                u32::MAX,
+                0x7fff_ffff,
+            ],
+        }),
     },
     Soc {
         chip_id: 0x6020,
@@ -239,6 +265,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -254,6 +281,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -269,6 +297,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -284,6 +313,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -299,6 +329,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -314,6 +345,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -329,6 +361,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -344,6 +377,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -359,6 +393,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -374,6 +409,7 @@ const SOCS: [Soc; 14] = [
         aon_fuses: None,
         cpu_start: None,
         caches: None,
+        wake_masks: None,
     },
 ];
 
@@ -666,9 +702,18 @@ pub struct Board {
     pub energy: Vec<EnergyBank>,
     /// AON/SOC/cluster performance banks and DT-selected counters.
     pub performance: Vec<PerfBank>,
+    /// AOP wake masks and reporting source IDs.
+    pub wake_masks: Option<WakeBank>,
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeBank {
+    pub physical: u64,
+    pub valid: [u32; wake::WORDS],
+    pub sources: Vec<u8>,
 }
 
 /// A version-1 `perf-regs` group: translated global word and the union of
@@ -1013,6 +1058,7 @@ fn pmgr_registers(
         clusters: Vec::new(),
         aon_fuses: None,
         cpu_start: None,
+        wake_masks: None,
         energy: Vec::new(),
         performance: Vec::new(),
     };
@@ -1077,12 +1123,60 @@ fn pmgr_registers(
     };
     let energy = energy_banks(&node, &reg, &clusters)?;
     let performance = performance_banks(&node, &reg)?;
+    let wake_masks = soc
+        .wake_masks
+        .map(|layout| wake_bank(&node, &reg, layout))
+        .transpose()?;
     Ok(PmgrRegisters {
+        wake_masks,
         performance,
         energy,
         clusters,
         aon_fuses: fuses,
         cpu_start,
+    })
+}
+
+/// `ap-wake-sources` is (u32 source, 32-byte name), kernel parser
+/// `ApplePMGR` and `setAPWakeupSources` 0x2fa3f84. Reported sources are
+/// validated against hardware capabilities, not used as a reset mask.
+fn wake_bank(
+    node: &Node<'_>,
+    reg: &[Option<(u64, u64)>],
+    layout: WakeLayout,
+) -> Result<WakeBank, String> {
+    const RECORD: usize = 36;
+    let (base, bytes) = reg
+        .get(layout.reg)
+        .copied()
+        .flatten()
+        .ok_or("PMGR AOP wake masks have no mapped reg bank")?;
+    if bytes < wake::OFFSET + wake::BYTES {
+        return Err("PMGR AOP wake masks exceed their reg bank".into());
+    }
+    base.checked_add(wake::OFFSET + wake::BYTES)
+        .ok_or("PMGR AOP wake mask span overflows")?;
+    let physical = base + wake::OFFSET;
+    let data = node.property("ap-wake-sources").unwrap_or_default();
+    if !data.len().is_multiple_of(RECORD) {
+        return Err("PMGR ap-wake-sources is not whole records".into());
+    }
+    let mut sources = Vec::new();
+    for entry in data.as_chunks::<RECORD>().0 {
+        let source = u32::from_le_bytes(entry[..4].try_into().expect("4 bytes"));
+        let id =
+            u8::try_from(source).map_err(|_| "PMGR wake source exceeds hardware mask width")?;
+        if layout.valid[source as usize / u32::BITS as usize] & (1 << (source % u32::BITS)) == 0
+            || sources.contains(&id)
+        {
+            return Err("PMGR ap-wake-sources contains an unsupported or duplicate source".into());
+        }
+        sources.push(id);
+    }
+    Ok(WakeBank {
+        physical,
+        valid: layout.valid,
+        sources,
     })
 }
 
@@ -1249,6 +1343,7 @@ fn energy_banks(
 
 /// The PMGR registers the machine models besides its power states.
 struct PmgrRegisters {
+    wake_masks: Option<WakeBank>,
     performance: Vec<PerfBank>,
     energy: Vec<EnergyBank>,
     clusters: Vec<CpuCluster>,
@@ -1543,6 +1638,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
+        wake_masks,
         performance,
         energy,
         clusters,
@@ -1551,6 +1647,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
+        wake_masks,
         performance,
         energy,
         cpus,
@@ -2080,6 +2177,7 @@ mod tests {
         // 17), and the eFuses (36).
         let mut reg = [[0x3b70_0000, 0xcc000]; 37];
         reg[1] = [0x3d28_0000, 0x7c000];
+        reg[4] = [0x3d00_4000, 0x1000];
         reg[5] = [0x10e2_0000, 0x2000];
         reg[7] = [0x10e4_0000, 0x9000];
         reg[10] = [0x1005_0000, 0x10000];
@@ -2205,6 +2303,7 @@ mod tests {
                 selectors: vec![24]
             }]
         );
+        assert_eq!(found.wake_masks.as_ref().unwrap().physical, 0x2_3d00_4008);
         assert_eq!(found.clusters, T8112_CLUSTERS.to_vec());
         assert_eq!(found.aon_fuses, Some((0x2_3d2c_8000, 0x4000)));
         assert_eq!(
@@ -2221,6 +2320,57 @@ mod tests {
                 .power_states,
             None
         );
+    }
+
+    #[test]
+    fn wake_masks_derive_the_bank_and_validate_dt_sources_without_assuming_reset_masks() {
+        use crate::machine::adt::encode;
+        let layout = SOCS
+            .iter()
+            .find(|soc| soc.chip_id == 0x8112)
+            .unwrap()
+            .wake_masks
+            .unwrap();
+        let mut reg = [None; 5];
+        reg[4] = Some((0x2_3d00_4000, 0x1000));
+        let source = |id: u32| {
+            let mut entry = [0u8; 36];
+            entry[..4].copy_from_slice(&id.to_le_bytes());
+            entry
+        };
+        let records = [source(14), source(157)].concat();
+        let tree = encode(&[("ap-wake-sources", &records)], &[]);
+        let found = wake_bank(&Node::root(&tree).unwrap(), &reg, layout).unwrap();
+        assert_eq!(
+            found,
+            WakeBank {
+                physical: 0x2_3d00_4008,
+                valid: layout.valid,
+                sources: vec![14, 157]
+            }
+        );
+        reg[4] = Some((0x5_0000_0000, 0x1000));
+        assert_eq!(
+            wake_bank(&Node::root(&tree).unwrap(), &reg, layout)
+                .unwrap()
+                .physical,
+            0x5_0000_0008
+        );
+        for invalid in [
+            source(255).to_vec(),
+            source(256).to_vec(),
+            [source(14), source(14)].concat(),
+            records[..35].to_vec(),
+        ] {
+            let tree = encode(&[("ap-wake-sources", &invalid)], &[]);
+            assert!(wake_bank(&Node::root(&tree).unwrap(), &reg, layout).is_err());
+        }
+        reg[4] = Some((0, wake::OFFSET + wake::BYTES - 1));
+        assert!(wake_bank(&Node::root(&tree).unwrap(), &reg, layout).is_err());
+        reg[4] = Some((u64::MAX - wake::OFFSET, 0x1000));
+        assert!(wake_bank(&Node::root(&tree).unwrap(), &reg, layout).is_err());
+        reg[4] = None;
+        assert!(wake_bank(&Node::root(&tree).unwrap(), &reg, layout).is_err());
     }
 
     #[test]

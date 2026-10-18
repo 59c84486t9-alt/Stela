@@ -31,4 +31,5 @@ pub mod regfile;
 pub mod rtkit;
 pub mod timer;
 pub mod uart;
+pub mod wake;
 pub mod wdt;
