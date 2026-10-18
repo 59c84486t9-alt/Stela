@@ -17,6 +17,7 @@ use crate::boot_policy::{self, Decision, SealedVolume, SecurityPolicy};
 use crate::carveouts::{self, Placed};
 use crate::darts;
 use crate::devices;
+use crate::dvfs;
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::lock_regs::{self, Programmed};
@@ -717,6 +718,13 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         lock_regs::publish(&mut tree, controller)?;
     }
     darts::publish(&mut tree)?;
+    if let Some(chip_id) = inputs.target.chip_id {
+        for table in dvfs::publish(&mut tree, chip_id)? {
+            unresolved.push(format!(
+                "/arm-io/pmgr {table}: operating points without calibrated voltages (0)"
+            ));
+        }
+    }
     let hidden_devices = devices::hide_unmodeled(&mut tree);
     if !hidden_devices.is_empty() {
         unresolved.push(format!(

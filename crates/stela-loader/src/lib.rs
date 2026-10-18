@@ -21,6 +21,7 @@ pub mod dependency_graph;
 #[cfg(feature = "std")]
 pub mod dependency_paths;
 pub mod devices;
+pub mod dvfs;
 #[cfg(feature = "std")]
 pub mod exports;
 pub mod im4m;

@@ -33,12 +33,13 @@ use alloc::{format, string::String, vec::Vec};
 /// `lockdown` is the CONTROL offset of the lockdown registers in each PE's
 /// `cpu-impl-reg` and each cluster's `cpm-impl-reg` (`platform::apple::
 /// lockdown`), on the SoCs whose SPTM shows them: the T8112's 26A434 SPTM.
-/// `clocks` is each cluster type's core clock in Hz, in `parts` order, which
-/// paces the cycle counter of Apple's performance monitor (`machine::pmu`):
-/// the highest operating point of each cluster in Linux
-/// `arch/arm64/boot/dts/apple/t8112.dtsi` (`blizzard_opp`, `avalanche_opp`).
-/// The IPSW DeviceTree leaves its `voltage-states` tables to iBoot, so the
-/// SoCs without that evidence have none. `memory_cache` is the memory
+/// `operating_points` is each cluster type's core clocks in MHz, lowest
+/// first, in `parts` order: the `ecluster_opp` and `pcluster_opp` tables of
+/// Linux `arch/arm64/boot/dts/apple/t8112.dtsi`, including the three P
+/// states it leaves disabled until CPU deep sleep. The highest paces the
+/// cycle counter of Apple's performance monitor (`machine::pmu`), and the
+/// bundle publishes them as iBoot's `voltage-states` tables, which the IPSW
+/// DeviceTree leaves to it; the SoCs without that evidence have none. `memory_cache` is the memory
 /// cache's bytes and ways: the defaults the T8112's 26A434
 /// `AppleT8112MemCacheController` driver starts from (`start` assumes 8 MiB
 /// before `readCacheSize`; `mccEnableCacheMode` powers at most 16 ways).
@@ -50,7 +51,7 @@ struct Soc {
     aic: Option<(&'static str, u64)>,
     dram_base: Option<u64>,
     lockdown: Option<[u64; 2]>,
-    clocks: Option<[u64; 2]>,
+    operating_points: Option<[&'static [u32]; 2]>,
     memory_cache: Option<(u64, u32)>,
 }
 
@@ -63,7 +64,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,1", AIC1_EVENT)),
         dram_base: Some(0x8_0000_0000),
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -74,7 +75,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -85,7 +86,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -96,7 +97,13 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0x8000)),
         dram_base: Some(0x8_0000_0000),
         lockdown: Some([0x5000, 0x9000]),
-        clocks: Some([2_424_000_000, 3_504_000_000]),
+        operating_points: Some([
+            &[600, 912, 1284, 1752, 2004, 2256, 2424],
+            &[
+                660, 924, 1188, 1452, 1704, 1968, 2208, 2400, 2568, 2724, 2868, 2988, 3096, 3204,
+                3324, 3408, 3504,
+            ],
+        ]),
         memory_cache: Some((8 << 20, 16)),
     },
     Soc {
@@ -107,7 +114,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -118,7 +125,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -129,7 +136,7 @@ const SOCS: [Soc; 14] = [
         aic: Some(("aic,3", 0x40000)),
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -140,7 +147,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -151,7 +158,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -162,7 +169,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -173,7 +180,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -184,7 +191,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -195,7 +202,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
     Soc {
@@ -206,7 +213,7 @@ const SOCS: [Soc; 14] = [
         aic: None,
         dram_base: None,
         lockdown: None,
-        clocks: None,
+        operating_points: None,
         memory_cache: None,
     },
 ];
@@ -229,6 +236,14 @@ pub struct Cpus {
 /// `reg` on the SoC with `chip_id`, when a public DeviceTree places it.
 pub fn aic(chip_id: u32) -> Option<(&'static str, u64)> {
     SOCS.iter().find(|soc| soc.chip_id == chip_id)?.aic
+}
+
+/// Each cluster type's operating points in MHz, lowest first, as
+/// `(cluster-type, points)` on the SoC with `chip_id`, where known.
+pub fn operating_points(chip_id: u32) -> Option<[(u8, &'static [u32]); 2]> {
+    let soc = SOCS.iter().find(|soc| soc.chip_id == chip_id)?;
+    let points = soc.operating_points?;
+    Some([(soc.parts[0].0, points[0]), (soc.parts[1].0, points[1])])
 }
 
 /// The guest DRAM base of the SoC with `chip_id`.
@@ -326,7 +341,11 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                 mpidr: 0x8000_0000
                     | u64::from(processor.cluster_type == b'P') << 16
                     | u64::from(processor.reg),
-                clock: soc.clocks.zip(index).map(|(clocks, index)| clocks[index]),
+                clock: soc
+                    .operating_points
+                    .zip(index)
+                    .and_then(|(points, index)| points[index].last())
+                    .map(|&mhz| u64::from(mhz) * 1_000_000),
             })
         })
         .collect::<Result<_, String>>()?;
