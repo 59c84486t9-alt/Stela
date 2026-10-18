@@ -162,6 +162,11 @@ impl Mux {
     pub fn stream_state(&self, id: StreamId) -> Result<StreamState, &'static str> {
         Ok(self.streams[self.stream(id)?].state)
     }
+    /// Space for one SYN/RST/window ACK. Native poll adapters check before
+    /// open/read/close, whose original APIs report queue backpressure as Err.
+    pub fn control_ready(&self) -> bool {
+        self.can_emit(self.header() + TCP_HEADER)
+    }
     pub fn open(&mut self, destination: u16) -> Result<StreamId, &'static str> {
         if self.state != State::Active || destination == 0 {
             return Err("usbmux is not active or port is zero");
@@ -449,7 +454,7 @@ fn tcp_header(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloc::vec;
     fn wire(protocol: u32, payload: &[u8], version: u32) -> Vec<u8> {
@@ -465,7 +470,7 @@ mod tests {
         data[..4].copy_from_slice(&major.to_be_bytes());
         wire(VERSION, &data, 0)
     }
-    fn connected() -> (Mux, StreamId) {
+    pub(crate) fn connected() -> (Mux, StreamId) {
         let mut mux = Mux::new();
         mux.take_packet();
         mux.receive(&version(2)).unwrap();

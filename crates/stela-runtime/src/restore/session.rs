@@ -6,6 +6,7 @@ use super::{
     answers::{Answers, Plan, Segment},
     asr,
     plist::{Limits, Value},
+    route::Route,
     store::Store,
     stream::{ByteStream, Endian, Framed, Output},
 };
@@ -39,6 +40,7 @@ pub enum Action {
 /// ID and source hashes; no previous session's nonces/checkpoints are reused.
 pub struct Session {
     phase: Phase,
+    route: Route,
     query: Option<String>,
     hardware: Option<Value>,
     ledger: Vec<Value>,
@@ -55,6 +57,7 @@ impl Session {
     pub fn new() -> Self {
         Self {
             phase: Phase::New,
+            route: Route::Stock,
             query: None,
             hardware: None,
             ledger: Vec::new(),
@@ -91,6 +94,9 @@ impl Session {
         ]))
     }
     pub fn start<R: ReadAt>(&mut self, answers: &Answers<R>) -> Result<Value> {
+        self.start_for(answers, Route::Stock)
+    }
+    pub fn start_for<R: ReadAt>(&mut self, answers: &Answers<R>, route: Route) -> Result<Value> {
         if self.phase != Phase::Ready {
             return Err(Error::Invalid("StartRestore phase"));
         }
@@ -145,7 +151,10 @@ impl Session {
         if let Some(v) = info.get("MinimumSystemPartition") {
             opts.insert("SystemPartitionSize".into(), v.clone());
         }
-        opts.insert("SupportedDataTypes".into(), answers.supported());
+        opts.insert(
+            "SupportedDataTypes".into(),
+            route.supported(answers.supported()),
+        );
         opts.insert(
             "SupportedMessageTypes".into(),
             Value::Dict(
@@ -163,11 +172,14 @@ impl Session {
                 .collect(),
             ),
         );
+        let mut options = Value::Dict(opts);
+        route.options(&mut options)?;
+        self.route = route;
         self.phase = Phase::Starting;
         Ok(Value::dict([
             ("Request", Value::from("StartRestore")),
             ("RestoreProtocolVersion", Value::Integer(PROTOCOL)),
-            ("RestoreOptions", Value::Dict(opts)),
+            ("RestoreOptions", options),
         ]))
     }
     /// Call only after the entire StartRestore frame has been sent.
@@ -235,6 +247,13 @@ impl Session {
             "DataRequestMsg" | "AsyncDataRequestMsg" => {
                 if self.outstanding.len() == MAX_JOBS {
                     return Err(Error::Limit("outstanding restore jobs"));
+                }
+                let kind = m.required("DataType")?.string()?;
+                if !self.route.allows(kind) {
+                    return Err(super::refuse(
+                        "Stela firmware option study: required request remains outside qualified global coverage; NORData may still be needed for RestoreSEP independently of FlashNOR",
+                        m,
+                    ));
                 }
                 let plan = answers.plan(m)?;
                 let port = m

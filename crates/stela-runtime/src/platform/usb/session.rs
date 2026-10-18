@@ -37,6 +37,10 @@ impl Default for Session {
     }
 }
 impl Session {
+    #[cfg(test)]
+    pub(crate) fn test_mux(mux: Mux) -> Self {
+        Self { mux, ..Self::new() }
+    }
     pub fn new() -> Self {
         Self {
             host: Host::new(),
@@ -76,6 +80,13 @@ impl Session {
     }
     pub fn open(&mut self, port: u16) -> Result<StreamId, &'static str> {
         self.mux.open(port)
+    }
+    /// Negotiation readiness, without opening a speculative stream.
+    pub fn mux_state(&self) -> State {
+        self.mux.state()
+    }
+    pub fn control_ready(&self) -> bool {
+        self.mux.control_ready()
     }
     pub fn state(&self, stream: StreamId) -> Result<StreamState, &'static str> {
         self.mux.stream_state(stream)

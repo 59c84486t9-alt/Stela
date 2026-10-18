@@ -48,7 +48,7 @@ use crate::platform::dma::Port;
 use crate::platform::usb::session::Session as UsbSession;
 pub use crate::platform::usb::{
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
-    mux::{StreamId as MuxStream, StreamState as MuxStreamState},
+    mux::{State as MuxState, StreamId as MuxStream, StreamState as MuxStreamState},
     session::Log as UsbLog,
 };
 use crate::system::access::{AccessKind, Encoding};
@@ -200,7 +200,19 @@ fn describe_transfer(error: MmioError) -> DeviceError {
 /// Native client boundary: enqueues bytes, exposes backpressure, and never
 /// executes guest code. Advance the machine between calls while connecting.
 pub struct UsbClient<'a>(&'a mut UsbSession);
+#[cfg(test)]
+impl<'a> UsbClient<'a> {
+    pub(crate) fn test_session(session: &'a mut UsbSession) -> Self {
+        Self(session)
+    }
+}
 impl UsbClient<'_> {
+    pub fn mux_state(&self) -> MuxState {
+        self.0.mux_state()
+    }
+    pub fn control_ready(&self) -> bool {
+        self.0.control_ready()
+    }
     pub fn open(&mut self, port: u16) -> Result<MuxStream, &'static str> {
         self.0.open(port)
     }
