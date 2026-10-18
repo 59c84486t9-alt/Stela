@@ -6,13 +6,17 @@
 //!   changes, so reads must return the last value written. A read before the
 //!   first write refuses, because the reset value is unknown.
 //! - `Tuning`: a core tuning ("chicken bit") register, named by m1n1
-//!   `cpu_regs.h` or used only in the same boot-time pattern. Software reads
-//!   it, sets or clears bits and writes it back.
+//!   `cpu_regs.h` or used only in the same boot-time pattern, or a
+//!   performance hint to the core's predictors. Software reads it, sets or
+//!   clears bits and writes it back, or saves and restores it.
 //!   The reset value is unknown and taken as 0 (inference). No bit has an
 //!   effect here.
 //! - `Scratch`: a register software keeps its own records in, with no
 //!   hardware effect. Reads return the last value written, 0 from cold
 //!   reset (inference).
+//! - `Control`: a control register whose bits select features this machine
+//!   does not advertise. It reads 0 from reset (inference) and takes only
+//!   values with no bit set; any set bit stops, as for ACTLR_EL1.
 //!
 //! The run reports every entry the guest used, so none of these is silent.
 use alloc::collections::BTreeMap;
@@ -23,6 +27,7 @@ pub enum Class {
     Storage,
     Tuning,
     Scratch,
+    Control,
 }
 
 pub struct Entry {
@@ -57,6 +62,12 @@ const SPTM_KEY_WRITES: &str = "SPTM 26A434 writes it once per CPU with a PAC-key
 
 const M1N1_TUNING: &str = "m1n1 cpu_regs.h names it a core tuning (HID) register; SPTM 26A434 \
     sets or clears bits with read-modify-write at boot";
+
+const XNU_THREAD_CONTROL: &str = "26A434 XNU saves it in every exception frame and \
+    restores it on return (0xfffffe000bb9da44, 0xfffffe000bb9db48), SPTM 26A434 keeps it in \
+    each context it resumes (__text+0x44a8), and CPU initialization clears bit 1 \
+    (0xfffffe000bd80ed8) unless a patch alternative sets it, the bit ACTLR_EL1 names EnTSO; \
+    AIDR_EL1 here advertises no TSO";
 
 const XNU_AMX_CONTEXT: &str = "26A434 XNU CPU initialization writes MPIDR.Aff0 to it \
     under one boot configuration (0xfffffe000bd80f44) and reads it nowhere; named AMX_CTX_EL1 \
@@ -95,7 +106,32 @@ const XNU_THREAD_KEYS: &str = "26A434 XNU's context switch writes it with the th
 const WATCHDOG_DIAG: &str = "XNU xnu-12377.121.6 debug.c names it WATCHDOG_DIAG0, which the \
     Apple watchdog logging ORs its flags into (awl_set_scratch_reg_hv_bit)";
 
+const OBJC_BRANCH_HINT: &str = "the objc_msgSend branch-predictor helper: public XNU \
+    apple_arm64_regs.h describes BP_OBJC_ADR_EL1 and BP_OBJC_CTL_EL1 under HAS_OBJC_BP_HELPER, \
+    and 26A434 XNU's objc_bp_assist_cfg_np(adr, ctl) (syscall 535) checks its two values \
+    against those fields, writes them to S3_6_C15_C0_4 and S3_6_C15_C0_5 on every CPU \
+    (0xfffffe000bda59b4) and saves both per thread; SPTM 26A434 clears C0_5 around TXM \
+    (__text+0x2aec); a prediction hint has no architectural effect";
+
 pub const TABLE: &[Entry] = &[
+    entry(
+        6,
+        15,
+        0,
+        4,
+        "BP_OBJC_ADR_EL1",
+        Class::Tuning,
+        OBJC_BRANCH_HINT,
+    ),
+    entry(
+        6,
+        15,
+        0,
+        5,
+        "BP_OBJC_CTL_EL1",
+        Class::Tuning,
+        OBJC_BRANCH_HINT,
+    ),
     entry(5, 15, 4, 0, "ACC_CFG", Class::Tuning, ACC_CFG),
     entry(5, 15, 6, 0, "ACC_OVRD", Class::Tuning, ACC_OVRD),
     entry(4, 15, 10, 4, "SIQ_CFG_EL1", Class::Tuning, SIQ_CFG),
@@ -118,6 +154,15 @@ pub const TABLE: &[Entry] = &[
         XNU_THREAD_KEYS,
     ),
     entry(5, 15, 2, 6, "WATCHDOG_DIAG0", Class::Scratch, WATCHDOG_DIAG),
+    entry(
+        4,
+        15,
+        12,
+        0,
+        "S3_4_C15_C12_0 (unnamed)",
+        Class::Control,
+        XNU_THREAD_CONTROL,
+    ),
     entry(
         4,
         15,
@@ -241,15 +286,22 @@ impl Registers {
         *self.reads.entry(key).or_default() += 1;
         match (self.values.get(&key), entry.class) {
             (Some(value), _) => Some(*value),
-            (None, Class::Tuning | Class::Scratch) => Some(0),
+            (None, Class::Tuning | Class::Scratch | Class::Control) => Some(0),
             (None, Class::Storage) => None,
         }
     }
 
-    pub fn write(&mut self, entry: &Entry, value: u64) {
+    /// A write, or why it cannot complete.
+    pub fn write(&mut self, entry: &Entry, value: u64) -> Result<(), &'static str> {
+        if entry.class == Class::Control && value != 0 {
+            return Err(
+                "implementation-defined control bit for a feature this machine does not advertise",
+            );
+        }
         let key = entry.encoding.selector();
         *self.writes.entry(key).or_default() += 1;
         self.values.insert(key, value);
+        Ok(())
     }
 
     /// (entry, reads, writes) for every register the guest touched.
@@ -272,8 +324,12 @@ mod tests {
         let mut registers = Registers::default();
         let storage = lookup(Encoding::new(3, 4, 15, 15, 4)).unwrap();
         assert_eq!(registers.read(storage), None);
-        registers.write(storage, 2);
+        registers.write(storage, 2).unwrap();
         assert_eq!(registers.read(storage), Some(2));
+        let control = lookup(Encoding::new(3, 4, 15, 12, 0)).unwrap();
+        assert_eq!(registers.read(control), Some(0));
+        registers.write(control, 0).unwrap();
+        assert!(registers.write(control, 2).is_err());
         let tuning = Entry {
             encoding: Encoding::new(3, 0, 15, 0, 0),
             name: "HID0",
@@ -283,7 +339,7 @@ mod tests {
         assert_eq!(registers.read(&tuning), Some(0));
         assert_eq!(
             registers.used().count(),
-            1,
+            2,
             "only table entries are reported"
         );
         for entry in TABLE {

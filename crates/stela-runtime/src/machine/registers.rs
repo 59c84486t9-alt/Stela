@@ -542,8 +542,10 @@ impl Cpu {
                     )),
                 }
             } else {
-                self.apple.impdef.write(entry, value);
-                Outcome::Written(Changes::default())
+                match self.apple.impdef.write(entry, value) {
+                    Ok(()) => Outcome::Written(Changes::default()),
+                    Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+                }
             };
         }
         match self.apple(encoding) {
