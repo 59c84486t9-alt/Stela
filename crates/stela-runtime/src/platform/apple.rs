@@ -41,6 +41,7 @@ pub mod sart;
 pub mod sep;
 pub mod spi;
 pub mod timer;
+pub mod typec;
 pub mod uart;
 pub mod wake;
 pub mod wdt;
