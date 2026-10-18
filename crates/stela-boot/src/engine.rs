@@ -627,6 +627,10 @@ fn run(
         machine.statistics.compiled,
         machine.statistics.chained,
     );
+    // The PE's PC at each slice end since the last heartbeat, and how many
+    // of those were at EL0.
+    let mut samples: Vec<u64> = Vec::new();
+    let mut user = 0;
     loop {
         let slice = machine.statistics.blocks + SLICE;
         let limit = if budget == 0 {
@@ -646,6 +650,8 @@ fn run(
         if !sliced {
             return stop;
         }
+        samples.push(machine.cpu.pc);
+        user += u32::from(machine.cpu.pstate.el == 0);
         if now - beat.0 >= BEAT_SECONDS * tsc_hz {
             let (native, blocks) = (host::native_ticks(), machine.statistics.blocks);
             let elapsed = now - beat.0;
@@ -669,8 +675,29 @@ fn run(
                 (chained - beat.4) * 100 / (blocks - beat.2).max(1),
             ));
             beat = (now, native, blocks, compiled, chained);
+            sample_report(&mut samples, user);
+            user = 0;
         }
     }
+}
+
+/// The PCs the heartbeat's slice-end samples found most often, and the
+/// share of samples at EL0, which show where a guest without output spends
+/// its time.
+fn sample_report(samples: &mut Vec<u64>, user: u32) {
+    const SHOWN: usize = 6;
+    samples.sort_unstable();
+    let mut counts: Vec<(usize, u64)> = samples
+        .chunk_by(|a, b| a == b)
+        .map(|run| (run.len(), run[0]))
+        .collect();
+    counts.sort_unstable_by(|a, b| b.cmp(a));
+    output::arguments(format_args!("SAMPLES el0={user}/{}", samples.len()));
+    for (count, pc) in counts.into_iter().take(SHOWN) {
+        output::arguments(format_args!(" {pc:#x}x{count}"));
+    }
+    output::arguments(format_args!("\n"));
+    samples.clear();
 }
 
 /// The instruction words that most often left compiled code for the engine.
