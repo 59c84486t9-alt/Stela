@@ -1287,9 +1287,11 @@ mod tests {
             pan: true,
             ..KERNEL
         };
+        // PAN under SPRR follows SPRR_PERM_EL0: this page has AP[1] set but
+        // no EL0 access, so the kernel keeps its rights.
         assert_eq!(
             translate(&controls, va, Access::Read, pan, &mut tables),
-            Outcome::Unsupported(Unsupported::Sprr("PAN"))
+            translate(&controls, va, Access::Read, KERNEL, &mut tables)
         );
     }
 
@@ -1324,19 +1326,12 @@ mod tests {
             )),
             Some((FaultKind::Permission, 3))
         );
-        // A set S3_6_C15_C3_x field for the index stops; other indexes walk.
-        controls.sprr.fields[1] = 0b01 << (2 * 9);
+        // S3_6_C15_C3_x fields concern SPRR_PERM writes, not accesses.
+        controls.sprr.fields = [0b01, 0b01 << (2 * 9)];
         assert!(matches!(
             translate(&controls, va, Access::Read, KERNEL, &mut tables),
             Outcome::Mapped(_)
         ));
-        controls.sprr.fields[0] = 0b10;
-        assert_eq!(
-            translate(&controls, va, Access::Read, KERNEL, &mut tables),
-            Outcome::Unsupported(Unsupported::Sprr(
-                "permission index with an S3_6_C15_C3_x field set"
-            ))
-        );
         // APTable keeps stopping.
         controls.sprr.fields = [0; 2];
         *tables.0.get_mut(&slot).unwrap() |= AP_TABLE_READ_ONLY;

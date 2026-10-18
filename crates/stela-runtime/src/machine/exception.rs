@@ -29,7 +29,7 @@ pub struct Pstate {
     /// instruction's PAC*SP, AUT*SP, RETA* or *1716 form take a second
     /// modifier.
     pub pacm: bool,
-    /// Apple GXF: executing at the guarded level beside `el` (GL1 or GL2).
+    /// Apple GXF: executing at the guarded level beside `el` (GL0, GL1 or GL2).
     /// SPSR does not encode it; the GL bank's ASPSR does.
     pub guarded: bool,
 }

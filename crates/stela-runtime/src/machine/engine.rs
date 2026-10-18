@@ -286,13 +286,13 @@ pub enum Event {
         return_address: u64,
         fault_address: Option<u64>,
     },
-    Return {
-        to_el: u8,
-        pc: u64,
-    },
-    /// GENTER or GEXIT; `entered` tells whether the PE is now guarded.
+    /// An exception return, to a guarded level when `guarded`.
+    Return { to_el: u8, guarded: bool, pc: u64 },
+    /// GENTER (`enter`) or GEXIT, and the level the PE is now at.
     Guarded {
-        entered: bool,
+        enter: bool,
+        el: u8,
+        guarded: bool,
         pc: u64,
     },
 }
@@ -2371,7 +2371,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return self.undefined();
                 }
                 self.host.report(&Event::Guarded {
-                    entered: true,
+                    enter: true,
+                    el: self.cpu.pstate.el,
+                    guarded: true,
                     pc: self.cpu.pc,
                 });
                 self.sync_regime();
@@ -2383,7 +2385,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Ok(Ok(())) => {
                     self.pacm_written = true;
                     self.host.report(&Event::Guarded {
-                        entered: self.cpu.pstate.guarded,
+                        enter: false,
+                        el: self.cpu.pstate.el,
+                        guarded: self.cpu.pstate.guarded,
                         pc: self.cpu.pc,
                     });
                     self.sync_regime();
@@ -2544,6 +2548,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.pacm_written = true;
         self.host.report(&Event::Return {
             to_el: self.cpu.pstate.el,
+            guarded: self.cpu.pstate.guarded,
             pc: self.cpu.pc,
         });
         self.sync_regime();
@@ -3811,6 +3816,55 @@ mod tests {
             );
             assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
         }
+    }
+
+    #[test]
+    fn eret_at_gl_enters_gl0_whose_exceptions_return_to_gl() {
+        let mut machine = machine(&[]);
+        machine.cpu.state.x[0] = 1;
+        machine.cpu.state.x[1] = 0x9000;
+        machine.cpu.state.x[2] = 0xa000;
+        machine.cpu.state.x[3] = 0x3c0;
+        machine.cpu.state.x[4] = 0xb000;
+        for word in [
+            0xd51e_f100, // msr SPRR_CONFIG_EL1, x0
+            0xd51e_f140, // msr GXF_CONFIG_EL1, x0
+            0xd51e_f821, // msr GXF_ENTER_EL1, x1
+            0x0020_1420, // genter
+            0xd51e_fa42, // msr VBAR_GL1, x2
+            0xd51e_fa63, // msr SPSR_GL1, x3 (EL0t, DAIF masked)
+            0xd51e_fac4, // msr ELR_GL1, x4
+            0xd69f_03e0, // eret
+        ] {
+            machine.system_instruction(word).unwrap();
+        }
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.pstate.guarded),
+            (0, true)
+        );
+        assert_eq!(machine.cpu.pc, 0xb000);
+        assert!(machine.host.regimes.last().unwrap().requester.guarded);
+        // An SVC at GL0 is taken at VBAR_GL1's lower-EL vector.
+        machine.system_instruction(0xd400_0001).unwrap();
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.pstate.guarded),
+            (1, true)
+        );
+        assert_eq!(machine.cpu.pc, 0xa400);
+        let bank = &machine.cpu.apple.guarded[0];
+        assert_eq!((bank.elr, bank.spsr, bank.aspsr), (0xb004, 0x3c0, 1));
+        assert_eq!(bank.esr, 0x5600_0000);
+        // GEXIT with ASPSR_GL bit 0 set resumes GL0.
+        machine.system_instruction(0x0020_1400).unwrap();
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.pstate.guarded),
+            (0, true)
+        );
+        assert_eq!(machine.cpu.pc, 0xb004);
+        // GL0 has no GEXIT.
+        machine.system_instruction(0x0020_1400).unwrap();
+        assert_eq!(machine.cpu.pc, 0xa400);
+        assert_eq!(machine.cpu.apple.guarded[0].esr, 0x0200_0000);
     }
 
     #[test]

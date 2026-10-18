@@ -354,16 +354,19 @@ pub(crate) fn report(event: &Event) {
                 None => "-".into(),
             }
         )),
-        Event::Return { to_el, pc } => {
-            output::arguments(format_args!("ERET to=EL{to_el} pc={pc:#x}\n"))
-        }
-        Event::Guarded { entered, pc } => output::arguments(format_args!(
-            "{} pc={pc:#x}\n",
-            if *entered {
-                "GENTER now=GL1"
-            } else {
-                "GEXIT now=EL"
-            }
+        Event::Return { to_el, guarded, pc } => output::arguments(format_args!(
+            "ERET to={}{to_el} pc={pc:#x}\n",
+            level_name(*guarded)
+        )),
+        Event::Guarded {
+            enter,
+            el,
+            guarded,
+            pc,
+        } => output::arguments(format_args!(
+            "{} now={}{el} pc={pc:#x}\n",
+            if *enter { "GENTER" } else { "GEXIT" },
+            level_name(*guarded)
         )),
     }
 }
@@ -563,6 +566,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let stop = machine.run(options.budget);
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds)
+}
+
+fn level_name(guarded: bool) -> &'static str {
+    if guarded { "GL" } else { "EL" }
 }
 
 /// The frame records from X29 (each the caller's X29 and the return

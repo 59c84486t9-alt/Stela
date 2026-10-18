@@ -16,7 +16,7 @@ pub mod tlbi;
 
 pub use sprr::{
     SPRR_CONFIG_EN, SPRR_CONFIG_LOCK_CONFIG, SPRR_CONFIG_LOCK_PERM_EL0, SPRR_CONFIG_LOCK_PERM_EL1,
-    SPRR_CONFIG_UNDOCUMENTED, Sprr,
+    SPRR_CONFIG_UNDOCUMENTED, Sprr, sprr_fields_valid, sprr_unlocked,
 };
 
 /// The stage-1 translation regime the controls describe.
@@ -237,7 +237,8 @@ pub struct Requester {
     /// LDTR/STTR without PSTATE.UAO, and AT S1E0*: a kernel-level access
     /// checked with EL0 permissions.
     pub unprivileged: bool,
-    /// At the Apple GXF guarded level (GL1 permissions under SPRR).
+    /// At an Apple GXF guarded level: under SPRR, GL0 takes the GL fields of
+    /// SPRR_PERM_EL0 and GL1 and GL2 those of SPRR_PERM_EL1.
     pub guarded: bool,
 }
 

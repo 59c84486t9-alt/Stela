@@ -730,9 +730,7 @@ impl Apple {
         let config = apple.sprr_config;
         let locked = |bit: u64| !guarded && config & bit != 0;
         let refuse = |reason| Outcome::Refused(Refusal::UnsupportedSetting(reason));
-        if matches!(self, Self::SprrPerm(_) | Self::SprrFields(_))
-            && locked(SPRR_CONFIG_UNDOCUMENTED)
-        {
+        if matches!(self, Self::SprrFields(_)) && locked(SPRR_CONFIG_UNDOCUMENTED) {
             return refuse("SPRR register write after an undocumented SPRR_CONFIG lock bit");
         }
         if matches!(self, Self::GxfConfig(1) | Self::GxfEntry(1, _))
@@ -754,21 +752,27 @@ impl Apple {
             }
             Self::SprrPerm(_) if config & SPRR_CONFIG_EN == 0 => return Outcome::Undefined,
             Self::SprrPerm(index) => {
-                let lock = if index == PERM_EL0_10 || index == PERM_EL0_20 {
-                    SPRR_CONFIG_LOCK_PERM_EL0
+                let user = index == PERM_EL0_10 || index == PERM_EL0_20;
+                let (lock, fields) = if user {
+                    (SPRR_CONFIG_LOCK_PERM_EL0, apple.sprr_fields[0])
                 } else {
-                    SPRR_CONFIG_LOCK_PERM_EL1
+                    (SPRR_CONFIG_LOCK_PERM_EL1, apple.sprr_fields[1])
                 };
-                if locked(lock) {
-                    return refuse("SPRR_PERM write after its lock");
+                let changed = apple.sprr_perm[index] ^ value;
+                if (locked(lock) || locked(SPRR_CONFIG_UNDOCUMENTED))
+                    && changed & !super::mmu::sprr_unlocked(fields) != 0
+                {
+                    return refuse(
+                        "SPRR_PERM change outside its unlocked EL fields after its lock",
+                    );
                 }
                 apple.sprr_perm[index] = value;
                 changes.translation = true;
             }
-            Self::SprrFields(which) => {
-                apple.sprr_fields[which] = value;
-                changes.translation = true;
+            Self::SprrFields(_) if !super::mmu::sprr_fields_valid(value) => {
+                return refuse("S3_6_C15_C3_x field value other than 0 or 1");
             }
+            Self::SprrFields(which) => apple.sprr_fields[which] = value,
             Self::GxfConfig(level) => {
                 if value & !(GXF_CONFIG_EN | GXF_CONFIG_LOCKS | GXF_CONFIG_EL1_LOCK) != 0 {
                     return refuse("GXF_CONFIG bit without documented or observed meaning");
@@ -1086,5 +1090,36 @@ mod tests {
             Outcome::Written(_)
         ));
         assert_eq!(cpu.apple.sprr_fields[0], 1 << 18);
+        // SPTM's lockdown: fields 2 and 9 of S3_6_C15_C3_1 keep those EL
+        // fields of SPRR_PERM_EL1 writable outside GL; field values above 1
+        // stop.
+        assert!(matches!(
+            write(&mut cpu, SPRR_FIELDS_1, 0b10),
+            Outcome::Refused(_)
+        ));
+        write(&mut cpu, SPRR_FIELDS_1, 0x40010);
+        write(&mut cpu, SPRR_PERM_EL1, 0x2020_a52a_302a_bae6);
+        cpu.pstate.guarded = false;
+        for (value, allowed) in [
+            (0x2020_a52a_302a_bbe6, true),  // index 2: EL r-- to rw-
+            (0x2020_a53a_302a_bbe6, true),  // index 9: EL r-- to rw-
+            (0x2020_a53a_302a_bfe6, false), // index 2's GL field
+            (0x2020_a53a_302a_bbe7, false), // index 0
+        ] {
+            assert_eq!(
+                matches!(write(&mut cpu, SPRR_PERM_EL1, value), Outcome::Written(_)),
+                allowed,
+                "{value:#x}"
+            );
+        }
+        // SPRR_PERM_EL0 follows S3_6_C15_C3_0, here field 9 only.
+        assert!(matches!(
+            write(&mut cpu, SPRR_PERM_EL0, 3 << 36),
+            Outcome::Written(_)
+        ));
+        assert!(matches!(
+            write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 1),
+            Outcome::Refused(_)
+        ));
     }
 }

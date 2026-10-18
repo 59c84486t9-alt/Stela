@@ -623,10 +623,10 @@ impl Cpu {
         Ok(())
     }
 
-    /// GEXIT at the guarded level: restore PSTATE from SPSR_GLx and continue
-    /// at ELR_GLx, at the guarded level when ASPSR_GLx says so.
+    /// GEXIT at GL1 or GL2: restore PSTATE from SPSR_GLx and continue at
+    /// ELR_GLx, guarded when ASPSR_GLx says so.
     pub fn guarded_exit(&mut self) -> Result<Result<(), IllegalReturn>, GuardedRefusal> {
-        if !self.pstate.guarded {
+        if !self.pstate.guarded || self.pstate.el == 0 {
             return Err(GuardedRefusal::Exit);
         }
         let level = usize::from(self.pstate.el) - 1;
@@ -637,7 +637,10 @@ impl Cpu {
         }
         let (mut next, nzcv) = exception::restore(self.pstate, spsr, false);
         next.guarded = aspsr & ASPSR_GUARDED != 0;
-        if next.guarded && next.el != self.pstate.el {
+        // GL0 is reachable from a guarded level: SPTM 26A434 resumes saved
+        // contexts with their ASPSR_GL (`__text+0x44e0`), TXM's at GL0
+        // among them. A guarded return to another level stops.
+        if next.guarded && next.el != self.pstate.el && next.el != 0 {
             return Ok(Err(IllegalReturn::Mode(0)));
         }
         self.state.nzcv = nzcv;
@@ -681,13 +684,30 @@ impl Cpu {
         }
     }
 
-    /// Take an exception and continue at its vector. At the guarded level it
-    /// stays there, through VBAR_GLx and the GL bank.
+    /// The guarded level GL0 takes its exceptions to: GL2 while EL2's GXF is
+    /// enabled, else GL1. SPTM 26A434 enters TXM at GL0 with HCR_EL2.TGE
+    /// clear, and handles its SVCs in VBAR_GL2's lower-EL vector
+    /// (`__exc+0x400`, reading ESR_GL), with EL1's GXF disabled; no public
+    /// source describes the routing (inference).
+    fn guarded_el0_target(&self) -> u8 {
+        if self.apple.gxf_config[1] & GXF_CONFIG_EN != 0 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Take an exception and continue at its vector. At a guarded level it
+    /// stays guarded, through VBAR_GLx and the GL bank; GL0 enters the
+    /// guarded level that owns it.
     pub fn take(&mut self, exception: Exception) {
         let from = self.pstate;
-        let target = exception.target.unwrap_or_else(|| self.route());
-        if from.guarded && target == from.el {
-            let level = usize::from(from.el) - 1;
+        let mut target = exception.target.unwrap_or_else(|| self.route());
+        if from.guarded && from.el == 0 {
+            target = self.guarded_el0_target();
+        }
+        if from.guarded && (target == from.el || from.el == 0) {
+            let level = usize::from(target) - 1;
             let spsr = from.to_spsr(self.state.nzcv);
             let bank = &mut self.apple.guarded[level];
             bank.spsr = spsr;
@@ -700,8 +720,8 @@ impl Cpu {
                 bank.far = address;
             }
             let vbar = bank.vbar;
-            let sctlr = self.read(bank_sctlr(from.el));
-            let entry = exception::entry_pstate(from, sctlr, from.el, self.in_host());
+            let sctlr = self.read(bank_sctlr(target));
+            let entry = exception::entry_pstate(from, sctlr, target, self.in_host());
             self.set_pstate(Pstate {
                 guarded: true,
                 ..entry
@@ -747,9 +767,20 @@ impl Cpu {
         }
     }
 
-    /// ELR_ELx of the current EL.
+    /// ELR_ELx of the current EL, or ELR_GLx at a guarded level.
     pub fn exception_link(&self) -> u64 {
-        self.read(bank(self.pstate.el).elr)
+        match self.pstate.guarded {
+            true => self.apple.guarded[usize::from(self.pstate.el) - 1].elr,
+            false => self.read(bank(self.pstate.el).elr),
+        }
+    }
+
+    /// SPSR_ELx of the current EL, or SPSR_GLx at a guarded level.
+    fn exception_state(&self) -> u64 {
+        match self.pstate.guarded {
+            true => self.apple.guarded[usize::from(self.pstate.el) - 1].spsr,
+            false => self.read(bank(self.pstate.el).spsr),
+        }
     }
 
     /// An instruction address with its tag removed for the current EL (Arm
@@ -776,8 +807,14 @@ impl Cpu {
     /// return sets PSTATE.IL instead of changing EL; after one to AArch32 the
     /// ARBITRARY PC bits 63:32 and 1:0 read 0. EL0 ERET is UNDEFINED and must
     /// not reach here.
+    ///
+    /// At a guarded level ERET returns through SPSR_GLx and ELR_GLx and stays
+    /// guarded: SPTM 26A434 enters TXM at GL0 that way (`__text+0x2b1c`,
+    /// SPSR_GL M=EL0t), and leaves for unguarded code only through GEXIT
+    /// with ASPSR_GL bit 0 clear (inference; no public description).
     pub fn exception_return(&mut self, target: u64) {
-        let spsr = self.read(bank(self.pstate.el).spsr);
+        let guarded = self.pstate.guarded;
+        let spsr = self.exception_state();
         let illegal = self.illegal_return(spsr).is_some();
         let destination = match exception::spsr_target(spsr) {
             Ok((el, _)) if !illegal => el,
@@ -786,6 +823,7 @@ impl Cpu {
         let ss = super::debug::return_ss(self, spsr, destination);
         let (mut next, nzcv) = exception::restore(self.pstate, spsr, illegal);
         next.ss = ss;
+        next.guarded = guarded;
         self.step_advance = false;
         self.state.nzcv = nzcv;
         self.set_pstate(next);
