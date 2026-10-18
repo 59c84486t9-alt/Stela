@@ -9,6 +9,7 @@ pub(crate) mod memory;
 pub mod pc;
 pub(crate) mod sync;
 pub(crate) mod unwind;
+pub(crate) mod usb;
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
 pub(crate) mod boot;
