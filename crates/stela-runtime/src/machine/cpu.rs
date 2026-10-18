@@ -43,6 +43,19 @@ const FPEN: u32 = 20;
 const CPACR_SMEN: u32 = 24;
 const CPTR_SMEN: u32 = 24;
 
+/// CTR_EL0.ERG = 4: sixteen words.
+pub const RESERVATION_GRANULE: u64 = 64;
+
+/// An Exclusives reservation: the physical reservation granule an exclusive
+/// load marked, with the bytes it held then. One PE runs at a time, so
+/// another observer's write can only break the reservation between runs;
+/// the granule's bytes changing is how it shows (`engine::processors`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reservation {
+    pub granule: u64,
+    pub bytes: [u8; RESERVATION_GRANULE as usize],
+}
+
 /// Apple GXF state of one guarded level: GL1 beside EL1, GL2 beside EL2
 /// (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h`, `gxf.c` and `gxf_asm.S`).
 #[derive(Debug, Clone, Default)]
@@ -196,9 +209,9 @@ pub struct Cpu {
     pub dcc: super::debug::Dcc,
     /// The claim tags (DBGCLAIMSET_EL1, DBGCLAIMCLR_EL1), clear at reset.
     pub claim: u8,
-    /// The Exclusives monitor: the physical reservation granule an exclusive
-    /// load marked (`engine::exclusive`).
-    pub monitor: Option<u64>,
+    /// The Exclusives monitor: the reservation an exclusive load marked
+    /// (`engine::exclusive`).
+    pub monitor: Option<Reservation>,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
     /// The GICv3 virtual CPU interface (`machine::vgic`).

@@ -3,11 +3,12 @@
 //! `AArch64_ExclusiveMonitorsPass`). The monitor holds the physical
 //! Exclusives reservation granule (CTR_EL0.ERG: 64 bytes) of the last
 //! exclusive load; a store-exclusive to that granule passes once and clears
-//! it, as do CLREX and exception return. On one PE the local and global
-//! monitors coincide; `IsExclusiveVA` is TRUE.
+//! it, as do CLREX and exception return. The local and global monitors
+//! coincide; another observer's write to the granule clears it
+//! (`processors`). `IsExclusiveVA` is TRUE.
 use super::{Devices, Host, Machine, RamTables, RequirementKind, Step, Translated};
 use crate::machine::{
-    cpu::Exception,
+    cpu::{Exception, RESERVATION_GRANULE, Reservation},
     debug,
     exception::Class,
     mmu::{self, Access, MemoryType, alignment},
@@ -16,9 +17,6 @@ use stela_compiler::aarch64::{
     Register,
     exclusive::{Data, Kind, Operand},
 };
-
-/// CTR_EL0.ERG = 4: sixteen words.
-pub const RESERVATION_GRANULE: u64 = 64;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn exclusive(&mut self, operand: Operand) -> Step {
@@ -100,12 +98,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let bytes = &mut bytes[..size as usize];
         match kind {
             Kind::Load { .. } => {
-                if !self.host.read_ram(physical, bytes) {
+                let mut reservation = Reservation {
+                    granule,
+                    bytes: [0; RESERVATION_GRANULE as usize],
+                };
+                if !self.host.read_ram(physical, bytes)
+                    || !self.host.read_ram(granule, &mut reservation.bytes)
+                {
                     return Err(self.unsupported(RequirementKind::Native(
                         "an exclusive load of a device register",
                     )));
                 }
-                self.cpu.monitor = Some(granule);
+                self.cpu.monitor = Some(reservation);
                 for (index, register) in registers.iter().enumerate() {
                     if let Some(register) = register {
                         let start = index * usize::from(element_bytes);
@@ -118,7 +122,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Kind::Store { status, .. } => {
                 let last = (physical + size - 1) & !(RESERVATION_GRANULE - 1);
-                let passed = self.cpu.monitor == Some(granule) && last == granule;
+                let passed = self
+                    .cpu
+                    .monitor
+                    .is_some_and(|reservation| reservation.granule == granule)
+                    && last == granule;
                 self.cpu.monitor = None;
                 if passed {
                     for (index, register) in registers.iter().enumerate() {

@@ -14,7 +14,12 @@ use super::{
     Devices, Host, Machine, RequirementKind, Start, Step, Stop, Wait, WaitKind, interrupt_pending,
     system, timer,
 };
-use crate::machine::{cpu::Cpu, exception::Pstate, registers::CpuProfile, registers::Lines};
+use crate::machine::{
+    cpu::{Cpu, RESERVATION_GRANULE},
+    exception::Pstate,
+    registers::CpuProfile,
+    registers::Lines,
+};
 use alloc::{boxed::Box, vec::Vec};
 
 /// Blocks a PE runs before the next PE that can run gets its turn.
@@ -68,6 +73,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let mut waited = false;
         loop {
+            self.observe_writes();
             let now = self.host.counter();
             let (current, count) = (self.current, self.peers.len());
             if let Some(next) = (1..=count)
@@ -211,21 +217,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.peers[self.current] = Peer::Parked(Box::new(outgoing));
         self.current = next;
         self.statistics.switches += 1;
-        self.clear_monitors();
         // The fetch and jump caches and the host's shadow tables follow the
         // incoming PE's translation regime.
         self.translations_changed();
     }
 
-    /// Clear every PE's Exclusives monitor. A monitor that held a granule
-    /// generates an event, the WFE wake-up event of a cleared global monitor.
-    fn clear_monitors(&mut self) {
+    /// Clear the Exclusives monitor of every PE whose reserved granule
+    /// another observer has written since its exclusive load, which
+    /// generates an event: the WFE wake-up event of a cleared global monitor
+    /// (Arm `AArch64_ExclusiveMonitorsStatus`, `ClearExclusiveByAddress`).
+    /// One PE runs at a time and only between runs can another PE's (or a
+    /// device's) write reach a reservation, so it is observed then, as the
+    /// granule's bytes changing. A write that leaves them as they were
+    /// clears nothing: a known gap, which neither a store-exclusive's
+    /// result on the values it reads nor a WFE that waits for a value to
+    /// change can observe.
+    fn observe_writes(&mut self) {
         let parked = self.peers.iter_mut().filter_map(|peer| match peer {
             Peer::Parked(parked) => Some(&mut parked.cpu),
             Peer::Running | Peer::Off => None,
         });
         for cpu in core::iter::once(&mut self.cpu).chain(parked) {
-            if cpu.monitor.take().is_some() {
+            let Some(reservation) = cpu.monitor else {
+                continue;
+            };
+            let mut bytes = [0; RESERVATION_GRANULE as usize];
+            if !self.host.read_ram(reservation.granule, &mut bytes) || bytes != reservation.bytes {
+                cpu.monitor = None;
                 cpu.event = true;
             }
         }
@@ -299,7 +317,8 @@ mod tests {
     use super::super::tests::{BASE, FakeHost, board};
     use super::*;
     use crate::machine::{
-        engine::DeviceError, exception::DAIF_ALL, registers::Identity, system::Register,
+        cpu::Reservation, engine::DeviceError, exception::DAIF_ALL, registers::Identity,
+        system::Register,
     };
 
     const WFE: u32 = 0xd503_205f;
@@ -403,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn wfe_parks_until_an_event_and_switches_clear_every_monitor() {
+    fn wfe_parks_until_an_event_and_writes_clear_other_pes_monitors() {
         let mut machine = pair();
         // PE 0 waits with no event: PE 1 runs.
         machine.system_instruction(WFE).unwrap();
@@ -424,18 +443,26 @@ mod tests {
         machine.schedule().unwrap();
         assert_eq!(machine.processor(), 0);
         assert_eq!((machine.cpu.pc, machine.cpu.event), (BASE + 4, false));
-        // A switch clears every monitor, and one that held a granule
-        // generates an event: PE 0, in WFE behind a load exclusive, wakes
-        // once PE 1 has run and could have written the granule.
-        machine.cpu.monitor = Some(BASE);
+        // PE 0 waits in WFE behind a load exclusive. PE 1 running clears
+        // nothing until it writes the granule; then PE 0's monitor clears,
+        // which generates the event that wakes it.
+        let data = 0x400;
+        machine.cpu.monitor = Some(Reservation {
+            granule: BASE + data as u64,
+            bytes: [0; RESERVATION_GRANULE as usize],
+        });
         machine.system_instruction(WFE).unwrap();
         machine.schedule().unwrap();
         assert_eq!(machine.processor(), 1);
-        assert_eq!(parked(&machine, 0).monitor, None);
-        assert!(parked(&machine, 0).event);
+        end_slice(&mut machine);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        assert!(parked(&machine, 0).monitor.is_some() && !parked(&machine, 0).event);
+        machine.host.ram[data + 8] = 1;
         end_slice(&mut machine);
         machine.schedule().unwrap();
         assert_eq!(machine.processor(), 0);
+        assert_eq!(machine.cpu.monitor, None);
         assert_eq!((machine.cpu.pc, machine.cpu.event), (BASE + 8, false));
     }
 

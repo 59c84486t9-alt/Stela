@@ -6557,7 +6557,10 @@ mod tests {
         // ldxr x1, [x2]; stxr w3, x4, [x2]: passes once.
         machine.system_instruction(0xc85f_7c41).unwrap();
         assert_eq!(machine.cpu.state.x[1], 0x0807_0605_0403_0201);
-        assert_eq!(machine.cpu.monitor, Some((BASE + 0x200) & !63));
+        assert_eq!(
+            machine.cpu.monitor.map(|reservation| reservation.granule),
+            Some((BASE + 0x200) & !63)
+        );
         machine.cpu.state.x[4] = 0x1111_2222_3333_4444;
         machine.system_instruction(0xc803_7c44).unwrap();
         assert_eq!(machine.cpu.state.x[3], 0);
