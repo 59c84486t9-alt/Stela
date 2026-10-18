@@ -11,7 +11,9 @@
 //! peripherals, interrupt enables and global/wake registers explicitly refuse.
 //! Stela boot handoff uses interrupt-disabled input words (0xe), with
 //! peripheral CS pins configured as GPIO outputs high (0x3); no external inputs
-//! drive this bank. Enabling an unconnected input without a pull refuses.
+//! drive this bank. Receiver configuration does not sample DATA: an unconnected
+//! input can be enabled without a pull, but reading that word then refuses
+//! until software supplies a pull or disables the receiver. No level is invented.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{vec, vec::Vec};
 const NAME: &str = "Apple GPIO";
@@ -20,6 +22,7 @@ const MODE: u32 = 7 << 1;
 const OUTPUT: u32 = 1 << 1;
 const INPUT_OFF: u32 = 7 << 1;
 const INPUT_ENABLE: u32 = 1 << 9;
+const PULL: u32 = 3 << 7;
 const PERIPH: u32 = 3 << 5;
 const LOCK: u32 = 1 << 21;
 const FIELDS: u32 =
@@ -69,6 +72,11 @@ impl MmioDevice for Gpio {
             return Err(err("GPIO registers require aligned 32-bit accesses"));
         }
         if let Some(&word) = self.pins.get(offset as usize / 4) {
+            if word & MODE == INPUT_OFF && word & INPUT_ENABLE != 0 && word & PULL == 0 {
+                return Err(err(
+                    "unconnected GPIO input has no pull; DATA is undetermined",
+                ));
+            }
             return Ok(u64::from(word));
         }
         if self.irq_word(offset) {
@@ -99,7 +107,9 @@ impl MmioDevice for Gpio {
             }
             if value & MODE == INPUT_OFF && value & INPUT_ENABLE != 0 {
                 match (value >> 7) & 3 {
-                    0 => return Err(err("unconnected GPIO input has no pull")),
+                    // Enabling the receiver changes configuration, but does
+                    // not observe its unknown DATA. A later read refuses.
+                    0 => {}
                     1 => value &= !DATA,
                     _ => value |= DATA,
                 }
@@ -124,6 +134,38 @@ impl MmioDevice for Gpio {
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+    #[test]
+    fn enabling_an_undriven_receiver_does_not_invent_a_sample() {
+        let mut bank = Gpio::new(213, 7, &[]).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let input = INPUT_OFF | INPUT_ENABLE | 2 << 16;
+        bank.write(4 * 84, Width::Word, input.into(), &mut a)
+            .unwrap();
+        assert_eq!(bank.pins[84], input);
+        assert!(bank.read(4 * 84, Width::Word, &mut a).is_err());
+        assert_eq!(bank.pins[84], input);
+        bank.write(4 * 84, Width::Word, (input | 1 << 7).into(), &mut a)
+            .unwrap();
+        assert_eq!(
+            bank.read(4 * 84, Width::Word, &mut a),
+            Ok(u64::from(input | 1 << 7))
+        );
+        bank.write(4 * 84, Width::Word, (input | 2 << 7).into(), &mut a)
+            .unwrap();
+        assert_eq!(
+            bank.read(4 * 84, Width::Word, &mut a),
+            Ok(u64::from(input | 2 << 7 | DATA))
+        );
+        bank.write(4 * 84, Width::Word, input.into(), &mut a)
+            .unwrap();
+        bank.write(4 * 84, Width::Word, u64::from(INPUT_OFF), &mut a)
+            .unwrap();
+        assert_eq!(
+            bank.read(4 * 84, Width::Word, &mut a),
+            Ok(u64::from(INPUT_OFF))
+        );
+    }
     #[test]
     fn cs_output_and_lock_and_unsupported_interrupt_are_explicit() {
         let mut bank = Gpio::new(213, 7, &[49]).unwrap();
