@@ -664,9 +664,19 @@ pub struct Board {
     pub aon_fuses: Option<(u64, u64)>,
     /// CPU/CPM energy banks selected by `hw-dpe-reg`, in absolute guest PA.
     pub energy: Vec<EnergyBank>,
+    /// AON/SOC/cluster performance banks and DT-selected counters.
+    pub performance: Vec<PerfBank>,
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+/// A version-1 `perf-regs` group: translated global word and the union of
+/// selectors named by the DeviceTree's counter-bearing records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerfBank {
+    pub physical: u64,
+    pub selectors: Vec<u16>,
 }
 
 /// A direct CPU energy bank, with its optional CPM enable configuration.
@@ -1004,6 +1014,7 @@ fn pmgr_registers(
         aon_fuses: None,
         cpu_start: None,
         energy: Vec::new(),
+        performance: Vec::new(),
     };
     let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
         return Ok(none);
@@ -1065,12 +1076,118 @@ fn pmgr_registers(
         }
     };
     let energy = energy_banks(&node, &reg, &clusters)?;
+    let performance = performance_banks(&node, &reg)?;
     Ok(PmgrRegisters {
+        performance,
         energy,
         clusters,
         aon_fuses: fuses,
         cpu_start,
     })
+}
+
+/// Version-1 group layout: `_initPerfCountersV1` (kernel file 0x2b79ec0),
+/// `_getPerfCounterOffset` (0x2b8e974) and the selector consumers
+/// (0x2b92ddc..0x2b93010, 0x2b95884..0x2b95964). No physical address or
+/// counter index is inferred from a reporting name or device ID.
+fn performance_banks(node: &Node<'_>, reg: &[Option<(u64, u64)>]) -> Result<Vec<PerfBank>, String> {
+    use crate::platform::apple::perf::{COUNTER_BASE, STRIDE};
+    const GROUP: usize = 16;
+    const SOURCE: usize = 24;
+    const DEVICE_COUNTER: u8 = 0x20;
+    let data = node.property("perf-regs").unwrap_or_default();
+    if !data.len().is_multiple_of(GROUP) {
+        return Err("/arm-io/pmgr perf-regs is not whole groups".into());
+    }
+    let mut banks = Vec::new();
+    let mut counts = Vec::new();
+    for entry in data.as_chunks::<GROUP>().0 {
+        let index = u32::from_le_bytes(entry[..4].try_into().expect("4 bytes")) as usize;
+        let offset = u64::from(u32::from_le_bytes(entry[4..8].try_into().expect("4 bytes")));
+        let count = u16::from_le_bytes(entry[8..10].try_into().expect("2 bytes"));
+        // Version zero defaults to one. Parent/global indirection and the
+        // busy protocol of classes 1/2 need separate semantics.
+        if !matches!(entry[12], 0 | 3) || entry[13] > 1 || entry[15] != 0 {
+            return Err("/arm-io/pmgr perf-regs has an unsupported class, layout or flags".into());
+        }
+        let (base, bytes) = reg
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or("/arm-io/pmgr perf-regs names an unmapped reg bank")?;
+        if count == 0
+            || count > 256
+            || !offset.is_multiple_of(4)
+            || offset + COUNTER_BASE + u64::from(count) * STRIDE > bytes
+        {
+            return Err(
+                "/arm-io/pmgr perf-regs counters exceed their reg bank or selector width".into(),
+            );
+        }
+        base.checked_add(offset + COUNTER_BASE + u64::from(count) * STRIDE)
+            .ok_or("PMGR performance bank span overflows")?;
+        let physical = base + offset;
+        banks.push(PerfBank {
+            physical,
+            selectors: Vec::new(),
+        });
+        counts.push(count);
+    }
+    if banks.is_empty() {
+        return Ok(banks);
+    }
+    let mut select = |group: u8, index: u8| -> Result<(), String> {
+        let bank = banks
+            .get_mut(usize::from(group))
+            .ok_or("PMGR counter source names a missing perf-regs group")?;
+        let index = u16::from(index);
+        if index >= counts[usize::from(group)] {
+            return Err("PMGR counter source exceeds its perf-regs count".into());
+        }
+        if !bank.selectors.contains(&index) {
+            bank.selectors.push(index);
+        }
+        Ok(())
+    };
+    let devices = node.property("devices").unwrap_or_default();
+    if !devices.len().is_multiple_of(PMGR_DEVICE) {
+        return Err("/arm-io/pmgr devices is not whole entries".into());
+    }
+    for entry in devices.as_chunks::<PMGR_DEVICE>().0 {
+        if entry[0] & DEVICE_COUNTER != 0 {
+            select(entry[9], entry[8])?;
+        }
+    }
+    for property in ["clocks", "power-domains", "events"] {
+        let data = node.property(property).unwrap_or_default();
+        if !data.len().is_multiple_of(SOURCE) {
+            return Err(format!(
+                "/arm-io/pmgr {property} is not whole counter records"
+            ));
+        }
+        for entry in data.as_chunks::<SOURCE>().0 {
+            match property {
+                "clocks" if entry[2] & 1 != 0 => select(entry[1], entry[0])?,
+                "power-domains" if (entry[2], entry[1]) != (0, 0) => select(entry[2], entry[1])?,
+                // Types 2/7 use the ACC accessor, and flag bit 0 selects
+                // another event path; neither authorizes a SOC selector.
+                "events" if entry[1] & 1 == 0 => match entry[2] {
+                    0 => select(entry[7], entry[6])?,
+                    1 | 5 | 6 => {
+                        select(entry[7], entry[6])?;
+                        select(entry[5], entry[4])?;
+                    }
+                    2 | 7 => (),
+                    _ => return Err("PMGR events has an unsupported counter type".into()),
+                },
+                _ => (),
+            }
+        }
+    }
+    for bank in &mut banks {
+        bank.selectors.sort_unstable();
+    }
+    Ok(banks)
 }
 
 /// `hw-dpe-reg` records are 40 bytes (`ApplePMGR` parser, kernel file
@@ -1132,6 +1249,7 @@ fn energy_banks(
 
 /// The PMGR registers the machine models besides its power states.
 struct PmgrRegisters {
+    performance: Vec<PerfBank>,
     energy: Vec<EnergyBank>,
     clusters: Vec<CpuCluster>,
     aon_fuses: Option<(u64, u64)>,
@@ -1425,6 +1543,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
+        performance,
         energy,
         clusters,
         aon_fuses,
@@ -1432,6 +1551,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
+        performance,
         energy,
         cpus,
         uart,
@@ -1983,6 +2103,13 @@ mod tests {
             energy_record(0x2_1105_9000),
         ]
         .concat();
+        let mut perf_group = [0u8; 16];
+        perf_group[..4].copy_from_slice(&1u32.to_le_bytes());
+        perf_group[4..8].copy_from_slice(&0x34000u32.to_le_bytes());
+        perf_group[8..10].copy_from_slice(&256u16.to_le_bytes());
+        perf_group[12] = 3;
+        let mut clock = [0u8; 24];
+        clock[..3].copy_from_slice(&[24, 0, 1]);
         let pmgr_with = |reg: &[u64]| {
             encode(
                 &[
@@ -1992,6 +2119,8 @@ mod tests {
                     ("ps-regs", &u32s(&[1, 0x4000, 0x3ff, 0, 0, 0x3ff])),
                     ("devices", &devices),
                     ("hw-dpe-reg", &energy),
+                    ("perf-regs", &perf_group),
+                    ("clocks", &clock),
                 ],
                 &[],
             )
@@ -2042,6 +2171,8 @@ mod tests {
                 ("ps-regs", &u32s(&[1, 0x4000, 0x3ff, 0, 0, 0x3ff])),
                 ("devices", &devices),
                 ("hw-dpe-reg", &energy),
+                ("perf-regs", &perf_group),
+                ("clocks", &clock),
             ],
             &[],
         );
@@ -2067,6 +2198,13 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(
+            found.performance,
+            vec![PerfBank {
+                physical: 0x2_3d2b_4000,
+                selectors: vec![24]
+            }]
+        );
         assert_eq!(found.clusters, T8112_CLUSTERS.to_vec());
         assert_eq!(found.aon_fuses, Some((0x2_3d2c_8000, 0x4000)));
         assert_eq!(
@@ -2083,6 +2221,123 @@ mod tests {
                 .power_states,
             None
         );
+    }
+
+    #[test]
+    fn perf_groups_derive_sparse_selectors_from_each_dt_record_kind() {
+        use crate::machine::adt::encode;
+        let group = |index: u32, offset: u32, count: u16, class: u8| {
+            let mut entry = [0u8; 16];
+            entry[..4].copy_from_slice(&index.to_le_bytes());
+            entry[4..8].copy_from_slice(&offset.to_le_bytes());
+            entry[8..10].copy_from_slice(&count.to_le_bytes());
+            entry[12] = class;
+            entry
+        };
+        let mut device = [0u8; PMGR_DEVICE];
+        device[0] = 0x20;
+        device[8] = 9;
+        device[9] = 0;
+        let source = |bytes: &[u8]| {
+            let mut entry = [0u8; 24];
+            entry[..bytes.len()].copy_from_slice(bytes);
+            entry
+        };
+        let groups = [
+            group(1, 0x34000, 256, 3),
+            group(0, 0x58000, 256, 0),
+            group(0, 0x78000, 12, 0),
+        ]
+        .concat();
+        let clocks = [source(&[24, 0, 1]), source(&[25, 0, 0])].concat();
+        let domains = [source(&[0, 31, 0]), source(&[0, 0, 0])].concat();
+        let events = [
+            source(&[0, 0, 1, 80, 41, 0, 40, 0]),
+            source(&[15, 0, 5, 52, 1, 2, 0, 2]),
+            source(&[0, 0, 0, 1, 0, 0, 120, 1]),
+            source(&[0, 0, 2, 96, 0, 0, 0, 0]),
+            source(&[0, 0, 7, 101, 0, 0, 12, 0]),
+            source(&[0, 1, 0, 128, 0, 0, 50, 1]),
+        ]
+        .concat();
+        let tree = |groups: &[u8], clocks: &[u8]| {
+            encode(
+                &[
+                    ("perf-regs", groups),
+                    ("devices", &device),
+                    ("clocks", clocks),
+                    ("power-domains", &domains),
+                    ("events", &events),
+                ],
+                &[],
+            )
+        };
+        let reg = [
+            Some((0x2_3b70_0000, 0xcc000)),
+            Some((0x2_3d28_0000, 0x7c000)),
+        ];
+        let data = tree(&groups, &clocks);
+        let node = Node::root(&data).unwrap();
+        assert_eq!(
+            performance_banks(&node, &reg).unwrap(),
+            vec![
+                PerfBank {
+                    physical: 0x2_3d2b_4000,
+                    selectors: vec![9, 24, 31, 40, 41]
+                },
+                PerfBank {
+                    physical: 0x2_3b75_8000,
+                    selectors: vec![120]
+                },
+                PerfBank {
+                    physical: 0x2_3b77_8000,
+                    selectors: vec![0, 1]
+                },
+            ]
+        );
+        for invalid in [
+            groups[..47].to_vec(),
+            {
+                let mut bad = groups.clone();
+                bad[13] = 2;
+                bad
+            },
+            {
+                let mut bad = groups.clone();
+                bad[15] = 2;
+                bad
+            },
+            {
+                let mut bad = groups.clone();
+                bad[12] = 1;
+                bad
+            },
+            {
+                let mut bad = groups.clone();
+                bad[..4].copy_from_slice(&3u32.to_le_bytes());
+                bad
+            },
+        ] {
+            let data = tree(&invalid, &clocks);
+            assert!(performance_banks(&Node::root(&data).unwrap(), &reg).is_err());
+        }
+        for invalid in [
+            clocks[..47].to_vec(),
+            source(&[12, 2, 1]).to_vec(),
+            source(&[0, 3, 1]).to_vec(),
+        ] {
+            let data = tree(&groups, &invalid);
+            assert!(performance_banks(&Node::root(&data).unwrap(), &reg).is_err());
+        }
+        assert!(performance_banks(&node, &[Some((0, 0x100)), reg[1]]).is_err());
+        assert!(performance_banks(&node, &[Some((u64::MAX - 0x58000, 0xcc000)), reg[1]]).is_err());
+        let relocated = [
+            Some((0x5_0000_0000, 0xcc000)),
+            Some((0x6_0000_0000, 0x7c000)),
+        ];
+        let placed = performance_banks(&node, &relocated).unwrap();
+        assert_eq!(placed[0].physical, 0x6_0003_4000);
+        assert_eq!(placed[1].physical, 0x5_0005_8000);
     }
 
     /// The J473AP's `/arm-io/mcc` and `/arm-io/pmp` registers behind its one

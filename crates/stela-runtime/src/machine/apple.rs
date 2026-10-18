@@ -22,6 +22,7 @@ use crate::platform::apple::{
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
     lockdown::Lockdown,
+    perf::PerfCounters,
     pmgr::{ACTIVE, Pmgr, PowerState},
     ptd::{self, Ptd},
     uart::S5lUart,
@@ -380,6 +381,30 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// One version-1 PMGR performance bank, at its `perf-regs` global word.
+    pub fn add_performance_counters(
+        &mut self,
+        physical: u64,
+        selectors: &[u16],
+    ) -> Result<(), String> {
+        let model = PerfCounters::new(selectors).map_err(String::from)?;
+        let spans = model.spans();
+        let device = self.bus.add(Box::new(model));
+        for (offset, bytes) in spans {
+            self.bus
+                .map(
+                    device,
+                    physical
+                        .checked_add(offset)
+                        .ok_or("PMGR performance address overflows")?,
+                    bytes,
+                    offset,
+                )
+                .map_err(|error| format!("PMGR performance placement: {error:?}"))?;
+        }
+        Ok(())
+    }
+
     /// A CPU/CPM energy bank at its absolute `hw-dpe-reg` address. Map only
     /// the two accumulators and, for CPM, its separate configuration word.
     pub fn add_cpu_energy(&mut self, physical: u64, cpm: bool) -> Result<(), String> {
@@ -689,6 +714,24 @@ mod tests {
                 .read(0, core + energy::CONTROL_OFFSET, 8, 0)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn performance_banks_map_sparse_words_without_claiming_holes() {
+        let mut devices = AppleDevices::new();
+        let base = 0x2_3d2b_4000;
+        devices.add_performance_counters(base, &[2, 7]).unwrap();
+        assert_eq!(devices.read(0, base, 4, 0), Ok(0));
+        devices.write(0, base, 4, 1, 0).unwrap();
+        devices.write(0, base + 0x120, 4, 3, 0).unwrap();
+        devices.write(0, base + 0x128, 4, 0x1234, 0).unwrap();
+        devices.write(0, base + 0x12c, 4, 0x5678, 0).unwrap();
+        assert_eq!(devices.read(0, base + 0x120, 4, 0), Ok(3));
+        assert_eq!(devices.read(0, base + 0x128, 4, 0), Ok(0x1234));
+        assert_eq!(devices.read(0, base + 0x12c, 4, 0), Ok(0x5678));
+        assert!(devices.read(0, base + 0x124, 4, 0).is_err());
+        assert!(devices.read(0, base + 0x130, 4, 0).is_err());
+        assert!(devices.read(0, base + 0x128, 8, 0).is_err());
     }
 
     #[derive(Clone, Default)]

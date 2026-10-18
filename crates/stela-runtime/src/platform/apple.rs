@@ -24,6 +24,7 @@ pub mod fuse;
 pub mod interrupt;
 pub mod ipi;
 pub mod lockdown;
+pub mod perf;
 pub mod pmgr;
 pub mod ptd;
 pub mod regfile;

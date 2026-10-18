@@ -415,6 +415,9 @@ fn devices(
             blocks.len()
         ));
     }
+    for bank in board.map_or(&[][..], |board| &board.performance) {
+        devices.add_performance_counters(bank.physical, &bank.selectors)?;
+    }
     for bank in board.map_or(&[][..], |board| &board.energy) {
         devices.add_cpu_energy(bank.physical, bank.cpm)?;
     }
