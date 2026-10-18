@@ -187,7 +187,8 @@ mod tests {
             sep.read(0x8830, Width::Double, &mut access),
             Ok(0x0000_0001_00d2_01ff)
         );
-        assert_eq!(sep.read(0x8838, Width::Double, &mut access), Ok(0));
+        // ASC snapshots the pre-pop count in the received status word.
+        assert_eq!(sep.read(0x8838, Width::Double, &mut access), Ok(1 << 52));
         assert!(!latch.is_asserted(Wire::Aic(irqs[2])));
         let mut access = Access::new(0, 0, &mut latch);
         assert!(matches!(

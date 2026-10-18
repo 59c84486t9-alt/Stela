@@ -16,7 +16,10 @@
 //! 0x8830 and 0x8838, `_getInboxEmpty`/`_getInboxFull` read 0x8110 bits 17/16,
 //! `_runCPU` sets or clears 0x44 bit 4 and on stop also clears bit 5).
 //! `getMailboxBulk` takes the number of waiting messages from I2A control
-//! bits 23:20, and the full and empty queries treat bits 19:18 as errors,
+//! bits 23:20. Each received second word also snapshots the pre-pop count in
+//! bits 55:52 (`getMailboxBulk`, kernel file 0x1badaa8); the driver uses
+//! that snapshot to stop a bulk read after its last message. The full and
+//! empty queries treat bits 19:18 as errors,
 //! which the model never raises.
 //!
 //! The ADT lists four interrupts in the order of their AIC numbers rotated by
@@ -52,6 +55,7 @@ const CPU_CONTROL: u64 = 0x44;
 const RUN: u64 = 1 << 4;
 /// Cleared with RUN on stop; its meaning is not documented, so it is held.
 const CPU_CONTROL_HELD: u64 = 1 << 5;
+const IDLE_STATUS: u64 = 0x8000;
 const A2I_CONTROL: u64 = 0x8110;
 const I2A_CONTROL: u64 = 0x8114;
 const A2I_SEND0: u64 = 0x8800;
@@ -64,6 +68,7 @@ const CONTROL_EMPTY: u64 = 1 << 17;
 /// The I2A control's count of waiting messages, bits 23:20.
 const OCCUPANCY_SHIFT: u32 = 20;
 const OCCUPANCY_MAX: usize = 0xf;
+const CONTROL_STATUS: u64 = CONTROL_FULL | CONTROL_EMPTY | (0xf << OCCUPANCY_SHIFT);
 /// The second message word holds the endpoint in its low byte.
 const ENDPOINT: u64 = 0xff;
 
@@ -144,6 +149,16 @@ impl Asc {
             lines,
             levels: [None; 4],
         })
+    }
+
+    /// Emulated boot-chain handoff: native firmware is running and both
+    /// mailboxes are enabled before the AP attaches. RTBuddy's preloaded
+    /// path waits for HELLO without reinitializing those controls.
+    pub fn booted(firmware: Box<dyn Firmware>, lines: Lines) -> Result<Self, &'static str> {
+        let mut asc = Self::new(firmware, true, lines)?;
+        asc.a2i_control = CONTROL_ENABLE;
+        asc.outbox_enabled = true;
+        Ok(asc)
     }
 
     /// A native coprocessor's typed state, for its DMA boundary. The wrapper
@@ -235,6 +250,11 @@ impl MmioDevice for Asc {
         let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
         let value = match (offset, width) {
             (CPU_CONTROL, Width::Word) => self.cpu_control,
+            // AppleASCWrapV4::_isIdle (kernel file 0x1bad724) consumes
+            // (IDLE_STATUS & 3) != 0. Emulated die choice: bit 0 denotes
+            // quiescent native mailboxes, with no partially posted message
+            // or pending response. Unknown writes remain refused.
+            (IDLE_STATUS, Width::Word) => u64::from(self.send0.is_none() && self.outbox.is_empty()),
             (A2I_CONTROL, Width::Word) => self.a2i_control | CONTROL_EMPTY,
             (I2A_CONTROL, Width::Word) => {
                 let waiting = if self.visible() { self.outbox.len() } else { 0 };
@@ -250,9 +270,10 @@ impl MmioDevice for Asc {
                 if !self.visible() {
                     return Err(fail("load of an empty outbox"));
                 }
+                let waiting = self.outbox.len().min(OCCUPANCY_MAX) as u64;
                 let message = self.outbox.pop_front().expect("visible outbox has a head");
                 self.update_lines(access);
-                u64::from(message.endpoint)
+                u64::from(message.endpoint) | waiting << (32 + OCCUPANCY_SHIFT)
             }
             _ => return Err(fail("ASC register without a model")),
         };
@@ -269,12 +290,16 @@ impl MmioDevice for Asc {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         match (offset, width) {
             (CPU_CONTROL, Width::Word) => self.write_cpu_control(value).map_err(fail)?,
-            (A2I_CONTROL, Width::Word) if value & !CONTROL_ENABLE == 0 => self.a2i_control = value,
-            (I2A_CONTROL, Width::Word) if value & !CONTROL_ENABLE == 0 => {
+            (A2I_CONTROL, Width::Word) if value & !(CONTROL_ENABLE | CONTROL_STATUS) == 0 => {
+                self.a2i_control = value & CONTROL_ENABLE
+            }
+            (I2A_CONTROL, Width::Word) if value & !(CONTROL_ENABLE | CONTROL_STATUS) == 0 => {
+                // _enableOutbox (kernel file 0x1badc28..0x1badc94)
+                // preserves read-only FIFO status in its RMW store.
                 self.outbox_enabled = value & CONTROL_ENABLE != 0;
             }
             (A2I_CONTROL | I2A_CONTROL, Width::Word) => {
-                return Err(fail("mailbox control bits other than enable are status"));
+                return Err(fail("mailbox control field without a model"));
             }
             (A2I_SEND0, Width::Double) => self.send0 = Some(value),
             (A2I_SEND1, Width::Double) => self.send(value).map_err(fail)?,
@@ -282,6 +307,10 @@ impl MmioDevice for Asc {
         }
         self.update_lines(access);
         Ok(())
+    }
+    fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        self.update_lines(access);
+        Ok(None)
     }
 }
 
@@ -329,6 +358,42 @@ mod tests {
     }
 
     #[test]
+    fn boot_handoff_delivers_hello_without_an_ap_mailbox_enable() {
+        let mut latch = InterruptLatch::new();
+        let mut asc = Asc::booted(Box::new(Echo), Lines::from_interrupts(LINES)).unwrap();
+        {
+            let mut access = Access::new(0, 0, &mut latch);
+            asc.advance(&mut access).unwrap();
+        }
+        assert!(latch.is_asserted(Wire::Aic(LINES[2])));
+        let mut access = Access::new(0, 0, &mut latch);
+        assert_eq!(asc.read(IDLE_STATUS, Width::Word, &mut access), Ok(0));
+        assert_eq!(
+            asc.read(A2I_CONTROL, Width::Word, &mut access),
+            Ok(CONTROL_ENABLE | CONTROL_EMPTY)
+        );
+        let control = asc.read(I2A_CONTROL, Width::Word, &mut access).unwrap();
+        asc.write(I2A_CONTROL, Width::Word, control, &mut access)
+            .unwrap();
+        assert_eq!(receive(&mut asc, &mut access), (0x11, 1 << 52));
+        assert_eq!(asc.read(IDLE_STATUS, Width::Word, &mut access), Ok(1));
+        assert!(!latch.is_asserted(Wire::Aic(LINES[2])));
+        let mut access = Access::new(0, 0, &mut latch);
+        asc.write(A2I_SEND0, Width::Double, 0x123, &mut access)
+            .unwrap();
+        assert_eq!(asc.read(IDLE_STATUS, Width::Word, &mut access), Ok(0));
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        asc.write(A2I_SEND0, Width::Double, 0x456, &mut access)
+            .unwrap();
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        assert_eq!(receive(&mut asc, &mut access), (0x123, 0x21 | 2 << 52));
+        assert_eq!(receive(&mut asc, &mut access), (0x456, 0x21 | 1 << 52));
+        assert!(asc.read(I2A_RECV0, Width::Double, &mut access).is_err());
+    }
+
+    #[test]
     fn a_started_coprocessor_answers_through_the_enabled_outbox() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
@@ -358,7 +423,7 @@ mod tests {
             asc.read(I2A_CONTROL, Width::Word, &mut access),
             Ok(1 | 1 << OCCUPANCY_SHIFT)
         );
-        assert_eq!(receive(&mut asc, &mut access), (0x11, 0));
+        assert_eq!(receive(&mut asc, &mut access), (0x11, 1 << 52));
         assert_eq!(
             asc.read(I2A_CONTROL, Width::Word, &mut access),
             Ok(1 | CONTROL_EMPTY)
@@ -372,7 +437,7 @@ mod tests {
             asc.read(A2I_CONTROL, Width::Word, &mut access),
             Ok(CONTROL_EMPTY)
         );
-        assert_eq!(receive(&mut asc, &mut access), (0xabc, 0x21));
+        assert_eq!(receive(&mut asc, &mut access), (0xabc, 0x21 | 1 << 52));
         assert!(!latch.is_asserted(Wire::Aic(LINES[2])));
         assert!(latch.is_asserted(Wire::Aic(LINES[3])));
     }
@@ -406,10 +471,10 @@ mod tests {
                 .is_err()
         );
         assert!(
-            asc.write(I2A_CONTROL, Width::Word, CONTROL_EMPTY, &mut access)
+            asc.write(I2A_CONTROL, Width::Word, 1 << 7, &mut access)
                 .is_err()
         );
-        assert!(asc.read(0x8000, Width::Word, &mut access).is_err());
+        assert!(asc.read(0x8004, Width::Word, &mut access).is_err());
         assert!(asc.read(I2A_RECV0, Width::Word, &mut access).is_err());
     }
 }

@@ -369,9 +369,8 @@ impl AppleDevices {
     ) -> Result<(), String> {
         let irq = |n| AicInput::new(0, n);
         let rtkit = RtKit::new(Vec::new(), Management::Ordinary).map_err(String::from)?;
-        let wrapper = Asc::new(
+        let wrapper = Asc::booted(
             Box::new(rtkit),
-            true,
             AscLines::from_interrupts(placement.interrupts.map(irq)),
         )
         .map_err(String::from)?;

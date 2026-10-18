@@ -47,6 +47,9 @@ const ASQ: u64 = 0x28;
 const ACQ: u64 = 0x30;
 const ADMIN_HEAD: u64 = 0x1004;
 const IO_HEAD: u64 = 0x100c;
+const IO_SQ: u64 = 0x1200;
+const IO_CQ: u64 = 0x1208;
+const TAG_STATUS: u64 = 0x28000;
 const MAX_PENDING: u64 = 0x1210;
 const BOOT_STATUS: u64 = 0x1300;
 const MODESEL: u64 = 0x1304;
@@ -112,7 +115,7 @@ pub struct Ans {
     medium: Medium,
     config: u32,
     status: u32,
-    interrupt_mask: bool,
+    interrupt_mask: u32,
     irq: Option<AicInput>,
     irq_level: bool,
     aqa: u32,
@@ -143,7 +146,7 @@ impl Ans {
             medium,
             config: 0,
             status: 0,
-            interrupt_mask: false,
+            interrupt_mask: 0,
             irq,
             irq_level: false,
             aqa: 0,
@@ -171,9 +174,49 @@ impl Ans {
         4096 << ((self.config >> 7) & 0xf)
     }
 
+    fn base(&self, offset: u64) -> Option<u64> {
+        Some(match offset {
+            ASQ => self.queues[0].sq,
+            ACQ => self.queues[0].cq,
+            IO_SQ => self.queues[1].sq,
+            IO_CQ => self.queues[1].cq,
+            ADMIN_TCB => self.tcb_bases[0],
+            IO_TCB => self.tcb_bases[1],
+            _ => return None,
+        })
+    }
+
+    /// SPTM 26A434 VA 0xfffffff0270c7250/0x270c6fd0 programs the
+    /// linear I/O queue bases; 0x270c7470 supplies the SQ/CQ entry counts.
+    /// Auto management (CGv2 0x3de5ad8) activates that single queue without
+    /// Create SQ/CQ commands. Existing manually created queues use the same
+    /// submission, completion, bounds and interrupt machinery.
+    fn refresh_auto_queue(&mut self) {
+        if !self.auto_queue || self.config & ENABLE == 0 {
+            return;
+        }
+        let sq_entries = self.max_pending as u16;
+        let cq_entries = (self.max_pending >> 16) as u16;
+        let q = &mut self.queues[1];
+        if q.sq != 0
+            && q.cq != 0
+            && sq_entries != 0
+            && cq_entries != 0
+            && !q.sq_enabled
+            && !q.cq_enabled
+        {
+            q.sq_entries = sq_entries;
+            q.cq_entries = cq_entries;
+            q.sq_enabled = true;
+            q.cq_enabled = true;
+            q.interrupt = true;
+            q.phase = true;
+        }
+    }
+
     fn update_irq(&mut self, access: &mut Access<'_>) {
-        let level =
-            !self.interrupt_mask && self.queues.iter().any(|q| q.interrupt && q.pending != 0);
+        let level = self.interrupt_mask & 1 == 0
+            && self.queues.iter().any(|q| q.interrupt && q.pending != 0);
         if self.irq_level != level {
             self.irq_level = level;
             if let Some(irq) = self.irq {
@@ -237,6 +280,7 @@ impl Ans {
             self.shutdown = false;
         }
         self.config = value;
+        self.refresh_auto_queue();
         Ok(())
     }
 
@@ -366,6 +410,33 @@ impl MmioDevice for Ans {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        if let Some(base) = self.base(offset & !7) {
+            return match (offset % 8, width) {
+                (0, Width::Double) => Ok(base),
+                (0 | 4, Width::Word) => Ok((base >> ((offset % 8) * 8)) & 0xffff_ffff),
+                _ => Err(refuse(
+                    NAME,
+                    offset,
+                    width,
+                    Direction::Read,
+                    "ANS base register width or alignment",
+                )),
+            };
+        }
+        // SPTM 0x270c7c40 invalidates a tag then checks its three-bit
+        // status in a four-bit lane (eight tags per word). The controller
+        // has no cached translations after a synchronous DMA completes.
+        if (TAG_STATUS..TAG_STATUS + 32).contains(&offset)
+            && offset.is_multiple_of(4)
+            && width == Width::Word
+        {
+            let first = ((offset - TAG_STATUS) * 2) as u16;
+            return Ok(self
+                .pending
+                .iter()
+                .filter(|(_, tag)| (first..first + 8).contains(tag))
+                .fold(0, |bits, (_, tag)| bits | (1 << ((tag - first) * 4))));
+        }
         let value = match (offset, width) {
             (CAP, Width::Double) => CAPABILITIES,
             (CAP, Width::Word) => CAPABILITIES & u64::from(u32::MAX),
@@ -407,20 +478,37 @@ impl MmioDevice for Ans {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let error = |reason| refuse(NAME, offset, width, Direction::Write, reason);
-        if width == Width::Double {
-            if self.config & ENABLE != 0 {
+        if let Some(old) = self.base(offset & !7) {
+            let base = offset & !7;
+            if self.config & ENABLE != 0 && !matches!(base, IO_SQ | IO_CQ) {
                 return Err(error("ANS queue/TCB base changed while enabled"));
             }
+            if !self.pending.is_empty() || self.queues[1].pending != 0 {
+                return Err(error("ANS base changed with outstanding commands"));
+            }
+            // SPTM 0x270c88c4..0x270c88e8 and 0x270c76cc..0x270c7750
+            // issue low/high 32-bit stores to TCB and queue addresses.
+            let value = match (offset % 8, width) {
+                (0, Width::Double) => value,
+                (0 | 4, Width::Word) if value <= u64::from(u32::MAX) => {
+                    let shift = (offset % 8) * 8;
+                    (old & !(0xffff_ffff << shift)) | (value << shift)
+                }
+                _ => return Err(error("ANS base register width or alignment")),
+            };
             if !value.is_multiple_of(4096) {
                 return Err(error("ANS queue/TCB base is not page-aligned"));
             }
-            match offset {
+            match base {
                 ASQ => self.queues[0].sq = value,
                 ACQ => self.queues[0].cq = value,
+                IO_SQ => self.queues[1].sq = value,
+                IO_CQ => self.queues[1].cq = value,
                 ADMIN_TCB => self.tcb_bases[0] = value,
                 IO_TCB => self.tcb_bases[1] = value,
-                _ => return Err(error("ANS 64-bit register without a model")),
+                _ => unreachable!(),
             }
+            self.refresh_auto_queue();
             return Ok(());
         }
         if width != Width::Word || value > u64::from(u32::MAX) {
@@ -429,11 +517,13 @@ impl MmioDevice for Ans {
         let value = value as u32;
         match offset {
             CC => self.configure(value).map_err(error)?,
-            INTMS | INTMC if value & !1 == 0 => {
-                self.interrupt_mask = if offset == INTMS {
-                    self.interrupt_mask || value != 0
+            INTMS | INTMC => {
+                // NVMe's full 32-bit interrupt mask: W1S/W1C. Only
+                // vector zero has a source in this single-vector die.
+                if offset == INTMS {
+                    self.interrupt_mask |= value;
                 } else {
-                    self.interrupt_mask && value == 0
+                    self.interrupt_mask &= !value;
                 }
             }
             AQA if self.config & ENABLE == 0 && value & 0xf000_f000 == 0 => self.aqa = value,
@@ -449,7 +539,7 @@ impl MmioDevice for Ans {
                 self.max_pending = value
             }
             MODESEL if value == 0 => self.modesel = value,
-            AUTO_QUEUE if value == 0 => self.auto_queue = false,
+            AUTO_QUEUE if value <= 1 => self.auto_queue = value != 0,
             TCB_COUNT if value < u32::from(TAGS) && self.config & ENABLE == 0 => {
                 self.tcb_count = value as u16
             }
@@ -467,6 +557,7 @@ impl MmioDevice for Ans {
             }
             _ => return Err(error("ANS register, field or state without a model")),
         }
+        self.refresh_auto_queue();
         self.update_irq(access);
         Ok(())
     }
@@ -608,6 +699,66 @@ mod tests {
     }
 
     #[test]
+    fn sptm_split_bases_auto_queue_and_packed_invalidation_status() {
+        let mut rig = Rig::new();
+        rig.write(CC, 0).unwrap();
+        for (register, address) in [
+            (ASQ, SQ),
+            (ACQ, CQ),
+            (ADMIN_TCB, TCB),
+            (IO_TCB, IOTCB),
+            (IO_SQ, IOSQ),
+            (IO_CQ, IOCQ),
+        ] {
+            rig.write(register, address & 0xffff_ffff).unwrap();
+            rig.write(register + 4, address >> 32).unwrap();
+            assert_eq!(
+                rig.ans.read(
+                    register,
+                    Width::Double,
+                    &mut Access::new(0, 0, &mut rig.latch)
+                ),
+                Ok(address)
+            );
+            assert_eq!(
+                rig.ans.read(
+                    register + 4,
+                    Width::Word,
+                    &mut Access::new(0, 0, &mut rig.latch)
+                ),
+                Ok(address >> 32)
+            );
+        }
+        rig.write(MAX_PENDING, 4 | (4 << 16)).unwrap();
+        rig.write(AUTO_QUEUE, 1).unwrap();
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+        assert!(rig.ans.queues[1].sq_enabled && rig.ans.queues[1].cq_enabled);
+        rig.submit(1, 2, 2, 1, DATA, [0; 6]).unwrap();
+        assert_eq!(rig.bytes(IOCQ + 14, 2), [1, 0]);
+        rig.retire(1, 2);
+        rig.write(IO_SUBMIT, 2).unwrap();
+        assert_eq!(
+            rig.ans.read(
+                TAG_STATUS,
+                Width::Word,
+                &mut Access::new(0, 0, &mut rig.latch)
+            ),
+            Ok(1 << 8)
+        );
+        assert!(rig.write(TCB_INVALIDATE, 2).is_err());
+        rig.run().unwrap();
+        rig.retire(1, 2);
+        assert_eq!(
+            rig.ans.read(
+                TAG_STATUS,
+                Width::Word,
+                &mut Access::new(0, 0, &mut rig.latch)
+            ),
+            Ok(0)
+        );
+    }
+
+    #[test]
     fn private_identify_matches_features_and_partition_capacity() {
         let mut rig = Rig::new();
         rig.submit(0, 0, 6, 0, DATA, [0; 6]).unwrap();
@@ -639,9 +790,11 @@ mod tests {
         assert_eq!(cqe[14], 1);
         assert_eq!(&cqe[8..14], &[0; 6]);
         assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
-        rig.write(INTMS, 1).unwrap();
+        rig.write(INTMS, u64::from(u32::MAX)).unwrap();
+        assert_eq!(rig.ans.interrupt_mask, u32::MAX);
         assert!(!rig.latch.is_asserted(Wire::Aic(IRQ)));
         rig.write(INTMC, 1).unwrap();
+        assert_eq!(rig.ans.interrupt_mask, u32::MAX - 1);
         assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
         assert!(rig.write(ADMIN_SUBMIT, 0).is_err());
         rig.retire(0, 0);
@@ -731,7 +884,7 @@ mod tests {
         );
         assert_eq!(rig.ans.config, ENTRY_SIZES | ENABLE);
         assert!(rig.write(MODESEL, 1).is_err());
-        assert!(rig.write(AUTO_QUEUE, 1).is_err());
+        assert!(rig.write(AUTO_QUEUE, 2).is_err());
         assert!(rig.write(ADMIN_HEAD, 3).is_err());
     }
 }

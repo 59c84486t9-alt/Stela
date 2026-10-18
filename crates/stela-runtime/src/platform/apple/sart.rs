@@ -16,7 +16,16 @@ use crate::platform::dma::{DmaError, Iommu, Memory};
 const NAME: &str = "sart";
 pub const ENTRIES: usize = 16;
 pub const PAGE: u64 = 4096;
-pub const REGISTER_BYTES: u64 = 0xc0;
+pub const REGISTER_BYTES: u64 = 0x8028;
+const ENTRY_BYTES: u64 = 0xc0;
+/// SPTM sart_sanity_check_throttles, VA 0xfffffff0270cb7bc..270cb838,
+/// with version-3 layout at 0xfffffff027019ac0: three nonzero boot
+/// configuration words, snapshotted before mappings can be installed.
+/// Emulated die / boot-chain choice: one synchronous transaction per
+/// channel. There is no buffered work to throttle. Changes to this reset
+/// configuration refuse until their field semantics are recovered.
+const THROTTLES: [u64; 3] = [0x8014, 0x801c, 0x8024];
+const SYNCHRONOUS_CHANNEL: u32 = 1;
 /// Bus-local offset used to map the separate, DT-placed idle word.
 pub const IDLE: u64 = 0x1000;
 const BASE: u64 = 0x40;
@@ -50,7 +59,7 @@ impl Sart {
     }
 
     fn register(&self, offset: u64) -> Option<u32> {
-        if offset >= REGISTER_BYTES || !offset.is_multiple_of(4) {
+        if offset >= ENTRY_BYTES || !offset.is_multiple_of(4) {
             return None;
         }
         let entry = self.entries[(offset % BASE / 4) as usize];
@@ -95,6 +104,9 @@ impl MmioDevice for Sart {
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         if width == Width::Word {
+            if THROTTLES.contains(&offset) {
+                return Ok(u64::from(SYNCHRONOUS_CHANNEL));
+            }
             if offset == IDLE {
                 return Ok(u64::from(self.idle));
             }
@@ -121,6 +133,13 @@ impl MmioDevice for Sart {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word || value > u64::from(u32::MAX) {
             return Err(fail("SART requires a 32-bit word"));
+        }
+        if THROTTLES.contains(&offset) {
+            return if value == u64::from(SYNCHRONOUS_CHANNEL) {
+                Ok(()) // Idempotent restore of Stela's boot configuration.
+            } else {
+                Err(fail("SART throttle configuration change is not modeled"))
+            };
         }
         if offset == IDLE {
             if value > 1 {
@@ -153,6 +172,21 @@ mod tests {
         apple::interrupt::InterruptLatch,
         dma::{Port, tests::Ram},
     };
+
+    #[test]
+    fn synchronous_channel_configuration_is_nonzero_and_never_grants_dma() {
+        let mut sart = Sart::default();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for offset in THROTTLES {
+            assert_eq!(sart.read(offset, Width::Word, &mut access), Ok(1));
+            sart.write(offset, Width::Word, 1, &mut access).unwrap();
+            assert!(sart.write(offset, Width::Word, 0, &mut access).is_err());
+            assert!(sart.write(offset, Width::Word, 2, &mut access).is_err());
+            assert!(sart.read(offset, Width::Double, &mut access).is_err());
+        }
+        assert!(!sart.allows(0x1000, 0x1fff));
+    }
 
     #[test]
     fn entries_filter_both_directions_and_removal_revokes_access() {
