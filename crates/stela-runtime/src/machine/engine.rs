@@ -8,7 +8,7 @@ mod unprivileged;
 mod watch;
 
 use super::{
-    chip::{AdmitFilter, Check},
+    chip::{AdmitTable, Check},
     cpu::{
         Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
         HCR_VI, HCR_VSE,
@@ -52,7 +52,6 @@ const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 const FETCH_CACHE: usize = 1024;
 const JUMP_CACHE: usize = 4096;
 const POINTER_MEMO: usize = 1024;
-const ADMITTED: usize = 4096;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
 
@@ -569,10 +568,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// Results of the implicit-operand PAC forms under `pointer_memo_inputs`.
     pointer_memo: Vec<Option<PointerEntry>>,
     pointer_memo_inputs: Option<PointerInputs>,
-    /// Words `Chip::admit` has answered, by a hash of the word.
-    admitted: Vec<Option<(u32, u32)>>,
-    /// The words the chip's `Chip::admit` may change.
-    admit_filter: AdmitFilter,
+    /// The chip's `Chip::admit`, indexed.
+    admit_table: AdmitTable,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
     /// The number of the running PE.
@@ -616,7 +613,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile.chip,
             "the boot PE is not the profile's chip"
         );
-        let admit_filter = profile.chip.admit_filter();
+        let admit_table = profile.chip.admit_table();
         let mut machine = Self {
             cpu,
             host,
@@ -642,8 +639,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             device_lines: None,
             pointer_memo: vec![None; POINTER_MEMO],
             pointer_memo_inputs: None,
-            admitted: vec![None; ADMITTED],
-            admit_filter,
+            admit_table,
             watch: Watch::default(),
             current: 0,
             waiting: None,
@@ -1531,22 +1527,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(self.admit(u32::from_le_bytes(bytes)))
     }
 
-    /// `Chip::admit` of the profile's chip, remembered: a pure function of
-    /// the word that searches every absent-form group, and every exit asks it
-    /// again of the word that exited.
-    fn admit(&mut self, word: u32) -> u32 {
-        if !self.admit_filter.may_change(word) {
-            return word;
-        }
-        let slot = (word.wrapping_mul(0x9e37_79b1) >> 20) as usize % ADMITTED;
-        match self.admitted[slot] {
-            Some((raw, admitted)) if raw == word => admitted,
-            _ => {
-                let admitted = self.profile.chip.admit(word);
-                self.admitted[slot] = Some((word, admitted));
-                admitted
-            }
-        }
+    /// The word the profile's chip executes for `word` (`Chip::admit`).
+    fn admit(&self, word: u32) -> u32 {
+        self.admit_table.admit(word)
     }
 
     fn exit(&mut self, index: usize, next_pc: u64, kind: u64) -> Step {

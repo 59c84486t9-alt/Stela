@@ -5,6 +5,7 @@
 //! [`Chip::implemented`], and [`Chip::admit`] makes an instruction form the
 //! chip lacks UNDEFINED (or a NOP, where Arm decodes it so).
 use super::system::generated::{CAPS, CHIPS, Feature};
+use alloc::{vec, vec::Vec};
 
 #[rustfmt::skip]
 mod forms;
@@ -87,27 +88,38 @@ fn unallocated_group(word: u32) -> bool {
     matches!((word >> 25) & 0xf, 0b0001 | 0b0011)
 }
 
-/// An Apple CPU, in the order of the generated per-chip tables.
-/// A chip's [`Chip::admit_filter`]: a word whose bits 31:21 it does not
-/// hold executes as itself, so most words skip the search of absent forms.
+/// A chip's absent-form groups indexed by bits 31:21 of the word, in
+/// [`forms::ABSENT`] order, so that [`AdmitTable::admit`] searches only the
+/// groups whose forms share a word's prefix; most prefixes have none.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdmitFilter([u64; AdmitFilter::WORDS]);
+pub struct AdmitTable {
+    chip: Chip,
+    /// The range of `groups` for each prefix, and its end.
+    starts: Vec<u32>,
+    groups: Vec<u16>,
+}
 
-impl AdmitFilter {
+impl AdmitTable {
     const SHIFT: u32 = 21;
-    const WORDS: usize = (1 << (32 - Self::SHIFT)) / 64;
+    const PREFIXES: usize = 1 << (32 - Self::SHIFT);
 
-    /// Whether `Chip::admit` may change `word`.
-    pub fn may_change(&self, word: u32) -> bool {
+    /// [`Chip::admit`] of the table's chip.
+    pub fn admit(&self, word: u32) -> u32 {
+        if unallocated_group(word) {
+            return UDF;
+        }
         let prefix = (word >> Self::SHIFT) as usize;
-        self.0[prefix / 64] >> (prefix % 64) & 1 != 0
-    }
-
-    fn insert(&mut self, prefix: u32) {
-        self.0[prefix as usize / 64] |= 1 << (prefix % 64);
+        let groups = &self.groups[self.starts[prefix] as usize..self.starts[prefix + 1] as usize];
+        self.chip.admit_in(
+            word,
+            groups
+                .iter()
+                .map(|&group| &forms::ABSENT[usize::from(group)]),
+        )
     }
 }
 
+/// An Apple CPU, in the order of the generated per-chip tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Chip {
     AppleM1,
@@ -142,28 +154,23 @@ impl Chip {
         CAPS[self as usize]
     }
 
-    /// The word the chip executes for `word`: the word itself, `UDF #0` for a
-    /// form the chip lacks or a word in an unallocated top-level group, or NOP
-    /// for an absent form Arm decodes as NOP.
-    /// The bits 31:21 of every word [`Self::admit`] can change on this chip:
-    /// those of its absent forms and of the unallocated top-level groups.
-    pub fn admit_filter(self) -> AdmitFilter {
-        const PREFIX: u32 = (1 << (32 - AdmitFilter::SHIFT)) - 1;
+    /// The chip's [`AdmitTable`].
+    pub fn admit_table(self) -> AdmitTable {
+        const PREFIX: u32 = AdmitTable::PREFIXES as u32 - 1;
         let bit = 1u8 << self as u8;
-        let mut filter = AdmitFilter([0; AdmitFilter::WORDS]);
-        for prefix in 0..=PREFIX {
-            if unallocated_group(prefix << AdmitFilter::SHIFT) {
-                filter.insert(prefix);
-            }
-        }
-        for group in forms::ABSENT {
+        let mut by_prefix = vec![Vec::new(); AdmitTable::PREFIXES];
+        for (index, group) in forms::ABSENT.iter().enumerate() {
+            let index = u16::try_from(index).expect("fewer than 65536 absent-form groups");
             // Every prefix that agrees with a form on the group's mask.
-            let free = !(group.mask >> AdmitFilter::SHIFT) & PREFIX;
+            let free = !(group.mask >> AdmitTable::SHIFT) & PREFIX;
             for form in group.forms.iter().filter(|form| form.chips & bit != 0) {
-                let fixed = form.value >> AdmitFilter::SHIFT & !free;
+                let fixed = form.value >> AdmitTable::SHIFT & !free;
                 let mut varying = free;
                 loop {
-                    filter.insert(fixed | varying);
+                    let groups: &mut Vec<u16> = &mut by_prefix[(fixed | varying) as usize];
+                    if groups.last() != Some(&index) {
+                        groups.push(index);
+                    }
                     if varying == 0 {
                         break;
                     }
@@ -171,15 +178,34 @@ impl Chip {
                 }
             }
         }
-        filter
+        let mut starts = Vec::with_capacity(AdmitTable::PREFIXES + 1);
+        let mut groups = Vec::new();
+        for prefix in by_prefix {
+            starts.push(groups.len() as u32);
+            groups.extend(prefix);
+        }
+        starts.push(groups.len() as u32);
+        AdmitTable {
+            chip: self,
+            starts,
+            groups,
+        }
     }
 
+    /// The word the chip executes for `word`: the word itself, `UDF #0` for a
+    /// form the chip lacks or a word in an unallocated top-level group, or NOP
+    /// for an absent form Arm decodes as NOP.
     pub fn admit(self, word: u32) -> u32 {
         if unallocated_group(word) {
             return UDF;
         }
+        self.admit_in(word, forms::ABSENT.iter())
+    }
+
+    /// The first of `groups` holding a form this chip lacks that `word` is.
+    fn admit_in<'a>(self, word: u32, groups: impl Iterator<Item = &'a AbsentGroup>) -> u32 {
         let bit = 1u8 << self as u8;
-        for group in forms::ABSENT {
+        for group in groups {
             let Ok(index) = group
                 .forms
                 .binary_search_by_key(&(word & group.mask), |form| form.value)
@@ -340,13 +366,14 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn the_admit_filter_holds_every_word_admit_changes() {
+    fn the_admit_table_answers_as_the_full_search() {
         for chip in Chip::ALL {
-            let filter = chip.admit_filter();
-            let bit = 1u8 << chip as u8;
+            let table = chip.admit_table();
             for group in forms::ABSENT {
-                for form in group.forms.iter().filter(|form| form.chips & bit != 0) {
-                    assert!(filter.may_change(form.value), "{chip:?} {:#x}", form.value);
+                for form in group.forms {
+                    for word in [form.value, form.value | !group.mask] {
+                        assert_eq!(table.admit(word), chip.admit(word), "{chip:?} {word:#x}");
+                    }
                 }
             }
             // A deterministic spread of words, and the unallocated groups.
@@ -355,12 +382,10 @@ mod tests {
                 word ^= word << 13;
                 word ^= word >> 17;
                 word ^= word << 5;
-                if !filter.may_change(word) {
-                    assert_eq!(chip.admit(word), word, "{chip:?} {word:#x}");
-                }
+                assert_eq!(table.admit(word), chip.admit(word), "{chip:?} {word:#x}");
             }
-            assert!(filter.may_change(0x0200_0000) && filter.may_change(0xe7ff_deff));
-            assert!(!filter.may_change(0xf940_0020)); // ldr x0, [x1]
+            assert_eq!(table.admit(0xe7ff_deff), UDF);
+            assert_eq!(table.admit(0xf940_0020), 0xf940_0020); // ldr x0, [x1]
         }
     }
 
