@@ -111,6 +111,16 @@ impl Queue {
     }
 }
 
+/// Last DMA submission, retained for an explicit refusal diagnostic. This
+/// never grants keys or substitutes a successful completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submission {
+    pub queue: usize,
+    pub tag: u16,
+    pub command: [u8; 64],
+    pub tcb: [u8; 128],
+}
+
 pub struct Ans {
     medium: Medium,
     config: u32,
@@ -133,6 +143,7 @@ pub struct Ans {
     features: [u32; 12],
     timestamp: u64,
     os_build: [u8; 16],
+    last_submission: Option<Submission>,
 }
 
 impl Ans {
@@ -163,7 +174,12 @@ impl Ans {
             features: [0; 12],
             timestamp: 0,
             os_build: [0; 16],
+            last_submission: None,
         })
+    }
+
+    pub fn last_submission(&self) -> Option<&Submission> {
+        self.last_submission.as_ref()
     }
 
     pub fn pending(&self) -> bool {
@@ -309,6 +325,7 @@ impl Ans {
     /// and hash fields must be zero until those engines are modeled.
     pub fn run(&mut self, port: &mut Port<'_, '_>) -> Result<(), MmioError> {
         while let Some(&(queue, tag)) = self.pending.front() {
+            self.last_submission = None;
             let error = |reason| {
                 refuse(
                     NAME,
@@ -341,6 +358,12 @@ impl Ans {
             )
             .map_err(dma_error)
             .map_err(error)?;
+            self.last_submission = Some(Submission {
+                queue,
+                tag,
+                command: command.0,
+                tcb,
+            });
             if tcb[0] != 0 && tcb[0] != command.opcode()
                 || u16::from(tcb[2]) != tag
                 || tcb[3] != 0
@@ -860,6 +883,10 @@ mod tests {
         assert!(rig.ram.write(TCB + 24, &DATA.to_le_bytes()));
         rig.write(ADMIN_SUBMIT, 0).unwrap();
         assert!(rig.run().is_err());
+        let rejected = rig.ans.last_submission().unwrap();
+        assert_eq!((rejected.queue, rejected.tag), (0, 0));
+        assert_eq!(rejected.command[0], 6);
+        assert_eq!(rejected.tcb[64], 1);
         assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
         let mut rig = Rig::new();
         rig.sart

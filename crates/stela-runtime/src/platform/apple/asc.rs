@@ -161,6 +161,19 @@ impl Asc {
         Ok(asc)
     }
 
+    /// Read-only mailbox state for boot diagnostics.
+    pub fn diagnostic(&self) -> alloc::string::String {
+        alloc::format!(
+            "run={} a2i={:#x} i2a_enabled={} send={:x?} outbox={:x?} levels={:?}",
+            self.running,
+            self.a2i_control,
+            self.outbox_enabled,
+            self.send0,
+            self.outbox,
+            self.levels
+        )
+    }
+
     /// A native coprocessor's typed state, for its DMA boundary. The wrapper
     /// still owns all mailbox and interrupt effects; firmware cannot replace it.
     pub fn firmware<F: Firmware>(&self) -> Option<&F> {

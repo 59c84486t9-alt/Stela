@@ -70,6 +70,7 @@ pub struct AppleDevices {
     memory_controller: Option<DeviceId>,
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
+    storage_wrappers: Vec<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
     cpu_start: Option<CpuStarter>,
@@ -136,6 +137,15 @@ fn describe(error: MmioError) -> DeviceError {
     }
 }
 
+fn describe_transfer(error: MmioError) -> DeviceError {
+    match describe(error) {
+        DeviceError::NoDevice => DeviceError::TransferRefused("unmapped DMA service".into()),
+        DeviceError::Refused(reason) | DeviceError::TransferRefused(reason) => {
+            DeviceError::TransferRefused(reason)
+        }
+    }
+}
+
 impl Default for AppleDevices {
     fn default() -> Self {
         Self::new()
@@ -155,12 +165,26 @@ impl AppleDevices {
             ipi: None,
             masters: Vec::new(),
             storage_masters: Vec::new(),
+            storage_wrappers: Vec::new(),
             sep_masters: Vec::new(),
             cpu_start: None,
             reset_vectors: Vec::new(),
             starts: Vec::new(),
             selects: Vec::new(),
         }
+    }
+
+    /// State of native storage coprocessors, without register side effects.
+    pub fn storage_diagnostics(&self) -> Vec<String> {
+        self.storage_wrappers
+            .iter()
+            .map(|&id| {
+                self.bus
+                    .device::<Asc>(id)
+                    .expect("storage wrapper")
+                    .diagnostic()
+            })
+            .collect()
     }
 
     /// Apple's fast-IPI registers for PEs with these MPIDR_EL1 values, in PE
@@ -381,6 +405,7 @@ impl AppleDevices {
         )
         .map_err(String::from)?;
         let asc = self.bus.add(Box::new(wrapper));
+        self.storage_wrappers.push(asc);
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("ANS ASC placement: {e:?}"))?;
@@ -979,7 +1004,7 @@ impl Devices for AppleDevices {
                 memory,
                 access: &mut access,
             };
-            aes.run(&mut port).map_err(describe)?;
+            aes.run(&mut port).map_err(describe_transfer)?;
         }
         for &(ans, sart) in &self.storage_masters {
             let (ans, sart) = self
@@ -996,7 +1021,14 @@ impl Devices for AppleDevices {
                 memory,
                 access: &mut access,
             };
-            ans.run(&mut port).map_err(describe)?;
+            ans.run(&mut port)
+                .map_err(|error| match describe_transfer(error) {
+                    DeviceError::TransferRefused(reason) => DeviceError::TransferRefused(format!(
+                        "{reason}; ANS last submission {:02x?}",
+                        ans.last_submission()
+                    )),
+                    other => other,
+                })?;
         }
         for master in &self.sep_masters {
             let (sep, dart) = self

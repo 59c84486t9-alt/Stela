@@ -232,6 +232,9 @@ pub enum DeviceError {
     NoDevice,
     /// The device refused this register, width or state.
     Refused(String),
+    /// A DMA service could not execute. Survey mode may substitute unknown
+    /// register reads/writes, but cannot invent a completed DMA operation.
+    TransferRefused(String),
 }
 
 /// The board's devices on the guest physical bus. `cpu` is the number of the
@@ -1247,6 +1250,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         write: Option<u64>,
         error: &DeviceError,
     ) -> bool {
+        if matches!(error, DeviceError::TransferRefused(_)) {
+            return false;
+        }
         let pc = self.cpu.pc;
         let link = self.strip_instruction_pointer(self.cpu.state.x[30]);
         let Some(survey) = self.survey.as_mut() else {
@@ -1265,7 +1271,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 value: 0,
                 detail: match error {
                     DeviceError::NoDevice => "no device model".into(),
-                    DeviceError::Refused(detail) => detail.clone(),
+                    DeviceError::Refused(detail) | DeviceError::TransferRefused(detail) => {
+                        detail.clone()
+                    }
                 },
             }
         });
@@ -3094,7 +3102,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Ok(value) => value,
                 Err(error) if self.surveyed(physical, bytes, None, &error) => 0,
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
-                Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
+                Err(DeviceError::Refused(detail) | DeviceError::TransferRefused(detail)) => {
+                    return Err(refuse(self, detail));
+                }
             };
             let bits = u32::from(bytes) * 8;
             let mut value = if bits == 64 {
@@ -3138,7 +3148,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Ok(()) => {}
                 Err(error) if self.surveyed(physical, bytes, Some(value), &error) => {}
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
-                Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
+                Err(DeviceError::Refused(detail) | DeviceError::TransferRefused(detail)) => {
+                    return Err(refuse(self, detail));
+                }
             }
             if let Some((base, updated)) = writeback {
                 self.write_register(base, updated);
@@ -3191,7 +3203,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             Err(DeviceError::NoDevice) => {
                                 return Err(refuse(self, "no device model".into()));
                             }
-                            Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
+                            Err(
+                                DeviceError::Refused(detail) | DeviceError::TransferRefused(detail),
+                            ) => return Err(refuse(self, detail)),
                         };
                         *value = match (bytes, signed) {
                             (8, _) => raw,
@@ -3222,7 +3236,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             Err(DeviceError::NoDevice) => {
                                 return Err(refuse(self, "no device model".into()));
                             }
-                            Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
+                            Err(
+                                DeviceError::Refused(detail) | DeviceError::TransferRefused(detail),
+                            ) => return Err(refuse(self, detail)),
                         }
                     }
                     self.follow_memory_lock();
@@ -4061,6 +4077,26 @@ mod tests {
         fn lines(&mut self, _: usize, _: u64) -> Lines {
             Lines::default()
         }
+    }
+
+    #[test]
+    fn survey_substitutes_registers_but_never_dma_service_effects() {
+        let mut machine = machine(&[0]);
+        machine.begin_survey();
+        assert!(!machine.surveyed(
+            0x1000,
+            4,
+            Some(1),
+            &DeviceError::TransferRefused("missing DMA/key service".into())
+        ));
+        assert!(machine.take_survey().is_empty());
+        assert!(machine.surveyed(
+            0x1000,
+            4,
+            None,
+            &DeviceError::Refused("unknown register".into())
+        ));
+        assert_eq!(machine.take_survey().len(), 1);
     }
 
     #[test]

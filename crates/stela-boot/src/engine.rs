@@ -933,6 +933,9 @@ fn run(
             }
             sample_report(&mut samples, user);
             timer_report(machine);
+            for state in machine.devices.storage_diagnostics() {
+                output::arguments(format_args!("STORAGE ASC {state}\n"));
+            }
             survey_report(machine);
             user = 0;
             beats += 1;

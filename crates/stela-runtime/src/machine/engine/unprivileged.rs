@@ -147,7 +147,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         "no device model".into(),
                     ));
                 }
-                Err(DeviceError::Refused(detail)) => {
+                Err(DeviceError::Refused(detail) | DeviceError::TransferRefused(detail)) => {
                     return Err(self.unprivileged_device(
                         address,
                         translation.physical,
