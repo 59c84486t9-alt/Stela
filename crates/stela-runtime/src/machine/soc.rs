@@ -14,7 +14,7 @@ use super::{Chip, adt::Node, registers::Identity};
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, cluster, dart, fuse,
+    amcc, cluster, dart, fuse, ptd,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -563,16 +563,28 @@ pub struct Board {
 }
 
 /// An `mcc,t8112`: its cache in the AMCC aperture, its DRAM channels and
-/// the PMP PTD update registers it writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// the PMP PTD bank it writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryCache {
     pub cache: amcc::Cache,
     /// The DCS channels (`reg[2]`) in guest PA: base, bytes and the
     /// `dcs_num_channels` that share them evenly.
     pub channels: (u64, u64, usize),
-    /// `/arm-io/pmp` `reg[ptd-update-reg-index]` in guest PA.
-    pub ptd: (u64, u64),
+    /// The PMP's PTD bank, `reg[pmp_ptd_reg_idx]`.
+    pub ptd: PtdBank,
 }
+
+/// The PMP's PTD bank (`platform::apple::ptd`): its guest PA and the
+/// `ptd-range` records of `/arm-io/pmp/iop-pmp-nub`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtdBank {
+    pub physical: u64,
+    pub ranges: Vec<ptd::Range>,
+}
+
+/// A `ptd-range` record's bytes: id, first entry, entries, interrupt and a
+/// 16-byte name.
+const PTD_RANGE: usize = 32;
 
 /// The PMGR power-state registers `/arm-io/pmgr` `ps-regs` and `devices`
 /// place (m1n1 `src/pmgr.c`): each block, the span from a `ps-regs` entry's
@@ -988,20 +1000,50 @@ fn memory_cache(
         node.first_u32(name)
             .ok_or_else(|| format!("{PATH} has no {name}"))
     };
-    let slot = range(&node, PATH, number("pmp_ptd_reg_idx")? as usize)?.0
-        + u64::from(number("pmp_ptd_update_space_offset")?);
+    let bank = range(&node, PATH, number("pmp_ptd_reg_idx")? as usize)?;
+    if bank.1 != ptd::PTD_BYTES
+        || u64::from(number("pmp_ptd_update_space_offset")?) != ptd::UPDATE_OFFSET
+    {
+        return Err(format!("{PATH} PTD registers are not one PTD bank"));
+    }
     let pmp = io
         .child("pmp")
         .ok_or_else(|| format!("{PATH} names PTD registers but there is no /arm-io/pmp"))?;
     let index = pmp
         .first_u32("ptd-update-reg-index")
         .ok_or("/arm-io/pmp has no ptd-update-reg-index")?;
-    let ptd = range(&pmp, "/arm-io/pmp", index as usize)?;
-    if !(ptd.0..ptd.0 + ptd.1).contains(&slot) {
-        return Err(format!(
-            "{PATH} PTD slot {slot:#x} is outside the PMP's PTD registers"
-        ));
+    let updates = range(&pmp, "/arm-io/pmp", index as usize)?;
+    let slots = bank.0 + ptd::UPDATE_OFFSET..bank.0 + ptd::PTD_BYTES;
+    if !slots.contains(&updates.0) || updates.0 + updates.1 > slots.end {
+        return Err("/arm-io/pmp PTD updates lie outside the PTD bank".into());
     }
+    let records = pmp
+        .child("iop-pmp-nub")
+        .and_then(|nub| nub.property("ptd-range"))
+        .filter(|records| !records.is_empty() && records.len() % PTD_RANGE == 0)
+        .ok_or("/arm-io/pmp/iop-pmp-nub has no whole ptd-range records")?;
+    let ranges = records
+        .as_chunks::<PTD_RANGE>()
+        .0
+        .iter()
+        .map(|record| {
+            let word = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("4"));
+            let name = record[16..]
+                .split(|&byte| byte == 0)
+                .next()
+                .unwrap_or_default();
+            ptd::Range {
+                id: word(0),
+                start: word(4),
+                count: word(8),
+                name: String::from_utf8_lossy(name).into_owned(),
+            }
+        })
+        .collect();
+    let ptd = PtdBank {
+        physical: bank.0,
+        ranges,
+    };
     Ok(Some(MemoryCache {
         cache: amcc::Cache {
             shared: in_aperture(0)?,
@@ -1737,7 +1779,7 @@ mod tests {
     /// The J473AP's `/arm-io/mcc` and `/arm-io/pmp` registers behind its one
     /// AMCC aperture.
     #[test]
-    fn an_mcc_places_its_cache_channels_and_ptd_slot() {
+    fn an_mcc_places_its_cache_channels_and_ptd_bank() {
         use crate::machine::adt::encode;
         const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
@@ -1780,13 +1822,24 @@ mod tests {
                 &[],
             )
         };
+        // Two J473AP `ptd-range` records.
+        let record = |id: u32, start: u32, count: u32, name: &str| {
+            let mut record = [0u8; PTD_RANGE];
+            for (at, word) in [id, start, count, 0].into_iter().enumerate() {
+                record[4 * at..4 * at + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            record[16..16 + name.len()].copy_from_slice(name.as_bytes());
+            record
+        };
+        let records = [record(1, 0, 1, "NULL"), record(2, 1, 1, "PMP-STATUS")].concat();
+        let nub = encode(&[("name", &z("iop-pmp-nub")), ("ptd-range", &records)], &[]);
         let pmp = encode(
             &[
                 ("name", &z("pmp")),
                 ("reg", &u64s(&[0x3bc0_0000, 0x6_c000, 0x3b3d_0000, 0x4000])),
                 ("ptd-update-reg-index", &u32s(&[1])),
             ],
-            &[],
+            &[nub],
         );
         let controller = MemoryController {
             apertures: vec![0x2_0000_0000],
@@ -1856,11 +1909,27 @@ mod tests {
                     ways: 16,
                 },
                 channels: (0x2_0100_0000, 0x200_0000, 8),
-                ptd: (0x2_3b3d_0000, 0x4000),
+                ptd: PtdBank {
+                    physical: 0x2_3b3c_0000,
+                    ranges: vec![
+                        ptd::Range {
+                            id: 1,
+                            start: 0,
+                            count: 1,
+                            name: "NULL".into(),
+                        },
+                        ptd::Range {
+                            id: 2,
+                            start: 1,
+                            count: 1,
+                            name: "PMP-STATUS".into(),
+                        },
+                    ],
+                },
             }))
         );
-        // The PTD slot must lie in the PMP's registers, and the planes need
-        // the lock-regs aperture.
+        // The PTD updates must be the bank's, and the planes need the
+        // lock-regs aperture.
         assert!(found(0x2_0000, Some(&controller)).is_err());
         assert!(found(0x1_0000, None).is_err());
     }

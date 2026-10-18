@@ -361,7 +361,7 @@ fn devices(
         devices.add_aon_fuses(physical)?;
     }
     let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
-    let memory_cache = board.and_then(|board| board.memory_cache);
+    let memory_cache = board.and_then(|board| board.memory_cache.as_ref());
     if let Some(controller) = memory_controller {
         devices.add_memory_controller(
             &controller.apertures,
@@ -372,19 +372,18 @@ fn devices(
     }
     if let Some(mcc) = memory_cache {
         let (physical, bytes, channels) = mcc.channels;
-        let (ptd, ptd_bytes) = mcc.ptd;
         devices.add_memory_channels(
             Range { physical, bytes },
             channels,
-            Range {
-                physical: ptd,
-                bytes: ptd_bytes,
-            },
+            mcc.ptd.physical,
+            &mcc.ptd.ranges,
         )?;
         output::arguments(format_args!(
-            "DEVICES mcc cache={}MiB ways={} dcs-channels={channels} ptd={ptd:#x}\n",
+            "DEVICES mcc cache={}MiB ways={} dcs-channels={channels} ptd={:#x} ptd-ranges={}\n",
             mcc.cache.bytes >> 20,
-            mcc.cache.ways
+            mcc.cache.ways,
+            mcc.ptd.physical,
+            mcc.ptd.ranges.len()
         ));
     }
     output::arguments(format_args!(
