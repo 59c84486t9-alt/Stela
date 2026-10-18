@@ -138,6 +138,17 @@ pub struct Run {
     /// starts it on the system-mode engine.
     #[arg(long, conflicts_with_all = ["module", "opencore", "bundle", "append", "payload"])]
     preboot_disk: Option<PathBuf>,
+    /// Use QEMU's directory-backed FAT16 for a bundle that fits its
+    /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
+    #[arg(long, requires = "bundle")]
+    directory_volume: bool,
+    /// Attach a raw GPT disk over NVMe, preserving writes. Select its
+    /// partition with --storage SERIAL:GUID in --append.
+    #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
+    storage_disk: Option<PathBuf>,
+    /// NVMe serial for --storage-disk.
+    #[arg(long, requires = "storage_disk", default_value = "STELAANS", value_parser = parse_storage_serial)]
+    storage_serial: String,
     /// Fresh directory for the boot volume, serial log and run report.
     #[arg(long)]
     output: PathBuf,
@@ -210,6 +221,19 @@ pub(crate) fn option_path(path: &std::path::Path) -> String {
     path.display().to_string().replace(',', ",,")
 }
 
+fn parse_storage_serial(value: &str) -> Result<String, String> {
+    if !value.is_empty()
+        && value.len() <= 20
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        Ok(value.into())
+    } else {
+        Err("storage serial must be one to 20 ASCII letters, digits or hyphens".into())
+    }
+}
+
 pub fn run(command: Command) -> Result<ExitCode> {
     match command {
         Command::Build { release } => {
@@ -256,6 +280,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         arguments.timeout > 0.0 && arguments.timeout <= limit,
         "timeout must be in (0, {limit}] seconds"
     );
+    if let Some(path) = &arguments.storage_disk {
+        ensure!(
+            path.is_file(),
+            "storage disk is not a file: {}",
+            path.display()
+        );
+    }
     let image = match arguments.image {
         Some(image) => image,
         None => build(true)?,
@@ -380,7 +411,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // QEMU's directory volume is FAT16 and holds 516 MB; larger volumes,
     // such as a recovery bundle with its ramdisk, go into a FAT32 image.
     let fat = match (&arguments.usb_image, &arguments.opencore) {
-        (None, None) if directory_bytes(&volume)? > VVFAT_BYTES => {
+        (None, None) if !arguments.directory_volume && directory_bytes(&volume)? > VVFAT_BYTES => {
             Some(fat_image(&volume, &output)?)
         }
         _ => None,
@@ -502,6 +533,19 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         None if picker => command.args(["-monitor", "stdio"]),
         None => command.args(["-monitor", "none"]),
     };
+    if let Some(path) = &arguments.storage_disk {
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=ans,format=raw,file={}",
+                option_path(path)
+            ))
+            .arg("-device")
+            .arg(format!(
+                "nvme,drive=ans,serial={}",
+                arguments.storage_serial
+            ));
+    }
     if let Some(port) = arguments.gdb {
         command
             .arg("-gdb")
@@ -606,6 +650,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "scenario": verification,
         "bundle": arguments.bundle,
         "preboot_disk": arguments.preboot_disk,
+        "directory_volume": arguments.directory_volume,
+        "storage_disk": arguments.storage_disk,
+        "storage_serial": arguments.storage_serial,
         "first_unsupported": unsupported,
         "returncode": code,
         "payload": arguments.payload.map(|mode| {
@@ -874,6 +921,52 @@ fn disable_drivers(volume: &Path, paths: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attached_storage_and_directory_volume_have_explicit_cli_contracts() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from([
+            "xtask",
+            "boot",
+            "run",
+            "--bundle",
+            "/tmp/bundle",
+            "--output",
+            "/tmp/run",
+            "--storage-disk",
+            "/tmp/disk.raw",
+            "--storage-serial",
+            "ANS-1",
+            "--directory-volume",
+            "--append",
+            "--system --storage ANS-1:GUID",
+        ])
+        .unwrap();
+        let crate::Task::Boot(Command::Run(run)) = cli.task else {
+            panic!("boot run");
+        };
+        assert_eq!(run.storage_serial, "ANS-1");
+        assert_eq!(run.storage_disk.unwrap(), Path::new("/tmp/disk.raw"));
+        assert!(run.directory_volume);
+        assert_eq!(run.append.as_deref(), Some("--system --storage ANS-1:GUID"));
+        for extra in [
+            vec!["--storage-disk", "/tmp/disk", "--storage-check"],
+            vec!["--storage-serial", "ANS"],
+            vec!["--directory-volume"],
+            vec![
+                "--storage-disk",
+                "/tmp/disk",
+                "--storage-serial",
+                "bad,drive=x",
+            ],
+        ] {
+            let args: Vec<_> = ["xtask", "boot", "run", "--output", "/tmp/run"]
+                .into_iter()
+                .chain(extra)
+                .collect();
+            assert!(crate::Cli::try_parse_from(args).is_err());
+        }
+    }
 
     #[test]
     fn option_paths_double_their_commas() {
