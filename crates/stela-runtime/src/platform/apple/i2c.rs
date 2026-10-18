@@ -171,7 +171,13 @@ impl I2c {
                 self.status |= NACK;
                 Ok(Vec::new())
             }
-            Err(TargetError::Unsupported(reason)) => Err(reason),
+            // A refusal stops the machine: name the transaction it refused.
+            Err(TargetError::Unsupported(reason)) => Err(Box::leak(
+                alloc::format!(
+                    "{reason} (target {address:#04x}, wrote {write:02x?}, read {count})"
+                )
+                .into_boxed_str(),
+            )),
         }
     }
     fn fifo(&mut self, word: u32) -> Result<(), &'static str> {
