@@ -947,7 +947,9 @@ pub struct I2cController {
 
 /// Digital PHY placement preserves all ADT views for evidence, but maps the
 /// canonical USB2/core regions once. The pipehandler belongs to the same PHY
-/// via `usb-drd*/atc-phy-parent`, whose `reg[3]` supplies its aperture.
+/// via `usb-drd*/atc-phy-parent`, whose `reg[3]` supplies its aperture; its
+/// `reg[4]` is the PHY's own view 1, the core event block
+/// (`AppleT8103TypeCPhy::initRegisterSpaces` keeps view n at +0x158 + 16n).
 /// Unqualified shared fuse, AXI and analog-only views are not claimed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypecPhy {
@@ -955,6 +957,7 @@ pub struct TypecPhy {
     pub usb2: (u64, u64),
     pub core: (u64, u64),
     pub pipe: (u64, u64),
+    pub events: (u64, u64),
     pub port: u32,
 }
 
@@ -1135,26 +1138,35 @@ fn typec_devices(
                     .first_u32("port-number")
                     .filter(|&p| p != 0)
                     .ok_or("ATC PHY has no port number")?;
-                let mut pipe = None;
+                let mut controller_views = None;
                 let mut duplicate = false;
                 io.visit(&mut |controller| {
                     if controller.property("device_type") == Some(b"usb-drd\0".as_slice())
                         && controller.first_u32("atc-phy-parent") == Some(phandle)
                     {
-                        duplicate |= pipe.is_some();
-                        pipe = controller.pairs("reg").and_then(|r| r.get(3).copied());
+                        duplicate |= controller_views.is_some();
+                        controller_views = controller
+                            .pairs("reg")
+                            .and_then(|r| Some((*r.get(3)?, *r.get(4)?)));
                     }
                 })
                 .ok_or("ATC controller walk failed")?;
-                let pipe = place(pipe.ok_or("ATC PHY has no controller pipehandler view")?)?;
-                if duplicate || pipe.1 != atc_phy::WINDOW_BYTES {
-                    return Err("ambiguous or incomplete ATC pipehandler view".into());
+                let (pipe, events) =
+                    controller_views.ok_or("ATC PHY has no controller pipehandler view")?;
+                let (pipe, events) = (place(pipe)?, place(events)?);
+                if duplicate
+                    || pipe.1 != atc_phy::WINDOW_BYTES
+                    || events != views[1]
+                    || events.1 != atc_phy::WINDOW_BYTES
+                {
+                    return Err("ambiguous or incomplete ATC pipehandler or event view".into());
                 }
                 phys.push(TypecPhy {
                     views,
                     usb2,
                     core,
                     pipe,
+                    events,
                     port,
                 });
             }
@@ -4094,6 +4106,8 @@ mod tests {
                         0x5800,
                         0x382a84000,
                         0x4000,
+                        0x382800000,
+                        0x4000,
                     ]),
                 ),
             ],
@@ -4147,6 +4161,7 @@ mod tests {
         assert_eq!(phys[0].usb2, (0x382a90000, 0x4000));
         assert_eq!(phys[0].core, (0x383000000, atc_phy::CORE_BYTES));
         assert_eq!(phys[0].pipe, (0x382a84000, 0x4000));
+        assert_eq!(phys[0].events, (0x382800000, 0x4000));
         assert_eq!(phys[0].views, views);
         assert!(place(&io, 0x99, Some(&gpio)).is_err());
         assert!(typec_devices(&Node::root(&io).unwrap(), &|_| None, 0x63, Some(&gpio)).is_err());

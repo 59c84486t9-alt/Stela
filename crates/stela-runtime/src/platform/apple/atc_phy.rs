@@ -15,6 +15,12 @@
 //! Power and lock handshakes settle synchronously. SuperSpeed, DP and USB4
 //! commands/links are unsupported; configuring their digital mux does not
 //! establish a link. The AUSPLL's DP programming command 0x2800 refuses.
+//!
+//! View 1 is the core event block. `configureUSB2` sets its
+//! `AUSBC_CORE_EVT_BLK_C0_USB2_CTL` LOAD_CNT (bit 3) and EVT_EN (bit 0) bits
+//! (0x3149ad8 and 0x3149c40, named by the driver's own log strings). They are
+//! retained; no event count is read or delivered by any observed consumer,
+//! so none is modeled, and the block's other words refuse.
 use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
     regfile::Held,
@@ -24,6 +30,10 @@ const NAME: &str = "Apple ATC PHY";
 /// Logical device offsets, independent of physical placement or ADT view index.
 pub const USB2: u64 = 0x10_0000;
 pub const PIPE: u64 = 0x20_0000;
+pub const EVENTS: u64 = 0x30_0000;
+const USB2_EVENTS: u64 = EVENTS;
+const EVENT_ENABLE: u32 = 1;
+const LOAD_COUNT: u32 = 1 << 3;
 pub const CORE_BYTES: u64 = 0x4c000;
 pub const WINDOW_BYTES: u64 = 0x4000;
 const USBCTL: u64 = USB2;
@@ -121,6 +131,7 @@ impl AtcPhy {
             LOCK_REQ => LOCK,
             AON => RESET_N | FORCE_CLAMP,
             NONSELECTED => 0xf | 1 << 12 | 1 << 15,
+            USB2_EVENTS => EVENT_ENABLE | LOAD_COUNT,
             // Public AUSPLL FSM override and common wait-for-ready tuning.
             0x1014 => 0x1ff << 13,
             0x1028 => 1 << 24,
@@ -225,6 +236,13 @@ mod tests {
         assert!(!p.usb2_ready());
         wr(&mut p, &mut a, MISCTUNE, 0x12345678);
         assert_eq!(rd(&mut p, &mut a, MISCTUNE), 0x12345678);
+        // configureUSB2 loads and enables the USB2 core event counter.
+        assert_eq!(rd(&mut p, &mut a, USB2_EVENTS), 0);
+        wr(&mut p, &mut a, USB2_EVENTS, LOAD_COUNT);
+        wr(&mut p, &mut a, USB2_EVENTS, LOAD_COUNT | EVENT_ENABLE);
+        assert_eq!(rd(&mut p, &mut a, USB2_EVENTS), 9);
+        assert!(p.write(USB2_EVENTS, Width::Word, 2, &mut a).is_err());
+        assert!(p.read(EVENTS + 4, Width::Word, &mut a).is_err());
     }
     #[test]
     fn power_pll_and_pipe_lock_handshakes_follow_requests_in_both_directions() {
