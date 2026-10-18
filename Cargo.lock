@@ -1599,6 +1599,7 @@ dependencies = [
  "aes",
  "anyhow",
  "hex",
+ "hmac",
  "libc",
  "lzfse_rust",
  "miniz_oxide",
@@ -1607,6 +1608,7 @@ dependencies = [
  "sha2",
  "stela-compiler",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]

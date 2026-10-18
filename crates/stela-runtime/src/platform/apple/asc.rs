@@ -44,6 +44,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::any::Any;
 
 const NAME: &str = "asc";
 
@@ -77,7 +78,7 @@ pub struct Message {
 }
 
 /// The coprocessor's software, emulated natively.
-pub trait Firmware {
+pub trait Firmware: Any {
     /// The coprocessor starts running; messages it sends go to `outbox`.
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
     /// The AP sent `message`.
@@ -143,6 +144,12 @@ impl Asc {
             lines,
             levels: [None; 4],
         })
+    }
+
+    /// A native coprocessor's typed state, for its DMA boundary. The wrapper
+    /// still owns all mailbox and interrupt effects; firmware cannot replace it.
+    pub fn firmware<F: Firmware>(&self) -> Option<&F> {
+        (&*self.firmware as &dyn Any).downcast_ref()
     }
 
     fn visible(&self) -> bool {

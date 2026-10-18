@@ -18,6 +18,9 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tempfile = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 sha2 = { version = "0.10", default-features = false }
+# SEP root derivations and secret lifetime; both work without std.
+hmac = { version = "0.12", default-features = false }
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 # The AES engine model's cipher: constant-time, no_std, AES-NI when present.
 aes = { version = "0.8", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
