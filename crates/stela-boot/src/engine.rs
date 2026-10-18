@@ -323,7 +323,7 @@ fn devices(
         };
         let irq = AicInput::new(0, dart.irq as u16);
         let placed = devices
-            .add_dart(range, usize::from(dart.streams), Some(irq))
+            .add_dart(range, usize::from(dart.streams), Some(irq), dart.apf)
             .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
         darts.push(placed);
     }

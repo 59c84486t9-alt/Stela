@@ -23,6 +23,17 @@
 //!   [37:10]; a page entry adds NO_WRITE 2, NO_READ 3 and the first and last
 //!   accessible 4-byte unit of the page in [63:52] and [51:40].
 //!
+//! A DART may pair with an address permission filter (`instance` `DAPF`,
+//! the node's second `reg`): `n-apfs-instance-0` slices of 0x40 bytes, each a
+//! 32-bit control (`0x333` meaningful), the first and last address as two
+//! 32-bit halves at 0x08 and 0x10, and a 256-bit bitmap of the streams it
+//! applies to at 0x20. The 26A434 J473AP SPTM programs every slice from
+//! `dapf-instance-0` while PROTECT bit 2 (APF) is clear, then writes 4 to
+//! PROTECT and PROTECT_LOCK, and verifies instead of writing once both read
+//! bit 2 set (`t8110dart` power-up and `t8110dart_write_dapf_reg`). PROTECT
+//! and PROTECT_LOCK hold one bit per protection domain: 0 TTBR and TCR, 2
+//! APF; a write sets bits, UNPROTECT clears those not locked.
+//!
 //! Inferred, not documented: the model caches no translations, so TLB
 //! commands complete at once and BUSY never reads set; a fault latches the
 //! first error until software clears its FLAG, and the interrupt follows
@@ -30,7 +41,11 @@
 //! missing page entry NO_PTE; an access to a stream not enabled, without
 //! translation or out of the 36-bit space faults NO_TTBR; while TTBR_TCR is
 //! protected, TCR and TTBR writes have no effect, and PROTECT_LOCK keeps it
-//! protected. The identification registers, FOUR_LEVEL and REMAP_EN are
+//! protected; likewise APF protection makes the filter's slices read-only.
+//! The filter's slices are SoC register windows a coprocessor's own firmware
+//! reaches; the machine's device models make no such accesses, so a
+//! transfer on a stream that does not bypass a present filter refuses
+//! rather than pass unfiltered. The identification registers, FOUR_LEVEL and REMAP_EN are
 //! refused until their values or behavior are known.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
@@ -64,6 +79,18 @@ const ERROR_FLAG: u32 = 1 << 31;
 const ERROR_STREAM_SHIFT: u32 = 20;
 const ERROR_CODE: u32 = 0x7fff;
 const PROTECT_TTBR_TCR: u32 = 1;
+const PROTECT_APF: u32 = 1 << 2;
+
+/// The filter's registers in the device's space, past the DART's.
+pub const DAPF_OFFSET: u64 = 0x4000;
+/// The filter's register span.
+pub const DAPF_BYTES: u64 = 0x4000;
+const SLICE: u64 = 0x40;
+const SLICE_CONTROL: u64 = 0x00;
+const SLICE_START: u64 = 0x08;
+const SLICE_END: u64 = 0x10;
+const SLICE_STREAMS: u64 = 0x20;
+const SLICE_CONTROL_KNOWN: u32 = 0x333;
 
 const TCR_TRANSLATE: u32 = 1;
 const TCR_BYPASS_DART: u32 = 1 << 1;
@@ -111,9 +138,35 @@ pub struct Dart {
     error_address: u64,
     error_streams: [u32; STREAM_WORDS as usize],
     protect: u32,
-    locked: bool,
+    locked: u32,
+    /// The address permission filter's slices, when the DART has one.
+    apf: Option<Vec<Slice>>,
     irq: Option<AicInput>,
     irq_level: bool,
+}
+
+/// One address permission filter slice, as its 32-bit registers hold it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Slice {
+    control: u32,
+    start: [u32; 2],
+    end: [u32; 2],
+    streams: [u32; STREAM_WORDS as usize],
+}
+
+impl Slice {
+    fn register(&mut self, offset: u64) -> Option<(&mut u32, u32)> {
+        let word = |base: u64| usize::try_from((offset - base) / 4).ok();
+        match offset {
+            SLICE_CONTROL => Some((&mut self.control, SLICE_CONTROL_KNOWN)),
+            SLICE_START | 0x0c => Some((&mut self.start[word(SLICE_START)?], u32::MAX)),
+            SLICE_END | 0x14 => Some((&mut self.end[word(SLICE_END)?], u32::MAX)),
+            _ if (SLICE_STREAMS..SLICE).contains(&offset) => {
+                Some((&mut self.streams[word(SLICE_STREAMS)?], u32::MAX))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Dart {
@@ -131,10 +184,37 @@ impl Dart {
             error_address: 0,
             error_streams: [0; STREAM_WORDS as usize],
             protect: 0,
-            locked: false,
+            locked: 0,
+            apf: None,
             irq,
             irq_level: false,
         }
+    }
+
+    /// The DART with an address permission filter of `slices` slices.
+    pub fn with_apf(mut self, slices: usize) -> Self {
+        assert!(
+            slices as u64 * SLICE <= DAPF_BYTES,
+            "APF slices exceed the filter's registers"
+        );
+        self.apf = Some(vec![Slice::default(); slices]);
+        self
+    }
+
+    /// The protection domains this DART has.
+    fn domains(&self) -> u32 {
+        PROTECT_TTBR_TCR | if self.apf.is_some() { PROTECT_APF } else { 0 }
+    }
+
+    /// The filter register at `offset` from the filter's start and the bits
+    /// it holds.
+    fn apf_register(&mut self, offset: u64) -> Option<(&mut u32, u32)> {
+        let slices = self.apf.as_mut()?;
+        let slice = slices.get_mut(usize::try_from(offset / SLICE).ok()?)?;
+        if !offset.is_multiple_of(4) {
+            return None;
+        }
+        slice.register(offset % SLICE)
     }
 
     fn stream_enabled(&self, sid: usize) -> bool {
@@ -155,6 +235,9 @@ impl Dart {
         let tcr = self.tcr[sid];
         if tcr & TCR_REMAP_ENABLE != 0 {
             return Err(DmaError::Unsupported("DART stream remapping"));
+        }
+        if self.apf.is_some() && tcr & TCR_BYPASS_DAPF == 0 {
+            return Err(DmaError::Unsupported("DART address permission filtering"));
         }
         if tcr & TCR_BYPASS_DART != 0 {
             return Ok(iova);
@@ -280,6 +363,12 @@ impl MmioDevice for Dart {
         if width != Width::Word {
             return Err(fail("DART registers are 32-bit"));
         }
+        if let Some(apf) = offset.checked_sub(DAPF_OFFSET) {
+            return self
+                .apf_register(apf)
+                .map(|(value, _)| u64::from(*value))
+                .ok_or_else(|| fail("unknown DART APF register"));
+        }
         let value = match offset {
             TLB_CMD => 0,
             ERROR => self.error,
@@ -287,7 +376,7 @@ impl MmioDevice for Dart {
             ERROR_ADDRESS_LOW => self.error_address as u32,
             ERROR_ADDRESS_HIGH => (self.error_address >> 32) as u32,
             PROTECT => self.protect,
-            PROTECT_LOCK => u32::from(self.locked),
+            PROTECT_LOCK => self.locked,
             _ => {
                 if let Some(word) = bitmap_word(offset, ERROR_STREAMS) {
                     self.error_streams[word]
@@ -317,7 +406,23 @@ impl MmioDevice for Dart {
             return Err(fail("DART registers are 32-bit"));
         }
         let value = value as u32;
+        if let Some(apf) = offset.checked_sub(DAPF_OFFSET) {
+            let locked = self.protect & PROTECT_APF != 0;
+            let (register, known) = self
+                .apf_register(apf)
+                .ok_or_else(|| fail("unknown DART APF register"))?;
+            if value & !known != 0 {
+                return Err(fail("DART APF slice control bits outside 0x333"));
+            }
+            if !locked {
+                *register = value;
+            }
+            return Ok(());
+        }
         let protected = self.protect & PROTECT_TTBR_TCR != 0;
+        if matches!(offset, PROTECT | UNPROTECT | PROTECT_LOCK) && value & !self.domains() != 0 {
+            return Err(fail("DART protection domain without a model"));
+        }
         match offset {
             TLB_CMD => match value & !TLB_STREAM & !TLB_OP {
                 0 if matches!(value & TLB_OP, TLB_OP_FLUSH_ALL | TLB_OP_FLUSH_STREAM) => {}
@@ -329,10 +434,9 @@ impl MmioDevice for Dart {
                 }
             }
             ERROR_MASK => self.error_mask = value & ERROR_CODE,
-            PROTECT => self.protect |= value & PROTECT_TTBR_TCR,
-            UNPROTECT if !self.locked => self.protect &= !value,
-            UNPROTECT => {}
-            PROTECT_LOCK => self.locked |= value & 1 != 0,
+            PROTECT => self.protect |= value,
+            UNPROTECT => self.protect &= !(value & !self.locked),
+            PROTECT_LOCK => self.locked |= value,
             _ => {
                 if let Some(word) = bitmap_word(offset, ERROR_STREAMS) {
                     self.error_streams[word] &= !value;
@@ -450,6 +554,58 @@ mod tests {
         let _ = dart.translate(&mut ram, 3, 0, 0, false, &mut access);
         assert_eq!(read(&mut dart, ERROR, &mut access) & ERROR_CODE, 1);
         assert!(!dart.irq_level);
+    }
+
+    #[test]
+    fn the_apf_holds_its_slices_until_sptm_locks_them() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut dart = Dart::new(16, None).with_apf(16);
+        let slice = |s: u64, register: u64| DAPF_OFFSET + s * SLICE + register;
+        for (offset, value) in [
+            (slice(1, SLICE_START), 0x0001_c000),
+            (slice(1, SLICE_START + 4), 0x2),
+            (slice(1, SLICE_END), 0x0005_1000),
+            (slice(1, SLICE_END + 4), 0x2),
+            (slice(1, SLICE_STREAMS), 0x1),
+            (slice(1, SLICE_CONTROL), 0x103),
+        ] {
+            dart.write(offset, Width::Word, value, &mut access).unwrap();
+            assert_eq!(dart.read(offset, Width::Word, &mut access), Ok(value));
+        }
+        assert!(
+            dart.write(slice(1, SLICE_CONTROL), Width::Word, 0x4, &mut access)
+                .is_err()
+        );
+        assert!(dart.read(slice(1, 0x04), Width::Word, &mut access).is_err());
+        assert!(dart.read(slice(16, 0), Width::Word, &mut access).is_err());
+        // SPTM locks the filter; its slices then keep their values.
+        dart.write(PROTECT, Width::Word, 4, &mut access).unwrap();
+        dart.write(PROTECT_LOCK, Width::Word, 4, &mut access)
+            .unwrap();
+        dart.write(UNPROTECT, Width::Word, 4, &mut access).unwrap();
+        assert_eq!(dart.read(PROTECT, Width::Word, &mut access), Ok(4));
+        assert_eq!(dart.read(PROTECT_LOCK, Width::Word, &mut access), Ok(4));
+        dart.write(slice(1, SLICE_STREAMS), Width::Word, 0, &mut access)
+            .unwrap();
+        assert_eq!(
+            dart.read(slice(1, SLICE_STREAMS), Width::Word, &mut access),
+            Ok(1)
+        );
+        // A transfer that the filter would check refuses.
+        let mut ram = Ram::new(ROOT, PAGE as usize);
+        dart.write(ENABLE_STREAMS, Width::Word, 1, &mut access)
+            .unwrap();
+        dart.write(TCR, Width::Word, u64::from(TCR_BYPASS_DART), &mut access)
+            .unwrap();
+        assert_eq!(
+            dart.translate(&mut ram, 0, ROOT, ROOT, false, &mut access),
+            Err(DmaError::Unsupported("DART address permission filtering"))
+        );
+        // A DART without a filter has no APF domain.
+        let mut plain = Dart::new(16, None);
+        assert!(plain.write(PROTECT, Width::Word, 4, &mut access).is_err());
+        assert!(plain.read(DAPF_OFFSET, Width::Word, &mut access).is_err());
     }
 
     #[test]

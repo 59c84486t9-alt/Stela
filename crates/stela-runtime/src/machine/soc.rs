@@ -14,7 +14,7 @@ use super::{Chip, adt::Node, registers::Identity};
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc,
+    amcc, dart,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -499,8 +499,9 @@ pub struct PowerStates {
 }
 
 /// A `dart,t8110`: its one DART register range (ADT `instance` `TRAD`), its
-/// `sid-count`, its AIC input, and the `AAPL,phandle` and stream (`reg`) of
-/// each `iommu-mapper` child.
+/// `sid-count`, its AIC input, the `AAPL,phandle` and stream (`reg`) of
+/// each `iommu-mapper` child, and its address permission filter (`instance`
+/// `FPAD`, the second range) with `n-apfs-instance-0` slices, if it has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Iommu {
     pub physical: u64,
@@ -508,6 +509,7 @@ pub struct Iommu {
     pub streams: u16,
     pub irq: u32,
     pub mappers: Vec<(u32, u32)>,
+    pub apf: Option<(u64, usize)>,
 }
 
 /// The AES engine: its block and key-disable register ranges, its
@@ -668,17 +670,35 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
     let path = format!("/arm-io/{}", name_of(node));
     let reg = node.pairs("reg").unwrap_or_default();
     let instances = node.property("instance").unwrap_or_default();
-    let &[(offset, bytes)] = reg.as_slice() else {
-        return Err(format!(
-            "{path} has {} register ranges, not one DART",
-            reg.len()
-        ));
+    // One 16-byte descriptor per range: its kind, instance number and owner.
+    let kinds: Vec<&[u8]> = instances.chunks(16).map(|d| &d[..8]).collect();
+    let (&(offset, bytes), apf) = match (reg.as_slice(), kinds.as_slice()) {
+        ([dart], [b"TRAD\0\0\0\0"]) => (dart, None),
+        ([dart, filter], [b"TRAD\0\0\0\0", b"FPAD\0\0\0\0"]) => (dart, Some(*filter)),
+        _ => {
+            return Err(format!(
+                "{path} is not one DART instance, alone or with its APF"
+            ));
+        }
     };
-    if instances.len() != 16 || &instances[..4] != b"TRAD" {
-        return Err(format!("{path} is not a single DART instance"));
-    }
     let physical =
         translate(offset).ok_or_else(|| format!("{path} lies outside /arm-io ranges"))?;
+    let apf = match apf {
+        None => None,
+        Some((filter, filter_bytes)) => {
+            let at = translate(filter)
+                .filter(|at| {
+                    at.is_multiple_of(dart::DAPF_BYTES) && filter_bytes == dart::DAPF_BYTES
+                })
+                .ok_or_else(|| format!("{path} APF is not one aligned 16 KiB block"))?;
+            let slices = node
+                .first_u32("n-apfs-instance-0")
+                .and_then(|count| usize::try_from(count).ok())
+                .filter(|&count| count > 0 && count as u64 * 0x40 <= dart::DAPF_BYTES)
+                .ok_or_else(|| format!("{path} has no n-apfs-instance-0 slice count"))?;
+            Some((at, slices))
+        }
+    };
     let streams = node
         .first_u32("sid-count")
         .and_then(|count| u16::try_from(count).ok())
@@ -703,6 +723,7 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
         streams,
         irq,
         mappers,
+        apf,
     })
 }
 
@@ -1414,6 +1435,7 @@ mod tests {
                 streams: 16,
                 irq: 0x301,
                 mappers: vec![(0x89, 0), (0x8a, 1)],
+                apf: None,
             }]
         );
         assert_eq!(
@@ -1436,12 +1458,27 @@ mod tests {
             )),
             Err("/arm-io/aes iommu-parent 0x99 is no modeled DART's mapper".into())
         );
-        // A DAPF range beside the DART is not modeled.
-        let dapf = [instance.as_slice(), b"FPAD", &[0; 4], b"DAPF", &[0; 4]].concat();
-        let aop = dart(&dapf, &[0x3500_4000, 0x4000, 0x3500_8000, 0x4000]);
+        // An APF beside the DART needs its slice count.
+        let dapf = [instance.as_slice(), b"FPAD", &[0; 4], b"DART", &[0; 4]].concat();
+        let pmp = dart(&dapf, &[0x3b30_0000, 0x4000, 0x3b30_4000, 0x4000]);
         assert_eq!(
-            board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[aop])),
-            Err("/arm-io/dart-sio has 2 register ranges, not one DART".into())
+            board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmp])),
+            Err("/arm-io/dart-sio has no n-apfs-instance-0 slice count".into())
+        );
+        let three = dart(
+            &[dapf.as_slice(), &dapf[16..]].concat(),
+            &[
+                0x3b30_0000,
+                0x4000,
+                0x3b30_4000,
+                0x4000,
+                0x3b30_8000,
+                0x4000,
+            ],
+        );
+        assert_eq!(
+            board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[three])),
+            Err("/arm-io/dart-sio is not one DART instance, alone or with its APF".into())
         );
     }
 

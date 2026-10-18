@@ -13,7 +13,7 @@ use crate::platform::apple::{
     aic1::Aic1,
     amcc::{self, Amcc},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
-    dart::Dart,
+    dart::{self, Dart},
     dcs::Dcs,
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
@@ -206,9 +206,18 @@ impl AppleDevices {
         range: Range,
         streams: usize,
         irq: Option<AicInput>,
+        apf: Option<(u64, usize)>,
     ) -> Result<DartId, MapError> {
-        let device = self.bus.add(Box::new(Dart::new(streams, irq)));
-        self.map(device, &[range])?;
+        let mut model = Dart::new(streams, irq);
+        if let Some((_, slices)) = apf {
+            model = model.with_apf(slices);
+        }
+        let device = self.bus.add(Box::new(model));
+        self.bus.map(device, range.physical, range.bytes, 0)?;
+        if let Some((physical, _)) = apf {
+            self.bus
+                .map(device, physical, dart::DAPF_BYTES, dart::DAPF_OFFSET)?;
+        }
         Ok(DartId(device))
     }
 
@@ -668,6 +677,7 @@ mod tests {
                     bytes: 0x4000,
                 },
                 16,
+                None,
                 None,
             )
             .unwrap();
