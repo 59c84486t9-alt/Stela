@@ -649,10 +649,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     ));
     let mut cpu = Cpu::of(profile.chip, entry, Pstate::reset(el));
     cpu.state.x[0] = x0;
-    // FP/SIMD is not trapped at hand-off (CPTR_EL2.FPEN = 0b11): SPTM uses
-    // FP/SIMD before it writes CPTR_EL2, and public XNU `start.s` notes that
-    // a monitor sets CPACR up for its client. Inferred hand-off value.
-    cpu.registers.set(Register::CPTR_EL2, 0, 0b11 << 20);
     if el == 1 {
         // An EL1 entry gets the EL2 state boot firmware leaves for its
         // client: the physical counter and timer are not trapped

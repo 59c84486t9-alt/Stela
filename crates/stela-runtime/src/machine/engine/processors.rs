@@ -384,6 +384,8 @@ mod tests {
         assert_eq!(cpu.read(Register::MIDR_EL1), 0x611f_0330);
         assert_eq!(cpu.read(Register::MPIDR_EL1), 0x8000_0100);
         assert_eq!(cpu.read(Register::VMPIDR_EL2), 0x8000_0100);
+        // FP/SIMD is not trapped out of reset.
+        assert_eq!(cpu.read(Register::CPTR_EL2) >> 20 & 0b11, 0b11);
         assert_eq!(parked(&machine, 0).pc, BASE);
         // Round robin returns to PE 0.
         end_slice(&mut machine);

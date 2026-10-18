@@ -38,6 +38,8 @@ pub const HCR_API: u32 = 41;
 /// It is the only length implemented (Arm `SupportedPowerTwoSVL`), so
 /// `ImplementedSMEVectorLength` selects it for every SMCR_ELx.LEN.
 pub const STREAMING_VECTOR_BYTES: usize = 64;
+/// CPACR_EL1.FPEN, and CPTR_EL2.FPEN in its CPACR layout.
+const FPEN: u32 = 20;
 const CPACR_SMEN: u32 = 24;
 const CPTR_SMEN: u32 = 24;
 
@@ -301,6 +303,13 @@ impl Cpu {
         // OSLK, set at Cold reset, comes with the reset value.
         let oslsr = registers.get(Register::OSLSR_EL1, 0);
         registers.set_raw(Register::OSLSR_EL1, 0, oslsr | 0b1000);
+        // CPTR_EL2.FPEN (E2H being RES1) leaves reset at 0b11, FP/SIMD not
+        // trapped, where Arm leaves it UNKNOWN: SPTM 26A434 (T8112) uses
+        // FP/SIMD on its cold entry and on its warm reset path (`ldr q0` at
+        // `__text+0x3f74c`, reached from the RVBAR page) before it ever
+        // writes CPTR_EL2, and nothing runs before it on a core leaving
+        // reset.
+        registers.set_raw(Register::CPTR_EL2, 0, 0b11 << FPEN);
         Self {
             state: GuestState::default(),
             pc,
@@ -353,7 +362,6 @@ impl Cpu {
     /// host, then CPTR_EL2.FPEN, which has the CPACR layout because HCR_EL2.E2H
     /// is RES1.
     pub fn floating_point_trap(&self) -> Option<u8> {
-        const FPEN: u32 = 20;
         let el = self.pstate.el;
         let in_host = el == 2 || (el == 0 && self.in_host());
         if el != 2 && !in_host {
