@@ -267,6 +267,20 @@ pub(super) fn parse(
                 terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
                 break;
             }
+            // BTI executes as NOP (Arm `BTI`). PSTATE.BTYPE can be nonzero
+            // only for a block's first instruction, after the indirect
+            // branch that ended the previous block, and the engine checks
+            // that instruction before entering the block.
+            if matches!(
+                crate::aarch64::system::synchronization::decode(word),
+                Some(crate::aarch64::system::synchronization::Operation::BranchTarget { .. })
+            ) {
+                instructions.push(Instruction {
+                    pc,
+                    operation: Operation::Nop,
+                });
+                continue;
+            }
             if let Some(decoded) =
                 system::decode_system_mode_instruction(pc, word).map_err(|error| {
                     BlockAnalysisError {

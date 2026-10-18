@@ -212,10 +212,10 @@ pub(super) fn decode_el1_system_instruction(
 
 /// Decode every instruction the system-mode profile hands to the runtime: the
 /// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
-/// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, BTI, ESB,
+/// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, ESB,
 /// TSB and unallocated hints), the Debug-state-only MOVT GPR/ZT0 forms, and
 /// the FEAT_CPA pointer arithmetic.
-/// YIELD, CSDB, SB and DMB stay ordinary; PAuth hints belong to the PAuth
+/// YIELD, CSDB, SB and DMB stay ordinary and BTI compiles as NOP; PAuth hints belong to the PAuth
 /// decoder, which the profile consults first.
 pub fn decode_system_mode_instruction(
     pc: GuestAddress,
@@ -247,7 +247,6 @@ pub fn decode_system_mode_instruction(
             Some(
                 operation @ (synchronization::Operation::DataCompletion { .. }
                 | synchronization::Operation::StoreBypassBarrier { .. }
-                | synchronization::Operation::BranchTarget { .. }
                 | synchronization::Operation::ErrorSynchronization
                 | synchronization::Operation::TraceSynchronization
                 | synchronization::Operation::OtherHint { .. }),

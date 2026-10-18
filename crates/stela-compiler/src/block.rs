@@ -820,12 +820,13 @@ mod tests {
         const DMB: u32 = 0xd503_3bbf; // dmb ish
         const YIELD: u32 = 0xd503_203f;
         const NOP: u32 = 0xd503_201f;
+        const BTI_C: u32 = 0xd503_245f;
         let profile = BlockProfile::SystemModeV1;
         assert_eq!(profile.abi(), SYSTEM_MODE_BLOCK_ABI);
         assert!(profile.supports_system() && profile.supports_system_registers());
         assert!(profile.supports_pointer_authentication());
         assert!(profile.checked_memory().is_none() && !profile.supports_clock());
-        let prefix = [ADD, LDR, STP, DMB, YIELD, NOP];
+        let prefix = [ADD, LDR, STP, DMB, YIELD, NOP, BTI_C];
         for (word, kind) in [
             (0xd518_1000_u32, ExitKind::System), // msr sctlr_el1, x0
             (0xd538_d080, ExitKind::System),     // mrs x0, tpidr_el1
@@ -836,7 +837,6 @@ mod tests {
             (0xd503_3f9f, ExitKind::System),     // dsb sy
             (0xd503_3fdf, ExitKind::System),     // isb
             (0xd503_207f, ExitKind::System),     // wfi
-            (0xd503_245f, ExitKind::System),     // bti c
             (0xd400_0001, ExitKind::System),     // svc #0
             (0xd400_0002, ExitKind::System),     // hvc #0
             (0xd69f_03e0, ExitKind::System),     // eret
