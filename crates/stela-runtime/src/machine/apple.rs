@@ -41,7 +41,6 @@ use crate::platform::apple::{
     sart::{self, Sart},
     sep::{self, Sep},
     spi::Spi,
-    typec,
     uart::S5lUart,
     wake::{self, WakeMasks},
     wdt::{self, AppleWdt},
@@ -67,6 +66,7 @@ pub use crate::platform::apple::{
         Evidence as SepSignatureEvidence, ManifestEvidence as SepManifestEvidence,
         inspect as inspect_sep_signature, verify_manifest as verify_sep_manifest_signature,
     },
+    typec,
     uart::{ConsoleBusy, ConsoleSink},
 };
 
@@ -111,13 +111,27 @@ struct UsbMaster {
     stream: usize,
     session: UsbSession,
     port: UsbPort,
+    connector: typec::Port,
     next_poll: u64,
     attached: bool,
     epoch: u64,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct UsbPort {
     generation: u64,
     ready: bool,
+}
+impl UsbPort {
+    /// Device-mode readiness from the connector: attached as UFP with VBUS.
+    fn of(connector: &typec::Port) -> Self {
+        let snapshot = connector.snapshot();
+        Self {
+            generation: snapshot.generation,
+            ready: snapshot
+                .connection
+                .is_some_and(|c| c.role == typec::DataRole::Ufp && c.vbus),
+        }
+    }
 }
 impl PortState for UsbPort {
     fn generation(&self) -> u64 {
@@ -776,6 +790,7 @@ impl AppleDevices {
         placement: &super::soc::UsbController,
         dart: DartId,
     ) -> Result<UsbId, String> {
+        let connector = self.typec_port(placement.port);
         let irqs = core::array::from_fn(|n| AicInput::new(0, placement.irqs[n] as u16));
         let device = self.bus.add(Box::new(Dwc3::new(irqs)));
         let (physical, bytes) = placement.ranges[0];
@@ -798,38 +813,22 @@ impl AppleDevices {
             dart: dart.0,
             stream: placement.stream as usize,
             session: UsbSession::new(),
-            port: UsbPort {
-                generation: 0,
-                ready: false,
-            },
+            port: UsbPort::of(&connector),
+            connector,
             next_poll: 0,
             attached: false,
             epoch: 0,
         });
         Ok(UsbId(device))
     }
-    /// Temporary port-state join. The Type-C provider must publish its actual
-    /// generation and USB2 UFP/PHY readiness here; placement alone never attaches.
-    pub fn set_usb_port(
+    /// A cable change on one Type-C connector, as the external peer makes
+    /// it. The connector's HPM dies and USB controller observe the same state.
+    pub fn set_connection(
         &mut self,
-        id: UsbId,
-        generation: u64,
-        high_speed_device_ready: bool,
+        connector: u32,
+        connection: Option<typec::Attached>,
     ) -> Result<(), &'static str> {
-        let master = self
-            .usb_masters
-            .iter_mut()
-            .find(|master| master.device == id.0)
-            .ok_or("unknown USB controller")?;
-        if master.port.generation != generation || master.port.ready != high_speed_device_ready {
-            master.session.detach()?;
-            master.attached = false;
-        }
-        master.port = UsbPort {
-            generation,
-            ready: high_speed_device_ready,
-        };
-        master.next_poll = 0;
+        self.typec_port(connector).set_connection(connection)?;
         Ok(())
     }
     pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>, &'static str> {
@@ -1394,8 +1393,14 @@ impl Devices for AppleDevices {
     fn dma_deadline(&self) -> Option<u64> {
         self.usb_masters
             .iter()
-            .filter(|master| master.port.ready || master.attached)
-            .map(|master| master.next_poll)
+            .filter_map(|master| {
+                let port = UsbPort::of(&master.connector);
+                if port != master.port {
+                    Some(0)
+                } else {
+                    (port.ready || master.attached).then_some(master.next_poll)
+                }
+            })
             .min()
     }
 
@@ -1476,6 +1481,14 @@ impl Devices for AppleDevices {
                 access: &mut access,
             };
             let fail = |why: &str| DeviceError::Refused(format!("USB device advance: {why}"));
+            let connector = UsbPort::of(&master.connector);
+            if connector != master.port {
+                // A new cable generation cancels the previous connection's work.
+                master.session.detach().map_err(fail)?;
+                master.attached = false;
+                master.port = connector;
+                master.next_poll = 0;
+            }
             controller.sync_port(&master.port).map_err(fail)?;
             controller.flush(&mut port).map_err(fail)?;
             let ready = controller.available();
@@ -2231,6 +2244,7 @@ mod tests {
             irqs: [1031, 1032, 1033, 1034, 990],
             iommu: 0,
             stream: 1,
+            port: 1,
         };
         let id = devices.add_usb(&placement, dart).unwrap();
         assert_eq!(devices.read(0, BASE + 0xc120, 4, 0), Ok(0x5533_300a));
@@ -2250,13 +2264,26 @@ mod tests {
             Err(DeviceError::NoDevice)
         );
         assert_eq!(devices.dma_deadline(), None);
-        devices.set_usb_port(id, 1, true).unwrap();
+        let host = typec::Attached {
+            orientation: typec::Orientation::Normal,
+            role: typec::DataRole::Ufp,
+            source: false,
+            vbus: true,
+            speed: typec::Usb2Speed::High,
+        };
+        devices.set_connection(1, Some(host)).unwrap();
         assert_eq!(devices.dma_deadline(), Some(0));
         let mut ram = crate::platform::dma::tests::Ram::new(0x800000000, 0x10000);
         devices.transfer(0, &mut ram, 0).unwrap();
         assert_eq!(devices.dma_deadline(), Some(USB_POLL_TICKS));
         assert!(devices.usb_client(id).unwrap().open(62078).is_err());
-        devices.set_usb_port(id, 2, false).unwrap();
+        // Without VBUS the controller is not ready; the change detaches.
+        let unpowered = typec::Attached {
+            vbus: false,
+            ..host
+        };
+        devices.set_connection(1, Some(unpowered)).unwrap();
+        assert_eq!(devices.dma_deadline(), Some(0));
         devices.transfer(0, &mut ram, USB_POLL_TICKS).unwrap();
         assert_eq!(devices.dma_deadline(), None);
     }

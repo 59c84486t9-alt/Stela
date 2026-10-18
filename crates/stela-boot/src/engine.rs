@@ -533,12 +533,24 @@ fn devices<'f>(
         // bus master's contract (`soc::Iommu`).
         let id = devices.add_usb(&usb, darts[usb.iommu][0])?;
         if restore {
+            // A restore host is cabled to this connector from power-on: it
+            // is the USB host and sources VBUS, so the Mac is a USB2 device.
+            // The connector's HPM die and controller observe the same cable.
+            use stela_runtime::machine::apple::typec::{
+                Attached, DataRole, Orientation, Usb2Speed,
+            };
+            let host = Attached {
+                orientation: Orientation::Normal,
+                role: DataRole::Ufp,
+                source: false,
+                vbus: true,
+                speed: Usb2Speed::High,
+            };
+            devices.set_connection(usb.port, Some(host))?;
             restore_usb = Some(id);
         } else {
             devices.usb_client(id)?.query_type()?;
         }
-        // Readiness remains false until the independent Type-C model
-        // publishes its actual USB2 UFP/PHY state through set_usb_port.
     }
     if let Some(aes) = board.and_then(|board| board.aes) {
         let [block, key_disable] = aes

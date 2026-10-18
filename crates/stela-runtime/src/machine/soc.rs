@@ -850,6 +850,8 @@ pub struct UsbController {
     pub irqs: [u32; 5],
     pub iommu: usize,
     pub stream: u32,
+    /// The Type-C connector's `port-number`, shared with its HPM die.
+    pub port: u32,
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
@@ -2853,11 +2855,16 @@ fn usb_controller(
     if stream >= u32::from(darts[iommu].streams) {
         return Err("usb-drd0 mapper stream exceeds DART capacity".into());
     }
+    let port = node
+        .first_u32("port-number")
+        .filter(|&port| port != 0)
+        .ok_or("usb-drd0 has no Type-C port number")?;
     Ok(Some(UsbController {
         ranges,
         irqs,
         iommu,
         stream,
+        port,
     }))
 }
 
@@ -5051,6 +5058,7 @@ mod tests {
                     ("reg", &pairs(ranges)),
                     ("iommu-parent", &words(&[parent])),
                     ("interrupts", &words(irqs)),
+                    ("port-number", &words(&[1])),
                 ],
                 &[],
             )
@@ -5072,7 +5080,8 @@ mod tests {
                 ranges,
                 irqs,
                 iommu: 0,
-                stream: 1
+                stream: 1,
+                port: 1,
             })
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);
