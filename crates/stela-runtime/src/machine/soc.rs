@@ -834,6 +834,11 @@ pub struct GpioSelect {
     pub pin: u32,
 }
 
+/// The opcode of a `function-*` property naming a GPIO pin: the FourCC
+/// `GPIO`, first character in the high byte, as the ADT cells store it (the
+/// J473AP `/arm-io/spi1` `function-spi_cs0` bytes `4f 49 50 47`).
+pub const GPIO_FUNCTION: u32 = u32::from_be_bytes(*b"GPIO");
+
 /// The byte-PIO SPI NOR topology. The 26A434 SPIMC driver accepts
 /// `internal-cs`; otherwise `function-spi_cs0` names an Apple GPIO function
 /// (four cells: provider phandle, 'GPIO', pin, function flags). J473AP uses
@@ -932,7 +937,7 @@ fn spi_nor(
         let [phandle, opcode, pin, flags] = cells[..] else {
             return Err("invalid SPI chip-select function".into());
         };
-        if opcode != u32::from_le_bytes(*b"GPIO") || flags != 0x10001 {
+        if opcode != GPIO_FUNCTION || flags != 0x10001 {
             return Err("unsupported SPI chip-select function encoding".into());
         }
         let gpio = io
@@ -2443,7 +2448,7 @@ mod tests {
                 ("interrupt-parent", &words(&[99])),
                 (
                     "function-spi_cs0",
-                    &words(&[106, u32::from_le_bytes(*b"GPIO"), 49, 0x10001]),
+                    &words(&[106, GPIO_FUNCTION, 49, 0x10001]),
                 ),
             ],
             &[flash],

@@ -216,7 +216,7 @@ mod tests {
         );
         spi.set_property(
             "function-spi_cs0",
-            [106u32, u32::from_le_bytes(*b"GPIO"), 49, 0x10001]
+            [106u32, soc::GPIO_FUNCTION, 49, 0x10001]
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .collect(),
