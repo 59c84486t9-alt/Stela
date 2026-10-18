@@ -3634,6 +3634,15 @@ mod tests {
     }
 
     #[test]
+    fn apple_sdsb_completes_as_a_barrier() {
+        const SDSB_ISH: u32 = 0x0020_1462;
+        let mut machine = machine(&[]);
+        let pc = machine.cpu.pc;
+        machine.system_instruction(SDSB_ISH).unwrap();
+        assert_eq!(machine.cpu.pc, pc + 4);
+    }
+
+    #[test]
     fn tlbi_invalidates_and_wfi_waits_for_the_virtual_timer() {
         let mut machine = machine(&[]);
         machine.system_instruction(0xd508_871f).unwrap(); // tlbi vmalle1

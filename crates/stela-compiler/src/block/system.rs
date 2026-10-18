@@ -97,6 +97,19 @@ impl DebugStateOperation {
 pub const GENTER: u32 = 0x0020_1420;
 pub const GEXIT: u32 = 0x0020_1400;
 
+/// Apple SDSB OSH, NSH, ISH and SY: `0x00201460` plus the domain (Asahi Linux
+/// "Apple Proprietary Instructions"; iBoot and SPTM use SDSB ISH). How it
+/// differs from DSB is not documented, so it decodes as the DSB of its
+/// domain, whose completion it at least provides (inference).
+const SDSB: u32 = 0x0020_1460;
+/// DSB with CRm OSH, NSH, ISH and SY, in SDSB's domain order.
+const SDSB_AS_DSB: [u32; 4] = [0xd503_339f, 0xd503_379f, 0xd503_3b9f, 0xd503_3f9f];
+
+fn decode_sdsb(word: u32) -> Option<synchronization::Operation> {
+    let domain = word.checked_sub(SDSB)? as usize;
+    synchronization::decode(*SDSB_AS_DSB.get(domain)?)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SystemInstruction {
     pub instruction_pc: GuestAddress,
@@ -213,7 +226,8 @@ pub(super) fn decode_el1_system_instruction(
 /// Decode every instruction the system-mode profile hands to the runtime: the
 /// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
 /// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, ESB,
-/// TSB and unallocated hints), the Debug-state-only MOVT GPR/ZT0 forms, and
+/// TSB and unallocated hints), Apple's SDSB, the Debug-state-only MOVT
+/// GPR/ZT0 forms, and
 /// the FEAT_CPA pointer arithmetic.
 /// YIELD, CSDB, SB and DMB stay ordinary and BTI compiles as NOP; PAuth hints belong to the PAuth
 /// decoder, which the profile consults first.
@@ -228,6 +242,8 @@ pub fn decode_system_mode_instruction(
         SystemOperation::Guarded(GuardedOperation::Enter)
     } else if word == GEXIT {
         SystemOperation::Guarded(GuardedOperation::Exit)
+    } else if let Some(operation) = decode_sdsb(word) {
+        SystemOperation::Synchronization(operation)
     } else if let Some(operation) = DebugStateOperation::decode(word) {
         SystemOperation::DebugStateOnly(operation)
     } else if let Some(decoded) = crate::aarch64::exclusive::decode(word) {
@@ -321,6 +337,30 @@ mod tests {
     const ADD_IMMEDIATE: u32 = 0x9100_0000;
     const RET: u32 = 0xd65f_03c0;
     const UNALLOCATED: u32 = 0xffff_ffff;
+
+    #[test]
+    fn system_mode_decodes_apple_sdsb_as_the_dsb_of_its_domain() {
+        let pc = GuestAddress(0x1000);
+        for (domain, dsb) in SDSB_AS_DSB.into_iter().enumerate() {
+            let instruction = decode_system_mode_instruction(pc, SDSB + domain as u32)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                instruction.operation,
+                SystemOperation::Synchronization(synchronization::decode(dsb).unwrap())
+            );
+        }
+        assert!(
+            decode_system_mode_instruction(pc, SDSB + 4)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_system_mode_instruction(pc, SDSB - 1)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn system_mode_claims_debug_state_only_movt_and_nothing_beside_it() {
