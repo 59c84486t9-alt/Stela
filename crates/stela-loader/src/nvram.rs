@@ -1,79 +1,95 @@
-//! The NVRAM iBoot hands the kernel: the current bank of the SPI NOR's NVRAM
-//! partition, copied into `/chosen` before the kernel starts.
+//! iBoot's NOR hand-off. The IPSW J473AP template supplies a 64 KiB
+//! `/chosen/nvram-proxy-data` slot and empty `spinor` child `reg`s. Stela
+//! assigns its emulated die's partitions and copies its current CHRP bank.
 //!
-//! XNU's `IODTNVRAM::initImageFormat` (`IONVRAM.cpp`, `xnu-12377`) reads
-//! `/chosen` `nvram-bank-size` and panics when it is 0, then takes
-//! `nvram-proxy-data` as the image. `IONVRAMV3Handler` accepts an image whose
-//! store header is `NVV3` version 1 and whose size equals the bank size, and
-//! also requires `nvram-bank-count`, `nvram-current-bank` and `nvram-raw`
-//! (whether its controller writes the NOR in place). The template leaves the
-//! three counts 0, has no `nvram-raw`, and sizes `nvram-proxy-data` at
-//! 64 KiB, which is taken as the bank size. XNU never writes a store header
-//! of its own: it copies the existing one into each bank it rewrites.
-//!
-//! Stela presents an erased partition of two banks, the layout Asahi's
-//! `apple-nvram` reads from M1 and M2 NOR (`PARTITION_SIZE` 0x10000 per bank),
-//! with bank 0 current and holding a store header and no variables. The
-//! header's generation 1, state 0xfe, flags 0x5a and the 0x4000/0xc000 split
-//! between the system and common regions (the common size includes the
-//! header) are those of `apple-nvram`'s store fixture; erased NOR reads 0xff.
-//! The bank count and `nvram-raw` 1 (the NOR controller writes in place) are
-//! inferences pending hardware. Variables persist only once a NOR model backs
-//! the partition.
+//! 26A434 `AppleARMNORNVRAM::getNVRAMProperties` file
+//! 0x1c92f48 reads the three 32-bit bank properties; `select` 0x1ca1d40
+//! bounds the index and `read` 0x1ca1bd8 addresses bank * bank-size.
+//! `AppleARMNORFlashDevice::initDeviceWithProvider` 0x1c5b948 interprets
+//! each child's `reg` as 8-byte (u32 offset, u32 length) records.
+//! XNU `IONVRAMCHRPHandler.cpp` validates CHRP checksums and Adler-32.
 use crate::apple_device_tree::DeviceTree;
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use anyhow::{Result, ensure};
+use stela_runtime::machine::apple::nor::{self, Image, nvram};
 
 const CHOSEN: &str = "/chosen";
-const PROXY_DATA: &str = "nvram-proxy-data";
-const BANK_SIZE: &str = "nvram-bank-size";
-const BANK_COUNT: &str = "nvram-bank-count";
-const CURRENT_BANK: &str = "nvram-current-bank";
-const RAW: &str = "nvram-raw";
+const PROXY: &str = "nvram-proxy-data";
+const SPINOR: &str = "/arm-io/spi1/spinor";
 
-const BANKS: u32 = 2;
-const SIGNATURE: &[u8; 4] = b"3VVN";
-const VERSION: u8 = 1;
-const GENERATION: u32 = 1;
-const STATE: u8 = 0xfe;
-const FLAGS: u8 = 0x5a;
-const SYSTEM_BYTES: u32 = 0x4000;
-const HEADER_BYTES: usize = 24;
-const ERASED: u8 = 0xff;
-
-/// An erased bank of `bytes` with a v3 store header and no variables.
-fn empty_bank(bytes: u32) -> Vec<u8> {
-    let mut bank = vec![ERASED; bytes as usize];
-    let mut header = Vec::with_capacity(HEADER_BYTES);
-    header.extend_from_slice(SIGNATURE);
-    header.extend_from_slice(&bytes.to_le_bytes());
-    header.extend_from_slice(&GENERATION.to_le_bytes());
-    header.extend_from_slice(&[STATE, FLAGS, VERSION, 0]);
-    header.extend_from_slice(&SYSTEM_BYTES.to_le_bytes());
-    header.extend_from_slice(&(bytes - SYSTEM_BYTES).to_le_bytes());
-    bank[..HEADER_BYTES].copy_from_slice(&header);
-    bank
-}
-
-/// Publishes the current NVRAM bank and its geometry in `/chosen`, when the
-/// template has a proxy slot; returns whether it did.
+/// Publish one image's current bank; the engine reconstructs the erased
+/// regions and installs these exact proxy bytes into its NOR before entry.
+/// No host-backed persistence is claimed: a new boot gets a new image.
 pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
-    let Some(slot) = tree.property(CHOSEN, PROXY_DATA) else {
+    let Some(slot) = tree.property(CHOSEN, PROXY) else {
         return Ok(false);
     };
-    let bytes = u32::try_from(slot.value.len())?;
     ensure!(
-        bytes > SYSTEM_BYTES && bytes.is_power_of_two(),
-        "{CHOSEN} {PROXY_DATA} is {bytes:#x} bytes, not an NVRAM bank"
+        slot.value.len() == nvram::BANK_SIZE,
+        "NVRAM proxy is not a 64 KiB bank"
     );
-    tree.set_property(CHOSEN, PROXY_DATA, empty_bank(bytes))?;
+    if let Some(spinor) = tree.node(SPINOR) {
+        let ranges: Vec<u8> = [0u32, 0, nor::CAPACITY as u32]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        ensure!(
+            spinor.property("ranges").is_some_and(|p| p.value == ranges),
+            "unsupported SPI NOR address ranges"
+        );
+        for (name, (offset, bytes)) in [
+            ("firmware", nor::FIRMWARE),
+            ("anvram", nor::ANVRAM),
+            ("syscfg", nor::SYSCFG),
+        ] {
+            let path = alloc::format!("{SPINOR}/{name}");
+            let reg: Vec<u8> = [offset, bytes]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let node = tree
+                .node(&path)
+                .ok_or_else(|| anyhow::anyhow!("missing {path}"))?;
+            ensure!(
+                node.property("reg")
+                    .is_some_and(|p| p.value.is_empty() || p.value == reg),
+                "unsupported {path} partition"
+            );
+        }
+        for (name, (offset, bytes)) in [
+            ("firmware", nor::FIRMWARE),
+            ("anvram", nor::ANVRAM),
+            ("syscfg", nor::SYSCFG),
+        ] {
+            tree.set_property(
+                &alloc::format!("{SPINOR}/{name}"),
+                "reg",
+                [offset, bytes]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            )?;
+        }
+    }
+    let image = Image::fresh();
+    tree.set_property(
+        CHOSEN,
+        PROXY,
+        image
+            .bank(nvram::CURRENT_BANK)
+            .expect("current bank")
+            .to_vec(),
+    )?;
     for (name, value) in [
-        (BANK_SIZE, bytes),
-        (BANK_COUNT, BANKS),
-        (CURRENT_BANK, 0),
-        (RAW, 1),
+        ("nvram-bank-size", nvram::BANK_SIZE as u32),
+        ("nvram-bank-count", nvram::BANK_COUNT),
+        ("nvram-current-bank", nvram::CURRENT_BANK),
     ] {
         tree.set_property(CHOSEN, name, value.to_le_bytes().to_vec())?;
+    }
+    // CHRP uses select/erase/write, not the V3 raw-store write protocol.
+    if let Some(chosen) = tree.node_mut(CHOSEN) {
+        chosen.remove_property("nvram-raw");
     }
     Ok(true)
 }
@@ -82,39 +98,95 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::apple_device_tree::Node;
+    use alloc::vec;
+    #[test]
+    fn boot_firmware_assigns_only_empty_partition_ranges() {
+        let mut root = Node::named("device-tree").unwrap();
+        let mut chosen = Node::named("chosen").unwrap();
+        chosen
+            .set_property(PROXY, vec![0; nvram::BANK_SIZE])
+            .unwrap();
+        let mut flash = Node::named("spinor").unwrap();
+        flash
+            .set_property(
+                "ranges",
+                [0u32, 0, nor::CAPACITY as u32]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            )
+            .unwrap();
+        for name in ["firmware", "anvram", "syscfg"] {
+            let mut n = Node::named(name).unwrap();
+            n.set_property("reg", vec![]).unwrap();
+            flash.children.push(n);
+        }
+        let mut spi = Node::named("spi1").unwrap();
+        spi.children.push(flash);
+        let mut io = Node::named("arm-io").unwrap();
+        io.children.push(spi);
+        root.children = vec![chosen, io];
+        let mut tree = DeviceTree { root };
+        assert!(publish(&mut tree).unwrap());
+        assert_eq!(
+            tree.property(&alloc::format!("{SPINOR}/anvram"), "reg")
+                .unwrap()
+                .value,
+            [nor::ANVRAM.0, nor::ANVRAM.1]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        tree.set_property(&alloc::format!("{SPINOR}/syscfg"), "reg", vec![0; 8])
+            .unwrap();
+        let before = tree.serialize();
+        assert!(publish(&mut tree).is_err());
+        assert_eq!(tree.serialize(), before);
+    }
 
     #[test]
-    fn the_proxy_slot_becomes_an_empty_v3_bank() {
+    fn proxy_is_the_nor_bank_and_chrp_has_no_raw_flag() {
         let mut chosen = Node::named("chosen").unwrap();
-        chosen.set_property(PROXY_DATA, vec![0; 0x10000]).unwrap();
-        chosen.set_property(BANK_SIZE, vec![0; 4]).unwrap();
+        chosen
+            .set_property(PROXY, vec![0; nvram::BANK_SIZE])
+            .unwrap();
+        chosen.set_property("nvram-raw", vec![1, 0, 0, 0]).unwrap();
         let mut root = Node::named("device-tree").unwrap();
         root.children.push(chosen);
         let mut tree = DeviceTree { root };
         assert!(publish(&mut tree).unwrap());
-        let image = &tree.property(CHOSEN, PROXY_DATA).unwrap().value;
-        assert_eq!(image.len(), 0x10000);
-        // apple-nvram's store fixture.
+        let image = Image::fresh();
         assert_eq!(
-            image[..HEADER_BYTES],
-            [
-                0x33, 0x56, 0x56, 0x4e, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0xfe, 0x5a,
-                0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00,
-            ]
+            tree.property(CHOSEN, PROXY).unwrap().value,
+            image.bank(0).unwrap()
         );
-        assert!(image[HEADER_BYTES..].iter().all(|&byte| byte == ERASED));
-        let word = |name| tree.property(CHOSEN, name).unwrap().as_u32();
-        assert_eq!(word(BANK_SIZE), Some(0x10000));
-        assert_eq!(word(BANK_COUNT), Some(2));
-        assert_eq!(word(CURRENT_BANK), Some(0));
-        assert_eq!(word(RAW), Some(1));
+        assert_eq!(
+            tree.property(CHOSEN, "nvram-bank-size").unwrap().as_u32(),
+            Some(65536)
+        );
+        assert_eq!(
+            tree.property(CHOSEN, "nvram-bank-count").unwrap().as_u32(),
+            Some(2)
+        );
+        assert_eq!(
+            tree.property(CHOSEN, "nvram-current-bank")
+                .unwrap()
+                .as_u32(),
+            Some(0)
+        );
+        assert!(tree.property(CHOSEN, "nvram-raw").is_none());
     }
-
     #[test]
-    fn a_tree_without_a_proxy_slot_is_left_alone() {
+    fn absent_proxy_is_unchanged_and_wrong_size_refuses() {
         let mut tree = DeviceTree {
             root: Node::named("device-tree").unwrap(),
         };
         assert!(!publish(&mut tree).unwrap());
+        let mut chosen = Node::named("chosen").unwrap();
+        chosen.set_property(PROXY, vec![0; 32]).unwrap();
+        tree.root.children.push(chosen);
+        let before = tree.serialize();
+        assert!(publish(&mut tree).is_err());
+        assert_eq!(tree.serialize(), before);
     }
 }

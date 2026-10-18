@@ -71,11 +71,24 @@ fn named(node: &Node, model: &str) -> bool {
 
 /// A modeled device that is not part of an IOMMU.
 fn modeled_client(node: &Node) -> bool {
+    // Only NOR-backed controllers have a modeled SPI slave. Other SPI
+    // controllers must not bind drivers for absent peripherals.
+    if named(node, soc::SPI) && !node.children.iter().any(|child| named(child, soc::NOR)) {
+        return false;
+    }
     !named(node, soc::DART) && !named(node, soc::IOMMU_MAPPER) && compatibles(node).any(soc::models)
 }
 
-/// The phandles modeled devices under `node` name as `iommu-parent`.
-fn iommu_parents(node: &Node, parents: &mut Vec<u32>) {
+/// The IOMMU and GPIO phandles that visible clients under `node` require.
+fn client_providers(node: &Node, parents: &mut Vec<u32>) {
+    if modeled_client(node)
+        && named(node, soc::SPI)
+        && let Some(phandle) = node
+            .property("function-spi_cs0")
+            .and_then(|p| p.value.get(..4))
+    {
+        parents.push(u32::from_le_bytes(phandle.try_into().expect("4 bytes")));
+    }
     if modeled_client(node)
         && let Some(property) = node.property(IOMMU_PARENT)
     {
@@ -83,7 +96,7 @@ fn iommu_parents(node: &Node, parents: &mut Vec<u32>) {
         parents.extend(cells.iter().map(|cell| u32::from_le_bytes(*cell)));
     }
     for child in &node.children {
-        iommu_parents(child, parents);
+        client_providers(child, parents);
     }
 }
 
@@ -97,7 +110,11 @@ fn kept_mapper(node: &Node, parents: &[u32]) -> bool {
 
 /// Whether the machine models `node` and it serves a visible device.
 fn modeled(node: &Node, parents: &[u32]) -> bool {
-    if named(node, soc::DART) {
+    if named(node, soc::GPIO) {
+        node.property(PHANDLE)
+            .and_then(|p| p.as_u32())
+            .is_some_and(|p| parents.contains(&p))
+    } else if named(node, soc::DART) {
         node.children
             .iter()
             .any(|child| kept_mapper(child, parents))
@@ -114,7 +131,7 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
 /// order, then the selections.
 pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     let mut parents = Vec::new();
-    iommu_parents(&tree.root, &mut parents);
+    client_providers(&tree.root, &mut parents);
     let mut hidden = Vec::new();
     visit(&mut tree.root, "", &parents, &mut hidden);
     let selected = tree
@@ -181,6 +198,45 @@ mod tests {
         }
         node.children = children;
         node
+    }
+
+    #[test]
+    fn spi_requires_a_nor_slave_and_retains_its_gpio_provider() {
+        let mut gpio = node("gpio", Some(soc::GPIO.as_bytes()), vec![]);
+        gpio.set_property(PHANDLE, 106u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut spi = node(
+            "spi1",
+            Some(soc::SPI.as_bytes()),
+            vec![node(
+                "spinor",
+                Some(soc::NOR.as_bytes()),
+                vec![node("anvram", Some(soc::NVRAM.as_bytes()), vec![])],
+            )],
+        );
+        spi.set_property(
+            "function-spi_cs0",
+            [106u32, u32::from_le_bytes(*b"GPIO"), 49, 0x10001]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect(),
+        )
+        .unwrap();
+        let mut tree = DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![node(
+                    "arm-io",
+                    None,
+                    vec![gpio, spi, node("spi0", Some(soc::SPI.as_bytes()), vec![])],
+                )],
+            ),
+        };
+        assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/spi0"]);
+        assert!(tree.property("/arm-io/gpio", COMPATIBLE).is_some());
+        tree.node_mut("/arm-io/spi1").unwrap().children.clear();
+        assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/gpio", "/arm-io/spi1"]);
     }
 
     #[test]

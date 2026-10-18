@@ -709,7 +709,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     }
     if nvram::publish(&mut tree)? {
         unresolved.push(
-            "/chosen nvram-proxy-data: an empty NVRAM bank; variables do not persist without a NOR model"
+            "/chosen nvram-proxy-data: a CHRP bank from the in-memory NOR; variables do not persist across boots"
                 .into(),
         );
     }

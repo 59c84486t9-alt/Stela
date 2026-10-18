@@ -19,7 +19,7 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, bridge, cluster, cpm, cpustart, dart, dpe, energy, fuse, power, ptd, wake,
+    amcc, bridge, cluster, cpm, cpustart, dart, dpe, energy, fuse, nor, power, ptd, spi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -722,15 +722,44 @@ pub const AES: &str = "aes,s8000";
 /// `platform::apple::amcc`, `dcs` and `ptd` model.
 pub const MCC: &str = "mcc,t8112";
 
-/// Whether the engine models a device `compatible` with `name`: the devices a
-/// [`Board`] places. A boot bundle presents no other device to the guest.
+/// SPI controller compatible, byte-PIO version 1.
+pub const SPI: &str = "spi-1,spimc";
+/// Single-wire SPI NOR compatible.
+pub const NOR: &str = "nor-flash,spi";
+/// Apple CHRP NVRAM service compatible.
+pub const NVRAM: &str = "nvram,chrp";
+/// GPIO output provider compatible.
+pub const GPIO: &str = "gpio,t8101";
+/// A NOR partition read by AppleDiagnosticDataAccessReadOnly (kernel file
+/// 0x235ecb8 start, 0x235f1e8 lazy whole-region read, 0x235f788 forwarding).
+pub const SYSCFG: &str = "diagnostic-data,format1";
+
+/// Whether a compatible names a modeled device. The loader also checks
+/// topology: SPI requires a NOR slave, and GPIO a visible SPI CS client.
 pub fn models(name: &str) -> bool {
-    [UART, WATCHDOG, DART, IOMMU_MAPPER, AES, MCC, PMGR].contains(&name) || AICS.contains(&name)
+    [
+        UART,
+        WATCHDOG,
+        DART,
+        IOMMU_MAPPER,
+        AES,
+        MCC,
+        PMGR,
+        SPI,
+        NOR,
+        NVRAM,
+        SYSCFG,
+        GPIO,
+    ]
+    .contains(&name)
+        || AICS.contains(&name)
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
+    /// SPI1, its NOR image and the GPIO chip-select wire, when visible.
+    pub spi_nor: Option<SpiNor>,
     pub cpus: Cpus,
     /// `/arm-io/uart0`, a `uart-1,samsung`.
     pub uart: Device,
@@ -776,6 +805,162 @@ pub struct Board {
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+/// Placement from SPI `reg`/`interrupts`, `function-spi_cs0`, the GPIO
+/// phandle and GPIO `reg`/`#gpio-pins`/`#gpio-int-groups`. No PA or pin is fixed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpiNor {
+    pub device: Device,
+    pub image: nor::Image,
+    pub select: Option<GpioSelect>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpioSelect {
+    pub physical: u64,
+    pub bytes: u64,
+    pub pins: u32,
+    pub groups: u32,
+    pub pin: u32,
+}
+
+/// The byte-PIO SPI NOR topology. The 26A434 SPIMC driver accepts
+/// `internal-cs`; otherwise `function-spi_cs0` names an Apple GPIO function
+/// (four cells: provider phandle, 'GPIO', pin, function flags). J473AP uses
+/// pin 49 with flags 0x10001; other function encodings refuse.
+fn spi_nor(
+    root: &Node<'_>,
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    aic: u32,
+) -> Result<Option<SpiNor>, String> {
+    let Some(node) = io.child("spi1").filter(|n| n.compatible(SPI)) else {
+        return Ok(None);
+    };
+    if node.first_u32("spi-version") != Some(1) {
+        return Err("unsupported SPI version".into());
+    }
+    let place = |node: &Node<'_>| -> Result<(u64, u64), String> {
+        let pairs = node.pairs("reg").ok_or("SPI/GPIO reg missing")?;
+        let [(offset, bytes)] = pairs[..] else {
+            return Err("SPI/GPIO requires one reg range".into());
+        };
+        let physical = translate(offset).ok_or("SPI/GPIO outside arm-io ranges")?;
+        if bytes == 0
+            || physical.checked_add(bytes).is_none()
+            || translate(
+                offset
+                    .checked_add(bytes - 1)
+                    .ok_or("SPI/GPIO span overflows")?,
+            ) != Some(physical + bytes - 1)
+        {
+            return Err("SPI/GPIO range exceeds arm-io ranges".into());
+        }
+        Ok((physical, bytes))
+    };
+    let (physical, bytes) = place(&node)?;
+    if bytes < spi::BYTES || node.first_u32("interrupt-parent") != Some(aic) {
+        return Err("SPI aperture or interrupt parent is unsupported".into());
+    }
+    let irq = node
+        .first_u32("interrupts")
+        .filter(|&irq| irq <= u32::from(u16::MAX))
+        .ok_or("SPI interrupt missing or too large")?;
+    let flash = node
+        .child("spinor")
+        .filter(|n| n.compatible(NOR))
+        .ok_or("SPI1 has no modeled NOR child")?;
+    // AppleARMSPIDevice's 32-byte AppleARMSPIConfig: CS index,
+    // clock period, CPOL/CPHA/bit order/word size, then delays.
+    // The byte PIO model has only one MSB-first NOR slave, at CS0.
+    let config = flash
+        .property("reg")
+        .ok_or("NOR SPI configuration missing")?;
+    if config.len() != 32
+        || config[..4] != [0; 4]
+        || config[8] > 1
+        || config[9] > 1
+        || config[10..12] != [1, 8]
+    {
+        return Err("unsupported NOR SPI configuration or chip select".into());
+    }
+    if flash.cells32("ranges").as_deref() != Some(&[0, 0, nor::CAPACITY as u32]) {
+        return Err("unsupported NOR ranges".into());
+    }
+    for (name, (offset, size)) in [
+        ("firmware", nor::FIRMWARE),
+        ("anvram", nor::ANVRAM),
+        ("syscfg", nor::SYSCFG),
+    ] {
+        if flash.child(name).and_then(|n| n.cells32("reg")).as_deref() != Some(&[offset, size]) {
+            return Err(format!(
+                "NOR {name} lacks its supported boot-firmware partition"
+            ));
+        }
+    }
+    let chosen = root.child("chosen").ok_or("NVRAM chosen missing")?;
+    if chosen.first_u32("nvram-bank-size") != Some(nor::nvram::BANK_SIZE as u32)
+        || chosen.first_u32("nvram-bank-count") != Some(nor::nvram::BANK_COUNT)
+    {
+        return Err("unsupported NVRAM bank geometry".into());
+    }
+    let current = chosen
+        .first_u32("nvram-current-bank")
+        .ok_or("NVRAM current bank missing")?;
+    let proxy = chosen
+        .property("nvram-proxy-data")
+        .ok_or("NVRAM proxy missing")?;
+    let image = nor::Image::fresh()
+        .with_proxy(current, proxy)
+        .map_err(String::from)?;
+    let select = if node.property("internal-cs").is_some() {
+        None
+    } else {
+        let cells = node
+            .cells32("function-spi_cs0")
+            .ok_or("SPI external chip select missing")?;
+        let [phandle, opcode, pin, flags] = cells[..] else {
+            return Err("invalid SPI chip-select function".into());
+        };
+        if opcode != u32::from_le_bytes(*b"GPIO") || flags != 0x10001 {
+            return Err("unsupported SPI chip-select function encoding".into());
+        }
+        let gpio = io
+            .child("gpio")
+            .filter(|n| n.compatible(GPIO) && n.first_u32("AAPL,phandle") == Some(phandle))
+            .ok_or("SPI CS GPIO provider is absent or unmodeled")?;
+        let (physical, bytes) = place(&gpio)?;
+        let pins = gpio
+            .first_u32("#gpio-pins")
+            .ok_or("GPIO pin count missing")?;
+        let groups = gpio
+            .first_u32("#gpio-int-groups")
+            .ok_or("GPIO group count missing")?;
+        if pins == 0
+            || pins > 512
+            || pin >= pins
+            || !(1..=7).contains(&groups)
+            || bytes < 0x800 + u64::from(groups) * 0x40
+        {
+            return Err("unsupported GPIO chip-select geometry".into());
+        }
+        Some(GpioSelect {
+            physical,
+            bytes,
+            pins,
+            groups,
+            pin,
+        })
+    };
+    Ok(Some(SpiNor {
+        device: Device {
+            physical,
+            bytes,
+            irq,
+        },
+        image,
+        select,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1996,11 +2181,13 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         cpu_start,
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
+    let spi_nor = spi_nor(&root, &io, &translate, phandle)?;
     Ok(Board {
         cluster_events,
         bridges,
         soc_dpe,
         power_banks,
+        spi_nor,
         wake_masks,
         performance,
         energy,
@@ -2073,6 +2260,85 @@ mod tests {
             watchdog_side(&Node::root(&tree).unwrap(), &Some).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn spi_nor_placement_uses_dt_ranges_bank_proxy_and_gpio_function() {
+        use crate::machine::adt::encode;
+        let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let partitions: Vec<_> = [
+            ("firmware", nor::FIRMWARE),
+            ("anvram", nor::ANVRAM),
+            ("syscfg", nor::SYSCFG),
+        ]
+        .into_iter()
+        .map(|(name, (offset, size))| {
+            encode(
+                &[("name", name.as_bytes()), ("reg", &words(&[offset, size]))],
+                &[],
+            )
+        })
+        .collect();
+        let flash = encode(
+            &[
+                ("name", b"spinor"),
+                ("compatible", NOR.as_bytes()),
+                ("reg", &words(&[0, 25, 0x08010000, 0, 20, 0, 0, 0])),
+                ("ranges", &words(&[0, 0, nor::CAPACITY as u32])),
+            ],
+            &partitions,
+        );
+        let spi = encode(
+            &[
+                ("name", b"spi1"),
+                ("compatible", SPI.as_bytes()),
+                ("spi-version", &words(&[1])),
+                ("reg", &pairs(&[0x35104000, 0x4000])),
+                ("interrupts", &words(&[749])),
+                ("interrupt-parent", &words(&[99])),
+                (
+                    "function-spi_cs0",
+                    &words(&[106, u32::from_le_bytes(*b"GPIO"), 49, 0x10001]),
+                ),
+            ],
+            &[flash],
+        );
+        let gpio = encode(
+            &[
+                ("name", b"gpio"),
+                ("compatible", GPIO.as_bytes()),
+                ("reg", &pairs(&[0x3c100000, 0x100000])),
+                ("#gpio-pins", &words(&[213])),
+                ("#gpio-int-groups", &words(&[7])),
+                ("AAPL,phandle", &words(&[106])),
+            ],
+            &[],
+        );
+        let io = encode(&[("name", b"arm-io")], &[spi, gpio]);
+        let chosen = encode(
+            &[
+                ("name", b"chosen"),
+                ("nvram-proxy-data", &nor::nvram::empty_bank()),
+                ("nvram-bank-size", &words(&[65536])),
+                ("nvram-bank-count", &words(&[2])),
+                ("nvram-current-bank", &words(&[0])),
+            ],
+            &[],
+        );
+        let data = encode(&[("name", b"device-tree")], &[chosen, io]);
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let placed = spi_nor(&root, &io, &|v| v.checked_add(0x2_0000_0000), 99)
+            .unwrap()
+            .unwrap();
+        assert_eq!(placed.device.physical, 0x2_3510_4000);
+        assert_eq!(placed.device.irq, 749);
+        assert_eq!(placed.select.unwrap().pin, 49);
+        assert_eq!(placed.select.unwrap().physical, 0x2_3c10_0000);
+        assert_eq!(placed.image.bank(0).unwrap(), nor::nvram::empty_bank());
+        assert!(spi_nor(&root, &io, &|_| None, 99).is_err());
+        assert!(spi_nor(&root, &io, &Some, 100).is_err());
     }
 
     #[test]

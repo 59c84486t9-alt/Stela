@@ -359,6 +359,9 @@ fn devices(
         .add_watchdog_with_side(wdt.0, board.and_then(|b| b.watchdog_side), Some(wdt.1), now)
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
     devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
+    if let Some(spi) = board.and_then(|board| board.spi_nor.as_ref()) {
+        devices.add_spi_nor(spi)?;
+    }
     for block in board.map_or(&[][..], |board| &board.lockdown) {
         let range = Range {
             physical: block.physical,

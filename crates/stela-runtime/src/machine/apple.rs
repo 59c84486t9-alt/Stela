@@ -22,6 +22,7 @@ use crate::platform::apple::{
     dpe::Dpe,
     energy::{self, Energy},
     fuse::{self, AonFuses},
+    gpio::Gpio,
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
     lockdown::{self, Lockdown},
@@ -29,6 +30,7 @@ use crate::platform::apple::{
     pmgr::{ACTIVE, Pmgr, PowerState},
     power::{self, Power},
     ptd::{self, Ptd},
+    spi::Spi,
     uart::S5lUart,
     wake::{self, WakeMasks},
     wdt::{self, AppleWdt},
@@ -41,6 +43,7 @@ pub use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     interrupt::AicInput,
+    nor,
     uart::{ConsoleBusy, ConsoleSink},
 };
 
@@ -63,6 +66,12 @@ pub struct AppleDevices {
     cpu_start: Option<CpuStarter>,
     reset_vectors: Vec<Option<DeviceId>>,
     starts: Vec<Start>,
+    selects: Vec<SelectWire>,
+}
+
+struct SelectWire {
+    spi: DeviceId,
+    physical: u64,
 }
 
 /// The CPU start registers and each PE's MPIDR_EL1 (Aff1 its cluster, Aff0
@@ -132,6 +141,7 @@ impl AppleDevices {
             cpu_start: None,
             reset_vectors: Vec::new(),
             starts: Vec::new(),
+            selects: Vec::new(),
         }
     }
 
@@ -153,6 +163,33 @@ impl AppleDevices {
         for range in ranges {
             self.bus.map(device, range.physical, range.bytes, offset)?;
             offset += range.bytes;
+        }
+        Ok(())
+    }
+
+    /// Installs the DT-derived SPI controller, one in-memory NOR die and
+    /// its external GPIO CS wire (or the internal PIN.CS connection).
+    pub fn add_spi_nor(&mut self, placement: &super::soc::SpiNor) -> Result<(), String> {
+        let device = placement.device;
+        let spi = self.bus.add(Box::new(Spi::new(
+            placement.image.clone(),
+            AicInput::new(0, device.irq as u16),
+            placement.select.is_some(),
+        )));
+        self.bus
+            .map(spi, device.physical, device.bytes, 0)
+            .map_err(|e| format!("SPI placement: {e:?}"))?;
+        if let Some(select) = placement.select {
+            let gpio =
+                Gpio::new(select.pins, select.groups, &[select.pin]).map_err(String::from)?;
+            let gpio = self.bus.add(Box::new(gpio));
+            self.bus
+                .map(gpio, select.physical, select.bytes, 0)
+                .map_err(|e| format!("GPIO placement: {e:?}"))?;
+            self.selects.push(SelectWire {
+                spi,
+                physical: select.physical + u64::from(select.pin) * 4,
+            });
         }
         Ok(())
     }
@@ -710,10 +747,32 @@ impl Devices for AppleDevices {
         now: u64,
     ) -> Result<(), DeviceError> {
         let width = width(bytes)?;
+        // Validate the NOR CS edge before the GPIO word changes. This keeps
+        // an incomplete-command refusal atomic across the two devices.
+        for wire in self
+            .selects
+            .iter()
+            .filter(|w| w.physical == physical && width == Width::Word)
+        {
+            let high = Gpio::driven_level(value as u32)
+                .ok_or_else(|| DeviceError::Refused("SPI CS must remain a GPIO output".into()))?;
+            self.bus
+                .device::<Spi>(wire.spi)
+                .expect("SPI wire")
+                .check_cs(high)
+                .map_err(|e| DeviceError::Refused(e.into()))?;
+        }
         let mut access = Access::new(cpu, now, &mut self.latch);
         self.bus
             .write(physical, width, value, &mut access)
             .map_err(describe)?;
+        for wire in self.selects.iter().filter(|w| w.physical == physical) {
+            self.bus
+                .device_mut::<Spi>(wire.spi)
+                .expect("SPI wire")
+                .set_cs(value & 1 != 0)
+                .map_err(|e| DeviceError::Refused(e.into()))?;
+        }
         let reset = reset_reason(&access);
         self.settle(cpu, now, reset)
     }
@@ -882,6 +941,68 @@ mod tests {
         d.write(0, cpm + 0x40f8, 8, 1, 0).unwrap();
         assert!(d.read(0, cpm + 0x40f8, 8, 0).is_err());
         assert!(d.read(0, cpm + 0x1234, 8, 0).is_err());
+    }
+
+    #[test]
+    fn external_gpio_cs_delimits_nor_commands_across_controller_transfers() {
+        use super::super::soc::{Device, GpioSelect, SpiNor};
+        const SPI: u64 = 0x10000;
+        const GPIO: u64 = 0x20000;
+        const PIN: u64 = GPIO + 49 * 4;
+        let mut devices = AppleDevices::new();
+        devices
+            .add_aic(0x100000, 1024, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        devices
+            .add_spi_nor(&SpiNor {
+                device: Device {
+                    physical: SPI,
+                    bytes: 0x4000,
+                    irq: 749,
+                },
+                image: nor::Image::fresh(),
+                select: Some(GpioSelect {
+                    physical: GPIO,
+                    bytes: 0x1000,
+                    pins: 213,
+                    groups: 7,
+                    pin: 49,
+                }),
+            })
+            .unwrap();
+        fn transfer(devices: &mut AppleDevices, bytes: &[u8]) -> Vec<u8> {
+            devices.write(0, SPI, 4, 0, 0).unwrap();
+            devices.write(0, SPI, 4, 12, 0).unwrap();
+            devices
+                .write(0, SPI + 0x34, 4, bytes.len() as u64, 0)
+                .unwrap();
+            devices
+                .write(0, SPI + 0x4c, 4, bytes.len() as u64, 0)
+                .unwrap();
+            for &b in bytes {
+                devices.write(0, SPI + 0x10, 4, u64::from(b), 0).unwrap();
+            }
+            devices.write(0, SPI, 4, 1, 0).unwrap();
+            (0..bytes.len())
+                .map(|_| devices.read(0, SPI + 0x20, 4, 0).unwrap() as u8)
+                .collect()
+        }
+        devices.write(0, PIN, 4, 2, 0).unwrap();
+        transfer(&mut devices, &[0x06]);
+        devices.write(0, PIN, 4, 3, 0).unwrap();
+        devices.write(0, PIN, 4, 2, 0).unwrap();
+        transfer(&mut devices, &[0x02, 0, 0, 0]);
+        transfer(&mut devices, &[0x42, 0x24]);
+        devices.write(0, PIN, 4, 3, 0).unwrap();
+        devices.write(0, PIN, 4, 2, 0).unwrap();
+        transfer(&mut devices, &[0x03, 0, 0, 0]);
+        assert_eq!(transfer(&mut devices, &[0xff, 0xff]), [0x42, 0x24]);
+        devices.write(0, PIN, 4, 3, 0).unwrap();
+        // An incomplete address cannot release CS or mutate the GPIO word.
+        devices.write(0, PIN, 4, 2, 0).unwrap();
+        transfer(&mut devices, &[0x20, 0]);
+        assert!(devices.write(0, PIN, 4, 3, 0).is_err());
+        assert_eq!(devices.read(0, PIN, 4, 0), Ok(2));
     }
 
     #[test]
