@@ -10,6 +10,7 @@
 //! with x0 holding the `boot_args` address. `boot_args` values follow m1n1
 //! `_write_boot_args`. The format is specified in
 //! `docs/design/runtime.md#kernel-boot-bundle`.
+use crate::aic;
 use crate::apple_device_tree::{DeviceTree, Placeholder};
 use crate::boot_args::{self, BootArgs, Video};
 use crate::boot_policy::{self, Decision, SealedVolume, SecurityPolicy};
@@ -701,6 +702,9 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         unresolved.extend(gaps);
     }
     carveouts::publish(&mut tree, &carveouts)?;
+    if let Some(chip_id) = inputs.target.chip_id {
+        aic::publish(&mut tree, chip_id)?;
+    }
     if nvram::publish(&mut tree)? {
         unresolved.push(
             "/chosen nvram-proxy-data: an empty NVRAM bank; variables do not persist without a NOR model"

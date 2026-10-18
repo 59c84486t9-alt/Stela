@@ -207,6 +207,12 @@ pub struct Cpus {
     pub lockdown: Option<[u64; 2]>,
 }
 
+/// The `aic` node's `compatible` and its event register's offset from its
+/// `reg` on the SoC with `chip_id`, when a public DeviceTree places it.
+pub fn aic(chip_id: u32) -> Option<(&'static str, u64)> {
+    SOCS.iter().find(|soc| soc.chip_id == chip_id)?.aic
+}
+
 /// The guest DRAM base of the SoC with `chip_id`.
 pub fn dram_base(chip_id: u32) -> Result<u64, String> {
     SOCS.iter()

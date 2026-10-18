@@ -7,6 +7,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
+pub mod aic;
 pub mod apple_device_tree;
 pub mod boot_args;
 pub mod boot_bundle;
