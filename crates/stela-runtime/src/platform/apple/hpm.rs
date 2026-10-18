@@ -11,8 +11,8 @@
 //! register: reading events does not acknowledge them.
 //!
 //! The class-10 startup research (`docs/research/hpm.md`) gives the registers AppleTCControllerType10 reads and their lengths: the
-//! identity, UID (0x05), revision (0x2c), boot flags (0x2d), configuration
-//! (0x29), power state (0x20), data control (0x50), Apple CF/VID status (0x5e)
+//! identity, UID (0x05), revision (0x2c), boot flags (0x2d), the firmware
+//! configuration records such as 0x29 and TX Identity 0x47, power state (0x20), data control (0x50), Apple CF/VID status (0x5e)
 //! and 5-byte data status. Event and mask banks keep the public 11-byte TPS
 //! layout; the driver reads 9 and masks 8, with Apple's bit map (0 AppLoaded,
 //! 1 plug, 8 status, 10 data status, 11 PD status). Masks preserve events and
@@ -38,7 +38,6 @@ const DATA: u8 = 0x09;
 const VERSION: u8 = 0x0f;
 const COMMAND2: u8 = 0x10;
 const POWER_STATE: u8 = 0x20;
-const CONFIG: u8 = 0x29;
 const REVISION: u8 = 0x2c;
 const BOOT_FLAGS: u8 = 0x2d;
 const DATA_CONTROL: u8 = 0x50;
@@ -75,28 +74,41 @@ const DATA_FLIPPED: u32 = 1 << 1;
 const DATA_USB2: u32 = 1 << 4;
 const DATA_UFP: u32 = 1 << 7;
 
-/// Firmware identity is an emulated-die choice, not a guest-build selector.
-/// The ramdisk's USB-C_HPM,47.bin (SHA-256 6db2150525133690452ce0ff05f498ba
-/// 158509a35918927d931511dbf7784b41) starts with a little-endian header pointer
-/// 0x4000, format 0xace00002 there, device 0x00cd3218 at header+0x30 and
-/// version 0x00216300 at +0x34. These field meanings are inferred by comparison
-/// with the IDs `publishHPMDevices` accepts at KC 0x277a4ac..0x277a514.
+/// Firmware identity and application configuration are an emulated-die
+/// choice, not a guest-build selector. The ramdisk's USB-C_HPM,47.bin
+/// (SHA-256 6db2150525133690452ce0ff05f498ba158509a35918927d931511dbf7784b41)
+/// starts with a little-endian header pointer 0x4000, format 0xace00002
+/// there, device 0x00cd3218 at header+0x30 and version 0x00216300 at +0x34.
+/// These field meanings are inferred by comparison with the IDs
+/// `publishHPMDevices` accepts at KC 0x277a4ac..0x277a514.
+///
+/// Header+0x48 and +0x4c hold the application configuration's offset from
+/// the header and its size (0x800, 0x1fd). The configuration starts with
+/// version 1 and the same size, a board tag ("J473") and, at +0x18, the
+/// offset of its register records (0x3a, after the board strings). Each
+/// record is `[register][length - 1][length bytes]` with ascending
+/// registers; the first non-ascending register ends the run. The layout is
+/// inferred: every record length equals the length the class-10 driver
+/// reads for that register (0x29 is 63 bytes, 0x28 64 bytes), and 0x47 holds
+/// the PD TX Identity VDOs with J473's product ID 0x7416. Records seed the
+/// registers the firmware loads from its configuration; registers that
+/// carry live state (masks, power state) keep their modeled values.
 /// Callers provide the input; no Apple firmware is embedded or executed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FirmwareIdentity {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Firmware {
     pub device: u32,
     pub version: u32,
+    pub config: Vec<(u8, Vec<u8>)>,
 }
-impl FirmwareIdentity {
+impl Firmware {
     pub fn from_image(image: &[u8]) -> Result<Self, &'static str> {
+        let bytes = |offset: usize, len: usize| image.get(offset..offset.checked_add(len)?);
         let word = |offset: usize| {
-            image
-                .get(offset..offset.checked_add(4)?)
-                .map(|v| u32::from_le_bytes(v.try_into().expect("four-byte field")))
+            bytes(offset, 4).map(|v| u32::from_le_bytes(v.try_into().expect("four-byte field")))
         };
-        let header = word(0)
-            .and_then(|v| usize::try_from(v).ok())
-            .ok_or("HPM firmware has no header pointer")?;
+        let field =
+            |offset: Option<usize>| offset.and_then(word).and_then(|v| usize::try_from(v).ok());
+        let header = field(Some(0)).ok_or("HPM firmware has no header pointer")?;
         if word(header) != Some(0xace0_0002) {
             return Err("unrecognized HPM firmware header format");
         }
@@ -111,14 +123,45 @@ impl FirmwareIdentity {
         if !matches!(device, 0x00cd_3217 | 0x00cd_3218) || version == 0 || version == u32::MAX {
             return Err("unqualified HPM device identity or firmware version");
         }
-        Ok(Self { device, version })
+        let start = field(header.checked_add(0x48))
+            .and_then(|offset| header.checked_add(offset))
+            .ok_or("truncated HPM configuration offset")?;
+        let size = field(header.checked_add(0x4c)).ok_or("truncated HPM configuration size")?;
+        let config = bytes(start, size).ok_or("truncated HPM application configuration")?;
+        if config.len() < 0x1a
+            || config[..2] != [1, 0]
+            || usize::from(u16::from_le_bytes([config[2], config[3]])) != size
+        {
+            return Err("unrecognized HPM application configuration");
+        }
+        let mut offset = usize::from(u16::from_le_bytes([config[0x18], config[0x19]]));
+        let mut records = Vec::new();
+        while let Some(&[register, len]) = config.get(offset..offset + 2) {
+            if records.last().is_some_and(|&(last, _)| register <= last) {
+                break;
+            }
+            let data = config
+                .get(offset + 2..offset + 3 + usize::from(len))
+                .filter(|data| data.len() <= MAX_DATA)
+                .ok_or("HPM configuration record exceeds its configuration")?;
+            records.push((register, data.to_vec()));
+            offset += 3 + usize::from(len);
+        }
+        if records.is_empty() {
+            return Err("HPM application configuration has no register records");
+        }
+        Ok(Self {
+            device,
+            version,
+            config: records,
+        })
     }
 }
 
 #[derive(Clone)]
 pub struct Hpm {
     port: Port,
-    identity: FirmwareIdentity,
+    firmware: Firmware,
     observed: Snapshot,
     events: [[u8; BANK_BYTES]; 2],
     masks: [[u8; BANK_BYTES]; 2],
@@ -140,9 +183,9 @@ impl Hpm {
     /// masks disabled, no events and the 4CC engine idle. Port electrical
     /// state is supplied independently by `Port`. This is Stela's
     /// boot-firmware handoff image, not captured iBoot state. Stela's die
-    /// reports silicon revision 0, clear boot flags and configuration, and a
-    /// UID naming its bus address.
-    pub fn new(port: Port, identity: FirmwareIdentity, address: u8) -> Self {
+    /// reports silicon revision 0, clear boot flags, its firmware's
+    /// configuration records and a UID naming its bus address.
+    pub fn new(port: Port, firmware: Firmware, address: u8) -> Self {
         let mut uid = *b"Stela HPM die   ";
         uid[15] = address;
         let observed = Snapshot {
@@ -151,7 +194,7 @@ impl Hpm {
         };
         Self {
             port,
-            identity,
+            firmware,
             observed,
             events: [[0; BANK_BYTES]; 2],
             masks: [[0; BANK_BYTES]; 2],
@@ -221,7 +264,7 @@ impl Hpm {
                 4
             }
             DEVICE => {
-                data[..4].copy_from_slice(&self.identity.device.to_le_bytes());
+                data[..4].copy_from_slice(&self.firmware.device.to_le_bytes());
                 4
             }
             MODE => {
@@ -229,7 +272,7 @@ impl Hpm {
                 4
             }
             VERSION => {
-                data[..4].copy_from_slice(&self.identity.version.to_le_bytes());
+                data[..4].copy_from_slice(&self.firmware.version.to_le_bytes());
                 4
             }
             UID => {
@@ -243,7 +286,7 @@ impl Hpm {
                 data[0] = self.power_state;
                 1
             }
-            CONFIG | BOOT_FLAGS => MAX_DATA,
+            BOOT_FLAGS => MAX_DATA,
             REVISION => 1,
             DATA_CONTROL => {
                 data[..4].copy_from_slice(&self.data_control);
@@ -305,7 +348,16 @@ impl Hpm {
                 data[..4].copy_from_slice(&status.to_le_bytes());
                 5
             }
-            _ => return Err("unmodeled HPM register or write-only interrupt clear"),
+            _ => {
+                let (_, record) = self
+                    .firmware
+                    .config
+                    .iter()
+                    .find(|(r, _)| *r == register)
+                    .ok_or("unmodeled HPM register or write-only interrupt clear")?;
+                data[..record.len()].copy_from_slice(record);
+                record.len()
+            }
         };
         Ok((data, len))
     }
@@ -506,10 +558,15 @@ impl I2cTarget for Summary {
 mod tests {
     use super::*;
     use crate::platform::apple::typec::{Attached, Usb2Speed};
-    fn identity() -> FirmwareIdentity {
-        FirmwareIdentity {
+    const CONFIG: u8 = 0x29;
+    const TX_IDENTITY: u8 = 0x47;
+    fn identity() -> Firmware {
+        let mut config = alloc::vec![0; 63];
+        config[62] = 0x6e;
+        Firmware {
             device: 0x00cd3218,
             version: 0x00216300,
+            config: alloc::vec![(CONFIG, config), (TX_IDENTITY, alloc::vec![6, 0xac, 5])],
         }
     }
     fn host() -> Attached {
@@ -533,18 +590,35 @@ mod tests {
         hpm.transfer(&bytes, &mut [], true).unwrap();
     }
     #[test]
-    fn identity_is_derived_from_the_supplied_header_and_truncation_refuses() {
-        let mut image = alloc::vec![0;0x140];
-        image[..4].copy_from_slice(&0x100u32.to_le_bytes());
-        image[0x100..0x104].copy_from_slice(&0xace00002u32.to_le_bytes());
-        image[0x130..0x134].copy_from_slice(&identity().device.to_le_bytes());
-        image[0x134..0x138].copy_from_slice(&identity().version.to_le_bytes());
-        assert_eq!(FirmwareIdentity::from_image(&image), Ok(identity()));
-        for end in [0, 3, 0x100, 0x103, 0x133, 0x137] {
-            assert!(FirmwareIdentity::from_image(&image[..end]).is_err());
+    fn identity_and_records_are_derived_from_the_supplied_image() {
+        let firmware = identity();
+        let mut image = alloc::vec![0; 0x200];
+        let word = |image: &mut [u8], at: usize, v: u32| {
+            image[at..at + 4].copy_from_slice(&v.to_le_bytes())
+        };
+        word(&mut image, 0, 0x100);
+        word(&mut image, 0x100, 0xace00002);
+        word(&mut image, 0x130, firmware.device);
+        word(&mut image, 0x134, firmware.version);
+        word(&mut image, 0x148, 0x80);
+        word(&mut image, 0x14c, 0x70);
+        image[0x180..0x184].copy_from_slice(&[1, 0, 0x70, 0]);
+        image[0x198] = 0x1a;
+        let mut records = alloc::vec![CONFIG, 62];
+        records.extend_from_slice(&firmware.config[0].1);
+        records.extend_from_slice(&[TX_IDENTITY, 2, 6, 0xac, 5]);
+        // A non-ascending register ends the run.
+        records.extend_from_slice(&[0x01, 0, 0]);
+        image[0x19a..0x19a + records.len()].copy_from_slice(&records);
+        assert_eq!(Firmware::from_image(&image), Ok(firmware));
+        for end in [0, 3, 0x100, 0x103, 0x133, 0x137, 0x14b, 0x14f, 0x1ef] {
+            assert!(Firmware::from_image(&image[..end]).is_err());
         }
+        let mut long = image.clone();
+        long[0x19b] = 0x70;
+        assert!(Firmware::from_image(&long).is_err());
         image[..4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(FirmwareIdentity::from_image(&image).is_err());
+        assert!(Firmware::from_image(&image).is_err());
     }
     #[test]
     fn one_port_drives_orientation_roles_vbus_and_all_status_registers() {
@@ -653,7 +727,9 @@ mod tests {
         assert_eq!((&uid[..14], uid[15]), (&b"Stela HPM die "[..], 0x3f));
         assert_eq!(read(&mut h, REVISION, 1), [0]);
         assert_eq!(read(&mut h, BOOT_FLAGS, 64), [0; 64]);
-        assert_eq!(read(&mut h, CONFIG, 64)[62] & 0x60, 0);
+        assert_eq!(read(&mut h, CONFIG, 63)[62] & 0x60, 0x60);
+        assert_eq!(read(&mut h, TX_IDENTITY, 3), [6, 0xac, 5]);
+        assert!(h.transfer(&[TX_IDENTITY], &mut [0; 5], true).is_err());
         assert_eq!(read(&mut h, APPLE_STATUS, 18), [0; 18]);
         assert_eq!(read(&mut h, COMMAND2, 4), [0; 4]);
         // A raw read may stop short of the payload.

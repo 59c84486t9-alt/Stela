@@ -28,7 +28,7 @@ use crate::platform::apple::{
     energy::{self, Energy},
     fuse::{self, AonFuses},
     gpio::{Gpio, Net},
-    hpm::{FirmwareIdentity, Hpm, Summary},
+    hpm::{Firmware, Hpm, Summary},
     i2c::{self, I2c},
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
@@ -631,12 +631,11 @@ impl AppleDevices {
             );
             let image =
                 firmware(&name).ok_or_else(|| format!("board firmware {name} was not supplied"))?;
-            let identity =
-                FirmwareIdentity::from_image(image).map_err(|e| format!("{name}: {e}"))?;
+            let die = Firmware::from_image(image).map_err(|e| format!("{name}: {e}"))?;
             let port = self.typec_port(target.port.ok_or("HPM has no port number")?);
             let pin = target.interrupt.ok_or("HPM has no bus-manager interrupt")?;
             let alert = self.gpio_net(pin)?.open_drain()?;
-            let hpm = Hpm::new(port, identity, target.address).with_interrupt(alert.clone());
+            let hpm = Hpm::new(port, die, target.address).with_interrupt(alert.clone());
             model
                 .attach(target.address, Box::new(hpm))
                 .map_err(String::from)?;
