@@ -485,6 +485,9 @@ pub struct Machine<H: Host, D: Devices> {
     pub devices: D,
     pub profile: CpuProfile,
     pub statistics: Statistics,
+    /// Exits to the engine from compiled code (System, FP, PAC and AMX), by
+    /// the instruction word that took them: which words to compile inline.
+    pub exit_words: BTreeMap<u32, u64>,
     target: TargetCpu,
     blocks: Vec<Block>,
     /// Blocks by PC, PA, FP enablement and SP alignment checking.
@@ -561,6 +564,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             devices,
             profile,
             statistics: Statistics::default(),
+            exit_words: BTreeMap::new(),
             target,
             blocks: Vec::new(),
             index: BTreeMap::new(),
@@ -1429,6 +1433,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
+    /// The word an exit at `pc` executes, counted in [`Self::exit_words`].
+    fn exit_word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
+        let word = self.word(index, pc)?;
+        *self.exit_words.entry(word).or_default() += 1;
+        Ok(word)
+    }
+
     /// The word an instruction inside a compiled block executes as: its
     /// original word, or the UDF or NOP of a form the chip lacks.
     fn word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
@@ -1466,13 +1477,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
                 self.statistics.system_exits += 1;
-                let word = self.word(index, next_pc)?;
+                let word = self.exit_word(index, next_pc)?;
                 self.completing(next_pc, |machine| machine.system_instruction(word))
             }
             Ok(ExitKind::FloatingPoint) => {
                 self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
-                let word = self.word(index, next_pc)?;
+                let word = self.exit_word(index, next_pc)?;
                 let Some(Ok(operation)) = FloatingPointOperation::decode(word) else {
                     return Err(self.unsupported(RequirementKind::Native(
                         "numerical exit at a word that is not numerical FP",
@@ -1492,13 +1503,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(ExitKind::PointerAuthentication) => {
                 self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
-                let word = self.word(index, next_pc)?;
+                let word = self.exit_word(index, next_pc)?;
                 self.completing(next_pc, |machine| machine.pointer_authentication(word))
             }
             Ok(ExitKind::Amx) => {
                 self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
-                let word = self.word(index, next_pc)?;
+                let word = self.exit_word(index, next_pc)?;
                 self.completing(next_pc, |machine| machine.amx(word))
             }
             _ => Err(self.unsupported(RequirementKind::Native("unknown block exit kind"))),

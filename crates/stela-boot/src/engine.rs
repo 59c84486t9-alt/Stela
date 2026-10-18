@@ -637,6 +637,16 @@ fn run(
     }
 }
 
+/// The instruction words that most often left compiled code for the engine.
+fn exit_report(machine: &Machine<BareHost, AppleDevices>) {
+    const SHOWN: usize = 16;
+    let mut words: Vec<_> = machine.exit_words.iter().map(|(&word, &count)| (count, word)).collect();
+    words.sort_unstable_by(|a, b| b.cmp(a));
+    for (count, word) in words.into_iter().take(SHOWN) {
+        output::arguments(format_args!("EXIT {word:#010x} x{count}\n"));
+    }
+}
+
 /// The frame records from X29 (each the caller's X29 and the return
 /// address, Arm's AAPCS64 frame chain) and the stack words above SP, read
 /// through the stopped PE's translation, so that a guest's own panic or
@@ -731,6 +741,7 @@ fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f6
         machine.statistics,
         EVENTS.load(Ordering::Relaxed),
     ));
+    exit_report(machine);
     output::arguments(format_args!(
         "FINAL pc={:#x} el={} sp={:#x} daif={:#x} nzcv={:#x} elr={:#x} spsr={:#x} esr={:#x} far={:#x} vbar={:#x}\n",
         cpu.pc,
