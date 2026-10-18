@@ -516,6 +516,11 @@ pub struct Machine<H: Host, D: Devices> {
     event_sample: Option<u64>,
     /// What self-hosted debug needs of each instruction, while valid.
     debug: Option<DebugMode>,
+    /// The running PE's device lines and the count before which no device
+    /// changes state by itself (`Devices::deadline`), while valid: a device
+    /// or board register access, a System register write, an exception and
+    /// a PE switch can change them, and clear it.
+    device_lines: Option<(Lines, u64)>,
     /// Words `Chip::admit` has answered, by a hash of the word.
     admitted: Vec<Option<(u32, u32)>>,
     /// The watched pages the host keeps unmapped.
@@ -582,6 +587,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             memory_checks: None,
             event_sample: None,
             debug: None,
+            device_lines: None,
             admitted: vec![None; ADMITTED],
             watch: Watch::default(),
             current: 0,
@@ -617,6 +623,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.floating_point = None;
         self.memory_checks = None;
         self.debug = None;
+        self.device_lines = None;
     }
 
     fn debug_mode(&mut self) -> DebugMode {
@@ -735,7 +742,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn lines(&mut self) -> Lines {
         let now = self.host.counter();
-        let device = self.devices.lines(self.current, now);
+        let device = match self.device_lines {
+            Some((lines, until)) if now < until => lines,
+            _ => {
+                let lines = self.devices.lines(self.current, now);
+                let until = self.devices.deadline(now).unwrap_or(u64::MAX);
+                self.device_lines = Some((lines, until));
+                lines
+            }
+        };
         // A timer signals exactly when the count reaches its deadline, which
         // only System register writes change.
         let deadline = self.timer_deadline();
@@ -2218,6 +2233,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ));
         };
         self.statistics.device_accesses += 1;
+        self.device_lines = None;
         if let Some(load) = ScalarLoad::from_instruction(&instruction) {
             let (accessed, writeback) = self.scalar_address(load.address());
             if accessed != address {
