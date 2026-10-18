@@ -13,8 +13,10 @@ use crate::platform::apple::{
     aic1::Aic1,
     amcc::{self, Amcc},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
+    cluster::{self, Cluster},
     dart::{self, Dart},
     dcs::Dcs,
+    fuse::{self, AonFuses},
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
     lockdown::Lockdown,
@@ -267,6 +269,37 @@ impl AppleDevices {
                 .map_err(|error| format!("PMGR placement: {error:?}"))?;
         }
         Ok(())
+    }
+
+    /// A CPU cluster's PMGR registers at `base`: its register window, with
+    /// the DVMR tables the boot firmware programmed, and its `pstates`
+    /// performance-state slots.
+    pub fn add_cpu_cluster(
+        &mut self,
+        base: u64,
+        dvmr: &[(u64, u64)],
+        pstates: usize,
+    ) -> Result<(), String> {
+        let model = Cluster::new(dvmr, pstates).map_err(String::from)?;
+        let table = model.pstate_bytes();
+        let device = self.bus.add(Box::new(model));
+        for (offset, bytes) in [
+            (cluster::ACC_OFFSET, cluster::ACC_BYTES),
+            (cluster::PSTATE_OFFSET, table),
+        ] {
+            self.bus
+                .map(device, base + offset, bytes, offset)
+                .map_err(|error| format!("CPU cluster placement: {error:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// The always-on eFuse block at `physical`.
+    pub fn add_aon_fuses(&mut self, physical: u64) -> Result<(), String> {
+        let device = self.bus.add(Box::new(AonFuses));
+        self.bus
+            .map(device, physical, fuse::FUSE_BYTES, 0)
+            .map_err(|error| format!("eFuse placement: {error:?}"))
     }
 
     /// The SoC watchdog; `now` is the counter value its timers start from.

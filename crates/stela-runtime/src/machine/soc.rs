@@ -14,7 +14,7 @@ use super::{Chip, adt::Node, registers::Identity};
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, dart,
+    amcc, cluster, dart, fuse,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -43,6 +43,11 @@ use alloc::{format, string::String, vec::Vec};
 /// cache's bytes and ways: the defaults the T8112's 26A434
 /// `AppleT8112MemCacheController` driver starts from (`start` assumes 8 MiB
 /// before `readCacheSize`; `mccEnableCacheMode` powers at most 16 ways).
+/// `clusters` is each cluster type's PMGR registers
+/// (`platform::apple::cluster`), in `parts` order, where known, and
+/// `aon_fuses` the `/arm-io/pmgr` `reg` index of the always-on eFuses
+/// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
+/// readPMGRAONFuseReg` reads `reg[36]`.
 struct Soc {
     chip_id: u32,
     name: &'static str,
@@ -53,7 +58,54 @@ struct Soc {
     lockdown: Option<[u64; 2]>,
     operating_points: Option<[&'static [u32]; 2]>,
     memory_cache: Option<(u64, u32)>,
+    clusters: Option<[CpuCluster; 2]>,
+    aon_fuses: Option<usize>,
 }
+
+/// One CPU cluster's PMGR registers (`platform::apple::cluster`): their
+/// base, the performance-state slots the boot firmware fills and the DVMR
+/// weight tables it programs, as `(offset, value)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuCluster {
+    pub base: u64,
+    pub pstates: usize,
+    pub dvmr: &'static [(u64, u64)],
+}
+
+/// The T8112 clusters. The 26A434 J473AP iBoot's native register lists
+/// program the DVMR tables: the E cluster's common list `0x17dd70`
+/// (descriptors `0x17ce28`, `0x17ce48`, `0x17ce58` and `0x17ce68`), the P
+/// cluster's common list `0x181f18` (`0x17f7f0`, `0x17f800`) and its
+/// revision 0 list `0x1825d8` (`0x17f810` to `0x17f850`), revision 0 being
+/// the `/arm-io` `chip-revision` the DeviceTree hands off. `0x206b8` keeps
+/// only the bits its descriptor masks, `0x4000003700000fff` (E) and
+/// `0x4000003780000fff` (P), with DVMR (bit 63) left for `enableDVMR` to
+/// set. iBoot's state captures span 16 E and 18 P performance-state slots.
+const T8112_CLUSTERS: [CpuCluster; 2] = [
+    CpuCluster {
+        base: 0x2_10e0_0000,
+        pstates: 16,
+        dvmr: &[
+            (0x206a8, 0x4444_4433_3322_2110),
+            (0x206b8, 0x4000_0037_0000_0321),
+            (0x206e0, 0x6666_6655_5544_4333),
+            (0x206f0, 0x6666_6655_5544_4333),
+        ],
+    },
+    CpuCluster {
+        base: 0x2_11e0_0000,
+        pstates: 18,
+        dvmr: &[
+            (0x206a8, 0x5555_5544_4433_3110),
+            (0x206b0, 0xcccc_ccaa_aa88_8776),
+            (0x206b8, 0x4000_0037_8000_0531),
+            (0x206e0, 0xaaaa_aa88_8877_7666),
+            (0x206e8, 0xeeee_eecc_ccaa_a886),
+            (0x206f0, 0xaaaa_aa88_8877_7666),
+            (0x206f8, 0xeeee_eecc_ccaa_a886),
+        ],
+    },
+];
 
 const SOCS: [Soc; 14] = [
     Soc {
@@ -66,6 +118,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -77,6 +131,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -88,6 +144,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -105,6 +163,8 @@ const SOCS: [Soc; 14] = [
             ],
         ]),
         memory_cache: Some((8 << 20, 16)),
+        clusters: Some(T8112_CLUSTERS),
+        aon_fuses: Some(36),
     },
     Soc {
         chip_id: 0x6020,
@@ -116,6 +176,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -127,6 +189,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -138,6 +202,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -149,6 +215,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -160,6 +228,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -171,6 +241,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -182,6 +254,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -193,6 +267,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -204,6 +280,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -215,6 +293,8 @@ const SOCS: [Soc; 14] = [
         lockdown: None,
         operating_points: None,
         memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
     },
 ];
 
@@ -475,6 +555,11 @@ pub struct Board {
     pub power_states: Option<PowerStates>,
     /// `/arm-io/mcc`, when the DeviceTree shows an `mcc,t8112`.
     pub memory_cache: Option<MemoryCache>,
+    /// The CPU clusters' PMGR registers, when the DeviceTree shows a
+    /// `pmgr1,t8112` and the SoC's are known.
+    pub clusters: Vec<CpuCluster>,
+    /// The always-on eFuse block, under the same conditions.
+    pub aon_fuses: Option<(u64, u64)>,
 }
 
 /// An `mcc,t8112`: its cache in the AMCC aperture, its DRAM channels and
@@ -779,6 +864,74 @@ fn power_states(
     }))
 }
 
+/// The SoC's CPU clusters and always-on eFuses, when the DeviceTree shows a
+/// `pmgr1,t8112` whose `reg` places each cluster's register window and
+/// performance-state table and the eFuse block.
+fn pmgr_registers(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    chip_id: u32,
+) -> Result<PmgrRegisters, String> {
+    let none = PmgrRegisters {
+        clusters: Vec::new(),
+        aon_fuses: None,
+    };
+    let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
+        return Ok(none);
+    };
+    let Some(soc) = SOCS.iter().find(|soc| soc.chip_id == chip_id) else {
+        return Ok(none);
+    };
+    // Each `reg` entry in guest PA, by index; None outside `/arm-io` ranges.
+    let reg: Vec<Option<(u64, u64)>> = node
+        .pairs("reg")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(offset, bytes)| Some((translate(offset)?, bytes)))
+        .collect();
+    let covered = |start: u64, bytes: u64| {
+        reg.iter()
+            .flatten()
+            .any(|&(base, size)| base <= start && start + bytes <= base + size)
+    };
+    let clusters = soc
+        .clusters
+        .map(|clusters| clusters.to_vec())
+        .unwrap_or_default();
+    for cluster in &clusters {
+        let window = cluster.base + cluster::ACC_OFFSET;
+        let table = cluster.pstates as u64 * cluster::PSTATE_BYTES;
+        if !reg.contains(&Some((window, cluster::ACC_BYTES)))
+            || !covered(cluster.base + cluster::PSTATE_OFFSET, table)
+        {
+            return Err(format!(
+                "/arm-io/pmgr reg does not place the CPU cluster at {:#x}",
+                cluster.base
+            ));
+        }
+    }
+    let fuses = soc
+        .aon_fuses
+        .map(|index| {
+            reg.get(index)
+                .copied()
+                .flatten()
+                .filter(|&(_, bytes)| bytes == fuse::FUSE_BYTES)
+                .ok_or_else(|| format!("/arm-io/pmgr reg[{index}] is not the eFuse block"))
+        })
+        .transpose()?;
+    Ok(PmgrRegisters {
+        clusters,
+        aon_fuses: fuses,
+    })
+}
+
+/// The PMGR registers the machine models besides its power states.
+struct PmgrRegisters {
+    clusters: Vec<CpuCluster>,
+    aon_fuses: Option<(u64, u64)>,
+}
+
 /// `/arm-io/mcc`, if it is a modeled memory cache controller. Its planes
 /// (`reg[1]`) are the lock-regs planes of the one AMCC aperture, which also
 /// holds its shared registers (`reg[0]`) and broadcast window (`reg[3]`);
@@ -1025,6 +1178,10 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
+    let PmgrRegisters {
+        clusters,
+        aon_fuses,
+    } = pmgr_registers(&io, &translate, chip_id)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
         cpus,
@@ -1036,6 +1193,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         aes,
         power_states,
         memory_cache,
+        clusters,
+        aon_fuses,
         aic: InterruptController {
             physical,
             inputs,
@@ -1515,17 +1674,50 @@ mod tests {
             device(0, 2, 0, "SBR"),
         ]
         .concat();
+        // J473AP's: the power-state blocks, each cluster's register window
+        // (5, 14) and the range its performance-state table lies in (8,
+        // 17), and the eFuses (36).
+        let mut reg = [[0x3b70_0000, 0xcc000]; 37];
+        reg[1] = [0x3d28_0000, 0x7c000];
+        reg[5] = [0x10e2_0000, 0x2000];
+        reg[8] = [0x10e5_0000, 0xe8_1000];
+        reg[14] = [0x11e2_0000, 0x2000];
+        reg[17] = [0x11e5_0000, 0xe8_1000];
+        reg[36] = [0x3d2c_8000, 0x4000];
+        let reg = reg.concat();
+        let pmgr_with = |reg: &[u64]| {
+            encode(
+                &[
+                    ("name", &z("pmgr")),
+                    ("compatible", &z(PMGR)),
+                    ("reg", &u64s(reg)),
+                    ("ps-regs", &u32s(&[1, 0x4000, 0x3ff, 0, 0, 0x3ff])),
+                    ("devices", &devices),
+                ],
+                &[],
+            )
+        };
+        // A cluster window the PMGR does not place, or an eFuse block of
+        // another size, refuses.
+        for (index, entry) in [(10, [0x10e2_0000, 0x1000]), (72, [0x3d2c_8000, 0x1000])] {
+            let mut other = reg.clone();
+            other[index..index + 2].copy_from_slice(&entry);
+            let tree = tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmgr_with(&other)]);
+            assert!(board(&tree).is_err());
+        }
         let pmgr = encode(
             &[
                 ("name", &z("pmgr")),
                 ("compatible", &z(PMGR)),
-                ("reg", &u64s(&[0x3b70_0000, 0xcc000, 0x3d28_0000, 0x7c000])),
+                ("reg", &u64s(&reg)),
                 ("ps-regs", &u32s(&[1, 0x4000, 0x3ff, 0, 0, 0x3ff])),
                 ("devices", &devices),
             ],
             &[],
         );
         let found = board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmgr])).unwrap();
+        assert_eq!(found.clusters, T8112_CLUSTERS.to_vec());
+        assert_eq!(found.aon_fuses, Some((0x2_3d2c_8000, 0x4000)));
         assert_eq!(
             found.power_states,
             Some(PowerStates {

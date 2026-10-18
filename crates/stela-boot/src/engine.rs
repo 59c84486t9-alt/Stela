@@ -354,6 +354,12 @@ fn devices(
             blocks.len()
         ));
     }
+    for cluster in board.map_or(&[][..], |board| &board.clusters) {
+        devices.add_cpu_cluster(cluster.base, cluster.dvmr, cluster.pstates)?;
+    }
+    if let Some((physical, _)) = board.and_then(|board| board.aon_fuses) {
+        devices.add_aon_fuses(physical)?;
+    }
     let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
     let memory_cache = board.and_then(|board| board.memory_cache);
     if let Some(controller) = memory_controller {
