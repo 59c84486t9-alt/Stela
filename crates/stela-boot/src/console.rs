@@ -78,6 +78,31 @@ impl Framebuffer {
         Self { base, ..self }
     }
 
+    /// Visible pixels across and down.
+    pub fn resolution(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Row `y` from 32-bit pixels with blue in the low byte, as many as fit.
+    pub fn show_row(&self, y: usize, pixels: &[u8]) {
+        if y >= self.height {
+            return;
+        }
+        let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *mut u32;
+        let (pixels, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
+        for (column, pixel) in pixels.iter().take(self.width).enumerate() {
+            let value = u32::from_le_bytes(*pixel);
+            let value = if self.bgr {
+                value
+            } else {
+                value & 0xff00_ff00 | (value & 0xff) << 16 | (value >> 16) & 0xff
+            };
+            // SAFETY: `column < width` and `y < height`, inside the mode's
+            // visible framebuffer.
+            unsafe { line.add(column).write_volatile(value) };
+        }
+    }
+
     fn pixel(&self, color: Color) -> u32 {
         let (red, green, blue) = match color {
             Color::Text => (0xe0, 0xe0, 0xe0),
@@ -192,6 +217,13 @@ pub fn install(screen: Framebuffer) {
     screen.clear();
     // SAFETY: see `Console`; no reference to the cursor is live here.
     unsafe { *CONSOLE.0.get() = Cursor::new(screen) };
+}
+
+/// Stop drawing text: the screen now shows something else. Output still
+/// reaches the UART.
+pub fn release() {
+    // SAFETY: see `Console`; no reference to the cursor is live here.
+    unsafe { *CONSOLE.0.get() = None };
 }
 
 pub fn write(text: &str, color: Color) {

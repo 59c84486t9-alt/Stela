@@ -26,7 +26,7 @@ use core::arch::{
 use stela_loader::{boot_bundle::Options, installed};
 use stela_runtime::{
     apfs::Container,
-    boot_bundle::{MANIFEST_FILE, Machine, Manifest},
+    boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest},
     machine::Host,
     payload::ReadAt,
     pc::{
@@ -278,15 +278,16 @@ pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<
 }
 
 /// Load the bundle the loader read into guest DRAM `[dram_base, dram_base +
-/// ram_bytes)`.
+/// ram_bytes)`, with the guest framebuffer when the machine shows one.
 pub fn load(
     host: &mut impl Host,
     files: &[File],
     dram_base: u64,
     ram_bytes: u64,
+    framebuffer: Option<Framebuffer>,
 ) -> Result<Entry, String> {
     let named = |name: &str| files.iter().find(|file| file.name() == name).map(contents);
-    load_named(host, &named, dram_base, ram_bytes)
+    load_named(host, &named, dram_base, ram_bytes, framebuffer)
 }
 
 /// Load a bundle built in the heap, as [`from_disk`] returns it.
@@ -295,6 +296,7 @@ pub fn load_built(
     files: &[(String, Vec<u8>)],
     dram_base: u64,
     ram_bytes: u64,
+    framebuffer: Option<Framebuffer>,
 ) -> Result<Entry, String> {
     let named = |name: &str| {
         files
@@ -302,7 +304,7 @@ pub fn load_built(
             .find(|(file, _)| file == name)
             .map(|(_, bytes)| bytes.as_slice())
     };
-    load_named(host, &named, dram_base, ram_bytes)
+    load_named(host, &named, dram_base, ram_bytes, framebuffer)
 }
 
 fn load_named<'a>(
@@ -310,6 +312,7 @@ fn load_named<'a>(
     named: &impl Fn(&str) -> Option<&'a [u8]>,
     dram_base: u64,
     ram_bytes: u64,
+    framebuffer: Option<Framebuffer>,
 ) -> Result<Entry, String> {
     let json = named(MANIFEST_FILE).ok_or("bundle.json was not read")?;
     let manifest = Manifest::parse(json).map_err(|e| format!("{e}"))?;
@@ -320,8 +323,7 @@ fn load_named<'a>(
         dram_base,
         ram_bytes,
         timebase_hz: TIMEBASE_HZ,
-        // No guest framebuffer yet: the prepared zeros stay.
-        framebuffer: None,
+        framebuffer,
         boot_args: None,
     };
     let image = verified

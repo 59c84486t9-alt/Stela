@@ -161,6 +161,23 @@ pub struct Machine {
     pub boot_args: Option<String>,
 }
 
+impl Machine {
+    /// The end of the range the kernel manages: the DRAM end, or the
+    /// framebuffer's base, which must then end the backed RAM. iBoot keeps
+    /// `/vram` out of the kernel's memory; where it puts it is not
+    /// established, so the machine places it at the top (inference).
+    fn managed_end(&self) -> Result<u64, &'static str> {
+        let end = self.dram_base + self.ram_bytes;
+        match self.framebuffer {
+            None => Ok(end),
+            Some(screen) if screen.guest_pa.checked_add(screen.bytes) == Some(end) => {
+                Ok(screen.guest_pa)
+            }
+            Some(_) => Err("the framebuffer does not end the backed RAM"),
+        }
+    }
+}
+
 /// A contiguous guest RAM range the engine must back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RamExtent {
@@ -358,7 +375,7 @@ impl<'a> Verified<'a> {
                 Some(u64_value(machine.ram_bytes))
             }
             ("dram-size", "boot_args.memSize") => Some(u64_value(
-                machine.dram_base + machine.ram_bytes - options.phys_base,
+                machine.managed_end().map_err(error)? - options.phys_base,
             )),
             ("entropy", _) => {
                 let mut random = vec![0; bytes];
@@ -638,6 +655,25 @@ mod tests {
         assert!(image.kept.is_empty());
         assert_eq!(&ram[dt + 12..dt + 20], &0u64.to_le_bytes());
         Ok(())
+    }
+
+    #[test]
+    fn the_framebuffer_ends_the_managed_range() {
+        let screen = |guest_pa| Machine {
+            framebuffer: Some(Framebuffer {
+                guest_pa,
+                bytes: 0x4000,
+                row_bytes: 64,
+                width: 16,
+                height: 16,
+                bits_per_pixel: 32,
+            }),
+            ..machine()
+        };
+        let end = BASE + FRAME_BYTES;
+        assert_eq!(machine().managed_end(), Ok(end));
+        assert_eq!(screen(end - 0x4000).managed_end(), Ok(end - 0x4000));
+        assert!(screen(BASE).managed_end().is_err());
     }
 
     #[test]

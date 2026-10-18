@@ -6,6 +6,7 @@
 //! loader's identity map and its uncached device mappings.
 
 pub(crate) mod bundle;
+mod display;
 mod host;
 mod interrupts;
 
@@ -456,13 +457,21 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut bare = BareHost;
     let target = target();
     let mut read_only_region = None;
+    // A bundle's kernel gets a framebuffer the size of the firmware's mode.
+    let mut display = handoff
+        .screen
+        .filter(|_| options.bundle)
+        .and_then(|screen| {
+            let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+            display::Display::new(screen, options.dram_base + options.ram_bytes)
+        });
     let (entry, x0) = if options.bundle {
         let files = &handoff.files[..handoff.file_count];
+        let framebuffer = display.as_ref().map(display::Display::framebuffer);
+        let (dram_base, ram_bytes) = (options.dram_base, options.ram_bytes);
         let loaded = match &built {
-            Some(built) => {
-                bundle::load_built(&mut bare, built, options.dram_base, options.ram_bytes)
-            }
-            None => bundle::load(&mut bare, files, options.dram_base, options.ram_bytes),
+            Some(built) => bundle::load_built(&mut bare, built, dram_base, ram_bytes, framebuffer),
+            None => bundle::load(&mut bare, files, dram_base, ram_bytes, framebuffer),
         };
         let loaded = match loaded {
             Ok(loaded) => loaded,
@@ -563,13 +572,69 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     };
     let mut machine = Machine::new(cpu, bare, devices, profile, target);
     let started = host::rdtsc();
-    let stop = machine.run(options.budget);
+    let stop = run(
+        &mut machine,
+        options.budget,
+        display.as_mut(),
+        handoff.tsc_hz,
+    );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds)
 }
 
 fn level_name(guarded: bool) -> &'static str {
     if guarded { "GL" } else { "EL" }
+}
+
+/// Blocks between checks of whether the screen or a heartbeat is due.
+const SLICE: u64 = 1 << 18;
+
+/// Seconds between heartbeats, which locate a guest that runs without output.
+const BEAT_SECONDS: u64 = 10;
+
+/// Run up to `budget` blocks (0: no limit), showing the guest framebuffer
+/// about twice a second and at the stop, and reporting the PE's position
+/// every [`BEAT_SECONDS`].
+fn run(
+    machine: &mut Machine<BareHost, AppleDevices>,
+    budget: u64,
+    mut display: Option<&mut display::Display>,
+    tsc_hz: u64,
+) -> Stop {
+    let mut shown = host::rdtsc();
+    let mut beat = shown;
+    loop {
+        let slice = machine.statistics.blocks + SLICE;
+        let limit = if budget == 0 {
+            slice
+        } else {
+            budget.min(slice)
+        };
+        let stop = machine.run(limit);
+        let sliced = matches!(stop, Stop::Budget) && limit != budget;
+        let now = host::rdtsc();
+        if let Some(display) = display.as_deref_mut()
+            && (!sliced || now - shown >= tsc_hz / 2)
+        {
+            display.show(&mut machine.host);
+            shown = host::rdtsc();
+        }
+        if !sliced {
+            return stop;
+        }
+        if now - beat >= BEAT_SECONDS * tsc_hz {
+            let cpu = &machine.cpu;
+            output::arguments(format_args!(
+                "BEAT blocks={} pc={:#x} {}{} lr={:#x}\n",
+                machine.statistics.blocks,
+                cpu.pc,
+                level_name(cpu.pstate.guarded),
+                cpu.pstate.el,
+                cpu.state.x[30],
+            ));
+            beat = now;
+        }
+    }
 }
 
 /// The frame records from X29 (each the caller's X29 and the return

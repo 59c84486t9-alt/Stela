@@ -462,7 +462,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 _ => format!("nvme,drive=target,serial={TARGET_SERIAL},addr={TARGET_SLOT:#x}"),
             });
     }
-    if picker {
+    // The boot picker, and a bundle's kernel through the mount's GOP, draw
+    // on a display.
+    if picker || bundle {
         command.args(["-device", "VGA"]);
     }
     match arguments.display {
