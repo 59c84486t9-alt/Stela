@@ -176,6 +176,11 @@ pub(crate) struct Prepare {
     /// colons (for example ethaddr=02:00:00:00:00:01); repeat for each.
     #[arg(long = "macaddr", value_parser = parse_keyed_bytes)]
     mac_addresses: Vec<(String, Vec<u8>)>,
+    /// A firmware image the board's own devices run, kept under its guest
+    /// file name (such as `USB-C_HPM,47.bin` from `extract-guest-files`);
+    /// repeat for each image.
+    #[arg(long, conflicts_with = "disk")]
+    board_firmware: Vec<PathBuf>,
 }
 
 fn parse_keyed_bytes(value: &str) -> Result<(String, Vec<u8>), String> {
@@ -526,6 +531,37 @@ impl Prepare {
                 source: decoded.source.clone(),
             }
         }
+        let board_firmware = self
+            .board_firmware
+            .iter()
+            .map(|path| {
+                let bytes = std::fs::read(path)
+                    .with_context(|| format!("cannot read {}", path.display()))?;
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .with_context(|| format!("{} has no UTF-8 file name", path.display()))?
+                    .to_owned();
+                let digest = stela_runtime::sha256(&bytes);
+                let source = Source {
+                    component: "BoardFirmware".into(),
+                    member: path.canonicalize()?.display().to_string(),
+                    container_sha256: digest.clone(),
+                    payload_type: "raw".into(),
+                    description: format!("board device firmware {name}"),
+                    decoded_bytes: bytes.len(),
+                    decoded_sha256: digest,
+                };
+                Ok((
+                    name,
+                    Decoded {
+                        bytes,
+                        source,
+                        declared_digest: None,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let inputs = Inputs {
             target: Target {
                 product_type: model.clone(),
@@ -550,6 +586,10 @@ impl Prepare {
                 volume: *volume,
                 im4p: decoded.as_ref().map(input),
             }),
+            board_firmware: board_firmware
+                .iter()
+                .map(|(name, decoded)| (name.clone(), input(decoded)))
+                .collect(),
         };
         let options = self.options(self.restore || self.recovery, inputs.dram_base()?)?;
         let bundle = boot_bundle::prepare(&inputs, &options)?;

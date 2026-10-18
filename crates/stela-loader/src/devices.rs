@@ -91,8 +91,14 @@ fn modeled_client(node: &Node) -> bool {
             .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
 }
 
-/// The IOMMU and GPIO phandles that visible clients under `node` require.
+/// The IOMMU, GPIO and interrupt-controller phandles that visible clients
+/// under `node` require.
 fn client_providers(node: &Node, parents: &mut Vec<u32>) {
+    if modeled_client(node)
+        && let Some(parent) = node.property("interrupt-parent").and_then(|p| p.as_u32())
+    {
+        parents.push(parent);
+    }
     if modeled_client(node)
         && named(node, soc::SPI)
         && let Some(phandle) = node
@@ -407,6 +413,28 @@ mod tests {
         assert!(tree.property("/arm-io/gpio", COMPATIBLE).is_some());
         tree.node_mut("/arm-io/spi1").unwrap().children.clear();
         assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/gpio", "/arm-io/spi1"]);
+    }
+
+    #[test]
+    fn a_visible_client_retains_the_gpio_bank_its_interrupt_names() {
+        let mut gpio = node("gpio", Some(soc::GPIO.as_bytes()), vec![]);
+        gpio.set_property(PHANDLE, 106u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut manager = node("hpmBusManager", Some(b"usbc,manager\0"), vec![]);
+        manager
+            .set_property("interrupt-parent", 106u32.to_le_bytes().to_vec())
+            .unwrap();
+        let i2c = node("i2c0", Some(b"i2c,t8101\0"), vec![manager]);
+        let mut tree = DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![node("arm-io", None, vec![gpio, i2c])],
+            ),
+        };
+        assert_eq!(hide_unmodeled(&mut tree), Vec::<String>::new());
+        tree.node_mut("/arm-io/i2c0").unwrap().children.clear();
+        assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/gpio"]);
     }
 
     #[test]

@@ -398,13 +398,14 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 /// accesses stop explicitly.
 /// The board's devices. `reset` is the entry point a boot bundle hands off
 /// to, on which boot firmware locks every PE's RVBAR.
-fn devices(
+fn devices<'f>(
     board: Option<&soc::Board>,
     read_only_region: Option<(u64, u64)>,
     reset: Option<u64>,
     now: u64,
     backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
     restore: bool,
+    firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
 ) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
         physical: ARM_IO + offset,
@@ -441,6 +442,18 @@ fn devices(
         .add_watchdog_with_side(wdt.0, board.and_then(|b| b.watchdog_side), Some(wdt.1), now)
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
     devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
+    if let Some(board) = board
+        && let Some(gpio) = &board.gpio
+    {
+        let selects: Vec<u32> = board.spi_nor.iter().filter_map(|spi| spi.select).collect();
+        let interrupts: Vec<u32> = board
+            .i2cs
+            .iter()
+            .flat_map(|controller| &controller.targets)
+            .filter_map(|target| target.interrupt)
+            .collect();
+        devices.add_gpio(gpio, &selects, &interrupts)?;
+    }
     if let Some(spi) = board.and_then(|board| board.spi_nor.as_ref()) {
         devices.add_spi_nor(spi)?;
     }
@@ -477,7 +490,7 @@ fn devices(
         }
     }
     for controller in board.map_or(&[][..], |board| &board.i2cs) {
-        devices.add_i2c(controller)?;
+        devices.add_i2c(controller, firmware)?;
     }
     for phy in board.map_or(&[][..], |board| &board.typec_phys) {
         devices
@@ -940,6 +953,20 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     let now = stela_runtime::machine::Host::counter(&mut bare);
     let reset = options.bundle.then_some(entry);
+    // Board device firmware images travel in the bundle by guest file name.
+    let files = &handoff.files[..handoff.file_count];
+    let firmware = |name: &str| -> Option<&[u8]> {
+        match built.as_deref() {
+            Some(built) => built
+                .iter()
+                .find(|(file, _)| file == name)
+                .map(|(_, bytes)| bytes.as_slice()),
+            None => files
+                .iter()
+                .find(|file| file.name() == name)
+                .map(bundle::contents),
+        }
+    };
     let (devices, restore_usb) = match devices(
         board.as_ref(),
         read_only_region,
@@ -947,6 +974,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         now,
         backing,
         options.restore,
+        &firmware,
     ) {
         Ok(devices) => devices,
         Err(error) => {

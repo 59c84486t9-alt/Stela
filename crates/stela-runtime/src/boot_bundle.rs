@@ -240,7 +240,7 @@ impl Manifest {
                 && file
                     .name
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_');
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_,".contains(&b));
             if !simple {
                 return Err(manifest_error(format!("unsafe file name {:?}", file.name)));
             }

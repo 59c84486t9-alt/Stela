@@ -17,6 +17,7 @@
 //! address 0x6b is a separate protocol and is not this target. Consequently
 //! neither `usbc,manager` nor `usbc,cd3217` is admitted in `soc::models`.
 use super::{
+    gpio::OpenDrain,
     i2c::{I2cTarget, TargetError},
     typec::{DataRole, Orientation, Port, Snapshot},
 };
@@ -109,6 +110,7 @@ pub struct Hpm {
     response: [u8; MAX_DATA + 1],
     cursor: usize,
     selected: bool,
+    irq: Option<OpenDrain>,
 }
 impl Hpm {
     /// APP firmware is running at handoff, with masks disabled and the 4CC
@@ -129,6 +131,18 @@ impl Hpm {
             response: [0; MAX_DATA + 1],
             cursor: 0,
             selected: false,
+            irq: None,
+        }
+    }
+    /// Drives the board's interrupt net from `interrupt_asserted`.
+    pub fn with_interrupt(mut self, irq: OpenDrain) -> Self {
+        self.irq = Some(irq);
+        self
+    }
+    fn drive(&mut self) {
+        let asserted = self.interrupt_asserted();
+        if let Some(irq) = &self.irq {
+            irq.pull_low(asserted);
         }
     }
     fn refresh(&mut self) {
@@ -334,11 +348,15 @@ impl I2cTarget for Hpm {
             .map_err(TargetError::Unsupported)?;
         read.copy_from_slice(output);
         *self = next;
+        self.drive();
         Ok(())
     }
     fn abort(&mut self) {
         self.selected = false;
         self.cursor = 0;
+    }
+    fn advance(&mut self) {
+        self.drive();
     }
 }
 
@@ -438,6 +456,23 @@ mod tests {
         write(&mut h, MASK2, &[0]);
         assert!(!h.interrupt_asserted());
         assert_eq!(read(&mut h, EVENT1, BANK_BYTES)[0] & 2, 2);
+    }
+    #[test]
+    fn dies_pull_their_shared_interrupt_net_until_every_event_is_cleared() {
+        use crate::platform::apple::gpio::Net;
+        let (net, port) = (Net::new(), Port::new());
+        let mut a = Hpm::new(port.clone(), identity()).with_interrupt(net.open_drain().unwrap());
+        let mut b = Hpm::new(Port::new(), identity()).with_interrupt(net.open_drain().unwrap());
+        write(&mut a, MASK1, &[2]);
+        port.set_connection(Some(host())).unwrap();
+        // A cable change is seen when the target advances, not only on access.
+        assert!(net.level());
+        a.advance();
+        assert!(!net.level());
+        b.advance();
+        assert!(!net.level());
+        write(&mut a, CLEAR1, &[2]);
+        assert!(net.level());
     }
     #[test]
     fn split_response_is_coherent_and_bad_transactions_have_no_effect() {

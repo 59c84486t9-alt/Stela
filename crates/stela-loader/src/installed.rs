@@ -485,6 +485,8 @@ pub fn prepare<R: ReadAt>(
         cryptex1_manifest: None,
         extra_trust_caches: Vec::new(),
         ramdisk: None,
+        // Board device firmware is not yet read from the System volume.
+        board_firmware: Vec::new(),
         root_hash: Some(RootHash {
             volume: SealedVolume::System,
             im4p: root_hash.as_ref().map(Decoded::input),

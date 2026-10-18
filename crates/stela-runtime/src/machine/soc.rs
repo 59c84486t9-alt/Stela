@@ -856,6 +856,8 @@ pub struct UsbController {
 /// Everything the engine models of a board, from its DeviceTree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
+    /// The AP GPIO bank, when visible.
+    pub gpio: Option<GpioBank>,
     /// SPI1, its NOR image and the GPIO chip-select wire, when visible.
     pub spi_nor: Option<SpiNor>,
     /// Explicitly visible I2C controllers and their addressed targets.
@@ -921,10 +923,20 @@ pub struct Board {
 
 /// An I2C child address is the first 32-bit `reg` cell followed by bus
 /// timing, not a 64-bit MMIO address. HPM nubs instead use `hpm-iic-addr`.
+/// `interrupt` is the AP GPIO pin of a target's own GPIO-parented
+/// `interrupts`; an HPM has none of its own and shares its `iicProvider` bus
+/// manager's line, which the dies' open-drain interrupt outputs drive.
+/// `firmware` is the `usbc-fw-personality` of an HPM's image. J473AP names it
+/// only on the flash-updated die (hpm0, `usbc-flash-update`); Stela
+/// provisions every die on one manager with that image, so hpm1 shares it.
+/// `port` is an HPM's connector `port-number`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct I2cAddress {
     pub address: u8,
     pub compatible: String,
+    pub interrupt: Option<u32>,
+    pub firmware: Option<String>,
+    pub port: Option<u32>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct I2cController {
@@ -949,6 +961,7 @@ fn typec_devices(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
     aic: u32,
+    gpio: Option<&GpioBank>,
 ) -> Result<(Vec<I2cController>, Vec<TypecPhy>), String> {
     let mut i2cs = Vec::new();
     let mut phys = Vec::new();
@@ -984,6 +997,8 @@ fn typec_devices(
                     .filter(|&i| u16::try_from(i).is_ok())
                     .ok_or("I2C interrupt is absent or too large")?;
                 let mut targets = Vec::new();
+                // Each target's phandle and, for an HPM, its provider.
+                let mut links: Vec<(Option<u32>, Option<u32>)> = Vec::new();
                 let mut bad = None;
                 let mut first = true;
                 node.visit(&mut |target| {
@@ -1003,6 +1018,31 @@ fn typec_devices(
                     } else {
                         target.first_u32("reg")
                     };
+                    let interrupt = match target.cells32("interrupts").as_deref() {
+                        None => None,
+                        Some(&[pin, _]) => match gpio {
+                            Some(gpio)
+                                if target.first_u32("interrupt-parent") == Some(gpio.phandle)
+                                    && pin < gpio.pins =>
+                            {
+                                Some(pin)
+                            }
+                            _ => {
+                                bad = Some("I2C target interrupt is not a visible AP GPIO pin");
+                                return;
+                            }
+                        },
+                        Some(_) => {
+                            bad = Some("unsupported I2C target interrupt encoding");
+                            return;
+                        }
+                    };
+                    let firmware = target
+                        .property("usbc-fw-personality")
+                        .and_then(|b| b.split(|b| *b == 0).next())
+                        .and_then(|b| core::str::from_utf8(b).ok())
+                        .filter(|name| !name.is_empty())
+                        .map(String::from);
                     match address
                         .and_then(|v| u8::try_from(v).ok())
                         .filter(|&v| v > 0 && v < 0x78)
@@ -1010,9 +1050,22 @@ fn typec_devices(
                         Some(address)
                             if !targets.iter().any(|t: &I2cAddress| t.address == address) =>
                         {
+                            links.push((
+                                target.first_u32("AAPL,phandle"),
+                                target
+                                    .compatible(HPM)
+                                    .then(|| target.first_u32("iicProvider"))
+                                    .flatten(),
+                            ));
                             targets.push(I2cAddress {
                                 address,
                                 compatible: compatible.into(),
+                                interrupt,
+                                firmware,
+                                port: target
+                                    .compatible(HPM)
+                                    .then(|| target.first_u32("port-number"))
+                                    .flatten(),
                             })
                         }
                         _ => {
@@ -1025,6 +1078,28 @@ fn typec_devices(
                 .ok_or("I2C target walk failed")?;
                 if let Some(error) = bad {
                     return Err(error.into());
+                }
+                for index in 0..targets.len() {
+                    if targets[index].compatible != HPM {
+                        continue;
+                    }
+                    let provider = links[index]
+                        .1
+                        .and_then(|p| links.iter().position(|&(phandle, _)| phandle == Some(p)))
+                        .filter(|&p| targets[p].compatible == HPM_MANAGER)
+                        .ok_or("HPM has no visible usbc,manager iicProvider")?;
+                    if targets[index].interrupt.is_some() || targets[index].port.is_none() {
+                        return Err("HPM lacks a port number or names its own interrupt".into());
+                    }
+                    targets[index].interrupt = targets[provider].interrupt;
+                    let mut images = (0..targets.len())
+                        .filter(|&t| links[t].1 == links[index].1)
+                        .filter_map(|t| targets[t].firmware.clone());
+                    let image = images.next();
+                    if images.any(|other| Some(other) != image) {
+                        return Err("HPMs on one bus manager name different firmware".into());
+                    }
+                    targets[index].firmware = image;
                 }
                 i2cs.push(I2cController {
                     device: Device {
@@ -1101,17 +1176,84 @@ fn typec_devices(
 pub struct SpiNor {
     pub device: Device,
     pub image: nor::Image,
-    pub select: Option<GpioSelect>,
+    /// The AP GPIO pin of an external chip select.
+    pub select: Option<u32>,
 }
+
+/// The visible AP GPIO bank, from `reg`, `#gpio-pins`, its AIC-parented
+/// `interrupts` (one per `#gpio-int-groups`) and phandle, with the board's
+/// pulled-up I2C lines in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GpioSelect {
+pub struct GpioBank {
     pub physical: u64,
     pub bytes: u64,
     pub pins: u32,
-    pub groups: u32,
-    pub pin: u32,
-    /// The board's pulled-up I2C lines in this bank, from `gpio-iic_*`.
-    pub pulled_up: Vec<u32>,
+    pub phandle: u32,
+    pub lines: Vec<u16>,
+    /// The ADT's `gpio-iic_scl`/`gpio-iic_sda` pins in this bank.
+    pub i2c_lines: Vec<u32>,
+}
+
+/// A node's one `reg` range, translated through contiguous `arm-io` ranges.
+fn single_range(
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<(u64, u64), &'static str> {
+    let pairs = node.pairs("reg").ok_or("device reg missing")?;
+    let [(offset, bytes)] = pairs[..] else {
+        return Err("device requires one reg range");
+    };
+    let physical = translate(offset).ok_or("device outside arm-io ranges")?;
+    let last = offset
+        .checked_add(bytes.wrapping_sub(1))
+        .filter(|_| bytes != 0)
+        .ok_or("device span is empty or overflows")?;
+    if translate(last) != physical.checked_add(bytes - 1) {
+        return Err("device range exceeds arm-io ranges");
+    }
+    Ok((physical, bytes))
+}
+
+fn gpio_bank(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    aic: u32,
+) -> Result<Option<GpioBank>, String> {
+    let Some(node) = io.child("gpio").filter(|n| n.compatible(GPIO)) else {
+        return Ok(None);
+    };
+    let (physical, bytes) = single_range(&node, translate)?;
+    let pins = node
+        .first_u32("#gpio-pins")
+        .ok_or("GPIO pin count missing")?;
+    let groups = node
+        .first_u32("#gpio-int-groups")
+        .ok_or("GPIO group count missing")?;
+    let lines = node
+        .cells32("interrupts")
+        .ok_or("GPIO interrupts missing")?
+        .into_iter()
+        .map(|irq| u16::try_from(irq).map_err(|_| "GPIO interrupt too large"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if pins == 0
+        || pins > 512
+        || !(1..=7).contains(&groups)
+        || lines.len() != groups as usize
+        || node.first_u32("interrupt-parent") != Some(aic)
+        || bytes < 0x800 + u64::from(groups) * 0x40
+    {
+        return Err("unsupported GPIO geometry or interrupt parent".into());
+    }
+    Ok(Some(GpioBank {
+        physical,
+        bytes,
+        pins,
+        phandle: node
+            .first_u32("AAPL,phandle")
+            .ok_or("GPIO phandle missing")?,
+        lines,
+        i2c_lines: i2c_lines(io, pins)?,
+    }))
 }
 
 /// The ADT cell naming the AP GPIO bank in a `gpio-iic_*` pin property
@@ -1155,6 +1297,7 @@ fn spi_nor(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
     aic: u32,
+    gpio: Option<&GpioBank>,
 ) -> Result<Option<SpiNor>, String> {
     let Some(node) = io.child("spi1").filter(|n| n.compatible(SPI)) else {
         return Ok(None);
@@ -1162,25 +1305,7 @@ fn spi_nor(
     if node.first_u32("spi-version") != Some(1) {
         return Err("unsupported SPI version".into());
     }
-    let place = |node: &Node<'_>| -> Result<(u64, u64), String> {
-        let pairs = node.pairs("reg").ok_or("SPI/GPIO reg missing")?;
-        let [(offset, bytes)] = pairs[..] else {
-            return Err("SPI/GPIO requires one reg range".into());
-        };
-        let physical = translate(offset).ok_or("SPI/GPIO outside arm-io ranges")?;
-        if bytes == 0
-            || physical.checked_add(bytes).is_none()
-            || translate(
-                offset
-                    .checked_add(bytes - 1)
-                    .ok_or("SPI/GPIO span overflows")?,
-            ) != Some(physical + bytes - 1)
-        {
-            return Err("SPI/GPIO range exceeds arm-io ranges".into());
-        }
-        Ok((physical, bytes))
-    };
-    let (physical, bytes) = place(&node)?;
+    let (physical, bytes) = single_range(&node, translate)?;
     if bytes < spi::BYTES || node.first_u32("interrupt-parent") != Some(aic) {
         return Err("SPI aperture or interrupt parent is unsupported".into());
     }
@@ -1247,37 +1372,16 @@ fn spi_nor(
         if opcode != GPIO_FUNCTION || flags != 0x10001 {
             return Err("unsupported SPI chip-select function encoding".into());
         }
-        let gpio = io
-            .child("gpio")
-            .filter(|n| n.compatible(GPIO) && n.first_u32("AAPL,phandle") == Some(phandle))
+        let gpio = gpio
+            .filter(|gpio| gpio.phandle == phandle)
             .ok_or("SPI CS GPIO provider is absent or unmodeled")?;
-        let (physical, bytes) = place(&gpio)?;
-        let pins = gpio
-            .first_u32("#gpio-pins")
-            .ok_or("GPIO pin count missing")?;
-        let groups = gpio
-            .first_u32("#gpio-int-groups")
-            .ok_or("GPIO group count missing")?;
-        if pins == 0
-            || pins > 512
-            || pin >= pins
-            || !(1..=7).contains(&groups)
-            || bytes < 0x800 + u64::from(groups) * 0x40
-        {
-            return Err("unsupported GPIO chip-select geometry".into());
+        if pin >= gpio.pins {
+            return Err("SPI chip select beyond the GPIO bank".into());
         }
-        let pulled_up = i2c_lines(io, pins)?;
-        if pulled_up.contains(&pin) {
+        if gpio.i2c_lines.contains(&pin) {
             return Err("SPI chip select shares an I2C line".into());
         }
-        Some(GpioSelect {
-            physical,
-            bytes,
-            pins,
-            groups,
-            pin,
-            pulled_up,
-        })
+        Some(pin)
     };
     Ok(Some(SpiNor {
         device: Device {
@@ -2987,7 +3091,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let inputs = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
     let memory_controller =
         memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
-    let (i2cs, typec_phys) = typec_devices(&io, &translate, phandle)?;
+    let gpio = gpio_bank(&io, &translate, phandle)?;
+    let (i2cs, typec_phys) = typec_devices(&io, &translate, phandle, gpio.as_ref())?;
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
     let ans = ans_controller(&io, &translate)?;
@@ -3007,8 +3112,9 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         cpu_start,
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
-    let spi_nor = spi_nor(&root, &io, &translate, phandle)?;
+    let spi_nor = spi_nor(&root, &io, &translate, phandle, gpio.as_ref())?;
     Ok(Board {
+        gpio,
         i2cs,
         typec_phys,
         cluster_events,
@@ -3221,6 +3327,8 @@ mod tests {
                 ("#gpio-pins", &words(&[213])),
                 ("#gpio-int-groups", &words(&[7])),
                 ("AAPL,phandle", &words(&[106])),
+                ("interrupt-parent", &words(&[99])),
+                ("interrupts", &words(&[199, 200, 201, 202, 203, 204, 205])),
             ],
             &[],
         );
@@ -3247,19 +3355,23 @@ mod tests {
         let data = encode(&[("name", b"device-tree")], &[chosen, io]);
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
-        let placed = spi_nor(&root, &io, &|v| v.checked_add(0x2_0000_0000), 99)
+        let translate = |v: u64| v.checked_add(0x2_0000_0000);
+        let bank = gpio_bank(&io, &translate, 99).unwrap().unwrap();
+        assert_eq!(bank.physical, 0x2_3c10_0000);
+        assert_eq!(bank.lines, [199, 200, 201, 202, 203, 204, 205]);
+        // Only the AP bank's I2C line; the AOP-bank pin belongs elsewhere.
+        assert_eq!(bank.i2c_lines, [0x56]);
+        assert!(gpio_bank(&io, &translate, 100).is_err());
+        let placed = spi_nor(&root, &io, &translate, 99, Some(&bank))
             .unwrap()
             .unwrap();
         assert_eq!(placed.device.physical, 0x2_3510_4000);
         assert_eq!(placed.device.irq, 749);
-        let select = placed.select.clone().unwrap();
-        assert_eq!(select.pin, 49);
-        assert_eq!(select.physical, 0x2_3c10_0000);
-        // Only the AP bank's I2C line; the AOP-bank pin belongs elsewhere.
-        assert_eq!(select.pulled_up, [0x56]);
+        assert_eq!(placed.select, Some(49));
         assert_eq!(placed.image.bank(0).unwrap(), nor::nvram::empty_bank());
-        assert!(spi_nor(&root, &io, &|_| None, 99).is_err());
-        assert!(spi_nor(&root, &io, &Some, 100).is_err());
+        assert!(spi_nor(&root, &io, &|_| None, 99, Some(&bank)).is_err());
+        assert!(spi_nor(&root, &io, &Some, 100, Some(&bank)).is_err());
+        assert!(spi_nor(&root, &io, &translate, 99, None).is_err());
     }
 
     #[test]
@@ -3838,22 +3950,40 @@ mod tests {
         use crate::machine::adt::encode;
         let c = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         let r = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
-        let hpm = encode(
-            &[
-                ("name", b"hpm0\0"),
-                ("compatible", b"usbc,cd3217\0"),
-                ("hpm-iic-addr", &c(&[0x38])),
-            ],
-            &[],
-        );
+        let hpm = |name: &[u8], address: u32, personality: Option<&[u8]>| {
+            let mut properties = vec![("name", name), ("compatible", b"usbc,cd3217\0".as_slice())];
+            let address = c(&[address]);
+            let (provider, port) = (c(&[0x9b]), c(&[1]));
+            properties.extend([
+                ("hpm-iic-addr", address.as_slice()),
+                ("iicProvider", provider.as_slice()),
+                ("port-number", port.as_slice()),
+            ]);
+            properties.extend(personality.map(|p| ("usbc-fw-personality", p)));
+            encode(&properties, &[])
+        };
         let manager = encode(
             &[
                 ("name", b"hpmBusManager\0"),
                 ("compatible", b"usbc,manager\0"),
                 ("reg", &c(&[0x6b, 2500, 0, 0])),
+                ("AAPL,phandle", &c(&[0x9b])),
+                ("interrupt-parent", &c(&[0x6a])),
+                ("interrupts", &c(&[8, 1])),
             ],
-            &[hpm],
+            &[
+                hpm(b"hpm0\0", 0x38, Some(b"HPM,47\0")),
+                hpm(b"hpm1\0", 0x3f, None),
+            ],
         );
+        let gpio = GpioBank {
+            physical: 0x23c100000,
+            bytes: 0x100000,
+            pins: 213,
+            phandle: 0x6a,
+            lines: vec![199],
+            i2c_lines: vec![],
+        };
         let i2c = encode(
             &[
                 ("name", b"i2c0\0"),
@@ -3920,25 +4050,44 @@ mod tests {
             &[i2c.clone(), phy(b"atc-phy,t8112\0"), usb.clone(), acio],
         );
         let translate = |a| Some(if a < 0x100000000 { a + 0x200000000 } else { a });
-        let (buses, phys) = typec_devices(&Node::root(&io).unwrap(), &translate, 0x63).unwrap();
+        let place =
+            |io: &[u8], aic, gpio| typec_devices(&Node::root(io).unwrap(), &translate, aic, gpio);
+        let (buses, phys) = place(&io, 0x63, Some(&gpio)).unwrap();
         assert_eq!(buses[0].device.physical, 0x235010000);
         assert_eq!(buses[0].device.irq, 761);
+        // Both dies share the manager's GPIO line and the flash-updated
+        // die's firmware.
+        let hpm = |address, port| I2cAddress {
+            address,
+            compatible: HPM.into(),
+            interrupt: Some(8),
+            firmware: Some("HPM,47".into()),
+            port,
+        };
         assert_eq!(
-            buses[0]
-                .targets
-                .iter()
-                .map(|t| t.address)
-                .collect::<Vec<_>>(),
-            [0x6b, 0x38]
+            buses[0].targets,
+            [
+                I2cAddress {
+                    address: 0x6b,
+                    compatible: HPM_MANAGER.into(),
+                    interrupt: Some(8),
+                    firmware: None,
+                    port: None,
+                },
+                hpm(0x38, Some(1)),
+                hpm(0x3f, Some(1)),
+            ]
         );
+        // The manager's line must be a visible AP GPIO pin.
+        assert!(place(&io, 0x63, None).is_err());
         assert_eq!(phys[0].usb2, (0x382a90000, 0x4000));
         assert_eq!(phys[0].core, (0x383000000, atc_phy::CORE_BYTES));
         assert_eq!(phys[0].pipe, (0x382a84000, 0x4000));
         assert_eq!(phys[0].views, views);
-        assert!(typec_devices(&Node::root(&io).unwrap(), &translate, 0x99).is_err());
-        assert!(typec_devices(&Node::root(&io).unwrap(), &|_| None, 0x63).is_err());
+        assert!(place(&io, 0x99, Some(&gpio)).is_err());
+        assert!(typec_devices(&Node::root(&io).unwrap(), &|_| None, 0x63, Some(&gpio)).is_err());
         let io = encode(&[("name", b"arm-io\0")], &[phy(b"atc-phy,t8112\0")]);
-        assert!(typec_devices(&Node::root(&io).unwrap(), &translate, 0x63).is_err());
+        assert!(place(&io, 0x63, Some(&gpio)).is_err());
         for compatible in [I2C, HPM_MANAGER, HPM, ATC_PHY] {
             assert!(models(compatible, |_| None));
         }
@@ -3946,12 +4095,7 @@ mod tests {
         assert!(!models(RETIMER, |_| None));
         // Hidden PHYs are not parsed or mapped merely because reg survives.
         let io = encode(&[("name", b"arm-io\0")], &[i2c, phy(b"hidden\0"), usb]);
-        assert!(
-            typec_devices(&Node::root(&io).unwrap(), &translate, 0x63)
-                .unwrap()
-                .1
-                .is_empty()
-        );
+        assert!(place(&io, 0x63, Some(&gpio)).unwrap().1.is_empty());
     }
 
     #[test]

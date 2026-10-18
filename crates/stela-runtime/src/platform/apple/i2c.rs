@@ -70,6 +70,9 @@ pub enum TargetError {
 pub trait I2cTarget {
     fn transfer(&mut self, write: &[u8], read: &mut [u8], stop: bool) -> Result<(), TargetError>;
     fn abort(&mut self) {}
+    /// Re-evaluates outputs that change without a transfer, such as an
+    /// interrupt line that follows external state.
+    fn advance(&mut self) {}
 }
 
 /// An electrically present target whose protocol has not been qualified.
@@ -332,6 +335,12 @@ impl MmioDevice for I2c {
         }
         self.interrupt(access);
         Ok(())
+    }
+    fn advance(&mut self, _: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        for target in &mut self.targets {
+            target.device.advance();
+        }
+        Ok(None)
     }
 }
 

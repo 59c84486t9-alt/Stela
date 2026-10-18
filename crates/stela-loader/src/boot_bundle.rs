@@ -102,6 +102,10 @@ pub struct Inputs<'a> {
     /// The sealed volume the boot roots from, and its root-hash `IM4P` when
     /// one is available; `None` when it roots from no sealed volume.
     pub root_hash: Option<RootHash<'a>>,
+    /// Firmware images the board's own devices run, copied unchanged as
+    /// bundle files named by their guest file names (such as
+    /// `USB-C_HPM,47.bin`); device models read their identity from them.
+    pub board_firmware: Vec<(String, Input<'a>)>,
 }
 
 impl Inputs<'_> {
@@ -429,6 +433,8 @@ const DEVICE_TREE_FILE: &str = "devicetree.adt";
 const TRUST_CACHE_FILE: &str = "trustcache.bin";
 const SEP_FILE: &str = "sepfw.im4p";
 const RAMDISK_FILE: &str = "ramdisk.img";
+/// The engine handoff's file-name capacity (`stela-boot` `handoff::MAX_NAME`).
+const MAX_FILE_NAME: usize = 48;
 const BOOT_ARGS_FILE: &str = "bootargs.bin";
 
 struct LoadedImage {
@@ -1001,6 +1007,15 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     if let Some(ramdisk) = &inputs.ramdisk {
         files.push((RAMDISK_FILE.to_owned(), ramdisk.bytes.to_vec()));
     }
+    for (name, image) in &inputs.board_firmware {
+        // The manifest admits only simple names; these checks keep the name
+        // within the engine handoff and distinct from the bundle's own files.
+        ensure!(
+            name.len() <= MAX_FILE_NAME && !files.iter().any(|(file, _)| file == name),
+            "board firmware name {name:?} is too long or already a bundle file"
+        );
+        files.push((name.clone(), image.bytes.to_vec()));
+    }
     for region in &mut regions {
         let (_, bytes) = files
             .iter()
@@ -1031,6 +1046,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
             .chain(&inputs.extra_trust_caches)
             .chain(&inputs.ramdisk)
             .chain(inputs.root_hash.iter().filter_map(|r| r.im4p.as_ref()))
+            .chain(inputs.board_firmware.iter().map(|(_, image)| image))
             .map(source_of),
     );
     let manifest = Manifest {
@@ -1530,7 +1546,7 @@ mod tests {
             source: source(name),
         };
         let leak = |v: Vec<u8>| -> &'static [u8] { Box::leak(v.into_boxed_slice()) };
-        let inputs = Inputs {
+        let mut inputs = Inputs {
             target: Target {
                 product_type: "Mac14,3".into(),
                 device_class: "j473ap".into(),
@@ -1549,6 +1565,10 @@ mod tests {
             boot_manifest: Some(input(leak(boot_manifest()), "BootManifest")),
             cryptex1_manifest: None,
             extra_trust_caches: vec![],
+            board_firmware: vec![(
+                "USB-C_HPM,47.bin".into(),
+                input(leak(vec![1, 2, 3]), "BoardFirmware"),
+            )],
             ramdisk: Some(input(leak(vec![0x5a; 100]), "RestoreRamDisk")),
             root_hash: None,
         };
@@ -1591,6 +1611,14 @@ mod tests {
             options.dram_base
         );
         let bundle = prepare(&inputs, &options)?;
+        // Board firmware travels unchanged under its guest file name, which
+        // must not replace a bundle file.
+        let firmware = bundle.files.iter().find(|(n, _)| n == "USB-C_HPM,47.bin");
+        assert_eq!(firmware.map(|(_, b)| b.as_slice()), Some(&[1u8, 2, 3][..]));
+        let supplied = core::mem::take(&mut inputs.board_firmware);
+        inputs.board_firmware = vec![(KERNEL_FILE.into(), input(leak(vec![1]), "BoardFirmware"))];
+        assert!(prepare(&inputs, &options).is_err());
+        inputs.board_firmware = supplied;
         let manifest = &bundle.manifest;
         let names: Vec<_> = manifest.regions.iter().map(|r| r.name.as_str()).collect();
         let expected: Vec<_> = REGION_ORDER

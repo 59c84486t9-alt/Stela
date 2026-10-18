@@ -27,7 +27,8 @@ use crate::platform::apple::{
     dwc3::{self, Dwc3, PortState},
     energy::{self, Energy},
     fuse::{self, AonFuses},
-    gpio::Gpio,
+    gpio::{Gpio, Net},
+    hpm::{FirmwareIdentity, Hpm},
     i2c::{self, I2c},
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
@@ -40,6 +41,7 @@ use crate::platform::apple::{
     sart::{self, Sart},
     sep::{self, Sep},
     spi::Spi,
+    typec,
     uart::S5lUart,
     wake::{self, WakeMasks},
     wdt::{self, AppleWdt},
@@ -92,6 +94,9 @@ pub struct AppleDevices {
     reset_vectors: Vec<Option<DeviceId>>,
     starts: Vec<Start>,
     selects: Vec<SelectWire>,
+    /// The AP GPIO bank's base and the board nets on its input pins.
+    gpio: Option<(u64, Vec<(u32, Net)>)>,
+    typec_ports: Vec<(u32, typec::Port)>,
     pmgr: Option<DeviceId>,
     dart_power: Vec<DartPower>,
 }
@@ -262,6 +267,8 @@ impl AppleDevices {
             reset_vectors: Vec::new(),
             starts: Vec::new(),
             selects: Vec::new(),
+            gpio: None,
+            typec_ports: Vec::new(),
             pmgr: None,
             dart_power: Vec::new(),
         }
@@ -302,8 +309,55 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// Places the AP GPIO bank before its clients: chip-select outputs, a
+    /// pulled-up net on each I2C line and on each client interrupt pin.
+    pub fn add_gpio(
+        &mut self,
+        bank: &super::soc::GpioBank,
+        selects: &[u32],
+        interrupts: &[u32],
+    ) -> Result<(), String> {
+        let mut nets: Vec<(u32, Net)> = Vec::new();
+        for &pin in bank.i2c_lines.iter().chain(interrupts) {
+            if !nets.iter().any(|(p, _)| *p == pin) {
+                nets.push((pin, Net::new()));
+            }
+        }
+        let lines = bank
+            .lines
+            .iter()
+            .map(|&irq| AicInput::new(0, irq))
+            .collect();
+        let gpio = Gpio::new(bank.pins, lines, selects, nets.clone()).map_err(String::from)?;
+        let id = self.bus.add(Box::new(gpio));
+        self.bus
+            .map(id, bank.physical, bank.bytes, 0)
+            .map_err(|e| format!("GPIO placement: {e:?}"))?;
+        self.gpio = Some((bank.physical, nets));
+        Ok(())
+    }
+
+    fn gpio_net(&self, pin: u32) -> Result<&Net, String> {
+        self.gpio
+            .as_ref()
+            .and_then(|(_, nets)| nets.iter().find(|(p, _)| *p == pin))
+            .map(|(_, net)| net)
+            .ok_or_else(|| format!("GPIO pin {pin} has no placed board net"))
+    }
+
+    /// The shared cable state of one Type-C connector.
+    fn typec_port(&mut self, number: u32) -> typec::Port {
+        if let Some((_, port)) = self.typec_ports.iter().find(|(n, _)| *n == number) {
+            return port.clone();
+        }
+        let port = typec::Port::new();
+        self.typec_ports.push((number, port.clone()));
+        port
+    }
+
     /// Installs the DT-derived SPI controller, one in-memory NOR die and
-    /// its external GPIO CS wire (or the internal PIN.CS connection).
+    /// its external GPIO CS wire (or the internal PIN.CS connection). An
+    /// external CS requires the placed GPIO bank.
     pub fn add_spi_nor(&mut self, placement: &super::soc::SpiNor) -> Result<(), String> {
         let device = placement.device;
         let spi = self.bus.add(Box::new(Spi::new(
@@ -314,16 +368,11 @@ impl AppleDevices {
         self.bus
             .map(spi, device.physical, device.bytes, 0)
             .map_err(|e| format!("SPI placement: {e:?}"))?;
-        if let Some(select) = &placement.select {
-            let gpio = Gpio::new(select.pins, select.groups, &[select.pin], &select.pulled_up)
-                .map_err(String::from)?;
-            let gpio = self.bus.add(Box::new(gpio));
-            self.bus
-                .map(gpio, select.physical, select.bytes, 0)
-                .map_err(|e| format!("GPIO placement: {e:?}"))?;
+        if let Some(pin) = placement.select {
+            let (base, _) = self.gpio.as_ref().ok_or("SPI CS requires the GPIO bank")?;
             self.selects.push(SelectWire {
                 spi,
-                physical: select.physical + u64::from(select.pin) * 4,
+                physical: base + u64::from(pin) * 4,
             });
         }
         Ok(())
@@ -545,7 +594,13 @@ impl AppleDevices {
 
     /// Place an explicitly visible I2C controller. Addressed but unqualified
     /// targets refuse; hiding a target must not turn its protocol into success.
-    pub fn add_i2c(&mut self, placement: &super::soc::I2cController) -> Result<(), String> {
+    /// `firmware` returns a board firmware image by its guest file name; an
+    /// HPM die runs `USB-C_<personality>.bin` and drives its interrupt net.
+    pub fn add_i2c<'f>(
+        &mut self,
+        placement: &super::soc::I2cController,
+        firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
+    ) -> Result<(), String> {
         let device = placement.device;
         let mut model = I2c::new(AicInput::new(0, device.irq as u16));
         for target in &placement.targets {
@@ -554,7 +609,23 @@ impl AppleDevices {
                     "HPM bus-manager interrupt summary and multiplexing are not yet modeled"
                 }
                 super::soc::HPM => {
-                    "HPM original-driver firmware startup and GPIO wiring are not yet qualified"
+                    let name = format!(
+                        "USB-C_{}.bin",
+                        target.firmware.as_deref().ok_or("HPM names no firmware")?
+                    );
+                    let image = firmware(&name)
+                        .ok_or_else(|| format!("board firmware {name} was not supplied"))?;
+                    let identity =
+                        FirmwareIdentity::from_image(image).map_err(|e| format!("{name}: {e}"))?;
+                    let port = self.typec_port(target.port.ok_or("HPM has no port number")?);
+                    let mut hpm = Hpm::new(port, identity);
+                    if let Some(pin) = target.interrupt {
+                        hpm = hpm.with_interrupt(self.gpio_net(pin)?.open_drain()?);
+                    }
+                    model
+                        .attach(target.address, Box::new(hpm))
+                        .map_err(String::from)?;
+                    continue;
                 }
                 super::soc::RETIMER => "ATC retimer register protocol is undetermined",
                 _ => "I2C target protocol is not modeled",
@@ -1539,7 +1610,7 @@ mod tests {
 
     #[test]
     fn external_gpio_cs_delimits_nor_commands_across_controller_transfers() {
-        use super::super::soc::{Device, GpioSelect, SpiNor};
+        use super::super::soc::{Device, GpioBank, SpiNor};
         const SPI: u64 = 0x10000;
         const GPIO: u64 = 0x20000;
         const PIN: u64 = GPIO + 49 * 4;
@@ -1547,6 +1618,15 @@ mod tests {
         devices
             .add_aic(0x100000, 1024, AicLayout::aic2(0x8000, 0))
             .unwrap();
+        let bank = GpioBank {
+            physical: GPIO,
+            bytes: 0x1000,
+            pins: 213,
+            phandle: 106,
+            lines: (199..206).collect(),
+            i2c_lines: Vec::new(),
+        };
+        devices.add_gpio(&bank, &[49], &[]).unwrap();
         devices
             .add_spi_nor(&SpiNor {
                 device: Device {
@@ -1555,14 +1635,7 @@ mod tests {
                     irq: 749,
                 },
                 image: nor::Image::fresh(),
-                select: Some(GpioSelect {
-                    physical: GPIO,
-                    bytes: 0x1000,
-                    pins: 213,
-                    groups: 7,
-                    pin: 49,
-                    pulled_up: Vec::new(),
-                }),
+                select: Some(49),
             })
             .unwrap();
         fn transfer(devices: &mut AppleDevices, bytes: &[u8]) -> Vec<u8> {
