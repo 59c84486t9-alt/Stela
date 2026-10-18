@@ -3,6 +3,16 @@
 //!
 //! Documented by Linux `drivers/iommu/apple-dart.c` and `io-pgtable-dart.c`
 //! (Asahi), registers 32-bit:
+//! - PARAMS1 (0x00): the page size's shift in [27:24]; PARAMS2 (0x04):
+//!   BYPASS_SUPPORT 0; PARAMS3 (0x08): PA_WIDTH [29:24], VA_WIDTH [21:16]
+//!   and the hardware version, major [15:8] and minor [7:0]; PARAMS4
+//!   (0x0c): NUM_SIDS [8:0]. The 26A434 J473AP `AppleT8110DART::
+//!   _dartValidateConfig` panics unless the shift is 14 (16 KiB pages) and,
+//!   for a stream its DeviceTree has bypass, unless bypass is supported.
+//!   Its `_hwVersion` accepts versions 1.0, 1.1, 2.0 to 2.4 and 3.0, and
+//!   SPTM's `t8110dart_init_instance` also 3.2; SPTM requires a VA space
+//!   above 40 bits from version 2 on, so this two-level DART of 36-bit VAs
+//!   (and 42-bit PAs, its entries' address field) reports version 1.0.
 //! - TLB_CMD (0x80): BUSY 31, OP [10:8] (0 flush all, 1 flush one stream),
 //!   STREAM [7:0].
 //! - ERROR (0x100): FLAG 31, STREAM [27:20], CODE [14:0] (READ_FAULT 5,
@@ -45,8 +55,9 @@
 //! The filter's slices are SoC register windows a coprocessor's own firmware
 //! reaches; the machine's device models make no such accesses, so a
 //! transfer on a stream that does not bypass a present filter refuses
-//! rather than pass unfiltered. The identification registers, FOUR_LEVEL and REMAP_EN are
-//! refused until their values or behavior are known.
+//! rather than pass unfiltered. The identification fields not listed above
+//! (PARAMS1 bit 31, PARAMS2 bit 4, PARAMS4 NUM_CLIENTS) read 0; FOUR_LEVEL
+//! and REMAP_EN are refused until their behavior is known.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
 use crate::platform::dma::{DmaError, Iommu, Memory};
@@ -55,6 +66,16 @@ use alloc::{vec, vec::Vec};
 
 const NAME: &str = "dart-t8110";
 
+const PARAMS1: u64 = 0x00;
+const PARAMS2: u64 = 0x04;
+/// PARAMS1: the page shift, 16 KiB pages.
+const PARAMS1_PAGE_SHIFT: u32 = PAGE_SHIFT << 24;
+/// PARAMS2: streams can bypass translation (TCR BYPASS_DART).
+const BYPASS_SUPPORT: u32 = 1;
+const PARAMS3: u64 = 0x08;
+const PARAMS4: u64 = 0x0c;
+/// PARAMS3: the PA and VA widths and version 1.0.
+const PARAMS3_VALUE: u32 = PA_BITS << 24 | IOVA_BITS << 16 | 0x0100;
 const TLB_CMD: u64 = 0x80;
 const TLB_OP: u32 = 0x7 << 8;
 const TLB_OP_FLUSH_ALL: u32 = 0;
@@ -111,6 +132,8 @@ const PAGE_SHIFT: u32 = 14;
 const PAGE: u64 = 1 << PAGE_SHIFT;
 const LEVEL_BITS: u32 = 11;
 const IOVA_BITS: u32 = PAGE_SHIFT + 2 * LEVEL_BITS;
+/// The PAs an entry's address field reaches.
+const PA_BITS: u32 = (ENTRY_ADDRESS << ENTRY_ADDRESS_SHIFT).ilog2() + 1;
 const ENTRY_VALID: u64 = 1;
 const ENTRY_NO_WRITE: u64 = 1 << 2;
 const ENTRY_NO_READ: u64 = 1 << 3;
@@ -370,6 +393,10 @@ impl MmioDevice for Dart {
                 .ok_or_else(|| fail("unknown DART APF register"));
         }
         let value = match offset {
+            PARAMS1 => PARAMS1_PAGE_SHIFT,
+            PARAMS2 => BYPASS_SUPPORT,
+            PARAMS3 => PARAMS3_VALUE,
+            PARAMS4 => self.streams as u32,
             TLB_CMD => 0,
             ERROR => self.error,
             ERROR_MASK => self.error_mask,
@@ -509,6 +536,13 @@ mod tests {
     fn streams_translate_through_two_levels_or_bypass() {
         let (mut dart, mut ram, mut latch) = setup();
         let mut access = Access::new(0, 0, &mut latch);
+        assert_eq!(dart.read(PARAMS1, Width::Word, &mut access), Ok(0xe << 24));
+        assert_eq!(dart.read(PARAMS2, Width::Word, &mut access), Ok(1));
+        assert_eq!(
+            dart.read(PARAMS3, Width::Word, &mut access),
+            Ok(42 << 24 | 36 << 16 | 0x100)
+        );
+        assert_eq!(dart.read(PARAMS4, Width::Word, &mut access), Ok(16));
         let iova = 0x200_4000 + 0x123;
         assert_eq!(
             dart.translate(&mut ram, 1, iova, iova + 3, false, &mut access),
@@ -626,7 +660,7 @@ mod tests {
             Ok(u64::from(TCR_TRANSLATE))
         );
         // Unknown registers and four-level tables are refused.
-        assert!(dart.read(0x8, Width::Word, &mut access).is_err());
+        assert!(dart.read(0x10, Width::Word, &mut access).is_err());
         assert!(
             dart.write(TCR + 4 * 16, Width::Word, 0, &mut access)
                 .is_err()
