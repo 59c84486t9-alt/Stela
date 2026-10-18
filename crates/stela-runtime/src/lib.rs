@@ -32,6 +32,7 @@ pub mod pauth;
 pub mod payload;
 mod platform;
 pub mod preboot;
+pub mod restore;
 /// Host PC storage for the UEFI mount after ExitBootServices.
 #[cfg(target_arch = "x86_64")]
 pub use platform::pc;

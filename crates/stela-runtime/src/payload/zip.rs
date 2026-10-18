@@ -41,6 +41,8 @@ pub struct Entry {
     pub compressed_bytes: u64,
     pub bytes: u64,
     pub crc32: u32,
+    /// Unix mode from central-directory external attributes, when supplied.
+    pub unix_mode: Option<u16>,
     local_header: u64,
 }
 
@@ -180,6 +182,7 @@ impl Archive {
                 compressed_bytes,
                 bytes,
                 crc32: u32_at(header, 16),
+                unix_mode: (header[5] == 3).then(|| (u32_at(header, 38) >> 16) as u16),
                 local_header,
             });
             at = next;
@@ -193,6 +196,50 @@ impl Archive {
 
     pub fn find(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.name == name)
+    }
+
+    /// Bounded random access. Stored members read directly; deflate members
+    /// replay through the existing bounded inflater, without buffering the file.
+    /// Integrity is the caller's responsibility, as for `open_member`.
+    pub fn read_member_at<R: ReadAt>(
+        &self,
+        reader: &mut R,
+        entry: &Entry,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<(), PayloadError> {
+        if offset
+            .checked_add(output.len() as u64)
+            .is_none_or(|end| end > entry.bytes)
+        {
+            return Err(corrupt("member read range"));
+        }
+        let mut stream = self.open_member(reader, entry)?;
+        if entry.method == Method::Stored {
+            stream.next += offset;
+            stream.remaining_input -= offset;
+            stream.remaining_output -= offset;
+        } else {
+            let mut discard = [0; 4096];
+            let mut remaining = offset;
+            while remaining > 0 {
+                let n = remaining.min(discard.len() as u64) as usize;
+                let n = stream.read(&mut discard[..n])?;
+                if n == 0 {
+                    return Err(corrupt("short random member read"));
+                }
+                remaining -= n as u64;
+            }
+        }
+        let mut done = 0;
+        while done < output.len() {
+            let n = stream.read(&mut output[done..])?;
+            if n == 0 {
+                return Err(corrupt("short random member read"));
+            }
+            done += n;
+        }
+        Ok(())
     }
 
     /// Stream one member's uncompressed bytes.

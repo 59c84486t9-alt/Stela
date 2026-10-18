@@ -1,0 +1,659 @@
+//! Manifest-driven offline answers. Firmware updater support is keyed to its
+//! protocol arguments, never an application/build identity. Unknown updater
+//! formats and nonce-bound ticket requests retain their full refusal context.
+use super::{
+    Error, Result,
+    asr::Sender,
+    plist::{self, Limits, Value},
+    store::{Identity, Store},
+    ticket::Global,
+};
+use crate::payload::{ReadAt, safe_path};
+use alloc::{
+    collections::BTreeMap,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+const MAX_STAGED_ANSWERS: usize = 128;
+const MAX_STAGED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
+/// A transfer is a bounded recipe. A scheduler opens DataPort and polls a Job;
+/// control-only responses use the control stream at its next frame boundary.
+pub enum Plan {
+    Reply(Value),
+    File(Vec<Segment>),
+    Raw(Vec<Segment>),
+    Asr(Sender),
+}
+#[derive(Clone)]
+pub enum Segment {
+    Bytes(Vec<u8>),
+    Member {
+        path: String,
+        offset: u64,
+        bytes: u64,
+    },
+}
+impl Segment {
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(b) => b.len() as u64,
+            Self::Member { bytes, .. } => *bytes,
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+/// Prefetched HTTP responses bind the entire Arguments dictionary (method,
+/// URL, headers and body), not just a URL. The expected response digest is
+/// supplied by the immutable staging inventory, never inferred from a peer.
+#[derive(Default)]
+pub struct Staged {
+    answers: BTreeMap<(String, String), Value>,
+    bytes: usize,
+}
+impl Staged {
+    pub fn insert(
+        &mut self,
+        kind: &str,
+        args: &Value,
+        response_bytes: &[u8],
+        sha256: &str,
+    ) -> Result<()> {
+        if !matches!(kind, "URLAsset" | "StreamedImageDecryptionKey") {
+            return Err(Error::Invalid("staged answer kind"));
+        }
+        if self.answers.len() >= MAX_STAGED_ANSWERS
+            || response_bytes.len() > MAX_STAGED_BYTES - self.bytes
+        {
+            return Err(Error::Limit("staged answers"));
+        }
+        if crate::sha256(response_bytes) != sha256 {
+            return Err(Error::Invalid("staged response digest"));
+        }
+        validate_http_args(kind, args)?;
+        let response = plist::decode(response_bytes, Limits::default())?;
+        response.required("ResponseBody")?.data()?;
+        response.required("ResponseHeaders")?;
+        if !response.required("ResponseBodyDone")?.boolean()?
+            || !(200..300).contains(&response.required("ResponseStatus")?.uint()?)
+        {
+            return Err(Error::Invalid(
+                "staged HTTP answer is incomplete/unsuccessful",
+            ));
+        }
+        let key = (kind.into(), fingerprint(args)?);
+        if self.answers.contains_key(&key) {
+            return Err(Error::Invalid("duplicate staged answer"));
+        }
+        self.answers.insert(key, response);
+        self.bytes += response_bytes.len();
+        Ok(())
+    }
+    fn get(&self, kind: &str, args: &Value) -> Result<Value> {
+        validate_http_args(kind, args)?;
+        self.answers
+            .get(&(kind.into(), fingerprint(args)?))
+            .cloned()
+            .ok_or(Error::Invalid("exact prefetched HTTP response unavailable"))
+    }
+}
+fn fingerprint(v: &Value) -> Result<String> {
+    Ok(crate::sha256(&plist::encode_binary(v, Limits::default())?))
+}
+fn validate_http_args(kind: &str, args: &Value) -> Result<()> {
+    let method = args.required("RequestMethod")?.string()?;
+    if method != if kind == "URLAsset" { "GET" } else { "POST" } {
+        return Err(Error::Invalid("offline HTTP request method"));
+    }
+    args.required("RequestURL")?.string()?;
+    if kind == "StreamedImageDecryptionKey" {
+        args.required("RequestAdditionalHeaders")?;
+        args.required("RequestBody")?.data()?;
+    }
+    Ok(())
+}
+pub struct Answers<R> {
+    pub store: Store<R>,
+    pub staged: Staged,
+}
+impl<R: ReadAt> Answers<R> {
+    pub fn new(store: Store<R>) -> Self {
+        Self {
+            store,
+            staged: Staged::default(),
+        }
+    }
+    pub fn supported(&self) -> Value {
+        let names = [
+            "BuildIdentityDict",
+            "RootTicket",
+            "RecoveryOSRootTicketData",
+            "SourceBootObjectV4",
+            "SourceBootObjectV5",
+            "PersonalizedBootObjectV3",
+            "SystemImageData",
+            "RecoveryOSASRImage",
+            "SystemImageRootHash",
+            "SystemImageCanonicalMetadata",
+            "FUDData",
+            "PersonalizedData",
+            "NORData",
+            "FirmwareUpdaterData",
+            "BootabilityBundle",
+            "BootabilityBundleV2",
+            "ReceiptManifest",
+            "FDRTrustData",
+        ];
+        let mut d: BTreeMap<String, Value> = names
+            .into_iter()
+            .map(|s| (s.into(), Value::Boolean(true)))
+            .collect();
+        for kind in ["URLAsset", "StreamedImageDecryptionKey"] {
+            if self.staged.answers.keys().any(|(k, _)| k == kind) {
+                d.insert(kind.into(), Value::Boolean(true));
+            }
+        }
+        Value::Dict(d)
+    }
+    fn identity(&self, args: &Value) -> Result<Identity> {
+        let current = self.store.identity();
+        if !args
+            .get("IsRecoveryOS")
+            .map(Value::boolean)
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Ok(current.clone());
+        }
+        let matches: Vec<_> = self
+            .store
+            .identities()
+            .iter()
+            .filter(|i| {
+                i.variant().ok() == Some("macOS Customer")
+                    && i.number("ApChipID").ok() == current.number("ApChipID").ok()
+                    && i.number("ApBoardID").ok() == current.number("ApBoardID").ok()
+            })
+            .collect();
+        let [identity] = matches.as_slice() else {
+            return Err(Error::Invalid("recovery identity is missing/ambiguous"));
+        };
+        Ok((*identity).clone())
+    }
+    fn global_path(&self, identity: &Identity, args: &Value, cryptex: bool) -> Result<String> {
+        let variant = args
+            .get("Variant")
+            .map(Value::string)
+            .transpose()?
+            .unwrap_or(identity.info()?.required("MacOSVariant")?.string()?);
+        let prefix = args
+            .get("GlobalManifestPrefix")
+            .map(Value::string)
+            .transpose()?
+            .unwrap_or("apticket");
+        let suffix = args
+            .get("GlobalManifestSuffix")
+            .map(Value::string)
+            .transpose()?
+            .unwrap_or("");
+        let class = identity.info()?.required("DeviceClass")?.string()?;
+        let path = format!(
+            "Firmware/Manifests/restore/{}{variant}/{prefix}.{class}{suffix}.im4m",
+            if cryptex { "cryptex1/" } else { "" }
+        );
+        if !safe_path(&path) || !self.store.manifest().global_manifests.contains(&path) {
+            return Err(Error::Invalid("global manifest not in immutable inventory"));
+        }
+        Ok(path)
+    }
+    fn global(&mut self, identity: &Identity, args: &Value, cryptex: bool) -> Result<Global> {
+        let path = self.global_path(identity, args, cryptex)?;
+        Global::parse(self.store.read_small(&path)?, identity)
+    }
+    fn member_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
+        let size = self.store.member_len(path)?;
+        if size > MAX_REPLY_BYTES as u64 {
+            return Err(Error::Limit("dictionary component bytes"));
+        }
+        let mut bytes = Vec::new();
+        let mut offset = 0;
+        while offset < size {
+            let n = (size - offset).min(super::store::MAX_READ_BYTES as u64) as usize;
+            bytes.extend(self.store.read_at(path, offset, n)?);
+            offset += n as u64;
+        }
+        Ok(bytes)
+    }
+    fn personalized_stream(
+        &mut self,
+        identity: &Identity,
+        name: &str,
+        args: &Value,
+    ) -> Result<Vec<Segment>> {
+        let path = identity.path(name)?.to_string();
+        let size = self.store.member_len(&path)?;
+        let prefix = self.store.read_at(&path, 0, size.min(64) as usize)?;
+        let tag = bare_type(&prefix, size)?;
+        let digest = identity.component(name)?.required("Digest")?.data()?;
+        if self.store.digest384(&path)?.as_slice() != digest {
+            return Err(Error::Invalid("IM4P differs from BuildManifest digest"));
+        }
+        let global = self.global(identity, args, name.starts_with("Cryptex1,"))?;
+        let (prefix, suffix) = global.envelope(tag, digest, size)?;
+        Ok(vec![
+            Segment::Bytes(prefix),
+            Segment::Member {
+                path,
+                offset: 0,
+                bytes: size,
+            },
+            Segment::Bytes(suffix),
+        ])
+    }
+    fn personalized(&mut self, identity: &Identity, name: &str, args: &Value) -> Result<Vec<u8>> {
+        let path = identity.path(name)?;
+        let bytes = self.member_bytes(path)?;
+        let digest = identity.component(name)?.required("Digest")?.data()?;
+        self.global(identity, args, name.starts_with("Cryptex1,"))?
+            .wrap(&bytes, digest)
+    }
+    pub fn plan(&mut self, request: &Value) -> Result<Plan> {
+        self.plan_inner(request)
+            .map_err(|e| super::refuse(format!("{e}"), request))
+    }
+    fn plan_inner(&mut self, r: &Value) -> Result<Plan> {
+        let kind = r.required("DataType")?.string()?;
+        let empty = Value::dict([]);
+        let args = r.get("Arguments").unwrap_or(&empty);
+        let identity = self.identity(args)?;
+        match kind {
+            "BuildIdentityDict" => Ok(Plan::Reply(Value::dict([
+                ("BuildIdentityDict", identity.value),
+                (
+                    "Variant",
+                    args.get("Variant").cloned().unwrap_or(Value::from("Erase")),
+                ),
+            ]))),
+            "RootTicket" | "RecoveryOSRootTicketData" => {
+                let g = self.global(&identity, args, false)?;
+                Ok(Plan::Reply(Value::dict([(
+                    "RootTicketData",
+                    Value::Data(g.bytes().to_vec()),
+                )])))
+            }
+            "ReceiptManifest" => Ok(Plan::Reply(Value::dict([(
+                "ReceiptManifest",
+                identity.value.required("Manifest")?.clone(),
+            )]))),
+            "FDRTrustData" => Ok(Plan::Reply(Value::dict([]))),
+            "RecoveryOSLocalPolicy" => Err(Error::Invalid(
+                "E1: SEP-signed policy cannot satisfy host lpol Apple trust root",
+            )),
+            "RestoreAttestation" => Ok(Plan::Reply(Value::dict([(
+                "RestoreShouldAttest",
+                Value::Boolean(false),
+            )]))),
+            "URLAsset" | "StreamedImageDecryptionKey" => {
+                Ok(Plan::Reply(self.staged.get(kind, args)?))
+            }
+            "SystemImageData" | "RecoveryOSASRImage" => {
+                let path = identity.path("OS")?.to_string();
+                Ok(Plan::Asr(Sender::new(path, &self.store)?))
+            }
+            "SystemImageRootHash" | "SystemImageCanonicalMetadata" => {
+                let component = if kind == "SystemImageRootHash" {
+                    "SystemVolume"
+                } else {
+                    "Ap,SystemVolumeCanonicalMetadata"
+                };
+                let data = if kind == "SystemImageCanonicalMetadata" {
+                    self.member_bytes(identity.path(component)?)?
+                } else {
+                    self.personalized(&identity, component, args)?
+                };
+                Ok(Plan::Reply(Value::Dict(
+                    [(format!("{kind}File"), Value::Data(data))].into(),
+                )))
+            }
+            "SourceBootObjectV4" | "SourceBootObjectV5" | "PersonalizedBootObjectV3" => {
+                let name = args.required("ImageName")?.string()?;
+                let path = match name {
+                    "__GlobalManifest__" => self.global_path(&identity, args, false)?,
+                    "__RestoreVersion__" => "RestoreVersion.plist".into(),
+                    "__SystemVersion__" => "SystemVersion.plist".into(),
+                    _ => identity.path(name)?.into(),
+                };
+                if kind == "PersonalizedBootObjectV3" && !name.starts_with("__") {
+                    return Ok(Plan::File(self.personalized_stream(&identity, name, args)?));
+                }
+                let bytes = self.store.member_len(&path)?;
+                self.store.verify(&path)?;
+                Ok(Plan::File(vec![Segment::Member {
+                    path,
+                    offset: 0,
+                    bytes,
+                }]))
+            }
+            "FUDData" | "PersonalizedData" => self.image_data(&identity, args, kind),
+            "FirmwareUpdaterData" => self.updater(&identity, args),
+            "FirmwareUpdaterPreflight" | "DeviceRestoreInfoPreflight" => Err(Error::Invalid(
+                "updater-specific preflight semantics unqualified; no empty success",
+            )),
+            "NORData" => self.nor(&identity, args),
+            "BootabilityBundle" | "BootabilityBundleV2" => self.bootability(kind),
+            _ => Err(Error::Invalid("unknown required restore DataType")),
+        }
+    }
+    fn nor(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
+        let llb = self.personalized(identity, "LLB", &Value::dict([]))?;
+        let Value::Dict(manifest) = identity.value.required("Manifest")? else {
+            return Err(Error::Invalid("NOR manifest dictionary"));
+        };
+        let mut names = Vec::new();
+        for (name, entry) in manifest {
+            let info = entry.required("Info")?;
+            let flag = |key| {
+                info.get(key)
+                    .map(Value::boolean)
+                    .transpose()
+                    .map(|b| b.unwrap_or(false))
+            };
+            if (flag("IsFirmwarePayload")?
+                || (flag("IsSecondaryFirmwarePayload")? && flag("IsLoadedByiBoot")?))
+                && !matches!(name.as_str(), "LLB" | "RestoreSEP")
+            {
+                names.push(name.clone());
+            }
+        }
+        if names.is_empty() {
+            return Err(Error::Invalid("NOR firmware set absent"));
+        }
+        // Public host places iBoot first in the array. Remaining members have
+        // stable component-name order; FlashVersion1 uses a dictionary instead.
+        names.sort_by_key(|name| (!name.starts_with("iBoot"), name.clone()));
+        let dict_mode = args.get("FlashVersion1").is_some();
+        let mut dict = BTreeMap::new();
+        let mut array = Vec::new();
+        let mut total = llb.len();
+        for name in names {
+            let b = self.personalized(identity, &name, &Value::dict([]))?;
+            total += b.len();
+            if total > MAX_REPLY_BYTES {
+                return Err(Error::Limit("NOR response bytes"));
+            }
+            if dict_mode {
+                dict.insert(name, Value::Data(b));
+            } else {
+                array.push(Value::Data(b));
+            }
+        }
+        let mut response: BTreeMap<String, Value> = [
+            ("LlbImageData".into(), Value::Data(llb)),
+            (
+                "NorImageData".into(),
+                if dict_mode {
+                    Value::Dict(dict)
+                } else {
+                    Value::Array(array)
+                },
+            ),
+        ]
+        .into();
+        for (component, key) in [
+            ("RestoreSEP", "RestoreSEPImageData"),
+            ("SEP", "SEPImageData"),
+            ("SepStage1", "SEPPatchImageData"),
+        ] {
+            if manifest.contains_key(component) {
+                let b = self.personalized(identity, component, &Value::dict([]))?;
+                total += b.len();
+                if total > MAX_REPLY_BYTES {
+                    return Err(Error::Limit("NOR response bytes"));
+                }
+                response.insert(key.into(), Value::Data(b));
+            }
+        }
+        Ok(Plan::Reply(Value::Dict(response)))
+    }
+    fn updater(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
+        let updater = args.required("MessageArgUpdaterName")?.string()?;
+        if updater != "Cryptex1" {
+            return Err(Error::Invalid(
+                "unsupported firmware updater/ticket trust boundary",
+            ));
+        }
+        let request = args.required("DeviceGeneratedRequest")?;
+        // Explicit nonce or ECID requests cannot be answered with a non-nonce
+        // global. Retain all device-generated context in the caller's refusal.
+        if let Value::Dict(d) = request
+            && d.keys().any(|k| k.contains("Nonce") || k.contains("ECID"))
+        {
+            return Err(Error::Invalid(
+                "cryptex updater requires personalized ticket",
+            ));
+        }
+        let response_tags = args
+            .required("DeviceGeneratedTags")?
+            .required("ResponseTags")?
+            .array()?;
+        if response_tags.len() != 1 || response_tags[0].string()? != "Cryptex1,Ticket" {
+            return Err(Error::Invalid("unsupported cryptex response tags"));
+        }
+        let global = self.global(identity, &Value::dict([]), true)?;
+        Ok(Plan::Reply(Value::dict([(
+            "FirmwareResponseData",
+            Value::dict([("Cryptex1,Ticket", Value::Data(global.bytes().to_vec()))]),
+        )])))
+    }
+    fn image_data(&mut self, identity: &Identity, args: &Value, kind: &str) -> Result<Plan> {
+        let (list_key, data_key, flag) = if kind == "FUDData" {
+            ("FUDImageList", "FUDImageData", "IsFUDFirmware")
+        } else {
+            (
+                "ImageList",
+                "ImageData",
+                args.required("ImageType")?.string()?,
+            )
+        };
+        let Value::Dict(manifest) = identity.value.required("Manifest")? else {
+            return Err(Error::Invalid("manifest dictionary"));
+        };
+        let list = args
+            .get(list_key)
+            .map(Value::boolean)
+            .transpose()?
+            .unwrap_or(false);
+        let name = args.get("ImageName").map(Value::string).transpose()?;
+        let mut matches = Vec::new();
+        for (component, entry) in manifest {
+            if entry
+                .required("Info")?
+                .get(flag)
+                .map(Value::boolean)
+                .transpose()?
+                .unwrap_or(false)
+            {
+                matches.push(component.clone());
+            }
+        }
+        if list {
+            return Ok(Plan::Reply(Value::Dict(
+                [(
+                    list_key.into(),
+                    Value::Array(matches.into_iter().map(Value::String).collect()),
+                )]
+                .into(),
+            )));
+        }
+        if let Some(name) = name {
+            if !matches.iter().any(|s| s == name) {
+                return Err(Error::Invalid(
+                    "requested image does not match manifest ImageType",
+                ));
+            }
+            let data = self.personalized(identity, name, &Value::dict([]))?;
+            return Ok(Plan::Reply(Value::dict([
+                (data_key, Value::Data(data)),
+                ("ImageName", Value::from(name)),
+            ])));
+        }
+        if matches.is_empty() {
+            return Err(Error::Invalid(
+                "no manifest images match required image request",
+            ));
+        }
+        let mut data = BTreeMap::new();
+        let mut total = 0;
+        for name in matches {
+            let bytes = self.personalized(identity, &name, &Value::dict([]))?;
+            total += bytes.len();
+            if total > MAX_REPLY_BYTES {
+                return Err(Error::Limit("firmware reply bytes"));
+            }
+            data.insert(name, Value::Data(bytes));
+        }
+        Ok(Plan::Reply(Value::Dict(
+            [(data_key.into(), Value::Dict(data))].into(),
+        )))
+    }
+    fn bootability(&mut self, kind: &str) -> Result<Plan> {
+        let prefix = format!("{kind}/Restore/Bootability/");
+        let cache = format!("{kind}/Restore/Firmware/Bootability.dmg.trustcache");
+        let mut segments = Vec::new();
+        for entry in self.store.zip_entries() {
+            let name = if entry.name == cache {
+                "Bootability.trustcache"
+            } else if let Some(s) = entry.name.strip_prefix(&prefix) {
+                s
+            } else {
+                continue;
+            };
+            let name = name.trim_end_matches('/');
+            if name.is_empty() {
+                continue;
+            }
+            if !safe_path(name) {
+                return Err(Error::Invalid("unsafe Bootability path"));
+            }
+            let mode = entry
+                .unix_mode
+                .ok_or(Error::Invalid("Bootability ZIP Unix mode absent"))?;
+            let file_type = mode & 0o170000;
+            if !matches!(file_type, 0o100000 | 0o040000 | 0o120000) {
+                return Err(Error::Invalid("unsupported Bootability file type"));
+            }
+            if file_type == 0o040000 && entry.bytes != 0 {
+                return Err(Error::Invalid("nonempty Bootability directory"));
+            }
+            if self.store.member_len(&entry.name)? != entry.bytes {
+                return Err(Error::Invalid("Bootability inventory size"));
+            }
+            segments.push(Segment::Bytes(cpio_header(name, mode as u64, entry.bytes)?));
+            if entry.bytes != 0 {
+                segments.push(Segment::Member {
+                    path: entry.name.clone(),
+                    offset: 0,
+                    bytes: entry.bytes,
+                });
+            }
+        }
+        if segments.is_empty() {
+            return Err(Error::Invalid("Bootability bundle absent"));
+        }
+        segments.push(Segment::Bytes(cpio_header("TRAILER!!!", 0, 0)?));
+        Ok(Plan::Raw(segments))
+    }
+}
+/// Check the outer IM4P header and its exact extent without loading the body.
+fn bare_type(prefix: &[u8], bytes: u64) -> Result<[u8; 4]> {
+    if prefix.first() != Some(&0x30) {
+        return Err(Error::Invalid("IM4P sequence"));
+    }
+    let first = *prefix.get(1).ok_or(Error::Invalid("short IM4P header"))?;
+    let (header, length) = if first < 128 {
+        (2, first as u64)
+    } else {
+        let width = (first & 127) as usize;
+        if !(1..=4).contains(&width) {
+            return Err(Error::Invalid("IM4P length width"));
+        }
+        let b = prefix
+            .get(2..2 + width)
+            .ok_or(Error::Invalid("short IM4P length"))?;
+        (2 + width, b.iter().fold(0u64, |n, &v| (n << 8) | v as u64))
+    };
+    if length + header as u64 != bytes || prefix.get(header..header + 6) != Some(b"\x16\x04IM4P") {
+        return Err(Error::Invalid("source must be exactly one bare IM4P"));
+    }
+    crate::img4::peek_payload_type(prefix).map_err(|_| Error::Invalid("IM4P streaming type"))
+}
+/// odc cpio, as public restore.c emits it. UID/GID zero, one link; deterministic
+/// archive metadata is a host archive choice, not a guest firmware identity.
+fn cpio_header(name: &str, mode: u64, size: u64) -> Result<Vec<u8>> {
+    if size > 0o77777777777 || name.len() + 1 > 0o777777 || mode > 0o777777 {
+        return Err(Error::Limit("odc header field"));
+    }
+    let header = format!(
+        "070707{:06o}{:06o}{mode:06o}{:06o}{:06o}{:06o}{:06o}{:011o}{:06o}{size:011o}",
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        name.len() + 1
+    );
+    let mut out = header.into_bytes();
+    out.extend_from_slice(name.as_bytes());
+    out.push(0);
+    Ok(out)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exact_http_arguments_digest_and_post_body_are_bound() {
+        let args = Value::dict([
+            ("RequestMethod", Value::from("GET")),
+            ("RequestURL", Value::from("https://example.invalid/key")),
+        ]);
+        let response = Value::dict([
+            ("ResponseBody", Value::Data(b"key".to_vec())),
+            ("ResponseBodyDone", Value::Boolean(true)),
+            ("ResponseHeaders", Value::dict([])),
+            ("ResponseStatus", Value::Integer(200)),
+        ]);
+        let bytes = plist::encode_binary(&response, Limits::default()).unwrap();
+        let mut staged = Staged::default();
+        assert!(
+            staged
+                .insert("URLAsset", &args, &bytes, &"0".repeat(64))
+                .is_err()
+        );
+        staged
+            .insert("URLAsset", &args, &bytes, &crate::sha256(&bytes))
+            .unwrap();
+        assert_eq!(staged.get("URLAsset", &args).unwrap(), response);
+        let mut changed = args.clone();
+        let Value::Dict(d) = &mut changed else {
+            unreachable!()
+        };
+        d.insert("RequestURL".into(), Value::from("https://else.invalid/key"));
+        assert!(staged.get("URLAsset", &changed).is_err());
+        assert!(staged.get("StreamedImageDecryptionKey", &args).is_err());
+    }
+    #[test]
+    fn cpio_header_has_the_public_wire_layout() {
+        let h = cpio_header("a/b", 0o100644, 123).unwrap();
+        assert_eq!(h.len(), 76 + 4);
+        assert_eq!(&h[..6], b"070707");
+        assert_eq!(&h[18..24], b"100644");
+        assert_eq!(&h[59..65], b"000004");
+        assert_eq!(&h[65..76], b"00000000173");
+        assert_eq!(&h[76..], b"a/b\0");
+    }
+}
