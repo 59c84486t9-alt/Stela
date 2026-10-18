@@ -23,6 +23,7 @@ use super::{
     timer, vgic,
 };
 use crate::pauth;
+pub use crate::platform::dma::Memory;
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::fmt;
 use stela_compiler::{
@@ -276,6 +277,29 @@ pub trait Devices {
     /// first and last byte.
     fn memory_lock(&self) -> Option<(u64, u64)> {
         None
+    }
+    /// Run the DMA a device write by PE `cpu` started, on guest RAM
+    /// `memory`, before the next guest access: device DMA completes in the
+    /// write's own step.
+    fn transfer(
+        &mut self,
+        _cpu: usize,
+        _memory: &mut dyn Memory,
+        _now: u64,
+    ) -> Result<(), DeviceError> {
+        Ok(())
+    }
+}
+
+/// Guest RAM through the host, as device DMA reaches it.
+struct HostMemory<'a, H: Host>(&'a mut H);
+
+impl<H: Host> Memory for HostMemory<'_, H> {
+    fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
+        self.0.read_ram(physical, buffer)
+    }
+    fn write(&mut self, physical: u64, data: &[u8]) -> bool {
+        self.0.write_ram(physical, data)
     }
 }
 
@@ -2916,10 +2940,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let value = self.read_register(store.source_register());
             let now = self.host.counter();
-            match self
+            let written = self
                 .devices
                 .write(self.current, physical, bytes, value, now)
-            {
+                .and_then(|()| {
+                    let mut memory = HostMemory(&mut self.host);
+                    self.devices.transfer(self.current, &mut memory, now)
+                });
+            match written {
                 Ok(()) => {}
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
                 Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),

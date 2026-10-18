@@ -4,22 +4,25 @@
 //! The models own every register decision; this adapter only routes accesses
 //! and time, and turns each `MmioError` into an explicit refusal.
 use super::{
-    engine::{DeviceError, Devices},
+    engine::{DeviceError, Devices, Memory},
     registers::Lines,
 };
 use crate::platform::apple::{
+    aes::{self, Aes},
     aic::{Aic2, Aic2Config},
     aic1::Aic1,
     amcc::{self, Amcc},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
+    dart::Dart,
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
     lockdown::Lockdown,
     uart::S5lUart,
     wdt::AppleWdt,
 };
+use crate::platform::dma::Port;
 use crate::system::access::{AccessKind, Encoding};
-use alloc::{boxed::Box, format, string::String};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 pub use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
@@ -43,7 +46,20 @@ pub struct AppleDevices {
     reset: Option<String>,
     memory_controller: Option<DeviceId>,
     ipi: Option<FastIpi>,
+    masters: Vec<Master>,
 }
+
+/// An AES engine and the DART stream its DMA goes through.
+#[derive(Debug, Clone, Copy)]
+struct Master {
+    aes: DeviceId,
+    dart: DeviceId,
+    stream: usize,
+}
+
+/// A DART on the bus, for [`AppleDevices::add_aes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DartId(DeviceId);
 
 /// The mapped AIC and which model it is.
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +105,7 @@ impl AppleDevices {
             reset: None,
             memory_controller: None,
             ipi: None,
+            masters: Vec::new(),
         }
     }
 
@@ -157,6 +174,47 @@ impl AppleDevices {
         self.map(device, &ranges)
             .map_err(|error| format!("AMCC placement: {error:?}"))?;
         self.memory_controller = Some(device);
+        Ok(())
+    }
+
+    /// A `dart,t8110` of `streams` streams at `range`.
+    pub fn add_dart(
+        &mut self,
+        range: Range,
+        streams: usize,
+        irq: Option<AicInput>,
+    ) -> Result<DartId, MapError> {
+        let device = self.bus.add(Box::new(Dart::new(streams, irq)));
+        self.map(device, &[range])?;
+        Ok(DartId(device))
+    }
+
+    /// An `aes,s8000` of `aes-version` `version` at its block and
+    /// key-disable ranges, whose DMA goes through `stream` of `dart` and
+    /// whose UID1 key is `uid`, if the board has one.
+    pub fn add_aes(
+        &mut self,
+        [block, key_disable]: [Range; 2],
+        version: u32,
+        irq: Option<AicInput>,
+        (dart, stream): (DartId, usize),
+        uid: Option<[u8; 32]>,
+    ) -> Result<(), String> {
+        if block.bytes != aes::BLOCK_BYTES {
+            return Err(format!(
+                "AES block registers span {:#x} bytes, not the modeled {:#x}",
+                block.bytes,
+                aes::BLOCK_BYTES
+            ));
+        }
+        let device = self.bus.add(Box::new(Aes::new(version, irq, uid)));
+        self.map(device, &[block, key_disable])
+            .map_err(|error| format!("AES placement: {error:?}"))?;
+        self.masters.push(Master {
+            aes: device,
+            dart: dart.0,
+            stream,
+        });
         Ok(())
     }
 
@@ -373,6 +431,32 @@ impl Devices for AppleDevices {
         let device = self.memory_controller?;
         self.bus.device::<Amcc>(device)?.locked_region()
     }
+
+    fn transfer(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
+        for master in &self.masters {
+            let (aes, dart) = self
+                .bus
+                .pair_mut::<Aes, Dart>(master.aes, master.dart)
+                .expect("a master names an AES engine and its DART");
+            if !aes.pending() {
+                continue;
+            }
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            let mut port = Port {
+                iommu: dart,
+                stream: master.stream,
+                memory,
+                access: &mut access,
+            };
+            aes.run(&mut port).map_err(describe)?;
+        }
+        self.settle(cpu, now, None)
+    }
 }
 
 #[cfg(test)]
@@ -524,5 +608,68 @@ mod tests {
             devices.read(0, AIC + 0x5008, 4, 0),
             Err(DeviceError::Refused(reason)) if reason.contains("per-CPU")
         ));
+    }
+
+    /// The AES engine's DMA runs in the write that starts it, through its
+    /// DART stream: here a bypassed one, ECB with the FIPS-197 C.1 key.
+    #[test]
+    fn aes_writes_move_data_through_the_dart_stream() {
+        use crate::platform::dma::tests::Ram;
+        const DART: u64 = 0x2_3500_4000;
+        const AES: u64 = 0x2_3500_c000;
+        const RAM: u64 = 0x8_0000_0000;
+        let mut devices = AppleDevices::new();
+        let dart = devices
+            .add_dart(
+                Range {
+                    physical: DART,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+            )
+            .unwrap();
+        let ranges = [
+            Range {
+                physical: AES,
+                bytes: 0x4000,
+            },
+            Range {
+                physical: 0x2_3d2d_c000,
+                bytes: 0x8000,
+            },
+        ];
+        devices.add_aes(ranges, 3, None, (dart, 1), None).unwrap();
+        let mut ram = Ram::new(RAM, 0x1000);
+        let plain: Vec<u8> = (0..16).map(|byte| byte * 0x11).collect();
+        assert!(Memory::write(&mut ram, RAM, &plain));
+        // Stream 1 enabled and bypassed: TCR BYPASS_DART | BYPASS_DAPF.
+        for (offset, value) in [(0xc00, 0b10), (0x1004, 0b110)] {
+            devices.write(0, DART + offset, 4, value, 0).unwrap();
+        }
+        let key: Vec<u64> = (0..4)
+            .map(|word| u64::from(0x0302_0100_u32 + 0x0404_0404 * word))
+            .collect();
+        let command =
+            [0x1010_0000]
+                .into_iter()
+                .chain(key)
+                .chain([0x5000_0010, 0x0008_0008, 0, 0x100]);
+        devices.write(0, AES + 0x8, 4, 1, 0).unwrap();
+        for word in command {
+            devices.write(0, AES + 0x200, 4, word, 0).unwrap();
+            devices.transfer(0, &mut ram, 0).unwrap();
+        }
+        let mut out = [0; 16];
+        assert!(Memory::read(&mut ram, RAM + 0x100, &mut out));
+        assert_eq!(
+            out,
+            [
+                0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+                0xc5, 0x5a
+            ]
+        );
+        // The FIFO drained: EMPTY with LEVEL 0.
+        assert_eq!(devices.read(0, AES + 0x24, 4, 0).unwrap() & 0xff02, 0b10);
     }
 }

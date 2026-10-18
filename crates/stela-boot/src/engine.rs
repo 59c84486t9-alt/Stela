@@ -307,6 +307,32 @@ fn devices(
         let mpidrs: Vec<u64> = board.cpus.processors.iter().map(|pe| pe.mpidr).collect();
         devices.add_fast_ipi(&mpidrs);
     }
+    let mut darts = Vec::new();
+    for dart in board.map_or(&[][..], |board| &board.darts) {
+        let range = Range {
+            physical: dart.physical,
+            bytes: dart.bytes,
+        };
+        let irq = AicInput::new(0, dart.irq as u16);
+        let placed = devices
+            .add_dart(range, usize::from(dart.streams), Some(irq))
+            .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
+        darts.push(placed);
+    }
+    if let Some(aes) = board.and_then(|board| board.aes) {
+        let [block, key_disable] = aes
+            .ranges
+            .map(|(physical, bytes)| Range { physical, bytes });
+        // No per-installation UID1 key is provisioned yet: the engine
+        // reports every hardware key disabled.
+        devices.add_aes(
+            [block, key_disable],
+            aes.version,
+            Some(AicInput::new(0, aes.irq as u16)),
+            (darts[aes.iommu], aes.stream as usize),
+            None,
+        )?;
+    }
     let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
     if let Some(controller) = memory_controller {
         devices.add_memory_controller(
@@ -317,7 +343,7 @@ fn devices(
     }
     output::arguments(format_args!(
         "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
-         lockdown-blocks={} amcc-apertures={} aic-timebase=unplaced\n",
+         lockdown-blocks={} amcc-apertures={} darts={} aes={} aic-timebase=unplaced\n",
         uart.0.physical,
         uart.0.bytes,
         uart.1.irq,
@@ -327,7 +353,9 @@ fn devices(
         aic.physical,
         aic.inputs,
         board.map_or(0, |board| board.lockdown.len()),
-        memory_controller.map_or(0, |controller| controller.apertures.len())
+        memory_controller.map_or(0, |controller| controller.apertures.len()),
+        darts.len(),
+        board.and_then(|board| board.aes).is_some()
     ));
     Ok(devices)
 }

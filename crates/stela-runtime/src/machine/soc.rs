@@ -391,11 +391,19 @@ pub const UART: &str = "uart-1,samsung";
 pub const WATCHDOG: &str = "wdt,s5l8960x";
 /// The AIC versions the engine models (`platform::apple::aic1` and `aic`).
 const AICS: [&str; 3] = ["aic,1", "aic,2", "aic,3"];
+/// The `compatible` of the DART the engine models (`platform::apple::dart`).
+pub const DART: &str = "dart,t8110";
+/// The `compatible` of a DART child naming one client's stream (its `reg`),
+/// which XNU's IODARTMapper binds and clients name as `iommu-parent`.
+pub const IOMMU_MAPPER: &str = "iommu-mapper";
+/// The `compatible` of the AES engine the engine models
+/// (`platform::apple::aes`).
+pub const AES: &str = "aes,s8000";
 
 /// Whether the engine models a device `compatible` with `name`: the devices a
 /// [`Board`] places. A boot bundle presents no other device to the guest.
 pub fn models(name: &str) -> bool {
-    name == UART || name == WATCHDOG || AICS.contains(&name)
+    [UART, WATCHDOG, DART, IOMMU_MAPPER, AES].contains(&name) || AICS.contains(&name)
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
@@ -414,6 +422,34 @@ pub struct Board {
     /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
     /// described them.
     pub memory_controller: Option<MemoryController>,
+    /// Every `/arm-io` `dart,t8110`.
+    pub darts: Vec<Iommu>,
+    /// `/arm-io/aes`, an `aes,s8000`, when the DeviceTree keeps it.
+    pub aes: Option<AesEngine>,
+}
+
+/// A `dart,t8110`: its one DART register range (ADT `instance` `TRAD`), its
+/// `sid-count`, its AIC input, and the `AAPL,phandle` and stream (`reg`) of
+/// each `iommu-mapper` child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Iommu {
+    pub physical: u64,
+    pub bytes: u64,
+    pub streams: u16,
+    pub irq: u32,
+    pub mappers: Vec<(u32, u32)>,
+}
+
+/// The AES engine: its block and key-disable register ranges, its
+/// `aes-version`, its AIC input, and the [`Board::darts`] index and stream
+/// of its `iommu-parent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AesEngine {
+    pub ranges: [(u64, u64); 2],
+    pub version: u32,
+    pub irq: u32,
+    pub iommu: usize,
+    pub stream: u32,
 }
 
 /// The AMCC as `/chosen/lock-regs/amcc` describes it: its apertures and
@@ -529,6 +565,121 @@ fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, Stri
     Ok(Some(MemoryController { apertures, layout }))
 }
 
+/// The `name` of an `/arm-io` child, for messages.
+fn name_of(node: &Node<'_>) -> String {
+    node.property("name")
+        .and_then(|name| core::str::from_utf8(name).ok())
+        .map_or_else(|| "?".into(), |name| name.trim_end_matches('\0').into())
+}
+
+/// Every `/arm-io` child that is a modeled DART. Each must have exactly one
+/// register range, a DART (`instance` `TRAD`): DAPF and SMMU ranges are not
+/// modeled.
+fn iommus(io: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Vec<Iommu>, String> {
+    let mut found = Vec::new();
+    let mut failure = None;
+    io.visit(&mut |node| {
+        if failure.is_some() || !node.compatible(DART) {
+            return;
+        }
+        match iommu(node, translate) {
+            Ok(iommu) => found.push(iommu),
+            Err(error) => failure = Some(error),
+        }
+    })
+    .ok_or("DeviceTree walk failed")?;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(found),
+    }
+}
+
+fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iommu, String> {
+    let path = format!("/arm-io/{}", name_of(node));
+    let reg = node.pairs("reg").unwrap_or_default();
+    let instances = node.property("instance").unwrap_or_default();
+    let &[(offset, bytes)] = reg.as_slice() else {
+        return Err(format!(
+            "{path} has {} register ranges, not one DART",
+            reg.len()
+        ));
+    };
+    if instances.len() != 16 || &instances[..4] != b"TRAD" {
+        return Err(format!("{path} is not a single DART instance"));
+    }
+    let physical =
+        translate(offset).ok_or_else(|| format!("{path} lies outside /arm-io ranges"))?;
+    let streams = node
+        .first_u32("sid-count")
+        .and_then(|count| u16::try_from(count).ok())
+        .filter(|&count| count <= 256)
+        .ok_or_else(|| format!("{path} has no sid-count of at most 256"))?;
+    let irq = node
+        .first_u32("interrupts")
+        .ok_or_else(|| format!("{path} has no interrupts"))?;
+    let mut mappers = Vec::new();
+    node.visit(&mut |child| {
+        if child.compatible(IOMMU_MAPPER)
+            && let (Some(phandle), Some(stream)) =
+                (child.first_u32("AAPL,phandle"), child.first_u32("reg"))
+        {
+            mappers.push((phandle, stream));
+        }
+    })
+    .ok_or("DeviceTree walk failed")?;
+    Ok(Iommu {
+        physical,
+        bytes,
+        streams,
+        irq,
+        mappers,
+    })
+}
+
+/// The modeled AES engine under `/arm-io`, if the DeviceTree keeps one; its
+/// `iommu-parent` must be a mapper of a modeled DART.
+fn aes_engine(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    darts: &[Iommu],
+) -> Result<Option<AesEngine>, String> {
+    let Some(node) = io.child("aes").filter(|node| node.compatible(AES)) else {
+        return Ok(None);
+    };
+    const PATH: &str = "/arm-io/aes";
+    let reg = node.pairs("reg").unwrap_or_default();
+    let &[block, key_disable] = reg.as_slice() else {
+        return Err(format!("{PATH} has {} register ranges, not two", reg.len()));
+    };
+    let place = |(offset, bytes): (u64, u64)| {
+        translate(offset)
+            .map(|physical| (physical, bytes))
+            .ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))
+    };
+    let number = |name: &str| {
+        node.first_u32(name)
+            .ok_or_else(|| format!("{PATH} has no {name}"))
+    };
+    let parent = number("iommu-parent")?;
+    let (iommu, stream) = darts
+        .iter()
+        .enumerate()
+        .find_map(|(index, dart)| {
+            dart.mappers
+                .iter()
+                .find(|(phandle, _)| *phandle == parent)
+                .map(|&(_, stream)| (index, stream))
+        })
+        .ok_or_else(|| format!("{PATH} iommu-parent {parent:#x} is no modeled DART's mapper"))?;
+    Ok(Some(AesEngine {
+        ranges: [place(block)?, place(key_disable)?],
+        version: number("aes-version")?,
+        irq: number("interrupts")?,
+        iommu,
+        stream,
+    }))
+}
+
 /// The board a DeviceTree describes, or why the engine cannot model it: its
 /// chip and PEs ([`cpus`], from `/chosen` `chip-id`, `/product`
 /// `product-soc-name` and each `/cpus` node with a `cluster-type`) and the
@@ -589,6 +740,12 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     }
     let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
     let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
+    let translate = |offset: u64| {
+        ranges
+            .iter()
+            .find(|(child, _, size)| (*child..child + size).contains(&offset))
+            .map(|(child, parent, _)| parent + (offset - child))
+    };
     let place = |name: &str, model: Option<&str>| -> Result<(Node<'_>, u64, u64), String> {
         let node = io
             .child(name)
@@ -602,10 +759,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
             .pairs("reg")
             .and_then(|reg| reg.first().copied())
             .ok_or_else(|| format!("/arm-io/{name} has no reg"))?;
-        let physical = ranges
-            .iter()
-            .find(|(child, _, size)| (*child..child + size).contains(&offset))
-            .map(|(child, parent, _)| parent + (offset - child))
+        let physical = translate(offset)
             .ok_or_else(|| format!("/arm-io/{name} lies outside /arm-io ranges"))?;
         Ok((node, physical, bytes))
     };
@@ -643,12 +797,16 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let inputs = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
     let memory_controller =
         memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
+    let darts = iommus(&io, &translate)?;
+    let aes = aes_engine(&io, &translate, &darts)?;
     Ok(Board {
         cpus,
         uart,
         watchdog,
         lockdown,
         memory_controller,
+        darts,
+        aes,
         aic: InterruptController {
             physical,
             inputs,
@@ -770,6 +928,16 @@ mod tests {
         compatibles: [&str; 3],
         aic_properties: &[(&str, u32)],
     ) -> Vec<u8> {
+        tree_with_io(chip_id, soc, compatibles, aic_properties, &[])
+    }
+    /// [`tree_with`] with more `/arm-io` children.
+    fn tree_with_io(
+        chip_id: u32,
+        soc: &str,
+        compatibles: [&str; 3],
+        aic_properties: &[(&str, u32)],
+        io_children: &[Vec<u8>],
+    ) -> Vec<u8> {
         use crate::machine::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
         let u32s = |cells: &[u32]| {
@@ -838,10 +1006,14 @@ mod tests {
                 ("ranges", &u64s(&[0, 0x2_0000_0000, 0x1_0000_0000])),
             ],
             &[
-                device("uart0", compatibles[0], 0x3520_0000, 739),
-                device("wdt", compatibles[1], 0x3d2b_0000, 379),
-                aic,
-            ],
+                vec![
+                    device("uart0", compatibles[0], 0x3520_0000, 739),
+                    device("wdt", compatibles[1], 0x3d2b_0000, 379),
+                    aic,
+                ],
+                io_children.to_vec(),
+            ]
+            .concat(),
         );
         encode(
             &[("name", &z("device-tree"))],
@@ -959,6 +1131,110 @@ mod tests {
             Err("/arm-io/aic is not aic,3, the modeled device".into())
         );
         assert!(board(&[0; 4]).is_err());
+    }
+
+    /// J473AP's `dart-sio` and the AES engine behind its `mapper-aes`.
+    #[test]
+    fn a_board_places_its_darts_and_the_aes_engine_behind_one() {
+        use crate::machine::adt::encode;
+        const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let u32s = |cells: &[u32]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let u64s = |cells: &[u64]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let mapper = |name: &str, phandle: u32, stream: u32| {
+            encode(
+                &[
+                    ("name", &z(name)),
+                    ("compatible", &z(IOMMU_MAPPER)),
+                    ("AAPL,phandle", &u32s(&[phandle])),
+                    ("reg", &u32s(&[stream])),
+                ],
+                &[],
+            )
+        };
+        let instance = [b"TRAD".as_slice(), &[0; 4], b"DART", &[0; 4]].concat();
+        let dart = |instance: &[u8], reg: &[u64]| {
+            encode(
+                &[
+                    ("name", &z("dart-sio")),
+                    ("compatible", &z(DART)),
+                    ("reg", &u64s(reg)),
+                    ("instance", instance),
+                    ("sid-count", &u32s(&[16])),
+                    ("interrupts", &u32s(&[0x301])),
+                ],
+                &[mapper("mapper-sio", 0x89, 0), mapper("mapper-aes", 0x8a, 1)],
+            )
+        };
+        let aes = |parent: u32| {
+            encode(
+                &[
+                    ("name", &z("aes")),
+                    ("compatible", &z(AES)),
+                    ("reg", &u64s(&[0x3500_c000, 0x4000, 0x3d2d_c000, 0x8000])),
+                    ("interrupts", &u32s(&[0x2f7])),
+                    ("iommu-parent", &u32s(&[parent])),
+                    ("aes-version", &u32s(&[3])),
+                ],
+                &[],
+            )
+        };
+        let sio = dart(&instance, &[0x3500_4000, 0x4000]);
+        let found = board(&tree_with_io(
+            0x8112,
+            "Apple M2",
+            MODELED,
+            &[],
+            &[sio.clone(), aes(0x8a)],
+        ))
+        .unwrap();
+        assert_eq!(
+            found.darts,
+            [Iommu {
+                physical: 0x2_3500_4000,
+                bytes: 0x4000,
+                streams: 16,
+                irq: 0x301,
+                mappers: vec![(0x89, 0), (0x8a, 1)],
+            }]
+        );
+        assert_eq!(
+            found.aes,
+            Some(AesEngine {
+                ranges: [(0x2_3500_c000, 0x4000), (0x2_3d2d_c000, 0x8000)],
+                version: 3,
+                irq: 0x2f7,
+                iommu: 0,
+                stream: 1,
+            })
+        );
+        assert_eq!(
+            board(&tree_with_io(
+                0x8112,
+                "Apple M2",
+                MODELED,
+                &[],
+                &[sio, aes(0x99)]
+            )),
+            Err("/arm-io/aes iommu-parent 0x99 is no modeled DART's mapper".into())
+        );
+        // A DAPF range beside the DART is not modeled.
+        let dapf = [instance.as_slice(), b"FPAD", &[0; 4], b"DAPF", &[0; 4]].concat();
+        let aop = dart(&dapf, &[0x3500_4000, 0x4000, 0x3500_8000, 0x4000]);
+        assert_eq!(
+            board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[aop])),
+            Err("/arm-io/dart-sio has 2 register ranges, not one DART".into())
+        );
     }
 
     #[test]

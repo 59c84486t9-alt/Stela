@@ -12,6 +12,13 @@
 //! runs. darwin-vm `dt_fixup.py` (MIT, commit `edfc1943`) boots the same
 //! SPTM kernels to a shell in QEMU after removing `compatible` the same way.
 //!
+//! A modeled DART (`dart,t8110`) presents only the streams visible devices
+//! use: an `iommu-mapper` child stays only while a device that keeps its
+//! `compatible` names it as `iommu-parent`, and the DART itself only while
+//! one of its mappers stays. SPTM initializes every DART the tree shows, and
+//! XNU starts an IODARTMapper per mapper; a DART no visible device reaches
+//! would only be programmed for clients the machine does not have.
+//!
 //! A selection of a hidden device goes with it: XNU `pe_serial.c` (`xnu-12377`)
 //! takes `/defaults` `serial-device`, a phandle, as its console and panics
 //! when that node has no `compatible`. On J473AP it names the unmodeled
@@ -40,6 +47,7 @@ const SERIAL_DEVICE: &str = "serial-device";
 const PHANDLE: &str = "AAPL,phandle";
 const SECURE_ROOT_PREFIX: &str = "secure-root-prefix";
 const DEVICE_TYPE: &str = "device_type";
+const IOMMU_PARENT: &str = "iommu-parent";
 
 /// Paths that keep their `compatible` whatever it names.
 fn structural(path: &str) -> bool {
@@ -50,14 +58,54 @@ fn structural(path: &str) -> bool {
             .is_some_and(|cpu| !cpu.contains('/'))
 }
 
-fn modeled(node: &Node) -> bool {
-    node.property(COMPATIBLE).is_some_and(|property| {
-        property
-            .value
-            .split(|&byte| byte == 0)
-            .filter_map(|name| core::str::from_utf8(name).ok())
-            .any(soc::models)
-    })
+fn compatibles(node: &Node) -> impl Iterator<Item = &str> {
+    node.property(COMPATIBLE)
+        .into_iter()
+        .flat_map(|property| property.value.split(|&byte| byte == 0))
+        .filter_map(|name| core::str::from_utf8(name).ok())
+}
+
+fn named(node: &Node, model: &str) -> bool {
+    compatibles(node).any(|name| name == model)
+}
+
+/// A modeled device that is not part of an IOMMU.
+fn modeled_client(node: &Node) -> bool {
+    !named(node, soc::DART) && !named(node, soc::IOMMU_MAPPER) && compatibles(node).any(soc::models)
+}
+
+/// The phandles modeled devices under `node` name as `iommu-parent`.
+fn iommu_parents(node: &Node, parents: &mut Vec<u32>) {
+    if modeled_client(node)
+        && let Some(property) = node.property(IOMMU_PARENT)
+    {
+        let cells = property.value.as_chunks::<4>().0;
+        parents.extend(cells.iter().map(|cell| u32::from_le_bytes(*cell)));
+    }
+    for child in &node.children {
+        iommu_parents(child, parents);
+    }
+}
+
+fn kept_mapper(node: &Node, parents: &[u32]) -> bool {
+    named(node, soc::IOMMU_MAPPER)
+        && node
+            .property(PHANDLE)
+            .and_then(|property| property.as_u32())
+            .is_some_and(|phandle| parents.contains(&phandle))
+}
+
+/// Whether the machine models `node` and it serves a visible device.
+fn modeled(node: &Node, parents: &[u32]) -> bool {
+    if named(node, soc::DART) {
+        node.children
+            .iter()
+            .any(|child| kept_mapper(child, parents))
+    } else if named(node, soc::IOMMU_MAPPER) {
+        kept_mapper(node, parents)
+    } else {
+        modeled_client(node)
+    }
 }
 
 /// Removes `compatible` from every device the machine does not model, a
@@ -65,8 +113,10 @@ fn modeled(node: &Node) -> bool {
 /// that no AES accelerator can acknowledge, and returns their paths in tree
 /// order, then the selections.
 pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
+    let mut parents = Vec::new();
+    iommu_parents(&tree.root, &mut parents);
     let mut hidden = Vec::new();
-    visit(&mut tree.root, "", &mut hidden);
+    visit(&mut tree.root, "", &parents, &mut hidden);
     let selected = tree
         .property(DEFAULTS, SERIAL_DEVICE)
         .and_then(|property| property.as_u32())
@@ -107,16 +157,16 @@ fn path_of(node: &Node, path: &str, phandle: u32) -> Option<String> {
     })
 }
 
-fn visit(node: &mut Node, path: &str, hidden: &mut Vec<String>) {
+fn visit(node: &mut Node, path: &str, parents: &[u32], hidden: &mut Vec<String>) {
     let here = if path.is_empty() { "/" } else { path };
-    if node.property(COMPATIBLE).is_some() && !structural(here) && !modeled(node) {
+    if node.property(COMPATIBLE).is_some() && !structural(here) && !modeled(node, parents) {
         node.remove_property(COMPATIBLE);
         hidden.push(here.into());
     }
     for child in &mut node.children {
         let name = child.name().unwrap_or("?");
         let path = format!("{path}/{name}");
-        visit(child, &path, hidden);
+        visit(child, &path, parents, hidden);
     }
 }
 
@@ -158,7 +208,7 @@ mod tests {
                                 vec![node("iop-sep-nub", Some(b"iop-nub,rtbuddy-v2\0"), vec![])],
                             ),
                             node("dart-sep", Some(b"dart,t8110\0"), vec![]),
-                            aes(),
+                            aes(b"aes,s5l8960x\0"),
                             phandle(
                                 node("dockchannel-uart", Some(b"aapl,dock-channels\0"), vec![]),
                                 0x4d,
@@ -208,7 +258,11 @@ mod tests {
 
     #[test]
     fn only_an_aes_node_with_its_compatible_is_a_visible_accelerator() {
-        let mut root = node("device-tree", None, vec![node("arm-io", None, vec![aes()])]);
+        let mut root = node(
+            "device-tree",
+            None,
+            vec![node("arm-io", None, vec![aes(b"aes,s8000\0")])],
+        );
         assert!(visible_aes(&root));
         root.children[0].children[0].remove_property(COMPATIBLE);
         assert!(!visible_aes(&root));
@@ -220,8 +274,8 @@ mod tests {
         assert!(!visible_aes(&other));
     }
 
-    fn aes() -> Node {
-        let mut aes = node("aes", Some(b"aes,s8000\0"), vec![]);
+    fn aes(compatible: &[u8]) -> Node {
+        let mut aes = node("aes", Some(compatible), vec![]);
         aes.set_property(DEVICE_TYPE, b"aes\0".to_vec()).unwrap();
         aes
     }
@@ -238,6 +292,66 @@ mod tests {
             .set_property(SERIAL_DEVICE, value.to_le_bytes().to_vec())
             .unwrap();
         defaults
+    }
+
+    fn mapper(name: &str, phandle_value: u32) -> Node {
+        phandle(node(name, Some(b"iommu-mapper\0"), vec![]), phandle_value)
+    }
+
+    /// J473AP's AES engine reaches RAM through `dart-sio` `mapper-aes`
+    /// (phandle 0x8a): that DART and mapper stay, its other mappers and the
+    /// DARTs no visible device names go.
+    #[test]
+    fn darts_stay_only_for_the_streams_of_visible_devices() {
+        let mut engine = aes(b"aes,s8000\0");
+        engine
+            .set_property(IOMMU_PARENT, 0x8a_u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut sio = node("sio", Some(b"iop,ascwrap-v4\0"), vec![]);
+        sio.set_property(IOMMU_PARENT, 0x89_u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: secure_root(node(
+                "device-tree",
+                None,
+                vec![node(
+                    "arm-io",
+                    None,
+                    vec![
+                        node(
+                            "dart-sio",
+                            Some(b"dart,t8110\0"),
+                            vec![mapper("mapper-sio", 0x89), mapper("mapper-aes", 0x8a)],
+                        ),
+                        node(
+                            "dart-sep",
+                            Some(b"dart,t8110\0"),
+                            vec![mapper("mapper-sep", 0x90)],
+                        ),
+                        engine,
+                        sio,
+                    ],
+                )],
+            )),
+        };
+        assert_eq!(
+            hide_unmodeled(&mut tree),
+            [
+                "/arm-io/dart-sio/mapper-sio",
+                "/arm-io/dart-sep",
+                "/arm-io/dart-sep/mapper-sep",
+                "/arm-io/sio",
+            ]
+        );
+        for kept in [
+            "/arm-io/dart-sio",
+            "/arm-io/dart-sio/mapper-aes",
+            "/arm-io/aes",
+        ] {
+            assert!(tree.property(kept, COMPATIBLE).is_some(), "{kept}");
+        }
+        // A visible AES engine keeps the secure root prefix.
+        assert!(tree.root.property(SECURE_ROOT_PREFIX).is_some());
     }
 
     #[test]
