@@ -17,6 +17,7 @@ use crate::platform::apple::{
     bridge::Bridge,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
+    coresight::{self, SoftwareLock},
     cpm::Cpm,
     cpustart::{self, CpuStart},
     dart::{self, Dart},
@@ -256,6 +257,19 @@ impl AppleDevices {
     ) -> Result<(), MapError> {
         let device = self.bus.add(Box::new(S5lUart::new(console, irq)));
         self.map(device, ranges)
+    }
+
+    /// The lock pair at the end of one DT-placed CoreSight component page.
+    pub fn add_coresight_lock(&mut self, physical: u64) -> Result<(), MapError> {
+        let device = self.bus.add(Box::new(SoftwareLock::new()));
+        self.bus.map(
+            device,
+            physical
+                .checked_add(coresight::ACCESS)
+                .ok_or(MapError::Overflow)?,
+            8,
+            coresight::ACCESS,
+        )
     }
 
     /// The lockdown registers of a CPU implementation block named `name`,
@@ -1114,6 +1128,22 @@ mod tests {
     use super::*;
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+
+    #[test]
+    fn coresight_components_keep_independent_locks_and_do_not_claim_debug_controls() {
+        let mut d = AppleDevices::new();
+        let bases = [0x2_1001_0000, 0x2_1101_0000];
+        for base in bases {
+            d.add_coresight_lock(base).unwrap();
+            assert_eq!(d.read(0, base + coresight::STATUS, 4, 0), Ok(3));
+        }
+        d.write(0, bases[0] + coresight::ACCESS, 4, 0xc5acce55, 0)
+            .unwrap();
+        assert_eq!(d.read(0, bases[0] + coresight::STATUS, 4, 0), Ok(1));
+        assert_eq!(d.read(0, bases[1] + coresight::STATUS, 4, 0), Ok(3));
+        assert!(d.read(0, bases[0], 4, 0).is_err());
+        assert!(d.write(0, bases[0] + coresight::ACCESS, 8, 0, 0).is_err());
+    }
 
     #[test]
     fn pmgr_power_gates_reset_dart_tables_but_clock_gates_and_retention_preserve_them() {

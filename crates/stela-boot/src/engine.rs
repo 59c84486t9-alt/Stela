@@ -387,6 +387,11 @@ fn devices(
         }
         (None, None) => (),
     }
+    for &physical in board.map_or(&[][..], |board| &board.coresight) {
+        devices
+            .add_coresight_lock(physical)
+            .map_err(|error| alloc::format!("CoreSight lock placement: {error:?}"))?;
+    }
     for block in board.map_or(&[][..], |board| &board.lockdown) {
         let range = Range {
             physical: block.physical,

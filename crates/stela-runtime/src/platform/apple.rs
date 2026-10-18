@@ -17,6 +17,7 @@ pub mod asc;
 pub mod bridge;
 pub mod bus;
 pub mod cluster;
+pub mod coresight;
 pub mod counter;
 pub mod cpm;
 pub mod cpustart;

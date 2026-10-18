@@ -19,8 +19,8 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, ans, asc, bridge, cluster, cpm, cpustart, dart, dpe, energy, fuse, nor, power, ptd, sart,
-    spi, wake,
+    amcc, ans, asc, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse, nor, power,
+    ptd, sart, spi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -844,6 +844,8 @@ pub struct Board {
     /// Every PE's `cpu-impl-reg` and every cluster's `cpm-impl-reg`, once
     /// each, on a SoC whose lockdown offsets are known; none otherwise.
     pub lockdown: Vec<LockdownBlock>,
+    /// CPU CoreSight component bases, for their architectural Software Locks.
+    pub coresight: Vec<u64>,
     /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
     /// described them.
     pub memory_controller: Option<MemoryController>,
@@ -1645,6 +1647,21 @@ fn watchdog_side(
     Ok(Some(side))
 }
 
+/// The DT region can contain several components. This model places only
+/// the first component's described management pair, within that region.
+fn place_coresight(pairs: &[(u64, u64)]) -> Result<u64, String> {
+    let [(physical, bytes)] = pairs else {
+        return Err("CPU CoreSight map must describe one component".into());
+    };
+    if *bytes < coresight::STATUS + 4
+        || !physical.is_multiple_of(coresight::BYTES)
+        || physical.checked_add(*bytes).is_none()
+    {
+        return Err("CPU CoreSight component is empty, unaligned or overflows its page".into());
+    }
+    Ok(*physical)
+}
+
 /// The SoC's CPU clusters and always-on eFuses, when the DeviceTree shows a
 /// `pmgr1,t8112` whose `reg` places each cluster's register window and
 /// performance-state table and the eFuse block.
@@ -2440,10 +2457,14 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         .ok_or("DeviceTree has no /product product-soc-name")?;
     let mut found = Vec::new();
     let mut blocks = Vec::new();
+    let mut debug_components = Vec::new();
     root.child("cpus")
         .ok_or("DeviceTree has no /cpus")?
         .visit(&mut |node| {
             if let Some(cluster_type) = node.property("cluster-type") {
+                if node.property("coresight-reg").is_some() {
+                    debug_components.push(node.pairs("coresight-reg"));
+                }
                 found.push((
                     cluster_type.first().copied(),
                     node.first_u32("reg"),
@@ -2456,6 +2477,10 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
             }
         })
         .ok_or("DeviceTree walk failed")?;
+    let coresight = debug_components
+        .into_iter()
+        .map(|pairs| place_coresight(&pairs.ok_or("CPU CoreSight reg contains partial records")?))
+        .collect::<Result<Vec<_>, String>>()?;
     let processors = found
         .into_iter()
         .map(|found| match found {
@@ -2580,6 +2605,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         watchdog,
         watchdog_side,
         lockdown,
+        coresight,
         memory_controller,
         darts,
         aes,
@@ -2615,6 +2641,23 @@ mod tests {
                 }),
             })
             .collect()
+    }
+
+    #[test]
+    fn coresight_lock_uses_the_dt_component_base_and_stays_inside_its_region() {
+        assert_eq!(
+            place_coresight(&[(0x2_1001_0000, 0x300c8)]).unwrap(),
+            0x2_1001_0000
+        );
+        for pairs in [
+            vec![],
+            vec![(0x2_1001_0001, 0x3c8)],
+            vec![(0, 0)],
+            vec![(0, 0x3c8)],
+            vec![(u64::MAX - 0xfff, 4)],
+        ] {
+            assert!(place_coresight(&pairs).is_err());
+        }
     }
 
     #[test]
@@ -3044,6 +3087,7 @@ mod tests {
                     ("reg", &u32s(&[reg])),
                     ("l2-cache-size", &u32s(&[4 << 20 << (2 * (reg >> 8))])),
                     ("cpu-impl-reg", &u64s(&[0x2_1005_0000 + cluster, 0x9010])),
+                    ("coresight-reg", &u64s(&[0x2_1001_0000 + cluster, 0x300c8])),
                     ("cpm-impl-reg", &u64s(&[0x2_10e4_0000 + cluster, 0x9010])),
                 ],
                 &[],
@@ -3158,6 +3202,7 @@ mod tests {
             }
         );
         assert_eq!(found.watchdog.irq, 379);
+        assert_eq!(found.coresight, vec![0x2_1001_0000, 0x2_1101_0000]);
         // Each PE's cpu-impl-reg and each cluster's cpm-impl-reg, once.
         let block = |name, physical, control, cpu| LockdownBlock {
             name,
