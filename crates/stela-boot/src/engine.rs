@@ -1068,8 +1068,16 @@ fn run(
         let stop = machine.run(limit);
         for hit in machine.take_trace_hits() {
             output::arguments(format_args!(
-                "TRACE pc={:#x} pe={} el={} x0-x3={:#x?} lr={:#x} dropped={}\n",
-                hit.pc, hit.pe, hit.el, hit.arguments, hit.lr, hit.dropped
+                "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
+                hit.pc,
+                hit.pe,
+                hit.el,
+                hit.arguments[0],
+                hit.arguments[1],
+                hit.arguments[2],
+                hit.arguments[3],
+                hit.lr,
+                hit.dropped
             ));
         }
         while let Some(log) = machine.devices.take_usb_log() {
