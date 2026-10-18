@@ -275,6 +275,18 @@ impl Bus {
         let device: &dyn Any = self.devices.get(device.0)?.as_ref();
         device.downcast_ref::<T>()
     }
+    /// Typed access to two different models at once, for wiring between
+    /// them such as a DMA master and its IOMMU.
+    pub fn pair_mut<A: MmioDevice, B: MmioDevice>(
+        &mut self,
+        a: DeviceId,
+        b: DeviceId,
+    ) -> Option<(&mut A, &mut B)> {
+        let [a, b] = self.devices.get_disjoint_mut([a.0, b.0]).ok()?;
+        let a: &mut dyn Any = a.as_mut();
+        let b: &mut dyn Any = b.as_mut();
+        Some((a.downcast_mut::<A>()?, b.downcast_mut::<B>()?))
+    }
     /// Typed access to a model, for engine wiring such as AIC inputs, UART
     /// receive data or fast-IPI system registers.
     pub fn device_mut<T: MmioDevice>(&mut self, device: DeviceId) -> Option<&mut T> {

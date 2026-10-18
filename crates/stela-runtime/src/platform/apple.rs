@@ -8,11 +8,13 @@
 //! register the model does not implement is an explicit [`bus::MmioError`];
 //! nothing reads as a silent zero. Doc comments mark what the cited sources
 //! document and what the model infers.
+pub mod aes;
 pub mod aic;
 pub mod aic1;
 pub mod amcc;
 pub mod bus;
 pub mod counter;
+pub mod dart;
 pub mod interrupt;
 pub mod ipi;
 pub mod lockdown;

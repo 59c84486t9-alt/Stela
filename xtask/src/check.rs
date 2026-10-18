@@ -5,6 +5,9 @@ use anyhow::Result;
 pub const BOOT_MANIFEST: &str = "crates/stela-boot/Cargo.toml";
 pub const BOOT_TARGET: &str = "x86_64-unknown-uefi";
 pub const BOOT_TARGET_DIR: &str = "target/boot";
+/// `.cargo/config.toml`'s flags for [`BOOT_TARGET`]: the soft-float target
+/// takes the `aes` crate's software backend.
+const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft";
 
 pub fn run(fix: bool) -> Result<()> {
     let boot = ["--manifest-path", BOOT_MANIFEST];
@@ -29,10 +32,11 @@ pub fn run(fix: bool) -> Result<()> {
         "warnings",
     ]))?;
     // RUSTFLAGS also denies warnings in the runtime crates the mount builds
-    // without std; registry dependencies stay lint-capped.
+    // without std; registry dependencies stay lint-capped. It replaces the
+    // target's configured flags, so it repeats them.
     exec(
         cargo()
-            .env("RUSTFLAGS", "-D warnings")
+            .env("RUSTFLAGS", format!("{BOOT_RUSTFLAGS} -D warnings"))
             .arg("clippy")
             .args(boot)
             .args([

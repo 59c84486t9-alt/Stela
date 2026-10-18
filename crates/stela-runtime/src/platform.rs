@@ -3,6 +3,7 @@
 #[allow(dead_code, reason = "the MMU-on system engine wires these models")]
 pub(crate) mod apple;
 pub(crate) mod cpu;
+pub(crate) mod dma;
 pub(crate) mod memory;
 #[cfg(target_arch = "x86_64")]
 pub mod pc;
