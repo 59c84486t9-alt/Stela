@@ -8,7 +8,7 @@ mod unprivileged;
 mod watch;
 
 use super::{
-    chip::Check,
+    chip::{AdmitFilter, Check},
     cpu::{
         Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
         HCR_VI, HCR_VSE,
@@ -571,6 +571,8 @@ pub struct Machine<H: Host, D: Devices> {
     pointer_memo_inputs: Option<PointerInputs>,
     /// Words `Chip::admit` has answered, by a hash of the word.
     admitted: Vec<Option<(u32, u32)>>,
+    /// The words the chip's `Chip::admit` may change.
+    admit_filter: AdmitFilter,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
     /// The number of the running PE.
@@ -614,6 +616,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile.chip,
             "the boot PE is not the profile's chip"
         );
+        let admit_filter = profile.chip.admit_filter();
         let mut machine = Self {
             cpu,
             host,
@@ -640,6 +643,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pointer_memo: vec![None; POINTER_MEMO],
             pointer_memo_inputs: None,
             admitted: vec![None; ADMITTED],
+            admit_filter,
             watch: Watch::default(),
             current: 0,
             waiting: None,
@@ -1531,6 +1535,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the word that searches every absent-form group, and every exit asks it
     /// again of the word that exited.
     fn admit(&mut self, word: u32) -> u32 {
+        if !self.admit_filter.may_change(word) {
+            return word;
+        }
         let slot = (word.wrapping_mul(0x9e37_79b1) >> 20) as usize % ADMITTED;
         match self.admitted[slot] {
             Some((raw, admitted)) if raw == word => admitted,

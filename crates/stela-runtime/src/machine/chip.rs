@@ -88,6 +88,26 @@ fn unallocated_group(word: u32) -> bool {
 }
 
 /// An Apple CPU, in the order of the generated per-chip tables.
+/// A chip's [`Chip::admit_filter`]: a word whose bits 31:21 it does not
+/// hold executes as itself, so most words skip the search of absent forms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmitFilter([u64; AdmitFilter::WORDS]);
+
+impl AdmitFilter {
+    const SHIFT: u32 = 21;
+    const WORDS: usize = (1 << (32 - Self::SHIFT)) / 64;
+
+    /// Whether `Chip::admit` may change `word`.
+    pub fn may_change(&self, word: u32) -> bool {
+        let prefix = (word >> Self::SHIFT) as usize;
+        self.0[prefix / 64] >> (prefix % 64) & 1 != 0
+    }
+
+    fn insert(&mut self, prefix: u32) {
+        self.0[prefix as usize / 64] |= 1 << (prefix % 64);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Chip {
     AppleM1,
@@ -125,6 +145,35 @@ impl Chip {
     /// The word the chip executes for `word`: the word itself, `UDF #0` for a
     /// form the chip lacks or a word in an unallocated top-level group, or NOP
     /// for an absent form Arm decodes as NOP.
+    /// The bits 31:21 of every word [`Self::admit`] can change on this chip:
+    /// those of its absent forms and of the unallocated top-level groups.
+    pub fn admit_filter(self) -> AdmitFilter {
+        const PREFIX: u32 = (1 << (32 - AdmitFilter::SHIFT)) - 1;
+        let bit = 1u8 << self as u8;
+        let mut filter = AdmitFilter([0; AdmitFilter::WORDS]);
+        for prefix in 0..=PREFIX {
+            if unallocated_group(prefix << AdmitFilter::SHIFT) {
+                filter.insert(prefix);
+            }
+        }
+        for group in forms::ABSENT {
+            // Every prefix that agrees with a form on the group's mask.
+            let free = !(group.mask >> AdmitFilter::SHIFT) & PREFIX;
+            for form in group.forms.iter().filter(|form| form.chips & bit != 0) {
+                let fixed = form.value >> AdmitFilter::SHIFT & !free;
+                let mut varying = free;
+                loop {
+                    filter.insert(fixed | varying);
+                    if varying == 0 {
+                        break;
+                    }
+                    varying = (varying - 1) & free;
+                }
+            }
+        }
+        filter
+    }
+
     pub fn admit(self, word: u32) -> u32 {
         if unallocated_group(word) {
             return UDF;
@@ -289,6 +338,31 @@ const fn engine_implements(feature: Feature) -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn the_admit_filter_holds_every_word_admit_changes() {
+        for chip in Chip::ALL {
+            let filter = chip.admit_filter();
+            let bit = 1u8 << chip as u8;
+            for group in forms::ABSENT {
+                for form in group.forms.iter().filter(|form| form.chips & bit != 0) {
+                    assert!(filter.may_change(form.value), "{chip:?} {:#x}", form.value);
+                }
+            }
+            // A deterministic spread of words, and the unallocated groups.
+            let mut word = 0x2545_f491_u32;
+            for _ in 0..20_000 {
+                word ^= word << 13;
+                word ^= word >> 17;
+                word ^= word << 5;
+                if !filter.may_change(word) {
+                    assert_eq!(chip.admit(word), word, "{chip:?} {word:#x}");
+                }
+            }
+            assert!(filter.may_change(0x0200_0000) && filter.may_change(0xe7ff_deff));
+            assert!(!filter.may_change(0xf940_0020)); // ldr x0, [x1]
+        }
+    }
 
     #[test]
     fn chips_follow_the_generated_tables_and_the_m2_implements_all_it_has() {
