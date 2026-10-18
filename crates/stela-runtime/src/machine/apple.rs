@@ -24,6 +24,7 @@ use crate::platform::apple::{
     dart::{self, Dart},
     dcs::Dcs,
     dpe::Dpe,
+    dwc3::{self, Dwc3, PortState},
     energy::{self, Energy},
     fuse::{self, AonFuses},
     gpio::Gpio,
@@ -44,6 +45,12 @@ use crate::platform::apple::{
     wdt::{self, AppleWdt},
 };
 use crate::platform::dma::Port;
+use crate::platform::usb::session::Session as UsbSession;
+pub use crate::platform::usb::{
+    host::{Descriptor as UsbDescriptor, MuxEndpoints},
+    mux::{StreamId as MuxStream, StreamState as MuxStreamState},
+    session::Log as UsbLog,
+};
 use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 
@@ -76,12 +83,40 @@ pub struct AppleDevices {
     storage_wrappers: Vec<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
+    usb_masters: Vec<UsbMaster>,
     cpu_start: Option<CpuStarter>,
     reset_vectors: Vec<Option<DeviceId>>,
     starts: Vec<Start>,
     selects: Vec<SelectWire>,
     pmgr: Option<DeviceId>,
     dart_power: Vec<DartPower>,
+}
+
+const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
+/// A native host handle, owned by this AppleDevices instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbId(DeviceId);
+struct UsbMaster {
+    device: DeviceId,
+    dart: DeviceId,
+    stream: usize,
+    session: UsbSession,
+    port: UsbPort,
+    next_poll: u64,
+    attached: bool,
+    epoch: u64,
+}
+struct UsbPort {
+    generation: u64,
+    ready: bool,
+}
+impl PortState for UsbPort {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+    fn high_speed_device_ready(&self) -> bool {
+        self.ready
+    }
 }
 
 struct SelectWire {
@@ -158,6 +193,33 @@ fn describe_transfer(error: MmioError) -> DeviceError {
     }
 }
 
+/// Native client boundary: enqueues bytes, exposes backpressure, and never
+/// executes guest code. Advance the machine between calls while connecting.
+pub struct UsbClient<'a>(&'a mut UsbSession);
+impl UsbClient<'_> {
+    pub fn open(&mut self, port: u16) -> Result<MuxStream, &'static str> {
+        self.0.open(port)
+    }
+    pub fn state(&self, stream: MuxStream) -> Result<MuxStreamState, &'static str> {
+        self.0.state(stream)
+    }
+    pub fn write(&mut self, stream: MuxStream, bytes: &[u8]) -> Result<usize, &'static str> {
+        self.0.write(stream, bytes)
+    }
+    pub fn read(&mut self, stream: MuxStream, bytes: &mut [u8]) -> Result<usize, &'static str> {
+        self.0.read(stream, bytes)
+    }
+    pub fn close(&mut self, stream: MuxStream) -> Result<(), &'static str> {
+        self.0.close(stream)
+    }
+    pub fn release(&mut self, stream: MuxStream) -> Result<(), &'static str> {
+        self.0.release(stream)
+    }
+    pub fn query_type(&mut self) -> Result<(), &'static str> {
+        self.0.query_type()
+    }
+}
+
 impl Default for AppleDevices {
     fn default() -> Self {
         Self::new()
@@ -179,6 +241,7 @@ impl AppleDevices {
             storage_masters: Vec::new(),
             storage_wrappers: Vec::new(),
             sep_masters: Vec::new(),
+            usb_masters: Vec::new(),
             cpu_start: None,
             reset_vectors: Vec::new(),
             starts: Vec::new(),
@@ -597,6 +660,86 @@ impl AppleDevices {
             stream,
         });
         Ok(())
+    }
+
+    /// Place the core once, with reg[2]/reg[8] sharing reg[0]'s bytes.
+    /// Platform windows retain distinct refusing offsets. IRQ indices 0..3
+    /// are from AppleUSBXDCI::goOnBus (KC 0x42f5338/5380/53c8/5d24),
+    /// passed unchanged to EventHandler::withParameters; initializePlatformSettings
+    /// at 0x4338e74 chooses four handlers. The fifth ADT IRQ is not an event ring.
+    pub fn add_usb(
+        &mut self,
+        placement: &super::soc::UsbController,
+        dart: DartId,
+    ) -> Result<UsbId, String> {
+        let irqs = core::array::from_fn(|n| AicInput::new(0, placement.irqs[n] as u16));
+        let device = self.bus.add(Box::new(Dwc3::new(irqs)));
+        let (physical, bytes) = placement.ranges[0];
+        self.bus
+            .map(device, physical, bytes, 0)
+            .map_err(|e| format!("DWC3 placement: {e:?}"))?;
+        for index in [1, 3, 4, 5, 6, 7] {
+            let (physical, bytes) = placement.ranges[index];
+            self.bus
+                .map(
+                    device,
+                    physical,
+                    bytes,
+                    dwc3::PLATFORM_WINDOW_BASE + index as u64 * dwc3::PLATFORM_WINDOW_STRIDE,
+                )
+                .map_err(|e| format!("USB platform window {index}: {e:?}"))?;
+        }
+        self.usb_masters.push(UsbMaster {
+            device,
+            dart: dart.0,
+            stream: placement.stream as usize,
+            session: UsbSession::new(),
+            port: UsbPort {
+                generation: 0,
+                ready: false,
+            },
+            next_poll: 0,
+            attached: false,
+            epoch: 0,
+        });
+        Ok(UsbId(device))
+    }
+    /// Temporary port-state join. The Type-C provider must publish its actual
+    /// generation and USB2 UFP/PHY readiness here; placement alone never attaches.
+    pub fn set_usb_port(
+        &mut self,
+        id: UsbId,
+        generation: u64,
+        high_speed_device_ready: bool,
+    ) -> Result<(), &'static str> {
+        let master = self
+            .usb_masters
+            .iter_mut()
+            .find(|master| master.device == id.0)
+            .ok_or("unknown USB controller")?;
+        if master.port.generation != generation || master.port.ready != high_speed_device_ready {
+            master.session.detach()?;
+            master.attached = false;
+        }
+        master.port = UsbPort {
+            generation,
+            ready: high_speed_device_ready,
+        };
+        master.next_poll = 0;
+        Ok(())
+    }
+    pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>, &'static str> {
+        let master = self
+            .usb_masters
+            .iter_mut()
+            .find(|master| master.device == id.0)
+            .ok_or("unknown USB controller")?;
+        Ok(UsbClient(&mut master.session))
+    }
+    pub fn take_usb_log(&mut self) -> Option<UsbLog> {
+        self.usb_masters
+            .iter_mut()
+            .find_map(|master| master.session.take_log())
     }
 
     /// An `aes,s8000` of `aes-version` `version` at its block and
@@ -1115,6 +1258,16 @@ impl Devices for AppleDevices {
             .and_then(|ipi| ipi.advance(now, &mut self.latch));
         let mut access = Access::new(0, now, &mut self.latch);
         let device = self.bus.advance(&mut access).ok().flatten();
+        let usb = self
+            .usb_masters
+            .iter()
+            .filter(|master| master.port.ready || master.attached)
+            .map(|master| master.next_poll)
+            .min();
+        let device = match (device, usb) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         match (deferred, device) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -1132,6 +1285,14 @@ impl Devices for AppleDevices {
     fn memory_lock(&self) -> Option<(u64, u64)> {
         let device = self.memory_controller?;
         self.bus.device::<Amcc>(device)?.locked_region()
+    }
+
+    fn dma_deadline(&self) -> Option<u64> {
+        self.usb_masters
+            .iter()
+            .filter(|master| master.port.ready || master.attached)
+            .map(|master| master.next_poll)
+            .min()
     }
 
     fn transfer(
@@ -1197,6 +1358,43 @@ impl Devices for AppleDevices {
                 access: &mut access,
             };
             sep.transfer(&mut port).map_err(describe)?;
+        }
+        for master in &mut self.usb_masters {
+            let (controller, dart) = self
+                .bus
+                .pair_mut::<Dwc3, Dart>(master.device, master.dart)
+                .expect("USB master retains its DART");
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            let mut port = Port {
+                iommu: dart,
+                stream: master.stream,
+                memory,
+                access: &mut access,
+            };
+            let fail = |why: &str| DeviceError::Refused(format!("USB device advance: {why}"));
+            controller.sync_port(&master.port).map_err(fail)?;
+            controller.flush(&mut port).map_err(fail)?;
+            let ready = controller.available();
+            if !ready && master.attached {
+                master.session.detach().map_err(fail)?;
+                master.attached = false;
+            }
+            if ready && !master.attached {
+                master.epoch = master
+                    .epoch
+                    .checked_add(1)
+                    .ok_or_else(|| fail("USB connection generation exhausted"))?;
+                master.session.attach(master.epoch).map_err(fail)?;
+                master.attached = true;
+            }
+            if now >= master.next_poll {
+                master.next_poll = now.saturating_add(USB_POLL_TICKS);
+                master
+                    .session
+                    .advance(&mut controller.peer(&mut port), now)
+                    .map_err(fail)?;
+                controller.flush(&mut port).map_err(fail)?;
+            }
         }
         self.settle(cpu, now, None)
     }
@@ -1882,5 +2080,59 @@ mod tests {
                 Err(DeviceError::NoDevice)
             ));
         }
+    }
+    #[test]
+    fn usb_core_aliases_platform_refusals_and_port_driven_polling() {
+        const BASE: u64 = 0x382280000;
+        let mut devices = AppleDevices::new();
+        let dart = devices
+            .add_dart(
+                Range {
+                    physical: 0x382f00000,
+                    bytes: 0x4000,
+                },
+                16,
+                Some(AicInput::new(0, 1035)),
+                None,
+            )
+            .unwrap();
+        let placement = super::super::soc::UsbController {
+            ranges: [
+                (BASE, 0x11800),
+                (0x382200000, 0x4000),
+                (BASE + 0xc000, 0x5800),
+                (0x382a84000, 0x4000),
+                (0x382800000, 0x4000),
+                (0x382a80000, 0x4000),
+                (0x382000000, 0x4000),
+                (0x382080000, 0x4000),
+                (BASE + 0xd000, 0x4000),
+            ],
+            irqs: [1031, 1032, 1033, 1034, 990],
+            iommu: 0,
+            stream: 1,
+        };
+        let id = devices.add_usb(&placement, dart).unwrap();
+        assert_eq!(devices.read(0, BASE + 0xc120, 4, 0), Ok(0x5533_300a));
+        devices
+            .write(0, placement.ranges[2].0 + 0x700, 4, 5 << 3, 0)
+            .unwrap();
+        assert_eq!(devices.read(0, BASE + 0xc700, 4, 0), Ok(5 << 3));
+        for index in [1, 3, 4, 5, 6, 7, 8] {
+            assert!(matches!(
+                devices.read(0, placement.ranges[index].0, 4, 0),
+                Err(DeviceError::Refused(_))
+            ));
+        }
+        assert_eq!(devices.dma_deadline(), None);
+        devices.set_usb_port(id, 1, true).unwrap();
+        assert_eq!(devices.dma_deadline(), Some(0));
+        let mut ram = crate::platform::dma::tests::Ram::new(0x800000000, 0x10000);
+        devices.transfer(0, &mut ram, 0).unwrap();
+        assert_eq!(devices.dma_deadline(), Some(USB_POLL_TICKS));
+        assert!(devices.usb_client(id).unwrap().open(62078).is_err());
+        devices.set_usb_port(id, 2, false).unwrap();
+        devices.transfer(0, &mut ram, USB_POLL_TICKS).unwrap();
+        assert_eq!(devices.dma_deadline(), None);
     }
 }

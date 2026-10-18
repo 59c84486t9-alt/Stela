@@ -446,6 +446,15 @@ fn devices(
             alloc::boxed::Box::new(bundle::entropy),
         )?;
     }
+    if let Some(usb) = board.and_then(|board| board.usb) {
+        // The controller's stream translates through the group's first TRAD
+        // instance, as SEP and AES masters do; per-instance selection is the
+        // bus master's contract (`soc::Iommu`).
+        let id = devices.add_usb(&usb, darts[usb.iommu][0])?;
+        devices.usb_client(id)?.query_type()?;
+        // Readiness remains false until the independent Type-C model
+        // publishes its actual USB2 UFP/PHY state through set_usb_port.
+    }
     if let Some(aes) = board.and_then(|board| board.aes) {
         let [block, key_disable] = aes
             .ranges
@@ -918,6 +927,24 @@ fn run(
             budget.min(slice)
         };
         let stop = machine.run(limit);
+        while let Some(log) = machine.devices.take_usb_log() {
+            use stela_runtime::machine::apple::UsbLog;
+            match log {
+                UsbLog::Descriptor(descriptor) => output::arguments(format_args!(
+                    "USB descriptor type={} index={} lang={:#x} bytes={:02x?}\n",
+                    descriptor.kind, descriptor.index, descriptor.language, descriptor.bytes
+                )),
+                UsbLog::MuxControl(bytes) => {
+                    output::arguments(format_args!("USB mux control bytes={:02x?}\n", bytes))
+                }
+                UsbLog::QueryTypeReply(bytes) => output::arguments(format_args!(
+                    "USB QueryType reply bytes={:02x?} text={}\n",
+                    bytes,
+                    String::from_utf8_lossy(&bytes)
+                )),
+            }
+        }
+
         let sliced = matches!(stop, Stop::Budget) && limit != budget;
         let now = host::rdtsc();
         if let Some(display) = display.as_deref_mut()

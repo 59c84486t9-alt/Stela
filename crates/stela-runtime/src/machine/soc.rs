@@ -834,6 +834,20 @@ pub struct SepDevice {
     pub firmware: Option<(u64, u64)>,
 }
 
+/// T8112 device controller compatible; admission stays closed until the
+/// unchanged Apple platform/PHY initialization has been observed.
+pub const USB_DRD: &str = "usb-drd,t8112";
+
+/// Nine ADT windows, five interrupt inputs and the mapper-selected DMA
+/// stream. Apple reg[2]/reg[8] overlap reg[0]; preserve their physical alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbController {
+    pub ranges: [(u64, u64); 9],
+    pub irqs: [u32; 5],
+    pub iommu: usize,
+    pub stream: u32,
+}
+
 /// Everything the engine models of a board, from its DeviceTree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
@@ -870,6 +884,8 @@ pub struct Board {
     /// SEP placement if the input tree explicitly keeps it. Production
     /// `models()` admission remains closed while sepOS boot services refuse.
     pub sep: Option<SepDevice>,
+    /// DWC3 placement for an explicitly visible input node. Not admitted by models().
+    pub usb: Option<UsbController>,
     /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows a
     /// `pmgr1,t8112`.
     pub power_states: Option<PowerStates>,
@@ -2631,6 +2647,78 @@ fn aes_engine(
     }))
 }
 
+/// J473AP usb-drd0: ADT reg/interrupts/iommu-parent (research transport
+/// section 1). Resolve all arm-io ranges, including the identity USB window;
+/// no fixed 8 GiB bias. The separate USB-DART worker owns multi-instance
+/// DART parsing; this consumer uses the mapper stream that it publishes.
+fn usb_controller(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    darts: &[Iommu],
+) -> Result<Option<UsbController>, String> {
+    let Some(node) = io.child("usb-drd0").filter(|node| node.compatible(USB_DRD)) else {
+        return Ok(None);
+    };
+    let raw: [(u64, u64); 9] = node
+        .pairs("reg")
+        .unwrap_or_default()
+        .try_into()
+        .map_err(|_| "usb-drd0 requires nine register windows")?;
+    let mut ranges = [(0, 0); 9];
+    for (slot, (offset, bytes)) in ranges.iter_mut().zip(raw) {
+        if bytes == 0 {
+            return Err("usb-drd0 has an empty register extent".into());
+        }
+        let physical = translate(offset).ok_or("usb-drd0 lies outside arm-io ranges")?;
+        let last = offset.checked_add(bytes - 1).and_then(translate);
+        if last.is_none() || last != physical.checked_add(bytes - 1) {
+            return Err("usb-drd0 extent crosses arm-io ranges".into());
+        }
+        *slot = (physical, bytes);
+    }
+    if ranges[0].1 < 0x11800
+        || ranges[2] != (ranges[0].0 + 0xc000, 0x5800)
+        || ranges[8] != (ranges[0].0 + 0xd000, 0x4000)
+    {
+        return Err("usb-drd0 has an undescribed DWC3 alias layout".into());
+    }
+    if [1, 3, 4, 5, 6, 7].iter().any(|&n| ranges[n].1 != 0x4000) {
+        return Err("usb-drd0 platform window is not 16 KiB".into());
+    }
+    let irqs: [u32; 5] = node
+        .cells32("interrupts")
+        .unwrap_or_default()
+        .try_into()
+        .map_err(|_| "usb-drd0 requires five ADT interrupts")?;
+    if irqs.iter().any(|&irq| u16::try_from(irq).is_err()) {
+        return Err("usb-drd0 interrupt exceeds AIC input encoding".into());
+    }
+    let parent = node
+        .first_u32("iommu-parent")
+        .ok_or("usb-drd0 has no iommu-parent")?;
+    let mut matching = darts.iter().enumerate().flat_map(|(index, dart)| {
+        dart.mappers
+            .iter()
+            .filter(move |(phandle, _)| *phandle == parent)
+            .map(move |&(_, stream)| (index, stream))
+    });
+    let (iommu, stream) = matching
+        .next()
+        .ok_or("usb-drd0 iommu-parent is no modeled DART mapper")?;
+    if matching.next().is_some() {
+        return Err("usb-drd0 iommu-parent is ambiguous".into());
+    }
+    if stream >= u32::from(darts[iommu].streams) {
+        return Err("usb-drd0 mapper stream exceeds DART capacity".into());
+    }
+    Ok(Some(UsbController {
+        ranges,
+        irqs,
+        iommu,
+        stream,
+    }))
+}
+
 /// J473AP `/arm-io/sep` supplies two ranges and four mailbox lines. Its
 /// `iommu-parent` is mapper-sep stream 0; `reg` addresses use arm-io ranges.
 /// `AppleSEPManager::start` obtains that mapper (kernel file 0x2d66f64).
@@ -2865,6 +2953,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let ans = ans_controller(&io, &translate)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
+    let usb = usb_controller(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
         cluster_events,
@@ -2902,6 +2991,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         aes,
         ans,
         sep,
+        usb,
         power_states,
         memory_cache,
         clusters,
@@ -3420,7 +3510,17 @@ mod tests {
         let io = encode(
             &[
                 ("name", &z("arm-io")),
-                ("ranges", &u64s(&[0, 0x2_0000_0000, 0x1_0000_0000])),
+                (
+                    "ranges",
+                    &u64s(&[
+                        0,
+                        0x2_0000_0000,
+                        0x1_0000_0000,
+                        0x3_8000_0000,
+                        0x3_8000_0000,
+                        0x1_0000_0000,
+                    ]),
+                ),
             ],
             &[
                 vec![
@@ -4697,5 +4797,97 @@ mod tests {
                 .is_err()
             );
         }
+    }
+    #[test]
+    fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts_without_admission() {
+        use crate::machine::adt::encode;
+        let words = |cells: &[u32]| {
+            cells
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |cells: &[(u64, u64)]| {
+            cells
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let ranges = [
+            (0x382280000, 0x11800),
+            (0x382200000, 0x4000),
+            (0x38228c000, 0x5800),
+            (0x382a84000, 0x4000),
+            (0x382800000, 0x4000),
+            (0x382a80000, 0x4000),
+            (0x382000000, 0x4000),
+            (0x382080000, 0x4000),
+            (0x38228d000, 0x4000),
+        ];
+        let mapper = encode(
+            &[
+                ("name", b"mapper-usb0\0"),
+                ("compatible", b"iommu-mapper\0"),
+                ("reg", &words(&[1])),
+                ("AAPL,phandle", &words(&[0xa4])),
+            ],
+            &[],
+        );
+        // One-instance fixture: the independent Type-C worker owns the
+        // production two-instance USB DART layout and SID remap.
+        let dart = encode(
+            &[
+                ("name", b"dart-usb0\0"),
+                ("compatible", b"dart,t8110\0"),
+                ("reg", &pairs(&[(0x382f00000, 0x4000)])),
+                ("instance", b"TRAD\0\0\0\0DART\0\0\0\0"),
+                ("sid-count", &words(&[16])),
+                ("interrupts", &words(&[1035])),
+            ],
+            &[mapper],
+        );
+        let usb = |ranges: &[(u64, u64)], parent: u32, irqs: &[u32]| {
+            encode(
+                &[
+                    ("name", b"usb-drd0\0"),
+                    ("compatible", b"usb-drd,t8112\0"),
+                    ("reg", &pairs(ranges)),
+                    ("iommu-parent", &words(&[parent])),
+                    ("interrupts", &words(irqs)),
+                ],
+                &[],
+            )
+        };
+        let irqs = [1031, 1032, 1033, 1034, 990];
+        let tree = |usb| {
+            tree_with_io(
+                0x8112,
+                "Apple M2",
+                [UART, WATCHDOG, "aic,2"],
+                &[],
+                &[dart.clone(), usb],
+            )
+        };
+        let found = board(&tree(usb(&ranges, 0xa4, &irqs))).unwrap();
+        assert_eq!(
+            found.usb,
+            Some(UsbController {
+                ranges,
+                irqs,
+                iommu: 0,
+                stream: 1
+            })
+        );
+        assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);
+        assert!(!models(USB_DRD, |_| None));
+        assert!(board(&tree(usb(&ranges, 0xff, &irqs))).is_err());
+        assert!(board(&tree(usb(&ranges, 0xa4, &irqs[..4]))).is_err());
+        let mut bad = ranges;
+        bad[2].0 += 4;
+        assert!(board(&tree(usb(&bad, 0xa4, &irqs))).is_err());
+        let mut bad = ranges;
+        bad[0].1 = u64::MAX;
+        assert!(board(&tree(usb(&bad, 0xa4, &irqs))).is_err());
     }
 }

@@ -283,6 +283,10 @@ pub trait Devices {
     fn memory_lock(&self) -> Option<(u64, u64)> {
         None
     }
+    /// A native bus peer's next bounded DMA step. None adds no polling work.
+    fn dma_deadline(&self) -> Option<u64> {
+        None
+    }
     /// Run the DMA a device write by PE `cpu` started, on guest RAM
     /// `memory`, before the next guest access: device DMA completes in the
     /// write's own step.
@@ -387,6 +391,7 @@ pub enum RequirementKind {
         write: bool,
         detail: String,
     },
+    DeviceAdvance(String),
     IllegalReturn(IllegalReturn),
     Native(&'static str),
 }
@@ -439,6 +444,7 @@ impl fmt::Display for Requirement {
                 "device {} at PA {physical:#x}: {detail}",
                 if *write { "write" } else { "read" }
             )?,
+            RequirementKind::DeviceAdvance(detail) => write!(f, "device advance: {detail}")?,
             RequirementKind::IllegalReturn(reason) => write!(f, "exception return {reason:?}")?,
             RequirementKind::Native(detail) => write!(f, "native execution: {detail}")?,
         }
@@ -1322,7 +1328,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// The same RAM publication path as MMIO-triggered DMA, reached with no
+    /// translated invocation live. Called while running and while all PEs wait.
+    fn poll_devices(&mut self, now: u64) -> Step {
+        if self
+            .devices
+            .dma_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let mut memory = HostMemory(&mut self.host);
+            self.devices
+                .transfer(self.current, &mut memory, now)
+                .map_err(|error| {
+                    self.unsupported(RequirementKind::DeviceAdvance(format!("{error:?}")))
+                })?;
+            self.device_lines = None;
+        }
+        Ok(())
+    }
+
     fn step(&mut self) -> Step {
+        let now = self.now();
+        self.poll_devices(now)?;
         let delivered = self.deliver_interrupts();
         if let Some(reason) = self.devices.take_reset() {
             return Err(Stop::Reset(reason));

@@ -119,6 +119,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         loop {
             self.observe_writes();
             let now = self.now();
+            self.poll_devices(now)?;
             let (current, count) = (self.current, self.peers.len());
             if let Some(next) = (1..=count)
                 .map(|offset| (current + offset) % count)
@@ -397,6 +398,7 @@ mod tests {
         starts: Vec<Start>,
         irq: [bool; 2],
         lines_asked: Vec<usize>,
+        dma: Option<u64>,
     }
 
     impl Devices for Board {
@@ -412,6 +414,27 @@ mod tests {
                 irq: self.irq[cpu],
                 fiq: false,
             }
+        }
+        fn dma_deadline(&self) -> Option<u64> {
+            self.dma
+        }
+        fn deadline(&mut self, _: u64) -> Option<u64> {
+            self.dma
+        }
+        fn transfer(
+            &mut self,
+            _: usize,
+            memory: &mut dyn crate::platform::dma::Memory,
+            now: u64,
+        ) -> Result<(), DeviceError> {
+            if self.dma.is_some_and(|deadline| now >= deadline) {
+                if !memory.write(BASE + 0x100, b"USB") {
+                    return Err(DeviceError::Refused("test DMA RAM unavailable".into()));
+                }
+                self.dma = None;
+                self.irq[0] = true;
+            }
+            Ok(())
         }
         fn take_start(&mut self) -> Option<Start> {
             self.starts.pop()
@@ -603,5 +626,25 @@ mod tests {
         assert_eq!(machine.processor(), 1);
         machine.system_instruction(WFI).unwrap();
         assert_eq!(machine.schedule(), Err(Stop::Idle));
+    }
+    #[test]
+    fn native_bus_peer_dma_runs_and_wakes_a_waiting_pe_without_mmio() {
+        let devices = Board {
+            dma: Some(1000),
+            ..Board::default()
+        };
+        let mut machine = board(&[WFI], devices, Vec::new());
+        machine.waiting = Some(Wait {
+            kind: WaitKind::Interrupt,
+            timeout: None,
+        });
+        machine.schedule().unwrap();
+        assert!(machine.waiting.is_none());
+        assert!(machine.host.now >= 1000);
+        let mut bytes = [0; 3];
+        assert!(machine.host.read_ram(BASE + 0x100, &mut bytes));
+        assert_eq!(&bytes, b"USB");
+        assert!(machine.devices.irq[0]);
+        assert_eq!(machine.devices.dma_deadline(), None);
     }
 }
