@@ -86,6 +86,7 @@ pub(crate) mod memory_store;
 mod non_temporal;
 mod ordered;
 mod pc_relative;
+pub mod pointer;
 mod pointer_checks;
 mod prefetch;
 mod region;
