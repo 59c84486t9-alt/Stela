@@ -621,7 +621,12 @@ fn run(
     tsc_hz: u64,
 ) -> Stop {
     let mut shown = host::rdtsc();
-    let mut beat = (shown, host::native_ticks(), machine.statistics.blocks);
+    let mut beat = (
+        shown,
+        host::native_ticks(),
+        machine.statistics.blocks,
+        machine.statistics.compiled,
+    );
     loop {
         let slice = machine.statistics.blocks + SLICE;
         let limit = if budget == 0 {
@@ -645,17 +650,22 @@ fn run(
             let (native, blocks) = (host::native_ticks(), machine.statistics.blocks);
             let elapsed = now - beat.0;
             let cpu = &machine.cpu;
-            // Ticks per block, and the share spent in compiled code.
+            let compiled = machine.statistics.compiled;
+            // Ticks per block, the share spent in compiled code, and the
+            // blocks compiled since the last beat and code discards so far.
             output::arguments(format_args!(
-                "BEAT blocks={blocks} pc={:#x} {}{} lr={:#x} ticks/block={} native={}%\n",
+                "BEAT blocks={blocks} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
+                 compiled={} discards={}\n",
                 cpu.pc,
                 level_name(cpu.pstate.guarded),
                 cpu.pstate.el,
                 cpu.state.x[30],
                 elapsed / (blocks - beat.2).max(1),
                 (native - beat.1) * 100 / elapsed.max(1),
+                compiled - beat.3,
+                machine.statistics.code_discards,
             ));
-            beat = (now, native, blocks);
+            beat = (now, native, blocks, compiled);
         }
     }
 }
