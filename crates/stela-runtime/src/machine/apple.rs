@@ -462,6 +462,43 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// Independently programmed DT TRAD windows with a shared fault wire.
+    /// Returned IDs retain DT instance order. This does not choose a USB DMA
+    /// stream or resolve a mapper to one instance.
+    pub fn add_dart_group(
+        &mut self,
+        ranges: &[Range],
+        streams: usize,
+        irq: Option<AicInput>,
+        apf: Option<(u64, usize)>,
+    ) -> Result<Vec<DartId>, MapError> {
+        if ranges.is_empty() {
+            return Err(MapError::Empty);
+        }
+        let mut ids = Vec::new();
+        for (index, (mut dart, range)) in Dart::group(streams, irq, ranges.len())
+            .into_iter()
+            .zip(ranges)
+            .enumerate()
+        {
+            if index == 0
+                && let Some((_, slices)) = apf
+            {
+                dart = dart.with_apf(slices);
+            }
+            let device = self.bus.add(Box::new(dart));
+            self.map(device, &[*range])?;
+            if index == 0
+                && let Some((physical, _)) = apf
+            {
+                self.bus
+                    .map(device, physical, dart::DAPF_BYTES, dart::DAPF_OFFSET)?;
+            }
+            ids.push(DartId(device));
+        }
+        Ok(ids)
+    }
+
     /// A `dart,t8110` of `streams` streams at `range`.
     pub fn add_dart(
         &mut self,

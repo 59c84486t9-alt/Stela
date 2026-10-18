@@ -1129,14 +1129,27 @@ pub struct PowerStates {
     pub devices: Vec<(u16, Vec<u64>)>,
 }
 
-/// A `dart,t8110`: its one DART register range (ADT `instance` `TRAD`), its
-/// `sid-count`, its AIC input, the `AAPL,phandle` and stream (`reg`) of
-/// each `iommu-mapper` child, and its address permission filter (`instance`
-/// `FPAD`, the second range) with `n-apfs-instance-0` slices, if it has one.
+/// One numbered TRAD instance. Owners are retained as the DT's eight bytes,
+/// not used as application or stream-selection keys. `AppleT8110DART::
+/// _dartSetupInstance` (26A434 KC file 0x2f12884..0x2f12918) checks the
+/// instance number and maps that numbered `reg` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Iommu {
+pub struct DartInstance {
     pub physical: u64,
     pub bytes: u64,
+    pub number: u32,
+    pub owner: [u8; 8],
+}
+
+/// A DT DART group, its independently programmed TRAD windows, mapper stream
+/// IDs and optional APF. `sid` is a list of u32 SIDs, not one stream per
+/// instance or a bitmap (`_dartSetup`, KC 0x2f11e20..0x2f11e38). `remap`
+/// contains byte source/destination pairs, with 0/0 padding ignored
+/// (0x2f11864..0x2f11938). They describe routing, not permission to bypass
+/// the DART. Per-instance DMA selection remains the bus master's contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Iommu {
+    pub instances: Vec<DartInstance>,
     pub streams: u16,
     pub irq: u32,
     pub mappers: Vec<(u32, u32)>,
@@ -1145,6 +1158,8 @@ pub struct Iommu {
     pub power_gates: Vec<u16>,
     /// A retained DART preserves ordinary state while its supply is gated.
     pub retention: bool,
+    pub sids: Vec<u32>,
+    pub remap: Vec<(u8, u8)>,
 }
 
 /// The AES engine: its block and key-disable register ranges, its
@@ -1411,9 +1426,8 @@ fn name_of(node: &Node<'_>) -> String {
         .map_or_else(|| "?".into(), |name| name.trim_end_matches('\0').into())
 }
 
-/// Every `/arm-io` child that is a modeled DART. Each must have exactly one
-/// register range, a DART (`instance` `TRAD`): DAPF and SMMU ranges are not
-/// modeled.
+/// Every visible DART group. Multiple numbered TRAD ranges retain separate
+/// register state; SMMU and mixed multi-TRAD/APF layouts remain unsupported.
 fn iommus(io: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Vec<Iommu>, String> {
     let mut found = Vec::new();
     let mut failure = None;
@@ -1436,20 +1450,63 @@ fn iommus(io: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Vec<I
 fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iommu, String> {
     let path = format!("/arm-io/{}", name_of(node));
     let reg = node.pairs("reg").unwrap_or_default();
-    let instances = node.property("instance").unwrap_or_default();
-    // One 16-byte descriptor per range: its kind, instance number and owner.
-    let kinds: Vec<&[u8]> = instances.chunks(16).map(|d| &d[..8]).collect();
-    let (&(offset, bytes), apf) = match (reg.as_slice(), kinds.as_slice()) {
-        ([dart], [b"TRAD\0\0\0\0"]) => (dart, None),
-        ([dart, filter], [b"TRAD\0\0\0\0", b"FPAD\0\0\0\0"]) => (dart, Some(*filter)),
-        _ => {
-            return Err(format!(
-                "{path} is not one DART instance, alone or with its APF"
-            ));
+    if node
+        .property("reg")
+        .is_none_or(|bytes| bytes.len() != reg.len() * 16)
+    {
+        return Err(format!("{path} has incomplete reg pairs"));
+    }
+    let descriptors = node.property("instance").unwrap_or_default();
+    if descriptors.is_empty()
+        || !descriptors.len().is_multiple_of(16)
+        || descriptors.len() / 16 != reg.len()
+    {
+        return Err(format!(
+            "{path} instance descriptors do not match its reg entries"
+        ));
+    }
+    let mut instances = Vec::new();
+    let mut apf = None;
+    for (descriptor, &(offset, bytes)) in descriptors.as_chunks::<16>().0.iter().zip(&reg) {
+        let number = u32::from_le_bytes(descriptor[4..8].try_into().expect("instance number"));
+        match &descriptor[..4] {
+            b"TRAD" if apf.is_none() && number as usize == instances.len() => {
+                let physical = translate(offset)
+                    .filter(|at| {
+                        at.is_multiple_of(dart::DAPF_BYTES)
+                            && bytes == dart::DAPF_BYTES
+                            && offset.checked_add(bytes - 1).and_then(translate)
+                                == at.checked_add(bytes - 1)
+                    })
+                    .ok_or_else(|| {
+                        format!("{path} DART instance is not one translated aligned 16 KiB block")
+                    })?;
+                if instances
+                    .iter()
+                    .any(|i: &DartInstance| i.physical == physical)
+                {
+                    return Err(format!("{path} has duplicate DART register windows"));
+                }
+                instances.push(DartInstance {
+                    physical,
+                    bytes,
+                    number,
+                    owner: descriptor[8..16].try_into().expect("eight-byte owner"),
+                });
+            }
+            b"FPAD" if instances.len() == 1 && number == 0 && apf.is_none() => {
+                apf = Some((offset, bytes))
+            }
+            _ => {
+                return Err(format!(
+                    "{path} has unsupported instance kinds, numbering or APF topology"
+                ));
+            }
         }
-    };
-    let physical =
-        translate(offset).ok_or_else(|| format!("{path} lies outside /arm-io ranges"))?;
+    }
+    if instances.is_empty() {
+        return Err(format!("{path} has no TRAD instance"));
+    }
     let apf = match apf {
         None => None,
         Some((filter, filter_bytes)) => {
@@ -1469,7 +1526,7 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
     let streams = node
         .first_u32("sid-count")
         .and_then(|count| u16::try_from(count).ok())
-        .filter(|&count| count <= 256)
+        .filter(|&count| count > 0 && count <= 256)
         .ok_or_else(|| format!("{path} has no sid-count of at most 256"))?;
     let irq = node
         .first_u32("interrupts")
@@ -1503,9 +1560,48 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
         }
     })
     .ok_or("DeviceTree walk failed")?;
+    let sids = match node.property("sid") {
+        None => Vec::new(),
+        Some(bytes) if bytes.len().is_multiple_of(4) => node
+            .cells32("sid")
+            .filter(|sids| sids.iter().all(|sid| *sid < u32::from(streams)))
+            .ok_or_else(|| format!("{path} has malformed or out-of-range sid entries"))?,
+        Some(_) => return Err(format!("{path} has incomplete sid cells")),
+    };
+    if sids
+        .iter()
+        .enumerate()
+        .any(|(index, sid)| sids[..index].contains(sid))
+    {
+        return Err(format!("{path} has duplicate sid entries"));
+    }
+    let remap_bytes = node.property("remap").unwrap_or_default();
+    if !remap_bytes.len().is_multiple_of(4) {
+        return Err(format!("{path} remap is not padded byte pairs"));
+    }
+    let mut remap = Vec::new();
+    for pair in remap_bytes.as_chunks::<2>().0 {
+        let (source, target) = (pair[0], pair[1]);
+        if source == 0 && target == 0 {
+            continue;
+        }
+        if u16::from(source) >= streams
+            || u16::from(target) >= streams
+            || source == target
+            || remap
+                .iter()
+                .any(|&(s, t)| [source, target].contains(&s) || [source, target].contains(&t))
+        {
+            return Err(format!(
+                "{path} has overlapping or out-of-range remap entries"
+            ));
+        }
+        remap.push((source, target));
+    }
     Ok(Iommu {
-        physical,
-        bytes,
+        instances,
+        sids,
+        remap,
         streams,
         irq,
         mappers,
@@ -2334,6 +2430,11 @@ fn aes_engine(
                 .map(|&(_, stream)| (index, stream))
         })
         .ok_or_else(|| format!("{PATH} iommu-parent {parent:#x} is no modeled DART's mapper"))?;
+    if darts[iommu].instances.len() != 1 {
+        return Err(format!(
+            "{PATH} DMA instance routing is undetermined for a multi-instance DART"
+        ));
+    }
     Ok(Some(AesEngine {
         ranges: [place(block)?, place(key_disable)?],
         version: number("aes-version")?,
@@ -2408,7 +2509,7 @@ fn sep_device(
                 .map(|&(_, stream)| (index, stream))
         })
         .ok_or_else(|| format!("{PATH} iommu-parent is no modeled DART's mapper"))?;
-    if stream != 0 || darts[iommu].streams != 1 {
+    if stream != 0 || darts[iommu].streams != 1 || darts[iommu].instances.len() != 1 {
         return Err(format!("{PATH} requires dart-sep's single stream 0"));
     }
     let firmware = root
@@ -3329,8 +3430,14 @@ mod tests {
         assert_eq!(
             found.darts,
             [Iommu {
-                physical: 0x2_3500_4000,
-                bytes: 0x4000,
+                instances: vec![DartInstance {
+                    physical: 0x2_3500_4000,
+                    bytes: 0x4000,
+                    number: 0,
+                    owner: *b"DART\0\0\0\0"
+                }],
+                sids: vec![],
+                remap: vec![],
                 streams: 16,
                 irq: 0x301,
                 mappers: vec![(0x89, 0), (0x8a, 1)],
@@ -3379,7 +3486,109 @@ mod tests {
         );
         assert_eq!(
             board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[three])),
-            Err("/arm-io/dart-sio is not one DART instance, alone or with its APF".into())
+            Err(
+                "/arm-io/dart-sio has unsupported instance kinds, numbering or APF topology".into()
+            )
+        );
+    }
+
+    #[test]
+    fn multiple_darts_preserve_numbered_windows_sids_and_remap_without_guessing_dma_routing() {
+        use crate::machine::adt::encode;
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[u64]| {
+            values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let descriptors = [
+            b"TRAD".as_slice(),
+            &0u32.to_le_bytes(),
+            b"DARTLLT\0",
+            b"TRAD",
+            &1u32.to_le_bytes(),
+            b"DARTBLK\0",
+        ]
+        .concat();
+        let reg = pairs(&[0x382f00000, 0x4000, 0x382f80000, 0x4000]);
+        let build = |instance: &[u8], regs: &[u8], sids: &[u32], remap: &[u8]| {
+            encode(
+                &[
+                    ("name", b"dart-usb0\0"),
+                    ("compatible", b"dart,t8110\0"),
+                    ("reg", regs),
+                    ("instance", instance),
+                    ("sid-count", &cells(&[16])),
+                    ("interrupts", &cells(&[1035])),
+                    ("sid", &cells(sids)),
+                    ("remap", remap),
+                ],
+                &[encode(
+                    &[
+                        ("name", b"mapper-usb0\0"),
+                        ("compatible", b"iommu-mapper\0"),
+                        ("reg", &cells(&[1])),
+                        ("AAPL,phandle", &cells(&[0xa4])),
+                    ],
+                    &[],
+                )],
+            )
+        };
+        let bytes = build(&descriptors, &reg, &[1, 14], &[0, 1, 0, 0]);
+        let found = iommu(&Node::root(&bytes).unwrap(), &|a| Some(a)).unwrap();
+        assert_eq!(
+            found.instances,
+            vec![
+                DartInstance {
+                    physical: 0x382f00000,
+                    bytes: 0x4000,
+                    number: 0,
+                    owner: *b"DARTLLT\0"
+                },
+                DartInstance {
+                    physical: 0x382f80000,
+                    bytes: 0x4000,
+                    number: 1,
+                    owner: *b"DARTBLK\0"
+                },
+            ]
+        );
+        assert_eq!(found.mappers, [(0xa4, 1)]);
+        assert_eq!(found.sids, [1, 14]);
+        assert_eq!(found.remap, [(0, 1)]);
+        for bad in [
+            build(&descriptors[..7], &reg, &[1, 14], &[0, 1, 0, 0]),
+            build(&descriptors[..31], &reg, &[1, 14], &[0, 1, 0, 0]),
+            build(&descriptors, &reg, &[1, 16], &[0, 1, 0, 0]),
+            build(&descriptors, &reg, &[1, 1], &[0, 1, 0, 0]),
+            build(&descriptors, &reg, &[1, 14], &[0, 1, 1, 2]),
+            build(&descriptors, &reg, &[1, 14], &[0, 16, 0, 0]),
+            build(&descriptors, &reg, &[1, 14], &[0, 1]),
+            build(
+                &descriptors,
+                &pairs(&[0x382f00000, 0x4000, 0x382f00000, 0x4000]),
+                &[1, 14],
+                &[0, 1, 0, 0],
+            ),
+        ] {
+            assert!(iommu(&Node::root(&bad).unwrap(), &|a| Some(a)).is_err());
+        }
+        let mut bad = descriptors.clone();
+        bad[20..24].copy_from_slice(&0u32.to_le_bytes());
+        let bytes = build(&bad, &reg, &[1, 14], &[0, 1, 0, 0]);
+        assert!(iommu(&Node::root(&bytes).unwrap(), &|a| Some(a)).is_err());
+        assert!(
+            iommu(
+                &Node::root(&build(&descriptors, &reg, &[1, 14], &[0, 1, 0, 0])).unwrap(),
+                &|_| None
+            )
+            .is_err()
         );
     }
 
@@ -4140,7 +4349,7 @@ mod tests {
                 firmware: None,
             })
         );
-        assert_eq!(found.darts[0].physical, 0x25d2c0000);
+        assert_eq!(found.darts[0].instances[0].physical, 0x25d2c0000);
         assert!(!models(SEP, |_| None));
         assert!(!models(SEP_NUB, |_| None));
         assert!(board(&tree("iop-nub,rtbuddy-v2", &irqs, 0x84, 0)).is_err());

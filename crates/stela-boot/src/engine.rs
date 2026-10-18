@@ -411,13 +411,17 @@ fn devices(
     }
     let mut darts = Vec::new();
     for dart in board.map_or(&[][..], |board| &board.darts) {
-        let range = Range {
-            physical: dart.physical,
-            bytes: dart.bytes,
-        };
+        let ranges: Vec<_> = dart
+            .instances
+            .iter()
+            .map(|instance| Range {
+                physical: instance.physical,
+                bytes: instance.bytes,
+            })
+            .collect();
         let irq = AicInput::new(0, dart.irq as u16);
         let placed = devices
-            .add_dart(range, usize::from(dart.streams), Some(irq), dart.apf)
+            .add_dart_group(&ranges, usize::from(dart.streams), Some(irq), dart.apf)
             .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
         darts.push(placed);
     }
@@ -430,7 +434,7 @@ fn devices(
         devices.add_sep(
             ranges,
             lines,
-            (darts[sep.iommu], sep.stream as usize),
+            (darts[sep.iommu][0], sep.stream as usize),
             alloc::boxed::Box::new(bundle::entropy),
         )?;
     }
@@ -444,7 +448,7 @@ fn devices(
             [block, key_disable],
             aes.version,
             Some(AicInput::new(0, aes.irq as u16)),
-            (darts[aes.iommu], aes.stream as usize),
+            (darts[aes.iommu][0], aes.stream as usize),
             None,
         )?;
     }
@@ -462,7 +466,7 @@ fn devices(
         ));
     }
     if let Some(board) = board {
-        for (bank, &dart) in board.darts.iter().zip(&darts) {
+        for (bank, instances) in board.darts.iter().zip(&darts) {
             let mut domains = Vec::new();
             for id in &bank.power_gates {
                 let supplies = board
@@ -477,7 +481,10 @@ fn devices(
             }
             domains.sort_unstable();
             domains.dedup();
-            devices.connect_dart_power(dart, &domains, bank.retention)?;
+            // One supply powers every TRAD instance of the DT DART.
+            for &dart in instances {
+                devices.connect_dart_power(dart, &domains, bank.retention)?;
+            }
         }
     }
     for bank in board.map_or(&[][..], |b| &b.bridges) {

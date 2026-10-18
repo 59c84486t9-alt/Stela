@@ -89,7 +89,9 @@ use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
 use crate::platform::dma::{DmaError, Iommu, Memory};
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::vec;
+use alloc::{rc::Rc, vec::Vec};
+use core::cell::RefCell;
 
 const NAME: &str = "dart-t8110";
 
@@ -204,6 +206,7 @@ pub struct Dart {
     apf: Option<Vec<Slice>>,
     irq: Option<AicInput>,
     irq_level: bool,
+    shared_fault: Option<(Rc<RefCell<Vec<bool>>>, usize)>,
 }
 
 /// One address permission filter slice, as its 32-bit registers hold it.
@@ -251,7 +254,22 @@ impl Dart {
             apf: None,
             irq,
             irq_level: false,
+            shared_fault: None,
         }
+    }
+
+    /// Independent TRAD instances sharing one level-sensitive fault output.
+    /// The J473AP `dart-usb0` DT has two ranges and one `interrupts` cell.
+    /// Clearing one instance cannot deassert another instance's pending fault.
+    pub fn group(streams: usize, irq: Option<AicInput>, count: usize) -> Vec<Self> {
+        let levels = Rc::new(RefCell::new(vec![false; count]));
+        (0..count)
+            .map(|index| {
+                let mut dart = Self::new(streams, irq);
+                dart.shared_fault = Some((levels.clone(), index));
+                dart
+            })
+            .collect()
     }
 
     /// The DART with an address permission filter of `slices` slices.
@@ -377,6 +395,13 @@ impl Dart {
         let level = self.error & ERROR_FLAG != 0 && self.error & ERROR_CODE & !self.error_mask != 0;
         if level != self.irq_level {
             self.irq_level = level;
+            let level = if let Some((levels, index)) = &self.shared_fault {
+                let mut levels = levels.borrow_mut();
+                levels[*index] = level;
+                levels.iter().any(|&level| level)
+            } else {
+                level
+            };
             if let Some(irq) = self.irq {
                 access.interrupts.set_level(Wire::Aic(irq), level);
             }
@@ -710,6 +735,41 @@ mod tests {
             dart.read(PROTECTED_WRITE, Width::Double, &mut access)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn instances_keep_separate_registers_and_or_their_shared_fault_wire() {
+        let irq = AicInput::new(0, 1035);
+        let mut group = Dart::group(16, Some(irq), 2);
+        let mut latch = InterruptLatch::new();
+        let mut ram = Ram::new(0, 0x4000);
+        {
+            let mut access = Access::new(0, 0, &mut latch);
+            for (instance, sid) in [(0, 0), (1, 1)] {
+                assert!(
+                    group[instance]
+                        .translate(&mut ram, sid, 0, 3, false, &mut access)
+                        .is_err()
+                );
+            }
+            group[0].write(TCR, Width::Word, 2, &mut access).unwrap();
+            assert_eq!(group[1].read(TCR, Width::Word, &mut access), Ok(0));
+        }
+        assert!(latch.is_asserted(Wire::Aic(irq)));
+        {
+            let mut access = Access::new(0, 0, &mut latch);
+            group[0]
+                .write(ERROR, Width::Word, u64::from(ERROR_FLAG), &mut access)
+                .unwrap();
+        }
+        assert!(latch.is_asserted(Wire::Aic(irq)));
+        {
+            let mut access = Access::new(0, 0, &mut latch);
+            group[1]
+                .write(ERROR, Width::Word, u64::from(ERROR_FLAG), &mut access)
+                .unwrap();
+        }
+        assert!(!latch.is_asserted(Wire::Aic(irq)));
     }
 
     #[test]
