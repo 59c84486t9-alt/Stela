@@ -36,7 +36,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The address an immediate-offset form accesses.
-    fn immediate_address(&self, base: Register, displacement: i32, mode: AddressMode) -> u64 {
+    pub(super) fn immediate_address(
+        &self,
+        base: Register,
+        displacement: i32,
+        mode: AddressMode,
+    ) -> u64 {
         let base = self.read_register(base);
         match mode {
             AddressMode::PostIndex => base,

@@ -29,7 +29,7 @@ use core::fmt;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{
-        AddressMode, Decoder, FloatingPointOperation, Register, Width,
+        AddressMode, Decoder, FloatingPointOperation, MemoryTransfer, Operation, Register, Width,
         register_offset::IndexExtend,
         system::{
             exception::{AuthenticationKey, Operation as ExceptionOperation},
@@ -3041,10 +3041,97 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.write_register(base, updated);
             }
             self.follow_memory_lock();
+        } else if let Operation::MemoryPair {
+            transfer,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode,
+        } = instruction.operation
+        {
+            // A pair is two accesses of `bytes` each, at ascending addresses
+            // and in register order; Device memory faults on either
+            // misaligned (Arm DDI 0487 B2.5.2).
+            let first = self.immediate_address(base, displacement, mode);
+            let bytes_wide = u64::from(bytes);
+            if first != address {
+                return Err(refuse(
+                    self,
+                    "device pair address differs from the fault".into(),
+                ));
+            }
+            if !address.is_multiple_of(bytes_wide) {
+                return self.alignment_fault(address, write);
+            }
+            // The smallest translation granule: the second element's PA
+            // follows the first's only within one.
+            const GRANULE: u64 = 0x1000;
+            if physical % GRANULE + 2 * bytes_wide > GRANULE {
+                return Err(refuse(self, "device pair across a page".into()));
+            }
+            let writeback = (mode != AddressMode::Offset).then(|| {
+                let updated = self
+                    .read_register(base)
+                    .wrapping_add(displacement as i64 as u64);
+                (base, updated)
+            });
+            let elements = [physical, physical + bytes_wide];
+            let now = self.host.counter();
+            match transfer {
+                MemoryTransfer::Load { signed, width } => {
+                    let mut values = [0; 2];
+                    for (value, element) in values.iter_mut().zip(elements) {
+                        let raw = match self.devices.read(self.current, element, bytes, now) {
+                            Ok(raw) => raw,
+                            Err(error) if self.surveyed(element, bytes, None, &error) => 0,
+                            Err(DeviceError::NoDevice) => {
+                                return Err(refuse(self, "no device model".into()));
+                            }
+                            Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
+                        };
+                        *value = match (bytes, signed) {
+                            (8, _) => raw,
+                            (4, true) => raw as u32 as i32 as i64 as u64,
+                            _ => raw & 0xffff_ffff,
+                        };
+                        if width == Width::W32 {
+                            *value &= 0xffff_ffff;
+                        }
+                    }
+                    for (register, value) in data.into_iter().zip(values) {
+                        self.write_register(register, value);
+                    }
+                }
+                MemoryTransfer::Store => {
+                    let values = data.map(|register| self.read_register(register));
+                    for (element, value) in elements.into_iter().zip(values) {
+                        let written = self
+                            .devices
+                            .write(self.current, element, bytes, value, now)
+                            .and_then(|()| {
+                                let mut memory = HostMemory(&mut self.host);
+                                self.devices.transfer(self.current, &mut memory, now)
+                            });
+                        match written {
+                            Ok(()) => {}
+                            Err(error) if self.surveyed(element, bytes, Some(value), &error) => {}
+                            Err(DeviceError::NoDevice) => {
+                                return Err(refuse(self, "no device model".into()));
+                            }
+                            Err(DeviceError::Refused(detail)) => return Err(refuse(self, detail)),
+                        }
+                    }
+                    self.follow_memory_lock();
+                }
+            }
+            if let Some((base, updated)) = writeback {
+                self.write_register(base, updated);
+            }
         } else {
             return Err(refuse(
                 self,
-                "device access by other than a single-register scalar integer transfer".into(),
+                "device access by other than a scalar or pair integer transfer".into(),
             ));
         }
         self.cpu.pc = pc;
@@ -3836,6 +3923,81 @@ mod tests {
             profile,
             TargetCpu::Baseline,
         )
+    }
+
+    /// Devices whose registers read their own PA's low 32 bits with the
+    /// top bit set, recording every access in order.
+    #[derive(Default)]
+    struct Recorder {
+        accesses: Vec<(u64, u8, Option<u64>)>,
+    }
+
+    impl Devices for Recorder {
+        fn read(&mut self, _: usize, physical: u64, bytes: u8, _: u64) -> Result<u64, DeviceError> {
+            self.accesses.push((physical, bytes, None));
+            Ok(0x8000_0000 | (physical & 0xffff))
+        }
+        fn write(
+            &mut self,
+            _: usize,
+            physical: u64,
+            bytes: u8,
+            value: u64,
+            _: u64,
+        ) -> Result<(), DeviceError> {
+            self.accesses.push((physical, bytes, Some(value)));
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+    }
+
+    #[test]
+    fn device_pairs_are_two_ascending_accesses_in_register_order() {
+        const DEVICE: u64 = 0x2_3b3c_0a00;
+        let mut machine = board(&[], Recorder::default(), Vec::new());
+        // ldp x2, x3, [x1, #16]!
+        machine.write_register(Register::X(1), DEVICE - 16);
+        machine
+            .device_access(0xa9c1_0c22, DEVICE, DEVICE, false)
+            .unwrap();
+        assert_eq!(
+            machine.devices.accesses,
+            [(DEVICE, 8, None), (DEVICE + 8, 8, None)]
+        );
+        assert_eq!(machine.read_register(Register::X(2)), 0x8000_0a00);
+        assert_eq!(machine.read_register(Register::X(3)), 0x8000_0a08);
+        assert_eq!(machine.read_register(Register::X(1)), DEVICE);
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        // ldpsw x2, x3, [x1] sign-extends each word.
+        machine.devices.accesses.clear();
+        machine
+            .device_access(0x6940_0c22, DEVICE, DEVICE, false)
+            .unwrap();
+        assert_eq!(
+            machine.devices.accesses,
+            [(DEVICE, 4, None), (DEVICE + 4, 4, None)]
+        );
+        assert_eq!(machine.read_register(Register::X(3)), 0xffff_ffff_8000_0a04);
+        // stp x2, x3, [x1]
+        machine.devices.accesses.clear();
+        machine
+            .device_access(0xa900_0c22, DEVICE, DEVICE, true)
+            .unwrap();
+        assert_eq!(
+            machine.devices.accesses,
+            [
+                (DEVICE, 8, Some(0xffff_ffff_8000_0a00)),
+                (DEVICE + 8, 8, Some(0xffff_ffff_8000_0a04))
+            ]
+        );
+        // A pair whose second element lies on another page refuses.
+        machine.write_register(Register::X(1), DEVICE + 0x5f8);
+        assert!(matches!(
+            machine.device_access(0xa940_0c22, DEVICE + 0x5f8, DEVICE + 0x5f8, false),
+            Err(Stop::Unsupported(_))
+        ));
     }
 
     #[test]
