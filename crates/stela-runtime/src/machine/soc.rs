@@ -813,7 +813,6 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         I2C,
         HPM_MANAGER,
         HPM,
-        RETIMER,
         ATC_PHY,
         USB_DRD,
     ]
@@ -3940,9 +3939,11 @@ mod tests {
         assert!(typec_devices(&Node::root(&io).unwrap(), &|_| None, 0x63).is_err());
         let io = encode(&[("name", b"arm-io\0")], &[phy(b"atc-phy,t8112\0")]);
         assert!(typec_devices(&Node::root(&io).unwrap(), &translate, 0x63).is_err());
-        for compatible in [I2C, HPM_MANAGER, HPM, RETIMER, ATC_PHY] {
+        for compatible in [I2C, HPM_MANAGER, HPM, ATC_PHY] {
             assert!(models(compatible, |_| None));
         }
+        // The retimer's register protocol is undetermined: hidden, not refused.
+        assert!(!models(RETIMER, |_| None));
         // Hidden PHYs are not parsed or mapped merely because reg survives.
         let io = encode(&[("name", b"arm-io\0")], &[i2c, phy(b"hidden\0"), usb]);
         assert!(
