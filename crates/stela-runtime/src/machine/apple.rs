@@ -379,8 +379,13 @@ impl AppleDevices {
         base: u64,
         dvmr: &[(u64, u64)],
         pstates: usize,
+        counter_capacity: usize,
+        mapped: bool,
+        events: &[u8],
     ) -> Result<(), String> {
-        let model = Cluster::new(dvmr, pstates).map_err(String::from)?;
+        let model = Cluster::new(dvmr, pstates)
+            .and_then(|c| c.with_counters(counter_capacity, mapped, events))
+            .map_err(String::from)?;
         let table = model.pstate_bytes();
         let device = self.bus.add(Box::new(model));
         for (offset, bytes) in [

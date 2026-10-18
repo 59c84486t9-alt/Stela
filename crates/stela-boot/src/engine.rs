@@ -439,8 +439,22 @@ fn devices(
     for bank in board.map_or(&[][..], |board| &board.energy) {
         devices.add_cpu_energy(bank.physical, bank.cpm)?;
     }
-    for cluster in board.map_or(&[][..], |board| &board.clusters) {
-        devices.add_cpu_cluster(cluster.base, cluster.dvmr, cluster.pstates)?;
+    for (index, cluster) in board
+        .map_or(&[][..], |board| &board.clusters)
+        .iter()
+        .enumerate()
+    {
+        let events = board
+            .and_then(|b| b.cluster_events.get(index))
+            .ok_or("CPU cluster has no DT event selection")?;
+        devices.add_cpu_cluster(
+            cluster.base,
+            cluster.dvmr,
+            cluster.pstates,
+            cluster.counter_capacity,
+            cluster.counter_map,
+            events,
+        )?;
     }
     if let Some((physical, _)) = board.and_then(|board| board.aon_fuses) {
         devices.add_aon_fuses(physical)?;

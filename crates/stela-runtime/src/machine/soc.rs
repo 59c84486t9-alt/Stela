@@ -130,6 +130,9 @@ const T8112_CACHES: [CoreCaches; 2] = [
 pub struct CpuCluster {
     pub base: u64,
     pub pstates: usize,
+    /// Driver capacity at kernel file 0x2b67d80; DT carries no count.
+    pub counter_capacity: usize,
+    pub counter_map: bool,
     pub dvmr: &'static [(u64, u64)],
 }
 
@@ -146,6 +149,8 @@ const T8112_CLUSTERS: [CpuCluster; 2] = [
     CpuCluster {
         base: 0x2_10e0_0000,
         pstates: 16,
+        counter_capacity: 16,
+        counter_map: false,
         dvmr: &[
             (0x206a8, 0x4444_4433_3322_2110),
             (0x206b8, 0x4000_0037_0000_0321),
@@ -156,6 +161,8 @@ const T8112_CLUSTERS: [CpuCluster; 2] = [
     CpuCluster {
         base: 0x2_11e0_0000,
         pstates: 18,
+        counter_capacity: 16,
+        counter_map: true,
         dvmr: &[
             (0x206a8, 0x5555_5544_4433_3110),
             (0x206b0, 0xcccc_ccaa_aa88_8776),
@@ -758,6 +765,7 @@ pub struct Board {
     pub soc_dpe: Option<SocDpe>,
     /// DT bridge maps, selected counter configurations and device dependencies.
     pub bridges: Vec<BridgeBank>,
+    pub cluster_events: Vec<Vec<u8>>,
     /// AON/SOC/cluster performance banks and DT-selected counters.
     pub performance: Vec<PerfBank>,
     /// AOP wake masks and reporting source IDs.
@@ -1145,6 +1153,7 @@ fn pmgr_registers(
         power_banks: Vec::new(),
         soc_dpe: None,
         bridges: Vec::new(),
+        cluster_events: Vec::new(),
     };
     let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
         return Ok(none);
@@ -1206,6 +1215,7 @@ fn pmgr_registers(
         }
     };
     let bridges = place_bridges(&node, &reg, soc.bridge_fields)?;
+    let cluster_events = acc_events(&node, clusters.len())?;
     let power_banks = place_power_banks(&reg, soc.power_banks)?;
     let soc_dpe = soc
         .dpe_reg
@@ -1218,6 +1228,7 @@ fn pmgr_registers(
         .map(|layout| wake_bank(&node, &reg, layout))
         .transpose()?;
     Ok(PmgrRegisters {
+        cluster_events,
         bridges,
         soc_dpe,
         power_banks,
@@ -1228,6 +1239,33 @@ fn pmgr_registers(
         aon_fuses: fuses,
         cpu_start,
     })
+}
+
+/// Special CPU event types2/7 select E/P ACC accessors, not the SOC-bank
+/// selector formula (kernel 0x2b93ac4..0x2b93cec). Byte6 is the event index.
+fn acc_events(node: &Node<'_>, clusters: usize) -> Result<Vec<Vec<u8>>, String> {
+    let mut events = alloc::vec![Vec::new();clusters];
+    let data = node.property("events").unwrap_or_default();
+    if !data.len().is_multiple_of(24) {
+        return Err("ACC events property is not whole records".into());
+    }
+    for entry in data.as_chunks::<24>().0 {
+        let cluster = match entry[2] {
+            2 => 0,
+            7 => 1,
+            _ => continue,
+        };
+        let bank = events
+            .get_mut(cluster)
+            .ok_or("ACC event names a missing CPU cluster")?;
+        if entry[6] >= 27 {
+            return Err("ACC event selector exceeds the accessor range".into());
+        }
+        if !bank.contains(&entry[6]) {
+            bank.push(entry[6]);
+        }
+    }
+    Ok(events)
 }
 
 /// Bridge map and source decoding: kernel file 0x2b71bd8..0x2b71fd8,
@@ -1595,6 +1633,7 @@ fn energy_banks(
 
 /// The PMGR registers the machine models besides its power states.
 struct PmgrRegisters {
+    cluster_events: Vec<Vec<u8>>,
     bridges: Vec<BridgeBank>,
     soc_dpe: Option<SocDpe>,
     power_banks: Vec<PowerBank>,
@@ -1893,6 +1932,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
+        cluster_events,
         bridges,
         soc_dpe,
         power_banks,
@@ -1905,6 +1945,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
+        cluster_events,
         bridges,
         soc_dpe,
         power_banks,
@@ -2586,6 +2627,27 @@ mod tests {
                 .power_states,
             None
         );
+    }
+
+    #[test]
+    fn special_acc_events_use_the_dt_selector_and_cluster_type() {
+        use crate::machine::adt::encode;
+        let mut e = [0u8; 24];
+        e[2] = 2;
+        e[6] = 12;
+        let mut p = [0u8; 24];
+        p[2] = 7;
+        p[6] = 24;
+        let data = [e, p].concat();
+        let tree = encode(&[("events", &data)], &[]);
+        assert_eq!(
+            acc_events(&Node::root(&tree).unwrap(), 2).unwrap(),
+            vec![vec![12], vec![24]]
+        );
+        assert!(acc_events(&Node::root(&tree).unwrap(), 1).is_err());
+        p[6] = 27;
+        let tree = encode(&[("events", &p)], &[]);
+        assert!(acc_events(&Node::root(&tree).unwrap(), 2).is_err());
     }
 
     #[test]
