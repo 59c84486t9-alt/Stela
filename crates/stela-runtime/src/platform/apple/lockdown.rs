@@ -17,9 +17,10 @@
 //! applies the lock, and both reset to 0. Once locked, a write that keeps
 //! both values (as the cluster's other PEs make) completes; one that changes
 //! them stops, because what hardware does is not documented. What each
-//! MASK bit protects is not documented either; the block's other registers
-//! are not modelled and refuse, so no access such a lock could forbid
-//! completes here.
+//! MASK bit protects is not documented either. This model owns only the
+//! lockdown pair and optional RVBAR; other described words in the shared
+//! implementation window belong to their own device models. Their placement
+//! does not establish a MASK-bit-to-register protection assignment.
 //!
 //! A PE's `cpu-impl-reg` also holds its RVBAR at +0 (m1n1 `src/smp.c`): the
 //! reset vector in bits 47:12, where the core leaves reset, and RVBAR_LOCK

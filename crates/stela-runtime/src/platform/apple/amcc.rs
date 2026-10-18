@@ -45,12 +45,19 @@
 //! The model keeps no cached data: guest memory is the host's, coherent for
 //! every requester, so powering ways takes effect at once, a flush has
 //! nothing to write back and completes at once, and no event is counted.
+//! `_mccDramAccessDisable` (kernel file 0x2efdfec) writes full32 zero at
+//! DT reg[3]+410, disabling DRAM access through all broadcast planes. The
+//! model records that state and requests a guest stop before further RAM
+//! execution: post-disable access and re-enable behavior are not established.
+//! This uses the bus's reset/stop request boundary, never a host reset.
+//! Readback, nonzero encodings and other widths refuse without effects.
 //! Every other register of the aperture refuses.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::regfile::{self, Held, Span};
 use alloc::vec::Vec;
 
 const NAME: &str = "amcc";
+const DRAM_ACCESS: u64 = 0x410;
 
 /// A plane register: its offset in the plane, the bits that hold it and,
 /// for a bit register, the masked value that means set.
@@ -100,6 +107,7 @@ pub struct Cache {
 /// What a plane or shared register of the memory cache means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
+    DramAccess,
     /// The ways to power.
     Ways,
     /// The powered data and tag ways.
@@ -117,7 +125,8 @@ enum Role {
 const MIB: u64 = 1 << 20;
 
 /// The `mcc,t8112` plane registers besides the lock-regs ones.
-const T8112_PLANE: [Span<Role>; 12] = [
+const T8112_PLANE: [Span<Role>; 13] = [
+    Span::new(DRAM_ACCESS, DRAM_ACCESS + 4, Width::Word, Role::DramAccess),
     Span::new(0x1c00, 0x1c04, Width::Word, Role::Ways),
     Span::new(0x1c04, 0x1c08, Width::Word, Role::PoweredWays),
     Span::new(0x1c2c, 0x1c30, Width::Word, Role::Flush),
@@ -157,6 +166,7 @@ struct Plane {
     write_disable: bool,
     lock: bool,
     cache_disabled: bool,
+    dram_access: bool,
     ways: u32,
     held: Held,
 }
@@ -170,6 +180,7 @@ impl Default for Plane {
             write_disable: false,
             lock: false,
             cache_disabled: true,
+            dram_access: true,
             ways: 0,
             held: Held::default(),
         }
@@ -359,6 +370,7 @@ impl Amcc {
             });
         }
         Ok(match self.plane_role(register, width)? {
+            Role::DramAccess => return Err("DRAM access command readback is not established"),
             Role::Ways => u64::from(plane.ways),
             Role::PoweredWays => u64::from(plane.ways) << 10 | u64::from(plane.ways) << 5,
             Role::Flush | Role::Counter => 0,
@@ -379,6 +391,11 @@ impl Amcc {
             let ways = self.cache.map_or(0, |cache| cache.ways);
             let plane = &mut self.planes[index];
             return match role {
+                Role::DramAccess if value == 0 => {
+                    plane.dram_access = false;
+                    Ok(())
+                }
+                Role::DramAccess => Err("only DRAM access disable write0 is described"),
                 Role::Ways if value <= u64::from(ways) => {
                     plane.ways = value as u32;
                     Ok(())
@@ -537,11 +554,21 @@ impl MmioDevice for Amcc {
         offset: u64,
         width: Width,
         value: u64,
-        _: &mut Access<'_>,
+        access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
+        let disables = matches!(
+            self.target(offset),
+            Ok(Target::Plane(_, DRAM_ACCESS) | Target::Broadcast(_, DRAM_ACCESS))
+        );
         self.access(offset, width, Some(value))
-            .map(|_| ())
-            .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))?;
+        if disables {
+            access.request_reset(
+                NAME,
+                "DRAM access disabled; execution with disabled guest RAM is unsupported",
+            );
+        }
+        Ok(())
     }
 }
 
@@ -579,6 +606,37 @@ mod tests {
             },
             dram_base: 0x8_0000_0000,
         }
+    }
+
+    #[test]
+    fn disabling_dram_broadcasts_and_stops_before_further_guest_ram_execution() {
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        let mut m = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        assert!(m.planes.iter().all(|p| p.dram_access));
+        assert!(
+            m.write(CACHE.broadcast + DRAM_ACCESS, Width::Word, 1, &mut a)
+                .is_err()
+        );
+        assert!(a.reset_request().is_none());
+        assert!(m.planes.iter().all(|p| p.dram_access));
+        m.write(CACHE.broadcast + DRAM_ACCESS, Width::Word, 0, &mut a)
+            .unwrap();
+        assert!(m.planes.iter().all(|p| !p.dram_access));
+        assert!(
+            a.reset_request()
+                .unwrap()
+                .reason
+                .contains("DRAM access disabled")
+        );
+        assert!(
+            m.read(CACHE.broadcast + DRAM_ACCESS, Width::Word, &mut a)
+                .is_err()
+        );
+        assert!(
+            m.write(CACHE.broadcast + DRAM_ACCESS, Width::Double, 0, &mut a)
+                .is_err()
+        );
     }
 
     #[test]

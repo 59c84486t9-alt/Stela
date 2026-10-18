@@ -31,7 +31,7 @@ use crate::platform::apple::{
     ptd::{self, Ptd},
     uart::S5lUart,
     wake::{self, WakeMasks},
-    wdt::AppleWdt,
+    wdt::{self, AppleWdt},
 };
 use crate::platform::dma::Port;
 use crate::system::access::{AccessKind, Encoding};
@@ -561,6 +561,27 @@ impl AppleDevices {
         self.map(device, ranges)
     }
 
+    /// The main watchdog and its independently DT-placed optional side words.
+    pub fn add_watchdog_with_side(
+        &mut self,
+        range: Range,
+        side: Option<[u64; 2]>,
+        irq: Option<AicInput>,
+        now: u64,
+    ) -> Result<(), MapError> {
+        let Some(side) = side else {
+            return self.add_watchdog(&[range], irq, now);
+        };
+        let device = self
+            .bus
+            .add(Box::new(AppleWdt::new(irq, now).with_side_controls()));
+        self.map(device, &[range])?;
+        for (physical, offset) in side.into_iter().zip([wdt::PANIC_SAVE, wdt::MECHANISM]) {
+            self.bus.map(device, physical, 4, offset)?;
+        }
+        Ok(())
+    }
+
     /// The AIC at `physical`, serving this PE. NR_IRQ is the number of
     /// inputs the board wires (one more than the highest DeviceTree
     /// `interrupts` value under the AIC), which the model reports in its INFO
@@ -801,6 +822,30 @@ mod tests {
     use super::*;
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+
+    #[test]
+    fn watchdog_routes_separate_side_words_without_claiming_intervening_addresses() {
+        let mut d = AppleDevices::new();
+        let base = 0x2_3d2b_0000;
+        let side = [base + 0xc218, base + 0x8008];
+        d.add_watchdog_with_side(
+            Range {
+                physical: base,
+                bytes: 0x4000,
+            },
+            Some(side),
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(d.read(0, side[0], 4, 0), Ok(0));
+        d.write(0, side[0], 4, 1, 0).unwrap();
+        assert_eq!(d.read(0, side[0], 4, 0), Ok(1));
+        d.write(0, side[1], 4, 0, 0).unwrap();
+        assert!(d.read(0, side[1], 4, 0).is_err());
+        assert!(d.read(0, side[0] + 4, 4, 0).is_err());
+        assert!(d.read(0, base + 0x5000, 4, 0).is_err());
+    }
 
     #[test]
     fn implementation_windows_share_lockdown_energy_and_cpm_without_overlap() {

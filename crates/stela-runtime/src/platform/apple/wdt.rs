@@ -14,7 +14,14 @@
 //! Inferred, not documented: CUR_TIME is a 32-bit count that wraps; the
 //! interrupt output follows IRQ_STATUS while IRQ_EN is set; every watchdog starts
 //! disarmed at zero, as m1n1 leaves the primary one, and BITE_TIME/BARK_TIME
-//! are refused until written because their reset values are not known.
+//! start at zero as Stela's disabled boot handoff image.
+//!
+//! The DT reg[1] panic-save scratch (panic-save-flag-bit) retains full32
+//! RMWs (`AppleARMWatchdogTimer::_handlePEHaltRestart`, kernel file 0x1ca4a88).
+//! reg[2] accepts the observed full32 write0 to disarm the separate watchdog
+//! mechanism (`AppleARMWatchdogTimer::_disarmWatchdogMechanism`, 0x1ca6114).
+//! It starts disabled; its other encodings and command readback are unproved
+//! and refuse. Neither side register changes the three primary timers.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
 
@@ -30,6 +37,8 @@ const BARK_TIME: u64 = 0x8;
 const CTRL: u64 = 0xc;
 const STRIDE: u64 = 0x10;
 const WATCHDOGS: usize = 3;
+pub const PANIC_SAVE: u64 = 0x4000;
+pub const MECHANISM: u64 = 0x4004;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Watchdog {
@@ -65,6 +74,9 @@ pub struct AppleWdt {
     watchdogs: [Watchdog; WATCHDOGS],
     irq: Option<AicInput>,
     irq_level: bool,
+    side: bool,
+    panic_save: u32,
+    mechanism_enabled: bool,
 }
 impl AppleWdt {
     /// `irq` is the node's DeviceTree `interrupts` AIC input; `now` the
@@ -73,13 +85,23 @@ impl AppleWdt {
         let watchdog = Watchdog {
             base: now,
             evaluated: now,
+            bite: Some(0),
+            bark: Some(0),
             ..Watchdog::default()
         };
         Self {
             watchdogs: [watchdog; WATCHDOGS],
             irq,
             irq_level: false,
+            side: false,
+            panic_save: 0,
+            mechanism_enabled: false,
         }
+    }
+    /// The two optional DT side controls, separate from the timer window.
+    pub fn with_side_controls(mut self) -> Self {
+        self.side = true;
+        self
     }
     fn evaluate(&mut self, access: &mut Access<'_>) -> Option<u64> {
         let now = access.now;
@@ -147,6 +169,16 @@ impl MmioDevice for AppleWdt {
         if width != Width::Word {
             return Err(fail("watchdog registers are 32-bit"));
         }
+        if self.side {
+            if offset == PANIC_SAVE {
+                return Ok(u64::from(self.panic_save));
+            }
+            if offset == MECHANISM {
+                return Err(fail(
+                    "watchdog mechanism command readback is not established",
+                ));
+            }
+        }
         let (index, register) =
             Self::decode(offset).ok_or_else(|| fail("unknown watchdog register"))?;
         self.evaluate(access);
@@ -173,6 +205,19 @@ impl MmioDevice for AppleWdt {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word {
             return Err(fail("watchdog registers are 32-bit"));
+        }
+        if self.side {
+            if offset == PANIC_SAVE {
+                self.panic_save = value as u32;
+                return Ok(());
+            }
+            if offset == MECHANISM {
+                if value != 0 {
+                    return Err(fail("only watchdog mechanism disarm write0 is described"));
+                }
+                self.mechanism_enabled = false;
+                return Ok(());
+            }
         }
         let (index, register) =
             Self::decode(offset).ok_or_else(|| fail("unknown watchdog register"))?;
@@ -230,6 +275,32 @@ mod tests {
 
     /// Linux `apple_wdt_set_timeout`, `apple_wdt_start` and `apple_wdt_ping`.
     #[test]
+    fn optional_side_controls_hold_panic_scratch_and_only_disarm_the_mechanism() {
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        let mut w = AppleWdt::new(None, 0).with_side_controls();
+        assert_eq!(w.read(BITE_TIME, Width::Word, &mut a), Ok(0));
+        assert_eq!(w.read(PANIC_SAVE, Width::Word, &mut a), Ok(0));
+        w.write(PANIC_SAVE, Width::Word, 0xabc0, &mut a).unwrap();
+        let v = w.read(PANIC_SAVE, Width::Word, &mut a).unwrap();
+        w.write(PANIC_SAVE, Width::Word, v | 1, &mut a).unwrap();
+        assert_eq!(w.read(PANIC_SAVE, Width::Word, &mut a), Ok(0xabc1));
+        w.mechanism_enabled = true;
+        w.write(MECHANISM, Width::Word, 0, &mut a).unwrap();
+        assert!(!w.mechanism_enabled);
+        assert!(w.write(MECHANISM, Width::Word, 1, &mut a).is_err());
+        assert!(w.read(MECHANISM, Width::Word, &mut a).is_err());
+        assert!(w.read(PANIC_SAVE, Width::Double, &mut a).is_err());
+        assert!(w.read(PANIC_SAVE + 8, Width::Word, &mut a).is_err());
+        assert_eq!(w.read(CTRL, Width::Word, &mut a), Ok(0));
+        assert!(
+            AppleWdt::new(None, 0)
+                .read(PANIC_SAVE, Width::Word, &mut a)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn linux_keepalive_then_expiry() {
         let mut latch = InterruptLatch::new();
         let mut wdt = AppleWdt::new(Some(IRQ), 0);
@@ -263,8 +334,8 @@ mod tests {
         let mut wdt = AppleWdt::new(None, 0);
         assert_eq!(
             write(&mut wdt, &mut latch, 5, WD1 + CTRL, CTRL_RESET_EN),
-            None,
-            "no BITE_TIME yet"
+            Some("watchdog bit: system reset requested"),
+            "zero handoff BITE_TIME expires immediately when enabled"
         );
         assert_eq!(
             write(&mut wdt, &mut latch, 6, WD1 + BITE_TIME, 0),
@@ -328,7 +399,7 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut wdt = AppleWdt::new(None, 0);
-        for offset in [WD1 + BARK_TIME, 0x30, BITE_TIME] {
+        for offset in [WD1 + BARK_TIME, 0x30] {
             assert!(
                 wdt.read(offset, Width::Word, &mut access).is_err(),
                 "{offset:#x}"

@@ -21,6 +21,11 @@
 //!   reads clear within 20 µs. Clearing a counter that counts nothing
 //!   completes at once, so those bits read 0.
 //!
+//! `_dcsWriteQueueFlush` (kernel file 0x2efde44) clears low16 of each
+//! channel's full32 +a40 while preserving high16. Stela hands it off zero;
+//! all configuration bits retain writes. There is no queued data in this
+//! coherent-memory model, so draining completes immediately.
+//!
 //! Every other register refuses.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::regfile::{self, Held, Span};
@@ -43,11 +48,12 @@ const DURATION_CLEAR: u64 = 1 << 8 | 1 << 12;
 /// The LPDDR5 1x refresh-rate code in both ranks' fields.
 const NOMINAL_REFRESH: u64 = 0xa | 0xa << 5;
 
-const CHANNEL: [Span<Role>; 7] = [
+const CHANNEL: [Span<Role>; 8] = [
     Span::new(0x41c, 0x420, Width::Word, Role::RefreshRate),
     Span::new(0x580, 0x588, Width::Word, Role::Held),
     Span::new(0x588, 0x58c, Width::Word, Role::DurationControl),
     Span::new(0x58c, 0x640, Width::Word, Role::Held),
+    Span::new(0xa40, 0xa44, Width::Word, Role::Held),
     Span::new(0xec8, 0xecc, Width::Word, Role::Held),
     Span::new(0xed0, 0xed4, Width::Word, Role::Held),
     Span::new(0x4000, 0x4060, Width::Double, Role::Counter),
@@ -134,6 +140,18 @@ mod tests {
             let at = channel * 0x40_0000;
             assert_eq!(dcs.read(at + 0x41c, Width::Word, &mut access), Ok(0x14a));
             assert_eq!(dcs.read(at + 0xed0, Width::Word, &mut access), Ok(0));
+            assert_eq!(dcs.read(at + 0xa40, Width::Word, &mut access), Ok(0));
+            dcs.write(at + 0xa40, Width::Word, 0xabcd_1234, &mut access)
+                .unwrap();
+            let value = dcs.read(at + 0xa40, Width::Word, &mut access).unwrap();
+            dcs.write(at + 0xa40, Width::Word, value & 0xffff_0000, &mut access)
+                .unwrap();
+            assert_eq!(
+                dcs.read(at + 0xa40, Width::Word, &mut access),
+                Ok(0xabcd_0000)
+            );
+            assert!(dcs.read(at + 0xa40, Width::Double, &mut access).is_err());
+            assert!(dcs.read(at + 0xa44, Width::Word, &mut access).is_err());
         }
         dcs.write(0x580, Width::Word, 0x71, &mut access).unwrap();
         assert_eq!(dcs.read(0x580, Width::Word, &mut access), Ok(0x71));

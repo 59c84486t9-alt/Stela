@@ -736,6 +736,8 @@ pub struct Board {
     pub uart: Device,
     /// `/arm-io/wdt`, a `wdt,s5l8960x`.
     pub watchdog: Device,
+    /// Optional panic scratch and mechanism command, from wdt reg[1]/reg[2].
+    pub watchdog_side: Option<[u64; 2]>,
     /// `/arm-io/aic`, an `aic,1`, `aic,2` or `aic,3`.
     pub aic: InterruptController,
     /// Every PE's `cpu-impl-reg` and every cluster's `cpm-impl-reg`, once
@@ -1133,6 +1135,40 @@ fn power_states(
         blocks: spans.into_iter().flatten().collect(),
         registers,
     }))
+}
+
+/// Two optional four-byte side registers. Their absolute addresses are not
+/// related to the timer window; panic bit selection comes from the DT too.
+fn watchdog_side(
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<[u64; 2]>, String> {
+    let reg = node.pairs("reg").ok_or("watchdog has no reg")?;
+    if reg.len() == 1 {
+        return Ok(None);
+    }
+    if reg.len() < 3
+        || node
+            .first_u32("panic-save-flag-bit")
+            .is_none_or(|bit| bit >= 32)
+    {
+        return Err("watchdog side controls need reg[1]/reg[2] and a valid panic flag bit".into());
+    }
+    let mut side = [0; 2];
+    for (out, (address, bytes)) in side.iter_mut().zip(&reg[1..3]) {
+        if *bytes != 4 || !address.is_multiple_of(4) {
+            return Err("watchdog side register is not one aligned full32 word".into());
+        }
+        *out = translate(*address).ok_or("watchdog side register is outside arm-io ranges")?;
+        let end = address
+            .checked_add(*bytes - 1)
+            .and_then(translate)
+            .ok_or("watchdog side range end is outside arm-io ranges")?;
+        if out.checked_add(*bytes - 1) != Some(end) {
+            return Err("watchdog side range translation is not contiguous".into());
+        }
+    }
+    Ok(Some(side))
 }
 
 /// The SoC's CPU clusters and always-on eFuses, when the DeviceTree shows a
@@ -1922,6 +1958,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     };
     let uart = device("uart0", UART)?;
     let watchdog = device("wdt", WATCHDOG)?;
+    let watchdog_side = watchdog_side(&io.child("wdt").expect("device was placed"), &translate)?;
     let (version, event) = cpus
         .aic
         .ok_or("the SoC's AIC event register offset is unknown")?;
@@ -1970,6 +2007,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         cpus,
         uart,
         watchdog,
+        watchdog_side,
         lockdown,
         memory_controller,
         darts,
@@ -2004,6 +2042,37 @@ mod tests {
                 }),
             })
             .collect()
+    }
+
+    #[test]
+    fn watchdog_side_words_use_independent_translated_dt_ranges() {
+        use crate::machine::adt::encode;
+        let reg = [
+            0x1000u64, 0x4000, 0xc218, 4, 0x8008, 4, 0x800c, 4, 0x8020, 4,
+        ]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect::<Vec<_>>();
+        let tree = encode(
+            &[("reg", &reg), ("panic-save-flag-bit", &0u32.to_le_bytes())],
+            &[],
+        );
+        let n = Node::root(&tree).unwrap();
+        assert_eq!(
+            watchdog_side(&n, &|a| Some(a + 0x2_0000_0000)).unwrap(),
+            Some([0x2_0000_c218, 0x2_0000_8008])
+        );
+        assert!(watchdog_side(&n, &|_| None).is_err());
+        let tree = encode(
+            &[("reg", &reg), ("panic-save-flag-bit", &32u32.to_le_bytes())],
+            &[],
+        );
+        assert!(watchdog_side(&Node::root(&tree).unwrap(), &Some).is_err());
+        let tree = encode(&[("reg", &reg[..16])], &[]);
+        assert_eq!(
+            watchdog_side(&Node::root(&tree).unwrap(), &Some).unwrap(),
+            None
+        );
     }
 
     #[test]
