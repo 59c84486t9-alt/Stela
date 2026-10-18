@@ -1777,6 +1777,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if uses_key && self.pointer_authentication_trapped() {
             return self.pointer_authentication_trap();
         }
+        if let Some(step) = self.register_pointer_authentication(instruction) {
+            return step;
+        }
         let context = self.pointer_context()?;
         if let PointerAuthenticationOperation::Load(load) = instruction.operation {
             return self.authenticated_load(word, &context, load);
@@ -1863,6 +1866,90 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok((value, _)) => {
                 self.cpu.state.x[register] = value;
                 self.cpu.pc = pc + INSTRUCTION;
+            }
+            Err(code) => self.take(Exception::synchronous(
+                Class::PointerAuthenticationFailure,
+                u32::from(code),
+                pc,
+            )),
+        }
+        Some(Ok(()))
+    }
+
+    /// PAC*, AUT*, BRA* and BLRA* with register, SP or zero modifiers, once
+    /// their key is known enabled and untrapped: each completes as the
+    /// general path does (Arm `AddPAC`, `Auth`; a branch authenticates as a
+    /// combined form, then links and branches) through
+    /// [`Self::pointer_result`]. `None` leaves forms naming register 31 to
+    /// the general path.
+    fn register_pointer_authentication(
+        &mut self,
+        instruction: PointerAuthentication,
+    ) -> Option<Step> {
+        use PointerAuthenticationModifier as Modifier;
+        use PointerAuthenticationOperation as Operation;
+        let (operation, key, register, modifier) = match instruction.operation {
+            Operation::Sign {
+                key,
+                destination,
+                modifier,
+            } => (PointerOperation::Sign, key, destination, modifier),
+            Operation::Authenticate {
+                key,
+                destination,
+                modifier,
+            } => (
+                PointerOperation::Authenticate { combined: false },
+                key,
+                destination,
+                modifier,
+            ),
+            Operation::Branch {
+                key,
+                target,
+                modifier,
+                ..
+            } => (
+                PointerOperation::Authenticate { combined: true },
+                key,
+                target,
+                modifier,
+            ),
+            _ => return None,
+        };
+        let modifier = match modifier {
+            Modifier::Register(31) => return None,
+            Modifier::Register(register) => self.cpu.state.x[usize::from(register)],
+            Modifier::StackPointer => self.cpu.state.sp,
+            Modifier::Zero => 0,
+        };
+        if register == 31 {
+            return None;
+        }
+        let key = match key {
+            PointerAuthenticationKey::Ia => pauth::Key::Ia,
+            PointerAuthenticationKey::Ib => pauth::Key::Ib,
+            PointerAuthenticationKey::Da => pauth::Key::Da,
+            PointerAuthenticationKey::Db => pauth::Key::Db,
+        };
+        let pc = self.cpu.pc;
+        let pointer = self.cpu.state.x[usize::from(register)];
+        let result = match self.pointer_result(operation, key, pointer, modifier) {
+            Ok(result) => result,
+            Err(stop) => return Some(Err(stop)),
+        };
+        match result {
+            Ok((value, _)) => {
+                self.cpu.pstate.btype = self.pointer_branch_type(pc, instruction.operation);
+                if let Operation::Branch { link, .. } = instruction.operation {
+                    if link {
+                        self.cpu.state.x[30] = instruction.next_pc.0;
+                    }
+                    self.cpu.pc = value;
+                } else {
+                    self.cpu.state.x[usize::from(register)] = value;
+                    self.cpu.pc = instruction.next_pc.0;
+                }
             }
             Err(code) => self.take(Exception::synchronous(
                 Class::PointerAuthenticationFailure,
@@ -4741,6 +4828,43 @@ mod tests {
             .set(SystemRegister::APIBKeyLo_EL1, 0, 0x0bad_cafe);
         machine.derived_changed();
         assert_ne!(sign(&mut machine), signed);
+    }
+
+    #[test]
+    fn register_pac_forms_complete_as_the_pac_service_computes() {
+        const PACIA_X0_X1: u32 = 0xdac1_0020;
+        const AUTIA_X0_X1: u32 = 0xdac1_1020;
+        const BLRAA_X2_X3: u32 = 0xd73f_0843;
+        const BRAAZ_X2: u32 = 0xd61f_085f;
+        let mut machine = pac_machine();
+        let pointer = 0xffff_ff80_0000_4000_u64;
+        let context = machine.pointer_context().unwrap();
+        machine.cpu.state.x[0] = pointer;
+        machine.cpu.state.x[1] = 0x1234;
+        machine.system_instruction_for_test(PACIA_X0_X1);
+        let signed = context.sign(pauth::Key::Ia, pointer, 0x1234).unwrap();
+        assert_eq!(machine.cpu.state.x[0], signed);
+        machine.system_instruction_for_test(AUTIA_X0_X1);
+        assert_eq!(machine.cpu.state.x[0], pointer);
+        // BLRAA links after authenticating the target with X3.
+        machine.cpu.state.x[2] = context.sign(pauth::Key::Ia, pointer, 0x99).unwrap();
+        machine.cpu.state.x[3] = 0x99;
+        let pc = machine.cpu.pc;
+        machine.system_instruction_for_test(BLRAA_X2_X3);
+        assert_eq!((machine.cpu.pc, machine.cpu.state.x[30]), (pointer, pc + 4));
+        // BRAAZ authenticates with a zero modifier; a wrong one corrupts
+        // the target, as the general path's combined authentication does.
+        machine.cpu.state.x[2] = context.sign(pauth::Key::Ia, pointer, 0).unwrap();
+        machine.system_instruction_for_test(BRAAZ_X2);
+        assert_eq!(machine.cpu.pc, pointer);
+        let wrong = context.sign(pauth::Key::Ia, pointer, 1).unwrap();
+        machine.cpu.state.x[2] = wrong;
+        machine.system_instruction_for_test(BRAAZ_X2);
+        let expected = context
+            .authenticate_operation(pauth::Key::Ia, wrong, 0, true)
+            .map(|result| result.pointer);
+        assert_eq!(Ok(machine.cpu.pc), expected);
+        assert_ne!(machine.cpu.pc, pointer);
     }
 
     #[test]
