@@ -456,6 +456,25 @@ fn devices(
             blocks.len()
         ));
     }
+    if let Some(board) = board {
+        for (bank, &dart) in board.darts.iter().zip(&darts) {
+            let mut domains = Vec::new();
+            for id in &bank.power_gates {
+                let supplies = board
+                    .power_states
+                    .as_ref()
+                    .and_then(|states| states.devices.iter().find(|(device, _)| device == id))
+                    .map(|(_, addresses)| addresses)
+                    .ok_or_else(|| {
+                        alloc::format!("DART power gate ID {id:#x} has no PMGR state")
+                    })?;
+                domains.extend_from_slice(supplies);
+            }
+            domains.sort_unstable();
+            domains.dedup();
+            devices.connect_dart_power(dart, &domains, bank.retention)?;
+        }
+    }
     for bank in board.map_or(&[][..], |b| &b.bridges) {
         devices.add_bridge(
             bank.physical,

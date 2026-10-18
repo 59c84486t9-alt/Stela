@@ -44,6 +44,33 @@
 //! and PROTECT_LOCK hold one bit per protection domain: 0 TTBR and TCR, 2
 //! APF; a write sets bits, UNPROTECT clears those not locked.
 //!
+//! SPTM's `t8110dart_powerup` (26A434 file offset 0xcbb90, store at
+//! 0xcc014) restores the protected-write word at +0x210. Stela's handoff
+//! disables that policy and has no protected-write violation, so a full-word
+//! zero write/read succeeds. Nonzero policy encodings remain unsupported;
+//! the status test of bit 1 on newer revisions alone does not describe how
+//! to enable or acknowledge it. This register is separate from PROTECT.
+//! The transaction-limit configuration at +0x228/+0x22c is saved on resume
+//! (0xcc678..0xcc684), restored through the write-or-verify helper
+//! (0xcc9cc..0xcc9f0), and clamped to zero by `clamp_tlimits`
+//! (0xc8bd0..0xc8be0). Each full-word value retains writes, initially zero.
+//! DMA is synchronous with no outstanding transaction queue, so the clamp
+//! has no queued transaction to drain; no physical credit rate is invented.
+//!
+//! Power-cycle evidence: SPTM saves enabled-stream words and optional
+//! performance state before power-down (file 0xcd47c..0xcd7c4) and restores
+//! TCR/TTBR, APF, interrupt masks and enabled words on power-up
+//! (0xcc3d0..0xcc9bc). Linux `apple_dart_suspend`/`apple_dart_resume` also
+//! save and restore stream tables around reset. Inferred: ordinary state is
+//! lost on a PMGR power gate unless the DT declares `retention`; clock gating
+//! preserves it. MMIO and DMA to an unpowered DART refuse. Secure TZ words
+//! survive: SPTM checks PROTECT/LOCK bits 3 and 4, +504 select bit0, +500
+//! enable bits 2:0 and nine region words at +508..548, stride8, masked with
+//! 0x3ffffffc (0xcc038..0xcc13c), before restoring ordinary registers.
+//! Stela establishes disabled zero zones in that boot-owned bank. Active TZ
+//! programming remains unsupported, so PARAMS2 does not advertise it. The
+//! recovered conditional path does not justify enabling that capability.
+//!
 //! Inferred, not documented: the model caches no translations, so TLB
 //! commands complete at once and BUSY never reads set; a fault latches the
 //! first error until software clears its FLAG, and the interrupt follows
@@ -89,6 +116,9 @@ const ERROR_STREAMS: u64 = 0x1c0;
 const PROTECT: u64 = 0x200;
 const UNPROTECT: u64 = 0x204;
 const PROTECT_LOCK: u64 = 0x208;
+/// Protected-write control/status, restored by SPTM at file offset 0xcc014.
+const PROTECTED_WRITE: u64 = 0x210;
+const TLIMITS: [u64; 2] = [0x228, 0x22c];
 const ENABLE_STREAMS: u64 = 0xc00;
 const DISABLE_STREAMS: u64 = 0xc20;
 const TCR: u64 = 0x1000;
@@ -101,6 +131,12 @@ const ERROR_STREAM_SHIFT: u32 = 20;
 const ERROR_CODE: u32 = 0x7fff;
 const PROTECT_TTBR_TCR: u32 = 1;
 const PROTECT_APF: u32 = 1 << 2;
+/// Secure translation-zone configuration is outside the switched DART state.
+const PROTECT_TZ: u32 = (1 << 3) | (1 << 4);
+const TZ_CONFIG: u64 = 0x500;
+const TZ_SELECT: u64 = 0x504;
+const TZ_FIRST: u64 = 0x508;
+const TZ_END: u64 = 0x550;
 
 /// The filter's registers in the device's space, past the DART's.
 pub const DAPF_OFFSET: u64 = 0x4000;
@@ -153,6 +189,8 @@ pub enum Fault {
 
 pub struct Dart {
     streams: usize,
+    powered: bool,
+    tlimits: [u32; 2],
     tcr: Vec<u32>,
     ttbr: Vec<u32>,
     enabled: [u32; STREAM_WORDS as usize],
@@ -199,6 +237,8 @@ impl Dart {
         assert!(streams <= 256, "the T8110 layout addresses 256 streams");
         Self {
             streams,
+            powered: true,
+            tlimits: [0; 2],
             tcr: vec![0; streams],
             ttbr: vec![0; streams],
             enabled: [0; STREAM_WORDS as usize],
@@ -224,9 +264,33 @@ impl Dart {
         self
     }
 
+    /// Apply a PMGR supply transition. Clock gating keeps this state; a
+    /// power gate resets ordinary registers unless the DT declares retention.
+    /// Secure translation-zone configuration/protection remains outside the
+    /// switched supply: SPTM verifies it before restoring ordinary state.
+    pub fn set_power(&mut self, powered: bool, retention: bool, access: &mut Access<'_>) {
+        if self.powered && !powered && !retention {
+            self.tlimits.fill(0);
+            self.tcr.fill(0);
+            self.ttbr.fill(0);
+            self.enabled.fill(0);
+            self.error = 0;
+            self.error_mask = 0;
+            self.error_address = 0;
+            self.error_streams.fill(0);
+            self.protect &= PROTECT_TZ;
+            self.locked &= PROTECT_TZ;
+            if let Some(apf) = &mut self.apf {
+                apf.fill(Slice::default());
+            }
+            self.signal(access);
+        }
+        self.powered = powered;
+    }
+
     /// The protection domains this DART has.
     fn domains(&self) -> u32 {
-        PROTECT_TTBR_TCR | if self.apf.is_some() { PROTECT_APF } else { 0 }
+        PROTECT_TTBR_TCR | PROTECT_TZ | if self.apf.is_some() { PROTECT_APF } else { 0 }
     }
 
     /// The filter register at `offset` from the filter's start and the bits
@@ -252,6 +316,9 @@ impl Dart {
         last: u64,
         write: bool,
     ) -> Result<u64, DmaError> {
+        if !self.powered {
+            return Err(DmaError::Unsupported("DART power domain is off"));
+        }
         if sid >= self.streams || !self.stream_enabled(sid) {
             return Err(fault(Fault::NoTtbr));
         }
@@ -386,6 +453,9 @@ impl MmioDevice for Dart {
         if width != Width::Word {
             return Err(fail("DART registers are 32-bit"));
         }
+        if !self.powered {
+            return Err(fail("DART power domain is off"));
+        }
         if let Some(apf) = offset.checked_sub(DAPF_OFFSET) {
             return self
                 .apf_register(apf)
@@ -404,6 +474,12 @@ impl MmioDevice for Dart {
             ERROR_ADDRESS_HIGH => (self.error_address >> 32) as u32,
             PROTECT => self.protect,
             PROTECT_LOCK => self.locked,
+            // The boot stage leaves protected-write reporting disabled and
+            // there is no pending protected-write violation.
+            PROTECTED_WRITE => 0,
+            _ if TLIMITS.contains(&offset) => self.tlimits[((offset - TLIMITS[0]) / 4) as usize],
+            TZ_CONFIG | TZ_SELECT => 0,
+            _ if (TZ_FIRST..TZ_END).contains(&offset) && (offset - TZ_FIRST).is_multiple_of(8) => 0,
             _ => {
                 if let Some(word) = bitmap_word(offset, ERROR_STREAMS) {
                     self.error_streams[word]
@@ -431,6 +507,9 @@ impl MmioDevice for Dart {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word {
             return Err(fail("DART registers are 32-bit"));
+        }
+        if !self.powered {
+            return Err(fail("DART power domain is off"));
         }
         let value = value as u32;
         if let Some(apf) = offset.checked_sub(DAPF_OFFSET) {
@@ -461,6 +540,19 @@ impl MmioDevice for Dart {
                 }
             }
             ERROR_MASK => self.error_mask = value & ERROR_CODE,
+            TZ_CONFIG | TZ_SELECT => {
+                return Err(fail(
+                    "translation zones are owned by the boot stage; active-zone programming is unsupported",
+                ));
+            }
+            _ if (TZ_FIRST..TZ_END).contains(&offset) && (offset - TZ_FIRST).is_multiple_of(8) => {
+                return Err(fail("translation-zone bounds are owned by the boot stage"));
+            }
+            _ if TLIMITS.contains(&offset) => {
+                self.tlimits[((offset - TLIMITS[0]) / 4) as usize] = value
+            }
+            PROTECTED_WRITE if value == 0 => {}
+            PROTECTED_WRITE => return Err(fail("nonzero protected-write policy is not described")),
             PROTECT => self.protect |= value,
             UNPROTECT => self.protect &= !(value & !self.locked),
             PROTECT_LOCK => self.locked |= value,
@@ -530,6 +622,94 @@ mod tests {
                 .unwrap();
         }
         (dart, ram, latch)
+    }
+
+    #[test]
+    fn resume_saves_and_restores_transaction_limits_and_clamp_retains_zero() {
+        let mut d = Dart::new(16, None);
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        for (index, offset) in TLIMITS.into_iter().enumerate() {
+            assert_eq!(d.read(offset, Width::Word, &mut a), Ok(0));
+            d.write(offset, Width::Word, 0x1234_5678 + index as u64, &mut a)
+                .unwrap();
+            let saved = d.read(offset, Width::Word, &mut a).unwrap();
+            d.set_power(false, false, &mut a);
+            d.set_power(true, false, &mut a);
+            assert_eq!(d.read(offset, Width::Word, &mut a), Ok(0));
+            d.write(offset, Width::Word, saved, &mut a).unwrap();
+            assert_eq!(d.read(offset, Width::Word, &mut a), Ok(saved));
+            d.write(offset, Width::Word, 0, &mut a).unwrap();
+            assert_eq!(d.read(offset, Width::Word, &mut a), Ok(0));
+            assert!(d.read(offset, Width::Double, &mut a).is_err());
+        }
+    }
+
+    #[test]
+    fn power_gates_lose_ordinary_state_but_retention_and_secure_zone_locks_survive() {
+        for retention in [false, true] {
+            let (mut d, mut ram, mut latch) = setup();
+            let mut a = Access::new(0, 0, &mut latch);
+            d.write(PROTECT, Width::Word, u64::from(PROTECT_TZ | 1), &mut a)
+                .unwrap();
+            d.write(PROTECT_LOCK, Width::Word, u64::from(PROTECT_TZ | 1), &mut a)
+                .unwrap();
+            d.set_power(false, retention, &mut a);
+            assert!(d.read(PARAMS1, Width::Word, &mut a).is_err());
+            assert_eq!(
+                d.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
+                Err(DmaError::Unsupported("DART power domain is off"))
+            );
+            d.set_power(true, retention, &mut a);
+            assert_eq!(
+                d.read(TCR + 4, Width::Word, &mut a),
+                Ok(if retention { 1 } else { 0 })
+            );
+            assert_eq!(
+                d.read(PROTECT_LOCK, Width::Word, &mut a),
+                Ok(u64::from(PROTECT_TZ) | u64::from(retention))
+            );
+            for offset in [TZ_CONFIG, TZ_SELECT, TZ_FIRST, TZ_END - 8] {
+                assert_eq!(d.read(offset, Width::Word, &mut a), Ok(0));
+                assert!(d.write(offset, Width::Word, 1, &mut a).is_err());
+            }
+            assert!(d.read(TZ_FIRST + 4, Width::Word, &mut a).is_err());
+            if !retention {
+                d.write(
+                    TCR + 8,
+                    Width::Word,
+                    u64::from(TCR_BYPASS_DART | TCR_BYPASS_DAPF),
+                    &mut a,
+                )
+                .unwrap();
+                d.write(ENABLE_STREAMS, Width::Word, 4, &mut a).unwrap();
+                assert_eq!(
+                    d.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
+                    Ok(ROOT)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn powerup_restores_disabled_protected_write_policy_without_unlocking_tables() {
+        let (mut dart, _, mut latch) = setup();
+        let mut access = Access::new(0, 0, &mut latch);
+        dart.write(PROTECT, Width::Word, 1, &mut access).unwrap();
+        dart.write(PROTECT_LOCK, Width::Word, 1, &mut access)
+            .unwrap();
+        dart.write(PROTECTED_WRITE, Width::Word, 0, &mut access)
+            .unwrap();
+        assert_eq!(dart.read(PROTECTED_WRITE, Width::Word, &mut access), Ok(0));
+        assert_eq!(dart.read(PROTECT_LOCK, Width::Word, &mut access), Ok(1));
+        assert!(
+            dart.write(PROTECTED_WRITE, Width::Word, 2, &mut access)
+                .is_err()
+        );
+        assert!(
+            dart.read(PROTECTED_WRITE, Width::Double, &mut access)
+                .is_err()
+        );
     }
 
     #[test]

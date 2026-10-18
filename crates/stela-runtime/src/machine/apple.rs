@@ -29,7 +29,7 @@ use crate::platform::apple::{
     ipi::{self, Affinity, FastIpi},
     lockdown::{self, Lockdown},
     perf::PerfCounters,
-    pmgr::{ACTIVE, Pmgr, PowerState},
+    pmgr::{ACTIVE, POWER_GATED, Pmgr, PowerState},
     power::{self, Power},
     ptd::{self, Ptd},
     rtkit::{Management, RtKit},
@@ -77,6 +77,8 @@ pub struct AppleDevices {
     reset_vectors: Vec<Option<DeviceId>>,
     starts: Vec<Start>,
     selects: Vec<SelectWire>,
+    pmgr: Option<DeviceId>,
+    dart_power: Vec<DartPower>,
 }
 
 struct SelectWire {
@@ -89,6 +91,13 @@ struct SelectWire {
 struct CpuStarter {
     device: DeviceId,
     mpidrs: Vec<u64>,
+}
+
+/// Supplies shared by one DART, with its hardware retention property.
+struct DartPower {
+    device: DeviceId,
+    domains: Vec<u64>,
+    retention: bool,
 }
 
 /// An AES engine and the DART stream its DMA goes through.
@@ -171,6 +180,8 @@ impl AppleDevices {
             reset_vectors: Vec::new(),
             starts: Vec::new(),
             selects: Vec::new(),
+            pmgr: None,
+            dart_power: Vec::new(),
         }
     }
 
@@ -540,6 +551,38 @@ impl AppleDevices {
                 .map(device, block.physical, block.bytes, block.physical)
                 .map_err(|error| format!("PMGR placement: {error:?}"))?;
         }
+        self.pmgr = Some(device);
+        Ok(())
+    }
+
+    /// Connect a DART to the translated PMGR supplies its DT names. Empty
+    /// supply lists require no PMGR. Every supplied address must be modeled.
+    pub fn connect_dart_power(
+        &mut self,
+        dart: DartId,
+        domains: &[u64],
+        retention: bool,
+    ) -> Result<(), String> {
+        if domains.is_empty() {
+            return Ok(());
+        }
+        let pmgr = self
+            .pmgr
+            .and_then(|id| self.bus.device::<Pmgr>(id))
+            .ok_or("DART supplies have no PMGR")?;
+        if domains.iter().any(|&address| pmgr.state(address).is_none()) {
+            return Err("DART names an undescribed PMGR supply".into());
+        }
+        if self.bus.device::<Dart>(dart.0).is_none()
+            || self.dart_power.iter().any(|p| p.device == dart.0)
+        {
+            return Err("DART supply binding is duplicate or not a DART".into());
+        }
+        self.dart_power.push(DartPower {
+            device: dart.0,
+            domains: domains.to_vec(),
+            retention,
+        });
         Ok(())
     }
 
@@ -811,6 +854,21 @@ impl AppleDevices {
         if self.reset.is_none() {
             self.reset = reset;
         }
+        for link in &self.dart_power {
+            let pmgr = self
+                .bus
+                .device::<Pmgr>(self.pmgr.expect("binding checked PMGR"))
+                .expect("PMGR type");
+            let powered = link
+                .domains
+                .iter()
+                .all(|&a| pmgr.state(a) != Some(POWER_GATED));
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            self.bus
+                .device_mut::<Dart>(link.device)
+                .expect("binding checked DART")
+                .set_power(powered, link.retention, &mut access);
+        }
         self.release_cores()?;
         loop {
             let inputs = self.latch.take_aic_inputs();
@@ -1056,6 +1114,43 @@ mod tests {
     use super::*;
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+
+    #[test]
+    fn pmgr_power_gates_reset_dart_tables_but_clock_gates_and_retention_preserve_them() {
+        for retention in [false, true] {
+            let mut d = AppleDevices::new();
+            let supply = 0x2_3b70_0100;
+            let base = 0x2_3500_4000;
+            d.add_power_states(
+                &[Range {
+                    physical: supply,
+                    bytes: 4,
+                }],
+                &[supply],
+            )
+            .unwrap();
+            let dart = d
+                .add_dart(
+                    Range {
+                        physical: base,
+                        bytes: 0x4000,
+                    },
+                    16,
+                    None,
+                    None,
+                )
+                .unwrap();
+            d.connect_dart_power(dart, &[supply], retention).unwrap();
+            d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+            d.write(0, supply, 4, 4, 0).unwrap();
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
+            d.write(0, supply, 4, 0, 0).unwrap();
+            assert!(d.read(0, base + 0x1000, 4, 0).is_err());
+            d.write(0, supply, 4, 15, 0).unwrap();
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(u64::from(retention)));
+            assert!(d.connect_dart_power(dart, &[supply + 4], false).is_err());
+        }
+    }
 
     #[test]
     fn watchdog_routes_separate_side_words_without_claiming_intervening_addresses() {

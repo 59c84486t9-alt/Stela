@@ -1122,6 +1122,9 @@ const PTD_RANGE: usize = 32;
 pub struct PowerStates {
     pub blocks: Vec<(u64, u64)>,
     pub registers: Vec<u64>,
+    /// Device IDs and their physical supply addresses, resolving virtual
+    /// devices through both parent IDs without using their names.
+    pub devices: Vec<(u16, Vec<u64>)>,
 }
 
 /// A `dart,t8110`: its one DART register range (ADT `instance` `TRAD`), its
@@ -1136,6 +1139,10 @@ pub struct Iommu {
     pub irq: u32,
     pub mappers: Vec<(u32, u32)>,
     pub apf: Option<(u64, usize)>,
+    /// PMGR supply IDs from the DT, resolved through `PowerStates::devices`.
+    pub power_gates: Vec<u16>,
+    /// A retained DART preserves ordinary state while its supply is gated.
+    pub retention: bool,
 }
 
 /// The AES engine: its block and key-disable register ranges, its
@@ -1465,6 +1472,25 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
     let irq = node
         .first_u32("interrupts")
         .ok_or_else(|| format!("{path} has no interrupts"))?;
+    let power_gates = node.property("power-gates").unwrap_or_default();
+    if !power_gates.len().is_multiple_of(4) {
+        return Err(format!("{path} power-gates contains a partial device ID"));
+    }
+    let power_gates = power_gates
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| {
+            u16::try_from(u32::from_le_bytes(*word))
+                .map_err(|_| format!("{path} power gate exceeds PMGR device ID width"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let retention = node.property("retention").is_some();
+    if retention && node.property("no-sleep").is_some() {
+        return Err(format!(
+            "{path} retention and no-sleep are mutually exclusive"
+        ));
+    }
     let mut mappers = Vec::new();
     node.visit(&mut |child| {
         if child.compatible(IOMMU_MAPPER)
@@ -1482,6 +1508,8 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
         irq,
         mappers,
         apf,
+        power_gates,
+        retention,
     })
 }
 
@@ -1510,9 +1538,19 @@ fn power_states(
     }
     let mut spans: Vec<Option<(u64, u64)>> = alloc::vec![None; blocks.len() / 3];
     let mut registers = Vec::new();
+    let mut ids = Vec::new();
     for entry in devices.as_chunks::<PMGR_DEVICE>().0 {
         let flags = u32::from_le_bytes(entry[..4].try_into().expect("4 bytes"));
+        let id = u16::from_le_bytes(entry[26..28].try_into().expect("device ID"));
+        let parents = [
+            u16::from_le_bytes(entry[4..6].try_into().expect("parent ID")),
+            u16::from_le_bytes(entry[6..8].try_into().expect("parent ID")),
+        ];
+        if ids.iter().any(|&(old, _, _)| old == id) {
+            return Err("PMGR has duplicate device IDs".into());
+        }
         if flags & PMGR_VIRTUAL != 0 {
+            ids.push((id, None, parents));
             continue;
         }
         let (index, block) = (u64::from(entry[10]), usize::from(entry[11]));
@@ -1524,6 +1562,7 @@ fn power_states(
             })
             .ok_or_else(|| format!("{PATH} device names ps-regs block {block} outside reg"))?;
         let address = base + index * 8;
+        ids.push((id, Some(address), parents));
         let span = spans[block].get_or_insert((base, 0));
         span.1 = span.1.max(address + 4 - base);
         if !registers.contains(&address) {
@@ -1534,7 +1573,42 @@ fn power_states(
     Ok(Some(PowerStates {
         blocks: spans.into_iter().flatten().collect(),
         registers,
+        devices: ids
+            .iter()
+            .map(|&(id, _, _)| Ok((id, resolve_supplies(id, &ids, &mut Vec::new())?)))
+            .collect::<Result<Vec<_>, String>>()?,
     }))
+}
+
+/// Virtual PMGR devices have no register; their nonzero parent IDs select
+/// the physical supplies (`devices` parents at bytes 4..8, m1n1 pmgr_device).
+/// Reject cycles/missing parents instead of silently dropping a dependency.
+fn resolve_supplies(
+    id: u16,
+    devices: &[(u16, Option<u64>, [u16; 2])],
+    visiting: &mut Vec<u16>,
+) -> Result<Vec<u64>, String> {
+    if visiting.contains(&id) {
+        return Err("PMGR virtual supply graph contains a cycle".into());
+    }
+    let (_, address, parents) = devices
+        .iter()
+        .find(|(device, _, _)| *device == id)
+        .ok_or("PMGR virtual supply has an absent parent")?;
+    if let Some(address) = address {
+        return Ok(alloc::vec![*address]);
+    }
+    visiting.push(id);
+    let mut supplies = Vec::new();
+    for &parent in parents.iter().filter(|&&parent| parent != 0) {
+        for address in resolve_supplies(parent, devices, visiting)? {
+            if !supplies.contains(&address) {
+                supplies.push(address);
+            }
+        }
+    }
+    visiting.pop();
+    Ok(supplies)
 }
 
 /// Two optional four-byte side registers. Their absolute addresses are not
@@ -2544,6 +2618,66 @@ mod tests {
     }
 
     #[test]
+    fn virtual_supply_graph_expands_both_parents_and_rejects_missing_nodes_and_cycles() {
+        let physical = 0x2_3b70_0100;
+        let graph = [
+            (1, Some(physical), [0, 0]),
+            (2, Some(physical + 8), [0, 0]),
+            (0x212, None, [1, 2]),
+            (4, None, [0x212, 1]),
+        ];
+        assert_eq!(
+            resolve_supplies(4, &graph, &mut Vec::new()).unwrap(),
+            vec![physical, physical + 8]
+        );
+        assert!(resolve_supplies(9, &graph, &mut Vec::new()).is_err());
+        assert!(
+            resolve_supplies(1, &[(1, None, [2, 0]), (2, None, [1, 0])], &mut Vec::new()).is_err()
+        );
+    }
+
+    #[test]
+    fn dart_supply_ids_and_retention_come_from_dt_properties() {
+        use crate::machine::adt::encode;
+        let reg = [0x35004000u64, 0x4000]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let tree = |gates: &[u8], retention: bool, no_sleep: bool| {
+            let mut props = vec![
+                ("reg", reg.as_slice()),
+                ("instance", b"TRAD\0\0\0\0DART\0\0\0\0".as_slice()),
+                ("sid-count", &b"\x10\0\0\0"[..]),
+                ("interrupts", &b"\x01\x03\0\0"[..]),
+                ("power-gates", gates),
+            ];
+            if retention {
+                props.push(("retention", &[]));
+            }
+            if no_sleep {
+                props.push(("no-sleep", &[]));
+            }
+            encode(&props, &[])
+        };
+        let gates = [0x212u32, 0x216]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let encoded = tree(&gates, true, false);
+        let node = Node::root(&encoded).unwrap();
+        let dart = iommu(&node, &|a| Some(a + 0x2_0000_0000)).unwrap();
+        assert_eq!(dart.power_gates, vec![0x212, 0x216]);
+        assert!(dart.retention);
+        for encoded in [
+            tree(&gates[..3], false, false),
+            tree(&u32::MAX.to_le_bytes(), false, false),
+            tree(&gates, true, true),
+        ] {
+            assert!(iommu(&Node::root(&encoded).unwrap(), &Some).is_err());
+        }
+    }
+
+    #[test]
     fn watchdog_side_words_use_independent_translated_dt_ranges() {
         use crate::machine::adt::encode;
         let reg = [
@@ -3156,6 +3290,8 @@ mod tests {
                 irq: 0x301,
                 mappers: vec![(0x89, 0), (0x8a, 1)],
                 apf: None,
+                power_gates: Vec::new(),
+                retention: false,
             }]
         );
         assert_eq!(
@@ -3273,6 +3409,10 @@ mod tests {
             let mut entry = [0u8; PMGR_DEVICE];
             entry[..4].copy_from_slice(&flags.to_le_bytes());
             (entry[10], entry[11]) = (index, block);
+            entry[26..28].copy_from_slice(&(u16::from(index) + 1).to_le_bytes());
+            if flags & PMGR_VIRTUAL != 0 {
+                entry[4..6].copy_from_slice(&1u16.to_le_bytes());
+            }
             entry[32..32 + name.len()].copy_from_slice(name.as_bytes());
             entry
         };
@@ -3428,6 +3568,12 @@ mod tests {
             Some(PowerStates {
                 blocks: vec![(0x2_3d28_4000, 0x14), (0x2_3b70_0000, 0x1c)],
                 registers: vec![0x2_3b70_0000, 0x2_3b70_0018, 0x2_3d28_4010],
+                devices: vec![
+                    (1, vec![0x2_3b70_0000]),
+                    (4, vec![0x2_3b70_0018]),
+                    (8, vec![0x2_3b70_0000]),
+                    (3, vec![0x2_3d28_4010])
+                ],
             })
         );
         // Without the PMGR's compatible, nothing is placed.

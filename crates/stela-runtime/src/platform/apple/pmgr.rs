@@ -77,6 +77,13 @@ impl Pmgr {
         }
         Ok(Self { registers })
     }
+    /// The completed hardware state of a described domain register.
+    pub fn state(&self, address: u64) -> Option<u8> {
+        self.registers
+            .get(&address)
+            .map(|value| ((value & ACTUAL) >> ACTUAL_SHIFT) as u8)
+    }
+
     /// Addresses whose actual state is not active, for diagnostics.
     pub fn inactive(&self) -> Vec<u64> {
         self.registers
