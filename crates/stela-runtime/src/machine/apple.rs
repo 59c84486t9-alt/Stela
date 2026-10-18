@@ -15,6 +15,7 @@ use crate::platform::apple::{
     bridge::Bridge,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
+    cpm::Cpm,
     cpustart::{self, CpuStart},
     dart::{self, Dart},
     dcs::Dcs,
@@ -391,10 +392,32 @@ impl AppleDevices {
         for (offset, bytes) in [
             (cluster::ACC_OFFSET, cluster::ACC_BYTES),
             (cluster::PSTATE_OFFSET, table),
+            (cluster::SCRATCH[0], 8),
+            (cluster::SCRATCH[1], 8),
         ] {
             self.bus
                 .map(device, base + offset, bytes, offset)
                 .map_err(|error| format!("CPU cluster placement: {error:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// CPM throttlers and restore command in the DT-validated CPM window.
+    pub fn add_cpm_power(&mut self, physical: u64, performance: bool) -> Result<(), String> {
+        let model = Cpm::new(performance);
+        let offsets = model.offsets();
+        let device = self.bus.add(Box::new(model));
+        for offset in offsets {
+            self.bus
+                .map(
+                    device,
+                    physical
+                        .checked_add(offset)
+                        .ok_or("CPM address overflows")?,
+                    8,
+                    offset,
+                )
+                .map_err(|e| format!("CPM power placement: {e:?}"))?;
         }
         Ok(())
     }
@@ -778,6 +801,43 @@ mod tests {
     use super::*;
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+
+    #[test]
+    fn implementation_windows_share_lockdown_energy_and_cpm_without_overlap() {
+        let mut d = AppleDevices::new();
+        let cpm = 0x2_11e4_0000;
+        let cpu = 0x2_1105_0000;
+        d.add_lockdown(
+            "cpm-impl-reg",
+            0x9000,
+            Range {
+                physical: cpm,
+                bytes: 0x10000,
+            },
+            None,
+        )
+        .unwrap();
+        d.add_cpm_power(cpm, true).unwrap();
+        d.add_cpu_energy(cpm + 0x8000, true).unwrap();
+        d.add_lockdown(
+            "cpu-impl-reg",
+            0x5000,
+            Range {
+                physical: cpu,
+                bytes: 0x10000,
+            },
+            Some((0, 0x8000_0000)),
+        )
+        .unwrap();
+        d.add_cpu_energy(cpu + 0x9000, false).unwrap();
+        assert_eq!(d.read(0, cpm + 0x9008, 8, 0), Ok(0));
+        assert_eq!(d.read(0, cpu, 8, 0), Ok(0x8000_0001));
+        d.write(0, cpm + 0x250, 8, 1 << 63, 0).unwrap();
+        assert_eq!(d.read(0, cpm + 0x250, 8, 0), Ok(1 << 63));
+        d.write(0, cpm + 0x40f8, 8, 1, 0).unwrap();
+        assert!(d.read(0, cpm + 0x40f8, 8, 0).is_err());
+        assert!(d.read(0, cpm + 0x1234, 8, 0).is_err());
+    }
 
     #[test]
     fn energy_banks_route_only_their_described_words() {

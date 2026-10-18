@@ -33,6 +33,16 @@
 //! has no physical residency/transition event source or known scaling, so
 //! counts retain software saves. No physical activity rate is invented.
 //!
+//! CPU state command +20020 (`setPerfState`, 0x2f9f238) uses low5, SET25,
+//! BUSY31; fixed-frequency relock changes bit42 (0x2b8b490). Stela selects
+//! state0 at handoff and completes supported SET requests at once, clearing
+//! SET/BUSY and APSC/DVMR pending flags. No clock frequency is synthesized:
+//! consumers use this selected state and the same retained state table.
+//! APSC disable configuration bit23 holds; snooze bit40 at +200f8 holds
+//! (`_initAPSC`, 0x2f9cf8c), as do the selected-table scratch words at
+//! +7ffe8/+7fff0. The P throttler enable +20078 (0x2fa5100) retains full64
+//! configuration. No physical snooze or overload cause is invented.
+//!
 //! Every other register refuses.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::regfile::Held;
@@ -45,6 +55,15 @@ const MAP_BASE: u64 = 0x20500;
 const EVENT_BASE: u64 = 0x20580;
 const COUNTER_ENABLE: u64 = 0x20660;
 const COUNTER_BYTES: u64 = 8;
+const COMMAND: u64 = 0x20020;
+const STATE: u64 = 0x1f;
+const SET: u64 = 1 << 25;
+const RELOCK: u64 = 1 << 42;
+const APSC_DISABLE: u64 = 1 << 23;
+const COMMAND_FIELDS: u64 = STATE | SET | RELOCK | APSC_DISABLE;
+const SNOOZE: u64 = 0x200f8;
+const THROTTLER: u64 = 0x20078;
+pub const SCRATCH: [u64; 2] = [0x7ffe8, 0x7fff0];
 
 /// The cluster register window the DVMR tables lie in (J473AP
 /// `/arm-io/pmgr` `reg[5]` and `reg[14]`).
@@ -66,10 +85,14 @@ pub struct Cluster {
     pstates: u64,
     registers: Held,
     counters: Vec<u64>,
+    mapped: bool,
 }
 
 impl Cluster {
     pub fn new(dvmr: &[(u64, u64)], pstates: usize) -> Result<Self, &'static str> {
+        if pstates == 0 || pstates > 32 {
+            return Err("CPU state table exceeds the five-bit state selector");
+        }
         let mut registers = Held::default();
         let mut offsets = Vec::new();
         for &(offset, value) in dvmr {
@@ -84,6 +107,7 @@ impl Cluster {
             pstates: pstates as u64,
             registers,
             counters: Vec::new(),
+            mapped: false,
         })
     }
 
@@ -98,6 +122,7 @@ impl Cluster {
         if capacity == 0 || capacity > 16 {
             return Err("ACC counter capacity exceeds a paired bank");
         }
+        self.mapped = mapped;
         for index in 0..capacity {
             let offset = COUNTER_BASE + index as u64 * COUNTER_BYTES;
             self.counters.extend([offset, offset + COUNTER_PAIR]);
@@ -129,7 +154,10 @@ impl Cluster {
             && offset.is_multiple_of(8)
             && (self.dvmr.contains(&offset)
                 || table.contains(&offset)
-                || self.counters.contains(&offset))
+                || self.counters.contains(&offset)
+                || matches!(offset, COMMAND | SNOOZE)
+                || self.mapped && offset == THROTTLER
+                || SCRATCH.contains(&offset))
     }
 }
 
@@ -167,7 +195,24 @@ impl MmioDevice for Cluster {
                 "cluster register without a known value",
             ));
         }
-        self.registers.set(offset, value);
+        if offset == COMMAND {
+            let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+            if value & !COMMAND_FIELDS != 0 {
+                return Err(fail(
+                    "CPU command contains undescribed or read-only status fields",
+                ));
+            }
+            let state = value & STATE;
+            if state >= self.pstates {
+                return Err(fail("CPU command selects a state outside its table"));
+            }
+            if value & SET == 0 && state != self.registers.get(COMMAND) & STATE {
+                return Err(fail("CPU state change requires a SET request"));
+            }
+            self.registers.set(offset, value & !SET);
+        } else {
+            self.registers.set(offset, value);
+        }
         Ok(())
     }
 }
@@ -176,6 +221,56 @@ impl MmioDevice for Cluster {
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+
+    #[test]
+    fn cpu_commands_complete_against_the_same_state_table_and_scratch_holds_copies() {
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let mut c = Cluster::new(&[], 18)
+            .unwrap()
+            .with_counters(16, true, &[])
+            .unwrap();
+        assert_eq!(c.read(COMMAND, Width::Double, &mut a), Ok(0));
+        c.write(
+            COMMAND,
+            Width::Double,
+            RELOCK | APSC_DISABLE | SET | 3,
+            &mut a,
+        )
+        .unwrap();
+        assert_eq!(
+            c.read(COMMAND, Width::Double, &mut a),
+            Ok(RELOCK | APSC_DISABLE | 3)
+        );
+        let table = PSTATE_OFFSET + 3 * PSTATE_BYTES;
+        for (index, scratch) in SCRATCH.into_iter().enumerate() {
+            c.write(
+                table + index as u64 * 8,
+                Width::Double,
+                0x1234 + index as u64,
+                &mut a,
+            )
+            .unwrap();
+            let value = c
+                .read(table + index as u64 * 8, Width::Double, &mut a)
+                .unwrap();
+            c.write(scratch, Width::Double, value, &mut a).unwrap();
+            assert_eq!(c.read(scratch, Width::Double, &mut a), Ok(value));
+        }
+        c.write(SNOOZE, Width::Double, 1 << 40, &mut a).unwrap();
+        assert_eq!(c.read(SNOOZE, Width::Double, &mut a), Ok(1 << 40));
+        c.write(THROTTLER, Width::Double, 0x123 | 1, &mut a)
+            .unwrap();
+        assert_eq!(c.read(THROTTLER, Width::Double, &mut a), Ok(0x123));
+        for value in [SET | 31, SET | (1 << 31), 4] {
+            assert!(c.write(COMMAND, Width::Double, value, &mut a).is_err());
+        }
+        assert_eq!(
+            c.read(COMMAND, Width::Double, &mut a),
+            Ok(RELOCK | APSC_DISABLE | 3)
+        );
+        assert!(c.read(SCRATCH[0], Width::Word, &mut a).is_err());
+    }
 
     #[test]
     fn acc_state_maps_event_pairs_and_enable_configuration_retain_full64_values() {
@@ -254,11 +349,7 @@ mod tests {
             .unwrap();
         assert_eq!(cluster.read(0x78048, Width::Double, &mut access), Ok(7));
         assert!(cluster.read(0x78400, Width::Double, &mut access).is_err());
-        assert!(
-            cluster
-                .write(0x20020, Width::Double, 0, &mut access)
-                .is_err()
-        );
+        assert_eq!(cluster.read(COMMAND, Width::Double, &mut access), Ok(0));
         assert!(Cluster::new(&[(0x20700, 0)], 1).is_err());
         assert!(Cluster::new(&[(0x206a8, 0), (0x206a8, 1)], 1).is_err());
     }

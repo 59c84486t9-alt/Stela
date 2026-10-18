@@ -447,6 +447,8 @@ fn devices(
         let events = board
             .and_then(|b| b.cluster_events.get(index))
             .ok_or("CPU cluster has no DT event selection")?;
+        // The board validated each CPM word against the translated DT reg.
+        devices.add_cpm_power(cluster.base + 0x40000, cluster.counter_map)?;
         devices.add_cpu_cluster(
             cluster.base,
             cluster.dvmr,

@@ -19,7 +19,7 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, bridge, cluster, cpustart, dart, dpe, energy, fuse, power, ptd, wake,
+    amcc, bridge, cluster, cpm, cpustart, dart, dpe, energy, fuse, power, ptd, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -276,6 +276,7 @@ const SOCS: [Soc; 14] = [
             (30, power::Kind::Marker),
             (34, power::Kind::Gpce),
             (32, power::Kind::Gating),
+            (35, power::Kind::Tvm),
         ],
         dpe_reg: Some(29),
         bridge_fields: Some(&bridge::tunables::T8112),
@@ -1178,6 +1179,20 @@ fn pmgr_registers(
         .map(|clusters| clusters.to_vec())
         .unwrap_or_default();
     for cluster in &clusters {
+        let cpm_base = cluster
+            .base
+            .checked_add(cpm::OFFSET)
+            .ok_or("CPM base overflows")?;
+        for offset in cpm::Cpm::new(cluster.counter_map).offsets() {
+            if !covered(cpm_base + offset, 8) {
+                return Err("PMGR reg does not cover a CPM power register".into());
+            }
+        }
+        for offset in cluster::SCRATCH {
+            if !covered(cluster.base + offset, 8) {
+                return Err("PMGR reg does not cover CPU state scratch".into());
+            }
+        }
         let window = cluster.base + cluster::ACC_OFFSET;
         let table = cluster.pstates as u64 * cluster::PSTATE_BYTES;
         if !reg.contains(&Some((window, cluster::ACC_BYTES)))
@@ -2493,6 +2508,7 @@ mod tests {
         reg[31] = [0x3b72_8000, 0x1000];
         reg[32] = [0x3b72_4000, 0x1000];
         reg[34] = [0x3b78_0000, 0x4000];
+        reg[35] = [0x3b76_0000, 0x4000];
         reg[36] = [0x3d2c_8000, 0x4000];
         let reg = reg.concat();
         let energy_record = |address: u64| {
@@ -2706,6 +2722,7 @@ mod tests {
             power::Kind::Marker,
             power::Kind::Gpce,
             power::Kind::Gating,
+            power::Kind::Tvm,
         ];
         for kind in kinds {
             let reg = [None, Some((0x5_0000_0000, 0x20000))];

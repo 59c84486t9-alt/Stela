@@ -18,6 +18,10 @@
 //! They permit automatic gating; no electrical idle event is modeled, so they
 //! do not invent a power-down of the existing PMGR device states.
 //!
+//! TVM controls (reg[35], `enableTVM` kernel file 0x2fa61f0) retain
+//! configuration at four 0x400-spaced domain words. Disable finishes at once;
+//! the +0x3e0 status words report no pending voltage/thermal decision.
+//!
 //! Stela's boot stage hands off idle/unlocked/disabled zero configuration,
 //! a zero marker and healthy zero status. Conditional iBoot programming is
 //! not reproduced. Only the described full32 registers are mapped.
@@ -42,6 +46,7 @@ pub enum Kind {
     Marker,
     Gpce,
     Gating,
+    Tvm,
 }
 
 impl Kind {
@@ -55,6 +60,10 @@ impl Kind {
             Self::Marker => alloc::vec![MARKER],
             Self::Gpce => alloc::vec![0, 4],
             Self::Gating => alloc::vec![0, 0x40, 0x80, 0x88],
+            Self::Tvm => [0, 0x400, 0x800, 0xc00]
+                .into_iter()
+                .flat_map(|o| [o, o + 0x3e0])
+                .collect(),
         }
     }
 }
@@ -98,6 +107,9 @@ impl MmioDevice for Power {
         self.check(offset, width).map_err(fail)?;
         let value = value & Width::Word.mask();
         match self.kind {
+            Kind::Tvm if offset % 0x400 == 0x3e0 => {
+                return Err(fail("TVM idle status is read-only"));
+            }
             Kind::Marker => {
                 return Err(fail("PS initialization marker is owned by the boot stage"));
             }
@@ -140,6 +152,22 @@ impl MmioDevice for Power {
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+    #[test]
+    fn tvm_enable_and_disable_complete_with_healthy_idle_status() {
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        let mut p = Power::new(Kind::Tvm);
+        for base in [0, 0x400, 0x800, 0xc00] {
+            assert_eq!(p.read(base, Width::Word, &mut a), Ok(0));
+            for value in [0x123, 0x122] {
+                p.write(base, Width::Word, value, &mut a).unwrap();
+                assert_eq!(p.read(base, Width::Word, &mut a), Ok(value));
+                assert_eq!(p.read(base + 0x3e0, Width::Word, &mut a), Ok(0));
+            }
+            assert!(p.write(base + 0x3e0, Width::Word, 2, &mut a).is_err());
+        }
+    }
+
     #[test]
     fn volman_acknowledges_without_injecting_errors_and_protects_channels() {
         let mut sink = InterruptLatch::new();
