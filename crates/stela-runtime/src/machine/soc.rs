@@ -735,8 +735,7 @@ pub const NOR: &str = "nor-flash,spi";
 pub const NVRAM: &str = "nvram,chrp";
 /// GPIO output provider compatible.
 pub const GPIO: &str = "gpio,t8101";
-/// Partial Type-C models: intentionally unadvertised until original startup
-/// and firmware/transport effects have been qualified.
+/// The Type-C I2C bus: controller, HPM bus manager and CD321x dies.
 pub const I2C: &str = "i2c,t8101";
 pub const HPM_MANAGER: &str = "usbc,manager";
 pub const HPM: &str = "usbc,cd3217";

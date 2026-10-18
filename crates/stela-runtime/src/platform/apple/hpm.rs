@@ -10,12 +10,19 @@
 //! `getAndClearInterrupts` (0x27c83ec) reads event then writes its clear
 //! register: reading events does not acknowledge them.
 //!
-//! This implements the public 11-byte TPS event banks, retaining both banks,
-//! masks and W1C independently. Exact class-10 bank geometry and private 4CC
-//! command completion remain unqualified; every 4CC refuses, rather than
-//! pretending that its firmware effect occurred. The bus-manager summary at
-//! address 0x6b is a separate protocol and is not this target. Consequently
-//! neither `usbc,manager` nor `usbc,cd3217` is admitted in `soc::models`.
+//! The class-10 startup research (`docs/research/hpm.md`) gives the registers AppleTCControllerType10 reads and their lengths: the
+//! identity, UID (0x05), revision (0x2c), boot flags (0x2d), configuration
+//! (0x29), power state (0x20), data control (0x50), Apple CF/VID status (0x5e)
+//! and 5-byte data status. Event and mask banks keep the public 11-byte TPS
+//! layout; the driver reads 9 and masks 8, with Apple's bit map (0 AppLoaded,
+//! 1 plug, 8 status, 10 data status, 11 PD status). Masks preserve events and
+//! clears are W1C. A 4CC written to CMD1 completes before the write returns:
+//! CMD1 reads zero again, the documented completion. `SSPS` (active power
+//! states 0 and 2), `USBd`, `USBw` and `ABRT` record their effect; sleep and
+//! every other command refuse rather than fake a firmware effect. The bus
+//! manager's summary at address 0x6b is `Summary`.
+use alloc::vec::Vec;
+
 use super::{
     gpio::OpenDrain,
     i2c::{I2cTarget, TargetError},
@@ -25,9 +32,17 @@ use super::{
 const VENDOR: u8 = 0x00;
 const DEVICE: u8 = 0x01;
 const MODE: u8 = 0x03;
+const UID: u8 = 0x05;
 const COMMAND: u8 = 0x08;
 const DATA: u8 = 0x09;
 const VERSION: u8 = 0x0f;
+const COMMAND2: u8 = 0x10;
+const POWER_STATE: u8 = 0x20;
+const CONFIG: u8 = 0x29;
+const REVISION: u8 = 0x2c;
+const BOOT_FLAGS: u8 = 0x2d;
+const DATA_CONTROL: u8 = 0x50;
+const APPLE_STATUS: u8 = 0x5e;
 const EVENT1: u8 = 0x14;
 const EVENT2: u8 = 0x15;
 const MASK1: u8 = 0x16;
@@ -40,6 +55,9 @@ const PD: u8 = 0x40;
 const DATA_STATUS: u8 = 0x5f;
 const BANK_BYTES: usize = 11;
 const MAX_DATA: usize = 64;
+const APPLE_STATUS_BYTES: usize = 18;
+/// Active with a cable and active unplugged; 3 is sleep.
+const ACTIVE_POWER_STATES: [u8; 2] = [0, 2];
 const PLUG_EVENT: u16 = 1 << 1;
 const STATUS_EVENT: u16 = 1 << 8;
 const POWER_EVENT: u16 = 1 << 9;
@@ -111,12 +129,22 @@ pub struct Hpm {
     cursor: usize,
     selected: bool,
     irq: Option<OpenDrain>,
+    uid: [u8; 16],
+    power_state: u8,
+    usb_detection: bool,
+    remote_wake: u8,
+    data_control: [u8; 4],
 }
 impl Hpm {
-    /// APP firmware is running at handoff, with masks disabled and the 4CC
-    /// engine idle. Port electrical state is supplied independently by `Port`.
-    /// This is Stela's boot-firmware handoff image, not captured iBoot state.
-    pub fn new(port: Port, identity: FirmwareIdentity) -> Self {
+    /// APP firmware is running at handoff, active (power state 0), with
+    /// masks disabled, no events and the 4CC engine idle. Port electrical
+    /// state is supplied independently by `Port`. This is Stela's
+    /// boot-firmware handoff image, not captured iBoot state. Stela's die
+    /// reports silicon revision 0, clear boot flags and configuration, and a
+    /// UID naming its bus address.
+    pub fn new(port: Port, identity: FirmwareIdentity, address: u8) -> Self {
+        let mut uid = *b"Stela HPM die   ";
+        uid[15] = address;
         let observed = Snapshot {
             generation: 0,
             connection: None,
@@ -132,6 +160,11 @@ impl Hpm {
             cursor: 0,
             selected: false,
             irq: None,
+            uid,
+            power_state: 0,
+            usb_detection: false,
+            remote_wake: 0,
+            data_control: [0; 4],
         }
     }
     /// Drives the board's interrupt net from `interrupt_asserted`.
@@ -199,7 +232,24 @@ impl Hpm {
                 data[..4].copy_from_slice(&self.identity.version.to_le_bytes());
                 4
             }
-            COMMAND => 4, // The idle command register, never a fabricated completion.
+            UID => {
+                data[..16].copy_from_slice(&self.uid);
+                16
+            }
+            // Commands complete synchronously, so both command registers
+            // are idle whenever software can read them.
+            COMMAND | COMMAND2 => 4,
+            POWER_STATE => {
+                data[0] = self.power_state;
+                1
+            }
+            CONFIG | BOOT_FLAGS => MAX_DATA,
+            REVISION => 1,
+            DATA_CONTROL => {
+                data[..4].copy_from_slice(&self.data_control);
+                4
+            }
+            APPLE_STATUS => APPLE_STATUS_BYTES,
             DATA => {
                 data = self.data;
                 MAX_DATA
@@ -253,7 +303,7 @@ impl Hpm {
                     }
                 }
                 data[..4].copy_from_slice(&status.to_le_bytes());
-                4
+                5
             }
             _ => return Err("unmodeled HPM register or write-only interrupt clear"),
         };
@@ -282,12 +332,32 @@ impl Hpm {
                 }
                 self.data[..data.len()].copy_from_slice(data);
             }
+            DATA_CONTROL => {
+                let control: [u8; 4] = data
+                    .try_into()
+                    .map_err(|_| "HPM data control is four bytes")?;
+                self.data_control = control;
+            }
             COMMAND => {
-                return Err(
-                    "HPM 4CC firmware commands and their completion events are not yet modeled",
-                );
+                let command: [u8; 4] = data
+                    .try_into()
+                    .map_err(|_| "HPM 4CC command is four bytes")?;
+                self.execute(command)?;
             }
             _ => return Err("unmodeled HPM write or read-only register"),
+        }
+        Ok(())
+    }
+    /// Runs one 4CC with its DATA1 argument to completion.
+    fn execute(&mut self, command: [u8; 4]) -> Result<(), &'static str> {
+        let argument = self.data[0];
+        match &command {
+            b"SSPS" if ACTIVE_POWER_STATES.contains(&argument) => self.power_state = argument,
+            b"SSPS" => return Err("HPM sleep or unknown power state is not modeled"),
+            b"USBd" if argument <= 1 => self.usb_detection = argument == 1,
+            b"USBw" if [0, 1, 9, 0x11, 0x80].contains(&argument) => self.remote_wake = argument,
+            b"ABRT" => {}
+            _ => return Err("unmodeled HPM 4CC command or argument"),
         }
         Ok(())
     }
@@ -360,6 +430,78 @@ impl I2cTarget for Hpm {
     }
 }
 
+/// The bus manager's interrupt summary, a target at its own I2C address.
+/// `AppleHPMBusController`'s interrupt action reads raw register 0x10, four
+/// wire bytes, and notifies die 0x38 + n for each set bit 2n + 1 of
+/// `be16(wire[2..4]) ^ 0xfffe` (`docs/research/hpm.md`): odd bits are the
+/// dies' active-low alerts, sampled from their open-drain interrupt outputs.
+/// Reading does not acknowledge; a die deasserts when its events are
+/// cleared. Stela's register is length-prefixed with three bytes whose
+/// unconsumed bits read released (one), so idle reads `03 ff ff ff`.
+pub struct Summary {
+    dies: Vec<(u8, OpenDrain)>,
+    response: Option<([u8; 4], usize)>,
+}
+const SUMMARY: u8 = 0x10;
+impl Summary {
+    pub fn new(dies: Vec<(u8, OpenDrain)>) -> Result<Self, &'static str> {
+        if dies
+            .iter()
+            .any(|&(address, _)| !(0x38..=0x3f).contains(&address))
+        {
+            return Err("HPM summary covers only dies at 0x38..=0x3f");
+        }
+        Ok(Self {
+            dies,
+            response: None,
+        })
+    }
+    fn word(&self) -> u16 {
+        self.dies
+            .iter()
+            .filter(|(_, alert)| alert.is_low())
+            .fold(u16::MAX, |word, &(address, _)| {
+                word & !(1 << (2 * (address - 0x38) + 1))
+            })
+    }
+}
+impl I2cTarget for Summary {
+    fn transfer(&mut self, write: &[u8], read: &mut [u8], stop: bool) -> Result<(), TargetError> {
+        let mut response = self.response;
+        match write {
+            [] => {}
+            [SUMMARY] => {
+                let [high, low] = self.word().to_be_bytes();
+                response = Some(([3, 0xff, high, low], 0));
+            }
+            _ => {
+                return Err(TargetError::Unsupported(
+                    "HPM bus manager has only its read-only summary register",
+                ));
+            }
+        }
+        if read.is_empty() {
+            self.response = response;
+            return Ok(());
+        }
+        let (bytes, cursor) = response.ok_or(TargetError::Unsupported(
+            "HPM summary read without its register selector",
+        ))?;
+        let end = cursor + read.len();
+        if end > bytes.len() {
+            return Err(TargetError::Unsupported(
+                "HPM summary read beyond its four bytes",
+            ));
+        }
+        read.copy_from_slice(&bytes[cursor..end]);
+        self.response = (!stop).then_some((bytes, end));
+        Ok(())
+    }
+    fn abort(&mut self) {
+        self.response = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,12 +549,12 @@ mod tests {
     #[test]
     fn one_port_drives_orientation_roles_vbus_and_all_status_registers() {
         let port = Port::new();
-        let mut h = Hpm::new(port.clone(), identity());
+        let mut h = Hpm::new(port.clone(), identity(), 0x38);
         assert_eq!(read(&mut h, MODE, 4), b"APP ");
         assert_eq!(read(&mut h, VERSION, 4), identity().version.to_le_bytes());
-        assert_eq!(read(&mut h, DATA_STATUS, 4), [0; 4]);
+        assert_eq!(read(&mut h, DATA_STATUS, 5), [0; 5]);
         port.set_connection(Some(host())).unwrap();
-        assert_eq!(read(&mut h, DATA_STATUS, 4), [0x91, 0, 0, 0]);
+        assert_eq!(read(&mut h, DATA_STATUS, 5), [0x91, 0, 0, 0, 0]);
         assert_eq!(read(&mut h, POWER, 2), [3, 0]);
         assert_eq!(read(&mut h, PD, 5), [0; 5]);
         let s = u32::from_le_bytes(read(&mut h, STATUS, 4).try_into().unwrap());
@@ -427,16 +569,16 @@ mod tests {
             ..host()
         }))
         .unwrap();
-        assert_eq!(read(&mut h, DATA_STATUS, 4), [0x13, 0, 0, 0]);
+        assert_eq!(read(&mut h, DATA_STATUS, 5), [0x13, 0, 0, 0, 0]);
         assert_eq!(read(&mut h, POWER, 2), [1, 0]);
         port.set_connection(None).unwrap();
-        assert_eq!(read(&mut h, DATA_STATUS, 4), [0; 4]);
+        assert_eq!(read(&mut h, DATA_STATUS, 5), [0; 5]);
         assert_eq!(read(&mut h, POWER, 2), [0; 2]);
     }
     #[test]
     fn event_banks_persist_across_reads_masks_acknowledgements_and_cable_bounce() {
         let port = Port::new();
-        let mut h = Hpm::new(port.clone(), identity());
+        let mut h = Hpm::new(port.clone(), identity(), 0x38);
         port.set_connection(Some(host())).unwrap();
         assert!(!h.interrupt_asserted());
         let events = read(&mut h, EVENT1, BANK_BYTES);
@@ -461,8 +603,10 @@ mod tests {
     fn dies_pull_their_shared_interrupt_net_until_every_event_is_cleared() {
         use crate::platform::apple::gpio::Net;
         let (net, port) = (Net::new(), Port::new());
-        let mut a = Hpm::new(port.clone(), identity()).with_interrupt(net.open_drain().unwrap());
-        let mut b = Hpm::new(Port::new(), identity()).with_interrupt(net.open_drain().unwrap());
+        let mut a =
+            Hpm::new(port.clone(), identity(), 0x38).with_interrupt(net.open_drain().unwrap());
+        let mut b =
+            Hpm::new(Port::new(), identity(), 0x3f).with_interrupt(net.open_drain().unwrap());
         write(&mut a, MASK1, &[2]);
         port.set_connection(Some(host())).unwrap();
         // A cable change is seen when the target advances, not only on access.
@@ -477,7 +621,7 @@ mod tests {
     #[test]
     fn split_response_is_coherent_and_bad_transactions_have_no_effect() {
         let port = Port::new();
-        let mut h = Hpm::new(port.clone(), identity());
+        let mut h = Hpm::new(port.clone(), identity(), 0x38);
         let mut length = [0];
         h.transfer(&[STATUS], &mut length, false).unwrap();
         assert_eq!(length, [4]);
@@ -501,5 +645,65 @@ mod tests {
         assert!(h.transfer(&[0xfe], &mut [0], true).is_err());
         h.abort();
         assert!(h.transfer(&[], &mut [0], true).is_err());
+    }
+    #[test]
+    fn startup_metadata_has_the_lengths_the_class_10_driver_reads() {
+        let mut h = Hpm::new(Port::new(), identity(), 0x3f);
+        let uid = read(&mut h, UID, 16);
+        assert_eq!((&uid[..14], uid[15]), (&b"Stela HPM die "[..], 0x3f));
+        assert_eq!(read(&mut h, REVISION, 1), [0]);
+        assert_eq!(read(&mut h, BOOT_FLAGS, 64), [0; 64]);
+        assert_eq!(read(&mut h, CONFIG, 64)[62] & 0x60, 0);
+        assert_eq!(read(&mut h, APPLE_STATUS, 18), [0; 18]);
+        assert_eq!(read(&mut h, COMMAND2, 4), [0; 4]);
+        // A raw read may stop short of the payload.
+        let mut raw = [0; 19];
+        h.transfer(&[BOOT_FLAGS], &mut raw, true).unwrap();
+        assert_eq!(raw[0], 64);
+        write(&mut h, DATA_CONTROL, &[0, 0x20, 0, 0]);
+        assert_eq!(read(&mut h, DATA_CONTROL, 4), [0, 0x20, 0, 0]);
+    }
+    #[test]
+    fn commands_complete_synchronously_or_refuse_without_effect() {
+        let mut h = Hpm::new(Port::new(), identity(), 0x38);
+        assert_eq!(read(&mut h, POWER_STATE, 1), [0]);
+        write(&mut h, DATA, &[2]);
+        write(&mut h, COMMAND, b"SSPS");
+        assert_eq!(read(&mut h, COMMAND, 4), [0; 4]);
+        assert_eq!(read(&mut h, POWER_STATE, 1), [2]);
+        write(&mut h, DATA, &[1]);
+        write(&mut h, COMMAND, b"USBd");
+        assert!(h.usb_detection);
+        write(&mut h, COMMAND, b"ABRT");
+        for (argument, command) in [(3, b"SSPS"), (2, b"USBd"), (0, b"GAID")] {
+            write(&mut h, DATA, &[argument]);
+            let frame = [&[COMMAND, 4][..], command].concat();
+            assert!(h.transfer(&frame, &mut [], true).is_err());
+        }
+        assert_eq!(read(&mut h, POWER_STATE, 1), [2]);
+        assert!(h.usb_detection);
+    }
+    #[test]
+    fn the_manager_summary_reports_each_alerting_die_active_low() {
+        use crate::platform::apple::gpio::Net;
+        let net = Net::new();
+        let (a, b) = (net.open_drain().unwrap(), net.open_drain().unwrap());
+        let mut summary = Summary::new(alloc::vec![(0x38, a.clone()), (0x3f, b.clone())]).unwrap();
+        let read = |summary: &mut Summary| {
+            let mut wire = [0; 4];
+            summary.transfer(&[SUMMARY], &mut [], true).unwrap();
+            summary.transfer(&[], &mut wire, true).unwrap();
+            // The consumer's view: odd bits of be16(wire[2..4]) ^ 0xfffe.
+            (wire, u16::from_be_bytes([wire[2], wire[3]]) ^ 0xfffe)
+        };
+        assert_eq!(read(&mut summary), ([3, 0xff, 0xff, 0xff], 1));
+        a.pull_low(true);
+        assert_eq!(read(&mut summary).1, 1 | 1 << 1);
+        b.pull_low(true);
+        a.pull_low(false);
+        assert_eq!(read(&mut summary).1, 1 | 1 << 15);
+        assert!(summary.transfer(&[], &mut [0], true).is_err());
+        assert!(summary.transfer(&[0x11], &mut [0], true).is_err());
+        assert!(Summary::new(alloc::vec![(0x40, a)]).is_err());
     }
 }

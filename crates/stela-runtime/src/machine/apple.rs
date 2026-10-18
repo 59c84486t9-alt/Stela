@@ -28,7 +28,7 @@ use crate::platform::apple::{
     energy::{self, Energy},
     fuse::{self, AonFuses},
     gpio::{Gpio, Net},
-    hpm::{FirmwareIdentity, Hpm},
+    hpm::{FirmwareIdentity, Hpm, Summary},
     i2c::{self, I2c},
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
@@ -595,7 +595,8 @@ impl AppleDevices {
     /// Place an explicitly visible I2C controller. Addressed but unqualified
     /// targets refuse; hiding a target must not turn its protocol into success.
     /// `firmware` returns a board firmware image by its guest file name; an
-    /// HPM die runs `USB-C_<personality>.bin` and drives its interrupt net.
+    /// HPM die runs `USB-C_<personality>.bin` and drives its manager's
+    /// interrupt net, whose summary the manager's own address reports.
     pub fn add_i2c<'f>(
         &mut self,
         placement: &super::soc::I2cController,
@@ -603,27 +604,42 @@ impl AppleDevices {
     ) -> Result<(), String> {
         let device = placement.device;
         let mut model = I2c::new(AicInput::new(0, device.irq as u16));
+        // Each die's alert output on its manager's interrupt net, which the
+        // manager's summary samples.
+        let mut alerts = Vec::new();
+        for target in &placement.targets {
+            if target.compatible != super::soc::HPM {
+                continue;
+            }
+            let name = format!(
+                "USB-C_{}.bin",
+                target.firmware.as_deref().ok_or("HPM names no firmware")?
+            );
+            let image =
+                firmware(&name).ok_or_else(|| format!("board firmware {name} was not supplied"))?;
+            let identity =
+                FirmwareIdentity::from_image(image).map_err(|e| format!("{name}: {e}"))?;
+            let port = self.typec_port(target.port.ok_or("HPM has no port number")?);
+            let pin = target.interrupt.ok_or("HPM has no bus-manager interrupt")?;
+            let alert = self.gpio_net(pin)?.open_drain()?;
+            let hpm = Hpm::new(port, identity, target.address).with_interrupt(alert.clone());
+            model
+                .attach(target.address, Box::new(hpm))
+                .map_err(String::from)?;
+            alerts.push((pin, target.address, alert));
+        }
         for target in &placement.targets {
             let reason = match target.compatible.as_str() {
+                super::soc::HPM => continue,
                 super::soc::HPM_MANAGER => {
-                    "HPM bus-manager interrupt summary and multiplexing are not yet modeled"
-                }
-                super::soc::HPM => {
-                    let name = format!(
-                        "USB-C_{}.bin",
-                        target.firmware.as_deref().ok_or("HPM names no firmware")?
-                    );
-                    let image = firmware(&name)
-                        .ok_or_else(|| format!("board firmware {name} was not supplied"))?;
-                    let identity =
-                        FirmwareIdentity::from_image(image).map_err(|e| format!("{name}: {e}"))?;
-                    let port = self.typec_port(target.port.ok_or("HPM has no port number")?);
-                    let mut hpm = Hpm::new(port, identity);
-                    if let Some(pin) = target.interrupt {
-                        hpm = hpm.with_interrupt(self.gpio_net(pin)?.open_drain()?);
-                    }
+                    let dies = alerts
+                        .iter()
+                        .filter(|(pin, ..)| Some(*pin) == target.interrupt)
+                        .map(|(_, address, alert)| (*address, alert.clone()))
+                        .collect();
+                    let summary = Summary::new(dies).map_err(String::from)?;
                     model
-                        .attach(target.address, Box::new(hpm))
+                        .attach(target.address, Box::new(summary))
                         .map_err(String::from)?;
                     continue;
                 }

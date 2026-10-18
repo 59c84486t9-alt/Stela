@@ -95,6 +95,9 @@ pub struct OpenDrain {
     bit: u64,
 }
 impl OpenDrain {
+    pub fn is_low(&self) -> bool {
+        self.net.0.get().pulling & self.bit != 0
+    }
     pub fn pull_low(&self, low: bool) {
         let mut state = self.net.0.get();
         if low {
