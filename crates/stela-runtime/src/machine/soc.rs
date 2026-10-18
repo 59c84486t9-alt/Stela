@@ -38,7 +38,10 @@ use alloc::{format, string::String, vec::Vec};
 /// the highest operating point of each cluster in Linux
 /// `arch/arm64/boot/dts/apple/t8112.dtsi` (`blizzard_opp`, `avalanche_opp`).
 /// The IPSW DeviceTree leaves its `voltage-states` tables to iBoot, so the
-/// SoCs without that evidence have none.
+/// SoCs without that evidence have none. `memory_cache` is the memory
+/// cache's bytes and ways: the defaults the T8112's 26A434
+/// `AppleT8112MemCacheController` driver starts from (`start` assumes 8 MiB
+/// before `readCacheSize`; `mccEnableCacheMode` powers at most 16 ways).
 struct Soc {
     chip_id: u32,
     name: &'static str,
@@ -48,6 +51,7 @@ struct Soc {
     dram_base: Option<u64>,
     lockdown: Option<[u64; 2]>,
     clocks: Option<[u64; 2]>,
+    memory_cache: Option<(u64, u32)>,
 }
 
 const SOCS: [Soc; 14] = [
@@ -60,6 +64,7 @@ const SOCS: [Soc; 14] = [
         dram_base: Some(0x8_0000_0000),
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -70,6 +75,7 @@ const SOCS: [Soc; 14] = [
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -80,6 +86,7 @@ const SOCS: [Soc; 14] = [
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -90,6 +97,7 @@ const SOCS: [Soc; 14] = [
         dram_base: Some(0x8_0000_0000),
         lockdown: Some([0x5000, 0x9000]),
         clocks: Some([2_424_000_000, 3_504_000_000]),
+        memory_cache: Some((8 << 20, 16)),
     },
     Soc {
         chip_id: 0x6020,
@@ -100,6 +108,7 @@ const SOCS: [Soc; 14] = [
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -110,6 +119,7 @@ const SOCS: [Soc; 14] = [
         dram_base: Some(0x100_0000_0000),
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -120,6 +130,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -130,6 +141,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -140,6 +152,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -150,6 +163,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -160,6 +174,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -170,6 +185,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -180,6 +196,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -190,6 +207,7 @@ const SOCS: [Soc; 14] = [
         dram_base: None,
         lockdown: None,
         clocks: None,
+        memory_cache: None,
     },
 ];
 
@@ -403,11 +421,14 @@ pub const PMGR: &str = "pmgr1,t8112";
 /// The `compatible` of the AES engine the engine models
 /// (`platform::apple::aes`).
 pub const AES: &str = "aes,s8000";
+/// The `compatible` of the memory cache controller whose registers
+/// `platform::apple::amcc`, `dcs` and `ptd` model.
+pub const MCC: &str = "mcc,t8112";
 
 /// Whether the engine models a device `compatible` with `name`: the devices a
 /// [`Board`] places. A boot bundle presents no other device to the guest.
 pub fn models(name: &str) -> bool {
-    [UART, WATCHDOG, DART, IOMMU_MAPPER, AES].contains(&name) || AICS.contains(&name)
+    [UART, WATCHDOG, DART, IOMMU_MAPPER, AES, MCC].contains(&name) || AICS.contains(&name)
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
@@ -433,6 +454,20 @@ pub struct Board {
     /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows a
     /// `pmgr1,t8112`.
     pub power_states: Option<PowerStates>,
+    /// `/arm-io/mcc`, when the DeviceTree shows an `mcc,t8112`.
+    pub memory_cache: Option<MemoryCache>,
+}
+
+/// An `mcc,t8112`: its cache in the AMCC aperture, its DRAM channels and
+/// the PMP PTD update registers it writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryCache {
+    pub cache: amcc::Cache,
+    /// The DCS channels (`reg[2]`) in guest PA: base, bytes and the
+    /// `dcs_num_channels` that share them evenly.
+    pub channels: (u64, u64, usize),
+    /// `/arm-io/pmp` `reg[ptd-update-reg-index]` in guest PA.
+    pub ptd: (u64, u64),
 }
 
 /// The PMGR power-state registers `/arm-io/pmgr` `ps-regs` and `devices`
@@ -704,6 +739,88 @@ fn power_states(
     }))
 }
 
+/// `/arm-io/mcc`, if it is a modeled memory cache controller. Its planes
+/// (`reg[1]`) are the lock-regs planes of the one AMCC aperture, which also
+/// holds its shared registers (`reg[0]`) and broadcast window (`reg[3]`);
+/// its PTD slot (`reg[pmp_ptd_reg_idx]` plus `pmp_ptd_update_space_offset`)
+/// lies in the PMP's PTD update registers.
+fn memory_cache(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    chip_id: u32,
+    controller: Option<&MemoryController>,
+) -> Result<Option<MemoryCache>, String> {
+    let Some(node) = io.child("mcc").filter(|node| node.compatible(MCC)) else {
+        return Ok(None);
+    };
+    const PATH: &str = "/arm-io/mcc";
+    let controller =
+        controller.ok_or_else(|| format!("{PATH} has no /chosen/lock-regs/amcc aperture"))?;
+    let [aperture] = controller.apertures[..] else {
+        return Err(format!(
+            "{PATH} behind several AMCC apertures is not modeled"
+        ));
+    };
+    let layout = &controller.layout;
+    let (bytes, ways) = SOCS
+        .iter()
+        .find(|soc| soc.chip_id == chip_id)
+        .and_then(|soc| soc.memory_cache)
+        .ok_or_else(|| format!("ApChipID {chip_id:#x} has no memory cache geometry"))?;
+    let range = |owner: &Node<'_>, path: &str, index: usize| -> Result<(u64, u64), String> {
+        owner
+            .pairs("reg")
+            .unwrap_or_default()
+            .get(index)
+            .and_then(|&(offset, bytes)| Some((translate(offset)?, bytes)))
+            .ok_or_else(|| format!("{path} reg[{index}] is missing or outside /arm-io ranges"))
+    };
+    let in_aperture = |index: usize| -> Result<(u64, u64), String> {
+        let (physical, bytes) = range(&node, PATH, index)?;
+        physical
+            .checked_sub(aperture)
+            .filter(|&offset| offset < layout.aperture_bytes)
+            .map(|offset| (offset, bytes))
+            .ok_or_else(|| format!("{PATH} reg[{index}] is outside the AMCC aperture"))
+    };
+    if in_aperture(1)? != (0, layout.stride * u64::from(layout.planes)) {
+        return Err(format!("{PATH} reg[1] is not the lock-regs planes"));
+    }
+    let channels = range(&node, PATH, 2)?;
+    let count = node
+        .first_u32("dcs_num_channels")
+        .filter(|&count| count != 0 && channels.1 % u64::from(count) == 0)
+        .ok_or_else(|| format!("{PATH} dcs_num_channels does not divide reg[2]"))?;
+    let number = |name: &str| {
+        node.first_u32(name)
+            .ok_or_else(|| format!("{PATH} has no {name}"))
+    };
+    let slot = range(&node, PATH, number("pmp_ptd_reg_idx")? as usize)?.0
+        + u64::from(number("pmp_ptd_update_space_offset")?);
+    let pmp = io
+        .child("pmp")
+        .ok_or_else(|| format!("{PATH} names PTD registers but there is no /arm-io/pmp"))?;
+    let index = pmp
+        .first_u32("ptd-update-reg-index")
+        .ok_or("/arm-io/pmp has no ptd-update-reg-index")?;
+    let ptd = range(&pmp, "/arm-io/pmp", index as usize)?;
+    if !(ptd.0..ptd.0 + ptd.1).contains(&slot) {
+        return Err(format!(
+            "{PATH} PTD slot {slot:#x} is outside the PMP's PTD registers"
+        ));
+    }
+    Ok(Some(MemoryCache {
+        cache: amcc::Cache {
+            shared: in_aperture(0)?,
+            broadcast: in_aperture(3)?.0,
+            bytes,
+            ways,
+        },
+        channels: (channels.0, channels.1, count as usize),
+        ptd,
+    }))
+}
+
 /// The modeled AES engine under `/arm-io`, if the DeviceTree keeps one; its
 /// `iommu-parent` must be a mapper of a modeled DART.
 fn aes_engine(
@@ -868,6 +985,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
+    let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
         cpus,
         uart,
@@ -877,6 +995,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         darts,
         aes,
         power_states,
+        memory_cache,
         aic: InterruptController {
             physical,
             inputs,
@@ -1365,6 +1484,137 @@ mod tests {
                 .power_states,
             None
         );
+    }
+
+    /// The J473AP's `/arm-io/mcc` and `/arm-io/pmp` registers behind its one
+    /// AMCC aperture.
+    #[test]
+    fn an_mcc_places_its_cache_channels_and_ptd_slot() {
+        use crate::machine::adt::encode;
+        const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let u32s = |cells: &[u32]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let u64s = |cells: &[u64]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let mcc = |ptd_offset: u32| {
+            encode(
+                &[
+                    ("name", &z("mcc")),
+                    ("compatible", &z(MCC)),
+                    (
+                        "reg",
+                        &u64s(&[
+                            0x10_0000,
+                            0x8_0000,
+                            0,
+                            0x10_0000,
+                            0x100_0000,
+                            0x200_0000,
+                            0xf0_0000,
+                            0x10_0000,
+                            0x3b3c_0000,
+                            0x2_0000,
+                        ]),
+                    ),
+                    ("dcs_num_channels", &u32s(&[8])),
+                    ("pmp_ptd_reg_idx", &u32s(&[4])),
+                    ("pmp_ptd_update_space_offset", &u32s(&[ptd_offset])),
+                ],
+                &[],
+            )
+        };
+        let pmp = encode(
+            &[
+                ("name", &z("pmp")),
+                ("reg", &u64s(&[0x3bc0_0000, 0x6_c000, 0x3b3d_0000, 0x4000])),
+                ("ptd-update-reg-index", &u32s(&[1])),
+            ],
+            &[],
+        );
+        let controller = MemoryController {
+            apertures: vec![0x2_0000_0000],
+            layout: amcc::Layout {
+                aperture_bytes: 0xf4_0000,
+                planes: 4,
+                stride: 0x4_0000,
+                cache_status: amcc::Register {
+                    offset: 0x424,
+                    mask: 1,
+                    value: 1,
+                },
+                group: amcc::LockGroup {
+                    page_size_shift: 14,
+                    lower_limit: amcc::Register {
+                        offset: 0x680,
+                        mask: u32::MAX,
+                        value: 0,
+                    },
+                    upper_limit: amcc::Register {
+                        offset: 0x684,
+                        mask: u32::MAX,
+                        value: 0,
+                    },
+                    enable: amcc::Register {
+                        offset: 0x688,
+                        mask: 1,
+                        value: 1,
+                    },
+                    write_disable: amcc::Register {
+                        offset: 0x7f0,
+                        mask: 1,
+                        value: 1,
+                    },
+                    lock: amcc::Register {
+                        offset: 0x68c,
+                        mask: 1,
+                        value: 1,
+                    },
+                },
+                dram_base: 0x8_0000_0000,
+            },
+        };
+        let found = |ptd_offset: u32, controller: Option<&MemoryController>| {
+            let tree = tree_with_io(
+                0x8112,
+                "Apple M2",
+                MODELED,
+                &[],
+                &[mcc(ptd_offset), pmp.clone()],
+            );
+            let io = Node::root(&tree).unwrap().child("arm-io").unwrap();
+            memory_cache(
+                &io,
+                &|offset| Some(0x2_0000_0000 + offset),
+                0x8112,
+                controller,
+            )
+        };
+        assert_eq!(
+            found(0x1_0000, Some(&controller)),
+            Ok(Some(MemoryCache {
+                cache: amcc::Cache {
+                    shared: (0x10_0000, 0x8_0000),
+                    broadcast: 0xf0_0000,
+                    bytes: 8 << 20,
+                    ways: 16,
+                },
+                channels: (0x2_0100_0000, 0x200_0000, 8),
+                ptd: (0x2_3b3d_0000, 0x4000),
+            }))
+        );
+        // The PTD slot must lie in the PMP's registers, and the planes need
+        // the lock-regs aperture.
+        assert!(found(0x2_0000, Some(&controller)).is_err());
+        assert!(found(0x1_0000, None).is_err());
     }
 
     #[test]

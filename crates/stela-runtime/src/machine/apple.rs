@@ -14,10 +14,12 @@ use crate::platform::apple::{
     amcc::{self, Amcc},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     dart::Dart,
+    dcs::Dcs,
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
     lockdown::Lockdown,
     pmgr::{ACTIVE, Pmgr, PowerState},
+    ptd::Ptd,
     uart::S5lUart,
     wdt::AppleWdt,
 };
@@ -156,14 +158,16 @@ impl AppleDevices {
     }
 
     /// The AMCC's lock registers at each aperture of `layout`, with the
-    /// CTRR-A region iBoot programmed (`[base, base + bytes)`).
+    /// CTRR-A region iBoot programmed (`[base, base + bytes)`), and the
+    /// memory cache's registers when the board shows its `cache`.
     pub fn add_memory_controller(
         &mut self,
         apertures: &[u64],
         layout: amcc::Layout,
         programmed: Option<(u64, u64)>,
+        cache: Option<amcc::Cache>,
     ) -> Result<(), String> {
-        let model = Amcc::new(layout, apertures.len(), programmed).map_err(String::from)?;
+        let model = Amcc::new(layout, apertures.len(), programmed, cache).map_err(String::from)?;
         let device = self.bus.add(Box::new(model));
         let ranges: alloc::vec::Vec<Range> = apertures
             .iter()
@@ -176,6 +180,24 @@ impl AppleDevices {
             .map_err(|error| format!("AMCC placement: {error:?}"))?;
         self.memory_controller = Some(device);
         Ok(())
+    }
+
+    /// The memory cache controller's `channels` DRAM channels, sharing
+    /// `range` evenly, and the PMP PTD update registers at `ptd`.
+    pub fn add_memory_channels(
+        &mut self,
+        range: Range,
+        channels: usize,
+        ptd: Range,
+    ) -> Result<(), String> {
+        let stride = range.bytes / channels.max(1) as u64;
+        let model = Dcs::new(channels, stride).map_err(String::from)?;
+        let device = self.bus.add(Box::new(model));
+        self.map(device, &[range])
+            .map_err(|error| format!("DCS placement: {error:?}"))?;
+        let device = self.bus.add(Box::new(Ptd::new()));
+        self.map(device, &[ptd])
+            .map_err(|error| format!("PTD placement: {error:?}"))
     }
 
     /// A `dart,t8110` of `streams` streams at `range`.

@@ -1,10 +1,12 @@
-//! The AMCC memory controller's lock registers: the cache status and the
-//! CTRR-A lock group of every plane, as iBoot describes them in
-//! `/chosen/lock-regs/amcc` (`machine::soc::MemoryController`).
+//! The AMCC memory controller aperture: the cache status and CTRR-A lock
+//! group of every plane, as iBoot describes them in `/chosen/lock-regs/amcc`
+//! (`machine::soc::MemoryController`), and, when the DeviceTree shows the
+//! `mcc,t8112` memory cache controller, the registers its driver programs.
 //!
-//! No public source documents the AMCC. The register map is iBoot's (26A434
-//! `iBoot.j473.RELEASE` builds it, `stela_loader::lock_regs`); the behavior
-//! comes from SPTM 26A434 `ctrr_map_lock_group` and `ctrr_lock_boot`:
+//! No public source documents the AMCC. The lock register map is iBoot's
+//! (26A434 `iBoot.j473.RELEASE` builds it, `stela_loader::lock_regs`); the
+//! behavior comes from SPTM 26A434 `ctrr_map_lock_group` and
+//! `ctrr_lock_boot`:
 //!
 //! - each plane's cache-status register reads `value` under `mask` while
 //!   the cache is disabled, which SPTM asserts before the lockdown; iBoot
@@ -19,9 +21,33 @@
 //! freezes the group, so a change after either stops, because what hardware
 //! does is not documented. Once enable or write-disable is set the region is
 //! taken as locked against writes from any requester, which the engine
-//! applies to every PE (`machine::mmu::Ctrr`). Every other register of the
-//! aperture refuses.
+//! applies to every PE (`machine::mmu::Ctrr`).
+//!
+//! The memory cache ([`Cache`]) follows the 26A434 J473AP
+//! `AppleT8112MemCacheController` driver, which reaches each plane through
+//! `/arm-io/mcc` `reg[1]`, the registers the planes share through `reg[0]`
+//! and every plane at once through the broadcast window `reg[3]`:
+//!
+//! - `mccEnableCacheMode` writes the ways to power to broadcast `0x1c00`
+//!   (at most 16) and `_mccWaitForWaysPwrOn` waits until each plane's
+//!   `0x1c04` shows that many data ways in bits 14:10 and tag ways in 9:5;
+//!   then it clears the cache-status register to enable the cache, and
+//!   disabling writes 0 ways;
+//! - `_cacheFlush` sets cache-status (disabling the cache) and broadcast
+//!   `0x1c2c`, then waits for each plane's `0x1c2c` bit 0 to clear;
+//! - `readCacheSize` reads the size in MiB from bits 15:8 of shared `0x1c`;
+//! - `setDSIDGroupQuota` writes group `n`'s quota, in 128 KiB units, to
+//!   broadcast `0xa000 + 4n`, which `getDSIDGroupQuota` reads back;
+//! - the performance counter, DSID profiling and group timeout registers
+//!   hold the configuration the driver writes, and the event counters read
+//!   what they counted.
+//!
+//! The model keeps no cached data: guest memory is the host's, coherent for
+//! every requester, so powering ways takes effect at once, a flush has
+//! nothing to write back and completes at once, and no event is counted.
+//! Every other register of the aperture refuses.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::regfile::{self, Held, Span};
 use alloc::vec::Vec;
 
 const NAME: &str = "amcc";
@@ -58,13 +84,96 @@ pub struct Layout {
     pub dram_base: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The memory cache of an `mcc,t8112`, its blocks as aperture offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cache {
+    /// The registers the planes share (`/arm-io/mcc` `reg[0]`): offset and
+    /// bytes.
+    pub shared: (u64, u64),
+    /// The window whose writes reach every plane (`reg[3]`), one plane
+    /// stride long.
+    pub broadcast: u64,
+    pub bytes: u64,
+    pub ways: u32,
+}
+
+/// What a plane or shared register of the memory cache means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// The ways to power.
+    Ways,
+    /// The powered data and tag ways.
+    PoweredWays,
+    /// Bit 0 starts a flush and reads set until it completes.
+    Flush,
+    /// The size in MiB in bits 15:8.
+    Size,
+    /// Holds what the driver writes.
+    Held,
+    /// Counts events.
+    Counter,
+}
+
+const MIB: u64 = 1 << 20;
+
+/// The `mcc,t8112` plane registers besides the lock-regs ones.
+const T8112_PLANE: [Span<Role>; 12] = [
+    Span::new(0x1c00, 0x1c04, Width::Word, Role::Ways),
+    Span::new(0x1c04, 0x1c08, Width::Word, Role::PoweredWays),
+    Span::new(0x1c2c, 0x1c30, Width::Word, Role::Flush),
+    // DSID group quotas (32 groups) and the group timeout.
+    Span::new(0xa000, 0xa080, Width::Word, Role::Held),
+    Span::new(0xa820, 0xa824, Width::Word, Role::Held),
+    // Performance counter control and configuration.
+    Span::new(0x1_c00c, 0x1_c014, Width::Word, Role::Held),
+    Span::new(0x1_e004, 0x1_e008, Width::Word, Role::Held),
+    Span::new(0x1_f000, 0x1_f040, Width::Word, Role::Held),
+    Span::new(0x2_4000, 0x2_4110, Width::Double, Role::Held),
+    Span::new(0x2_4800, 0x2_4870, Width::Double, Role::Held),
+    Span::new(0x2_5000, 0x2_5080, Width::Double, Role::Counter),
+    // DSID profile counter configuration.
+    Span::new(0x2_7000, 0x2_7020, Width::Double, Role::Held),
+];
+
+/// The `mcc,t8112` registers the planes share.
+const T8112_SHARED: [Span<Role>; 8] = [
+    Span::new(0x1c, 0x20, Width::Word, Role::Size),
+    // Performance counter control, configuration and counters.
+    Span::new(0x5_2000, 0x5_2008, Width::Word, Role::Held),
+    Span::new(0x5_3000, 0x5_3020, Width::Word, Role::Held),
+    Span::new(0x5_8000, 0x5_83b8, Width::Double, Role::Held),
+    Span::new(0x5_8800, 0x5_8938, Width::Double, Role::Held),
+    Span::new(0x5_9000, 0x5_91d8, Width::Double, Role::Counter),
+    Span::new(0x5_a000, 0x5_a010, Width::Double, Role::Counter),
+    // DSID profile counter enable.
+    Span::new(0x5_e000, 0x5_e004, Width::Word, Role::Held),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Plane {
     lower: u32,
     upper: u32,
     enable: bool,
     write_disable: bool,
     lock: bool,
+    cache_disabled: bool,
+    ways: u32,
+    held: Held,
+}
+
+impl Default for Plane {
+    fn default() -> Self {
+        Self {
+            lower: 0,
+            upper: 0,
+            enable: false,
+            write_disable: false,
+            lock: false,
+            cache_disabled: true,
+            ways: 0,
+            held: Held::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,26 +186,65 @@ enum Kind {
     Lock,
 }
 
+/// Where an aperture offset lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// A plane (aperture-wide index) and its register.
+    Plane(usize, u64),
+    /// Every plane of an aperture (its first index) and the register.
+    Broadcast(usize, u64),
+    /// An aperture's shared register.
+    Shared(usize, u64),
+}
+
 /// Every aperture's planes behind one device.
 #[derive(Debug, Clone)]
 pub struct Amcc {
     layout: Layout,
+    cache: Option<Cache>,
     planes: Vec<Plane>,
+    shared: Vec<Held>,
 }
 
 impl Amcc {
     /// The controller with `apertures` apertures and the CTRR-A region iBoot
     /// programmed, `[base, base + bytes)` in whole pages above the DRAM
-    /// base, on every plane; with none programmed the limits read 0.
+    /// base, on every plane; with none programmed the limits read 0. With a
+    /// `cache`, its registers are modeled too.
     pub fn new(
         layout: Layout,
         apertures: usize,
         programmed: Option<(u64, u64)>,
+        cache: Option<Cache>,
     ) -> Result<Self, &'static str> {
         let shift = layout.group.page_size_shift;
         let page = 1u64.checked_shl(shift).ok_or("page-size-shift too large")?;
-        if layout.planes == 0 || layout.stride * u64::from(layout.planes) > layout.aperture_bytes {
+        let planes_end = layout.stride * u64::from(layout.planes);
+        if layout.planes == 0 || planes_end > layout.aperture_bytes {
             return Err("AMCC planes do not fit the aperture");
+        }
+        if let Some(cache) = cache {
+            let (shared, shared_bytes) = cache.shared;
+            let inside = |start: u64, bytes: u64| {
+                start >= planes_end
+                    && start
+                        .checked_add(bytes)
+                        .is_some_and(|end| end <= layout.aperture_bytes)
+            };
+            if !inside(shared, shared_bytes)
+                || !inside(cache.broadcast, layout.stride)
+                || (shared < cache.broadcast + layout.stride
+                    && cache.broadcast < shared + shared_bytes)
+            {
+                return Err("memory cache blocks do not fit the aperture beside its planes");
+            }
+            if cache.ways == 0
+                || cache.ways > 0x1f
+                || !cache.bytes.is_multiple_of(MIB)
+                || cache.bytes / MIB > 0xff
+            {
+                return Err("memory cache geometry the registers cannot state");
+            }
         }
         let mut plane = Plane::default();
         if let Some((base, bytes)) = programmed {
@@ -111,7 +259,9 @@ impl Amcc {
         }
         Ok(Self {
             planes: alloc::vec![plane; apertures * layout.planes as usize],
+            shared: alloc::vec![Held::default(); apertures],
             layout,
+            cache,
         })
     }
 
@@ -132,23 +282,35 @@ impl Amcc {
             .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     }
 
-    fn locate(
-        &self,
-        offset: u64,
-        width: Width,
-        direction: Direction,
-    ) -> Result<(usize, Kind), MmioError> {
-        let refused = |reason| refuse(NAME, offset, width, direction, reason);
+    fn target(&self, offset: u64) -> Result<Target, &'static str> {
         let layout = &self.layout;
-        let aperture = offset / layout.aperture_bytes;
+        let aperture = (offset / layout.aperture_bytes) as usize;
         let within = offset % layout.aperture_bytes;
+        let first = aperture * layout.planes as usize;
         let plane = within / layout.stride;
-        if plane >= u64::from(layout.planes) {
-            return Err(refused("AMCC register outside the lock-regs planes"));
+        if plane < u64::from(layout.planes) {
+            return Ok(Target::Plane(
+                first + plane as usize,
+                within % layout.stride,
+            ));
         }
-        let register = within % layout.stride;
+        let cache = self
+            .cache
+            .ok_or("AMCC register outside the lock-regs planes")?;
+        let (shared, bytes) = cache.shared;
+        if (cache.broadcast..cache.broadcast + layout.stride).contains(&within) {
+            Ok(Target::Broadcast(first, within - cache.broadcast))
+        } else if (shared..shared + bytes).contains(&within) {
+            Ok(Target::Shared(aperture, within - shared))
+        } else {
+            Err("AMCC register outside the planes and memory cache blocks")
+        }
+    }
+
+    fn lock_kind(&self, register: u64) -> Option<Kind> {
+        let layout = &self.layout;
         let group = &layout.group;
-        let kind = [
+        [
             (layout.cache_status, Kind::CacheStatus),
             (group.lower_limit, Kind::Lower),
             (group.upper_limit, Kind::Upper),
@@ -159,12 +321,6 @@ impl Amcc {
         .into_iter()
         .find(|(candidate, _)| candidate.offset == register)
         .map(|(_, kind)| kind)
-        .ok_or_else(|| refused("AMCC register without public description"))?;
-        if width != Width::Word {
-            return Err(refused("AMCC register access other than 32 bits"));
-        }
-        let index = aperture as usize * layout.planes as usize + plane as usize;
-        Ok((index, kind))
     }
 
     fn register(&self, kind: Kind) -> Register {
@@ -178,10 +334,192 @@ impl Amcc {
             Kind::Lock => group.lock,
         }
     }
+
+    fn plane_role(&self, register: u64, width: Width) -> Result<Role, &'static str> {
+        if self.cache.is_none() {
+            return Err("AMCC register without public description");
+        }
+        regfile::role(&T8112_PLANE, register, width)
+    }
+
+    fn read_plane(&self, index: usize, register: u64, width: Width) -> Result<u64, &'static str> {
+        let plane = &self.planes[index];
+        if let Some(kind) = self.lock_kind(register) {
+            if width != Width::Word {
+                return Err("AMCC register access other than 32 bits");
+            }
+            let bits = self.register(kind);
+            return Ok(match kind {
+                Kind::CacheStatus => bit(plane.cache_disabled, bits),
+                Kind::Lower => u64::from(plane.lower),
+                Kind::Upper => u64::from(plane.upper),
+                Kind::Enable => bit(plane.enable, bits),
+                Kind::WriteDisable => bit(plane.write_disable, bits),
+                Kind::Lock => bit(plane.lock, bits),
+            });
+        }
+        Ok(match self.plane_role(register, width)? {
+            Role::Ways => u64::from(plane.ways),
+            Role::PoweredWays => u64::from(plane.ways) << 10 | u64::from(plane.ways) << 5,
+            Role::Flush | Role::Counter => 0,
+            Role::Held => plane.held.get(register),
+            Role::Size => unreachable!("no plane register states the size"),
+        })
+    }
+
+    fn write_plane(
+        &mut self,
+        index: usize,
+        register: u64,
+        width: Width,
+        value: u64,
+    ) -> Result<(), &'static str> {
+        let Some(kind) = self.lock_kind(register) else {
+            let role = self.plane_role(register, width)?;
+            let ways = self.cache.map_or(0, |cache| cache.ways);
+            let plane = &mut self.planes[index];
+            return match role {
+                Role::Ways if value <= u64::from(ways) => {
+                    plane.ways = value as u32;
+                    Ok(())
+                }
+                Role::Ways => Err("more memory cache ways than the cache has"),
+                Role::Flush if value == 1 => Ok(()),
+                Role::Flush => Err("memory cache flush value other than 1"),
+                Role::Held => {
+                    plane.held.set(register, value);
+                    Ok(())
+                }
+                Role::PoweredWays | Role::Counter | Role::Size => {
+                    Err("write to a memory cache status or counter")
+                }
+            };
+        };
+        if width != Width::Word {
+            return Err("AMCC register access other than 32 bits");
+        }
+        let bits = self.register(kind);
+        let value = value as u32;
+        if value & !bits.mask != 0 {
+            return Err("AMCC register bit without described meaning");
+        }
+        let plane = &mut self.planes[index];
+        let set = match kind {
+            Kind::CacheStatus if self.cache.is_none() => return Err("AMCC cache-status write"),
+            Kind::Lower | Kind::Upper => {
+                let limit = if kind == Kind::Lower {
+                    &mut plane.lower
+                } else {
+                    &mut plane.upper
+                };
+                if *limit != value && (plane.lock || plane.write_disable) {
+                    return Err("AMCC limit change after write-disable or lock");
+                }
+                *limit = value;
+                return Ok(());
+            }
+            _ if value == bits.value => true,
+            _ if value == 0 => false,
+            _ => return Err("AMCC bit register value other than set or clear"),
+        };
+        let locked = plane.lock;
+        let flag = match kind {
+            Kind::CacheStatus => {
+                plane.cache_disabled = set;
+                return Ok(());
+            }
+            Kind::Enable => &mut plane.enable,
+            Kind::WriteDisable => &mut plane.write_disable,
+            _ => &mut plane.lock,
+        };
+        if locked && *flag != set {
+            return Err("AMCC lock group change after its lock");
+        }
+        *flag = set;
+        Ok(())
+    }
+
+    fn read_shared(
+        &self,
+        aperture: usize,
+        register: u64,
+        width: Width,
+    ) -> Result<u64, &'static str> {
+        let cache = self
+            .cache
+            .ok_or("AMCC register outside the lock-regs planes")?;
+        Ok(match regfile::role(&T8112_SHARED, register, width)? {
+            Role::Size => (cache.bytes / MIB) << 8,
+            Role::Held => self.shared[aperture].get(register),
+            _ => 0,
+        })
+    }
+
+    fn write_shared(
+        &mut self,
+        aperture: usize,
+        register: u64,
+        width: Width,
+        value: u64,
+    ) -> Result<(), &'static str> {
+        match regfile::role(&T8112_SHARED, register, width)? {
+            Role::Held => {
+                self.shared[aperture].set(register, value);
+                Ok(())
+            }
+            _ => Err("write to a memory cache status or counter"),
+        }
+    }
+
+    fn access(
+        &mut self,
+        offset: u64,
+        width: Width,
+        write: Option<u64>,
+    ) -> Result<u64, &'static str> {
+        let planes = self.layout.planes as usize;
+        match (self.target(offset)?, write) {
+            (Target::Plane(index, register), None) => self.read_plane(index, register, width),
+            (Target::Plane(index, register), Some(value)) => {
+                self.write_plane(index, register, width, value).map(|()| 0)
+            }
+            (Target::Shared(aperture, register), None) => {
+                self.read_shared(aperture, register, width)
+            }
+            (Target::Shared(aperture, register), Some(value)) => self
+                .write_shared(aperture, register, width, value)
+                .map(|()| 0),
+            // A broadcast read answers only while the planes agree.
+            (Target::Broadcast(first, register), None) => {
+                let value = self.read_plane(first, register, width)?;
+                for index in first + 1..first + planes {
+                    if self.read_plane(index, register, width)? != value {
+                        return Err("broadcast read of planes that differ");
+                    }
+                }
+                Ok(value)
+            }
+            // Every plane takes the write, or none does.
+            (Target::Broadcast(first, register), Some(value)) => {
+                let before = self.planes[first..first + planes].to_vec();
+                for index in first..first + planes {
+                    if let Err(reason) = self.write_plane(index, register, width, value) {
+                        self.planes[first..first + planes].clone_from_slice(&before);
+                        return Err(reason);
+                    }
+                }
+                Ok(0)
+            }
+        }
+    }
 }
 
 fn bit(set: bool, register: Register) -> u64 {
-    if set { u64::from(register.value) } else { 0 }
+    if set {
+        u64::from(register.value & register.mask)
+    } else {
+        0
+    }
 }
 
 impl MmioDevice for Amcc {
@@ -190,17 +528,8 @@ impl MmioDevice for Amcc {
     }
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let (index, kind) = self.locate(offset, width, Direction::Read)?;
-        let plane = &self.planes[index];
-        let register = self.register(kind);
-        Ok(match kind {
-            Kind::CacheStatus => u64::from(register.value & register.mask),
-            Kind::Lower => u64::from(plane.lower),
-            Kind::Upper => u64::from(plane.upper),
-            Kind::Enable => bit(plane.enable, register),
-            Kind::WriteDisable => bit(plane.write_disable, register),
-            Kind::Lock => bit(plane.lock, register),
-        })
+        self.access(offset, width, None)
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))
     }
 
     fn write(
@@ -210,43 +539,9 @@ impl MmioDevice for Amcc {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let (index, kind) = self.locate(offset, width, Direction::Write)?;
-        let refused = |reason| refuse(NAME, offset, width, Direction::Write, reason);
-        let register = self.register(kind);
-        let value = value as u32;
-        if value & !register.mask != 0 {
-            return Err(refused("AMCC register bit without described meaning"));
-        }
-        let plane = &mut self.planes[index];
-        let set = match kind {
-            Kind::CacheStatus => return Err(refused("AMCC cache-status write")),
-            Kind::Lower | Kind::Upper => {
-                let limit = if kind == Kind::Lower {
-                    &mut plane.lower
-                } else {
-                    &mut plane.upper
-                };
-                if *limit != value && (plane.lock || plane.write_disable) {
-                    return Err(refused("AMCC limit change after write-disable or lock"));
-                }
-                *limit = value;
-                return Ok(());
-            }
-            _ if value == register.value => true,
-            _ if value == 0 => false,
-            _ => return Err(refused("AMCC bit register value other than set or clear")),
-        };
-        let locked = plane.lock;
-        let flag = match kind {
-            Kind::Enable => &mut plane.enable,
-            Kind::WriteDisable => &mut plane.write_disable,
-            _ => &mut plane.lock,
-        };
-        if locked && *flag != set {
-            return Err(refused("AMCC lock group change after its lock"));
-        }
-        *flag = set;
-        Ok(())
+        self.access(offset, width, Some(value))
+            .map(|_| ())
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))
     }
 }
 
@@ -290,7 +585,7 @@ mod tests {
     fn sptms_lockdown_reads_iboots_limits_and_locks_every_plane() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        let mut amcc = Amcc::new(layout(), 1, Some((0x8_0200_0000, 0x579_0000))).unwrap();
+        let mut amcc = Amcc::new(layout(), 1, Some((0x8_0200_0000, 0x579_0000)), None).unwrap();
         for plane in 0..4u64 {
             let at = |offset: u64| plane * 0x4_0000 + offset;
             assert_eq!(amcc.read(at(0x424), Width::Word, &mut access), Ok(1));
@@ -320,9 +615,90 @@ mod tests {
 
     #[test]
     fn programmed_regions_are_whole_pages_above_dram() {
-        assert!(Amcc::new(layout(), 1, Some((0x8_0200_1000, 0x4000))).is_err());
-        assert!(Amcc::new(layout(), 1, Some((0x7_0000_0000, 0x4000))).is_err());
-        let blank = Amcc::new(layout(), 2, None).unwrap();
+        assert!(Amcc::new(layout(), 1, Some((0x8_0200_1000, 0x4000)), None).is_err());
+        assert!(Amcc::new(layout(), 1, Some((0x7_0000_0000, 0x4000)), None).is_err());
+        let blank = Amcc::new(layout(), 2, None, None).unwrap();
         assert_eq!(blank.planes.len(), 8);
+    }
+
+    const CACHE: Cache = Cache {
+        shared: (0x10_0000, 0x8_0000),
+        broadcast: 0xf0_0000,
+        bytes: 8 << 20,
+        ways: 16,
+    };
+
+    /// `mccEnableCacheMode`, `_cacheFlush` and `readCacheSize` as the 26A434
+    /// J473AP driver runs them.
+    #[test]
+    fn the_memory_cache_powers_ways_enables_and_flushes_at_once() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut amcc = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        let plane = |n: u64, offset: u64| n * 0x4_0000 + offset;
+        let mut read = |amcc: &mut Amcc, offset, width| amcc.read(offset, width, &mut access);
+        assert_eq!(read(&mut amcc, 0x10_001c, Width::Word), Ok(0x800));
+        for n in 0..4 {
+            assert_eq!(read(&mut amcc, plane(n, 0x424), Width::Word), Ok(1));
+            assert_eq!(read(&mut amcc, plane(n, 0x1c04), Width::Word), Ok(0));
+        }
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut write =
+            |amcc: &mut Amcc, offset, width, value| amcc.write(offset, width, value, &mut access);
+        // Enable: power 16 ways, wait, then clear cache-status.
+        write(&mut amcc, 0xf0_1c00, Width::Word, 16).unwrap();
+        write(&mut amcc, 0xf0_0424, Width::Word, 0).unwrap();
+        assert!(write(&mut amcc, 0xf0_1c00, Width::Word, 17).is_err());
+        // Flush: set cache-status and start the flush.
+        write(&mut amcc, 0xf0_0424, Width::Word, 1).unwrap();
+        write(&mut amcc, 0xf0_1c2c, Width::Word, 1).unwrap();
+        // A group quota through the broadcast window, and the shared
+        // configuration.
+        write(&mut amcc, 0xf0_a010, Width::Word, 0x20).unwrap();
+        write(&mut amcc, 0x15_8000, Width::Double, 1 << 55).unwrap();
+        assert!(write(&mut amcc, 0x15_9000, Width::Double, 0).is_err());
+        assert!(write(&mut amcc, 0x10_001c, Width::Word, 0).is_err());
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut read = |amcc: &mut Amcc, offset, width| amcc.read(offset, width, &mut access);
+        for n in 0..4 {
+            assert_eq!(
+                read(&mut amcc, plane(n, 0x1c04), Width::Word),
+                Ok(16 << 10 | 16 << 5)
+            );
+            assert_eq!(read(&mut amcc, plane(n, 0x1c2c), Width::Word), Ok(0));
+            assert_eq!(read(&mut amcc, plane(n, 0x424), Width::Word), Ok(1));
+            assert_eq!(read(&mut amcc, plane(n, 0xa010), Width::Word), Ok(0x20));
+            assert_eq!(read(&mut amcc, plane(n, 0x2_5000), Width::Double), Ok(0));
+        }
+        assert_eq!(read(&mut amcc, 0xf0_a010, Width::Word), Ok(0x20));
+        assert_eq!(read(&mut amcc, 0x15_8000, Width::Double), Ok(1 << 55));
+        // Undescribed registers and widths still refuse.
+        assert!(read(&mut amcc, 0x1c04, Width::Double).is_err());
+        assert!(read(&mut amcc, 0x1c08, Width::Word).is_err());
+        assert!(read(&mut amcc, 0x18_0000, Width::Word).is_err());
+    }
+
+    #[test]
+    fn a_broadcast_write_reaches_every_plane_or_none() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut amcc = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        // Plane 3 locks its group; a broadcast change of enable then stops
+        // without changing planes 0 to 2.
+        for offset in [0x688, 0x68c] {
+            amcc.write(3 * 0x4_0000 + offset, Width::Word, 1, &mut access)
+                .unwrap();
+        }
+        assert!(amcc.write(0xf0_0688, Width::Word, 0, &mut access).is_err());
+        assert!(amcc.read(0xf0_0688, Width::Word, &mut access).is_err());
+        assert_eq!(amcc.read(0x688, Width::Word, &mut access), Ok(0));
+        // Blocks that overlap the planes or each other are refused.
+        let overlapping = Cache {
+            shared: (0xf0_0000, 0x8_0000),
+            ..CACHE
+        };
+        assert!(Amcc::new(layout(), 1, None, Some(overlapping)).is_err());
     }
 }

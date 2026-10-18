@@ -355,12 +355,31 @@ fn devices(
         ));
     }
     let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
+    let memory_cache = board.and_then(|board| board.memory_cache);
     if let Some(controller) = memory_controller {
         devices.add_memory_controller(
             &controller.apertures,
             controller.layout,
             read_only_region,
+            memory_cache.map(|mcc| mcc.cache),
         )?;
+    }
+    if let Some(mcc) = memory_cache {
+        let (physical, bytes, channels) = mcc.channels;
+        let (ptd, ptd_bytes) = mcc.ptd;
+        devices.add_memory_channels(
+            Range { physical, bytes },
+            channels,
+            Range {
+                physical: ptd,
+                bytes: ptd_bytes,
+            },
+        )?;
+        output::arguments(format_args!(
+            "DEVICES mcc cache={}MiB ways={} dcs-channels={channels} ptd={ptd:#x}\n",
+            mcc.cache.bytes >> 20,
+            mcc.cache.ways
+        ));
     }
     output::arguments(format_args!(
         "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
