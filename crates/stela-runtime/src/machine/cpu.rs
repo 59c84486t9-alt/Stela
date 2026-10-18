@@ -199,6 +199,8 @@ pub struct Cpu {
     pub monitor: Option<u64>,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
+    /// The GICv3 virtual CPU interface (`machine::vgic`).
+    pub vgic: super::vgic::CpuInterface,
     /// On a chip with FEAT_SME: PSTATE.SM and ZA, ZA itself, ZT0 with
     /// FEAT_SME2, and the Z, P and FFR state beyond `state.v`
     /// (`crate::scalable`).
@@ -311,6 +313,7 @@ impl Cpu {
             claim: 0,
             monitor: None,
             amx: super::amx::Unit::default(),
+            vgic: super::vgic::CpuInterface::default(),
             scalable: (chip.implemented(Feature::FEAT_SME) == Ok(true)).then(|| {
                 let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)
                     .expect("a 512-bit vector length");

@@ -20,7 +20,7 @@ use super::{
     registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
     streaming::{self, Denial},
     system::{Feature, Register as SystemRegister},
-    timer,
+    timer, vgic,
 };
 use crate::pauth;
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
@@ -2587,6 +2587,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let exception = self.floating_point_exception(self.cpu.pc);
             self.take(exception);
             return Ok(());
+        }
+        // Apple's vGIC CPU interface answers the ICH_* encodings before the
+        // generated accessors, which follow the profile's absent FEAT_GICv3.
+        // Under HCR_EL2.NV an EL1 access to an EL2 register traps to EL2.
+        let el = self.cpu.pstate.el;
+        let vgic = if el == 1 && self.cpu.nested() & 1 != 0 && vgic::owns(encoding) {
+            Some(RegisterOutcome::Trapped(Some(2)))
+        } else if access.direction() == Direction::Read {
+            self.cpu.vgic.read(encoding, el)
+        } else {
+            let value = match access.rt() {
+                31 => 0,
+                rt => self.cpu.state.x[usize::from(rt)],
+            };
+            self.cpu.vgic.write(encoding, el, value)
+        };
+        if let Some(outcome) = vgic {
+            return self.register_outcome(word, Some(access), outcome);
         }
         if let Some(step) = self.system_access(word, access) {
             return step;

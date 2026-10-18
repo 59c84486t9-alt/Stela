@@ -21,6 +21,7 @@ pub mod soc;
 pub mod streaming;
 pub mod system;
 pub mod timer;
+pub mod vgic;
 
 pub use chip::Chip;
 #[cfg(test)]
