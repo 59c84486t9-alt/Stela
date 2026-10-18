@@ -46,8 +46,9 @@ const TIMEOUT_EXIT: u8 = 124;
 const MAX_TIMEOUT_SECONDS: f64 = 120.0;
 /// QEMU's FAT16 directory volume holds at most 516 MB; keep a margin.
 const VVFAT_BYTES: u64 = 480 * 1024 * 1024;
-/// A real restore payload verifies in tens of minutes under TCG.
-const MAX_USB_TIMEOUT_SECONDS: f64 = 4.0 * 3600.0;
+/// A real restore payload verifies, and a kernel bundle boots, in tens of
+/// minutes under TCG.
+const MAX_LONG_TIMEOUT_SECONDS: f64 = 4.0 * 3600.0;
 const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
 const FIRMWARE_VARIABLES: &str = "edk2-i386-vars.fd";
 /// How often an OpenCore run presses Enter in the boot picker.
@@ -240,9 +241,10 @@ fn firmware(qemu: &Path) -> Result<PathBuf> {
 }
 
 fn launch(arguments: Run) -> Result<ExitCode> {
-    let limit = match arguments.usb_image {
-        Some(_) => MAX_USB_TIMEOUT_SECONDS,
-        None => MAX_TIMEOUT_SECONDS,
+    let limit = if arguments.usb_image.is_some() || arguments.bundle.is_some() {
+        MAX_LONG_TIMEOUT_SECONDS
+    } else {
+        MAX_TIMEOUT_SECONDS
     };
     ensure!(
         arguments.timeout > 0.0 && arguments.timeout <= limit,
