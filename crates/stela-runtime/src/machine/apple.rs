@@ -13,7 +13,7 @@ use crate::platform::apple::{
     aic1::Aic1,
     amcc::{self, Amcc},
     ans::Ans,
-    asc::{Asc, Lines as AscLines},
+    asc::{self, Asc},
     bridge::Bridge,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
@@ -34,6 +34,7 @@ use crate::platform::apple::{
     ptd::{self, Ptd},
     rtkit::{Management, RtKit},
     sart::{self, Sart},
+    sep::{self, Sep},
     spi::Spi,
     uart::S5lUart,
     wake::{self, WakeMasks},
@@ -46,8 +47,10 @@ use alloc::{boxed::Box, format, string::String, vec::Vec};
 pub use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
+    asc::Lines as AscLines,
     interrupt::AicInput,
     nor,
+    sep::Entropy as SepEntropy,
     uart::{ConsoleBusy, ConsoleSink},
 };
 
@@ -68,6 +71,7 @@ pub struct AppleDevices {
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
+    sep_masters: Vec<SepMaster>,
     cpu_start: Option<CpuStarter>,
     reset_vectors: Vec<Option<DeviceId>>,
     starts: Vec<Start>,
@@ -90,6 +94,13 @@ struct CpuStarter {
 #[derive(Debug, Clone, Copy)]
 struct Master {
     aes: DeviceId,
+    dart: DeviceId,
+    stream: usize,
+}
+
+/// A SEP and the DT-selected DART stream carrying its firmware DMA.
+struct SepMaster {
+    sep: DeviceId,
     dart: DeviceId,
     stream: usize,
 }
@@ -144,6 +155,7 @@ impl AppleDevices {
             ipi: None,
             masters: Vec::new(),
             storage_masters: Vec::new(),
+            sep_masters: Vec::new(),
             cpu_start: None,
             reset_vectors: Vec::new(),
             starts: Vec::new(),
@@ -420,6 +432,43 @@ impl AppleDevices {
                 .map(device, physical, dart::DAPF_BYTES, dart::DAPF_OFFSET)?;
         }
         Ok(DartId(device))
+    }
+
+    /// SEP ROM prefix at DT wrapper/auxiliary ranges, on its four mailbox
+    /// lines and dart-sep stream. This does not admit SEP in `soc::models`.
+    pub fn add_sep(
+        &mut self,
+        [wrapper, auxiliary]: [Range; 2],
+        lines: asc::Lines,
+        (dart, stream): (DartId, usize),
+        entropy: Box<dyn sep::Entropy>,
+    ) -> Result<(), String> {
+        if wrapper.bytes < asc::WRAPPER_BYTES || auxiliary.bytes == 0 {
+            return Err("SEP register apertures are incomplete".into());
+        }
+        if stream != 0 {
+            return Err("SEP requires dart-sep stream zero".into());
+        }
+        let device = self
+            .bus
+            .add(Box::new(Sep::new(entropy, lines).map_err(String::from)?));
+        self.bus
+            .map(device, wrapper.physical, wrapper.bytes, 0)
+            .map_err(|e| format!("SEP wrapper placement: {e:?}"))?;
+        self.bus
+            .map(
+                device,
+                auxiliary.physical,
+                auxiliary.bytes,
+                sep::AUXILIARY_OFFSET,
+            )
+            .map_err(|e| format!("SEP auxiliary placement: {e:?}"))?;
+        self.sep_masters.push(SepMaster {
+            sep: device,
+            dart: dart.0,
+            stream,
+        });
+        Ok(())
     }
 
     /// An `aes,s8000` of `aes-version` `version` at its block and
@@ -949,6 +998,23 @@ impl Devices for AppleDevices {
                 access: &mut access,
             };
             ans.run(&mut port).map_err(describe)?;
+        }
+        for master in &self.sep_masters {
+            let (sep, dart) = self
+                .bus
+                .pair_mut::<Sep, Dart>(master.sep, master.dart)
+                .expect("a SEP master names its model and DART");
+            if !sep.pending() {
+                continue;
+            }
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            let mut port = Port {
+                iommu: dart,
+                stream: master.stream,
+                memory,
+                access: &mut access,
+            };
+            sep.transfer(&mut port).map_err(describe)?;
         }
         self.settle(cpu, now, None)
     }
@@ -1494,5 +1560,92 @@ mod tests {
         );
         // The FIFO drained: EMPTY with LEVEL 0.
         assert_eq!(devices.read(0, AES + 0x24, 4, 0).unwrap() & 0xff02, 0b10);
+    }
+    #[test]
+    fn sep_firmware_dma_faults_or_refuses_authentication_without_a_boot_ack() {
+        use crate::platform::{
+            apple::sep::message::{Frame, ROM},
+            dma::tests::Ram,
+        };
+        const DART: u64 = 0x25d2c0000;
+        const SEP: u64 = 0x25e400000;
+        const AUX: u64 = 0x25e050000;
+        const RAM: u64 = 0x800000000;
+        for enable in [false, true] {
+            let mut devices = AppleDevices::new();
+            let dart = devices
+                .add_dart(
+                    Range {
+                        physical: DART,
+                        bytes: 0x4000,
+                    },
+                    1,
+                    None,
+                    None,
+                )
+                .unwrap();
+            devices
+                .add_sep(
+                    [
+                        Range {
+                            physical: SEP,
+                            bytes: 0x6c000,
+                        },
+                        Range {
+                            physical: AUX,
+                            bytes: 0x60000,
+                        },
+                    ],
+                    asc::Lines::default(),
+                    (dart, 0),
+                    Box::new(|_: &mut [u8]| Err("unused entropy")),
+                )
+                .unwrap();
+            devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap();
+            if enable {
+                devices.write(0, DART + 0xc00, 4, 1, 0).unwrap();
+                devices.write(0, DART + 0x1000, 4, 6, 0).unwrap();
+            }
+            let mut ram = Ram::new(RAM, 0x1000);
+            ram.bytes[..8].copy_from_slice(b"\x30\x06\x16\x04IM4P");
+            for (opcode, data) in [(5, 0), (6, (RAM >> 12) as u32)] {
+                let message = Frame {
+                    service: ROM,
+                    tag: 1,
+                    opcode,
+                    parameter: 0,
+                    data,
+                }
+                .mailbox();
+                devices
+                    .write(0, SEP + 0x8800, 8, message.payload, 0)
+                    .unwrap();
+                devices.write(0, SEP + 0x8808, 8, 0, 0).unwrap();
+                let result = devices.transfer(0, &mut ram, 0);
+                if opcode == 5 {
+                    result.unwrap();
+                    devices.read(0, SEP + 0x8830, 8, 0).unwrap();
+                    devices.read(0, SEP + 0x8838, 8, 0).unwrap();
+                } else {
+                    let Err(DeviceError::Refused(reason)) = result else {
+                        panic!("SEP must not boot from an unauthenticated image");
+                    };
+                    assert!(reason.contains(if enable {
+                        "Image4 authentication"
+                    } else {
+                        "DMA fault"
+                    }));
+                    assert_eq!(devices.read(0, SEP + 0x8114, 4, 0).unwrap(), 1 | 1 << 17);
+                    assert_eq!(ram.bytes[..8], *b"\x30\x06\x16\x04IM4P");
+                }
+            }
+            assert!(
+                matches!(devices.read(0, AUX, 4, 0), Err(DeviceError::Refused(reason)) if reason.contains("auxiliary"))
+            );
+            assert!(matches!(
+                devices.read(0, SEP + 0x6c000, 4, 0),
+                Err(DeviceError::NoDevice)
+            ));
+        }
     }
 }

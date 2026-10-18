@@ -261,7 +261,7 @@ mod tests {
                             node(
                                 "sep",
                                 Some(b"iop-sep,ascwrap-v4\0"),
-                                vec![node("iop-sep-nub", Some(b"iop-nub,rtbuddy-v2\0"), vec![])],
+                                vec![node("iop-sep-nub", Some(b"iop-nub,sep\0"), vec![])],
                             ),
                             node("dart-sep", Some(b"dart,t8110\0"), vec![]),
                             aes(b"aes,s5l8960x\0"),

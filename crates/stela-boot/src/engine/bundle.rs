@@ -242,7 +242,7 @@ pub fn from_disk(storage: &pc::Handoff, target: &Target) -> Result<Vec<(String, 
 
 /// Fill `buffer` from RDSEED, or from RDRAND on a CPU without RDSEED. A CPU
 /// with neither is refused: the kernel's seeds must not be predictable.
-fn entropy(buffer: &mut [u8]) -> Result<(), &'static str> {
+pub(super) fn entropy(buffer: &mut [u8]) -> Result<(), &'static str> {
     let seed = __cpuid_count(7, 0).ebx & CPUID_RDSEED != 0;
     let rand = __cpuid(1).ecx & CPUID_RDRAND != 0;
     if !seed && !rand {

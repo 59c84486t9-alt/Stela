@@ -416,6 +416,19 @@ fn devices(
             .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
         darts.push(placed);
     }
+    if let Some(sep) = board.and_then(|board| board.sep) {
+        use stela_runtime::machine::apple::AscLines;
+        let ranges = sep
+            .ranges
+            .map(|(physical, bytes)| Range { physical, bytes });
+        let lines = AscLines::from_interrupts(sep.irqs.map(|irq| AicInput::new(0, irq as u16)));
+        devices.add_sep(
+            ranges,
+            lines,
+            (darts[sep.iommu], sep.stream as usize),
+            alloc::boxed::Box::new(bundle::entropy),
+        )?;
+    }
     if let Some(aes) = board.and_then(|board| board.aes) {
         let [block, key_disable] = aes
             .ranges
