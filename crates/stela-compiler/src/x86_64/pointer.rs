@@ -24,7 +24,7 @@ use crate::{
 use alloc::vec::Vec;
 
 /// Entries in the memo.
-pub const MEMO_ENTRIES: usize = 1024;
+pub const MEMO_ENTRIES: usize = 1 << 14;
 /// A signing result.
 pub const SIGNED: u64 = 1;
 /// A successful authentication, which answers both the plain and the
@@ -46,9 +46,9 @@ const _: () = assert!(core::mem::size_of::<MemoEntry>() == 32);
 const MODIFIER: u8 = core::mem::offset_of!(MemoEntry, modifier) as u8;
 const TAG: u8 = core::mem::offset_of!(MemoEntry, tag) as u8;
 const VALUE: u8 = core::mem::offset_of!(MemoEntry, value) as u8;
-/// The multiplier and shift of [`slot`]: the top 10 bits index the memo.
+/// The multiplier and shift of [`slot`]: the top 14 bits index the memo.
 const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
-const SLOT_SHIFT: u8 = 54;
+const SLOT_SHIFT: u8 = 50;
 const _: () = assert!(1 << (64 - SLOT_SHIFT) == MEMO_ENTRIES);
 
 /// The memo slot of a PAC operation's operands, which never depends on a key.
@@ -183,7 +183,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64) -> Thunk {
     code.extend([0x49, 0xb8]); // movabs r8,MIX
     code.extend(MIX.to_le_bytes());
     code.extend([0x49, 0x0f, 0xaf, 0xc8]); // imul rcx,r8
-    code.extend([0x48, 0xc1, 0xe9, SLOT_SHIFT]); // shr rcx,54
+    code.extend([0x48, 0xc1, 0xe9, SLOT_SHIFT]); // shr rcx,50
     code.extend([0x48, 0xc1, 0xe1, 5]); // shl rcx,5: 32-byte entries
     code.extend([0x49, 0xb8]); // movabs r8,memo
     code.extend(memo.to_le_bytes());
