@@ -27,6 +27,8 @@ pub mod dpe;
 pub mod energy;
 pub mod fuse;
 pub mod gpio;
+pub mod hpm;
+pub mod i2c;
 pub mod interrupt;
 pub mod ipi;
 pub mod lockdown;
