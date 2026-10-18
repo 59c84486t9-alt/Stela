@@ -157,6 +157,10 @@ pub struct State {
     native: bool,
     tsc_base: u64,
     tsc_hz: u64,
+    /// COUNTER_HZ / tsc_hz as a 0.64 fixed-point fraction: the counter is
+    /// read several times per block, and a 128-bit division is a library
+    /// call.
+    counter_per_tsc: u64,
     apic: Apic,
     pub fills: u64,
     pub resets: u64,
@@ -253,6 +257,10 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             native: false,
             tsc_base: rdtsc(),
             tsc_hz: config.tsc_hz,
+            counter_per_tsc: u64::try_from(
+                (u128::from(COUNTER_HZ) << 64) / u128::from(config.tsc_hz),
+            )
+            .expect("the TSC is faster than the 24 MHz counter"),
             apic,
             fills: 0,
             native_ticks: 0,
@@ -623,7 +631,7 @@ impl Host for BareHost {
     fn counter(&mut self) -> u64 {
         let state = state();
         let ticks = rdtsc() - state.tsc_base;
-        (u128::from(ticks) * u128::from(COUNTER_HZ) / u128::from(state.tsc_hz)) as u64
+        ((u128::from(ticks) * u128::from(state.counter_per_tsc)) >> 64) as u64
     }
 
     fn arm_timer(&mut self, deadline: Option<u64>) {
