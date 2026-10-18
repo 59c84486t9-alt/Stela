@@ -24,7 +24,7 @@ use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Machine, Stop,
-    apple::{AIC2_IRQ_CFG, AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
+    apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::DCZID_EL0,
     soc,
@@ -270,10 +270,7 @@ fn devices(
             soc::InterruptController {
                 physical: ARM_IO + J473_AIC.0,
                 inputs: J473_AIC.1,
-                layout: AicLayout::V2 {
-                    irq_config: AIC2_IRQ_CFG,
-                    event: J473_AIC_EVENT,
-                },
+                layout: AicLayout::aic2(J473_AIC_EVENT),
             },
         ),
     };

@@ -186,10 +186,16 @@ impl AppleDevices {
                 let device = self.bus.add(Box::new(aic));
                 (Controller::V1(device), Aic1::span())
             }
-            AicLayout::V2 { irq_config, event } => {
+            AicLayout::V2 {
+                version,
+                irq_config,
+                max_irq,
+                event,
+            } => {
                 let config = Aic2Config {
+                    version,
                     nr_irq,
-                    max_irq: nr_irq.div_ceil(32) * 32,
+                    max_irq: max_irq.unwrap_or(nr_irq.div_ceil(32) * 32),
                     irq_config,
                     event_offset: event,
                     cpus: 1,
@@ -458,14 +464,16 @@ mod tests {
                 Some(AicInput::new(0, 739)),
             )
             .unwrap();
-        let v2 = |event| AicLayout::V2 {
-            irq_config: AIC2_IRQ_CFG,
-            event,
-        };
-        devices.add_aic(0x2_3b0c_0000, 1152, v2(0x8000)).unwrap();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000))
+            .unwrap();
         // CAP0 (offset 4) reports NR_IRQ in bits 15:0.
         assert_eq!(devices.read(0, 0x2_3b0c_0004, 4, 0).unwrap() & 0xffff, 1152);
-        assert!(devices.add_aic(0x2_3b0c_0000, 1152, v2(0x10)).is_err());
+        assert!(
+            devices
+                .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x10))
+                .is_err()
+        );
     }
 
     /// J274AP (M1): `aic,1` at 0x2_3b10_0000 with 896 inputs, the UART on 605.

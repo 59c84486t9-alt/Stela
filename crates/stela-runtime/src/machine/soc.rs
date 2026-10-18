@@ -12,7 +12,7 @@
 //! the M6's M cores.
 use super::{Chip, adt::Node, registers::Identity};
 use crate::platform::apple::{
-    aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
+    aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     amcc,
 };
@@ -364,12 +364,7 @@ const AIC3_OFFSETS: [(&str, u32); 5] = [
 fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout, String> {
     match version {
         "aic,1" => return Ok(AicLayout::V1),
-        "aic,2" => {
-            return Ok(AicLayout::V2 {
-                irq_config: AIC2_IRQ_CFG,
-                event,
-            });
-        }
+        "aic,2" => return Ok(AicLayout::aic2(event)),
         _ => {}
     }
     for (name, expected) in AIC3_OFFSETS {
@@ -382,10 +377,7 @@ fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout, St
             ));
         }
     }
-    Ok(AicLayout::V2 {
-        irq_config: AIC3_IRQ_CFG,
-        event,
-    })
+    Ok(AicLayout::aic3(event))
 }
 
 /// The `compatible` of the S5L UART the engine models (`platform::apple::uart`).
@@ -929,10 +921,7 @@ mod tests {
             InterruptController {
                 physical: 0x2_3b0c_0000,
                 inputs: 740,
-                layout: AicLayout::V2 {
-                    irq_config: AIC2_IRQ_CFG,
-                    event: 0x8000
-                }
+                layout: AicLayout::aic2(0x8000)
             }
         );
         // The M1's AICv1 has its event register in its core block.
@@ -973,13 +962,7 @@ mod tests {
         let found = board(&tree_with(0x8122, "Apple M3", M3, &AIC3_OFFSETS)).unwrap();
         assert_eq!(
             (found.cpus.chip, found.aic.layout),
-            (
-                Chip::AppleM3,
-                AicLayout::V2 {
-                    irq_config: AIC3_IRQ_CFG,
-                    event: 0x40000
-                }
-            )
+            (Chip::AppleM3, AicLayout::aic3(0x40000))
         );
         assert_eq!(
             board(&tree_with(0x8122, "Apple M3", M3, &AIC3_OFFSETS[1..])),

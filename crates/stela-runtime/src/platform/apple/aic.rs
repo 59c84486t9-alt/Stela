@@ -6,7 +6,8 @@
 //!
 //! Documented by Linux `drivers/irqchip/irq-apple-aic.c` and m1n1
 //! `src/aic.c` / `src/aic_regs.h`:
-//! - `INFO1` (`CAP0`, 0x4) holds NR_IRQ [15:0] and LAST_DIE [27:24]; `INFO3`
+//! - `VERSION` (`REV`, 0x0) holds VER [7:0]; `INFO1` (`CAP0`, 0x4) holds
+//!   NR_IRQ [15:0] and LAST_DIE [27:24]; `INFO3`
 //!   (`MAXNUMIRQ`, 0xc) holds MAX_IRQ [15:0] and MAX_DIE [27:24]; `CONFIG`
 //!   (0x14) bit 0 enables the controller.
 //! - From 0x2000 (v3: 0x10000) each die has `IRQ_CFG[MAX_IRQ]` (TARGET [3:0], DELAY_IDX
@@ -19,7 +20,16 @@
 //!   bits are ORed with the hardware line; lower IRQ numbers win.
 //! - AICv2 has no IPI registers; IPIs are fast IPIs.
 //!
-//! Inferred, not documented: the reset state masks every IRQ with zero
+//! The 26A434 kernel's `AppleInterruptControllerV2` (the ADT `aic,2` driver)
+//! hard-codes `MASK_SET` at 0x6400, `MASK_CLR` at 0x6600, `HW_STATE` at
+//! 0x6800 and a die stride of 0x4a00 (`start` and `_configureExternalInterruptMap`),
+//! the layout of a MAX_IRQ of 4096 ([`AIC2_MAX_IRQ`]), and reads INFO3's
+//! MAX_IRQ to split IRQ numbers into dies. Its `start` keeps VERSION [7:0] in a
+//! field no code reads.
+//!
+//! Inferred, not documented: VER is the controller's generation (2 for
+//! AICv2, 3 for AICv3), which no public source states and no kernel consumes;
+//! an AICv3's MAX_IRQ is NR_IRQ rounded up to a mask word; the reset state masks every IRQ with zero
 //! configuration; `SET`/`CLR` reads return the current bits; IRQs with TARGET 0
 //! go to the default CPU set, and each TARGET bit selects a CPU group that the
 //! board configuration must name (the hardware group assignment is not
@@ -43,6 +53,8 @@ const CONFIG: u64 = 0x0014;
 pub const AIC2_IRQ_CFG: u64 = 0x2000;
 /// Where AICv3's per-die arrays start (Linux `AIC3_IRQ_CFG`).
 pub const AIC3_IRQ_CFG: u64 = 0x10000;
+/// An AICv2's IRQs per die, which fix its per-die array layout.
+pub const AIC2_MAX_IRQ: u16 = 4096;
 
 const INFO_DIE_SHIFT: u32 = 24;
 const CONFIG_ENABLE: u32 = 1;
@@ -52,13 +64,40 @@ const EVENT_TYPE_IRQ: u32 = 1 << 16;
 const TARGET_GROUPS: usize = 4;
 
 /// Which AIC a board has: an AICv1 (`aic1`), whose event register is in its
-/// core block, or an AICv2 or AICv3 with its per-die arrays at `irq_config`
-/// ([`AIC2_IRQ_CFG`] or [`AIC3_IRQ_CFG`]) and its event register `event`
-/// bytes from the core block.
+/// core block, or an AICv2 or AICv3 of generation `version` with its per-die
+/// arrays at `irq_config` ([`AIC2_IRQ_CFG`] or [`AIC3_IRQ_CFG`]) sized for
+/// `max_irq` IRQs (NR_IRQ rounded up to a mask word when `None`) and its
+/// event register `event` bytes from the core block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AicLayout {
     V1,
-    V2 { irq_config: u64, event: u64 },
+    V2 {
+        version: u8,
+        irq_config: u64,
+        max_irq: Option<u16>,
+        event: u64,
+    },
+}
+
+impl AicLayout {
+    /// An AICv2 whose event register is `event` bytes from its core block.
+    pub const fn aic2(event: u64) -> Self {
+        Self::V2 {
+            version: 2,
+            irq_config: AIC2_IRQ_CFG,
+            max_irq: Some(AIC2_MAX_IRQ),
+            event,
+        }
+    }
+    /// An AICv3 whose event register is `event` bytes from its core block.
+    pub const fn aic3(event: u64) -> Self {
+        Self::V2 {
+            version: 3,
+            irq_config: AIC3_IRQ_CFG,
+            max_irq: None,
+            event,
+        }
+    }
 }
 
 /// Hardware facts of one AICv2 instance. NR_IRQ and MAX_IRQ come from the
@@ -66,6 +105,8 @@ pub enum AicLayout {
 /// real machine (m1n1 prints them as "AIC: AIC2 with 1/1 dies, N/M IRQs").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Aic2Config {
+    /// VERSION's VER field.
+    pub version: u8,
     pub nr_irq: u16,
     /// A multiple of 32.
     pub max_irq: u16,
@@ -109,6 +150,7 @@ enum Array {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Register {
+    Version,
     Info1,
     Info3,
     Config,
@@ -255,6 +297,7 @@ impl Aic2 {
         let configs = irq_config + 4 * u64::from(self.config.max_irq);
         let used_words = usize::from(self.config.nr_irq).div_ceil(32) as u64;
         Some(match offset {
+            VERSION => Register::Version,
             INFO1 => Register::Info1,
             INFO3 => Register::Info3,
             CONFIG => Register::Config,
@@ -286,7 +329,6 @@ impl Aic2 {
     }
     fn unknown_reason(offset: u64) -> &'static str {
         match offset {
-            VERSION => "AIC2 VERSION value is not known",
             INFO2 => "AIC2 INFO2 is not documented",
             RESET => "AIC2 RESET is not modeled",
             _ => "unknown or unimplemented AIC2 register",
@@ -306,6 +348,7 @@ impl Aic2 {
     }
     fn read_register(&mut self, register: Register, cpu: CpuIndex) -> Result<u32, &'static str> {
         Ok(match register {
+            Register::Version => u32::from(self.config.version),
             Register::Info1 => u32::from(self.config.nr_irq),
             Register::Info3 => u32::from(self.config.max_irq) | 1 << INFO_DIE_SHIFT,
             Register::Config => u32::from(self.enabled),
@@ -355,7 +398,7 @@ impl Aic2 {
                     Array::HardwareState => return Err("AIC2 HW_STATE is read-only"),
                 }
             }
-            Register::Info1 | Register::Info3 => {
+            Register::Version | Register::Info1 | Register::Info3 => {
                 return Err("AIC2 capability registers are read-only");
             }
             Register::Event => return Err("AIC2 event register is read-only"),
@@ -426,6 +469,7 @@ mod tests {
 
     fn aic(cpus: usize) -> Aic2 {
         Aic2::new(Aic2Config {
+            version: 2,
             nr_irq: NR_IRQ,
             max_irq: MAX_IRQ,
             irq_config: IRQ_CFG,
@@ -488,6 +532,34 @@ mod tests {
         aic.set_input(UART, true, &mut Access::new(0, 0, &mut latch))
             .unwrap();
         assert!(latch.pins(0).irq);
+    }
+
+    /// The 26A434 kernel's `AppleInterruptControllerV2::start` on a T8112:
+    /// VERSION, INFO1 and INFO3, then masks at its fixed 0x6400 and reads
+    /// back through 0x6600 and HW_STATE at 0x6800.
+    #[test]
+    fn xnu_aic2_layout_is_that_of_4096_irqs() {
+        let mut latch = InterruptLatch::new();
+        let mut aic = Aic2::new(Aic2Config {
+            version: 2,
+            nr_irq: 740,
+            max_irq: AIC2_MAX_IRQ,
+            irq_config: AIC2_IRQ_CFG,
+            event_offset: 0x8000,
+            cpus: 1,
+            default_cpus: 1,
+            target_groups: [None; 4],
+        })
+        .unwrap();
+        assert_eq!(read(&mut aic, &mut latch, 0, VERSION) & 0xff, 2);
+        assert_eq!(read(&mut aic, &mut latch, 0, INFO1) & 0x7ff, 740);
+        assert_eq!(read(&mut aic, &mut latch, 0, INFO3), 1 << 24 | 0x1000);
+        for word in 0..740u64.div_ceil(32) {
+            write(&mut aic, &mut latch, 0x6400 + 4 * word, u32::MAX);
+        }
+        assert_eq!(read(&mut aic, &mut latch, 0, 0x6600), u32::MAX);
+        assert_eq!(read(&mut aic, &mut latch, 0, 0x6600 + 4 * 23), 0xf);
+        assert_eq!(read(&mut aic, &mut latch, 0, 0x6800), 0);
     }
 
     #[test]
@@ -555,7 +627,6 @@ mod tests {
         );
         let mut access = Access::new(0, 0, &mut latch);
         for offset in [
-            VERSION,
             INFO2,
             RESET,
             0x28,
@@ -586,6 +657,7 @@ mod tests {
     fn aic3_moves_the_per_die_arrays() {
         let v3 = |irq_config, event_offset| {
             Aic2::new(Aic2Config {
+                version: 3,
                 nr_irq: NR_IRQ,
                 max_irq: MAX_IRQ,
                 irq_config,
