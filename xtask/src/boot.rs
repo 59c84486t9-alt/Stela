@@ -154,6 +154,12 @@ pub struct Run {
     /// Serve the QEMU monitor over telnet on this loopback port.
     #[arg(long, conflicts_with = "opencore")]
     monitor: Option<u16>,
+    /// Advance QEMU's clocks by 2^SHIFT ns per executed x86 instruction
+    /// (`-icount shift=SHIFT,sleep=off`) instead of host time, so that guest
+    /// timeouts measure emulated work, as they would on hardware, and an idle
+    /// guest skips ahead to its next timer.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=10))]
+    icount: Option<u8>,
     /// Boot through a copy of this OpenCore ESP (the directory holding
     /// `EFI/OC`), without `EFI/Microsoft`, with the mount installed as a tool.
     #[arg(long)]
@@ -413,6 +419,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042={keyboard},vmport=off"
         ))
         .args(["-accel", "tcg,thread=single", "-cpu", cpu, "-smp", "1"])
+        .args(
+            arguments
+                .icount
+                .map(|shift| ["-icount".into(), format!("shift={shift},sleep=off")])
+                .into_iter()
+                .flatten(),
+        )
         .args(["-m", &memory, "-nodefaults", "-no-reboot"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=4"])
         .arg("-drive")
