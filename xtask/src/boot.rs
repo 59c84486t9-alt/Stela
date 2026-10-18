@@ -138,6 +138,11 @@ pub struct Run {
     /// starts it on the system-mode engine.
     #[arg(long, conflicts_with_all = ["module", "opencore", "bundle", "append", "payload"])]
     preboot_disk: Option<PathBuf>,
+    /// A restore payload inventory (`stela image-manifest
+    /// --payload-manifest`), placed at `\EFI\stela\payload.json` for the
+    /// mount's `--restore-manifest`.
+    #[arg(long, requires = "bundle")]
+    restore_manifest: Option<PathBuf>,
     /// Use QEMU's directory-backed FAT16 for a bundle that fits its
     /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
     #[arg(long, requires = "bundle")]
@@ -400,6 +405,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
             if let Some(bundle) = &arguments.bundle {
                 copy_bundle(bundle, &volume.join("EFI/stela/bundle"))?;
+            }
+            if let Some(manifest) = &arguments.restore_manifest {
+                fs::copy(manifest, volume.join("EFI/stela/payload.json"))
+                    .with_context(|| format!("restore manifest {}", manifest.display()))?;
             }
         }
         Some(esp) => {
@@ -667,6 +676,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "bundle": arguments.bundle,
         "preboot_disk": arguments.preboot_disk,
         "directory_volume": arguments.directory_volume,
+        "restore_manifest": arguments.restore_manifest,
         "storage_disks": attached
             .iter()
             .map(|(path, serial)| json!({ "path": path, "serial": serial }))

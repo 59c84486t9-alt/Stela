@@ -1,6 +1,6 @@
 //! Apple restore image discovery, download, inspection and extraction.
 use crate::restore;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use std::{io::Write, path::PathBuf};
 use stela_runtime::write_json;
@@ -48,6 +48,11 @@ pub(crate) struct ImageManifest {
     /// 0600 files; the report lists them by SHA-256 only.
     #[arg(long, requires = "payload")]
     aea_keys: Option<PathBuf>,
+    /// Also write the in-place archive `payload.json`, carrying the keys
+    /// `--aea-keys` fetched, for a restore that reads this IPSW unchanged
+    /// from its own source partition.
+    #[arg(long, requires = "payload")]
+    payload_manifest: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -132,6 +137,7 @@ impl ImageManifest {
             hash_members,
             payload,
             aea_keys,
+            payload_manifest,
         } = self;
         ensure!(
             !output.exists(),
@@ -140,8 +146,15 @@ impl ImageManifest {
         let report = restore::archive::manifest(&input, model.as_deref(), hash_members)?;
         if let (true, Some(model)) = (payload, model.as_deref()) {
             let mut value = serde_json::to_value(&report)?;
-            value["payload"] = restore::payload::inventory(&input, model, aea_keys.as_deref())?;
+            let (inventory, manifest) =
+                restore::payload::inventory(&input, model, aea_keys.as_deref())?;
+            value["payload"] = inventory;
             write_json(&output, &value)?;
+            if let Some(path) = payload_manifest {
+                let mut file = std::fs::File::create_new(&path)
+                    .with_context(|| format!("{} exists", path.display()))?;
+                std::io::Write::write_all(&mut file, (manifest.to_json() + "\n").as_bytes())?;
+            }
         } else {
             write_json(&output, &report)?;
         }

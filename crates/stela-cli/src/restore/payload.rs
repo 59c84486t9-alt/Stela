@@ -273,8 +273,13 @@ fn manifest_for(
 /// The `image-manifest --payload` report: member sets with SHA-256s, the
 /// global manifests and each AEA member's key URL. Key material goes only
 /// to `key_dir`, as 0600 files named by header SHA-256, never into the
-/// report.
-pub fn inventory(image: &Path, model: &str, key_dir: Option<&Path>) -> Result<serde_json::Value> {
+/// report. Also returns the in-place archive manifest, carrying the fetched
+/// public AEA keys, for an IPSW read where it is (a restore source disk).
+pub fn inventory(
+    image: &Path,
+    model: &str,
+    key_dir: Option<&Path>,
+) -> Result<(serde_json::Value, PayloadManifest)> {
     let mut archive = ZipArchive::new(File::open(image)?)?;
     let selection = select(&mut archive, model)?;
     let metadata = aea_metadata(&mut archive, image, &selection.names)?;
@@ -284,9 +289,11 @@ pub fn inventory(image: &Path, model: &str, key_dir: Option<&Path>) -> Result<se
         (whole.join().expect("hash worker panicked"), members)
     });
     let mut keys = Vec::new();
+    let mut aea_keys = Vec::new();
     if let Some(directory) = key_dir {
         fs::create_dir_all(directory)?;
-        for key in fetch_keys(&metadata)? {
+        aea_keys = fetch_keys(&metadata)?;
+        for key in &aea_keys {
             let path = directory.join(format!("{}.pem", key.header_sha256));
             if !path.exists() {
                 let mut file = tempfile::NamedTempFile::new_in(directory)?;
@@ -312,14 +319,22 @@ pub fn inventory(image: &Path, model: &str, key_dir: Option<&Path>) -> Result<se
         Vec::new(),
         ipsw?,
     )?;
-    Ok(json!({
+    let keyed = PayloadManifest {
+        aea_keys,
+        ..manifest.clone()
+    };
+    keyed
+        .validate()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let report = json!({
         "payload": manifest,
         "aea": metadata.iter().map(|(member, metadata)| json!({
             "member": member, "header_sha256": metadata.header_sha256,
             "public_key_url": metadata.public_key_url})).collect::<Vec<_>>(),
         "aea_keys": keys,
         "limits": "Member SHA-256s are of the bytes in this IPSW; the BuildManifest's own digests are opaque and not reinterpreted. Key bodies are omitted from this report.",
-    }))
+    });
+    Ok((report, keyed))
 }
 
 /// The product version and build of an IPSW's restore identity for
@@ -658,8 +673,11 @@ mod tests {
             fs::read(directory.join("Synthetic.ipsw"))?,
             fs::read(&image)?
         );
-        let report = inventory(&image, SYNTHETIC_MODEL, None)?;
+        let (report, in_place) = inventory(&image, SYNTHETIC_MODEL, None)?;
         assert_eq!(report["payload"]["members"], json!(manifest.members));
+        // The in-place manifest describes the same archive bytes.
+        assert_eq!(in_place.members, manifest.members);
+        assert_eq!(in_place.source, manifest.source);
         assert!(inventory(&image, "Missing1,1", None).is_err());
         Ok(())
     }
