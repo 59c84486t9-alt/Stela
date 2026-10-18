@@ -55,6 +55,8 @@ const DATA_STATUS: u8 = 0x5f;
 const BANK_BYTES: usize = 11;
 const MAX_DATA: usize = 64;
 const APPLE_STATUS_BYTES: usize = 18;
+/// Configured registers wider than the leading bytes their record stores.
+const REGISTER_WIDTHS: [(u8, usize); 1] = [(0x47, 49)];
 /// Active with a cable and active unplugged; 3 is sleep.
 const ACTIVE_POWER_STATES: [u8; 2] = [0, 2];
 const PLUG_EVENT: u16 = 1 << 1;
@@ -88,9 +90,11 @@ const DATA_UFP: u32 = 1 << 7;
 /// offset of its register records (0x3a, after the board strings). Each
 /// record is `[register][length - 1][length bytes]` with ascending
 /// registers; the first non-ascending register ends the run. The layout is
-/// inferred: every record length equals the length the class-10 driver
-/// reads for that register (0x29 is 63 bytes, 0x28 64 bytes), and 0x47 holds
-/// the PD TX Identity VDOs with J473's product ID 0x7416. Records seed the
+/// inferred: record lengths equal the lengths the class-10 driver reads (0x29
+/// is 63 bytes, 0x28 64 bytes), and 0x47 holds the PD TX Identity VDOs with
+/// J473's product ID 0x7416. A record may store only a register's leading
+/// bytes: TX Identity is 49 bytes (`getTCCPID`, KC 0x27c19e0, reads 49) but
+/// its record keeps the 25 that carry VDOs, so the rest reads zero. Records seed the
 /// registers the firmware loads from its configuration; registers that
 /// carry live state (masks, power state) keep their modeled values.
 /// Callers provide the input; no Apple firmware is embedded or executed.
@@ -356,7 +360,10 @@ impl Hpm {
                     .find(|(r, _)| *r == register)
                     .ok_or("unmodeled HPM register or write-only interrupt clear")?;
                 data[..record.len()].copy_from_slice(record);
-                record.len()
+                REGISTER_WIDTHS
+                    .iter()
+                    .find(|(r, _)| *r == register)
+                    .map_or(record.len(), |&(_, width)| width.max(record.len()))
             }
         };
         Ok((data, len))
@@ -728,8 +735,12 @@ mod tests {
         assert_eq!(read(&mut h, REVISION, 1), [0]);
         assert_eq!(read(&mut h, BOOT_FLAGS, 64), [0; 64]);
         assert_eq!(read(&mut h, CONFIG, 63)[62] & 0x60, 0x60);
-        assert_eq!(read(&mut h, TX_IDENTITY, 3), [6, 0xac, 5]);
-        assert!(h.transfer(&[TX_IDENTITY], &mut [0; 5], true).is_err());
+        let identity = read(&mut h, TX_IDENTITY, 49);
+        assert_eq!(
+            (&identity[..3], &identity[3..]),
+            (&[6, 0xac, 5][..], &[0; 46][..])
+        );
+        assert!(h.transfer(&[TX_IDENTITY], &mut [0; 51], true).is_err());
         assert_eq!(read(&mut h, APPLE_STATUS, 18), [0; 18]);
         assert_eq!(read(&mut h, COMMAND2, 4), [0; 4]);
         // A raw read may stop short of the payload.
