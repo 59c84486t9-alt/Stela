@@ -19,7 +19,8 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, bridge, cluster, cpm, cpustart, dart, dpe, energy, fuse, nor, power, ptd, spi, wake,
+    amcc, ans, asc, bridge, cluster, cpm, cpustart, dart, dpe, energy, fuse, nor, power, ptd, sart,
+    spi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -721,6 +722,12 @@ pub const AES: &str = "aes,s8000";
 /// The `compatible` of the memory cache controller whose registers
 /// `platform::apple::amcc`, `dcs` and `ptd` model.
 pub const MCC: &str = "mcc,t8112";
+/// ASC wrapper and nub used by ANS2. These are deliberately not in
+/// `models()`: other coprocessors share them, and ANS2's complete Apple
+/// vendor Identify/firmware contract is not yet modeled.
+pub const ASC: &str = "iop,ascwrap-v4";
+pub const RTBUDDY: &str = "iop-nub,rtbuddy-v2";
+pub const SART: &str = "sart,coastguard";
 
 /// SPI controller compatible, byte-PIO version 1.
 pub const SPI: &str = "spi-1,spimc";
@@ -779,6 +786,9 @@ pub struct Board {
     pub darts: Vec<Iommu>,
     /// `/arm-io/aes`, an `aes,s8000`, when the DeviceTree keeps it.
     pub aes: Option<AesEngine>,
+    /// ANS2 and its SART, if an input tree explicitly presents the device.
+    /// Prepared bundles still hide its compatibles until its vendor ABI is complete.
+    pub ans: Option<AnsController>,
     /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows a
     /// `pmgr1,t8112`.
     pub power_states: Option<PowerStates>,
@@ -1065,6 +1075,138 @@ pub struct AesEngine {
     pub irq: u32,
     pub iommu: usize,
     pub stream: u32,
+}
+
+/// ANS2's DT placement. `reg[0]` is the ASC wrapper; `reg[3]` is the
+/// NVMe aperture. `iommu-parent` names SART itself, not a DART stream.
+/// J473AP: `IOCoastGuardSARTMapper::start` (kernel file 0x2ccada8),
+/// `AppleANS2NVMeController::start` (0x3dbb040); neither map is guessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnsController {
+    pub wrapper: (u64, u64),
+    pub nvme: (u64, u64),
+    pub sart: (u64, u64),
+    pub sart_idle: u64,
+    pub interrupts: [u16; 4],
+    pub completion_irq: u16,
+    pub namespaces: Vec<ans::Description>,
+    pub clock_gates: Vec<u32>,
+    pub power_gates: Vec<u32>,
+}
+
+/// Only explicitly visible ANS2 hardware is placed. Do not preserve all
+/// ASC compatibles in the loader: SIO, AOP, PMP and others need their own
+/// native application protocols before they can be exposed.
+fn ans_controller(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<AnsController>, String> {
+    let Some(node) = io.child("ans").filter(|n| n.compatible(ASC)) else {
+        return Ok(None);
+    };
+    if node.property("role") != Some(b"ANS2\0".as_slice()) {
+        return Err("/arm-io/ans role is not the modeled ANS2".into());
+    }
+    if node.property("nvme-linear-sq").is_none()
+        || node.first_u32("nvme-queue-entries") != Some(u32::from(ans::TAGS))
+    {
+        return Err("ANS2 requires linear submission queues with 64 entries".into());
+    }
+    if !node
+        .child("iop-ans-nub")
+        .is_some_and(|nub| nub.compatible(RTBUDDY))
+    {
+        return Err("ANS2 has no RTBuddy v2 nub".into());
+    }
+    let regs = node.pairs("reg").ok_or("ANS2 has no reg pairs")?;
+    let parent = node
+        .first_u32("iommu-parent")
+        .ok_or("ANS2 has no iommu-parent")?;
+    let mut found = None;
+    let mut duplicate = false;
+    io.visit(&mut |candidate| {
+        if candidate.first_u32("AAPL,phandle") == Some(parent) {
+            duplicate |= found.is_some();
+            found = Some(name_of(candidate));
+        }
+    })
+    .ok_or("DeviceTree walk failed")?;
+    if duplicate {
+        return Err("ANS2 iommu-parent is ambiguous".into());
+    }
+    let sart_node = found
+        .and_then(|name| io.child(&name))
+        .filter(|n| n.compatible(SART) && n.first_u32("sart-version") == Some(3))
+        .ok_or("ANS2 iommu-parent is not SART v3")?;
+    let sart_regs = sart_node.pairs("reg").ok_or("SART has no reg pairs")?;
+    let place = |pairs: &[(u64, u64)], index: usize, minimum: u64| -> Result<(u64, u64), String> {
+        let &(offset, bytes) = pairs
+            .get(index)
+            .filter(|(_, bytes)| *bytes >= minimum)
+            .ok_or("ANS2/SART register bank is absent or too short")?;
+        let first = translate(offset).ok_or("ANS2/SART bank outside arm-io ranges")?;
+        let last = offset
+            .checked_add(bytes - 1)
+            .and_then(translate)
+            .ok_or("ANS2/SART bank end outside arm-io ranges")?;
+        if first.checked_add(bytes - 1) != Some(last) {
+            return Err("ANS2/SART bank crosses arm-io translations".into());
+        }
+        Ok((first, bytes))
+    };
+    let wrapper = place(&regs, 0, asc::WRAPPER_BYTES)?;
+    let nvme = place(&regs, 3, ans::REGISTER_BYTES)?;
+    let sart = place(&sart_regs, 0, sart::REGISTER_BYTES)?;
+    let power = place(&sart_regs, 2, 4)?;
+    let offset = u64::from(
+        sart_node
+            .first_u32("sart-power-reg-offset")
+            .ok_or("SART has no idle register offset")?,
+    );
+    if offset + 4 > power.1 {
+        return Err("SART idle word outside reg[2]".into());
+    }
+    let sart_idle = power
+        .0
+        .checked_add(offset)
+        .ok_or("SART idle address wraps")?;
+    if sart_idle < nvme.0 || sart_idle + 4 > nvme.0 + nvme.1 {
+        return Err("SART idle word is not inside the shared NVMe bank".into());
+    }
+    let irqs = node.cells32("interrupts").ok_or("ANS2 has no interrupts")?;
+    let index = node
+        .first_u32("nvme-interrupt-idx")
+        .ok_or("ANS2 has no nvme-interrupt-idx")? as usize;
+    if index < 4 {
+        return Err("ANS2 completion interrupt overlaps ASC mailbox lines".into());
+    }
+    let irq = |index: usize| -> Result<u16, String> {
+        irqs.get(index)
+            .and_then(|&n| u16::try_from(n).ok())
+            .ok_or_else(|| "ANS2 interrupt index/number is invalid".into())
+    };
+    let interrupts = [irq(0)?, irq(1)?, irq(2)?, irq(3)?];
+    let completion_irq = irq(index)?;
+    let namespaces = ans::Description::decode(
+        node.property("namespaces")
+            .ok_or("ANS2 has no namespaces")?,
+    )
+    .map_err(String::from)?;
+    Ok(Some(AnsController {
+        wrapper,
+        nvme,
+        sart,
+        sart_idle,
+        interrupts,
+        completion_irq,
+        namespaces,
+        clock_gates: node
+            .cells32("clock-gates")
+            .ok_or("ANS2 has no clock-gates")?,
+        power_gates: node
+            .cells32("power-gates")
+            .ok_or("ANS2 has no power-gates")?,
+    }))
 }
 
 /// The AMCC as `/chosen/lock-regs/amcc` describes it: its apertures and
@@ -2167,6 +2309,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
+    let ans = ans_controller(&io, &translate)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
         cluster_events,
@@ -2199,6 +2342,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         memory_controller,
         darts,
         aes,
+        ans,
         power_states,
         memory_cache,
         clusters,
@@ -2339,6 +2483,105 @@ mod tests {
         assert_eq!(placed.image.bank(0).unwrap(), nor::nvram::empty_bank());
         assert!(spi_nor(&root, &io, &|_| None, 99).is_err());
         assert!(spi_nor(&root, &io, &Some, 100).is_err());
+    }
+
+    #[test]
+    fn ans2_placement_uses_phandles_interrupt_index_and_sparse_register_banks() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        let tree = |version: u32, parent: u32, interrupt_index: u32| {
+            let nub = encode(
+                &[("name", &z("iop-ans-nub")), ("compatible", &z(RTBUDDY))],
+                &[],
+            );
+            let ans = encode(
+                &[
+                    ("name", &z("ans")),
+                    ("compatible", &z(ASC)),
+                    ("role", &z("ANS2")),
+                    (
+                        "reg",
+                        &pairs(&[
+                            (0x7740_0000, 0x6c000),
+                            (0x7705_0000, 0x4000),
+                            (0, 0),
+                            (0x7bcc_0000, 0x60000),
+                        ]),
+                    ),
+                    ("nvme-linear-sq", &[]),
+                    ("nvme-queue-entries", &cells(&[64])),
+                    ("nvme-interrupt-idx", &cells(&[interrupt_index])),
+                    ("interrupts", &cells(&[718, 717, 720, 719, 724])),
+                    ("iommu-parent", &cells(&[parent])),
+                    ("namespaces", &cells(&[1, 1, 0, 2, 8, 768, 3, 13, 32768])),
+                    ("clock-gates", &cells(&[125])),
+                    ("power-gates", &cells(&[125])),
+                ],
+                &[nub],
+            );
+            let sart = encode(
+                &[
+                    ("name", &z("sart-ans")),
+                    ("compatible", &z(SART)),
+                    ("sart-version", &cells(&[version])),
+                    ("AAPL,phandle", &cells(&[0x8e])),
+                    ("sart-power-reg-offset", &cells(&[0x13e8])),
+                    (
+                        "reg",
+                        &pairs(&[(0x7bc5_0000, 0xc000), (0, 0), (0x7bcc_0000, 0x4000)]),
+                    ),
+                ],
+                &[],
+            );
+            encode(&[("name", &z("arm-io"))], &[ans, sart])
+        };
+        let bytes = tree(3, 0x8e, 4);
+        let io = Node::root(&bytes).unwrap();
+        let placed = ans_controller(&io, &|offset| Some(0x2_0000_0000 + offset))
+            .unwrap()
+            .unwrap();
+        assert_eq!(placed.wrapper, (0x2_7740_0000, 0x6c000));
+        assert_eq!(placed.nvme, (0x2_7bcc_0000, 0x60000));
+        assert_eq!(placed.sart, (0x2_7bc5_0000, 0xc000));
+        assert_eq!(placed.sart_idle, 0x2_7bcc_13e8);
+        assert_eq!(placed.completion_irq, 724);
+        assert_eq!(placed.interrupts, [718, 717, 720, 719]);
+        assert_eq!(
+            placed.namespaces[2],
+            ans::Description {
+                id: 3,
+                kind: 13,
+                blocks: 32768
+            }
+        );
+        assert_eq!(placed.clock_gates, [125]);
+        for bytes in [
+            tree(2, 0x8e, 4),
+            tree(3, 0x99, 4),
+            tree(3, 0x8e, 3),
+            tree(3, 0x8e, 5),
+        ] {
+            assert!(ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a)).is_err());
+        }
+        assert!(ans_controller(&io, &|_| None).is_err());
+        // These compatibles are shared by other hardware. The partial ANS
+        // controller cannot authorize advertising every ASC/RTBuddy/SART.
+        assert!(!models(ASC));
+        assert!(!models(RTBUDDY));
+        assert!(!models(SART));
     }
 
     #[test]

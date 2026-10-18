@@ -9,6 +9,7 @@ pub(crate) mod bundle;
 mod display;
 mod host;
 mod interrupts;
+mod storage;
 
 use crate::{
     console,
@@ -61,6 +62,8 @@ struct Options {
     /// Build the boot bundle from the installed system on this APFS
     /// partition instead (`SERIAL:GUID`).
     preboot: Option<Target>,
+    /// One host partition backing all ANS namespaces.
+    storage: Option<Target>,
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
@@ -130,6 +133,7 @@ impl Options {
             budget: 0,
             bundle: false,
             preboot: None,
+            storage: None,
             survey: false,
             breakpoints: Vec::new(),
             dumps: Vec::new(),
@@ -146,6 +150,16 @@ impl Options {
             }
             if name == "--survey" {
                 options.survey = true;
+                continue;
+            }
+            if name == "--storage" {
+                let target = words
+                    .next()
+                    .ok_or("missing ANS storage partition")?
+                    .parse()?;
+                if options.storage.replace(target).is_some() {
+                    return Err("system mode accepts exactly one ANS backing partition");
+                }
                 continue;
             }
             if name == "--preboot" {
@@ -323,6 +337,7 @@ fn devices(
     read_only_region: Option<(u64, u64)>,
     reset: Option<u64>,
     now: u64,
+    backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
 ) -> Result<AppleDevices, String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
         physical: ARM_IO + offset,
@@ -361,6 +376,16 @@ fn devices(
     devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
     if let Some(spi) = board.and_then(|board| board.spi_nor.as_ref()) {
         devices.add_spi_nor(spi)?;
+    }
+    match (board.and_then(|b| b.ans.as_ref()), backing) {
+        (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
+        (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
+        (None, Some(_)) => {
+            return Err(
+                "--storage was supplied but this DeviceTree exposes no modeled ANS2".into(),
+            );
+        }
+        (None, None) => (),
     }
     for block in board.map_or(&[][..], |board| &board.lockdown) {
         let range = Range {
@@ -634,6 +659,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             range.guest, range.bytes, range.host
         ));
     }
+    let backing = options.storage.as_ref().map(|target| {
+        let handoff = handoff
+            .storage
+            .handoff()
+            .unwrap_or_else(|| output::fatal("the loader found no ANS backing controllers"));
+        // SAFETY: before host::install; the completed Preboot reader has
+        // dropped its controllers. This service now owns the DMA pages.
+        unsafe { storage::open(&handoff, target) }.unwrap_or_else(|error| {
+            output::arguments(format_args!("ANS backing refusal: {error}\n"));
+            output::fatal("the ANS backing partition could not be opened")
+        })
+    });
     let config = Config {
         ram,
         pool_physical: handoff.pool.physical,
@@ -755,7 +792,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     let now = stela_runtime::machine::Host::counter(&mut bare);
     let reset = options.bundle.then_some(entry);
-    let devices = match devices(board.as_ref(), read_only_region, reset, now) {
+    let devices = match devices(board.as_ref(), read_only_region, reset, now, backing) {
         Ok(devices) => devices,
         Err(error) => {
             output::arguments(format_args!("device refusal: {error}\n"));

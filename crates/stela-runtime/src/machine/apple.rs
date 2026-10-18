@@ -12,6 +12,8 @@ use crate::platform::apple::{
     aic::{Aic2, Aic2Config},
     aic1::Aic1,
     amcc::{self, Amcc},
+    ans::Ans,
+    asc::{Asc, Lines as AscLines},
     bridge::Bridge,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
@@ -30,6 +32,8 @@ use crate::platform::apple::{
     pmgr::{ACTIVE, Pmgr, PowerState},
     power::{self, Power},
     ptd::{self, Ptd},
+    rtkit::{Management, RtKit},
+    sart::{self, Sart},
     spi::Spi,
     uart::S5lUart,
     wake::{self, WakeMasks},
@@ -63,6 +67,7 @@ pub struct AppleDevices {
     memory_controller: Option<DeviceId>,
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
+    storage_masters: Vec<(DeviceId, DeviceId)>,
     cpu_start: Option<CpuStarter>,
     reset_vectors: Vec<Option<DeviceId>>,
     starts: Vec<Start>,
@@ -138,6 +143,7 @@ impl AppleDevices {
             memory_controller: None,
             ipi: None,
             masters: Vec::new(),
+            storage_masters: Vec::new(),
             cpu_start: None,
             reset_vectors: Vec::new(),
             starts: Vec::new(),
@@ -338,6 +344,61 @@ impl AppleDevices {
         self.bus
             .map(device, ptd, ptd::PTD_BYTES, 0)
             .map_err(|error| format!("PTD placement: {error:?}"))
+    }
+
+    /// Place an explicitly described ANS2, its started RTKit management
+    /// coprocessor and SART. Split the shared NVMe bank around SART's idle
+    /// word so each physical byte has one owner. The boot chain's choice is
+    /// to start the native RTKit service before handing off to SPTM.
+    pub fn add_ans(
+        &mut self,
+        placement: &super::soc::AnsController,
+        backing: Box<dyn crate::platform::pc::block::BlockDevice>,
+    ) -> Result<(), String> {
+        let irq = |n| AicInput::new(0, n);
+        let rtkit = RtKit::new(Vec::new(), Management::Ordinary).map_err(String::from)?;
+        let wrapper = Asc::new(
+            Box::new(rtkit),
+            true,
+            AscLines::from_interrupts(placement.interrupts.map(irq)),
+        )
+        .map_err(String::from)?;
+        let controller = Ans::new(
+            backing,
+            &placement.namespaces,
+            Some(irq(placement.completion_irq)),
+        )
+        .map_err(String::from)?;
+        let asc = self.bus.add(Box::new(wrapper));
+        self.bus
+            .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
+            .map_err(|e| format!("ANS ASC placement: {e:?}"))?;
+        let sart = self.bus.add(Box::new(Sart::default()));
+        self.bus
+            .map(sart, placement.sart.0, placement.sart.1, 0)
+            .map_err(|e| format!("SART placement: {e:?}"))?;
+        self.bus
+            .map(sart, placement.sart_idle, 4, sart::IDLE)
+            .map_err(|e| format!("SART idle placement: {e:?}"))?;
+        let ans = self.bus.add(Box::new(controller));
+        let (base, bytes) = placement.nvme;
+        let before = placement
+            .sart_idle
+            .checked_sub(base)
+            .ok_or("SART idle word precedes NVMe")?;
+        let after = before
+            .checked_add(4)
+            .filter(|&end| end <= bytes)
+            .ok_or("SART idle word outside NVMe")?;
+        for (offset, bytes) in [(0, before), (after, bytes - after)] {
+            if bytes != 0 {
+                self.bus
+                    .map(ans, base + offset, bytes, offset)
+                    .map_err(|e| format!("ANS placement: {e:?}"))?;
+            }
+        }
+        self.storage_masters.push((ans, sart));
+        Ok(())
     }
 
     /// A `dart,t8110` of `streams` streams at `range`.
@@ -872,6 +933,23 @@ impl Devices for AppleDevices {
             };
             aes.run(&mut port).map_err(describe)?;
         }
+        for &(ans, sart) in &self.storage_masters {
+            let (ans, sart) = self
+                .bus
+                .pair_mut::<Ans, Sart>(ans, sart)
+                .expect("a storage master names ANS2 and SART");
+            if !ans.pending() {
+                continue;
+            }
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            let mut port = Port {
+                iommu: sart,
+                stream: 0,
+                memory,
+                access: &mut access,
+            };
+            ans.run(&mut port).map_err(describe)?;
+        }
         self.settle(cpu, now, None)
     }
 }
@@ -1003,6 +1081,83 @@ mod tests {
         transfer(&mut devices, &[0x20, 0]);
         assert!(devices.write(0, PIN, 4, 3, 0).is_err());
         assert_eq!(devices.read(0, PIN, 4, 0), Ok(2));
+    }
+
+    #[test]
+    fn ans_dma_and_sart_idle_share_the_nvme_aperture_without_aliasing() {
+        use crate::machine::soc::AnsController;
+        use crate::platform::dma::tests::Ram;
+        use crate::platform::{
+            apple::{ans, sart},
+            pc::block::tests::RamDisk,
+        };
+        const NVME: u64 = 0x2_7bcc_0000;
+        const SART: u64 = 0x2_7bc5_0000;
+        const WRAPPER: u64 = 0x2_7740_0000;
+        const RAM: u64 = 0x8_0000_0000;
+        let placement = AnsController {
+            wrapper: (WRAPPER, 0x6c000),
+            nvme: (NVME, 0x60000),
+            sart: (SART, 0xc000),
+            sart_idle: NVME + 0x13e8,
+            interrupts: [718, 717, 720, 719],
+            completion_irq: 724,
+            namespaces: alloc::vec![ans::Description {
+                id: 1,
+                kind: 1,
+                blocks: 0
+            }],
+            clock_gates: alloc::vec![125],
+            power_gates: alloc::vec![125],
+        };
+        let mut devices = AppleDevices::new();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        devices
+            .add_ans(&placement, Box::new(RamDisk::new("backing", 16, 4096)))
+            .unwrap();
+        assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        devices.write(0, NVME + 0x13e8, 4, 1, 0).unwrap();
+        assert_eq!(devices.read(0, NVME + 0x13e8, 4, 0), Ok(1));
+        assert_eq!(devices.read(0, NVME + 0x1300, 4, 0), Ok(0xde71_ce55));
+        assert!(devices.read(0, NVME + 0x13ec, 4, 0).is_err());
+        for (at, value) in [
+            (SART + 0x40, RAM / sart::PAGE),
+            (SART + 0x80, 16),
+            (SART, 0xff),
+            (NVME + 0x24, 0x0001_0001),
+            (NVME + 0x28, RAM),
+            (NVME + 0x30, RAM + 0x1000),
+            (NVME + 0x28108, RAM + 0x2000),
+            (NVME + 0x24908, 1),
+            (NVME + 0x14, 0x0046_0001),
+        ] {
+            let width = if [NVME + 0x28, NVME + 0x30, NVME + 0x28108].contains(&at) {
+                8
+            } else {
+                4
+            };
+            devices.write(0, at, width, value, 0).unwrap();
+        }
+        let mut ram = Ram::new(RAM, 0x10000);
+        let mut command = [0; 64];
+        command[0] = 6;
+        command[24..32].copy_from_slice(&(RAM + 0x4000).to_le_bytes());
+        command[40] = 1;
+        let mut tcb = [0; 128];
+        tcb[1] = 1;
+        tcb[24..32].copy_from_slice(&(RAM + 0x4000).to_le_bytes());
+        assert!(Memory::write(&mut ram, RAM, &command));
+        assert!(Memory::write(&mut ram, RAM + 0x2000, &tcb));
+        devices.write(0, NVME + 0x2490c, 4, 0, 0).unwrap();
+        devices.transfer(0, &mut ram, 0).unwrap();
+        let mut completion = [0; 16];
+        assert!(Memory::read(&mut ram, RAM + 0x1000, &mut completion));
+        assert_eq!(completion[14], 1);
+        let mut model = [0; 10];
+        assert!(Memory::read(&mut ram, RAM + 0x4000 + 24, &mut model));
+        assert_eq!(&model, b"Stela ANS2");
     }
 
     #[test]

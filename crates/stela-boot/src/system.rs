@@ -206,19 +206,24 @@ fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
 /// whose ranges are found here.
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+    let storage = if option(text, "--storage").is_some() || option(text, "--preboot").is_some() {
+        Some(storage::discover()?)
+    } else {
+        None
+    };
     if option(text, "--preboot").is_some() {
         drop(volume);
-        return Ok((Vec::new(), Vec::new(), Some(storage::discover()?)));
+        return Ok((Vec::new(), Vec::new(), storage));
     }
     let Some(directory) = option(text, "--bundle") else {
-        return Ok((firmware::source(&mut volume)?, Vec::new(), None));
+        return Ok((firmware::source(&mut volume)?, Vec::new(), storage));
     };
     drop(volume);
     let files = crate::engine::bundle::read(directory)?;
     if files.len() > MAX_FILES {
         return Err("bundle lists too many files");
     }
-    Ok((Vec::new(), files, None))
+    Ok((Vec::new(), files, storage))
 }
 
 /// `source.bin`, the bundle files, and the storage drivers' ranges.
