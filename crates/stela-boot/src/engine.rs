@@ -626,10 +626,15 @@ fn run(
         machine.statistics.blocks,
         machine.statistics.compiled,
         machine.statistics.chained,
+        (
+            machine.statistics.exceptions,
+            machine.statistics.interrupts,
+            machine.statistics.waits,
+        ),
     );
-    // The PE's PC at each slice end since the last heartbeat, and how many
-    // of those were at EL0.
-    let mut samples: Vec<u64> = Vec::new();
+    // The PE's call chain at each slice end since the last heartbeat, and
+    // how many of those were at EL0.
+    let mut samples: Vec<[u64; CHAIN]> = Vec::new();
     let mut user = 0;
     loop {
         let slice = machine.statistics.blocks + SLICE;
@@ -650,7 +655,7 @@ fn run(
         if !sliced {
             return stop;
         }
-        samples.push(machine.cpu.pc);
+        samples.push(call_chain(machine));
         user += u32::from(machine.cpu.pstate.el == 0);
         if now - beat.0 >= BEAT_SECONDS * tsc_hz {
             let (native, blocks) = (host::native_ticks(), machine.statistics.blocks);
@@ -658,12 +663,19 @@ fn run(
             let cpu = &machine.cpu;
             let compiled = machine.statistics.compiled;
             // Ticks per block, the share spent in compiled code, the blocks
-            // compiled since the last beat, code discards so far, and the
-            // share of blocks entered through a chain.
-            let chained = machine.statistics.chained;
+            // compiled since the last beat, code discards so far, the share
+            // of blocks entered through a chain, and the exceptions,
+            // interrupts and waits since the last beat.
+            let statistics = &machine.statistics;
+            let chained = statistics.chained;
+            let events = (
+                statistics.exceptions,
+                statistics.interrupts,
+                statistics.waits,
+            );
             output::arguments(format_args!(
                 "BEAT blocks={blocks} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
-                 compiled={} discards={} chained={}%\n",
+                 compiled={} discards={} chained={}% exceptions={} interrupts={} waits={}\n",
                 cpu.pc,
                 level_name(cpu.pstate.guarded),
                 cpu.pstate.el,
@@ -673,31 +685,80 @@ fn run(
                 compiled - beat.3,
                 machine.statistics.code_discards,
                 (chained - beat.4) * 100 / (blocks - beat.2).max(1),
+                events.0 - beat.5.0,
+                events.1 - beat.5.1,
+                events.2 - beat.5.2,
             ));
-            beat = (now, native, blocks, compiled, chained);
+            beat = (now, native, blocks, compiled, chained, events);
             sample_report(&mut samples, user);
+            timer_report(machine);
             user = 0;
         }
     }
 }
 
-/// The PCs the heartbeat's slice-end samples found most often, and the
-/// share of samples at EL0, which show where a guest without output spends
-/// its time.
-fn sample_report(samples: &mut Vec<u64>, user: u32) {
-    const SHOWN: usize = 6;
+/// The PC and return addresses a call chain sample keeps.
+const CHAIN: usize = 6;
+
+/// The PC and the return addresses of the frame records from X29, without
+/// their PACs; zero past the chain's end.
+fn call_chain(machine: &mut Machine<BareHost, AppleDevices>) -> [u64; CHAIN] {
+    let mut chain = [0; CHAIN];
+    chain[0] = machine.cpu.pc;
+    let mut frame = machine.cpu.state.x[29];
+    for slot in &mut chain[1..] {
+        let mut record = [0u8; 16];
+        if frame == 0 || !frame.is_multiple_of(8) || !machine.read_virtual(frame, &mut record) {
+            break;
+        }
+        let link = u64::from_le_bytes(record[8..].try_into().expect("8 bytes"));
+        *slot = machine.strip_instruction_pointer(link);
+        frame = u64::from_le_bytes(record[..8].try_into().expect("8 bytes"));
+    }
+    chain
+}
+
+/// The share of the heartbeat's slice-end samples at EL0 and the call
+/// chains they found most often, which show where a guest without output
+/// spends its time.
+fn sample_report(samples: &mut Vec<[u64; CHAIN]>, user: u32) {
+    const SHOWN: usize = 3;
     samples.sort_unstable();
-    let mut counts: Vec<(usize, u64)> = samples
+    let mut counts: Vec<(usize, [u64; CHAIN])> = samples
         .chunk_by(|a, b| a == b)
         .map(|run| (run.len(), run[0]))
         .collect();
     counts.sort_unstable_by(|a, b| b.cmp(a));
-    output::arguments(format_args!("SAMPLES el0={user}/{}", samples.len()));
-    for (count, pc) in counts.into_iter().take(SHOWN) {
-        output::arguments(format_args!(" {pc:#x}x{count}"));
+    output::arguments(format_args!("SAMPLES el0={user}/{}\n", samples.len()));
+    for (count, chain) in counts.into_iter().take(SHOWN) {
+        output::arguments(format_args!("SAMPLE x{count}"));
+        for address in chain.into_iter().take_while(|&address| address != 0) {
+            output::arguments(format_args!(" {address:#x}"));
+        }
+        output::arguments(format_args!("\n"));
+    }
+    samples.clear();
+}
+
+/// The counter, PSTATE.DAIF and each generic timer's CTL and CVAL, which
+/// show why a PE that should sleep in WFI does not.
+fn timer_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    use stela_runtime::machine::{engine::Host, timer::CHANNELS};
+    let now = machine.host.counter();
+    let cpu = &machine.cpu;
+    output::arguments(format_args!(
+        "TIMERS now={now:#x} daif={:#x}",
+        cpu.pstate.daif
+    ));
+    for channel in CHANNELS {
+        output::arguments(format_args!(
+            " {:?}={:#x}/{:#x}",
+            channel.control,
+            channel.read_control(cpu, now),
+            cpu.read(channel.compare)
+        ));
     }
     output::arguments(format_args!("\n"));
-    samples.clear();
 }
 
 /// The instruction words that most often left compiled code for the engine.

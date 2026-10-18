@@ -1022,6 +1022,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// `pointer` without its PAC, laid out as an instruction address in the
+    /// current regime (Arm `XPACI`), for diagnostics such as return
+    /// addresses in frame records; unchanged without a PAC layout.
+    pub fn strip_instruction_pointer(&self, pointer: u64) -> u64 {
+        self.pointer_context()
+            .ok()
+            .and_then(|context| context.strip(pauth::Key::Ia, pointer).ok())
+            .unwrap_or(pointer)
+    }
+
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
         self.block_limit = if budget == 0 { u64::MAX } else { budget };
