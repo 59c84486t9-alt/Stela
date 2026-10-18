@@ -18,6 +18,7 @@ use crate::devices;
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::lock_regs::{self, Programmed};
+use crate::nvram;
 use crate::trust_cache;
 use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
@@ -700,6 +701,12 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         unresolved.extend(gaps);
     }
     carveouts::publish(&mut tree, &carveouts)?;
+    if nvram::publish(&mut tree)? {
+        unresolved.push(
+            "/chosen nvram-proxy-data: an empty NVRAM bank; variables do not persist without a NOR model"
+                .into(),
+        );
+    }
     let memory_controller = inputs.target.chip_id.and_then(lock_regs::table);
     if let Some(controller) = memory_controller {
         lock_regs::publish(&mut tree, controller)?;

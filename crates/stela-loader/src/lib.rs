@@ -34,6 +34,7 @@ pub mod load_plan;
 pub mod lock_regs;
 #[cfg(feature = "std")]
 pub mod mapped_image;
+pub mod nvram;
 mod thread_state;
 pub mod trust_cache;
 #[cfg(feature = "std")]
