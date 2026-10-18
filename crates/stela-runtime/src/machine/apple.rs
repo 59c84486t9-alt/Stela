@@ -17,6 +17,7 @@ use crate::platform::apple::{
     cpustart::{self, CpuStart},
     dart::{self, Dart},
     dcs::Dcs,
+    dpe::Dpe,
     energy::{self, Energy},
     fuse::{self, AonFuses},
     interrupt::{CpuIndex, InterruptLatch},
@@ -388,6 +389,24 @@ impl AppleDevices {
             self.bus
                 .map(device, base + offset, bytes, offset)
                 .map_err(|error| format!("CPU cluster placement: {error:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// SOC DPE sample aliases and enable words, each mapped sparsely.
+    pub fn add_soc_dpe(&mut self, physical: u64, samples: &[(u64, bool)]) -> Result<(), String> {
+        let model = Dpe::new(samples).map_err(String::from)?;
+        let spans = model.spans();
+        let device = self.bus.add(Box::new(model));
+        for (o, n) in spans {
+            self.bus
+                .map(
+                    device,
+                    physical.checked_add(o).ok_or("SOC DPE address overflows")?,
+                    n,
+                    o,
+                )
+                .map_err(|e| format!("SOC DPE placement: {e:?}"))?;
         }
         Ok(())
     }

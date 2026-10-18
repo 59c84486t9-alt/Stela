@@ -415,6 +415,9 @@ fn devices(
             blocks.len()
         ));
     }
+    if let Some(bank) = board.and_then(|b| b.soc_dpe.as_ref()) {
+        devices.add_soc_dpe(bank.physical, &bank.samples)?;
+    }
     for bank in board.map_or(&[][..], |board| &board.power_banks) {
         devices.add_soc_power(bank.physical, bank.kind)?;
     }

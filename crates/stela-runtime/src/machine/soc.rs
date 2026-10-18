@@ -19,7 +19,7 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, cluster, cpustart, dart, energy, fuse, power, ptd, wake,
+    amcc, cluster, cpustart, dart, dpe, energy, fuse, power, ptd, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -72,6 +72,7 @@ struct Soc {
     caches: Option<[CoreCaches; 2]>,
     wake_masks: Option<WakeLayout>,
     power_banks: &'static [(usize, power::Kind)],
+    dpe_reg: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,6 +184,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -200,6 +202,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -217,6 +220,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -262,6 +266,7 @@ const SOCS: [Soc; 14] = [
             (34, power::Kind::Gpce),
             (32, power::Kind::Gating),
         ],
+        dpe_reg: Some(29),
     },
     Soc {
         chip_id: 0x6020,
@@ -279,6 +284,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -296,6 +302,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -313,6 +320,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -330,6 +338,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -347,6 +356,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -364,6 +374,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -381,6 +392,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -398,6 +410,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -415,6 +428,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -432,6 +446,7 @@ const SOCS: [Soc; 14] = [
         caches: None,
         wake_masks: None,
         power_banks: &[],
+        dpe_reg: None,
     },
 ];
 
@@ -724,6 +739,8 @@ pub struct Board {
     pub energy: Vec<EnergyBank>,
     /// SOC configuration banks, bound to translated PMGR `reg` entries.
     pub power_banks: Vec<PowerBank>,
+    /// SOC DPE controls and absolute DT energy samples.
+    pub soc_dpe: Option<SocDpe>,
     /// AON/SOC/cluster performance banks and DT-selected counters.
     pub performance: Vec<PerfBank>,
     /// AOP wake masks and reporting source IDs.
@@ -731,6 +748,12 @@ pub struct Board {
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SocDpe {
+    pub physical: u64,
+    pub samples: Vec<(u64, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1092,6 +1115,7 @@ fn pmgr_registers(
         energy: Vec::new(),
         performance: Vec::new(),
         power_banks: Vec::new(),
+        soc_dpe: None,
     };
     let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
         return Ok(none);
@@ -1153,6 +1177,10 @@ fn pmgr_registers(
         }
     };
     let power_banks = place_power_banks(&reg, soc.power_banks)?;
+    let soc_dpe = soc
+        .dpe_reg
+        .map(|i| place_soc_dpe(&node, &reg, i))
+        .transpose()?;
     let energy = energy_banks(&node, &reg, &clusters)?;
     let performance = performance_banks(&node, &reg)?;
     let wake_masks = soc
@@ -1160,6 +1188,7 @@ fn pmgr_registers(
         .map(|layout| wake_bank(&node, &reg, layout))
         .transpose()?;
     Ok(PmgrRegisters {
+        soc_dpe,
         power_banks,
         wake_masks,
         performance,
@@ -1168,6 +1197,45 @@ fn pmgr_registers(
         aon_fuses: fuses,
         cpu_start,
     })
+}
+
+/// SOC DPE direct split-word records have group 0x1d, die mask 1,
+/// command flag 0, split flag 1 and width 64 (PMGR parser 0x2b7796c).
+fn place_soc_dpe(
+    node: &Node<'_>,
+    reg: &[Option<(u64, u64)>],
+    index: usize,
+) -> Result<SocDpe, String> {
+    let (physical, bytes) = reg
+        .get(index)
+        .copied()
+        .flatten()
+        .ok_or("SOC DPE has no mapped DT reg bank")?;
+    let data = node.property("hw-dpe-reg").unwrap_or_default();
+    if !data.len().is_multiple_of(40) {
+        return Err("SOC DPE hw-dpe-reg has partial records".into());
+    }
+    let mut samples = Vec::new();
+    for entry in data.as_chunks::<40>().0 {
+        if entry[16..18] != [0x1d, 0] || entry[19] != 0 {
+            continue;
+        }
+        if entry[18] != 1 || entry[20] != 1 || entry[23] != 64 {
+            return Err("unsupported SOC DPE sampling flags".into());
+        }
+        let address = u64::from_le_bytes(entry[..8].try_into().expect("8 bytes"));
+        let offset = address
+            .checked_sub(physical)
+            .ok_or("SOC DPE sample below its reg bank")?;
+        samples.push((offset, dpe::RESTORE.contains(&offset)));
+    }
+    let model = dpe::Dpe::new(&samples).map_err(String::from)?;
+    for (o, n) in model.spans() {
+        if o.checked_add(n).is_none_or(|end| end > bytes) || physical.checked_add(o + n).is_none() {
+            return Err("SOC DPE register outside its DT bank".into());
+        }
+    }
+    Ok(SocDpe { physical, samples })
 }
 
 /// Bind documented RegMap roles to DT addresses, validating every modeled
@@ -1403,6 +1471,7 @@ fn energy_banks(
 
 /// The PMGR registers the machine models besides its power states.
 struct PmgrRegisters {
+    soc_dpe: Option<SocDpe>,
     power_banks: Vec<PowerBank>,
     wake_masks: Option<WakeBank>,
     performance: Vec<PerfBank>,
@@ -1699,6 +1768,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
+        soc_dpe,
         power_banks,
         wake_masks,
         performance,
@@ -1709,6 +1779,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
+        soc_dpe,
         power_banks,
         wake_masks,
         performance,
@@ -2249,6 +2320,7 @@ mod tests {
         reg[16] = [0x11e4_0000, 0xb000];
         reg[19] = [0x1105_0000, 0x10000];
         reg[17] = [0x11e5_0000, 0xe8_1000];
+        reg[29] = [0x3b20_8000, 0x8000];
         reg[30] = [0x3b70_0000, 0x20000];
         reg[31] = [0x3b72_8000, 0x1000];
         reg[32] = [0x3b72_4000, 0x1000];
@@ -2387,6 +2459,21 @@ mod tests {
                 .power_states,
             None
         );
+    }
+
+    #[test]
+    fn soc_dpe_samples_are_absolute_and_checked_against_the_selected_dt_bank() {
+        use crate::machine::adt::encode;
+        let mut sample = [0u8; 40];
+        sample[..8].copy_from_slice(&0x5_0000_2708u64.to_le_bytes());
+        sample[16..24].copy_from_slice(&[0x1d, 0, 1, 0, 1, 1, 1, 64]);
+        let tree = encode(&[("hw-dpe-reg", &sample)], &[]);
+        let node = Node::root(&tree).unwrap();
+        let bank = place_soc_dpe(&node, &[Some((0x5_0000_0000, 0x8000))], 0).unwrap();
+        assert_eq!(bank.samples, vec![(0x2708, true)]);
+        assert_eq!(bank.physical, 0x5_0000_0000);
+        assert!(place_soc_dpe(&node, &[Some((0, 0x8000))], 0).is_err());
+        assert!(place_soc_dpe(&node, &[Some((0x5_0000_0000, 0x3000))], 0).is_err());
     }
 
     #[test]
