@@ -17,6 +17,7 @@ use crate::platform::apple::{
     cpustart::{self, CpuStart},
     dart::{self, Dart},
     dcs::Dcs,
+    energy::{self, Energy},
     fuse::{self, AonFuses},
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
@@ -379,6 +380,28 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// A CPU/CPM energy bank at its absolute `hw-dpe-reg` address. Map only
+    /// the two accumulators and, for CPM, its separate configuration word.
+    pub fn add_cpu_energy(&mut self, physical: u64, cpm: bool) -> Result<(), String> {
+        let device = self.bus.add(Box::new(Energy::new(cpm)));
+        self.bus
+            .map(device, physical, energy::COUNTER_BYTES, 0)
+            .map_err(|error| format!("CPU energy placement: {error:?}"))?;
+        if cpm {
+            self.bus
+                .map(
+                    device,
+                    physical
+                        .checked_add(energy::CONTROL_OFFSET)
+                        .ok_or("CPM energy configuration address overflows")?,
+                    8,
+                    energy::CONTROL_OFFSET,
+                )
+                .map_err(|error| format!("CPM energy configuration placement: {error:?}"))?;
+        }
+        Ok(())
+    }
+
     /// The always-on eFuse block at `physical`.
     pub fn add_aon_fuses(&mut self, physical: u64) -> Result<(), String> {
         let device = self.bus.add(Box::new(AonFuses));
@@ -638,6 +661,35 @@ mod tests {
     use super::*;
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+
+    #[test]
+    fn energy_banks_route_only_their_described_words() {
+        let mut devices = AppleDevices::new();
+        let cpm = 0x2_11e4_8000;
+        let core = 0x2_1005_9000;
+        devices.add_cpu_energy(cpm, true).unwrap();
+        devices.add_cpu_energy(core, false).unwrap();
+        assert_eq!(devices.read(0, cpm, 8, 0), Ok(0));
+        devices
+            .write(0, cpm + 8, 8, 0x1234_5678_ffff_0000, 0)
+            .unwrap();
+        assert_eq!(devices.read(0, cpm + 8, 8, 99), Ok(0x1234_5678_ffff_0000));
+        assert_eq!(devices.read(0, core + 8, 8, 99), Ok(0));
+        assert_eq!(devices.read(0, cpm + energy::CONTROL_OFFSET, 8, 0), Ok(0));
+        devices
+            .write(0, cpm + energy::CONTROL_OFFSET, 8, 0xa800_0000_0000_0000, 0)
+            .unwrap();
+        assert_eq!(
+            devices.read(0, cpm + energy::CONTROL_OFFSET, 8, 0),
+            Ok(0xa800_0000_0000_0000)
+        );
+        assert!(devices.read(0, cpm + 16, 8, 0).is_err());
+        assert!(
+            devices
+                .read(0, core + energy::CONTROL_OFFSET, 8, 0)
+                .is_err()
+        );
+    }
 
     #[derive(Clone, Default)]
     struct Console(Rc<RefCell<Vec<u8>>>);

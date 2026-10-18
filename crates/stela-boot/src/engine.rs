@@ -415,6 +415,9 @@ fn devices(
             blocks.len()
         ));
     }
+    for bank in board.map_or(&[][..], |board| &board.energy) {
+        devices.add_cpu_energy(bank.physical, bank.cpm)?;
+    }
     for cluster in board.map_or(&[][..], |board| &board.clusters) {
         devices.add_cpu_cluster(cluster.base, cluster.dvmr, cluster.pstates)?;
     }

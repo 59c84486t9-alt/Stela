@@ -19,7 +19,7 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, cluster, cpustart, dart, fuse, ptd,
+    amcc, cluster, cpustart, dart, energy, fuse, ptd,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -662,9 +662,18 @@ pub struct Board {
     pub clusters: Vec<CpuCluster>,
     /// The always-on eFuse block, under the same conditions.
     pub aon_fuses: Option<(u64, u64)>,
+    /// CPU/CPM energy banks selected by `hw-dpe-reg`, in absolute guest PA.
+    pub energy: Vec<EnergyBank>,
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+/// A direct CPU energy bank, with its optional CPM enable configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnergyBank {
+    pub physical: u64,
+    pub cpm: bool,
 }
 
 /// An `mcc,t8112`: its cache in the AMCC aperture, its DRAM channels and
@@ -994,6 +1003,7 @@ fn pmgr_registers(
         clusters: Vec::new(),
         aon_fuses: None,
         cpu_start: None,
+        energy: Vec::new(),
     };
     let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
         return Ok(none);
@@ -1054,15 +1064,75 @@ fn pmgr_registers(
             return Err("/arm-io/pmgr reg[0] does not hold the CPU start registers".into());
         }
     };
+    let energy = energy_banks(&node, &reg, &clusters)?;
     Ok(PmgrRegisters {
+        energy,
         clusters,
         aon_fuses: fuses,
         cpu_start,
     })
 }
 
+/// `hw-dpe-reg` records are 40 bytes (`ApplePMGR` parser, kernel file
+/// 0x2b7796c..0x2b77af8). The first u64 is an absolute PA, not an arm-io
+/// bus address. Direct, single-load, 64-bit CPU records have group 0,
+/// die mask 1, command/split flags 0 and behavior flags 1/0. Other groups
+/// (GPU/PMP, ANE, SOC DPE) belong to separate models, not CPU accumulators.
+fn energy_banks(
+    node: &Node<'_>,
+    reg: &[Option<(u64, u64)>],
+    clusters: &[CpuCluster],
+) -> Result<Vec<EnergyBank>, String> {
+    const RECORD: usize = 40;
+    let data = node.property("hw-dpe-reg").unwrap_or_default();
+    if !data.len().is_multiple_of(RECORD) {
+        return Err("/arm-io/pmgr hw-dpe-reg is not whole records".into());
+    }
+    let mut banks = Vec::new();
+    for entry in data.as_chunks::<RECORD>().0 {
+        if entry[16..18] != [0, 0] || entry[19] != 0 {
+            continue;
+        }
+        if entry[18..24] != [1, 0, 0, 1, 0, 64] {
+            return Err(
+                "PMGR CPU hw-dpe-reg has unsupported die, sampling, behavior or width flags".into(),
+            );
+        }
+        let physical = u64::from_le_bytes(entry[..8].try_into().expect("8 bytes"));
+        let cpm = clusters
+            .iter()
+            .any(|c| c.base.checked_add(energy::CPM_OFFSET) == Some(physical));
+        let bytes = if cpm {
+            energy::CONTROL_OFFSET + 8
+        } else {
+            energy::COUNTER_BYTES
+        };
+        let covered = reg.iter().flatten().any(|&(base, size)| {
+            base <= physical
+                && physical
+                    .checked_add(bytes)
+                    .zip(base.checked_add(size))
+                    .is_some_and(|(end, limit)| end <= limit)
+                && (cpm
+                    || size == energy::CORE_BYTES
+                        && base.checked_add(energy::CORE_OFFSET) == Some(physical))
+        });
+        if !physical.is_multiple_of(8)
+            || !covered
+            || banks.iter().any(|b: &EnergyBank| b.physical == physical)
+        {
+            return Err(format!(
+                "/arm-io/pmgr CPU hw-dpe-reg PA {physical:#x} is duplicated or outside its reg bank"
+            ));
+        }
+        banks.push(EnergyBank { physical, cpm });
+    }
+    Ok(banks)
+}
+
 /// The PMGR registers the machine models besides its power states.
 struct PmgrRegisters {
+    energy: Vec<EnergyBank>,
     clusters: Vec<CpuCluster>,
     aon_fuses: Option<(u64, u64)>,
     cpu_start: Option<(u64, u8)>,
@@ -1355,12 +1425,14 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
+        energy,
         clusters,
         aon_fuses,
         cpu_start,
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
+        energy,
         cpus,
         uart,
         watchdog,
@@ -1889,11 +1961,28 @@ mod tests {
         let mut reg = [[0x3b70_0000, 0xcc000]; 37];
         reg[1] = [0x3d28_0000, 0x7c000];
         reg[5] = [0x10e2_0000, 0x2000];
+        reg[7] = [0x10e4_0000, 0x9000];
+        reg[10] = [0x1005_0000, 0x10000];
         reg[8] = [0x10e5_0000, 0xe8_1000];
         reg[14] = [0x11e2_0000, 0x2000];
+        reg[16] = [0x11e4_0000, 0xb000];
+        reg[19] = [0x1105_0000, 0x10000];
         reg[17] = [0x11e5_0000, 0xe8_1000];
         reg[36] = [0x3d2c_8000, 0x4000];
         let reg = reg.concat();
+        let energy_record = |address: u64| {
+            let mut record = [0u8; 40];
+            record[..8].copy_from_slice(&address.to_le_bytes());
+            record[16..24].copy_from_slice(&[0, 0, 1, 0, 0, 1, 0, 64]);
+            record
+        };
+        let energy = [
+            energy_record(0x2_10e4_8000),
+            energy_record(0x2_1005_9000),
+            energy_record(0x2_11e4_8000),
+            energy_record(0x2_1105_9000),
+        ]
+        .concat();
         let pmgr_with = |reg: &[u64]| {
             encode(
                 &[
@@ -1902,6 +1991,7 @@ mod tests {
                     ("reg", &u64s(reg)),
                     ("ps-regs", &u32s(&[1, 0x4000, 0x3ff, 0, 0, 0x3ff])),
                     ("devices", &devices),
+                    ("hw-dpe-reg", &energy),
                 ],
                 &[],
             )
@@ -1914,6 +2004,36 @@ mod tests {
             let tree = tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmgr_with(&other)]);
             assert!(board(&tree).is_err());
         }
+        for invalid in [
+            energy[..39].to_vec(),
+            [energy.clone(), energy[..40].to_vec()].concat(),
+            {
+                let mut unsupported = energy.clone();
+                unsupported[20] = 1;
+                unsupported
+            },
+            {
+                let mut unsupported = energy.clone();
+                unsupported[23] = 32;
+                unsupported
+            },
+            {
+                let mut outside = energy.clone();
+                outside[..8].copy_from_slice(&0x4_10e4_8000u64.to_le_bytes());
+                outside
+            },
+        ] {
+            let pmgr = encode(
+                &[
+                    ("name", &z("pmgr")),
+                    ("compatible", &z(PMGR)),
+                    ("reg", &u64s(&reg)),
+                    ("hw-dpe-reg", &invalid),
+                ],
+                &[],
+            );
+            assert!(board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmgr])).is_err());
+        }
         let pmgr = encode(
             &[
                 ("name", &z("pmgr")),
@@ -1921,10 +2041,32 @@ mod tests {
                 ("reg", &u64s(&reg)),
                 ("ps-regs", &u32s(&[1, 0x4000, 0x3ff, 0, 0, 0x3ff])),
                 ("devices", &devices),
+                ("hw-dpe-reg", &energy),
             ],
             &[],
         );
         let found = board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmgr])).unwrap();
+        assert_eq!(
+            found.energy,
+            vec![
+                EnergyBank {
+                    physical: 0x2_10e4_8000,
+                    cpm: true
+                },
+                EnergyBank {
+                    physical: 0x2_1005_9000,
+                    cpm: false
+                },
+                EnergyBank {
+                    physical: 0x2_11e4_8000,
+                    cpm: true
+                },
+                EnergyBank {
+                    physical: 0x2_1105_9000,
+                    cpm: false
+                },
+            ]
+        );
         assert_eq!(found.clusters, T8112_CLUSTERS.to_vec());
         assert_eq!(found.aon_fuses, Some((0x2_3d2c_8000, 0x4000)));
         assert_eq!(
