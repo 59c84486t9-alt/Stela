@@ -37,6 +37,14 @@
 //! a hidden AES engine leaves the kernel asleep before `launchd` forever.
 //! Removing the prefix keeps the verdict a matching root gets (secure); only
 //! the callback into the absent driver goes.
+//!
+//! A watchdog whose board shows no PMU says so. `AppleARMWatchdogTimer::start`
+//! (26A434 J473AP kernelcache file 0x1ca4458..0x1ca4488) waits without a
+//! timeout for an `IOPMU` service unless its node has `no-pmu`; a PMU
+//! driver binds to a `pmu,*` node (J473AP's SPMI `pmu,spmi`). With every PMU
+//! hidden, that wait never ends, `IOWatchdog` never registers and
+//! `restored_external` fails its `disable_watchdog` step, so a visible
+//! watchdog gets an empty `no-pmu`, the board fact the kernel tests for.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
 use stela_runtime::machine::soc;
@@ -48,6 +56,7 @@ const PHANDLE: &str = "AAPL,phandle";
 const SECURE_ROOT_PREFIX: &str = "secure-root-prefix";
 const DEVICE_TYPE: &str = "device_type";
 const IOMMU_PARENT: &str = "iommu-parent";
+const NO_PMU: &str = "no-pmu";
 
 /// Paths that keep their `compatible` whatever it names.
 fn structural(path: &str) -> bool {
@@ -134,8 +143,9 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
 
 /// Removes `compatible` from every device the machine does not model, a
 /// `/defaults serial-device` that selects one and a `secure-root-prefix`
-/// that no AES accelerator can acknowledge, and returns their paths in tree
-/// order, then the selections.
+/// that no AES accelerator can acknowledge, marks visible watchdogs
+/// `no-pmu` when no PMU is visible, and returns their paths in tree order,
+/// then the selections and marks (`PATH +no-pmu`).
 pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     let mut parents = Vec::new();
     client_providers(&tree.root, &mut parents);
@@ -155,7 +165,43 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
         tree.root.remove_property(SECURE_ROOT_PREFIX);
         hidden.push(format!("/ {SECURE_ROOT_PREFIX}"));
     }
+    if !visible(&tree.root, &|node| {
+        compatibles(node).any(|name| name.starts_with("pmu,"))
+    }) {
+        let mut watchdogs = Vec::new();
+        visible_paths(
+            &tree.root,
+            "",
+            &|node| named(node, soc::WATCHDOG),
+            &mut watchdogs,
+        );
+        for path in watchdogs {
+            let node = tree.node_mut(&path).expect("visited path");
+            if node.property(NO_PMU).is_none() {
+                node.set_property(NO_PMU, Vec::new())
+                    .expect("empty property");
+                hidden.push(format!("{path} +{NO_PMU}"));
+            }
+        }
+    }
     hidden
+}
+
+/// Whether a node under `node` that `test` selects keeps its `compatible`.
+fn visible(node: &Node, test: &dyn Fn(&Node) -> bool) -> bool {
+    test(node) && node.property(COMPATIBLE).is_some()
+        || node.children.iter().any(|child| visible(child, test))
+}
+
+/// The paths of the visible nodes under `node` that `test` selects.
+fn visible_paths(node: &Node, path: &str, test: &dyn Fn(&Node) -> bool, paths: &mut Vec<String>) {
+    if test(node) && node.property(COMPATIBLE).is_some() {
+        paths.push(path.into());
+    }
+    for child in &node.children {
+        let name = child.name().unwrap_or("?");
+        visible_paths(child, &format!("{path}/{name}"), test, paths);
+    }
 }
 
 /// Whether an AES accelerator under `node` keeps its `compatible`.
@@ -226,6 +272,34 @@ mod tests {
         }
         node.children = children;
         node
+    }
+
+    #[test]
+    fn a_watchdog_without_a_visible_pmu_says_no_pmu() {
+        let tree = |pmu: Option<&[u8]>| DeviceTree {
+            root: node(
+                "device-tree",
+                None,
+                vec![node(
+                    "arm-io",
+                    None,
+                    vec![
+                        node("wdt", Some(b"wdt,t8101\0wdt,s5l8960x\0"), vec![]),
+                        node("nub-spmi0", None, vec![node("pmu-main", pmu, vec![])]),
+                    ],
+                )],
+            ),
+        };
+        let mut hidden = tree(Some(b"pmu,spmi\0pmu,stowe\0"));
+        let paths = hide_unmodeled(&mut hidden);
+        assert_eq!(paths, ["/arm-io/nub-spmi0/pmu-main", "/arm-io/wdt +no-pmu"]);
+        let no_pmu = hidden.property("/arm-io/wdt", NO_PMU).unwrap();
+        assert!(no_pmu.value.is_empty());
+        // Already marked: nothing more to say.
+        assert_eq!(hide_unmodeled(&mut hidden), Vec::<String>::new());
+        // A tree without any PMU node at all is marked the same way.
+        let mut absent = tree(None);
+        assert_eq!(hide_unmodeled(&mut absent), ["/arm-io/wdt +no-pmu"]);
     }
 
     #[test]
@@ -383,7 +457,8 @@ mod tests {
                 "/arm-io/dockchannel-uart",
                 "/buttons",
                 "/defaults serial-device",
-                "/ secure-root-prefix"
+                "/ secure-root-prefix",
+                "/arm-io/wdt +no-pmu",
             ]
         );
         for kept in [
