@@ -609,6 +609,34 @@ fn stack_report(machine: &mut Machine<BareHost, AppleDevices>) {
         }
         output::arguments(format_args!("\n"));
     }
+    text_report(machine);
+}
+
+/// The text a general-purpose register points to, when it reads as at least
+/// eight printable characters: a guest's panic message often sits in one at
+/// a stop, while the console that would print it is off.
+fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    const LIMIT: usize = 512;
+    for register in 0..29 {
+        let address = machine.cpu.state.x[register];
+        let mut text = Vec::new();
+        'read: while text.len() < LIMIT {
+            let mut chunk = [0u8; 16];
+            if !machine.read_virtual(address.wrapping_add(text.len() as u64), &mut chunk) {
+                break;
+            }
+            for byte in chunk {
+                if byte == 0 || !(byte.is_ascii_graphic() || b" \t\n".contains(&byte)) {
+                    break 'read;
+                }
+                text.push(byte);
+            }
+        }
+        if text.len() >= 8 {
+            let text = core::str::from_utf8(&text).expect("ASCII");
+            output::arguments(format_args!("TEXT x{register} {address:#x}: {text:?}\n"));
+        }
+    }
 }
 
 fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
