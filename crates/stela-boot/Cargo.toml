@@ -28,6 +28,9 @@ panic = "abort"
 panic = "abort"
 codegen-units = 1
 lto = "thin"
+# Line tables go to the separate PDB, so profiles of a boot can name the
+# engine's functions; the image itself is unchanged.
+debug = "line-tables-only"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
