@@ -16,6 +16,7 @@ pub mod message;
 pub mod ool;
 pub mod rom;
 pub mod shared;
+pub mod store;
 
 use super::{
     asc::{Asc, Lines},
