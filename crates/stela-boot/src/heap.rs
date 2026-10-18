@@ -1,5 +1,11 @@
 //! Boot heap. Each allocation records its full extent, including alignment gaps,
 //! so deallocation can coalesce the original physical range.
+//!
+//! The address-ordered free list costs a walk per allocation and release, and
+//! the system engine allocates and frees small blocks constantly. Blocks of up
+//! to 4 KiB with at most 16-byte alignment are therefore rounded up to a
+//! power-of-two size class and, once freed, kept on that class's LIFO list
+//! for the next allocation of the class instead of returning to the free list.
 use core::{
     alloc::{GlobalAlloc, Layout},
     cell::UnsafeCell,
@@ -17,8 +23,22 @@ struct Header {
     base: usize,
     bytes: usize,
 }
+/// A freed size-class block, linked through its first word.
+struct Small {
+    next: *mut Small,
+}
+const SMALLEST: usize = 16;
+const CLASSES: usize = 9;
+const SMALL_ALIGNMENT: usize = 16;
+/// The size class of `layout`, or `None` for the free list.
+fn class(layout: Layout) -> Option<usize> {
+    let bytes = layout.size().max(SMALLEST).next_power_of_two();
+    (layout.align() <= SMALL_ALIGNMENT && bytes <= SMALLEST << (CLASSES - 1))
+        .then(|| (bytes / SMALLEST).trailing_zeros() as usize)
+}
 struct State {
     first: *mut Free,
+    small: [*mut Small; CLASSES],
     ready: bool,
 }
 pub struct Heap {
@@ -34,6 +54,7 @@ impl Heap {
             held: AtomicBool::new(false),
             state: UnsafeCell::new(State {
                 first: ptr::null_mut(),
+                small: [ptr::null_mut(); CLASSES],
                 ready: false,
             }),
         }
@@ -89,110 +110,147 @@ unsafe impl GlobalAlloc for Heap {
         if !state.ready {
             return ptr::null_mut();
         }
-        let minimum = core::mem::size_of::<Free>();
-        let header = core::mem::size_of::<Header>();
-        let alignment = layout.align().max(WORD);
-        let mut link = &mut state.first as *mut *mut Free;
-        loop {
-            let node = unsafe { *link };
-            if node.is_null() {
-                return ptr::null_mut();
-            }
-            let base = node as usize;
-            let Some(end) = base.checked_add(unsafe { (*node).bytes }) else {
-                return ptr::null_mut();
-            };
-            let Some(user) = base.checked_add(header).and_then(|v| aligned(v, alignment)) else {
-                return ptr::null_mut();
-            };
-            let Some(mut used_end) = user
-                .checked_add(layout.size().max(1))
-                .and_then(|v| aligned(v, WORD))
-            else {
-                return ptr::null_mut();
-            };
-            if used_end > end {
-                link = unsafe { &mut (*node).next };
-                continue;
-            }
-            let header_base = user - header;
-            let prefix = header_base - base;
-            let allocated_base = if prefix >= minimum { header_base } else { base };
-            if end - used_end < minimum {
-                used_end = end;
-            }
-            let next = unsafe { (*node).next };
-            let suffix = if used_end < end {
-                let suffix = used_end as *mut Free;
-                unsafe {
-                    suffix.write(Free {
-                        bytes: end - used_end,
-                        next,
-                    });
-                }
-                suffix
-            } else {
-                next
-            };
-            if prefix >= minimum {
-                unsafe {
-                    node.write(Free {
-                        bytes: prefix,
-                        next: suffix,
-                    });
-                }
-            } else {
-                unsafe {
-                    *link = suffix;
-                }
-            }
-            unsafe {
-                (header_base as *mut Header).write(Header {
-                    base: allocated_base,
-                    bytes: used_end - allocated_base,
-                });
-            }
-            return user as *mut u8;
+        let Some(class) = class(layout) else {
+            return unsafe { carve(state, layout.size(), layout.align()) };
+        };
+        let head = state.small[class];
+        if head.is_null() {
+            return unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) };
         }
+        // SAFETY: a block of this class that `dealloc` linked and nothing
+        // else owns.
+        state.small[class] = unsafe { (*head).next };
+        head.cast()
     }
-    unsafe fn dealloc(&self, pointer: *mut u8, _layout: Layout) {
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         let _guard = self.lock();
         let state = unsafe { &mut *self.state.get() };
-        // SAFETY: exact pointer from alloc; the caller has ended all accesses.
-        let header =
-            unsafe { (pointer.sub(core::mem::size_of::<Header>()) as *const Header).read() };
-        let base = header.base;
-        let end = base + header.bytes;
-        let mut previous: *mut Free = ptr::null_mut();
-        let mut next = state.first;
-        while !next.is_null() && (next as usize) < base {
-            previous = next;
-            next = unsafe { (*next).next };
-        }
-        let node = base as *mut Free;
-        unsafe {
-            node.write(Free {
-                bytes: header.bytes,
-                next,
-            });
-        }
-        if !next.is_null() && end == next as usize {
+        if let Some(class) = class(layout) {
+            let block = pointer.cast::<Small>();
+            // SAFETY: the caller's block of this class, at least 16 bytes
+            // and 16-byte aligned, which it no longer accesses.
             unsafe {
-                (*node).bytes += (*next).bytes;
-                (*node).next = (*next).next;
+                block.write(Small {
+                    next: state.small[class],
+                })
+            };
+            state.small[class] = block;
+        } else {
+            unsafe { release(state, pointer) };
+        }
+    }
+}
+
+/// Split `size` bytes aligned to `alignment` from the free list.
+///
+/// # Safety
+/// The heap's lock is held and `state` is initialized.
+unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
+    let minimum = core::mem::size_of::<Free>();
+    let header = core::mem::size_of::<Header>();
+    let alignment = alignment.max(WORD);
+    let mut link = &mut state.first as *mut *mut Free;
+    loop {
+        let node = unsafe { *link };
+        if node.is_null() {
+            return ptr::null_mut();
+        }
+        let base = node as usize;
+        let Some(end) = base.checked_add(unsafe { (*node).bytes }) else {
+            return ptr::null_mut();
+        };
+        let Some(user) = base.checked_add(header).and_then(|v| aligned(v, alignment)) else {
+            return ptr::null_mut();
+        };
+        let Some(mut used_end) = user.checked_add(size.max(1)).and_then(|v| aligned(v, WORD))
+        else {
+            return ptr::null_mut();
+        };
+        if used_end > end {
+            link = unsafe { &mut (*node).next };
+            continue;
+        }
+        let header_base = user - header;
+        let prefix = header_base - base;
+        let allocated_base = if prefix >= minimum { header_base } else { base };
+        if end - used_end < minimum {
+            used_end = end;
+        }
+        let next = unsafe { (*node).next };
+        let suffix = if used_end < end {
+            let suffix = used_end as *mut Free;
+            unsafe {
+                suffix.write(Free {
+                    bytes: end - used_end,
+                    next,
+                });
             }
-        }
-        if previous.is_null() {
-            state.first = node;
-        } else if previous as usize + unsafe { (*previous).bytes } == base {
+            suffix
+        } else {
+            next
+        };
+        if prefix >= minimum {
             unsafe {
-                (*previous).bytes += (*node).bytes;
-                (*previous).next = (*node).next;
+                node.write(Free {
+                    bytes: prefix,
+                    next: suffix,
+                });
             }
         } else {
             unsafe {
-                (*previous).next = node;
+                *link = suffix;
             }
+        }
+        unsafe {
+            (header_base as *mut Header).write(Header {
+                base: allocated_base,
+                bytes: used_end - allocated_base,
+            });
+        }
+        return user as *mut u8;
+    }
+}
+
+/// Return the extent of a block `carve` made to the free list, coalescing it
+/// with its neighbours.
+///
+/// # Safety
+/// The heap's lock is held, and `pointer` came from `carve` and is no longer
+/// accessed.
+unsafe fn release(state: &mut State, pointer: *mut u8) {
+    // SAFETY: exact pointer from alloc; the caller has ended all accesses.
+    let header = unsafe { (pointer.sub(core::mem::size_of::<Header>()) as *const Header).read() };
+    let base = header.base;
+    let end = base + header.bytes;
+    let mut previous: *mut Free = ptr::null_mut();
+    let mut next = state.first;
+    while !next.is_null() && (next as usize) < base {
+        previous = next;
+        next = unsafe { (*next).next };
+    }
+    let node = base as *mut Free;
+    unsafe {
+        node.write(Free {
+            bytes: header.bytes,
+            next,
+        });
+    }
+    if !next.is_null() && end == next as usize {
+        unsafe {
+            (*node).bytes += (*next).bytes;
+            (*node).next = (*next).next;
+        }
+    }
+    if previous.is_null() {
+        state.first = node;
+    } else if previous as usize + unsafe { (*previous).bytes } == base {
+        unsafe {
+            (*previous).bytes += (*node).bytes;
+            (*previous).next = (*node).next;
+        }
+    } else {
+        unsafe {
+            (*previous).next = node;
         }
     }
 }
