@@ -11,7 +11,8 @@ use stela_cli::{
 const RET: u32 = 0xd65f_03c0;
 const GUEST_BASE: u64 = 0x1000_0000;
 const DEFAULT_SOURCE_BYTES: u64 = 4;
-/// System profiles compile a bare exit: `movabs rax, pc; mov edx, kind; ret`.
+/// System profiles end a block with a bare exit at its last instruction:
+/// `movabs rax, pc; mov edx, kind; ret`.
 const SYSTEM_EXIT_KIND: u32 = 11;
 const X86_MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
 const X86_MOV_EDX: u8 = 0xba;
@@ -92,15 +93,19 @@ fn verify(probe: &Probe, sample: &Value, word: u32, compiled: &Compiled) -> Resu
         probe.profile.as_str(),
         "system-v1" | "el1-platform-v1" | "system-mode-v1"
     ) {
+        let consumed = manifest["source_bytes"].as_u64().context("source bytes")?;
         let mut exit = X86_MOVABS_RAX.to_vec();
-        exit.extend(GUEST_BASE.to_le_bytes());
+        exit.extend((GUEST_BASE + consumed - 4).to_le_bytes());
         exit.push(X86_MOV_EDX);
         exit.extend(SYSTEM_EXIT_KIND.to_le_bytes());
         exit.push(X86_RET);
-        ensure!(
-            compiled.native == exit,
-            "{word:#x} must compile to the bare System exit"
-        );
+        // Instructions before the exiting one compile inline ahead of it.
+        let bare = if consumed > 4 {
+            compiled.native.ends_with(&exit)
+        } else {
+            compiled.native == exit
+        };
+        ensure!(bare, "{word:#x} must compile to the bare System exit");
     }
     Ok(())
 }
