@@ -24,6 +24,7 @@ use crate::platform::apple::{
     lockdown::{self, Lockdown},
     perf::PerfCounters,
     pmgr::{ACTIVE, Pmgr, PowerState},
+    power::{self, Power},
     ptd::{self, Ptd},
     uart::S5lUart,
     wake::{self, WakeMasks},
@@ -387,6 +388,25 @@ impl AppleDevices {
             self.bus
                 .map(device, base + offset, bytes, offset)
                 .map_err(|error| format!("CPU cluster placement: {error:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// A typed SOC configuration bank at its DT `reg` address.
+    pub fn add_soc_power(&mut self, physical: u64, kind: power::Kind) -> Result<(), String> {
+        let model = Power::new(kind);
+        let device = self.bus.add(Box::new(model));
+        for offset in kind.offsets() {
+            self.bus
+                .map(
+                    device,
+                    physical
+                        .checked_add(offset)
+                        .ok_or("SOC power address overflows")?,
+                    4,
+                    offset,
+                )
+                .map_err(|e| format!("SOC power placement: {e:?}"))?;
         }
         Ok(())
     }

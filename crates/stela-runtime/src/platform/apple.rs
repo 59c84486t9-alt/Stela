@@ -26,6 +26,7 @@ pub mod ipi;
 pub mod lockdown;
 pub mod perf;
 pub mod pmgr;
+pub mod power;
 pub mod ptd;
 pub mod regfile;
 pub mod rtkit;

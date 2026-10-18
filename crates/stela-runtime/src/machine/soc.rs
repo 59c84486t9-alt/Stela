@@ -19,7 +19,7 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, cluster, cpustart, dart, energy, fuse, ptd, wake,
+    amcc, cluster, cpustart, dart, energy, fuse, power, ptd, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -71,6 +71,7 @@ struct Soc {
     cpu_start: Option<u64>,
     caches: Option<[CoreCaches; 2]>,
     wake_masks: Option<WakeLayout>,
+    power_banks: &'static [(usize, power::Kind)],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +182,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x6000,
@@ -197,6 +199,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x6001,
@@ -213,6 +216,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x8112,
@@ -250,6 +254,14 @@ const SOCS: [Soc; 14] = [
                 0x7fff_ffff,
             ],
         }),
+        // initRegMaps, kernel file 0x2fa31bc..0x2fa3620: RegMap
+        // 0x68/0x64/0x62/0x65. DT gives the addresses, not enum bindings.
+        power_banks: &[
+            (31, power::Kind::Volman),
+            (30, power::Kind::Marker),
+            (34, power::Kind::Gpce),
+            (32, power::Kind::Gating),
+        ],
     },
     Soc {
         chip_id: 0x6020,
@@ -266,6 +278,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x6021,
@@ -282,6 +295,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x8122,
@@ -298,6 +312,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x6030,
@@ -314,6 +329,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x6031,
@@ -330,6 +346,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x8132,
@@ -346,6 +363,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x6040,
@@ -362,6 +380,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x6041,
@@ -378,6 +397,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x8142,
@@ -394,6 +414,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
     Soc {
         chip_id: 0x8152,
@@ -410,6 +431,7 @@ const SOCS: [Soc; 14] = [
         cpu_start: None,
         caches: None,
         wake_masks: None,
+        power_banks: &[],
     },
 ];
 
@@ -700,6 +722,8 @@ pub struct Board {
     pub aon_fuses: Option<(u64, u64)>,
     /// CPU/CPM energy banks selected by `hw-dpe-reg`, in absolute guest PA.
     pub energy: Vec<EnergyBank>,
+    /// SOC configuration banks, bound to translated PMGR `reg` entries.
+    pub power_banks: Vec<PowerBank>,
     /// AON/SOC/cluster performance banks and DT-selected counters.
     pub performance: Vec<PerfBank>,
     /// AOP wake masks and reporting source IDs.
@@ -707,6 +731,12 @@ pub struct Board {
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerBank {
+    pub physical: u64,
+    pub kind: power::Kind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1061,6 +1091,7 @@ fn pmgr_registers(
         wake_masks: None,
         energy: Vec::new(),
         performance: Vec::new(),
+        power_banks: Vec::new(),
     };
     let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
         return Ok(none);
@@ -1121,6 +1152,7 @@ fn pmgr_registers(
             return Err("/arm-io/pmgr reg[0] does not hold the CPU start registers".into());
         }
     };
+    let power_banks = place_power_banks(&reg, soc.power_banks)?;
     let energy = energy_banks(&node, &reg, &clusters)?;
     let performance = performance_banks(&node, &reg)?;
     let wake_masks = soc
@@ -1128,6 +1160,7 @@ fn pmgr_registers(
         .map(|layout| wake_bank(&node, &reg, layout))
         .transpose()?;
     Ok(PmgrRegisters {
+        power_banks,
         wake_masks,
         performance,
         energy,
@@ -1135,6 +1168,33 @@ fn pmgr_registers(
         aon_fuses: fuses,
         cpu_start,
     })
+}
+
+/// Bind documented RegMap roles to DT addresses, validating every modeled
+/// word against the selected range rather than claiming a broad PMGR bank.
+fn place_power_banks(
+    reg: &[Option<(u64, u64)>],
+    layouts: &[(usize, power::Kind)],
+) -> Result<Vec<PowerBank>, String> {
+    layouts
+        .iter()
+        .map(|&(index, kind)| {
+            let (physical, bytes) = reg
+                .get(index)
+                .copied()
+                .flatten()
+                .ok_or("PMGR power bank names an unmapped reg entry")?;
+            for offset in kind.offsets() {
+                if offset.checked_add(4).is_none_or(|end| end > bytes)
+                    || physical.checked_add(offset + 4).is_none()
+                    || !physical.is_multiple_of(4)
+                {
+                    return Err("PMGR power register lies outside its DT range".into());
+                }
+            }
+            Ok(PowerBank { physical, kind })
+        })
+        .collect()
 }
 
 /// `ap-wake-sources` is (u32 source, 32-byte name), kernel parser
@@ -1343,6 +1403,7 @@ fn energy_banks(
 
 /// The PMGR registers the machine models besides its power states.
 struct PmgrRegisters {
+    power_banks: Vec<PowerBank>,
     wake_masks: Option<WakeBank>,
     performance: Vec<PerfBank>,
     energy: Vec<EnergyBank>,
@@ -1638,6 +1699,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
+        power_banks,
         wake_masks,
         performance,
         energy,
@@ -1647,6 +1709,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
+        power_banks,
         wake_masks,
         performance,
         energy,
@@ -2186,6 +2249,10 @@ mod tests {
         reg[16] = [0x11e4_0000, 0xb000];
         reg[19] = [0x1105_0000, 0x10000];
         reg[17] = [0x11e5_0000, 0xe8_1000];
+        reg[30] = [0x3b70_0000, 0x20000];
+        reg[31] = [0x3b72_8000, 0x1000];
+        reg[32] = [0x3b72_4000, 0x1000];
+        reg[34] = [0x3b78_0000, 0x4000];
         reg[36] = [0x3d2c_8000, 0x4000];
         let reg = reg.concat();
         let energy_record = |address: u64| {
@@ -2320,6 +2387,29 @@ mod tests {
                 .power_states,
             None
         );
+    }
+
+    #[test]
+    fn soc_power_roles_use_dt_ranges_and_refuse_short_or_overflowed_ranges() {
+        let kinds = [
+            power::Kind::Volman,
+            power::Kind::Marker,
+            power::Kind::Gpce,
+            power::Kind::Gating,
+        ];
+        for kind in kinds {
+            let reg = [None, Some((0x5_0000_0000, 0x20000))];
+            assert_eq!(
+                place_power_banks(&reg, &[(1, kind)]).unwrap(),
+                vec![PowerBank {
+                    physical: 0x5_0000_0000,
+                    kind
+                }]
+            );
+            assert!(place_power_banks(&[None], &[(1, kind)]).is_err());
+            assert!(place_power_banks(&[Some((0, 0))], &[(0, kind)]).is_err());
+            assert!(place_power_banks(&[Some((u64::MAX - 3, 0x20000))], &[(0, kind)]).is_err());
+        }
     }
 
     #[test]

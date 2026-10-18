@@ -415,6 +415,9 @@ fn devices(
             blocks.len()
         ));
     }
+    for bank in board.map_or(&[][..], |board| &board.power_banks) {
+        devices.add_soc_power(bank.physical, bank.kind)?;
+    }
     if let Some(bank) = board.and_then(|board| board.wake_masks.as_ref()) {
         devices.add_wake_masks(bank.physical, bank.valid)?;
     }
