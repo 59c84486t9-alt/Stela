@@ -4,7 +4,7 @@
 //! (logs/features), 0x3dec394 (Apple time), 0x3dec794 (namespace records),
 //! and 0x3dec980 (tunnel). Unknown vendor effects stop before completion.
 use super::{
-    Ans, Queue, TAGS,
+    Ans, Queue, TAGS, die,
     namespace::BLOCK_BYTES,
     prp::{MAX_TRANSFER, Prps, dma_error},
 };
@@ -111,13 +111,13 @@ fn block_result(result: Result<(), BlockError>) -> Outcome {
         Err(_) => DATA_TRANSFER_ERROR,
     })
 }
-fn put16(data: &mut [u8], offset: usize, value: u16) {
+pub(super) fn put16(data: &mut [u8], offset: usize, value: u16) {
     data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
-fn put32(data: &mut [u8], offset: usize, value: u32) {
+pub(super) fn put32(data: &mut [u8], offset: usize, value: u32) {
     data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
-fn put64(data: &mut [u8], offset: usize, value: u64) {
+pub(super) fn put64(data: &mut [u8], offset: usize, value: u64) {
     data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 fn ascii(data: &mut [u8], value: &[u8]) {
@@ -170,17 +170,8 @@ impl Ans {
         let mut data = [0; IDENTIFY_BYTES];
         match cmd.word(40) {
             1 if cmd.nsid() == 0 => {
-                put16(&mut data, 0, APPLE_VENDOR_ID);
-                put16(&mut data, 2, APPLE_VENDOR_ID);
+                self.controller_identity(&mut data);
                 data[260] = READ_ONLY_FIRMWARE_SLOT;
-                // Stela is the emulated controller, not the host disk. The
-                // serial remains the selected partition's persistent identity.
-                ascii(
-                    &mut data[4..24],
-                    self.medium.device.identity().serial.as_bytes(),
-                );
-                ascii(&mut data[24..64], b"Stela ANS2");
-                ascii(&mut data[64..72], b"1.0");
                 data[77] = 8; // MDTS: 2^8 * 4 KiB = 1 MiB.
                 put16(&mut data, 78, 1); // Controller ID, Stela choice.
                 put32(&mut data, 80, super::VERSION as u32);
@@ -191,7 +182,8 @@ impl Ans {
                 // VWC/OACS are zero: no downloadable firmware/cache.
             }
             0 if cmd.nsid() == 0 => {
-                return Err("ANS private namespace-zero Identify data is not modeled");
+                self.controller_identity(&mut data);
+                die::identify(&self.medium, &mut data)?;
             }
             0 => {
                 let Some(ns) = self.medium.namespace(cmd.nsid()) else {
@@ -219,6 +211,18 @@ impl Ans {
         cmd.prps(port, data.len(), self.page())?
             .write(port, &data)?;
         Ok(Outcome::status(SUCCESS))
+    }
+
+    /// Common standard identity fields read by both Identify selectors.
+    fn controller_identity(&self, data: &mut [u8]) {
+        put16(data, 0, APPLE_VENDOR_ID);
+        put16(data, 2, APPLE_VENDOR_ID);
+        ascii(
+            &mut data[4..24],
+            self.medium.device.identity().serial.as_bytes(),
+        );
+        ascii(&mut data[24..64], b"Stela ANS2");
+        ascii(&mut data[64..72], b"1.0");
     }
 
     fn create_queue(&mut self, cmd: &Command) -> Result<Outcome, &'static str> {
@@ -274,6 +278,16 @@ impl Ans {
         let value = cmd.word(44);
         let setting = cmd.opcode() == SET_FEATURES;
         match id {
+            0xc0..=0xc2 if !setting && value == 0 => {
+                // Emulated die: Stela's choice, consumed by GetNANDInfo
+                // (0x3dbec38/0x3dbec5c) as low/high descriptor words;
+                // GetMSPType (0x3dbed48) as MSP code S3E, matching c1c.
+                Ok(Outcome::result(match id {
+                    0xc0 => die::DESCRIPTOR as u32,
+                    0xc1 => (die::DESCRIPTOR >> 32) as u32,
+                    _ => 0,
+                }))
+            }
             7 => Ok(Outcome::result(0)), // Exactly one I/O SQ/CQ, zero based.
             1 | 2 | 4 | 5 | 6 | 8 | 9 | 10 | 11 => {
                 // Round-robin arbitration, power state 0, no volatile cache,
@@ -399,7 +413,7 @@ impl Ans {
     /// `SendOSBuildStrToDevice` (0x3de51e8) builds request type 0x120 at +12,
     /// a 16-byte OS build at +24 and checks the status at +0x4c afterwards.
     fn tunnel(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome, &'static str> {
-        if cmd.nsid() != 0 || cmd.word(40) != 1 || cmd.long(52) != 0 || cmd.word(60) != 0 {
+        if cmd.nsid() != 0 || cmd.word(40) != 1 {
             return Err("ANS tunnel selector/output contract is not modeled");
         }
         let address = cmd.long(44);
@@ -408,8 +422,69 @@ impl Ans {
         }
         let mut request = [0; 80];
         port.read(address, &mut request).map_err(dma_error)?;
-        if u32::from_le_bytes(request[12..16].try_into().unwrap()) != 0x120 {
-            return Err("ANS tunnel request type is not modeled");
+        let kind = u32::from_le_bytes(request[12..16].try_into().unwrap());
+        if kind == 0xba {
+            if cmd.long(52) == 0
+                || cmd.word(60) != 4096
+                || request[..12]
+                    .iter()
+                    .chain(&request[16..76])
+                    .any(|&b| b != 0)
+            {
+                return Err("ANS NAND geometry tunnel fields are not modeled");
+            }
+            let output = cmd.long(52);
+            let fields = die::geometry(&self.medium)?;
+            // Validate every field address before any DMA effect.
+            output
+                .checked_add(0x70)
+                .ok_or("ANS NAND geometry output wraps")?;
+            for (offset, value) in fields {
+                port.write(output + offset as u64, &value.to_le_bytes())
+                    .map_err(dma_error)?;
+            }
+            // Emulated die: Stela's choice, consumed at 0x3dfb6a8 and
+            // 0x3dfb6c8 as one die on bus zero, attached to MSP zero.
+            port.write(output + 0x60, &[1]).map_err(dma_error)?;
+            port.write(output + 0x70, &[0]).map_err(dma_error)?;
+            port.write(
+                address
+                    .checked_add(0x4c)
+                    .ok_or("ANS tunnel status address wraps")?,
+                &0u32.to_le_bytes(),
+            )
+            .map_err(dma_error)?;
+            return Ok(Outcome::status(SUCCESS));
+        }
+        if kind == 0x38 {
+            // Emulated die: Stela's choice, consumed by SetNANDIDProperties
+            // (0x3df69c4..0x3df6a20), CopyNANDIDData (0x3dc0088) as
+            // eight opaque manufacturer-ID bytes. The chosen ID starts 9b
+            // and agrees with the descriptor's YMTC personality. Only the
+            // consumed eight bytes have a modeled meaning; no fabricated
+            // geometry is placed in the rest of the 4 KiB output buffer.
+            if cmd.long(52) == 0
+                || cmd.word(60) != 4096
+                || request[..12]
+                    .iter()
+                    .chain(&request[16..76])
+                    .any(|&b| b != 0)
+            {
+                return Err("ANS NAND-ID tunnel fields are not modeled");
+            }
+            port.write(cmd.long(52), &die::NAND_ID.to_le_bytes())
+                .map_err(dma_error)?;
+            port.write(
+                address
+                    .checked_add(0x4c)
+                    .ok_or("ANS tunnel status address wraps")?,
+                &0u32.to_le_bytes(),
+            )
+            .map_err(dma_error)?;
+            return Ok(Outcome::status(SUCCESS));
+        }
+        if kind != 0x120 || cmd.long(52) != 0 || cmd.word(60) != 0 {
+            return Err("ANS tunnel request type or output is not modeled");
         }
         if request[..12]
             .iter()
@@ -453,11 +528,11 @@ mod tests {
             None,
         )
         .unwrap();
-        let mut memory = Ram::new(0x1000, 4096);
+        let mut memory = Ram::new(0x1000, 8192);
         let mut sart = Sart::default();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        for (offset, value) in [(0x40, 1), (0x80, 1), (0, 0xff)] {
+        for (offset, value) in [(0x40, 1), (0x80, 2), (0, 0xff)] {
             sart.write(offset, Width::Word, value, &mut access).unwrap();
         }
         let mut port = Port {
@@ -487,10 +562,42 @@ mod tests {
         assert_eq!(&ans.os_build[..6], b"26A434");
         port.read(0x104c, &mut status).unwrap();
         assert_eq!(status, [0xff; 4]);
+        request.fill(0);
+        request[12..16].copy_from_slice(&0x38u32.to_le_bytes());
+        port.write(0x1000, &request).unwrap();
+        port.write(0x2000, &[0xa5; 4096]).unwrap();
+        command.0[52..60].copy_from_slice(&0x2000u64.to_le_bytes());
+        command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
+        ans.execute(0, &command, &mut port).unwrap();
+        let mut output = [0; 16];
+        port.read(0x2000, &mut output).unwrap();
+        assert_eq!(&output[..8], &die::NAND_ID.to_le_bytes());
+        assert_eq!(
+            &output[8..],
+            &[0xa5; 8],
+            "unconsumed fields have no invented content"
+        );
+        request[12..16].copy_from_slice(&0xbau32.to_le_bytes());
+        port.write(0x1000, &request).unwrap();
+        port.write(0x2000, &[0xa5; 4096]).unwrap();
+        ans.execute(0, &command, &mut port).unwrap();
+        let mut geometry = [0; 0x80];
+        port.read(0x2000, &mut geometry).unwrap();
+        let field = |offset| u32::from_le_bytes(geometry[offset..offset + 4].try_into().unwrap());
+        assert_eq!(field(8), 1);
+        assert_eq!(field(0x14) << 12, BLOCK_BYTES);
+        assert!(u64::from(field(0x10)) * u64::from(field(0x28)) >= ans.medium.namespaces[0].blocks);
+        assert_eq!(field(0x38), field(0x10));
+        assert_eq!(field(0x18), field(0x24) * field(0x14));
+        assert_eq!(field(0x1c), field(0x28) * field(0x14));
+        assert_eq!(&geometry[..4], &[0xa5; 4]);
+        assert_eq!(&geometry[0x44..0x60], &[0xa5; 28]);
+        assert_eq!(&geometry[0x60..0x62], &[1, 0xa5]);
+        assert_eq!(&geometry[0x70..0x72], &[0, 0xa5]);
     }
 
     #[test]
-    fn private_identify_and_unknown_vendor_effects_refuse_without_dma() {
+    fn unknown_vendor_effects_refuse_without_dma() {
         let mut ans = Ans::new(
             Box::new(RamDisk::new("", 4, 4096)),
             &[Description {
@@ -512,11 +619,6 @@ mod tests {
             access: &mut access,
         };
         let mut command = Command([0; 64]);
-        command.0[0] = IDENTIFY;
-        assert!(matches!(
-            ans.execute(0, &command, &mut port),
-            Err("ANS private namespace-zero Identify data is not modeled")
-        ));
         command.0[0] = APPLE_TUNNEL;
         assert!(ans.execute(0, &command, &mut port).is_err());
         assert_eq!(ans.os_build, [0; 16]);

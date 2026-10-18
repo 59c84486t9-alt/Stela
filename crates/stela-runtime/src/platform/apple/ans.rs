@@ -19,6 +19,7 @@
 //! management protocol with no application endpoints (ANS NVMe uses MMIO).
 //! Undescribed registers, commands, fields and cryptographic effects refuse.
 mod commands;
+mod die;
 mod namespace;
 mod prp;
 
@@ -604,6 +605,27 @@ mod tests {
             assert!(self.ram.read(address, &mut data));
             data
         }
+    }
+
+    #[test]
+    fn private_identify_matches_features_and_partition_capacity() {
+        let mut rig = Rig::new();
+        rig.submit(0, 0, 6, 0, DATA, [0; 6]).unwrap();
+        assert_eq!(rig.bytes(DATA + 0x204, 4), 1u32.to_le_bytes());
+        assert_eq!(&rig.bytes(DATA + 0xc00, 16)[..14], b"Stela ANS2 1.0");
+        assert_eq!(rig.bytes(DATA + 0xe06, 2), 1u16.to_le_bytes());
+        let descriptor = u64::from_le_bytes(rig.bytes(DATA + 0xd00, 8).try_into().unwrap());
+        rig.retire(0, 0);
+        rig.submit(0, 1, 0xa, 0, 0, [0xc0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(rig.bytes(CQ + 16, 4), (descriptor as u32).to_le_bytes());
+        rig.retire(0, 1);
+        rig.submit(0, 0, 0xa, 0, 0, [0xc1, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(rig.bytes(CQ, 4), ((descriptor >> 32) as u32).to_le_bytes());
+        rig.retire(0, 0);
+        rig.submit(0, 1, 0xa, 0, 0, [0xc2, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(rig.bytes(CQ + 16, 4), [0; 4]);
+        rig.retire(0, 1);
+        assert!(rig.submit(0, 0, 9, 0, 0, [0xc0, 0, 0, 0, 0, 0]).is_err());
     }
 
     #[test]
