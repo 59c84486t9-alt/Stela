@@ -5772,11 +5772,23 @@ mod tests {
         assert_eq!(machine.cpu.pc, pointer);
         let wrong = context.sign(pauth::Key::Ia, pointer, 1).unwrap();
         machine.cpu.state.x[2] = wrong;
+        let fault_pc = machine.cpu.pc;
         machine.system_instruction_for_test(BRAAZ_X2);
-        let expected = context
-            .authenticate_operation(pauth::Key::Ia, wrong, 0, true)
-            .map(|result| result.pointer);
-        assert_eq!(Ok(machine.cpu.pc), expected);
+        match context.authenticate_operation(pauth::Key::Ia, wrong, 0, true) {
+            Ok(result) => assert_eq!(machine.cpu.pc, result.pointer),
+            Err(pauth::AuthenticationError::Failure { code }) => {
+                // FEAT_FPACCOMBINE (M6) faults the failed branch instead of
+                // returning a corrupted target. Its source stays unchanged.
+                assert_eq!(
+                    machine.cpu.read(SystemRegister::ESR_EL1),
+                    0x7200_0000 | u64::from(code)
+                );
+                assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), fault_pc);
+                assert_eq!(machine.cpu.pc, 0x1_0200);
+                assert_eq!(machine.cpu.state.x[2], wrong);
+            }
+            Err(error) => panic!("{error:?}"),
+        }
         assert_ne!(machine.cpu.pc, pointer);
     }
 
