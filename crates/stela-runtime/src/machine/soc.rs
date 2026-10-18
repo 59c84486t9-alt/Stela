@@ -722,9 +722,7 @@ pub const AES: &str = "aes,s8000";
 /// The `compatible` of the memory cache controller whose registers
 /// `platform::apple::amcc`, `dcs` and `ptd` model.
 pub const MCC: &str = "mcc,t8112";
-/// ASC wrapper and nub used by ANS2. These are deliberately not in
-/// `models()`: other coprocessors share them, and ANS2's complete Apple
-/// vendor Identify/firmware contract is not yet modeled.
+/// ASC wrapper and nub shared by multiple coprocessor roles.
 pub const ASC: &str = "iop,ascwrap-v4";
 pub const RTBUDDY: &str = "iop-nub,rtbuddy-v2";
 pub const SART: &str = "sart,coastguard";
@@ -741,9 +739,57 @@ pub const GPIO: &str = "gpio,t8101";
 /// 0x235ecb8 start, 0x235f1e8 lazy whole-region read, 0x235f788 forwarding).
 pub const SYSCFG: &str = "diagnostic-data,format1";
 
-/// Whether a compatible names a modeled device. The loader also checks
-/// topology: SPI requires a NOR slave, and GPIO a visible SPI CS client.
-pub fn models(name: &str) -> bool {
+/// A compatible may require a distinguishing property and may own children
+/// sharing a compatible with unrelated devices. Match properties exactly;
+/// a missing or malformed role never broadens the claim.
+struct ModelClaim {
+    compatible: &'static str,
+    property: (&'static str, &'static [u8]),
+    children: &'static [ChildModel],
+}
+/// A child owned by a native coprocessor model and its boot-chain facts.
+/// Properties describe model state, never a guest image or a driver patch.
+pub struct ChildModel {
+    pub compatible: &'static str,
+    pub boot_properties: &'static [(&'static str, &'static [u8])],
+}
+const ROLE_MODELS: &[ModelClaim] = &[ModelClaim {
+    compatible: ASC,
+    property: ("role", b"ANS2\0"),
+    children: &[ChildModel {
+        compatible: RTBUDDY,
+        // Native RTKit is already running before SPTM and uses no ARM
+        // firmware memory. RTBuddy::_initConfigEDT (0x4661408..14b4)
+        // reads pre-loaded/running/no-firmware-service; getSegmentMap
+        // (0x4661d68/1df8) accepts empty segment-ranges/segment-names.
+        // _handlePreloadFirmware (0x465a488) consumes that segment map.
+        boot_properties: &[
+            ("pre-loaded", b""),
+            ("running", b""),
+            ("no-firmware-service", b""),
+            ("segment-ranges", b""),
+            ("segment-names", b""),
+        ],
+    }],
+}];
+
+/// Child compatibles claimed by a matching parent model. The loader uses
+/// this relationship before changing the tree, without relying on paths.
+pub fn model_children<'a>(
+    name: &str,
+    property: impl Fn(&str) -> Option<&'a [u8]>,
+) -> &'static [ChildModel] {
+    ROLE_MODELS
+        .iter()
+        .find(|claim| {
+            claim.compatible == name && property(claim.property.0) == Some(claim.property.1)
+        })
+        .map_or(&[], |claim| claim.children)
+}
+
+/// Whether a compatible and its distinguishing properties name a modeled
+/// device. The loader also checks provider and parent/child relationships.
+pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bool {
     [
         UART,
         WATCHDOG,
@@ -760,6 +806,9 @@ pub fn models(name: &str) -> bool {
     ]
     .contains(&name)
         || AICS.contains(&name)
+        || ROLE_MODELS.iter().any(|claim| {
+            claim.compatible == name && property(claim.property.0) == Some(claim.property.1)
+        })
 }
 
 /// SEP's wrapper and native nub, from the J473AP IPSW DeviceTree. They are
@@ -2698,9 +2747,9 @@ mod tests {
         assert!(ans_controller(&io, &|_| None).is_err());
         // These compatibles are shared by other hardware. The partial ANS
         // controller cannot authorize advertising every ASC/RTBuddy/SART.
-        assert!(!models(ASC));
-        assert!(!models(RTBUDDY));
-        assert!(!models(SART));
+        assert!(!models(ASC, |_| None));
+        assert!(!models(RTBUDDY, |_| None));
+        assert!(!models(SART, |_| None));
     }
 
     #[test]
@@ -3150,6 +3199,54 @@ mod tests {
         assert_eq!(
             board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[three])),
             Err("/arm-io/dart-sio is not one DART instance, alone or with its APF".into())
+        );
+    }
+
+    /// J473AP ANS gate ancestry and virtual clock IDs, decoded from
+    /// ps-regs/devices. Virtual clocks have no hardware power-state word.
+    #[test]
+    fn ans_power_gates_are_placed_and_virtual_clocks_do_not_invent_registers() {
+        use crate::machine::adt::encode;
+        let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let mut devices = Vec::new();
+        for (id, flags, index, block) in [
+            (37u16, 0x29u32, 21, 6),
+            (89, 1, 9, 8),
+            (120, 0x21, 5, 9),
+            (125, 0x21, 10, 9),
+            (332, 0x10, 0, 0),
+            (333, 0x10, 0, 0),
+            (334, 0x30, 0, 0),
+        ] {
+            let mut entry = [0; PMGR_DEVICE];
+            entry[..4].copy_from_slice(&flags.to_le_bytes());
+            entry[10] = index;
+            entry[11] = block;
+            entry[26..28].copy_from_slice(&id.to_le_bytes());
+            devices.extend(entry);
+        }
+        let mut blocks = [0; 30];
+        for (block, offset) in [(6, 0x100), (8, 0x300), (9, 0x400)] {
+            blocks[block * 3 + 1] = offset;
+        }
+        let pmgr = encode(
+            &[
+                ("name", b"pmgr"),
+                ("compatible", PMGR.as_bytes()),
+                ("reg", &pairs(&[0x3b70_0000, 0xcc000])),
+                ("ps-regs", &words(&blocks)),
+                ("devices", &devices),
+            ],
+            &[],
+        );
+        let bytes = encode(&[("name", b"arm-io")], &[pmgr]);
+        let found = power_states(&Node::root(&bytes).unwrap(), &|a| Some(a + 0x2_0000_0000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            found.registers,
+            [0x2_3b70_01a8, 0x2_3b70_0348, 0x2_3b70_0428, 0x2_3b70_0450]
         );
     }
 
@@ -3853,8 +3950,8 @@ mod tests {
             })
         );
         assert_eq!(found.darts[0].physical, 0x25d2c0000);
-        assert!(!models(SEP));
-        assert!(!models(SEP_NUB));
+        assert!(!models(SEP, |_| None));
+        assert!(!models(SEP_NUB, |_| None));
         assert!(board(&tree("iop-nub,rtbuddy-v2", &irqs, 0x84, 0)).is_err());
         assert!(board(&tree(SEP_NUB, &irqs[..3], 0x84, 0)).is_err());
         assert!(board(&tree(SEP_NUB, &irqs, 0x85, 0)).is_err());

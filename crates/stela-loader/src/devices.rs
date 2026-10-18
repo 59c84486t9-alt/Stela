@@ -76,7 +76,10 @@ fn modeled_client(node: &Node) -> bool {
     if named(node, soc::SPI) && !node.children.iter().any(|child| named(child, soc::NOR)) {
         return false;
     }
-    !named(node, soc::DART) && !named(node, soc::IOMMU_MAPPER) && compatibles(node).any(soc::models)
+    !named(node, soc::DART)
+        && !named(node, soc::IOMMU_MAPPER)
+        && compatibles(node)
+            .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
 }
 
 /// The IOMMU and GPIO phandles that visible clients under `node` require.
@@ -118,6 +121,10 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
         node.children
             .iter()
             .any(|child| kept_mapper(child, parents))
+    } else if named(node, soc::SART) {
+        node.property(PHANDLE)
+            .and_then(|p| p.as_u32())
+            .is_some_and(|p| parents.contains(&p))
     } else if named(node, soc::IOMMU_MAPPER) {
         kept_mapper(node, parents)
     } else {
@@ -133,7 +140,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     let mut parents = Vec::new();
     client_providers(&tree.root, &mut parents);
     let mut hidden = Vec::new();
-    visit(&mut tree.root, "", &parents, &mut hidden);
+    visit(&mut tree.root, "", &parents, &[], &mut hidden);
     let selected = tree
         .property(DEFAULTS, SERIAL_DEVICE)
         .and_then(|property| property.as_u32())
@@ -174,16 +181,37 @@ fn path_of(node: &Node, path: &str, phandle: u32) -> Option<String> {
     })
 }
 
-fn visit(node: &mut Node, path: &str, parents: &[u32], hidden: &mut Vec<String>) {
+fn visit(
+    node: &mut Node,
+    path: &str,
+    parents: &[u32],
+    inherited: &[&soc::ChildModel],
+    hidden: &mut Vec<String>,
+) {
+    if let Some(model) = inherited.iter().find(|model| named(node, model.compatible)) {
+        for &(key, value) in model.boot_properties {
+            node.set_property(key, value.to_vec())
+                .expect("static native boot property");
+        }
+    }
+    let owned: Vec<&soc::ChildModel> = compatibles(node)
+        .flat_map(|name| {
+            soc::model_children(name, |key| node.property(key).map(|p| p.value.as_slice())).iter()
+        })
+        .collect();
     let here = if path.is_empty() { "/" } else { path };
-    if node.property(COMPATIBLE).is_some() && !structural(here) && !modeled(node, parents) {
+    if node.property(COMPATIBLE).is_some()
+        && !structural(here)
+        && !modeled(node, parents)
+        && !inherited.iter().any(|model| named(node, model.compatible))
+    {
         node.remove_property(COMPATIBLE);
         hidden.push(here.into());
     }
     for child in &mut node.children {
         let name = child.name().unwrap_or("?");
         let path = format!("{path}/{name}");
-        visit(child, &path, parents, hidden);
+        visit(child, &path, parents, &owned, hidden);
     }
 }
 
@@ -198,6 +226,74 @@ mod tests {
         }
         node.children = children;
         node
+    }
+
+    #[test]
+    fn role_claim_retains_only_its_nub_and_referenced_provider() {
+        let mut ans = node(
+            "ans",
+            Some(soc::ASC.as_bytes()),
+            vec![node("iop-ans-nub", Some(soc::RTBUDDY.as_bytes()), vec![])],
+        );
+        ans.set_property("role", b"ANS2\0".to_vec()).unwrap();
+        ans.set_property(IOMMU_PARENT, 142u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut sart = node("sart-ans", Some(soc::SART.as_bytes()), vec![]);
+        sart.set_property(PHANDLE, 142u32.to_le_bytes().to_vec())
+            .unwrap();
+        let other = node(
+            "other",
+            Some(soc::ASC.as_bytes()),
+            vec![node("nub", Some(soc::RTBUDDY.as_bytes()), vec![])],
+        );
+        let mut tree = DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![node(
+                    "arm-io",
+                    None,
+                    vec![
+                        ans,
+                        sart,
+                        other,
+                        node("unused-sart", Some(soc::SART.as_bytes()), vec![]),
+                    ],
+                )],
+            ),
+        };
+        assert_eq!(
+            hide_unmodeled(&mut tree),
+            ["/arm-io/other", "/arm-io/other/nub", "/arm-io/unused-sart"]
+        );
+        assert!(
+            tree.property("/arm-io/ans/iop-ans-nub", COMPATIBLE)
+                .is_some()
+        );
+        assert!(tree.property("/arm-io/sart-ans", COMPATIBLE).is_some());
+        for key in [
+            "pre-loaded",
+            "running",
+            "no-firmware-service",
+            "segment-ranges",
+            "segment-names",
+        ] {
+            assert!(
+                tree.property("/arm-io/ans/iop-ans-nub", key)
+                    .unwrap()
+                    .value
+                    .is_empty()
+            );
+            assert!(tree.property("/arm-io/other/nub", key).is_none());
+        }
+        tree.node_mut("/arm-io/ans")
+            .unwrap()
+            .set_property("role", b"ANS3\0".to_vec())
+            .unwrap();
+        assert_eq!(
+            hide_unmodeled(&mut tree),
+            ["/arm-io/ans", "/arm-io/ans/iop-ans-nub", "/arm-io/sart-ans"]
+        );
     }
 
     #[test]
