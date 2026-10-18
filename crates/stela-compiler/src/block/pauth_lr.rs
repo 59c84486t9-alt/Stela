@@ -138,6 +138,21 @@ const PC_MASK: u32 = 0xffe0_001f;
 const AUTH_PC_FORMS: [(u32, Key); 2] = [(0xf380_001f, Key::Ia), (0xf3a0_001f, Key::Ib)];
 const RETURN_PC_FORMS: [(u32, Key); 2] = [(0x5500_001f, Key::Ia), (0x5520_001f, Key::Ib)];
 
+/// Whether `word` is PACIASPPC or PACIBSPPC, the forms that are also BTI
+/// landing pads, without decoding the others.
+pub fn signs_with_implicit_bti(word: u32) -> bool {
+    EXACT_FORMS.iter().any(|&(value, instruction)| {
+        value == word
+            && matches!(
+                instruction,
+                Instruction::SignSpPc {
+                    implicit_bti: true,
+                    ..
+                }
+            )
+    })
+}
+
 /// Decode a FEAT_PAuth_LR instruction.
 pub fn decode(word: u32) -> Option<Instruction> {
     for (value, instruction) in EXACT_FORMS {
@@ -174,4 +189,25 @@ pub fn decode(word: u32) -> Option<Instruction> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn implicit_bti_forms_match_the_decoder() {
+        let words = EXACT_FORMS.iter().map(|&(value, _)| value);
+        for word in words.chain([0xd503_233f, 0xdac1_a3ff, 0]) {
+            let decoded = matches!(
+                decode(word),
+                Some(Instruction::SignSpPc {
+                    implicit_bti: true,
+                    ..
+                })
+            );
+            assert_eq!(signs_with_implicit_bti(word), decoded, "{word:#x}");
+        }
+        assert!(signs_with_implicit_bti(0xdac1_a3fe) && signs_with_implicit_bti(0xdac1_a7fe));
+    }
 }

@@ -1664,14 +1664,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 _ => true,
             };
         }
-        let sppc = matches!(
-            block::pauth_lr::decode(word),
-            Some(block::pauth_lr::Instruction::SignSpPc {
-                implicit_bti: true,
-                ..
-            })
-        );
-        if word == PACIASP || word == PACIBSP || sppc {
+        if word == PACIASP || word == PACIBSP || block::pauth_lr::signs_with_implicit_bti(word) {
             let sctlr = self.cpu.regime_sctlr();
             let forbid = if self.cpu.pstate.el == 0 {
                 SCTLR_BT0
