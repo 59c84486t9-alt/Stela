@@ -1,7 +1,15 @@
 //! The board's PEs. One runs on [`Machine::cpu`]; each other one is off,
 //! preempted at the end of its time slice, or waiting in WFI or WFE. The
-//! scheduler gives each PE that can run [`QUANTUM`] blocks in turn and waits
-//! on the host when none can.
+//! scheduler gives each PE that can run a time slice in turn, of at most
+//! [`QUANTUM`] blocks and [`QUANTUM_HZ`]⁻¹ seconds of the system counter, and
+//! waits on the host when none can.
+//!
+//! The PEs share the system counter but not the host: a PE preempted while
+//! it holds a spinlock keeps it until its next turn, while the others spin
+//! against the kernel's timeout. XNU 26A434 panics once a ticket spinlock
+//! stays held for 3,000,000 counts (125 ms at 24 MHz, `lock_ticket.c`), so
+//! a slice bounded in counter time keeps the wait for a preempted holder,
+//! at most one slice of every other PE, short of it on every board.
 //!
 //! Native code writes guest RAM directly, so the engine cannot see the store
 //! by one PE that clears another PE's global Exclusives monitor (Arm
@@ -22,6 +30,10 @@ use alloc::{boxed::Box, vec::Vec};
 
 /// Blocks a PE runs before the next PE that can run gets its turn.
 pub(super) const QUANTUM: u64 = 1 << 14;
+/// The inverse of the longest time slice in seconds of the system counter:
+/// 2 ms, so the seven other PEs of an eight-PE board hold a preempted
+/// spinlock holder off for at most 14 ms.
+pub(super) const QUANTUM_HZ: u64 = 500;
 
 pub(super) enum Peer {
     /// The PE on [`Machine::cpu`].
@@ -94,7 +106,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         while let Some(start) = self.devices.take_start() {
             self.start(start)?;
         }
-        if self.waiting.is_none() && self.statistics.blocks < self.slice_end {
+        if self.waiting.is_none()
+            && self.statistics.blocks < self.slice_end
+            && (self.peers.len() < 2 || self.host.counter() < self.slice_deadline)
+        {
             return Ok(());
         }
         let mut waited = false;
@@ -113,6 +128,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.switch_to(next);
                 }
                 self.slice_end = self.statistics.blocks + QUANTUM;
+                self.slice_deadline = now + self.profile.counter_frequency / QUANTUM_HZ;
                 return self.wake();
             }
             let Some(deadline) = self.next_deadline(now) else {
@@ -449,6 +465,24 @@ mod tests {
             });
             assert!(matches!(machine.schedule(), Err(Stop::Unsupported(_))));
         }
+    }
+
+    #[test]
+    fn a_slice_ends_after_its_blocks_or_its_counter_time() {
+        let mut machine = pair();
+        let quantum = machine.profile.counter_frequency / QUANTUM_HZ;
+        // PE 0's blocks spent, PE 1 runs its slice.
+        end_slice(&mut machine);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        // Within both bounds PE 1 keeps running.
+        machine.host.now += quantum - 1;
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        // Its counter time spent, PE 0 runs, though blocks remain.
+        machine.host.now += 1;
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 0);
     }
 
     #[test]

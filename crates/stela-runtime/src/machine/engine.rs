@@ -703,6 +703,8 @@ pub struct Machine<H: Host, D: Devices> {
     peers: Vec<processors::Peer>,
     /// The block count at which the running PE's time slice ends.
     slice_end: u64,
+    /// The system counter value at which it ends, whichever comes first.
+    slice_deadline: u64,
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.
     pacm_written: bool,
@@ -780,6 +782,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             waiting: None,
             peers: Vec::new(),
             slice_end: processors::QUANTUM,
+            slice_deadline: u64::MAX,
             pacm_written: false,
             completing: None,
             chain: alloc::boxed::Box::default(),
