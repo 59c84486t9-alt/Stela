@@ -5,11 +5,9 @@
 //!
 //! Native code writes guest RAM directly, so the engine cannot see the store
 //! by one PE that clears another PE's global Exclusives monitor (Arm
-//! `ClearExclusiveByAddress`). Every switch of the running PE therefore
-//! clears every monitor, and a monitor that held a granule generates the
-//! event Arm gives a cleared global monitor, which wakes a WFE. A store
-//! exclusive may then fail spuriously, as the architecture permits, while a
-//! load/store exclusive loop shorter than a time slice still completes.
+//! `ClearExclusiveByAddress`) as it happens; `Machine::observe_writes`
+//! finds it between runs, and a PE that resumes after another ran has lost
+//! its reservation.
 use super::{
     Devices, Host, Machine, RequirementKind, Start, Step, Stop, Wait, WaitKind, interrupt_pending,
     system, timer,
@@ -245,6 +243,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.peers[self.current] = Peer::Parked(Box::new(outgoing));
         self.current = next;
         self.statistics.switches += 1;
+        // Another PE ran since the incoming one's exclusive load and may
+        // have written its granule, even back to the same bytes: its
+        // store-exclusive fails, as Arm permits of any (`observe_writes`).
+        self.cpu.monitor = None;
         // The fetch and jump caches and the host's shadow tables follow the
         // incoming PE's translation regime.
         self.translations_changed();
@@ -257,9 +259,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// One PE runs at a time and only between runs can another PE's (or a
     /// device's) write reach a reservation, so it is observed then, as the
     /// granule's bytes changing. A write that leaves them as they were
-    /// clears nothing: a known gap, which neither a store-exclusive's
-    /// result on the values it reads nor a WFE that waits for a value to
-    /// change can observe.
+    /// generates no event: a WFE that waits for the value to change sees
+    /// none. It cannot let a store-exclusive pass, because a PE that
+    /// resumes after another ran has lost its reservation (`switch_to`).
     fn observe_writes(&mut self) {
         let parked = self.peers.iter_mut().filter_map(|peer| match peer {
             Peer::Parked(parked) => Some(&mut parked.cpu),
@@ -503,6 +505,22 @@ mod tests {
         assert_eq!(machine.processor(), 0);
         assert_eq!(machine.cpu.monitor, None);
         assert_eq!((machine.cpu.pc, machine.cpu.event), (BASE + 16, false));
+        // PE 1 may have written the granule and restored its bytes: PE 0,
+        // preempted behind a load exclusive, resumes without its
+        // reservation, and without an event since no change shows.
+        let mut bytes = [0; RESERVATION_GRANULE as usize];
+        bytes.copy_from_slice(&machine.host.ram[data..data + RESERVATION_GRANULE as usize]);
+        machine.cpu.monitor = Some(Reservation {
+            granule: BASE + data as u64,
+            bytes,
+        });
+        end_slice(&mut machine);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        end_slice(&mut machine);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 0);
+        assert_eq!((machine.cpu.monitor, machine.cpu.event), (None, false));
     }
 
     #[test]
