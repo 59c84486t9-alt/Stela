@@ -1,71 +1,105 @@
-//! The CPU clusters' `voltage-states` tables, hand-off properties iBoot adds
-//! to `/arm-io/pmgr`.
+//! The performance domains' `voltage-states` tables, hand-off properties
+//! iBoot adds to `/arm-io/pmgr`.
 //!
-//! The shipped DeviceTree leaves them out; 26A434 J473AP `ApplePMGR::
-//! initDriver` panics without them ("voltage-states1 not found"). It looks
-//! up a table per performance domain, `voltage-states1` for the E cluster
-//! and `voltage-states5` for the P cluster (`ECPU` and `PCPU` in its domain
-//! table), each a run of `(period, voltage)` pairs that ends at the first
-//! zero period. iBoot (26A434 `iBoot.j473.RELEASE`, the routine that writes
-//! `voltage-states1`, `-sram` and `-extra`) stores each state's period as
-//! 65,536 × 10⁹ / its clock in Hz, and the driver reads the clock back as
-//! 65,536,000 / period MHz.
+//! The shipped DeviceTree lists the domains in `/arm-io/pmgr` `perf-domains`,
+//! 28-byte entries whose byte 0 numbers the domain's table, byte 2 is 1 for a
+//! CPU cluster, and bytes 12..28 name it (J473AP: `SOC` 0, `ECPU` 1, `DCS` 2,
+//! `PCPU` 5, `ANE` 8, `DISP` 11). It ships tables for only some of them;
+//! 26A434 J473AP `ApplePMGR::initDriver` looks up `voltage-states<table>` for
+//! every domain and panics on one it lacks ("voltage-states1 not found").
 //!
-//! The states are the SoC's operating points (`machine::soc::
-//! operating_points`), lowest first. iBoot takes each state's voltage from
-//! the chip's own calibration, which an emulated chip does not have; the
-//! driver uses it only for its dynamic energy estimate (V² × f). The tables
-//! leave it 0, as the templates the IPSW DeviceTree ships for the other
-//! domains do, so the estimate states no energy rather than an invented one.
-//! The optional `-sram` and `-extra` tables are not published.
+//! A table is a run of `(u32, u32)` states. The driver reads it two ways:
+//!
+//! - a CPU cluster's states are `(period, voltage)`, lowest first, ending at
+//!   the first zero period. iBoot (26A434 `iBoot.j473.RELEASE`, the routine
+//!   that writes `voltage-states1`, `-sram` and `-extra`) stores the period as
+//!   65,536 × 10⁹ / the state's clock in Hz, and the driver reads the clock
+//!   back as 65,536,000 / period MHz. The states are the SoC's operating
+//!   points (`machine::soc::operating_points`);
+//! - any other domain's table whose first state has voltage 0 is a list of
+//!   state numbers, `(0, 0), (1, 0), …`, and the domain has as many states as
+//!   the last number plus one. The IPSW DeviceTree ships `voltage-states0`,
+//!   `2` and `9` in this form; the driver asserts the list is not empty.
+//!
+//! iBoot fills these tables from the chip itself: each state's voltage from
+//! its calibration fuses, and the non-CPU domains' clocks from their PLL
+//! registers. An emulated chip has neither. The CPU tables leave the voltage
+//! 0, which the driver uses only for its dynamic energy estimate (V² × f), so
+//! the estimate states no energy rather than an invented one. Every other
+//! domain gets one state, `(0, 0)`: the machine does not scale its clock, so
+//! the domain has a single operating point. The optional `-sram` and
+//! `-extra` tables are not published.
 use crate::apple_device_tree::DeviceTree;
-use alloc::vec::Vec;
-use anyhow::{Result, ensure};
+use alloc::{format, string::String, vec::Vec};
+use anyhow::{Result, bail, ensure};
 use stela_runtime::machine::soc;
 
 const PMGR: &str = "/arm-io/pmgr";
+const PERF_DOMAINS: &str = "perf-domains";
+const DOMAIN: usize = 28;
 /// The period unit: a state's period is this over its clock in Hz.
 const PERIOD_SCALE: u64 = 65_536 * 1_000_000_000;
 
-/// The table name of a cluster type.
-fn table(cluster_type: u8) -> Option<&'static str> {
-    match cluster_type {
-        b'E' => Some("voltage-states1"),
-        b'P' => Some("voltage-states5"),
-        _ => None,
-    }
+/// A table [`publish`] wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    pub name: String,
+    /// The domain's name in `perf-domains`.
+    pub domain: String,
+    /// A CPU cluster's operating points, rather than a single state.
+    pub cpu: bool,
 }
 
-/// Add each cluster's table to `/arm-io/pmgr` on a SoC with known operating
-/// points, unless the tree already has it. Returns the tables written.
-pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Vec<&'static str>> {
-    let mut written = Vec::new();
-    let Some(clusters) = soc::operating_points(chip_id) else {
-        return Ok(written);
+/// A CPU cluster's table: its operating points as periods, voltages 0.
+fn cluster(domain: &str, chip_id: u32) -> Result<Vec<u8>> {
+    let cluster_type = match domain {
+        "ECPU" => b'E',
+        "PCPU" => b'P',
+        _ => bail!("CPU domain {domain} names no cluster type"),
     };
-    if tree.node_mut(PMGR).is_none() {
-        return Ok(written);
+    let Some(points) = soc::operating_points(chip_id)
+        .and_then(|clusters| clusters.into_iter().find(|(kind, _)| *kind == cluster_type))
+        .map(|(_, points)| points)
+    else {
+        bail!("ApChipID {chip_id:#x} has no {domain} operating points");
+    };
+    ensure!(!points.is_empty(), "{domain} has no operating points");
+    let mut value = Vec::with_capacity(points.len() * 8);
+    for &mhz in points {
+        let period = u32::try_from(PERIOD_SCALE / (u64::from(mhz) * 1_000_000))?;
+        value.extend_from_slice(&period.to_le_bytes());
+        value.extend_from_slice(&0u32.to_le_bytes());
     }
-    for (cluster_type, points) in clusters {
-        let Some(name) = table(cluster_type) else {
+    Ok(value)
+}
+
+/// Add the table of each `perf-domains` domain that lacks one. Returns the
+/// tables written; a tree without the domains gets none.
+pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Vec<Table>> {
+    let Some(domains) = tree.property(PMGR, PERF_DOMAINS).map(|p| p.value.clone()) else {
+        return Ok(Vec::new());
+    };
+    ensure!(
+        domains.len().is_multiple_of(DOMAIN),
+        "{PMGR} {PERF_DOMAINS} is not a run of {DOMAIN}-byte domains"
+    );
+    let mut written = Vec::new();
+    for entry in domains.as_chunks::<DOMAIN>().0 {
+        let name = format!("voltage-states{}", entry[0]);
+        if tree.property(PMGR, &name).is_some() {
             continue;
+        }
+        let label = &entry[12..];
+        let label = &label[..label.iter().position(|&b| b == 0).unwrap_or(label.len())];
+        let domain = String::from(core::str::from_utf8(label)?);
+        let cpu = entry[2] == 1;
+        let value = if cpu {
+            cluster(&domain, chip_id)?
+        } else {
+            [0u8; 8].to_vec()
         };
-        if tree.property(PMGR, name).is_some() {
-            continue;
-        }
-        ensure!(
-            !points.is_empty(),
-            "cluster {} has no operating points",
-            char::from(cluster_type)
-        );
-        let mut value = Vec::with_capacity(points.len() * 8);
-        for &mhz in points {
-            let period = u32::try_from(PERIOD_SCALE / (u64::from(mhz) * 1_000_000))?;
-            value.extend_from_slice(&period.to_le_bytes());
-            value.extend_from_slice(&0u32.to_le_bytes());
-        }
-        tree.set_property(PMGR, name, value)?;
-        written.push(name);
+        tree.set_property(PMGR, &name, value)?;
+        written.push(Table { name, domain, cpu });
     }
     Ok(written)
 }
@@ -76,35 +110,77 @@ mod tests {
     use crate::apple_device_tree::Node;
     use alloc::vec;
 
+    fn domain(table: u8, cpu: bool, name: &str) -> [u8; DOMAIN] {
+        let mut entry = [0u8; DOMAIN];
+        entry[0] = table;
+        entry[2] = u8::from(cpu);
+        entry[3] = table;
+        entry[12..12 + name.len()].copy_from_slice(name.as_bytes());
+        entry
+    }
+
     fn tree() -> DeviceTree {
+        let domains = [
+            domain(0, false, "SOC"),
+            domain(1, true, "ECPU"),
+            domain(5, true, "PCPU"),
+            domain(8, false, "ANE"),
+        ];
+        with_domains(Some(&domains.concat()))
+    }
+
+    fn with_domains(domains: Option<&[u8]>) -> DeviceTree {
+        let mut pmgr = Node::named("pmgr").unwrap();
+        if let Some(domains) = domains {
+            pmgr.set_property(PERF_DOMAINS, domains.to_vec()).unwrap();
+        }
+        pmgr.set_property("voltage-states0", [0u8; 24].to_vec())
+            .unwrap();
         let mut io = Node::named("arm-io").unwrap();
-        io.children.push(Node::named("pmgr").unwrap());
+        io.children.push(pmgr);
         let mut root = Node::named("device-tree").unwrap();
         root.children.push(io);
         DeviceTree { root }
     }
 
+    fn word(value: &[u8], index: usize) -> u32 {
+        u32::from_le_bytes(value[index * 4..index * 4 + 4].try_into().unwrap())
+    }
+
     #[test]
-    fn the_m2_clusters_get_their_operating_points_as_periods() {
+    fn every_domain_without_a_table_gets_one() {
         let mut tree = tree();
+        let written = publish(&mut tree, 0x8112).unwrap();
+        let names: Vec<_> = written.iter().map(|table| table.name.as_str()).collect();
         assert_eq!(
-            publish(&mut tree, 0x8112).unwrap(),
-            vec!["voltage-states1", "voltage-states5"]
+            names,
+            vec!["voltage-states1", "voltage-states5", "voltage-states8"]
         );
+        assert_eq!(written[2].domain, "ANE");
+        assert!(written[0].cpu && !written[2].cpu);
+        // 600 MHz is period 109,226, which the driver reads back as 600 MHz.
         let e = &tree.property(PMGR, "voltage-states1").unwrap().value;
         assert_eq!(e.len(), 7 * 8);
-        // 600 MHz is period 109,226, which the driver reads back as 600 MHz.
-        assert_eq!(u32::from_le_bytes(e[..4].try_into().unwrap()), 109_226);
+        assert_eq!((word(e, 0), word(e, 1)), (109_226, 0));
         assert_eq!(65_536_000 / 109_226, 600);
-        assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 0);
         let p = &tree.property(PMGR, "voltage-states5").unwrap().value;
         assert_eq!(p.len(), 17 * 8);
+        assert_eq!(word(p, 32), 18_703);
+        // A domain whose clock the machine does not scale has one state.
+        let ane = &tree.property(PMGR, "voltage-states8").unwrap().value;
+        assert_eq!(ane, &vec![0u8; 8]);
+        // The shipped table stays, and a second publish writes nothing.
         assert_eq!(
-            u32::from_le_bytes(p[16 * 8..16 * 8 + 4].try_into().unwrap()),
-            18_703
+            tree.property(PMGR, "voltage-states0").unwrap().value.len(),
+            24
         );
-        // A table the tree has stays, and an unknown SoC gets none.
         assert!(publish(&mut tree, 0x8112).unwrap().is_empty());
-        assert!(publish(&mut self::tree(), 0x8122).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cpu_domain_without_operating_points_refuses() {
+        assert!(publish(&mut tree(), 0x8122).is_err());
+        assert!(publish(&mut with_domains(None), 0x8122).unwrap().is_empty());
+        assert!(publish(&mut with_domains(Some(&[0; 27])), 0x8112).is_err());
     }
 }

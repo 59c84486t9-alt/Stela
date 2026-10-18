@@ -720,9 +720,17 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     darts::publish(&mut tree)?;
     if let Some(chip_id) = inputs.target.chip_id {
         for table in dvfs::publish(&mut tree, chip_id)? {
-            unresolved.push(format!(
-                "/arm-io/pmgr {table}: operating points without calibrated voltages (0)"
-            ));
+            unresolved.push(if table.cpu {
+                format!(
+                    "/arm-io/pmgr {}: {} operating points without calibrated voltages (0)",
+                    table.name, table.domain
+                )
+            } else {
+                format!(
+                    "/arm-io/pmgr {}: {} has one state; its clock is not modeled",
+                    table.name, table.domain
+                )
+            });
         }
     }
     let hidden_devices = devices::hide_unmodeled(&mut tree);
