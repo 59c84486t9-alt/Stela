@@ -11,12 +11,14 @@ pub mod apple_device_tree;
 pub mod boot_args;
 pub mod boot_bundle;
 pub mod boot_policy;
+pub mod carveouts;
 #[cfg(feature = "std")]
 pub mod chained_fixups;
 #[cfg(feature = "std")]
 pub mod dependency_graph;
 #[cfg(feature = "std")]
 pub mod dependency_paths;
+pub mod devices;
 #[cfg(feature = "std")]
 pub mod exports;
 pub mod im4m;
@@ -29,6 +31,7 @@ pub mod kernel_collection;
 pub mod linked_images;
 #[cfg(feature = "std")]
 pub mod load_plan;
+pub mod lock_regs;
 #[cfg(feature = "std")]
 pub mod mapped_image;
 mod thread_state;

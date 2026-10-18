@@ -382,6 +382,19 @@ fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout, St
     })
 }
 
+/// The `compatible` of the S5L UART the engine models (`platform::apple::uart`).
+pub const UART: &str = "uart-1,samsung";
+/// The `compatible` of the watchdog the engine models (`platform::apple::wdt`).
+pub const WATCHDOG: &str = "wdt,s5l8960x";
+/// The AIC versions the engine models (`platform::apple::aic1` and `aic`).
+const AICS: [&str; 3] = ["aic,1", "aic,2", "aic,3"];
+
+/// Whether the engine models a device `compatible` with `name`: the devices a
+/// [`Board`] places. A boot bundle presents no other device to the guest.
+pub fn models(name: &str) -> bool {
+    name == UART || name == WATCHDOG || AICS.contains(&name)
+}
+
 /// Everything the engine models of a board, from its DeviceTree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
@@ -604,8 +617,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
             irq,
         })
     };
-    let uart = device("uart0", "uart-1,samsung")?;
-    let watchdog = device("wdt", "wdt,s5l8960x")?;
+    let uart = device("uart0", UART)?;
+    let watchdog = device("wdt", WATCHDOG)?;
     let (version, event) = cpus
         .aic
         .ok_or("the SoC's AIC event register offset is unknown")?;

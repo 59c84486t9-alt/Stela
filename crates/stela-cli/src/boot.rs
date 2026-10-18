@@ -135,7 +135,8 @@ pub(crate) struct Prepare {
     /// Guest DRAM size assumed until the mount patches it at boot.
     #[arg(long, value_parser = parse_address, default_value = "0x200000000")]
     dram_size: u64,
-    /// Lowest address handed to the kernel; the DRAM base by default.
+    /// Lowest address handed to the kernel; the DRAM base by default, and
+    /// always past iBoot's carveouts.
     #[arg(long, value_parser = parse_address)]
     phys_base: Option<u64>,
     /// Distance of the first region above the physical base.

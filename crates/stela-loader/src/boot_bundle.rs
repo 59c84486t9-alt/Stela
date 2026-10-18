@@ -13,8 +13,11 @@
 use crate::apple_device_tree::{DeviceTree, Placeholder};
 use crate::boot_args::{self, BootArgs, Video};
 use crate::boot_policy::{self, Decision, SealedVolume, SecurityPolicy};
+use crate::carveouts::{self, Placed};
+use crate::devices;
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
+use crate::lock_regs::{self, Programmed};
 use crate::trust_cache;
 use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
@@ -135,7 +138,8 @@ fn hex_bytes<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok,
 pub struct Options {
     pub dram_base: u64,
     pub dram_size: u64,
-    /// Lowest physical address handed to the kernel (`boot_args.physBase`).
+    /// Lowest physical address handed to the kernel (`boot_args.physBase`);
+    /// a bundle raises it past iBoot's carveouts (`carveouts`).
     pub phys_base: u64,
     /// First region's distance above `phys_base`.
     pub load_offset: u64,
@@ -303,6 +307,14 @@ pub struct Manifest {
     pub boot_args: BootArgs,
     pub device_tree_bytes: usize,
     pub top_of_kernel_data: u64,
+    /// iBoot's carveouts, below the managed range.
+    pub carveouts: Vec<Placed>,
+    /// The region iBoot programs into the AMCC's CTRR-A lock group, from
+    /// the first region through `SPTM-rx` (`lock_regs`).
+    pub read_only_region: Option<Programmed>,
+    /// The DeviceTree nodes whose `compatible` names no modeled device and
+    /// was removed (`devices`).
+    pub hidden_devices: Vec<String>,
     pub patches: Vec<Patch>,
     pub placeholders: Vec<PlaceholderDecision>,
     /// Boot-policy and manifest values written into `/chosen`.
@@ -397,6 +409,14 @@ const REGION_ORDER: &[&str] = &[
     "SEPFW",
     "BootArgs",
 ];
+
+/// The secure kernel's entries, unset: the board has no exclave image
+/// (its identity lists no CL4 component). SPTM 26A434 requires `CL4-entry`,
+/// `CL4-rx` and `CL4-virt` (`init_get_image_region`) and starts the secure
+/// kernel only when `rx + entry - virt` is not `~0`; with every value the
+/// template's unset `(~0, ~0)` it is `~0`, and the `CL4-rx` range it types
+/// rounds to no pages.
+const ABSENT_SECURE_KERNEL: [&str; 3] = ["CL4-entry", "CL4-rx", "CL4-virt"];
 
 const KERNEL_FILE: &str = "kernelcache.img";
 const SPTM_FILE: &str = "sptm.img";
@@ -583,6 +603,19 @@ fn source_of(input: &Input) -> Source {
 }
 
 pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
+    // iBoot's carveouts sit below the managed range, which starts past them.
+    let carveouts = inputs
+        .target
+        .chip_id
+        .and_then(carveouts::table)
+        .map(|table| carveouts::place(table, options.dram_base))
+        .unwrap_or_default();
+    let options = &Options {
+        phys_base: options
+            .phys_base
+            .max(carveouts::managed_floor(&carveouts, options.dram_base)),
+        ..options.clone()
+    };
     if let (Some(chip_id), Some(base)) = (inputs.target.chip_id, inputs.dram_base()?) {
         ensure!(
             options.dram_base == base,
@@ -665,6 +698,18 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         let (decisions, gaps) = boot_policy::apply_environment(&mut tree, environment)?;
         security.extend(decisions);
         unresolved.extend(gaps);
+    }
+    carveouts::publish(&mut tree, &carveouts)?;
+    let memory_controller = inputs.target.chip_id.and_then(lock_regs::table);
+    if let Some(controller) = memory_controller {
+        lock_regs::publish(&mut tree, controller)?;
+    }
+    let hidden_devices = devices::hide_unmodeled(&mut tree);
+    if !hidden_devices.is_empty() {
+        unresolved.push(format!(
+            "{} devices have no model; their compatible is removed (hidden_devices)",
+            hidden_devices.len()
+        ));
     }
     apply_overlay(&mut tree, &options.overlay)?;
     unresolved.extend(platform_gaps(&tree, inputs));
@@ -764,7 +809,9 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         "BootKC-entry",
         "BootKC-virt",
         "SPTM-rm",
-    ];
+    ]
+    .into_iter()
+    .chain(ABSENT_SECURE_KERNEL);
     for name in contents
         .iter()
         .map(|c| c.name.as_str())
@@ -816,6 +863,17 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
             range_value(region.guest_pa, region.memory_bytes),
         )?;
     }
+    let read_only_region = memory_controller
+        .map(|controller| {
+            let sptm_rx = region("SPTM-rx")?;
+            lock_regs::ctrr_a(
+                controller,
+                options.dram_base,
+                load_base,
+                sptm_rx.guest_pa + page_round(sptm_rx.memory_bytes),
+            )
+        })
+        .transpose()?;
     let sptm_ro = region("SPTM-ro")?;
     let sptm_total: u64 = ["SPTM-ro", "SPTM-rx", "SPTM-rw", "SPTM-le"]
         .iter()
@@ -834,7 +892,10 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         ),
         ("BootKC-virt", range_value(0, 0)),
         ("SPTM-rm", range_value(sptm_ro.guest_pa, sptm_total)),
-    ] {
+    ]
+    .into_iter()
+    .chain(ABSENT_SECURE_KERNEL.map(|name| (name, range_value(u64::MAX, u64::MAX))))
+    {
         memory_map.set_property(name, value)?;
     }
     let device_tree = tree.serialize();
@@ -963,6 +1024,9 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         boot_args,
         device_tree_bytes: device_tree_bytes as usize,
         top_of_kernel_data,
+        carveouts,
+        read_only_region,
+        hidden_devices,
         patches,
         placeholders,
         security,
@@ -999,21 +1063,10 @@ fn apply_overlay(tree: &mut DeviceTree, overlay: &[OverlayProperty]) -> Result<(
 /// Bootloader-provided inputs SPTM reads that no restore member supplies.
 fn platform_gaps(tree: &DeviceTree, inputs: &Inputs) -> Vec<String> {
     let mut gaps = vec![];
-    if tree
-        .property("/chosen/lock-regs/amcc", "aperture-count")
-        .is_none()
-    {
-        gaps.push(
-            "/chosen/lock-regs/amcc: the AMCC CTRR register map (aperture-*, plane-*, cache-status and amcc-ctrr-a..d lock registers) comes from the memory-controller model; supply it with an overlay"
-                .into(),
-        );
+    if tree.property(lock_regs::AMCC, "aperture-count").is_none() {
+        gaps.extend(lock_regs::gaps(None));
     }
-    if tree
-        .node("/chosen/carveout-memory-map")
-        .is_some_and(|node| node.properties.len() <= 2)
-    {
-        gaps.push("/chosen/carveout-memory-map: empty; the machine declares no carveouts".into());
-    }
+    gaps.extend(carveouts::gaps(tree, inputs.target.chip_id));
     if inputs.extra_trust_caches.is_empty() {
         gaps.push(
             "TrustCache: static module only; Cryptex1 trust caches load later through their manifest"
@@ -1532,6 +1585,22 @@ mod tests {
         let kc = manifest.images.iter().find(|i| i.name == "BootKC").unwrap();
         assert_eq!(kc.entry.physical_address, region("BootKC-bx").guest_pa);
         assert_eq!(region("SPTM-le").memory_bytes, PAGE);
+        // iBoot's carveouts sit below physBase, which starts past them.
+        let phys_base = manifest.options.phys_base;
+        assert_eq!(phys_base, 0x8_0200_0000);
+        assert_eq!(manifest.boot_args.phys_base, phys_base);
+        assert_eq!(manifest.boot_args.mem_size, 0xa_0000_0000 - phys_base);
+        assert!(manifest.regions[0].guest_pa >= phys_base);
+        assert!(
+            manifest
+                .carveouts
+                .iter()
+                .all(|c| c.base >= 0x8_0000_0000 && c.base + c.bytes <= phys_base)
+        );
+        // CTRR-A covers the read-only run, ending where SPTM's data starts.
+        let ctrr = manifest.read_only_region.unwrap();
+        assert_eq!(ctrr.base, manifest.regions[0].guest_pa);
+        assert_eq!(ctrr.base + ctrr.bytes, region("SPTM-rw").guest_pa);
 
         let file = |name: &str| &bundle.files.iter().find(|(n, _)| n == name).unwrap().1;
         let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
@@ -1542,11 +1611,21 @@ mod tests {
                 .all(|p| !p.name().starts_with(RESERVED_ENTRY_PREFIX))
         );
         let entry = |name: &str| map.property(name).unwrap().value.clone();
+        let nvme = manifest.carveouts.iter().find(|c| c.id == 0x37).unwrap();
+        assert_eq!(
+            tree.property(carveouts::MEMORY_MAP, "region-id-55")
+                .unwrap()
+                .value,
+            range_value(nvme.base, nvme.bytes)
+        );
         assert_eq!(
             entry("TrustCache"),
             range_value(region("TrustCache").guest_pa, PAGE)
         );
         assert_eq!(entry("BootKC-entry"), range_value(3 * PAGE, 0));
+        for name in ABSENT_SECURE_KERNEL {
+            assert_eq!(entry(name), range_value(u64::MAX, u64::MAX));
+        }
         assert_eq!(
             entry("SPTM-rm"),
             range_value(region("SPTM-ro").guest_pa, 4 * PAGE)
