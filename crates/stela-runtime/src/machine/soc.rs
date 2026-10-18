@@ -14,7 +14,7 @@ use super::{Chip, adt::Node, registers::Identity};
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, cluster, dart, fuse, ptd,
+    amcc, cluster, cpustart, dart, fuse, ptd,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -47,7 +47,9 @@ use alloc::{format, string::String, vec::Vec};
 /// (`platform::apple::cluster`), in `parts` order, where known, and
 /// `aon_fuses` the `/arm-io/pmgr` `reg` index of the always-on eFuses
 /// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
-/// readPMGRAONFuseReg` reads `reg[36]`.
+/// readPMGRAONFuseReg` reads `reg[36]`. `cpu_start` is the offset of the
+/// CPU start registers (`platform::apple::cpustart`) from `/arm-io/pmgr`
+/// `reg[0]`: m1n1 `src/smp.c` `CPU_START_OFF_T8112`.
 struct Soc {
     chip_id: u32,
     name: &'static str,
@@ -60,6 +62,7 @@ struct Soc {
     memory_cache: Option<(u64, u32)>,
     clusters: Option<[CpuCluster; 2]>,
     aon_fuses: Option<usize>,
+    cpu_start: Option<u64>,
 }
 
 /// One CPU cluster's PMGR registers (`platform::apple::cluster`): their
@@ -120,6 +123,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -133,6 +137,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -146,6 +151,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -165,6 +171,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: Some((8 << 20, 16)),
         clusters: Some(T8112_CLUSTERS),
         aon_fuses: Some(36),
+        cpu_start: Some(0x34000),
     },
     Soc {
         chip_id: 0x6020,
@@ -178,6 +185,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -191,6 +199,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -204,6 +213,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -217,6 +227,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -230,6 +241,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -243,6 +255,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -256,6 +269,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -269,6 +283,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -282,6 +297,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -295,6 +311,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
+        cpu_start: None,
     },
 ];
 
@@ -446,14 +463,16 @@ pub struct Device {
 }
 
 /// The lockdown registers of one CPU implementation block: the ADT `/cpus`
-/// property naming the block, its guest PA and size, and the offset of its
-/// lockdown CONTROL.
+/// property naming the block, its guest PA and size, the offset of its
+/// lockdown CONTROL, and for a `cpu-impl-reg` the PE (in `/cpus` order)
+/// whose RVBAR it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockdownBlock {
     pub name: &'static str,
     pub physical: u64,
     pub bytes: u64,
     pub control: u64,
+    pub cpu: Option<usize>,
 }
 
 /// The AIC: its core block's guest PA, its input count and its layout.
@@ -560,6 +579,9 @@ pub struct Board {
     pub clusters: Vec<CpuCluster>,
     /// The always-on eFuse block, under the same conditions.
     pub aon_fuses: Option<(u64, u64)>,
+    /// The CPU start registers' guest PA and the clusters they start, under
+    /// the same conditions.
+    pub cpu_start: Option<(u64, u8)>,
 }
 
 /// An `mcc,t8112`: its cache in the AMCC aperture, its DRAM channels and
@@ -883,10 +905,12 @@ fn pmgr_registers(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
     chip_id: u32,
+    processors: &[Identity],
 ) -> Result<PmgrRegisters, String> {
     let none = PmgrRegisters {
         clusters: Vec::new(),
         aon_fuses: None,
+        cpu_start: None,
     };
     let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
         return Ok(none);
@@ -932,9 +956,25 @@ fn pmgr_registers(
                 .ok_or_else(|| format!("/arm-io/pmgr reg[{index}] is not the eFuse block"))
         })
         .transpose()?;
+    let mut cluster_ids: Vec<u64> = processors.iter().map(|pe| (pe.mpidr >> 8) & 0xff).collect();
+    cluster_ids.sort_unstable();
+    cluster_ids.dedup();
+    let clusters_started = cluster_ids.last().map_or(0, |&last| last as u8 + 1);
+    let cpu_start = match (soc.cpu_start, reg.first().copied().flatten()) {
+        (None, _) => None,
+        (Some(offset), Some((base, bytes)))
+            if offset + cpustart::bytes(clusters_started) <= bytes =>
+        {
+            Some((base + offset, clusters_started))
+        }
+        (Some(_), _) => {
+            return Err("/arm-io/pmgr reg[0] does not hold the CPU start registers".into());
+        }
+    };
     Ok(PmgrRegisters {
         clusters,
         aon_fuses: fuses,
+        cpu_start,
     })
 }
 
@@ -942,6 +982,7 @@ fn pmgr_registers(
 struct PmgrRegisters {
     clusters: Vec<CpuCluster>,
     aon_fuses: Option<(u64, u64)>,
+    cpu_start: Option<(u64, u8)>,
 }
 
 /// `/arm-io/mcc`, if it is a modeled memory cache controller. Its planes
@@ -1127,7 +1168,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
             if let Some(cluster_type) = node.property("cluster-type") {
                 found.push((cluster_type.first().copied(), node.first_u32("reg")));
                 for (index, name) in ["cpu-impl-reg", "cpm-impl-reg"].into_iter().enumerate() {
-                    blocks.push((index, name, node.pairs(name)));
+                    let pe = (index == 0).then(|| found.len() - 1);
+                    blocks.push((index, name, node.pairs(name), pe));
                 }
             }
         })
@@ -1141,7 +1183,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         .collect::<Result<Vec<_>, _>>()?;
     let cpus = cpus(chip_id, soc_name, &processors)?;
     let mut lockdown: Vec<LockdownBlock> = Vec::new();
-    for (index, name, pairs) in blocks.into_iter().filter(|_| cpus.lockdown.is_some()) {
+    for (index, name, pairs, cpu) in blocks.into_iter().filter(|_| cpus.lockdown.is_some()) {
         let (physical, bytes) = pairs
             .and_then(|pairs| pairs.first().copied())
             .ok_or_else(|| format!("a /cpus node has no {name}"))?;
@@ -1155,6 +1197,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
                 physical,
                 bytes,
                 control,
+                cpu,
             });
         }
     }
@@ -1223,7 +1266,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let PmgrRegisters {
         clusters,
         aon_fuses,
-    } = pmgr_registers(&io, &translate, chip_id)?;
+        cpu_start,
+    } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
         cpus,
@@ -1237,6 +1281,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         memory_cache,
         clusters,
         aon_fuses,
+        cpu_start,
         aic: InterruptController {
             physical,
             inputs,
@@ -1507,19 +1552,20 @@ mod tests {
         );
         assert_eq!(found.watchdog.irq, 379);
         // Each PE's cpu-impl-reg and each cluster's cpm-impl-reg, once.
-        let block = |name, physical, control| LockdownBlock {
+        let block = |name, physical, control, cpu| LockdownBlock {
             name,
             physical,
             bytes: 0x9010,
             control,
+            cpu,
         };
         assert_eq!(
             found.lockdown,
             [
-                block("cpu-impl-reg", 0x2_1005_0000, 0x5000),
-                block("cpm-impl-reg", 0x2_10e4_0000, 0x9000),
-                block("cpu-impl-reg", 0x2_1105_0000, 0x5000),
-                block("cpm-impl-reg", 0x2_11e4_0000, 0x9000),
+                block("cpu-impl-reg", 0x2_1005_0000, 0x5000, Some(0)),
+                block("cpm-impl-reg", 0x2_10e4_0000, 0x9000, None),
+                block("cpu-impl-reg", 0x2_1105_0000, 0x5000, Some(1)),
+                block("cpm-impl-reg", 0x2_11e4_0000, 0x9000, None),
             ]
         );
         // The UART's input 739 is the highest that names the AIC.

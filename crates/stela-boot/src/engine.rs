@@ -262,9 +262,12 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 /// placed as the board's DeviceTree places them (`machine::soc::board`).
 /// `aic-timebase` has no public register description and no model, so its
 /// accesses stop explicitly.
+/// The board's devices. `reset` is the entry point a boot bundle hands off
+/// to, on which boot firmware locks every PE's RVBAR.
 fn devices(
     board: Option<&soc::Board>,
     read_only_region: Option<(u64, u64)>,
+    reset: Option<u64>,
     now: u64,
 ) -> Result<AppleDevices, String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
@@ -307,13 +310,17 @@ fn devices(
             physical: block.physical,
             bytes: block.bytes,
         };
+        let rvbar = block.cpu.zip(reset);
         devices
-            .add_lockdown(block.name, block.control, range)
+            .add_lockdown(block.name, block.control, range, rvbar)
             .map_err(|error| alloc::format!("{} placement: {error:?}", block.name))?;
     }
     if let Some(board) = board {
         let mpidrs: Vec<u64> = board.cpus.processors.iter().map(|pe| pe.mpidr).collect();
         devices.add_fast_ipi(&mpidrs);
+        if let Some((physical, clusters)) = board.cpu_start {
+            devices.add_cpu_start(physical, clusters, &mpidrs)?;
+        }
     }
     let mut darts = Vec::new();
     for dart in board.map_or(&[][..], |board| &board.darts) {
@@ -654,7 +661,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .set(Register::CNTHCTL_EL2, 0, 1 << 10 | 1 << 11);
     }
     let now = stela_runtime::machine::Host::counter(&mut bare);
-    let devices = match devices(board.as_ref(), read_only_region, now) {
+    let reset = options.bundle.then_some(entry);
+    let devices = match devices(board.as_ref(), read_only_region, reset, now) {
         Ok(devices) => devices,
         Err(error) => {
             output::arguments(format_args!("device refusal: {error}\n"));

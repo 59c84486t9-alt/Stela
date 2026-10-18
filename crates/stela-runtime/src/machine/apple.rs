@@ -4,7 +4,7 @@
 //! The models own every register decision; this adapter only routes accesses
 //! and time, and turns each `MmioError` into an explicit refusal.
 use super::{
-    engine::{DeviceError, Devices, Memory},
+    engine::{DeviceError, Devices, Memory, Start},
     registers::Lines,
 };
 use crate::platform::apple::{
@@ -14,6 +14,7 @@ use crate::platform::apple::{
     amcc::{self, Amcc},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
+    cpustart::{self, CpuStart},
     dart::{self, Dart},
     dcs::Dcs,
     fuse::{self, AonFuses},
@@ -52,6 +53,16 @@ pub struct AppleDevices {
     memory_controller: Option<DeviceId>,
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
+    cpu_start: Option<CpuStarter>,
+    reset_vectors: Vec<Option<DeviceId>>,
+    starts: Vec<Start>,
+}
+
+/// The CPU start registers and each PE's MPIDR_EL1 (Aff1 its cluster, Aff0
+/// its core), by which a released core finds its PE.
+struct CpuStarter {
+    device: DeviceId,
+    mpidrs: Vec<u64>,
 }
 
 /// An AES engine and the DART stream its DMA goes through.
@@ -111,6 +122,9 @@ impl AppleDevices {
             memory_controller: None,
             ipi: None,
             masters: Vec::new(),
+            cpu_start: None,
+            reset_vectors: Vec::new(),
+            starts: Vec::new(),
         }
     }
 
@@ -147,16 +161,84 @@ impl AppleDevices {
         self.map(device, ranges)
     }
 
-    /// The lockdown registers of a CPU implementation block named `name`
-    /// at `range`, with CONTROL `control` bytes from its start.
+    /// The lockdown registers of a CPU implementation block named `name`,
+    /// with CONTROL at `control`, at `range`; a PE's `cpu-impl-reg` also
+    /// holds that PE's RVBAR, which the boot firmware locked on `reset`.
     pub fn add_lockdown(
         &mut self,
         name: &'static str,
         control: u64,
         range: Range,
+        reset: Option<(usize, u64)>,
     ) -> Result<(), MapError> {
-        let device = self.bus.add(Box::new(Lockdown::new(name, control)));
+        let mut model = Lockdown::new(name, control);
+        if let Some((_, entry)) = reset {
+            model = model.with_reset_vector(entry);
+        }
+        let device = self.bus.add(Box::new(model));
+        if let Some((pe, _)) = reset {
+            if self.reset_vectors.len() <= pe {
+                self.reset_vectors.resize(pe + 1, None);
+            }
+            self.reset_vectors[pe] = Some(device);
+        }
         self.map(device, &[range])
+    }
+
+    /// The PMGR's CPU start registers for `clusters` clusters at `physical`,
+    /// releasing the PEs with these MPIDR_EL1 values, in PE order, at the
+    /// RVBARs of their `cpu-impl-reg` blocks.
+    pub fn add_cpu_start(
+        &mut self,
+        physical: u64,
+        clusters: u8,
+        mpidrs: &[u64],
+    ) -> Result<(), String> {
+        let device = self.bus.add(Box::new(CpuStart::new(clusters)));
+        self.bus
+            .map(device, physical, cpustart::bytes(clusters), 0)
+            .map_err(|error| format!("CPU start placement: {error:?}"))?;
+        self.cpu_start = Some(CpuStarter {
+            device,
+            mpidrs: mpidrs.to_vec(),
+        });
+        Ok(())
+    }
+
+    /// Turn the cores the CPU start registers released into PE starts.
+    fn release_cores(&mut self) -> Result<(), DeviceError> {
+        let Some(starter) = &self.cpu_start else {
+            return Ok(());
+        };
+        let released = self
+            .bus
+            .device_mut::<CpuStart>(starter.device)
+            .expect("the CPU start id names its model")
+            .take();
+        for core in released {
+            let affinity = u64::from(core.cluster) << 8 | u64::from(core.core);
+            let cpu = starter
+                .mpidrs
+                .iter()
+                .position(|&mpidr| mpidr & 0xffff == affinity)
+                .ok_or_else(|| {
+                    DeviceError::Refused(format!(
+                        "CPU start of cluster {} core {}, which the board does not have",
+                        core.cluster, core.core
+                    ))
+                })?;
+            let address = self
+                .reset_vectors
+                .get(cpu)
+                .copied()
+                .flatten()
+                .and_then(|block| self.bus.device::<Lockdown>(block)?.reset_address())
+                .ok_or_else(|| {
+                    DeviceError::Refused(format!("CPU start of PE {cpu}, which has no RVBAR"))
+                })?;
+            self.starts.push(Start { cpu, address });
+        }
+        Ok(())
     }
 
     /// The AMCC's lock registers at each aperture of `layout`, with the
@@ -374,6 +456,7 @@ impl AppleDevices {
         if self.reset.is_none() {
             self.reset = reset;
         }
+        self.release_cores()?;
         loop {
             let inputs = self.latch.take_aic_inputs();
             if inputs.is_empty() {
@@ -514,6 +597,10 @@ impl Devices for AppleDevices {
         self.reset.take()
     }
 
+    fn take_start(&mut self) -> Option<Start> {
+        (!self.starts.is_empty()).then(|| self.starts.remove(0))
+    }
+
     fn memory_lock(&self) -> Option<(u64, u64)> {
         let device = self.memory_controller?;
         self.bus.device::<Amcc>(device)?.locked_region()
@@ -588,6 +675,40 @@ mod tests {
             devices.system_register(0, request, Some(1 << 16 | 3 << 28), 0),
             Some(Err(_))
         ));
+    }
+
+    #[test]
+    fn a_start_bit_releases_its_pe_at_the_locked_rvbar() {
+        const START: u64 = 0x2_3b73_4000;
+        const ENTRY: u64 = 0x8_0300_c388;
+        let mpidrs = [0x8000_0000, 0x8000_0001, 0x8000_0100, 0x8000_0101];
+        let mut devices = AppleDevices::new();
+        for pe in 0..4 {
+            let range = Range {
+                physical: 0x2_1005_0000 + 0x10_0000 * pe as u64,
+                bytes: 0x9010,
+            };
+            devices
+                .add_lockdown("cpu-impl-reg", 0x5000, range, Some((pe, ENTRY)))
+                .unwrap();
+        }
+        devices.add_cpu_start(START, 2, &mpidrs).unwrap();
+        // The kernel's sequence for cluster 1 core 1: its startup bit, then
+        // both clusters' start words.
+        devices.write(0, START + 4, 4, 1 << 5, 0).unwrap();
+        assert_eq!(devices.take_start(), None);
+        devices.write(0, START + 8, 4, 0, 0).unwrap();
+        devices.write(0, START + 0xc, 4, 1 << 1, 0).unwrap();
+        assert_eq!(
+            devices.take_start(),
+            Some(Start {
+                cpu: 3,
+                address: 0x8_0300_c000
+            })
+        );
+        assert_eq!(devices.take_start(), None);
+        // A core the board does not have refuses.
+        assert!(devices.write(0, START + 0xc, 4, 1 << 2, 0).is_err());
     }
 
     #[test]

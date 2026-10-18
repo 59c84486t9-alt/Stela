@@ -16,6 +16,7 @@ pub mod asc;
 pub mod bus;
 pub mod cluster;
 pub mod counter;
+pub mod cpustart;
 pub mod dart;
 pub mod dcs;
 pub mod fuse;

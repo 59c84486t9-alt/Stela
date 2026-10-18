@@ -20,9 +20,20 @@
 //! MASK bit protects is not documented either; the block's other registers
 //! are not modelled and refuse, so no access such a lock could forbid
 //! completes here.
+//!
+//! A PE's `cpu-impl-reg` also holds its RVBAR at +0 (m1n1 `src/smp.c`): the
+//! reset vector in bits 47:12, where the core leaves reset, and RVBAR_LOCK
+//! in bit 0. Boot firmware programs and locks it before its client runs:
+//! m1n1 finds it locked on the entry point iBoot gave it, and SPTM 26A434
+//! (T8112) neither reads nor writes it, its warm reset path at the page
+//! of its entry point (`b` to the code that looks the PE up by MPIDR). So a
+//! block given the boot hand-off's entry point reads it locked, a write
+//! that keeps it completes and one that changes it stops.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 
 const LOCK: u64 = 1;
+const RVBAR: u64 = 0;
+const RVBAR_ADDRESS: u64 = 0x0000_ffff_ffff_f000;
 
 /// The lockdown pair of one implementation block, with CONTROL at
 /// `control` bytes from the block's start.
@@ -32,6 +43,7 @@ pub struct Lockdown {
     control: u64,
     lock: u64,
     mask: u64,
+    rvbar: Option<u64>,
 }
 
 impl Lockdown {
@@ -41,7 +53,19 @@ impl Lockdown {
             control,
             lock: 0,
             mask: 0,
+            rvbar: None,
         }
+    }
+
+    /// A PE's block, whose RVBAR the boot firmware locked on `entry`.
+    pub fn with_reset_vector(mut self, entry: u64) -> Self {
+        self.rvbar = Some(entry & RVBAR_ADDRESS | LOCK);
+        self
+    }
+
+    /// Where the PE leaves reset, for a PE's block.
+    pub fn reset_address(&self) -> Option<u64> {
+        Some(self.rvbar? & RVBAR_ADDRESS)
     }
 
     /// Whether CONTROL bit 0 has applied the lock.
@@ -69,6 +93,12 @@ impl MmioDevice for Lockdown {
     }
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        if let Some(rvbar) = self
+            .rvbar
+            .filter(|_| offset == RVBAR && width == Width::Double)
+        {
+            return Ok(rvbar);
+        }
         Ok(if self.register(offset, width, Direction::Read)? {
             self.mask
         } else {
@@ -83,8 +113,18 @@ impl MmioDevice for Lockdown {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let is_mask = self.register(offset, width, Direction::Write)?;
         let refused = |reason| refuse(self.name, offset, width, Direction::Write, reason);
+        if let Some(rvbar) = self
+            .rvbar
+            .filter(|_| offset == RVBAR && width == Width::Double)
+        {
+            return if value == rvbar {
+                Ok(())
+            } else {
+                Err(refused("RVBAR change after the boot firmware locked it"))
+            };
+        }
+        let is_mask = self.register(offset, width, Direction::Write)?;
         let current = if is_mask { self.mask } else { self.lock };
         if self.locked() && value != current {
             return Err(refused("lockdown register change after the lock"));
@@ -138,5 +178,24 @@ mod tests {
         assert!(fresh.read(0x9008, Width::Word, &mut access).is_err());
         assert!(fresh.read(0x9010, Width::Double, &mut access).is_err());
         assert!(fresh.read(0x100, Width::Double, &mut access).is_err());
+        assert!(fresh.read(0, Width::Double, &mut access).is_err());
+    }
+
+    #[test]
+    fn a_pes_rvbar_reads_locked_on_the_boot_entry_page() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut block = Lockdown::new("cpu-impl-reg", 0x5000).with_reset_vector(0x8_0300_c388);
+        assert_eq!(block.reset_address(), Some(0x8_0300_c000));
+        assert_eq!(block.read(0, Width::Double, &mut access), Ok(0x8_0300_c001));
+        block
+            .write(0, Width::Double, 0x8_0300_c001, &mut access)
+            .unwrap();
+        assert!(
+            block
+                .write(0, Width::Double, 0x8_0400_0001, &mut access)
+                .is_err()
+        );
+        assert!(block.read(0, Width::Word, &mut access).is_err());
     }
 }
