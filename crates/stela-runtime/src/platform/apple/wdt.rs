@@ -18,10 +18,15 @@
 //!
 //! The DT reg[1] panic-save scratch (panic-save-flag-bit) retains full32
 //! RMWs (`AppleARMWatchdogTimer::_handlePEHaltRestart`, kernel file 0x1ca4a88).
-//! reg[2] accepts the observed full32 write0 to disarm the separate watchdog
-//! mechanism (`AppleARMWatchdogTimer::_disarmWatchdogMechanism`, 0x1ca6114).
-//! It starts disabled; its other encodings and command readback are unproved
-//! and refuse. reg[3], the AP watchdog configuration, and reg[4], the panic
+//! reg[2] commands the separate watchdog mechanism. Writing 0 disarms it
+//! (`AppleARMWatchdogTimer::_disarmWatchdogMechanism`, 0x1ca6114);
+//! `_armWatchdogMechanism` (0x1ca5e28) writes an absolute deadline in whole
+//! seconds: uptime converted to nanoseconds plus the timeout (10 s from
+//! 0x1ca5f28), divided by 10^9. The deadline counts the system counter's
+//! seconds, the time base the driver read; when the counter reaches it while
+//! armed, the mechanism requests a reset. That comparator is inferred from
+//! the driver's arithmetic. It starts disarmed; command readback is unproved
+//! and refuses. reg[3], the AP watchdog configuration, and reg[4], the panic
 //! force-power-off flags, retain full32 RMWs: `start` sets configuration
 //! bits [5:4] to 1, `_writeApWatchdogConfiguration` (0x1ca5da0) replaces its
 //! low byte with expiry flags and `_clearApWatchdogConfiguration`
@@ -50,6 +55,8 @@ const BARK_TIME: u64 = 0x8;
 const CTRL: u64 = 0xc;
 const STRIDE: u64 = 0x10;
 const WATCHDOGS: usize = 3;
+/// The `clkref` reference clock and system counter rate.
+const REFERENCE_HZ: u64 = 24_000_000;
 pub const PANIC_SAVE: u64 = 0x4000;
 pub const MECHANISM: u64 = 0x4004;
 pub const CONFIGURATION: u64 = 0x4008;
@@ -91,7 +98,8 @@ pub struct AppleWdt {
     irq_level: bool,
     side: bool,
     panic_save: u32,
-    mechanism_enabled: bool,
+    /// The armed mechanism deadline, in seconds of the system counter.
+    mechanism: Option<u32>,
     configuration: u32,
     power_off: u32,
 }
@@ -112,7 +120,7 @@ impl AppleWdt {
             irq_level: false,
             side: false,
             panic_save: 0,
-            mechanism_enabled: false,
+            mechanism: None,
             configuration: 0,
             power_off: 0,
         }
@@ -127,6 +135,14 @@ impl AppleWdt {
         let mut next: Option<u64> = None;
         let mut earliest =
             |deadline: u64| next = Some(next.map_or(deadline, |next| next.min(deadline)));
+        if let Some(seconds) = self.mechanism {
+            let deadline = u64::from(seconds) * REFERENCE_HZ;
+            if now >= deadline {
+                access.request_reset(NAME, "watchdog mechanism deadline passed: reset requested");
+            } else {
+                earliest(deadline);
+            }
+        }
         for (index, watchdog) in self.watchdogs.iter_mut().enumerate() {
             if watchdog.control & CTRL_RESET_EN != 0
                 && let Some(bite) = watchdog.bite
@@ -240,10 +256,8 @@ impl MmioDevice for AppleWdt {
                 return Ok(());
             }
             if offset == MECHANISM {
-                if value != 0 {
-                    return Err(fail("only watchdog mechanism disarm write0 is described"));
-                }
-                self.mechanism_enabled = false;
+                self.mechanism = (value != 0).then_some(value as u32);
+                self.evaluate(access);
                 return Ok(());
             }
         }
@@ -360,10 +374,11 @@ mod tests {
         let v = w.read(PANIC_SAVE, Width::Word, &mut a).unwrap();
         w.write(PANIC_SAVE, Width::Word, v | 1, &mut a).unwrap();
         assert_eq!(w.read(PANIC_SAVE, Width::Word, &mut a), Ok(0xabc1));
-        w.mechanism_enabled = true;
+        // Arming sets a deadline in counter seconds; write0 disarms.
+        w.write(MECHANISM, Width::Word, 10, &mut a).unwrap();
+        assert_eq!(w.mechanism, Some(10));
         w.write(MECHANISM, Width::Word, 0, &mut a).unwrap();
-        assert!(!w.mechanism_enabled);
-        assert!(w.write(MECHANISM, Width::Word, 1, &mut a).is_err());
+        assert_eq!(w.mechanism, None);
         assert!(w.read(MECHANISM, Width::Word, &mut a).is_err());
         assert!(w.read(PANIC_SAVE, Width::Double, &mut a).is_err());
         assert!(w.read(PANIC_SAVE + 0x10, Width::Word, &mut a).is_err());
@@ -400,6 +415,24 @@ mod tests {
         assert!(trigger.write(0, Width::Word, 0x11, &mut a).is_err());
         assert!(trigger.read(0, Width::Double, &mut a).is_err());
         assert_eq!(trigger.read(0, Width::Word, &mut a), Ok(1));
+    }
+
+    #[test]
+    fn an_armed_mechanism_resets_at_its_deadline_unless_rearmed() {
+        let mut latch = InterruptLatch::new();
+        let mut w = AppleWdt::new(None, 0).with_side_controls();
+        let second = REFERENCE_HZ;
+        let mut a = Access::new(0, 5 * second, &mut latch);
+        w.write(MECHANISM, Width::Word, 15, &mut a).unwrap();
+        assert_eq!(w.advance(&mut a), Ok(Some(15 * second)));
+        let mut a = Access::new(0, 14 * second, &mut latch);
+        w.write(MECHANISM, Width::Word, 24, &mut a).unwrap();
+        let mut a = Access::new(0, 20 * second, &mut latch);
+        w.advance(&mut a).unwrap();
+        assert!(a.reset_request().is_none());
+        let mut a = Access::new(0, 24 * second, &mut latch);
+        w.advance(&mut a).unwrap();
+        assert!(a.reset_request().is_some());
     }
 
     #[test]
