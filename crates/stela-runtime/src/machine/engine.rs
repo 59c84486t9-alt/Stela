@@ -559,6 +559,9 @@ pub struct StaleCode {
     pub first: Option<(u64, u64)>,
 }
 
+/// The distinct PAC inputs whose memo generations are kept.
+const POINTER_INPUTS_SEEN: usize = 16;
+
 /// What a PAC result depends on besides its operands: the five keys, the
 /// chip's PAC version and the regime's TCR (Arm `AddPAC`, `Auth`).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -704,12 +707,19 @@ pub struct Machine<H: Host, D: Devices> {
     /// or board register access, a System register write, an exception and
     /// a PE switch can change them, and clear it.
     device_lines: Option<(Lines, u64)>,
-    /// Signing and authentication results under `pointer_memo_inputs`,
-    /// which native code reads (`x86_64::pointer`); entries of an earlier
-    /// `pointer_generation` are stale.
+    /// Signing and authentication results, which native code reads
+    /// (`x86_64::pointer`), each tagged with the generation of the inputs it
+    /// was computed under; `pointer_generation` is that of
+    /// `pointer_memo_inputs`.
     pointer_memo: alloc::boxed::Box<[pointer::MemoEntry]>,
     pointer_memo_inputs: Option<PointerInputs>,
     pointer_generation: u64,
+    /// The generations of the most recent distinct inputs, most recent
+    /// first, so entries stay valid across a return to earlier inputs (EL0
+    /// and EL1 keys, guarded levels, PE switches).
+    pointer_inputs_seen: Vec<(PointerInputs, u64)>,
+    /// The last generation handed out; an evicted one is never reused.
+    pointer_generations: u64,
     /// Each key's tag word for native code: zero until a PAC exit finds the
     /// key enabled and untrapped under the current memo, and again whenever
     /// derived state may have changed.
@@ -802,6 +812,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .into_boxed_slice(),
             pointer_memo_inputs: None,
             pointer_generation: 0,
+            pointer_inputs_seen: Vec::new(),
+            pointer_generations: 0,
             pointer_tags: alloc::boxed::Box::new([0; 4]),
             admit_table,
             watch: Watch::default(),
@@ -2462,7 +2474,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 tcr: self.cpu.regime_tcr(),
             };
             if self.pointer_memo_inputs != Some(inputs) {
-                self.pointer_generation += 1;
+                self.pointer_generation = self.pointer_generation_of(inputs);
                 self.pointer_memo_inputs = Some(inputs);
             }
             let [ia, ib, da, db, generic] = inputs.keys;
@@ -2514,6 +2526,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.remember(authenticate, key, signed, modifier, Ok((pointer, true)));
         }
         Ok(result)
+    }
+
+    /// The memo generation of `inputs`: the one they had if they are among
+    /// the [`POINTER_INPUTS_SEEN`] most recent distinct inputs, else a new
+    /// one. A result depends only on its inputs and operands, so an entry
+    /// of a reused generation is still exact.
+    fn pointer_generation_of(&mut self, inputs: PointerInputs) -> u64 {
+        let seen = &mut self.pointer_inputs_seen;
+        let generation = match seen.iter().position(|&(known, _)| known == inputs) {
+            Some(index) => seen.remove(index).1,
+            None => {
+                self.pointer_generations += 1;
+                self.pointer_generations
+            }
+        };
+        seen.insert(0, (inputs, generation));
+        seen.truncate(POINTER_INPUTS_SEEN);
+        generation
     }
 
     /// The current memo's result of `operation` with `key` on these
@@ -5700,6 +5730,40 @@ mod tests {
         assert_eq!(machine.pointer_tags[usize::from(ib)], open);
         machine.derived_changed();
         assert_eq!(*machine.pointer_tags, [0; 4]);
+    }
+
+    /// A return to earlier keys finds their generation, and its entries,
+    /// again; other keys get their own, and beyond the inputs kept a
+    /// generation is new.
+    #[test]
+    fn memo_generations_follow_the_keys() {
+        let mut machine = pac_machine();
+        let (pointer, modifier) = (0xffff_ff80_0000_4000, 0x10);
+        let sign = |machine: &mut Machine<FakeHost, NoDevices>, key| {
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::APIBKeyLo_EL1, 0, key);
+            machine.derived_changed();
+            let signed = machine
+                .pointer_result(PointerOperation::Sign, pauth::Key::Ib, pointer, modifier)
+                .unwrap()
+                .unwrap();
+            (signed, machine.pointer_generation)
+        };
+        let (first, generation) = sign(&mut machine, 1);
+        let (other, other_generation) = sign(&mut machine, 2);
+        assert_ne!((other, other_generation), (first, generation));
+        assert_eq!(sign(&mut machine, 1), (first, generation));
+        let remembered =
+            machine.remembered(PointerOperation::Sign, pauth::Key::Ib, pointer, modifier);
+        assert_eq!(remembered, Some(Ok(first)));
+        for key in 0..POINTER_INPUTS_SEEN as u64 {
+            sign(&mut machine, 0x1000 + key);
+        }
+        let (again, renewed) = sign(&mut machine, 1);
+        assert_eq!(again, first);
+        assert!(renewed > other_generation);
     }
 
     /// A signing remembers that its result authenticates back to its
