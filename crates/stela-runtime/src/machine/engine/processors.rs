@@ -9,7 +9,8 @@
 //! against the kernel's timeout. XNU 26A434 panics once a ticket spinlock
 //! stays held for 3,000,000 counts (125 ms at 24 MHz, `lock_ticket.c`), so
 //! a slice bounded in counter time keeps the wait for a preempted holder,
-//! at most one slice of every other PE, short of it on every board.
+//! at most one slice of every other PE, short of it on every board, and the
+//! counter itself advances no faster than the PEs progress (`clock`).
 //!
 //! Native code writes guest RAM directly, so the engine cannot see the store
 //! by one PE that clears another PE's global Exclusives monitor (Arm
@@ -108,14 +109,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         if self.waiting.is_none()
             && self.statistics.blocks < self.slice_end
-            && (self.peers.len() < 2 || self.host.counter() < self.slice_deadline)
+            && (self.peers.len() < 2 || self.now() < self.slice_deadline)
         {
             return Ok(());
         }
+        let host = self.host.counter();
+        self.clock.end_slice(host, self.statistics.blocks);
         let mut waited = false;
         loop {
             self.observe_writes();
-            let now = self.host.counter();
+            let now = self.now();
             let (current, count) = (self.current, self.peers.len());
             if let Some(next) = (1..=count)
                 .map(|offset| (current + offset) % count)
@@ -129,16 +132,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 self.slice_end = self.statistics.blocks + QUANTUM;
                 self.slice_deadline = now + self.profile.counter_frequency / QUANTUM_HZ;
+                let host = self.host.counter();
+                let share = self.runnable();
+                self.clock.start_slice(host, self.statistics.blocks, share);
                 return self.wake();
             }
             let Some(deadline) = self.next_deadline(now) else {
                 return Err(Stop::Idle);
             };
             self.statistics.waits += 1;
-            self.host.arm_timer(Some(deadline));
+            self.host
+                .arm_timer(Some(self.clock.host_deadline(deadline)));
             self.host.wait_for_interrupt();
             waited = true;
         }
+    }
+
+    /// The PEs that share the round with the running one, itself included:
+    /// those out of reset and not waiting for an interrupt. A PE in WFE
+    /// spins, so it shares the round.
+    fn runnable(&self) -> u64 {
+        let parked = self.peers.iter().filter(|peer| {
+            matches!(peer, Peer::Parked(parked)
+                if parked.waiting.is_none_or(|wait| wait.kind != WaitKind::Interrupt))
+        });
+        1 + parked.count() as u64
     }
 
     /// Whether PE `pe` can run: it is running or preempted, or a WFI it waits

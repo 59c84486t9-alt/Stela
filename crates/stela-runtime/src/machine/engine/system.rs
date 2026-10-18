@@ -876,7 +876,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             access.direction() == stela_compiler::aarch64::system::registers::Direction::Read;
         let (accessor, index) = self.lookup.find(access.encoding(), read)?;
         let lines = self.lines();
-        let now = self.host.counter();
+        let now = self.now();
         let mut context = Access {
             machine: self,
             rt: access.rt(),
@@ -2167,7 +2167,7 @@ mod tests {
             &mut super::Machine<super::super::tests::FakeHost, super::super::NoDevices>,
         ),
     ) -> alloc::vec::Vec<bool> {
-        use super::{ACCESSORS, Access, Cell, Effect, Host};
+        use super::{ACCESSORS, Access, Cell, Effect};
         let mut machine = machine(&[]);
         configure(&mut machine);
         ACCESSORS
@@ -2175,7 +2175,7 @@ mod tests {
             .flat_map(|accessor| (0..1u64 << accessor.index.len()).map(move |m| (accessor, m)))
             .map(|(accessor, m)| {
                 let lines = machine.lines();
-                let now = machine.host.counter();
+                let now = machine.now();
                 let mut context = Access {
                     machine: &mut machine,
                     rt: 0,

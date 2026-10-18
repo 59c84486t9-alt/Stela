@@ -122,7 +122,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     "unprivileged access crossing out of RAM".into(),
                 ));
             };
-            let now = self.host.counter();
+            let now = self.now();
             let result = if write {
                 self.devices
                     .write(

@@ -1,6 +1,7 @@
 //! The dispatch loop: fetch translation, block cache, native execution and
 //! every exit back from native code.
 mod amx;
+mod clock;
 mod exclusive;
 mod processors;
 mod system;
@@ -729,6 +730,8 @@ pub struct Machine<H: Host, D: Devices> {
     slice_end: u64,
     /// The system counter value at which it ends, whichever comes first.
     slice_deadline: u64,
+    /// The system counter the PEs observe (`clock`).
+    clock: clock::Clock,
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.
     pacm_written: bool,
@@ -808,6 +811,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             breakpoints: Vec::new(),
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
+            clock: clock::Clock::default(),
             pacm_written: false,
             completing: None,
             chain: alloc::boxed::Box::default(),
@@ -1008,8 +1012,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.sync_regime();
     }
 
+    /// The system counter's count (`clock`).
+    pub(super) fn now(&mut self) -> u64 {
+        let host = self.host.counter();
+        self.clock.read(host)
+    }
+
     fn lines(&mut self) -> Lines {
-        let now = self.host.counter();
+        let now = self.now();
         let device = match self.device_lines {
             Some((lines, until)) if now < until => lines,
             _ => {
@@ -1041,16 +1051,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             waiting: self.waiting.is_some(),
         };
         let retired = self.cpu.retired;
-        let Some(monitor) = self.cpu.pmu.as_mut() else {
+        let Some(timed) = self.cpu.pmu.as_ref().map(|monitor| monitor.timed()) else {
             return;
         };
         // Without PMC0 nothing counts time, so the count need not be read.
-        let now = if monitor.timed() {
-            self.host.counter()
-        } else {
-            0
-        };
-        monitor.sync(now, retired, context);
+        let now = if timed { self.now() } else { 0 };
+        if let Some(monitor) = self.cpu.pmu.as_mut() {
+            monitor.sync(now, retired, context);
+        }
     }
 
     /// Complete the instruction at `pc` in the engine, counting it as
@@ -3058,7 +3066,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if !address.is_multiple_of(u64::from(bytes)) {
                 return self.alignment_fault(address, false);
             }
-            let now = self.host.counter();
+            let now = self.now();
             let raw = match self.devices.read(self.current, physical, bytes, now) {
                 Ok(value) => value,
                 Err(error) if self.surveyed(physical, bytes, None, &error) => 0,
@@ -3095,7 +3103,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return self.alignment_fault(address, true);
             }
             let value = self.read_register(store.source_register());
-            let now = self.host.counter();
+            let now = self.now();
             let written = self
                 .devices
                 .write(self.current, physical, bytes, value, now)
@@ -3149,7 +3157,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 (base, updated)
             });
             let elements = [physical, physical + bytes_wide];
-            let now = self.host.counter();
+            let now = self.now();
             match transfer {
                 MemoryTransfer::Load { signed, width } => {
                     let mut values = [0; 2];
@@ -3563,7 +3571,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(outcome) = self.board_register(access) {
             return self.register_outcome(word, Some(access), outcome);
         }
-        let physical = self.host.counter();
+        let physical = self.now();
         let outcome = self.cpu.apple_access(access, physical);
         self.derived_changed();
         self.register_outcome(word, Some(access), outcome)
@@ -3587,7 +3595,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             31 => 0,
             rt => self.cpu.state.x[usize::from(rt)],
         });
-        let now = self.host.counter();
+        let now = self.now();
         let result = self
             .devices
             .system_register(self.current, encoding, write, now)?;
@@ -3696,7 +3704,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0b00),
             WaitKind::Event => (1u64 << 18, HCR_TWE, 0b01),
         };
-        let now = self.host.counter();
+        let now = self.now();
         if kind == WaitKind::Event {
             self.sample_events(now);
         }
