@@ -76,12 +76,24 @@ impl BlockDevice for Service {
 
 /// Open the explicitly selected partition while the loader's identity root
 /// is still active, before host::install. No guessed disk/partition, no
-/// writes at open. Ownership of the partition and controller lasts with ANS.
+/// writes at open. Ownership lasts with the returned services. Probe once
+/// for all consumers;
+/// do not reset a controller or reuse its DMA pages for a second probe.
 ///
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, and the loader root/window remain live for the boot.
-pub unsafe fn open(handoff: &pc::Handoff, target: &Target) -> Result<Box<dyn BlockDevice>, String> {
+pub unsafe fn open(
+    handoff: &pc::Handoff,
+    targets: &[&Target],
+) -> Result<alloc::vec::Vec<Box<dyn BlockDevice>>, String> {
+    if targets
+        .iter()
+        .enumerate()
+        .any(|(i, t)| targets[..i].iter().any(|other| other.serial == t.serial))
+    {
+        return Err("ANS and restore source must use distinct host disks".into());
+    }
     let root: u64;
     // SAFETY: engine CPL0, before switching away from the loader root.
     unsafe {
@@ -94,17 +106,22 @@ pub unsafe fn open(handoff: &pc::Handoff, target: &Target) -> Result<Box<dyn Blo
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
-    let partition = storage::open(&mut disks.devices, target)
-        .map_err(|error| format!("{}:{}: {error}", target.serial, target.partition))?;
-    output::arguments(format_args!(
-        "ANS BACKING serial={} partition={} blocks={} block_size={}\n",
-        target.serial,
-        target.partition,
-        partition.identity().blocks,
-        partition.identity().block_size
-    ));
-    Ok(Box::new(Service {
-        inner: Box::new(partition),
-        root,
-    }))
+    targets
+        .iter()
+        .map(|target| {
+            let partition = storage::open(&mut disks.devices, target)
+                .map_err(|error| format!("{}:{}: {error}", target.serial, target.partition))?;
+            output::arguments(format_args!(
+                "HOST PARTITION serial={} partition={} blocks={} block_size={}\n",
+                target.serial,
+                target.partition,
+                partition.identity().blocks,
+                partition.identity().block_size
+            ));
+            Ok(Box::new(Service {
+                inner: Box::new(partition),
+                root,
+            }) as Box<dyn BlockDevice>)
+        })
+        .collect()
 }

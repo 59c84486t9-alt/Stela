@@ -9,6 +9,7 @@ pub(crate) mod bundle;
 mod display;
 mod host;
 mod interrupts;
+mod restore;
 mod storage;
 
 use crate::{
@@ -64,6 +65,10 @@ struct Options {
     preboot: Option<Target>,
     /// One host partition backing all ANS namespaces.
     storage: Option<Target>,
+    restore: bool,
+    restore_source: Option<Target>,
+    restore_manifest: bool,
+    restore_identity: Option<usize>,
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
@@ -134,6 +139,10 @@ impl Options {
             bundle: false,
             preboot: None,
             storage: None,
+            restore: false,
+            restore_source: None,
+            restore_manifest: false,
+            restore_identity: None,
             survey: false,
             breakpoints: Vec::new(),
             dumps: Vec::new(),
@@ -143,6 +152,39 @@ impl Options {
             return Err("system options must start with --system");
         }
         while let Some(name) = words.next() {
+            if name == "--restore-study" {
+                options.restore = true;
+                continue;
+            }
+            if name == "--restore-source" {
+                let target = words
+                    .next()
+                    .ok_or("missing restore source partition")?
+                    .parse()?;
+                if options.restore_source.replace(target).is_some() {
+                    return Err("duplicate restore source");
+                }
+                continue;
+            }
+            if name == "--restore-manifest" {
+                words.next().ok_or("missing restore manifest path")?;
+                if options.restore_manifest {
+                    return Err("duplicate restore manifest");
+                }
+                options.restore_manifest = true;
+                continue;
+            }
+            if name == "--restore-identity" {
+                let index = number(words.next().ok_or("missing restore identity index")?)?;
+                if options
+                    .restore_identity
+                    .replace(usize::try_from(index).map_err(|_| "restore identity too large")?)
+                    .is_some()
+                {
+                    return Err("duplicate restore identity");
+                }
+                continue;
+            }
             if name == "--bundle" {
                 words.next().ok_or("missing bundle directory")?;
                 options.bundle = true;
@@ -188,6 +230,25 @@ impl Options {
                 "--budget" => options.budget = value,
                 _ => return Err("unknown system option"),
             }
+        }
+        let restore_inputs = options.restore_source.is_some()
+            || options.restore_manifest
+            || options.restore_identity.is_some();
+        if options.restore
+            && (!options.bundle
+                || options.preboot.is_some()
+                || options.storage.is_none()
+                || options.restore_source.is_none()
+                || !options.restore_manifest
+                || options.restore_identity.is_none()
+                || options.survey)
+        {
+            return Err(
+                "--restore-study requires --bundle, --storage, --restore-source, --restore-manifest and --restore-identity; refuses --preboot/--survey",
+            );
+        }
+        if !options.restore && restore_inputs {
+            return Err("restore inputs require explicit --restore-study");
         }
         if !options.dram_base.is_multiple_of(LARGE) || options.ram_bytes < LARGE {
             return Err("guest DRAM base must be 2 MiB aligned and hold at least 2 MiB");
@@ -338,7 +399,8 @@ fn devices(
     reset: Option<u64>,
     now: u64,
     backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
-) -> Result<AppleDevices, String> {
+    restore: bool,
+) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
         physical: ARM_IO + offset,
         bytes,
@@ -446,12 +508,17 @@ fn devices(
             alloc::boxed::Box::new(bundle::entropy),
         )?;
     }
+    let mut restore_usb = None;
     if let Some(usb) = board.and_then(|board| board.usb) {
         // The controller's stream translates through the group's first TRAD
         // instance, as SEP and AES masters do; per-instance selection is the
         // bus master's contract (`soc::Iommu`).
         let id = devices.add_usb(&usb, darts[usb.iommu][0])?;
-        devices.usb_client(id)?.query_type()?;
+        if restore {
+            restore_usb = Some(id);
+        } else {
+            devices.usb_client(id)?.query_type()?;
+        }
         // Readiness remains false until the independent Type-C model
         // publishes its actual USB2 UFP/PHY state through set_usb_port.
     }
@@ -592,7 +659,10 @@ fn devices(
         darts.len(),
         board.and_then(|board| board.aes).is_some()
     ));
-    Ok(devices)
+    if restore && restore_usb.is_none() {
+        return Err("restore study requires a DT-placed USB device".into());
+    }
+    Ok((devices, restore_usb))
 }
 
 static EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -720,18 +790,30 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             range.guest, range.bytes, range.host
         ));
     }
-    let backing = options.storage.as_ref().map(|target| {
-        let handoff = handoff
+    let targets: Vec<&Target> = options
+        .storage
+        .iter()
+        .chain(options.restore_source.iter())
+        .collect();
+    let mut services = if targets.is_empty() {
+        Vec::new()
+    } else {
+        let storage_handoff = handoff
             .storage
             .handoff()
-            .unwrap_or_else(|| output::fatal("the loader found no ANS backing controllers"));
-        // SAFETY: before host::install; the completed Preboot reader has
-        // dropped its controllers. This service now owns the DMA pages.
-        unsafe { storage::open(&handoff, target) }.unwrap_or_else(|error| {
-            output::arguments(format_args!("ANS backing refusal: {error}\n"));
-            output::fatal("the ANS backing partition could not be opened")
+            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+        // SAFETY: before host::install, with sole ownership of DMA/controllers.
+        unsafe { storage::open(&storage_handoff, &targets) }.unwrap_or_else(|error| {
+            output::arguments(format_args!("host storage refusal: {error}\n"));
+            output::fatal("host storage could not be opened")
         })
-    });
+    }
+    .into_iter();
+    let backing = options.storage.as_ref().map(|_| services.next().unwrap());
+    let source = options
+        .restore_source
+        .as_ref()
+        .map(|_| services.next().unwrap());
     let config = Config {
         ram,
         pool_physical: handoff.pool.physical,
@@ -853,7 +935,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     let now = stela_runtime::machine::Host::counter(&mut bare);
     let reset = options.bundle.then_some(entry);
-    let devices = match devices(board.as_ref(), read_only_region, reset, now, backing) {
+    let (devices, restore_usb) = match devices(
+        board.as_ref(),
+        read_only_region,
+        reset,
+        now,
+        backing,
+        options.restore,
+    ) {
         Ok(devices) => devices,
         Err(error) => {
             output::arguments(format_args!("device refusal: {error}\n"));
@@ -871,12 +960,25 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     if !options.breakpoints.is_empty() {
         machine.set_breakpoints(&options.breakpoints);
     }
+    let mut restore = source.map(|source| {
+        restore::Experiment::new(
+            source,
+            restore_usb.unwrap(),
+            handoff,
+            options.restore_identity.unwrap(),
+        )
+        .unwrap_or_else(|error| {
+            output::arguments(format_args!("restore preparation refusal: {error}\n"));
+            output::fatal("restore preparation failed")
+        })
+    });
     let started = host::rdtsc();
     let stop = run(
         &mut machine,
         options.budget,
         display.as_mut(),
         handoff.tsc_hz,
+        restore.as_mut(),
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds, &options.dumps)
@@ -900,6 +1002,7 @@ fn run(
     budget: u64,
     mut display: Option<&mut display::Display>,
     tsc_hz: u64,
+    mut restore: Option<&mut restore::Experiment>,
 ) -> Stop {
     let mut shown = host::rdtsc();
     let mut beat = (
@@ -943,6 +1046,12 @@ fn run(
                     String::from_utf8_lossy(&bytes)
                 )),
             }
+        }
+
+        if matches!(stop, Stop::Budget)
+            && let Some(experiment) = restore.as_deref_mut()
+        {
+            experiment.poll(&mut machine.devices);
         }
 
         let sliced = matches!(stop, Stop::Budget) && limit != budget;

@@ -206,24 +206,38 @@ fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
 /// whose ranges are found here.
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let storage = if option(text, "--storage").is_some() || option(text, "--preboot").is_some() {
+    let storage = if ["--storage", "--preboot", "--restore-source"]
+        .iter()
+        .any(|key| option(text, key).is_some())
+    {
         Some(storage::discover()?)
     } else {
         None
     };
-    if option(text, "--preboot").is_some() {
+    let (source, mut files) = if option(text, "--preboot").is_some() {
         drop(volume);
-        return Ok((Vec::new(), Vec::new(), storage));
-    }
-    let Some(directory) = option(text, "--bundle") else {
-        return Ok((firmware::source(&mut volume)?, Vec::new(), storage));
+        (Vec::new(), Vec::new())
+    } else if let Some(directory) = option(text, "--bundle") {
+        drop(volume);
+        (Vec::new(), crate::engine::bundle::read(directory)?)
+    } else {
+        let source = firmware::source(&mut volume)?;
+        drop(volume);
+        (source, Vec::new())
     };
-    drop(volume);
-    let files = crate::engine::bundle::read(directory)?;
+    if let Some(path) = option(text, "--restore-manifest") {
+        if files.iter().any(|(name, _)| name == "restore-payload.json") {
+            return Err("bundle reserves restore-payload.json");
+        }
+        files.push((
+            String::from("restore-payload.json"),
+            crate::engine::bundle::restore_inventory(path)?,
+        ));
+    }
     if files.len() > MAX_FILES {
         return Err("bundle lists too many files");
     }
-    Ok((Vec::new(), files, storage))
+    Ok((source, files, storage))
 }
 
 /// `source.bin`, the bundle files, and the storage drivers' ranges.

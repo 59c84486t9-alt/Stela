@@ -62,7 +62,7 @@ pub struct Entry {
     pub read_only_region: Option<(u64, u64)>,
 }
 
-fn contents(file: &File) -> &'static [u8] {
+pub(super) fn contents(file: &File) -> &'static [u8] {
     // SAFETY: the loader left every bundle file allocated; the physmap maps it.
     unsafe {
         core::slice::from_raw_parts(
@@ -82,11 +82,18 @@ fn open(root: &mut Directory, path: &str) -> Result<RegularFile, &'static str> {
 
 /// Read a whole file into fresh `LOADER_DATA` pages, which Stela keeps.
 fn read_file(root: &mut Directory, path: &str) -> Result<Region, &'static str> {
+    read_bounded(root, path, u64::MAX)
+}
+
+fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, &'static str> {
     let mut file = open(root, path)?;
     let bytes = file
         .get_boxed_info::<FileInfo>()
         .map_err(|_| "cannot read a bundle file's size")?
         .file_size();
+    if bytes > limit {
+        return Err("file size outside configured bound");
+    }
     let length = usize::try_from(bytes).map_err(|_| "bundle file is too large")?;
     let physical = firmware::pages(length.div_ceil(PAGE).max(1))?;
     // SAFETY: fresh pages Stela owns for the whole boot, never freed.
@@ -142,6 +149,29 @@ pub fn read(directory: &str) -> Result<Vec<(String, Region)>, &'static str> {
     Err("no volume has the bundle's bundle.json")
 }
 
+/// Bounded restore inventory, read before ExitBootServices. Reject ambiguous
+/// paths across firmware volumes rather than choosing a different inventory.
+pub fn restore_inventory(path: &str) -> Result<Region, &'static str> {
+    const LIMIT: u64 = 16 * 1024 * 1024;
+    let mut found = None;
+    for handle in boot::find_handles::<SimpleFileSystem>().map_err(|_| "no file systems")? {
+        let Ok(mut volume) = boot::open_protocol_exclusive::<SimpleFileSystem>(handle) else {
+            continue;
+        };
+        let Ok(mut root) = volume.open_volume() else {
+            continue;
+        };
+        if open(&mut root, path).is_err() {
+            continue;
+        }
+        if found.is_some() {
+            return Err("restore inventory path appears on multiple volumes");
+        }
+        found = Some(read_bounded(&mut root, path, LIMIT)?);
+    }
+    found.ok_or("restore inventory file was not found")
+}
+
 /// One 64-bit word from RDSEED or RDRAND, retried while the source is busy.
 fn random_word(seed: bool) -> Option<u64> {
     for _ in 0..ENTROPY_RETRIES {
@@ -167,13 +197,13 @@ fn random_word(seed: bool) -> Option<u64> {
 const TRANSFER_BYTES: usize = 1 << 20;
 
 /// Byte-addressed reads over a block device, for the APFS reader.
-struct Bytes<D> {
+pub(super) struct Bytes<D> {
     device: D,
     block: Vec<u8>,
 }
 
 impl<D: BlockDevice> Bytes<D> {
-    fn new(device: D) -> Self {
+    pub(super) fn new(device: D) -> Self {
         let block = vec![0; device.identity().block_size as usize];
         Self { device, block }
     }
