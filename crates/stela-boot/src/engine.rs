@@ -37,9 +37,14 @@ const DRAM_BASE: u64 = 0x8_0000_0000;
 const DEFAULT_RAM: u64 = 4 << 30;
 const LARGE: u64 = 2 * 1024 * 1024;
 /// Synchronous exceptions and returns logged before the log goes quiet;
-/// interrupts are logged up to `REPORTED_INTERRUPTS`.
+/// interrupts are logged up to `REPORTED_INTERRUPTS`. A guarded level's
+/// synchronous exceptions other than SVC, which its monitor otherwise
+/// handles without a trace, are always logged.
 const REPORTED_EVENTS: u64 = 24;
 const REPORTED_INTERRUPTS: u64 = 64;
+const ESR_EC_SHIFT: u32 = 26;
+/// ESR EC of an SVC from AArch64 state.
+const EC_SVC64: u64 = 0x15;
 
 struct Options {
     dram_base: u64,
@@ -337,7 +342,15 @@ pub(crate) fn report(event: &Event) {
         event,
         Event::Exception { vector, .. } if *vector != stela_runtime::machine::exception::Vector::Synchronous
     );
-    let quiet = if interrupt {
+    let guarded_fault = matches!(
+        event,
+        Event::Exception { vector, from_guarded: true, syndrome, .. }
+            if *vector == stela_runtime::machine::exception::Vector::Synchronous
+                && syndrome >> ESR_EC_SHIFT != EC_SVC64
+    );
+    let quiet = if guarded_fault {
+        false
+    } else if interrupt {
         INTERRUPTS.fetch_add(1, Ordering::Relaxed) >= REPORTED_INTERRUPTS
     } else {
         count >= REPORTED_EVENTS
@@ -349,11 +362,13 @@ pub(crate) fn report(event: &Event) {
         Event::Exception {
             vector,
             from_el,
+            from_guarded,
             syndrome,
             return_address,
             fault_address,
         } => output::arguments(format_args!(
-            "EXCEPTION {vector:?} from=EL{from_el} esr={syndrome:#x} elr={return_address:#x} far={}\n",
+            "EXCEPTION {vector:?} from={}{from_el} esr={syndrome:#x} elr={return_address:#x} far={}\n",
+            level_name(*from_guarded),
             match fault_address {
                 Some(address) => alloc::format!("{address:#x}"),
                 None => "-".into(),

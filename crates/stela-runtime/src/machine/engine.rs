@@ -294,9 +294,12 @@ impl Devices for NoDevices {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
+    /// An exception taken from `from_el`, a guarded level when
+    /// `from_guarded`.
     Exception {
         vector: Vector,
         from_el: u8,
+        from_guarded: bool,
         syndrome: u64,
         return_address: u64,
         fault_address: Option<u64>,
@@ -776,12 +779,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             self.cpu.retired -= 1;
         }
-        let from_el = self.cpu.pstate.el;
+        let (from_el, from_guarded) = (self.cpu.pstate.el, self.cpu.pstate.guarded);
         self.cpu.take(exception);
         self.statistics.exceptions += 1;
         self.host.report(&Event::Exception {
             vector: exception.vector,
             from_el,
+            from_guarded,
             syndrome: exception.syndrome,
             return_address: exception.return_address,
             fault_address: exception.fault_address,
