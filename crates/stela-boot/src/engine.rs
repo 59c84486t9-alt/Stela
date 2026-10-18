@@ -64,6 +64,50 @@ struct Options {
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
+    /// Stop when a PE reaches one of these guest PCs (`--break`), with the
+    /// stop's report.
+    breakpoints: Vec<u64>,
+    /// Guest virtual ranges the stop's report shows (`--dump BASE,BYTES`).
+    dumps: Vec<(Base, u64)>,
+}
+
+/// Where a `--dump` range starts: a guest virtual address, or the stopped
+/// PE's general register `xN` plus or minus an offset (`x21`, `x22+0x4000`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Base {
+    Address(u64),
+    Register(usize, i64),
+}
+
+impl Base {
+    fn parse(text: &str) -> Result<Self, &'static str> {
+        let Some(register) = text.strip_prefix('x') else {
+            return Ok(Self::Address(number(text)?));
+        };
+        let (index, offset) = match register.find(['+', '-']) {
+            Some(at) => {
+                let magnitude = number(&register[at + 1..])? as i64;
+                let sign = if register.as_bytes()[at] == b'-' {
+                    -1
+                } else {
+                    1
+                };
+                (&register[..at], sign * magnitude)
+            }
+            None => (register, 0),
+        };
+        match index.parse() {
+            Ok(index) if index < 31 => Ok(Self::Register(index, offset)),
+            _ => Err("a dump register is x0 to x30"),
+        }
+    }
+
+    fn resolve(self, x: &[u64; 31]) -> u64 {
+        match self {
+            Self::Address(address) => address,
+            Self::Register(index, offset) => x[index].wrapping_add_signed(offset),
+        }
+    }
 }
 
 fn number(value: &str) -> Result<u64, &'static str> {
@@ -87,6 +131,8 @@ impl Options {
             bundle: false,
             preboot: None,
             survey: false,
+            breakpoints: Vec::new(),
+            dumps: Vec::new(),
         };
         let mut words = text.split_ascii_whitespace();
         if words.next() != Some("--system") {
@@ -108,8 +154,15 @@ impl Options {
                 options.bundle = true;
                 continue;
             }
+            if name == "--dump" {
+                let range = words.next().ok_or("missing dump range")?;
+                let (base, bytes) = range.split_once(',').ok_or("a dump is BASE,BYTES")?;
+                options.dumps.push((Base::parse(base)?, number(bytes)?));
+                continue;
+            }
             let value = number(words.next().ok_or("missing system option value")?)?;
             match name {
+                "--break" => options.breakpoints.push(value),
                 "--dram-base" => {
                     options.dram_base = value;
                     options.dram_explicit = true;
@@ -674,6 +727,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         machine.begin_survey();
     }
+    if !options.breakpoints.is_empty() {
+        machine.set_breakpoints(&options.breakpoints);
+    }
     let started = host::rdtsc();
     let stop = run(
         &mut machine,
@@ -682,7 +738,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         handoff.tsc_hz,
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
-    finish(&mut machine, stop, seconds)
+    finish(&mut machine, stop, seconds, &options.dumps)
 }
 
 fn level_name(guarded: bool) -> &'static str {
@@ -778,6 +834,10 @@ fn run(
             ));
             beat = (now, native, blocks, compiled, chained, events);
             peers_report(machine);
+            let stale = machine.stale_code();
+            if stale.stale > 0 {
+                output::arguments(format_args!("STALE {stale:?}\n"));
+            }
             sample_report(&mut samples, user);
             timer_report(machine);
             survey_report(machine);
@@ -940,6 +1000,26 @@ fn frames(machine: &mut Machine<BareHost, AppleDevices>, label: &str, mut frame:
         let link = u64::from_le_bytes(record[8..].try_into().expect("8 bytes"));
         output::arguments(format_args!("{label} {depth} fp={frame:#x} lr={link:#x}\n"));
         frame = next;
+    }
+}
+
+/// The guest virtual ranges `--dump` names, 16 bytes a line, through the
+/// stopped PE's translation regime.
+fn dump_report(machine: &mut Machine<BareHost, AppleDevices>, dumps: &[(Base, u64)]) {
+    for &(base, bytes) in dumps {
+        let address = base.resolve(&machine.cpu.state.x);
+        for line in (address..address + bytes).step_by(16) {
+            let mut data = [0u8; 16];
+            if !machine.read_virtual(line, &mut data) {
+                output::arguments(format_args!("DUMP {line:#x}: unmapped\n"));
+                break;
+            }
+            output::arguments(format_args!("DUMP {line:#x}:"));
+            for word in data.as_chunks::<8>().0 {
+                output::arguments(format_args!(" {:#018x}", u64::from_le_bytes(*word)));
+            }
+            output::arguments(format_args!("\n"));
+        }
     }
 }
 
@@ -1110,9 +1190,15 @@ impl fmt::Display for Registers<'_> {
     }
 }
 
-fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
+fn finish(
+    machine: &mut Machine<BareHost, AppleDevices>,
+    stop: Stop,
+    seconds: f64,
+    dumps: &[(Base, u64)],
+) -> ! {
     survey_report(machine);
     stack_report(machine);
+    dump_report(machine, dumps);
     let (fills, resets, stray, _) = host::statistics();
     output::arguments(format_args!(
         "STATISTICS {:?} shadow_fills={fills} shadow_resets={resets} stray_interrupts={stray} events={} seconds={seconds:.3}\n",
@@ -1168,6 +1254,10 @@ fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f6
         Stop::Unsupported(requirement) => {
             output::arguments(format_args!("STOP UNSUPPORTED {requirement}\n"));
             output::terminate(0x13)
+        }
+        Stop::Breakpoint(pc) => {
+            output::arguments(format_args!("STOP breakpoint pc={pc:#x}\n"));
+            output::terminate(0x16)
         }
     }
 }

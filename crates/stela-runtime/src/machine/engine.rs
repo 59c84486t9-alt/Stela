@@ -457,6 +457,9 @@ pub enum Stop {
     /// A device carried out the guest's reset or power-off request.
     Reset(String),
     Unsupported(Requirement),
+    /// The running PE reached a host breakpoint (`Machine::set_breakpoints`)
+    /// at this PC, before executing its instruction.
+    Breakpoint(u64),
 }
 
 /// Where a guest thread stopped running: the PE's PC, frame pointer and
@@ -534,6 +537,25 @@ struct Block {
     terminal: (u64, u32),
     /// Exits to the engine at `terminal`.
     taken: u64,
+    /// The guest bytes it was compiled from, for [`Machine::stale_code`].
+    source_bytes: usize,
+    source_hash: u64,
+}
+
+/// FNV-1a over a block's guest bytes.
+fn source_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Compiled blocks whose guest bytes changed without a code invalidation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StaleCode {
+    pub blocks: usize,
+    pub stale: usize,
+    /// The first stale block's PC and physical address.
+    pub first: Option<(u64, u64)>,
 }
 
 /// What a PAC result depends on besides its operands: the five keys, the
@@ -701,6 +723,8 @@ pub struct Machine<H: Host, D: Devices> {
     waiting: Option<Wait>,
     /// Every PE by number; the running one's state is `cpu`.
     peers: Vec<processors::Peer>,
+    /// Host breakpoints, ascending (`set_breakpoints`).
+    breakpoints: Vec<u64>,
     /// The block count at which the running PE's time slice ends.
     slice_end: u64,
     /// The system counter value at which it ends, whichever comes first.
@@ -781,6 +805,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             current: 0,
             waiting: None,
             peers: Vec::new(),
+            breakpoints: Vec::new(),
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
             pacm_written: false,
@@ -894,6 +919,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
             watch,
         };
         self.host.set_regime(&regime);
+    }
+
+    /// Stop the run when any PE reaches one of these guest PCs, before its
+    /// instruction executes: a diagnostic of the host, invisible to the
+    /// guest. Compiled code is discarded so no block runs past one.
+    pub fn set_breakpoints(&mut self, pcs: &[u64]) {
+        self.breakpoints = pcs.to_vec();
+        self.breakpoints.sort_unstable();
+        self.breakpoints.dedup();
+        self.discard_code();
+    }
+
+    /// Check every reachable compiled block against the guest bytes it was
+    /// compiled from: a diagnostic of code changed without the IC
+    /// maintenance that would discard its blocks.
+    pub fn stale_code(&mut self) -> StaleCode {
+        let mut report = StaleCode::default();
+        let mut bytes = Vec::new();
+        for &index in self.index.values() {
+            let block = &self.blocks[index];
+            bytes.resize(block.source_bytes, 0);
+            report.blocks += 1;
+            if self.host.read_ram(block.physical, &mut bytes)
+                && source_hash(&bytes) != block.source_hash
+            {
+                report.stale += 1;
+                report.first.get_or_insert((block.pc, block.physical));
+            }
+        }
+        report
     }
 
     fn translations_changed(&mut self) {
@@ -1267,6 +1322,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             self.take(exception);
             return Ok(());
+        }
+        if self.breakpoints.binary_search(&pc).is_ok() {
+            return Err(Stop::Breakpoint(pc));
         }
         // Active-not-pending: this one instruction advances the step.
         self.cpu.step_advance = mode.step;
@@ -1720,6 +1778,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let chip = self.profile.chip;
         let mut length = source.len();
+        // No block runs into a host breakpoint: one ends before it.
+        if let Some(&stop) = self
+            .breakpoints
+            .iter()
+            .find(|&&stop| stop > pc && stop < pc + length as u64)
+        {
+            length = (stop - pc) as usize;
+        }
         if !fp {
             let first = source
                 .as_chunks::<4>()
@@ -1816,6 +1882,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             successors,
             terminal: (terminal_pc, terminal),
             taken: 0,
+            source_bytes: compiled.source_bytes,
+            source_hash: source_hash(&source[..compiled.source_bytes]),
         });
         let index = self.blocks.len() - 1;
         self.index.insert((pc, physical, variant), index);
@@ -4009,6 +4077,21 @@ mod tests {
             machine.device_access(0xa940_0c22, DEVICE + 0x5f8, DEVICE + 0x5f8, false),
             Err(Stop::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn host_breakpoints_end_blocks_and_stop_before_their_instruction() {
+        // add x0, x0, #1 (three times); svc #0
+        let add = 0x9100_0400;
+        let mut machine = machine(&[add, add, add, 0xd400_0001]);
+        machine.set_breakpoints(&[BASE + 8]);
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+            panic!("block")
+        };
+        assert_eq!(machine.blocks[index].source_map.len(), 2);
+        machine.cpu.pc = BASE + 8;
+        assert!(matches!(machine.step(), Err(Stop::Breakpoint(pc)) if pc == BASE + 8));
+        assert_eq!(machine.cpu.state.x[0], 0);
     }
 
     #[test]
