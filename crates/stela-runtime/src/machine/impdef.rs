@@ -113,7 +113,49 @@ const OBJC_BRANCH_HINT: &str = "the objc_msgSend branch-predictor helper: public
     (0xfffffe000bda59b4) and saves both per thread; SPTM 26A434 clears C0_5 around TXM \
     (__text+0x2aec); a prediction hint has no architectural effect";
 
+const XNU_SWITCH_CLEARS: &str = "26A434 XNU writes 0 to it at every context switch \
+    (0xfffffe000bd8393c, beside S3_5_C15_C10_1) and reads it nowhere; SPTM and TXM never \
+    touch it. Writing 0 can only clear state this machine does not have (inference)";
+
+const XNU_TRACE_CLEARS: &str = "26A434 XNU writes 0 to it at every context switch \
+    (0xfffffe000bd83940) and after appending a timestamp record to a per-CPU trace ring \
+    (0xfffffe000bd7b0e0), and reads it nowhere; SPTM and TXM never touch it. Writing 0 can \
+    only clear state this machine does not have (inference)";
+
+const XNU_THREAD_PERMISSIONS: &str = "26A434 XNU swaps a per-thread value through it at \
+    context switch (0xfffffe000bd83950) and elsewhere reads it beside SPRR_PERM_EL0, treating \
+    the thread as unrestricted when bits 14-15 are clear and SPRR_PERM_EL0 holds its default \
+    (0xfffffe000bd787cc). Those bits relate to EL0 permissions this machine does not \
+    implement for them, so only 0 is accepted (inference)";
+
 pub const TABLE: &[Entry] = &[
+    entry(
+        5,
+        15,
+        1,
+        4,
+        "S3_5_C15_C1_4 (unnamed)",
+        Class::Control,
+        XNU_SWITCH_CLEARS,
+    ),
+    entry(
+        5,
+        15,
+        10,
+        1,
+        "S3_5_C15_C10_1 (unnamed)",
+        Class::Control,
+        XNU_TRACE_CLEARS,
+    ),
+    entry(
+        4,
+        15,
+        15,
+        6,
+        "S3_4_C15_C15_6 (unnamed)",
+        Class::Control,
+        XNU_THREAD_PERMISSIONS,
+    ),
     entry(
         6,
         15,
