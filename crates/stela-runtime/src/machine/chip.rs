@@ -79,6 +79,14 @@ struct AbsentGroup {
 const UDF: u32 = 0;
 const NOP: u32 = 0xd503_201f;
 
+/// Whether `word` is in one of the A64 top-level groups Arm leaves
+/// unallocated, op1 (bits 28:25) 0b0001 or 0b0011 (Arm ARM DDI 0487 C4.1),
+/// which execute as UNDEFINED. The op0 0, op1 0b0000 reserved group is not
+/// among them: Apple's GXF and AMX instructions are encoded there.
+fn unallocated_group(word: u32) -> bool {
+    matches!((word >> 25) & 0xf, 0b0001 | 0b0011)
+}
+
 /// An Apple CPU, in the order of the generated per-chip tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Chip {
@@ -115,8 +123,12 @@ impl Chip {
     }
 
     /// The word the chip executes for `word`: the word itself, `UDF #0` for a
-    /// form the chip lacks, or NOP for an absent form Arm decodes as NOP.
+    /// form the chip lacks or a word in an unallocated top-level group, or NOP
+    /// for an absent form Arm decodes as NOP.
     pub fn admit(self, word: u32) -> u32 {
+        if unallocated_group(word) {
+            return UDF;
+        }
         let bit = 1u8 << self as u8;
         for group in forms::ABSENT {
             let Ok(index) = group
@@ -361,6 +373,13 @@ mod tests {
         // the RETAA encoding it overlaps.
         assert_eq!(Chip::AppleM2.admit(0xd65f_0be2), UDF);
         assert_eq!(Chip::AppleM2.admit(0xd65f_0bff), 0xd65f_0bff);
+        // XNU's 0xe7ffdeff (op1 0b0011) and a word with op1 0b0001 are in
+        // unallocated groups.
+        for word in [0xe7ff_deff, 0x0200_0000] {
+            for chip in Chip::ALL {
+                assert_eq!(chip.admit(word), UDF, "{word:#x} {chip:?}");
+            }
+        }
         // Forms every chip has, and words no form claims, pass unchanged.
         for word in [0x8b02_0020, 0xd503_201f, 0xd503_3f9f, 0x0020_1420] {
             for chip in Chip::ALL {
