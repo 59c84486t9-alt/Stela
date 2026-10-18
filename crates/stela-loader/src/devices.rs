@@ -17,6 +17,19 @@
 //! when that node has no `compatible`. On J473AP it names the unmodeled
 //! `dockchannel-uart`, so the property is removed and the kernel runs without
 //! a console unless the `serial-device-name` boot-arg selects one.
+//!
+//! So does the root's `secure-root-prefix` once no AES accelerator (a node of
+//! `device_type` `aes`) stays visible. `AppleARMPE::start` (26A434 J473AP
+//! kernelcache) reads it from the platform node: without it the platform
+//! records the root as secure and `SecureRootName` returns at once; with it,
+//! `SecureRootName`, which `IOSecureBSDRoot` calls from `bsd_init`, compares
+//! the root device's name against the prefix and then sleeps until a
+//! `SecureRoot` call without a result buffer consumes the verdict.
+//! `IOAESAccelerator::start` makes that call to install its
+//! `SecureRootCallBack`, so on J473AP (`aes,s8000`, root `md0`, prefix `md`)
+//! a hidden AES engine leaves the kernel asleep before `launchd` forever.
+//! Removing the prefix keeps the verdict a matching root gets (secure); only
+//! the callback into the absent driver goes.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
 use stela_runtime::machine::soc;
@@ -25,6 +38,8 @@ const COMPATIBLE: &str = "compatible";
 const DEFAULTS: &str = "/defaults";
 const SERIAL_DEVICE: &str = "serial-device";
 const PHANDLE: &str = "AAPL,phandle";
+const SECURE_ROOT_PREFIX: &str = "secure-root-prefix";
+const DEVICE_TYPE: &str = "device_type";
 
 /// Paths that keep their `compatible` whatever it names.
 fn structural(path: &str) -> bool {
@@ -45,9 +60,10 @@ fn modeled(node: &Node) -> bool {
     })
 }
 
-/// Removes `compatible` from every device the machine does not model, and a
-/// `/defaults serial-device` that selects one, and returns their paths in
-/// tree order, the selection last.
+/// Removes `compatible` from every device the machine does not model, a
+/// `/defaults serial-device` that selects one and a `secure-root-prefix`
+/// that no AES accelerator can acknowledge, and returns their paths in tree
+/// order, then the selections.
 pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     let mut hidden = Vec::new();
     visit(&mut tree.root, "", &mut hidden);
@@ -61,7 +77,19 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
         }
         hidden.push(format!("{DEFAULTS} {SERIAL_DEVICE}"));
     }
+    if tree.root.property(SECURE_ROOT_PREFIX).is_some() && !visible_aes(&tree.root) {
+        tree.root.remove_property(SECURE_ROOT_PREFIX);
+        hidden.push(format!("/ {SECURE_ROOT_PREFIX}"));
+    }
     hidden
+}
+
+/// Whether an AES accelerator under `node` keeps its `compatible`.
+fn visible_aes(node: &Node) -> bool {
+    let aes = node
+        .property(DEVICE_TYPE)
+        .is_some_and(|property| property.value.split(|&byte| byte == 0).next() == Some(b"aes"));
+    aes && node.property(COMPATIBLE).is_some() || node.children.iter().any(visible_aes)
 }
 
 /// The path of the node whose phandle is `phandle`.
@@ -108,7 +136,7 @@ mod tests {
     #[test]
     fn keeps_the_board_cpus_fabric_and_modeled_devices_and_hides_the_rest() {
         let mut tree = DeviceTree {
-            root: node(
+            root: secure_root(node(
                 "device-tree",
                 Some(b"J473AP\0AppleARM\0"),
                 vec![
@@ -130,6 +158,7 @@ mod tests {
                                 vec![node("iop-sep-nub", Some(b"iop-nub,rtbuddy-v2\0"), vec![])],
                             ),
                             node("dart-sep", Some(b"dart,t8110\0"), vec![]),
+                            aes(),
                             phandle(
                                 node("dockchannel-uart", Some(b"aapl,dock-channels\0"), vec![]),
                                 0x4d,
@@ -139,7 +168,7 @@ mod tests {
                     node("buttons", Some(b"buttons\0"), vec![]),
                     serial_default(0x4d),
                 ],
-            ),
+            )),
         };
         let hidden = hide_unmodeled(&mut tree);
         assert_eq!(
@@ -148,9 +177,11 @@ mod tests {
                 "/arm-io/sep",
                 "/arm-io/sep/iop-sep-nub",
                 "/arm-io/dart-sep",
+                "/arm-io/aes",
                 "/arm-io/dockchannel-uart",
                 "/buttons",
-                "/defaults serial-device"
+                "/defaults serial-device",
+                "/ secure-root-prefix"
             ]
         );
         for kept in [
@@ -166,6 +197,33 @@ mod tests {
         assert!(tree.property("/arm-io/dart-sep", COMPATIBLE).is_none());
         assert!(tree.node("/arm-io/sep/iop-sep-nub").is_some());
         assert!(tree.property(DEFAULTS, SERIAL_DEVICE).is_none());
+        assert!(tree.root.property(SECURE_ROOT_PREFIX).is_none());
+    }
+
+    fn secure_root(mut root: Node) -> Node {
+        root.set_property(SECURE_ROOT_PREFIX, b"md\0".to_vec())
+            .unwrap();
+        root
+    }
+
+    #[test]
+    fn only_an_aes_node_with_its_compatible_is_a_visible_accelerator() {
+        let mut root = node("device-tree", None, vec![node("arm-io", None, vec![aes()])]);
+        assert!(visible_aes(&root));
+        root.children[0].children[0].remove_property(COMPATIBLE);
+        assert!(!visible_aes(&root));
+        let other = node(
+            "device-tree",
+            None,
+            vec![node("sio", Some(b"iop,ascwrap-v4\0"), vec![])],
+        );
+        assert!(!visible_aes(&other));
+    }
+
+    fn aes() -> Node {
+        let mut aes = node("aes", Some(b"aes,s8000\0"), vec![]);
+        aes.set_property(DEVICE_TYPE, b"aes\0".to_vec()).unwrap();
+        aes
     }
 
     fn phandle(mut node: Node, value: u32) -> Node {
