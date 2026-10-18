@@ -18,12 +18,13 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use core::{
     arch::x86_64::{__cpuid, __cpuid_count},
+    fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::{
-    Chip, Cpu, CpuProfile, Event, Machine, Stop,
+    Chip, Cpu, CpuProfile, Event, Machine, PeerState, Stop,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::DCZID_EL0,
@@ -776,6 +777,7 @@ fn run(
                 events.2 - beat.5.2,
             ));
             beat = (now, native, blocks, compiled, chained, events);
+            peers_report(machine);
             sample_report(&mut samples, user);
             timer_report(machine);
             survey_report(machine);
@@ -926,8 +928,9 @@ fn exit_report(machine: &Machine<BareHost, AppleDevices>) {
 /// address, Arm's AAPCS64 frame chain) and the stack words above SP, read
 /// through the stopped PE's translation, so that a guest's own panic or
 /// wait path can be located.
-fn stack_report(machine: &mut Machine<BareHost, AppleDevices>) {
-    let mut frame = machine.cpu.state.x[29];
+/// The frame records from `frame` on, read through the running PE's
+/// translation regime (a parked PE's kernel frames share it).
+fn frames(machine: &mut Machine<BareHost, AppleDevices>, label: &str, mut frame: u64) {
     for depth in 0..16 {
         let mut record = [0u8; 16];
         if frame == 0 || !frame.is_multiple_of(8) || !machine.read_virtual(frame, &mut record) {
@@ -935,9 +938,13 @@ fn stack_report(machine: &mut Machine<BareHost, AppleDevices>) {
         }
         let next = u64::from_le_bytes(record[..8].try_into().expect("8 bytes"));
         let link = u64::from_le_bytes(record[8..].try_into().expect("8 bytes"));
-        output::arguments(format_args!("FRAME {depth} fp={frame:#x} lr={link:#x}\n"));
+        output::arguments(format_args!("{label} {depth} fp={frame:#x} lr={link:#x}\n"));
         frame = next;
     }
+}
+
+fn stack_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    frames(machine, "FRAME", machine.cpu.state.x[29]);
     let sp = machine.cpu.state.sp;
     for line in 0..32u64 {
         let mut bytes = [0u8; 16];
@@ -1008,54 +1015,7 @@ fn survey_report(machine: &mut Machine<BareHost, AppleDevices>) {
     }
 }
 
-fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
-    survey_report(machine);
-    stack_report(machine);
-    let cpu = &machine.cpu;
-    // The exception registers of the EL the run ended at.
-    let bank = if cpu.pstate.el == 2 {
-        [
-            Register::ELR_EL2,
-            Register::SPSR_EL2,
-            Register::ESR_EL2,
-            Register::FAR_EL2,
-            Register::VBAR_EL2,
-        ]
-    } else {
-        [
-            Register::ELR_EL1,
-            Register::SPSR_EL1,
-            Register::ESR_EL1,
-            Register::FAR_EL1,
-            Register::VBAR_EL1,
-        ]
-    };
-    let (fills, resets, stray, _) = host::statistics();
-    output::arguments(format_args!(
-        "STATISTICS {:?} shadow_fills={fills} shadow_resets={resets} stray_interrupts={stray} events={} seconds={seconds:.3}\n",
-        machine.statistics,
-        EVENTS.load(Ordering::Relaxed),
-    ));
-    exit_report(machine);
-    output::arguments(format_args!(
-        "FINAL pc={:#x} el={} sp={:#x} daif={:#x} nzcv={:#x} elr={:#x} spsr={:#x} esr={:#x} far={:#x} vbar={:#x}\n",
-        cpu.pc,
-        cpu.pstate.el,
-        cpu.state.sp,
-        cpu.pstate.daif,
-        cpu.state.nzcv,
-        cpu.read(bank[0]),
-        cpu.read(bank[1]),
-        cpu.read(bank[2]),
-        cpu.read(bank[3]),
-        cpu.read(bank[4]),
-    ));
-    for (entry, reads, writes) in cpu.apple.impdef.used() {
-        output::arguments(format_args!(
-            "IMPDEF {} {:?} reads={reads} writes={writes}: {}\n",
-            entry.name, entry.class, entry.evidence
-        ));
-    }
+fn general_registers(cpu: &Cpu) {
     for (index, pair) in cpu.state.x.chunks(4).enumerate() {
         output::arguments(format_args!("X{}:", index * 4));
         for value in pair {
@@ -1063,6 +1023,133 @@ fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f6
         }
         output::arguments(format_args!("\n"));
     }
+}
+
+/// Where every PE is: `R` running, `-` held in reset, or a parked PE's PC
+/// and its wait (`i` WFI, `e` WFE, `p` preempted), with the switch count.
+fn peers_report(machine: &Machine<BareHost, AppleDevices>) {
+    output::arguments(format_args!("PES switches={}", machine.statistics.switches));
+    for (number, state) in machine.peer_states().into_iter().enumerate() {
+        match state {
+            PeerState::Running => output::arguments(format_args!(" {number}:R")),
+            PeerState::Off => output::arguments(format_args!(" {number}:-")),
+            PeerState::Parked { cpu, wfi } => {
+                let wait = match wfi {
+                    Some(true) => 'i',
+                    Some(false) => 'e',
+                    None => 'p',
+                };
+                output::arguments(format_args!(" {number}:{:#x}/{wait}", cpu.pc));
+            }
+        }
+    }
+    output::arguments(format_args!("\n"));
+}
+
+/// A PE's PC and its EL1 and EL2 exception registers.
+struct Registers<'a>(&'a Cpu);
+
+impl fmt::Display for Registers<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cpu = self.0;
+        write!(
+            f,
+            "pc={:#x} el={} sp={:#x} daif={:#x} nzcv={:#x}",
+            cpu.pc, cpu.pstate.el, cpu.state.sp, cpu.pstate.daif, cpu.state.nzcv,
+        )?;
+        let banks = [
+            (
+                1,
+                [
+                    Register::ELR_EL1,
+                    Register::SPSR_EL1,
+                    Register::ESR_EL1,
+                    Register::FAR_EL1,
+                    Register::VBAR_EL1,
+                    Register::SCTLR_EL1,
+                ],
+            ),
+            (
+                2,
+                [
+                    Register::ELR_EL2,
+                    Register::SPSR_EL2,
+                    Register::ESR_EL2,
+                    Register::FAR_EL2,
+                    Register::VBAR_EL2,
+                    Register::SCTLR_EL2,
+                ],
+            ),
+        ];
+        for (el, bank) in banks {
+            let [elr, spsr, esr, far, vbar, sctlr] = bank.map(|register| cpu.read(register));
+            write!(
+                f,
+                " el{el}: elr={elr:#x} spsr={spsr:#x} esr={esr:#x} far={far:#x} vbar={vbar:#x} sctlr={sctlr:#x}"
+            )?;
+        }
+        for (level, bank) in cpu.apple.guarded.iter().enumerate() {
+            write!(
+                f,
+                " gl{}: elr={:#x} spsr={:#x} esr={:#x} far={:#x} vbar={:#x}",
+                level + 1,
+                bank.elr,
+                bank.spsr,
+                bank.esr,
+                bank.far,
+                bank.vbar
+            )?;
+        }
+        write!(
+            f,
+            " guarded={} cntkctl={:#x} cnthctl={:#x}",
+            cpu.pstate.guarded,
+            cpu.read(Register::CNTKCTL_EL1),
+            cpu.read(Register::CNTHCTL_EL2)
+        )
+    }
+}
+
+fn finish(machine: &mut Machine<BareHost, AppleDevices>, stop: Stop, seconds: f64) -> ! {
+    survey_report(machine);
+    stack_report(machine);
+    let (fills, resets, stray, _) = host::statistics();
+    output::arguments(format_args!(
+        "STATISTICS {:?} shadow_fills={fills} shadow_resets={resets} stray_interrupts={stray} events={} seconds={seconds:.3}\n",
+        machine.statistics,
+        EVENTS.load(Ordering::Relaxed),
+    ));
+    exit_report(machine);
+    output::arguments(format_args!("FINAL {}\n", Registers(&machine.cpu)));
+    let mut parked_frames = Vec::new();
+    for (number, state) in machine.peer_states().into_iter().enumerate() {
+        let PeerState::Parked { cpu, wfi } = state else {
+            output::arguments(format_args!("PE {number} {state:?}\n"));
+            continue;
+        };
+        let wait = match wfi {
+            Some(true) => "wfi",
+            Some(false) => "wfe",
+            None => "none",
+        };
+        output::arguments(format_args!(
+            "PE {number} parked wait={wait} {}\n",
+            Registers(cpu)
+        ));
+        general_registers(cpu);
+        parked_frames.push((number, cpu.state.x[29]));
+    }
+    for (number, frame) in parked_frames {
+        frames(machine, &alloc::format!("PE {number} FRAME"), frame);
+    }
+    let cpu = &machine.cpu;
+    for (entry, reads, writes) in cpu.apple.impdef.used() {
+        output::arguments(format_args!(
+            "IMPDEF {} {:?} reads={reads} writes={writes}: {}\n",
+            entry.name, entry.class, entry.evidence
+        ));
+    }
+    general_registers(cpu);
     match stop {
         Stop::Idle => {
             output::arguments(format_args!(

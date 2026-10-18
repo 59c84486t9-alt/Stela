@@ -26,6 +26,7 @@ use crate::pauth;
 pub use crate::platform::dma::Memory;
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::fmt;
+pub use processors::PeerState;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{

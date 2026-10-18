@@ -54,10 +54,38 @@ impl Parked {
     }
 }
 
+/// A PE as a report shows it.
+#[derive(Debug, Clone, Copy)]
+pub enum PeerState<'a> {
+    Running,
+    Off,
+    /// Out of reset but not running: its state, and whether it waits in
+    /// WFI (`Some(true)`) or WFE (`Some(false)`).
+    Parked {
+        cpu: &'a Cpu,
+        wfi: Option<bool>,
+    },
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// The number of the running PE.
     pub fn processor(&self) -> usize {
         self.current
+    }
+
+    /// Every PE's state, in PE order.
+    pub fn peer_states(&self) -> Vec<PeerState<'_>> {
+        self.peers
+            .iter()
+            .map(|peer| match peer {
+                Peer::Running => PeerState::Running,
+                Peer::Off => PeerState::Off,
+                Peer::Parked(parked) => PeerState::Parked {
+                    cpu: &parked.cpu,
+                    wfi: parked.waiting.map(|wait| wait.kind == WaitKind::Interrupt),
+                },
+            })
+            .collect()
     }
 
     /// Release the PEs devices started, then keep the running PE until its

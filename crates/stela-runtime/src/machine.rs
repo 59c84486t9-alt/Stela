@@ -29,6 +29,6 @@ pub(crate) use chip::test_chip;
 pub use cpu::{Cpu, Exception};
 pub use engine::{
     DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,
-    NativeFault, NoDevices, Regime, Requirement, RequirementKind, Statistics, Stop,
+    NativeFault, NoDevices, PeerState, Regime, Requirement, RequirementKind, Statistics, Stop,
 };
 pub use registers::{CpuProfile, Identity, Lines};
