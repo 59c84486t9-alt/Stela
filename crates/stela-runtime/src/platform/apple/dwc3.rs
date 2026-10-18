@@ -1274,7 +1274,121 @@ mod tests {
         }
     }
 
-
+    #[test]
+    fn host_enumeration_reaches_real_control_trb_dma_and_event_buffers() {
+        use crate::platform::usb::host::Host;
+        // A small synthetic guest driver: posts actual TRBs between host
+        // steps. It supplies test descriptors; production has no descriptors.
+        let device = vec![18, 1, 0, 2, 0, 0, 0, 64, 0x34, 0x12, 0, 1, 0, 1, 0, 0, 0, 1];
+        let config = vec![
+            9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 3, 0, 2, 0xff, 0xfe, 2, 0, 7, 5, 0x85, 2, 0, 2,
+            0, 7, 5, 9, 2, 0, 2, 0,
+        ];
+        let (mut dwc, mut dart, mut ram, mut latch) = setup();
+        let mut host = Host::new();
+        host.attach(1);
+        {
+            let mut access = Access::new(0, 0, &mut latch);
+            let mut port = Port {
+                iommu: &mut dart,
+                stream: SID,
+                memory: &mut ram,
+                access: &mut access,
+            };
+            host.advance(&mut dwc.peer(&mut port), 0).unwrap();
+        }
+        let mut access = Access::new(0, 0, &mut latch);
+        configure(&mut dwc, 0, 0, &mut access);
+        configure(&mut dwc, 1, 0, &mut access);
+        trb(&mut ram, TRB, 8, HWO | LST | IOC | 2 << 4);
+        start(&mut dwc, 0, TRB, &mut access);
+        // (posted endpoint, phase): setup=0, data=1, status=2.
+        let mut posted = (0, 0);
+        let mut address = 0;
+        let mut configuration = 0;
+        let mut request = [0; 8];
+        for step in 1..100 {
+            let now = step * 24000;
+            let mut access = Access::new(0, now, &mut latch);
+            {
+                let mut port = Port {
+                    iommu: &mut dart,
+                    stream: SID,
+                    memory: &mut ram,
+                    access: &mut access,
+                };
+                host.advance(&mut dwc.peer(&mut port), now).unwrap();
+                dwc.flush(&mut port).unwrap();
+            }
+            if dwc.endpoints[posted.0].active.is_none() {
+                let (n, kind, bytes) = match posted.1 {
+                    0 => {
+                        assert!(ram.read(PAYLOAD, &mut request));
+                        let length = usize::from(u16::from_le_bytes([request[6], request[7]]));
+                        if length == 0 {
+                            (1, 3, vec![])
+                        } else {
+                            let mut response = match request[3] {
+                                1 => device.clone(),
+                                2 => config.clone(),
+                                _ => panic!("unexpected fixture descriptor"),
+                            };
+                            response.truncate(length);
+                            (1, 5, response)
+                        }
+                    }
+                    1 => (0, 4, vec![]),
+                    _ => {
+                        if request[1] == 5 {
+                            address = u16::from_le_bytes([request[2], request[3]]);
+                            write(&mut dwc, DCFG, u32::from(address) << 3, &mut access);
+                        }
+                        if request[1] == 9 {
+                            configuration = request[2];
+                        }
+                        (0, 2, vec![0; 8])
+                    }
+                };
+                assert!(ram.write(PAYLOAD, &bytes));
+                trb(
+                    &mut ram,
+                    TRB,
+                    bytes.len() as u32,
+                    HWO | LST | IOC | kind << 4,
+                );
+                start(&mut dwc, n, TRB, &mut access);
+                posted = (
+                    n,
+                    if kind == 2 {
+                        0
+                    } else if kind == 5 {
+                        1
+                    } else {
+                        2
+                    },
+                );
+            }
+            let count = dwc.rings[0].count;
+            if count != 0 {
+                write(&mut dwc, GEVNT + 12, count, &mut access);
+            }
+            if host.ready() {
+                break;
+            }
+        }
+        assert!(host.ready());
+        assert_eq!(address, 1);
+        assert_eq!(configuration, 7);
+        assert_eq!(
+            host.descriptors()
+                .iter()
+                .map(|d| d.bytes.clone())
+                .collect::<alloc::vec::Vec<_>>(),
+            [device, config]
+        );
+        assert!(dwc.rings[0].producer > 0);
+        assert!(!dwc.poisoned);
+    }
     #[test]
     fn one_full_ring_does_not_block_another_interrupt_buffer() {
         let (mut dwc, mut dart, mut ram, mut latch) = setup();

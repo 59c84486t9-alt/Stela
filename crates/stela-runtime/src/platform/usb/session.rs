@@ -1,0 +1,266 @@
+//! Joins the USB and mux state machines with bounded queues. The machine
+//! owner supplies one bus step; clients only enqueue/read bytes and cannot
+//! recursively enter translated code while device memory is borrowed.
+use super::{
+    BusPeer, MAX_PACKET,
+    host::{Descriptor, Host, TransferStatus},
+    mux::{Mux, State, StreamId, StreamState},
+    plist::{self, Channel},
+};
+use alloc::{collections::VecDeque, vec::Vec};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Log {
+    Descriptor(Descriptor),
+    MuxControl(Vec<u8>),
+    QueryTypeReply(Vec<u8>),
+}
+struct Probe {
+    stream: Option<StreamId>,
+    request: Vec<u8>,
+    sent: usize,
+    reply: Channel,
+}
+pub struct Session {
+    host: Host,
+    mux: Mux,
+    generation: Option<u64>,
+    descriptors_logged: bool,
+    input: Option<u64>,
+    output: Option<u64>,
+    logs: VecDeque<Log>,
+    probe: Option<Probe>,
+}
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Session {
+    pub fn new() -> Self {
+        Self {
+            host: Host::new(),
+            mux: Mux::new(),
+            generation: None,
+            descriptors_logged: false,
+            input: None,
+            output: None,
+            logs: VecDeque::new(),
+            probe: None,
+        }
+    }
+    pub fn attach(&mut self, generation: u64) -> Result<(), &'static str> {
+        if self.generation == Some(generation) {
+            return Ok(());
+        }
+        self.detach()?;
+        self.generation = Some(generation);
+        self.host.attach(generation);
+        Ok(())
+    }
+    pub fn detach(&mut self) -> Result<(), &'static str> {
+        if self.generation.take().is_some() {
+            self.mux.reset()?;
+        }
+        self.host.detach();
+        while self.host.completion().is_some() {}
+        self.descriptors_logged = false;
+        self.input = None;
+        self.output = None;
+        if let Some(probe) = self.probe.as_mut() {
+            probe.stream = None;
+            probe.sent = 0;
+            probe.reply = Channel::default();
+        }
+        Ok(())
+    }
+    pub fn open(&mut self, port: u16) -> Result<StreamId, &'static str> {
+        self.mux.open(port)
+    }
+    pub fn state(&self, stream: StreamId) -> Result<StreamState, &'static str> {
+        self.mux.stream_state(stream)
+    }
+    pub fn write(&mut self, stream: StreamId, bytes: &[u8]) -> Result<usize, &'static str> {
+        self.mux.write(stream, bytes)
+    }
+    pub fn read(&mut self, stream: StreamId, bytes: &mut [u8]) -> Result<usize, &'static str> {
+        self.mux.read(stream, bytes)
+    }
+    pub fn close(&mut self, stream: StreamId) -> Result<(), &'static str> {
+        self.mux.close(stream)
+    }
+    pub fn release(&mut self, stream: StreamId) -> Result<(), &'static str> {
+        self.mux.release(stream)
+    }
+    pub fn take_log(&mut self) -> Option<Log> {
+        self.logs.pop_front()
+    }
+    /// An explicitly requested diagnostic using the same public stream path
+    /// as a later restore client. It records the guest's opaque plist bytes.
+    pub fn query_type(&mut self) -> Result<(), &'static str> {
+        if self.probe.is_some() {
+            return Err("QueryType probe already pending");
+        }
+        self.probe = Some(Probe {
+            stream: None,
+            request: plist::frame(plist::QUERY_TYPE)?,
+            sent: 0,
+            reply: Channel::default(),
+        });
+        Ok(())
+    }
+    pub fn advance(&mut self, peer: &mut impl BusPeer, now: u64) -> Result<(), &'static str> {
+        if self.generation.is_none() {
+            return Ok(());
+        }
+        // Log backpressure cannot discard a diagnostic or grow without bound.
+        if self.logs.len() >= 32 {
+            return Ok(());
+        }
+        self.host.advance(peer, now)?;
+        while let Some(completion) = self.host.completion() {
+            let input = self.input == Some(completion.id);
+            let output = self.output == Some(completion.id);
+            if !input && !output {
+                return Err("USB session received a stale completion");
+            }
+            if input {
+                self.input = None;
+            } else {
+                self.output = None;
+            }
+            match completion.status {
+                TransferStatus::Complete => {
+                    if input {
+                        self.mux.receive(&completion.bytes)?;
+                    }
+                }
+                TransferStatus::Timeout if input && completion.transferred == 0 => {}
+                _ => return Err("USB mux bulk transfer failed"),
+            }
+        }
+        if !self.host.ready() {
+            return Ok(());
+        }
+        if !self.descriptors_logged {
+            for descriptor in self.host.descriptors() {
+                self.logs.push_back(Log::Descriptor(descriptor.clone()));
+            }
+            self.descriptors_logged = true;
+        }
+        while let Some(log) = self.mux.take_log() {
+            self.logs.push_back(Log::MuxControl(log));
+        }
+        self.advance_probe()?;
+        if self.input.is_none() {
+            self.input = Some(self.host.submit_in(MAX_PACKET, now)?);
+        }
+        if self.output.is_none()
+            && let Some(packet) = self.mux.take_packet()
+        {
+            // A full-size last USB packet is followed by a ZLP; the mux
+            // frame length remains independent of that USB terminator.
+            self.output = Some(self.host.submit_out(
+                &packet,
+                packet.len().is_multiple_of(MAX_PACKET),
+                now,
+            )?);
+        }
+        Ok(())
+    }
+    fn advance_probe(&mut self) -> Result<(), &'static str> {
+        if self.mux.state() != State::Active {
+            return Ok(());
+        }
+        let Some(probe) = self.probe.as_mut() else {
+            return Ok(());
+        };
+        let stream = match probe.stream {
+            Some(id) => id,
+            None => {
+                let id = self.mux.open(62078)?;
+                probe.stream = Some(id);
+                id
+            }
+        };
+        match self.mux.stream_state(stream)? {
+            StreamState::Connecting => return Ok(()),
+            StreamState::Open => {}
+            _ => return Err("QueryType stream was refused or reset"),
+        }
+        if probe.sent < probe.request.len() {
+            probe.sent += self.mux.write(stream, &probe.request[probe.sent..])?;
+        }
+        let mut bytes = [0; MAX_PACKET];
+        let count = self.mux.read(stream, &mut bytes)?;
+        if count != 0 {
+            let (consumed, reply) = probe.reply.receive(&bytes[..count])?;
+            if consumed != count {
+                return Err("unexpected bytes following QueryType reply");
+            }
+            if let Some(reply) = reply {
+                self.mux.close(stream)?;
+                self.mux.release(stream)?;
+                self.logs.push_back(Log::QueryTypeReply(reply));
+                self.probe = None;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    /// Synthetic mux wire fixture, never represented as an observed guest.
+    fn packet(protocol: u32, payload: &[u8], v2: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&protocol.to_be_bytes());
+        bytes.extend_from_slice(&((if v2 { 16 } else { 8 }) + payload.len() as u32).to_be_bytes());
+        if v2 {
+            bytes.extend_from_slice(&0xfeed_faceu32.to_be_bytes());
+            bytes.extend_from_slice(&[0, 0, 0, 0]);
+        }
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+    #[test]
+    fn query_type_uses_port_62078_and_logs_only_received_plist() {
+        let mut session = Session::new();
+        session.mux.take_packet();
+        session.query_type().unwrap();
+        session
+            .mux
+            .receive(&packet(0, &[0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0], false))
+            .unwrap();
+        session.mux.take_packet();
+        session.advance_probe().unwrap();
+        let syn = session.mux.take_packet().unwrap();
+        assert_eq!(&syn[18..20], &62078u16.to_be_bytes());
+        let mut tcp = vec![0; 20];
+        tcp[..2].copy_from_slice(&62078u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&syn[16..18]);
+        tcp[11] = 1;
+        tcp[12] = 0x50;
+        tcp[13] = 0x12;
+        tcp[14] = 1;
+        session.mux.receive(&packet(6, &tcp, true)).unwrap();
+        session.mux.take_packet();
+        session.advance_probe().unwrap();
+        let query = session.mux.take_packet().unwrap();
+        assert_eq!(&query[36..], &plist::frame(plist::QUERY_TYPE).unwrap());
+        let response=b"<plist version=\"1.0\"><dict><key>Type</key><string>com.apple.mobile.restored</string><key>RestoreProtocolVersion</key><integer>15</integer></dict></plist>";
+        tcp[4..8].copy_from_slice(&1u32.to_be_bytes());
+        tcp[8..12].copy_from_slice(&((query.len() - 36 + 1) as u32).to_be_bytes());
+        tcp[13] = 0x10;
+        tcp.extend_from_slice(&plist::frame(response).unwrap());
+        session.mux.receive(&packet(6, &tcp, true)).unwrap();
+        session.advance_probe().unwrap();
+        assert_eq!(
+            session.take_log(),
+            Some(Log::QueryTypeReply(response.to_vec()))
+        );
+        assert!(session.probe.is_none());
+    }
+}

@@ -1,4 +1,8 @@
 //! Native USB bus peers. No guest code execution or translator callbacks.
+pub mod host;
+pub mod mux;
+pub mod plist;
+pub mod session;
 
 /// The initial transport profile has USB2 high-speed packets only.
 pub const MAX_PACKET: usize = 512;
