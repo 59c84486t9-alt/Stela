@@ -21,7 +21,11 @@ use serde::Serialize;
 const ASMB: &str = "/chosen/asmb";
 const CHOSEN: &str = "/chosen";
 const MANIFEST_PROPERTIES: &str = "/chosen/manifest-properties";
-/// Template `UnusedStringProperty` slots hold 64 bytes.
+/// Template `UnusedStringProperty` slots hold 64 bytes. A slot takes the
+/// octet string's own bytes, not padded to the slot: TXM 26A434 copies
+/// `love` with a bounds check that its length is at most the length of its
+/// NUL-terminated text plus one (`__text+0x3cc64`), which a padded value
+/// fails.
 const STRING_SLOT_BYTES: usize = 0x40;
 const INTEGER_SLOT: &str = "UnusedIntegerProperty";
 const BOOLEAN_SLOT: &str = "UnusedBooleanProperty";
@@ -137,9 +141,7 @@ fn manifest_properties(writer: &mut Writer, manifest: &Manifest) -> Result<()> {
                     "manifest property {} exceeds a {STRING_SLOT_BYTES}-byte slot",
                     property.name
                 );
-                let mut value = bytes.clone();
-                value.resize(STRING_SLOT_BYTES, 0);
-                (STRING_SLOT, value)
+                (STRING_SLOT, bytes.clone())
             }
         };
         let node = writer
@@ -503,10 +505,8 @@ mod tests {
         assert_eq!(value(CHOSEN, "security-domain"), 1u32.to_le_bytes());
         assert_eq!(value(CHOSEN, "sepfw-load-at-boot"), boolean(false));
         assert_eq!(value(MANIFEST_PROPERTIES, "CPRO"), boolean(true));
-        let mut love = b"26.1.434.0.0,0".to_vec();
-        love.resize(STRING_SLOT_BYTES, 0);
-        assert_eq!(value(MANIFEST_PROPERTIES, "love"), love);
-        // The slots keep their place and size; one of each kind remains.
+        assert_eq!(value(MANIFEST_PROPERTIES, "love"), b"26.1.434.0.0,0");
+        // The slots keep their place; one of each kind remains.
         assert!(
             tree.property(MANIFEST_PROPERTIES, "UnusedIntegerProperty0")
                 .is_none()
