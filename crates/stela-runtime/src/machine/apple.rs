@@ -10,6 +10,7 @@ use super::{
 use crate::platform::apple::{
     aic::{Aic2, Aic2Config},
     aic1::Aic1,
+    amcc::{self, Amcc},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     interrupt::{CpuIndex, InterruptLatch},
     lockdown::Lockdown,
@@ -38,6 +39,7 @@ pub struct AppleDevices {
     latch: InterruptLatch,
     aic: Option<Controller>,
     reset: Option<String>,
+    memory_controller: Option<DeviceId>,
 }
 
 /// The mapped AIC and which model it is.
@@ -82,6 +84,7 @@ impl AppleDevices {
             latch: InterruptLatch::new(),
             aic: None,
             reset: None,
+            memory_controller: None,
         }
     }
 
@@ -115,6 +118,29 @@ impl AppleDevices {
     ) -> Result<(), MapError> {
         let device = self.bus.add(Box::new(Lockdown::new(name, control)));
         self.map(device, &[range])
+    }
+
+    /// The AMCC's lock registers at each aperture of `layout`, with the
+    /// CTRR-A region iBoot programmed (`[base, base + bytes)`).
+    pub fn add_memory_controller(
+        &mut self,
+        apertures: &[u64],
+        layout: amcc::Layout,
+        programmed: Option<(u64, u64)>,
+    ) -> Result<(), String> {
+        let model = Amcc::new(layout, apertures.len(), programmed).map_err(String::from)?;
+        let device = self.bus.add(Box::new(model));
+        let ranges: alloc::vec::Vec<Range> = apertures
+            .iter()
+            .map(|&physical| Range {
+                physical,
+                bytes: layout.aperture_bytes,
+            })
+            .collect();
+        self.map(device, &ranges)
+            .map_err(|error| format!("AMCC placement: {error:?}"))?;
+        self.memory_controller = Some(device);
+        Ok(())
     }
 
     /// The SoC watchdog; `now` is the counter value its timers start from.
@@ -283,6 +309,11 @@ impl Devices for AppleDevices {
 
     fn take_reset(&mut self) -> Option<String> {
         self.reset.take()
+    }
+
+    fn memory_lock(&self) -> Option<(u64, u64)> {
+        let device = self.memory_controller?;
+        self.bus.device::<Amcc>(device)?.locked_region()
     }
 }
 

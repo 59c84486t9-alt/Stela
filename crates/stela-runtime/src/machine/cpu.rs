@@ -14,6 +14,8 @@ use super::{
     },
 };
 use crate::scalable::ScalableState;
+use alloc::rc::Rc;
+use core::cell::RefCell;
 use stela_compiler::{
     GuestState,
     aarch64::scalable::{ScalableMode, VectorLength},
@@ -206,6 +208,12 @@ pub struct Cpu {
     pub pmu: Option<super::pmu::Pmu>,
     /// The instructions this PE has retired (`machine::pmu`).
     pub retired: u64,
+    /// The CTRR registers of this PE's cluster, shared with its other PEs
+    /// (`machine::ctrr`).
+    pub ctrr: Rc<RefCell<super::ctrr::Cluster>>,
+    /// The region the memory controller has locked against writes, first
+    /// and last byte, as the engine last read it from the devices.
+    pub memory_lock: Option<(u64, u64)>,
 }
 
 /// What an exception entry needs beyond the vector kind.
@@ -310,6 +318,8 @@ impl Cpu {
             }),
             pmu: None,
             retired: 0,
+            ctrr: Rc::default(),
+            memory_lock: None,
         }
     }
 
@@ -546,6 +556,14 @@ impl Cpu {
                 el1: self.apple.sprr_perm[kernel],
                 el0: self.apple.sprr_perm[user],
                 fields: self.apple.sprr_fields,
+            },
+            ctrr: mmu::Ctrr {
+                privileged: self.ctrr.borrow().levels[match regime {
+                    TranslationRegime::El10 => 0,
+                    TranslationRegime::El20 => 1,
+                }]
+                .region(self.read(sctlr) & mmu::SCTLR_M != 0),
+                memory: self.memory_lock,
             },
             stage2: self.stage2(regime),
             second_stage: (regime == TranslationRegime::El10).then(|| mmu::Stage2 {

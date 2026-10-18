@@ -818,7 +818,7 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         let tables = &mut super::RamTables(&mut self.machine.host);
         let outcome = match stage {
             Stage::S1 => mmu::translate_stage1(&controls, address, memory, requester, tables),
-            Stage::S12 => mmu::translate(&controls, address, memory, requester, tables),
+            Stage::S12 => mmu::translate_tables(&controls, address, memory, requester, tables),
         };
         if let Translated::Fault(fault) = outcome {
             let walk = fault.second_stage.is_some_and(|second| second.walk);

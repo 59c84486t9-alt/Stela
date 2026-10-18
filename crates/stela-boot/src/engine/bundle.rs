@@ -58,6 +58,8 @@ pub struct Entry {
     pub regions: usize,
     pub patches: usize,
     pub kept: Vec<String>,
+    /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
+    pub read_only_region: Option<(u64, u64)>,
 }
 
 fn contents(file: &File) -> &'static [u8] {
@@ -340,5 +342,8 @@ fn load_named<'a>(
         regions: image.regions.len(),
         patches: image.patches.len(),
         kept: image.kept,
+        read_only_region: manifest
+            .read_only_region
+            .map(|region| (region.base, region.bytes)),
     })
 }

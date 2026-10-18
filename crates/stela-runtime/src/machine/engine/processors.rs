@@ -43,6 +43,12 @@ pub(super) fn boot(profile: &CpuProfile) -> Vec<Peer> {
     peers
 }
 
+impl Parked {
+    pub(super) fn cpu_mut(&mut self) -> &mut Cpu {
+        &mut self.cpu
+    }
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// The number of the running PE.
     pub fn processor(&self) -> usize {
@@ -260,6 +266,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Every PE has the registers of PE 0, the profile's missing ones
         // included.
         system::identify(&self.profile, start.cpu, &mut cpu, &mut Vec::new());
+        // The PEs of a cluster (MPIDR_EL1 Aff2 and Aff1) share its CTRR
+        // registers; the memory controller's lock binds every PE.
+        let cluster = |pe: usize| {
+            self.profile
+                .processors
+                .get(pe)
+                .map(|identity| identity.mpidr & 0x00ff_ff00)
+        };
+        let shared = (0..self.peers.len())
+            .filter(|&pe| cluster(pe) == cluster(start.cpu))
+            .find_map(|pe| match &self.peers[pe] {
+                Peer::Running => Some(self.cpu.ctrr.clone()),
+                Peer::Parked(parked) => Some(parked.cpu.ctrr.clone()),
+                Peer::Off => None,
+            });
+        if let Some(shared) = shared {
+            cpu.ctrr = shared;
+        }
+        cpu.memory_lock = self.cpu.memory_lock;
         self.peers[start.cpu] = Peer::Parked(Box::new(Parked {
             cpu,
             event_sample: None,

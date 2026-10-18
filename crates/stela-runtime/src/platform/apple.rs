@@ -10,6 +10,7 @@
 //! document and what the model infers.
 pub mod aic;
 pub mod aic1;
+pub mod amcc;
 pub mod bus;
 pub mod counter;
 pub mod interrupt;

@@ -107,6 +107,13 @@ pub struct Entry {
     pub physical_address: u64,
 }
 
+/// A physical range iBoot programs into a memory-controller lock group.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct Programmed {
+    pub base: u64,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BootArgs {
     pub command_line: String,
@@ -124,6 +131,9 @@ pub struct Manifest {
     pub boot_args: BootArgs,
     pub top_of_kernel_data: u64,
     pub patches: Vec<Patch>,
+    /// The AMCC CTRR-A region iBoot programs, when the bundle has one.
+    #[serde(default)]
+    pub read_only_region: Option<Programmed>,
 }
 
 /// The firmware framebuffer as the guest sees it.

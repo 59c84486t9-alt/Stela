@@ -478,9 +478,26 @@ impl Cpu {
         if self.pstate.el == 1 && !self.in_host() && self.hcr(HCR_TIDCP) {
             return Outcome::Trapped(Some(2));
         }
+        if let Some((level, field)) = super::ctrr::owns(encoding) {
+            if level == 1 && self.pstate.el != 2 {
+                return Outcome::Undefined;
+            }
+            let mut cluster = self.ctrr.borrow_mut();
+            return if read {
+                Outcome::Read(cluster.read(level, field))
+            } else {
+                match cluster.write(level, field, value) {
+                    Ok(()) => Outcome::Written(Changes {
+                        translation: true,
+                        ..Changes::default()
+                    }),
+                    Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+                }
+            };
+        }
         if encoding.crn() == 11 {
             return Outcome::Refused(Refusal::UnsupportedSetting(
-                "CRn=11 IMPLEMENTATION DEFINED register (CTRR, paused)",
+                "CRn=11 IMPLEMENTATION DEFINED register without a model",
             ));
         }
         if super::amx::Unit::owns(encoding) {

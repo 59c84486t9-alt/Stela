@@ -270,6 +270,11 @@ impl Bus {
         }
         Ok(next)
     }
+    /// A model's state, for engine wiring such as the AMCC's write lock.
+    pub fn device<T: MmioDevice>(&self, device: DeviceId) -> Option<&T> {
+        let device: &dyn Any = self.devices.get(device.0)?.as_ref();
+        device.downcast_ref::<T>()
+    }
     /// Typed access to a model, for engine wiring such as AIC inputs, UART
     /// receive data or fast-IPI system registers.
     pub fn device_mut<T: MmioDevice>(&mut self, device: DeviceId) -> Option<&mut T> {

@@ -14,6 +14,7 @@ use super::{Chip, adt::Node, registers::Identity};
 use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
+    amcc,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -394,6 +395,122 @@ pub struct Board {
     /// Every PE's `cpu-impl-reg` and every cluster's `cpm-impl-reg`, once
     /// each, on a SoC whose lockdown offsets are known; none otherwise.
     pub lockdown: Vec<LockdownBlock>,
+    /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
+    /// described them.
+    pub memory_controller: Option<MemoryController>,
+}
+
+/// The AMCC as `/chosen/lock-regs/amcc` describes it: its apertures and
+/// each aperture's planes and lock registers (`platform::apple::amcc`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryController {
+    pub apertures: Vec<u64>,
+    pub layout: amcc::Layout,
+}
+
+const LOCK_GROUP: &str = "amcc-ctrr-a";
+/// Lock groups iBoot's map names but leaves empty; one with registers is
+/// refused, as the model implements CTRR-A alone.
+const EMPTY_GROUPS: [&str; 3] = ["amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d"];
+
+/// A `<name>-reg-offset`, `-reg-mask` and, for a bit register,
+/// `-reg-value` triple.
+fn lock_register(
+    node: &Node<'_>,
+    path: &str,
+    name: &str,
+    bit: bool,
+) -> Result<amcc::Register, String> {
+    let field = |suffix: &str| {
+        node.first_u32(&format!("{name}-reg-{suffix}"))
+            .ok_or_else(|| format!("{path} has no {name}-reg-{suffix}"))
+    };
+    let mask = field("mask")?;
+    let value = if bit { field("value")? } else { 0 };
+    if value & !mask != 0 {
+        return Err(format!("{path} {name}-reg-value has bits outside its mask"));
+    }
+    Ok(amcc::Register {
+        offset: u64::from(field("offset")?),
+        mask,
+        value,
+    })
+}
+
+/// The AMCC map of `/chosen/lock-regs/amcc`, or `None` without one.
+fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, String> {
+    let Some(node) = chosen
+        .child("lock-regs")
+        .and_then(|regs| regs.child("amcc"))
+    else {
+        return Ok(None);
+    };
+    const PATH: &str = "/chosen/lock-regs/amcc";
+    let number = |name: &str| {
+        node.first_u32(name)
+            .ok_or_else(|| format!("{PATH} has no {name}"))
+    };
+    let count = number("aperture-count")? as usize;
+    let apertures: Vec<u64> = node
+        .property("aperture-phys-addr")
+        .map(|value| {
+            value
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|cell| u64::from_le_bytes(*cell))
+                .collect()
+        })
+        .unwrap_or_default();
+    if count == 0 || apertures.len() != count {
+        return Err(format!(
+            "{PATH} aperture-phys-addr does not list aperture-count apertures"
+        ));
+    }
+    let group_path = format!("{PATH}/{LOCK_GROUP}");
+    let group = node
+        .child(LOCK_GROUP)
+        .ok_or_else(|| format!("{PATH} has no {LOCK_GROUP}"))?;
+    for name in EMPTY_GROUPS {
+        if node
+            .child(name)
+            .is_some_and(|empty| empty.property("page-size-shift").is_some())
+        {
+            return Err(format!(
+                "{PATH}/{name} is a lock group the AMCC model does not implement"
+            ));
+        }
+    }
+    let register = |name: &str, bit: bool| lock_register(&group, &group_path, name, bit);
+    let dram_base = chosen
+        .property("dram-base")
+        .and_then(|value| {
+            value
+                .first_chunk::<8>()
+                .map(|cell| u64::from_le_bytes(*cell))
+        })
+        .ok_or("/chosen has no dram-base")?;
+    let layout = amcc::Layout {
+        aperture_bytes: u64::from(number("aperture-size")?),
+        planes: number("plane-count")?,
+        stride: u64::from(number("plane-stride")?),
+        cache_status: lock_register(&node, PATH, "cache-status", true)?,
+        group: amcc::LockGroup {
+            page_size_shift: group
+                .first_u32("page-size-shift")
+                .ok_or_else(|| format!("{group_path} has no page-size-shift"))?,
+            lower_limit: register("lower-limit", false)?,
+            upper_limit: register("upper-limit", false)?,
+            enable: register("enable", true)?,
+            write_disable: register("write-disable", true)?,
+            lock: register("lock", true)?,
+        },
+        dram_base,
+    };
+    if layout.aperture_bytes == 0 || layout.stride == 0 {
+        return Err(format!("{PATH} has an empty aperture or plane stride"));
+    }
+    Ok(Some(MemoryController { apertures, layout }))
 }
 
 /// The board a DeviceTree describes, or why the engine cannot model it: its
@@ -508,11 +625,14 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     .ok_or("DeviceTree walk failed")?;
     let highest = highest.ok_or("no node names the AIC as its interrupt parent")?;
     let inputs = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
+    let memory_controller =
+        memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
     Ok(Board {
         cpus,
         uart,
         watchdog,
         lockdown,
+        memory_controller,
         aic: InterruptController {
             physical,
             inputs,

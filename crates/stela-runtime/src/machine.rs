@@ -8,6 +8,7 @@ pub mod amx;
 pub mod apple;
 pub mod chip;
 pub mod cpu;
+pub mod ctrr;
 pub mod debug;
 pub mod engine;
 pub mod exception;

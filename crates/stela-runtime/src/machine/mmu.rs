@@ -46,6 +46,8 @@ pub struct Controls {
     /// the attributes report XS (`attributes`).
     pub xs: bool,
     pub sprr: Sprr,
+    /// Apple's CTRR, applied to the output address of an access.
+    pub ctrr: Ctrr,
     pub regime: Regime,
     /// The caller requires stage 2 (HCR_EL2.VM in the EL1&0 regime). Without
     /// [`Controls::second_stage`] the walker refuses instead of translating
@@ -54,6 +56,85 @@ pub struct Controls {
     /// The stage-2 controls. They apply to the EL1&0 regime while HCR_EL2.VM
     /// or DC is set and TGE is clear.
     pub second_stage: Option<Stage2>,
+}
+
+/// Apple's CTRR as one PE applies it after translation (`machine::ctrr`):
+/// the core group of the regime's privileged level, which binds every
+/// access but EL0's, and a region the memory controller has locked against
+/// writes from any requester. Both work on whole pages of the translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Ctrr {
+    pub privileged: Option<CtrrRegion>,
+    /// The locked region's first and last byte.
+    pub memory: Option<(u64, u64)>,
+}
+
+/// A core CTRR group's region, first and last byte, and what it forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtrrRegion {
+    pub first: u64,
+    pub last: u64,
+    pub write_protect: bool,
+    pub execute_inside_only: bool,
+}
+
+/// The smallest page a CTRR decision covers: a translation whose block
+/// straddles a region boundary is narrowed to it.
+const CTRR_PAGE: u64 = 1 << 12;
+
+fn overlaps(base: u64, bytes: u64, (first, last): (u64, u64)) -> bool {
+    base <= last && first <= base + (bytes - 1)
+}
+
+fn within(base: u64, bytes: u64, (first, last): (u64, u64)) -> bool {
+    first <= base && base + (bytes - 1) <= last
+}
+
+impl Ctrr {
+    /// `translation` limited for `requester`: an access CTRR forbids stops,
+    /// because the fault hardware reports is not documented, and the
+    /// rights CTRR removes are cleared so that a later access walks again.
+    fn limit(&self, mut translation: Translation, access: Access, requester: Requester) -> Outcome {
+        let privileged = self.privileged.filter(|_| requester.el != 0);
+        let bounds = privileged
+            .map(|region| (region.first, region.last))
+            .into_iter()
+            .chain(self.memory);
+        for region in bounds.clone() {
+            let base = translation.physical & !(translation.size - 1);
+            if overlaps(base, translation.size, region) && !within(base, translation.size, region) {
+                translation.size = translation.size.min(CTRR_PAGE);
+            }
+        }
+        let base = translation.physical & !(translation.size - 1);
+        let mut write = None;
+        let mut execute = None;
+        if self
+            .memory
+            .is_some_and(|region| overlaps(base, translation.size, region))
+        {
+            write = Some("write into the memory controller's locked CTRR region");
+        }
+        if let Some(region) = privileged {
+            let bounds = (region.first, region.last);
+            if region.write_protect && overlaps(base, translation.size, bounds) {
+                write = Some("write into the CTRR-protected region");
+            }
+            if region.execute_inside_only && !within(base, translation.size, bounds) {
+                execute = Some("privileged execution outside the CTRR region");
+            }
+        }
+        match (access, write, execute) {
+            (Access::Write, Some(reason), _) | (Access::Execute, _, Some(reason)) => {
+                return Outcome::Unsupported(Unsupported::Ctrr(reason));
+            }
+            _ => {}
+        }
+        translation.writable &= write.is_none();
+        translation.executable &= execute.is_none();
+        translation.guarded &= translation.executable;
+        Outcome::Mapped(translation)
+    }
 }
 
 /// The EL2 registers that control stage 2 of the EL1&0 regime.
@@ -328,6 +409,9 @@ pub enum Unsupported {
     /// A stage-2 MemAttr field with a reserved encoding: the resulting
     /// attributes are CONSTRAINED UNPREDICTABLE.
     Stage2Attributes { field: u8 },
+    /// An access Apple's CTRR forbids: the fault hardware reports is not
+    /// documented.
+    Ctrr(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,7 +554,31 @@ pub fn translate(
     requester: Requester,
     memory: &mut dyn TableMemory,
 ) -> Outcome {
+    limited(
+        controls,
+        access,
+        requester,
+        full(controls, address, access, requester, None, memory),
+    )
+}
+
+/// [`translate`] as the translation tables alone decide it, for AT: CTRR
+/// limits accesses, not the address translation AT reports.
+pub fn translate_tables(
+    controls: &Controls,
+    address: u64,
+    access: Access,
+    requester: Requester,
+    memory: &mut dyn TableMemory,
+) -> Outcome {
     full(controls, address, access, requester, None, memory)
+}
+
+fn limited(controls: &Controls, access: Access, requester: Requester, outcome: Outcome) -> Outcome {
+    match outcome {
+        Outcome::Mapped(translation) => controls.ctrr.limit(translation, access, requester),
+        other => other,
+    }
 }
 
 /// [`translate`] for a data access of `shape`, with Arm's alignment checks
@@ -489,7 +597,8 @@ pub fn translate_checked(
     if alignment::before_translation(controls.sctlr, address, shape) {
         return Outcome::Fault(Fault::stage1(FaultKind::Alignment, 0));
     }
-    full(controls, address, access, requester, Some(shape), memory)
+    let outcome = full(controls, address, access, requester, Some(shape), memory);
+    limited(controls, access, requester, outcome)
 }
 
 fn full(

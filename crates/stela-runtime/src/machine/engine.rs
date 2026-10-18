@@ -248,6 +248,11 @@ pub trait Devices {
     fn take_start(&mut self) -> Option<Start> {
         None
     }
+    /// The physical region a memory controller has locked against writes,
+    /// first and last byte.
+    fn memory_lock(&self) -> Option<(u64, u64)> {
+        None
+    }
 }
 
 /// A powered-off PE leaves reset at `address` (its RVBAR) in EL2h.
@@ -2243,6 +2248,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if let Some((base, updated)) = writeback {
                 self.write_register(base, updated);
             }
+            self.follow_memory_lock();
         } else {
             return Err(refuse(
                 self,
@@ -2255,6 +2261,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Some(reason) => Err(Stop::Reset(reason)),
             None => Ok(()),
         }
+    }
+
+    /// Give every PE the memory controller's write lock after a device
+    /// write changed it.
+    fn follow_memory_lock(&mut self) {
+        let lock = self.devices.memory_lock();
+        if lock == self.cpu.memory_lock {
+            return;
+        }
+        self.cpu.memory_lock = lock;
+        for peer in &mut self.peers {
+            if let processors::Peer::Parked(parked) = peer {
+                parked.cpu_mut().memory_lock = lock;
+            }
+        }
+        self.translations_changed();
     }
 
     fn alignment_fault(&mut self, address: u64, write: bool) -> Step {

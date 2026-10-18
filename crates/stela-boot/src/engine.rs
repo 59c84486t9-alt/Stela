@@ -246,7 +246,11 @@ const J473_AIC_EVENT: u64 = 0x8000;
 /// placed as the board's DeviceTree places them (`machine::soc::board`).
 /// `aic-timebase` has no public register description and no model, so its
 /// accesses stop explicitly.
-fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String> {
+fn devices(
+    board: Option<&soc::Board>,
+    read_only_region: Option<(u64, u64)>,
+    now: u64,
+) -> Result<AppleDevices, String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
         physical: ARM_IO + offset,
         bytes,
@@ -294,9 +298,17 @@ fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String>
             .add_lockdown(block.name, block.control, range)
             .map_err(|error| alloc::format!("{} placement: {error:?}", block.name))?;
     }
+    let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
+    if let Some(controller) = memory_controller {
+        devices.add_memory_controller(
+            &controller.apertures,
+            controller.layout,
+            read_only_region,
+        )?;
+    }
     output::arguments(format_args!(
         "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
-         lockdown-blocks={} aic-timebase=unplaced\n",
+         lockdown-blocks={} amcc-apertures={} aic-timebase=unplaced\n",
         uart.0.physical,
         uart.0.bytes,
         uart.1.irq,
@@ -305,7 +317,8 @@ fn devices(board: Option<&soc::Board>, now: u64) -> Result<AppleDevices, String>
         wdt.1.irq,
         aic.physical,
         aic.inputs,
-        board.map_or(0, |board| board.lockdown.len())
+        board.map_or(0, |board| board.lockdown.len()),
+        memory_controller.map_or(0, |controller| controller.apertures.len())
     ));
     Ok(devices)
 }
@@ -439,6 +452,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let (_, _, _, apic_hz) = host::statistics();
     let mut bare = BareHost;
     let target = target();
+    let mut read_only_region = None;
     let (entry, x0) = if options.bundle {
         let files = &handoff.files[..handoff.file_count];
         let loaded = match &built {
@@ -458,6 +472,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             "BUNDLE regions={} patched={} kept={:?} dram_base={:#x}\n",
             loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
         ));
+        read_only_region = loaded.read_only_region;
         (loaded.pc, loaded.x0)
     } else {
         // SAFETY: the guest image was left allocated by the loader.
@@ -536,7 +551,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .set(Register::CNTHCTL_EL2, 0, 1 << 10 | 1 << 11);
     }
     let now = stela_runtime::machine::Host::counter(&mut bare);
-    let devices = match devices(board.as_ref(), now) {
+    let devices = match devices(board.as_ref(), read_only_region, now) {
         Ok(devices) => devices,
         Err(error) => {
             output::arguments(format_args!("device refusal: {error}\n"));
