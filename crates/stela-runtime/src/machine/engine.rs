@@ -471,6 +471,12 @@ struct Block {
     taken: u64,
 }
 
+/// The [`Machine::pointer_memo`] slot of a PAC operation's operands.
+fn pointer_slot(pointer: u64, modifier: u64) -> usize {
+    ((pointer ^ modifier.rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 54) as usize
+        % POINTER_MEMO
+}
+
 /// What a PAC result depends on besides its operands: the five keys, the
 /// chip's PAC version and the regime's TCR (Arm `AddPAC`, `Auth`).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2119,6 +2125,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// layout, remembered while they stay the same: both are pure functions
     /// of them and the operands. The memo slot comes from the pointer and
     /// modifier alone, so which slot is touched never depends on a key.
+    /// A signing whose result strips back to its pointer also remembers
+    /// that authenticating the result with the same key and modifier
+    /// succeeds with that pointer (Arm `Auth` recomputes the PAC of the
+    /// stripped pointer), which answers the epilogue of a signed frame; a
+    /// success answers both the combined and the plain authentication.
     fn pointer_result(
         &mut self,
         operation: PointerOperation,
@@ -2146,14 +2157,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .with_translation_regime(inputs.tcr),
             );
         }
-        let slot = ((pointer ^ modifier.rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 54)
-            as usize
-            % POINTER_MEMO;
-        if let Some(entry) = self.pointer_memo[slot]
-            && entry.operation == operation
+        if let Some(entry) = self.pointer_memo[pointer_slot(pointer, modifier)]
             && entry.key == key
             && entry.pointer == pointer
             && entry.modifier == modifier
+            && (entry.operation == operation
+                || matches!(
+                    (entry.operation, operation, entry.result),
+                    (
+                        PointerOperation::Authenticate { .. },
+                        PointerOperation::Authenticate { .. },
+                        Ok((_, true))
+                    )
+                ))
         {
             return Ok(entry.result);
         }
@@ -2178,13 +2194,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
         };
-        self.pointer_memo[slot] = Some(PointerEntry {
+        self.pointer_memo[pointer_slot(pointer, modifier)] = Some(PointerEntry {
             operation,
             key,
             pointer,
             modifier,
             result,
         });
+        if let (PointerOperation::Sign, Ok((signed, _))) = (operation, result)
+            && context.strip(key, signed).ok() == Some(pointer)
+        {
+            self.pointer_memo[pointer_slot(signed, modifier)] = Some(PointerEntry {
+                operation: PointerOperation::Authenticate { combined: false },
+                key,
+                pointer: signed,
+                modifier,
+                result: Ok((pointer, true)),
+            });
+        }
         Ok(result)
     }
 
@@ -5088,6 +5115,55 @@ mod tests {
             .set(SystemRegister::APIBKeyLo_EL1, 0, 0x0bad_cafe);
         machine.derived_changed();
         assert_ne!(sign(&mut machine), signed);
+    }
+
+    /// A signing remembers that its result authenticates back to its
+    /// pointer, for the plain and the combined form, unless the pointer was
+    /// not canonical, when authentication must be computed (and fails).
+    #[test]
+    fn signing_remembers_the_authentication_of_its_result() {
+        let mut machine = pac_machine();
+        let modifier = 0xffff_ff80_0001_0000;
+        let sign = PointerOperation::Sign;
+        let plain = PointerOperation::Authenticate { combined: false };
+        let combined = PointerOperation::Authenticate { combined: true };
+        let pointer = 0xffff_ff80_0000_4000;
+        let (signed, _) = machine
+            .pointer_result(sign, pauth::Key::Ib, pointer, modifier)
+            .unwrap()
+            .unwrap();
+        let remembered = machine.pointer_memo[pointer_slot(signed, modifier)].unwrap();
+        assert_eq!(remembered.result, Ok((pointer, true)));
+        let context = machine.pointer_context().unwrap();
+        for operation in [plain, combined] {
+            let PointerOperation::Authenticate { combined } = operation else {
+                unreachable!()
+            };
+            let computed = context
+                .authenticate_operation(pauth::Key::Ib, signed, modifier, combined)
+                .unwrap();
+            assert_eq!(
+                machine.pointer_result(operation, pauth::Key::Ib, signed, modifier),
+                Ok(Ok((computed.pointer, computed.authenticated)))
+            );
+        }
+        // A pointer whose extension bits disagree does not strip back.
+        let odd = 0x7fff_ff80_0000_4000;
+        let (signed, _) = machine
+            .pointer_result(sign, pauth::Key::Ib, odd, modifier)
+            .unwrap()
+            .unwrap();
+        assert!(
+            machine.pointer_memo[pointer_slot(signed, modifier)]
+                .is_none_or(|entry| entry.pointer != signed)
+        );
+        let computed = context.authenticate_operation(pauth::Key::Ib, signed, modifier, false);
+        let result = machine.pointer_result(plain, pauth::Key::Ib, signed, modifier);
+        match computed {
+            Ok(computed) => assert_eq!(result, Ok(Ok((computed.pointer, computed.authenticated)))),
+            Err(pauth::AuthenticationError::Failure { code }) => assert_eq!(result, Ok(Err(code))),
+            Err(error) => panic!("{error:?}"),
+        }
     }
 
     #[test]
