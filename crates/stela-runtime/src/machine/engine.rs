@@ -854,12 +854,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.retired += (pc - self.blocks[index].pc) / INSTRUCTION;
     }
 
-    /// Whether an interrupt routed to `target` is taken now: always when it
-    /// goes to a higher EL, under its PSTATE mask at the same EL, never when
-    /// it targets a lower EL (Arm ARM D1.3.6).
+    /// Whether an interrupt routed to `target` is taken now (Arm ARM D1.3.6;
+    /// QEMU `arm_excp_unmasked`): never when it targets a lower EL. Its
+    /// PSTATE mask applies at the same EL, to EL1 from EL0, and to EL2 from
+    /// EL0 in the host (HCR_EL2.{E2H,TGE} {1,1}; E2H is RES1 on Apple
+    /// cores); EL2 from EL0 or EL1 otherwise ignores it.
     fn taken(&self, target: u8, mask: u8) -> bool {
         let el = self.cpu.pstate.el;
-        target > el || (target == el && self.cpu.pstate.daif & mask == 0)
+        let maskable = target == el || target == 1 || self.cpu.in_host();
+        target >= el && (!maskable || self.cpu.pstate.daif & mask == 0)
     }
 
     /// Take a pending interrupt before the next instruction: the physical
@@ -3649,6 +3652,31 @@ mod tests {
             .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
         machine.derived_changed();
         assert_eq!(wait(&mut machine, 0xd503_207f), Err(Stop::Idle));
+    }
+
+    #[test]
+    fn pstate_masks_interrupts_to_el1_from_el0_and_to_el2_from_the_host() {
+        let mut machine = machine(&[]);
+        machine.cpu.pstate.daif = DAIF_F;
+        let hcr = |machine: &mut Machine<FakeHost, NoDevices>, value: u64| {
+            machine
+                .cpu
+                .registers
+                .set_raw(SystemRegister::HCR_EL2, 0, value)
+        };
+        machine.cpu.pstate.el = 0;
+        hcr(&mut machine, 0);
+        assert!(!machine.taken(1, DAIF_F));
+        assert!(machine.taken(2, DAIF_F));
+        hcr(&mut machine, 1 << HCR_TGE);
+        assert!(!machine.taken(2, DAIF_F));
+        machine.cpu.pstate.el = 1;
+        hcr(&mut machine, 0);
+        assert!(!machine.taken(1, DAIF_F));
+        assert!(machine.taken(2, DAIF_F));
+        assert!(!machine.taken(0, 0));
+        machine.cpu.pstate.daif = 0;
+        assert!(machine.taken(1, DAIF_F));
     }
 
     #[test]
