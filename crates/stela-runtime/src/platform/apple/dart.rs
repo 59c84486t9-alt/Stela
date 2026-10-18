@@ -3,7 +3,8 @@
 //!
 //! Documented by Linux `drivers/iommu/apple-dart.c` and `io-pgtable-dart.c`
 //! (Asahi), registers 32-bit:
-//! - PARAMS1 (0x00): the page size's shift in [27:24]; PARAMS2 (0x04):
+//! - PARAMS1 (0x00): access region protection 31 (below) and the page
+//!   size's shift in [27:24]; PARAMS2 (0x04):
 //!   BYPASS_SUPPORT 0; PARAMS3 (0x08): PA_WIDTH [29:24], VA_WIDTH [21:16]
 //!   and the hardware version, major [15:8] and minor [7:0]; PARAMS4
 //!   (0x0c): NUM_SIDS [8:0]. The 26A434 J473AP `AppleT8110DART::
@@ -16,7 +17,8 @@
 //! - TLB_CMD (0x80): BUSY 31, OP [10:8] (0 flush all, 1 flush one stream),
 //!   STREAM [7:0].
 //! - ERROR (0x100): FLAG 31, STREAM [27:20], CODE [14:0] (READ_FAULT 5,
-//!   WRITE_FAULT 4, NO_PTE 3, NO_PMD 2, NO_PGD 1, NO_TTBR 0); software
+//!   WRITE_FAULT 4, NO_PTE 3, NO_PMD 2, NO_PGD 1, NO_TTBR 0) and region
+//!   protect 29 (below); software
 //!   writes back what it read to clear it. ERROR_MASK (0x104), ERROR_ADDR_LO
 //!   and _HI (0x170, 0x174) and the per-stream ERROR_STREAMS bitmap (0x1c0),
 //!   which software clears by writing ones.
@@ -82,8 +84,20 @@
 //! The filter's slices are SoC register windows a coprocessor's own firmware
 //! reaches; the machine's device models make no such accesses, so a
 //! transfer on a stream that does not bypass a present filter refuses
-//! rather than pass unfiltered. The identification fields not listed above
-//! (PARAMS1 bit 31, PARAMS2 bit 4, PARAMS4 NUM_CLIENTS) read 0; FOUR_LEVEL
+//! rather than pass unfiltered.
+//!
+//! Access region protection is the page entries' accessible-unit bounds.
+//! 26A434 `AppleT8110DART` reads the DeviceTree `dart-options` word
+//! (`IODARTFamily` file 0x3b55130..0x3b551c0); its bit 1 asks for access
+//! region protection, and the instance validation (file 0x2f1d6a4) panics
+//! "access region protection is incorrectly configured" unless PARAMS1 bit
+//! 31 reports it (J473AP `dart-usb0` sets the option). With the option the
+//! driver maps start/end ranges at its `protection-granularity` within a
+//! page (0x2f15774) and names ERROR bit 29 "region protect" (0x2f16fe4),
+//! beside bits 4 and 5, write and read protect. Inferred: an access outside
+//! a page's bounds reports bit 29 after the entry's NO_READ/NO_WRITE
+//! checks, and bit 29 masks and signals like CODE. The identification
+//! fields not listed above (PARAMS2 bit 4, PARAMS4 NUM_CLIENTS) read 0; FOUR_LEVEL
 //! and REMAP_EN are refused until their behavior is known.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
@@ -97,8 +111,10 @@ const NAME: &str = "dart-t8110";
 
 const PARAMS1: u64 = 0x00;
 const PARAMS2: u64 = 0x04;
-/// PARAMS1: the page shift, 16 KiB pages.
-const PARAMS1_PAGE_SHIFT: u32 = PAGE_SHIFT << 24;
+/// PARAMS1: access region protection (page entries' accessible-unit
+/// bounds) and the page shift, 16 KiB pages.
+const PARAMS1_VALUE: u32 = REGION_PROTECTION | PAGE_SHIFT << 24;
+const REGION_PROTECTION: u32 = 1 << 31;
 /// PARAMS2: streams can bypass translation (TCR BYPASS_DART).
 const BYPASS_SUPPORT: u32 = 1;
 const PARAMS3: u64 = 0x08;
@@ -130,7 +146,7 @@ const STREAM_WORDS: u64 = 8;
 
 const ERROR_FLAG: u32 = 1 << 31;
 const ERROR_STREAM_SHIFT: u32 = 20;
-const ERROR_CODE: u32 = 0x7fff;
+const ERROR_CODE: u32 = 0x7fff | Fault::Region as u32;
 const PROTECT_TTBR_TCR: u32 = 1;
 const PROTECT_APF: u32 = 1 << 2;
 /// Secure translation-zone configuration is outside the switched DART state.
@@ -187,6 +203,7 @@ pub enum Fault {
     NoPte = 1 << 3,
     Write = 1 << 4,
     Read = 1 << 5,
+    Region = 1 << 29,
 }
 
 pub struct Dart {
@@ -374,8 +391,9 @@ impl Dart {
         let inside =
             offset / SUBPAGE_UNIT >= first_unit && (last & (PAGE - 1)) / SUBPAGE_UNIT <= last_unit;
         match write {
-            true if page & ENTRY_NO_WRITE != 0 || !inside => Err(fault(Fault::Write)),
-            false if page & ENTRY_NO_READ != 0 || !inside => Err(fault(Fault::Read)),
+            true if page & ENTRY_NO_WRITE != 0 => Err(fault(Fault::Write)),
+            false if page & ENTRY_NO_READ != 0 => Err(fault(Fault::Read)),
+            _ if !inside => Err(fault(Fault::Region)),
             _ => Ok(target(page) + offset),
         }
     }
@@ -488,7 +506,7 @@ impl MmioDevice for Dart {
                 .ok_or_else(|| fail("unknown DART APF register"));
         }
         let value = match offset {
-            PARAMS1 => PARAMS1_PAGE_SHIFT,
+            PARAMS1 => PARAMS1_VALUE,
             PARAMS2 => BYPASS_SUPPORT,
             PARAMS3 => PARAMS3_VALUE,
             PARAMS4 => self.streams as u32,
@@ -776,7 +794,10 @@ mod tests {
     fn streams_translate_through_two_levels_or_bypass() {
         let (mut dart, mut ram, mut latch) = setup();
         let mut access = Access::new(0, 0, &mut latch);
-        assert_eq!(dart.read(PARAMS1, Width::Word, &mut access), Ok(0xe << 24));
+        assert_eq!(
+            dart.read(PARAMS1, Width::Word, &mut access),
+            Ok(1 << 31 | 0xe << 24)
+        );
         assert_eq!(dart.read(PARAMS2, Width::Word, &mut access), Ok(1));
         assert_eq!(
             dart.read(PARAMS3, Width::Word, &mut access),
@@ -807,6 +828,27 @@ mod tests {
             dart.translate(&mut ram, 1, 0x400_0000, 0x400_0000, false, &mut access),
             Err(fault(Fault::NoPmd))
         );
+        // Page entry 2 allows bytes 0x10..0x1f: a read past them violates
+        // its region.
+        ram.put_u64(LEAVES + 16, table_entry(FRAME) | 4 << 52 | 7 << 40);
+        let narrow = 0x200_8000;
+        assert_eq!(
+            dart.translate(&mut ram, 1, narrow + 0x10, narrow + 0x1f, true, &mut access),
+            Ok(FRAME + 0x10)
+        );
+        for (first, last) in [(0xc, 0xf), (0x1c, 0x20)] {
+            assert_eq!(
+                dart.translate(
+                    &mut ram,
+                    1,
+                    narrow + first,
+                    narrow + last,
+                    false,
+                    &mut access
+                ),
+                Err(fault(Fault::Region))
+            );
+        }
         let read = |dart: &mut Dart, offset, access: &mut Access<'_>| {
             dart.read(offset, Width::Word, access).unwrap() as u32
         };
