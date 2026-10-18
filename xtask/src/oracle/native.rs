@@ -241,8 +241,11 @@ impl Translation {
         Ok(admitted.then_some(Self::ScalableLeaf(leaf, profile)))
     }
 
-    /// Admit a System word the system-mode profile exits on at once.
+    /// Admit a System word the system-mode profile exits on, after only
+    /// hints it compiles inline, which access no memory.
     pub fn system(words: &[u32]) -> Result<Self> {
+        const HINT_MASK: u32 = 0xffff_f01f;
+        const HINT: u32 = 0xd503_201f;
         let source: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
         let compiled = stela_compiler::block::compile_for_target(
             &source,
@@ -251,9 +254,10 @@ impl Translation {
             target(),
         )
         .map_err(|error| anyhow::anyhow!(error))?;
+        let inline = compiled.native.source_map.len() - 1;
         ensure!(
-            compiled.native.source_map.len() == 1,
-            "system lane cases start with a System word that ends its block"
+            words[..inline].iter().all(|word| word & HINT_MASK == HINT),
+            "system lane cases run only hints before the System word that ends their block"
         );
         Ok(Self::System)
     }
@@ -273,7 +277,8 @@ impl Translation {
     /// the windows.
     pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
         if let Self::System = self {
-            // SAFETY: `system` admitted only words that exit at once.
+            // SAFETY: `system` admitted only blocks that reach their exit
+            // without a native memory access.
             return unsafe { super::system::run(case, target()) };
         }
         let windows = windows()?.lock().expect("native windows lock");
