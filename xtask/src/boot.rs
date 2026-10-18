@@ -142,13 +142,14 @@ pub struct Run {
     /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
     #[arg(long, requires = "bundle")]
     directory_volume: bool,
-    /// Attach a raw GPT disk over NVMe, preserving writes. Select its
-    /// partition with --storage SERIAL:GUID in --append.
+    /// Attach a raw GPT disk over NVMe, preserving writes; repeat for more
+    /// disks. Select a partition with --storage SERIAL:GUID in --append.
     #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
-    storage_disk: Option<PathBuf>,
-    /// NVMe serial for --storage-disk.
-    #[arg(long, requires = "storage_disk", default_value = "STELAANS", value_parser = parse_storage_serial)]
-    storage_serial: String,
+    storage_disk: Vec<PathBuf>,
+    /// NVMe serial of the --storage-disk at the same position. One disk
+    /// defaults to STELAANS; several disks need distinct serials each.
+    #[arg(long, requires = "storage_disk", value_parser = parse_storage_serial)]
+    storage_serial: Vec<String>,
     /// Fresh directory for the boot volume, serial log and run report.
     #[arg(long)]
     output: PathBuf,
@@ -234,6 +235,30 @@ fn parse_storage_serial(value: &str) -> Result<String, String> {
     }
 }
 
+/// Pair each --storage-disk with its serial. Distinct serials keep the
+/// guest's `--storage SERIAL:GUID` selection unambiguous.
+fn storage_disks(paths: &[PathBuf], serials: &[String]) -> Result<Vec<(PathBuf, String)>> {
+    let serials = match (paths.len(), serials.len()) {
+        (1, 0) => vec!["STELAANS".to_owned()],
+        (disks, named) if disks == named => serials.to_vec(),
+        _ => bail!("each --storage-disk needs its own --storage-serial"),
+    };
+    for (index, serial) in serials.iter().enumerate() {
+        ensure!(
+            !serials[..index].contains(serial),
+            "storage serial {serial} is attached twice"
+        );
+    }
+    for path in paths {
+        ensure!(
+            path.is_file(),
+            "storage disk is not a file: {}",
+            path.display()
+        );
+    }
+    Ok(paths.iter().cloned().zip(serials).collect())
+}
+
 pub fn run(command: Command) -> Result<ExitCode> {
     match command {
         Command::Build { release } => {
@@ -280,13 +305,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         arguments.timeout > 0.0 && arguments.timeout <= limit,
         "timeout must be in (0, {limit}] seconds"
     );
-    if let Some(path) = &arguments.storage_disk {
-        ensure!(
-            path.is_file(),
-            "storage disk is not a file: {}",
-            path.display()
-        );
-    }
+    let attached = storage_disks(&arguments.storage_disk, &arguments.storage_serial)?;
     let image = match arguments.image {
         Some(image) => image,
         None => build(true)?,
@@ -533,18 +552,15 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         None if picker => command.args(["-monitor", "stdio"]),
         None => command.args(["-monitor", "none"]),
     };
-    if let Some(path) = &arguments.storage_disk {
+    for (index, (path, serial)) in attached.iter().enumerate() {
         command
             .arg("-drive")
             .arg(format!(
-                "if=none,id=ans,format=raw,file={}",
+                "if=none,id=ans{index},format=raw,file={}",
                 option_path(path)
             ))
             .arg("-device")
-            .arg(format!(
-                "nvme,drive=ans,serial={}",
-                arguments.storage_serial
-            ));
+            .arg(format!("nvme,drive=ans{index},serial={serial}"));
     }
     if let Some(port) = arguments.gdb {
         command
@@ -651,8 +667,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "bundle": arguments.bundle,
         "preboot_disk": arguments.preboot_disk,
         "directory_volume": arguments.directory_volume,
-        "storage_disk": arguments.storage_disk,
-        "storage_serial": arguments.storage_serial,
+        "storage_disks": attached
+            .iter()
+            .map(|(path, serial)| json!({ "path": path, "serial": serial }))
+            .collect::<Vec<_>>(),
         "first_unsupported": unsupported,
         "returncode": code,
         "payload": arguments.payload.map(|mode| {
@@ -945,8 +963,8 @@ mod tests {
         let crate::Task::Boot(Command::Run(run)) = cli.task else {
             panic!("boot run");
         };
-        assert_eq!(run.storage_serial, "ANS-1");
-        assert_eq!(run.storage_disk.unwrap(), Path::new("/tmp/disk.raw"));
+        assert_eq!(run.storage_serial, ["ANS-1"]);
+        assert_eq!(run.storage_disk, [Path::new("/tmp/disk.raw")]);
         assert!(run.directory_volume);
         assert_eq!(run.append.as_deref(), Some("--system --storage ANS-1:GUID"));
         for extra in [
@@ -966,6 +984,19 @@ mod tests {
                 .collect();
             assert!(crate::Cli::try_parse_from(args).is_err());
         }
+    }
+
+    #[test]
+    fn storage_disks_pair_with_distinct_serials() {
+        let file = std::env::current_exe().unwrap();
+        let one = storage_disks(std::slice::from_ref(&file), &[]).unwrap();
+        assert_eq!(one, [(file.clone(), "STELAANS".to_owned())]);
+        let two = [file.clone(), file.clone()];
+        let serials = ["TARGET".to_owned(), "SOURCE".to_owned()];
+        assert_eq!(storage_disks(&two, &serials).unwrap()[1].1, "SOURCE");
+        assert!(storage_disks(&two, &[]).is_err());
+        assert!(storage_disks(&two, &["A".to_owned(), "A".to_owned()]).is_err());
+        assert!(storage_disks(&[file.with_extension("missing")], &[]).is_err());
     }
 
     #[test]
