@@ -161,6 +161,8 @@ pub struct State {
     pub fills: u64,
     pub resets: u64,
     pub stray: u64,
+    /// TSC ticks spent in compiled guest code, its exits and faults.
+    pub native_ticks: u64,
 }
 
 struct Global(UnsafeCell<Option<State>>);
@@ -253,6 +255,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             tsc_hz: config.tsc_hz,
             apic,
             fills: 0,
+            native_ticks: 0,
             resets: 0,
             stray: 0,
         });
@@ -288,6 +291,11 @@ fn start_apic() {
 pub fn statistics() -> (u64, u64, u64, u64) {
     let state = state();
     (state.fills, state.resets, state.stray, state.apic.hz)
+}
+
+/// TSC ticks spent in compiled guest code so far.
+pub fn native_ticks() -> u64 {
+    state().native_ticks
 }
 
 impl State {
@@ -560,10 +568,12 @@ impl Host for BareHost {
 
     unsafe fn execute(&mut self, code: NativeCode, guest: &mut GuestState) -> NativeExit {
         state().native = true;
+        let entered = rdtsc();
         // SAFETY: the engine passes installed system-mode block code.
         let exit = unsafe { stela_enter_block(guest, code.0) };
         let state = state();
         state.native = false;
+        state.native_ticks += rdtsc() - entered;
         if exit.kind == FAULT_KIND
             && let Some(recorded) = state.recorded.take()
         {
