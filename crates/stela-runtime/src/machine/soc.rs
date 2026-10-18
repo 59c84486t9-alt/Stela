@@ -19,8 +19,8 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, ans, asc, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse, nor, power,
-    ptd, sart, spi, wake,
+    amcc, ans, asc, atc_phy, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse,
+    i2c, nor, power, ptd, sart, spi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -735,6 +735,13 @@ pub const NOR: &str = "nor-flash,spi";
 pub const NVRAM: &str = "nvram,chrp";
 /// GPIO output provider compatible.
 pub const GPIO: &str = "gpio,t8101";
+/// Partial Type-C models: intentionally unadvertised until original startup
+/// and firmware/transport effects have been qualified.
+pub const I2C: &str = "i2c,t8101";
+pub const HPM_MANAGER: &str = "usbc,manager";
+pub const HPM: &str = "usbc,cd3217";
+pub const RETIMER: &str = "atcrt";
+pub const ATC_PHY: &str = "atc-phy,t8112";
 /// A NOR partition read by AppleDiagnosticDataAccessReadOnly (kernel file
 /// 0x235ecb8 start, 0x235f1e8 lazy whole-region read, 0x235f788 forwarding).
 pub const SYSCFG: &str = "diagnostic-data,format1";
@@ -832,6 +839,10 @@ pub struct SepDevice {
 pub struct Board {
     /// SPI1, its NOR image and the GPIO chip-select wire, when visible.
     pub spi_nor: Option<SpiNor>,
+    /// Explicitly visible I2C controllers and their addressed targets.
+    pub i2cs: Vec<I2cController>,
+    /// Explicitly visible T8112 PHYs. Prepared bundles still hide them.
+    pub typec_phys: Vec<TypecPhy>,
     pub cpus: Cpus,
     /// `/arm-io/uart0`, a `uart-1,samsung`.
     pub uart: Device,
@@ -885,6 +896,182 @@ pub struct Board {
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+/// An I2C child address is the first 32-bit `reg` cell followed by bus
+/// timing, not a 64-bit MMIO address. HPM nubs instead use `hpm-iic-addr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct I2cAddress {
+    pub address: u8,
+    pub compatible: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct I2cController {
+    pub device: Device,
+    pub targets: Vec<I2cAddress>,
+}
+
+/// Digital PHY placement preserves all ADT views for evidence, but maps the
+/// canonical USB2/core regions once. The pipehandler belongs to the same PHY
+/// via `usb-drd*/atc-phy-parent`, whose `reg[3]` supplies its aperture.
+/// Unqualified shared fuse, AXI and analog-only views are not claimed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypecPhy {
+    pub views: Vec<(u64, u64)>,
+    pub usb2: (u64, u64),
+    pub core: (u64, u64),
+    pub pipe: (u64, u64),
+    pub port: u32,
+}
+
+fn typec_devices(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    aic: u32,
+) -> Result<(Vec<I2cController>, Vec<TypecPhy>), String> {
+    let mut i2cs = Vec::new();
+    let mut phys = Vec::new();
+    let mut failure = None;
+    let place = |(offset, bytes): (u64, u64)| -> Result<_, String> {
+        let first = translate(offset).ok_or("Type-C range starts outside arm-io ranges")?;
+        if bytes == 0
+            || offset.checked_add(bytes - 1).and_then(translate) != first.checked_add(bytes - 1)
+        {
+            return Err("Type-C range exceeds one arm-io translation".into());
+        }
+        Ok((first, bytes))
+    };
+    io.visit(&mut |node| {
+        if failure.is_some() {
+            return;
+        }
+        let result = (|| -> Result<(), String> {
+            if node.compatible(I2C) {
+                let regs = node.pairs("reg").ok_or("I2C controller has no reg pairs")?;
+                let &[range] = regs.as_slice() else {
+                    return Err("I2C controller requires one reg range".into());
+                };
+                let (physical, bytes) = place(range)?;
+                if bytes != i2c::BYTES
+                    || !physical.is_multiple_of(i2c::BYTES)
+                    || node.first_u32("interrupt-parent") != Some(aic)
+                {
+                    return Err("unsupported I2C aperture or interrupt parent".into());
+                }
+                let irq = node
+                    .first_u32("interrupts")
+                    .filter(|&i| u16::try_from(i).is_ok())
+                    .ok_or("I2C interrupt is absent or too large")?;
+                let mut targets = Vec::new();
+                let mut bad = None;
+                let mut first = true;
+                node.visit(&mut |target| {
+                    if first {
+                        first = false;
+                        return;
+                    }
+                    let Some(compatible) = target
+                        .property("compatible")
+                        .and_then(|b| b.split(|b| *b == 0).next())
+                        .and_then(|b| core::str::from_utf8(b).ok())
+                    else {
+                        return;
+                    };
+                    let address = if target.compatible(HPM) {
+                        target.first_u32("hpm-iic-addr")
+                    } else {
+                        target.first_u32("reg")
+                    };
+                    match address
+                        .and_then(|v| u8::try_from(v).ok())
+                        .filter(|&v| v > 0 && v < 0x78)
+                    {
+                        Some(address)
+                            if !targets.iter().any(|t: &I2cAddress| t.address == address) =>
+                        {
+                            targets.push(I2cAddress {
+                                address,
+                                compatible: compatible.into(),
+                            })
+                        }
+                        _ => {
+                            bad = Some(
+                                "I2C target has an invalid, missing or duplicate seven-bit address",
+                            )
+                        }
+                    }
+                })
+                .ok_or("I2C target walk failed")?;
+                if let Some(error) = bad {
+                    return Err(error.into());
+                }
+                i2cs.push(I2cController {
+                    device: Device {
+                        physical,
+                        bytes,
+                        irq,
+                    },
+                    targets,
+                });
+            }
+            if node.compatible(ATC_PHY) {
+                let reg = node.pairs("reg").ok_or("ATC PHY has no reg pairs")?;
+                if reg.len() != 29 {
+                    return Err("T8112 ATC PHY requires its 29 register views".into());
+                }
+                let views = reg.into_iter().map(place).collect::<Result<Vec<_>, _>>()?;
+                let usb2 = views[0];
+                let core = (views[3].0, atc_phy::CORE_BYTES);
+                if usb2.1 != atc_phy::WINDOW_BYTES
+                    || views[2].0
+                        != core
+                            .0
+                            .checked_add(0x20000)
+                            .ok_or("ATC core address overflows")?
+                {
+                    return Err("ATC USB2/core views disagree with the T8112 layout".into());
+                }
+                let phandle = node
+                    .first_u32("AAPL,phandle")
+                    .ok_or("ATC PHY has no phandle")?;
+                let port = node
+                    .first_u32("port-number")
+                    .filter(|&p| p != 0)
+                    .ok_or("ATC PHY has no port number")?;
+                let mut pipe = None;
+                let mut duplicate = false;
+                io.visit(&mut |controller| {
+                    if controller.property("device_type") == Some(b"usb-drd\0".as_slice())
+                        && controller.first_u32("atc-phy-parent") == Some(phandle)
+                    {
+                        duplicate |= pipe.is_some();
+                        pipe = controller.pairs("reg").and_then(|r| r.get(3).copied());
+                    }
+                })
+                .ok_or("ATC controller walk failed")?;
+                let pipe = place(pipe.ok_or("ATC PHY has no controller pipehandler view")?)?;
+                if duplicate || pipe.1 != atc_phy::WINDOW_BYTES {
+                    return Err("ambiguous or incomplete ATC pipehandler view".into());
+                }
+                phys.push(TypecPhy {
+                    views,
+                    usb2,
+                    core,
+                    pipe,
+                    port,
+                });
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            failure = Some(error);
+        }
+    })
+    .ok_or("Type-C DeviceTree walk failed")?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok((i2cs, phys))
 }
 
 /// Placement from SPI `reg`/`interrupts`, `function-spi_cs0`, the GPIO
@@ -2673,6 +2860,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let inputs = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
     let memory_controller =
         memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
+    let (i2cs, typec_phys) = typec_devices(&io, &translate, phandle)?;
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
     let ans = ans_controller(&io, &translate)?;
@@ -2693,6 +2881,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     let spi_nor = spi_nor(&root, &io, &translate, phandle)?;
     Ok(Board {
+        i2cs,
+        typec_phys,
         cluster_events,
         bridges,
         soc_dpe,
@@ -3489,6 +3679,125 @@ mod tests {
             Err(
                 "/arm-io/dart-sio has unsupported instance kinds, numbering or APF topology".into()
             )
+        );
+    }
+
+    #[test]
+    fn typec_placement_distinguishes_i2c_addresses_from_mmio_and_preserves_phy_aliases() {
+        use crate::machine::adt::encode;
+        let c = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let r = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let hpm = encode(
+            &[
+                ("name", b"hpm0\0"),
+                ("compatible", b"usbc,cd3217\0"),
+                ("hpm-iic-addr", &c(&[0x38])),
+            ],
+            &[],
+        );
+        let manager = encode(
+            &[
+                ("name", b"hpmBusManager\0"),
+                ("compatible", b"usbc,manager\0"),
+                ("reg", &c(&[0x6b, 2500, 0, 0])),
+            ],
+            &[hpm],
+        );
+        let i2c = encode(
+            &[
+                ("name", b"i2c0\0"),
+                ("compatible", b"i2c,t8101\0"),
+                ("reg", &r(&[0x35010000, 0x4000])),
+                ("interrupt-parent", &c(&[0x63])),
+                ("interrupts", &c(&[761])),
+            ],
+            &[manager],
+        );
+        let mut views = vec![(0x383000000, 0x4000); 29];
+        views[0] = (0x382a90000, 0x4000);
+        views[1] = (0x382800000, 0x4000);
+        views[2] = (0x383020000, 0x4000);
+        views[4] = (0x383002000, 0x4000);
+        let phy = |compatible: &[u8]| {
+            encode(
+                &[
+                    ("name", b"atc-phy0\0"),
+                    ("compatible", compatible),
+                    ("AAPL,phandle", &c(&[0xa2])),
+                    ("port-number", &c(&[1])),
+                    (
+                        "reg",
+                        &r(&views.iter().flat_map(|&(a, n)| [a, n]).collect::<Vec<_>>()),
+                    ),
+                ],
+                &[],
+            )
+        };
+        let usb = encode(
+            &[
+                ("name", b"usb-drd0\0"),
+                ("device_type", b"usb-drd\0"),
+                ("atc-phy-parent", &c(&[0xa2])),
+                (
+                    "reg",
+                    &r(&[
+                        0x382280000,
+                        0x11800,
+                        0x382200000,
+                        0x4000,
+                        0x38228c000,
+                        0x5800,
+                        0x382a84000,
+                        0x4000,
+                    ]),
+                ),
+            ],
+            &[],
+        );
+        // ACIO also references the PHY, but is not its USB pipehandler.
+        let acio = encode(
+            &[
+                ("name", b"acio0\0"),
+                ("device_type", b"acio\0"),
+                ("atc-phy-parent", &c(&[0xa2])),
+                ("reg", &r(&[0x381f00000, 0x100000])),
+            ],
+            &[],
+        );
+        let io = encode(
+            &[("name", b"arm-io\0")],
+            &[i2c.clone(), phy(b"atc-phy,t8112\0"), usb.clone(), acio],
+        );
+        let translate = |a| Some(if a < 0x100000000 { a + 0x200000000 } else { a });
+        let (buses, phys) = typec_devices(&Node::root(&io).unwrap(), &translate, 0x63).unwrap();
+        assert_eq!(buses[0].device.physical, 0x235010000);
+        assert_eq!(buses[0].device.irq, 761);
+        assert_eq!(
+            buses[0]
+                .targets
+                .iter()
+                .map(|t| t.address)
+                .collect::<Vec<_>>(),
+            [0x6b, 0x38]
+        );
+        assert_eq!(phys[0].usb2, (0x382a90000, 0x4000));
+        assert_eq!(phys[0].core, (0x383000000, atc_phy::CORE_BYTES));
+        assert_eq!(phys[0].pipe, (0x382a84000, 0x4000));
+        assert_eq!(phys[0].views, views);
+        assert!(typec_devices(&Node::root(&io).unwrap(), &translate, 0x99).is_err());
+        assert!(typec_devices(&Node::root(&io).unwrap(), &|_| None, 0x63).is_err());
+        let io = encode(&[("name", b"arm-io\0")], &[phy(b"atc-phy,t8112\0")]);
+        assert!(typec_devices(&Node::root(&io).unwrap(), &translate, 0x63).is_err());
+        for compatible in [I2C, HPM_MANAGER, HPM, RETIMER, ATC_PHY] {
+            assert!(!models(compatible, |_| None));
+        }
+        // Hidden PHYs are not parsed or mapped merely because reg survives.
+        let io = encode(&[("name", b"arm-io\0")], &[i2c, phy(b"hidden\0"), usb]);
+        assert!(
+            typec_devices(&Node::root(&io).unwrap(), &translate, 0x63)
+                .unwrap()
+                .1
+                .is_empty()
         );
     }
 

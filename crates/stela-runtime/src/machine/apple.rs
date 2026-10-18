@@ -14,6 +14,7 @@ use crate::platform::apple::{
     amcc::{self, Amcc},
     ans::Ans,
     asc::{self, Asc},
+    atc_phy::{self, AtcPhy},
     bridge::Bridge,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
@@ -26,6 +27,7 @@ use crate::platform::apple::{
     energy::{self, Energy},
     fuse::{self, AonFuses},
     gpio::Gpio,
+    i2c::{self, I2c},
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
     lockdown::{self, Lockdown},
@@ -459,6 +461,46 @@ impl AppleDevices {
             }
         }
         self.storage_masters.push((ans, sart));
+        Ok(())
+    }
+
+    /// Place an explicitly visible I2C controller. Addressed but unqualified
+    /// targets refuse; hiding a target must not turn its protocol into success.
+    pub fn add_i2c(&mut self, placement: &super::soc::I2cController) -> Result<(), String> {
+        let device = placement.device;
+        let mut model = I2c::new(AicInput::new(0, device.irq as u16));
+        for target in &placement.targets {
+            let reason = match target.compatible.as_str() {
+                super::soc::HPM_MANAGER => {
+                    "HPM bus-manager interrupt summary and multiplexing are not yet modeled"
+                }
+                super::soc::HPM => {
+                    "HPM original-driver firmware startup and GPIO wiring are not yet qualified"
+                }
+                super::soc::RETIMER => "ATC retimer register protocol is undetermined",
+                _ => "I2C target protocol is not modeled",
+            };
+            model
+                .attach(target.address, Box::new(i2c::Unmodeled(reason)))
+                .map_err(String::from)?;
+        }
+        let id = self.bus.add(Box::new(model));
+        self.bus
+            .map(id, device.physical, device.bytes, 0)
+            .map_err(|e| format!("I2C placement: {e:?}"))
+    }
+
+    /// Place canonical PHY regions once. ADT aliases inside the core resolve
+    /// by physical address; no length concatenation or duplicate storage.
+    pub fn add_atc_phy(&mut self, placement: &super::soc::TypecPhy) -> Result<(), MapError> {
+        let id = self.bus.add(Box::new(AtcPhy::new()));
+        for ((physical, bytes), offset) in [
+            (placement.usb2, atc_phy::USB2),
+            (placement.core, 0),
+            (placement.pipe, atc_phy::PIPE),
+        ] {
+            self.bus.map(id, physical, bytes, offset)?;
+        }
         Ok(())
     }
 

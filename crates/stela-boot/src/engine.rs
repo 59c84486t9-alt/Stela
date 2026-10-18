@@ -409,6 +409,14 @@ fn devices(
             devices.add_cpu_start(physical, clusters, &mpidrs)?;
         }
     }
+    for controller in board.map_or(&[][..], |board| &board.i2cs) {
+        devices.add_i2c(controller)?;
+    }
+    for phy in board.map_or(&[][..], |board| &board.typec_phys) {
+        devices
+            .add_atc_phy(phy)
+            .map_err(|error| alloc::format!("ATC PHY placement: {error:?}"))?;
+    }
     let mut darts = Vec::new();
     for dart in board.map_or(&[][..], |board| &board.darts) {
         let ranges: Vec<_> = dart
