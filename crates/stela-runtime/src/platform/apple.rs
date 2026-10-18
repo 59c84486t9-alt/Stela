@@ -13,6 +13,7 @@ pub mod aic;
 pub mod aic1;
 pub mod amcc;
 pub mod asc;
+pub mod bridge;
 pub mod bus;
 pub mod cluster;
 pub mod counter;

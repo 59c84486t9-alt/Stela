@@ -415,6 +415,15 @@ fn devices(
             blocks.len()
         ));
     }
+    for bank in board.map_or(&[][..], |b| &b.bridges) {
+        devices.add_bridge(
+            bank.physical,
+            &bank.fields,
+            bank.header,
+            &bank.configs,
+            bank.axi,
+        )?;
+    }
     if let Some(bank) = board.and_then(|b| b.soc_dpe.as_ref()) {
         devices.add_soc_dpe(bank.physical, &bank.samples)?;
     }

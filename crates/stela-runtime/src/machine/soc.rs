@@ -19,7 +19,7 @@ use super::{
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, cluster, cpustart, dart, dpe, energy, fuse, power, ptd, wake,
+    amcc, bridge, cluster, cpustart, dart, dpe, energy, fuse, power, ptd, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -73,6 +73,7 @@ struct Soc {
     wake_masks: Option<WakeLayout>,
     power_banks: &'static [(usize, power::Kind)],
     dpe_reg: Option<usize>,
+    bridge_fields: Option<&'static [&'static [(u64, u32)]]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -185,6 +186,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -203,6 +205,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -221,6 +224,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -267,6 +271,7 @@ const SOCS: [Soc; 14] = [
             (32, power::Kind::Gating),
         ],
         dpe_reg: Some(29),
+        bridge_fields: Some(&bridge::tunables::T8112),
     },
     Soc {
         chip_id: 0x6020,
@@ -285,6 +290,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -303,6 +309,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -321,6 +328,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -339,6 +347,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -357,6 +366,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -375,6 +385,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -393,6 +404,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -411,6 +423,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -429,6 +442,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -447,6 +461,7 @@ const SOCS: [Soc; 14] = [
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
+        bridge_fields: None,
     },
 ];
 
@@ -741,6 +756,8 @@ pub struct Board {
     pub power_banks: Vec<PowerBank>,
     /// SOC DPE controls and absolute DT energy samples.
     pub soc_dpe: Option<SocDpe>,
+    /// DT bridge maps, selected counter configurations and device dependencies.
+    pub bridges: Vec<BridgeBank>,
     /// AON/SOC/cluster performance banks and DT-selected counters.
     pub performance: Vec<PerfBank>,
     /// AOP wake masks and reporting source IDs.
@@ -748,6 +765,17 @@ pub struct Board {
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeBank {
+    pub physical: u64,
+    pub fields: Vec<(u64, u32)>,
+    pub header: [u8; 4],
+    pub configs: Vec<[u8; 36]>,
+    pub axi: Option<[u8; 4]>,
+    /// IDs whose `device-bridges` dependency list names this bridge.
+    pub devices: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1116,6 +1144,7 @@ fn pmgr_registers(
         performance: Vec::new(),
         power_banks: Vec::new(),
         soc_dpe: None,
+        bridges: Vec::new(),
     };
     let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
         return Ok(none);
@@ -1176,6 +1205,7 @@ fn pmgr_registers(
             return Err("/arm-io/pmgr reg[0] does not hold the CPU start registers".into());
         }
     };
+    let bridges = place_bridges(&node, &reg, soc.bridge_fields)?;
     let power_banks = place_power_banks(&reg, soc.power_banks)?;
     let soc_dpe = soc
         .dpe_reg
@@ -1188,6 +1218,7 @@ fn pmgr_registers(
         .map(|layout| wake_bank(&node, &reg, layout))
         .transpose()?;
     Ok(PmgrRegisters {
+        bridges,
         soc_dpe,
         power_banks,
         wake_masks,
@@ -1197,6 +1228,99 @@ fn pmgr_registers(
         aon_fuses: fuses,
         cpu_start,
     })
+}
+
+/// Bridge map and source decoding: kernel file 0x2b71bd8..0x2b71fd8,
+/// device dependencies 0x2b73c80 and version3 counter programmer 0x2b96214.
+/// `reg` always passes through arm-io ranges, including high PCIe windows.
+fn place_bridges(
+    node: &Node<'_>,
+    reg: &[Option<(u64, u64)>],
+    fields: Option<&[&[(u64, u32)]]>,
+) -> Result<Vec<BridgeBank>, String> {
+    let Some(first) = node.first_u32("bridge-reg-index") else {
+        return Ok(Vec::new());
+    };
+    let fields = fields.ok_or("this SoC has no documented bridge register layouts")?;
+    let count = node
+        .first_u32("#bridges")
+        .ok_or("PMGR has no bridge count")? as usize;
+    if count > fields.len()
+        || node.first_u32("bridge-settings-version") != Some(1)
+        || node.first_u32("bridge-counter-version") != Some(3)
+    {
+        return Err("unsupported bridge count or configuration version".into());
+    }
+    let headers = node
+        .property("bridge-counters")
+        .ok_or("PMGR has no bridge counter headers")?;
+    let configs = node.property("bridge-counter-configs").unwrap_or_default();
+    let dependencies = node.property("device-bridges").unwrap_or_default();
+    let axi = node.property("axi2af-axi-config");
+    if headers.len() != count * 4
+        || !configs.len().is_multiple_of(36)
+        || !dependencies.len().is_multiple_of(76)
+        || axi.is_some_and(|a| a.len() != count * 4)
+    {
+        return Err("PMGR bridge properties have partial records or wrong counts".into());
+    }
+    let all_configs = configs.as_chunks::<36>().0;
+    let mut banks = Vec::new();
+    let optional = node.first_u32("optional-bridge-mask").unwrap_or(0);
+    if optional != 0 {
+        return Err("optional bridge suppression requires an established selection policy".into());
+    }
+    for (id, tunables) in fields.iter().enumerate().take(count) {
+        let index = (first as usize)
+            .checked_add(id)
+            .ok_or("bridge reg index overflows")?;
+        let (physical, bytes) = reg
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or("bridge names an unmapped DT reg window")?;
+        let header: [u8; 4] = headers[id * 4..id * 4 + 4].try_into().expect("header");
+        let start = usize::from(header[2]);
+        let end = start + usize::from(header[3]);
+        let selected = all_configs
+            .get(start..end)
+            .ok_or("bridge counter header exceeds configuration records")?
+            .to_vec();
+        let axi = axi.map(|a| a[id * 4..id * 4 + 4].try_into().expect("4 bytes"));
+        let model = bridge::Bridge::new(tunables, header, &selected, axi).map_err(String::from)?;
+        for o in model.offsets() {
+            if o.checked_add(4).is_none_or(|end| end > bytes)
+                || physical.checked_add(o + 4).is_none()
+            {
+                return Err("bridge configuration lies outside its DT range".into());
+            }
+        }
+        let mut devices = Vec::new();
+        for entry in dependencies.as_chunks::<76>().0 {
+            // The first slot may be bridge0; subsequent zero slots terminate
+            // the list. Names and device IDs never choose a hardware base.
+            for (slot, &bridge) in entry[4..].iter().enumerate() {
+                if slot != 0 && bridge == 0 {
+                    break;
+                }
+                if usize::from(bridge) >= count {
+                    return Err("device-bridges names an absent bridge".into());
+                }
+                if usize::from(bridge) == id && !devices.contains(&entry[3]) {
+                    devices.push(entry[3]);
+                }
+            }
+        }
+        banks.push(BridgeBank {
+            physical,
+            fields: tunables.to_vec(),
+            header,
+            configs: selected,
+            axi,
+            devices,
+        });
+    }
+    Ok(banks)
 }
 
 /// SOC DPE direct split-word records have group 0x1d, die mask 1,
@@ -1471,6 +1595,7 @@ fn energy_banks(
 
 /// The PMGR registers the machine models besides its power states.
 struct PmgrRegisters {
+    bridges: Vec<BridgeBank>,
     soc_dpe: Option<SocDpe>,
     power_banks: Vec<PowerBank>,
     wake_masks: Option<WakeBank>,
@@ -1768,6 +1893,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
+        bridges,
         soc_dpe,
         power_banks,
         wake_masks,
@@ -1779,6 +1905,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     Ok(Board {
+        bridges,
         soc_dpe,
         power_banks,
         wake_masks,
@@ -2459,6 +2586,40 @@ mod tests {
                 .power_states,
             None
         );
+    }
+
+    #[test]
+    fn bridge_headers_configs_axi_and_dependencies_place_the_translated_window() {
+        use crate::machine::adt::encode;
+        let cells = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
+        let mut config = [0u8; 36];
+        config[1] = 7;
+        let mut dependency = [0u8; 76];
+        dependency[3] = 9;
+        let tree = encode(
+            &[
+                ("bridge-reg-index", &cells(&[1])),
+                ("#bridges", &cells(&[1])),
+                ("bridge-settings-version", &cells(&[1])),
+                ("bridge-counter-version", &cells(&[3])),
+                ("bridge-counters", &[0, 0x80, 0, 1]),
+                ("bridge-counter-configs", &config),
+                ("axi2af-axi-config", &[0, 0x20, 0x18, 8]),
+                ("device-bridges", &dependency),
+            ],
+            &[],
+        );
+        let n = Node::root(&tree).unwrap();
+        let fields: &[&[(u64, u32)]] = &[&[(0, 0x103)]];
+        let banks =
+            place_bridges(&n, &[None, Some((0x6_8c00_0000, 0x1000000))], Some(fields)).unwrap();
+        assert_eq!(banks[0].physical, 0x6_8c00_0000);
+        assert_eq!(banks[0].devices, vec![9]);
+        assert_eq!(banks[0].configs, vec![config]);
+        assert_eq!(banks[0].axi, Some([0, 0x20, 0x18, 8]));
+        assert!(place_bridges(&n, &[None, Some((0, 0x100))], Some(fields)).is_err());
+        assert!(place_bridges(&n, &[None], Some(fields)).is_err());
+        assert!(place_bridges(&n, &[], None).is_err());
     }
 
     #[test]

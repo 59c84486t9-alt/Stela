@@ -12,6 +12,7 @@ use crate::platform::apple::{
     aic::{Aic2, Aic2Config},
     aic1::Aic1,
     amcc::{self, Amcc},
+    bridge::Bridge,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
     cpustart::{self, CpuStart},
@@ -389,6 +390,31 @@ impl AppleDevices {
             self.bus
                 .map(device, base + offset, bytes, offset)
                 .map_err(|error| format!("CPU cluster placement: {error:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// One fabric bridge; only described configuration and command words map.
+    pub fn add_bridge(
+        &mut self,
+        physical: u64,
+        fields: &[(u64, u32)],
+        header: [u8; 4],
+        configs: &[[u8; 36]],
+        axi: Option<[u8; 4]>,
+    ) -> Result<(), String> {
+        let model = Bridge::new(fields, header, configs, axi).map_err(String::from)?;
+        let offsets = model.offsets();
+        let device = self.bus.add(Box::new(model));
+        for o in offsets {
+            self.bus
+                .map(
+                    device,
+                    physical.checked_add(o).ok_or("bridge address overflows")?,
+                    4,
+                    o,
+                )
+                .map_err(|e| format!("bridge placement: {e:?}"))?;
         }
         Ok(())
     }
