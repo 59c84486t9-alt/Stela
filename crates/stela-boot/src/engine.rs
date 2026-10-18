@@ -333,6 +333,19 @@ fn devices(
             None,
         )?;
     }
+    if let Some(states) = board.and_then(|board| board.power_states.as_ref()) {
+        let blocks: Vec<Range> = states
+            .blocks
+            .iter()
+            .map(|&(physical, bytes)| Range { physical, bytes })
+            .collect();
+        devices.add_power_states(&blocks, &states.registers)?;
+        output::arguments(format_args!(
+            "DEVICES pmgr power-states={} blocks={}\n",
+            states.registers.len(),
+            blocks.len()
+        ));
+    }
     let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
     if let Some(controller) = memory_controller {
         devices.add_memory_controller(

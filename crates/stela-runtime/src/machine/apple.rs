@@ -17,6 +17,7 @@ use crate::platform::apple::{
     interrupt::{CpuIndex, InterruptLatch},
     ipi::{self, Affinity, FastIpi},
     lockdown::Lockdown,
+    pmgr::{ACTIVE, Pmgr, PowerState},
     uart::S5lUart,
     wdt::AppleWdt,
 };
@@ -215,6 +216,25 @@ impl AppleDevices {
             dart: dart.0,
             stream,
         });
+        Ok(())
+    }
+
+    /// The PMGR power-state registers at `registers`, in `blocks` of guest
+    /// PA. The boot firmware's states are not handed off, so each starts
+    /// active.
+    pub fn add_power_states(&mut self, blocks: &[Range], registers: &[u64]) -> Result<(), String> {
+        let states = registers.iter().map(|&address| PowerState {
+            address,
+            initial: ACTIVE,
+        });
+        let model = Pmgr::new(states).map_err(|error| format!("PMGR states: {error:?}"))?;
+        let device = self.bus.add(Box::new(model));
+        for block in blocks {
+            // The model's offsets are guest PAs.
+            self.bus
+                .map(device, block.physical, block.bytes, block.physical)
+                .map_err(|error| format!("PMGR placement: {error:?}"))?;
+        }
         Ok(())
     }
 

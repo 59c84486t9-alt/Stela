@@ -396,6 +396,10 @@ pub const DART: &str = "dart,t8110";
 /// The `compatible` of a DART child naming one client's stream (its `reg`),
 /// which XNU's IODARTMapper binds and clients name as `iommu-parent`.
 pub const IOMMU_MAPPER: &str = "iommu-mapper";
+/// The `compatible` of the PMGR whose power-state registers
+/// `platform::apple::pmgr` models. The engine places them when a tree shows
+/// it; until the rest of the PMGR is modeled, bundles hide it.
+pub const PMGR: &str = "pmgr1,t8112";
 /// The `compatible` of the AES engine the engine models
 /// (`platform::apple::aes`).
 pub const AES: &str = "aes,s8000";
@@ -426,6 +430,18 @@ pub struct Board {
     pub darts: Vec<Iommu>,
     /// `/arm-io/aes`, an `aes,s8000`, when the DeviceTree keeps it.
     pub aes: Option<AesEngine>,
+    /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows a
+    /// `pmgr1,t8112`.
+    pub power_states: Option<PowerStates>,
+}
+
+/// The PMGR power-state registers `/arm-io/pmgr` `ps-regs` and `devices`
+/// place (m1n1 `src/pmgr.c`): each block, the span from a `ps-regs` entry's
+/// base to its last device's register, and each device's register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerStates {
+    pub blocks: Vec<(u64, u64)>,
+    pub registers: Vec<u64>,
 }
 
 /// A `dart,t8110`: its one DART register range (ADT `instance` `TRAD`), its
@@ -636,6 +652,58 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
     })
 }
 
+/// Bytes of one `/arm-io/pmgr` `devices` entry: flags, parents, the
+/// register index in its `ps-regs` block [10], the block [11], the device
+/// id [26..28] and the name [32..48] (m1n1 `struct pmgr_device`).
+const PMGR_DEVICE: usize = 48;
+/// A `devices` entry with no power-state register (m1n1
+/// `PMGR_FLAG_VIRTUAL`).
+const PMGR_VIRTUAL: u32 = 0x10;
+
+/// The power-state registers of `/arm-io/pmgr`, if it is a modeled PMGR.
+fn power_states(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<PowerStates>, String> {
+    let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
+        return Ok(None);
+    };
+    const PATH: &str = "/arm-io/pmgr";
+    let reg = node.pairs("reg").unwrap_or_default();
+    let blocks = node.cells32("ps-regs").unwrap_or_default();
+    let devices = node.property("devices").unwrap_or_default();
+    if blocks.len() % 3 != 0 || devices.len() % PMGR_DEVICE != 0 {
+        return Err(format!("{PATH} ps-regs or devices is not whole entries"));
+    }
+    let mut spans: Vec<Option<(u64, u64)>> = alloc::vec![None; blocks.len() / 3];
+    let mut registers = Vec::new();
+    for entry in devices.as_chunks::<PMGR_DEVICE>().0 {
+        let flags = u32::from_le_bytes(entry[..4].try_into().expect("4 bytes"));
+        if flags & PMGR_VIRTUAL != 0 {
+            continue;
+        }
+        let (index, block) = (u64::from(entry[10]), usize::from(entry[11]));
+        let base = blocks
+            .get(block * 3..block * 3 + 2)
+            .and_then(|cells| {
+                let (range, _) = reg.get(cells[0] as usize)?;
+                Some(translate(*range)? + u64::from(cells[1]))
+            })
+            .ok_or_else(|| format!("{PATH} device names ps-regs block {block} outside reg"))?;
+        let address = base + index * 8;
+        let span = spans[block].get_or_insert((base, 0));
+        span.1 = span.1.max(address + 4 - base);
+        if !registers.contains(&address) {
+            registers.push(address);
+        }
+    }
+    registers.sort_unstable();
+    Ok(Some(PowerStates {
+        blocks: spans.into_iter().flatten().collect(),
+        registers,
+    }))
+}
+
 /// The modeled AES engine under `/arm-io`, if the DeviceTree keeps one; its
 /// `iommu-parent` must be a mapper of a modeled DART.
 fn aes_engine(
@@ -799,6 +867,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
+    let power_states = power_states(&io, &translate)?;
     Ok(Board {
         cpus,
         uart,
@@ -807,6 +876,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         memory_controller,
         darts,
         aes,
+        power_states,
         aic: InterruptController {
             physical,
             inputs,
@@ -1234,6 +1304,66 @@ mod tests {
         assert_eq!(
             board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[aop])),
             Err("/arm-io/dart-sio has 2 register ranges, not one DART".into())
+        );
+    }
+
+    /// CPU devices in a block at the PMGR's first range and a device in a
+    /// block at its second, with a virtual device that has no register.
+    #[test]
+    fn a_pmgr_places_each_devices_power_state_register() {
+        use crate::machine::adt::encode;
+        const MODELED: [&str; 3] = ["uart-1,samsung", "wdt,s5l8960x", "aic,2"];
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let u32s = |cells: &[u32]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let u64s = |cells: &[u64]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let device = |flags: u32, index: u8, block: u8, name: &str| {
+            let mut entry = [0u8; PMGR_DEVICE];
+            entry[..4].copy_from_slice(&flags.to_le_bytes());
+            (entry[10], entry[11]) = (index, block);
+            entry[32..32 + name.len()].copy_from_slice(name.as_bytes());
+            entry
+        };
+        let devices = [
+            device(0x2_0000, 0, 1, "ECPU0"),
+            device(0x2_0000, 3, 1, "ECPU3"),
+            device(PMGR_VIRTUAL, 7, 0, "VIRT"),
+            device(0, 2, 0, "SBR"),
+        ]
+        .concat();
+        let pmgr = encode(
+            &[
+                ("name", &z("pmgr")),
+                ("compatible", &z(PMGR)),
+                ("reg", &u64s(&[0x3b70_0000, 0xcc000, 0x3d28_0000, 0x7c000])),
+                ("ps-regs", &u32s(&[1, 0x4000, 0x3ff, 0, 0, 0x3ff])),
+                ("devices", &devices),
+            ],
+            &[],
+        );
+        let found = board(&tree_with_io(0x8112, "Apple M2", MODELED, &[], &[pmgr])).unwrap();
+        assert_eq!(
+            found.power_states,
+            Some(PowerStates {
+                blocks: vec![(0x2_3d28_4000, 0x14), (0x2_3b70_0000, 0x1c)],
+                registers: vec![0x2_3b70_0000, 0x2_3b70_0018, 0x2_3d28_4010],
+            })
+        );
+        // Without the PMGR's compatible, nothing is placed.
+        assert_eq!(
+            board(&tree(0x8112, "Apple M2", MODELED))
+                .unwrap()
+                .power_states,
+            None
         );
     }
 
