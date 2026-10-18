@@ -61,6 +61,10 @@ pub use crate::platform::apple::{
     interrupt::AicInput,
     nor,
     sep::Entropy as SepEntropy,
+    sep::image::signature::{
+        Evidence as SepSignatureEvidence, ManifestEvidence as SepManifestEvidence,
+        inspect as inspect_sep_signature, verify_manifest as verify_sep_manifest_signature,
+    },
     uart::{ConsoleBusy, ConsoleSink},
 };
 
@@ -2005,81 +2009,94 @@ mod tests {
         const SEP: u64 = 0x25e400000;
         const AUX: u64 = 0x25e050000;
         const RAM: u64 = 0x800000000;
-        for enable in [false, true] {
-            let mut devices = AppleDevices::new();
-            let dart = devices
-                .add_dart(
-                    Range {
-                        physical: DART,
-                        bytes: 0x4000,
-                    },
-                    1,
-                    None,
-                    None,
-                )
-                .unwrap();
-            devices
-                .add_sep(
-                    [
+        let (signed_payload, manifest) = sep::image::signature::tests::inputs();
+        for (image, refusal) in [
+            (
+                b"\x30\x06\x16\x04IM4P".to_vec(),
+                "payload type is malformed",
+            ),
+            (
+                crate::img4::tests::im4p(b"sepi", b"synthetic"),
+                "bare IM4P has no manifest",
+            ),
+            (
+                crate::img4::compose(&signed_payload, &manifest),
+                "signature evidence verified; trust constraints",
+            ),
+        ] {
+            for enable in [false, true] {
+                let mut devices = AppleDevices::new();
+                let dart = devices
+                    .add_dart(
                         Range {
-                            physical: SEP,
-                            bytes: 0x6c000,
+                            physical: DART,
+                            bytes: 0x4000,
                         },
-                        Range {
-                            physical: AUX,
-                            bytes: 0x60000,
-                        },
-                    ],
-                    asc::Lines::default(),
-                    (dart, 0),
-                    Box::new(|_: &mut [u8]| Err("unused entropy")),
-                )
-                .unwrap();
-            devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap();
-            if enable {
-                devices.write(0, DART + 0xc00, 4, 1, 0).unwrap();
-                devices.write(0, DART + 0x1000, 4, 6, 0).unwrap();
-            }
-            let mut ram = Ram::new(RAM, 0x1000);
-            ram.bytes[..8].copy_from_slice(b"\x30\x06\x16\x04IM4P");
-            for (opcode, data) in [(5, 0), (6, (RAM >> 12) as u32)] {
-                let message = Frame {
-                    service: ROM,
-                    tag: 1,
-                    opcode,
-                    parameter: 0,
-                    data,
-                }
-                .mailbox();
-                devices
-                    .write(0, SEP + 0x8800, 8, message.payload, 0)
+                        1,
+                        None,
+                        None,
+                    )
                     .unwrap();
-                devices.write(0, SEP + 0x8808, 8, 0, 0).unwrap();
-                let result = devices.transfer(0, &mut ram, 0);
-                if opcode == 5 {
-                    result.unwrap();
-                    devices.read(0, SEP + 0x8830, 8, 0).unwrap();
-                    devices.read(0, SEP + 0x8838, 8, 0).unwrap();
-                } else {
-                    let Err(DeviceError::Refused(reason)) = result else {
-                        panic!("SEP must not boot from an unauthenticated image");
-                    };
-                    assert!(reason.contains(if enable {
-                        "Image4 authentication"
-                    } else {
-                        "DMA fault"
-                    }));
-                    assert_eq!(devices.read(0, SEP + 0x8114, 4, 0).unwrap(), 1 | 1 << 17);
-                    assert_eq!(ram.bytes[..8], *b"\x30\x06\x16\x04IM4P");
+                devices
+                    .add_sep(
+                        [
+                            Range {
+                                physical: SEP,
+                                bytes: 0x6c000,
+                            },
+                            Range {
+                                physical: AUX,
+                                bytes: 0x60000,
+                            },
+                        ],
+                        asc::Lines::default(),
+                        (dart, 0),
+                        Box::new(|_: &mut [u8]| Err("unused entropy")),
+                    )
+                    .unwrap();
+                devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap();
+                if enable {
+                    devices.write(0, DART + 0xc00, 4, 1, 0).unwrap();
+                    devices.write(0, DART + 0x1000, 4, 6, 0).unwrap();
                 }
+                let mut ram = Ram::new(RAM, 0x1000);
+                ram.bytes[..image.len()].copy_from_slice(&image);
+                let before = ram.bytes.clone();
+                for (opcode, data) in [(5, 0), (6, (RAM >> 12) as u32)] {
+                    let message = Frame {
+                        service: ROM,
+                        tag: 1,
+                        opcode,
+                        parameter: 0,
+                        data,
+                    }
+                    .mailbox();
+                    devices
+                        .write(0, SEP + 0x8800, 8, message.payload, 0)
+                        .unwrap();
+                    devices.write(0, SEP + 0x8808, 8, 0, 0).unwrap();
+                    let result = devices.transfer(0, &mut ram, 0);
+                    if opcode == 5 {
+                        result.unwrap();
+                        devices.read(0, SEP + 0x8830, 8, 0).unwrap();
+                        devices.read(0, SEP + 0x8838, 8, 0).unwrap();
+                    } else {
+                        let Err(DeviceError::Refused(reason)) = result else {
+                            panic!("SEP must not boot from an unauthenticated image");
+                        };
+                        assert!(reason.contains(if enable { refusal } else { "DMA fault" }));
+                        assert_eq!(devices.read(0, SEP + 0x8114, 4, 0).unwrap(), 1 | 1 << 17);
+                        assert_eq!(ram.bytes, before);
+                    }
+                }
+                assert!(
+                    matches!(devices.read(0, AUX, 4, 0), Err(DeviceError::Refused(reason)) if reason.contains("auxiliary"))
+                );
+                assert!(matches!(
+                    devices.read(0, SEP + 0x6c000, 4, 0),
+                    Err(DeviceError::NoDevice)
+                ));
             }
-            assert!(
-                matches!(devices.read(0, AUX, 4, 0), Err(DeviceError::Refused(reason)) if reason.contains("auxiliary"))
-            );
-            assert!(matches!(
-                devices.read(0, SEP + 0x6c000, 4, 0),
-                Err(DeviceError::NoDevice)
-            ));
         }
     }
     #[test]

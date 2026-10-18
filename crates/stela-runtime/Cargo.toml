@@ -22,6 +22,8 @@ sha2 = { version = "0.10", default-features = false }
 # SEP root derivations and secret lifetime; both work without std.
 hmac = { version = "0.12", default-features = false }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+# Public RSA verification for Image4 evidence; no private-key operations.
+crypto-bigint = { version = "0.5", default-features = false }
 # The AES engine model's cipher: constant-time, no_std, AES-NI when present.
 aes = { version = "0.8", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }

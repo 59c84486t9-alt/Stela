@@ -57,9 +57,15 @@ fn element(bytes: &[u8]) -> Result<(u8, &[u8], &[u8]), Img4Error> {
             return Err(Img4Error::Malformed("unsupported DER length"));
         }
         let digits = bytes.get(2..2 + width).ok_or(malformed)?;
+        if digits[0] == 0 {
+            return Err(Img4Error::Malformed("nonminimal DER length"));
+        }
         let length = digits
             .iter()
             .fold(0usize, |n, &b| (n << 8) | usize::from(b));
+        if length < 128 {
+            return Err(Img4Error::Malformed("nonminimal DER length"));
+        }
         (length, 2 + width)
     };
     let end = header.checked_add(length).ok_or(malformed)?;
@@ -109,11 +115,31 @@ pub fn parse(bytes: &[u8]) -> Result<Parts<'_>, Img4Error> {
         let (tag, contents, whole) = element(rest)?;
         match tag {
             CONTEXT_0 => {
+                if parts.manifest.is_some() {
+                    return Err(Img4Error::Malformed("duplicate IMG4 manifest"));
+                }
+                let (_, _, manifest) = element(contents)?;
+                if manifest.len() != contents.len() {
+                    return Err(Img4Error::Malformed("trailing fields in IMG4 manifest"));
+                }
                 labeled(contents, b"IM4M")
                     .map_err(|_| Img4Error::Malformed("[0] is not an IM4M"))?;
                 parts.manifest = Some(contents);
             }
-            CONTEXT_1 => parts.restore_info = Some(contents),
+            CONTEXT_1 => {
+                if parts.restore_info.is_some() {
+                    return Err(Img4Error::Malformed("duplicate IMG4 restore information"));
+                }
+                let (_, _, restore) = element(contents)?;
+                if restore.len() != contents.len() {
+                    return Err(Img4Error::Malformed(
+                        "trailing fields in IMG4 restore information",
+                    ));
+                }
+                labeled(contents, b"IM4R")
+                    .map_err(|_| Img4Error::Malformed("[1] is not an IM4R"))?;
+                parts.restore_info = Some(contents);
+            }
             _ => return Err(Img4Error::Malformed("unknown IMG4 field")),
         }
         rest = &rest[whole.len()..];
@@ -336,5 +362,22 @@ pub(crate) mod tests {
         let mut trailing = file.clone();
         trailing.push(0);
         assert!(parse(&trailing).is_err());
+    }
+    #[test]
+    fn ambiguous_manifests_restore_fields_and_nonminimal_lengths_refuse() {
+        let payload = im4p(b"sepi", b"synthetic");
+        let manifest = der(SEQUENCE, &der(IA5_STRING, b"IM4M"));
+        let restore = der(SEQUENCE, &der(IA5_STRING, b"IM4R"));
+        let prefix = [der(IA5_STRING, b"IMG4"), payload].concat();
+        for fields in [
+            [der(CONTEXT_0, &manifest), der(CONTEXT_0, &manifest)].concat(),
+            [der(CONTEXT_1, &restore), der(CONTEXT_1, &restore)].concat(),
+            der(CONTEXT_0, &[manifest.clone(), manifest.clone()].concat()),
+            der(CONTEXT_1, &manifest),
+        ] {
+            assert!(parse(&der(SEQUENCE, &[prefix.clone(), fields].concat())).is_err());
+        }
+        assert!(parse(b"\x30\x81\x06\x16\x04IM4P").is_err());
+        assert!(parse(b"\x30\x82\0\x80").is_err());
     }
 }

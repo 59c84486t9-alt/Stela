@@ -5,7 +5,8 @@
 //! service ID in its payload; ASC endpoint zero carries it unchanged.
 //! docs/research/sep.md owns the recovered contract and remaining gates.
 //!
-//! Only the ROM command prefix is executable today. Image4 authentication,
+//! Only the ROM command prefix is executable today. Image4 signature evidence
+//! is checked without conferring trust. Boot authentication,
 //! shared-memory/TXM, sepOS services and persistence are explicit refusals.
 //! No production compatible is admitted in `machine::soc::models` yet.
 pub mod endpoint;
@@ -62,9 +63,9 @@ impl Sep {
             .is_some()
     }
 
-    /// Inspect the delivered container through dart-sep, then stop at the
-    /// unrecovered authentication boundary. The ROM never replies "accepted"
-    /// for ciphertext it merely measured. No guest memory is modified.
+    /// Snapshot the delivered container through dart-sep, check the manifest's
+    /// signature and payload binding when supplied, then refuse at the trust/
+    /// native-service boundary. Signature evidence alone never boots SEP.
     pub fn transfer(&mut self, port: &mut Port<'_, '_>) -> Result<(), MmioError> {
         let Some(request) = self
             .mailbox
@@ -74,20 +75,46 @@ impl Sep {
         else {
             return Ok(());
         };
-        image::measure(port, request.address, image::MAX_IMAGE_BYTES).map_err(|error| {
-            let reason = match error {
-                crate::platform::dma::DmaError::Unsupported(reason) => reason,
-                crate::platform::dma::DmaError::Fault(_) => "SEP firmware DMA fault in dart-sep",
-                crate::platform::dma::DmaError::Memory => "SEP firmware DMA is outside guest RAM",
+        let snapshot =
+            image::snapshot(port, request.address, image::MAX_IMAGE_BYTES).map_err(|error| {
+                let reason = match error {
+                    crate::platform::dma::DmaError::Unsupported(reason) => reason,
+                    crate::platform::dma::DmaError::Fault(_) => {
+                        "SEP firmware DMA fault in dart-sep"
+                    }
+                    crate::platform::dma::DmaError::Memory => {
+                        "SEP firmware DMA is outside guest RAM"
+                    }
+                };
+                refuse(NAME, SEND_COMMIT, Width::Double, Direction::Write, reason)
+            })?;
+        let inspect = || -> Result<(), &'static str> {
+            let parts = crate::img4::parse(snapshot.bytes())
+                .map_err(|_| "SEP firmware Image4 structure is malformed")?;
+            let kind = crate::img4::payload_type(parts.payload)
+                .map_err(|_| "SEP firmware payload type is malformed")?;
+            let expected = if request.parameter == 0 {
+                *b"sepi"
+            } else {
+                *b"rsep"
             };
-            refuse(NAME, SEND_COMMIT, Width::Double, Direction::Write, reason)
-        })?;
+            if kind != expected {
+                return Err("SEP firmware payload type differs from the ROM request");
+            }
+            let manifest = parts
+                .manifest
+                .ok_or("SEP bare IM4P has no manifest to authenticate")?;
+            image::signature::inspect(parts.payload, manifest)?;
+            Err(
+                "SEP signature evidence verified; trust constraints and native sepOS services are not modeled",
+            )
+        };
         Err(refuse(
             NAME,
             SEND_COMMIT,
             Width::Double,
             Direction::Write,
-            "SEP Image4 authentication and native sepOS boot services are not modeled",
+            inspect().expect_err("signature evidence cannot admit native sepOS"),
         ))
     }
 }
