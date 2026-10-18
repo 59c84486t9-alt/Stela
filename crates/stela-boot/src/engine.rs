@@ -75,6 +75,9 @@ struct Options {
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
     breakpoints: Vec<u64>,
+    /// Log, without stopping, when a PE reaches one of these guest PCs
+    /// (`--trace`; `Machine::set_traces`).
+    traces: Vec<u64>,
     /// Guest virtual ranges the stop's report shows (`--dump BASE,BYTES`).
     dumps: Vec<(Base, u64)>,
 }
@@ -145,6 +148,7 @@ impl Options {
             restore_identity: None,
             survey: false,
             breakpoints: Vec::new(),
+            traces: Vec::new(),
             dumps: Vec::new(),
         };
         let mut words = text.split_ascii_whitespace();
@@ -219,6 +223,7 @@ impl Options {
             let value = number(words.next().ok_or("missing system option value")?)?;
             match name {
                 "--break" => options.breakpoints.push(value),
+                "--trace" => options.traces.push(value),
                 "--dram-base" => {
                     options.dram_base = value;
                     options.dram_explicit = true;
@@ -960,6 +965,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     if !options.breakpoints.is_empty() {
         machine.set_breakpoints(&options.breakpoints);
     }
+    if !options.traces.is_empty() {
+        machine.set_traces(&options.traces);
+    }
     let mut restore = source.map(|source| {
         restore::Experiment::new(
             source,
@@ -1030,6 +1038,12 @@ fn run(
             budget.min(slice)
         };
         let stop = machine.run(limit);
+        for hit in machine.take_trace_hits() {
+            output::arguments(format_args!(
+                "TRACE pc={:#x} pe={} el={} x0-x3={:#x?} lr={:#x} dropped={}\n",
+                hit.pc, hit.pe, hit.el, hit.arguments, hit.lr, hit.dropped
+            ));
+        }
         while let Some(log) = machine.devices.take_usb_log() {
             use stela_runtime::machine::apple::UsbLog;
             match log {

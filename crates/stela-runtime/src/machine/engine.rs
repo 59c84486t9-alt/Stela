@@ -458,6 +458,22 @@ impl fmt::Display for Requirement {
     }
 }
 
+/// Trace hits kept between [`Machine::take_trace_hits`] calls.
+pub const TRACE_HITS: usize = 64;
+
+/// A PE reaching a host trace point (`Machine::set_traces`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceHit {
+    pub pc: u64,
+    pub pe: usize,
+    pub el: u8,
+    /// X0 to X3 and the link register.
+    pub arguments: [u64; 4],
+    pub lr: u64,
+    /// Further hits dropped after this one, beyond [`TRACE_HITS`].
+    pub dropped: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
     /// The block budget ran out.
@@ -745,6 +761,10 @@ pub struct Machine<H: Host, D: Devices> {
     peers: Vec<processors::Peer>,
     /// Host breakpoints, ascending (`set_breakpoints`).
     breakpoints: Vec<u64>,
+    /// Host trace points, ascending (`set_traces`), and the hits not yet
+    /// taken (`take_trace_hits`).
+    traces: Vec<u64>,
+    trace_hits: Vec<TraceHit>,
     /// The block count at which the running PE's time slice ends.
     slice_end: u64,
     /// The system counter value at which it ends, whichever comes first.
@@ -830,6 +850,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             waiting: None,
             peers: Vec::new(),
             breakpoints: Vec::new(),
+            traces: Vec::new(),
+            trace_hits: Vec::new(),
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
             clock: clock::Clock::default(),
@@ -954,6 +976,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.breakpoints.sort_unstable();
         self.breakpoints.dedup();
         self.discard_code();
+    }
+
+    /// Record, without stopping, when a PE reaches one of these guest PCs
+    /// as a block start through the engine: always its first execution
+    /// there, then whenever no chained block enters it directly. Like a
+    /// breakpoint, a host diagnostic invisible to the guest.
+    pub fn set_traces(&mut self, pcs: &[u64]) {
+        self.traces = pcs.to_vec();
+        self.traces.sort_unstable();
+        self.traces.dedup();
+        self.discard_code();
+    }
+
+    /// The trace hits since the last call, oldest first, at most
+    /// [`TRACE_HITS`] of them; later hits are counted in the last one.
+    pub fn take_trace_hits(&mut self) -> Vec<TraceHit> {
+        core::mem::take(&mut self.trace_hits)
     }
 
     /// Check every reachable compiled block against the guest bytes it was
@@ -1297,6 +1336,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Record that software at `now` replaces the running thread pointer
     /// (TPIDR_EL1) with `next`: the thread it named is suspended where the
     /// PE stands, and `next` runs.
+    fn trace(&mut self, pc: u64) {
+        if self.trace_hits.len() == TRACE_HITS {
+            if let Some(last) = self.trace_hits.last_mut() {
+                last.dropped += 1;
+            }
+            return;
+        }
+        let x = &self.cpu.state.x;
+        self.trace_hits.push(TraceHit {
+            pc,
+            pe: self.current,
+            el: self.cpu.pstate.el,
+            arguments: [x[0], x[1], x[2], x[3]],
+            lr: x[30],
+            dropped: 0,
+        });
+    }
+
     fn switch_thread(&mut self, next: u64, now: u64) {
         let previous = self.cpu.read(SystemRegister::TPIDR_EL1);
         if previous == next {
@@ -1380,6 +1437,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         if self.breakpoints.binary_search(&pc).is_ok() {
             return Err(Stop::Breakpoint(pc));
+        }
+        if self.traces.binary_search(&pc).is_ok() {
+            self.trace(pc);
         }
         // Active-not-pending: this one instruction advances the step.
         self.cpu.step_advance = mode.step;
@@ -1517,7 +1577,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// that changes what the next fetch checks returns to the engine.
     fn link(&mut self, index: usize, next_pc: u64, kind: ExitKind) {
         let block = &self.blocks[index];
-        if block.variant.single || (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
+        if block.variant.single
+            || (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0
+            || self.traces.binary_search(&next_pc).is_ok()
+        {
             return;
         }
         let Some(position) = block
@@ -1826,11 +1889,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let chip = self.profile.chip;
         let mut length = source.len();
-        // No block runs into a host breakpoint: one ends before it.
-        if let Some(&stop) = self
+        // No block runs into a host breakpoint or trace point: one ends
+        // before it.
+        if let Some(stop) = self
             .breakpoints
             .iter()
-            .find(|&&stop| stop > pc && stop < pc + length as u64)
+            .chain(&self.traces)
+            .filter(|&&stop| stop > pc && stop < pc + length as u64)
+            .min()
         {
             length = (stop - pc) as usize;
         }
@@ -4186,6 +4252,32 @@ mod tests {
         machine.cpu.pc = BASE + 8;
         assert!(matches!(machine.step(), Err(Stop::Breakpoint(pc)) if pc == BASE + 8));
         assert_eq!(machine.cpu.state.x[0], 0);
+    }
+
+    #[test]
+    fn trace_points_end_blocks_and_record_each_entry_without_stopping() {
+        // add x0, x0, #1 (twice); fmov d0, d0, which traps with FP access
+        // disabled, so the step completes without native code.
+        let add = 0x9100_0400;
+        let mut machine = machine(&[add, add, 0x1e60_4000]);
+        machine.set_traces(&[BASE + 8]);
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+            panic!("block")
+        };
+        assert_eq!(machine.blocks[index].source_map.len(), 2);
+        machine.cpu.pc = BASE + 8;
+        machine.cpu.state.x[0] = 7;
+        machine.step().unwrap();
+        let hits = machine.take_trace_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].pc, hits[0].arguments[0]), (BASE + 8, 7));
+        assert_ne!(machine.cpu.pc, BASE + 8, "the step went on, to the FP trap");
+        assert!(machine.take_trace_hits().is_empty());
+        for _ in 0..TRACE_HITS + 3 {
+            machine.trace(BASE);
+        }
+        let hits = machine.take_trace_hits();
+        assert_eq!((hits.len(), hits[TRACE_HITS - 1].dropped), (TRACE_HITS, 3));
     }
 
     #[test]
