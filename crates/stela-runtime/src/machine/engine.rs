@@ -51,6 +51,7 @@ const FETCH_PAGE: u64 = 4096;
 const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 const FETCH_CACHE: usize = 1024;
 const JUMP_CACHE: usize = 4096;
+const ADMITTED: usize = 4096;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
 
@@ -515,6 +516,8 @@ pub struct Machine<H: Host, D: Devices> {
     event_sample: Option<u64>,
     /// What self-hosted debug needs of each instruction, while valid.
     debug: Option<DebugMode>,
+    /// Words `Chip::admit` has answered, by a hash of the word.
+    admitted: Vec<Option<(u32, u32)>>,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
     /// The number of the running PE.
@@ -579,6 +582,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             memory_checks: None,
             event_sample: None,
             debug: None,
+            admitted: vec![None; ADMITTED],
             watch: Watch::default(),
             current: 0,
             waiting: None,
@@ -1300,10 +1304,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
         // A form the chip lacks compiles as the UDF or NOP it executes as.
-        let chip = self.profile.chip;
         for bytes in source.as_chunks_mut::<4>().0 {
-            *bytes = chip.admit(u32::from_le_bytes(*bytes)).to_le_bytes();
+            *bytes = self.admit(u32::from_le_bytes(*bytes)).to_le_bytes();
         }
+        let chip = self.profile.chip;
         let mut length = source.len();
         if !fp {
             let first = source
@@ -1449,7 +1453,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !self.host.read_ram(physical, &mut bytes) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
-        Ok(self.profile.chip.admit(u32::from_le_bytes(bytes)))
+        Ok(self.admit(u32::from_le_bytes(bytes)))
+    }
+
+    /// `Chip::admit` of the profile's chip, remembered: a pure function of
+    /// the word that searches every absent-form group, and every exit asks it
+    /// again of the word that exited.
+    fn admit(&mut self, word: u32) -> u32 {
+        let slot = (word.wrapping_mul(0x9e37_79b1) >> 20) as usize % ADMITTED;
+        match self.admitted[slot] {
+            Some((raw, admitted)) if raw == word => admitted,
+            _ => {
+                let admitted = self.profile.chip.admit(word);
+                self.admitted[slot] = Some((word, admitted));
+                admitted
+            }
+        }
     }
 
     fn exit(&mut self, index: usize, next_pc: u64, kind: u64) -> Step {
