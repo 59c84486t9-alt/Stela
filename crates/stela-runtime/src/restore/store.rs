@@ -63,8 +63,10 @@ pub struct Store<R> {
     reader: R,
     archive: Archive,
     manifest: PayloadManifest,
+    /// This board's BuildIdentities, each with its original index.
     identities: Vec<Identity>,
-    selected: usize,
+    /// The selected identity's position in `identities`.
+    current: usize,
     verified: BTreeMap<String, Verified>,
     block_count: usize,
 }
@@ -98,25 +100,44 @@ impl<R: ReadAt> Store<R> {
         if crate::sha256(&bytes) != manifest.source.build_manifest_sha256 {
             return Err(Error::Invalid("BuildManifest SHA-256"));
         }
-        let build = plist::decode(
+        // A universal BuildManifest names every board. Only this board's
+        // identities are kept, as they are decoded: the selected one and the
+        // RecoveryOS identity `answers` looks up by ApChipID/ApBoardID.
+        let mut identities = Vec::new();
+        let mut count = 0;
+        let mut sink = |index: usize, value: Value| {
+            count = index + 1;
+            let class = value
+                .get("Info")
+                .and_then(|info| info.get("DeviceClass"))
+                .map(Value::string)
+                .transpose()?;
+            if index == selected || class == Some(manifest.device_class.as_str()) {
+                identities.push(Identity { index, value });
+            }
+            Ok(())
+        };
+        plist::decode_streaming(
             &bytes,
             Limits {
                 bytes: MAX_BUILD_MANIFEST_BYTES,
                 nodes: 2_000_000,
                 depth: 64,
             },
+            plist::Stream {
+                path: &["BuildIdentities"],
+                sink: &mut sink,
+            },
         )?;
-        let identities: Vec<_> = build
-            .required("BuildIdentities")?
-            .array()?
+        if count == 0 {
+            return Err(Error::Invalid("BuildManifest has no BuildIdentities"));
+        }
+        drop(bytes);
+        let current = identities
             .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, value)| Identity { index, value })
-            .collect();
-        let identity = identities
-            .get(selected)
+            .position(|identity| identity.index == selected)
             .ok_or(Error::Invalid("BuildManifest identity index"))?;
+        let identity = &identities[current];
         if identity.info()?.required("RestoreBehavior")?.string()? != "Erase" {
             return Err(Error::Invalid("selected identity is not erase"));
         }
@@ -136,7 +157,7 @@ impl<R: ReadAt> Store<R> {
             archive,
             manifest,
             identities,
-            selected,
+            current,
             verified: BTreeMap::new(),
             block_count: 0,
         })
@@ -145,7 +166,7 @@ impl<R: ReadAt> Store<R> {
         &self.manifest
     }
     pub fn identity(&self) -> &Identity {
-        &self.identities[self.selected]
+        &self.identities[self.current]
     }
     pub fn zip_entries(&self) -> &[Entry] {
         self.archive.entries()

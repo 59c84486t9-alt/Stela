@@ -115,16 +115,41 @@ impl Budget {
     }
 }
 pub fn decode(bytes: &[u8], limits: Limits) -> Result<Value> {
+    if bytes.starts_with(b"bplist00") {
+        if bytes.len() > limits.bytes {
+            return Err(Error::Limit("plist input bytes"));
+        }
+        return Binary::decode(bytes, limits);
+    }
+    decode_xml(bytes, limits, None)
+}
+
+/// Where the elements of one array go instead of the decoded tree.
+pub struct Stream<'a> {
+    /// Dictionary keys from the root to the array.
+    pub path: &'a [&'a str],
+    /// Receives each element, with its index, as soon as it is decoded.
+    pub sink: &'a mut dyn FnMut(usize, Value) -> Result<()>,
+}
+
+/// Decode an XML plist, handing each element of the array at
+/// `stream.path` to its sink rather than keeping it: that array decodes
+/// empty. Memory then holds only what the sink keeps, which bounds a very
+/// large document such as a universal BuildManifest.
+pub fn decode_streaming(bytes: &[u8], limits: Limits, stream: Stream<'_>) -> Result<Value> {
+    decode_xml(bytes, limits, Some(stream))
+}
+
+fn decode_xml(bytes: &[u8], limits: Limits, stream: Option<Stream<'_>>) -> Result<Value> {
     if bytes.len() > limits.bytes {
         return Err(Error::Limit("plist input bytes"));
-    }
-    if bytes.starts_with(b"bplist00") {
-        return Binary::decode(bytes, limits);
     }
     let text = core::str::from_utf8(bytes).map_err(|_| Error::Invalid("XML UTF-8"))?;
     let mut xml = Xml {
         rest: text,
         budget: Budget::new(limits),
+        stream,
+        keys: Vec::new(),
     };
     xml.space();
     if xml.rest.starts_with("<?xml ") {
@@ -153,11 +178,23 @@ pub fn decode(bytes: &[u8], limits: Limits) -> Result<Value> {
     }
     Ok(value)
 }
-struct Xml<'a> {
+struct Xml<'a, 's> {
     rest: &'a str,
     budget: Budget,
+    stream: Option<Stream<'s>>,
+    /// The dictionary keys above the current value, kept while streaming.
+    keys: Vec<String>,
 }
-impl<'a> Xml<'a> {
+impl<'a> Xml<'a, '_> {
+    fn streamed(&self) -> bool {
+        self.stream.as_ref().is_some_and(|stream| {
+            stream
+                .path
+                .iter()
+                .copied()
+                .eq(self.keys.iter().map(String::as_str))
+        })
+    }
     fn space(&mut self) {
         self.rest = self.rest.trim_start_matches([' ', '\t', '\r', '\n']);
     }
@@ -231,9 +268,16 @@ impl<'a> Xml<'a> {
             return Ok(Value::Array(Vec::new()));
         }
         if self.take("<array>") {
+            let streamed = self.streamed();
             let mut a = Vec::new();
+            let mut index = 0;
             while !self.take("</array>") {
-                a.push(self.value(depth + 1)?);
+                let element = self.value(depth + 1)?;
+                match &mut self.stream {
+                    Some(stream) if streamed => (stream.sink)(index, element)?,
+                    _ => a.push(element),
+                }
+                index += 1;
             }
             return Ok(Value::Array(a));
         }
@@ -250,7 +294,14 @@ impl<'a> Xml<'a> {
                     self.expect("<key>")?;
                     self.text("</key>")?
                 };
-                let v = self.value(depth + 1)?;
+                let v = if self.stream.is_some() {
+                    self.keys.push(k.clone());
+                    let v = self.value(depth + 1);
+                    self.keys.pop();
+                    v?
+                } else {
+                    self.value(depth + 1)?
+                };
                 if d.insert(k, v).is_some() {
                     return Err(Error::Invalid("duplicate plist key"));
                 }
@@ -741,6 +792,36 @@ pub fn encode_binary(v: &Value, limits: Limits) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn streaming_hands_one_arrays_elements_to_the_sink() {
+        let xml = br#"<plist version="1.0"><dict><key>Other</key><array><string>kept</string></array><key>Ids</key><array><dict><key>Ids</key><array><integer>9</integer></array></dict><integer>7</integer></array></dict></plist>"#;
+        let mut seen = Vec::new();
+        let mut sink = |index, value| {
+            seen.push((index, value));
+            Ok(())
+        };
+        let tree = decode_streaming(
+            xml,
+            Limits::default(),
+            Stream {
+                path: &["Ids"],
+                sink: &mut sink,
+            },
+        )
+        .unwrap();
+        assert_eq!(tree.required("Ids").unwrap().array().unwrap(), []);
+        assert_eq!(tree.required("Other").unwrap().array().unwrap().len(), 1);
+        // A nested array of the same key name is not the root path.
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1], (1, Value::Integer(7)));
+        assert_eq!(seen[0].1.required("Ids").unwrap().array().unwrap().len(), 1);
+        let mut refuse = |_, _| Err(Error::Invalid("sink refused"));
+        let stream = Stream {
+            path: &["Ids"],
+            sink: &mut refuse,
+        };
+        assert!(decode_streaming(xml, Limits::default(), stream).is_err());
+    }
     #[test]
     fn both_encodings_preserve_restore_dictionary() {
         let v = Value::dict([
