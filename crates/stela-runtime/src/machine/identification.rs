@@ -123,9 +123,10 @@ pub const REGISTERS: &[Encoding] = &[
     ID_AA64MMFR4_EL1,
     CTR_EL0,
     AIDR_EL1,
-    // No caches are visible: memory is coherent and CTR_EL0.IDC holds, so
-    // CLIDR_EL1 reports no cache level and LoC, LoUU and LoUIS 0, and
-    // CCSIDR_EL1 (UNKNOWN for an unimplemented cache) reads 0.
+    // Without a board identity's caches (`machine::caches`) none are
+    // visible: memory is coherent and CTR_EL0.IDC holds, so CLIDR_EL1
+    // reports no cache level and LoC, LoUU and LoUIS 0, and CCSIDR_EL1
+    // (UNKNOWN for an unimplemented cache) reads 0.
     CLIDR_EL1,
     CCSIDR_EL1,
     // No revision-specific information.

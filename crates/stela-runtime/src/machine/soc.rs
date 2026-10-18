@@ -10,7 +10,12 @@
 //! evidence refuses: the M1, M2 and M3 Ultra, the second M3 Max (ApChipID
 //! 0x6034), the A18 Pro and the M5 Pro and Max (no `product-soc-name`), and
 //! the M6's M cores.
-use super::{Chip, adt::Node, registers::Identity};
+use super::{
+    Chip,
+    adt::Node,
+    caches::{Cache, Caches},
+    registers::Identity,
+};
 use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
@@ -49,7 +54,8 @@ use alloc::{format, string::String, vec::Vec};
 /// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
 /// readPMGRAONFuseReg` reads `reg[36]`. `cpu_start` is the offset of the
 /// CPU start registers (`platform::apple::cpustart`) from `/arm-io/pmgr`
-/// `reg[0]`: m1n1 `src/smp.c` `CPU_START_OFF_T8112`.
+/// `reg[0]`: m1n1 `src/smp.c` `CPU_START_OFF_T8112`. `caches` is each
+/// cluster type's caches ([`CoreCaches`]), in `parts` order, where known.
 struct Soc {
     chip_id: u32,
     name: &'static str,
@@ -63,7 +69,49 @@ struct Soc {
     clusters: Option<[CpuCluster; 2]>,
     aon_fuses: Option<usize>,
     cpu_start: Option<u64>,
+    caches: Option<[CoreCaches; 2]>,
 }
+
+/// A cluster type's level 1 caches and its level 2's associativity; the
+/// level 2's capacity is each `/cpus` node's `l2-cache-size`. The T8112's
+/// capacities are the `i-cache-size` and `d-cache-size` of the cpu nodes of
+/// Linux `arch/arm64/boot/dts/apple/t8112.dtsi`, whose `l2-cache` nodes
+/// agree with the J473AP DeviceTree's `l2-cache-size`; its lines are 128
+/// bytes, the `hw.cachelinesize` macOS reports on Apple silicon, which XNU
+/// takes from the level 1 data cache's CCSIDR_EL1. The associativities
+/// are inferred: no public capture gives them, and XNU reads only the line
+/// length and the capacities they multiply to (`machine::caches`).
+#[derive(Debug, Clone, Copy)]
+struct CoreCaches {
+    instruction: Cache,
+    data: Cache,
+    unified_ways: u32,
+}
+
+/// Apple's 128-byte cache lines.
+const LINE: u32 = 128;
+
+const fn cache(bytes: u32, ways: u32) -> Cache {
+    Cache {
+        bytes,
+        ways,
+        line: LINE,
+    }
+}
+
+/// The T8112's Blizzard and Avalanche cores.
+const T8112_CACHES: [CoreCaches; 2] = [
+    CoreCaches {
+        instruction: cache(128 << 10, 8),
+        data: cache(64 << 10, 8),
+        unified_ways: 16,
+    },
+    CoreCaches {
+        instruction: cache(192 << 10, 6),
+        data: cache(128 << 10, 8),
+        unified_ways: 16,
+    },
+];
 
 /// One CPU cluster's PMGR registers (`platform::apple::cluster`): their
 /// base, the performance-state slots the boot firmware fills and the DVMR
@@ -124,6 +172,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x6000,
@@ -138,6 +187,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x6001,
@@ -152,6 +202,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x8112,
@@ -172,6 +223,7 @@ const SOCS: [Soc; 14] = [
         clusters: Some(T8112_CLUSTERS),
         aon_fuses: Some(36),
         cpu_start: Some(0x34000),
+        caches: Some(T8112_CACHES),
     },
     Soc {
         chip_id: 0x6020,
@@ -186,6 +238,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x6021,
@@ -200,6 +253,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x8122,
@@ -214,6 +268,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x6030,
@@ -228,6 +283,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x6031,
@@ -242,6 +298,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x8132,
@@ -256,6 +313,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x6040,
@@ -270,6 +328,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x6041,
@@ -284,6 +343,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x8142,
@@ -298,6 +358,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
     Soc {
         chip_id: 0x8152,
@@ -312,6 +373,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: None,
+        caches: None,
     },
 ];
 
@@ -375,11 +437,12 @@ pub fn board_dram_base(tree: &[u8], chip_id: u32) -> Result<u64, String> {
     }
 }
 
-/// One `/cpus` node: its `cluster-type` letter and `reg`.
+/// One `/cpus` node: its `cluster-type` letter, `reg` and `l2-cache-size`.
 #[derive(Debug, Clone, Copy)]
 pub struct Processor {
     pub cluster_type: u8,
     pub reg: u32,
+    pub l2_bytes: Option<u32>,
 }
 
 /// The chip and PEs, in `/cpus` order, of a board whose DeviceTree names
@@ -443,6 +506,11 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                     .zip(index)
                     .and_then(|(points, index)| points[index].last())
                     .map(|&mhz| u64::from(mhz) * 1_000_000),
+                caches: soc
+                    .caches
+                    .zip(index)
+                    .map(|(caches, index)| core_caches(caches[index], processor))
+                    .transpose()?,
             })
         })
         .collect::<Result<_, String>>()?;
@@ -452,6 +520,21 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
         processors,
         aic: soc.aic,
     })
+}
+
+/// A PE's caches: its cluster type's level 1 caches and the level 2 its
+/// `/cpus` node sizes.
+fn core_caches(caches: CoreCaches, processor: &Processor) -> Result<Caches, String> {
+    let bytes = processor
+        .l2_bytes
+        .ok_or_else(|| format!("cpu reg {:#x} has no l2-cache-size", processor.reg))?;
+    let unified = Cache {
+        bytes,
+        ways: caches.unified_ways,
+        line: LINE,
+    };
+    Caches::split_unified(caches.instruction, caches.data, unified)
+        .map_err(|reason| format!("cpu reg {:#x}: {reason}", processor.reg))
 }
 
 /// A device's first `reg` range in guest PA and its AIC input.
@@ -1166,7 +1249,11 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         .ok_or("DeviceTree has no /cpus")?
         .visit(&mut |node| {
             if let Some(cluster_type) = node.property("cluster-type") {
-                found.push((cluster_type.first().copied(), node.first_u32("reg")));
+                found.push((
+                    cluster_type.first().copied(),
+                    node.first_u32("reg"),
+                    node.first_u32("l2-cache-size"),
+                ));
                 for (index, name) in ["cpu-impl-reg", "cpm-impl-reg"].into_iter().enumerate() {
                     let pe = (index == 0).then(|| found.len() - 1);
                     blocks.push((index, name, node.pairs(name), pe));
@@ -1177,7 +1264,11 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let processors = found
         .into_iter()
         .map(|found| match found {
-            (Some(cluster_type), Some(reg)) => Ok(Processor { cluster_type, reg }),
+            (Some(cluster_type), Some(reg), l2_bytes) => Ok(Processor {
+                cluster_type,
+                reg,
+                l2_bytes,
+            }),
             _ => Err("a /cpus node has no reg or an empty cluster-type"),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1297,7 +1388,15 @@ mod tests {
     fn layout_of(layout: &[(u8, u32)]) -> Vec<Processor> {
         layout
             .iter()
-            .map(|&(cluster_type, reg)| Processor { cluster_type, reg })
+            .map(|&(cluster_type, reg)| Processor {
+                cluster_type,
+                reg,
+                l2_bytes: Some(if cluster_type == b'P' {
+                    16 << 20
+                } else {
+                    4 << 20
+                }),
+            })
             .collect()
     }
 
@@ -1324,6 +1423,14 @@ mod tests {
                 midr: 0x611f_0320,
                 mpidr: 0x8000_0000,
                 clock: Some(2_424_000_000),
+                caches: Some(
+                    Caches::split_unified(
+                        cache(128 << 10, 8),
+                        cache(64 << 10, 8),
+                        cache(4 << 20, 16)
+                    )
+                    .unwrap()
+                ),
             }
         );
         assert_eq!(
@@ -1332,8 +1439,20 @@ mod tests {
                 midr: 0x611f_0330,
                 mpidr: 0x8001_0103,
                 clock: Some(3_504_000_000),
+                caches: Some(
+                    Caches::split_unified(
+                        cache(192 << 10, 6),
+                        cache(128 << 10, 8),
+                        cache(16 << 20, 16)
+                    )
+                    .unwrap()
+                ),
             }
         );
+        // The level 2's capacity is the cpu node's.
+        let mut sizeless = layout_of(&layout);
+        sizeless[5].l2_bytes = None;
+        assert!(cpus(0x8112, "Apple M2", &sizeless).is_err());
         // J604AP (Mac16,1): six M4 E cores and four P cores.
         let layout = [(b'E', 0), (b'E', 5), (b'P', 0x100), (b'P', 0x103)];
         let found = cpus(0x8132, "Apple M4", &layout_of(&layout)).unwrap();
@@ -1346,6 +1465,7 @@ mod tests {
                 midr: 0x611f_0530,
                 mpidr: 0x8001_0103,
                 clock: None,
+                caches: None,
             }
         );
         // An M2 Pro's AIC2 has its event register at +0xc000.
@@ -1436,6 +1556,7 @@ mod tests {
                     ("name", &z(name)),
                     ("cluster-type", kind),
                     ("reg", &u32s(&[reg])),
+                    ("l2-cache-size", &u32s(&[4 << 20 << (2 * (reg >> 8))])),
                     ("cpu-impl-reg", &u64s(&[0x2_1005_0000 + cluster, 0x9010])),
                     ("cpm-impl-reg", &u64s(&[0x2_10e4_0000 + cluster, 0x9010])),
                 ],

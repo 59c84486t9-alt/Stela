@@ -209,6 +209,9 @@ pub struct Cpu {
     pub dcc: super::debug::Dcc,
     /// The claim tags (DBGCLAIMSET_EL1, DBGCLAIMCLR_EL1), clear at reset.
     pub claim: u8,
+    /// The caches CLIDR_EL1 and CCSIDR_EL1 describe, where the board's
+    /// identity gives them (`machine::caches`).
+    pub caches: Option<super::caches::Caches>,
     /// The Exclusives monitor: the reservation an exclusive load marked
     /// (`engine::exclusive`).
     pub monitor: Option<Reservation>,
@@ -333,6 +336,7 @@ impl Cpu {
             step_advance: false,
             dcc: super::debug::Dcc::default(),
             claim: 0,
+            caches: None,
             monitor: None,
             amx: super::amx::Unit::default(),
             vgic: super::vgic::CpuInterface::default(),

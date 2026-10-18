@@ -6,6 +6,7 @@
 pub mod adt;
 pub mod amx;
 pub mod apple;
+pub mod caches;
 pub mod chip;
 pub mod cpu;
 pub mod ctrr;

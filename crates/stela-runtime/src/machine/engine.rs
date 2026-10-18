@@ -4397,6 +4397,7 @@ mod tests {
             midr: 0x611f_0330,
             mpidr: 0x8001_0000,
             clock: Some(3_504_000_000),
+            caches: None,
         };
         let chip = crate::machine::Chip::AppleM2;
         let mut machine = board_on(chip, &words, NoDevices, vec![identity]);

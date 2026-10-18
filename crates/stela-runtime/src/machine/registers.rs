@@ -50,6 +50,9 @@ pub struct Identity {
     /// The core clock in Hz, where the SoC row has evidence of it; it paces
     /// the cycle counter of Apple's performance monitor (`machine::pmu`).
     pub clock: Option<u64>,
+    /// The PE's caches, where the SoC row and DeviceTree describe them;
+    /// without them CLIDR_EL1 and CCSIDR_EL1 take the profile's values.
+    pub caches: Option<super::caches::Caches>,
 }
 
 /// Encodings named by the Arm ARM and by m1n1 `cpu_regs.h`.

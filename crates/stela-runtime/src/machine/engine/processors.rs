@@ -405,6 +405,7 @@ mod tests {
             midr: 0x611f_0320 | cpu << 4,
             mpidr: 0x8000_0000 | cpu << 8,
             clock: None,
+            caches: None,
         }
     }
 

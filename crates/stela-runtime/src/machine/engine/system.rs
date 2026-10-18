@@ -419,6 +419,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::FPSR => u64::from(cpu.state.fpsr),
             Register::SVCR => cpu.svcr(),
             Register::ISR_EL1 => self.pending(),
+            Register::CCSIDR_EL1 => match cpu.caches {
+                Some(caches) => caches.ccsidr(cpu.registers.get(Register::CSSELR_EL1, 0)),
+                None => cpu.registers.get(register, 0),
+            },
             register if lor_region(register) && no_lor_descriptors(cpu) => 0,
             Register::MPAM1_EL1 => {
                 cpu.registers.get(register, 0) & !MPAMEN
@@ -982,6 +986,7 @@ pub(super) fn identify(
         .and_then(|identity| identity.clock)
         .filter(|_| Pmu::on(profile.chip))
         .map(|clock| Pmu::new(clock, profile.counter_frequency));
+    cpu.caches = own.and_then(|identity| identity.caches);
     for register in Register::ALL {
         if !identification(register) {
             continue;
@@ -989,6 +994,13 @@ pub(super) fn identify(
         let value = match (register, own) {
             (Register::MIDR_EL1, Some(identity)) => Some(identity.midr),
             (Register::MPIDR_EL1, Some(identity)) => Some(identity.mpidr),
+            // CCSIDR_EL1 reads follow CSSELR_EL1 (`Access::read`).
+            (Register::CLIDR_EL1, Some(identity)) if identity.caches.is_some() => {
+                identity.caches.map(|caches| caches.clidr())
+            }
+            (Register::CCSIDR_EL1, Some(identity)) if identity.caches.is_some() => {
+                identity.caches.map(|caches| caches.ccsidr(0))
+            }
             _ => encoding_of(register).and_then(|encoding| {
                 profile
                     .fixed
@@ -1075,6 +1087,55 @@ mod tests {
             "{word:#x}"
         );
         machine.cpu.read(Register::ESR_EL2)
+    }
+
+    #[test]
+    fn ccsidr_reads_the_cache_csselr_selects() {
+        use crate::machine::{
+            caches::{Cache, Caches},
+            registers::Identity,
+        };
+        const CLIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 1);
+        const CCSIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 0);
+        const CSSELR_EL1: Encoding = Encoding::new(3, 2, 0, 0, 0);
+        let cache = |bytes, ways| Cache {
+            bytes,
+            ways,
+            line: 128,
+        };
+        let caches =
+            Caches::split_unified(cache(128 << 10, 8), cache(64 << 10, 8), cache(4 << 20, 16))
+                .unwrap();
+        let identity = Identity {
+            midr: 0x611f_0320,
+            mpidr: 0x8000_0000,
+            clock: None,
+            caches: Some(caches),
+        };
+        let mut machine = super::super::tests::board_on(
+            Chip::AppleM2,
+            &[],
+            super::super::NoDevices,
+            vec![identity],
+        );
+        let run = |machine: &mut TestMachine, word| {
+            machine.cpu.pc = BASE;
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.system_instruction(word).unwrap();
+            machine.cpu.state.x[2]
+        };
+        assert_eq!(run(&mut machine, access(true, CLIDR_EL1, 2)), 0b100_011);
+        for csselr in [0, 1, 2, 3, 0x10] {
+            machine.cpu.state.x[1] = csselr;
+            run(&mut machine, access(false, CSSELR_EL1, 1));
+            assert_eq!(
+                run(&mut machine, access(true, CCSIDR_EL1, 2)),
+                caches.ccsidr(csselr),
+                "{csselr:#x}"
+            );
+        }
+        // XNU's cache_line_size: 16 << the level 1 data cache's LineSize.
+        assert_eq!(16 << (caches.ccsidr(0) & 7), 128);
     }
 
     #[test]
