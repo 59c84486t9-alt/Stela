@@ -18,8 +18,7 @@ fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
 }
 
 pub(super) fn direct_exit(code: &mut Vec<u8>, target: GuestAddress, kind: ExitKind) {
-    super::immediate(code, target.0);
-    exit_kind(code, kind);
+    code.extend(super::chain::direct_exit(target, kind));
 }
 
 fn conditional_exit(
@@ -195,6 +194,48 @@ fn emit_selected(
     emit_terminal(code, &mut block.source_map, terminal, fallthrough, target);
     block
 }
+/// The direct exits to static successors that [`emit_terminal`] ended
+/// `code` with: the target's last, after a conditional branch's fallthrough.
+pub(crate) fn successor_exits(
+    code: &[u8],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+) -> Vec<super::chain::DirectExit> {
+    use super::chain::{DIRECT_EXIT_BYTES, DirectExit, direct_exit};
+    let (target, kind, conditional) = match terminal.map(|(_, terminal)| terminal) {
+        None => (fallthrough, ExitKind::Fallthrough, false),
+        Some(Terminator::DirectCall(target)) => (*target, ExitKind::Call, false),
+        Some(Terminator::Branch(Operation::Branch { target })) => {
+            (*target, ExitKind::Direct, false)
+        }
+        Some(Terminator::Branch(
+            Operation::BranchCondition { target, .. }
+            | Operation::BranchZero { target, .. }
+            | Operation::BranchBit { target, .. },
+        )) => (*target, ExitKind::Direct, true),
+        Some(_) => return vec![],
+    };
+    let candidates = [
+        conditional.then_some((2, fallthrough, ExitKind::Fallthrough)),
+        Some((1, target, kind)),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .filter_map(|(from_end, target, kind)| {
+            let offset = code.len().checked_sub(from_end * DIRECT_EXIT_BYTES)?;
+            // An always-true condition emits no fallthrough exit.
+            (code[offset..offset + DIRECT_EXIT_BYTES] == direct_exit(target, kind)).then_some(
+                DirectExit {
+                    offset,
+                    target,
+                    kind,
+                },
+            )
+        })
+        .collect()
+}
+
 fn emit_terminal(
     code: &mut Vec<u8>,
     source_map: &mut Vec<(GuestAddress, usize)>,

@@ -300,7 +300,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.watch.pass = [pages.first().copied(), pages.get(1).copied()];
         self.sync_regime();
         let result = match self.fetch_block(pc, true) {
-            Ok(super::Fetched::Block(index)) => self.execute(index),
+            Ok(super::Fetched::Block(index)) => self.execute(index, 0),
             Ok(super::Fetched::Exception(exception)) => {
                 self.take(exception);
                 Ok(())

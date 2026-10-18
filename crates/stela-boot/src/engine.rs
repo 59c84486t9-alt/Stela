@@ -625,6 +625,7 @@ fn run(
         host::native_ticks(),
         machine.statistics.blocks,
         machine.statistics.compiled,
+        machine.statistics.chained,
     );
     loop {
         let slice = machine.statistics.blocks + SLICE;
@@ -650,11 +651,13 @@ fn run(
             let elapsed = now - beat.0;
             let cpu = &machine.cpu;
             let compiled = machine.statistics.compiled;
-            // Ticks per block, the share spent in compiled code, and the
-            // blocks compiled since the last beat and code discards so far.
+            // Ticks per block, the share spent in compiled code, the blocks
+            // compiled since the last beat, code discards so far, and the
+            // share of blocks entered through a chain.
+            let chained = machine.statistics.chained;
             output::arguments(format_args!(
                 "BEAT blocks={blocks} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
-                 compiled={} discards={}\n",
+                 compiled={} discards={} chained={}%\n",
                 cpu.pc,
                 level_name(cpu.pstate.guarded),
                 cpu.pstate.el,
@@ -663,8 +666,9 @@ fn run(
                 (native - beat.1) * 100 / elapsed.max(1),
                 compiled - beat.3,
                 machine.statistics.code_discards,
+                (chained - beat.4) * 100 / (blocks - beat.2).max(1),
             ));
-            beat = (now, native, blocks, compiled);
+            beat = (now, native, blocks, compiled, chained);
         }
     }
 }

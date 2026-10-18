@@ -42,7 +42,10 @@ use stela_compiler::{
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::{GuardedOperation, SystemOperation},
     },
-    x86_64::MemoryChecks,
+    x86_64::{
+        MemoryChecks,
+        chain::{self, ChainControl, DirectExit},
+    },
 };
 
 const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
@@ -52,6 +55,9 @@ const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 const FETCH_CACHE: usize = 1024;
 const JUMP_CACHE: usize = 4096;
 const POINTER_MEMO: usize = 1024;
+/// The most blocks one native run chains into, which bounds how late the
+/// engine sees an interrupt, a timer or the end of a time slice.
+const CHAIN_LIMIT: u64 = 256;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
 
@@ -191,9 +197,13 @@ pub trait Host {
     /// Write guest RAM. False when any byte is not RAM.
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool;
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError>;
+    /// Overwrite installed code at `code` with `bytes`, which the next
+    /// native run executes.
+    fn patch(&mut self, code: NativeCode, bytes: &[u8]);
     /// Free every installed block.
     fn discard_code(&mut self);
-    /// Run one native block on `state`.
+    /// Run one native block on `state`, and the blocks it chains into. A
+    /// fault's offset is from `code`.
     ///
     /// # Safety
     /// `code` was returned by [`Host::install`] since the last discard and
@@ -427,6 +437,10 @@ pub enum Stop {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Statistics {
     pub blocks: u64,
+    /// Blocks entered through a chain from another, without the engine.
+    pub chained: u64,
+    /// Direct exits redirected into their successors.
+    pub links: u64,
     pub compiled: u64,
     pub exceptions: u64,
     pub interrupts: u64,
@@ -448,6 +462,9 @@ struct Block {
     source_map: Vec<(u64, usize)>,
     /// The memory checks it was compiled with.
     checks: MemoryChecks,
+    variant: Variant,
+    /// Direct exits to static successors not yet chained.
+    exits: Vec<DirectExit>,
 }
 
 /// What a PAC result depends on besides its operands: the five keys, the
@@ -590,6 +607,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// The instruction the engine is completing, already counted as retired
     /// (`Machine::completing`).
     completing: Option<u64>,
+    /// The chaining state native code updates (`x86_64::chain`).
+    chain: alloc::boxed::Box<ChainControl>,
+    /// The block count at which `run` stops.
+    block_limit: u64,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -652,6 +673,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             slice_end: processors::QUANTUM,
             pacm_written: false,
             completing: None,
+            chain: alloc::boxed::Box::default(),
+            block_limit: u64::MAX,
         };
         machine.peers = processors::boot(&machine.profile);
         machine.load_profile();
@@ -995,8 +1018,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
+        self.block_limit = if budget == 0 { u64::MAX } else { budget };
         loop {
-            if budget != 0 && self.statistics.blocks >= budget {
+            if self.statistics.blocks >= self.block_limit {
                 return Stop::Budget;
             }
             if let Err(stop) = self.schedule().and_then(|()| self.step()) {
@@ -1055,7 +1079,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Ok(());
             }
         }
-        let step = self.execute(index);
+        let step = self.execute(index, if single { 0 } else { self.chain_budget() });
         if !core::mem::take(&mut self.pacm_written) && pacm {
             self.cpu.pstate.pacm = false;
         }
@@ -1115,17 +1139,102 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
-    /// Run one compiled block and complete its exit or fault.
-    fn execute(&mut self, index: usize) -> Step {
-        let code = self.blocks[index].code;
+    /// Blocks the next native run may chain into: none past the time slice
+    /// or the run's limit.
+    fn chain_budget(&self) -> u64 {
+        let next = self.statistics.blocks + 1;
+        CHAIN_LIMIT
+            .min(self.slice_end.saturating_sub(next))
+            .min(self.block_limit.saturating_sub(next))
+    }
+
+    /// Run compiled block `index` and the blocks it chains into, up to
+    /// `budget` of them, and complete the last one's exit or fault.
+    fn execute(&mut self, index: usize, budget: u64) -> Step {
+        let entry = self.blocks[index].code;
+        *self.chain = ChainControl {
+            budget,
+            retired: 0,
+            block: index as u64,
+        };
         // SAFETY: installed by this machine since the last discard, for the
-        // system-mode block ABI.
-        let exit = unsafe { self.host.execute(code, &mut self.cpu.state) };
-        self.statistics.blocks += 1;
+        // system-mode block ABI; chained blocks and thunks too.
+        let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
+        let control = *self.chain;
+        // A thunk that found no transfer left wrapped the budget.
+        let chained = budget - control.budget.min(budget);
+        let last = control.block as usize;
+        self.cpu.retired += control.retired;
+        self.statistics.blocks += 1 + chained;
+        self.statistics.chained += chained;
         match exit {
-            NativeExit::Exit { next_pc, kind } => self.exit(index, next_pc, kind),
-            NativeExit::Fault(fault) => self.native_fault(index, fault),
+            NativeExit::Exit { next_pc, kind } => {
+                self.exit(last, next_pc, kind)?;
+                if let Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call)) =
+                    ExitKind::try_from(kind)
+                    && self.cpu.pstate.btype == 0
+                {
+                    self.link(last, next_pc, kind);
+                }
+                Ok(())
+            }
+            NativeExit::Fault(mut fault) => {
+                let at = (entry.0 as u64).wrapping_add(fault.offset as u64);
+                fault.offset = at.wrapping_sub(self.blocks[last].code.0 as u64) as usize;
+                self.native_fault(last, fault)
+            }
         }
+    }
+
+    /// Redirect block `index`'s direct exit to `next_pc` into the block a
+    /// fetch there would run, once that block exists: one in the same
+    /// page, so the same translation and permissions, compiled for the same
+    /// variant. Its BTYPE is 0, as no branch that sets it ends in a direct
+    /// exit, and every System register write, exception and device access
+    /// that changes what the next fetch checks returns to the engine.
+    fn link(&mut self, index: usize, next_pc: u64, kind: ExitKind) {
+        let block = &self.blocks[index];
+        if block.variant.single || (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
+            return;
+        }
+        let Some(position) = block
+            .exits
+            .iter()
+            .position(|exit| exit.target.0 == next_pc && exit.kind == kind)
+        else {
+            return;
+        };
+        let physical = block.physical.wrapping_add(next_pc.wrapping_sub(block.pc));
+        let Some(&target) = self.index.get(&(next_pc, physical, block.variant)) else {
+            return;
+        };
+        let exit = block.exits[position];
+        let site = block.code.0 as u64 + exit.offset as u64;
+        let retired = block.source_map.len() as u32;
+        let entry = self.blocks[target].code.0 as u64;
+        let control = &*self.chain as *const ChainControl as u64;
+        let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
+            return;
+        };
+        let at = thunk.0 as u64;
+        let (Some(code), Some(jump)) = (
+            chain::thunk(
+                at,
+                control,
+                retired,
+                target as u32,
+                entry,
+                exit.target,
+                exit.kind,
+            ),
+            chain::jump(site, at),
+        ) else {
+            return;
+        };
+        self.host.patch(thunk, &code);
+        self.host.patch(NativeCode(site as usize), &jump);
+        self.blocks[index].exits.swap_remove(position);
+        self.statistics.links += 1;
     }
 
     /// The checks before an instruction executes, in Arm's priority after PC
@@ -1473,6 +1582,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .map(|(guest, offset)| (guest.0, *offset))
                 .collect(),
             checks,
+            variant,
+            exits: compiled.direct_exits,
         });
         let index = self.blocks.len() - 1;
         self.index.insert((pc, physical, variant), index);
@@ -3262,6 +3373,9 @@ mod tests {
         regimes: Vec<Regime>,
         invalidations: usize,
         installed: Vec<Vec<u8>>,
+        patches: Vec<(usize, Vec<u8>)>,
+        /// The chaining state the next native run leaves, as thunks would.
+        chained: Option<(*mut ChainControl, ChainControl)>,
         /// What the next native blocks return, in order: unit tests do not
         /// run native code.
         pub(super) exits: Vec<NativeExit>,
@@ -3298,11 +3412,18 @@ mod tests {
             self.installed.push(code.to_vec());
             Ok(NativeCode(self.installed.len()))
         }
+        fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
+            self.patches.push((code.0, bytes.to_vec()));
+        }
         fn discard_code(&mut self) {
             self.installed.clear();
         }
         unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
             assert!(!self.exits.is_empty(), "unit tests do not run native code");
+            if let Some((control, chained)) = self.chained.take() {
+                // SAFETY: the test points at the machine's boxed control.
+                unsafe { *control = chained };
+            }
             self.exits.remove(0)
         }
         fn set_regime(&mut self, regime: &Regime) {
@@ -3363,6 +3484,8 @@ mod tests {
             regimes: Vec::new(),
             invalidations: 0,
             installed: Vec::new(),
+            patches: Vec::new(),
+            chained: None,
             exits: Vec::new(),
         };
         let profile = CpuProfile {
@@ -3755,6 +3878,70 @@ mod tests {
         machine.system_instruction(IC_IALLU).unwrap();
         assert!(machine.index.is_empty() && machine.code_pages.is_empty());
         assert_eq!(machine.statistics.code_discards, 1);
+    }
+
+    /// Two blocks that branch to each other in one page: each direct exit
+    /// is redirected through a thunk once its successor exists, and a run
+    /// that chained counts the blocks and instructions it passed through.
+    #[test]
+    fn direct_exits_chain_into_their_successors_in_the_page() {
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        let mut machine = machine(&[ADD, 0x1400_0002, 0, ADD, 0x17ff_fffc]);
+        let base = machine.cpu.pc;
+        let direct = |next_pc| NativeExit::Exit {
+            next_pc,
+            kind: ExitKind::Direct as u64,
+        };
+        machine.host.exits = vec![direct(base + 12), direct(base), direct(base + 12)];
+        machine.step().unwrap();
+        assert!(
+            machine.host.patches.is_empty(),
+            "the successor is not compiled"
+        );
+        machine.step().unwrap();
+        machine.step().unwrap();
+        assert_eq!(machine.statistics.links, 2);
+        let control = &*machine.chain as *const ChainControl as u64;
+        let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
+        // The second block's exit to the first, then the first's to it.
+        for (patches, from, to, target, index) in [
+            (&machine.host.patches[..2], second, first, base, 0),
+            (&machine.host.patches[2..], first, second, base + 12, 1),
+        ] {
+            let (at, thunk) = &patches[0];
+            let expected = chain::thunk(
+                *at as u64,
+                control,
+                2,
+                index,
+                to.code.0 as u64,
+                GuestAddress(target),
+                ExitKind::Direct,
+            );
+            assert_eq!(Some(thunk.clone()), expected);
+            // The block's one direct exit ends its code.
+            let code = &machine.host.installed[from.code.0 - 1];
+            let site = from.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
+            let jump = chain::jump(site as u64, *at as u64).unwrap().to_vec();
+            assert_eq!(patches[1], (site, jump));
+            assert!(from.exits.is_empty());
+        }
+        // The first block chains into the second, which exits to the first.
+        let (blocks, retired) = (machine.statistics.blocks, machine.cpu.retired);
+        machine.host.chained = Some((
+            &mut *machine.chain,
+            ChainControl {
+                budget: CHAIN_LIMIT - 1,
+                retired: 2,
+                block: 1,
+            },
+        ));
+        machine.host.exits = vec![direct(base)];
+        machine.step().unwrap();
+        assert_eq!(machine.statistics.blocks, blocks + 2);
+        assert_eq!(machine.statistics.chained, 1);
+        assert_eq!(machine.cpu.retired, retired + 4);
+        assert_eq!(machine.cpu.pc, base);
     }
 
     #[test]

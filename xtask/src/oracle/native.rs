@@ -148,6 +148,33 @@ impl Executable {
         }
         Ok(executable)
     }
+
+    /// Whether `address` lies in this mapping's code.
+    pub(super) fn contains(&self, address: usize) -> bool {
+        (self.address()..self.address() + self.bytes).contains(&address)
+    }
+
+    /// Overwrite the code at `address` with `bytes`.
+    pub(super) fn patch(&mut self, address: usize, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            self.contains(address) && address + bytes.len() <= self.address() + self.bytes,
+            "a patch outside the native code"
+        );
+        let pointer = self.pointer.as_ptr().cast();
+        // SAFETY: the owned mapping, writable only while it is copied into.
+        unsafe {
+            ensure!(
+                libc::mprotect(pointer, self.bytes, libc::PROT_READ | libc::PROT_WRITE) == 0,
+                "cannot make native code writable"
+            );
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
+            ensure!(
+                libc::mprotect(pointer, self.bytes, libc::PROT_READ | libc::PROT_EXEC) == 0,
+                "cannot make native code executable"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Executable {

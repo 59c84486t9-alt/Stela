@@ -348,6 +348,9 @@ pub struct CompiledBlock {
     pub native: NativeBlock,
     /// Exact consumed prefix, including the terminator when present.
     pub source_bytes: usize,
+    /// The native code's direct exits to static successors, which the
+    /// system-mode engine may chain (`x86_64::chain`).
+    pub direct_exits: alloc::vec::Vec<crate::x86_64::chain::DirectExit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,17 +592,28 @@ impl CompilationPlan {
                 self.target,
             )
         } else {
-            crate::x86_64::block::emit_for_target(
+            let native = crate::x86_64::block::emit_for_target(
                 &self.parsed.instructions,
                 self.parsed.terminal.as_ref(),
                 self.parsed.next_pc,
                 self.target,
                 self.checks,
-            )
+            );
+            let direct_exits = crate::x86_64::block::successor_exits(
+                &native.x86_64_code,
+                self.parsed.terminal.as_ref(),
+                self.parsed.next_pc,
+            );
+            return Ok(CompiledBlock {
+                native,
+                source_bytes: self.parsed.source_bytes,
+                direct_exits,
+            });
         };
         Ok(CompiledBlock {
             native,
             source_bytes: self.parsed.source_bytes,
+            direct_exits: alloc::vec::Vec::new(),
         })
     }
 }
@@ -809,6 +823,62 @@ mod tests {
         assert_eq!(granule(&default), 2);
         assert_eq!(granule(&relaxed), 0);
         assert_ne!(default, relaxed);
+    }
+
+    /// The direct exits a system-mode block reports are the exact stubs at
+    /// the end of its code, the conditional fallthrough before the target.
+    #[test]
+    fn system_mode_blocks_report_their_direct_successor_exits() {
+        use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+        const BASE: u64 = 0x4000;
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        let fallthrough = (BASE + 8, ExitKind::Fallthrough);
+        for (word, expected) in [
+            (0x1400_0002_u32, vec![(BASE + 12, ExitKind::Direct)]), // b +8
+            (
+                0x5400_0040,
+                vec![fallthrough, (BASE + 12, ExitKind::Direct)],
+            ), // b.eq +8
+            (0x5400_004e, vec![(BASE + 12, ExitKind::Direct)]),     // b.al +8
+            (
+                0xb400_0040,
+                vec![fallthrough, (BASE + 12, ExitKind::Direct)],
+            ), // cbz x0, +8
+            (
+                0x3700_0040,
+                vec![fallthrough, (BASE + 12, ExitKind::Direct)],
+            ), // tbnz w0, #0, +8
+            (0x9400_0002, vec![(BASE + 12, ExitKind::Call)]),       // bl +8
+            (ADD, vec![fallthrough]),
+            (0xd65f_03c0, vec![]), // ret
+            (0xd63f_0000, vec![]), // blr x0
+            (0xd518_1000, vec![]), // msr sctlr_el1, x0
+        ] {
+            let source: Vec<u8> = [ADD, word].into_iter().flat_map(u32::to_le_bytes).collect();
+            let compiled = compile_for_target(
+                &source,
+                GuestAddress(BASE),
+                BlockProfile::SystemModeV1,
+                crate::TargetCpu::Baseline,
+            )
+            .unwrap();
+            let code = &compiled.native.x86_64_code;
+            let exits: Vec<_> = compiled
+                .direct_exits
+                .iter()
+                .map(|exit| {
+                    assert_eq!(
+                        code[exit.offset..exit.offset + DIRECT_EXIT_BYTES],
+                        direct_exit(exit.target, exit.kind)
+                    );
+                    (exit.target.0, exit.kind)
+                })
+                .collect();
+            assert_eq!(exits, expected, "{word:#x}");
+            if let Some(last) = compiled.direct_exits.last() {
+                assert_eq!(last.offset + DIRECT_EXIT_BYTES, code.len(), "{word:#x}");
+            }
+        }
     }
 
     #[test]

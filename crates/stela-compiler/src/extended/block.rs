@@ -284,6 +284,7 @@ pub fn compile_for_profile(
             source_map,
         },
         source_bytes,
+        direct_exits: Vec::new(),
     })
 }
 

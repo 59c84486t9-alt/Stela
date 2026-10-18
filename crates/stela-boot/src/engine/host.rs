@@ -570,6 +570,25 @@ impl Host for BareHost {
         Ok(NativeCode((layout::CODE + offset) as usize))
     }
 
+    fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
+        let state = state();
+        let offset = code.0 as u64 - layout::CODE;
+        assert!(
+            offset + bytes.len() as u64 <= state.code_used,
+            "a patch outside the installed code"
+        );
+        // SAFETY: installed arena bytes through the writable physmap alias.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                layout::physical(state.code_physical + offset) as *mut u8,
+                bytes.len(),
+            );
+        }
+        // Serialize before the executable alias runs the new bytes.
+        core::arch::x86_64::__cpuid(0);
+    }
+
     fn discard_code(&mut self) {
         state().code_used = 0;
     }
@@ -586,7 +605,8 @@ impl Host for BareHost {
             && let Some(recorded) = state.recorded.take()
         {
             return NativeExit::Fault(NativeFault {
-                offset: (recorded.rip - code.0 as u64) as usize,
+                // A chained block may lie below the entered one.
+                offset: recorded.rip.wrapping_sub(code.0 as u64) as usize,
                 address: recorded.address,
                 write: recorded.write,
                 cause: recorded.cause,

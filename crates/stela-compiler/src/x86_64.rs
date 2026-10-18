@@ -69,6 +69,7 @@ pub mod amx;
 mod atomic;
 mod bitfield;
 pub(crate) mod block;
+pub mod chain;
 pub(crate) mod checked_pointer;
 mod conditional_select;
 mod crc;

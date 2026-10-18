@@ -229,13 +229,23 @@ impl Host for OracleHost {
         Ok(NativeCode(address))
     }
 
+    fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
+        self.installed
+            .iter_mut()
+            .find(|executable| executable.contains(code.0))
+            .expect("a patch of installed code")
+            .patch(code.0, bytes)
+            .expect("a writable native mapping");
+    }
+
     fn discard_code(&mut self) {
         self.installed.clear();
     }
 
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit {
         // SAFETY: the engine passes code it installed for the system-mode
-        // block ABI; the lane admits only words whose blocks exit at once.
+        // block ABI; the lane admits only blocks that exit before any native
+        // memory access.
         let block: extern "sysv64" fn(*mut GuestState) -> BlockExit =
             unsafe { std::mem::transmute(code.0) };
         let exit = block(state);
