@@ -51,6 +51,7 @@ const FETCH_PAGE: u64 = 4096;
 const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 const FETCH_CACHE: usize = 1024;
 const JUMP_CACHE: usize = 4096;
+const POINTER_MEMO: usize = 1024;
 const ADMITTED: usize = 4096;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
@@ -432,6 +433,32 @@ struct Block {
     checks: MemoryChecks,
 }
 
+/// What a PAC result depends on besides its operands: the five keys, the
+/// chip's PAC version and the regime's TCR (Arm `AddPAC`, `Auth`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PointerInputs {
+    keys: [[u64; 2]; 5],
+    version: pauth::Version,
+    tcr: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PointerOperation {
+    Sign,
+    Authenticate { combined: bool },
+}
+
+/// One signing or authentication result: the pointer, whether it
+/// authenticated, or the PAC failure code a faulting version raises.
+#[derive(Clone, Copy)]
+struct PointerEntry {
+    operation: PointerOperation,
+    key: pauth::Key,
+    pointer: u64,
+    modifier: u64,
+    result: Result<(u64, bool), u8>,
+}
+
 #[derive(Clone, Copy)]
 struct FetchEntry {
     page: u64,
@@ -516,11 +543,16 @@ pub struct Machine<H: Host, D: Devices> {
     event_sample: Option<u64>,
     /// What self-hosted debug needs of each instruction, while valid.
     debug: Option<DebugMode>,
+    /// The PAC keys, version and layout, while valid.
+    pointer: Option<pauth::Context>,
     /// The running PE's device lines and the count before which no device
     /// changes state by itself (`Devices::deadline`), while valid: a device
     /// or board register access, a System register write, an exception and
     /// a PE switch can change them, and clear it.
     device_lines: Option<(Lines, u64)>,
+    /// Results of the implicit-operand PAC forms under `pointer_memo_inputs`.
+    pointer_memo: Vec<Option<PointerEntry>>,
+    pointer_memo_inputs: Option<PointerInputs>,
     /// Words `Chip::admit` has answered, by a hash of the word.
     admitted: Vec<Option<(u32, u32)>>,
     /// The watched pages the host keeps unmapped.
@@ -587,7 +619,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             memory_checks: None,
             event_sample: None,
             debug: None,
+            pointer: None,
             device_lines: None,
+            pointer_memo: vec![None; POINTER_MEMO],
+            pointer_memo_inputs: None,
             admitted: vec![None; ADMITTED],
             watch: Watch::default(),
             current: 0,
@@ -623,6 +658,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.floating_point = None;
         self.memory_checks = None;
         self.debug = None;
+        self.pointer = None;
         self.device_lines = None;
     }
 
@@ -1651,6 +1687,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// PAC Fail exception (EC 0x1C) to the current EL, or from EL0 to EL1 or
     /// the host's EL2 (Arm `AArch64_PACFailException`).
     fn pointer_authentication(&mut self, word: u32) -> Step {
+        if let Some(step) = self.implicit_pointer_authentication(word) {
+            return step;
+        }
         let pc = self.cpu.pc;
         let refuse = |machine: &Self, detail: String| {
             Err(machine.unsupported(RequirementKind::Instruction { word, detail }))
@@ -1738,6 +1777,146 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 _ => refuse(self, format!("{error:#}")),
             },
         }
+    }
+
+    /// PACIASP, PACIBSP, AUTIASP, AUTIBSP, RETAA, RETAB and the HINT-space
+    /// *1716 forms, whose operands are implicit (X30 and SP, or X17 and X16):
+    /// the kernel's prologues and epilogues. With the key enabled and its use
+    /// not trapped, each completes as the general path does (Arm `AddPAC`,
+    /// `Auth`; RETA* branches to the authenticated pointer and keeps X30
+    /// signed) through [`Self::pointer_result`]. `None` leaves every other
+    /// case, and every form under PSTATE.PACM, to the general path.
+    fn implicit_pointer_authentication(&mut self, word: u32) -> Option<Step> {
+        use PointerAuthenticationKey as Block;
+        use pauth::Key;
+        #[derive(PartialEq)]
+        enum Form {
+            Sign,
+            Authenticate,
+            Return,
+        }
+        let (form, key, block_key, stack) = match word {
+            0xd503_233f => (Form::Sign, Key::Ia, Block::Ia, true),
+            0xd503_237f => (Form::Sign, Key::Ib, Block::Ib, true),
+            0xd503_23bf => (Form::Authenticate, Key::Ia, Block::Ia, true),
+            0xd503_23ff => (Form::Authenticate, Key::Ib, Block::Ib, true),
+            0xd65f_0bff => (Form::Return, Key::Ia, Block::Ia, true),
+            0xd65f_0fff => (Form::Return, Key::Ib, Block::Ib, true),
+            0xd503_211f => (Form::Sign, Key::Ia, Block::Ia, false),
+            0xd503_215f => (Form::Sign, Key::Ib, Block::Ib, false),
+            0xd503_219f => (Form::Authenticate, Key::Ia, Block::Ia, false),
+            0xd503_21df => (Form::Authenticate, Key::Ib, Block::Ib, false),
+            _ => return None,
+        };
+        if self.cpu.pstate.pacm
+            || !self.key_enabled(block_key)
+            || self.pointer_authentication_trapped()
+        {
+            return None;
+        }
+        let (register, modifier) = if stack {
+            (30, self.cpu.state.sp)
+        } else {
+            (17, self.cpu.state.x[16])
+        };
+        let operation = match form {
+            Form::Sign => PointerOperation::Sign,
+            Form::Authenticate => PointerOperation::Authenticate { combined: false },
+            Form::Return => PointerOperation::Authenticate { combined: true },
+        };
+        let pointer = self.cpu.state.x[register];
+        let result = match self.pointer_result(operation, key, pointer, modifier) {
+            Ok(result) => result,
+            Err(stop) => return Some(Err(stop)),
+        };
+        let pc = self.cpu.pc;
+        self.cpu.pstate.btype = 0;
+        match result {
+            Ok((target, _)) if form == Form::Return => self.cpu.pc = target,
+            Ok((value, _)) => {
+                self.cpu.state.x[register] = value;
+                self.cpu.pc = pc + INSTRUCTION;
+            }
+            Err(code) => self.take(Exception::synchronous(
+                Class::PointerAuthenticationFailure,
+                u32::from(code),
+                pc,
+            )),
+        }
+        Some(Ok(()))
+    }
+
+    /// One signing or authentication with the current keys, version and
+    /// layout, remembered while they stay the same: both are pure functions
+    /// of them and the operands. The memo slot comes from the pointer and
+    /// modifier alone, so which slot is touched never depends on a key.
+    fn pointer_result(
+        &mut self,
+        operation: PointerOperation,
+        key: pauth::Key,
+        pointer: u64,
+        modifier: u64,
+    ) -> Result<Result<(u64, bool), u8>, Stop> {
+        if self.pointer.is_none() {
+            let inputs = PointerInputs {
+                keys: self.pointer_keys(),
+                version: self.pointer_version()?,
+                tcr: self.cpu.controls(self.cpu.regime()).tcr,
+            };
+            if self.pointer_memo_inputs != Some(inputs) {
+                self.pointer_memo.fill(None);
+                self.pointer_memo_inputs = Some(inputs);
+            }
+            let [ia, ib, da, db, generic] = inputs.keys;
+            self.pointer = Some(
+                pauth::Context::new_with_version(
+                    0,
+                    pauth::Keys::from_words(ia, ib, da, db).with_generic_words(generic),
+                    inputs.version,
+                )
+                .with_translation_regime(inputs.tcr),
+            );
+        }
+        let slot = ((pointer ^ modifier.rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 54)
+            as usize
+            % POINTER_MEMO;
+        if let Some(entry) = self.pointer_memo[slot]
+            && entry.operation == operation
+            && entry.key == key
+            && entry.pointer == pointer
+            && entry.modifier == modifier
+        {
+            return Ok(entry.result);
+        }
+        let context = self.pointer.as_ref().expect("built above");
+        let result = match operation {
+            PointerOperation::Sign => match context.sign(key, pointer, modifier) {
+                Ok(signed) => Ok((signed, true)),
+                Err(_) => {
+                    return Err(self
+                        .unsupported(RequirementKind::Native("PAC key unavailable for signing")));
+                }
+            },
+            PointerOperation::Authenticate { combined } => {
+                match context.authenticate_operation(key, pointer, modifier, combined) {
+                    Ok(result) => Ok((result.pointer, result.authenticated)),
+                    Err(pauth::AuthenticationError::Failure { code }) => Err(code),
+                    Err(pauth::AuthenticationError::KeyUnavailable { .. }) => {
+                        return Err(self.unsupported(RequirementKind::Native(
+                            "PAC key unavailable for authentication",
+                        )));
+                    }
+                }
+            }
+        };
+        self.pointer_memo[slot] = Some(PointerEntry {
+            operation,
+            key,
+            pointer,
+            modifier,
+            result,
+        });
+        Ok(result)
     }
 
     /// The two-modifier operation PSTATE.PACM makes of a PAC*SP, AUT*SP,
@@ -4422,6 +4601,52 @@ mod tests {
         machine.cpu.registers.set(SystemRegister::SCTLR_EL1, 0, 0);
         machine.system_instruction_for_test(PACIBSP);
         assert_eq!(machine.cpu.pstate.el, 1);
+    }
+
+    #[test]
+    fn implicit_pac_forms_repeat_their_results_until_the_keys_change() {
+        const PACIBSP: u32 = 0xd503_237f;
+        const AUTIBSP: u32 = 0xd503_23ff;
+        const RETAB: u32 = 0xd65f_0fff;
+        const PACIA1716: u32 = 0xd503_211f;
+        let mut machine = pac_machine();
+        let pointer = 0xffff_ff80_0000_4000_u64;
+        machine.cpu.state.sp = 0xffff_ff80_0001_0000;
+        let sign = |machine: &mut Machine<FakeHost, NoDevices>| {
+            machine.cpu.state.x[30] = pointer;
+            machine.system_instruction_for_test(PACIBSP);
+            machine.cpu.state.x[30]
+        };
+        let signed = sign(&mut machine);
+        let expected = machine
+            .pointer_context()
+            .unwrap()
+            .sign(pauth::Key::Ib, pointer, machine.cpu.state.sp)
+            .unwrap();
+        assert_eq!(signed, expected);
+        assert_eq!(sign(&mut machine), signed, "remembered");
+        machine.system_instruction_for_test(AUTIBSP);
+        assert_eq!(machine.cpu.state.x[30], pointer);
+        // RETAB branches to the authenticated pointer and keeps X30 signed.
+        machine.cpu.state.x[30] = signed;
+        machine.system_instruction_for_test(RETAB);
+        assert_eq!((machine.cpu.pc, machine.cpu.state.x[30]), (pointer, signed));
+        // PACIA1716 signs X17 with X16 under key A.
+        machine.cpu.state.x[16] = 0x55;
+        machine.cpu.state.x[17] = pointer;
+        machine.system_instruction_for_test(PACIA1716);
+        let context = machine.pointer_context().unwrap();
+        assert_eq!(
+            machine.cpu.state.x[17],
+            context.sign(pauth::Key::Ia, pointer, 0x55).unwrap()
+        );
+        // A key the guest writes changes every later result.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::APIBKeyLo_EL1, 0, 0x0bad_cafe);
+        machine.derived_changed();
+        assert_ne!(sign(&mut machine), signed);
     }
 
     #[test]
