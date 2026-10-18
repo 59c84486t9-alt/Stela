@@ -648,7 +648,11 @@ fn run(
 /// The instruction words that most often left compiled code for the engine.
 fn exit_report(machine: &Machine<BareHost, AppleDevices>) {
     const SHOWN: usize = 16;
-    let mut words: Vec<_> = machine.exit_words.iter().map(|(&word, &count)| (count, word)).collect();
+    let mut words: Vec<_> = machine
+        .exit_words
+        .iter()
+        .map(|(&word, &count)| (count, word))
+        .collect();
     words.sort_unstable_by(|a, b| b.cmp(a));
     for (count, word) in words.into_iter().take(SHOWN) {
         output::arguments(format_args!("EXIT {word:#010x} x{count}\n"));
