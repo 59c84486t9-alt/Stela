@@ -230,7 +230,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let accesses = self
             .data_accesses(pc, word)
             .map_err(|detail| self.refuse_word(word, detail))?;
-        let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+        let sctlr = self.cpu.regime_sctlr();
         match accesses
             .iter()
             .find(|(access, shape)| alignment::before_translation(sctlr, access.address, *shape))

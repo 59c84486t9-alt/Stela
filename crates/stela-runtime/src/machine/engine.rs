@@ -464,7 +464,11 @@ struct Block {
     checks: MemoryChecks,
     variant: Variant,
     /// Direct exits to static successors not yet chained.
-    exits: Vec<DirectExit>,
+    successors: Vec<DirectExit>,
+    /// The PC and word of its last instruction, where it exits to the engine.
+    terminal: (u64, u32),
+    /// Exits to the engine at `terminal`.
+    taken: u64,
 }
 
 /// What a PAC result depends on besides its operands: the five keys, the
@@ -548,8 +552,9 @@ pub struct Machine<H: Host, D: Devices> {
     pub profile: CpuProfile,
     pub statistics: Statistics,
     /// Exits to the engine from compiled code (System, FP, PAC and AMX), by
-    /// the instruction word that took them: which words to compile inline.
-    pub exit_words: BTreeMap<u32, u64>,
+    /// the instruction word that took them, except those the live blocks
+    /// count at their last instructions (see [`Self::exit_words`]).
+    exit_words: BTreeMap<u32, u64>,
     target: TargetCpu,
     blocks: Vec<Block>,
     /// Blocks by PC, PA, FP enablement and SP alignment checking.
@@ -750,7 +755,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// alignment, A (Arm `AlignmentEnforced`) and nAA.
     fn memory_checks(&mut self) -> MemoryChecks {
         *self.memory_checks.get_or_insert_with(|| {
-            let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+            let sctlr = self.cpu.regime_sctlr();
             let bit = if self.cpu.pstate.el == 0 { 4 } else { 3 };
             MemoryChecks {
                 stack_alignment: sctlr & (1 << bit) != 0,
@@ -803,6 +808,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn discard_code(&mut self) {
+        self.exit_words = self.exit_words();
         self.host.discard_code();
         self.blocks.clear();
         self.index.clear();
@@ -1198,7 +1204,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         let Some(position) = block
-            .exits
+            .successors
             .iter()
             .position(|exit| exit.target.0 == next_pc && exit.kind == kind)
         else {
@@ -1208,7 +1214,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(&target) = self.index.get(&(next_pc, physical, block.variant)) else {
             return;
         };
-        let exit = block.exits[position];
+        let exit = block.successors[position];
         let site = block.code.0 as u64 + exit.offset as u64;
         let retired = block.source_map.len() as u32;
         let entry = self.blocks[target].code.0 as u64;
@@ -1233,7 +1239,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         self.host.patch(thunk, &code);
         self.host.patch(NativeCode(site as usize), &jump);
-        self.blocks[index].exits.swap_remove(position);
+        self.blocks[index].successors.swap_remove(position);
         self.statistics.links += 1;
     }
 
@@ -1384,7 +1390,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             })
         );
         if word == PACIASP || word == PACIBSP || sppc {
-            let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+            let sctlr = self.cpu.regime_sctlr();
             let forbid = if self.cpu.pstate.el == 0 {
                 SCTLR_BT0
             } else {
@@ -1559,6 +1565,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
             };
         let compiled = self.compile_prefix(&source[..consumed], pc, checks)?;
+        let last = compiled.source_bytes - INSTRUCTION as usize;
+        let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         let code = match self.host.install(&compiled.native.x86_64_code) {
             Ok(code) => code,
             Err(InstallError::Full) => {
@@ -1583,7 +1591,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .collect(),
             checks,
             variant,
-            exits: compiled.direct_exits,
+            successors: compiled.direct_exits,
+            terminal: (pc + compiled.source_bytes as u64 - INSTRUCTION, terminal),
+            taken: 0,
         });
         let index = self.blocks.len() - 1;
         self.index.insert((pc, physical, variant), index);
@@ -1644,11 +1654,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
-    /// The word an exit at `pc` executes, counted in [`Self::exit_words`].
+    /// The word an exit at `pc` executes, counted in [`Self::exit_words`]:
+    /// the block's last instruction, as it was compiled, or one it reads.
     fn exit_word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
+        let block = &mut self.blocks[index];
+        if pc == block.terminal.0 {
+            block.taken += 1;
+            return Ok(block.terminal.1);
+        }
         let word = self.word(index, pc)?;
         *self.exit_words.entry(word).or_default() += 1;
         Ok(word)
+    }
+
+    /// Exits to the engine from compiled code (System, FP, PAC and AMX), by
+    /// the instruction word that took them: which words to compile inline.
+    pub fn exit_words(&self) -> BTreeMap<u32, u64> {
+        let mut words = self.exit_words.clone();
+        for block in self.blocks.iter().filter(|block| block.taken != 0) {
+            *words.entry(block.terminal.1).or_default() += block.taken;
+        }
+        words
     }
 
     /// The word an instruction inside a compiled block executes as: its
@@ -1762,7 +1788,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             PointerAuthenticationKey::Da => 27,
             PointerAuthenticationKey::Db => 13,
         };
-        self.cpu.controls(self.cpu.regime()).sctlr & (1 << bit) != 0
+        self.cpu.regime_sctlr() & (1 << bit) != 0
     }
 
     /// The PAC keys as (low, high) words in APIA, APIB, APDA, APDB, APGA order.
@@ -1807,7 +1833,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pauth::Keys::from_words(keys[0], keys[1], keys[2], keys[3]).with_generic_words(keys[4]),
             self.pointer_version()?,
         )
-        .with_translation_regime(self.cpu.controls(self.cpu.regime()).tcr))
+        .with_translation_regime(self.cpu.regime_tcr()))
     }
 
     /// Whether HCR_EL2.API clear traps the use of an enabled key, or PACGA,
@@ -2094,7 +2120,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let inputs = PointerInputs {
                 keys: self.pointer_keys(),
                 version: self.pointer_version()?,
-                tcr: self.cpu.controls(self.cpu.regime()).tcr,
+                tcr: self.cpu.regime_tcr(),
             };
             if self.pointer_memo_inputs != Some(inputs) {
                 self.pointer_memo.fill(None);
@@ -3194,7 +3220,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             },
         });
         let el = self.cpu.pstate.el;
-        let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+        let sctlr = self.cpu.regime_sctlr();
         let (enable_bit, hcr_trap, form) = match kind {
             WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0b00),
             WaitKind::Event => (1u64 << 18, HCR_TWE, 0b01),
@@ -3924,7 +3950,7 @@ mod tests {
             let site = from.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
             let jump = chain::jump(site as u64, *at as u64).unwrap().to_vec();
             assert_eq!(patches[1], (site, jump));
-            assert!(from.exits.is_empty());
+            assert!(from.successors.is_empty());
         }
         // The first block chains into the second, which exits to the first.
         let (blocks, retired) = (machine.statistics.blocks, machine.cpu.retired);

@@ -524,6 +524,22 @@ impl Cpu {
         }
     }
 
+    /// SCTLR_ELx of the current regime, without the rest of [`Self::controls`].
+    pub fn regime_sctlr(&self) -> u64 {
+        self.read(match self.regime() {
+            TranslationRegime::El10 => Register::SCTLR_EL1,
+            TranslationRegime::El20 => Register::SCTLR_EL2,
+        })
+    }
+
+    /// TCR_ELx of the current regime, without the rest of [`Self::controls`].
+    pub fn regime_tcr(&self) -> u64 {
+        self.read(match self.regime() {
+            TranslationRegime::El10 => Register::TCR_EL1,
+            TranslationRegime::El20 => Register::TCR_EL2,
+        })
+    }
+
     /// Translation controls of a regime: its stage-1 registers and, for
     /// EL1&0, the stage-2 registers that `mmu` applies under HCR_EL2.VM or DC.
     pub fn controls(&self, regime: TranslationRegime) -> Controls {

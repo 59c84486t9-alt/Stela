@@ -704,7 +704,7 @@ fn sample_report(samples: &mut Vec<u64>, user: u32) {
 fn exit_report(machine: &Machine<BareHost, AppleDevices>) {
     const SHOWN: usize = 16;
     let mut words: Vec<_> = machine
-        .exit_words
+        .exit_words()
         .iter()
         .map(|(&word, &count)| (count, word))
         .collect();

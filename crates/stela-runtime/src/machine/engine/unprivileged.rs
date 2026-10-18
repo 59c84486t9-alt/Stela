@@ -38,7 +38,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let bytes = usize::from(operand.bytes);
         let write = operand.transfer == MemoryTransfer::Store;
         let aligned = address.is_multiple_of(u64::from(operand.bytes));
-        let sctlr = self.cpu.controls(self.cpu.regime()).sctlr;
+        let sctlr = self.cpu.regime_sctlr();
         if !aligned && sctlr & SCTLR_A != 0 {
             return self.alignment_fault(address, write);
         }
