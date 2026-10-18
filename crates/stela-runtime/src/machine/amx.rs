@@ -14,6 +14,13 @@
 //!   [`AmxView`], and [`route`] alone maps encodings to views by the kernel's
 //!   EL. All three `AMX_CTL` encodings are op1=4, CRn=15, outside the generic
 //!   VHE alias tables, so this module routes them itself.
+//! - `AMXIDR_EL1` advertises the AMX generation: the kernel's
+//!   `machine_routines_apple.c` (`0xfffffe000c551f80`) takes its highest set
+//!   bit of 0..5 as generation 1..6, panics on any of bits 6..15 ("Unknown
+//!   AMX feature ID bit") or none ("doesn't advertise any known version"),
+//!   and CPU initialization branches on the result. The model is corsix's
+//!   `AMX_VER_M2`, generation 2; whether hardware also sets bit 0 is not
+//!   known and the kernel would not see it.
 //! - Every context-switch use sets or clears only bit 63 with
 //!   read-modify-write, and reads `AMX_STATE_T` after `dsb ish` testing only
 //!   for nonzero (`0xfffffe000bd83694`). Live state reads as 1 here
@@ -30,6 +37,10 @@ pub const AMX_CTL_EL12: Encoding = Encoding::new(3, 4, 15, 4, 6);
 pub const AMX_CTL_EL2: Encoding = Encoding::new(3, 4, 15, 4, 7);
 /// `S3_4_C15_C1_3`: nonzero while `set` state is live. Read-only in the kernel.
 pub const AMX_STATE_T: Encoding = Encoding::new(3, 4, 15, 1, 3);
+/// `S3_6_C15_C2_7`: the AMX generation, one bit per generation.
+pub const AMXIDR_EL1: Encoding = Encoding::new(3, 6, 15, 2, 7);
+/// The generation this unit implements (`docs/research/amx.md`).
+const GENERATION: u32 = 2;
 pub const AMX_CTL_ENABLE: u64 = 1 << 63;
 /// The low fields CPU initialization writes (0x100 | MPIDR.Aff0).
 const AMX_CTL_INIT_FIELDS: u64 = 0x1ff;
@@ -111,6 +122,7 @@ impl Unit {
         }
         match encoding {
             AMX_STATE_T => Some(Outcome::Read(u64::from(self.live()))),
+            AMXIDR_EL1 => Some(Outcome::Read(1 << (GENERATION - 1))),
             _ => None,
         }
     }
@@ -119,7 +131,7 @@ impl Unit {
     pub fn owns(encoding: Encoding) -> bool {
         matches!(
             encoding,
-            AMX_CTL_EL1 | AMX_CTL_EL12 | AMX_CTL_EL2 | AMX_STATE_T
+            AMX_CTL_EL1 | AMX_CTL_EL12 | AMX_CTL_EL2 | AMX_STATE_T | AMXIDR_EL1
         )
     }
 
@@ -139,6 +151,7 @@ impl Unit {
         }
         match encoding {
             AMX_STATE_T => Some(refuse("AMX_STATE_T write: the kernel only reads it")),
+            AMXIDR_EL1 => Some(refuse("AMXIDR_EL1 write: an identification register")),
             _ => None,
         }
     }
@@ -172,6 +185,11 @@ mod tests {
             Some(Outcome::Refused(_))
         ));
         assert_eq!(unit.read(Encoding::new(3, 4, 15, 1, 5), 1), None);
+        assert_eq!(unit.read(AMXIDR_EL1, 2), Some(Outcome::Read(0b10)));
+        assert!(matches!(
+            unit.write(AMXIDR_EL1, 2, 0),
+            Some(Outcome::Refused(_))
+        ));
     }
 
     #[test]
