@@ -314,9 +314,9 @@ impl AppleDevices {
         self.bus
             .map(spi, device.physical, device.bytes, 0)
             .map_err(|e| format!("SPI placement: {e:?}"))?;
-        if let Some(select) = placement.select {
-            let gpio =
-                Gpio::new(select.pins, select.groups, &[select.pin]).map_err(String::from)?;
+        if let Some(select) = &placement.select {
+            let gpio = Gpio::new(select.pins, select.groups, &[select.pin], &select.pulled_up)
+                .map_err(String::from)?;
             let gpio = self.bus.add(Box::new(gpio));
             self.bus
                 .map(gpio, select.physical, select.bytes, 0)
@@ -1561,6 +1561,7 @@ mod tests {
                     pins: 213,
                     groups: 7,
                     pin: 49,
+                    pulled_up: Vec::new(),
                 }),
             })
             .unwrap();

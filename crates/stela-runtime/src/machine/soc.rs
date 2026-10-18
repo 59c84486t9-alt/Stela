@@ -1104,13 +1104,42 @@ pub struct SpiNor {
     pub image: nor::Image,
     pub select: Option<GpioSelect>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpioSelect {
     pub physical: u64,
     pub bytes: u64,
     pub pins: u32,
     pub groups: u32,
     pub pin: u32,
+    /// The board's pulled-up I2C lines in this bank, from `gpio-iic_*`.
+    pub pulled_up: Vec<u32>,
+}
+
+/// The ADT cell naming the AP GPIO bank in a `gpio-iic_*` pin property
+/// (`[pin, flags, bank]`); the AOP bank's pins (`AOP`) are not in it.
+const AP_GPIO_BANK: u32 = 0x5041;
+
+/// Every AP-bank pin an `arm-io` I2C node names as its SCL or SDA line.
+fn i2c_lines(io: &Node<'_>, pins: u32) -> Result<Vec<u32>, String> {
+    let mut lines = Vec::new();
+    let mut failure = None;
+    io.visit(&mut |node| {
+        for name in ["gpio-iic_scl", "gpio-iic_sda"] {
+            let Some(cells) = node.cells32(name) else {
+                continue;
+            };
+            match cells[..] {
+                [pin, _, AP_GPIO_BANK] if pin < pins => lines.push(pin),
+                [_, _, bank] if bank != AP_GPIO_BANK => {}
+                _ => failure = Some(format!("unsupported {name} pin encoding")),
+            }
+        }
+    })
+    .ok_or("I2C line walk failed")?;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(lines),
+    }
 }
 
 /// The opcode of a `function-*` property naming a GPIO pin: the FourCC
@@ -1238,12 +1267,17 @@ fn spi_nor(
         {
             return Err("unsupported GPIO chip-select geometry".into());
         }
+        let pulled_up = i2c_lines(io, pins)?;
+        if pulled_up.contains(&pin) {
+            return Err("SPI chip select shares an I2C line".into());
+        }
         Some(GpioSelect {
             physical,
             bytes,
             pins,
             groups,
             pin,
+            pulled_up,
         })
     };
     Ok(Some(SpiNor {
@@ -3191,7 +3225,16 @@ mod tests {
             ],
             &[],
         );
-        let io = encode(&[("name", b"arm-io")], &[spi, gpio]);
+        let i2c = encode(
+            &[
+                ("name", b"i2c2"),
+                ("gpio-iic_sda", &words(&[0x56, 0x10102, AP_GPIO_BANK])),
+                ("gpio-lstx", &words(&[0x1c, 0x100, 0x504f41])),
+                ("gpio-iic_scl", &words(&[0x57, 0x10102, 0x504f41])),
+            ],
+            &[],
+        );
+        let io = encode(&[("name", b"arm-io")], &[spi, gpio, i2c]);
         let chosen = encode(
             &[
                 ("name", b"chosen"),
@@ -3210,8 +3253,11 @@ mod tests {
             .unwrap();
         assert_eq!(placed.device.physical, 0x2_3510_4000);
         assert_eq!(placed.device.irq, 749);
-        assert_eq!(placed.select.unwrap().pin, 49);
-        assert_eq!(placed.select.unwrap().physical, 0x2_3c10_0000);
+        let select = placed.select.clone().unwrap();
+        assert_eq!(select.pin, 49);
+        assert_eq!(select.physical, 0x2_3c10_0000);
+        // Only the AP bank's I2C line; the AOP-bank pin belongs elsewhere.
+        assert_eq!(select.pulled_up, [0x56]);
         assert_eq!(placed.image.bank(0).unwrap(), nor::nvram::empty_bank());
         assert!(spi_nor(&root, &io, &|_| None, 99).is_err());
         assert!(spi_nor(&root, &io, &Some, 100).is_err());

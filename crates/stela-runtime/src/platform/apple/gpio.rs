@@ -18,10 +18,15 @@
 //! on the mux. PERIPH with output or interrupt modes, and global/wake
 //! registers, explicitly refuse.
 //! Stela boot handoff uses interrupt-disabled input words (0xe), with
-//! peripheral CS pins configured as GPIO outputs high (0x3); no external inputs
-//! drive this bank. Receiver configuration does not sample DATA: an unconnected
-//! input can be enabled without a pull, but reading that word then refuses
-//! until software supplies a pull or disables the receiver. No level is invented.
+//! peripheral CS pins configured as GPIO outputs high (0x3). The only
+//! external levels are the board's I2C pull-ups on the ADT's
+//! `gpio-iic_scl`/`gpio-iic_sda` pins: I2C lines are open-drain and pulled
+//! high (NXP UM10204 section 3.1.1), and the I2C models complete each
+//! transaction between register accesses, so a receiver samples the idle
+//! high level. Nothing else drives this bank. Receiver configuration does not
+//! sample DATA: an unconnected input can be enabled without a pull, but
+//! reading that word then refuses until software supplies a pull or disables
+//! the receiver. No level is invented.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{vec, vec::Vec};
 const NAME: &str = "Apple GPIO";
@@ -38,29 +43,56 @@ const PULL: u32 = 3 << 7;
 const PERIPH: u32 = 3 << 5;
 const LOCK: u32 = 1 << 21;
 const FIELDS: u32 =
-    DATA | MODE | PERIPH | 3 << 7 | INPUT_ENABLE | 3 << 10 | 1 << 15 | 7 << 16 | LOCK | 3 << 22;
+    DATA | MODE | PERIPH | PULL | INPUT_ENABLE | 3 << 10 | 1 << 15 | 7 << 16 | LOCK | 3 << 22;
 const IRQ_BASE: u64 = 0x800;
 const IRQ_STRIDE: u64 = 0x40;
 
 pub struct Gpio {
     pins: Vec<u32>,
+    pulled_up: Vec<bool>,
     groups: u32,
 }
 impl Gpio {
-    pub fn new(pins: u32, groups: u32, selects: &[u32]) -> Result<Self, &'static str> {
+    /// `selects` are chip-select outputs; `pulled_up` are I2C lines.
+    pub fn new(
+        pins: u32,
+        groups: u32,
+        selects: &[u32],
+        pulled_up: &[u32],
+    ) -> Result<Self, &'static str> {
         if pins == 0
             || pins > 512
             || groups == 0
             || groups > 7
-            || selects.iter().any(|&p| p >= pins)
+            || selects.iter().chain(pulled_up).any(|&p| p >= pins)
+            || selects.iter().any(|p| pulled_up.contains(p))
         {
-            return Err("invalid GPIO pin/group geometry or CS pin");
+            return Err("invalid GPIO pin/group geometry, CS or I2C pin");
         }
-        let mut pins = vec![INPUT_OFF; pins as usize];
+        let mut bank = Self {
+            pins: vec![INPUT_OFF; pins as usize],
+            pulled_up: vec![false; pins as usize],
+            groups,
+        };
         for &pin in selects {
-            pins[pin as usize] = OUTPUT | DATA;
+            bank.pins[pin as usize] = OUTPUT | DATA;
         }
-        Ok(Self { pins, groups })
+        for &pin in pulled_up {
+            bank.pulled_up[pin as usize] = true;
+        }
+        Ok(bank)
+    }
+    /// The level a receiver samples on an input pin, when one is determined:
+    /// a board pull-up, otherwise the pin's own pull. Without either it floats.
+    fn input_level(&self, pin: usize, word: u32) -> Option<bool> {
+        if self.pulled_up[pin] {
+            return Some(true);
+        }
+        match (word >> 7) & 3 {
+            0 => None,
+            1 => Some(false),
+            _ => Some(true),
+        }
     }
     pub fn output(&self, pin: u32) -> Option<bool> {
         Self::driven_level(*self.pins.get(pin as usize)?)
@@ -83,8 +115,12 @@ impl MmioDevice for Gpio {
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("GPIO registers require aligned 32-bit accesses"));
         }
-        if let Some(&word) = self.pins.get(offset as usize / 4) {
-            if word & MODE != OUTPUT && word & INPUT_ENABLE != 0 && word & PULL == 0 {
+        let pin = offset as usize / 4;
+        if let Some(&word) = self.pins.get(pin) {
+            if word & MODE != OUTPUT
+                && word & INPUT_ENABLE != 0
+                && self.input_level(pin, word).is_none()
+            {
                 return Err(err(
                     "unconnected GPIO input has no pull; DATA is undetermined",
                 ));
@@ -107,7 +143,8 @@ impl MmioDevice for Gpio {
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("GPIO registers require aligned 32-bit accesses"));
         }
-        if let Some(word) = self.pins.get_mut(offset as usize / 4) {
+        let pin = offset as usize / 4;
+        if let Some(&word) = self.pins.get(pin) {
             let mut value = value as u32;
             let mode = value & MODE;
             if value & !FIELDS != 0 || mode == 0 {
@@ -118,19 +155,19 @@ impl MmioDevice for Gpio {
                     "GPIO peripheral mux with output or interrupt mode is not modeled",
                 ));
             }
+            let level = self.input_level(pin, value);
             if mode != OUTPUT && value & INPUT_ENABLE != 0 {
-                match (value >> 7) & 3 {
-                    // Enabling the receiver changes configuration, but does
-                    // not observe its unknown DATA. A later read refuses.
-                    0 => {}
-                    1 => value &= !DATA,
-                    _ => value |= DATA,
+                // Enabling the receiver changes configuration, but does not
+                // observe an undetermined DATA. A later read refuses.
+                match level {
+                    None => {}
+                    Some(false) => value &= !DATA,
+                    Some(true) => value |= DATA,
                 }
             }
-            let pulled = value & PULL != 0;
             let asserted = match mode {
-                LEVEL_HIGH => !pulled || value & DATA != 0,
-                LEVEL_LOW => !pulled || value & DATA == 0,
+                LEVEL_HIGH => level != Some(false),
+                LEVEL_LOW => level != Some(true),
                 _ => false,
             };
             if asserted {
@@ -138,13 +175,13 @@ impl MmioDevice for Gpio {
                     "GPIO level interrupt would assert or has an undetermined level; AIC delivery is not modeled",
                 ));
             }
-            if *word & LOCK != 0 {
-                if (*word ^ value) & !(DATA | LOCK) != 0 {
+            if word & LOCK != 0 {
+                if (word ^ value) & !(DATA | LOCK) != 0 {
                     return Err(err("GPIO configuration is locked"));
                 }
                 value |= LOCK;
             }
-            *word = value;
+            self.pins[pin] = value;
             return Ok(());
         }
         if self.irq_word(offset) {
@@ -160,7 +197,7 @@ mod tests {
     use crate::platform::apple::interrupt::InterruptLatch;
     #[test]
     fn enabling_an_undriven_receiver_does_not_invent_a_sample() {
-        let mut bank = Gpio::new(213, 7, &[]).unwrap();
+        let mut bank = Gpio::new(213, 7, &[], &[]).unwrap();
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
         let input = INPUT_OFF | INPUT_ENABLE | 2 << 16;
@@ -192,7 +229,7 @@ mod tests {
     }
     #[test]
     fn edge_interrupts_never_latch_and_asserting_levels_refuse() {
-        let mut bank = Gpio::new(213, 7, &[]).unwrap();
+        let mut bank = Gpio::new(213, 7, &[], &[]).unwrap();
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
         for mode in (EDGE_RISING..=EDGE_ANY).step_by(2) {
@@ -231,8 +268,40 @@ mod tests {
         assert!(bank.write(4 * 84, Width::Word, 0, &mut a).is_err());
     }
     #[test]
+    fn i2c_lines_sample_their_board_pull_up() {
+        let mut bank = Gpio::new(213, 7, &[49], &[86]).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let sda = INPUT_OFF | INPUT_ENABLE | 1 << 5;
+        bank.write(4 * 86, Width::Word, sda.into(), &mut a).unwrap();
+        assert_eq!(
+            bank.read(4 * 86, Width::Word, &mut a),
+            Ok(u64::from(sda | DATA))
+        );
+        // Even an internal pull-down loses to the external pull-up.
+        bank.write(4 * 86, Width::Word, (sda | 1 << 7).into(), &mut a)
+            .unwrap();
+        assert_eq!(
+            bank.read(4 * 86, Width::Word, &mut a),
+            Ok(u64::from(sda | 1 << 7 | DATA))
+        );
+        let level_low = LEVEL_LOW | INPUT_ENABLE | 2 << 16;
+        bank.write(4 * 86, Width::Word, level_low.into(), &mut a)
+            .unwrap();
+        assert!(
+            bank.write(
+                4 * 86,
+                Width::Word,
+                (LEVEL_HIGH | INPUT_ENABLE).into(),
+                &mut a
+            )
+            .is_err()
+        );
+        assert!(Gpio::new(213, 7, &[49], &[49]).is_err());
+    }
+    #[test]
     fn peripheral_functions_record_the_mux_without_a_gpio_level() {
-        let mut bank = Gpio::new(213, 7, &[49]).unwrap();
+        let mut bank = Gpio::new(213, 7, &[49], &[]).unwrap();
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
         let sda = INPUT_OFF | INPUT_ENABLE | 1 << 5;
@@ -256,7 +325,7 @@ mod tests {
     }
     #[test]
     fn cs_output_and_lock_and_unsupported_interrupt_are_explicit() {
-        let mut bank = Gpio::new(213, 7, &[49]).unwrap();
+        let mut bank = Gpio::new(213, 7, &[49], &[]).unwrap();
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
         assert_eq!(bank.output(49), Some(true));
