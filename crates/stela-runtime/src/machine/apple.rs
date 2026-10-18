@@ -13,10 +13,12 @@ use crate::platform::apple::{
     amcc::{self, Amcc},
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     interrupt::{CpuIndex, InterruptLatch},
+    ipi::{self, Affinity, FastIpi},
     lockdown::Lockdown,
     uart::S5lUart,
     wdt::AppleWdt,
 };
+use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String};
 
 pub use crate::platform::apple::{
@@ -40,6 +42,7 @@ pub struct AppleDevices {
     aic: Option<Controller>,
     reset: Option<String>,
     memory_controller: Option<DeviceId>,
+    ipi: Option<FastIpi>,
 }
 
 /// The mapped AIC and which model it is.
@@ -85,7 +88,21 @@ impl AppleDevices {
             aic: None,
             reset: None,
             memory_controller: None,
+            ipi: None,
         }
+    }
+
+    /// Apple's fast-IPI registers for PEs with these MPIDR_EL1 values, in PE
+    /// order: each PE's cluster and CPU number are its Aff1 and Aff0.
+    pub fn add_fast_ipi(&mut self, mpidrs: &[u64]) {
+        let cpus = mpidrs
+            .iter()
+            .map(|&mpidr| Affinity {
+                cluster: (mpidr >> 8) as u8,
+                cpu: mpidr as u8,
+            })
+            .collect();
+        self.ipi = Some(FastIpi::new(cpus));
     }
 
     fn map(&mut self, device: DeviceId, ranges: &[Range]) -> Result<(), MapError> {
@@ -281,7 +298,32 @@ impl Devices for AppleDevices {
         self.settle(cpu, now, reset)
     }
 
+    fn system_register(
+        &mut self,
+        cpu: usize,
+        encoding: Encoding,
+        write: Option<u64>,
+        now: u64,
+    ) -> Option<Result<u64, &'static str>> {
+        let register = ipi::Register::decode(encoding)?;
+        let ipi = self.ipi.as_mut()?;
+        let kind = match write {
+            Some(value) => AccessKind::Write { value },
+            None => AccessKind::Read,
+        };
+        Some(
+            ipi.access(cpu, register, kind, now, &mut self.latch)
+                .map_err(|error| match error {
+                    ipi::IpiError::UnknownCpu(_) => "fast IPI from a PE the board does not have",
+                    ipi::IpiError::Unsupported(_, reason) => reason,
+                }),
+        )
+    }
+
     fn lines(&mut self, cpu: usize, now: u64) -> Lines {
+        if let Some(ipi) = self.ipi.as_mut() {
+            ipi.advance(now, &mut self.latch);
+        }
         let mut access = Access::new(cpu, now, &mut self.latch);
         let advanced = self.bus.advance(&mut access);
         let reset = reset_reason(&access);
@@ -303,8 +345,16 @@ impl Devices for AppleDevices {
     fn deadline(&mut self, now: u64) -> Option<u64> {
         // Time-driven state is the board's, not a PE's: the access names
         // cpu0.
+        let deferred = self
+            .ipi
+            .as_mut()
+            .and_then(|ipi| ipi.advance(now, &mut self.latch));
         let mut access = Access::new(0, now, &mut self.latch);
-        self.bus.advance(&mut access).ok().flatten()
+        let device = self.bus.advance(&mut access).ok().flatten();
+        match (deferred, device) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn take_reset(&mut self) -> Option<String> {
@@ -333,6 +383,33 @@ mod tests {
     }
 
     const UART: u64 = 0x2_3520_0000;
+
+    /// XNU's fast-IPI send and acknowledge between T8112 PEs, through the
+    /// board's System registers: IPI_RR_GLOBAL_EL1 to cluster 1 CPU 0, then
+    /// IPI_SR_EL1 on that PE; other encodings are not the board's.
+    #[test]
+    fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
+        let request = Encoding::new(3, 5, 15, 0, 1);
+        let status = Encoding::new(3, 5, 15, 1, 1);
+        let mut devices = AppleDevices::new();
+        devices.add_fast_ipi(&[0x8000_0000, 0x8000_0001, 0x8000_0100, 0x8000_0101]);
+        assert_eq!(
+            devices.system_register(0, request, Some(1 << 16), 0),
+            Some(Ok(0))
+        );
+        assert!(devices.lines(2, 0).fiq && !devices.lines(0, 0).fiq);
+        assert_eq!(devices.system_register(2, status, None, 0), Some(Ok(1)));
+        assert_eq!(devices.system_register(2, status, Some(1), 0), Some(Ok(0)));
+        assert!(!devices.lines(2, 0).fiq);
+        assert_eq!(
+            devices.system_register(0, Encoding::new(3, 5, 15, 2, 0), None, 0),
+            None
+        );
+        assert!(matches!(
+            devices.system_register(0, request, Some(1 << 16 | 3 << 28), 0),
+            Some(Err(_))
+        ));
+    }
 
     #[test]
     fn routes_the_console_and_refuses_unmapped_and_unknown_registers() {

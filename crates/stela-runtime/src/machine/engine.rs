@@ -17,7 +17,7 @@ use super::{
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
     mmu::{self, Access, Controls, Outcome as Translated},
     pmu,
-    registers::{self, CpuProfile, Lines, Outcome as RegisterOutcome, Refusal},
+    registers::{self, CpuProfile, HCR_TIDCP, Lines, Outcome as RegisterOutcome, Refusal},
     streaming::{self, Denial},
     system::{Feature, Register as SystemRegister},
     timer, vgic,
@@ -32,7 +32,7 @@ use stela_compiler::{
         register_offset::IndexExtend,
         system::{
             exception::{AuthenticationKey, Operation as ExceptionOperation},
-            registers::{Direction, RegisterAccess},
+            registers::{Direction, Encoding, RegisterAccess},
             synchronization::{Operation as Synchronization, WaitKind},
         },
     },
@@ -240,6 +240,19 @@ pub trait Devices {
     fn lines(&mut self, cpu: usize, now: u64) -> Lines;
     /// The next counter value at which a device changes state by itself.
     fn deadline(&mut self, _now: u64) -> Option<u64> {
+        None
+    }
+    /// An MRS (`write` `None`) or MSR by PE `cpu` of a System register the
+    /// board implements for all its PEs rather than one core, such as
+    /// Apple's fast-IPI registers: `None` for an encoding it does not
+    /// implement, else the value read (0 for a write) or why it is refused.
+    fn system_register(
+        &mut self,
+        _cpu: usize,
+        _encoding: Encoding,
+        _write: Option<u64>,
+        _now: u64,
+    ) -> Option<Result<u64, &'static str>> {
         None
     }
     /// A reset or power-off the guest requested from a device, once.
@@ -2834,10 +2847,43 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(step) = self.system_access(word, access) {
             return step;
         }
+        if let Some(outcome) = self.board_register(access) {
+            return self.register_outcome(word, Some(access), outcome);
+        }
         let physical = self.host.counter();
         let outcome = self.cpu.apple_access(access, physical);
         self.derived_changed();
         self.register_outcome(word, Some(access), outcome)
+    }
+
+    /// An Apple IMPLEMENTATION DEFINED register of the board (`Devices::
+    /// system_register`), at EL1 and EL2. EL0 accesses and EL1 accesses that
+    /// HCR_EL2.TIDCP traps outside the host are left to `Cpu::apple_access`,
+    /// which makes them UNDEFINED or traps them as for the core's own.
+    fn board_register(&mut self, access: RegisterAccess) -> Option<RegisterOutcome> {
+        let encoding = access.encoding();
+        let el = self.cpu.pstate.el;
+        if encoding.op0() != 3
+            || encoding.crn() != 15
+            || el == 0
+            || (el == 1 && !self.cpu.in_host() && self.cpu.hcr(HCR_TIDCP))
+        {
+            return None;
+        }
+        let write = (access.direction() == Direction::Write).then(|| match access.rt() {
+            31 => 0,
+            rt => self.cpu.state.x[usize::from(rt)],
+        });
+        let now = self.host.counter();
+        let result = self
+            .devices
+            .system_register(self.current, encoding, write, now)?;
+        self.device_lines = None;
+        Some(match (result, write) {
+            (Ok(value), None) => RegisterOutcome::Read(value),
+            (Ok(_), Some(_)) => RegisterOutcome::Written(registers::Changes::default()),
+            (Err(reason), _) => RegisterOutcome::Refused(Refusal::UnsupportedSetting(reason)),
+        })
     }
 
     fn register_outcome(

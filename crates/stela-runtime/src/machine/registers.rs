@@ -211,7 +211,7 @@ pub struct Lines {
     pub fiq: bool,
 }
 
-const HCR_TIDCP: u32 = 20;
+pub(crate) const HCR_TIDCP: u32 = 20;
 const SCTLR_UMA: u64 = 1 << 9;
 /// APSTS_EL1.MKEYVld: the hardware master key is ready. This machine has no
 /// key-generation delay, so the bit always reads as set.

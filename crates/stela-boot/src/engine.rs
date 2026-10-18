@@ -299,6 +299,10 @@ fn devices(
             .add_lockdown(block.name, block.control, range)
             .map_err(|error| alloc::format!("{} placement: {error:?}", block.name))?;
     }
+    if let Some(board) = board {
+        let mpidrs: Vec<u64> = board.cpus.processors.iter().map(|pe| pe.mpidr).collect();
+        devices.add_fast_ipi(&mpidrs);
+    }
     let memory_controller = board.and_then(|board| board.memory_controller.as_ref());
     if let Some(controller) = memory_controller {
         devices.add_memory_controller(
