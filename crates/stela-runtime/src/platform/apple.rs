@@ -12,6 +12,7 @@ pub mod aes;
 pub mod aic;
 pub mod aic1;
 pub mod amcc;
+pub mod ans;
 pub mod asc;
 pub mod bridge;
 pub mod bus;
