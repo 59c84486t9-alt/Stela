@@ -7,8 +7,16 @@
 //! 0x24db5b8 snapshots these words and clears IRQ groups at 0x800 +
 //! group * 0x40; `_readReg32`/`_writeReg32` 0x24db7e8/0x24db7f8,
 //! `setGPIODirection` 0x24dd094 and `setGPIOData` 0x24dd3b0 use them.
-//! Only output and interrupt-disabled input modes are implemented. Other
-//! peripherals, interrupt enables and global/wake registers explicitly refuse.
+//! MODE values are 1 output, 2/3 level-high/low, 4/5/6 rising/falling/any
+//! edge interrupt and 7 interrupt-disabled input. Edge modes are accepted:
+//! nothing in the model drives this bank, so no edge ever latches. A level
+//! mode is accepted only when its pull holds the line inactive; a level
+//! that would assert, or an undetermined one, refuses because delivering
+//! GPIO interrupts to the AIC is not modeled. A PERIPH function (such as
+//! i2c0's `gpio-iic_sda` pin) is recorded on an interrupt-disabled input:
+//! the pin then has no GPIO-driven level, and peripheral models do not gate
+//! on the mux. PERIPH with output or interrupt modes, and global/wake
+//! registers, explicitly refuse.
 //! Stela boot handoff uses interrupt-disabled input words (0xe), with
 //! peripheral CS pins configured as GPIO outputs high (0x3); no external inputs
 //! drive this bank. Receiver configuration does not sample DATA: an unconnected
@@ -20,6 +28,10 @@ const NAME: &str = "Apple GPIO";
 const DATA: u32 = 1;
 const MODE: u32 = 7 << 1;
 const OUTPUT: u32 = 1 << 1;
+const LEVEL_HIGH: u32 = 2 << 1;
+const LEVEL_LOW: u32 = 3 << 1;
+const EDGE_RISING: u32 = 4 << 1;
+const EDGE_ANY: u32 = 6 << 1;
 const INPUT_OFF: u32 = 7 << 1;
 const INPUT_ENABLE: u32 = 1 << 9;
 const PULL: u32 = 3 << 7;
@@ -72,7 +84,7 @@ impl MmioDevice for Gpio {
             return Err(err("GPIO registers require aligned 32-bit accesses"));
         }
         if let Some(&word) = self.pins.get(offset as usize / 4) {
-            if word & MODE == INPUT_OFF && word & INPUT_ENABLE != 0 && word & PULL == 0 {
+            if word & MODE != OUTPUT && word & INPUT_ENABLE != 0 && word & PULL == 0 {
                 return Err(err(
                     "unconnected GPIO input has no pull; DATA is undetermined",
                 ));
@@ -97,15 +109,16 @@ impl MmioDevice for Gpio {
         }
         if let Some(word) = self.pins.get_mut(offset as usize / 4) {
             let mut value = value as u32;
-            if value & !FIELDS != 0
-                || value & PERIPH != 0
-                || !matches!(value & MODE, OUTPUT | INPUT_OFF)
-            {
+            let mode = value & MODE;
+            if value & !FIELDS != 0 || mode == 0 {
+                return Err(err("unknown GPIO fields are not modeled"));
+            }
+            if value & PERIPH != 0 && mode != INPUT_OFF {
                 return Err(err(
-                    "GPIO interrupts, peripheral mux or unknown fields are not modeled",
+                    "GPIO peripheral mux with output or interrupt mode is not modeled",
                 ));
             }
-            if value & MODE == INPUT_OFF && value & INPUT_ENABLE != 0 {
+            if mode != OUTPUT && value & INPUT_ENABLE != 0 {
                 match (value >> 7) & 3 {
                     // Enabling the receiver changes configuration, but does
                     // not observe its unknown DATA. A later read refuses.
@@ -113,6 +126,17 @@ impl MmioDevice for Gpio {
                     1 => value &= !DATA,
                     _ => value |= DATA,
                 }
+            }
+            let pulled = value & PULL != 0;
+            let asserted = match mode {
+                LEVEL_HIGH => !pulled || value & DATA != 0,
+                LEVEL_LOW => !pulled || value & DATA == 0,
+                _ => false,
+            };
+            if asserted {
+                return Err(err(
+                    "GPIO level interrupt would assert or has an undetermined level; AIC delivery is not modeled",
+                ));
             }
             if *word & LOCK != 0 {
                 if (*word ^ value) & !(DATA | LOCK) != 0 {
@@ -165,6 +189,70 @@ mod tests {
             bank.read(4 * 84, Width::Word, &mut a),
             Ok(u64::from(INPUT_OFF))
         );
+    }
+    #[test]
+    fn edge_interrupts_never_latch_and_asserting_levels_refuse() {
+        let mut bank = Gpio::new(213, 7, &[]).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        for mode in (EDGE_RISING..=EDGE_ANY).step_by(2) {
+            let word = mode | INPUT_ENABLE | 2 << 16;
+            bank.write(4 * 84, Width::Word, word.into(), &mut a)
+                .unwrap();
+            assert_eq!(bank.pins[84], word);
+            assert_eq!(bank.read(0x800 + 2 * 0x40 + 8, Width::Word, &mut a), Ok(0));
+        }
+        let pulled_down = INPUT_ENABLE | 1 << 7;
+        assert!(
+            bank.write(
+                4 * 84,
+                Width::Word,
+                (LEVEL_HIGH | INPUT_ENABLE).into(),
+                &mut a
+            )
+            .is_err()
+        );
+        assert!(
+            bank.write(
+                4 * 84,
+                Width::Word,
+                (LEVEL_LOW | pulled_down).into(),
+                &mut a
+            )
+            .is_err()
+        );
+        bank.write(
+            4 * 84,
+            Width::Word,
+            (LEVEL_HIGH | pulled_down).into(),
+            &mut a,
+        )
+        .unwrap();
+        assert!(bank.write(4 * 84, Width::Word, 0, &mut a).is_err());
+    }
+    #[test]
+    fn peripheral_functions_record_the_mux_without_a_gpio_level() {
+        let mut bank = Gpio::new(213, 7, &[49]).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let sda = INPUT_OFF | INPUT_ENABLE | 1 << 5;
+        bank.write(4 * 110, Width::Word, sda.into(), &mut a)
+            .unwrap();
+        assert_eq!(bank.pins[110], sda);
+        assert!(
+            bank.write(49 * 4, Width::Word, u64::from(OUTPUT | 1 << 5), &mut a)
+                .is_err()
+        );
+        assert!(
+            bank.write(
+                4 * 110,
+                Width::Word,
+                u64::from(EDGE_RISING | 1 << 5),
+                &mut a
+            )
+            .is_err()
+        );
+        assert_eq!(bank.output(110), None);
     }
     #[test]
     fn cs_output_and_lock_and_unsupported_interrupt_are_explicit() {
