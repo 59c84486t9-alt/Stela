@@ -210,8 +210,18 @@ pub(super) struct Access<'a, H: Host, D: Devices> {
     result: Option<u64>,
     translation: bool,
     regime: bool,
-    code: bool,
+    code: Code,
     refusal: Cell<Option<&'static str>>,
+}
+
+/// The compiled code an instruction-cache invalidation makes stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Code {
+    Unchanged,
+    /// IC IVAU: the page holding this physical address.
+    Page(u64),
+    /// IC IALLU and IC IALLUIS.
+    All,
 }
 
 impl<H: Host, D: Devices> Access<'_, H, D> {
@@ -618,10 +628,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 Ok(())
             }
             Operation::Ic { scope, operand } => {
-                if scope == CacheScope::PoU {
-                    self.check_maintenance(operand, false)?;
-                }
-                self.code = true;
+                self.code = if scope == CacheScope::PoU {
+                    Code::Page(self.check_maintenance(operand, false)?)
+                } else {
+                    Code::All
+                };
                 Ok(())
             }
             Operation::ZeroBlock { address, .. } => self.zero_block(address),
@@ -720,7 +731,9 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         )
     }
 
-    fn check_maintenance(&mut self, address: u64, write: bool) -> Result<(), Effect> {
+    /// The physical address cache maintenance by `address` acts on, or the
+    /// fault its translation takes.
+    fn check_maintenance(&mut self, address: u64, write: bool) -> Result<u64, Effect> {
         let regime = self.machine.cpu.regime();
         let requester = self.machine.cpu.requester();
         let access = if write {
@@ -729,7 +742,7 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
             MemoryAccess::Read
         };
         match self.translate(regime, requester, address, access) {
-            Translated::Mapped(_) => Ok(()),
+            Translated::Mapped(translation) => Ok(translation.physical),
             Translated::Fault(fault) => Err(Effect::Exception(
                 self.machine
                     .data_abort_exception(address, fault, true, true),
@@ -865,7 +878,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             result: None,
             translation: false,
             regime: false,
-            code: false,
+            code: Code::Unchanged,
             refusal: Cell::new(None),
         };
         let effect = match (accessor.run)(&mut context, index) {
@@ -899,8 +912,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else if regime {
             self.sync_regime();
         }
-        if code {
-            self.discard_code();
+        match code {
+            Code::Unchanged => {}
+            Code::Page(physical) => self.invalidate_code_page(physical),
+            Code::All => self.discard_code(),
         }
         Some(match effect {
             Effect::Done => {
@@ -1006,6 +1021,7 @@ pub(super) fn identify(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{BASE, machine, machine_on};
+    use super::Code;
     use crate::machine::{
         Chip, Stop,
         cpu::{HCR_HCD, HCR_TGE, HCR_TSC},
@@ -2072,7 +2088,7 @@ mod tests {
                     result: None,
                     translation: false,
                     regime: false,
-                    code: false,
+                    code: Code::Unchanged,
                     refusal: Cell::new(None),
                 };
                 let effect = match (accessor.run)(&mut context, m) {

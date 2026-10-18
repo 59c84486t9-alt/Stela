@@ -433,6 +433,8 @@ pub struct Statistics {
     pub system_exits: u64,
     pub device_accesses: u64,
     pub code_discards: u64,
+    /// Pages of compiled code an IC IVAU made stale.
+    pub code_invalidations: u64,
     pub waits: u64,
     /// Changes of the running PE.
     pub switches: u64,
@@ -535,6 +537,8 @@ pub struct Machine<H: Host, D: Devices> {
     blocks: Vec<Block>,
     /// Blocks by PC, PA, FP enablement and SP alignment checking.
     index: BTreeMap<(u64, u64, Variant), usize>,
+    /// The `index` keys of the blocks compiled from each physical page.
+    code_pages: BTreeMap<u64, Vec<(u64, u64, Variant)>>,
     fetch: Vec<Option<FetchEntry>>,
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
@@ -624,6 +628,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             target,
             blocks: Vec::new(),
             index: BTreeMap::new(),
+            code_pages: BTreeMap::new(),
             fetch: vec![None; FETCH_CACHE],
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
@@ -759,10 +764,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.sync_regime();
     }
 
+    /// Forget the blocks compiled from the page holding `physical`, which an
+    /// IC IVAU made stale: a later fetch compiles the page again. Their code
+    /// stays installed until the next full discard.
+    fn invalidate_code_page(&mut self, physical: u64) {
+        let Some(keys) = self.code_pages.remove(&(physical & !(FETCH_PAGE - 1))) else {
+            return;
+        };
+        for key in keys {
+            self.index.remove(&key);
+        }
+        // The jump cache holds no generation per page.
+        self.code_generation += 1;
+        self.statistics.code_invalidations += 1;
+    }
+
     fn discard_code(&mut self) {
         self.host.discard_code();
         self.blocks.clear();
         self.index.clear();
+        self.code_pages.clear();
         self.code_generation += 1;
         self.statistics.code_discards += 1;
     }
@@ -1455,6 +1476,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
         let index = self.blocks.len() - 1;
         self.index.insert((pc, physical, variant), index);
+        self.code_pages
+            .entry(physical & !(FETCH_PAGE - 1))
+            .or_default()
+            .push((pc, physical, variant));
         Ok(Fetched::Block(index))
     }
 
@@ -3701,6 +3726,35 @@ mod tests {
         assert!(machine.lines().fiq);
         machine.system_instruction(MRS_X7_PMCR0).unwrap();
         assert_eq!(machine.cpu.state.x[7], 0x3 | 0x3000 | 0x400 | 1 << 11);
+    }
+
+    #[test]
+    fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
+        const NOP: u32 = 0xd503_201f;
+        const RET: u32 = 0xd65f_03c0;
+        const IC_IVAU_X0: u32 = 0xd50b_7520;
+        const IC_IALLU: u32 = 0xd508_751f;
+        let mut words = vec![NOP; 2 * FETCH_PAGE as usize / 4];
+        words[0] = RET;
+        words[FETCH_PAGE as usize / 4] = RET;
+        let mut machine = machine(&words);
+        let base = machine.cpu.pc;
+        for pc in [base, base + FETCH_PAGE] {
+            assert!(matches!(
+                machine.fetch_block(pc, false),
+                Ok(Fetched::Block(_))
+            ));
+        }
+        assert_eq!(machine.index.len(), 2);
+        machine.cpu.state.x[0] = base + 0x40;
+        machine.system_instruction(IC_IVAU_X0).unwrap();
+        let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+        assert_eq!(left, [base + FETCH_PAGE]);
+        assert_eq!(machine.statistics.code_invalidations, 1);
+        assert_eq!(machine.statistics.code_discards, 0);
+        machine.system_instruction(IC_IALLU).unwrap();
+        assert!(machine.index.is_empty() && machine.code_pages.is_empty());
+        assert_eq!(machine.statistics.code_discards, 1);
     }
 
     #[test]
