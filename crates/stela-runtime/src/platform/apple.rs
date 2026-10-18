@@ -14,6 +14,7 @@ pub mod aic1;
 pub mod amcc;
 pub mod ans;
 pub mod asc;
+pub mod atc_phy;
 pub mod bridge;
 pub mod bus;
 pub mod cluster;
