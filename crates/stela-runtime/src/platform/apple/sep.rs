@@ -13,7 +13,9 @@ pub mod endpoint;
 pub mod image;
 pub mod keys;
 pub mod message;
+pub mod ool;
 pub mod rom;
+pub mod shared;
 
 use super::{
     asc::{Asc, Lines},
