@@ -1,4 +1,4 @@
-//! Digital USB2 portion of `atc-phy,t8112`; admission remains closed.
+//! Digital USB2 portion of `atc-phy,t8112`, including the pipehandler.
 //!
 //! Linux `drivers/phy/apple/atc.c` at a0ff06b3 supplies the USB2, core-power,
 //! AUSPLL request/ack and pipehandler fields below. Original

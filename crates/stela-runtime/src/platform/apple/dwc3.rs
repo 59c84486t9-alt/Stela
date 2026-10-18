@@ -33,7 +33,6 @@ use regs::*;
 const NAME: &str = "dwc3-device";
 pub const PLATFORM_WINDOW_BASE: u64 = 0x20000;
 pub const PLATFORM_WINDOW_STRIDE: u64 = 0x4000;
-const APPLE_PIPE_CONTROL: u64 = PLATFORM_WINDOW_BASE + 3 * PLATFORM_WINDOW_STRIDE + 0x20;
 const APPLE_INTERRUPT_CONTROL: u64 = 0xc11c;
 const MAX_PENDING_EVENTS: usize = 256;
 const MAX_LINKS_PER_PACKET: usize = 8;
@@ -636,11 +635,11 @@ impl MmioDevice for Dwc3 {
             ));
         }
         let value = match offset {
-            // Emulated boot handoff, not captured reset values: Stela
-            // programs neither interrupt routing nor pipe-handler enables.
-            // Original 32-bit RMWs: KC 0x42fa004 and 0x430b66c. Their
-            // control effects still refuse on write; a read is not readiness.
-            APPLE_INTERRUPT_CONTROL | APPLE_PIPE_CONTROL => 0,
+            // Emulated boot handoff, not a captured reset value: Stela
+            // programs no interrupt routing. Original 32-bit RMW: KC
+            // 0x42fa004. Its control effect still refuses on write; a read
+            // is not readiness. The pipehandler (reg[3]) is the ATC PHY's.
+            APPLE_INTERRUPT_CONTROL => 0,
             GCTL => self.gctl,
             GSNPSID => 0x5533_300a,
             GHWPARAMS => (64 << 24) | (32 << 16) | (32 << 8),
@@ -862,8 +861,8 @@ impl MmioDevice for Dwc3 {
                     field => self.endpoints[index].parameters[(field / 4) as usize] = value,
                 }
             }
-            APPLE_INTERRUPT_CONTROL | APPLE_PIPE_CONTROL => {
-                return Err(err("Apple interrupt/pipe control effects are not modeled"));
+            APPLE_INTERRUPT_CONTROL => {
+                return Err(err("Apple interrupt control effects are not modeled"));
             }
             _ => return Err(err("read-only or unmodeled DWC3/Apple register")),
         }
@@ -974,11 +973,10 @@ mod tests {
         assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
         assert!(dwc.read(GSNPSID, Width::Double, &mut access).is_err());
         assert!(dwc.read(0xcd38, Width::Word, &mut access).is_err());
-        for at in [APPLE_INTERRUPT_CONTROL, APPLE_PIPE_CONTROL] {
-            assert_eq!(dwc.read(at, Width::Word, &mut access), Ok(0));
-            assert!(dwc.write(at, Width::Word, 0x8000, &mut access).is_err());
-            assert_eq!(dwc.read(at, Width::Word, &mut access), Ok(0));
-        }
+        let at = APPLE_INTERRUPT_CONTROL;
+        assert_eq!(dwc.read(at, Width::Word, &mut access), Ok(0));
+        assert!(dwc.write(at, Width::Word, 0x8000, &mut access).is_err());
+        assert_eq!(dwc.read(at, Width::Word, &mut access), Ok(0));
         assert!(dwc.write(DCTL, Width::Word, 1 << 9, &mut access).is_err());
         assert_eq!(dwc.dctl, RUN);
         write(&mut dwc, DEP + 12, CMDACT | 6, &mut access);

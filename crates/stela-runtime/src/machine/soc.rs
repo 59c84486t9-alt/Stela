@@ -810,6 +810,12 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         NVRAM,
         SYSCFG,
         GPIO,
+        I2C,
+        HPM_MANAGER,
+        HPM,
+        RETIMER,
+        ATC_PHY,
+        USB_DRD,
     ]
     .contains(&name)
         || AICS.contains(&name)
@@ -3889,7 +3895,7 @@ mod tests {
         let io = encode(&[("name", b"arm-io\0")], &[phy(b"atc-phy,t8112\0")]);
         assert!(typec_devices(&Node::root(&io).unwrap(), &translate, 0x63).is_err());
         for compatible in [I2C, HPM_MANAGER, HPM, RETIMER, ATC_PHY] {
-            assert!(!models(compatible, |_| None));
+            assert!(models(compatible, |_| None));
         }
         // Hidden PHYs are not parsed or mapped merely because reg survives.
         let io = encode(&[("name", b"arm-io\0")], &[i2c, phy(b"hidden\0"), usb]);
@@ -4799,7 +4805,7 @@ mod tests {
         }
     }
     #[test]
-    fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts_without_admission() {
+    fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts() {
         use crate::machine::adt::encode;
         let words = |cells: &[u32]| {
             cells
@@ -4880,7 +4886,7 @@ mod tests {
             })
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);
-        assert!(!models(USB_DRD, |_| None));
+        assert!(models(USB_DRD, |_| None));
         assert!(board(&tree(usb(&ranges, 0xff, &irqs))).is_err());
         assert!(board(&tree(usb(&ranges, 0xa4, &irqs[..4]))).is_err());
         let mut bad = ranges;

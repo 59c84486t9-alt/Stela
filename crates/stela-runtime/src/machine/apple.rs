@@ -663,7 +663,8 @@ impl AppleDevices {
     }
 
     /// Place the core once, with reg[2]/reg[8] sharing reg[0]'s bytes.
-    /// Platform windows retain distinct refusing offsets. IRQ indices 0..3
+    /// Platform windows retain distinct refusing offsets; reg[3] is the
+    /// pipehandler, which the ATC PHY placement owns (`atc-phy-parent`). IRQ indices 0..3
     /// are from AppleUSBXDCI::goOnBus (KC 0x42f5338/5380/53c8/5d24),
     /// passed unchanged to EventHandler::withParameters; initializePlatformSettings
     /// at 0x4338e74 chooses four handlers. The fifth ADT IRQ is not an event ring.
@@ -678,7 +679,7 @@ impl AppleDevices {
         self.bus
             .map(device, physical, bytes, 0)
             .map_err(|e| format!("DWC3 placement: {e:?}"))?;
-        for index in [1, 3, 4, 5, 6, 7] {
+        for index in [1, 4, 5, 6, 7] {
             let (physical, bytes) = placement.ranges[index];
             self.bus
                 .map(
@@ -2118,12 +2119,17 @@ mod tests {
             .write(0, placement.ranges[2].0 + 0x700, 4, 5 << 3, 0)
             .unwrap();
         assert_eq!(devices.read(0, BASE + 0xc700, 4, 0), Ok(5 << 3));
-        for index in [1, 3, 4, 5, 6, 7, 8] {
+        for index in [1, 4, 5, 6, 7, 8] {
             assert!(matches!(
                 devices.read(0, placement.ranges[index].0, 4, 0),
                 Err(DeviceError::Refused(_))
             ));
         }
+        // The pipehandler is left for the ATC PHY placement.
+        assert_eq!(
+            devices.read(0, placement.ranges[3].0, 4, 0),
+            Err(DeviceError::NoDevice)
+        );
         assert_eq!(devices.dma_deadline(), None);
         devices.set_usb_port(id, 1, true).unwrap();
         assert_eq!(devices.dma_deadline(), Some(0));
