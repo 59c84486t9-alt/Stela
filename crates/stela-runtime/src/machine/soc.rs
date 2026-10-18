@@ -364,7 +364,12 @@ const AIC3_OFFSETS: [(&str, u32); 5] = [
 fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout, String> {
     match version {
         "aic,1" => return Ok(AicLayout::V1),
-        "aic,2" => return Ok(AicLayout::aic2(event)),
+        "aic,2" => {
+            let timestamps = aic.first_u32("#shared-timestamps").unwrap_or(0);
+            let timestamps = u8::try_from(timestamps)
+                .map_err(|_| format!("/arm-io/aic has {timestamps} shared timestamps"))?;
+            return Ok(AicLayout::aic2(event, timestamps));
+        }
         _ => {}
     }
     for (name, expected) in AIC3_OFFSETS {
@@ -921,7 +926,7 @@ mod tests {
             InterruptController {
                 physical: 0x2_3b0c_0000,
                 inputs: 740,
-                layout: AicLayout::aic2(0x8000)
+                layout: AicLayout::aic2(0x8000, 0)
             }
         );
         // The M1's AICv1 has its event register in its core block.

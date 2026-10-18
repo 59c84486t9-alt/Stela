@@ -191,9 +191,11 @@ impl AppleDevices {
                 irq_config,
                 max_irq,
                 event,
+                timestamps,
             } => {
                 let config = Aic2Config {
                     version,
+                    timestamps: usize::from(timestamps),
                     nr_irq,
                     max_irq: max_irq.unwrap_or(nr_irq.div_ceil(32) * 32),
                     irq_config,
@@ -465,13 +467,13 @@ mod tests {
             )
             .unwrap();
         devices
-            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000))
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 16))
             .unwrap();
         // CAP0 (offset 4) reports NR_IRQ in bits 15:0.
         assert_eq!(devices.read(0, 0x2_3b0c_0004, 4, 0).unwrap() & 0xffff, 1152);
         assert!(
             devices
-                .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x10))
+                .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x10, 16))
                 .is_err()
         );
     }

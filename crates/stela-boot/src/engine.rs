@@ -247,6 +247,8 @@ const J473_AIC: (u64, u16) = (0x3b0c_0000, 1152);
 /// `aic-iack-offset`. A loaded DeviceTree's board takes its SoC's offset
 /// (`machine::soc`).
 const J473_AIC_EVENT: u64 = 0x8000;
+/// The J473AP ADT `aic` `#shared-timestamps`.
+const J473_AIC_TIMESTAMPS: u8 = 16;
 
 /// The modeled board devices: the console UART, the watchdog and the AIC2,
 /// placed as the board's DeviceTree places them (`machine::soc::board`).
@@ -270,7 +272,7 @@ fn devices(
             soc::InterruptController {
                 physical: ARM_IO + J473_AIC.0,
                 inputs: J473_AIC.1,
-                layout: AicLayout::aic2(J473_AIC_EVENT),
+                layout: AicLayout::aic2(J473_AIC_EVENT, J473_AIC_TIMESTAMPS),
             },
         ),
     };
