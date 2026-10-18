@@ -3591,7 +3591,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// and the register in ISS[9:5] (Arm `AArch64_WFxTrap`). On a chip
     /// without FEAT_WFxT the timeout forms are UNDEFINED. An event stream
     /// event wakes WFE and, by this implementation's choice of Arm's
-    /// IMPLEMENTATION DEFINED option, clears the event register.
+    /// IMPLEMENTATION DEFINED option, clears the event register. A WFE that
+    /// completes at once still yields the rest of the time slice to the
+    /// other PEs (`processors`), as a spin-wait that waits for another PE
+    /// would on hardware where they run at the same time; only timing
+    /// changes.
     fn wait(&mut self, _word: u32, kind: WaitKind, register: Option<u8>) -> Step {
         const HCR_TWI: u32 = 13;
         const HCR_TWE: u32 = 14;
@@ -3627,6 +3631,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match kind {
             WaitKind::Event if self.cpu.event => {
                 self.cpu.event = false;
+                // The WFE of a spin-wait ends the PE's time slice: the PE
+                // it waits for runs next instead of after the slice.
+                self.slice_end = self.statistics.blocks;
                 return self.next();
             }
             WaitKind::Interrupt if self.interrupt_pending() => return self.next(),

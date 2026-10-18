@@ -443,6 +443,17 @@ mod tests {
         machine.schedule().unwrap();
         assert_eq!(machine.processor(), 0);
         assert_eq!((machine.cpu.pc, machine.cpu.event), (BASE + 4, false));
+        // A WFE that completes at once yields the rest of the slice to PE 1,
+        // and PE 0 continues after it at PE 1's next WFE.
+        machine.system_instruction(SEVL).unwrap();
+        machine.system_instruction(WFE).unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 12);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        machine.system_instruction(SEVL).unwrap();
+        machine.system_instruction(WFE).unwrap();
+        machine.schedule().unwrap();
+        assert_eq!((machine.processor(), machine.cpu.pc), (0, BASE + 12));
         // PE 0 waits in WFE behind a load exclusive. PE 1 running clears
         // nothing until it writes the granule; then PE 0's monitor clears,
         // which generates the event that wakes it.
@@ -463,7 +474,7 @@ mod tests {
         machine.schedule().unwrap();
         assert_eq!(machine.processor(), 0);
         assert_eq!(machine.cpu.monitor, None);
-        assert_eq!((machine.cpu.pc, machine.cpu.event), (BASE + 8, false));
+        assert_eq!((machine.cpu.pc, machine.cpu.event), (BASE + 16, false));
     }
 
     #[test]
