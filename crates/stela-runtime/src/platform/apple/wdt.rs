@@ -21,7 +21,20 @@
 //! reg[2] accepts the observed full32 write0 to disarm the separate watchdog
 //! mechanism (`AppleARMWatchdogTimer::_disarmWatchdogMechanism`, 0x1ca6114).
 //! It starts disabled; its other encodings and command readback are unproved
-//! and refuse. Neither side register changes the three primary timers.
+//! and refuse. reg[3], the AP watchdog configuration, and reg[4], the panic
+//! force-power-off flags, retain full32 RMWs: `start` sets configuration
+//! bits [5:4] to 1, `_writeApWatchdogConfiguration` (0x1ca5da0) replaces its
+//! low byte with expiry flags and `_clearApWatchdogConfiguration`
+//! (0x1ca6134) clears it; the panic path sets the force-power-off bit. Both
+//! choose what the SoC does when a watchdog expires or the machine resets,
+//! and Stela stops the guest at either, so no later guest-visible behavior
+//! depends on them. Every side register starts zero in Stela's boot handoff.
+//! No side register changes the three primary timers.
+//!
+//! `CoreTrigger` is one `trigger-config` word in a CPU's CoreSight region,
+//! which the driver sets to its value under the record's mask on CPU start
+//! events (`writeCoreTriggerConfigurationStateChange`, 0x1ca5cf8). Bits
+//! outside the mask refuse; like the configuration, it acts only on expiry.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
 
@@ -39,6 +52,8 @@ const STRIDE: u64 = 0x10;
 const WATCHDOGS: usize = 3;
 pub const PANIC_SAVE: u64 = 0x4000;
 pub const MECHANISM: u64 = 0x4004;
+pub const CONFIGURATION: u64 = 0x4008;
+pub const POWER_OFF: u64 = 0x400c;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Watchdog {
@@ -77,6 +92,8 @@ pub struct AppleWdt {
     side: bool,
     panic_save: u32,
     mechanism_enabled: bool,
+    configuration: u32,
+    power_off: u32,
 }
 impl AppleWdt {
     /// `irq` is the node's DeviceTree `interrupts` AIC input; `now` the
@@ -96,9 +113,11 @@ impl AppleWdt {
             side: false,
             panic_save: 0,
             mechanism_enabled: false,
+            configuration: 0,
+            power_off: 0,
         }
     }
-    /// The two optional DT side controls, separate from the timer window.
+    /// The optional DT side controls, separate from the timer window.
     pub fn with_side_controls(mut self) -> Self {
         self.side = true;
         self
@@ -170,8 +189,11 @@ impl MmioDevice for AppleWdt {
             return Err(fail("watchdog registers are 32-bit"));
         }
         if self.side {
-            if offset == PANIC_SAVE {
-                return Ok(u64::from(self.panic_save));
+            match offset {
+                PANIC_SAVE => return Ok(u64::from(self.panic_save)),
+                CONFIGURATION => return Ok(u64::from(self.configuration)),
+                POWER_OFF => return Ok(u64::from(self.power_off)),
+                _ => {}
             }
             if offset == MECHANISM {
                 return Err(fail(
@@ -207,8 +229,14 @@ impl MmioDevice for AppleWdt {
             return Err(fail("watchdog registers are 32-bit"));
         }
         if self.side {
-            if offset == PANIC_SAVE {
-                self.panic_save = value as u32;
+            let retained = match offset {
+                PANIC_SAVE => Some(&mut self.panic_save),
+                CONFIGURATION => Some(&mut self.configuration),
+                POWER_OFF => Some(&mut self.power_off),
+                _ => None,
+            };
+            if let Some(register) = retained {
+                *register = value as u32;
                 return Ok(());
             }
             if offset == MECHANISM {
@@ -244,6 +272,53 @@ impl MmioDevice for AppleWdt {
     }
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
         Ok(self.evaluate(access))
+    }
+}
+
+/// One watchdog `trigger-config` word: retains the bits of its mask.
+pub struct CoreTrigger {
+    mask: u32,
+    value: u32,
+}
+impl CoreTrigger {
+    pub fn new(mask: u32) -> Self {
+        Self { mask, value: 0 }
+    }
+}
+impl MmioDevice for CoreTrigger {
+    fn name(&self) -> &'static str {
+        "watchdog-core-trigger"
+    }
+    fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        if offset != 0 || width != Width::Word {
+            return Err(refuse(
+                self.name(),
+                offset,
+                width,
+                Direction::Read,
+                "the core trigger word is one full32 register",
+            ));
+        }
+        Ok(u64::from(self.value))
+    }
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        _: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
+        if offset != 0 || width != Width::Word || value as u32 & !self.mask != 0 {
+            return Err(refuse(
+                self.name(),
+                offset,
+                width,
+                Direction::Write,
+                "core trigger bits outside the trigger-config mask are not described",
+            ));
+        }
+        self.value = value as u32;
+        Ok(())
     }
 }
 
@@ -291,13 +366,40 @@ mod tests {
         assert!(w.write(MECHANISM, Width::Word, 1, &mut a).is_err());
         assert!(w.read(MECHANISM, Width::Word, &mut a).is_err());
         assert!(w.read(PANIC_SAVE, Width::Double, &mut a).is_err());
-        assert!(w.read(PANIC_SAVE + 8, Width::Word, &mut a).is_err());
+        assert!(w.read(PANIC_SAVE + 0x10, Width::Word, &mut a).is_err());
+        // The driver's configuration RMWs: start's bits [5:4], then the
+        // expiry flags in the low byte, then a clear of that byte.
+        let configuration = w.read(CONFIGURATION, Width::Word, &mut a).unwrap();
+        w.write(
+            CONFIGURATION,
+            Width::Word,
+            configuration & !0x30 | 0x10,
+            &mut a,
+        )
+        .unwrap();
+        w.write(CONFIGURATION, Width::Word, 0x1d, &mut a).unwrap();
+        assert_eq!(w.read(CONFIGURATION, Width::Word, &mut a), Ok(0x1d));
+        w.write(POWER_OFF, Width::Word, 1 << 2, &mut a).unwrap();
+        assert_eq!(w.read(POWER_OFF, Width::Word, &mut a), Ok(4));
         assert_eq!(w.read(CTRL, Width::Word, &mut a), Ok(0));
         assert!(
             AppleWdt::new(None, 0)
                 .read(PANIC_SAVE, Width::Word, &mut a)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_core_trigger_word_retains_only_its_mask() {
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        let mut trigger = CoreTrigger::new(0xf);
+        assert_eq!(trigger.read(0, Width::Word, &mut a), Ok(0));
+        trigger.write(0, Width::Word, 1, &mut a).unwrap();
+        assert_eq!(trigger.read(0, Width::Word, &mut a), Ok(1));
+        assert!(trigger.write(0, Width::Word, 0x11, &mut a).is_err());
+        assert!(trigger.read(0, Width::Double, &mut a).is_err());
+        assert_eq!(trigger.read(0, Width::Word, &mut a), Ok(1));
     }
 
     #[test]

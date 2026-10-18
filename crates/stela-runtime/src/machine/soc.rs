@@ -870,8 +870,8 @@ pub struct Board {
     pub uart: Device,
     /// `/arm-io/wdt`, a `wdt,s5l8960x`.
     pub watchdog: Device,
-    /// Optional panic scratch and mechanism command, from wdt reg[1]/reg[2].
-    pub watchdog_side: Option<[u64; 2]>,
+    /// Optional side registers and per-CPU trigger words of the watchdog.
+    pub watchdog_side: Option<WatchdogSide>,
     /// `/arm-io/aic`, an `aic,1`, `aic,2` or `aic,3`.
     pub aic: InterruptController,
     /// Every PE's `cpu-impl-reg` and every cluster's `cpm-impl-reg`, once
@@ -2056,38 +2056,67 @@ fn resolve_supplies(
     Ok(supplies)
 }
 
-/// Two optional four-byte side registers. Their absolute addresses are not
-/// related to the timer window; panic bit selection comes from the DT too.
+/// The watchdog's side registers, each one aligned word outside its timer
+/// window, as `AppleARMWatchdogTimer::start` (26A434 file 0x1ca362c) maps
+/// device memory 1..=4: the panic-save scratch, the mechanism command, the
+/// AP watchdog configuration and the panic force-power-off flags
+/// (`panic-forcepoweroff-flag-bit`); the last two are optional. `triggers`
+/// are the `trigger-config` records it maps per CPU: a physical word, a
+/// mask and the value it sets under that mask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchdogSide {
+    pub words: Vec<u64>,
+    pub triggers: Vec<(u64, u32, u32)>,
+}
+
 fn watchdog_side(
     node: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
-) -> Result<Option<[u64; 2]>, String> {
+) -> Result<Option<WatchdogSide>, String> {
     let reg = node.pairs("reg").ok_or("watchdog has no reg")?;
     if reg.len() == 1 {
         return Ok(None);
     }
-    if reg.len() < 3
-        || node
-            .first_u32("panic-save-flag-bit")
-            .is_none_or(|bit| bit >= 32)
+    let bit = |name| node.first_u32(name).is_some_and(|bit| bit < 32);
+    if !(3..=5).contains(&reg.len())
+        || !bit("panic-save-flag-bit")
+        || (reg.len() == 5 && !bit("panic-forcepoweroff-flag-bit"))
     {
-        return Err("watchdog side controls need reg[1]/reg[2] and a valid panic flag bit".into());
+        return Err(
+            "watchdog side controls need reg[1]/reg[2], valid flag bits and at most reg[4]".into(),
+        );
     }
-    let mut side = [0; 2];
-    for (out, (address, bytes)) in side.iter_mut().zip(&reg[1..3]) {
-        if *bytes != 4 || !address.is_multiple_of(4) {
+    let mut words = Vec::new();
+    for &(address, bytes) in &reg[1..] {
+        if bytes != 4 || !address.is_multiple_of(4) {
             return Err("watchdog side register is not one aligned full32 word".into());
         }
-        *out = translate(*address).ok_or("watchdog side register is outside arm-io ranges")?;
-        let end = address
-            .checked_add(*bytes - 1)
-            .and_then(translate)
-            .ok_or("watchdog side range end is outside arm-io ranges")?;
-        if out.checked_add(*bytes - 1) != Some(end) {
+        let physical =
+            translate(address).ok_or("watchdog side register is outside arm-io ranges")?;
+        if address.checked_add(3).and_then(translate) != physical.checked_add(3) {
             return Err("watchdog side range translation is not contiguous".into());
         }
+        words.push(physical);
     }
-    Ok(Some(side))
+    let mut triggers = Vec::new();
+    if let Some(records) = node.property("trigger-config") {
+        let (records, rest) = records.as_chunks::<16>();
+        if !rest.is_empty() {
+            return Err("watchdog trigger-config holds a partial record".into());
+        }
+        for record in records {
+            let word = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("word"));
+            let physical = u64::from_le_bytes(record[..8].try_into().expect("address"));
+            let (mask, value) = (word(8), word(12));
+            if !physical.is_multiple_of(4) || mask == 0 || value & !mask != 0 {
+                return Err(
+                    "watchdog trigger-config record is unaligned or exceeds its mask".into(),
+                );
+            }
+            triggers.push((physical, mask, value));
+        }
+    }
+    Ok(Some(WatchdogSide { words, triggers }))
 }
 
 /// The DT region can contain several components. This model places only
@@ -3261,21 +3290,50 @@ mod tests {
         .into_iter()
         .flat_map(u64::to_le_bytes)
         .collect::<Vec<_>>();
+        let trigger = [0x10020304u32, 2, 0xf, 1, 0x10120304, 2, 0xf, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let bit = |n: u32| n.to_le_bytes();
+        let (zero, two) = (bit(0), bit(2));
         let tree = encode(
-            &[("reg", &reg), ("panic-save-flag-bit", &0u32.to_le_bytes())],
+            &[
+                ("reg", &reg),
+                ("panic-save-flag-bit", &zero),
+                ("panic-forcepoweroff-flag-bit", &two),
+                ("trigger-config", &trigger),
+            ],
             &[],
         );
         let n = Node::root(&tree).unwrap();
         assert_eq!(
             watchdog_side(&n, &|a| Some(a + 0x2_0000_0000)).unwrap(),
-            Some([0x2_0000_c218, 0x2_0000_8008])
+            Some(WatchdogSide {
+                words: vec![0x2_0000_c218, 0x2_0000_8008, 0x2_0000_800c, 0x2_0000_8020],
+                // Trigger words are absolute physical addresses.
+                triggers: vec![(0x2_1002_0304, 0xf, 1), (0x2_1012_0304, 0xf, 1)],
+            })
         );
         assert!(watchdog_side(&n, &|_| None).is_err());
+        let tree = encode(&[("reg", &reg), ("panic-save-flag-bit", &zero)], &[]);
+        // reg[4] needs its force-power-off flag bit.
+        assert!(watchdog_side(&Node::root(&tree).unwrap(), &Some).is_err());
         let tree = encode(
-            &[("reg", &reg), ("panic-save-flag-bit", &32u32.to_le_bytes())],
+            &[
+                ("reg", &reg[..48]),
+                ("panic-save-flag-bit", &32u32.to_le_bytes()),
+            ],
             &[],
         );
         assert!(watchdog_side(&Node::root(&tree).unwrap(), &Some).is_err());
+        let tree = encode(&[("reg", &reg[..48]), ("panic-save-flag-bit", &zero)], &[]);
+        assert_eq!(
+            watchdog_side(&Node::root(&tree).unwrap(), &Some)
+                .unwrap()
+                .unwrap()
+                .words,
+            [0xc218, 0x8008]
+        );
         let tree = encode(&[("reg", &reg[..16])], &[]);
         assert_eq!(
             watchdog_side(&Node::root(&tree).unwrap(), &Some).unwrap(),

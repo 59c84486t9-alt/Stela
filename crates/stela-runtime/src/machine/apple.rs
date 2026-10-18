@@ -1118,7 +1118,7 @@ impl AppleDevices {
     pub fn add_watchdog_with_side(
         &mut self,
         range: Range,
-        side: Option<[u64; 2]>,
+        side: Option<&super::soc::WatchdogSide>,
         irq: Option<AicInput>,
         now: u64,
     ) -> Result<(), MapError> {
@@ -1129,8 +1129,18 @@ impl AppleDevices {
             .bus
             .add(Box::new(AppleWdt::new(irq, now).with_side_controls()));
         self.map(device, &[range])?;
-        for (physical, offset) in side.into_iter().zip([wdt::PANIC_SAVE, wdt::MECHANISM]) {
+        let offsets = [
+            wdt::PANIC_SAVE,
+            wdt::MECHANISM,
+            wdt::CONFIGURATION,
+            wdt::POWER_OFF,
+        ];
+        for (&physical, offset) in side.words.iter().zip(offsets) {
             self.bus.map(device, physical, 4, offset)?;
+        }
+        for &(physical, mask, _) in &side.triggers {
+            let trigger = self.bus.add(Box::new(wdt::CoreTrigger::new(mask)));
+            self.bus.map(trigger, physical, 4, 0)?;
         }
         Ok(())
     }
@@ -1580,13 +1590,17 @@ mod tests {
     fn watchdog_routes_separate_side_words_without_claiming_intervening_addresses() {
         let mut d = AppleDevices::new();
         let base = 0x2_3d2b_0000;
-        let side = [base + 0xc218, base + 0x8008];
+        let side = [base + 0xc218, base + 0x8008, base + 0x800c, base + 0x8020];
+        let trigger = 0x2_1002_0304;
         d.add_watchdog_with_side(
             Range {
                 physical: base,
                 bytes: 0x4000,
             },
-            Some(side),
+            Some(&super::super::soc::WatchdogSide {
+                words: side.to_vec(),
+                triggers: alloc::vec![(trigger, 0xf, 1)],
+            }),
             None,
             0,
         )
@@ -1596,8 +1610,14 @@ mod tests {
         assert_eq!(d.read(0, side[0], 4, 0), Ok(1));
         d.write(0, side[1], 4, 0, 0).unwrap();
         assert!(d.read(0, side[1], 4, 0).is_err());
+        d.write(0, side[2], 4, 0x10, 0).unwrap();
+        assert_eq!(d.read(0, side[2], 4, 0), Ok(0x10));
+        assert_eq!(d.read(0, side[3], 4, 0), Ok(0));
         assert!(d.read(0, side[0] + 4, 4, 0).is_err());
         assert!(d.read(0, base + 0x5000, 4, 0).is_err());
+        d.write(0, trigger, 4, 1, 0).unwrap();
+        assert_eq!(d.read(0, trigger, 4, 0), Ok(1));
+        assert!(d.read(0, trigger + 4, 4, 0).is_err());
     }
 
     #[test]

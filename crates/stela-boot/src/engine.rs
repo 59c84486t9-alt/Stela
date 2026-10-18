@@ -439,7 +439,12 @@ fn devices<'f>(
         .add_uart(GuestConsole::default(), &[uart.0], Some(uart.1))
         .map_err(|error| alloc::format!("UART placement: {error:?}"))?;
     devices
-        .add_watchdog_with_side(wdt.0, board.and_then(|b| b.watchdog_side), Some(wdt.1), now)
+        .add_watchdog_with_side(
+            wdt.0,
+            board.and_then(|b| b.watchdog_side.as_ref()),
+            Some(wdt.1),
+            now,
+        )
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
     devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
     if let Some(board) = board
