@@ -70,6 +70,8 @@ pub(super) struct Kernel {
     pub(super) map_with_linking_ended: bool,
     /// Guest system roots read-only absolute lookups resolve under first.
     pub(super) roots: Vec<std::path::PathBuf>,
+    /// The host command `execve` activates the new image with.
+    pub(super) reexec: Vec<std::ffi::OsString>,
     /// Code signatures attached to files.
     pub(super) signatures: bsd::signatures::Signatures,
     /// This task's, its thread's and the host's kernel-object port names.
@@ -118,6 +120,7 @@ pub(super) struct Config {
     pub(super) executable: Executable,
     pub(super) user_stack: u64,
     pub(super) roots: Vec<std::path::PathBuf>,
+    pub(super) reexec: Vec<std::ffi::OsString>,
     pub(super) trace: bool,
 }
 
@@ -157,6 +160,7 @@ impl Kernel {
             signals: bsd::signal::Signals::inherit(),
             user_stack: config.user_stack,
             roots: config.roots,
+            reexec: config.reexec,
             signatures: Default::default(),
             map_with_linking_ended: false,
             kernel_objects,

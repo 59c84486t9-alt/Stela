@@ -77,7 +77,7 @@ fn reported_path(kernel: &mut Kernel, call: &Call, buffer: u64) -> Result<Option
 }
 
 /// The first root holding `path`, as the host path to look up instead.
-fn resolve(roots: &[PathBuf], path: &[u8]) -> Option<PathBuf> {
+pub(super) fn resolve(roots: &[PathBuf], path: &[u8]) -> Option<PathBuf> {
     if path.first() != Some(&b'/') {
         return None;
     }

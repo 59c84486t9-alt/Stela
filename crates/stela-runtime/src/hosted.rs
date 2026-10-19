@@ -17,6 +17,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::BTreeMap;
 use stela_compiler::TargetCpu;
 
+pub mod activation;
 pub mod commpage;
 pub mod exec;
 pub mod features;
@@ -60,6 +61,10 @@ pub struct Launch {
     /// Guest system roots, in order, that absolute paths the guest looks up
     /// read-only resolve under before the host's own file system.
     pub roots: Vec<std::path::PathBuf>,
+    /// The host command that activates a new guest image in this process
+    /// for `execve`: it is run with `--argv0=ARGV0 -- PATH ARGS...`
+    /// appended and the new environment.
+    pub reexec: Vec<std::ffi::OsString>,
     pub argv: Vec<Vec<u8>>,
     pub environment: Vec<Vec<u8>>,
     pub trace: bool,
@@ -207,6 +212,7 @@ pub fn run(launch: Launch) -> Result<Report> {
         },
         user_stack: stack.top,
         roots: launch.roots.clone(),
+        reexec: launch.reexec.clone(),
         trace: launch.trace,
     });
     loop {

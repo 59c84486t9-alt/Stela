@@ -1,5 +1,7 @@
 //! `stela run PROGRAM [ARGS...]`: exec an unchanged arm64e Mach-O as the
-//! arm64 kernel would, in this process, and exit with its status.
+//! arm64 kernel would, in this process, and exit with its status. A `#!`
+//! script runs its interpreter as exec does. The guest's own `execve`
+//! comes back here, through `--argv0`, in the same host process.
 //!
 //! Exec's inputs are read here: the executable's arm64e slice (arm64 when
 //! it has none), its load commands and code signature, and the dynamic
@@ -9,10 +11,11 @@
 //! itself. Everything after is the hosted runtime's.
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use stela_loader::{code_signature, load_plan, split_slices};
+use stela_runtime::hosted::activation::{self, Activator};
 use stela_runtime::hosted::{self, Dylinker, Launch, Signature, Termination};
 use stela_runtime::machine::Chip;
 
@@ -32,6 +35,10 @@ pub(crate) struct Run {
     /// lookups of absolute paths that exist under it resolve there.
     #[arg(long)]
     root: Vec<PathBuf>,
+    /// The new image's argv[0], when it is not the program path (as
+    /// `execve` passes it).
+    #[arg(long)]
+    argv0: Option<OsString>,
     /// Print every serviced call to standard error.
     #[arg(long)]
     trace: bool,
@@ -114,11 +121,89 @@ fn guest_path(roots: &[PathBuf], path: &Path) -> PathBuf {
     }
 }
 
+/// The image exec activates.
+struct Activated {
+    /// The host file holding it.
+    file: PathBuf,
+    /// The path exec reports (`executable_path=`).
+    path: Vec<u8>,
+    argv: Vec<Vec<u8>>,
+    data: Vec<u8>,
+}
+
+/// The image exec activates for `program` and its argv: the program
+/// itself, or the interpreter its `#!` line names with the line's tokens,
+/// the script path and the arguments after argv[0].
+fn activate(roots: &[PathBuf], program: &Path, argv: Vec<Vec<u8>>) -> Result<Activated> {
+    let file = guest_path(roots, program);
+    let data = std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?;
+    let head = &data[..data.len().min(hosted::memory::PAGE_BYTES as usize)];
+    let tokens = match activation::activator(head) {
+        Ok(Activator::MachO) => {
+            return Ok(Activated {
+                file,
+                path: program.as_os_str().as_bytes().to_vec(),
+                argv,
+                data,
+            });
+        }
+        Ok(Activator::Interpreter(tokens)) => tokens,
+        Err(errno) => bail!("{} cannot be executed: errno {errno}", program.display()),
+    };
+    let interpreter = PathBuf::from(OsStr::from_bytes(&tokens[0]));
+    let mut interpreted = tokens;
+    interpreted.push(program.as_os_str().as_bytes().to_vec());
+    interpreted.extend(argv.into_iter().skip(1));
+    let file = guest_path(roots, &interpreter);
+    let data = std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?;
+    if data.starts_with(b"#!") {
+        bail!(
+            "{}: nested interpreters are not executed (ENOEXEC)",
+            interpreter.display()
+        );
+    }
+    Ok(Activated {
+        file,
+        path: interpreter.as_os_str().as_bytes().to_vec(),
+        argv: interpreted,
+        data,
+    })
+}
+
 impl Run {
+    /// The host command that activates another guest image here.
+    fn reexec(&self) -> Result<Vec<OsString>> {
+        let mut command = vec![std::env::current_exe()?.into_os_string(), "run".into()];
+        for root in &self.root {
+            command.push("--root".into());
+            command.push(root.clone().into_os_string());
+        }
+        if self.trace {
+            command.push("--trace".into());
+        }
+        if self.statistics {
+            command.push("--statistics".into());
+        }
+        Ok(command)
+    }
+
     pub(crate) fn run(self) -> Result<()> {
-        let program_file = guest_path(&self.root, &self.program);
-        let data = std::fs::read(&program_file)
-            .with_context(|| format!("cannot read {}", program_file.display()))?;
+        let argv0 = self
+            .argv0
+            .clone()
+            .unwrap_or_else(|| self.program.clone().into_os_string());
+        let mut argv = vec![argv0.as_bytes().to_vec()];
+        argv.extend(
+            self.arguments
+                .iter()
+                .map(|argument| argument.as_bytes().to_vec()),
+        );
+        let Activated {
+            file: program_file,
+            path: program,
+            argv,
+            data,
+        } = activate(&self.root, &self.program, argv)?;
         let (slice_offset, slice) = select_slice(&data)?;
         let plan = load_plan::plan(slice)?;
         let signature = signature(slice)?;
@@ -131,13 +216,6 @@ impl Run {
             .with_context(|| format!("cannot read {}", dylinker_file.display()))?;
         let (dylinker_offset, dylinker_slice) = select_slice(&dylinker_data)?;
         let dylinker_plan = load_plan::plan_dynamic_linker(dylinker_slice)?;
-        let program = self.program.as_os_str().as_bytes().to_vec();
-        let mut argv = vec![program.clone()];
-        argv.extend(
-            self.arguments
-                .iter()
-                .map(|argument| argument.as_bytes().to_vec()),
-        );
         let environment = std::env::vars_os()
             .map(|(key, value)| {
                 let mut entry = key.as_bytes().to_vec();
@@ -157,6 +235,7 @@ impl Run {
                 entry: dylinker_plan.thread.pc,
             },
             roots: self.root.clone(),
+            reexec: self.reexec()?,
             argv,
             environment,
             trace: self.trace,
