@@ -21,7 +21,7 @@ use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     amcc, ans, asc, atc_phy, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse,
-    i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
+    gpio, i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -1535,6 +1535,8 @@ pub struct GpioBank {
     pub physical: u64,
     pub bytes: u64,
     pub pins: u32,
+    /// `#gpio-int-groups`; the first `lines.len()` have an AIC line.
+    pub groups: u32,
     pub phandle: u32,
     pub lines: Vec<u16>,
     /// The ADT's `gpio-iic_scl`/`gpio-iic_sda` pins in this bank.
@@ -1566,7 +1568,11 @@ fn gpio_bank(
     translate: &dyn Fn(u64) -> Option<u64>,
     aic: u32,
 ) -> Result<Option<GpioBank>, String> {
-    let Some(node) = io.child("gpio").filter(|n| n.compatible(GPIO)) else {
+    let Some(node) = AP_GPIO_NAMES
+        .iter()
+        .find_map(|name| io.child(name))
+        .filter(|n| n.compatible(GPIO))
+    else {
         return Ok(None);
     };
     let mut bank = gpio_geometry(&node, translate, aic)?;
@@ -1601,7 +1607,7 @@ fn aux_gpio_banks(
             .and_then(|name| core::str::from_utf8(name).ok())
             .map(|name| name.trim_end_matches('\0'))
             .unwrap_or_default();
-        if name == "gpio" || !node.compatible(GPIO) {
+        if AP_GPIO_NAMES.contains(&name) || !node.compatible(GPIO) {
             continue;
         }
         let bank =
@@ -1637,7 +1643,19 @@ fn aux_gpio_banks(
     Ok(banks)
 }
 
-/// A `gpio,t8101` node's registers, pins, groups and AIC lines.
+/// The AP GPIO bank's node: `gpio` in the M1 and M2 DeviceTrees, `gpio0`
+/// (die 0) in the M2 Pro and Max and every later one (J414sAP, J504AP).
+const AP_GPIO_NAMES: [&str; 2] = ["gpio", "gpio0"];
+/// The pin words a bank's `#gpio-pins` may name (`platform::apple::gpio`).
+const GPIO_PINS: u32 = 512;
+/// The first interrupt group's status bank and the stride between groups
+/// (`platform::apple::gpio`).
+const GPIO_IRQ_BASE: u64 = 0x800;
+const GPIO_IRQ_STRIDE: u64 = 0x40;
+
+/// A `gpio,t8101` node's registers, pins, groups and AIC lines: up to
+/// [`gpio::GROUPS`] interrupt groups, the first of which have the node's
+/// `interrupts` as their lines.
 fn gpio_geometry(
     node: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
@@ -1657,11 +1675,12 @@ fn gpio_geometry(
         .map(|irq| u16::try_from(irq).map_err(|_| "GPIO interrupt too large"))
         .collect::<Result<Vec<_>, _>>()?;
     if pins == 0
-        || pins > 512
-        || !(1..=7).contains(&groups)
-        || lines.len() != groups as usize
+        || pins > GPIO_PINS
+        || !(1..=gpio::GROUPS as u32).contains(&groups)
+        || lines.is_empty()
+        || lines.len() > groups as usize
         || node.first_u32("interrupt-parent") != Some(aic)
-        || bytes < 0x800 + u64::from(groups) * 0x40
+        || bytes < GPIO_IRQ_BASE + u64::from(groups) * GPIO_IRQ_STRIDE
     {
         return Err("unsupported GPIO geometry or interrupt parent".into());
     }
@@ -1669,6 +1688,7 @@ fn gpio_geometry(
         physical,
         bytes,
         pins,
+        groups,
         phandle: node
             .first_u32("AAPL,phandle")
             .ok_or("GPIO phandle missing")?,
@@ -5618,6 +5638,7 @@ mod tests {
             physical: 0x23c100000,
             bytes: 0x100000,
             pins: 213,
+            groups: 7,
             phandle: 0x6a,
             lines: vec![199],
             i2c_lines: vec![],

@@ -12,7 +12,11 @@
 //! `apple_gpio_irq_type`). Each pin's group selects one IRQ status bank at
 //! 0x800 + group * 0x40, one bit per pin, write-one-to-clear
 //! (`apple_gpio_irq_ack`); the group's DT `interrupts` entry is the OR of
-//! its bank. A level mode latches while its input is active, so it relatches
+//! its bank. A bank has `#gpio-int-groups` status banks, at most the eight
+//! the group field selects, and an AIC line for each of its first
+//! `interrupts` groups: J414sAP's `gpio0` states 8 groups and wires 7.
+//! A pin interrupt routed to a group without a line refuses, since what
+//! hardware signals then is not documented. A level mode latches while its input is active, so it relatches
 //! immediately after an acknowledgement; an edge mode latches on a sampled
 //! transition. Linux masks a pin by switching it to mode 7; a latched bit
 //! remains until software acknowledges it. A level mode on an input whose
@@ -58,6 +62,8 @@ const FIELDS: u32 =
     DATA | MODE | PERIPH | PULL | INPUT_ENABLE | 3 << 10 | 1 << 15 | 7 << 16 | LOCK | 3 << 22;
 const IRQ_BASE: u64 = 0x800;
 const IRQ_STRIDE: u64 = 0x40;
+/// The interrupt groups the 3-bit group field selects.
+pub const GROUPS: usize = 8;
 
 /// A board net pulled high: open-drain outputs attached to it pull it low.
 /// Clones share the net; at most 64 outputs attach to one net.
@@ -119,6 +125,8 @@ pub struct Gpio {
     /// IRQ status, `words` 32-bit words per group.
     pending: Vec<u32>,
     words: usize,
+    groups: usize,
+    /// The AIC lines of the first groups.
     lines: Vec<AicInput>,
     asserted: Vec<bool>,
 }
@@ -134,7 +142,7 @@ impl Gpio {
         if pins == 0
             || pins > 512
             || lines.is_empty()
-            || lines.len() > 7
+            || lines.len() > GROUPS
             || selects
                 .iter()
                 .chain(nets.iter().map(|(pin, _)| pin))
@@ -151,6 +159,7 @@ impl Gpio {
             armed: Vec::new(),
             pending: vec![0; words * lines.len()],
             words,
+            groups: lines.len(),
             asserted: vec![false; lines.len()],
             lines,
         };
@@ -163,6 +172,16 @@ impl Gpio {
             }
         }
         Ok(bank)
+    }
+    /// A bank of `groups` interrupt groups, of which the first have the
+    /// AIC lines [`Gpio::new`] took.
+    pub fn with_groups(mut self, groups: usize) -> Result<Self, &'static str> {
+        if groups < self.lines.len() || groups > GROUPS {
+            return Err("GPIO group count below its lines or beyond the group field");
+        }
+        self.groups = groups;
+        self.pending = vec![0; self.words * groups];
+        Ok(self)
     }
     /// The level a receiver samples on an input pin, when one is determined:
     /// a board net, otherwise the pin's own pull. Without either it floats.
@@ -184,7 +203,7 @@ impl Gpio {
     }
     fn group(&self, word: u32) -> Option<usize> {
         let group = ((word >> GROUP_SHIFT) & 7) as usize;
-        (group < self.lines.len()).then_some(group)
+        (group < self.groups).then_some(group)
     }
     fn irq_word(&self, offset: u64) -> Option<usize> {
         let offset = offset.checked_sub(IRQ_BASE)?;
@@ -192,7 +211,7 @@ impl Gpio {
             (offset / IRQ_STRIDE) as usize,
             (offset % IRQ_STRIDE) as usize / 4,
         );
-        (group < self.lines.len() && word < self.words).then_some(group * self.words + word)
+        (group < self.groups && word < self.words).then_some(group * self.words + word)
     }
     /// Latches every armed pin's condition and drives each group's line.
     fn sample(&mut self, access: &mut Access<'_>) {
@@ -299,8 +318,14 @@ impl MmioDevice for Gpio {
                     Some(true) => value |= DATA,
                 }
             }
-            if matches!(mode, LEVEL_HIGH..=EDGE_ANY) && self.group(value).is_none() {
-                return Err(err("GPIO interrupt group beyond the DT group count"));
+            if matches!(mode, LEVEL_HIGH..=EDGE_ANY) {
+                match self.group(value) {
+                    None => return Err(err("GPIO interrupt group beyond the DT group count")),
+                    Some(group) if group >= self.lines.len() => {
+                        return Err(err("GPIO interrupt group without an AIC line"));
+                    }
+                    Some(_) => {}
+                }
             }
             if word & LOCK != 0 {
                 if (word ^ value) & !(DATA | LOCK) != 0 {
@@ -472,6 +497,40 @@ mod tests {
         );
         assert!(Gpio::new(213, lines(), &[49], vec![(49, Net::new())]).is_err());
         assert!(Gpio::new(213, vec![], &[], vec![]).is_err());
+    }
+    #[test]
+    fn an_eighth_group_without_a_line_has_status_but_takes_no_interrupt() {
+        // J414sAP `gpio0`: `#gpio-int-groups` 8, seven `interrupts`.
+        let mut bank = Gpio::new(255, lines(), &[], vec![(8, Net::new())])
+            .unwrap()
+            .with_groups(GROUPS)
+            .unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let last = IRQ_BASE + (GROUPS as u64 - 1) * IRQ_STRIDE;
+        bank.write(last, Width::Word, u64::from(u32::MAX), &mut a)
+            .unwrap();
+        assert_eq!(bank.read(last, Width::Word, &mut a), Ok(0));
+        let unwired = EDGE_RISING | (GROUPS as u32 - 1) << GROUP_SHIFT;
+        assert!(
+            bank.write(4 * 8, Width::Word, u64::from(unwired), &mut a)
+                .is_err()
+        );
+        let wired = EDGE_RISING | 6 << GROUP_SHIFT;
+        bank.write(4 * 8, Width::Word, u64::from(wired), &mut a)
+            .unwrap();
+        assert!(
+            Gpio::new(255, lines(), &[], vec![])
+                .unwrap()
+                .with_groups(GROUPS + 1)
+                .is_err()
+        );
+        assert!(
+            Gpio::new(255, lines(), &[], vec![])
+                .unwrap()
+                .with_groups(1)
+                .is_err()
+        );
     }
     #[test]
     fn peripheral_functions_record_the_mux_without_a_gpio_level() {

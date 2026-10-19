@@ -411,7 +411,9 @@ impl AppleDevices {
             .iter()
             .map(|&irq| AicInput::new(0, irq))
             .collect();
-        let gpio = Gpio::new(bank.pins, lines, selects, nets.clone()).map_err(String::from)?;
+        let gpio = Gpio::new(bank.pins, lines, selects, nets.clone())
+            .and_then(|gpio| gpio.with_groups(bank.groups as usize))
+            .map_err(String::from)?;
         let id = self.bus.add(Box::new(gpio));
         self.bus
             .map(id, bank.physical, bank.bytes, 0)
@@ -445,6 +447,7 @@ impl AppleDevices {
             .map(|&irq| AicInput::new(0, irq))
             .collect();
         let gpio = Gpio::new(aux.bank.pins, lines, &[], nets.clone())
+            .and_then(|gpio| gpio.with_groups(aux.bank.groups as usize))
             .map_err(|error| format!("{}: {error}", aux.name))?;
         let id = self.bus.add(Box::new(gpio));
         self.bus
@@ -2214,6 +2217,7 @@ mod tests {
             physical: GPIO,
             bytes: 0x1000,
             pins: 213,
+            groups: 7,
             phandle: 106,
             lines: (199..206).collect(),
             i2c_lines: Vec::new(),
@@ -2373,6 +2377,7 @@ mod tests {
                 physical: BANK,
                 bytes: 0x4000,
                 pins: 0x36,
+                groups: 7,
                 phandle: 0x6b,
                 lines: alloc::vec![0x12d, 0x12e, 0x12f, 0x130, 0x131, 0x132, 0x133],
                 i2c_lines: Vec::new(),
