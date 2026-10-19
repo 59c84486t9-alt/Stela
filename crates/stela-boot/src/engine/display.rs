@@ -10,9 +10,16 @@
 //! BGR order; an RGB mode swaps red and blue.
 use super::host::BareHost;
 use crate::console::{self, Framebuffer};
+use crate::output;
 use alloc::vec;
-use stela_runtime::machine::apple::{Scanout, ScanoutFormat, ScanoutMode};
+use core::sync::atomic::{AtomicBool, Ordering};
+use stela_runtime::machine::apple::{DisplayLog, Scanout, ScanoutFormat, ScanoutMode};
 use stela_runtime::{boot_bundle, machine::Host};
+
+/// Whether the DCP model has presented a swap. From then on the display
+/// pipe scans out the swapped surfaces, not iBoot's boot framebuffer, so the
+/// boot-framebuffer copy stops overwriting them.
+static DCP_PRESENTED: AtomicBool = AtomicBool::new(false);
 
 /// The host scanout the modeled DCP presents completed swaps to: the UEFI GOP
 /// framebuffer at its own mode. The DCP model converts each front surface to
@@ -21,6 +28,12 @@ use stela_runtime::{boot_bundle, machine::Host};
 /// arrives here as rows ready for the firmware's mode.
 pub struct GopScanout {
     screen: Framebuffer,
+}
+
+/// Print one display-log entry: what the guest sent the DCP model. Each
+/// line starts `DCP `.
+pub fn print_log(entry: &DisplayLog) {
+    output::arguments(format_args!("{entry}\n"));
 }
 
 impl GopScanout {
@@ -46,6 +59,9 @@ impl Scanout for GopScanout {
         let row_bytes = width * 4;
         if rows.len() < row_bytes * height {
             return Err("presented frame is smaller than the scanout mode");
+        }
+        if !DCP_PRESENTED.swap(true, Ordering::Relaxed) {
+            console::release();
         }
         for y in 0..height {
             self.screen.show_row(y, &rows[y * row_bytes..][..row_bytes]);
@@ -91,8 +107,12 @@ impl Display {
     }
 
     /// Copy the guest framebuffer to the screen. The first copy takes the
-    /// screen from the mount's text console.
+    /// screen from the mount's text console; once the DCP model presents
+    /// swaps, it owns the screen.
     pub fn show(&mut self, host: &mut BareHost) {
+        if DCP_PRESENTED.load(Ordering::Relaxed) {
+            return;
+        }
         if !self.shown {
             console::release();
             self.shown = true;

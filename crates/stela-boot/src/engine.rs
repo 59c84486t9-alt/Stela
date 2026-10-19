@@ -1535,6 +1535,10 @@ fn run(
             }
         }
 
+        while let Some(entry) = machine.devices.take_display_log() {
+            display::print_log(&entry);
+        }
+
         while let Some(log) = machine.devices.take_power_log() {
             use stela_runtime::machine::apple::PowerLog;
             match log {
