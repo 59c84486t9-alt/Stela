@@ -161,6 +161,7 @@ pub(super) const CALLS: &[&str] = &[
     "__pthread_canceled",
     "setitimer",
     "getitimer",
+    "sigreturn",
 ];
 
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
@@ -169,6 +170,7 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
         "sigprocmask" | "__pthread_sigmask" => mask(kernel, call)?,
         "__pthread_kill" => thread_kill(kernel, call)?,
         "sigaltstack" => alternate_stack(kernel, call)?,
+        "sigreturn" => sigreturn(kernel, call)?,
         "sigpending"
         | "kill"
         | "__sigwait"
@@ -283,16 +285,51 @@ fn alternate_stack(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         let base = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let size = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let flags = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
-        if flags & SS_ONSTACK != 0 {
-            return Ok(Outcome::Error(super::EPERM));
-        }
+        // `sigaltstack`'s order: unknown flags, then a change while the
+        // thread runs on the stack.
         if flags & !SS_DISABLE != 0 {
             return Ok(Outcome::Error(EINVAL));
+        }
+        if kernel.signals.alternate.2 & SS_ONSTACK != 0 {
+            return Ok(Outcome::Error(super::EPERM));
         }
         if flags & SS_DISABLE == 0 && size < MINIMUM_STACK {
             return Ok(Outcome::Error(super::ENOMEM));
         }
         kernel.signals.alternate = (base, size, flags);
+    }
+    Ok(Outcome::value(0))
+}
+
+/// `sigreturn` infostyles that only set or clear whether the thread runs
+/// on its alternate stack (`UC_SET_ALT_STACK`, `UC_RESET_ALT_STACK`), as
+/// `siglongjmp` out of a handler does.
+const UC_SET_ALT_STACK: u64 = 0x4000_0000;
+const UC_RESET_ALT_STACK: u64 = 0x8000_0000;
+
+impl ThreadSignals {
+    /// Apply a `sigreturn` alternate-stack infostyle: whether it was one.
+    fn set_on_stack(&mut self, infostyle: u64) -> bool {
+        if infostyle & UC_SET_ALT_STACK == UC_SET_ALT_STACK {
+            self.alternate.2 |= SS_ONSTACK;
+        } else if infostyle & UC_RESET_ALT_STACK == UC_RESET_ALT_STACK {
+            self.alternate.2 &= !SS_ONSTACK;
+        } else {
+            return false;
+        }
+        true
+    }
+}
+
+/// `sigreturn(uctx, infostyle, token)`: the alternate-stack forms. A
+/// return through a signal context needs delivery to guest handlers.
+fn sigreturn(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
+    let [context, infostyle, ..] = call.arguments;
+    if !kernel.signals.set_on_stack(infostyle) {
+        bail!(
+            "sigreturn through the signal context at {context:#x} (infostyle {infostyle:#x}): \
+             delivering signals to guest handlers is not implemented"
+        );
     }
     Ok(Outcome::value(0))
 }
@@ -317,6 +354,19 @@ const ENOTSUP: u64 = 45;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_alternate_stack_flag_follows_sigreturn() {
+        let mut signals = ThreadSignals {
+            mask: 0,
+            alternate: (0x1000, MINIMUM_STACK, 0),
+        };
+        assert!(signals.set_on_stack(UC_SET_ALT_STACK));
+        assert_eq!(signals.alternate.2, SS_ONSTACK);
+        assert!(signals.set_on_stack(UC_RESET_ALT_STACK));
+        assert_eq!(signals.alternate.2, 0);
+        assert!(!signals.set_on_stack(30));
+    }
 
     #[test]
     fn the_workqueue_thread_mask_is_xnus() {

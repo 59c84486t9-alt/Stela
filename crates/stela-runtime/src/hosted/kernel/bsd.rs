@@ -271,6 +271,10 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
         "kern.version and kern.osrelease are the host kernel's",
     ),
     (
+        "sigreturn",
+        "only the alternate-stack forms: no signal is delivered to a guest handler",
+    ),
+    (
         "posix_spawn",
         "binary preferences naming an x86-64 slice (Rosetta) are refused",
     ),
@@ -299,10 +303,6 @@ pub(crate) const REFUSED: &[(&str, &str)] = &[
     ),
     (
         "sigsuspend_nocancel",
-        "delivering signals to guest handlers is not implemented",
-    ),
-    (
-        "sigreturn",
         "delivering signals to guest handlers is not implemented",
     ),
     (
