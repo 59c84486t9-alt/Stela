@@ -106,6 +106,20 @@ impl HostNetwork {
     }
 }
 
+/// The restore client's way to Apple's signing service (`--tss`).
+impl stela_runtime::restore::tss::Transport for HostNetwork {
+    fn post(
+        &mut self,
+        host: &str,
+        path: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> stela_runtime::restore::Result<Vec<u8>> {
+        HostNetwork::post(self, host, path, content_type, body)
+            .map_err(|error| stela_runtime::restore::Error::Transport(format!("{error}")))
+    }
+}
+
 /// `http://HOST[:PORT]/PATH` as the host and the path.
 pub fn split_url(url: &str) -> Result<(&str, &str), &'static str> {
     let rest = url

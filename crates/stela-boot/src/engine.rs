@@ -1162,8 +1162,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
     }
     // The restore client's signing-server transport (`restore::tss`)
-    // borrows this; it lives for the whole run.
-    let _host_network = host_network;
+    // takes `host_network` below; it lives for the whole run.
     let mut services = services.into_iter();
     let backing = options.storage.as_ref().map(|_| services.next().unwrap());
     let source = options
@@ -1372,11 +1371,34 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         machine.set_watches(&options.watches);
     }
     let mut restore = source.map(|source| {
+        // `--tss` hands the restore client Apple's signing service, for the
+        // machine whose ECID the bundle names (`/chosen unique-chip-id`).
+        let signer = options.tss.then(|| {
+            let ecid = tree
+                .and_then(stela_runtime::machine::adt::Node::root)
+                .and_then(|root| root.child("chosen"))
+                .and_then(|chosen| chosen.property("unique-chip-id"))
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_le_bytes)
+                .filter(|&ecid| ecid != 0)
+                .unwrap_or_else(|| {
+                    output::fatal(
+                        "--tss needs the bundle's machine ECID (stela boot prepare --ecid)",
+                    )
+                });
+            stela_runtime::restore::tss::Signer {
+                ecid,
+                transport: alloc::boxed::Box::new(
+                    host_network.take().expect("--tss opens the host network"),
+                ),
+            }
+        });
         restore::Experiment::new(
             source,
             restore_usb.unwrap(),
             handoff,
             options.restore_identity.unwrap(),
+            signer,
         )
         .unwrap_or_else(|error| {
             output::arguments(format_args!("restore preparation refusal: {error}\n"));

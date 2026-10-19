@@ -25,6 +25,7 @@ impl Experiment {
         usb: UsbId,
         handoff: &Handoff,
         identity: usize,
+        signer: Option<stela_runtime::restore::tss::Signer>,
     ) -> Result<Self, String> {
         let file = handoff.files[..handoff.file_count]
             .iter()
@@ -44,6 +45,7 @@ impl Experiment {
         ));
         let store = Store::open(reader, manifest, identity).map_err(|e| format!("{e}"))?;
         let mut answers = Answers::new(store);
+        answers.signer = signer;
         if let Some(seconds) = handoff.wall_seconds {
             // The firmware's time at the handoff, carried forward on the TSC.
             let (tsc, hz) = (handoff.wall_tsc, handoff.tsc_hz);
