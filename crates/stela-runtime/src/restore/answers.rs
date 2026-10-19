@@ -115,6 +115,32 @@ fn validate_http_args(kind: &str, args: &Value) -> Result<()> {
     }
     Ok(())
 }
+const DATA_TYPES: [(&str, bool); 21] = [
+    ("BootabilityBundle", false),
+    ("BootabilityBundleV2", false),
+    ("BuildIdentityDict", false),
+    ("DataType", false),
+    ("FDRTrustData", false),
+    ("FUDData", false),
+    ("FileData", false),
+    ("FileDataDone", true),
+    ("FirmwareUpdaterData", false),
+    ("NORData", false),
+    ("PersonalizedBootObjectV3", false),
+    ("PersonalizedData", true),
+    ("ReceiptManifest", true),
+    ("RecoveryOSASRImage", true),
+    ("RecoveryOSRootTicketData", true),
+    ("RootTicket", false),
+    ("SourceBootObjectV4", false),
+    ("SourceBootObjectV5", false),
+    ("SystemImageCanonicalMetadata", false),
+    ("SystemImageData", false),
+    ("SystemImageRootHash", false),
+];
+/// Advertised only when the embedding host staged an answer for them.
+const STAGED_DATA_TYPES: [(&str, bool); 2] =
+    [("URLAsset", true), ("StreamedImageDecryptionKey", false)];
 pub struct Answers<R> {
     pub store: Store<R>,
     pub staged: Staged,
@@ -126,34 +152,18 @@ impl<R: ReadAt> Answers<R> {
             staged: Staged::default(),
         }
     }
+    /// The data types this host answers, with the value the public host
+    /// sends for each (idevicerestore 4b3e847e `restore_supported_data_types`,
+    /// "extracted from ac2"), including the FileData framing keys and the
+    /// DataType key the public table lists.
     pub fn supported(&self) -> Value {
-        let names = [
-            "BuildIdentityDict",
-            "RootTicket",
-            "RecoveryOSRootTicketData",
-            "SourceBootObjectV4",
-            "SourceBootObjectV5",
-            "PersonalizedBootObjectV3",
-            "SystemImageData",
-            "RecoveryOSASRImage",
-            "SystemImageRootHash",
-            "SystemImageCanonicalMetadata",
-            "FUDData",
-            "PersonalizedData",
-            "NORData",
-            "FirmwareUpdaterData",
-            "BootabilityBundle",
-            "BootabilityBundleV2",
-            "ReceiptManifest",
-            "FDRTrustData",
-        ];
-        let mut d: BTreeMap<String, Value> = names
+        let mut d: BTreeMap<String, Value> = DATA_TYPES
             .into_iter()
-            .map(|s| (s.into(), Value::Boolean(true)))
+            .map(|(name, value)| (name.into(), Value::Boolean(value)))
             .collect();
-        for kind in ["URLAsset", "StreamedImageDecryptionKey"] {
+        for (kind, value) in STAGED_DATA_TYPES {
             if self.staged.answers.keys().any(|(k, _)| k == kind) {
-                d.insert(kind.into(), Value::Boolean(true));
+                d.insert(kind.into(), Value::Boolean(value));
             }
         }
         Value::Dict(d)

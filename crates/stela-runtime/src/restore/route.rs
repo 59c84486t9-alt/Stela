@@ -4,6 +4,9 @@
 //! `docs/research/stela-firmware-route.md`. No application/build keys.
 use super::{Error, Result, plist::Value};
 
+/// Data-type keys of the transfer framing rather than requests.
+const FRAMING: [&str; 3] = ["DataType", "FileData", "FileDataDone"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
     #[default]
@@ -53,9 +56,11 @@ impl Route {
                     | "RestoreAttestation"
             )
     }
+    /// Requests outside the route are withheld; the framing keys every
+    /// streamed answer uses are not requests and always stay advertised.
     pub fn supported(self, mut supported: Value) -> Value {
         if let Value::Dict(d) = &mut supported {
-            d.retain(|k, _| self.allows(k));
+            d.retain(|k, _| FRAMING.contains(&k.as_str()) || self.allows(k));
         }
         supported
     }

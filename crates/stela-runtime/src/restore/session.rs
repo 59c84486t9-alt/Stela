@@ -18,6 +18,31 @@ pub const PROTOCOL: u64 = 15;
 const MAX_JOBS: usize = 16;
 const MAX_LEDGER_BYTES: usize = 16 * 1024 * 1024;
 const FILE_CHUNK: usize = 8192;
+/// Every message type the host understands, with the value the public host
+/// sends for it (idevicerestore 4b3e847e `restore_supported_message_types`,
+/// "extracted from ac2"). Restored's `is_host_compatible` compares this
+/// dictionary with the messages it can send and fails the restore with
+/// AMRError 10 when one it marks required is missing.
+const MESSAGE_TYPES: [(&str, bool); 18] = [
+    ("AsyncDataRequestMsg", true),
+    ("AsyncWait", true),
+    ("BBUpdateStatusMsg", false),
+    ("CheckpointMsg", true),
+    ("CrashLog", true),
+    ("DataRequestMsg", false),
+    ("FDRSubmit", true),
+    ("MsgType", false),
+    ("PreviousRestoreLogMsg", false),
+    ("ProgressMsg", false),
+    ("ProvisioningAck", false),
+    ("ProvisioningInfo", false),
+    ("ProvisioningStatusMsg", false),
+    ("ReceivedFinalStatusMsg", false),
+    ("RestoreAttestation", true),
+    ("RestoreProtocol", true),
+    ("RestoredCrash", true),
+    ("StatusMsg", false),
+];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     New,
@@ -158,18 +183,10 @@ impl Session {
         opts.insert(
             "SupportedMessageTypes".into(),
             Value::Dict(
-                [
-                    "DataRequestMsg",
-                    "AsyncDataRequestMsg",
-                    "ProgressMsg",
-                    "CheckpointMsg",
-                    "StatusMsg",
-                    "PreviousRestoreLogMsg",
-                    "RestoreAttestation",
-                ]
-                .into_iter()
-                .map(|s| (s.into(), Value::Boolean(true)))
-                .collect(),
+                MESSAGE_TYPES
+                    .into_iter()
+                    .map(|(name, value)| (name.into(), Value::Boolean(value)))
+                    .collect(),
             ),
         );
         let mut options = Value::Dict(opts);
@@ -323,7 +340,23 @@ impl Session {
                 m.required("CHECKPOINT_COMPLETE")?.boolean()?;
                 Ok(Action::Event(m.clone()))
             }
-            "PreviousRestoreLogMsg" => Ok(Action::Event(m.clone())),
+            // Reports the public host logs and the device continues past.
+            "PreviousRestoreLogMsg"
+            | "RestoredCrash"
+            | "CrashLog"
+            | "AsyncWait"
+            | "FDRSubmit"
+            | "RestoreProtocol" => Ok(Action::Event(m.clone())),
+            // J473 has no baseband, and Stela does no factory provisioning:
+            // the host understands these messages but cannot act on them.
+            "BBUpdateStatusMsg" => Err(super::refuse(
+                "baseband update status on a board without a baseband",
+                m,
+            )),
+            "ProvisioningInfo" | "ProvisioningAck" | "ProvisioningStatusMsg" => Err(super::refuse(
+                "factory provisioning is not provided by this host",
+                m,
+            )),
             "StatusMsg" => {
                 let status = m.required("Status")?.uint()?;
                 let amr = m.get("AMRError").map(Value::uint).transpose()?.unwrap_or(0);
@@ -561,6 +594,30 @@ mod tests {
             ("DataPort", Value::Integer(2345)),
             ("Arguments", Value::dict([])),
         ])
+    }
+    #[test]
+    fn device_reports_continue_and_baseband_or_provisioning_messages_refuse() {
+        for kind in [
+            "RestoredCrash",
+            "CrashLog",
+            "AsyncWait",
+            "FDRSubmit",
+            "RestoreProtocol",
+        ] {
+            let (mut session, mut answers) = ready();
+            let message = Value::dict([("MsgType", Value::from(kind))]);
+            assert!(matches!(
+                session.receive(message, &mut answers),
+                Ok(Action::Event(_))
+            ));
+            assert_eq!(session.phase(), Phase::Restoring);
+        }
+        for kind in ["BBUpdateStatusMsg", "ProvisioningInfo", "ProvisioningAck"] {
+            let (mut session, mut answers) = ready();
+            let message = Value::dict([("MsgType", Value::from(kind))]);
+            assert!(session.receive(message, &mut answers).is_err());
+            assert_eq!(session.phase(), Phase::Failed);
+        }
     }
     #[test]
     fn synthetic_public_protocol_transcript_keeps_control_live_and_requires_ack_write() {

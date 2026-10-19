@@ -461,12 +461,17 @@ mod tests {
         assert_eq!(responses.len(), 6);
         let opts = responses[2].required("RestoreOptions").unwrap();
         assert!(!opts.required("FlashNOR").unwrap().boolean().unwrap());
-        assert!(
-            opts.required("SupportedDataTypes")
-                .unwrap()
-                .get("NORData")
-                .is_none()
-        );
+        let data = opts.required("SupportedDataTypes").unwrap();
+        assert!(data.get("NORData").is_none());
+        assert!(data.required("FileDataDone").unwrap().boolean().unwrap());
+        let messages = opts.required("SupportedMessageTypes").unwrap();
+        for name in [
+            "ProvisioningInfo",
+            "BBUpdateStatusMsg",
+            "ReceivedFinalStatusMsg",
+        ] {
+            assert!(!messages.required(name).unwrap().boolean().unwrap());
+        }
         assert_eq!(
             responses[5].required("MsgType").unwrap().string().unwrap(),
             "ReceivedFinalStatusMsg"
