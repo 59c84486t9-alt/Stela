@@ -62,6 +62,9 @@ const SECURE_ROOT_PREFIX: &str = "secure-root-prefix";
 const DEVICE_TYPE: &str = "device_type";
 const IOMMU_PARENT: &str = "iommu-parent";
 const NO_PMU: &str = "no-pmu";
+/// The prefix of a button's platform function: the provider's phandle, the
+/// function code and its arguments (`function-button_hold`).
+const BUTTON_FUNCTION: &str = "function-button_";
 /// The GPU TTBAT the boot stage hands off (`gpu-region-base`), published as
 /// `AGXSecureMonitor::init` (KC file 0x1b8c5c4..0x1b8c6b4) reads it: the
 /// presence of `gptbat-ready`, then `ttbat-phys-addr-base` as one 32-bit
@@ -170,6 +173,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     client_providers(&tree.root, &mut parents);
     let mut hidden = Vec::new();
     visit(&mut tree.root, "", &parents, &[], &mut hidden);
+    hide_unprovided_buttons(tree, &mut hidden);
     let selected = tree
         .property(DEFAULTS, SERIAL_DEVICE)
         .and_then(|property| property.as_u32())
@@ -205,6 +209,43 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     }
     publish_gpu_ttbat(tree, &mut hidden);
     hidden
+}
+
+/// Hides each visible `/buttons` node that names no `function-button_*`
+/// provider, or one whose provider lost its `compatible`. AppleM68Buttons
+/// reads its buttons through those platform functions (`function-button_hold`
+/// = `smc-pmu`, `btnR`, `bHLD` on J473AP); with the provider hidden it would
+/// bind to buttons no model drives.
+fn hide_unprovided_buttons(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
+    let mut buttons = Vec::new();
+    visible_paths(
+        &tree.root,
+        "",
+        &|node| named(node, soc::BUTTONS),
+        &mut buttons,
+    );
+    for path in buttons {
+        let node = tree.node(&path).expect("visited path");
+        let providers: Vec<u32> = node
+            .properties
+            .iter()
+            .filter(|property| property.name().starts_with(BUTTON_FUNCTION))
+            .filter_map(|property| property.value.get(..4))
+            .map(|cell| u32::from_le_bytes(cell.try_into().expect("4 bytes")))
+            .collect();
+        let provided = !providers.is_empty()
+            && providers.iter().all(|&phandle| {
+                path_of(&tree.root, "", phandle)
+                    .and_then(|provider| tree.property(&provider, COMPATIBLE))
+                    .is_some()
+            });
+        if !provided {
+            tree.node_mut(&path)
+                .expect("visited path")
+                .remove_property(COMPATIBLE);
+            hidden.push(path);
+        }
+    }
 }
 
 /// Publish on each visible GPU the TTBAT the machine hands it off with: its
@@ -282,7 +323,11 @@ fn visit(
     inherited: &[&soc::ChildModel],
     hidden: &mut Vec<String>,
 ) {
-    if let Some(model) = inherited.iter().find(|model| named(node, model.compatible)) {
+    let inherited_model = inherited
+        .iter()
+        .copied()
+        .find(|model| named(node, model.compatible));
+    if let Some(model) = inherited_model {
         for &(key, value) in model.boot_properties {
             node.set_property(key, value.to_vec())
                 .expect("static native boot property");
@@ -303,6 +348,7 @@ fn visit(
         .flat_map(|name| {
             soc::model_children(name, |key| node.property(key).map(|p| p.value.as_slice())).iter()
         })
+        .chain(inherited_model.into_iter().flat_map(|model| model.children))
         .collect();
     let here = if path.is_empty() { "/" } else { path };
     if node.property(COMPATIBLE).is_some()
@@ -446,6 +492,82 @@ mod tests {
             hide_unmodeled(&mut tree),
             ["/arm-io/ans", "/arm-io/ans/iop-ans-nub", "/arm-io/sart-ans"]
         );
+    }
+
+    /// J473AP's SMC subtree: the claimed wrapper, its native nub, the nub's
+    /// `smc-pmu` child and `/buttons`, whose hold button `smc-pmu` provides.
+    #[test]
+    fn the_smc_claim_keeps_its_pmu_and_the_buttons_it_provides() {
+        let smc = |role: &[u8]| {
+            let mut pmu = node("smc-pmu", Some(b"smc-pmu\0"), vec![]);
+            pmu.set_property(PHANDLE, 0x91u32.to_le_bytes().to_vec())
+                .unwrap();
+            let mut smc = node(
+                "smc",
+                Some(soc::ASC.as_bytes()),
+                vec![node(
+                    "iop-smc-nub",
+                    Some(soc::RTBUDDY.as_bytes()),
+                    vec![pmu, node("smc-socd", Some(b"smc-socd\0"), vec![])],
+                )],
+            );
+            smc.set_property("role", role.to_vec()).unwrap();
+            smc
+        };
+        let buttons = |provider: u32| {
+            let mut buttons = node("buttons", Some(b"buttons\0"), vec![]);
+            let hold = [provider, four_char_code(b"btnR"), four_char_code(b"bHLD")];
+            buttons
+                .set_property(
+                    "function-button_hold",
+                    hold.iter().flat_map(|cell| cell.to_le_bytes()).collect(),
+                )
+                .unwrap();
+            buttons
+        };
+        let tree = |role: &[u8], provider: u32| DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![node("arm-io", None, vec![smc(role)]), buttons(provider)],
+            ),
+        };
+        let mut modeled = tree(b"SMC\0", 0x91);
+        // Only the unmodeled grandchild goes.
+        assert_eq!(
+            hide_unmodeled(&mut modeled),
+            ["/arm-io/smc/iop-smc-nub/smc-socd"]
+        );
+        for kept in [
+            "/arm-io/smc",
+            "/arm-io/smc/iop-smc-nub",
+            "/arm-io/smc/iop-smc-nub/smc-pmu",
+            "/buttons",
+        ] {
+            assert!(modeled.property(kept, COMPATIBLE).is_some(), "{kept}");
+        }
+        // The PMU child carries no RTKit hand-off facts of its own.
+        assert!(
+            modeled
+                .property("/arm-io/smc/iop-smc-nub/smc-pmu", "pre-loaded")
+                .is_none()
+        );
+        // Without the SMC claim the PMU goes, and so do the buttons it
+        // provides; buttons naming a missing provider go too.
+        let mut unclaimed = tree(b"PMU\0", 0x91);
+        let hidden = hide_unmodeled(&mut unclaimed);
+        assert_eq!(hidden.last().map(String::as_str), Some("/buttons"));
+        assert!(
+            hidden
+                .iter()
+                .any(|path| path == "/arm-io/smc/iop-smc-nub/smc-pmu")
+        );
+        let mut orphaned = tree(b"SMC\0", 0x42);
+        assert!(hide_unmodeled(&mut orphaned).contains(&"/buttons".into()));
+    }
+
+    fn four_char_code(name: &[u8; 4]) -> u32 {
+        u32::from_be_bytes(*name)
     }
 
     #[test]

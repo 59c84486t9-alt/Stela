@@ -726,6 +726,19 @@ pub const MCC: &str = "mcc,t8112";
 /// ASC wrapper and nub shared by multiple coprocessor roles.
 pub const ASC: &str = "iop,ascwrap-v4";
 pub const RTBUDDY: &str = "iop-nub,rtbuddy-v2";
+/// The SMC nub's PMU child: `AppleSMCPMU` binds it through the
+/// `AppleSMCInterface` nub that `AppleSMCInterface::startInterfaces`
+/// (26A434 J473AP KC file 0x2d99550) creates for every child of the SMC's
+/// RTBuddy nub except `smc-socd`. Its contract (boot and shutdown records,
+/// `MBSE` system events, HID button notifications and the `pKW4`, `keyW`
+/// and `btnR` platform functions other nodes route through it) is the SMC
+/// key endpoint's (`platform::apple::smc`).
+pub const SMC_PMU: &str = "smc-pmu";
+/// The board's buttons (`/buttons`), which `AppleM68Buttons` binds. Its
+/// `function-button_*` platform functions name their provider; the loader
+/// keeps the node only while each provider stays visible
+/// (`stela_loader::devices`).
+pub const BUTTONS: &str = "buttons";
 
 /// `/arm-io/ans` properties under which SPTM's `nvme_bootstrap`
 /// (0x270c8a74..8bc0, 0x270c8dac) drives banks or flows the ANS2 model
@@ -812,24 +825,38 @@ struct ModelClaim {
 pub const GPU_ADMITTED: bool = false;
 /// A child owned by a native coprocessor model and its boot-chain facts.
 /// Properties describe model state, never a guest image or a driver patch.
+/// `children` are the child's own children the same model owns.
 pub struct ChildModel {
     pub compatible: &'static str,
     pub boot_properties: &'static [(&'static str, &'static [u8])],
+    pub children: &'static [ChildModel],
 }
 /// Native RTKit is already running before SPTM and uses no ARM firmware
 /// memory. RTBuddy::_initConfigEDT (0x4661408..14b4) reads
 /// pre-loaded/running/no-firmware-service; getSegmentMap (0x4661d68/1df8)
 /// accepts empty segment-ranges/segment-names. _handlePreloadFirmware
 /// (0x465a488) consumes that segment map.
+const NATIVE_RTKIT_PROPERTIES: &[(&str, &[u8])] = &[
+    ("pre-loaded", b""),
+    ("running", b""),
+    ("no-firmware-service", b""),
+    ("segment-ranges", b""),
+    ("segment-names", b""),
+];
 const NATIVE_RTKIT: ChildModel = ChildModel {
     compatible: RTBUDDY,
-    boot_properties: &[
-        ("pre-loaded", b""),
-        ("running", b""),
-        ("no-firmware-service", b""),
-        ("segment-ranges", b""),
-        ("segment-names", b""),
-    ],
+    boot_properties: NATIVE_RTKIT_PROPERTIES,
+    children: &[],
+};
+/// The SMC's native nub, which also owns its `smc-pmu` child ([`SMC_PMU`]).
+const SMC_RTKIT: ChildModel = ChildModel {
+    compatible: RTBUDDY,
+    boot_properties: NATIVE_RTKIT_PROPERTIES,
+    children: &[ChildModel {
+        compatible: SMC_PMU,
+        boot_properties: &[],
+        children: &[],
+    }],
 };
 /// The SEP's native nub (`iop-nub,sep`, kept so `AppleSEPManager`'s
 /// `A7IOPNub` personality binds). Unlike RTBuddy coprocessors, the SEP is not
@@ -838,6 +865,7 @@ const NATIVE_RTKIT: ChildModel = ChildModel {
 const SEP_NUB_MODEL: ChildModel = ChildModel {
     compatible: SEP_NUB,
     boot_properties: &[],
+    children: &[],
 };
 /// The register tunings the ANS2 driver requires before it re-powers the
 /// coprocessor. `AppleANS2NVMeController::ApplyTunables` (0x3dbfc48), from
@@ -872,7 +900,7 @@ const ROLE_MODELS: &[ModelClaim] = &[
     ModelClaim {
         compatible: ASC,
         property: ("role", b"SMC\0"),
-        children: &[NATIVE_RTKIT],
+        children: &[SMC_RTKIT],
         boot_properties: &[],
         admitted: true,
     },
@@ -959,6 +987,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         USB_DRD,
         SPMI,
         PMU,
+        BUTTONS,
     ]
     .contains(&name)
         || GPU_ADMITTED && [SGX, GFX_MAPPER].contains(&name)
@@ -4837,6 +4866,22 @@ mod tests {
         let root = Node::root(&small).unwrap();
         let io = root.child("arm-io").unwrap();
         assert!(smc_controller(&root, &io, &translate).is_err());
+        // The SMC claim owns its nub and the nub's PMU child; the buttons
+        // the PMU provides are a modeled compatible.
+        let smc_role = |key: &str| (key == "role").then_some(b"SMC\0".as_slice());
+        let [nub] = model_children(ASC, smc_role) else {
+            panic!("the SMC claim owns one nub");
+        };
+        assert_eq!(nub.compatible, RTBUDDY);
+        assert_eq!(
+            nub.children
+                .iter()
+                .map(|child| child.compatible)
+                .collect::<Vec<_>>(),
+            [SMC_PMU]
+        );
+        assert!(models(BUTTONS, |_| None));
+        assert!(!models(SMC_PMU, |_| None));
     }
 
     #[test]
