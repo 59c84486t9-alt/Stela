@@ -1,7 +1,9 @@
 //! What `stela setup` reads from the computer it runs on: each volume's file
-//! system and free space, and the disks with their partitions. Nothing here
-//! writes; macOS answers through `diskutil`.
-use anyhow::{Context, Result, bail};
+//! system and free space, the disks with their partitions and serial
+//! numbers, and, for a disk the PC boots itself, its memory and CPU. macOS
+//! answers through `diskutil`, `system_profiler` and `sysctl`. The only
+//! write is [`Host::write`], which setup uses for the NOR partition alone.
+use anyhow::{Context, Result, bail, ensure};
 use plist::Value;
 use std::{
     path::{Path, PathBuf},
@@ -56,10 +58,48 @@ pub(crate) struct Disk {
     pub(crate) partitions: Vec<Partition>,
 }
 
+/// One partition, as `stela.cfg` names it and setup checks it.
+#[derive(Debug, Clone)]
+pub(crate) struct PartitionInfo {
+    pub(crate) identifier: String,
+    /// The whole disk, such as `disk1`.
+    pub(crate) disk: String,
+    /// The GPT unique partition GUID.
+    pub(crate) guid: String,
+    pub(crate) bytes: u64,
+    /// The partition type, such as `Apple_APFS`, or empty.
+    pub(crate) content: String,
+    pub(crate) mount: Option<PathBuf>,
+    /// The APFS container it backs, when any of that container's volumes is
+    /// mounted.
+    pub(crate) container: Option<String>,
+}
+
+/// What the PC's CPU offers the engine.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Cpu {
+    /// Five-level paging: system mode's address space needs it.
+    pub(crate) la57: bool,
+    /// RDSEED or RDRAND: the kernel's seeds.
+    pub(crate) entropy: bool,
+}
+
 pub(crate) trait Host {
     fn volume(&self, path: &Path) -> Result<Volume>;
     /// Physical whole disks; empty where the host cannot list them.
     fn disks(&self) -> Result<Vec<Disk>>;
+    /// A partition by its identifier, such as `disk1s2`.
+    fn partition(&self, identifier: &str) -> Result<PartitionInfo>;
+    /// A whole disk's serial number, as its NVMe or ATA controller reports
+    /// it and `stela.efi` reads it; `None` when the host cannot tell.
+    fn serial(&self, disk: &str) -> Result<Option<String>>;
+    /// Read `length` bytes at `offset` of a partition.
+    fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>>;
+    /// Write `bytes` at `offset` of a partition, durably.
+    fn write(&self, identifier: &str, offset: u64, bytes: &[u8]) -> Result<()>;
+    /// This computer's memory and CPU, for a disk it boots itself.
+    fn memory_bytes(&self) -> Result<u64>;
+    fn cpu(&self) -> Result<Cpu>;
 }
 
 /// The computer `stela setup` runs on.
@@ -77,6 +117,152 @@ impl Host for System {
             Ok(Vec::new())
         }
     }
+
+    fn partition(&self, identifier: &str) -> Result<PartitionInfo> {
+        ensure!(
+            cfg!(target_os = "macos"),
+            "naming an installed disk's partitions needs macOS's diskutil"
+        );
+        ensure!(
+            identifier.starts_with("disk") && identifier.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "{identifier} is not a partition identifier such as disk1s2"
+        );
+        let info = plist(Command::new("diskutil").args(["info", "-plist", identifier]))?;
+        let size = info
+            .as_dictionary()
+            .and_then(|d| d.get("Size").or_else(|| d.get("TotalSize")))
+            .and_then(Value::as_unsigned_integer)
+            .unwrap_or(0);
+        let list = plist(Command::new("diskutil").args(["list", "-plist"]))?;
+        let container = array(&list, "AllDisksAndPartitions")
+            .iter()
+            .find(|entry| {
+                array(entry, "APFSPhysicalStores")
+                    .iter()
+                    .any(|store| text(store, "DeviceIdentifier") == identifier)
+                    && array(entry, "APFSVolumes")
+                        .iter()
+                        .any(|volume| !text(volume, "MountPoint").is_empty())
+            })
+            .map(|entry| text(entry, "DeviceIdentifier"));
+        Ok(PartitionInfo {
+            identifier: identifier.into(),
+            disk: text(&info, "ParentWholeDisk"),
+            guid: text(&info, "DiskUUID"),
+            bytes: size,
+            content: text(&info, "Content"),
+            mount: Some(text(&info, "MountPoint"))
+                .filter(|m| !m.is_empty())
+                .map(PathBuf::from),
+            container,
+        })
+    }
+
+    fn serial(&self, disk: &str) -> Result<Option<String>> {
+        if !cfg!(target_os = "macos") {
+            return Ok(None);
+        }
+        let output = Command::new("system_profiler")
+            .args(["-json", "SPNVMeDataType", "SPSerialATADataType"])
+            .output()
+            .context("cannot run system_profiler")?;
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        Ok(serial_of(&report, disk))
+    }
+
+    fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+        use std::{io::Read, io::Seek, io::SeekFrom};
+        let path = raw_device(identifier)?;
+        let mut file = std::fs::File::open(&path).with_context(|| {
+            format!(
+                "cannot read {path}; setup reads the installed disk's partitions as root (sudo)"
+            )
+        })?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn write(&self, identifier: &str, offset: u64, bytes: &[u8]) -> Result<()> {
+        use std::{io::Seek, io::SeekFrom, io::Write};
+        let path = raw_device(identifier)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("cannot open {path} for writing (sudo)"))?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn memory_bytes(&self) -> Result<u64> {
+        let output = Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .context("cannot run sysctl")?;
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .context("sysctl hw.memsize is not a number")
+    }
+
+    fn cpu(&self) -> Result<Cpu> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use core::arch::x86_64::{__cpuid, __cpuid_count};
+            const LA57: u32 = 1 << 16;
+            const RDSEED: u32 = 1 << 18;
+            const RDRAND: u32 = 1 << 30;
+            let (basic, extended) = (__cpuid(1), __cpuid_count(7, 0));
+            Ok(Cpu {
+                la57: extended.ecx & LA57 != 0,
+                entropy: extended.ebx & RDSEED != 0 || basic.ecx & RDRAND != 0,
+            })
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        bail!("an installed disk is set up on the x86 PC that boots it")
+    }
+}
+
+/// `/dev/rdiskNsM` for a partition identifier.
+fn raw_device(identifier: &str) -> Result<String> {
+    let partition = identifier.strip_prefix("disk").is_some_and(|rest| {
+        rest.split_once('s').is_some_and(|(disk, slice)| {
+            !disk.is_empty()
+                && !slice.is_empty()
+                && disk.bytes().all(|b| b.is_ascii_digit())
+                && slice.bytes().all(|b| b.is_ascii_digit())
+        })
+    });
+    ensure!(
+        partition,
+        "{identifier} is not a partition identifier such as disk1s2"
+    );
+    Ok(format!("/dev/r{identifier}"))
+}
+
+/// The serial `system_profiler -json` reports for the whole disk `disk`.
+pub(crate) fn serial_of(report: &serde_json::Value, disk: &str) -> Option<String> {
+    let groups = report.as_object()?;
+    for controllers in groups.values().filter_map(serde_json::Value::as_array) {
+        for controller in controllers {
+            let devices = controller
+                .get("_items")
+                .and_then(serde_json::Value::as_array);
+            for device in devices.into_iter().flatten() {
+                if device.get("bsd_name").and_then(serde_json::Value::as_str) == Some(disk) {
+                    return device
+                        .get("device_serial")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -232,5 +418,26 @@ mod tests {
         assert_eq!(whole_disk("disk3s1s1"), "disk3");
         assert_eq!(whole_disk("disk12"), "disk12");
         assert_eq!(whole_disk("disk12s3"), "disk12");
+    }
+
+    #[test]
+    fn serials_come_from_the_controller_listing_by_bsd_name() {
+        let report = serde_json::json!({
+            "SPNVMeDataType": [{"_items": [
+                {"bsd_name": "disk0", "device_serial": "  74EXN0LIWOG103  "},
+                {"bsd_name": "disk1", "device_serial": ""},
+            ]}],
+            "SPSerialATADataType": [{"_items": [{"bsd_name": "disk2", "device_serial": "WD-1"}]}],
+        });
+        assert_eq!(
+            serial_of(&report, "disk0").as_deref(),
+            Some("74EXN0LIWOG103")
+        );
+        assert_eq!(serial_of(&report, "disk1"), None);
+        assert_eq!(serial_of(&report, "disk2").as_deref(), Some("WD-1"));
+        assert_eq!(serial_of(&report, "disk9"), None);
+        assert!(raw_device("disk1s2").is_ok());
+        assert!(raw_device("disk1").is_err());
+        assert!(raw_device("../disk1s2").is_err());
     }
 }

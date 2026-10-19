@@ -8,9 +8,25 @@
 //! OpenCore can read, adds `stela.efi` to OpenCore's boot picker with a
 //! `stela.cfg` that boots that bundle, and records what it wrote in
 //! `EFI/stela/setup.json`. `--dry-run` stops after the checks; `--uninstall`
-//! removes everything the record names. Setup writes no disk but the USB.
+//! removes everything the record names.
+//!
+//! With `--target` and `--nor`, setup runs on the PC itself and also names
+//! the PC's own disk (`setup::installed`): the entry then boots the
+//! installed macOS from that disk, or recoveryOS when NVRAM asks for it or
+//! the disk holds no system yet, as a Mac does. Setup writes no disk but
+//! the USB, except a fresh NOR image with `--initialize-nor` and NVRAM with
+//! `--next-boot`.
+//!
+//! An existing setup is updated in place (`setup::update`): `--update-stela`
+//! installs a new `stela.efi`, `--update-os` a new macOS build's recoveryOS,
+//! and `--rollback` undoes the last update or finishes undoing an
+//! interrupted one. Every path takes `--dry-run`.
 mod host;
+mod installed;
+mod update;
 mod usb;
+
+pub(crate) use installed::NextBoot;
 
 use crate::{boot, efi, restore};
 use anyhow::{Context, Result, bail, ensure};
@@ -29,11 +45,11 @@ const PINNED_BUILD: &str = "26A434";
 const PINNED_MODEL: &str = "Mac14,3";
 const RECORD: &str = "EFI/stela/setup.json";
 /// A margin so no volume is filled to its last byte.
-const MARGIN: u64 = 64 * 1024 * 1024;
+pub(super) const MARGIN: u64 = 64 * 1024 * 1024;
 
 /// The bundle setup prepares: recoveryOS, the installed system's kernel with
 /// BaseSystem as its ramdisk.
-const RECOVERY: &str = "recovery";
+pub(super) const RECOVERY: &str = "recovery";
 
 #[derive(Args)]
 pub(crate) struct Setup {
@@ -69,8 +85,43 @@ pub(crate) struct Setup {
     #[arg(long)]
     dry_run: bool,
     /// Remove everything a previous setup wrote to this USB.
-    #[arg(long, conflicts_with_all = ["ipsw", "fetch", "volume"])]
+    #[arg(long, conflicts_with_all = ["ipsw", "fetch", "volume", "target", "update_stela",
+        "update_os", "rollback", "next_boot"])]
     uninstall: bool,
+    /// The PC's partition that becomes the Mac's internal SSD, such as
+    /// disk1s2: macOS is installed onto it from recoveryOS and booted from it.
+    #[arg(long, requires = "nor")]
+    target: Option<String>,
+    /// The PC's partition (at least 1 MiB) that holds the Mac's NOR flash,
+    /// where NVRAM persists.
+    #[arg(long, requires = "target")]
+    nor: Option<String>,
+    /// The serial number of the disk holding `--target` and `--nor`, when
+    /// this computer cannot read it.
+    #[arg(long, requires = "target")]
+    disk_serial: Option<String>,
+    /// Use a `--target` that holds other data, which installing macOS onto
+    /// it erases.
+    #[arg(long, requires = "target")]
+    erase_target: bool,
+    /// Write a fresh NOR image over a `--nor` that is neither blank nor one.
+    #[arg(long, requires = "nor")]
+    initialize_nor: bool,
+    /// Replace `stela.efi` (`--efi`, or the one beside `stela`) on an
+    /// existing setup, keeping the old one for `--rollback`.
+    #[arg(long, conflicts_with_all = ["ipsw", "fetch", "target", "update_os", "rollback",
+        "next_boot"])]
+    update_stela: bool,
+    /// Add a new macOS build's recoveryOS (`--ipsw` or `--fetch`) to an
+    /// existing setup for System Recovery and Reinstall macOS.
+    #[arg(long, conflicts_with_all = ["target", "rollback", "next_boot"])]
+    update_os: bool,
+    /// Undo the last update, or an interrupted one.
+    #[arg(long, conflicts_with_all = ["ipsw", "fetch", "target", "next_boot"])]
+    rollback: bool,
+    /// Choose the next boot of the installed disk in its NVRAM.
+    #[arg(long, value_enum, conflicts_with_all = ["ipsw", "fetch", "target"])]
+    next_boot: Option<NextBoot>,
 }
 
 /// What setup writes, recorded on the ESP so `--uninstall` can remove it.
@@ -92,10 +143,68 @@ struct Record {
     created_directories: Vec<PathBuf>,
     options: String,
     complete: bool,
+    /// Schema 3: the PC's own disk, when setup named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    installed: Option<installed::InstalledDisk>,
+    /// Schema 3: the active `stela.efi` version and those kept, oldest
+    /// first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stela_version: Option<String>,
+    #[serde(default)]
+    stela_versions: Vec<String>,
+    /// Schema 3: the recoveryOS builds kept, oldest first; `build` is the
+    /// active one.
+    #[serde(default)]
+    recovery_builds: Vec<String>,
+    /// Schema 3: an update that started and has not finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<update::Change>,
+    /// Schema 3: finished updates, for `--rollback`.
+    #[serde(default)]
+    history: Vec<update::Change>,
 }
 
 const RECORD_KIND: &str = "stela_setup";
-const RECORD_SCHEMA: u32 = 2;
+const RECORD_SCHEMA: u32 = 3;
+
+/// `stela.cfg` for the record: recoveryOS alone, or the installed disk with
+/// recoveryOS for System Recovery.
+fn options(record: &Record) -> String {
+    options_for(&record.build, record.installed.as_ref())
+}
+
+fn options_for(build: &str, installed: Option<&installed::InstalledDisk>) -> String {
+    let dram_bytes = BundleOptions::default().dram_size;
+    let recovery = format!("\\EFI\\stela\\boot\\{build}\\{RECOVERY}");
+    match installed {
+        Some(disk) => disk.options(&recovery, dram_bytes),
+        None => format!("--system --bundle {recovery} --ram-bytes {dram_bytes:#x}\n"),
+    }
+}
+
+/// The record on the ESP of `usb`, which must be a complete setup's.
+fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<Record> {
+    let esp = locate_esp(environment.host, usb)?;
+    let path = esp.join(RECORD);
+    ensure!(
+        path.is_file(),
+        "{} has no setup; run `stela setup` first",
+        esp.display()
+    );
+    let record: Record = stela_runtime::read_json(&path)?;
+    ensure!(
+        record.kind == RECORD_KIND && (1..=RECORD_SCHEMA).contains(&record.schema_version),
+        "{} is not a setup record this version understands",
+        path.display()
+    );
+    ensure!(
+        record.payload_directory.is_none(),
+        "{} is a schema 1 setup, which installs from a restore payload; run `stela setup \
+         --uninstall` and set up again",
+        esp.display()
+    );
+    Ok(record)
+}
 
 /// The checks' result: everything setup will write, and where.
 #[derive(Debug)]
@@ -111,6 +220,8 @@ struct Plan {
     bundle_bytes: u64,
     options: String,
     efi_image: PathBuf,
+    /// The PC's own disk, and the NOR image setup writes to it.
+    installed: Option<installed::Checked>,
     notes: Vec<String>,
 }
 
@@ -138,13 +249,70 @@ impl Setup {
             host: &host::System,
             prepare: &prepare_recovery,
         };
-        let report = if self.uninstall {
-            uninstall(&environment, &self.usb, self.dry_run)?
-        } else {
-            setup(&environment, self)?
-        };
-        print!("{report}");
+        print!("{}", self.dispatch(&environment)?);
         Ok(())
+    }
+
+    fn dispatch(self, environment: &Environment<'_>) -> Result<String> {
+        if self.uninstall {
+            return uninstall(environment, &self.usb, self.dry_run);
+        }
+        if self.update_stela {
+            let record = read_record(environment, &self.usb)?;
+            let image = match &self.efi {
+                Some(path) => path.clone(),
+                None => default_efi_image()
+                    .context("no stela.efi found beside stela or in the build tree; pass --efi")?,
+            };
+            return update::update_stela(record, &image, self.dry_run);
+        }
+        if self.update_os {
+            let record = read_record(environment, &self.usb)?;
+            let ipsw = self.image()?;
+            return update::update_os(environment, record, &ipsw, self.dry_run);
+        }
+        if self.rollback {
+            return update::rollback(read_record(environment, &self.usb)?, self.dry_run);
+        }
+        if let Some(next) = self.next_boot {
+            let record = read_record(environment, &self.usb)?;
+            let disk = record.installed.as_ref().with_context(|| {
+                format!(
+                    "the setup on {} names no installed disk (--target and --nor)",
+                    record.esp.display()
+                )
+            })?;
+            let changes = installed::next_boot(environment.host, disk, next, self.dry_run)?;
+            let mut text = format!("NVRAM of {} (the NOR partition):\n", disk.nor);
+            if changes.is_empty() {
+                text.push_str("  nothing to change\n");
+            }
+            for change in changes {
+                writeln!(text, "  {change}")?;
+            }
+            text.push_str(if self.dry_run {
+                "Dry run: nothing was changed.\n"
+            } else {
+                "Done.\n"
+            });
+            return Ok(text);
+        }
+        setup(environment, self)
+    }
+
+    /// The restore image: `--ipsw`, or the pinned build `--fetch` downloads.
+    fn image(&self) -> Result<PathBuf> {
+        match (&self.ipsw, self.fetch) {
+            (Some(path), false) => Ok(path.clone()),
+            (None, true) if self.dry_run => {
+                bail!(
+                    "--dry-run with --fetch needs the image first; download it without \
+                     --dry-run, or pass --ipsw"
+                )
+            }
+            (None, true) => fetch(self),
+            _ => bail!("pass --ipsw IPSW, or --fetch to download macOS 27 from Apple"),
+        }
     }
 }
 
@@ -336,13 +504,41 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     let host = environment.host;
     let esp = locate_esp(host, &command.usb)?;
     efi::check_config(&esp)?;
-    ensure!(
-        !esp.join(RECORD).exists(),
-        "{} was already set up ({}); run `stela setup --uninstall --usb {}` first",
-        esp.display(),
-        esp.join(RECORD).display(),
-        command.usb.display()
-    );
+    if esp.join(RECORD).exists() {
+        let interrupted = stela_runtime::read_json::<Record>(&esp.join(RECORD))
+            .is_ok_and(|record| !record.complete);
+        bail!(
+            "{} was already set up{} ({}); run `stela setup --uninstall --usb {}` first, or \
+             update it with --update-stela or --update-os",
+            esp.display(),
+            if interrupted {
+                ", and that setup was interrupted"
+            } else {
+                ""
+            },
+            esp.join(RECORD).display(),
+            command.usb.display()
+        );
+    }
+    let dram_bytes = BundleOptions::default().dram_size;
+    let installed = match (&command.target, &command.nor) {
+        (Some(target), Some(nor)) => {
+            let usb_disk = host.volume(&esp)?.disk;
+            Some(installed::check(
+                host,
+                &installed::Request {
+                    apple_region: target,
+                    nor,
+                    serial: command.disk_serial.as_deref(),
+                    erase_target: command.erase_target,
+                    initialize_nor: command.initialize_nor,
+                    dram_bytes,
+                    usb_disk: usb_disk.as_deref(),
+                },
+            )?)
+        }
+        _ => None,
+    };
     let (product_version, build) = restore::payload::identity(&ipsw, &command.model)?;
     let efi_image = match &command.efi {
         Some(path) => path.clone(),
@@ -374,22 +570,29 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         command.volume.as_deref(),
         bundle_bytes,
     )?;
-    let dram_bytes = BundleOptions::default().dram_size;
-    let options = format!(
-        "--system --bundle \\EFI\\stela\\boot\\{}\\{RECOVERY} --ram-bytes {dram_bytes:#x}\n",
-        build
-    );
-    let notes = vec![
+    let options = options_for(&build, installed.as_ref().map(|checked| &checked.disk));
+    let mut notes = vec![
         format!(
             "recoveryOS runs in {} GiB of guest memory, so the PC needs more RAM than that \
              free when it boots the entry.",
             dram_bytes >> 30
         ),
-        "Paused: Disk Utility and Reinstall macOS reach the PC's disks and keyboard only \
-         through PCIe/DART passthrough; the installer's personalization and the Secure Enclave \
-         are not modeled."
-            .into(),
+        match &installed {
+            Some(checked) => format!(
+                "Paused: Disk Utility and Reinstall macOS see {} as the Mac's internal SSD \
+                 (ANS2), but the installer's personalization and the Secure Enclave are not \
+                 modeled, so an install does not finish yet.",
+                checked.disk.apple_region
+            ),
+            None => "Paused: Disk Utility and Reinstall macOS reach the PC's disks and \
+                     keyboard only through PCIe/DART passthrough; the installer's \
+                     personalization and the Secure Enclave are not modeled."
+                .into(),
+        },
     ];
+    if let Some(checked) = &installed {
+        notes.extend(checked.notes.iter().cloned());
+    }
     Ok(Plan {
         esp,
         ipsw,
@@ -401,6 +604,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         bundle_bytes,
         options,
         efi_image,
+        installed,
         notes,
     })
 }
@@ -449,12 +653,44 @@ fn describe(plan: &Plan) -> Result<String> {
         efi::NAME,
         plan.esp.join("EFI/stela/config.plist.backup").display()
     )?;
-    writeln!(
-        text,
-        "  stela.cfg      {}: boots recoveryOS",
-        plan.esp.join("EFI/stela/stela.cfg").display()
-    )?;
-    writeln!(text, "  disks          none are written but this USB")?;
+    match &plan.installed {
+        Some(checked) => {
+            let disk = &checked.disk;
+            writeln!(
+                text,
+                "  stela.cfg      {}: boots macOS from {}, or recoveryOS when NVRAM asks or \
+                 the disk holds no system",
+                plan.esp.join("EFI/stela/stela.cfg").display(),
+                disk.apple_region
+            )?;
+            writeln!(
+                text,
+                "  Apple region   {} (serial {}, partition {})",
+                disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
+            )?;
+            writeln!(
+                text,
+                "  NOR            {} (serial {}, partition {})",
+                disk.nor, disk.nor_serial, disk.nor_guid
+            )?;
+            match checked.nor_image {
+                Some(_) => writeln!(
+                    text,
+                    "  disks          this USB, and a fresh NOR image on {}",
+                    disk.nor
+                )?,
+                None => writeln!(text, "  disks          none are written but this USB")?,
+            }
+        }
+        None => {
+            writeln!(
+                text,
+                "  stela.cfg      {}: boots recoveryOS",
+                plan.esp.join("EFI/stela/stela.cfg").display()
+            )?;
+            writeln!(text, "  disks          none are written but this USB")?;
+        }
+    }
     for note in &plan.notes {
         writeln!(text, "  note           {note}")?;
     }
@@ -462,30 +698,30 @@ fn describe(plan: &Plan) -> Result<String> {
 }
 
 fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
-    let ipsw = match (&command.ipsw, command.fetch) {
-        (Some(path), false) => path.clone(),
-        (None, true) if command.dry_run => {
-            bail!(
-                "--dry-run with --fetch needs the image first; download it without --dry-run, \
-                   or pass --ipsw"
-            )
-        }
-        (None, true) => fetch(&command)?,
-        _ => bail!("pass --ipsw IPSW, or --fetch to download macOS 27 from Apple"),
-    };
+    let ipsw = command.image()?;
     let plan = plan(environment, &command, ipsw)?;
     let mut report = describe(&plan)?;
     if command.dry_run {
         report.push_str("Dry run: nothing was changed.\n");
         return Ok(report);
     }
-    apply(&plan)?;
+    apply(environment, &plan)?;
+    let start = match &plan.installed {
+        Some(checked) => format!(
+            "stela.efi boots the macOS installed on {}, or recoveryOS while it holds none or \
+             when NVRAM asks (`stela setup --next-boot recovery`); from recoveryOS, Disk \
+             Utility and Reinstall macOS install onto it, as on a Mac",
+            checked.disk.apple_region
+        ),
+        None => "stela.efi starts recoveryOS, where Disk Utility prepares a disk and \
+                 Reinstall macOS installs onto it, as on a Mac"
+            .into(),
+    };
     writeln!(
         report,
-        "Done. Boot the PC from this USB and choose \"{}\" in OpenCore's picker: stela.efi \
-         starts recoveryOS, where Disk Utility prepares a disk and Reinstall macOS installs \
-         onto it, as on a Mac. Stela does not run recoveryOS to its window yet.\nUndo with: \
-         stela setup --uninstall --usb {}",
+        "Done. Boot the PC from this USB and choose \"{}\" in OpenCore's picker: {start}. \
+         Stela does not run recoveryOS to its window yet.\nUndo with: stela setup \
+         --uninstall --usb {}",
         efi::NAME,
         command.usb.display()
     )?;
@@ -511,9 +747,10 @@ fn write_record(esp: &Path, record: &Record) -> Result<()> {
     stela_runtime::write_json(&path, record)
 }
 
-fn apply(plan: &Plan) -> Result<()> {
+fn apply(environment: &Environment<'_>, plan: &Plan) -> Result<()> {
     let mut created = missing_directories(&plan.volume, &plan.bundle_directory());
     created.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    let image = fs::read(&plan.efi_image)?;
     let mut record = Record {
         schema_version: RECORD_SCHEMA,
         kind: RECORD_KIND.into(),
@@ -526,6 +763,12 @@ fn apply(plan: &Plan) -> Result<()> {
         created_directories: created,
         options: plan.options.clone(),
         complete: false,
+        installed: plan.installed.as_ref().map(|checked| checked.disk.clone()),
+        stela_version: Some(update::version_id(&image)),
+        stela_versions: vec![update::version_id(&image)],
+        recovery_builds: vec![plan.build.clone()],
+        pending: None,
+        history: Vec::new(),
     };
     // Recorded before the first write, so an interrupted setup can be undone.
     write_record(&plan.esp, &record)?;
@@ -535,7 +778,15 @@ fn apply(plan: &Plan) -> Result<()> {
         let file = file?;
         fs::copy(file.path(), destination.join(file.file_name()))?;
     }
+    if let Some(checked) = &plan.installed
+        && let Some(nor) = &checked.nor_image
+    {
+        installed::initialize_nor(environment.host, &checked.disk, nor)?;
+    }
+    // The version is kept first, so `--rollback` of a later update finds it.
+    let version = update::store_version(&plan.esp, &image)?;
     efi::add_mount(&plan.esp, &plan.efi_image, None, Some(&plan.options))?;
+    debug_assert_eq!(Some(version), record.stela_version);
     record.complete = true;
     write_record(&plan.esp, &record)
 }
@@ -556,19 +807,30 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
             "{} is not a setup record this version understands",
             esp.join(RECORD).display()
         );
-        for directory in record
+        let builds = record
+            .recovery_builds
+            .iter()
+            .map(|build| (update::bundle_directory(record, build), build));
+        let directories: Vec<(PathBuf, &String)> = record
             .payload_directory
             .iter()
             .chain([&record.bundle_directory])
-        {
+            .map(|d| (d.clone(), &record.build))
+            .chain(builds)
+            .collect();
+        for (directory, build) in directories {
             ensure!(
-                directory.starts_with(&record.volume) && directory.ends_with(&record.build),
+                directory.starts_with(&record.volume) && directory.ends_with(build),
                 "the setup record names an unexpected directory {}",
                 directory.display()
             );
-            if directory.exists() {
-                removals.push(directory.clone());
+            if directory.exists() && !removals.contains(&directory) {
+                removals.push(directory);
             }
+        }
+        let versions = esp.join(update::VERSIONS);
+        if versions.is_dir() {
+            removals.push(versions);
         }
     } else {
         writeln!(
@@ -628,8 +890,9 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use host::{Disk, Partition, Volume};
+    use host::{Cpu, Disk, Partition, PartitionInfo, Volume};
     use std::collections::BTreeMap;
+    use stela_runtime::machine::apple::nor::nvram::Variables;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -642,9 +905,70 @@ mod tests {
     struct FakeHost {
         volumes: BTreeMap<PathBuf, (FileSystem, u64, Option<&'static str>)>,
         disks: Vec<Disk>,
+        /// Partitions of the PC's disk, each backed by an image file.
+        partitions: BTreeMap<String, (PartitionInfo, PathBuf)>,
+        serials: BTreeMap<String, String>,
+        memory: u64,
+        cpu: Cpu,
+    }
+
+    impl FakeHost {
+        fn new(
+            volumes: BTreeMap<PathBuf, (FileSystem, u64, Option<&'static str>)>,
+            disks: Vec<Disk>,
+        ) -> Self {
+            Self {
+                volumes,
+                disks,
+                partitions: BTreeMap::new(),
+                serials: BTreeMap::new(),
+                memory: 32 * GIB,
+                cpu: Cpu {
+                    la57: true,
+                    entropy: true,
+                },
+            }
+        }
+
+        fn image(&self, identifier: &str) -> Result<&Path> {
+            self.partitions
+                .get(identifier)
+                .map(|(_, path)| path.as_path())
+                .context("no such partition")
+        }
     }
 
     impl Host for FakeHost {
+        fn partition(&self, identifier: &str) -> Result<PartitionInfo> {
+            self.partitions
+                .get(identifier)
+                .map(|(info, _)| info.clone())
+                .context("no such partition")
+        }
+        fn serial(&self, disk: &str) -> Result<Option<String>> {
+            Ok(self.serials.get(disk).cloned())
+        }
+        fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+            let bytes = fs::read(self.image(identifier)?)?;
+            Ok(bytes[offset as usize..offset as usize + length].to_vec())
+        }
+        fn write(&self, identifier: &str, offset: u64, data: &[u8]) -> Result<()> {
+            let path = self.image(identifier)?;
+            let mut bytes = fs::read(path)?;
+            ensure!(
+                offset as usize + data.len() <= bytes.len(),
+                "write past the partition"
+            );
+            bytes[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+            fs::write(path, bytes)?;
+            Ok(())
+        }
+        fn memory_bytes(&self) -> Result<u64> {
+            Ok(self.memory)
+        }
+        fn cpu(&self) -> Result<Cpu> {
+            Ok(self.cpu)
+        }
         fn volume(&self, path: &Path) -> Result<Volume> {
             let (filesystem, free_bytes, disk) = self
                 .volumes
@@ -709,8 +1033,8 @@ mod tests {
         efi::synthetic_ipsw(&ipsw).unwrap();
         let efi = dir.path().join("stela.efi");
         fs::write(&efi, b"MZstela").unwrap();
-        let host = FakeHost {
-            volumes: [
+        let host = FakeHost::new(
+            [
                 (esp.clone(), (FileSystem::Fat, esp_free, Some("disk5"))),
                 (data.clone(), (FileSystem::Hfs, 100 * GIB, Some("disk5"))),
                 (
@@ -719,11 +1043,11 @@ mod tests {
                 ),
             ]
             .into(),
-            disks: vec![
+            vec![
                 disk("disk0", &[("EFI", None), ("Apple_APFS", None)]),
                 disk("disk5", &[("EFI", Some(&esp)), ("Apple_HFS", Some(&data))]),
             ],
-        };
+        );
         Fixture {
             _dir: dir,
             esp,
@@ -746,6 +1070,15 @@ mod tests {
             build: PINNED_BUILD.into(),
             dry_run: false,
             uninstall: false,
+            target: None,
+            nor: None,
+            disk_serial: None,
+            erase_target: false,
+            initialize_nor: false,
+            update_stela: false,
+            update_os: false,
+            rollback: false,
+            next_boot: None,
         }
     }
 
@@ -870,10 +1203,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir_all(dir.path().join(layout)).unwrap();
-            let mut host = FakeHost {
-                volumes: f.host.volumes.clone(),
-                disks: Vec::new(),
-            };
+            let mut host = FakeHost::new(f.host.volumes.clone(), Vec::new());
             host.volumes
                 .insert(dir.path().to_path_buf(), (FileSystem::Fat, GIB, None));
             let before = snapshot(dir.path());
@@ -885,10 +1215,7 @@ mod tests {
             assert_eq!(snapshot(dir.path()), before);
         }
         // An internal OpenCore ESP is another system's boot partition.
-        let mut host = FakeHost {
-            volumes: f.host.volumes.clone(),
-            disks: f.host.disks.clone(),
-        };
+        let mut host = FakeHost::new(f.host.volumes.clone(), f.host.disks.clone());
         host.volumes
             .insert(f.esp.clone(), (FileSystem::Fat, 64 * GIB, Some("disk0")));
         let error = setup(&environment(&host), command(&f, &f.esp))
@@ -926,6 +1253,310 @@ mod tests {
             "complete": true,
         });
         stela_runtime::write_json(&f.esp.join(RECORD), &record).unwrap();
+        uninstall(&environment(&f.host), &f.esp, false).unwrap();
+        assert_eq!(snapshot(&f.esp), before);
+    }
+
+    const REGION: &str = "disk1s2";
+    const NOR: &str = "disk1s3";
+    const REGION_GUID: &str = "5E1A0000-0000-4000-8000-000000000001";
+    const NOR_GUID: &str = "5E1A0000-0000-4000-8000-000000000002";
+    const SERIAL: &str = "STELAPC01";
+    /// Bytes of each synthetic partition image: the probe reads and a NOR.
+    const IMAGE_BYTES: usize = 2 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    /// Give `f`'s PC a disk1 with an Apple region and a NOR partition,
+    /// backed by synthetic images that start with `region` and `nor`.
+    fn add_installed_disk(f: &mut Fixture, region: &[u8], nor: &[u8]) {
+        for (identifier, guid, bytes, head) in [
+            (REGION, REGION_GUID, 100 * GIB, region),
+            (NOR, NOR_GUID, 256 * MIB, nor),
+        ] {
+            let path = f._dir.path().join(format!("{identifier}.img"));
+            let mut image = vec![0u8; IMAGE_BYTES];
+            image[..head.len()].copy_from_slice(head);
+            fs::write(&path, image).unwrap();
+            let info = PartitionInfo {
+                identifier: identifier.into(),
+                disk: "disk1".into(),
+                guid: guid.to_ascii_lowercase(),
+                bytes,
+                content: "Apple_APFS".into(),
+                mount: None,
+                container: None,
+            };
+            f.host.partitions.insert(identifier.into(), (info, path));
+        }
+        f.host.serials.insert("disk1".into(), SERIAL.into());
+    }
+
+    fn installed_command(f: &Fixture) -> Setup {
+        let mut command = command(f, &f.esp);
+        command.target = Some(REGION.into());
+        command.nor = Some(NOR.into());
+        command
+    }
+
+    fn partition_bytes(f: &Fixture, identifier: &str) -> Vec<u8> {
+        fs::read(f.host.image(identifier).unwrap()).unwrap()
+    }
+
+    fn nvram(f: &Fixture) -> Variables {
+        let bytes =
+            partition_bytes(f, NOR)[..stela_runtime::machine::apple::nor::CAPACITY].to_vec();
+        let image = stela_runtime::machine::apple::nor::Image::from_bytes(bytes).unwrap();
+        Variables::parse(image.bank(image.current_bank().unwrap()).unwrap()).unwrap()
+    }
+
+    fn rerun(f: &Fixture, configure: impl Fn(&mut Setup)) -> Result<String> {
+        let mut command = command(f, &f.esp);
+        command.ipsw = None;
+        configure(&mut command);
+        command.dispatch(&environment(&f.host))
+    }
+
+    #[test]
+    fn an_installed_disk_boots_macos_or_recoveryos_and_keeps_its_partitions() {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let before = snapshot(&f.esp);
+        let disks = (partition_bytes(&f, REGION), partition_bytes(&f, NOR));
+
+        let mut dry = installed_command(&f);
+        dry.dry_run = true;
+        let plan = setup(&environment(&f.host), dry).unwrap();
+        assert!(
+            plan.contains("Apple region   disk1s2 (serial STELAPC01"),
+            "{plan}"
+        );
+        assert!(plan.contains("is blank: install macOS onto it"), "{plan}");
+        assert!(plan.contains("Dry run"), "{plan}");
+        assert_eq!(snapshot(&f.esp), before);
+
+        setup(&environment(&f.host), installed_command(&f)).unwrap();
+        let region = format!("{SERIAL}:{REGION_GUID}");
+        assert_eq!(
+            fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
+            format!(
+                "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --preboot {region} \
+                 --recovery-bundle \\EFI\\stela\\boot\\{}\\recovery --ram-bytes 0x200000000\n",
+                restore::payload::SYNTHETIC_BUILD
+            )
+        );
+        // Setup itself writes neither partition.
+        assert_eq!(
+            (partition_bytes(&f, REGION), partition_bytes(&f, NOR)),
+            disks
+        );
+
+        // The next boot is chosen in NVRAM, which a dry run leaves alone.
+        let dry = rerun(&f, |c| {
+            c.next_boot = Some(NextBoot::Recovery);
+            c.dry_run = true;
+        })
+        .unwrap();
+        assert!(
+            dry.contains("one-time-boot-command=recover-system"),
+            "{dry}"
+        );
+        assert_eq!(partition_bytes(&f, NOR), disks.1);
+        rerun(&f, |c| c.next_boot = Some(NextBoot::Recovery)).unwrap();
+        let variables = nvram(&f);
+        assert_eq!(
+            stela_loader::boot_selection::select(&variables)
+                .unwrap()
+                .target,
+            stela_loader::boot_selection::Target::SystemRecovery
+        );
+        rerun(&f, |c| c.next_boot = Some(NextBoot::Macos)).unwrap();
+        assert_eq!(
+            stela_loader::boot_selection::select(&nvram(&f))
+                .unwrap()
+                .target,
+            stela_loader::boot_selection::Target::MacOs { safe: false }
+        );
+
+        // Uninstall restores the USB and keeps the installed disk and NVRAM.
+        let nor = partition_bytes(&f, NOR);
+        uninstall(&environment(&f.host), &f.esp, false).unwrap();
+        assert_eq!(snapshot(&f.esp), before);
+        assert_eq!(partition_bytes(&f, REGION), disks.0);
+        assert_eq!(partition_bytes(&f, NOR), nor);
+    }
+
+    #[test]
+    fn installed_disks_that_would_lose_data_or_cannot_boot_are_refused() {
+        let refusal = |f: &Fixture, configure: &dyn Fn(&mut Setup)| {
+            let mut command = installed_command(f);
+            configure(&mut command);
+            setup(&environment(&f.host), command)
+                .unwrap_err()
+                .to_string()
+        };
+        // An Apple region with another file system needs --erase-target.
+        let mut apfs = vec![0u8; 64];
+        apfs[32..36].copy_from_slice(b"NXSB");
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &apfs, &[]);
+        assert!(refusal(&f, &|_| {}).contains("--erase-target"));
+        let mut dry = installed_command(&f);
+        dry.erase_target = true;
+        dry.dry_run = true;
+        let plan = setup(&environment(&f.host), dry).unwrap();
+        assert!(plan.contains("erases (--erase-target)"), "{plan}");
+        // A NOR partition with other bytes needs --initialize-nor.
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], b"not a NOR image");
+        assert!(refusal(&f, &|_| {}).contains("--initialize-nor"));
+        let mut initialize = installed_command(&f);
+        initialize.initialize_nor = true;
+        setup(&environment(&f.host), initialize).unwrap();
+        assert_eq!(
+            stela_loader::boot_selection::select(&nvram(&f))
+                .unwrap()
+                .target,
+            stela_loader::boot_selection::Target::MacOs { safe: false }
+        );
+        // A guest disk is kept and booted.
+        let mut gpt = vec![0u8; 520];
+        gpt[512..520].copy_from_slice(b"EFI PART");
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &gpt, &[]);
+        let mut dry = installed_command(&f);
+        dry.dry_run = true;
+        assert!(
+            setup(&environment(&f.host), dry)
+                .unwrap()
+                .contains("already holds a guest disk")
+        );
+        // Mounted or in-use partitions, the PC's limits and serials.
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        f.host.partitions.get_mut(REGION).unwrap().0.container = Some("disk4".into());
+        assert!(refusal(&f, &|_| {}).contains("unmountDisk disk4"));
+        f.host.partitions.get_mut(REGION).unwrap().0.container = None;
+        f.host.partitions.get_mut(NOR).unwrap().0.mount = Some("/Volumes/x".into());
+        assert!(refusal(&f, &|_| {}).contains("is mounted"));
+        f.host.partitions.get_mut(NOR).unwrap().0.mount = None;
+        assert!(refusal(&f, &|c| c.nor = Some(REGION.into())).contains("two partitions"));
+        f.host.memory = 8 * GIB;
+        assert!(refusal(&f, &|_| {}).contains("GiB of memory"));
+        f.host.memory = 32 * GIB;
+        f.host.cpu.la57 = false;
+        assert!(refusal(&f, &|_| {}).contains("LA57"));
+        f.host.cpu.la57 = true;
+        assert!(refusal(&f, &|c| c.disk_serial = Some("OTHER".into())).contains("reports serial"));
+        f.host.serials.clear();
+        assert!(refusal(&f, &|_| {}).contains("--disk-serial"));
+        let mut given = installed_command(&f);
+        given.disk_serial = Some(SERIAL.into());
+        given.dry_run = true;
+        setup(&environment(&f.host), given).unwrap();
+        // Nothing was written by any refusal.
+        assert!(!f.esp.join(RECORD).exists());
+    }
+
+    #[test]
+    fn stela_updates_keep_the_old_version_and_roll_back() {
+        let f = fixture(64 * GIB, false);
+        let before = snapshot(&f.esp);
+        setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+        let tool = f.esp.join("EFI/OC/Tools/Stela.efi");
+        let config = fs::read(f.esp.join("EFI/OC/config.plist")).unwrap();
+        let new = f._dir.path().join("new.efi");
+        fs::write(&new, b"MZstela-2").unwrap();
+        let update = |dry_run: bool| {
+            rerun(&f, |c| {
+                c.update_stela = true;
+                c.efi = Some(new.clone());
+                c.dry_run = dry_run;
+            })
+        };
+        assert!(update(true).unwrap().contains("Dry run"));
+        assert_eq!(fs::read(&tool).unwrap(), b"MZstela");
+        let report = update(false).unwrap();
+        assert!(report.contains("no translation cache"), "{report}");
+        assert_eq!(fs::read(&tool).unwrap(), b"MZstela-2");
+        // Only the tool changed: the entry and stela.cfg stay.
+        assert_eq!(fs::read(f.esp.join("EFI/OC/config.plist")).unwrap(), config);
+        assert!(update(false).unwrap().contains("already installed"));
+        let record: Record = stela_runtime::read_json(&f.esp.join(RECORD)).unwrap();
+        assert_eq!(record.stela_versions.len(), 2);
+        assert_eq!(record.history.len(), 1);
+        rerun(&f, |c| c.rollback = true).unwrap();
+        assert_eq!(fs::read(&tool).unwrap(), b"MZstela");
+        assert!(
+            rerun(&f, |c| c.rollback = true)
+                .unwrap_err()
+                .to_string()
+                .contains("no update")
+        );
+        update(false).unwrap();
+        uninstall(&environment(&f.host), &f.esp, false).unwrap();
+        assert_eq!(snapshot(&f.esp), before);
+    }
+
+    #[test]
+    fn os_updates_add_recoveryos_and_interrupted_updates_finish_or_roll_back() {
+        let f = fixture(64 * GIB, false);
+        let before = snapshot(&f.esp);
+        setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+        let newer = f._dir.path().join("Newer.ipsw");
+        restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
+        let update = |dry_run: bool| {
+            rerun(&f, |c| {
+                c.update_os = true;
+                c.ipsw = Some(newer.clone());
+                c.dry_run = dry_run;
+            })
+        };
+        let options = || fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
+        let first = options();
+        assert!(update(true).unwrap().contains("Dry run"));
+        assert_eq!(options(), first);
+        let report = update(false).unwrap();
+        assert!(report.contains("Reinstall macOS"), "{report}");
+        assert!(options().contains("\\boot\\STELA2\\recovery"));
+        assert!(
+            f.esp
+                .join("EFI/stela/boot/STELA2/recovery/bundle.json")
+                .is_file()
+        );
+        // The old build stays for rollback.
+        assert!(bundle(&f.esp).join("bundle.json").is_file());
+        rerun(&f, |c| c.rollback = true).unwrap();
+        assert_eq!(options(), first);
+        assert!(!f.esp.join("EFI/stela/boot/STELA2").exists());
+
+        // An update interrupted after it was recorded refuses other updates,
+        // finishes when run again, and rolls back otherwise.
+        let mut record: Record = stela_runtime::read_json(&f.esp.join(RECORD)).unwrap();
+        record.pending = Some(update::Change::Os {
+            from: restore::payload::SYNTHETIC_BUILD.into(),
+            to: "STELA2".into(),
+        });
+        write_record(&f.esp, &record).unwrap();
+        fs::create_dir_all(f.esp.join("EFI/stela/boot/STELA2/recovery")).unwrap();
+        fs::write(f.esp.join("EFI/stela/boot/STELA2/recovery/partial"), b"x").unwrap();
+        let other = rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(f.efi.clone());
+        });
+        assert!(other.unwrap_err().to_string().contains("interrupted"));
+        update(false).unwrap();
+        assert!(options().contains("STELA2"));
+        assert!(
+            !f.esp
+                .join("EFI/stela/boot/STELA2/recovery/partial")
+                .exists()
+        );
+        record = stela_runtime::read_json(&f.esp.join(RECORD)).unwrap();
+        record.pending = record.history.last().cloned();
+        write_record(&f.esp, &record).unwrap();
+        let undo = rerun(&f, |c| c.rollback = true).unwrap();
+        assert!(undo.contains("interrupted macOS update"), "{undo}");
+        assert_eq!(options(), first);
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert_eq!(snapshot(&f.esp), before);
     }

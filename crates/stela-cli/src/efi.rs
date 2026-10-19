@@ -167,7 +167,7 @@ fn is_stela(entry: &Value) -> bool {
 
 /// Replace `path` through a sibling temporary file, so a failed write leaves
 /// the old file in place; with `fresh`, only when nothing is there yet.
-fn write_atomic(path: &Path, bytes: &[u8], fresh: bool) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], fresh: bool) -> Result<()> {
     let parent = path.parent().context("a file without a parent directory")?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(bytes)?;

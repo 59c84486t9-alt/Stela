@@ -513,6 +513,11 @@ pub const SYNTHETIC_BUILD: &str = "STELA1";
 /// identity for [`SYNTHETIC_MODEL`], one identity for another model, a
 /// global manifest, stored and deflate members, and one ZIP64 member.
 pub fn synthetic_ipsw(path: &Path) -> Result<()> {
+    synthetic_ipsw_of(path, SYNTHETIC_BUILD)
+}
+
+/// [`synthetic_ipsw`] of another build, as a later macOS release would be.
+pub fn synthetic_ipsw_of(path: &Path, build: &str) -> Result<()> {
     use zip::{CompressionMethod, write::SimpleFileOptions};
     let identity = |model: &str, class: &str, variant: &str, members: &[(&str, &str)]| {
         let entries: String = members
@@ -558,7 +563,7 @@ pub fn synthetic_ipsw(path: &Path) -> Result<()> {
     let build_manifest = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict>\
          <key>ProductVersion</key><string>0.0.1</string>\
-         <key>ProductBuildVersion</key><string>{SYNTHETIC_BUILD}</string>\
+         <key>ProductBuildVersion</key><string>{build}</string>\
          <key>SupportedProductTypes</key><array><string>{SYNTHETIC_MODEL}</string>\
          <string>Other1,1</string></array>\
          <key>BuildIdentities</key><array>{identities}</array></dict></plist>"
