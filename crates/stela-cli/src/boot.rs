@@ -210,11 +210,25 @@ pub(crate) struct Prepare {
     /// colons (for example ethaddr=02:00:00:00:00:01); repeat for each.
     #[arg(long = "macaddr", value_parser = parse_keyed_bytes)]
     mac_addresses: Vec<(String, Vec<u8>)>,
+    /// The machine's ECID, as hex: a nonzero per-machine value the install
+    /// tooling generates and keeps (`/chosen unique-chip-id`, `die-id`,
+    /// `unique-device-id`). Without it those rows stay unresolved.
+    #[arg(long, value_parser = parse_ecid)]
+    ecid: Option<u64>,
     /// A firmware image the board's own devices run, kept under its guest
     /// file name (such as `USB-C_HPM,47.bin` from `extract-guest-files`);
     /// repeat for each image.
     #[arg(long, conflicts_with = "disk")]
     board_firmware: Vec<PathBuf>,
+}
+
+fn parse_ecid(value: &str) -> Result<u64, String> {
+    let digits = value.strip_prefix("0x").unwrap_or(value);
+    match u64::from_str_radix(digits, 16) {
+        Ok(0) => Err("an ECID is nonzero".into()),
+        Ok(ecid) => Ok(ecid),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn parse_keyed_bytes(value: &str) -> Result<(String, Vec<u8>), String> {
@@ -713,6 +727,7 @@ impl Prepare {
             // A ramdisk roots from itself; an installed system's root is
             // named from its disk (`stela_loader::installed`).
             root: (self.restore || self.recovery).then_some(Root::Ramdisk),
+            ecid: self.ecid,
             boot_cpu: self.boot_cpu.clone(),
             timebase_frequency: self.timebase_frequency,
             syscfg: self.syscfg.iter().cloned().collect(),
@@ -772,6 +787,15 @@ impl Prepare {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ecid_is_nonzero_hex() {
+        assert_eq!(parse_ecid("0x1a2b3c4d5e6f7081"), Ok(0x1a2b_3c4d_5e6f_7081));
+        assert_eq!(parse_ecid("ABCDEF"), Ok(0xab_cdef));
+        assert!(parse_ecid("0").is_err());
+        assert!(parse_ecid("0x").is_err());
+        assert!(parse_ecid("12345678901234567").is_err());
+    }
 
     #[test]
     fn a_manifest_admits_objects_by_digest_and_restore_objects_may_sit_outside() {

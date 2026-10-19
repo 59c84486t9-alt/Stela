@@ -6,7 +6,7 @@
 //! row by row, is `docs/research/iboot-handoff.md`.
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};
-use anyhow::Result;
+use anyhow::{Result, ensure};
 
 const ROOT: &str = "/";
 const CPUS: &str = "/cpus";
@@ -125,6 +125,70 @@ fn core_counts(
         tree.set_property(CPUS, property, value)?;
     }
     Ok(())
+}
+
+const CHOSEN: &str = "/chosen";
+
+/// The machine's identity rows: iBoot reads the ECID from the chip's fuse
+/// pair at 0x23d2c8800 for both `unique-chip-id` and `die-id` (0x23ab4,
+/// 0x23b6c; both getters reach 0x40a78) and writes `unique-device-id` as
+/// the ECID followed by the 32-bit chip ID (0x23af8..0x23b64), each in place
+/// in the template's slot. Stela's machine ECID is a per-machine value its
+/// install tooling generates and persists; without one the template's zeros
+/// stay and the rows are unresolved, never invented.
+pub fn apply_identity(
+    tree: &mut DeviceTree,
+    ecid: Option<u64>,
+    chip_id: Option<u32>,
+) -> Result<(Vec<Decision>, Vec<String>)> {
+    let (mut decisions, mut gaps) = (vec![], vec![]);
+    let Some(ecid) = ecid else {
+        gaps.push(
+            "/chosen unique-chip-id, die-id, unique-device-id: no machine ECID given (--ecid)"
+                .into(),
+        );
+        return Ok((decisions, gaps));
+    };
+    ensure!(ecid != 0, "a machine ECID is nonzero");
+    let mut fill = |name: &str, value: Vec<u8>, source: String| -> Result<()> {
+        let Some(slot) = tree.property(CHOSEN, name) else {
+            return Ok(());
+        };
+        ensure!(
+            slot.value.len() >= value.len(),
+            "{CHOSEN} {name} is {} bytes; iBoot writes {}",
+            slot.value.len(),
+            value.len()
+        );
+        let mut bytes = slot.value.clone();
+        bytes[..value.len()].copy_from_slice(&value);
+        decisions.push(decision(CHOSEN, name, &bytes, source));
+        tree.set_property(CHOSEN, name, bytes)
+    };
+    let ecid_bytes = ecid.to_le_bytes().to_vec();
+    fill(
+        "unique-chip-id",
+        ecid_bytes.clone(),
+        "the machine ECID (--ecid)".into(),
+    )?;
+    fill(
+        "die-id",
+        ecid_bytes.clone(),
+        "the machine ECID: iBoot reads die-id from the same fuses".into(),
+    )?;
+    match chip_id {
+        Some(chip) => {
+            let mut value = ecid_bytes;
+            value.extend_from_slice(&chip.to_le_bytes());
+            fill(
+                "unique-device-id",
+                value,
+                format!("the machine ECID, then chip ID {chip:#x}, as iBoot composes it"),
+            )?;
+        }
+        None => gaps.push("/chosen unique-device-id: the identity names no chip ID".into()),
+    }
+    Ok((decisions, gaps))
 }
 
 /// Rows iBoot writes that Stela cannot produce yet, each with its reason.
@@ -252,6 +316,47 @@ mod tests {
         assert!(gaps.iter().any(|g| g.contains(PLATFORM_NAME)));
         assert!(gaps.iter().any(|g| g.contains("cpu2")));
         Ok(())
+    }
+
+    #[test]
+    fn the_ecid_fills_the_identity_slots_as_iboot_composes_them() -> Result<()> {
+        let mut tree = tree();
+        tree.ensure_child(ROOT, "chosen")?;
+        for (name, bytes) in [
+            ("unique-chip-id", 8),
+            ("die-id", 8),
+            ("unique-device-id", 16),
+        ] {
+            tree.set_property(CHOSEN, name, vec![0; bytes])?;
+        }
+        let (decisions, gaps) =
+            apply_identity(&mut tree, Some(0x1122_3344_5566_7788), Some(0x8112))?;
+        assert!(gaps.is_empty());
+        assert_eq!(decisions.len(), 3);
+        let value = |name: &str| tree.property(CHOSEN, name).unwrap().value.clone();
+        assert_eq!(
+            value("unique-chip-id"),
+            0x1122_3344_5566_7788u64.to_le_bytes()
+        );
+        assert_eq!(value("die-id"), value("unique-chip-id"));
+        let device = value("unique-device-id");
+        assert_eq!(device.len(), 16);
+        assert_eq!(&device[..8], &value("unique-chip-id")[..]);
+        assert_eq!(&device[8..12], &0x8112u32.to_le_bytes());
+        assert_eq!(&device[12..], &[0; 4]);
+
+        // No ECID: the zeros stay and the gap is named; zero is refused.
+        tree.set_property(CHOSEN, "unique-chip-id", vec![0; 8])?;
+        let (decisions, gaps) = apply_identity(&mut tree, None, Some(0x8112))?;
+        assert!(decisions.is_empty());
+        assert!(gaps[0].contains("no machine ECID"));
+        assert_eq!(value_of(&tree, "unique-chip-id"), vec![0; 8]);
+        assert!(apply_identity(&mut tree, Some(0), Some(0x8112)).is_err());
+        Ok(())
+    }
+
+    fn value_of(tree: &DeviceTree, name: &str) -> Vec<u8> {
+        tree.property(CHOSEN, name).unwrap().value.clone()
     }
 
     #[test]

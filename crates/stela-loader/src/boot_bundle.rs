@@ -171,6 +171,10 @@ pub struct Options {
     /// `boot-uuid`, `associated-volume-group`, `boot-objects-path`); `None`
     /// keeps the template's values.
     pub root: Option<root_selection::Root>,
+    /// The machine's ECID, nonzero and unique per machine, for `/chosen`
+    /// `unique-chip-id`, `die-id` and `unique-device-id`; `None` keeps the
+    /// template's zeros and lists the rows as unresolved.
+    pub ecid: Option<u64>,
     /// Applied after every other DeviceTree change.
     pub overlay: Vec<OverlayProperty>,
 }
@@ -214,6 +218,7 @@ impl Default for Options {
             },
             osenvironment: None,
             root: None,
+            ecid: None,
             overlay: Vec::new(),
         }
     }
@@ -748,6 +753,10 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     // iBoot deletes the environments once one is applied.
     security.extend(handoff::remove_environments(&mut tree));
     let (decisions, gaps) = handoff::apply(&mut tree, inputs.target.chip_id)?;
+    security.extend(decisions);
+    unresolved.extend(gaps);
+    let (decisions, gaps) =
+        handoff::apply_identity(&mut tree, options.ecid, inputs.target.chip_id)?;
     security.extend(decisions);
     unresolved.extend(gaps);
     match &options.root {
@@ -1678,6 +1687,7 @@ mod tests {
             boot_cpu: "cpu0".into(),
             osenvironment: None,
             root: None,
+            ecid: None,
             timebase_frequency: 24_000_000,
             syscfg: BTreeMap::from([("SwBh".to_owned(), vec![7; 4])]),
             mac_addresses: BTreeMap::from([("wifiaddr".to_owned(), vec![2, 0, 0, 0, 0, 1])]),
