@@ -74,7 +74,6 @@ const UNMODELED: &[&str] = &[
     "hw",
     "hw.optional",
     "hw.optional.arm",
-    "hw.optional.arm.caps",
     "hw.optional.arm.sme_max_svl_b",
     "hw.perflevel0",
     "hw.perflevel1",
@@ -124,6 +123,8 @@ enum Value {
     /// A NUL-terminated string.
     String(String),
     Opaque(Vec<u8>),
+    /// A `CTLTYPE_QUAD` handler that writes a byte buffer of its own size.
+    QuadBytes(Vec<u8>),
     /// The arm64 kernel's handler fails with this errno.
     Fails(u64),
 }
@@ -132,7 +133,7 @@ impl Value {
     fn kind(&self) -> u32 {
         match self {
             Self::Int(_) | Self::Fails(_) => CTLTYPE_INT,
-            Self::Quad(_) | Self::Number(_) => CTLTYPE_QUAD,
+            Self::Quad(_) | Self::Number(_) | Self::QuadBytes(_) => CTLTYPE_QUAD,
             Self::String(_) => CTLTYPE_STRING,
             Self::Opaque(_) => CTLTYPE_OPAQUE,
         }
@@ -141,7 +142,7 @@ impl Value {
     fn format(&self) -> &'static str {
         match self {
             Self::Int(_) | Self::Fails(_) => "I",
-            Self::Quad(_) | Self::Number(_) | Self::Opaque(_) => "Q",
+            Self::Quad(_) | Self::Number(_) | Self::Opaque(_) | Self::QuadBytes(_) => "Q",
             Self::String(_) => "A",
         }
     }
@@ -161,7 +162,7 @@ impl Value {
                 bytes.push(0);
                 bytes
             }
-            Self::Opaque(bytes) => bytes.clone(),
+            Self::Opaque(bytes) | Self::QuadBytes(bytes) => bytes.clone(),
             Self::Fails(errno) => return Err(*errno),
         })
     }
@@ -304,6 +305,10 @@ impl Model {
                 Value::Int((*present).into()),
             );
         }
+        add(
+            "hw.optional.arm.caps",
+            Value::QuadBytes(crate::hosted::features::capability_buffer(features).to_vec()),
+        );
         for (legacy, name) in [
             ("neon", "AdvSIMD"),
             ("neon_hpfp", "AdvSIMD_HPFPCvt"),
@@ -650,6 +655,11 @@ mod tests {
         assert_eq!(value("hw.optional.arm.FEAT_LSE"), &Value::Int(1));
         assert_eq!(value("hw.optional.neon"), &Value::Int(1));
         assert_eq!(value("hw.optional.armv8_2_sha3"), &Value::Int(0));
+        let Value::QuadBytes(caps) = value("hw.optional.arm.caps") else {
+            panic!("hw.optional.arm.caps is not a byte buffer");
+        };
+        assert_eq!(caps.len(), 12);
+        assert_ne!(caps[0] & 1 << 6, 0, "FEAT_LSE");
         assert_eq!(
             Value::Number(16384).bytes(Some(4)).unwrap(),
             16384i32.to_le_bytes()

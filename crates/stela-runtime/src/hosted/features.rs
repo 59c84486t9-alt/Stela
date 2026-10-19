@@ -55,6 +55,99 @@ pub mod capability {
     pub const FEAT_DIT: u64 = 0x0200_0000_0000_0000;
 }
 
+/// `osfmk/arm/cpu_capabilities_public.h` `CAP_BIT_*`: each
+/// `ARM_FEATURE_FLAG`'s bit in the `hw.optional.arm.caps` buffer. The
+/// positions are ABI and never change; `CAP_BIT_UCNORMALMEM` (59) is a
+/// private bit no feature flag sets.
+const CAP_BITS: &[(&str, u32)] = &[
+    ("FEAT_FlagM", 0),
+    ("FEAT_FlagM2", 1),
+    ("FEAT_FHM", 2),
+    ("FEAT_DotProd", 3),
+    ("FEAT_SHA3", 4),
+    ("FEAT_RDM", 5),
+    ("FEAT_LSE", 6),
+    ("FEAT_SHA256", 7),
+    ("FEAT_SHA512", 8),
+    ("FEAT_SHA1", 9),
+    ("FEAT_AES", 10),
+    ("FEAT_PMULL", 11),
+    ("FEAT_SPECRES", 12),
+    ("FEAT_SB", 13),
+    ("FEAT_FRINTTS", 14),
+    ("FEAT_LRCPC", 15),
+    ("FEAT_LRCPC2", 16),
+    ("FEAT_FCMA", 17),
+    ("FEAT_JSCVT", 18),
+    ("FEAT_PAuth", 19),
+    ("FEAT_PAuth2", 20),
+    ("FEAT_FPAC", 21),
+    ("FEAT_DPB", 22),
+    ("FEAT_DPB2", 23),
+    ("FEAT_BF16", 24),
+    ("FEAT_I8MM", 25),
+    ("FEAT_WFxT", 26),
+    ("FEAT_RPRES", 27),
+    ("FEAT_ECV", 28),
+    ("FEAT_AFP", 29),
+    ("FEAT_LSE2", 30),
+    ("FEAT_CSV2", 31),
+    ("FEAT_CSV3", 32),
+    ("FEAT_DIT", 33),
+    ("FEAT_FP16", 34),
+    ("FEAT_SSBS", 35),
+    ("FEAT_BTI", 36),
+    ("FEAT_SME", 40),
+    ("FEAT_SME2", 41),
+    ("FEAT_SME_F64F64", 42),
+    ("FEAT_SME_I16I64", 43),
+    ("FEAT_SME2p1", 44),
+    ("FEAT_SME_F16F16", 45),
+    ("FEAT_SME_B16B16", 46),
+    ("FEAT_SME_F8F16", 47),
+    ("FEAT_SME_F8F32", 48),
+    ("AdvSIMD", 49),
+    ("AdvSIMD_HPFPCvt", 50),
+    ("FEAT_CRC32", 51),
+    ("SME_F32F32", 52),
+    ("SME_BI32I32", 53),
+    ("SME_B16F32", 54),
+    ("SME_F16F32", 55),
+    ("SME_I8I32", 56),
+    ("SME_I16I32", 57),
+    ("FEAT_PACIMP", 58),
+    ("FEAT_MTE", 60),
+    ("FEAT_MTE2", 61),
+    ("FEAT_MTE3", 62),
+    ("FEAT_MTE4", 63),
+    ("FEAT_HBC", 64),
+    ("FEAT_EBF16", 65),
+    ("FEAT_SPECRES2", 66),
+    ("FEAT_CSSC", 67),
+    ("FEAT_FPACCOMBINE", 68),
+    ("FEAT_MTE_ASYNC", 69),
+    ("FEAT_MTE_CANONICAL_TAGS", 70),
+    ("FEAT_MTE_STORE_ONLY", 71),
+    ("FEAT_MTE_NO_ADDRESS_TAGS", 72),
+    ("FP_SyncExceptions", 73),
+    ("FEAT_SVE_B16B16", 91),
+];
+
+/// `CAP_BYTE_NB`: `CAP_BIT_NB` (92) bits, rounded up to bytes.
+pub const CAP_BYTES: usize = 12;
+
+/// `sysctl_hw_caps`: one bit per present feature, least significant bit
+/// of byte 0 first. A feature without a `CAP_BIT_*` has no bit.
+pub fn capability_buffer(features: &[(&str, bool)]) -> [u8; CAP_BYTES] {
+    let mut buffer = [0u8; CAP_BYTES];
+    for (name, _) in features.iter().filter(|(_, present)| *present) {
+        if let Some((_, bit)) = CAP_BITS.iter().find(|(flag, _)| flag == name) {
+            buffer[(bit >> 3) as usize] |= 1 << (bit & 7);
+        }
+    }
+    buffer
+}
+
 /// One feature row: the `hw.optional.arm.` sysctl name, the register and
 /// field, the minimum field value and the commpage bit, if any.
 struct Row {
@@ -255,6 +348,15 @@ mod tests {
         assert_eq!(bits & c::FEAT_SHA3, 0);
         let features = identification.optional_features();
         assert!(features.contains(&("FEAT_FPACCOMBINE", true)));
+        for (name, _) in &features {
+            assert!(CAP_BITS.iter().any(|(flag, _)| flag == name), "{name}");
+        }
+        let caps = capability_buffer(&features);
+        // FEAT_LSE (6), FEAT_FPACCOMBINE (68), AdvSIMD (49); not FEAT_SHA3 (4).
+        assert_ne!(caps[0] & 1 << 6, 0);
+        assert_ne!(caps[8] & 1 << 4, 0);
+        assert_ne!(caps[6] & 1 << 1, 0);
+        assert_eq!(caps[0] & 1 << 4, 0);
         assert!(features.contains(&("FEAT_SHA3", false)));
         let capabilities = cpu_capabilities(&identification, 128, 8);
         assert_eq!((capabilities >> c::NUM_CPUS_SHIFT) & 0xff, 8);
