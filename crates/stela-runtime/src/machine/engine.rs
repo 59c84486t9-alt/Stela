@@ -1135,7 +1135,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
-        let result = self.devices.write(self.current, physical, bytes, value, now);
+        let result = self
+            .devices
+            .write(self.current, physical, bytes, value, now);
         self.watch(physical, bytes, result.is_ok().then_some(value), true);
         result
     }
@@ -3523,12 +3525,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 MemoryTransfer::Store => {
                     let values = data.map(|register| self.read_register(register));
                     for (element, value) in elements.into_iter().zip(values) {
-                        let written = self
-                            .device_write(element, bytes, value, now)
-                            .and_then(|()| {
-                                let mut memory = HostMemory(&mut self.host);
-                                self.devices.transfer(self.current, &mut memory, now)
-                            });
+                        let written =
+                            self.device_write(element, bytes, value, now)
+                                .and_then(|()| {
+                                    let mut memory = HostMemory(&mut self.host);
+                                    self.devices.transfer(self.current, &mut memory, now)
+                                });
                         match written {
                             Ok(()) => {}
                             Err(error) if self.surveyed(element, bytes, Some(value), &error) => {}
