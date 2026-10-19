@@ -50,11 +50,17 @@
 //! ...) are services of Apple's firmware this coprocessor does not have, so
 //! they are not listed rather than advertised with nothing behind them.
 //! Every other management message refuses.
-use super::asc::{Firmware, Message};
+//!
+//! Application endpoints also send on their own (the SMC's board
+//! notifications): an enabled endpoint's pending messages leave at each
+//! device advance once enumeration is complete. An endpoint whose message
+//! restarts or powers off the machine hands the wrapper that transition.
+use super::asc::{Firmware, Message, TransitionRequest};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::any::Any;
 
 const MANAGEMENT: u8 = 0;
 const TYPE_SHIFT: u32 = 52;
@@ -94,12 +100,22 @@ const AP_STATES: [u64; 3] = [0x201, POWER_ON, 0];
 pub const FIRST_APPLICATION: u8 = 0x20;
 
 /// An application endpoint of the coprocessor.
-pub trait Endpoint {
+pub trait Endpoint: Any {
     /// The AP enabled the endpoint; messages it sends go to `outbox` as
     /// payloads on this endpoint.
     fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str>;
     /// The AP sent `payload` to the enabled endpoint.
     fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str>;
+    /// Messages the enabled endpoint sends on its own, such as events
+    /// from the board, collected at each device advance.
+    fn poll(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+        Ok(())
+    }
+    /// A machine transition the endpoint carries out for the AP's last
+    /// message, once.
+    fn take_transition(&mut self) -> Option<TransitionRequest> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +191,12 @@ impl RtKit {
     pub fn quiesced(mut self) -> Self {
         self.quiesced = true;
         self
+    }
+
+    /// Application endpoint `number`'s model, for board events it reports.
+    pub fn endpoint_mut<E: Endpoint>(&mut self, number: u8) -> Option<&mut E> {
+        let (endpoint, _) = self.endpoints.get_mut(&number)?;
+        (&mut **endpoint as &mut dyn Any).downcast_mut()
     }
 
     fn hello(&mut self, outbox: &mut Vec<Message>) {
@@ -331,6 +353,32 @@ impl Firmware for RtKit {
         }));
         Ok(())
     }
+
+    /// Unsolicited messages of the enabled endpoints, once the AP has
+    /// enumerated them.
+    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        if self.stage != Stage::Ready {
+            return Ok(());
+        }
+        for (&number, (endpoint, enabled)) in &mut self.endpoints {
+            if !*enabled {
+                continue;
+            }
+            let mut sent = Vec::new();
+            endpoint.poll(&mut sent)?;
+            outbox.extend(sent.into_iter().map(|payload| Message {
+                endpoint: number,
+                payload,
+            }));
+        }
+        Ok(())
+    }
+
+    fn take_transition(&mut self) -> Option<TransitionRequest> {
+        self.endpoints
+            .values_mut()
+            .find_map(|(endpoint, _)| endpoint.take_transition())
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +530,69 @@ mod tests {
             mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 1 << 32).unwrap(),
             vec![management(IOP_POWER_ACK, WAKE)]
         );
+    }
+
+    /// Sends `pending` on its own and restarts the machine on any message.
+    #[derive(Default)]
+    struct Board {
+        pending: Vec<u64>,
+        restart: bool,
+    }
+    impl Endpoint for Board {
+        fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn receive(&mut self, _payload: u64, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+            self.restart = true;
+            Ok(())
+        }
+        fn poll(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+            outbox.append(&mut self.pending);
+            Ok(())
+        }
+        fn take_transition(&mut self) -> Option<TransitionRequest> {
+            core::mem::take(&mut self.restart).then_some(TransitionRequest {
+                device: "board",
+                transition: super::super::bus::Transition::Restart,
+                reason: "test",
+            })
+        }
+    }
+
+    #[test]
+    fn enabled_endpoints_send_board_events_and_carry_transitions() {
+        let mut rtkit = RtKit::new(
+            vec![(0x20, Box::new(Board::default()) as Box<dyn Endpoint>)],
+            Management::User,
+        )
+        .unwrap();
+        rtkit.start(&mut Vec::new()).unwrap();
+        rtkit.endpoint_mut::<Board>(0x20).unwrap().pending.push(9);
+        assert!(rtkit.endpoint_mut::<Complement>(0x20).is_none());
+        assert!(rtkit.endpoint_mut::<Board>(0x21).is_none());
+        // Nothing leaves before enumeration and the endpoint's enable.
+        let mut outbox = Vec::new();
+        Firmware::poll(&mut rtkit, &mut outbox).unwrap();
+        assert!(outbox.is_empty());
+        mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, 0).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 1 << 32).unwrap();
+        Firmware::poll(&mut rtkit, &mut outbox).unwrap();
+        assert!(outbox.is_empty());
+        mgmt(&mut rtkit, ENDPOINT_CONTROL, 0x20 << 32 | ENABLE).unwrap();
+        Firmware::poll(&mut rtkit, &mut outbox).unwrap();
+        assert_eq!(
+            outbox,
+            vec![Message {
+                endpoint: 0x20,
+                payload: 9
+            }]
+        );
+        assert!(Firmware::take_transition(&mut rtkit).is_none());
+        step(&mut rtkit, 0x20, 1).unwrap();
+        let request = Firmware::take_transition(&mut rtkit).unwrap();
+        assert_eq!(request.device, "board");
+        assert!(Firmware::take_transition(&mut rtkit).is_none());
     }
 
     #[test]

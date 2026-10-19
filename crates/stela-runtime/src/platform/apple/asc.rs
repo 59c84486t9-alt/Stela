@@ -41,7 +41,7 @@
 //!   `AppleA7IOP::_outboxUnderflowCheck` treats as an error);
 //! - stopping a running coprocessor is refused until a firmware models what
 //!   a restart loses.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::interrupt::{AicInput, Wire};
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
@@ -83,6 +83,15 @@ pub struct Message {
     pub payload: u64,
 }
 
+/// A machine transition a coprocessor carries out for the AP, such as the
+/// SMC's restart and standby commands: the device and its reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransitionRequest {
+    pub device: &'static str,
+    pub transition: Transition,
+    pub reason: &'static str,
+}
+
 /// The coprocessor's software, emulated natively.
 pub trait Firmware: Any {
     /// The coprocessor starts running; messages it sends go to `outbox`.
@@ -103,6 +112,15 @@ pub trait Firmware: Any {
         _outbox: &mut Vec<Message>,
     ) -> Result<(), &'static str> {
         Ok(())
+    }
+    /// Messages the running coprocessor sends on its own, collected at each
+    /// device advance.
+    fn poll(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        Ok(())
+    }
+    /// A machine transition the AP's last message asked for, once.
+    fn take_transition(&mut self) -> Option<TransitionRequest> {
+        None
     }
 }
 
@@ -213,6 +231,12 @@ impl Asc {
         self.deliver(result)?;
         self.update_lines(port.access);
         Ok(())
+    }
+
+    /// The native coprocessor, for board events it reports; what it sends
+    /// in response leaves through the mailbox at the next device advance.
+    pub fn firmware_mut<F: Firmware>(&mut self) -> Option<&mut F> {
+        (&mut *self.firmware as &mut dyn Any).downcast_mut()
     }
 
     fn visible(&self) -> bool {
@@ -350,13 +374,24 @@ impl MmioDevice for Asc {
                 return Err(fail("mailbox control field without a model"));
             }
             (A2I_SEND0, Width::Double) => self.send0 = Some(value),
-            (A2I_SEND1, Width::Double) => self.send(value).map_err(fail)?,
+            (A2I_SEND1, Width::Double) => {
+                self.send(value).map_err(fail)?;
+                if let Some(request) = self.firmware.take_transition() {
+                    access.request_transition(request.device, request.transition, request.reason);
+                }
+            }
             _ => return Err(fail("ASC register without a model")),
         }
         self.update_lines(access);
         Ok(())
     }
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        if self.running {
+            let mut sent = Vec::new();
+            let result = self.firmware.poll(&mut sent).map(|()| sent);
+            self.deliver(result)
+                .map_err(|reason| refuse(NAME, 0, Width::Double, Direction::Read, reason))?;
+        }
         self.update_lines(access);
         Ok(None)
     }
@@ -524,5 +559,66 @@ mod tests {
         );
         assert!(asc.read(0x8004, Width::Word, &mut access).is_err());
         assert!(asc.read(I2A_RECV0, Width::Word, &mut access).is_err());
+    }
+
+    /// Powers the machine off for any message and reports one event of
+    /// its own per poll.
+    struct Standby {
+        events: u64,
+        requested: bool,
+    }
+    impl Firmware for Standby {
+        fn start(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn receive(
+            &mut self,
+            _message: Message,
+            _outbox: &mut Vec<Message>,
+        ) -> Result<(), &'static str> {
+            self.requested = true;
+            Ok(())
+        }
+        fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+            self.events += 1;
+            outbox.push(Message {
+                endpoint: 0x20,
+                payload: self.events,
+            });
+            Ok(())
+        }
+        fn take_transition(&mut self) -> Option<TransitionRequest> {
+            core::mem::take(&mut self.requested).then_some(TransitionRequest {
+                device: "standby",
+                transition: Transition::PowerOff,
+                reason: "test",
+            })
+        }
+    }
+
+    #[test]
+    fn firmware_events_leave_at_advance_and_transitions_reach_the_machine() {
+        let mut latch = InterruptLatch::new();
+        let firmware = Standby {
+            events: 0,
+            requested: false,
+        };
+        let mut asc = Asc::booted(Box::new(firmware), Lines::from_interrupts(LINES)).unwrap();
+        let mut access = Access::new(0, 7, &mut latch);
+        asc.advance(&mut access).unwrap();
+        assert!(latch.is_asserted(Wire::Aic(LINES[2])));
+        let mut access = Access::new(0, 7, &mut latch);
+        assert_eq!(receive(&mut asc, &mut access), (1, 0x20 | 1 << 52));
+        assert_eq!(asc.firmware_mut::<Standby>().unwrap().events, 1);
+        assert!(asc.firmware_mut::<Echo>().is_none());
+        asc.write(A2I_SEND0, Width::Double, 0, &mut access).unwrap();
+        assert!(access.reset_request().is_none());
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        let request = access.reset_request().unwrap();
+        assert_eq!(
+            (request.device, request.transition, request.at),
+            ("standby", Transition::PowerOff, 7)
+        );
     }
 }

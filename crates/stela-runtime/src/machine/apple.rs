@@ -4,7 +4,7 @@
 //! The models own every register decision; this adapter only routes accesses
 //! and time, and turns each `MmioError` into an explicit refusal.
 use super::{
-    engine::{DeviceError, Devices, Memory, Start},
+    engine::{DeviceError, Devices, Memory, Reset, Start, Transition},
     registers::Lines,
 };
 pub use crate::platform::apple::pmu::WallClock;
@@ -90,7 +90,7 @@ pub struct AppleDevices {
     bus: Bus,
     latch: InterruptLatch,
     aic: Option<Controller>,
-    reset: Option<String>,
+    reset: Option<Reset>,
     memory_controller: Option<DeviceId>,
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
@@ -966,6 +966,23 @@ impl AppleDevices {
             .input(input)
     }
 
+    /// The machine's power button went down or up. The SMC reports it to
+    /// the AP as a HID button notification once the AP has enabled them.
+    pub fn power_button(&mut self, pressed: bool) -> Result<(), &'static str> {
+        let &(_, id) = self
+            .coprocessors
+            .iter()
+            .find(|(role, _)| *role == "SMC")
+            .ok_or("the board has no SMC to report the power button")?;
+        self.bus
+            .device_mut::<Asc>(id)
+            .and_then(Asc::firmware_mut::<RtKit>)
+            .and_then(|rtkit| rtkit.endpoint_mut::<Smc>(smc::ENDPOINT))
+            .ok_or("the SMC coprocessor has no native key endpoint")?
+            .power_button(pressed);
+        Ok(())
+    }
+
     pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>, &'static str> {
         let master = self
             .usb_masters
@@ -1329,12 +1346,7 @@ impl AppleDevices {
 
     /// Forward queued device wires into the AIC and record a reset request;
     /// `cpu` is the PE whose access or time step queued them.
-    fn settle(
-        &mut self,
-        cpu: CpuIndex,
-        now: u64,
-        reset: Option<String>,
-    ) -> Result<(), DeviceError> {
+    fn settle(&mut self, cpu: CpuIndex, now: u64, reset: Option<Reset>) -> Result<(), DeviceError> {
         if self.reset.is_none() {
             self.reset = reset;
         }
@@ -1392,12 +1404,13 @@ fn width(bytes: u8) -> Result<Width, DeviceError> {
         .ok_or_else(|| DeviceError::Refused(format!("{bytes}-byte device access")))
 }
 
-fn reset_reason(access: &Access<'_>) -> Option<String> {
-    access.reset_request().map(|request| {
-        format!(
+fn reset_reason(access: &Access<'_>) -> Option<Reset> {
+    access.reset_request().map(|request| Reset {
+        transition: request.transition,
+        reason: format!(
             "{}: {} at counter {}",
             request.device, request.reason, request.at
-        )
+        ),
     })
 }
 
@@ -1488,7 +1501,10 @@ impl Devices for AppleDevices {
         {
             // A model that cannot advance stops the machine like a reset
             // would, with the model's own reason.
-            self.reset = Some(format!("device advance refused: {error:?}"));
+            self.reset = Some(Reset {
+                transition: Transition::Halt,
+                reason: format!("device advance refused: {error:?}"),
+            });
         }
         let pins = self.latch.pins(cpu);
         Lines {
@@ -1522,7 +1538,7 @@ impl Devices for AppleDevices {
         }
     }
 
-    fn take_reset(&mut self) -> Option<String> {
+    fn take_reset(&mut self) -> Option<Reset> {
         self.reset.take()
     }
 
@@ -1960,7 +1976,12 @@ mod tests {
         devices
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
+        assert!(devices.power_button(true).is_err());
         devices.add_smc(&placement).unwrap();
+        // The press waits in the key endpoint until the AP enables
+        // notifications.
+        devices.power_button(true).unwrap();
+        devices.power_button(false).unwrap();
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
         devices.write(0, REGION + 8, 8, 0x1122_3344, 0).unwrap();
         assert_eq!(devices.read(0, REGION + 8, 8, 0), Ok(0x1122_3344));

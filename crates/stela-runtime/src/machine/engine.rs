@@ -24,6 +24,7 @@ use super::{
     timer, vgic,
 };
 use crate::pauth;
+pub use crate::platform::apple::bus::Transition;
 pub use crate::platform::dma::Memory;
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::fmt;
@@ -271,7 +272,7 @@ pub trait Devices {
         None
     }
     /// A reset or power-off the guest requested from a device, once.
-    fn take_reset(&mut self) -> Option<String> {
+    fn take_reset(&mut self) -> Option<Reset> {
         None
     }
     /// A PE the guest released from reset through a device, once.
@@ -500,11 +501,25 @@ pub enum Stop {
     /// Every PE is off or waits in WFI or WFE with nothing able to wake it.
     Idle,
     /// A device carried out the guest's reset or power-off request.
-    Reset(String),
+    Reset(Reset),
     Unsupported(Requirement),
     /// The running PE reached a host breakpoint (`Machine::set_breakpoints`)
     /// at this PC, before executing its instruction.
     Breakpoint(u64),
+}
+
+/// A machine-wide transition a device carried out for the guest: what the
+/// host must do next and the device's account of why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reset {
+    pub transition: Transition,
+    pub reason: String,
+}
+
+impl fmt::Display for Reset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}: {}", self.transition, self.reason)
+    }
 }
 
 /// Where a guest thread stopped running: the PE's PC, frame pointer and

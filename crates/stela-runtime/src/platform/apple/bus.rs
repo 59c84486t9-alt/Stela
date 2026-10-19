@@ -63,11 +63,25 @@ pub enum MmioError {
     },
 }
 
+/// What a guest request does to the whole machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition {
+    /// The machine resets and boots again (a watchdog bite, the SMC's
+    /// restart command).
+    Restart,
+    /// The machine powers off (the SMC's standby command).
+    PowerOff,
+    /// The machine cannot continue (a model reached a state it cannot run
+    /// in); neither a reset nor a power-off was asked for.
+    Halt,
+}
+
 /// A guest request to reset or stop the machine, surfaced instead of acting
 /// on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetRequest {
     pub device: &'static str,
+    pub transition: Transition,
     pub reason: &'static str,
     /// System counter value at which the request took effect.
     pub at: u64,
@@ -91,9 +105,21 @@ impl<'a> Access<'a> {
             reset: None,
         }
     }
+    /// The guest asked for a machine reset.
     pub fn request_reset(&mut self, device: &'static str, reason: &'static str) {
+        self.request_transition(device, Transition::Restart, reason);
+    }
+    /// The guest's request takes the whole machine through `transition`;
+    /// the first request of an access wins.
+    pub fn request_transition(
+        &mut self,
+        device: &'static str,
+        transition: Transition,
+        reason: &'static str,
+    ) {
         self.reset.get_or_insert(ResetRequest {
             device,
+            transition,
             reason,
             at: self.now,
         });

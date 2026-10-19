@@ -52,7 +52,7 @@
 //! This uses the bus's reset/stop request boundary, never a host reset.
 //! Readback, nonzero encodings and other widths refuse without effects.
 //! Every other register of the aperture refuses.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::regfile::{self, Held, Span};
 use alloc::vec::Vec;
 
@@ -563,8 +563,9 @@ impl MmioDevice for Amcc {
         self.access(offset, width, Some(value))
             .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))?;
         if disables {
-            access.request_reset(
+            access.request_transition(
                 NAME,
+                Transition::Halt,
                 "DRAM access disabled; execution with disabled guest RAM is unsupported",
             );
         }
@@ -623,12 +624,9 @@ mod tests {
         m.write(CACHE.broadcast + DRAM_ACCESS, Width::Word, 0, &mut a)
             .unwrap();
         assert!(m.planes.iter().all(|p| !p.dram_access));
-        assert!(
-            a.reset_request()
-                .unwrap()
-                .reason
-                .contains("DRAM access disabled")
-        );
+        let request = a.reset_request().unwrap();
+        assert_eq!(request.transition, Transition::Halt);
+        assert!(request.reason.contains("DRAM access disabled"));
         assert!(
             m.read(CACHE.broadcast + DRAM_ACCESS, Width::Word, &mut a)
                 .is_err()
