@@ -1740,6 +1740,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.blocks += 1 + chained;
         self.statistics.chained += chained;
         self.statistics.lookup_hits += control.hits;
+        // A transfer entered the last block, with BTYPE 0: every thunk
+        // takes a direct branch, a fallthrough or a return.
+        if chained > 0 {
+            self.cpu.pstate.btype = 0;
+        }
         match exit {
             NativeExit::Exit { next_pc, kind } => {
                 if let Some(count) = self.statistics.exit_kinds.get_mut(kind as usize) {
@@ -5063,6 +5068,34 @@ mod tests {
         machine.step().unwrap();
         assert_eq!(machine.statistics.chained, chained + budget);
         assert_eq!(machine.statistics.blocks, blocks + 1 + budget);
+        // A run entered with BTYPE 0b01 that chained into a block and
+        // faulted at its first instruction saves BTYPE 0, which the
+        // transfer left, in SPSR_EL1.
+        machine.cpu.pc = base;
+        machine.cpu.pstate.btype = 0b01;
+        let current = *machine.chain;
+        machine.host.chained = Some((
+            &mut *machine.chain,
+            ChainControl {
+                budget: CHAIN_LIMIT - 1,
+                retired: 2,
+                block: 1,
+                ..current
+            },
+        ));
+        let offset = machine.blocks[1]
+            .code
+            .0
+            .wrapping_sub(machine.blocks[0].code.0);
+        machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            offset,
+            address: 0x40,
+            write: false,
+            cause: FaultCause::Guest(mmu::Fault::stage1(mmu::FaultKind::Translation, 3)),
+        })];
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), base + 12);
+        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1) >> 10 & 3, 0);
     }
 
     /// A direct exit out of its page and a RET are redirected through
