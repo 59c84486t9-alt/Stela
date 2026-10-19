@@ -15,7 +15,7 @@ impl Prepare {
             "output exists; choose a new --output directory"
         );
         let mut probe = open_image(path)?;
-        let options = self.options(false, None)?;
+        let options = self.options(None)?;
         let mut failures = Vec::new();
         for offset in apfs::containers(&mut probe)? {
             let mut container = Container::open(open_image(path)?, offset)?;

@@ -20,8 +20,21 @@ const RESTORE_VARIANT: &str = "Customer Erase Install (IPSW)";
 /// The `/osenvironments` child for a restore ramdisk: it turns off the SEP
 /// firmware load and protected data access and selects ephemeral storage.
 const RESTORE_ENVIRONMENT: &str = "darwinos-ramdisk-environment";
-const INSTALLED_BOOT_ARGS: &str = "-v";
-const RESTORE_BOOT_ARGS: &str = "-v rd=md0";
+/// The console boot-args when `--boot-args` gives none.
+const DEFAULT_BOOT_ARGS: &str = "-v";
+/// The boot-args a restore host has iBoot pass to the restore ramdisk
+/// (idevicerestore `restore.c`): the ramdisk root, NAND reformat permission,
+/// the progress UI and restore mode. `-restore` is read by the kernel and
+/// about twenty kexts; IOUSBDeviceConfigurator, for one, leaves the USB
+/// device controllers to restored only in restore mode.
+const RESTORE_MODE_ARGS: &[&str] = &[
+    "rd=md0",
+    "nand-enable-reformat=0x1",
+    "-progress",
+    "-restore",
+];
+/// recoveryOS roots from its BaseSystem ramdisk.
+const RECOVERY_MODE_ARGS: &[&str] = &["rd=md0"];
 /// recoveryOS from the installed-system identity: BaseSystem as the ramdisk.
 const RECOVERY_ENVIRONMENT: &str = "recovery-environment";
 const BASE_SYSTEM: &str = "BaseSystem";
@@ -142,7 +155,8 @@ pub(crate) struct Prepare {
     /// Distance of the first region above the physical base.
     #[arg(long, value_parser = parse_address, default_value = "0")]
     load_offset: u64,
-    /// The kernel command line; `-v`, or `-v rd=md0` with `--restore`.
+    /// The kernel command line, `-v` by default. `--restore` and
+    /// `--recovery` add the arguments their boot mode needs.
     #[arg(long)]
     boot_args: Option<String>,
     /// The boot policy expressed to SPTM, TXM and the kernel.
@@ -349,6 +363,21 @@ fn parse_id(value: Option<&str>) -> Result<Option<u32>> {
                 .with_context(|| format!("bad restore identity value {v}"))
         })
         .transpose()
+}
+
+/// `console` followed by each of the boot mode's arguments whose name it does
+/// not already give, so an explicit `name=value` keeps its value.
+fn boot_args(console: &str, mode: &[&str]) -> String {
+    let name = |argument: &str| argument.split('=').next().unwrap_or(argument).to_owned();
+    let given: Vec<String> = console.split_whitespace().map(name).collect();
+    let mut line = console.trim().to_owned();
+    for argument in mode.iter().filter(|a| !given.contains(&name(a))) {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(argument);
+    }
+    line
 }
 
 impl Prepare {
@@ -591,7 +620,7 @@ impl Prepare {
                 .map(|(name, decoded)| (name.clone(), input(decoded)))
                 .collect(),
         };
-        let options = self.options(self.restore || self.recovery, inputs.dram_base()?)?;
+        let options = self.options(inputs.dram_base()?)?;
         let bundle = boot_bundle::prepare(&inputs, &options)?;
         let provenance = serde_json::json!({
             "archive": {
@@ -603,9 +632,9 @@ impl Prepare {
         Ok(())
     }
 
-    /// The bundle options from the command line; `ramdisk_boot` picks the
-    /// restore defaults for boot-args and the OS environment.
-    fn options(&self, ramdisk_boot: bool, board_dram_base: Option<u64>) -> Result<Options> {
+    /// The bundle options from the command line, with the boot-args and OS
+    /// environment of the selected boot mode.
+    fn options(&self, board_dram_base: Option<u64>) -> Result<Options> {
         let dram_base = self
             .dram_base
             .or(board_dram_base)
@@ -615,13 +644,14 @@ impl Prepare {
             dram_size: self.dram_size,
             phys_base: self.phys_base.unwrap_or(dram_base),
             load_offset: self.load_offset,
-            boot_args: self.boot_args.clone().unwrap_or_else(|| {
-                match ramdisk_boot {
-                    true => RESTORE_BOOT_ARGS,
-                    false => INSTALLED_BOOT_ARGS,
-                }
-                .into()
-            }),
+            boot_args: boot_args(
+                self.boot_args.as_deref().unwrap_or(DEFAULT_BOOT_ARGS),
+                match (self.restore, self.recovery) {
+                    (true, _) => RESTORE_MODE_ARGS,
+                    (false, true) => RECOVERY_MODE_ARGS,
+                    (false, false) => &[],
+                },
+            ),
             osenvironment: self.osenvironment.clone().or_else(|| {
                 match (self.restore, self.recovery) {
                     (true, _) => Some(RESTORE_ENVIRONMENT),
@@ -683,5 +713,32 @@ impl Prepare {
             self.output.join(MANIFEST_FILE).display()
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boot_modes_add_their_arguments_after_the_console_arguments() {
+        assert_eq!(boot_args(DEFAULT_BOOT_ARGS, &[]), "-v");
+        assert_eq!(
+            boot_args(DEFAULT_BOOT_ARGS, RESTORE_MODE_ARGS),
+            "-v rd=md0 nand-enable-reformat=0x1 -progress -restore"
+        );
+        assert_eq!(
+            boot_args("-v debug=0x8", RECOVERY_MODE_ARGS),
+            "-v debug=0x8 rd=md0"
+        );
+    }
+
+    #[test]
+    fn an_explicit_argument_keeps_its_value() {
+        assert_eq!(
+            boot_args("serial=3 rd=md1 -restore", RESTORE_MODE_ARGS),
+            "serial=3 rd=md1 -restore nand-enable-reformat=0x1 -progress"
+        );
+        assert_eq!(boot_args("", RECOVERY_MODE_ARGS), "rd=md0");
     }
 }
