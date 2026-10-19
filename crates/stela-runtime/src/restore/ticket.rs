@@ -1,8 +1,9 @@
-//! Global IM4M coverage, not signature validation. The caller obtains the bytes
-//! from a digest-verified IPSW inventory. Guest Image4 still owns authentication.
-//! Reject personalized manifests and require exact chip/board/domain plus the
-//! SHA-384 of the original IM4P before constructing an IMG4. No new signature,
-//! nonce substitution, type rewrite or certificate is manufactured.
+//! IM4M coverage, not signature validation. A global ticket comes from a
+//! digest-verified IPSW inventory, a personalized one from Apple's signing
+//! service (`tss`). Guest Image4 still owns authentication. Require exact
+//! chip/board/domain (and, personalized, the device's ECID) plus the SHA-384 of
+//! the original IM4P before constructing an IMG4. No new signature, nonce
+//! substitution, type rewrite or certificate is manufactured.
 use super::{Error, Result, plist::Value, store::Identity};
 use alloc::{collections::BTreeMap, vec::Vec};
 use sha2::{Digest, Sha384};
@@ -96,12 +97,33 @@ fn integer(b: &[u8]) -> Result<u64> {
     }
     Ok(b.iter().fold(0, |n, &v| (n << 8) | v as u64))
 }
-pub struct Global {
+pub struct Ticket {
     bytes: Vec<u8>,
     entries: BTreeMap<[u8; 4], BTreeMap<[u8; 4], Value>>,
 }
-impl Global {
-    pub fn parse(bytes: Vec<u8>, identity: &Identity) -> Result<Self> {
+impl Ticket {
+    /// A global ticket: one with any personalized or nonce-bound property
+    /// refuses.
+    pub fn global(bytes: Vec<u8>, identity: &Identity) -> Result<Self> {
+        Self::parse(bytes, identity, None)
+    }
+    /// A ticket personalized for the device whose ECID is `ecid`: its `MANP`
+    /// must name exactly that ECID. A nonce-bound property (`BNCH`, `snon`)
+    /// still refuses, since no request here sends a nonce.
+    pub fn personalized(bytes: Vec<u8>, identity: &Identity, ecid: u64) -> Result<Self> {
+        let ticket = Self::parse(bytes, identity, Some(ecid))?;
+        let named = ticket
+            .entries
+            .get(b"MANP")
+            .and_then(|p| p.get(b"ECID"))
+            .ok_or(Error::Invalid("personalized ticket names no ECID"))?
+            .uint()?;
+        if named != ecid {
+            return Err(Error::Invalid("personalized ticket names another ECID"));
+        }
+        Ok(ticket)
+    }
+    fn parse(bytes: Vec<u8>, identity: &Identity, ecid: Option<u64>) -> Result<Self> {
         if bytes.len() > MAX_TICKET_BYTES {
             return Err(Error::Limit("IM4M bytes"));
         }
@@ -140,7 +162,9 @@ impl Global {
                 let (key, mut property) = named(first, tag, b)?;
                 let (first, _, b) = property.next()?;
                 property.end()?;
-                if matches!(&key, b"ECID" | b"BNCH" | b"snon") {
+                if matches!(&key, b"BNCH" | b"snon")
+                    || (key == *b"ECID" && (ecid.is_none() || name != *b"MANP"))
+                {
                     return Err(Error::Invalid("manifest is personalized/nonce-bound"));
                 }
                 let value = match first {
@@ -259,7 +283,7 @@ fn tlv(tag: u8, b: &[u8]) -> Vec<u8> {
     out
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     fn entry(name: &[u8; 4], value: &[u8]) -> Vec<u8> {
         let mut n = u32::from_be_bytes(*name);
@@ -280,16 +304,31 @@ mod tests {
         out
     }
     pub(crate) fn manifest(payload: &[u8]) -> Vec<u8> {
-        let p = [
+        ticket_for(b"krnl", payload, None)
+    }
+    /// A synthetic ticket covering `payload` as `tag`, personalized for
+    /// `ecid` when given.
+    pub(crate) fn ticket_for(tag: &[u8; 4], payload: &[u8], ecid: Option<u64>) -> Vec<u8> {
+        let mut p = [
             entry(b"CHIP", &tlv(2, &[0, 0x81, 0x12])),
             entry(b"BORD", &tlv(2, &[0x24])),
             entry(b"SDOM", &tlv(2, &[1])),
         ]
         .concat();
+        if let Some(ecid) = ecid {
+            let mut digits = ecid.to_be_bytes().to_vec();
+            while digits.len() > 1 && digits[0] == 0 && digits[1] & 0x80 == 0 {
+                digits.remove(0);
+            }
+            if digits[0] & 0x80 != 0 {
+                digits.insert(0, 0);
+            }
+            p.extend(entry(b"ECID", &tlv(2, &digits)));
+        }
         let entries = [
             entry(b"MANP", &tlv(0x31, &p)),
             entry(
-                b"krnl",
+                tag,
                 &tlv(0x31, &entry(b"DGST", &tlv(4, &Sha384::digest(payload)))),
             ),
         ]
@@ -307,6 +346,18 @@ mod tests {
         )
     }
     #[test]
+    fn a_personalized_ticket_must_name_this_devices_ecid() {
+        let store = super::super::store::tests::fixture(b"x", false);
+        let identity = store.identity();
+        let bytes = ticket_for(b"lpol", b"policy", Some(0xabcd_1234));
+        assert!(Ticket::global(bytes.clone(), identity).is_err());
+        assert!(Ticket::personalized(bytes.clone(), identity, 0xabcd_1235).is_err());
+        let ticket = Ticket::personalized(bytes, identity, 0xabcd_1234).unwrap();
+        assert!(ticket.covers(*b"lpol", &Sha384::digest(b"policy")));
+        let global = ticket_for(b"lpol", b"policy", None);
+        assert!(Ticket::personalized(global, identity, 0xabcd_1234).is_err());
+    }
+    #[test]
     fn only_exact_payload_digest_can_be_wrapped() {
         let store = super::super::store::tests::fixture(b"x", false);
         let p = tlv(
@@ -319,7 +370,7 @@ mod tests {
             ]
             .concat(),
         );
-        let g = Global::parse(manifest(&p), store.identity()).unwrap();
+        let g = Ticket::global(manifest(&p), store.identity()).unwrap();
         let hash = Sha384::digest(&p);
         let wrapped = g.wrap(&p, &hash).unwrap();
         let parts = crate::img4::parse(&wrapped).unwrap();
@@ -329,6 +380,6 @@ mod tests {
         let mut changed = p.clone();
         *changed.last_mut().unwrap() ^= 1;
         assert!(g.wrap(&changed, &hash).is_err());
-        assert!(Global::parse(vec![0; 6], store.identity()).is_err());
+        assert!(Ticket::global(vec![0; 6], store.identity()).is_err());
     }
 }

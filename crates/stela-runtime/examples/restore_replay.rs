@@ -128,7 +128,7 @@ fn main() -> Result<()> {
             .context("identity index")?
             .clone();
         let identity = stela_runtime::restore::store::Identity { index, value };
-        let global = stela_runtime::restore::ticket::Global::parse(fs::read(&args[2])?, &identity)
+        let global = stela_runtime::restore::ticket::Ticket::global(fs::read(&args[2])?, &identity)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         println!(
             "global manifest parsed for identity {index}: {} bytes; signature not evaluated",

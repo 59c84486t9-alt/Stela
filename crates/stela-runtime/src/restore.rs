@@ -17,6 +17,7 @@ pub mod source;
 pub mod store;
 pub mod stream;
 pub mod ticket;
+pub mod tss;
 
 use alloc::{boxed::Box, string::String};
 use plist::Value;

@@ -6,7 +6,8 @@ use super::{
     asr::Sender,
     plist::{self, Limits, Value},
     store::{Identity, Store},
-    ticket::Global,
+    ticket::Ticket,
+    tss,
 };
 use crate::payload::{ReadAt, safe_path};
 use alloc::{
@@ -15,6 +16,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+use sha2::{Digest, Sha384};
 const MAX_STAGED_ANSWERS: usize = 128;
 const MAX_STAGED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
@@ -195,12 +197,15 @@ const DATA_TYPES: [(&str, bool); 69] = [
 pub struct Answers<R> {
     pub store: Store<R>,
     pub staged: Staged,
+    /// Apple's signing service, only when the user enables it (`tss`).
+    pub signer: Option<tss::Signer>,
 }
 impl<R: ReadAt> Answers<R> {
     pub fn new(store: Store<R>) -> Self {
         Self {
             store,
             staged: Staged::default(),
+            signer: None,
         }
     }
     pub fn supported(&self) -> Value {
@@ -262,9 +267,9 @@ impl<R: ReadAt> Answers<R> {
         }
         Ok(path)
     }
-    fn global(&mut self, identity: &Identity, args: &Value, cryptex: bool) -> Result<Global> {
+    fn global(&mut self, identity: &Identity, args: &Value, cryptex: bool) -> Result<Ticket> {
         let path = self.global_path(identity, args, cryptex)?;
-        Global::parse(self.store.read_small(&path)?, identity)
+        Ticket::global(self.store.read_small(&path)?, identity)
     }
     fn member_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
         let size = self.store.member_len(path)?;
@@ -342,9 +347,7 @@ impl<R: ReadAt> Answers<R> {
                 identity.value.required("Manifest")?.clone(),
             )]))),
             "FDRTrustData" => Ok(Plan::Reply(Value::dict([]))),
-            "RecoveryOSLocalPolicy" => Err(Error::Invalid(
-                "E1: SEP-signed policy cannot satisfy host lpol Apple trust root",
-            )),
+            "RecoveryOSLocalPolicy" => self.recovery_local_policy(&identity, args),
             "RestoreAttestation" => Ok(Plan::Reply(Value::dict([(
                 "RestoreShouldAttest",
                 Value::Boolean(false),
@@ -399,6 +402,21 @@ impl<R: ReadAt> Answers<R> {
             "BootabilityBundle" | "BootabilityBundleV2" => self.bootability(kind),
             _ => Err(Error::Invalid("unknown required restore DataType")),
         }
+    }
+    /// libbootpolicy accepts only an Apple-signed recoveryOS policy
+    /// (`docs/research/restore-trust.md`): Apple's ticket for the bare
+    /// policy, stitched unchanged, or a refusal without the signing service.
+    fn recovery_local_policy(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
+        let signer = self.signer.as_mut().ok_or(Error::Invalid(
+            "recoveryOS LocalPolicy needs Apple's signing service (opt-in --tss); a Stela-signed policy fails libbootpolicy's Apple root",
+        ))?;
+        let bytes = tss::request_local_policy(signer, identity, args)?;
+        let ticket = Ticket::personalized(bytes, identity, signer.ecid)?;
+        let policy = ticket.wrap(&tss::LOCAL_POLICY, &Sha384::digest(tss::LOCAL_POLICY))?;
+        Ok(Plan::Reply(Value::dict([(
+            "Ap,LocalPolicy",
+            Value::Data(policy),
+        )])))
     }
     fn nor(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
         let llb = self.personalized(identity, "LLB", &Value::dict([]))?;
