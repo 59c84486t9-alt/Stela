@@ -17,7 +17,8 @@
 //! Stela's die choices: NVMe 1.3, one I/O queue, 64 tags, 4/16 KiB memory
 //! pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
 //! optional encryption/SHA/firmware-slot updates or asynchronous events.
-//! The restore mode's boot-from-host image download is recorded, not run. Identity
+//! The restore mode's boot-from-host image download is recorded, not run,
+//! and so are the restore updater's NAND tunable tables. Identity
 //! strings identify Stela rather than impersonating a physical Apple SSD.
 //! The boot stage starts RTKit before handoff. NVMe itself uses MMIO; the
 //! RTKit coprocessor lists one application endpoint, [`RTKIT_ENDPOINT`],
