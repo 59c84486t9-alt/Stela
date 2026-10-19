@@ -94,7 +94,8 @@ impl Word {
     /// Decode a message word, or `None` for a type the protocol does not use.
     pub fn decode(word: u64) -> Option<Self> {
         let kind = Kind::of(word & TYPE)?;
-        let stream = (word & STREAM_PRESENT != 0).then(|| ((word & STREAM) >> STREAM_SHIFT) as u8);
+        let stream =
+            (word & STREAM_PRESENT != 0).then_some(((word & STREAM) >> STREAM_SHIFT) as u8);
         Some(Self {
             kind,
             ack: word & ACK != 0,
@@ -220,7 +221,7 @@ mod tests {
         assert_eq!(&swap.code(), b"A407");
         assert_eq!(
             swap.slot_bytes(),
-            (12 + 0x1d30 + 0xc as u32).next_multiple_of(0x40)
+            (12u32 + 0x1d30 + 0xc).next_multiple_of(0x40)
         );
     }
 }

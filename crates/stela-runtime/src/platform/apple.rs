@@ -26,6 +26,7 @@ pub mod cpustart;
 pub mod dart;
 pub mod dcp;
 pub mod dcs;
+pub mod display;
 pub mod dpe;
 pub mod dwc3;
 pub mod energy;

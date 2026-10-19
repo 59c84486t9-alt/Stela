@@ -139,8 +139,8 @@ fn detailed_timing(mode: Mode) -> [u8; 18] {
     d[10] = ((3 << 4) | 10) as u8; // v front porch / sync width low
     d[11] = 0;
     // Image size in mm (nominal), borders 0, digital separate sync +/+.
-    d[12] = (w / 4 & 0xff) as u8;
-    d[13] = (h / 4 & 0xff) as u8;
+    d[12] = ((w / 4) & 0xff) as u8;
+    d[13] = ((h / 4) & 0xff) as u8;
     d[14] = 0;
     d[15] = 0;
     d[16] = 0;

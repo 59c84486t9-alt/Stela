@@ -870,6 +870,20 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
 pub const SEP: &str = "iop-sep,ascwrap-v4";
 pub const SEP_NUB: &str = "iop-nub,sep";
 
+/// The J473AP HDMI display pipeline compatibles the engine models at the
+/// AP-facing protocols (`platform::apple::dcp`, `display`): the `dcpext`
+/// coprocessor (the shared ASC [`ASC`] with `role` `DCPEXT`), and the
+/// register apertures around it. Like [`SEP`], they are deliberately absent
+/// from `models()`: the IOMFB RPC shared-region exchange that carries the
+/// host-call payloads is recovered but not yet validated against a boot, so
+/// admitting DCPEXT would stop the guest at that boundary. The `add_dcpext`
+/// and `add_display` placements and this model exist and are tested so the
+/// path can be closed and admitted once the exchange is confirmed.
+pub const DCPEXT_ROLE: &[u8] = b"DCPEXT\0";
+pub const DISPEXT: &str = "dispext0,t8112";
+pub const DPTX_PHY: &str = "dptx-phy,t8112";
+pub const DISPLAY_CROSSBAR: &str = "display-crossbar,t8112";
+
 /// SEP's DT-placed register banks, four mailbox IRQs, DART stream and optional
 /// iBoot SEPFW source extent. The extent is not proof of firmware acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

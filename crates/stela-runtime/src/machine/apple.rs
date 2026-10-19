@@ -23,7 +23,9 @@ use crate::platform::apple::{
     cpm::Cpm,
     cpustart::{self, CpuStart},
     dart::{self, Dart},
+    dcp,
     dcs::Dcs,
+    display as display_hw,
     dpe::Dpe,
     dwc3::{self, Dwc3, PortState},
     energy::{self, Energy},
@@ -70,6 +72,7 @@ pub use crate::platform::apple::{
     asc::Lines as AscLines,
     interrupt::AicInput,
     nor,
+    scanout::{Mode as ScanoutMode, PixelFormat as ScanoutFormat, Scanout},
     sep::Entropy as SepEntropy,
     sep::image::signature::{
         Evidence as SepSignatureEvidence, ManifestEvidence as SepManifestEvidence,
@@ -755,6 +758,54 @@ impl AppleDevices {
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("PMP ASC placement: {e:?}"))
+    }
+
+    /// Place the `dcpext` display coprocessor: its booted, user-power-managed
+    /// RTKit (reusing the common ASC wrapper) carrying the IOMFB link endpoint
+    /// and the AFK/EPIC endpoints, presenting one fixed connected monitor to
+    /// `scanout`. The DCPEXT nub is `quiesced`, so (like the SMC) start-up
+    /// completes at RTKit enumeration behind the boot-chain handoff. This does
+    /// not admit DCPEXT in `soc::models`; the IOMFB RPC shared-region exchange
+    /// is not yet modeled (see `platform::apple::dcp`).
+    pub fn add_dcpext(
+        &mut self,
+        wrapper: Range,
+        interrupts: [u32; 4],
+        quiesced: bool,
+        scanout: Box<dyn Scanout>,
+    ) -> Result<(), String> {
+        if wrapper.bytes < asc::WRAPPER_BYTES {
+            return Err("DCPEXT register aperture is incomplete".into());
+        }
+        let mut rtkit =
+            RtKit::new(dcp::endpoints(scanout), Management::User).map_err(String::from)?;
+        if quiesced {
+            rtkit = rtkit.quiesced();
+        }
+        let wrap = Asc::booted(
+            Box::new(rtkit),
+            AscLines::from_interrupts(interrupts.map(|n| AicInput::new(0, n as u16))),
+        )
+        .map_err(String::from)?;
+        let asc = self.bus.add(Box::new(wrap));
+        self.coprocessors.push(("DCPEXT", asc));
+        self.bus
+            .map(asc, wrapper.physical, wrapper.bytes, 0)
+            .map_err(|e| format!("DCPEXT ASC placement: {e:?}"))
+    }
+
+    /// Place the display-hardware register apertures around the DCP
+    /// (`dispext0`, `dptx-phy`, `display-crossbar0`): present but with no
+    /// modeled register meaning, since the DCP firmware programs them. Each
+    /// `(name, range)` is one aperture; an access by the AP refuses, named.
+    pub fn add_display(&mut self, regions: &[(&'static str, Range)]) -> Result<(), String> {
+        for &(name, range) in regions {
+            let device = self.bus.add(Box::new(display_hw::Region::new(name)));
+            self.bus
+                .map(device, range.physical, range.bytes, 0)
+                .map_err(|e| format!("{name} placement: {e:?}"))?;
+        }
+        Ok(())
     }
 
     /// Place a visible SPMI controller and its PMUs. Bank B is the device's
@@ -2123,6 +2174,54 @@ mod tests {
         assert_eq!(devices.read(0, WATCHDOG + 0xc, 4, 0), Ok(0));
         devices.write(0, WATCHDOG + 0xc, 4, 0, 0).unwrap();
         assert_eq!(devices.coprocessor_diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn dcpext_enumerates_its_rtkit_and_the_display_regions_refuse() {
+        struct Screen;
+        impl Scanout for Screen {
+            fn mode(&self) -> ScanoutMode {
+                ScanoutMode {
+                    width: 1920,
+                    height: 1080,
+                    format: ScanoutFormat::Bgra8888,
+                }
+            }
+            fn present(&mut self, _rows: &[u8]) -> Result<(), &'static str> {
+                Ok(())
+            }
+        }
+        const WRAPPER: u64 = 0x2_71c0_0000;
+        const DISPEXT: u64 = 0x2_7000_0000;
+        let mut devices = AppleDevices::new();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        devices
+            .add_dcpext(
+                Range {
+                    physical: WRAPPER,
+                    bytes: 0x6c000,
+                },
+                [0x242, 0x242, 0x245, 0x244],
+                true,
+                Box::new(Screen),
+            )
+            .unwrap();
+        devices
+            .add_display(&[(
+                "dispext0",
+                Range {
+                    physical: DISPEXT,
+                    bytes: 0x61c000,
+                },
+            )])
+            .unwrap();
+        // The ASC wrapper runs (RUN bit set by the boot-chain handoff).
+        assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        assert_eq!(devices.coprocessor_diagnostics().len(), 1);
+        // A display register has no modeled meaning and refuses.
+        assert!(devices.read(0, DISPEXT, 4, 0).is_err());
     }
 
     #[test]
