@@ -852,7 +852,7 @@ impl Cpu {
     }
 
     /// SPSR_ELx of the current EL, or SPSR_GLx at a guarded level.
-    fn exception_state(&self) -> u64 {
+    pub(crate) fn exception_state(&self) -> u64 {
         match self.pstate.guarded {
             true => self.apple.guarded[usize::from(self.pstate.el) - 1].spsr,
             false => self.read(bank(self.pstate.el).spsr),

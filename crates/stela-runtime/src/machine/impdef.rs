@@ -35,8 +35,8 @@
 //!   loads before it runs a vCPU and saves afterwards. It is stored like
 //!   `Storage`, but this machine applies none of it to a guest, so entering
 //!   an EL1&0 guest of the EL2 host while one holds a nonzero value must
-//!   stop. `Registers::guest_state` finds such a value; the engine's ERET
-//!   and GEXIT paths do not yet check it (docs/research/j473-kernel.md).
+//!   stop. `Registers::guest_state` finds such a value, which the engine's
+//!   ERET and GEXIT check before entering such a guest.
 //! - `Unsupported`: its consumer relies on an effect this machine cannot
 //!   provide; every access stops with the evidence as the reason.
 //!
@@ -501,7 +501,7 @@ const GUEST_EVIDENCE: &str = "no public name; 26A434 XNU's hypervisor saves it w
     context before entering EL1, saves it on return and clears the PAC-group ones \
     (__text+0x49e80, __text+0x4a824, __text+0x4a120). A VM's copy of Apple EL1 state this \
     machine does not apply to a guest: stored; entering an EL1&0 guest while it is \
-    nonzero must stop (not yet checked at ERET or GEXIT)";
+    nonzero stops at the ERET or GEXIT";
 
 pub const TABLE: &[Entry] = &[
     entry(

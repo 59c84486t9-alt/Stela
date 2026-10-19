@@ -13,8 +13,8 @@ mod watch;
 use super::{
     chip::{AdmitTable, Check},
     cpu::{
-        Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
-        HCR_VI, HCR_VSE,
+        ASPSR_GUARDED, Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE,
+        HCR_TSC, HCR_VF, HCR_VI, HCR_VSE,
     },
     debug,
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
@@ -425,6 +425,10 @@ pub enum RequirementKind {
     },
     DeviceAdvance(String),
     IllegalReturn(IllegalReturn),
+    /// Entering an EL1&0 guest of the EL2 host while the named Apple VM
+    /// register (`impdef::Class::Guest`) holds state the machine does not
+    /// apply to a guest.
+    VmState(&'static str),
     Native(&'static str),
 }
 
@@ -478,6 +482,10 @@ impl fmt::Display for Requirement {
             )?,
             RequirementKind::DeviceAdvance(detail) => write!(f, "device advance: {detail}")?,
             RequirementKind::IllegalReturn(reason) => write!(f, "exception return {reason:?}")?,
+            RequirementKind::VmState(register) => write!(
+                f,
+                "entering an EL1&0 guest with nonzero Apple VM state in {register}"
+            )?,
             RequirementKind::Native(detail) => write!(f, "native execution: {detail}")?,
         }
         if let Some(syndrome) = self.syndrome {
@@ -3836,21 +3844,50 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.sync_regime();
                 Ok(())
             }
-            SystemOperation::Guarded(GuardedOperation::Exit) => match self.cpu.guarded_exit() {
-                Err(_) => self.undefined(),
-                Ok(Err(reason)) => Err(self.unsupported(RequirementKind::IllegalReturn(reason))),
-                Ok(Ok(())) => {
-                    self.pacm_written = true;
-                    self.host.report(&Event::Guarded {
-                        enter: false,
-                        el: self.cpu.pstate.el,
-                        guarded: self.cpu.pstate.guarded,
-                        pc: self.cpu.pc,
-                    });
-                    self.sync_regime();
-                    Ok(())
+            SystemOperation::Guarded(GuardedOperation::Exit) => {
+                if self.cpu.pstate.guarded && self.cpu.pstate.el != 0 {
+                    let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
+                    self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0)?;
                 }
-            },
+                self.guarded_exit()
+            }
+        }
+    }
+
+    /// GEXIT (`Cpu::guarded_exit`).
+    fn guarded_exit(&mut self) -> Step {
+        match self.cpu.guarded_exit() {
+            Err(_) => self.undefined(),
+            Ok(Err(reason)) => Err(self.unsupported(RequirementKind::IllegalReturn(reason))),
+            Ok(Ok(())) => {
+                self.pacm_written = true;
+                self.host.report(&Event::Guarded {
+                    enter: false,
+                    el: self.cpu.pstate.el,
+                    guarded: self.cpu.pstate.guarded,
+                    pc: self.cpu.pc,
+                });
+                self.sync_regime();
+                Ok(())
+            }
+        }
+    }
+
+    /// An ERET or GEXIT to `spsr`, guarded when `guarded`, that enters an
+    /// EL1&0 guest of the EL2 host (EL1 or EL0, unguarded, HCR_EL2.TGE
+    /// clear) stops while an Apple VM register holds state this machine
+    /// does not apply to a guest (`impdef::Registers::guest_state`): SPTM
+    /// and the kernel's hypervisor load a VM's values into them before it
+    /// runs (`machine::impdef` `GUEST_EVIDENCE`).
+    fn guest_entry(&self, spsr: u64, guarded: bool) -> Result<(), Stop> {
+        let enters_guest = !guarded
+            && !self.cpu.in_host()
+            && super::exception::spsr_target(spsr).is_ok_and(|(el, _)| el < 2);
+        match self.cpu.apple.impdef.guest_state() {
+            Some(entry) if enters_guest => {
+                Err(self.unsupported(RequirementKind::VmState(entry.name)))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -4001,6 +4038,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
         }
+        self.guest_entry(self.cpu.exception_state(), self.cpu.pstate.guarded)?;
         self.cpu.exception_return(target);
         self.pacm_written = true;
         self.host.report(&Event::Return {
@@ -7322,6 +7360,75 @@ mod tests {
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0000);
         assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
         assert_eq!((machine.cpu.pc, machine.cpu.pstate.el), (0x1_0200, 1));
+    }
+
+    /// An ERET or GEXIT into an EL1&0 guest stops while a VM register holds
+    /// a nonzero value, and enters it once the value is zero; the host's
+    /// own returns are unaffected.
+    #[test]
+    fn entering_a_guest_with_unapplied_vm_state_stops() {
+        const ERET: u32 = 0xd69f_03e0;
+        const GEXIT: u32 = 0x0020_1400;
+        const EL1H: u64 = 0x3c5;
+        const EL0T: u64 = 0x3c0;
+        const HCR_E2H: u64 = 1 << 34;
+        let guest = super::super::impdef::TABLE
+            .iter()
+            .find(|entry| entry.encoding == super::super::impdef::GUEST_SPRR_C15_4)
+            .unwrap();
+        let mut machine = machine(&[]);
+        let enter = |machine: &mut Machine<_, _>, word, spsr| {
+            machine.cpu.set_pstate(Pstate::reset(2));
+            machine.cpu.pc = BASE;
+            machine.cpu.registers.set(SystemRegister::SPSR_EL2, 0, spsr);
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::ELR_EL2, 0, 0x8000);
+            machine.system_instruction(word)
+        };
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
+        machine.cpu.apple.impdef.write(guest, 0x3b).unwrap();
+        match enter(&mut machine, ERET, EL1H) {
+            Err(Stop::Unsupported(requirement)) => {
+                assert_eq!(requirement.kind, RequirementKind::VmState(guest.name));
+                assert_eq!((requirement.pc, requirement.el), (BASE, 2));
+            }
+            other => panic!("{other:?}"),
+        }
+        // The host (HCR_EL2.TGE) returning to its EL0 is no guest entry.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H | 1 << HCR_TGE);
+        enter(&mut machine, ERET, EL0T).unwrap();
+        assert_eq!(machine.cpu.pstate.el, 0);
+        // GEXIT from GL2 into the guest stops the same way.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
+        machine.cpu.set_pstate(Pstate {
+            guarded: true,
+            ..Pstate::reset(2)
+        });
+        machine.cpu.apple.guarded[1].spsr = EL1H;
+        machine.cpu.apple.guarded[1].elr = 0x8000;
+        machine.cpu.apple.guarded[1].aspsr = 0;
+        assert!(matches!(
+            machine.system_instruction(GEXIT),
+            Err(Stop::Unsupported(_))
+        ));
+        assert!(machine.cpu.pstate.guarded, "the GEXIT was not made");
+        // SPTM's zero loads leave nothing to apply.
+        machine.cpu.apple.impdef.write(guest, 0).unwrap();
+        machine.system_instruction(GEXIT).unwrap();
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x8000));
+        enter(&mut machine, ERET, EL1H).unwrap();
+        assert_eq!(machine.cpu.pstate.el, 1);
     }
 
     #[test]
