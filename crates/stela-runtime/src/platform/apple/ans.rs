@@ -1203,6 +1203,12 @@ mod tests {
 
     /// Disable, select MODESEL 4 and re-enable, as the restore boot does.
     fn restore_mode(rig: &mut Rig) {
+        reenable(rig, MODE_RESTORE);
+    }
+
+    /// `IONVMeController::EnableController` (0x3ddaec0): CC 0, the admin
+    /// queues, `PreCCEnableHook`'s MODESEL (0x3dbdfb8), then CC.EN.
+    fn reenable(rig: &mut Rig, mode: u32) {
         rig.write(CC, 0).unwrap();
         for (base, address) in [(ASQ, SQ), (ACQ, CQ)] {
             rig.ans
@@ -1214,8 +1220,63 @@ mod tests {
                 )
                 .unwrap();
         }
-        rig.write(MODESEL, u64::from(MODE_RESTORE)).unwrap();
+        rig.write(MODESEL, u64::from(mode)).unwrap();
         rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+    }
+
+    /// `update_NAND_firmware` on this die. `nvmefwupdater --query` reads the
+    /// MSP type (selector 10), boot-loads the loader (selector 4) and reads
+    /// the NAND descriptor (selector 5). restored finds no package named
+    /// after that descriptor and runs `--skip`: selectors 3, 8 and 7 reach
+    /// no register, and `SetNVMeState(1, 1)` (selector 6, 0x3dc9aec)
+    /// re-initializes the controller after `SetBFHMode(false)` cleared the
+    /// MODESEL 4 flag (`InitializeNVMe` 0x3dbdf28).
+    #[test]
+    fn restore_nand_query_then_skip_returns_the_die_to_regular_mode() {
+        let mut rig = Rig::new();
+        restore_mode(&mut rig);
+        rig.io_queues();
+        // The completion status and result of admin command `tag`.
+        let admin = |rig: &mut Rig, tag: u16, opcode: u8, nsid: u32, prp: u64, words| {
+            let slot = rig.ans.queues[0].tail;
+            rig.submit(0, tag, opcode, nsid, prp, words).unwrap();
+            let cqe = rig.bytes(CQ + u64::from(slot) * 16, 16);
+            rig.retire(0, tag);
+            (
+                u16::from_le_bytes([cqe[14], cqe[15]]) >> 1,
+                u32::from_le_bytes(cqe[..4].try_into().unwrap()),
+            )
+        };
+        let feature = |rig: &mut Rig, tag, id| admin(rig, tag, 0xa, 0, 0, [id, 0, 0, 0, 0, 0]);
+        assert_eq!(feature(&mut rig, 2, 0xc2), (0, 0), "GetMSPType: part 0");
+        let loader: Vec<u8> = (0..0x1000u32).map(|i| (i * 13 + 1) as u8).collect();
+        assert!(rig.ram.write(DATA, &loader));
+        let download = [0x3ff, 0, 0, 0, 0, bfh::crc32c(&loader)];
+        assert_eq!(admin(&mut rig, 3, 0x11, 0, DATA, download).0, 0);
+        assert_eq!(admin(&mut rig, 4, 0x10, 0, 0, [1 << 3, 0, 0, 0, 0, 0]).0, 0);
+        let (_, low) = feature(&mut rig, 5, 0xc0);
+        let (_, high) = feature(&mut rig, 6, 0xc1);
+        assert_eq!(u64::from(high) << 32 | u64::from(low), die::DESCRIPTOR);
+
+        reenable(&mut rig, MODE_REGULAR);
+        assert_eq!(rig.read(CSTS), u64::from(READY));
+        assert_eq!(rig.read(MODESEL), u64::from(MODE_REGULAR));
+        assert!(
+            !rig.ans.queues[1].sq_enabled,
+            "the reset dropped the I/O pair"
+        );
+        rig.io_queues();
+        // `IdentifyNamespaces`, then `CheckClogVersionMismatch`'s
+        // namespace-1 Identify (0x3df6c90), which must not answer Invalid
+        // Namespace, and the type `IsFWNamespaceTypeMismatch` compares.
+        assert_eq!(admin(&mut rig, 2, 6, 0, DATA, [0; 6]).0, 0);
+        assert_eq!(rig.bytes(DATA + 0x204, 4), 1u32.to_le_bytes());
+        assert_eq!(admin(&mut rig, 3, 6, 1, DATA, [0; 6]).0, 0);
+        assert_eq!(rig.bytes(DATA + 0x180, 1), [1]);
+        // Regular mode serves no boot-from-host command; the loader's
+        // record stays.
+        assert!(rig.submit(0, 4, 0x11, 0, DATA, download).is_err());
+        assert_eq!(rig.ans.boot_image().unwrap().sections.len(), 1);
     }
 
     #[test]
