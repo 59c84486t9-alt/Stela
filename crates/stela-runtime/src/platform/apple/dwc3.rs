@@ -22,9 +22,12 @@
 //! personality. `AppleT8112USBXHCI::start` read-modify-writes it to host at
 //! KC file 0x4457644 whatever the port's role; the device driver selects
 //! device again when it powers the core. Host mode idles the device
-//! personality like a core reset. The xHCI host registers are not modeled
-//! and refuse; OTG and the reserved selection refuse.
+//! personality like a core reset; OTG and the reserved selection refuse.
+//! The host personality's registers (`xhci`) occupy the core's first
+//! 4 KiB; host interrupter n shares event buffer n's wire, and a GCTL core
+//! soft reset resets both personalities.
 mod regs;
+pub mod xhci;
 
 use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
@@ -129,6 +132,7 @@ pub struct Dwc3 {
     port_ready: bool,
     connected: bool,
     poisoned: bool,
+    host: xhci::Xhci,
 }
 
 impl Dwc3 {
@@ -155,6 +159,7 @@ impl Dwc3 {
             port_ready: false,
             connected: false,
             poisoned: false,
+            host: xhci::Xhci::new(),
         }
     }
 
@@ -211,6 +216,7 @@ impl Dwc3 {
         if self.poisoned {
             return Err("DWC3 requires reset after a DMA failure");
         }
+        self.host.service(port)?;
         for _ in 0..self.pending.len() {
             let Some(event) = self.pending.front().copied() else {
                 break;
@@ -237,9 +243,14 @@ impl Dwc3 {
         Ok(())
     }
 
+    /// Host personality work (a doorbell, events to post) waits for DMA.
+    pub fn host_pending(&self) -> bool {
+        self.host.pending()
+    }
+
     fn interrupts(&mut self, access: &mut Access<'_>) {
-        for (ring, irq) in self.rings.iter_mut().zip(self.irqs) {
-            let level = ring.count != 0 && !ring.masked;
+        for (n, (ring, irq)) in self.rings.iter_mut().zip(self.irqs).enumerate() {
+            let level = ring.count != 0 && !ring.masked || self.host.interrupt(n);
             if ring.asserted != level {
                 access.interrupts.set_level(Wire::Aic(irq), level);
                 ring.asserted = level;
@@ -634,7 +645,18 @@ impl MmioDevice for Dwc3 {
     fn name(&self) -> &'static str {
         NAME
     }
-    fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+    fn read(
+        &mut self,
+        offset: u64,
+        width: Width,
+        access: &mut Access<'_>,
+    ) -> Result<u64, MmioError> {
+        if offset < xhci::BYTES {
+            return self
+                .host
+                .read(offset, width.bytes(), access.now)
+                .map_err(|why| refuse(NAME, offset, width, Direction::Read, why));
+        }
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(refuse(
                 NAME,
@@ -708,6 +730,13 @@ impl MmioDevice for Dwc3 {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
+        if offset < xhci::BYTES {
+            self.host
+                .write(offset, width.bytes(), value, access.now)
+                .map_err(|why| refuse(NAME, offset, width, Direction::Write, why))?;
+            self.interrupts(access);
+            return Ok(());
+        }
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(refuse(
                 NAME,
@@ -735,6 +764,10 @@ impl MmioDevice for Dwc3 {
                 if value & CORE_RESET != 0 || value & PRTCAP != PRTCAP_DEVICE {
                     self.cancel();
                     self.connected = false;
+                }
+                if value & CORE_RESET != 0 {
+                    self.host = xhci::Xhci::new();
+                    self.interrupts(access);
                 }
                 self.gctl = value;
             }
@@ -976,6 +1009,38 @@ mod tests {
         dart.write(at, Width::Word, u64::from(value), access)
             .unwrap();
     }
+    #[test]
+    fn a_host_command_completion_raises_its_interrupters_shared_wire() {
+        let (mut dwc, mut dart, mut ram, mut latch) = setup();
+        let (erst, ring, commands) = (RAM + 0x8000, RAM + 0x9000, RAM + 0xa000);
+        assert!(ram.write(erst, &ring.to_le_bytes()));
+        assert!(ram.write(erst + 8, &16u64.to_le_bytes()));
+        let command = (23u64 << 42) | 1 << 32; // No Op, cycle one
+        assert!(ram.write(commands + 8, &command.to_le_bytes()));
+        let mut access = Access::new(0, 0, &mut latch);
+        // Interrupter 0 at runtime offset 0x20 (RTSOFF 0x440).
+        write(&mut dwc, 0x468, 1, &mut access);
+        write(&mut dwc, 0x478, ring as u32, &mut access);
+        write(&mut dwc, 0x47c, (ring >> 32) as u32, &mut access);
+        write(&mut dwc, 0x470, erst as u32, &mut access);
+        write(&mut dwc, 0x474, (erst >> 32) as u32, &mut access);
+        write(&mut dwc, 0x460, 2, &mut access);
+        write(&mut dwc, 0x38, commands as u32 | 1, &mut access);
+        write(&mut dwc, 0x3c, (commands >> 32) as u32, &mut access);
+        write(&mut dwc, 0x20, 1 | 4, &mut access);
+        write(&mut dwc, 0x4e0, 0, &mut access);
+        assert!(dwc.host_pending());
+        let mut port = Port {
+            iommu: &mut dart,
+            stream: SID,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        dwc.flush(&mut port).unwrap();
+        assert!(!dwc.host_pending());
+        assert!(latch.is_asserted(Wire::Aic(irqs()[0])));
+    }
+
     #[test]
     fn the_host_driver_selects_host_mode_which_idles_the_device() {
         let (mut dwc, _, _, mut latch) = setup();

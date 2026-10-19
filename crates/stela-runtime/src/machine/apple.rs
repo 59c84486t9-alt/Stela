@@ -1406,7 +1406,11 @@ impl Devices for AppleDevices {
             .iter()
             .filter_map(|master| {
                 let port = UsbPort::of(&master.connector);
-                if port != master.port {
+                let host = self
+                    .bus
+                    .device::<Dwc3>(master.device)
+                    .is_some_and(Dwc3::host_pending);
+                if port != master.port || host {
                     Some(0)
                 } else {
                     (port.ready || master.attached).then_some(master.next_poll)
