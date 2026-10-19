@@ -591,6 +591,10 @@ pub struct Statistics {
     pub chained: u64,
     /// Direct exits redirected into their successors.
     pub links: u64,
+    /// Exits redirected through a lookup of their target (returns and
+    /// direct exits out of their page), and the transfers those made.
+    pub lookups: u64,
+    pub lookup_hits: u64,
     pub compiled: u64,
     pub exceptions: u64,
     pub interrupts: u64,
@@ -624,6 +628,9 @@ struct Block {
     /// Direct exits to static successors not yet chained, its own and its
     /// PAC thunk's.
     successors: Vec<Successor>,
+    /// The host address of its RET's exit to the target in RAX, until a
+    /// lookup thunk serves it.
+    return_site: Option<u64>,
     /// The PC and word of its last instruction, where it exits to the engine.
     terminal: (u64, u32),
     /// Exits to the engine at `terminal`.
@@ -760,6 +767,16 @@ pub struct Machine<H: Host, D: Devices> {
     translation_generation: u64,
     /// Advances when installed code is discarded.
     code_generation: u64,
+    /// The blocks fetches ran, by PC and context, for lookup thunks
+    /// (`x86_64::chain`): the table `ChainControl::table` names.
+    targets: alloc::boxed::Box<[chain::LookupEntry]>,
+    /// The context numbers of the current generations, by EL (with the
+    /// guarded level) and variant; numbers are never reused.
+    contexts: Vec<(u8, Variant, u64)>,
+    /// The translation and code generations `contexts` are for, and the
+    /// next number.
+    context_generations: (u64, u64),
+    next_context: u64,
     /// Identification registers the CPU profile has no value for.
     profile_missing: Vec<SystemRegister>,
     /// Accessors by encoding.
@@ -876,6 +893,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
             code_generation: 1,
+            targets: vec![chain::LookupEntry::default(); chain::LOOKUP_ENTRIES].into_boxed_slice(),
+            contexts: Vec::new(),
+            context_generations: (0, 0),
+            next_context: 1,
             profile_missing: Vec::new(),
             lookup: super::system::Lookup::new(),
             timers: None,
@@ -908,6 +929,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             suspended: BTreeMap::new(),
             survey: None,
         };
+        machine.chain.table = machine.targets.as_ptr() as u64;
         machine.peers = processors::boot(&machine.profile);
         machine.load_profile();
         machine.sync_regime();
@@ -1699,6 +1721,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             budget,
             retired: 0,
             block: index as u64,
+            hits: 0,
+            ..*self.chain
         };
         // SAFETY: installed by this machine since the last discard, for the
         // system-mode block ABI; chained blocks and thunks too.
@@ -1711,14 +1735,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.retired += control.retired;
         self.statistics.blocks += 1 + chained;
         self.statistics.chained += chained;
+        self.statistics.lookup_hits += control.hits;
         match exit {
             NativeExit::Exit { next_pc, kind } => {
                 self.exit(last, next_pc, kind)?;
-                if let Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call)) =
-                    ExitKind::try_from(kind)
-                    && self.cpu.pstate.btype == 0
-                {
-                    self.link(last, next_pc, kind);
+                match ExitKind::try_from(kind) {
+                    _ if self.cpu.pstate.btype != 0 => {}
+                    Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call)) => {
+                        self.link(last, next_pc, kind);
+                    }
+                    Ok(ExitKind::Return) => self.link_return(last),
+                    _ => {}
                 }
                 Ok(())
             }
@@ -1735,13 +1762,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// page, so the same translation and permissions, compiled for the same
     /// variant. Its BTYPE is 0, as no branch that sets it ends in a direct
     /// exit, and every System register write, exception and device access
-    /// that changes what the next fetch checks returns to the engine.
+    /// that changes what the next fetch checks returns to the engine. An
+    /// exit out of the page goes through a lookup thunk instead.
     fn link(&mut self, index: usize, next_pc: u64, kind: ExitKind) {
         let block = &self.blocks[index];
-        if block.variant.single
-            || (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0
-            || self.traces.binary_search(&next_pc).is_ok()
-        {
+        if block.variant.single || self.traces.binary_search(&next_pc).is_ok() {
             return;
         }
         let Some(position) = block
@@ -1751,6 +1776,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         else {
             return;
         };
+        if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
+            let exit = block.successors[position];
+            let retired = block.source_map.len() as u32;
+            if self.redirect_through_lookup(exit.site, retired, Some(exit.target), kind) {
+                self.blocks[index].successors.swap_remove(position);
+            }
+            return;
+        }
         let physical = block.physical.wrapping_add(next_pc.wrapping_sub(block.pc));
         let Some(&target) = self.index.get(&(next_pc, physical, block.variant)) else {
             return;
@@ -1782,6 +1815,64 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.host.patch(NativeCode(site as usize), &jump);
         self.blocks[index].successors.swap_remove(position);
         self.statistics.links += 1;
+    }
+
+    /// Redirect block `index`'s RET through a lookup thunk, whose target
+    /// any fetch may have run: RET leaves BTYPE 0.
+    fn link_return(&mut self, index: usize) {
+        let block = &self.blocks[index];
+        let Some(site) = block.return_site.filter(|_| !block.variant.single) else {
+            return;
+        };
+        let retired = block.source_map.len() as u32;
+        if self.redirect_through_lookup(site, retired, None, ExitKind::Return) {
+            self.blocks[index].return_site = None;
+        }
+    }
+
+    /// Install a lookup thunk for the exit of `kind` at host address `site`
+    /// (to `target`, or the target in RAX) and jump there from the exit.
+    fn redirect_through_lookup(
+        &mut self,
+        site: u64,
+        retired: u32,
+        target: Option<GuestAddress>,
+        kind: ExitKind,
+    ) -> bool {
+        let control = &*self.chain as *const ChainControl as u64;
+        let Some(code) = chain::lookup_thunk(control, retired, target, kind) else {
+            return false;
+        };
+        let Ok(thunk) = self.host.install(&code) else {
+            return false;
+        };
+        let Some(jump) = chain::jump(site, thunk.0 as u64) else {
+            return false;
+        };
+        self.host.patch(NativeCode(site as usize), &jump);
+        self.statistics.lookups += 1;
+        true
+    }
+
+    /// The number of the context a fetch runs in now: the generations, the
+    /// EL with the guarded level, and the variant. Lookup entries name it.
+    fn context(&mut self, el: u8, variant: Variant) -> u64 {
+        let generations = (self.translation_generation, self.code_generation);
+        if self.context_generations != generations {
+            self.context_generations = generations;
+            self.contexts.clear();
+        }
+        if let Some(&(_, _, number)) = self
+            .contexts
+            .iter()
+            .find(|(other, kind, _)| *other == el && *kind == variant)
+        {
+            return number;
+        }
+        let number = self.next_context;
+        self.next_context += 1;
+        self.contexts.push((el, variant, number));
+        number
     }
 
     /// The checks before an instruction executes, in Arm's priority after PC
@@ -1997,6 +2088,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .then(|| self.cpu.svcr() & 1 != 0),
             system: self.native_system(),
         };
+        let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
+        self.chain.context = self.context(el, variant);
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
@@ -2004,6 +2097,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && entry.variant == variant
             && entry.generation == self.code_generation
         {
+            self.remember_target(pc, entry.block);
             return Ok(Fetched::Block(entry.block));
         }
         let index = match self.index.get(&(pc, physical, variant)) {
@@ -2020,7 +2114,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
             generation: self.code_generation,
             block: index,
         });
+        self.remember_target(pc, index);
         Ok(Fetched::Block(index))
+    }
+
+    /// Record that a fetch at `pc` runs block `index` in the current
+    /// context, for lookup thunks: not single-instruction blocks, which
+    /// debug checks precede, nor trace points, which the engine records.
+    fn remember_target(&mut self, pc: u64, index: usize) {
+        let block = &self.blocks[index];
+        if block.variant.single || self.traces.binary_search(&pc).is_ok() {
+            return;
+        }
+        self.targets[chain::lookup_slot(pc)] = chain::LookupEntry {
+            pc,
+            context: self.chain.context,
+            entry: block.code.0 as u64,
+            block: index as u64,
+        };
     }
 
     /// Compile the block at `pc`, unless its first instruction is a
@@ -2133,6 +2244,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 kind: exit.kind,
             })
             .collect();
+        // RET X<n> ends the code with its exit to the target in RAX.
+        let code_bytes = &compiled.native.x86_64_code;
+        let return_site = (!single
+            && terminal & 0xffff_fc1f == 0xd65f_0000
+            && code_bytes.ends_with(&chain::dynamic_exit(ExitKind::Return)))
+        .then(|| (code.0 + code_bytes.len() - chain::DYNAMIC_EXIT_BYTES) as u64);
         if !single {
             successors.extend(self.complete_pointer_natively(
                 code,
@@ -2160,6 +2277,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             checks,
             variant,
             successors,
+            return_site,
             terminal: (terminal_pc, terminal),
             taken: 0,
             source_bytes: compiled.source_bytes,
@@ -4895,12 +5013,14 @@ mod tests {
         }
         // The first block chains into the second, which exits to the first.
         let (blocks, retired) = (machine.statistics.blocks, machine.cpu.retired);
+        let current = *machine.chain;
         machine.host.chained = Some((
             &mut *machine.chain,
             ChainControl {
                 budget: CHAIN_LIMIT - 1,
                 retired: 2,
                 block: 1,
+                ..current
             },
         ));
         machine.host.exits = vec![direct(base)];
@@ -4913,18 +5033,98 @@ mod tests {
         // budget, chained the whole budget.
         let budget = machine.chain_budget();
         let (blocks, chained) = (machine.statistics.blocks, machine.statistics.chained);
+        let current = *machine.chain;
         machine.host.chained = Some((
             &mut *machine.chain,
             ChainControl {
                 budget: u64::MAX,
                 retired: 2 * budget,
                 block: 0,
+                ..current
             },
         ));
         machine.host.exits = vec![direct(base + 12)];
         machine.step().unwrap();
         assert_eq!(machine.statistics.chained, chained + budget);
         assert_eq!(machine.statistics.blocks, blocks + 1 + budget);
+    }
+
+    /// A direct exit out of its page and a RET are redirected through
+    /// lookup thunks at their first exits; every fetch records its block
+    /// under the context's number, which changes with the generations and
+    /// the EL and returns with neither changed.
+    #[test]
+    fn returns_and_exits_out_of_the_page_go_through_lookup_thunks() {
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const RET: u32 = 0xd65f_03c0;
+        let mut words = vec![0; 1026];
+        words[0] = 0x1400_0400; // b .+0x1000
+        words[1024] = ADD;
+        words[1025] = RET;
+        let mut machine = machine(&words);
+        let base = machine.cpu.pc;
+        let far = base + 0x1000;
+        let exit = |next_pc, kind: ExitKind| NativeExit::Exit {
+            next_pc,
+            kind: kind as u64,
+        };
+        machine.host.exits = vec![exit(far, ExitKind::Direct), exit(base, ExitKind::Return)];
+        machine.step().unwrap();
+        machine.step().unwrap();
+        assert_eq!(
+            (machine.statistics.lookups, machine.statistics.links),
+            (2, 0)
+        );
+        let control = &*machine.chain as *const ChainControl as u64;
+        let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
+        assert!(first.successors.is_empty() && first.return_site.is_none());
+        assert!(second.return_site.is_none());
+        let code = |block: &Block| &machine.host.installed[block.code.0 - 1];
+        // The branch's direct exit, then the RET's exit to RAX, ends each
+        // block's code.
+        let sites = [
+            first.code.0 + code(first).len() - chain::DIRECT_EXIT_BYTES,
+            second.code.0 + code(second).len() - chain::DYNAMIC_EXIT_BYTES,
+        ];
+        let thunks = [
+            chain::lookup_thunk(control, 1, Some(GuestAddress(far)), ExitKind::Direct),
+            chain::lookup_thunk(control, 2, None, ExitKind::Return),
+        ];
+        for (index, (site, thunk)) in sites.into_iter().zip(thunks).enumerate() {
+            let at = machine
+                .host
+                .installed
+                .iter()
+                .position(|installed| Some(installed) == thunk.as_ref())
+                .expect("the thunk is installed")
+                + 1;
+            let jump = chain::jump(site as u64, at as u64).unwrap().to_vec();
+            assert_eq!(machine.host.patches[index], (site, jump));
+        }
+        let context = machine.chain.context;
+        assert_ne!(context, 0);
+        for (pc, block) in [(base, 0), (far, 1)] {
+            let entry = machine.targets[chain::lookup_slot(pc)];
+            let expected = chain::LookupEntry {
+                pc,
+                context,
+                entry: machine.blocks[block].code.0 as u64,
+                block: block as u64,
+            };
+            assert_eq!(entry, expected);
+        }
+        // Another generation numbers the context anew; another EL too, and
+        // the same EL and generation give the same number back.
+        machine.translations_changed();
+        machine.host.exits = vec![exit(far, ExitKind::Direct)];
+        machine.step().unwrap();
+        let renewed = machine.chain.context;
+        assert!(renewed > context);
+        let variant = machine.blocks[0].variant;
+        let el = machine.cpu.pstate.el;
+        assert_eq!(machine.context(el, variant), renewed);
+        assert_ne!(machine.context(el ^ 1, variant), renewed);
+        assert_eq!(machine.context(el, variant), renewed);
     }
 
     #[test]

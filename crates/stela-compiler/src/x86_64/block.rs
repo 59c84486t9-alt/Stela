@@ -11,7 +11,7 @@ use crate::{
     block::{ExitKind, Terminator},
 };
 
-fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
+pub(super) fn exit_kind(code: &mut Vec<u8>, kind: ExitKind) {
     code.push(0xba); // mov edx,kind: zero-extends to the ABI's u64
     code.extend((kind as u32).to_le_bytes());
     code.push(0xc3);

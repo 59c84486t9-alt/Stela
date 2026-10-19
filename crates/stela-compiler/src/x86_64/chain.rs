@@ -11,6 +11,16 @@
 //! call returns, `block` is the block whose exit or fault ended the run.
 //! Thunks clobber only RAX, RCX, RDX and flags, which every direct exit
 //! already may.
+//!
+//! A [`lookup_thunk`] serves an exit whose successor is not in the block's
+//! page, or not static (a return): it finds the target in the engine's
+//! [`LookupEntry`] table, which the engine fills from its own dispatches
+//! and tags with the context they were valid in (`ChainControl::context`,
+//! everything that decides which block a fetch runs: the translation and
+//! code generations, the exception level and the block variant). A hit
+//! transfers like a thunk; a miss, another context or no budget exits
+//! exactly as the redirected exit would. It also clobbers R8, which no exit
+//! keeps live.
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
 
@@ -20,6 +30,13 @@ pub const DIRECT_EXIT_BYTES: usize = 16;
 pub const JUMP_BYTES: usize = 5;
 /// Bytes in a [`thunk`].
 pub const THUNK_BYTES: usize = 37 + DIRECT_EXIT_BYTES;
+/// Bytes in an exit to a dynamic target in RAX: `mov edx, kind; ret`.
+pub const DYNAMIC_EXIT_BYTES: usize = 6;
+/// Entries in the engine's lookup table, a power of two.
+pub const LOOKUP_ENTRIES: usize = 4096;
+/// Bytes in a [`lookup_thunk`], without and with its static target.
+pub const LOOKUP_THUNK_BYTES: usize = 79;
+pub const STATIC_LOOKUP_THUNK_BYTES: usize = LOOKUP_THUNK_BYTES + 10;
 
 /// A direct exit to a static successor in a block's code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,12 +58,44 @@ pub struct ChainControl {
     pub retired: u64,
     /// The index of the block running.
     pub block: u64,
+    /// The context the engine runs in now; lookup entries of another miss.
+    /// The engine never names a context 0.
+    pub context: u64,
+    /// The host address of the [`LookupEntry`] table.
+    pub table: u64,
+    /// Transfers lookup thunks made.
+    pub hits: u64,
+}
+
+/// One block a fetch at `pc` runs in `context`, or nothing in context 0.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LookupEntry {
+    pub pc: u64,
+    pub context: u64,
+    /// The block's code.
+    pub entry: u64,
+    /// The block's index.
+    pub block: u64,
+}
+
+/// The table slot of `pc`.
+pub const fn lookup_slot(pc: u64) -> usize {
+    (pc as usize >> 2) & (LOOKUP_ENTRIES - 1)
 }
 
 // `sub qword [rcx],1` addresses the budget at offset 0.
 const _: () = assert!(core::mem::offset_of!(ChainControl, budget) == 0);
 const RETIRED: u8 = core::mem::offset_of!(ChainControl, retired) as u8;
 const BLOCK: u8 = core::mem::offset_of!(ChainControl, block) as u8;
+const CONTEXT: u8 = core::mem::offset_of!(ChainControl, context) as u8;
+const TABLE: u8 = core::mem::offset_of!(ChainControl, table) as u8;
+const HITS: u8 = core::mem::offset_of!(ChainControl, hits) as u8;
+const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
+const _: () = assert!(core::mem::offset_of!(LookupEntry, pc) == 0);
+const ENTRY_CONTEXT: u8 = core::mem::offset_of!(LookupEntry, context) as u8;
+const ENTRY_CODE: u8 = core::mem::offset_of!(LookupEntry, entry) as u8;
+const ENTRY_BLOCK: u8 = core::mem::offset_of!(LookupEntry, block) as u8;
 
 /// A direct exit to `target` with `kind`, as every block emits it.
 pub fn direct_exit(target: GuestAddress, kind: ExitKind) -> [u8; DIRECT_EXIT_BYTES] {
@@ -90,6 +139,70 @@ pub fn thunk(
     code.extend(direct_exit(target, kind));
     debug_assert_eq!(code.len(), THUNK_BYTES);
     Some(code)
+}
+
+/// A lookup thunk for an exit of `kind` from a block of `retired`
+/// instructions, to `target` or, for `None`, to the target in RAX. `None`
+/// when `retired` exceeds its 32-bit field.
+pub fn lookup_thunk(
+    control: u64,
+    retired: u32,
+    target: Option<GuestAddress>,
+    kind: ExitKind,
+) -> Option<Vec<u8>> {
+    let retired = i32::try_from(retired).ok()?;
+    let mut code = Vec::with_capacity(STATIC_LOOKUP_THUNK_BYTES);
+    if let Some(target) = target {
+        code.extend([0x48, 0xb8]); // movabs rax,target
+        code.extend(target.0.to_le_bytes());
+    }
+    code.extend([0x48, 0xb9]); // movabs rcx,control
+    code.extend(control.to_le_bytes());
+    code.extend([0x89, 0xc2]); // mov edx,eax
+    code.extend([0xc1, 0xea, 0x02]); // shr edx,2
+    code.extend([0x81, 0xe2]); // and edx,LOOKUP_ENTRIES-1
+    code.extend((LOOKUP_ENTRIES as u32 - 1).to_le_bytes());
+    code.extend([0xc1, 0xe2, 0x05]); // shl edx,5
+    code.extend([0x48, 0x03, 0x51, TABLE]); // add rdx,[rcx+table]
+    let mut misses = Vec::new();
+    code.extend([0x48, 0x3b, 0x02]); // cmp rax,[rdx]
+    code.extend([0x75, 0]); // jne miss
+    misses.push(code.len());
+    code.extend([0x4c, 0x8b, 0x41, CONTEXT]); // mov r8,[rcx+context]
+    code.extend([0x4c, 0x3b, 0x42, ENTRY_CONTEXT]); // cmp r8,[rdx+context]
+    code.extend([0x75, 0]); // jne miss
+    misses.push(code.len());
+    code.extend([0x48, 0x83, 0x29, 0x01]); // sub qword [rcx],1
+    code.extend([0x72, 0]); // jb miss
+    misses.push(code.len());
+    code.extend([0x48, 0x81, 0x41, RETIRED]); // add qword [rcx+retired],imm32
+    code.extend(retired.to_le_bytes());
+    code.extend([0x48, 0x83, 0x41, HITS, 0x01]); // add qword [rcx+hits],1
+    code.extend([0x4c, 0x8b, 0x42, ENTRY_BLOCK]); // mov r8,[rdx+block]
+    code.extend([0x4c, 0x89, 0x41, BLOCK]); // mov [rcx+block],r8
+    code.extend([0xff, 0x62, ENTRY_CODE]); // jmp qword [rdx+entry]
+    for site in misses {
+        code[site - 1] = (code.len() - site) as u8;
+    }
+    code.push(0xba); // miss: mov edx,kind
+    code.extend((kind as u32).to_le_bytes());
+    code.push(0xc3); // ret
+    debug_assert_eq!(
+        code.len(),
+        if target.is_some() {
+            STATIC_LOOKUP_THUNK_BYTES
+        } else {
+            LOOKUP_THUNK_BYTES
+        }
+    );
+    Some(code)
+}
+
+/// The exit to a dynamic target in RAX that blocks end with.
+pub fn dynamic_exit(kind: ExitKind) -> [u8; DYNAMIC_EXIT_BYTES] {
+    let mut code = [0xba, 0, 0, 0, 0, 0xc3]; // mov edx,kind; ret
+    code[1..5].copy_from_slice(&(kind as u32).to_le_bytes());
+    code
 }
 
 /// `jmp rel32` at host address `at` to `to`, or `None` out of reach.
@@ -141,5 +254,106 @@ mod tests {
         assert_eq!(jump(0x1000, 0x1005), Some([0xe9, 0, 0, 0, 0]));
         assert_eq!(jump(0x1000, 0x1000), Some([0xe9, 0xfb, 0xff, 0xff, 0xff]));
         assert_eq!(jump(0, 1 << 32), None);
+    }
+
+    #[test]
+    fn dynamic_exits_match_the_block_emitter() {
+        let mut emitted = Vec::new();
+        super::super::block::exit_kind(&mut emitted, ExitKind::Return);
+        assert_eq!(emitted, dynamic_exit(ExitKind::Return));
+        assert_eq!(lookup_slot(0x4004), 1);
+        assert_eq!(lookup_slot(0x4000 + 4 * LOOKUP_ENTRIES as u64), 0);
+    }
+
+    /// Lookup thunks run on the host: a hit in the current context with
+    /// budget left counts and enters the entry's block; a miss, another
+    /// context or no budget exits with the target and kind.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn lookup_thunks_enter_current_entries_and_exit_otherwise() {
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        const BLOCK_AT: usize = 1024;
+        const TARGET: u64 = 0xffff_fe00_0123_4568;
+        let mut table = vec![LookupEntry::default(); LOOKUP_ENTRIES];
+        let mut control = ChainControl {
+            table: table.as_ptr() as u64,
+            context: 7,
+            ..ChainControl::default()
+        };
+        let control_at = &mut control as *mut ChainControl as u64;
+        // A target block that returns a marker; the dynamic thunk takes its
+        // target from the second argument; the static one names TARGET.
+        let block = [
+            0xb8, 0x51, 0x51, 0, 0, // mov eax,0x5151
+            0xba, 99, 0, 0, 0, // mov edx,99
+            0xc3,
+        ];
+        let dynamic = lookup_thunk(control_at, 9, None, ExitKind::Return).unwrap();
+        let fixed =
+            lookup_thunk(control_at, 3, Some(GuestAddress(TARGET)), ExitKind::Call).unwrap();
+        assert_eq!(fixed.len(), STATIC_LOOKUP_THUNK_BYTES);
+        assert_eq!(fixed[fixed.len() - 6..], dynamic_exit(ExitKind::Call));
+        // SAFETY: private anonymous memory, RX after the copies, unmapped
+        // at the end; the thunks touch only `control` and `table`.
+        unsafe {
+            let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+            assert_ne!(page as usize, usize::MAX);
+            let base = page as *mut u8;
+            let mut code = vec![0x48, 0x89, 0xf0]; // mov rax,rsi
+            code.extend(&dynamic);
+            let fixed_at = code.len();
+            code.extend(&fixed);
+            core::ptr::copy_nonoverlapping(code.as_ptr(), base, code.len());
+            core::ptr::copy_nonoverlapping(block.as_ptr(), base.add(BLOCK_AT), block.len());
+            assert_eq!(mprotect(page, PAGE, 5), 0);
+            type Thunk = unsafe extern "sysv64" fn(u64, u64) -> u128;
+            let dynamic: Thunk = core::mem::transmute(page);
+            let fixed: Thunk = core::mem::transmute(base.add(fixed_at));
+            let exit = |result: u128| (result as u64, (result >> 64) as u64);
+            let entry = LookupEntry {
+                pc: TARGET,
+                context: 7,
+                entry: base.add(BLOCK_AT) as u64,
+                block: 42,
+            };
+            table[lookup_slot(TARGET)] = entry;
+            control.budget = 2;
+            assert_eq!(exit(dynamic(0, TARGET)), (0x5151, 99));
+            assert_eq!(
+                (control.budget, control.retired, control.hits, control.block),
+                (1, 9, 1, 42)
+            );
+            assert_eq!(exit(fixed(0, 0)), (0x5151, 99));
+            assert_eq!((control.budget, control.retired, control.hits), (0, 12, 2));
+            // No budget left: the budget wraps and the exit is taken.
+            assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!((control.budget, control.retired), (u64::MAX, 12));
+            control.budget = 5;
+            // Another PC in the slot, and another context, miss.
+            let other = TARGET + 4 * LOOKUP_ENTRIES as u64;
+            assert_eq!(exit(dynamic(0, other)), (other, ExitKind::Return as u64));
+            table[lookup_slot(TARGET)].context = 6;
+            assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(exit(fixed(0, 0)), (TARGET, ExitKind::Call as u64));
+            assert_eq!((control.budget, control.hits, control.block), (5, 2, 42));
+            assert_eq!(munmap(page, PAGE), 0);
+        }
     }
 }

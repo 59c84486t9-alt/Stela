@@ -342,12 +342,18 @@ task_a:
 task_b:
     mov x8, #1
 1:  mov x9, #0
-2:  add x9, x9, #1
+2:  bl increment                        // a call out of the 4 KiB page
     str x9, [sp, #-16]!
     ldr x10, [sp], #16
     tst x9, #0xff
     b.ne 2b
     svc #1
     b 2b
+// The next 4 KiB page of the user text (USER_VA + 0x1000): the call to it
+// and the return from it go through the engine's lookup thunks.
+.org user_start + 0x1000
+increment:
+    add x9, x9, #1
+    ret
 .balign 16
 user_end:
