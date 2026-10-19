@@ -36,7 +36,7 @@
 
 pub mod channel;
 pub mod event;
-pub mod exec;
+
 pub mod firmware;
 pub mod initdata;
 pub mod isa;

@@ -73,7 +73,7 @@ fn read(xnu: &std::path::Path, relative: &str) -> Result<String> {
 }
 
 /// `rustfmt` the generated text, as the checked-in tables are formatted.
-fn rustfmt(text: &str) -> Result<String> {
+pub(crate) fn rustfmt(text: &str) -> Result<String> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("generated.rs");
     std::fs::write(&path, text)?;

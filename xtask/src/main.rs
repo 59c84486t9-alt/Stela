@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod agx_isa;
 mod amx;
 mod bench;
 mod boot;
@@ -15,6 +16,7 @@ mod progress;
 mod soc_facts;
 mod system_matrix;
 mod tools;
+mod xml;
 
 #[derive(Parser)]
 #[command(about = "Stela development tasks")]
@@ -50,6 +52,8 @@ enum Task {
     /// Derive the per-SoC facts of a universal macOS IPSW's SPTM, TXM,
     /// kernelcache and DeviceTree builds.
     SocFacts(soc_facts::SocFacts),
+    /// Generate the AGX2 shader ISA tables from Mesa's AGX2.xml.
+    AgxIsa(agx_isa::AgxIsa),
     /// Audit the native code of Arm's data-independent-time instructions
     /// against Intel's data operand independent timing list.
     DitAudit(dit::DitAudit),
@@ -73,6 +77,7 @@ fn main() -> ExitCode {
         Task::SystemMatrix(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::SocFacts(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
