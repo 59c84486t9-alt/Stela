@@ -194,10 +194,72 @@ pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
     effects(operation)
 }
 
-pub fn prefix_clean_load_effects(instructions: &[Instruction]) -> Vec<Effects> {
+/// [`clean_load_effects`], and the stores whose shared recipe is one host
+/// store per element and no page-crossing split: byte stores with an
+/// X-register or SP base, and, under SCTLR_ELx.SA (`stack_alignment`), SP
+/// stores and pairs whose offset is a multiple of the element size, which
+/// the checked SP alignment keeps within a page (`memory_store::
+/// aligned_immediate`). None writes back.
+pub fn clean_access_effects(operation: &Operation, stack_alignment: bool) -> Option<Effects> {
+    let aligned_sp = |base: Register, bytes: u8, displacement: i32| {
+        base == Register::Sp && stack_alignment && displacement % i32::from(bytes) == 0
+    };
+    let data_reads = |data: &[Register]| {
+        data.iter()
+            .filter_map(|&register| slot(register))
+            .fold(0, |mask, guest| mask | (1 << guest))
+    };
+    match *operation {
+        Operation::Memory {
+            transfer: MemoryTransfer::Store,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode: AddressMode::Offset,
+        } if matches!(
+            bytes,
+            BYTE_LOAD_BYTES | HALFWORD_LOAD_BYTES | WORD_LOAD_BYTES | DOUBLEWORD_LOAD_BYTES
+        ) && (bytes == BYTE_LOAD_BYTES || aligned_sp(base, bytes, displacement))
+            && valid(data)
+            && data != Register::Sp =>
+        {
+            Some(Effects {
+                reads: (1 << slot(base)?) | data_reads(&[data]),
+                writes: 0,
+            })
+        }
+        Operation::MemoryPair {
+            transfer: MemoryTransfer::Store,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode: AddressMode::Offset,
+        } if matches!(bytes, WORD_LOAD_BYTES | DOUBLEWORD_LOAD_BYTES)
+            && aligned_sp(base, bytes, displacement)
+            && (-PAIR_OFFSET_HALF_RANGE..PAIR_OFFSET_HALF_RANGE)
+                .contains(&(displacement / i32::from(bytes)))
+            && data
+                .iter()
+                .all(|&register| valid(register) && register != Register::Sp) =>
+        {
+            Some(Effects {
+                reads: (1 << slot(base)?) | data_reads(&data),
+                writes: 0,
+            })
+        }
+        _ => clean_load_effects(operation),
+    }
+}
+
+pub fn prefix_clean_access_effects(
+    instructions: &[Instruction],
+    stack_alignment: bool,
+) -> Vec<Effects> {
     instructions
         .iter()
-        .map_while(|instruction| clean_load_effects(&instruction.operation))
+        .map_while(|instruction| clean_access_effects(&instruction.operation, stack_alignment))
         .collect()
 }
 
@@ -295,6 +357,7 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     const REX_R8_WORD: u8 = 0x44;
     const REX_R8_DOUBLEWORD: u8 = 0x4c;
     const R8D_FROM_RAX_DISP8: u8 = 0x40;
+    const MOV_BYTE_STORE: u8 = 0x88;
 
     let mut cursor = 0usize;
     let mut ends = vec![];
@@ -403,6 +466,37 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
             )
         {
             // Exact second unsigned W or X pair load into R8.
+            cursor += 2;
+        } else if opcode == MOV_BYTE_STORE
+            && !word
+            && rex.is_none()
+            && code.get(cursor).copied() == Some(ECX_FROM_RAX_MEMORY)
+        {
+            // Exact selected STRB store of CL to [RAX].
+            cursor += 1;
+        } else if opcode == MOV_STORE
+            && code.get(cursor).copied() == Some(ECX_FROM_RAX_MEMORY)
+            && match rex {
+                None => true,
+                Some(rex) => !word && rex == REX_X64_LOW_REGISTERS,
+            }
+        {
+            // Exact selected H/W/X store of RCX to [RAX].
+            cursor += 1;
+        } else if opcode == MOV_STORE
+            && !word
+            && matches!(
+                (rex, code.get(cursor..cursor + 2)),
+                (
+                    Some(REX_R8_WORD),
+                    Some([R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES])
+                ) | (
+                    Some(REX_R8_DOUBLEWORD),
+                    Some([R8D_FROM_RAX_DISP8, DOUBLEWORD_LOAD_BYTES])
+                )
+            )
+        {
+            // Exact second W or X pair store of R8.
             cursor += 2;
         } else if opcode == NOP && !word && rex.is_none() {
             // Exact single-byte NOP only.

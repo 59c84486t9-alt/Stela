@@ -354,8 +354,12 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
 }
 
 fn check_frame_store(code: &[u8], start: usize, guest: usize, rex: u8, modrm: u8) -> Option<usize> {
+    check_frame_access(code, start, guest, [rex, MOV_STORE, modrm])
+}
+
+fn check_frame_access(code: &[u8], start: usize, guest: usize, opcode: [u8; 3]) -> Option<usize> {
     let end = start.checked_add(FRAME_STORE_BYTES)?;
-    if code.get(start..start + 3)? != [rex, MOV_STORE, modrm]
+    if code.get(start..start + 3)? != opcode
         || code.get(start + 3..end)?
             != u32::try_from(guest.checked_mul(GPR_BYTES)?)
                 .ok()?
@@ -445,6 +449,116 @@ pub fn ordinary_pair_load_ends(
         }
     }
     (code.len() == end).then_some(ends)
+}
+
+/// The data of a store element staged in RCX (`second` false) or R8: its
+/// frame load, or zero for ZR.
+fn check_store_data(
+    code: &[u8],
+    start: usize,
+    guest: Option<usize>,
+    second: bool,
+) -> Option<usize> {
+    const ZERO_ECX: [u8; 2] = [0x31, 0xc9];
+    const ZERO_R8D: [u8; 3] = [REX | REX_R | REX_B, 0x31, 0xc0];
+    match (guest, second) {
+        (Some(guest), false) => check_frame_access(
+            code,
+            start,
+            guest,
+            [REX | REX_W, MOV_LOAD, FRAME_DISP32_FROM_RCX],
+        ),
+        (Some(guest), true) => check_frame_access(
+            code,
+            start,
+            guest,
+            [REX | REX_W | REX_R, MOV_LOAD, FRAME_DISP32_FROM_R8],
+        ),
+        (None, false) => code
+            .get(start..)?
+            .starts_with(&ZERO_ECX)
+            .then_some(start + ZERO_ECX.len()),
+        (None, true) => code
+            .get(start..)?
+            .starts_with(&ZERO_R8D)
+            .then_some(start + ZERO_R8D.len()),
+    }
+}
+
+/// The exact shared store of one element staged in RCX to [RAX], without
+/// the page-crossing split.
+fn single_store(bytes: u8) -> Option<&'static [u8]> {
+    const OPERAND_SIZE: u8 = 0x66;
+    const MOV_BYTE_STORE: u8 = 0x88;
+    Some(match bytes {
+        BYTE_LOAD_BYTES => &[MOV_BYTE_STORE, ECX_FROM_RAX_MEMORY],
+        HALFWORD_LOAD_BYTES => &[OPERAND_SIZE, MOV_STORE, ECX_FROM_RAX_MEMORY],
+        WORD_LOAD_BYTES => &[MOV_STORE, ECX_FROM_RAX_MEMORY],
+        DOUBLEWORD_LOAD_BYTES => &[REX | REX_W, MOV_STORE, ECX_FROM_RAX_MEMORY],
+        _ => return None,
+    })
+}
+
+/// Inspect the exact shared store: address, the data's frame load (or
+/// zero) into RCX, and one host store. Also the index of the data's segment
+/// in the ends.
+pub fn ordinary_store_ends(
+    code: &[u8],
+    bytes: u8,
+    base: usize,
+    data: Option<usize>,
+    displacement: i32,
+) -> Option<(Vec<usize>, usize)> {
+    let mut ends = ordinary_address_ends(code, base, displacement)?;
+    let data_segment = ends.len();
+    let data_end = check_store_data(code, *ends.last()?, data, false)?;
+    ends.push(data_end);
+    let store = single_store(bytes)?;
+    let end = data_end + store.len();
+    if code.get(data_end..end)? != store {
+        return None;
+    }
+    ends.push(end);
+    (code.len() == end).then_some((ends, data_segment))
+}
+
+/// Inspect the exact shared W or X pair store: address, both elements'
+/// data in RCX and R8, then one host store each, first element first. Also
+/// the index of the first element's data segment in the ends.
+pub fn ordinary_pair_store_ends(
+    code: &[u8],
+    bytes: u8,
+    base: usize,
+    data: [Option<usize>; 2],
+    displacement: i32,
+) -> Option<(Vec<usize>, usize)> {
+    let second: [u8; 4] = match bytes {
+        WORD_LOAD_BYTES => [REX | REX_R, MOV_STORE, R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES],
+        DOUBLEWORD_LOAD_BYTES => [
+            REX | REX_W | REX_R,
+            MOV_STORE,
+            R8D_FROM_RAX_DISP8,
+            DOUBLEWORD_LOAD_BYTES,
+        ],
+        _ => return None,
+    };
+    let mut ends = ordinary_address_ends(code, base, displacement)?;
+    let data_segment = ends.len();
+    let mut end = *ends.last()?;
+    for (index, guest) in data.into_iter().enumerate() {
+        end = check_store_data(code, end, guest, index == 1)?;
+        ends.push(end);
+    }
+    let first = single_store(bytes)?;
+    for store in [first, &second[..]] {
+        let start = end;
+        end += store.len();
+        if code.get(start..end)? != store {
+            return None;
+        }
+        ends.push(end);
+    }
+    (code.len() == end).then_some((ends, data_segment))
 }
 
 /// Native conditions after a full-width ARM subtraction (C is inverted CF).

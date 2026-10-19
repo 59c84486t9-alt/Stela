@@ -51,6 +51,8 @@ pub struct AllocationStats {
     pub load_boundary_stores: usize,
     pub clean_loads: usize,
     pub pair_loads: usize,
+    /// Stores and store pairs.
+    pub stores: usize,
     pub input_cache_loads: usize,
     pub address_cache_hits: usize,
     pub flag_loads: usize,
@@ -282,6 +284,104 @@ impl Emitter<'_> {
         self.output.stats.commits += 1;
     }
 
+    /// A store whose shared recipe is one host store per element
+    /// ([`analysis::clean_access_effects`]). Every dirty value settles
+    /// first, so a fault finds the frame exact. A resident base or data
+    /// value supplies its register without a frame reload; a data value
+    /// staged from the frame stays in RCX (R8 for a pair's second element)
+    /// as a clean copy.
+    fn clean_store(
+        &mut self,
+        bytes: u8,
+        data: &[Register],
+        base: Register,
+        displacement: i32,
+        mode: AddressMode,
+    ) -> Result<(), RegionError> {
+        const STAGING: [HostGpr; 2] = [HostGpr::Rcx, HostGpr::R8];
+        let base_slot = slot(base).expect("eligible base");
+        let mut raw = vec![];
+        let selected = if let &[first, second] = data {
+            super::memory_pair(
+                &mut raw,
+                self.memory_checks(),
+                MemoryTransfer::Store,
+                bytes,
+                [first, second],
+                base,
+                displacement,
+                mode,
+            );
+            encoding::ordinary_pair_store_ends(
+                &raw,
+                bytes,
+                base_slot,
+                [slot(first), slot(second)],
+                displacement,
+            )
+        } else {
+            super::memory(
+                &mut raw,
+                self.memory_checks(),
+                MemoryTransfer::Store,
+                bytes,
+                data[0],
+                base,
+                displacement,
+                mode,
+            );
+            encoding::ordinary_store_ends(&raw, bytes, base_slot, slot(data[0]), displacement)
+        };
+        let (ends, data_segment) = selected.ok_or(RegionError::ChangedMemoryEncoding)?;
+        let cached_base = self.cached(base);
+        // The guest range check and the first element overwrite RCX, and
+        // the second element R8, before a staged value would be read.
+        let cached_data: Vec<Option<HostGpr>> = data
+            .iter()
+            .map(|&register| self.cached(register).filter(|host| !STAGING.contains(host)))
+            .collect();
+        let clobbers = STAGING[..data.len()]
+            .iter()
+            .fold(0, |mask, host| mask | host.mask());
+        self.settle_before_load(clobbers, &[]);
+        let mut start = 0;
+        for (segment, end) in ends.into_iter().enumerate() {
+            let element = segment
+                .checked_sub(data_segment)
+                .filter(|&index| index < data.len());
+            let copy = match element {
+                _ if segment == 0 => cached_base.map(|host| (HostGpr::Rax, host)),
+                Some(index) => cached_data[index].map(|host| (STAGING[index], host)),
+                None => None,
+            };
+            if let Some((destination, host)) = copy {
+                self.emit(|code| encoding::copy(code, destination, host, Width::X64));
+                if segment == 0 {
+                    self.output.stats.address_cache_hits += 1;
+                }
+            } else {
+                self.emit(|code| code.extend_from_slice(&raw[start..end]));
+            }
+            start = end;
+        }
+        for (index, &register) in data.iter().enumerate() {
+            if cached_data[index].is_none()
+                && !data[..index].contains(&register)
+                && slot(register).is_some_and(|guest| {
+                    !self
+                        .resident
+                        .iter()
+                        .any(|value| value.is_some_and(|value| value.guest == guest))
+                })
+            {
+                self.retain_clean_result(register, STAGING[index]);
+            }
+        }
+        self.output.stats.stores += 1;
+        self.output.stats.commits += 1;
+        Ok(())
+    }
+
     fn clean_load(
         &mut self,
         transfer: MemoryTransfer,
@@ -482,6 +582,26 @@ impl Emitter<'_> {
             return Ok(());
         }
         match instruction.operation {
+            Operation::Memory {
+                transfer: MemoryTransfer::Store,
+                bytes,
+                data,
+                base,
+                displacement,
+                mode,
+            } => {
+                self.clean_store(bytes, &[data], base, displacement, mode)?;
+            }
+            Operation::MemoryPair {
+                transfer: MemoryTransfer::Store,
+                bytes,
+                data,
+                base,
+                displacement,
+                mode,
+            } => {
+                self.clean_store(bytes, &data, base, displacement, mode)?;
+            }
             Operation::Memory {
                 transfer,
                 bytes,
@@ -863,7 +983,7 @@ fn emit_prefix_selected<'a>(
         return Err(RegionError::Misaligned);
     }
     let effects = if clean_loads {
-        analysis::prefix_clean_load_effects(instructions)
+        analysis::prefix_clean_access_effects(instructions, stack_alignment)
     } else {
         prefix_effects(instructions)
     };
@@ -2004,6 +2124,227 @@ mod tests {
                 })
                 .is_none()
             );
+        }
+    }
+
+    fn store(bytes: u8, data: Register, base: Register, displacement: i32) -> Operation {
+        Operation::Memory {
+            transfer: MemoryTransfer::Store,
+            bytes,
+            data,
+            base,
+            displacement,
+            mode: AddressMode::Offset,
+        }
+    }
+
+    fn store_pair(bytes: u8, data: [Register; 2], displacement: i32) -> Operation {
+        Operation::MemoryPair {
+            transfer: MemoryTransfer::Store,
+            bytes,
+            data,
+            base: Register::Sp,
+            displacement,
+            mode: AddressMode::Offset,
+        }
+    }
+
+    /// Stores settle every dirty value first, take resident bases and data
+    /// from their registers, keep a value staged from the frame clean in
+    /// RCX, and pass the cost gate against the unchanged emitter.
+    #[test]
+    fn stores_settle_first_and_reuse_resident_values() {
+        // sub sp,sp,#32; add x9,x9,#1; add x9,x9,#1; str x9,[sp,#8];
+        // stp x9,x10,[sp,#16]; strb w11,[x2,#3]; add x11,x11,#1;
+        // strh wzr,[sp,#2]
+        let instructions = [
+            instruction(
+                0,
+                Operation::AddSub {
+                    width: Width::X64,
+                    subtract: true,
+                    flags: false,
+                    destination: Register::Sp,
+                    source: Register::Sp,
+                    immediate: 32,
+                },
+            ),
+            instruction(1, add(Register::X(9), Register::X(9))),
+            instruction(2, add(Register::X(9), Register::X(9))),
+            instruction(
+                3,
+                store(DOUBLEWORD_LOAD_BYTES, Register::X(9), Register::Sp, 8),
+            ),
+            instruction(
+                4,
+                store_pair(DOUBLEWORD_LOAD_BYTES, [Register::X(9), Register::X(10)], 16),
+            ),
+            instruction(
+                5,
+                store(BYTE_LOAD_BYTES, Register::X(11), Register::X(2), 3),
+            ),
+            instruction(6, add(Register::X(11), Register::X(11))),
+            instruction(
+                7,
+                store(HALFWORD_LOAD_BYTES, Register::Zero, Register::Sp, 2),
+            ),
+        ];
+        let region = emit_clean_load_prefix(&instructions, true, None).unwrap();
+        assert_eq!(region.consumed_instructions, instructions.len());
+        assert_eq!(region.stats.stores, 4);
+        // SP and X9 are dirty before the first store, and X11, whose staged
+        // copy in RCX the ADD changes, before the last.
+        assert_eq!(region.stats.load_boundary_stores, 3);
+        assert_eq!(region.stats.address_cache_hits, 3);
+        let contains = |bytes: &[u8]| {
+            region
+                .code
+                .windows(bytes.len())
+                .any(|window| window == bytes)
+        };
+        assert!(contains(&[0x48, 0x89, 0x08]));
+        assert!(contains(&[0x4c, 0x89, 0x40, 0x08]));
+        assert!(contains(&[0x88, 0x08]));
+        assert!(contains(&[0x66, 0x89, 0x08]));
+        let mut baseline = vec![];
+        for instruction in &instructions {
+            super::super::emit_instruction(
+                &mut baseline,
+                instruction,
+                &mut vec![],
+                crate::TargetCpu::Baseline,
+                super::super::MemoryChecks::DEFAULT,
+            );
+        }
+        assert!(admits_ordinary(&region, &baseline));
+    }
+
+    /// Stores that may split at a page, or whose SP alignment is not
+    /// checked, end the region.
+    #[test]
+    fn stores_that_may_cross_a_page_are_not_selected() {
+        let selected = |operation, stack_alignment| {
+            analysis::clean_access_effects(&operation, stack_alignment).is_some()
+        };
+        let sp = Register::Sp;
+        let x = Register::X(3);
+        let data = Register::X(4);
+        assert!(selected(store(BYTE_LOAD_BYTES, data, x, 1), false));
+        assert!(selected(store(WORD_LOAD_BYTES, data, sp, 12), true));
+        assert!(selected(
+            store_pair(WORD_LOAD_BYTES, [data, data], -64),
+            true
+        ));
+        assert_eq!(
+            analysis::clean_access_effects(&store(BYTE_LOAD_BYTES, Register::Zero, sp, 0), true),
+            Some(analysis::Effects {
+                reads: 1 << 31,
+                writes: 0
+            })
+        );
+        for (operation, stack_alignment) in [
+            (store(DOUBLEWORD_LOAD_BYTES, data, x, 8), true),
+            (store(HALFWORD_LOAD_BYTES, data, x, 2), true),
+            (store(DOUBLEWORD_LOAD_BYTES, data, sp, 8), false),
+            (store(DOUBLEWORD_LOAD_BYTES, data, sp, 4), true),
+            (store_pair(DOUBLEWORD_LOAD_BYTES, [data, data], 16), false),
+            (store_pair(DOUBLEWORD_LOAD_BYTES, [data, data], 12), true),
+            (store_pair(DOUBLEWORD_LOAD_BYTES, [data, data], 512), true),
+            (
+                Operation::MemoryPair {
+                    transfer: MemoryTransfer::Store,
+                    bytes: DOUBLEWORD_LOAD_BYTES,
+                    data: [data, data],
+                    base: x,
+                    displacement: 16,
+                    mode: AddressMode::Offset,
+                },
+                true,
+            ),
+            (
+                Operation::Memory {
+                    transfer: MemoryTransfer::Store,
+                    bytes: BYTE_LOAD_BYTES,
+                    data,
+                    base: sp,
+                    displacement: 16,
+                    mode: AddressMode::PreIndex,
+                },
+                true,
+            ),
+        ] {
+            assert!(!selected(operation, stack_alignment));
+        }
+    }
+
+    #[test]
+    fn shared_store_recipes_reject_any_change() {
+        for (bytes, base) in [
+            (BYTE_LOAD_BYTES, Register::X(15)),
+            (BYTE_LOAD_BYTES, Register::Sp),
+            (HALFWORD_LOAD_BYTES, Register::Sp),
+            (WORD_LOAD_BYTES, Register::Sp),
+            (DOUBLEWORD_LOAD_BYTES, Register::Sp),
+        ] {
+            for data in [Register::X(16), Register::Zero] {
+                let mut raw = vec![];
+                super::super::memory(
+                    &mut raw,
+                    super::super::MemoryChecks::DEFAULT,
+                    MemoryTransfer::Store,
+                    bytes,
+                    data,
+                    base,
+                    -16,
+                    AddressMode::Offset,
+                );
+                let ends = |raw: &[u8], bytes| {
+                    encoding::ordinary_store_ends(raw, bytes, slot(base).unwrap(), slot(data), -16)
+                };
+                let (selected, _) = ends(&raw, bytes).unwrap();
+                assert_eq!(selected.last(), Some(&raw.len()));
+                for index in 0..raw.len() {
+                    let mut changed = raw.clone();
+                    changed[index] ^= 1;
+                    assert!(ends(&changed, bytes).is_none());
+                }
+                for other in [
+                    BYTE_LOAD_BYTES,
+                    HALFWORD_LOAD_BYTES,
+                    WORD_LOAD_BYTES,
+                    DOUBLEWORD_LOAD_BYTES,
+                ] {
+                    assert_eq!(ends(&raw, other).is_some(), other == bytes);
+                }
+            }
+        }
+        for bytes in [WORD_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES] {
+            for data in [
+                [Register::X(16), Register::X(17)],
+                [Register::Zero, Register::X(16)],
+                [Register::X(16), Register::Zero],
+            ] {
+                let mut raw = vec![];
+                super::super::memory_pair(
+                    &mut raw,
+                    super::super::MemoryChecks::DEFAULT,
+                    MemoryTransfer::Store,
+                    bytes,
+                    data,
+                    Register::Sp,
+                    -16,
+                    AddressMode::Offset,
+                );
+                let ends = |raw: &[u8], bytes| {
+                    encoding::ordinary_pair_store_ends(raw, bytes, 31, data.map(slot), -16)
+                };
+                assert!(ends(&raw, bytes).is_some());
+                for index in 0..raw.len() {
+                    let mut changed = raw.clone();
+                    changed[index] ^= 1;
+                    assert!(ends(&changed, bytes).is_none());
+                }
+            }
         }
     }
 

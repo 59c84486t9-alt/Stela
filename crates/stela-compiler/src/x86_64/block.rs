@@ -601,6 +601,7 @@ mod tests {
             total.load_boundary_stores += s.load_boundary_stores;
             total.clean_loads += s.clean_loads;
             total.pair_loads += s.pair_loads;
+            total.stores += s.stores;
             total.flag_loads += s.flag_loads;
             total.flag_stores += s.flag_stores;
         };
