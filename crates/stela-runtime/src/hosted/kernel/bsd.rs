@@ -14,6 +14,7 @@ use crate::darwin::{BsdReturnType, catalog};
 use crate::hosted::forward;
 use anyhow::{Result, anyhow, bail};
 
+pub(super) mod additions;
 mod codesign;
 mod forwarded;
 pub(super) mod kqworkloop;
@@ -108,8 +109,20 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
     let start = usize::from(indirect);
     let mut arguments = [0u64; forward::MAX_ARGUMENTS];
     arguments.copy_from_slice(&registers[start..start + forward::MAX_ARGUMENTS]);
+    Trap { cpu: &mut pe.cpu }.set_carry(false);
+    // The 26A434 additions lie at numbers the pinned catalog reserves.
+    if let Some(name) = additions::addition(number) {
+        kernel.count(name);
+        let (return_type, outcome) = additions::call(kernel, pe, number, name, &arguments)?;
+        if kernel.trace {
+            eprintln!("stela: bsd {name}({arguments:x?}) = {outcome:x?}");
+        }
+        if kernel.end.is_some() {
+            return Ok(());
+        }
+        return complete(&mut Trap { cpu: &mut pe.cpu }, return_type, outcome);
+    }
     let mut trap = Trap { cpu: &mut pe.cpu };
-    trap.set_carry(false);
     let entry = catalog::entry(number);
     let Some(entry) = entry.filter(|entry| entry.prototype().is_some()) else {
         // `enosys` rows fail quietly; `nosys` and numbers past the table
@@ -173,6 +186,7 @@ pub(crate) enum Family {
     Threads,
     Workqueue,
     Signals,
+    Additions,
 }
 
 impl Family {
@@ -187,6 +201,7 @@ impl Family {
             Self::Threads => "threads",
             Self::Workqueue => "workqueue",
             Self::Signals => "signals",
+            Self::Additions => "26A434 additions",
         }
     }
 }
@@ -421,7 +436,9 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         Some(Family::Threads) => thread::call(kernel, pe, call)?,
         Some(Family::Workqueue) => workqueue::call(kernel, pe, call)?,
         Some(Family::Signals) => signal::call(kernel, call)?,
-        None => None,
+        // The additions have no catalog row: [`call`] dispatches them by
+        // number.
+        Some(Family::Additions) | None => None,
     };
     outcome.ok_or_else(|| {
         let reason = REFUSED

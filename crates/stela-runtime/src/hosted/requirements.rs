@@ -123,10 +123,13 @@ fn bsd_rows() -> impl Iterator<Item = Row> {
                 "syscall (indirect)".to_owned(),
                 ("dispatcher".into(), Status::Implemented, None),
             ),
-            _ => (
-                stub_name(site.stub),
-                ("refused".into(), Status::Refused(ADDITION), None),
-            ),
+            _ => match services::bsd_addition(site.number) {
+                Some((name, service, limit)) => (name.to_owned(), self::status(service, limit)),
+                None => (
+                    stub_name(site.stub),
+                    ("refused".into(), Status::Refused(ADDITION), None),
+                ),
+            },
         };
         Row {
             area: Area::Bsd,
@@ -438,10 +441,14 @@ mod tests {
         assert_eq!(find(Area::Bsd, "mmap").service, "memory");
         assert_eq!(find(Area::Bsd, "sys_sysctlbyname").service, "sysctl");
         assert!(matches!(find(Area::Bsd, "fork").status, Status::Refused(_)));
-        assert!(matches!(
-            find(Area::Bsd, "pipe2").status,
-            Status::Refused(ADDITION)
-        ));
+        // Each 26A434 addition is serviced by its family or refused by name.
+        for name in ["pipe2", "dup3", "getumask", "register_uexc_handler"] {
+            let row = find(Area::Bsd, name);
+            assert!(
+                row.service == "26A434 additions" || row.status == Status::Refused(ADDITION),
+                "{name}"
+            );
+        }
         assert_eq!(
             find(Area::Mach, "mach_absolute_time").status,
             Status::Implemented

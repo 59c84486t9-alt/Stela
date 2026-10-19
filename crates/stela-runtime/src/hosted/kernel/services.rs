@@ -45,6 +45,23 @@ pub fn bsd(name: &str) -> (Service, Option<&'static str>) {
     (service, find(bsd::LIMITS, name))
 }
 
+/// The 26A434 addition at the BSD number `number`, a number the pinned
+/// catalog reserves: its name, service and named limit.
+pub fn bsd_addition(number: u32) -> Option<(&'static str, Service, Option<&'static str>)> {
+    use bsd::additions;
+    let name = additions::addition(u16::try_from(number).ok()?)?;
+    let service = if additions::CALLS.contains(&name) {
+        Service::Modeled {
+            family: bsd::Family::Additions.name(),
+        }
+    } else {
+        Service::Refused {
+            reason: additions::UNIMPLEMENTED,
+        }
+    };
+    Some((name, service, find(additions::LIMITS, name)))
+}
+
 /// The Mach trap `name` of the pinned catalog, and its named limit.
 pub fn mach(name: &str) -> (Service, Option<&'static str>) {
     let service = match mach::forwarded(name) {
