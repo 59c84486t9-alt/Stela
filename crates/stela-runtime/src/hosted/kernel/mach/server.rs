@@ -86,6 +86,11 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     ),
     (Object::Host, "host_get_special_port", Some("the host port")),
     (
+        Object::Host,
+        "host_get_io_main",
+        Some("the IOKit main port is the host's: its registry describes the x86 host"),
+    ),
+    (
         Object::Task,
         "task_info_from_user",
         Some("the TASK_AUDIT_TOKEN flavor"),
@@ -163,6 +168,10 @@ pub(super) fn serve(
         }
         // `node`, `which`. The host port is the host's, already this
         // process's host kernel object.
+        // The IOKit main port. IOKit's own requests then go to the host's
+        // registry, whose serialized properties have one layout in both
+        // ABIs but describe the x86 machine.
+        (Object::Host, "host_get_io_main", false) => Reply::Forward,
         (Object::Host, "host_get_special_port", false) => {
             let (Some(node), Some(which)) = (request.word(8), request.word(12)) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
