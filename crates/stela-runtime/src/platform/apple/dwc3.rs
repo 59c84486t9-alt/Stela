@@ -25,7 +25,9 @@
 //! personality like a core reset; OTG and the reserved selection refuse.
 //! The host personality's registers (`xhci`) occupy the core's first
 //! 4 KiB; host interrupter n shares event buffer n's wire, and a GCTL core
-//! soft reset resets both personalities.
+//! soft reset resets both personalities. The Apple registers the host
+//! driver programs around the core are `apple`'s.
+mod apple;
 mod regs;
 pub mod xhci;
 
@@ -133,6 +135,7 @@ pub struct Dwc3 {
     connected: bool,
     poisoned: bool,
     host: xhci::Xhci,
+    apple: apple::Registers,
 }
 
 impl Dwc3 {
@@ -160,6 +163,7 @@ impl Dwc3 {
             connected: false,
             poisoned: false,
             host: xhci::Xhci::new(),
+            apple: apple::Registers::default(),
         }
     }
 
@@ -246,6 +250,12 @@ impl Dwc3 {
     /// Host personality work (a doorbell, events to post) waits for DMA.
     pub fn host_pending(&self) -> bool {
         self.host.pending()
+    }
+
+    /// The system count at which the host personality next has an event
+    /// to post on its own.
+    pub fn host_deadline(&self) -> Option<u64> {
+        self.host.deadline()
     }
 
     fn interrupts(&mut self, access: &mut Access<'_>) {
@@ -713,6 +723,10 @@ impl MmioDevice for Dwc3 {
                     field => ep.parameters[(field / 4) as usize],
                 }
             }
+            at if apple::Registers::claims(at) => self
+                .apple
+                .read(at)
+                .map_err(|why| Self::error(offset, Direction::Read, why))?,
             _ => {
                 return Err(Self::error(
                     offset,
@@ -750,15 +764,18 @@ impl MmioDevice for Dwc3 {
         let err = |why| Self::error(offset, Direction::Write, why);
         match offset {
             GCTL => {
+                // GBLHIBERNATIONEN (bit 1), which AppleT8112USBXHCI::reset
+                // sets, has no effect on a core built without hibernation
+                // (GHWPARAMS1.EN_PWROPT): it is retained only.
                 const GCTL_CONFIG: u32 =
-                    0xfff8_0000 | (1 << 16) | PRTCAP | CORE_RESET | (1 << 10) | (3 << 6) | 0x1d;
+                    0xfff8_0000 | (1 << 16) | PRTCAP | CORE_RESET | (1 << 10) | (3 << 6) | 0x1f;
                 if value & !GCTL_CONFIG != 0
                     || !matches!(value & PRTCAP, PRTCAP_HOST | PRTCAP_DEVICE)
                     || value & (3 << 6) != 0
                     || value & (3 << 4) != 0
                 {
                     return Err(err(
-                        "DWC3 requires device mode, bus clock and documented non-hibernating configuration",
+                        "DWC3 requires host or device mode, bus clock and documented configuration",
                     ));
                 }
                 if value & CORE_RESET != 0 || value & PRTCAP != PRTCAP_DEVICE {
@@ -907,6 +924,7 @@ impl MmioDevice for Dwc3 {
             APPLE_INTERRUPT_CONTROL => {
                 return Err(err("Apple interrupt control effects are not modeled"));
             }
+            at if apple::Registers::claims(at) => self.apple.write(at, value).map_err(err)?,
             _ => return Err(err("read-only or unmodeled DWC3/Apple register")),
         }
         Ok(())
@@ -1069,7 +1087,8 @@ mod tests {
         let mut access = Access::new(0, 0, &mut latch);
         assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
         assert!(dwc.read(GSNPSID, Width::Double, &mut access).is_err());
-        assert!(dwc.read(0xcd38, Width::Word, &mut access).is_err());
+        assert_eq!(dwc.read(0xcd38, Width::Word, &mut access), Ok(0));
+        assert!(dwc.read(0xcd44, Width::Word, &mut access).is_err());
         let at = APPLE_INTERRUPT_CONTROL;
         assert_eq!(dwc.read(at, Width::Word, &mut access), Ok(0));
         assert!(dwc.write(at, Width::Word, 0x8000, &mut access).is_err());

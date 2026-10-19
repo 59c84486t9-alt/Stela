@@ -15,7 +15,9 @@
 //! Spec-defined behavior: USBCMD run/stop and reset complete at once (HCH
 //! and CNR settle before the next read); save and restore state (CSS/CRS)
 //! succeed with nothing lost, since this model retains its state; MFINDEX
-//! counts 125 us microframes from the system counter while running. The
+//! counts 125 us microframes from the system counter while running, and
+//! with USBCMD.EWE each wrap from 3FFFh to 0 posts an MFINDEX Wrap Event on
+//! the primary interrupter (spec 4.14.2, 6.4.2.8). The
 //! command ring runs from a doorbell 0 write until software stops or aborts
 //! it, completing each command with a Command Completion Event (spec
 //! 6.4.2.2): No Op, Enable/Disable Slot and Get Port Bandwidth complete as
@@ -28,8 +30,14 @@
 //! wire follows IP with IE and USBCMD.INTE. Interrupt moderation only
 //! delays interrupts, and this model raises them at once.
 //!
+//! A warm reset (PORTSC.WPR) of the disconnected USB3 port completes at
+//! once: the link returns to RxDetect with PRC and WRC set (spec 4.19.5.1,
+//! 5.4.8). A change bit set while running, then and only then, posts a Port
+//! Status Change Event and sets USBSTS.PCD (spec 4.19.2). PR of a
+//! disconnected port and WPR of the USB2 port (RsvdZ) have no effect.
+//!
 //! Refused rather than modeled: features not advertised (light reset,
-//! MFINDEX wrap events, CEM, extended TBC, virtualization), Address Device
+//! CEM, extended TBC, virtualization), Address Device
 //! with BSR (it initializes contexts without a device transaction), device
 //! slot doorbells (no slot ever reaches Addressed), port test modes and
 //! port indicators. A full event ring holds further events until software
@@ -96,6 +104,8 @@ const CA: u64 = 1 << 2;
 const CRR: u64 = 1 << 3;
 
 const PED: u32 = 1 << 1;
+const WRC: u32 = 1 << 19;
+const PRC: u32 = 1 << 21;
 const PR: u32 = 1 << 4;
 const PLS_SHIFT: u32 = 5;
 const PLS: u32 = 0xf << PLS_SHIFT;
@@ -122,6 +132,8 @@ const ADDRESS_DEVICE: u32 = 11;
 const GET_PORT_BANDWIDTH: u32 = 21;
 const NO_OP: u32 = 23;
 const COMMAND_COMPLETION: u32 = 33;
+const PORT_STATUS_CHANGE: u32 = 34;
+const MFINDEX_WRAP: u32 = 39;
 const SUCCESS: u32 = 1;
 const TRANSACTION_ERROR: u32 = 4;
 const TRB_ERROR: u32 = 5;
@@ -135,6 +147,8 @@ const COMMANDS_PER_SERVICE: usize = 256;
 const MAX_PENDING_EVENTS: usize = 256;
 /// 24 MHz system counts per 125 us microframe.
 const MICROFRAME: u64 = 3000;
+/// Microframes from one MFINDEX wrap to the next.
+const MFINDEX_PERIOD: u64 = 1 << 14;
 
 #[derive(Clone, Copy, Default)]
 struct Interrupter {
@@ -179,9 +193,12 @@ pub struct Xhci {
     slots: [bool; MAX_SLOTS],
     interrupters: [Interrupter; INTERRUPTERS],
     pending: VecDeque<Event>,
-    /// MFINDEX when last halted, and the count the run started at.
+    /// Microframes counted when last halted, and the system count the run
+    /// started at.
     mfindex: u64,
     started: Option<u64>,
+    /// The microframe count of the next wrap event, while EWE is set.
+    next_wrap: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -220,6 +237,7 @@ impl Xhci {
             pending: VecDeque::new(),
             mfindex: 0,
             started: None,
+            next_wrap: 0,
         }
     }
 
@@ -228,6 +246,13 @@ impl Xhci {
         self.command_doorbell
             || !self.pending.is_empty()
             || self.interrupters.iter().any(|i| i.reload)
+    }
+
+    /// The system count at which the next MFINDEX Wrap Event falls due.
+    pub fn deadline(&self) -> Option<u64> {
+        let start = self.started.filter(|_| self.usbcmd & EWE != 0)?;
+        let ahead = self.next_wrap.saturating_sub(self.mfindex);
+        Some(start.saturating_add(ahead.saturating_mul(MICROFRAME)))
     }
 
     /// Interrupter `n`'s wire level.
@@ -286,12 +311,16 @@ impl Xhci {
         .then_some(())
     }
 
-    fn mfindex(&self, now: u64) -> u32 {
-        let count = match self.started {
+    /// Microframes counted while running, at system count `now`.
+    fn microframes(&self, now: u64) -> u64 {
+        match self.started {
             Some(start) => self.mfindex + now.saturating_sub(start) / MICROFRAME,
             None => self.mfindex,
-        };
-        (count & 0x3fff) as u32
+        }
+    }
+
+    fn mfindex(&self, now: u64) -> u32 {
+        (self.microframes(now) % MFINDEX_PERIOD) as u32
     }
 
     fn read_dword(&mut self, offset: u64, now: u64) -> Result<u32, &'static str> {
@@ -521,8 +550,8 @@ impl Xhci {
         if value & !USBCMD_KNOWN != 0 {
             return Err("xHCI USBCMD feature not advertised (CEM, ETE, TSC, VTIO)");
         }
-        if value & (LHCRST | EWE) != 0 {
-            return Err("xHCI light reset and MFINDEX wrap events are not advertised");
+        if value & LHCRST != 0 {
+            return Err("xHCI light reset is not advertised");
         }
         if value & HCRST != 0 {
             if self.usbsts & HCH == 0 {
@@ -540,17 +569,20 @@ impl Xhci {
         match (self.started, running) {
             (None, true) => self.started = Some(now),
             (Some(_), false) => {
-                self.mfindex = u64::from(self.mfindex(now));
+                self.mfindex = self.microframes(now);
                 self.started = None;
             }
             _ => {}
+        }
+        if value & EWE != 0 && self.usbcmd & EWE == 0 {
+            self.next_wrap = (self.microframes(now) / MFINDEX_PERIOD + 1) * MFINDEX_PERIOD;
         }
         if running {
             self.usbsts &= !HCH;
         } else {
             self.usbsts |= HCH;
         }
-        self.usbcmd = value & (RUN | INTE | HSEE | EU3S);
+        self.usbcmd = value & (RUN | INTE | HSEE | EWE | EU3S);
         Ok(())
     }
 
@@ -561,11 +593,12 @@ impl Xhci {
         }
         let port = &mut self.ports[n];
         let usb3 = n == 1;
+        let before = port.portsc;
         let mut portsc = port.portsc & !(value & PORT_CHANGES);
-        // PED is RW1CS: writing one disables an enabled port; none is.
-        // PR (and WPR on the USB3 port) start a reset only from the Enabled
-        // or Disabled states, which need a connection.
-        let _ = value & (PED | PR | WPR);
+        // PED is RW1CS: writing one disables an enabled port; none is. PR
+        // starts a reset only from the Enabled or Disabled states, which
+        // need a connection.
+        let _ = value & (PED | PR);
         portsc = portsc & !WAKE | value & WAKE;
         if value & PP == 0 {
             portsc &= !PP;
@@ -583,8 +616,27 @@ impl Xhci {
                 _ => return Err("xHCI port link state write is not defined for this port"),
             }
         }
+        // A warm reset with no device ends in RxDetect at once.
+        if usb3 && value & WPR != 0 && portsc & PP != 0 {
+            portsc = portsc & !PLS | RX_DETECT << PLS_SHIFT | PRC | WRC;
+        }
         port.portsc = portsc;
+        if portsc & !before & PORT_CHANGES != 0 {
+            self.usbsts |= PCD;
+            if self.usbsts & HCH == 0 {
+                self.post(0, Self::port_status_change(n))?;
+            }
+        }
         Ok(())
+    }
+
+    fn port_status_change(n: usize) -> [u32; 4] {
+        [
+            (n as u32 + 1) << 24,
+            0,
+            SUCCESS << 24,
+            PORT_STATUS_CHANGE << 10,
+        ]
     }
 
     fn completion(trb: u64, code: u32, slot: usize) -> [u32; 4] {
@@ -608,6 +660,13 @@ impl Xhci {
     /// stream. A DMA fault is a host system error the guest cannot recover
     /// from in this model, so it stops the run.
     pub fn service(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+        while self
+            .deadline()
+            .is_some_and(|deadline| port.access.now >= deadline)
+        {
+            self.next_wrap += MFINDEX_PERIOD;
+            self.post(0, [0, 0, SUCCESS << 24, MFINDEX_WRAP << 10])?;
+        }
         for n in 0..INTERRUPTERS {
             if self.interrupters[n].reload {
                 // A new segment table starts a new ring, cycle state one.
@@ -838,9 +897,12 @@ mod tests {
         x.write(at, 4, u64::from(value), 0).unwrap();
     }
     fn service(x: &mut Xhci, ram: &mut Ram) {
+        service_at(x, ram, 0);
+    }
+    fn service_at(x: &mut Xhci, ram: &mut Ram, now: u64) {
         let mut dart = Dart::new(16, None);
         let mut latch = InterruptLatch::new();
-        let mut access = Access::new(0, 0, &mut latch);
+        let mut access = Access::new(0, now, &mut latch);
         // Stream 0 bypasses translation and the filter: IOVAs are physical.
         dart.write(0xc00, Width::Word, 1, &mut access).unwrap();
         dart.write(0x1000, Width::Word, 6, &mut access).unwrap();
@@ -917,6 +979,49 @@ mod tests {
         assert_eq!(rd(&mut x, usb2), DISABLED << PLS_SHIFT);
         assert!(x.write(usb2, 4, u64::from(PP | 1 << 14), 0).is_err());
         assert!(x.write(usb2 + 4, 4, 1 << 28, 0).is_err());
+        // WPR is RsvdZ on the USB2 port; halted, a change posts no event.
+        wr(&mut x, usb2, PP | WPR);
+        assert_eq!(rd(&mut x, usb2), PP | RX_DETECT << PLS_SHIFT);
+        wr(&mut x, usb3, PP | WPR);
+        assert_eq!(rd(&mut x, usb3), PP | PRC | WRC | RX_DETECT << PLS_SHIFT);
+        assert_ne!(rd(&mut x, OPERATIONAL + 4) & PCD, 0);
+        assert!(x.pending.is_empty());
+        // The driver's write-back keeps WPR clear and clears the changes.
+        wr(&mut x, usb3, PP | PRC | WRC);
+        assert_eq!(rd(&mut x, usb3), PP | RX_DETECT << PLS_SHIFT);
+    }
+
+    #[test]
+    fn a_running_controller_posts_port_changes_and_mfindex_wraps() {
+        let mut ram = Ram::new(RAM, 0x4000);
+        let mut x = Xhci::new();
+        ram.put_u64(ERST, EVENTS);
+        ram.put_u64(ERST + 8, 16);
+        let i0 = INTERRUPTER_BASE;
+        wr(&mut x, i0 + 8, 1);
+        x.write(i0 + 0x18, 8, EVENTS, 0).unwrap();
+        x.write(i0 + 0x10, 8, ERST, 0).unwrap();
+        wr(&mut x, i0, IE);
+        let period = MFINDEX_PERIOD * MICROFRAME;
+        x.write(OPERATIONAL, 4, u64::from(RUN | INTE | EWE), 100)
+            .unwrap();
+        assert_eq!(x.deadline(), Some(100 + period));
+        wr(&mut x, PORT_BASE + PORT_STRIDE, PP | WPR);
+        service_at(&mut x, &mut ram, period);
+        assert_eq!(event(&mut ram, 0)[0] >> 24, 2);
+        assert_eq!(event(&mut ram, 0)[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
+        assert_eq!(event(&mut ram, 1), [0; 4]);
+        service_at(&mut x, &mut ram, 100 + period);
+        assert_eq!(event(&mut ram, 1)[2] >> 24, SUCCESS);
+        assert_eq!(event(&mut ram, 1)[3] >> 10 & 0x3f, MFINDEX_WRAP);
+        assert_eq!(x.read(RUNTIME, 4, 100 + period), Ok(0));
+        assert_eq!(x.deadline(), Some(100 + 2 * period));
+        assert!(x.interrupt(0));
+        // Halting stops the count and the wraps.
+        x.write(OPERATIONAL, 4, u64::from(EWE), 100 + period + 3000)
+            .unwrap();
+        assert_eq!(x.deadline(), None);
+        assert_eq!(x.read(RUNTIME, 4, u64::MAX), Ok(1));
     }
 
     #[test]

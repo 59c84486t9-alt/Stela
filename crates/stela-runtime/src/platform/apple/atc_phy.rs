@@ -10,7 +10,10 @@
 //!
 //! Stela boot handoff leaves USB2 isolated, reset and in SIDDQ; the core is
 //! clamped, with sleep requests and reset releases clear; PIPE is clamped and
-//! reset. Configuration/tuning words start zero and retain documented writes.
+//! reset, its mux on the dummy PIPE that stands in for the absent SuperSpeed
+//! PHY (the xHCI driver's reset then skips the PHY-ready poll, KC
+//! 0x4457e68). Other configuration/tuning words start zero and retain
+//! documented writes.
 //! These are emulated-die handoff choices, not captured iBoot/reset values.
 //! Power and lock handshakes settle synchronously. SuperSpeed, DP and USB4
 //! commands/links are unsupported; configuring their digital mux does not
@@ -84,6 +87,9 @@ const FORCE_CLAMP: u32 = 1 << 4;
 const LOCK: u32 = 1;
 const MUX_CLOCK: u32 = 7 << 3;
 const MUX_DATA: u32 = 7;
+/// The dummy PIPE clock (4) and data (2) selections (Linux
+/// `PIPEHANDLER_MUX_CTRL_{CLK,DATA}_DUMMY`).
+const MUX_DUMMY: u32 = 4 << 3 | 2;
 
 pub struct AtcPhy {
     held: Held,
@@ -102,6 +108,7 @@ impl AtcPhy {
         held.set(CTL, u64::from(RESET | PORT_RESET | SIDDQ));
         held.set(POWER_CTRL, u64::from(CLAMP));
         held.set(AON, u64::from(FORCE_CLAMP));
+        held.set(MUX, u64::from(MUX_DUMMY));
         Self {
             held,
             utmi_clock_event: false,

@@ -1406,15 +1406,13 @@ impl Devices for AppleDevices {
             .iter()
             .filter_map(|master| {
                 let port = UsbPort::of(&master.connector);
-                let host = self
-                    .bus
-                    .device::<Dwc3>(master.device)
-                    .is_some_and(Dwc3::host_pending);
-                if port != master.port || host {
-                    Some(0)
-                } else {
-                    (port.ready || master.attached).then_some(master.next_poll)
+                let controller = self.bus.device::<Dwc3>(master.device);
+                if port != master.port || controller.is_some_and(Dwc3::host_pending) {
+                    return Some(0);
                 }
+                let poll = (port.ready || master.attached).then_some(master.next_poll);
+                let host = controller.and_then(Dwc3::host_deadline);
+                poll.into_iter().chain(host).min()
             })
             .min()
     }
@@ -2277,7 +2275,12 @@ mod tests {
             .write(0, placement.ranges[2].0 + 0x700, 4, 5 << 3, 0)
             .unwrap();
         assert_eq!(devices.read(0, BASE + 0xc700, 4, 0), Ok(5 << 3));
-        for index in [1, 5, 6, 7, 8] {
+        // DRD_USB31_CFG's RAM status and the power block's request are
+        // modeled; the other platform words refuse.
+        for index in [1, 5] {
+            assert_eq!(devices.read(0, placement.ranges[index].0, 4, 0), Ok(0));
+        }
+        for index in [6, 7, 8] {
             assert!(matches!(
                 devices.read(0, placement.ranges[index].0, 4, 0),
                 Err(DeviceError::Refused(_))
