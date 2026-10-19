@@ -17,6 +17,13 @@
 //! streams/hibernation/OTG/SuperSpeed. The Apple vendor windows are gated:
 //! unknown offsets and widths refuse. Two traced RMW control reads have an
 //! explicit disabled handoff image; their unmodeled write effects refuse.
+//!
+//! GCTL.PRTCAPDIR selects the dual-role core's host (1) or device (2)
+//! personality. `AppleT8112USBXHCI::start` read-modify-writes it to host at
+//! KC file 0x4457644 whatever the port's role; the device driver selects
+//! device again when it powers the core. Host mode idles the device
+//! personality like a core reset. The xHCI host registers are not modeled
+//! and refuse; OTG and the reserved selection refuse.
 mod regs;
 
 use super::{
@@ -42,6 +49,9 @@ const HALTED: u32 = 1 << 22;
 const RX_EMPTY: u32 = 1 << 17;
 const MAX_PACKET_CONTROL: usize = 64;
 const CMD_FAILURE: u32 = 1 << 12;
+const PRTCAP: u32 = 3 << 12;
+const PRTCAP_HOST: u32 = 1 << 12;
+const PRTCAP_DEVICE: u32 = 2 << 12;
 
 /// Minimal port boundary until the independent Type-C model lands. A new
 /// connection generation cancels old resources before any bus transaction.
@@ -130,7 +140,7 @@ impl Dwc3 {
             rings: [Ring::new(); RINGS],
             endpoints: [Endpoint::default(); ENDPOINTS],
             pending: VecDeque::new(),
-            gctl: 2 << 12,
+            gctl: PRTCAP_DEVICE,
             usb2: 0,
             usb3: 0,
             tx_fifo: [0; ENDPOINTS / 2],
@@ -394,7 +404,7 @@ impl Dwc3 {
     pub fn available(&self) -> bool {
         self.port_ready
             && self.dctl & RUN != 0
-            && self.gctl & CORE_RESET == 0
+            && self.gctl & (CORE_RESET | PRTCAP) == PRTCAP_DEVICE
             && self.usb2 & (1 << 31) == 0
     }
 
@@ -712,9 +722,9 @@ impl MmioDevice for Dwc3 {
         match offset {
             GCTL => {
                 const GCTL_CONFIG: u32 =
-                    0xfff8_0000 | (1 << 16) | (3 << 12) | CORE_RESET | (1 << 10) | (3 << 6) | 0x1d;
+                    0xfff8_0000 | (1 << 16) | PRTCAP | CORE_RESET | (1 << 10) | (3 << 6) | 0x1d;
                 if value & !GCTL_CONFIG != 0
-                    || value & (3 << 12) != 2 << 12
+                    || !matches!(value & PRTCAP, PRTCAP_HOST | PRTCAP_DEVICE)
                     || value & (3 << 6) != 0
                     || value & (3 << 4) != 0
                 {
@@ -722,7 +732,7 @@ impl MmioDevice for Dwc3 {
                         "DWC3 requires device mode, bus clock and documented non-hibernating configuration",
                     ));
                 }
-                if value & CORE_RESET != 0 {
+                if value & CORE_RESET != 0 || value & PRTCAP != PRTCAP_DEVICE {
                     self.cancel();
                     self.connected = false;
                 }
@@ -965,6 +975,28 @@ mod tests {
     fn write_dart(dart: &mut Dart, at: u64, value: u32, access: &mut Access<'_>) {
         dart.write(at, Width::Word, u64::from(value), access)
             .unwrap();
+    }
+    #[test]
+    fn the_host_driver_selects_host_mode_which_idles_the_device() {
+        let (mut dwc, _, _, mut latch) = setup();
+        let mut access = Access::new(0, 0, &mut latch);
+        dwc.connected = true;
+        // AppleT8112USBXHCI::start: clear PRTCAPDIR, select host.
+        let gctl = dwc.read(GCTL, Width::Word, &mut access).unwrap() as u32;
+        write(&mut dwc, GCTL, gctl & !PRTCAP | PRTCAP_HOST, &mut access);
+        assert_eq!(
+            dwc.read(GCTL, Width::Word, &mut access),
+            Ok(u64::from(PRTCAP_HOST))
+        );
+        assert!(!dwc.connected && !dwc.available());
+        for reserved in [0, PRTCAP] {
+            assert!(
+                dwc.write(GCTL, Width::Word, u64::from(reserved), &mut access)
+                    .is_err()
+            );
+        }
+        write(&mut dwc, GCTL, PRTCAP_DEVICE, &mut access);
+        assert_eq!(dwc.gctl, PRTCAP_DEVICE);
     }
     #[test]
     fn registers_commands_widths_and_failures_have_real_state() {
