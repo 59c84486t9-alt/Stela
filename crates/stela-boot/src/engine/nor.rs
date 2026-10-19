@@ -1,9 +1,10 @@
 //! The machine-state partition (`--nor SERIAL:GUID`): the guest's NOR flash
 //! image in its first [`CAPACITY`] bytes, so NVRAM survives reboots, then the
-//! SEP's roots and anti-replay store ([`sep_state`]). The image is loaded
+//! SEP's roots and anti-replay store ([`sep_state`]), then, when the
+//! partition holds it, the boot log ([`boot_log`]). The image is loaded
 //! before the bundle, which hands the kernel its newest valid bank; every
 //! sector a committed program or erase changes is stored durably between
-//! engine slices, and at the stop.
+//! engine slices, and at the stop, as is the pending output.
 use crate::output;
 use alloc::boxed::Box;
 use stela_runtime::{
@@ -13,7 +14,10 @@ use stela_runtime::{
         nor::{CAPACITY, Image, persist},
         sep_state,
     },
-    pc::block::{BlockDevice, Shared},
+    pc::{
+        block::{BlockDevice, BlockError, Shared},
+        boot_log,
+    },
 };
 
 pub struct HostNor {
@@ -49,6 +53,7 @@ impl HostNor {
             .expect("persist::load returns an image with a valid bank");
         let proxy = image.bank(bank).expect("current bank").to_vec();
         output::arguments(format_args!("NOR persistent fresh={fresh} bank={bank}\n"));
+        open_log(&disk, block, available);
         (
             Self { device },
             image,
@@ -57,10 +62,15 @@ impl HostNor {
         )
     }
 
-    /// Store the sectors the guest changed. A failed store stops the
-    /// machine: NVRAM the guest believes committed must not be lost
-    /// silently.
+    /// Store the sectors the guest changed and the pending output. A failed
+    /// store stops the machine: NVRAM the guest believes committed must not
+    /// be lost silently.
     pub fn poll(&mut self, devices: &mut AppleDevices) {
+        self.store_sectors(devices);
+        output::flush_log();
+    }
+
+    fn store_sectors(&mut self, devices: &mut AppleDevices) {
         for (offset, sector) in devices.nor_dirty() {
             if let Err(error) = persist::store(&mut *self.device, offset, &sector) {
                 output::arguments(format_args!("NOR refusal: {error}\n"));
@@ -68,4 +78,48 @@ impl HostNor {
             }
         }
     }
+}
+
+/// Open the boot log after the SEP's state and hand it to the output, when
+/// the partition holds the region; otherwise say why there is none.
+fn open_log(disk: &Shared, block: u64, available: u64) {
+    if available < boot_log::PARTITION_BYTES {
+        output::arguments(format_args!(
+            "BOOT LOG off: the machine-state partition holds {available:#x} bytes; the log needs {:#x}\n",
+            boot_log::PARTITION_BYTES
+        ));
+        return;
+    }
+    if !boot_log::OFFSET.is_multiple_of(block) || !boot_log::LOG_BYTES.is_multiple_of(block) {
+        output::arguments(format_args!(
+            "BOOT LOG off: {block}-byte blocks do not divide the log region\n"
+        ));
+        return;
+    }
+    let mut device: Box<dyn BlockDevice> = Box::new(
+        disk.window(boot_log::OFFSET / block, boot_log::LOG_BYTES / block)
+            .expect("the partition holds the log region"),
+    );
+    let writer = match boot_log::Writer::open(&mut *device) {
+        Ok(writer) => writer,
+        Err(error @ (BlockError::Unsupported(_) | BlockError::ReadOnly)) => {
+            output::arguments(format_args!("BOOT LOG off: {error}\n"));
+            return;
+        }
+        Err(error) => {
+            output::arguments(format_args!("BOOT LOG refusal: {error}\n"));
+            output::fatal("the boot log could not be opened")
+        }
+    };
+    if let Some(reason) = writer.fresh() {
+        output::arguments(format_args!("BOOT LOG fresh: {reason}\n"));
+    }
+    output::arguments(format_args!(
+        "BOOT LOG boot={} offset={:#x} bytes={:#x} head={:#x}\n",
+        writer.boots(),
+        boot_log::OFFSET,
+        boot_log::LOG_BYTES,
+        writer.head()
+    ));
+    output::install_log(writer, device);
 }

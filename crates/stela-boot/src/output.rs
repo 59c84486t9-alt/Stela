@@ -1,21 +1,88 @@
 //! The mount's output: every line goes to the UART and, once installed, the
-//! framebuffer console.
+//! framebuffer console, and waits from the very first line in a bounded
+//! buffer for the persistent boot log (`pc::boot_log`). Once `--nor` opens
+//! the log ([`install_log`]), [`flush_log`] stores what waits: between
+//! engine slices and at every stop, which [`terminate`] reaches.
 use crate::{console, serial::Serial};
+use alloc::boxed::Box;
 use core::{
     arch::asm,
+    cell::RefCell,
     fmt::{self, Write},
+    sync::atomic::{AtomicBool, Ordering},
+};
+use stela_runtime::pc::{
+    block::BlockDevice,
+    boot_log::{PENDING_BYTES, Pending, Writer},
 };
 
 /// `isa-debug-exit` under QEMU; an unused port on a PC.
 const EXIT_PORT: u16 = 0xf4;
+
+/// One engine-wide value. The mount runs on one processor and its handlers
+/// only print; every access is a `try_borrow`, so output that arrives while
+/// the value is in use (a line printed during a flush) is skipped instead of
+/// re-entering it.
+struct Global<T>(RefCell<T>);
+// SAFETY: one processor runs the mount, and no access blocks or assumes
+// the value is free.
+unsafe impl<T> Sync for Global<T> {}
+
+/// Every output byte since the first line that the log has not stored.
+static PENDING: Global<Pending<[u8; PENDING_BYTES]>> =
+    Global(RefCell::new(Pending::new([0; PENDING_BYTES])));
+
+/// The open log and its window of the machine-state partition.
+struct Sink {
+    writer: Writer,
+    device: Box<dyn BlockDevice>,
+}
+
+static SINK: Global<Option<Sink>> = Global(RefCell::new(None));
+/// A flush is running: a fatal or panic raised inside it halts without
+/// flushing again.
+static FLUSHING: AtomicBool = AtomicBool::new(false);
 
 struct Output(console::Color);
 impl Write for Output {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         let _ = Serial.write_str(value);
         console::write(value, self.0);
+        if let Ok(mut pending) = PENDING.0.try_borrow_mut() {
+            pending.push(value.as_bytes());
+        }
         Ok(())
     }
+}
+
+/// Keep the output in `writer`'s log on `device` from now on, starting with
+/// everything printed so far.
+pub fn install_log(writer: Writer, device: Box<dyn BlockDevice>) {
+    if let Ok(mut sink) = SINK.0.try_borrow_mut() {
+        *sink = Some(Sink { writer, device });
+    }
+    flush_log();
+}
+
+/// Store the pending output in the log, when one is open. A failed store
+/// stops the machine; output printed during the flush is not logged.
+pub fn flush_log() {
+    if FLUSHING.swap(true, Ordering::Acquire) {
+        return;
+    }
+    let result = match (SINK.0.try_borrow_mut(), PENDING.0.try_borrow_mut()) {
+        (Ok(mut sink), Ok(mut pending)) => match sink.as_mut() {
+            Some(Sink { writer, device }) => writer.flush_from(&mut **device, &mut pending),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        // FLUSHING stays set: the log is not stored again.
+        arguments(format_args!("BOOT LOG refusal: {error}\n"));
+        fatal("the boot log could not be stored");
+    }
+    FLUSHING.store(false, Ordering::Release);
 }
 
 pub fn arguments(args: fmt::Arguments<'_>) {
@@ -37,6 +104,7 @@ pub fn terminate(code: u32) -> ! {
     arguments(format_args!(
         "STELA STOPPED code={code:#x}; power off to continue\n"
     ));
+    flush_log();
     debug_exit(code);
     loop {
         unsafe {
