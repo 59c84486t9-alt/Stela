@@ -418,7 +418,8 @@ impl Ans {
     /// buffers, which the coprocessor reaches at raw addresses carried in the
     /// command (`AllocateTunnelBuffer` 0x3dbe83c), are checked against `sart`.
     /// NVMMU TCB PRPs are authoritative; their encryption and hash fields
-    /// must be zero until those engines are modeled.
+    /// must be zero until those engines are modeled, apart from the
+    /// CDW14/CDW15 copy the CG v2 driver places at TCB 0x38.
     pub fn run(&mut self, port: &mut Port<'_, '_>, sart: &mut Sart) -> Result<(), MmioError> {
         while let Some(&(queue, tag)) = self.pending.front() {
             self.last_submission = None;
@@ -460,10 +461,20 @@ impl Ans {
                 command: command.0,
                 tcb,
             });
+            // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
+            // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier
+            // submissions leave them zero. The key area from 0x40 on must
+            // stay empty.
+            let mirror = &tcb[56..64];
             if tcb[0] != 0 && tcb[0] != command.opcode()
                 || u16::from(tcb[2]) != tag
                 || tcb[3] != 0
-                || tcb[6..24].iter().chain(tcb[40..].iter()).any(|&b| b != 0)
+                || mirror != [0; 8] && mirror != &command.0[56..64]
+                || tcb[6..24]
+                    .iter()
+                    .chain(&tcb[40..56])
+                    .chain(&tcb[64..])
+                    .any(|&b| b != 0)
             {
                 return Err(error(
                     "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled",
@@ -834,6 +845,7 @@ mod tests {
             tcb[4..6].copy_from_slice(&(words[2] as u16).to_le_bytes());
             tcb[24..32].copy_from_slice(&prp.to_le_bytes());
             tcb[1] = commands::Command(cmd).direction(queue).unwrap_or(0);
+            tcb[56..64].copy_from_slice(&cmd[56..64]);
             let (sq, tcbs, doorbell) = if queue == 0 {
                 (SQ, TCB, ADMIN_SUBMIT)
             } else {
@@ -1034,6 +1046,15 @@ mod tests {
         assert_eq!((rejected.queue, rejected.tag), (0, 0));
         assert_eq!(rejected.command[0], 6);
         assert_eq!(rejected.tcb[64], 1);
+        assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
+        // TCB 0x38..0x40 holds zero or a copy of CDW14 and CDW15.
+        let mut rig = Rig::new();
+        assert!(rig.ram.write(SQ, &cmd));
+        assert!(rig.ram.write(TCB + 1, &[1]));
+        assert!(rig.ram.write(TCB + 24, &DATA.to_le_bytes()));
+        assert!(rig.ram.write(TCB + 60, &[1]));
+        rig.write(ADMIN_SUBMIT, 0).unwrap();
+        assert!(rig.run().is_err());
         assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
         // Queues, TCBs and PRP data are physical: an Identify completes
         // with every SART entry disabled.
