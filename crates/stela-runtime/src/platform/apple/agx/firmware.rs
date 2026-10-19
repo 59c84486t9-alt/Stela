@@ -34,17 +34,22 @@
 //! the firmware context. On the initdata message it reads the root
 //! ([`super::initdata::Root`]) and refuses one that is not the kext's. On the
 //! device-control doorbell it consumes the device-control ring: the
-//! power-transition notice (type 0x28) is recorded and retired; every other
-//! type refuses by name and stays unconsumed. On a work doorbell it reads the
-//! named data-master ring and refuses the first pending entry by its
-//! channel command's type, since command execution is a later layer: no work is retired and no completion event is
-//! fabricated.
+//! power-transition notice (type 0x28) is recorded and the device-state query
+//! (type 7) answered, each retired; every other type refuses by name and stays
+//! unconsumed. On a work doorbell it runs the named data-master ring: each
+//! entry's channel runs its pending commands in order. The signal commands
+//! complete ([`super::signal`]), with their events posted on the firmware
+//! event ring ([`super::event`]) and each announced by the 0x42 message on
+//! 0x20; every command that needs the GPU refuses by its type and stays
+//! pending, so no GPU work is retired and no completion is fabricated.
 
 use super::super::asc::{Firmware, Message as Mail};
 use super::super::rtkit::{Endpoint, RtKit};
 use super::channel;
+use super::event;
 use super::initdata::{self, Root};
 use super::ring::{self, Kind, Shared};
+use super::signal;
 use super::uat;
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
@@ -160,6 +165,10 @@ pub struct State {
     pub power: Vec<PowerNotice>,
     /// Device-state queries answered.
     pub device_state_queries: u64,
+    /// Channel commands completed.
+    pub commands: u64,
+    /// Firmware events posted.
+    pub events: u64,
     jobs: VecDeque<Job>,
 }
 
@@ -215,7 +224,7 @@ impl State {
     }
 
     /// Read the root, then run the queued doorbells in order.
-    fn dma(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+    fn dma(&mut self, memory: &mut dyn Shared, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
         if let Some(va) = self.initdata_va.filter(|_| !self.initdata_checked) {
             let root = Root::read(memory, uat::canonical_firmware_va(va))?;
             self.root = Some(root);
@@ -228,7 +237,7 @@ impl State {
                 .ok_or("GFX doorbell before the initdata root")?;
             match job {
                 Job::DeviceControl => self.device_control(memory, &root)?,
-                Job::Work(pipe, index) => Self::work_ring(memory, &root, pipe, index)?,
+                Job::Work(pipe, index) => self.work_ring(memory, &root, pipe, index, outbox)?,
             }
             self.jobs.pop_front();
         }
@@ -256,31 +265,46 @@ impl State {
         Ok(())
     }
 
-    /// Read a data-master ring's pending work down to the channel's next
-    /// command. Executing it is a later layer, so a pending entry refuses by
-    /// the command's type and nothing is retired.
+    /// Run a data-master ring's pending entries. Each names a channel; the
+    /// channel's pending commands run in order, each retired from the
+    /// channel's command ring once complete, and the entry is retired once
+    /// its channel has nothing pending. A command the model does not execute
+    /// refuses by name and stays pending, as does its entry.
     fn work_ring(
+        &mut self,
         memory: &mut dyn Shared,
         root: &Root,
         pipe: Pipe,
         index: u8,
+        outbox: &mut Vec<Mail>,
     ) -> Result<(), &'static str> {
         let work = root.work(memory, pipe, index)?;
-        let (read, write) = work.indices(memory)?;
-        if read == write {
-            return Ok(());
+        let (mut read, write) = work.indices(memory)?;
+        while read != write {
+            let entry = work.entry(memory, Kind::DataMaster, read)?;
+            let command = u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
+            if command != pipe as u32 {
+                return Err("GFX data-master entry's command type is not its ring's pipe");
+            }
+            let state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
+            let queue = channel::Queue::read(memory, state)?;
+            while let Some(va) = queue.next(memory)? {
+                let command = channel::Command::read(memory, va)?;
+                for event in signal::execute(memory, &command)? {
+                    event::post(memory, root, event)?;
+                    outbox.push(Mail {
+                        endpoint: MESSAGE_ENDPOINT,
+                        payload: EVENT_TYPE << TYPE_SHIFT,
+                    });
+                    self.events += 1;
+                }
+                queue.retire(memory)?;
+                self.commands += 1;
+            }
+            read = ring::next(read);
+            work.retire(memory, read)?;
         }
-        let entry = work.entry(memory, Kind::DataMaster, read)?;
-        let command = u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
-        if command != pipe as u32 {
-            return Err("GFX data-master entry's command type is not its ring's pipe");
-        }
-        let state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
-        let queue = channel::Queue::read(memory, state)?;
-        let command = queue
-            .next(memory)?
-            .ok_or("GFX data-master entry names a channel with no pending command")?;
-        Err(channel::Command::read(memory, command)?.kind.unexecuted())
+        Ok(())
     }
 }
 
@@ -366,12 +390,8 @@ impl Firmware for Coprocessor {
     fn dma_pending(&self) -> bool {
         self.protocol.with(State::dma_pending)
     }
-    fn dma(
-        &mut self,
-        port: &mut Port<'_, '_>,
-        _outbox: &mut Vec<Mail>,
-    ) -> Result<(), &'static str> {
-        self.protocol.0.borrow_mut().dma(port)
+    fn dma(&mut self, port: &mut Port<'_, '_>, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+        self.protocol.0.borrow_mut().dma(port, outbox)
     }
 }
 
@@ -443,7 +463,7 @@ mod tests {
         state
             .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
-        state.dma(&mut memory).unwrap();
+        state.dma(&mut memory, &mut Vec::new()).unwrap();
         (state, memory)
     }
 
@@ -515,7 +535,7 @@ mod tests {
         state
             .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
             .unwrap();
-        state.dma(&mut memory).unwrap();
+        state.dma(&mut memory, &mut Vec::new()).unwrap();
         assert_eq!(
             state.power,
             [PowerNotice::PoweringOff, PowerNotice::PoweredOn]
@@ -537,7 +557,7 @@ mod tests {
         state
             .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
             .unwrap();
-        state.dma(&mut memory).unwrap();
+        state.dma(&mut memory, &mut Vec::new()).unwrap();
         let mut mask = [0xff];
         memory.read(sections, &mut mask).unwrap();
         assert_eq!(mask, [0]);
@@ -557,7 +577,7 @@ mod tests {
             .unwrap();
         assert!(
             state
-                .dma(&mut memory)
+                .dma(&mut memory, &mut Vec::new())
                 .unwrap_err()
                 .contains("host-allocation")
         );
@@ -569,40 +589,102 @@ mod tests {
         assert!(device_control_entry(&power(2)).is_err());
     }
 
-    #[test]
-    fn pending_work_refuses_rather_than_completing() {
-        let (mut state, mut memory) = with_device_control(&[]);
-        // The 3D ring at submission index 0, with one entry of command type 1.
+    /// The 3D ring at submission index 0 with one entry naming the channel
+    /// at `channel_state`, whose queue holds one command at `command`.
+    fn one_3d_entry(memory: &mut Flat, channel_state: u64, command: u64) -> (u64, u64) {
         let (ring_state, entries) = (BASE + 0x9000, BASE + 0xc000);
         memory.put_descriptor(RINGS + 0x20 + 0x20, ring_state, entries);
         memory.put_u32(entries + 0x10, 1);
         memory.put_u32(ring_state + WRITE, 1);
+        if channel_state != 0 {
+            crate::platform::apple::agx::channel::tests::one_command(
+                memory,
+                channel_state,
+                command,
+            );
+            memory.put_u64(entries + 0x08, channel_state);
+        }
+        (ring_state, entries)
+    }
+
+    #[test]
+    fn unexecuted_work_refuses_rather_than_completing() {
+        let (mut state, mut memory) = with_device_control(&[]);
+        let (ring_state, _) = one_3d_entry(&mut memory, 0, 0);
         state.doorbell(work(1, 0)).unwrap();
         // The entry names no channel yet.
         assert_eq!(
-            state.dma(&mut memory),
+            state.dma(&mut memory, &mut Vec::new()),
             Err("GFX data-master entry names no channel state")
         );
         // A channel whose next command is a 3D command.
         let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
-        crate::platform::apple::agx::channel::tests::one_command(
-            &mut memory,
-            channel_state,
-            command,
-        );
-        memory.put_u64(entries + 0x08, channel_state);
+        one_3d_entry(&mut memory, channel_state, command);
         memory.put_u32(command, 1);
         assert_eq!(
-            state.dma(&mut memory),
+            state.dma(&mut memory, &mut Vec::new()),
             Err("GFX 3D command (type 1) is not executed")
         );
         assert_eq!(memory.read_u32(ring_state + READ), Ok(0));
+        assert_eq!(memory.read_u32(channel_state + 0x1000), Ok(0));
         // An empty ring has nothing to refuse.
         let mut idle = with_device_control(&[]);
-        memory.put_descriptor(RINGS + 0x20, ring_state + 0x100, entries);
+        memory.put_descriptor(RINGS + 0x20, ring_state + 0x100, BASE + 0xc000);
         idle.1 = memory;
         idle.0.doorbell(work(0, 0)).unwrap();
-        idle.0.dma(&mut idle.1).unwrap();
+        idle.0.dma(&mut idle.1, &mut Vec::new()).unwrap();
+    }
+
+    #[test]
+    fn a_shared_event_signal_completes_and_posts_its_events() {
+        use crate::platform::apple::agx::event::Event;
+        use crate::platform::apple::agx::event::tests::{EVENT_STATE, entry, event_ring};
+        let (mut state, mut memory) = with_device_control(&[]);
+        event_ring(&mut memory);
+        let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
+        let (ring_state, _) = one_3d_entry(&mut memory, channel_state, command);
+        let (stream, shared) = (command + 0x400, command + 0x800);
+        memory.put_u32(command, 9);
+        memory.put_u64(command + 0x1c, stream);
+        memory.put_u64(command + 0x30, command + 0x900);
+        memory.put_u64(command + 0x38, command + 0x908);
+        memory.put_u32(command + 0x40, 0x100);
+        memory.put_u32(command + 0x44, 2);
+        memory.put_u32(stream, 0xe);
+        memory.put_u64(stream + 0x10, 0x55);
+        memory.put_u64(stream + 0x18, 1);
+        memory.put_u64(stream + 0x28, shared);
+        memory.put_u64(stream + 0x30, command + 0x908);
+        memory.put_u32(stream + 0x38, 0x100);
+        memory.put_u32(stream + 0x4c, 0x4000_0002);
+        state.doorbell(work(1, 0)).unwrap();
+        let mut outbox = Vec::new();
+        state.dma(&mut memory, &mut outbox).unwrap();
+        // Two events, each announced by the 0x42 message on 0x20.
+        assert_eq!(
+            outbox,
+            [Mail {
+                endpoint: MESSAGE_ENDPOINT,
+                payload: EVENT_TYPE << TYPE_SHIFT
+            }; 2]
+        );
+        assert_eq!(memory.read_u32(EVENT_STATE + WRITE), Ok(2));
+        assert_eq!(
+            entry(&mut memory, 0),
+            Event::SharedSignal {
+                id: 0x55,
+                value: 1,
+                flag: 0
+            }
+            .encode()
+        );
+        assert_eq!(entry(&mut memory, 1), Event::Flag(1 << 2).encode());
+        assert_eq!(memory.read_u64(shared), Ok(1));
+        assert_eq!(memory.read_u32(command + 0x900), Ok(0x100));
+        // The command and the data-master entry are retired.
+        assert_eq!(memory.read_u32(channel_state + 0x1000), Ok(1));
+        assert_eq!(memory.read_u32(ring_state + READ), Ok(1));
+        assert_eq!((state.commands, state.events), (1, 2));
     }
 
     #[test]
@@ -613,7 +695,7 @@ mod tests {
             .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
         assert_eq!(
-            state.dma(&mut memory),
+            state.dma(&mut memory, &mut Vec::new()),
             Err("GFX initdata root lacks its magic")
         );
         assert!(state.dma_pending());
@@ -621,7 +703,7 @@ mod tests {
         early
             .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
             .unwrap();
-        assert!(early.dma(&mut memory).is_err());
+        assert!(early.dma(&mut memory, &mut Vec::new()).is_err());
     }
 
     #[test]
@@ -675,7 +757,7 @@ mod tests {
                 memory: ram,
                 access: &mut access,
             };
-            state.dma(&mut port)
+            state.dma(&mut port, &mut Vec::new())
         };
         // A root without the magic refuses and stays pending.
         assert!(run(&mut state, &mut ram, &mut table).is_err());

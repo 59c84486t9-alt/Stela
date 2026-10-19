@@ -19,22 +19,28 @@
 //!   descriptors) and the firmware's consume.
 //! - [`channel`]: a channel's command queue, the commands it names (type,
 //!   stream, completion stamp) and the command-stream records.
+//! - [`signal`]: the commands that need no GPU work (shared-event and
+//!   dashboard signals), run to completion.
+//! - [`event`]: the firmware event ring's producer and the entries the kext
+//!   reads (Flag, shared-event signal, CLPC notice).
 //! - [`isa`]: a bit-exact decoder and x86-host interpreter for a bounded
 //!   subset of the AGX2 shader ISA.
 //! - [`exec`]: a compute-style dispatch that runs a shader over a surface grid
 //!   and stores checked pixels, with an in-order fence.
 //!
-//! Still to come (docs/research/agx.md §2, §5): the channel command layouts
-//! behind the data-master entries, the rest of the shader ISA (integer,
+//! Still to come (docs/research/agx.md §2, §5): the TA, 3D, CL and blit
+//! command layouts and their start records, the rest of the shader ISA (integer,
 //! memory/PBE, texture, control flow), the VDM/CDM/PPP control streams, the
 //! tiler/rasterizer, texture formats and compression, and driving the
 //! executor from a real firmware work queue.
 
 pub mod channel;
+pub mod event;
 pub mod exec;
 pub mod firmware;
 pub mod initdata;
 pub mod isa;
 pub mod ring;
 pub mod sgx;
+pub mod signal;
 pub mod uat;

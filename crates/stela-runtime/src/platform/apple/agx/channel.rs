@@ -53,8 +53,8 @@
 //!   `encodeDashboardSignalCommandSKUStream` 0x1b0cf30) and the end 0x2 (4,
 //!   flag 0x40).
 //!
-//! The firmware model reads the queue and the next command and refuses by
-//! the command's type: executing commands is a later layer.
+//! The firmware model reads the queue and the next command; the signal
+//! commands run in [`super::signal`], every other type refuses by name.
 
 use super::ring::Shared;
 
