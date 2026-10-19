@@ -251,12 +251,14 @@ impl Cpu {
         cyc_ovrd_field(self.apple.cyc_ovrd, CYC_OVRD_WFI_SHIFT)
     }
 
-    /// The interrupt lines this core takes and wakes for: CYC_OVRD's FIQ and
-    /// IRQ disable modes keep the core from seeing either.
+    /// The interrupt lines this core takes and wakes for: the device lines
+    /// with the vGIC maintenance interrupt on IRQ (`machine::vgic`), which
+    /// CYC_OVRD's FIQ and IRQ disable modes keep the core from seeing.
     pub fn core_lines(&self, lines: Lines) -> Lines {
         let enabled = |shift| cyc_ovrd_field(self.apple.cyc_ovrd, shift) != CYC_OVRD_DISABLE;
+        let irq = lines.irq || self.vgic.maintenance_asserted();
         Lines {
-            irq: lines.irq && enabled(CYC_OVRD_IRQ_SHIFT),
+            irq: irq && enabled(CYC_OVRD_IRQ_SHIFT),
             fiq: lines.fiq && enabled(CYC_OVRD_FIQ_SHIFT),
         }
     }

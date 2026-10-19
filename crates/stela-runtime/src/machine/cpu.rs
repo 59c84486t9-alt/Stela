@@ -510,6 +510,38 @@ impl Cpu {
         self.hcr(HCR_TGE)
     }
 
+    /// What the vGIC's accessors read of this PE for an MRS or, with
+    /// `write`, an MSR: with FEAT_FGT, HFGRTR_EL2 or HFGWTR_EL2's
+    /// ICC_IGRPENn_EL1 trap.
+    pub fn vgic_context(&self, write: bool) -> super::vgic::Context {
+        const HFGXTR_ICC_IGRPENN: u32 = 39;
+        let fine_grained = if write {
+            Register::HFGWTR_EL2
+        } else {
+            Register::HFGRTR_EL2
+        };
+        super::vgic::Context {
+            el: self.pstate.el,
+            hcr: self.read(Register::HCR_EL2),
+            nested: self.nested() & 1 != 0,
+            fine_grained_trap: self.registers.chip().implemented(Feature::FEAT_FGT) == Ok(true)
+                && self.field(fine_grained, HFGXTR_ICC_IGRPENN, 1) == 1,
+        }
+    }
+
+    /// A virtual IRQ (`HCR_VI`) or FIQ (`HCR_VF`) pending for EL1 and EL0:
+    /// the HCR_EL2 bit, or the vGIC CPU interface's signal, which Arm ORs
+    /// with it. A virtual SError (`HCR_VSE`) has only its bit.
+    pub fn virtual_pending(&self, virtual_bit: u32) -> bool {
+        let signals = self.vgic.signals();
+        self.hcr(virtual_bit)
+            || match virtual_bit {
+                HCR_VI => signals.irq,
+                HCR_VF => signals.fiq,
+                _ => false,
+            }
+    }
+
     /// Arm `IsPACMEnabled` for the current PSTATE: PACM sets PSTATE.PACM
     /// only on a chip with FEAT_PAuth_LR, with HCRX_EL2.PACMEn set for EL0
     /// and EL1 outside the host, and with the regime's SCTLR2_ELx.EnPACM

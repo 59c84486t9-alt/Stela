@@ -21,7 +21,7 @@ use super::{
     registers::{self, CpuProfile, HCR_TIDCP, Lines, Outcome as RegisterOutcome, Refusal},
     streaming::{self, Denial},
     system::{Feature, Register as SystemRegister},
-    timer, vgic,
+    timer,
 };
 use crate::pauth;
 pub use crate::platform::apple::bus::Transition;
@@ -1322,8 +1322,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn deliver_interrupts(&mut self) -> bool {
         let lines = self.lines();
         let virtual_pending = self.cpu.pstate.el != 2
-            && self.cpu.read(SystemRegister::HCR_EL2) & (1 << HCR_VI | 1 << HCR_VF | 1 << HCR_VSE)
-                != 0;
+            && [HCR_VI, HCR_VF, HCR_VSE]
+                .into_iter()
+                .any(|bit| self.cpu.virtual_pending(bit));
         if !lines.irq && !lines.fiq && !virtual_pending {
             return false;
         }
@@ -1346,7 +1347,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 (Vector::SError, HCR_AMO, HCR_VSE, DAIF_A),
             ] {
                 if self.cpu.hcr(routing)
-                    && self.cpu.hcr(virtual_bit)
+                    && self.cpu.virtual_pending(virtual_bit)
                     && self.cpu.pstate.daif & mask == 0
                 {
                     let syndrome = if vector == Vector::SError {
@@ -1980,12 +1981,9 @@ fn interrupt_pending(cpu: &Cpu, lines: Lines) -> bool {
     if lines.irq || lines.fiq {
         return true;
     }
-    let hcr = cpu.read(SystemRegister::HCR_EL2);
-    let routed = |routing: u32, pending: u32| {
-        hcr & (1 << routing | 1 << pending) == 1 << routing | 1 << pending
-    };
+    let routed = |routing: u32, pending: u32| cpu.hcr(routing) && cpu.virtual_pending(pending);
     cpu.pstate.el != 2
-        && hcr & (1 << HCR_TGE) == 0
+        && !cpu.in_host()
         && (routed(HCR_IMO, HCR_VI) || routed(HCR_FMO, HCR_VF) || routed(HCR_AMO, HCR_VSE))
 }
 
@@ -3902,22 +3900,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(exception);
             return Ok(());
         }
-        // Apple's vGIC CPU interface answers the ICH_* encodings before the
-        // generated accessors, which follow the profile's absent FEAT_GICv3.
-        // Under HCR_EL2.NV an EL1 access to an EL2 register traps to EL2.
-        let el = self.cpu.pstate.el;
-        let vgic = if el == 1 && self.cpu.nested() & 1 != 0 && vgic::owns(encoding) {
-            Some(RegisterOutcome::Trapped(Some(2)))
-        } else if access.direction() == Direction::Read {
-            self.cpu.vgic.read(encoding, el)
-        } else {
-            let value = match access.rt() {
-                31 => 0,
-                rt => self.cpu.state.x[usize::from(rt)],
-            };
-            self.cpu.vgic.write(encoding, el, value)
-        };
-        if let Some(outcome) = vgic {
+        // Apple's vGIC CPU interface answers the ICH_* and ICC_* encodings
+        // before the generated accessors, which follow the profile's absent
+        // FEAT_GICv3.
+        let write = (access.direction() == Direction::Write).then(|| match access.rt() {
+            31 => 0,
+            rt => self.cpu.state.x[usize::from(rt)],
+        });
+        let context = self.cpu.vgic_context(write.is_some());
+        if let Some(outcome) = self.cpu.vgic.access(encoding, write, &context) {
             return self.register_outcome(word, Some(access), outcome);
         }
         // Whether the access is a plain TPIDR_EL1 read, judged before it

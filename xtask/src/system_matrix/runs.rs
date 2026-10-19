@@ -26,12 +26,14 @@ const TREES: [&str; 2] = ["crates/stela-runtime/src", "crates/stela-compiler/src
 const RUNTIME_SOURCE: &str = "crates/stela-runtime/src/";
 /// Cited tests whose code cannot name a chip, so that their pass holds on
 /// every chip: the compiler, which depends on no crate that defines one
-/// (the engine replaces a form the chip lacks before compiling it), and the
+/// (the engine replaces a form the chip lacks before compiling it), the
 /// reset derivation, which reads only the profile that generation builds
-/// for each chip.
-const CHIP_INDEPENDENT: [&str; 2] = [
+/// for each chip, and the vGIC CPU interface, which takes no chip (every
+/// PE's is the same model).
+const CHIP_INDEPENDENT: [&str; 3] = [
     "crates/stela-compiler/src/",
     "xtask/src/system_matrix/resets.rs#",
+    "crates/stela-runtime/src/machine/vgic",
 ];
 
 /// Each chip's credited tests, by libtest name.

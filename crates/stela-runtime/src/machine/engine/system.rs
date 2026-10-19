@@ -756,7 +756,7 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         let guest = cpu.pstate.el != 2 && !cpu.in_host();
         let line = |routing: u32, virtual_bit: u32, physical: bool| {
             if guest && cpu.hcr(routing) {
-                cpu.hcr(virtual_bit)
+                cpu.virtual_pending(virtual_bit)
             } else {
                 physical
             }
@@ -2629,6 +2629,92 @@ mod tests {
                 .unwrap();
             assert_eq!(machine.cpu.state.x[1], isr, "{hcr:#x}");
         }
+    }
+
+    #[test]
+    fn the_vgic_signals_a_virtual_irq_that_el1_acknowledges_through_icc_iar1() {
+        const ICH_HCR_EL2: Encoding = Encoding::new(3, 4, 12, 11, 0);
+        const ICH_VMCR_EL2: Encoding = Encoding::new(3, 4, 12, 11, 7);
+        const ICH_LR0_EL2: Encoding = Encoding::new(3, 4, 12, 12, 0);
+        const ICH_MISR_EL2: Encoding = Encoding::new(3, 4, 12, 11, 2);
+        const ICC_IAR1_EL1: Encoding = Encoding::new(3, 0, 12, 12, 0);
+        const ICC_EOIR1_EL1: Encoding = Encoding::new(3, 0, 12, 12, 1);
+        const ICC_SGI1R_EL1: Encoding = Encoding::new(3, 0, 12, 11, 5);
+        const HFGRTR_ICC_IGRPENN: u64 = 1 << 39;
+        const ICC_IGRPEN1_EL1: Encoding = Encoding::new(3, 0, 12, 12, 7);
+        let mut machine = machine(&[]);
+        // No System register interface to a physical GIC: GIC reads 0.
+        assert_eq!(machine.cpu.field(Register::ID_AA64PFR0_EL1, 24, 4), 0);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        let at = |machine: &mut TestMachine, el: u8, read: bool, encoding, value| {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[1] = value;
+            machine
+                .system_instruction(access(read, encoding, 1))
+                .unwrap();
+            machine.cpu.state.x[1]
+        };
+        // EL2 queues vINTID 27, group 1, priority 0x80, and enables the
+        // interface with group 1 on and no priority mask.
+        at(
+            &mut machine,
+            2,
+            false,
+            ICH_LR0_EL2,
+            1 << 62 | 1 << 60 | 0x80 << 48 | 27,
+        );
+        at(&mut machine, 2, false, ICH_VMCR_EL2, 0xff << 24 | 1 << 1);
+        at(&mut machine, 2, false, ICH_HCR_EL2, 1);
+        // With HCR_EL2.IMO the guest at EL1 takes it as a virtual IRQ.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 4);
+        machine.cpu.pstate = Pstate {
+            daif: 0,
+            ..Pstate::reset(1)
+        };
+        machine.cpu.pc = BASE;
+        machine.derived_changed();
+        assert!(machine.deliver_interrupts());
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x1_0280));
+        // ICC_IAR1_EL1 reaches ICV_IAR1_EL1, which acknowledges it, and
+        // ICC_EOIR1_EL1 completes it.
+        assert_eq!(at(&mut machine, 1, true, ICC_IAR1_EL1, 0), 27);
+        machine.cpu.pstate.daif = 0;
+        assert!(!machine.deliver_interrupts(), "active, nothing pending");
+        at(&mut machine, 1, false, ICC_EOIR1_EL1, 27);
+        assert_eq!(at(&mut machine, 2, true, ICH_LR0_EL2, 0) >> 62, 0);
+        // The SGI registers trap to EL2 with EC 0x18.
+        at(&mut machine, 1, false, ICC_SGI1R_EL1, 0);
+        assert_eq!(machine.cpu.pstate.el, 2);
+        assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, 0x18);
+        // HFGRTR_EL2.ICC_IGRPENn_EL1 needs FEAT_GICv3, so it is RES0 and
+        // the group enable reads VENG1 untrapped.
+        machine
+            .cpu
+            .registers
+            .set(Register::HFGRTR_EL2, 0, HFGRTR_ICC_IGRPENN);
+        assert_eq!(machine.cpu.read(Register::HFGRTR_EL2), 0);
+        let enable = at(&mut machine, 1, true, ICC_IGRPEN1_EL1, 0);
+        assert_eq!((machine.cpu.pstate.el, enable), (1, 1));
+        // Underflow with no valid list register raises the maintenance
+        // interrupt on the core's IRQ, which IMO routes to EL2.
+        at(&mut machine, 2, false, ICH_HCR_EL2, 1 | 1 << 1);
+        assert_eq!(at(&mut machine, 2, true, ICH_MISR_EL2, 0), 1 << 1);
+        machine.cpu.pstate = Pstate {
+            daif: 0,
+            ..Pstate::reset(1)
+        };
+        machine.cpu.pc = BASE;
+        assert!(machine.deliver_interrupts());
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0480));
+        // At EL2 the physical CPU interface is absent: UNDEFINED.
+        machine.cpu.pstate = Pstate::reset(2);
+        machine.cpu.pc = BASE;
+        machine
+            .system_instruction(access(true, ICC_IAR1_EL1, 1))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, 0);
     }
 
     #[test]
