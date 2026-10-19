@@ -2178,6 +2178,13 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
                 .first_u32("info-rtc_alarm_ctrl_en_mask")
                 .and_then(|mask| u8::try_from(mask).ok())
                 .ok_or("PMU RTC has no alarm enable mask")?;
+            let bits = |name: &str| -> Result<Option<u8>, String> {
+                node.first_u32(name)
+                    .map(|mask| {
+                        u8::try_from(mask).map_err(|_| format!("PMU {name} exceeds a byte"))
+                    })
+                    .transpose()
+            };
             Some(pmu::Rtc {
                 upcount,
                 clock_offset: clock_offset.base,
@@ -2186,6 +2193,9 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
                 alarm_offset: need("info-rtc_alarm_offset")?,
                 alarm_event: need("info-rtc_alarm_event")?,
                 irq_mask: need("info-rtc_irq_mask_offset")?,
+                event_mask: bits("info-rtc_alarm_event_mask")?.unwrap_or(pmu::DEFAULT_EVENT_MASK),
+                interrupt_mask: bits("info-rtc_alarm_mask")?
+                    .ok_or("PMU RTC has no info-rtc_alarm_mask")?,
             })
         }
     };
@@ -4791,6 +4801,7 @@ mod tests {
                     ("info-rtc_alarm_offset", &cells(&[0xf808])),
                     ("info-rtc_alarm_event", &cells(&[0xf80c])),
                     ("info-rtc_irq_mask_offset", &cells(&[0xf80e])),
+                    ("info-rtc_alarm_mask", &cells(&[0x1])),
                 ],
                 &[],
             );
@@ -4842,6 +4853,8 @@ mod tests {
             (rtc.upcount, rtc.clock_offset, rtc.alarm_enable),
             (0xf802, 0xf900, 0x40)
         );
+        // J473AP gives no event mask: the driver's default holds.
+        assert_eq!((rtc.event_mask, rtc.interrupt_mask), (0x1, 0x1));
         // A clock offset that is not six bytes refuses.
         let bytes = tree(&[0xf900, 4]);
         let io = Node::root(&bytes).unwrap();

@@ -80,6 +80,11 @@ pub enum SlaveError {
 pub trait SpmiSlave {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError>;
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError>;
+    /// Bring time-driven state up to `now`; the next counter value at which
+    /// the slave changes state by itself, if any.
+    fn advance(&mut self, _now: u64) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -342,6 +347,13 @@ impl MmioDevice for Spmi {
         }
         self.update_irq(access);
         Ok(())
+    }
+    fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        Ok(self
+            .slaves
+            .iter_mut()
+            .filter_map(|(_, slave)| slave.advance(access.now))
+            .min())
     }
 }
 

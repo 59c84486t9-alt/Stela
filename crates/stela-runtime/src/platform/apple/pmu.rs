@@ -1,6 +1,6 @@
 //! Dialog SPMI PMU (`pmu,spmi`): a byte-addressed register file behind an
 //! SPMI slave ID, holding the boot-state scratchpads and, on the primary
-//! PMU, the 32768 Hz real-time clock.
+//! PMU, the 32768 Hz real-time clock and its alarm.
 //!
 //! Evidence (26A434 KC VAs, unslid): `AppleDialogSPMIPMU::_readConfiguration`
 //! 0xfffffe0009dd5014 reads the `info-*` windows; `_readRegs` 0xfffffe0009dd6610
@@ -16,6 +16,22 @@
 //! `(upcount + offset) >> 15` Unix seconds. `updatePMSetting`
 //! 0xfffffe0009dd44d8 read-modify-writes the byte at `info-pm_setting`.
 //!
+//! The alarm (KC file offsets): `AppleDialogSPMIPMURTC::_readConfiguration`
+//! (0x2dd9874) takes the alarm's registers from `info-rtc_alarm_event`,
+//! `_alarm_offset`, `_irq_mask_offset` and `_alarm_ctrl`, and its bits from
+//! `info-rtc_alarm_event_mask` (0x1 when absent, as on J473AP),
+//! `_alarm_mask`, `_alarm_monitor_mask` and `_alarm_ctrl_en_mask`.
+//! `programRTCAlarm` (0x2ddab18) clears a latched event by writing its bit
+//! to the event register, writes the alarm time as four little-endian bytes
+//! at the alarm offset, the alarm mask to the IRQ mask register to mask the
+//! alarm's interrupt or zero to unmask it, and the monitor bit, with the
+//! enable bit for an alarm, to the control register. The time is in
+//! seconds of the upcount (upcount ticks >> 15): `enableDateTimeAlarm`
+//! (0x2ddad80) subtracts the clock offset's seconds from a calendar time,
+//! and `scheduleRTCWakeAlarm` (0x2ddb1bc) compares it with the upcount's.
+//! `checkRTCWakeEvent` (0x2ddb450) reports an RTC wake when every event-mask
+//! bit is set in the event register.
+//!
 //! The model maps exactly the windows the DeviceTree names. Scratchpads,
 //! fault logs and the PM setting are storage that holds the clean cold-boot
 //! value zero (no faults, no wake source, no LPM state), which the driver
@@ -23,18 +39,32 @@
 //! extent rounded to the 256-byte page at whose end the RTC block begins
 //! (inferred). The upcount follows the system counter and refuses writes;
 //! the clock offset starts at the host's wall time when the engine knows it
-//! and otherwise at zero, a PMU whose RTC lost power. Every other address
-//! NACKs, as do RTC alarm enables: the model does not wake the machine.
+//! and otherwise at zero, a PMU whose RTC lost power. An enabled alarm
+//! latches its event when the upcount's seconds reach the alarm time, once
+//! per programming: writing the time or control arms it only for a time
+//! still ahead (inferred: a comparator that fires on reaching the time, so
+//! a time already passed never fires and `programRTCAlarm`'s clear of a
+//! fired event does not retrigger it). The event register is
+//! write-one-to-clear. The PMU's interrupt output ([`Interrupt`]) is
+//! asserted while the event is latched and the IRQ mask leaves it
+//! unmasked; where it leads is the board's. Every other address NACKs.
 use super::spmi::{SlaveError, SpmiSlave};
 use crate::platform::apple::counter::FREQUENCY_HZ;
-use alloc::vec::Vec;
+use alloc::{rc::Rc, vec::Vec};
+use core::cell::Cell;
 
 /// The RTC's tick rate.
 pub const RTC_HZ: u64 = 32_768;
+/// Upcount ticks per second of the alarm's time.
+const SECOND_SHIFT: u32 = 15;
 const UPCOUNT_BYTES: u16 = 6;
 const OFFSET_BYTES: u16 = 6;
+const ALARM_BYTES: u16 = 4;
 /// The legacy scratchpad's extent (see the module comment).
 pub const LEGACY_SCRATCH_BYTES: u16 = 0x100;
+/// `AppleDialogSPMIPMURTC::_readConfiguration`'s event mask when the
+/// DeviceTree gives none.
+pub const DEFAULT_EVENT_MASK: u8 = 0x1;
 
 /// A DeviceTree-named register window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +89,10 @@ pub struct Rtc {
     pub alarm_offset: u16,
     pub alarm_event: u16,
     pub irq_mask: u16,
+    /// `info-rtc_alarm_event_mask`: the event register's alarm bits.
+    pub event_mask: u8,
+    /// `info-rtc_alarm_mask`: the IRQ mask register's alarm bits.
+    pub interrupt_mask: u8,
 }
 
 /// Host wall time at a system counter value, for the RTC's initial offset.
@@ -68,8 +102,19 @@ pub struct WallClock {
     pub counter: u64,
 }
 
+/// The PMU's interrupt output, shared with whatever the board connects it
+/// to: asserted while an alarm event is latched and unmasked.
+#[derive(Debug, Clone, Default)]
+pub struct Interrupt(Rc<Cell<bool>>);
+
+impl Interrupt {
+    pub fn asserted(&self) -> bool {
+        self.0.get()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Cell {
+enum Byte {
     Storage,
     Upcount(u16),
     AlarmControl,
@@ -84,6 +129,9 @@ pub struct Pmu {
     storage: Vec<Vec<u8>>,
     alarm_control: u8,
     alarm_event: u8,
+    /// The alarm has not fired since its time or control was last written.
+    armed: bool,
+    interrupt: Interrupt,
 }
 
 impl Pmu {
@@ -94,7 +142,7 @@ impl Pmu {
                 base: rtc.clock_offset,
                 bytes: OFFSET_BYTES,
             });
-            for (base, bytes) in [(rtc.alarm_offset, 4), (rtc.irq_mask, 1)] {
+            for (base, bytes) in [(rtc.alarm_offset, ALARM_BYTES), (rtc.irq_mask, 1)] {
                 windows.push(Window { base, bytes });
             }
         }
@@ -108,6 +156,8 @@ impl Pmu {
             storage,
             alarm_control: 0,
             alarm_event: 0,
+            armed: false,
+            interrupt: Interrupt::default(),
         };
         if let (Some(rtc), Some(wall)) = (rtc, wall) {
             let target = i128::from(wall.unix_seconds) * i128::from(RTC_HZ);
@@ -117,22 +167,28 @@ impl Pmu {
         }
         pmu
     }
-    fn cell(&self, address: u16) -> Option<Cell> {
+
+    /// The PMU's interrupt output.
+    pub fn interrupt(&self) -> Interrupt {
+        self.interrupt.clone()
+    }
+
+    fn cell(&self, address: u16) -> Option<Byte> {
         if let Some(rtc) = self.rtc {
             if address.wrapping_sub(rtc.upcount) < UPCOUNT_BYTES {
-                return Some(Cell::Upcount(address - rtc.upcount));
+                return Some(Byte::Upcount(address - rtc.upcount));
             }
             if address == rtc.alarm_control {
-                return Some(Cell::AlarmControl);
+                return Some(Byte::AlarmControl);
             }
             if address == rtc.alarm_event {
-                return Some(Cell::AlarmEvent);
+                return Some(Byte::AlarmEvent);
             }
         }
         self.windows
             .iter()
             .any(|w| w.contains(address))
-            .then_some(Cell::Storage)
+            .then_some(Byte::Storage)
     }
     fn byte(&mut self, address: u16) -> &mut u8 {
         let (index, window) = self
@@ -155,6 +211,50 @@ impl Pmu {
         }
         Ok((u32::from(address)..end).map(|a| a as u16))
     }
+
+    /// The counter value at which the enabled alarm latches its event, if
+    /// it is enabled, armed and has not.
+    fn alarm_deadline(&mut self) -> Option<u64> {
+        let rtc = self.rtc?;
+        if !self.armed || self.alarm_event & rtc.event_mask != 0 {
+            return None;
+        }
+        self.alarm_time()
+    }
+
+    /// The counter value of the enabled alarm's time.
+    fn alarm_time(&mut self) -> Option<u64> {
+        let rtc = self.rtc?;
+        if self.alarm_control & rtc.alarm_enable == 0 {
+            return None;
+        }
+        let mut time = [0u8; ALARM_BYTES as usize];
+        for (i, byte) in time.iter_mut().enumerate() {
+            *byte = *self.byte(rtc.alarm_offset + i as u16);
+        }
+        let upcount = u128::from(u32::from_le_bytes(time)) << SECOND_SHIFT;
+        // The first count whose RTC ticks reach the alarm's (`ticks`).
+        Some((upcount * u128::from(FREQUENCY_HZ)).div_ceil(u128::from(RTC_HZ)) as u64)
+    }
+
+    /// Latch the alarm's event once its time is reached, and drive the
+    /// interrupt output.
+    fn update(&mut self, now: u64) {
+        let Some(rtc) = self.rtc else {
+            return;
+        };
+        if self
+            .alarm_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.alarm_event |= rtc.event_mask;
+            self.armed = false;
+        }
+        let masked = *self.byte(rtc.irq_mask) & rtc.interrupt_mask != 0;
+        self.interrupt
+            .0
+            .set(self.alarm_event & rtc.event_mask != 0 && !masked);
+    }
 }
 
 /// System counter ticks as RTC ticks.
@@ -168,41 +268,58 @@ impl SpmiSlave for Pmu {
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
             .ok_or(SlaveError::Nack)?;
+        self.update(now);
         // One sample serves every upcount byte of the access.
         let raw = (ticks(now) << 1).to_le_bytes();
         for ((at, cell), out) in cells.into_iter().zip(data.iter_mut()) {
             *out = match cell {
-                Cell::Storage => *self.byte(at),
-                Cell::Upcount(i) => raw[usize::from(i)],
-                Cell::AlarmControl => self.alarm_control,
-                Cell::AlarmEvent => self.alarm_event,
+                Byte::Storage => *self.byte(at),
+                Byte::Upcount(i) => raw[usize::from(i)],
+                Byte::AlarmControl => self.alarm_control,
+                Byte::AlarmEvent => self.alarm_event,
             };
         }
         Ok(())
     }
-    fn write(&mut self, address: u16, data: &[u8], _: u64) -> Result<(), SlaveError> {
+    fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError> {
         let cells: Vec<_> = Self::span(address, data.len())?
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
             .ok_or(SlaveError::Nack)?;
-        let enable = self.rtc.map_or(0, |rtc| rtc.alarm_enable);
-        for (&(_, cell), &value) in cells.iter().zip(data) {
-            match cell {
-                Cell::Upcount(_) => return Err(SlaveError::Nack),
-                Cell::AlarmControl if value & enable != 0 => return Err(SlaveError::Nack),
-                _ => {}
-            }
+        if cells
+            .iter()
+            .any(|&(_, cell)| matches!(cell, Byte::Upcount(_)))
+        {
+            return Err(SlaveError::Nack);
         }
+        self.update(now);
+        let alarm = self
+            .rtc
+            .map(|rtc| rtc.alarm_offset..rtc.alarm_offset + ALARM_BYTES);
+        let mut programmed = false;
         for ((at, cell), &value) in cells.into_iter().zip(data) {
             match cell {
-                Cell::Storage => *self.byte(at) = value,
-                Cell::AlarmControl => self.alarm_control = value,
-                // Write one to clear; no alarm event ever latches.
-                Cell::AlarmEvent => self.alarm_event &= !value,
-                Cell::Upcount(_) => unreachable!(),
+                Byte::Storage => {
+                    *self.byte(at) = value;
+                    programmed |= alarm.as_ref().is_some_and(|time| time.contains(&at));
+                }
+                Byte::AlarmControl => {
+                    self.alarm_control = value;
+                    programmed = true;
+                }
+                Byte::AlarmEvent => self.alarm_event &= !value,
+                Byte::Upcount(_) => unreachable!(),
             }
         }
+        if programmed {
+            self.armed = self.alarm_time().is_some_and(|time| time > now);
+        }
+        self.update(now);
         Ok(())
+    }
+    fn advance(&mut self, now: u64) -> Option<u64> {
+        self.update(now);
+        self.alarm_deadline()
     }
 }
 
@@ -218,6 +335,8 @@ mod tests {
         alarm_offset: 0xf808,
         alarm_event: 0xf80c,
         irq_mask: 0xf80e,
+        event_mask: DEFAULT_EVENT_MASK,
+        interrupt_mask: 0x1,
     };
     fn stowe(wall: Option<WallClock>) -> Pmu {
         let windows = alloc::vec![
@@ -292,20 +411,69 @@ mod tests {
         assert_eq!(off, [0; 6]);
     }
 
+    /// `programRTCAlarm`'s writes for an alarm at upcount second `seconds`,
+    /// or for none.
+    fn program(pmu: &mut Pmu, seconds: u32, now: u64) {
+        let mut event = [0];
+        pmu.read(RTC.alarm_event, &mut event, now).unwrap();
+        if event[0] & RTC.event_mask != 0 {
+            pmu.write(RTC.alarm_event, &[RTC.event_mask], now).unwrap();
+        }
+        let enabled = seconds != 0;
+        pmu.write(RTC.alarm_offset, &seconds.to_le_bytes(), now)
+            .unwrap();
+        let mask = if enabled { 0 } else { RTC.interrupt_mask };
+        pmu.write(RTC.irq_mask, &[mask], now).unwrap();
+        let control = 0x1 | if enabled { RTC.alarm_enable } else { 0 };
+        pmu.write(RTC.alarm_control, &[control], now).unwrap();
+    }
+
     #[test]
-    fn alarm_disable_is_accepted_and_alarm_enable_nacks() {
+    fn an_enabled_alarm_latches_its_event_at_its_second_and_interrupts_until_cleared() {
         let mut pmu = stowe(None);
-        pmu.write(RTC.alarm_control, &[0], 0).unwrap();
-        pmu.write(RTC.irq_mask, &[1], 0).unwrap();
-        pmu.write(RTC.alarm_offset, &[1, 2, 3, 4], 0).unwrap();
-        assert_eq!(
-            pmu.write(RTC.alarm_control, &[0x41], 0),
-            Err(SlaveError::Nack)
-        );
-        let mut event = [0xff];
-        pmu.read(RTC.alarm_event, &mut event, 0).unwrap();
+        let interrupt = pmu.interrupt();
+        // No alarm: nothing to wait for.
+        program(&mut pmu, 0, 0);
+        assert_eq!(pmu.advance(0), None);
+        // An alarm at upcount second 30 fires at 30 s of the counter.
+        program(&mut pmu, 30, FREQUENCY_HZ);
+        assert_eq!(pmu.advance(FREQUENCY_HZ), Some(30 * FREQUENCY_HZ));
+        assert!(!interrupt.asserted());
+        assert_eq!(pmu.advance(30 * FREQUENCY_HZ - 1), Some(30 * FREQUENCY_HZ));
+        assert_eq!(pmu.advance(30 * FREQUENCY_HZ), None);
+        assert!(interrupt.asserted());
+        let mut event = [0];
+        pmu.read(RTC.alarm_event, &mut event, 30 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(event, [RTC.event_mask]);
+        // Disabling it clears the event and masks the interrupt.
+        program(&mut pmu, 0, 31 * FREQUENCY_HZ);
+        assert!(!interrupt.asserted());
+        pmu.read(RTC.alarm_event, &mut event, 31 * FREQUENCY_HZ)
+            .unwrap();
         assert_eq!(event, [0]);
-        pmu.write(RTC.alarm_event, &[1], 0).unwrap();
+        // A time already passed never fires.
+        program(&mut pmu, 10, 40 * FREQUENCY_HZ);
+        assert_eq!(pmu.advance(40 * FREQUENCY_HZ), None);
+        pmu.read(RTC.alarm_event, &mut event, 40 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(event, [0]);
+        // A masked alarm still latches its event, without interrupting.
+        program(&mut pmu, 40, 39 * FREQUENCY_HZ);
+        pmu.write(RTC.irq_mask, &[RTC.interrupt_mask], 39 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(pmu.advance(40 * FREQUENCY_HZ), None);
+        pmu.read(RTC.alarm_event, &mut event, 40 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(event, [RTC.event_mask]);
+        assert!(!interrupt.asserted());
+        // Cleared, a fired alarm stays quiet until it is programmed again.
+        pmu.write(RTC.alarm_event, &[RTC.event_mask], 41 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(pmu.advance(41 * FREQUENCY_HZ), None);
+        pmu.read(RTC.alarm_event, &mut event, 41 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(event, [0]);
         // A PMU without an RTC has no RTC registers.
         let mut aux = Pmu::new(
             alloc::vec![Window {
@@ -317,5 +485,6 @@ mod tests {
         );
         assert_eq!(aux.read(0xf802, &mut [0; 6], 0), Err(SlaveError::Nack));
         aux.write(0xa7ff, &[9], 0).unwrap();
+        assert_eq!(aux.advance(0), None);
     }
 }
