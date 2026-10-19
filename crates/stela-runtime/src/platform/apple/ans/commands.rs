@@ -15,6 +15,16 @@ use crate::platform::{apple::sart::Sart, dma::Port, pc::block::BlockError};
 use alloc::vec;
 
 const IDENTIFY_BYTES: usize = 4096;
+/// `AppleANS2NVMeController::AllocateTunnelBuffer` (0x3dbe83c) rounds every
+/// tunnel buffer up to 16 KiB (0x3dbe844..0x3dbe84c), `AppleNVMeBuffer::Init`
+/// keeps that rounded size (0x3de6318) and `ProcessTunnelCommand`
+/// (0x3de8acc..0x3de8b20) sends it as the output length at command +60.
+const TUNNEL_PAGE: u32 = 0x4000;
+
+/// The output length a tunnel request of `bytes` carries at command +60.
+pub(super) const fn tunnel_buffer(bytes: u32) -> u32 {
+    bytes.div_ceil(TUNNEL_PAGE) * TUNNEL_PAGE
+}
 /// Apple hardware personality (Linux `include/linux/pci_ids.h`). The model
 /// identifies its own software as Stela and offers one read-only firmware
 /// slot; these are emulated-die choices, not copied Apple firmware data.
@@ -559,7 +569,7 @@ impl Ans {
         let kind = u32::from_le_bytes(request[12..16].try_into().unwrap());
         if kind == 0xba {
             if cmd.long(52) == 0
-                || cmd.word(60) != 4096
+                || cmd.word(60) != tunnel_buffer(4096)
                 || request[..12]
                     .iter()
                     .chain(&request[16..76])
@@ -598,7 +608,7 @@ impl Ans {
             // consumed eight bytes have a modeled meaning; no fabricated
             // geometry is placed in the rest of the 4 KiB output buffer.
             if cmd.long(52) == 0
-                || cmd.word(60) != 4096
+                || cmd.word(60) != tunnel_buffer(4096)
                 || request[..12]
                     .iter()
                     .chain(&request[16..76])
@@ -746,7 +756,12 @@ mod tests {
         port.write(0x1000, &request).unwrap();
         port.write(0x2000, &[0xa5; 4096]).unwrap();
         command.0[52..60].copy_from_slice(&0x2000u64.to_le_bytes());
+        // The driver's 4 KiB request travels as one 16 KiB tunnel buffer.
+        assert_eq!(tunnel_buffer(4096), 0x4000);
+        assert_eq!(tunnel_buffer(0x4001), 0x8000);
         command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
+        assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+        command.0[60..64].copy_from_slice(&tunnel_buffer(4096).to_le_bytes());
         ans.execute(0, &command, &mut port, &mut sart).unwrap();
         let mut output = [0; 16];
         port.read(0x2000, &mut output).unwrap();
