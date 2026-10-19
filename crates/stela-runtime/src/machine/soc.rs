@@ -726,6 +726,19 @@ pub const MCC: &str = "mcc,t8112";
 /// ASC wrapper and nub shared by multiple coprocessor roles.
 pub const ASC: &str = "iop,ascwrap-v4";
 pub const RTBUDDY: &str = "iop-nub,rtbuddy-v2";
+
+/// `/arm-io/ans` properties under which SPTM's `nvme_bootstrap`
+/// (0x270c8a74..8bc0, 0x270c8dac) drives banks or flows the ANS2 model
+/// lacks: the secure BAR and its alternate register layout (SPTM programs
+/// the queues at `reg[9]` or +0x4000), the transfer-length workaround
+/// (`reg[10..12]` doorbells written on unmap) and the SHA engine
+/// (`reg[14]`). docs/research/ans2.md has the matrix.
+const UNMODELED_ANS_SPTM: [&str; 4] = [
+    "nvme-secure-bar",
+    "nvme-secure-reg-layout",
+    "nvme-tl-wa",
+    "nvme-ans-sha-present",
+];
 pub const SART: &str = "sart,coastguard";
 
 /// RTBuddy nub flags under which the AP does not wait for the coprocessor's
@@ -1754,10 +1767,13 @@ pub struct AesEngine {
 /// NVMe aperture. `iommu-parent` names SART itself, not a DART stream.
 /// J473AP: `IOCoastGuardSARTMapper::start` (kernel file 0x2ccada8),
 /// `AppleANS2NVMeController::start` (0x3dbb040); neither map is guessed.
+/// `vdma` is `reg[13]`, which SPTM reads only under `nvme-vdma-wa`
+/// (`ans::VDMA_CACHE_OFFSET`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnsController {
     pub wrapper: (u64, u64),
     pub nvme: (u64, u64),
+    pub vdma: Option<(u64, u64)>,
     pub sart: (u64, u64),
     pub sart_idle: u64,
     pub interrupts: [u16; 4],
@@ -2134,10 +2150,20 @@ fn ans_controller(
     if node.property("role") != Some(b"ANS2\0".as_slice()) {
         return Err("/arm-io/ans role is not the modeled ANS2".into());
     }
+    // SPTM INIT compares the kernel's queue entries, MQES, with this
+    // property (`ans::QUEUE_ENTRIES`).
     if node.property("nvme-linear-sq").is_none()
-        || node.first_u32("nvme-queue-entries") != Some(u32::from(ans::TAGS))
+        || node.first_u32("nvme-queue-entries") != Some(u32::from(ans::QUEUE_ENTRIES - 1))
     {
-        return Err("ANS2 requires linear submission queues with 64 entries".into());
+        return Err("ANS2 requires linear submission queues with MQES 64".into());
+    }
+    if let Some(flag) = UNMODELED_ANS_SPTM
+        .into_iter()
+        .find(|flag| node.property(flag).is_some())
+    {
+        return Err(format!(
+            "ANS2 {flag} selects an SPTM NVMe contract the model does not carry"
+        ));
     }
     let nub = node
         .child("iop-ans-nub")
@@ -2182,6 +2208,10 @@ fn ans_controller(
     };
     let wrapper = place(&regs, 0, asc::WRAPPER_BYTES)?;
     let nvme = place(&regs, 3, ans::REGISTER_BYTES)?;
+    let vdma = node
+        .property("nvme-vdma-wa")
+        .map(|_| place(&regs, 13, ans::VDMA_CACHE_OFFSET + ans::VDMA_CACHE_BYTES))
+        .transpose()?;
     let sart = place(&sart_regs, 0, sart::REGISTER_BYTES)?;
     let power = place(&sart_regs, 2, 4)?;
     let offset = u64::from(
@@ -2221,6 +2251,7 @@ fn ans_controller(
     Ok(Some(AnsController {
         wrapper,
         nvme,
+        vdma,
         sart,
         sart_idle,
         interrupts,
@@ -4257,36 +4288,42 @@ mod tests {
                 .flat_map(u64::to_le_bytes)
                 .collect::<Vec<_>>()
         };
-        let tree = |version: u32, parent: u32, interrupt_index: u32| {
+        let mut banks = vec![
+            (0x7740_0000, 0x6c000),
+            (0x7705_0000, 0x4000),
+            (0, 0),
+            (0x7bcc_0000, 0x60000),
+        ];
+        banks.resize(13, (0, 0));
+        banks.push((0x7b10_0000, 0x44000));
+        let banks = pairs(&banks);
+        let flagged = |flags: &[&'static str], version: u32, parent: u32, interrupt_index: u32| {
             let nub = encode(
                 &[("name", &z("iop-ans-nub")), ("compatible", &z(RTBUDDY))],
                 &[],
             );
-            let ans = encode(
-                &[
-                    ("name", &z("ans")),
-                    ("compatible", &z(ASC)),
-                    ("role", &z("ANS2")),
-                    (
-                        "reg",
-                        &pairs(&[
-                            (0x7740_0000, 0x6c000),
-                            (0x7705_0000, 0x4000),
-                            (0, 0),
-                            (0x7bcc_0000, 0x60000),
-                        ]),
-                    ),
-                    ("nvme-linear-sq", &[]),
-                    ("nvme-queue-entries", &cells(&[64])),
-                    ("nvme-interrupt-idx", &cells(&[interrupt_index])),
-                    ("interrupts", &cells(&[718, 717, 720, 719, 724])),
-                    ("iommu-parent", &cells(&[parent])),
-                    ("namespaces", &cells(&[1, 1, 0, 2, 8, 768, 3, 13, 32768])),
-                    ("clock-gates", &cells(&[125])),
-                    ("power-gates", &cells(&[125])),
-                ],
-                &[nub],
-            );
+            let (name, compatible, role) = (z("ans"), z(ASC), z("ANS2"));
+            let (entries, index) = (cells(&[64]), cells(&[interrupt_index]));
+            let interrupts = cells(&[718, 717, 720, 719, 724]);
+            let iommu = cells(&[parent]);
+            let namespaces = cells(&[1, 1, 0, 2, 8, 768, 3, 13, 32768]);
+            let gates = cells(&[125]);
+            let mut properties: Vec<(&str, &[u8])> = vec![
+                ("name", &name),
+                ("compatible", &compatible),
+                ("role", &role),
+                ("reg", &banks),
+                ("nvme-linear-sq", &[]),
+                ("nvme-queue-entries", &entries),
+                ("nvme-interrupt-idx", &index),
+                ("interrupts", &interrupts),
+                ("iommu-parent", &iommu),
+                ("namespaces", &namespaces),
+                ("clock-gates", &gates),
+                ("power-gates", &gates),
+            ];
+            properties.extend(flags.iter().map(|&flag| (flag, [].as_slice())));
+            let ans = encode(&properties, &[nub]);
             let sart = encode(
                 &[
                     ("name", &z("sart-ans")),
@@ -4303,6 +4340,8 @@ mod tests {
             );
             encode(&[("name", &z("arm-io"))], &[ans, sart])
         };
+        let tree =
+            |version, parent, interrupt_index| flagged(&[], version, parent, interrupt_index);
         let bytes = tree(3, 0x8e, 4);
         let io = Node::root(&bytes).unwrap();
         let placed = ans_controller(&io, &|offset| Some(0x2_0000_0000 + offset))
@@ -4323,6 +4362,18 @@ mod tests {
             }
         );
         assert_eq!(placed.clock_gates, [125]);
+        // reg[13] is SPTM's VDMA cache only under nvme-vdma-wa.
+        assert_eq!(placed.vdma, None);
+        let vdma = flagged(&["nvme-vdma-wa"], 3, 0x8e, 4);
+        let placed = ans_controller(&Node::root(&vdma).unwrap(), &|a| Some(a))
+            .unwrap()
+            .unwrap();
+        assert_eq!(placed.vdma, Some((0x7b10_0000, 0x44000)));
+        for flag in UNMODELED_ANS_SPTM {
+            let bytes = flagged(&[flag], 3, 0x8e, 4);
+            let error = ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a)).unwrap_err();
+            assert!(error.contains(flag), "{error}");
+        }
         for bytes in [
             tree(2, 0x8e, 4),
             tree(3, 0x99, 4),

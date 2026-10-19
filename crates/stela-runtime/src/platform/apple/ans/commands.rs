@@ -4,7 +4,7 @@
 //! (logs/features), 0x3dec394 (Apple time), 0x3dec794 (namespace records),
 //! and 0x3dec980 (tunnel). Unknown vendor effects stop before completion.
 use super::{
-    Ans, Queue, TAGS, die,
+    Ans, QUEUE_ENTRIES, Queue, die,
     namespace::BLOCK_BYTES,
     prp::{MAX_TRANSFER, Prps, dma_error},
 };
@@ -236,7 +236,7 @@ impl Ans {
         {
             return Err("ANS queue creation fields or address are not modeled");
         }
-        if id != 1 || depth > u32::from(TAGS) {
+        if id != 1 || depth > u32::from(QUEUE_ENTRIES) {
             return Ok(Outcome::status(INVALID_FIELD));
         }
         let flags = cmd.word(44);

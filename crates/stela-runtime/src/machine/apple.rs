@@ -715,6 +715,16 @@ impl AppleDevices {
                     .map_err(|e| format!("ANS placement: {e:?}"))?;
             }
         }
+        if let Some((base, _)) = placement.vdma {
+            self.bus
+                .map(
+                    ans,
+                    base + ans::VDMA_CACHE_OFFSET,
+                    ans::VDMA_CACHE_BYTES,
+                    ans::VDMA_CACHE,
+                )
+                .map_err(|e| format!("ANS VDMA cache placement: {e:?}"))?;
+        }
         self.storage_masters.push((ans, sart));
         Ok(())
     }
@@ -2127,10 +2137,12 @@ mod tests {
         const NVME: u64 = 0x2_7bcc_0000;
         const SART: u64 = 0x2_7bc5_0000;
         const WRAPPER: u64 = 0x2_7740_0000;
+        const VDMA: u64 = 0x2_7b10_0000;
         const RAM: u64 = 0x8_0000_0000;
         let placement = AnsController {
             wrapper: (WRAPPER, 0x6c000),
             nvme: (NVME, 0x60000),
+            vdma: Some((VDMA, 0x44000)),
             sart: (SART, 0xc000),
             sart_idle: NVME + 0x13e8,
             interrupts: [718, 717, 720, 719],
@@ -2196,6 +2208,18 @@ mod tests {
         let mut model = [0; 10];
         assert!(Memory::read(&mut ram, RAM + 0x4000 + 24, &mut model));
         assert_eq!(&model, b"Stela ANS2");
+        // The completed tag's VDMA cache entry holds no DMA permissions, the
+        // state SPTM's UNMAP_PAGES requires; other words have no model.
+        let entry = VDMA + ans::VDMA_CACHE_OFFSET;
+        assert_eq!(devices.read(0, entry, 4, 0), Ok(0));
+        assert_eq!(devices.read(0, entry + 63 * 32, 4, 0), Ok(0));
+        assert!(devices.read(0, entry + 4, 4, 0).is_err());
+        assert!(devices.write(0, entry, 4, 0, 0).is_err());
+        assert!(
+            devices
+                .read(0, entry + ans::VDMA_CACHE_BYTES, 4, 0)
+                .is_err()
+        );
     }
 
     #[test]

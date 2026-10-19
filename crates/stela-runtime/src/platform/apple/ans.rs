@@ -5,11 +5,13 @@
 //! 0x28108/0x28110, invalidation/status 0x28118/0x28120, and BOOT_STATUS
 //! 0x1300 = 0xde71ce55. NVMe 1.4 sections 3, 4, 5 and 6 define the base
 //! registers, PRPs, admin commands, completions and NVM read/write/flush.
-//! The 26A434 J473AP kernel uses `AppleANS2CGv2Controller` (file 0x3de4954):
-//! `GetIOSQES` (0x3de51d0) returns 6; `SetupAdminQueue` (0x3de502c) and
-//! `Enable{Completion,Submission}Queue` (0x3de54a4/0x3de5608) ask SPTM to
-//! program the NVMe registers. The register accessors at 0x3ddee24..64 use
-//! ANS `reg[3]`; its `nvme-interrupt-idx` selects the completion interrupt.
+//! The 26A434 J473AP kernel drives an ANS2 with `nvme-linear-sq` through
+//! `AppleANS3CGv2Controller` (`probe` 0x3dfa2f4), a subclass of
+//! `AppleANS2CGv2Controller` (file 0x3de4954) whose `GetIOSQES`
+//! (0x3de51d0) returns 6. The register accessors at 0x3ddee24..64 use ANS
+//! `reg[3]`; its `nvme-interrupt-idx` selects the completion interrupt.
+//! docs/research/ans2.md owns the SPTM NVMe validation matrix this
+//! controller's values must satisfy.
 //!
 //! Stela's die choices: NVMe 1.3, one I/O queue, 64 tags, 4/16 KiB memory
 //! pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
@@ -36,7 +38,27 @@ use prp::dma_error;
 
 const NAME: &str = "ans2";
 pub const TAGS: u16 = 64;
+/// Entries one queue may hold, CAP.MQES + 1. SPTM `INIT` (0x270c79d0)
+/// requires the kernel's queue entries to equal `nvme-queue-entries` (64),
+/// and `AppleANS3CGv2Controller::GetNVMeSPTMQueueEntries` (0x3db9270)
+/// passes `min(MQES + 1, 257) - 1` (0x3de4aa8..ae0 with its 256 pending
+/// commands, 0x3db9264), so MQES is exactly 64. The kernel sizes every
+/// ring with that minimum (`SetNVMeProperties` 0x3db3850, read by
+/// `CreateSubmissionQueue` 0x3ddd1dc and `CreateCompletionQueue`
+/// 0x3ddd648): 65-entry admin and I/O rings, while tags stay below
+/// [`TAGS`] (SPTM `MAP_PAGES` 0x270c8178).
+pub const QUEUE_ENTRIES: u16 = 65;
 pub const REGISTER_BYTES: u64 = 0x28134;
+/// Where SPTM finds the VDMA translation cache in ANS2 `reg[13]` when the
+/// node carries `nvme-vdma-wa` (`nvme_bootstrap` 0x270c8cac..cdc maps the
+/// bank and keeps it + 0x20000), and the cache's span: one 32-byte entry
+/// per tag (`UNMAP_PAGES` 0x270c7c20..30 reads tag << 5).
+pub const VDMA_CACHE_OFFSET: u64 = 0x2_0000;
+pub const VDMA_CACHE_BYTES: u64 = TAGS as u64 * VDMA_ENTRY_BYTES;
+/// The device offset the board maps the VDMA cache window at, past the
+/// NVMe registers.
+pub const VDMA_CACHE: u64 = 0x10_0000;
+const VDMA_ENTRY_BYTES: u64 = 32;
 const CAP: u64 = 0;
 const VS: u64 = 8;
 const INTMS: u64 = 0xc;
@@ -70,7 +92,8 @@ const CONFIG_MASK: u32 = ENABLE | (0xf << 7) | SHUTDOWN | (0xf << 16) | (0xf << 
 const ENTRY_SIZES: u32 = (6 << 16) | (4 << 20);
 const READY: u32 = 1;
 const SHUTDOWN_COMPLETE: u32 = 2 << 2;
-const CAPABILITIES: u64 = (TAGS as u64 - 1) | (1 << 16) | (1 << 24) | (1 << 37) | (2 << 52);
+const CAPABILITIES: u64 =
+    (QUEUE_ENTRIES as u64 - 1) | (1 << 16) | (1 << 24) | (1 << 37) | (2 << 52);
 const VERSION: u64 = 0x0001_0300;
 const BOOT_OK: u64 = 0xde71_ce55;
 const COMMAND_BYTES: u64 = 64;
@@ -164,7 +187,13 @@ pub struct Ans {
     valid: [bool; TAGS as usize],
     pending: VecDeque<(usize, u16)>,
     linear: bool,
-    max_pending: u32,
+    /// I/O queue attributes at 0x1210: 0's-based SQ entries in bits 15:0
+    /// and CQ entries in bits 31:16, as AQA. Both writers size their rings
+    /// one larger than the field: `AppleANS2CGv2Controller::SetupIOQARegister`
+    /// (0x3de5a6c) passes ring entries - 1 through SPTM `IOQA` (0x270c7470),
+    /// and `AppleANS2NVMeController::SetupIOQARegister` (0x3dc15d4) writes
+    /// 64 for its 65-entry rings. None until programmed.
+    queue_attributes: Option<u32>,
     modesel: u32,
     auto_queue: bool,
     shutdown: bool,
@@ -196,7 +225,7 @@ impl Ans {
             valid: [false; TAGS as usize],
             pending: VecDeque::new(),
             linear: false,
-            max_pending: 0,
+            queue_attributes: None,
             modesel: 0,
             auto_queue: false,
             shutdown: false,
@@ -240,16 +269,13 @@ impl Ans {
         if !self.auto_queue || self.config & ENABLE == 0 {
             return;
         }
-        let sq_entries = self.max_pending as u16;
-        let cq_entries = (self.max_pending >> 16) as u16;
+        let Some(attributes) = self.queue_attributes else {
+            return;
+        };
+        let sq_entries = (attributes & 0xffff) as u16 + 1;
+        let cq_entries = (attributes >> 16) as u16 + 1;
         let q = &mut self.queues[1];
-        if q.sq != 0
-            && q.cq != 0
-            && sq_entries != 0
-            && cq_entries != 0
-            && !q.sq_enabled
-            && !q.cq_enabled
-        {
+        if q.sq != 0 && q.cq != 0 && !q.sq_enabled && !q.cq_enabled {
             q.sq_entries = sq_entries;
             q.cq_entries = cq_entries;
             q.sq_enabled = true;
@@ -289,8 +315,8 @@ impl Ans {
                 let cq_entries = (((self.aqa >> 16) & 0xfff) + 1) as u16;
                 let page = 4096 << ((value >> 7) & 0xf);
                 let queue = self.queues[0];
-                if sq_entries > TAGS
-                    || cq_entries > TAGS
+                if sq_entries > QUEUE_ENTRIES
+                    || cq_entries > QUEUE_ENTRIES
                     || queue.sq == 0
                     || queue.cq == 0
                     || !queue.sq.is_multiple_of(page)
@@ -339,8 +365,11 @@ impl Ans {
         if self.tcb_bases[queue] == 0 {
             return Err("ANS submission without an NVMMU TCB array");
         }
-        let limit = (self.max_pending >> (queue * 16)) & 0xffff;
-        if limit != 0 && self.pending.iter().filter(|&&(q, _)| q == queue).count() >= limit as usize
+        let limit = self
+            .queue_attributes
+            .map(|attributes| ((attributes >> (queue * 16)) & 0xffff) as usize + 1);
+        if limit
+            .is_some_and(|limit| self.pending.iter().filter(|&&(q, _)| q == queue).count() >= limit)
         {
             return Err("ANS pending commands exceed the programmed queue limit");
         }
@@ -475,6 +504,26 @@ impl MmioDevice for Ans {
                 )),
             };
         }
+        // Before invalidating a tag, SPTM's UNMAP_PAGES (0x270c7c18..30,
+        // with nvme-vdma-wa) requires the tag's VDMA cache entry to hold no
+        // DMA permissions (bits 9:8 of its first word, the TCB's direction
+        // bits). The controller caches no translation once a command
+        // completes, so that entry reads 0; every other word, and the entry
+        // of a tag whose command is still pending, has no model.
+        if (VDMA_CACHE..VDMA_CACHE + VDMA_CACHE_BYTES).contains(&offset) {
+            let tag = (offset - VDMA_CACHE) / VDMA_ENTRY_BYTES;
+            let pending = self.pending.iter().any(|&(_, t)| u64::from(t) == tag);
+            if width != Width::Word || !offset.is_multiple_of(VDMA_ENTRY_BYTES) || pending {
+                return Err(refuse(
+                    NAME,
+                    offset,
+                    width,
+                    Direction::Read,
+                    "ANS VDMA cache word or pending entry without a model",
+                ));
+            }
+            return Ok(0);
+        }
         // SPTM 0x270c7c40 invalidates a tag then checks its three-bit
         // status in a four-bit lane (eight tags per word). The controller
         // has no cached translations after a synchronous DMA completes.
@@ -506,7 +555,7 @@ impl MmioDevice for Ans {
             (BASE_CID, Width::Word) => 0, // Stela assigns tags starting at zero.
             (MODESEL, Width::Word) => u64::from(self.modesel),
             (AUTO_QUEUE, Width::Word) => u64::from(self.auto_queue),
-            (MAX_PENDING, Width::Word) => u64::from(self.max_pending),
+            (MAX_PENDING, Width::Word) => u64::from(self.queue_attributes.unwrap_or(0)),
             (LINEAR, Width::Word) => u64::from(self.linear),
             (TCB_COUNT, Width::Word) => u64::from(self.tcb_count),
             (TCB_STATUS, Width::Word) => 0, // No cached translations: invalidation completes synchronously.
@@ -587,8 +636,11 @@ impl MmioDevice for Ans {
                     .map_err(error)?;
             }
             LINEAR if value <= 1 && self.pending.is_empty() => self.linear = value != 0,
-            MAX_PENDING if value & 0xffff <= u32::from(TAGS) && value >> 16 <= u32::from(TAGS) => {
-                self.max_pending = value
+            MAX_PENDING
+                if value & 0xffff < u32::from(QUEUE_ENTRIES)
+                    && value >> 16 < u32::from(QUEUE_ENTRIES) =>
+            {
+                self.queue_attributes = Some(value)
             }
             MODESEL if value == 0 => self.modesel = value,
             AUTO_QUEUE if value <= 1 => self.auto_queue = value != 0,
@@ -781,7 +833,7 @@ mod tests {
                 Ok(address >> 32)
             );
         }
-        rig.write(MAX_PENDING, 4 | (4 << 16)).unwrap();
+        rig.write(MAX_PENDING, 3 | (3 << 16)).unwrap();
         rig.write(AUTO_QUEUE, 1).unwrap();
         rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
         assert!(rig.ans.queues[1].sq_enabled && rig.ans.queues[1].cq_enabled);
@@ -924,6 +976,52 @@ mod tests {
         assert!(rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).is_err());
         assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
         assert!(!rig.latch.is_asserted(Wire::Aic(IRQ)));
+    }
+
+    #[test]
+    fn queue_depth_satisfies_the_sptm_queue_entries_contract() {
+        // ANS3CGv2 hands SPTM INIT min(MQES + 1, 256 + 1) - 1, which must
+        // equal the tree's nvme-queue-entries.
+        const NVME_QUEUE_ENTRIES: u64 = 64;
+        let mut rig = Rig::new();
+        let cap = rig
+            .ans
+            .read(CAP, Width::Double, &mut Access::new(0, 0, &mut rig.latch))
+            .unwrap();
+        assert_eq!((cap & 0xffff) + 1, u64::from(QUEUE_ENTRIES));
+        assert_eq!(((cap & 0xffff) + 1).min(256 + 1) - 1, NVME_QUEUE_ENTRIES);
+        // The kernel's 65-entry admin rings fit; a deeper ring does not.
+        rig.write(CC, 0).unwrap();
+        for (base, address) in [(ASQ, SQ), (ACQ, CQ)] {
+            rig.ans
+                .write(
+                    base,
+                    Width::Double,
+                    address,
+                    &mut Access::new(0, 0, &mut rig.latch),
+                )
+                .unwrap();
+        }
+        rig.write(AQA, 65 | 65 << 16).unwrap();
+        assert!(rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).is_err());
+        rig.write(AQA, 64 | 64 << 16).unwrap();
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+        assert_eq!(rig.ans.queues[0].sq_entries, QUEUE_ENTRIES);
+        assert_eq!(rig.ans.queues[0].cq_entries, QUEUE_ENTRIES);
+        // Create I/O CQ: QSIZE 65 (66 entries) fails, QSIZE 64 succeeds.
+        rig.submit(0, 0, 5, 0, IOCQ, [1 | (65 << 16), 3, 0, 0, 0, 0])
+            .unwrap();
+        assert_ne!(rig.bytes(CQ + 14, 2), [1, 0]);
+        rig.retire(0, 0);
+        rig.submit(0, 1, 5, 0, IOCQ, [1 | (64 << 16), 3, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(rig.bytes(CQ + 16 + 14, 2), [1, 0]);
+        assert_eq!(rig.ans.queues[1].cq_entries, QUEUE_ENTRIES);
+        // Tags stay below 64 whatever the ring depth.
+        assert!(rig.write(ADMIN_SUBMIT, u64::from(TAGS)).is_err());
+        // I/O queue attributes are 0's based like AQA.
+        assert!(rig.write(MAX_PENDING, 65).is_err());
+        rig.write(MAX_PENDING, 64 | 64 << 16).unwrap();
     }
 
     #[test]
