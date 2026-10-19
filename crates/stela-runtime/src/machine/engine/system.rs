@@ -141,6 +141,12 @@ fn watches(register: Register) -> bool {
     )
 }
 
+/// Writes that change only the translation of the lower half (TTBR0 of
+/// either regime): the host keeps its shadow of the upper half.
+fn table_base(register: Register) -> bool {
+    matches!(register, Register::TTBR0_EL1 | Register::TTBR0_EL2)
+}
+
 /// Writes that change translation: shadow roots and fetch translations go.
 fn translates(register: Register) -> bool {
     matches!(
@@ -327,10 +333,20 @@ pub(super) struct Access<'a, H: Host, D: Devices> {
     lines: Lines,
     now: u64,
     result: Option<u64>,
-    translation: bool,
+    translation: Translation,
     regime: bool,
     code: Code,
     refusal: Cell<Option<&'static str>>,
+}
+
+/// The cached translations an access makes stale, least first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Translation {
+    Unchanged,
+    /// A TTBR0 write: the lower half's ([`table_base`]).
+    TableBase,
+    /// Another translation control, or TLB maintenance: all.
+    All,
 }
 
 /// The compiled code an instruction-cache invalidation makes stale.
@@ -685,8 +701,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         self.machine
             .profile_missing
             .retain(|missing| *missing != register);
-        if translates(register) {
-            self.translation = true;
+        if table_base(register) {
+            self.translation = self.translation.max(Translation::TableBase);
+        } else if translates(register) {
+            self.translation = Translation::All;
         }
         if watches(register) {
             self.regime = true;
@@ -713,7 +731,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             // Every TLB maintenance operation discards all translations, a
             // superset of what any scope or level requires.
             Operation::Tlbi(_) => {
-                self.translation = true;
+                self.translation = Translation::All;
                 Ok(())
             }
             Operation::At {
@@ -1025,7 +1043,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lines,
             now,
             result: None,
-            translation: false,
+            translation: Translation::Unchanged,
             regime: false,
             code: Code::Unchanged,
             refusal: Cell::new(None),
@@ -1056,10 +1074,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ));
             return Some(Err(Stop::Unsupported(requirement)));
         }
-        if translation {
-            self.translations_changed();
-        } else if regime {
-            self.sync_regime();
+        match translation {
+            Translation::All => self.translations_changed(),
+            Translation::TableBase => self.table_base_changed(),
+            Translation::Unchanged if regime => self.sync_regime(),
+            Translation::Unchanged => {}
         }
         match code {
             Code::Unchanged => {}
@@ -1178,7 +1197,7 @@ pub(super) fn identify(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{BASE, machine, machine_on, normal_memory};
-    use super::Code;
+    use super::{Code, Translation};
     use crate::machine::{
         Chip, Stop,
         cpu::{HCR_HCD, HCR_TGE, HCR_TSC},
@@ -2497,7 +2516,7 @@ mod tests {
                     lines,
                     now,
                     result: None,
-                    translation: false,
+                    translation: Translation::Unchanged,
                     regime: false,
                     code: Code::Unchanged,
                     refusal: Cell::new(None),

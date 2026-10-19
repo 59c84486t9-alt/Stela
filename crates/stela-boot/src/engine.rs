@@ -1086,7 +1086,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     if let Err(error) = unsafe { host::install(config) } {
         output::fatal(error);
     }
-    let (_, _, _, apic_hz) = host::statistics();
+    let (_, _, _, _, apic_hz) = host::statistics();
     let mut bare = BareHost;
     let target = target();
     let mut read_only_region = None;
@@ -1818,9 +1818,9 @@ fn finish(
     survey_report(machine);
     stack_report(machine);
     dump_report(machine, dumps);
-    let (fills, resets, stray, _) = host::statistics();
+    let (fills, resets, lower_resets, stray, _) = host::statistics();
     output::arguments(format_args!(
-        "STATISTICS {:?} shadow_fills={fills} shadow_resets={resets} stray_interrupts={stray} events={} seconds={seconds:.3}\n",
+        "STATISTICS {:?} shadow_fills={fills} shadow_resets={resets} lower_resets={lower_resets} stray_interrupts={stray} events={} seconds={seconds:.3}\n",
         machine.statistics,
         EVENTS.load(Ordering::Relaxed),
     ));

@@ -4,7 +4,9 @@
 //! Shadow roots are PML5 pages whose entry 0 and 511 hold the guest's two
 //! halves and whose entry 64 is the shared window. There is one root per
 //! permission view (EL0, EL1, EL1 with PAN, GL1), filled on demand by the #PF
-//! handler from the software walk of the guest's tables.
+//! handler from the software walk of the guest's tables. Each half takes its
+//! tables from its own part of the pool, so a change of TTBR0 alone (a
+//! context switch) drops the lower half and keeps the upper half's.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
 use crate::{
     layout,
@@ -31,23 +33,33 @@ pub struct RamRange {
 }
 
 /// Page-table frames from the handoff pool: a permanent part for roots and a
-/// shadow part that resets wholesale.
+/// shadow part, split between the guest's two halves, each of which resets
+/// wholesale.
 struct Pool {
     base: u64,
     bytes: u64,
     permanent: u64,
-    shadow: u64,
+    /// The next free shadow frame's offset of each half ([`LOWER`],
+    /// [`UPPER`]).
+    shadow: [u64; 2],
     /// First shadow frame.
     shadow_base: u64,
+    /// The half the next frames map.
+    half: usize,
 }
+
+/// The guest halves: VAs with bit 63 clear and set.
+const LOWER: usize = 0;
+const UPPER: usize = 1;
 
 impl Frames for Pool {
     fn frame(&mut self) -> Option<u64> {
-        if self.shadow + PAGE > self.bytes {
+        let (_, end) = self.range(self.half);
+        if self.shadow[self.half] + PAGE > end {
             return None;
         }
-        let frame = self.base + self.shadow;
-        self.shadow += PAGE;
+        let frame = self.base + self.shadow[self.half];
+        self.shadow[self.half] += PAGE;
         zero(frame);
         Some(frame)
     }
@@ -71,8 +83,19 @@ impl Pool {
         zero(frame);
         Some(frame)
     }
-    fn reset_shadow(&mut self) {
-        self.shadow = self.shadow_base - self.base;
+    /// The offsets of `half`'s shadow frames: the lower half of the shadow
+    /// part, or the upper.
+    fn range(&self, half: usize) -> (u64, u64) {
+        let start = self.shadow_base - self.base;
+        let middle = start + (self.bytes - start) / 2 / PAGE * PAGE;
+        if half == LOWER {
+            (start, middle)
+        } else {
+            (middle, self.bytes)
+        }
+    }
+    fn reset_half(&mut self, half: usize) {
+        self.shadow[half] = self.range(half).0;
     }
 }
 
@@ -164,6 +187,8 @@ pub struct State {
     apic: Apic,
     pub fills: u64,
     pub resets: u64,
+    /// Resets of the lower half alone.
+    pub lower_resets: u64,
     pub stray: u64,
     /// TSC ticks spent in compiled guest code, its exits and faults.
     pub native_ticks: u64,
@@ -218,9 +243,13 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
         base: config.pool_physical,
         bytes: config.pool_bytes,
         permanent: 0,
-        shadow: PERMANENT_FRAMES * PAGE,
+        shadow: [0; 2],
         shadow_base: config.pool_physical + PERMANENT_FRAMES * PAGE,
+        half: LOWER,
     };
+    for half in [LOWER, UPPER] {
+        pool.reset_half(half);
+    }
     let window_entry = config.window | PRESENT | WRITABLE;
     let mut root = || -> Result<u64, &'static str> {
         let frame = pool.permanent().ok_or("page-table pool too small")?;
@@ -265,6 +294,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             fills: 0,
             native_ticks: 0,
             resets: 0,
+            lower_resets: 0,
             stray: 0,
         });
     }
@@ -296,9 +326,17 @@ fn start_apic() {
     apic.hz = (u128::from(elapsed) * u128::from(state.tsc_hz) / u128::from(tsc.max(1))) as u64;
 }
 
-pub fn statistics() -> (u64, u64, u64, u64) {
+/// Shadow fills, full resets, lower-half resets, stray interrupts and the
+/// APIC timer frequency.
+pub fn statistics() -> (u64, u64, u64, u64, u64) {
     let state = state();
-    (state.fills, state.resets, state.stray, state.apic.hz)
+    (
+        state.fills,
+        state.resets,
+        state.lower_resets,
+        state.stray,
+        state.apic.hz,
+    )
 }
 
 /// TSC ticks spent in compiled guest code so far.
@@ -335,16 +373,32 @@ impl State {
     }
 
     fn reset_shadow(&mut self) {
-        self.pool.reset_shadow();
-        for root in self.roots {
-            let entries = layout::physical(root) as *mut u64;
-            // SAFETY: permanent root frames through the physmap.
-            unsafe {
-                entries.add(GUEST_LOW).write(0);
-                entries.add(GUEST_HIGH).write(0);
-            }
-        }
+        self.clear(LOWER);
+        self.clear(UPPER);
         self.resets += 1;
+        self.reload();
+    }
+
+    /// Drop the lower half's translations only.
+    fn reset_lower(&mut self) {
+        self.clear(LOWER);
+        self.lower_resets += 1;
+        self.reload();
+    }
+
+    /// Unmap `half` from every root and free its frames.
+    fn clear(&mut self, half: usize) {
+        self.pool.reset_half(half);
+        let entry = if half == LOWER { GUEST_LOW } else { GUEST_HIGH };
+        for root in self.roots {
+            // SAFETY: permanent root frames through the physmap.
+            unsafe { (layout::physical(root) as *mut u64).add(entry).write(0) };
+        }
+    }
+
+    /// Load the current root again, which flushes the TLB of the guest's
+    /// (non-global) mappings.
+    fn reload(&mut self) {
         let root = if self.current < ROOTS {
             self.roots[self.current]
         } else {
@@ -487,6 +541,7 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     let rights = PRESENT | NX | if translation.writable { WRITABLE } else { 0 };
     let root = state.roots[state.current];
     let virtual_page = address & !(PAGE - 1);
+    state.pool.half = if address >> 63 == 0 { LOWER } else { UPPER };
     if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
         // The shadow pool is exhausted: start over and map again.
         state.reset_shadow();
@@ -620,11 +675,19 @@ impl Host for BareHost {
 
     fn set_regime(&mut self, regime: &Regime) {
         let state = state();
-        if state
-            .regime
-            .is_some_and(|current| current.controls != regime.controls)
+        if let Some(current) = state.regime
+            && current.controls != regime.controls
         {
-            state.reset_shadow();
+            // TTBR0 alone translates only the lower half.
+            let ttbr0 = mmu::Controls {
+                ttbr0: regime.controls.ttbr0,
+                ..current.controls
+            };
+            if ttbr0 == regime.controls {
+                state.reset_lower();
+            } else {
+                state.reset_shadow();
+            }
         }
         state.regime = Some(*regime);
         // EL0, EL1, EL1 with PAN, and the GXF guarded level (GL1).

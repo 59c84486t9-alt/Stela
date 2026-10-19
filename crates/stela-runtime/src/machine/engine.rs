@@ -219,7 +219,9 @@ pub trait Host {
     /// `code` was returned by [`Host::install`] since the last discard and
     /// was compiled for the system-mode block ABI.
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit;
-    /// Make the shadow translation follow `regime`.
+    /// Make the shadow translation follow `regime`: drop what a change of
+    /// its controls translates differently (a TTBR0 write arrives only
+    /// here, not through [`Host::invalidate_translations`]).
     fn set_regime(&mut self, regime: &Regime);
     /// Drop every cached translation (TLB maintenance).
     fn invalidate_translations(&mut self);
@@ -593,6 +595,11 @@ pub struct Statistics {
     pub waits: u64,
     /// Changes of the running PE.
     pub switches: u64,
+    /// TLB maintenance and translation control writes that dropped every
+    /// cached translation.
+    pub translation_changes: u64,
+    /// TTBR0 writes, which drop the lower half's.
+    pub table_base_changes: u64,
 }
 
 struct Block {
@@ -1137,7 +1144,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn translations_changed(&mut self) {
         self.translation_generation += 1;
+        self.statistics.translation_changes += 1;
         self.host.invalidate_translations();
+        self.sync_regime();
+    }
+
+    /// A TTBR0 write, which changes the translation of the lower half
+    /// alone: the regime's new controls tell the host so
+    /// ([`Host::set_regime`]), which keeps the upper half's shadow.
+    fn table_base_changed(&mut self) {
+        self.translation_generation += 1;
+        self.statistics.table_base_changes += 1;
         self.sync_regime();
     }
 
@@ -4870,6 +4887,43 @@ mod tests {
         let pc = machine.cpu.pc;
         machine.system_instruction(SDSB_ISH).unwrap();
         assert_eq!(machine.cpu.pc, pc + 4);
+    }
+
+    /// A TTBR0 write reaches the host only as the regime's new controls,
+    /// which differ from the old in TTBR0 alone, so the host keeps the upper
+    /// half's shadow; any other translation control and TLB maintenance
+    /// invalidate everything. Both make the fetch translations stale.
+    #[test]
+    fn ttbr0_writes_change_only_the_regime_and_other_controls_invalidate() {
+        const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
+        const MSR_TCR_EL1_X0: u32 = 0xd518_2040;
+        let mut machine = machine(&[]);
+        let before = *machine.host.regimes.last().unwrap();
+        let generation = machine.translation_generation;
+        machine.cpu.state.x[0] = 0x1_0000_8000_4000;
+        machine.system_instruction(MSR_TTBR0_EL1_X0).unwrap();
+        assert_eq!(machine.host.invalidations, 0);
+        let after = *machine.host.regimes.last().unwrap();
+        assert_ne!(after.controls, before.controls);
+        assert_eq!(
+            mmu::Controls {
+                ttbr0: after.controls.ttbr0,
+                ..before.controls
+            },
+            after.controls
+        );
+        assert!(machine.translation_generation > generation);
+        assert_eq!(
+            (
+                machine.statistics.table_base_changes,
+                machine.statistics.translation_changes
+            ),
+            (1, 0)
+        );
+        machine.cpu.state.x[0] = 25 | 25 << 16;
+        machine.system_instruction(MSR_TCR_EL1_X0).unwrap();
+        assert_eq!(machine.host.invalidations, 1);
+        assert_eq!(machine.statistics.translation_changes, 1);
     }
 
     #[test]
