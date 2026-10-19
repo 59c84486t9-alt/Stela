@@ -7,7 +7,10 @@
 //! the engine then completes the instruction itself, which reports Xt as
 //! the fault address and checks watchpoints over the whole block. Code
 //! clobbers RAX, RCX and RDX.
-use crate::aarch64::{Register, system::registers::Encoding};
+use crate::aarch64::{
+    Register,
+    system::registers::{Direction, Encoding},
+};
 use crate::block::{SystemInstruction, system::SystemOperation};
 use alloc::vec::Vec;
 
@@ -23,7 +26,12 @@ const UNROLLED_BYTES: u16 = 128;
 /// Xt of a DC ZVA, or `None` for any other System instruction.
 pub fn operand(instruction: &SystemInstruction) -> Option<u8> {
     match instruction.operation {
-        SystemOperation::Maintenance(access) if access.encoding() == DC_ZVA => Some(access.rt()),
+        // SYSL with DC ZVA's encoding is not DC ZVA.
+        SystemOperation::Maintenance(access)
+            if access.encoding() == DC_ZVA && access.direction() == Direction::Write =>
+        {
+            Some(access.rt())
+        }
         _ => None,
     }
 }
@@ -77,6 +85,7 @@ mod tests {
             0xd50b_7463,     // dc gva, x3
             0xd50b_7483,     // dc gzva, x3
             0xd538_d080,     // mrs x0, tpidr_el1
+            0xd52b_7423,     // sysl x3, #3, c7, c4, #1
         ] {
             assert_eq!(operand(&decode(word).unwrap()), None, "{word:#x}");
         }
