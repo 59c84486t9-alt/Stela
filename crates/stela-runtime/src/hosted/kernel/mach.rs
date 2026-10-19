@@ -20,6 +20,7 @@ use crate::mach::catalog::{self, Reserved};
 use anyhow::{Result, bail};
 
 mod message;
+pub(super) mod reclaim;
 mod server;
 
 /// The fast traps `handle_svc` answers before the table.
@@ -29,6 +30,7 @@ const KERN_SUCCESS: u64 = 0;
 const KERN_INVALID_ARGUMENT: u64 = 4;
 /// `MACH_SEND_INVALID_DEST`-class failure for a bad user address.
 const KERN_INVALID_ADDRESS: u64 = 1;
+const MACH_SEND_INVALID_DEST: u64 = 0x1000_0003;
 const VM_FLAGS_ANYWHERE: u64 = 1;
 /// `VM_PROT_DEFAULT`.
 const VM_PROT_DEFAULT: u64 = 3;
@@ -74,7 +76,6 @@ const FORWARDED: &[&str] = &[
     "swtch",
     "thread_switch",
     "clock_sleep_trap",
-    "mach_vm_reclaim_update_kernel_accounting_trap",
     "host_create_mach_voucher_trap",
     "mach_voucher_extract_attr_recipe_trap",
     "mk_timer_create_trap",
@@ -226,6 +227,25 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
                 }
             }
             status
+        }
+        "mach_vm_reclaim_update_kernel_accounting_trap" => {
+            // `(target_task, bytes_reclaimed_out, next_deadline_out)`.
+            let (bytes_out, deadline_out) = (arguments[1], arguments[2]);
+            if arguments[0] != u64::from(kernel.kernel_objects[0]) {
+                return Ok(MACH_SEND_INVALID_DEST);
+            }
+            if bytes_out == 0 || deadline_out == 0 {
+                return Ok(KERN_INVALID_ARGUMENT);
+            }
+            match reclaim::update_accounting(&mut kernel.reclaim) {
+                Ok((bytes, deadline)) => {
+                    // The kernel ignores copy-out faults here.
+                    crate::hosted::memory::write_u64(bytes_out, bytes);
+                    crate::hosted::memory::write_u64(deadline_out, deadline);
+                    KERN_SUCCESS
+                }
+                Err(status) => u64::from(status),
+            }
         }
         "mach_timebase_info_trap" => {
             let mut info = TIMEBASE_NUMERATOR.to_le_bytes().to_vec();

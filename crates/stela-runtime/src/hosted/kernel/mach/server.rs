@@ -4,6 +4,7 @@
 //! the out arguments), as the routine's MIG server stub lays it out, or a
 //! failing `RetCode` for the short `mig_reply_error_t`.
 use super::super::Kernel;
+use super::reclaim;
 use crate::hosted::{
     hardware,
     memory::{self, Protection},
@@ -36,6 +37,8 @@ pub(super) enum Reply {
     Success(Vec<u8>),
     /// A failing `RetCode`.
     Failure(u32),
+    /// The host kernel's answer is the arm64 kernel's: forward the request.
+    Forward,
 }
 
 const KERN_INVALID_ARGUMENT: u32 = 4;
@@ -58,7 +61,7 @@ pub(super) enum Object {
 /// Answer `routine` sent to `object`, or `None` when the hosted kernel
 /// does not serve it. `complex` is the request's `MACH_MSGH_BITS_COMPLEX`.
 pub(super) fn serve(
-    kernel: &Kernel,
+    kernel: &mut Kernel,
     object: Object,
     routine: &str,
     complex: bool,
@@ -73,8 +76,143 @@ pub(super) fn serve(
             host_info(&kernel.hardware, flavor, count.min(HOST_INFO_MAX))
         }
         (Object::Task, "_kernelrpc_mach_vm_map_external", true) => vm_map(request)?,
+        // `which_port`. The bootstrap port is the host's launchd, as for
+        // any process of this user; the kernel and host ports are this
+        // task's own kernel objects, whose names the reply repeats.
+        (Object::Task, "task_get_special_port_from_user", false) => match request.word(8) {
+            Some(TASK_KERNEL_PORT | TASK_HOST_PORT | TASK_BOOTSTRAP_PORT) => Reply::Forward,
+            Some(which) => bail!("task_get_special_port({which}) is not implemented"),
+            None => Reply::Failure(MIG_BAD_ARGUMENTS),
+        },
+        // One port descriptor, then `which_port`: replacing the bootstrap
+        // or debug-control port changes only this task's own state.
+        (Object::Task, "task_set_special_port_from_user", true) => match request.word(24) {
+            Some(TASK_BOOTSTRAP_PORT | TASK_DEBUG_CONTROL_PORT) => Reply::Forward,
+            Some(which) => bail!("task_set_special_port({which}) is not implemented"),
+            None => Reply::Failure(MIG_BAD_ARGUMENTS),
+        },
+        // `flavor`, `task_info_outCnt`. The audit token is this process's
+        // identity, the same in either ABI.
+        (Object::Task, "task_info_from_user", false) => {
+            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            match flavor {
+                TASK_AUDIT_TOKEN => Reply::Forward,
+                _ => bail!("task_info flavor {flavor} (count {count}) is not implemented"),
+            }
+        }
+        (Object::Task, "task_restartable_ranges_register", false) => {
+            restartable_ranges_register(kernel, request)
+        }
+        // The process runs one thread, which is making this call outside
+        // any range: no thread has a PC to reset.
+        (Object::Task, "task_restartable_ranges_synchronize", false) => Reply::Success(Vec::new()),
+        // `len`, `max_len`; out `address`, `next_deadline`.
+        (Object::Task, "mach_vm_deferred_reclamation_buffer_allocate", false) => {
+            let (Some(len), Some(max_len)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            pair(reclaim::allocate(&mut kernel.reclaim, len, max_len))
+        }
+        // `num_entries_to_reclaim`; out `bytes_reclaimed`, `next_deadline`.
+        (Object::Task, "mach_vm_deferred_reclamation_buffer_flush", false) => {
+            let Some(entries) = request.word(8) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            pair(reclaim::flush(&kernel.reclaim, entries))
+        }
+        // `new_len`; out `bytes_reclaimed`, `next_deadline`.
+        (Object::Task, "mach_vm_deferred_reclamation_buffer_resize", false) => {
+            let Some(len) = request.word(8) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            pair(reclaim::resize(&mut kernel.reclaim, len))
+        }
         _ => return Ok(None),
     }))
+}
+
+/// `osfmk/mach/task_special_ports.h`.
+const TASK_KERNEL_PORT: u32 = 1;
+const TASK_HOST_PORT: u32 = 2;
+const TASK_BOOTSTRAP_PORT: u32 = 4;
+const TASK_DEBUG_CONTROL_PORT: u32 = 10;
+/// `osfmk/mach/task_info.h`.
+const TASK_AUDIT_TOKEN: u32 = 15;
+
+/// `task_restartable_range_t` and the kernel's bounds
+/// (`osfmk/kern/restartable.c`).
+const RESTARTABLE_RANGE_BYTES: usize = 16;
+const RESTARTABLE_RANGES_MAX: u32 = 64;
+const TASK_RESTARTABLE_OFFSET_MAX: u16 = 4096;
+
+/// `task_restartable_ranges_register(ranges, count)`: validated and kept
+/// once, as a release kernel allows. The hosted kernel interrupts a guest
+/// thread only at its own exceptions, which a range never contains, and
+/// delivers no signals, so no PC is ever reset into a recovery path yet.
+fn restartable_ranges_register(kernel: &mut Kernel, request: &Request) -> Reply {
+    let Some(count) = request
+        .word(8)
+        .filter(|&count| count <= RESTARTABLE_RANGES_MAX)
+    else {
+        return Reply::Failure(MIG_BAD_ARGUMENTS);
+    };
+    let Some(bytes) = request
+        .body
+        .get(12..12 + count as usize * RESTARTABLE_RANGE_BYTES)
+    else {
+        return Reply::Failure(MIG_BAD_ARGUMENTS);
+    };
+    let mut ranges: Vec<(u64, u16, u16, u32)> = bytes
+        .as_chunks::<RESTARTABLE_RANGE_BYTES>()
+        .0
+        .iter()
+        .map(|range| {
+            (
+                u64::from_le_bytes(range[..8].try_into().unwrap()),
+                u16::from_le_bytes(range[8..10].try_into().unwrap()),
+                u16::from_le_bytes(range[10..12].try_into().unwrap()),
+                u32::from_le_bytes(range[12..16].try_into().unwrap()),
+            )
+        })
+        .collect();
+    // `_ranges_validate`: sorted, bounded, unflagged and disjoint.
+    ranges.sort_by_key(|&(location, length, ..)| (location, length));
+    if ranges.is_empty() {
+        return Reply::Failure(KERN_INVALID_ARGUMENT);
+    }
+    for (index, &(location, length, recovery, flags)) in ranges.iter().enumerate() {
+        let end = location.checked_add(u64::from(length));
+        let valid = length <= TASK_RESTARTABLE_OFFSET_MAX
+            && recovery <= TASK_RESTARTABLE_OFFSET_MAX
+            && flags == 0
+            && end.is_some()
+            && location.checked_add(u64::from(recovery)).is_some()
+            && ranges
+                .get(index + 1)
+                .is_none_or(|next| end.is_some_and(|end| end <= next.0));
+        if !valid {
+            return Reply::Failure(KERN_INVALID_ARGUMENT);
+        }
+    }
+    if kernel.restartable_ranges.is_some() {
+        return Reply::Failure(KERN_NOT_SUPPORTED);
+    }
+    kernel.restartable_ranges = Some(ranges);
+    Reply::Success(Vec::new())
+}
+
+/// A reply of two 64-bit out arguments.
+fn pair(result: Result<(u64, u64), u32>) -> Reply {
+    match result {
+        Ok((first, second)) => {
+            let mut body = first.to_le_bytes().to_vec();
+            body.extend(second.to_le_bytes());
+            Reply::Success(body)
+        }
+        Err(status) => Reply::Failure(status),
+    }
 }
 
 /// `mach_vm_map` on this task: one port descriptor (the memory object),

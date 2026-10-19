@@ -77,7 +77,11 @@ pub(super) fn send(
                     body: &request.body,
                 };
                 let complex = request.bits & MACH_MSGH_BITS_COMPLEX != 0;
-                if let Some(reply) = server::serve(kernel, object, routine.name, complex, &body)? {
+                let served = server::serve(kernel, object, routine.name, complex, &body)?;
+                if matches!(served, Some(Reply::Forward)) {
+                    return forward_trap(kernel, index, arguments);
+                }
+                if let Some(reply) = served {
                     if kernel.trace {
                         eprintln!("stela: mig {}.{} answered", routine.subsystem, routine.name);
                     }
@@ -203,6 +207,7 @@ fn answer(
                 body.extend(out);
             }
             Reply::Failure(code) => body.extend(code.to_le_bytes()),
+            Reply::Forward => unreachable!("forwarded requests are not answered"),
         }
         let size = HEADER_BYTES as u32 + body.len() as u32;
         let mut message = Vec::with_capacity(size as usize);

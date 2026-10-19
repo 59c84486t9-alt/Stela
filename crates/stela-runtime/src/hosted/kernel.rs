@@ -76,6 +76,11 @@ pub(super) struct Kernel {
     pub(super) kernel_objects: Vec<u32>,
     /// The port MIG reply rights are carried through, once allocated.
     pub(super) mig_relay: Option<u32>,
+    /// The task's restartable ranges (`t_rr_ranges`): location, length,
+    /// recovery offset and flags.
+    pub(super) restartable_ranges: Option<Vec<(u64, u16, u16, u32)>>,
+    /// The deferred-reclamation ring, once libmalloc registers one.
+    pub(super) reclaim: Option<mach::reclaim::Ring>,
 }
 
 /// The trapped guest thread as the exception left it: X0..X30 in the
@@ -156,6 +161,8 @@ impl Kernel {
             map_with_linking_ended: false,
             kernel_objects,
             mig_relay: None,
+            restartable_ranges: None,
+            reclaim: None,
         }
     }
 
