@@ -595,6 +595,10 @@ pub struct Statistics {
     /// direct exits out of their page), and the transfers those made.
     pub lookups: u64,
     pub lookup_hits: u64,
+    /// Native runs that ended in an exit to the engine, by `ExitKind`
+    /// (Fallthrough, Direct, Indirect, Call, Return, Trap, PAC, Clock,
+    /// ThreadRegister, FloatingPoint, ScalableNumerical, System, AMX).
+    pub exit_kinds: [u64; 13],
     pub compiled: u64,
     pub exceptions: u64,
     pub interrupts: u64,
@@ -1738,6 +1742,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.lookup_hits += control.hits;
         match exit {
             NativeExit::Exit { next_pc, kind } => {
+                if let Some(count) = self.statistics.exit_kinds.get_mut(kind as usize) {
+                    *count += 1;
+                }
                 self.exit(last, next_pc, kind)?;
                 match ExitKind::try_from(kind) {
                     _ if self.cpu.pstate.btype != 0 => {}
@@ -5084,6 +5091,11 @@ mod tests {
             (machine.statistics.lookups, machine.statistics.links),
             (2, 0)
         );
+        // The engine counts the exits it completed by kind.
+        let mut kinds = [0; 13];
+        kinds[ExitKind::Direct as usize] = 1;
+        kinds[ExitKind::Return as usize] = 1;
+        assert_eq!(machine.statistics.exit_kinds, kinds);
         let control = &*machine.chain as *const ChainControl as u64;
         let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
         assert!(first.successors.is_empty() && first.return_site.is_none());
