@@ -441,6 +441,8 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 struct Cables {
     restore: bool,
     input: bool,
+    /// The firmware's GOP mode, for the DCP display coprocessor's scanout.
+    screen: Option<console::Framebuffer>,
 }
 
 /// The system counter at placement and the host's wall time at it.
@@ -536,6 +538,28 @@ fn devices<'f>(
     }
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
         devices.add_spmi(spmi, clock.wall)?;
+    }
+    // The dcpext display coprocessor and its register apertures, presenting
+    // to the GOP framebuffer. Admission is closed (soc::models hides the
+    // nodes), so this places an inert coprocessor like a hidden SEP; it needs
+    // a scanout, so it is placed only when the firmware gave Stela a mode.
+    if let Some(dcp) = board.and_then(|board| board.dcp.as_ref())
+        && let Some(screen) = cables.screen
+    {
+        let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+        let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
+        devices.add_dcpext(
+            range(dcp.wrapper),
+            dcp.interrupts,
+            dcp.quiesced,
+            alloc::boxed::Box::new(display::GopScanout::new(screen)),
+        )?;
+        let regions: Vec<(&'static str, Range)> = dcp
+            .regions
+            .iter()
+            .map(|&(name, reg)| (name, range(reg)))
+            .collect();
+        devices.add_display(&regions)?;
     }
     for &physical in board.map_or(&[][..], |board| &board.coresight) {
         devices
@@ -1100,6 +1124,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Cables {
             restore: options.restore,
             input: options.input,
+            screen: handoff.screen,
         },
         &firmware,
     ) {

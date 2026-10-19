@@ -895,6 +895,20 @@ pub struct SepDevice {
     pub firmware: Option<(u64, u64)>,
 }
 
+/// The `dcpext` display coprocessor and the register apertures around it,
+/// from the J473AP DeviceTree: the ASC wrapper `reg[0]` and four mailbox IRQs,
+/// whether the nub is `quiesced`, and each present display aperture's primary
+/// `reg[0]` with a stable model name. Admission stays closed (see
+/// [`DISPEXT`]); `board` parses it so `add_dcpext`/`add_display` can place the
+/// inert model, exactly as SEP is placed while hidden.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DcpController {
+    pub wrapper: (u64, u64),
+    pub interrupts: [u32; 4],
+    pub quiesced: bool,
+    pub regions: Vec<(&'static str, (u64, u64))>,
+}
+
 /// T8112 device controller compatible; admission stays closed until the
 /// unchanged Apple platform/PHY initialization has been observed.
 pub const USB_DRD: &str = "usb-drd,t8112";
@@ -985,6 +999,9 @@ pub struct Board {
     pub cpu_start: Option<(u64, u8)>,
     /// Visible SPMI controllers and the PMUs on them.
     pub spmis: Vec<SpmiController>,
+    /// The `dcpext` display coprocessor and its register apertures, when the
+    /// DeviceTree shows them (admission is closed; see [`DcpController`]).
+    pub dcp: Option<DcpController>,
 }
 
 /// A Dialog PMU's slave ID and the register windows its `info-*`
@@ -3469,6 +3486,81 @@ fn sep_device(
     }))
 }
 
+/// The `dcpext` coprocessor and the display apertures around it, when the
+/// DeviceTree shows a `dcpext` with `role` `DCPEXT`. Admission is closed, so
+/// this is placed hidden (like SEP); the parse validates the shape the model
+/// needs and refuses a tree that does not match rather than guessing.
+fn dcp_device(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<DcpController>, String> {
+    let Some(node) = io
+        .child("dcpext")
+        .filter(|n| n.compatible(ASC) && n.property("role") == Some(DCPEXT_ROLE))
+    else {
+        return Ok(None);
+    };
+    const PATH: &str = "/arm-io/dcpext";
+    let place = |offset: u64, bytes: u64| -> Result<(u64, u64), String> {
+        if bytes == 0 {
+            return Err(format!("{PATH} aperture is empty"));
+        }
+        let physical =
+            translate(offset).ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))?;
+        let last = offset.checked_add(bytes - 1).and_then(translate);
+        if last != physical.checked_add(bytes - 1) {
+            return Err(format!(
+                "{PATH} register extent lies outside /arm-io ranges"
+            ));
+        }
+        Ok((physical, bytes))
+    };
+    let reg = node.pairs("reg").unwrap_or_default();
+    let &(wrapper_off, wrapper_bytes) = reg
+        .first()
+        .ok_or_else(|| format!("{PATH} has no register range"))?;
+    if wrapper_bytes < crate::platform::apple::asc::WRAPPER_BYTES {
+        return Err(format!("{PATH} has an incomplete ASC aperture"));
+    }
+    let quiesced = node
+        .child("iop-dcpext-nub")
+        .is_some_and(|nub| nub.property("quiesced").is_some());
+    let irqs: [u32; 4] = node
+        .cells32("interrupts")
+        .unwrap_or_default()
+        .get(..4)
+        .and_then(|cells| cells.try_into().ok())
+        .ok_or_else(|| format!("{PATH} requires four mailbox interrupts"))?;
+    if irqs.iter().any(|&irq| u16::try_from(irq).is_err()) {
+        return Err(format!(
+            "{PATH} mailbox interrupt is outside the AIC encoding"
+        ));
+    }
+    // Each present display aperture's primary reg[0], by DeviceTree node name
+    // and the compatible the model keys on.
+    let mut regions = Vec::new();
+    for (name, model, model_name) in [
+        ("dispext0", DISPEXT, "dispext0"),
+        ("dptx-phy", DPTX_PHY, "dptx-phy"),
+        ("display-crossbar0", DISPLAY_CROSSBAR, "display-crossbar0"),
+    ] {
+        if let Some(child) = io.child(name).filter(|n| n.compatible(model)) {
+            let &(offset, bytes) = child
+                .pairs("reg")
+                .unwrap_or_default()
+                .first()
+                .ok_or_else(|| format!("/arm-io/{name} has no register range"))?;
+            regions.push((model_name, place(offset, bytes)?));
+        }
+    }
+    Ok(Some(DcpController {
+        wrapper: place(wrapper_off, wrapper_bytes)?,
+        interrupts: irqs,
+        quiesced,
+        regions,
+    }))
+}
+
 /// The board a DeviceTree describes, or why the engine cannot model it: its
 /// chip and PEs ([`cpus`], from `/chosen` `chip-id`, `/product`
 /// `product-soc-name` and each `/cpus` node with a `cluster-type`) and the
@@ -3631,8 +3723,10 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     let spi_nor = spi_nor(&root, &io, &translate, phandle, gpio.as_ref())?;
     let spmis = spmi_controllers(&io, &translate, phandle)?;
+    let dcp = dcp_device(&io, &translate)?;
     Ok(Board {
         spmis,
+        dcp,
         gpio,
         aux_gpios,
         i2cs,
@@ -5888,6 +5982,96 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn dcp_placement_reads_the_wrapper_irqs_nub_and_display_apertures_without_admitting_it() {
+        use crate::machine::adt::encode;
+        const MODELED: [&str; 3] = [UART, WATCHDOG, "aic,2"];
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let words = |cells: &[u32]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |cells: &[u64]| {
+            cells
+                .iter()
+                .flat_map(|c| c.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let irqs = [0x242, 0x242, 0x245, 0x244];
+        let build = |role: &[u8], quiesced: bool, with_regions: bool| {
+            let nub_props: Vec<(&str, &[u8])> = if quiesced {
+                vec![("name", b"iop-dcpext-nub\0"), ("quiesced", &[])]
+            } else {
+                vec![("name", b"iop-dcpext-nub\0")]
+            };
+            let nub = encode(&nub_props, &[]);
+            let dcpext = encode(
+                &[
+                    ("name", &z("dcpext")),
+                    ("compatible", &z(ASC)),
+                    ("role", role),
+                    ("interrupts", &words(&irqs)),
+                    ("reg", &pairs(&[0x71c0_0000, 0x6c000, 0x7185_0000, 0x4000])),
+                ],
+                &[nub],
+            );
+            let mut children = alloc::vec![dcpext];
+            if with_regions {
+                children.push(encode(
+                    &[
+                        ("name", &z("dispext0")),
+                        ("compatible", &z(DISPEXT)),
+                        ("reg", &pairs(&[0x7000_0000, 0x61c000])),
+                    ],
+                    &[],
+                ));
+                children.push(encode(
+                    &[
+                        ("name", &z("dptx-phy")),
+                        ("compatible", &z(DPTX_PHY)),
+                        ("reg", &pairs(&[0x3c54_0000, 0xc000])),
+                    ],
+                    &[],
+                ));
+                children.push(encode(
+                    &[
+                        ("name", &z("display-crossbar0")),
+                        ("compatible", &z(DISPLAY_CROSSBAR)),
+                        ("reg", &pairs(&[0x3c00_0000, 0x4000])),
+                    ],
+                    &[],
+                ));
+            }
+            tree_with_io(0x8112, "Apple M2", MODELED, &[], &children)
+        };
+        let found = board(&build(DCPEXT_ROLE, true, true)).unwrap();
+        let dcp = found.dcp.expect("dcpext is parsed");
+        // /arm-io ranges translate the low window by +0x2_0000_0000.
+        assert_eq!(dcp.wrapper, (0x2_71c0_0000, 0x6c000));
+        assert_eq!(dcp.interrupts, irqs);
+        assert!(dcp.quiesced);
+        assert_eq!(
+            dcp.regions,
+            alloc::vec![
+                ("dispext0", (0x2_7000_0000, 0x61c000)),
+                ("dptx-phy", (0x2_3c54_0000, 0xc000)),
+                ("display-crossbar0", (0x2_3c00_0000, 0x4000)),
+            ]
+        );
+        // A non-quiesced nub and an absent set of apertures still parse.
+        let bare = board(&build(DCPEXT_ROLE, false, false))
+            .unwrap()
+            .dcp
+            .unwrap();
+        assert!(!bare.quiesced);
+        assert!(bare.regions.is_empty());
+        // Admission stays closed, and a wrong role is not a DCP.
+        assert!(!models(ASC, |key| (key == "role").then_some(DCPEXT_ROLE)));
+        assert!(board(&build(b"DCP\0", true, false)).unwrap().dcp.is_none());
+    }
+
     #[test]
     fn usb_placement_uses_identity_ranges_mapper_and_all_interrupts() {
         use crate::machine::adt::encode;

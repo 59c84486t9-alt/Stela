@@ -11,7 +11,48 @@
 use super::host::BareHost;
 use crate::console::{self, Framebuffer};
 use alloc::vec;
+use stela_runtime::machine::apple::{Scanout, ScanoutFormat, ScanoutMode};
 use stela_runtime::{boot_bundle, machine::Host};
+
+/// The host scanout the modeled DCP presents completed swaps to: the UEFI GOP
+/// framebuffer at its own mode. The DCP model converts each front surface to
+/// this scanout's pixel order (blue-low, which `Framebuffer::show_row` writes,
+/// swapping red and blue for an RGB panel) and honors its stride, so a frame
+/// arrives here as rows ready for the firmware's mode.
+pub struct GopScanout {
+    screen: Framebuffer,
+}
+
+impl GopScanout {
+    /// A scanout over `screen`, already relocated to the engine's physmap.
+    pub fn new(screen: Framebuffer) -> Self {
+        Self { screen }
+    }
+}
+
+impl Scanout for GopScanout {
+    fn mode(&self) -> ScanoutMode {
+        let (width, height) = self.screen.resolution();
+        ScanoutMode {
+            width: width as u32,
+            height: height as u32,
+            // show_row takes blue-low pixels and swaps for an RGB panel.
+            format: ScanoutFormat::Bgra8888,
+        }
+    }
+
+    fn present(&mut self, rows: &[u8]) -> Result<(), &'static str> {
+        let (width, height) = self.screen.resolution();
+        let row_bytes = width * 4;
+        if rows.len() < row_bytes * height {
+            return Err("presented frame is smaller than the scanout mode");
+        }
+        for y in 0..height {
+            self.screen.show_row(y, &rows[y * row_bytes..][..row_bytes]);
+        }
+        Ok(())
+    }
+}
 
 const BYTES_PER_PIXEL: u64 = 4;
 /// The guest framebuffer is whole 16 KiB pages.
