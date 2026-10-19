@@ -37,6 +37,8 @@ pub mod payload;
 mod platform;
 pub mod preboot;
 pub mod restore;
+/// Stela's own IPv4 client stack over any raw Ethernet link.
+pub use platform::net;
 /// Host PC storage for the UEFI mount after ExitBootServices.
 #[cfg(target_arch = "x86_64")]
 pub use platform::pc;

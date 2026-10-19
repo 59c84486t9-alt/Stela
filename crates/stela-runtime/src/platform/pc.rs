@@ -86,6 +86,11 @@ impl Clock {
         unsafe { core::arch::x86_64::_rdtsc() }
     }
 
+    /// Microseconds since an arbitrary origin.
+    pub fn now_us(&self) -> u64 {
+        Self::ticks() / self.ticks_per_microsecond
+    }
+
     /// A deadline `microseconds` from now.
     pub fn deadline(&self, microseconds: u64) -> Deadline {
         Deadline {
