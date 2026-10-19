@@ -1065,6 +1065,13 @@ impl AppleDevices {
         Ok(ids)
     }
 
+    /// A DART's SMMU instance block at `range` (`soc::Iommu::smmu`): present
+    /// so the driver maps it, every access refusing by name.
+    pub fn add_dart_smmu(&mut self, range: Range) -> Result<(), MapError> {
+        let device = self.bus.add(Box::new(dart::SmmuBlock));
+        self.bus.map(device, range.physical, range.bytes, 0)
+    }
+
     /// A `dart,t8110` of `streams` streams at `range`.
     pub fn add_dart(
         &mut self,

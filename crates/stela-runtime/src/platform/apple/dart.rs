@@ -700,6 +700,48 @@ impl MmioDevice for Dart {
     }
 }
 
+/// A DART's SMMU instance (`instance` kind `UMMS`, J473AP `dart-dispext0`
+/// `reg[1]`): its registers are not documented, and the 26A434 driver maps
+/// them but reads them only to capture state after a DART fault
+/// (`machine::soc::Iommu::smmu`), so every access refuses by name.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SmmuBlock;
+
+const SMMU_NAME: &str = "dart-smmu";
+const SMMU_REASON: &str = "DART SMMU instance register has no documented meaning";
+
+impl MmioDevice for SmmuBlock {
+    fn name(&self) -> &'static str {
+        SMMU_NAME
+    }
+
+    fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        Err(refuse(
+            SMMU_NAME,
+            offset,
+            width,
+            Direction::Read,
+            SMMU_REASON,
+        ))
+    }
+
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        _: u64,
+        _: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
+        Err(refuse(
+            SMMU_NAME,
+            offset,
+            width,
+            Direction::Write,
+            SMMU_REASON,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::interrupt::InterruptLatch;
@@ -709,6 +751,16 @@ mod tests {
     const ROOT: u64 = 0x1_0000_0000;
     const LEAVES: u64 = ROOT + PAGE;
     const FRAME: u64 = ROOT + 4 * PAGE;
+
+    #[test]
+    fn every_smmu_register_access_refuses_by_name() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut smmu = SmmuBlock;
+        assert_eq!(smmu.name(), SMMU_NAME);
+        assert!(smmu.read(0x18, Width::Word, &mut access).is_err());
+        assert!(smmu.write(0, Width::Word, 1, &mut access).is_err());
+    }
 
     fn table_entry(address: u64) -> u64 {
         (address >> ENTRY_ADDRESS_SHIFT) & ENTRY_ADDRESS | ENTRY_VALID

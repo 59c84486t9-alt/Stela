@@ -733,12 +733,17 @@ fn devices<'f>(
         let placed = devices
             .add_dart_group(&ranges, usize::from(dart.streams), Some(irq), dart.apf)
             .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
+        if let Some((physical, bytes)) = dart.smmu {
+            devices
+                .add_dart_smmu(Range { physical, bytes })
+                .map_err(|error| alloc::format!("DART SMMU placement: {error:?}"))?;
+        }
         darts.push(placed);
     }
     // The dcpext display coprocessor and its register apertures, presenting
-    // to the GOP framebuffer. Admission is closed (soc::models hides the
-    // nodes), so this places a hidden coprocessor like SEP, mastering through
-    // its DART; it needs a scanout, so it is placed only when the firmware gave Stela a mode.
+    // to the GOP framebuffer, mastering through its DART and reading swap
+    // surfaces through the display pipe's; it needs a scanout, so it is
+    // placed only when the firmware gave Stela a mode.
     if let Some(dcp) = board.and_then(|board| board.dcp.as_ref())
         && let Some(screen) = cables.screen
     {
@@ -751,10 +756,8 @@ fn devices<'f>(
             alloc::boxed::Box::new(display::GopScanout::new(screen)),
             (darts[dcp.iommu][0], dcp.stream as usize),
             dcp.window,
-            // The display pipe's DART (dart-dispext0, TRAD plus SMMU) is
-            // not parsed by `soc::board` yet, so swap surfaces cannot be
-            // read and a presented swap refuses by name.
-            None,
+            dcp.surface
+                .map(|(iommu, stream)| (darts[iommu][0], stream as usize)),
         )?;
         let regions: Vec<(&'static str, Range)> = dcp
             .regions

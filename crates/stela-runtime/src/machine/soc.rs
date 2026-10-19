@@ -1039,6 +1039,15 @@ const ROLE_MODELS: &[ModelClaim] = &[
         boot_properties: &[],
         admitted: true,
     },
+    // The display coprocessor (`platform::apple::dcp`): its `iop-dcpext-nub`
+    // reads as the native RTKit the other ASC claims present.
+    ModelClaim {
+        compatible: ASC,
+        property: ("role", DCPEXT_ROLE),
+        children: &[NATIVE_RTKIT],
+        boot_properties: &[],
+        admitted: true,
+    },
 ];
 
 /// Child compatibles claimed by a matching parent model. The loader uses
@@ -1095,6 +1104,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         SPMI,
         PMU,
         BUTTONS,
+        DISPEXT,
     ]
     .contains(&name)
         || GPU_ADMITTED && [SGX, GFX_MAPPER].contains(&name)
@@ -1116,15 +1126,25 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
 pub const SEP: &str = "iop-sep,ascwrap-v4";
 pub const SEP_NUB: &str = "iop-nub,sep";
 
-/// The J473AP HDMI display pipeline compatibles the engine models at the
-/// AP-facing protocols (`platform::apple::dcp`, `display`): the `dcpext`
-/// coprocessor (the shared ASC [`ASC`] with `role` `DCPEXT`), and the
-/// register apertures around it. Like [`SEP`], they are deliberately absent
-/// from `models()`: the IOMFB RPC shared-region exchange that carries the
-/// host-call payloads is recovered but not yet validated against a boot, so
-/// admitting DCPEXT would stop the guest at that boundary. The `add_dcpext`
-/// and `add_display` placements and this model exist and are tested so the
-/// path can be closed and admitted once the exchange is confirmed.
+/// The J473AP HDMI display pipeline the engine models at its AP-facing
+/// protocols (`platform::apple::dcp`, `display`,
+/// `docs/research/display-gpu.md` section 8): the `dcpext` coprocessor (the
+/// shared ASC [`ASC`] with `role` `DCPEXT`, admitted through [`ROLE_MODELS`])
+/// and the display pipe `dispext0` ([`DISPEXT`], kept so `AppleCLCD2`, an
+/// `IOMobileFramebufferAP`, matches), whose DART `dart-dispext0` the
+/// coprocessor reads swap surfaces through ([`DcpController::surface`]).
+///
+/// `dptx-phy` ([`DPTX_PHY`]) and `display-crossbar0` ([`DISPLAY_CROSSBAR`])
+/// stay hidden. Their AP drivers (`AppleT8112DPTXPort` and
+/// `AppleT8112DisplayCrossbar`, both in `com.apple.driver.AppleDisplayCrossbar`;
+/// the 26A434 DeviceTree-to-kext match) configure the physical link: the
+/// crossbar node has no `reg` and only routes the four `dispext` pipes and
+/// `scodec0` to the ATC, `lpdptx` and `dptx` endpoints, and the PHY answers
+/// the DCP's DPTX-port requests (AFK endpoint 0x2a, Linux `dptxep.c`). The
+/// model drives no link and announces no DPTX-port service, so no request
+/// reaches either driver; the model's monitor is connected by the
+/// coprocessor itself. A guest that waits for their services instead is an
+/// Open row of section 8.6.
 pub const DCPEXT_ROLE: &[u8] = b"DCPEXT\0";
 pub const DISPEXT: &str = "dispext0,t8112";
 pub const DPTX_PHY: &str = "dptx-phy,t8112";
@@ -1146,10 +1166,8 @@ pub struct SepDevice {
 
 /// The `dcpext` display coprocessor and the register apertures around it,
 /// from the J473AP DeviceTree: the ASC wrapper `reg[0]` and four mailbox IRQs,
-/// whether the nub is `quiesced`, and each present display aperture's primary
-/// `reg[0]` with a stable model name. Admission stays closed (see
-/// [`DISPEXT`]); `board` parses it so `add_dcpext`/`add_display` can place the
-/// inert model, exactly as SEP is placed while hidden.
+/// whether the nub is `quiesced`, each visible display aperture's primary
+/// `reg[0]` with a stable model name, and the DART streams it masters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcpController {
     pub wrapper: (u64, u64),
@@ -1164,6 +1182,12 @@ pub struct DcpController {
     /// hands the coprocessor only a DVA's low 32 bits
     /// (`AppleA7IOP::_restrictDVA`, kernel file 0x1bb1424).
     pub window: Option<u64>,
+    /// The [`Board::darts`] index and stream the swap surfaces are read
+    /// through: the visible display pipe's ([`DISPEXT`]) first
+    /// `iommu-parent` (J473AP `mapper-dispext0`, dart-dispext0 stream 0, the
+    /// framebuffer mapping Linux `plane.c` gives the display DART; the second,
+    /// `mapper-dispext0-piodma`, is the pipe's programmed-I/O DMA).
+    pub surface: Option<(usize, u32)>,
 }
 
 /// T8112 device controller compatible; admission stays closed until the
@@ -1997,6 +2021,15 @@ pub struct Iommu {
     pub remap: Vec<(u8, u8)>,
     /// The base of the I/O window its mappers allocate in (`vm-base`).
     pub vm_base: u64,
+    /// Its SMMU instance's register block, an `instance` descriptor of kind
+    /// `UMMS` after its TRAD instances (J473AP `dart-dispext0`).
+    /// `AppleT8110DART::_smmuSetupInstance` (26A434 KC file 0x2f12b64) maps
+    /// that numbered `reg` entry and records it, and `_smmuSetup` (0x2f12af0)
+    /// only marks the DART as having one; the driver reads it only to capture
+    /// state after a DART fault (`_smmuCaptureHardwareState` 0x2f1a3ec,
+    /// `_smmuCaptureRegs` 0x2f1d2b4). Placed as a block whose every access
+    /// refuses by name.
+    pub smmu: Option<(u64, u64)>,
 }
 
 /// The AES engine: its block and key-disable register ranges, its
@@ -2748,6 +2781,7 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
     }
     let mut instances = Vec::new();
     let mut apf = None;
+    let mut smmu = None;
     for (descriptor, &(offset, bytes)) in descriptors.as_chunks::<16>().0.iter().zip(&reg) {
         let number = u32::from_le_bytes(descriptor[4..8].try_into().expect("instance number"));
         match &descriptor[..4] {
@@ -2775,8 +2809,21 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
                     owner: descriptor[8..16].try_into().expect("eight-byte owner"),
                 });
             }
-            b"FPAD" if instances.len() == 1 && number == 0 && apf.is_none() => {
+            b"FPAD" if instances.len() == 1 && number == 0 && apf.is_none() && smmu.is_none() => {
                 apf = Some((offset, bytes))
+            }
+            b"UMMS" if !instances.is_empty() && number == 0 && apf.is_none() && smmu.is_none() => {
+                let physical = translate(offset)
+                    .filter(|at| {
+                        at.is_multiple_of(dart::DAPF_BYTES)
+                            && bytes == dart::DAPF_BYTES
+                            && offset.checked_add(bytes - 1).and_then(translate)
+                                == at.checked_add(bytes - 1)
+                    })
+                    .ok_or_else(|| {
+                        format!("{path} SMMU instance is not one translated aligned 16 KiB block")
+                    })?;
+                smmu = Some((physical, bytes));
             }
             _ => {
                 return Err(format!(
@@ -2892,6 +2939,7 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
         sids,
         remap,
         vm_base,
+        smmu,
         streams,
         irq,
         mappers,
@@ -4004,10 +4052,20 @@ fn sep_device(
     }))
 }
 
+/// The [`Board::darts`] index and stream of the mapper with `phandle`.
+fn mapper_stream(darts: &[Iommu], phandle: u32) -> Option<(usize, u32)> {
+    darts.iter().enumerate().find_map(|(index, dart)| {
+        dart.mappers
+            .iter()
+            .find(|(mapper, _)| *mapper == phandle)
+            .map(|&(_, stream)| (index, stream))
+    })
+}
+
 /// The `dcpext` coprocessor and the display apertures around it, when the
-/// DeviceTree shows a `dcpext` with `role` `DCPEXT`. Admission is closed, so
-/// this is placed hidden (like SEP); the parse validates the shape the model
-/// needs and refuses a tree that does not match rather than guessing.
+/// DeviceTree shows a `dcpext` with `role` `DCPEXT`. The parse validates the
+/// shape the model needs and refuses a tree that does not match rather than
+/// guessing.
 fn dcp_device(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
@@ -4077,15 +4135,7 @@ fn dcp_device(
     let parent = node
         .first_u32("iommu-parent")
         .ok_or_else(|| format!("{PATH} has no iommu-parent"))?;
-    let (iommu, stream) = darts
-        .iter()
-        .enumerate()
-        .find_map(|(index, dart)| {
-            dart.mappers
-                .iter()
-                .find(|(phandle, _)| *phandle == parent)
-                .map(|&(_, stream)| (index, stream))
-        })
+    let (iommu, stream) = mapper_stream(darts, parent)
         .ok_or_else(|| format!("{PATH} iommu-parent is no modeled DART's mapper"))?;
     if stream >= u32::from(darts[iommu].streams) {
         return Err(format!(
@@ -4093,6 +4143,22 @@ fn dcp_device(
         ));
     }
     let window = node.property("truncate-dvas").map(|_| darts[iommu].vm_base);
+    let surface = match io.child("dispext0").filter(|n| n.compatible(DISPEXT)) {
+        None => None,
+        Some(pipe) => {
+            let parent = pipe
+                .first_u32("iommu-parent")
+                .ok_or("/arm-io/dispext0 has no iommu-parent")?;
+            let (index, stream) = mapper_stream(darts, parent)
+                .ok_or("/arm-io/dispext0 iommu-parent is no modeled DART's mapper")?;
+            if stream >= u32::from(darts[index].streams) {
+                return Err(
+                    "/arm-io/dispext0 iommu-parent stream exceeds its DART's sid-count".into(),
+                );
+            }
+            Some((index, stream))
+        }
+    };
     Ok(Some(DcpController {
         wrapper: place(wrapper_off, wrapper_bytes)?,
         interrupts: irqs,
@@ -4101,6 +4167,7 @@ fn dcp_device(
         iommu,
         stream,
         window,
+        surface,
     }))
 }
 
@@ -5601,6 +5668,7 @@ mod tests {
                 apf: None,
                 power_gates: Vec::new(),
                 retention: false,
+                smmu: None,
             }]
         );
         assert_eq!(
@@ -6818,13 +6886,49 @@ mod tests {
                 ],
                 &[nub],
             );
+            let surface_mappers = [
+                encode(
+                    &[
+                        ("name", &z("mapper-dispext0")),
+                        ("compatible", &z(IOMMU_MAPPER)),
+                        ("reg", &words(&[0])),
+                        ("AAPL,phandle", &words(&[0xca])),
+                    ],
+                    &[],
+                ),
+                encode(
+                    &[
+                        ("name", &z("mapper-dispext0-piodma")),
+                        ("compatible", &z(IOMMU_MAPPER)),
+                        ("reg", &words(&[4])),
+                        ("AAPL,phandle", &words(&[0xcb])),
+                    ],
+                    &[],
+                ),
+            ];
+            let pipe_dart = encode(
+                &[
+                    ("name", &z("dart-dispext0")),
+                    ("compatible", &z(DART)),
+                    ("reg", &pairs(&[0x7130_4000, 0x4000, 0x7130_0000, 0x4000])),
+                    ("sid-count", &words(&[16])),
+                    (
+                        "instance",
+                        b"TRAD\0\0\0\0DART\0\0\0\0UMMS\0\0\0\0SMMU\0\0\0\0",
+                    ),
+                    ("interrupts", &words(&[0x251])),
+                ],
+                &surface_mappers,
+            );
             let mut children = alloc::vec![dart, dcpext];
             if with_regions {
+                children.push(pipe_dart);
                 children.push(encode(
                     &[
                         ("name", &z("dispext0")),
                         ("compatible", &z(DISPEXT)),
                         ("reg", &pairs(&[0x7000_0000, 0x61c000])),
+                        ("iommu-parent", &words(&[0xca, 0xcb])),
                     ],
                     &[],
                 ));
@@ -6856,6 +6960,12 @@ mod tests {
         assert_eq!((dcp.iommu, dcp.stream), (0, 5));
         assert_eq!(found.darts[0].vm_base, 0x8_0000_0000);
         assert_eq!(dcp.window, Some(0x8_0000_0000));
+        // The surfaces translate through dart-dispext0 stream 0; its SMMU
+        // block is the second reg entry.
+        assert_eq!(dcp.surface, Some((1, 0)));
+        assert_eq!(found.darts[1].instances[0].physical, 0x2_7130_4000);
+        assert_eq!(found.darts[1].smmu, Some((0x2_7130_0000, 0x4000)));
+        assert_eq!(found.darts[0].smmu, None);
         assert_eq!(
             dcp.regions,
             alloc::vec![
@@ -6871,8 +6981,14 @@ mod tests {
             .unwrap();
         assert!(!bare.quiesced);
         assert!(bare.regions.is_empty());
-        // Admission stays closed, and a wrong role is not a DCP.
-        assert!(!models(ASC, |key| (key == "role").then_some(DCPEXT_ROLE)));
+        assert_eq!(bare.surface, None);
+        // DCPEXT and its pipe are admitted with a native nub; the PHY and
+        // crossbar stay hidden, and a wrong role is not a DCP.
+        let role = |key: &str| (key == "role").then_some(DCPEXT_ROLE);
+        assert!(models(ASC, role));
+        assert_eq!(model_children(ASC, role)[0].compatible, RTBUDDY);
+        assert!(models(DISPEXT, |_| None));
+        assert!(!models(DPTX_PHY, |_| None) && !models(DISPLAY_CROSSBAR, |_| None));
         assert!(board(&build(b"DCP\0", true, false)).unwrap().dcp.is_none());
     }
 
