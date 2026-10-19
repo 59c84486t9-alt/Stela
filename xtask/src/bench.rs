@@ -17,21 +17,28 @@
 //! reports paired medians. Preparation and compilation stay outside the
 //! clocks; state reset, dispatch and the return stay inside, with nothing
 //! subtracted. Both clocks are kept: thread CPU time and monotonic wall time.
+//!
+//! Two builds also differ in the layout of the runtime's own code, which
+//! moves the engines' timings by itself. So each build also dumps the native
+//! blocks both engines compile, and this build's workers run either build's
+//! blocks under one minimal dispatcher (engines `n-blocks` and `n-hosted`),
+//! where only the native code differs.
+mod engines;
+mod fixtures;
+
 use crate::tools::root;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
-use object::read::macho::{FatArch, MachOFatFile32};
-use object::{Object, ObjectSection, ObjectSymbol, SymbolKind, macho};
+use engines::{Blocks, Hosted, Native, NativeBlock, Profile, Runner, compile_blocks};
+use fixtures::{
+    ARENA, CODE, STOP, Source, WORKLOADS, arm64e_slice, function, prepare, state_digest,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Instant;
-use stela_compiler::{GuestAddress, GuestState, TargetCpu, block::BlockProfile};
-use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
-use stela_runtime::hosted::{host::ProcessHost, pe, tables::Tables};
-use stela_runtime::machine::{Chip, Machine, NoDevices, Stop};
+use stela_compiler::TargetCpu;
 
 const M1N1: &str = ".stela/agx-work/src/m1n1";
 const DYLD: &str = ".stela/26A434-guest-files/usr/lib/dyld";
@@ -84,155 +91,53 @@ pub struct Bench {
     /// Worker: the round, which places the hosted engine's code.
     #[arg(long, hide = true, default_value_t = 0)]
     round: usize,
+    /// Worker: write the native blocks both engines compile here instead.
+    #[arg(long, hide = true)]
+    dump_native: Option<PathBuf>,
+    /// Worker: run the native blocks of this dump instead of the engines.
+    #[arg(long, hide = true)]
+    native_code: Option<PathBuf>,
 }
-
-#[derive(Clone, Copy, Debug)]
-enum Source {
-    M1n1String,
-    Dyld,
-    /// A microbenchmark's words, not a program's.
-    Words(&'static [u32]),
-}
-
-/// Microbenchmark loop: per iteration, two loads from X0 into X9 and X11,
-/// ADD and EOR into X10, then SUBS X1 and B.NE; returns X10.
-const fn micro_loop(first: u32, second: u32) -> [u32; 8] {
-    const ADD_X10_X10_X9: u32 = 0x8b09_014a;
-    const EOR_X10_X10_X11: u32 = 0xca0b_014a;
-    const SUBS_X1_X1_ONE: u32 = 0xf100_0421;
-    const B_NE_MINUS_5: u32 = 0x54ff_ff61;
-    const MOV_X0_X10: u32 = 0xaa0a_03e0;
-    [
-        first,
-        ADD_X10_X10_X9,
-        second,
-        EOR_X10_X10_X11,
-        SUBS_X1_X1_ONE,
-        B_NE_MINUS_5,
-        MOV_X0_X10,
-        RET,
-    ]
-}
-/// LDR X9, [X0, #8] and LDR X11, [X0, #16].
-const MICRO_DOUBLEWORD: [u32; 8] = micro_loop(0xf940_0409, 0xf940_080b);
-/// LDRH W9, [X0, #2] and LDRH W11, [X0, #4].
-const MICRO_HALFWORD: [u32; 8] = micro_loop(0x7940_0409, 0x7940_080b);
-const MICRO_ITERATIONS: usize = 1000;
-
-/// The input a workload passes, which decides its expected result.
-#[derive(Clone, Copy, Debug)]
-enum Input {
-    /// memchr over `n` bytes without the byte.
-    MemchrMiss(usize),
-    /// strncmp of two equal `n`-byte strings, limit `n`.
-    StrncmpEqual(usize),
-    Atol(&'static str),
-    /// lsl::Allocator::owned over a list of `n` regions none of which owns
-    /// the pointer: half start above it, half end below it.
-    AllocatorMiss(usize),
-    /// RuntimeState::inPermanentRange over two chunks of `n` ranges, none
-    /// containing the range: half start above it, half are compared fully.
-    PermanentRangeMiss(usize),
-    /// murmurHash over `n` bytes.
-    Murmur(usize),
-    /// A microbenchmark loop for `n` iterations over loads of `bytes`.
-    Micro {
-        iterations: usize,
-        bytes: usize,
-    },
-}
-
-struct Workload {
-    name: &'static str,
-    source: Source,
-    symbol: &'static str,
-    input: Input,
-}
-
-const WORKLOADS: [Workload; 10] = [
-    Workload {
-        name: "m1n1 memchr, 257-byte miss",
-        source: Source::M1n1String,
-        symbol: "_memchr",
-        input: Input::MemchrMiss(257),
-    },
-    Workload {
-        name: "m1n1 memchr, 4096-byte miss",
-        source: Source::M1n1String,
-        symbol: "_memchr",
-        input: Input::MemchrMiss(4096),
-    },
-    Workload {
-        name: "m1n1 strncmp, 257 equal bytes",
-        source: Source::M1n1String,
-        symbol: "_strncmp",
-        input: Input::StrncmpEqual(257),
-    },
-    Workload {
-        name: "m1n1 atol, 19 digits",
-        source: Source::M1n1String,
-        symbol: "_atol",
-        input: Input::Atol("1234567890123456789"),
-    },
-    Workload {
-        name: "dyld lsl::Allocator::owned, 64-region list",
-        source: Source::Dyld,
-        symbol: "__ZNK3lsl9Allocator5ownedEPKvy",
-        input: Input::AllocatorMiss(64),
-    },
-    Workload {
-        name: "dyld RuntimeState::inPermanentRange, 2x64 ranges",
-        source: Source::Dyld,
-        symbol: "__ZN5dyld412RuntimeState16inPermanentRangeEmmPhPPKNS_6LoaderE",
-        input: Input::PermanentRangeMiss(64),
-    },
-    Workload {
-        name: "dyld murmurHash, 1027 bytes",
-        source: Source::Dyld,
-        symbol: "__Z10murmurHashPKviy",
-        input: Input::Murmur(1027),
-    },
-    Workload {
-        name: "dyld murmurHash, 64 bytes",
-        source: Source::Dyld,
-        symbol: "__Z10murmurHashPKviy",
-        input: Input::Murmur(64),
-    },
-    Workload {
-        name: "micro: LDR X offset loop, 1000 iterations",
-        source: Source::Words(&MICRO_DOUBLEWORD),
-        symbol: "",
-        input: Input::Micro {
-            iterations: MICRO_ITERATIONS,
-            bytes: 8,
-        },
-    },
-    Workload {
-        name: "micro: LDRH offset loop, 1000 iterations",
-        source: Source::Words(&MICRO_HALFWORD),
-        symbol: "",
-        input: Input::Micro {
-            iterations: MICRO_ITERATIONS,
-            bytes: 2,
-        },
-    },
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Engine {
     Hosted,
     Blocks,
+    /// A build's blocks-engine code under the bench's dispatcher.
+    NativeBlocks,
+    /// A build's hosted-engine code under the bench's dispatcher.
+    NativeHosted,
 }
-
-const ENGINES: [Engine; 2] = [Engine::Hosted, Engine::Blocks];
 
 impl Engine {
     fn name(self) -> &'static str {
         match self {
             Self::Hosted => "hosted",
             Self::Blocks => "blocks",
+            Self::NativeBlocks => "n-blocks",
+            Self::NativeHosted => "n-hosted",
         }
     }
+
+    /// The compilation a native engine runs.
+    fn profile(self) -> Option<Profile> {
+        match self {
+            Self::NativeBlocks => Some(Profile::Ordinary),
+            Self::NativeHosted => Some(Profile::System),
+            Self::Hosted | Self::Blocks => None,
+        }
+    }
+}
+
+const PROCESS_ENGINES: [Engine; 2] = [Engine::Hosted, Engine::Blocks];
+const NATIVE_ENGINES: [Engine; 2] = [Engine::NativeBlocks, Engine::NativeHosted];
+
+/// What a worker runs.
+#[derive(Clone, Copy)]
+enum Mode<'a> {
+    Process,
+    /// The native blocks of a dump.
+    Native(&'a Path),
 }
 
 impl Bench {
@@ -242,24 +147,80 @@ impl Bench {
             "time a release build: cargo run --release --locked -p xtask -- bench"
         );
         if let Some(fixtures) = &self.worker {
-            return worker(fixtures, &self.calls, self.target_ms, self.round);
+            if let Some(path) = &self.dump_native {
+                return dump_native(fixtures, path);
+            }
+            let mode = self
+                .native_code
+                .as_deref()
+                .map_or(Mode::Process, Mode::Native);
+            return worker(fixtures, mode, &self.calls, self.target_ms, self.round);
         }
         let fixtures = self.fixtures()?;
         let me = std::env::current_exe()?;
-        let calls = calibrate(&me, &fixtures, self.target_ms)?;
+        let work = root().join(WORK);
+        let mut builds = vec![("candidate", me.clone(), work.join("native-candidate.json"))];
+        if let Some(baseline) = &self.baseline {
+            builds.push((
+                "baseline",
+                baseline.clone(),
+                work.join("native-baseline.json"),
+            ));
+        }
+        for (_, executable, dump) in &builds {
+            let status = Command::new(executable)
+                .arg("bench")
+                .arg("--worker")
+                .arg(&fixtures)
+                .arg("--dump-native")
+                .arg(dump)
+                .status()?;
+            ensure!(
+                status.success(),
+                "{} failed to dump native blocks",
+                executable.display()
+            );
+        }
+        let process = Worker {
+            executable: &me,
+            fixtures: &fixtures,
+            native: None,
+            target_ms: self.target_ms,
+        };
+        let process_calls = process.calibrate()?;
+        let native_calls = Worker {
+            native: Some(&builds[0].2),
+            ..process
+        }
+        .calibrate()?;
         let mut samples: BTreeMap<(String, &str), Vec<Value>> = BTreeMap::new();
         for round in 0..self.rounds {
-            let mut builds = vec![("candidate", me.as_path())];
-            if let Some(baseline) = &self.baseline {
-                builds.push(("baseline", baseline.as_path()));
-                if round % 2 == 1 {
-                    builds.reverse();
-                }
+            let mut order: Vec<_> = builds.iter().collect();
+            if round % 2 == 1 {
+                order.reverse();
             }
-            for (build, executable) in builds {
-                for line in run_worker(executable, &fixtures, &calls, self.target_ms, round)? {
-                    let key = line["key"].as_str().context("key")?.to_owned();
-                    samples.entry((key, build)).or_default().push(line);
+            for (build, executable, dump) in order {
+                let runs = [
+                    (
+                        Worker {
+                            executable,
+                            ..process
+                        },
+                        &process_calls,
+                    ),
+                    (
+                        Worker {
+                            native: Some(dump),
+                            ..process
+                        },
+                        &native_calls,
+                    ),
+                ];
+                for (worker, calls) in runs {
+                    for line in worker.run(calls, round)? {
+                        let key = line["key"].as_str().context("key")?.to_owned();
+                        samples.entry((key, *build)).or_default().push(line);
+                    }
                 }
             }
         }
@@ -272,7 +233,8 @@ impl Bench {
             let report = json!({
                 "rounds": self.rounds,
                 "target_ms": self.target_ms,
-                "calls": calls,
+                "calls": process_calls,
+                "native_calls": native_calls,
                 "target": TargetCpu::detect().id(),
                 "summary": summary,
                 "raw": raw,
@@ -355,90 +317,106 @@ fn unhex(text: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-fn arm64e_slice(file: &[u8]) -> Result<&[u8]> {
-    let fat = MachOFatFile32::parse(file)?;
-    for arch in fat.arches() {
-        if arch.cputype() == macho::CPU_TYPE_ARM64
-            && arch.cpusubtype() & !macho::CPU_SUBTYPE_MASK == macho::CPU_SUBTYPE_ARM64E
-        {
-            return Ok(arch.data(file)?);
-        }
-    }
-    bail!("no arm64e slice")
-}
-
-/// The bytes of `symbol`, up to the next symbol of its section, refusing
-/// any relocation inside them.
-fn function(data: &[u8], symbol: &str) -> Result<Vec<u8>> {
-    let file = object::File::parse(data)?;
-    let found = file
-        .symbols()
-        .find(|candidate| candidate.name() == Ok(symbol))
-        .with_context(|| format!("no symbol {symbol}"))?;
-    let section = file.section_by_index(found.section_index().context("undefined symbol")?)?;
-    let start = found.address();
-    let end = file
-        .symbols()
-        .filter(|other| {
-            other.section_index() == found.section_index()
-                && other.address() > start
-                && matches!(other.kind(), SymbolKind::Text | SymbolKind::Label)
-        })
-        .map(|other| other.address())
-        .min()
-        .unwrap_or(section.address() + section.size());
-    let offset = |address: u64| (address - section.address()) as usize;
-    ensure!(
-        section
-            .relocations()
-            .all(|(at, _)| !(start..end).contains(&(section.address() + at))),
-        "{symbol} has relocations"
-    );
-    let bytes = section.data()?[offset(start)..offset(end)].to_vec();
-    ensure!(
-        bytes.len() % 4 == 0 && bytes.ends_with(&RET.to_le_bytes()),
-        "{symbol} does not end in RET"
-    );
-    Ok(bytes)
-}
-
-fn calibrate(me: &Path, fixtures: &Path, target_ms: u64) -> Result<Vec<u64>> {
-    run_worker(me, fixtures, &[], target_ms, 0)?
-        .iter()
-        .map(|line| line["calls"].as_u64().context("calls"))
-        .collect()
-}
-
-fn run_worker(
-    executable: &Path,
-    fixtures: &Path,
-    calls: &[u64],
+/// One worker invocation: an executable over the fixtures, timing its own
+/// engines or, with `native`, a dump's native blocks.
+#[derive(Clone, Copy)]
+struct Worker<'a> {
+    executable: &'a Path,
+    fixtures: &'a Path,
+    native: Option<&'a Path>,
     target_ms: u64,
-    round: usize,
-) -> Result<Vec<Value>> {
-    let mut command = Command::new(executable);
-    command
-        .arg("bench")
-        .arg("--worker")
-        .arg(fixtures)
-        .arg("--target-ms")
-        .arg(target_ms.to_string())
-        .arg("--round")
-        .arg(round.to_string());
-    if !calls.is_empty() {
-        let list: Vec<String> = calls.iter().map(u64::to_string).collect();
-        command.arg("--calls").arg(list.join(","));
+}
+
+impl Worker<'_> {
+    fn calibrate(self) -> Result<Vec<u64>> {
+        self.run(&[], 0)?
+            .iter()
+            .map(|line| line["calls"].as_u64().context("calls"))
+            .collect()
     }
-    let output = command.output()?;
-    ensure!(
-        output.status.success(),
-        "{} worker failed: {}",
-        executable.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)?
-        .lines()
-        .map(|line| Ok(serde_json::from_str(line)?))
+
+    fn run(self, calls: &[u64], round: usize) -> Result<Vec<Value>> {
+        let mut command = Command::new(self.executable);
+        command
+            .arg("bench")
+            .arg("--worker")
+            .arg(self.fixtures)
+            .arg("--target-ms")
+            .arg(self.target_ms.to_string())
+            .arg("--round")
+            .arg(round.to_string());
+        if let Some(dump) = self.native {
+            command.arg("--native-code").arg(dump);
+        }
+        if !calls.is_empty() {
+            let list: Vec<String> = calls.iter().map(u64::to_string).collect();
+            command.arg("--calls").arg(list.join(","));
+        }
+        let output = command.output()?;
+        ensure!(
+            output.status.success(),
+            "{} worker failed: {}",
+            self.executable.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)?
+            .lines()
+            .map(|line| Ok(serde_json::from_str(line)?))
+            .collect()
+    }
+}
+
+/// Write the native blocks both engines compile for every fixture, at its
+/// arena's code address.
+fn dump_native(fixtures: &Path, path: &Path) -> Result<()> {
+    let fixtures: Vec<Value> = serde_json::from_slice(&std::fs::read(fixtures)?)?;
+    let mut dump = vec![];
+    for fixture in &fixtures {
+        let code = unhex(fixture["code"].as_str().context("code")?)?;
+        let entry = ARENA + CODE as u64;
+        let mut profiles = json!({"index": fixture["index"]});
+        for engine in NATIVE_ENGINES {
+            let profile = engine.profile().context("native engine")?;
+            let blocks: Vec<Value> = compile_blocks(&code, entry, profile)?
+                .into_iter()
+                .map(|block| {
+                    json!({
+                        "pc": block.pc - entry,
+                        "code": hex(&block.code),
+                        "resident": block.resident,
+                    })
+                })
+                .collect();
+            profiles[engine.name()] = json!(blocks);
+        }
+        dump.push(profiles);
+    }
+    std::fs::write(path, serde_json::to_vec(&dump)?)?;
+    Ok(())
+}
+
+/// The blocks a dump holds for one fixture and native engine.
+fn dumped_blocks(
+    dump: &[Value],
+    index: u64,
+    engine: Engine,
+    entry: u64,
+) -> Result<Vec<NativeBlock>> {
+    let fixture = dump
+        .iter()
+        .find(|fixture| fixture["index"].as_u64() == Some(index))
+        .context("fixture missing from the native dump")?;
+    fixture[engine.name()]
+        .as_array()
+        .context("native engine missing from the dump")?
+        .iter()
+        .map(|block| {
+            Ok(NativeBlock {
+                pc: entry + block["pc"].as_u64().context("pc")?,
+                code: unhex(block["code"].as_str().context("code")?)?,
+                resident: block["resident"].as_bool().context("resident")?,
+            })
+        })
         .collect()
 }
 
@@ -464,8 +442,8 @@ fn summarize(samples: &BTreeMap<(String, &str), Vec<Value>>, paired: bool) -> Re
         .collect();
     let mut summary = vec![];
     println!(
-        "{:<50} {:>6} {:>11} {:>11} {:>9} {:>9} {:>5} {:>5}",
-        "workload", "engine", "base ns", "cand ns", "cpu red.", "wall red.", "wins", "code"
+        "{:<50} {:>8} {:>11} {:>11} {:>9} {:>9} {:>5} {:>5}",
+        "workload", "engine", "base ns", "cand ns", "cpu red.", "best red.", "wins", "code"
     );
     for key in keys {
         let candidate = &samples[&(key.clone(), "candidate")];
@@ -491,7 +469,7 @@ fn summarize(samples: &BTreeMap<(String, &str), Vec<Value>>, paired: bool) -> Re
             "candidate_cpu_ns": cpu,
             "candidate_wall_ns": median(candidate.iter().map(|line| per_call(line, "wall_ns")).collect()),
         });
-        let (mut base_ns, mut cpu_reduction, mut wall_reduction, mut wins) =
+        let (mut base_ns, mut cpu_reduction, mut best_reduction, mut wins) =
             (f64::NAN, f64::NAN, f64::NAN, 0);
         // Whether the builds ran the same native code, where the engine tells.
         let mut code = "?";
@@ -519,7 +497,15 @@ fn summarize(samples: &BTreeMap<(String, &str), Vec<Value>>, paired: bool) -> Re
                     .collect(),
             );
             cpu_reduction = reduction("cpu_ns");
-            wall_reduction = reduction("wall_ns");
+            // Other load on the host only adds time, so each build's best
+            // round is its least disturbed one.
+            let best = |lines: &[Value]| {
+                lines
+                    .iter()
+                    .map(|line| per_call(line, "cpu_ns"))
+                    .fold(f64::INFINITY, f64::min)
+            };
+            best_reduction = 1.0 - best(candidate) / best(baseline);
             wins = baseline
                 .iter()
                 .zip(candidate)
@@ -536,216 +522,20 @@ fn summarize(samples: &BTreeMap<(String, &str), Vec<Value>>, paired: bool) -> Re
                 };
             }
             entry["paired_cpu_reduction"] = json!(cpu_reduction);
-            entry["paired_wall_reduction"] = json!(wall_reduction);
+            entry["paired_wall_reduction"] = json!(reduction("wall_ns"));
+            entry["best_cpu_reduction"] = json!(best_reduction);
             entry["cpu_wins"] = json!(wins);
         }
         let (name, engine) = key.rsplit_once(" / ").unwrap_or((key, ""));
         println!(
-            "{name:<50} {engine:>6} {base_ns:>11.1} {cpu:>11.1} {:>8.2}% {:>8.2}% {:>5} {code:>5}",
+            "{name:<50} {engine:>8} {base_ns:>11.1} {cpu:>11.1} {:>8.2}% {:>8.2}% {:>5} {code:>5}",
             cpu_reduction * 100.0,
-            wall_reduction * 100.0,
+            best_reduction * 100.0,
             format!("{wins}/{}", candidate.len()),
         );
         summary.push(entry);
     }
     Ok(summary)
-}
-
-/// Where every arena is mapped, so that code placement, pointers and final
-/// states are the same in every worker and build.
-const ARENA: u64 = 0x7_0000_0000;
-
-/// Host memory a workload's function and data live in: guest addresses are
-/// host addresses in both engines.
-struct Arena {
-    base: *mut u8,
-    bytes: usize,
-}
-
-impl Arena {
-    fn new(bytes: usize) -> Result<Self> {
-        let bytes = bytes.next_multiple_of(PAGE);
-        // SAFETY: a fresh private anonymous mapping owned by this value, at
-        // a hint only, so nothing else is replaced.
-        let base = unsafe {
-            libc::mmap(
-                ARENA as *mut libc::c_void,
-                bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        ensure!(base != libc::MAP_FAILED, "cannot map the bench arena");
-        if base as u64 != ARENA {
-            // SAFETY: the mapping just made.
-            unsafe { libc::munmap(base, bytes) };
-            bail!("the bench arena's address {ARENA:#x} is in use");
-        }
-        Ok(Self {
-            base: base.cast(),
-            bytes,
-        })
-    }
-
-    fn address(&self, offset: usize) -> u64 {
-        assert!(offset < self.bytes);
-        self.base as u64 + offset as u64
-    }
-
-    fn write(&mut self, offset: usize, data: &[u8]) {
-        assert!(offset + data.len() <= self.bytes);
-        // SAFETY: inside the mapping.
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.base.add(offset), data.len()) };
-    }
-
-    fn write_u64(&mut self, offset: usize, value: u64) {
-        self.write(offset, &value.to_le_bytes());
-    }
-}
-
-impl Drop for Arena {
-    fn drop(&mut self) {
-        // SAFETY: the mapping this value owns.
-        unsafe { libc::munmap(self.base.cast(), self.bytes) };
-    }
-}
-
-const CODE: usize = 0;
-const STOP: usize = PAGE - 4;
-/// The hosted engine's padding function, below the stack.
-const PADDING: usize = PAGE;
-/// Padding instructions: round times the step, modulo the span.
-const PADDING_STEP: usize = 7;
-const PADDING_SPAN: usize = 32;
-const STACK_TOP: usize = 2 * PAGE;
-const DATA: usize = 2 * PAGE;
-
-/// The arena, initial state and expected X0 of one workload.
-fn prepare(input: Input, code: &[u8]) -> Result<(Arena, GuestState, u64)> {
-    ensure!(code.len() < STOP, "function larger than its page");
-    let mut arena = Arena::new(DATA + 64 * PAGE)?;
-    arena.write(CODE, code);
-    // Never executed: the run stops at its breakpoint first.
-    arena.write(STOP, &0u32.to_le_bytes());
-    let mut state = GuestState::default();
-    state.x[30] = arena.address(STOP);
-    state.sp = arena.address(STACK_TOP);
-    let data = arena.address(DATA);
-    let expected = match input {
-        Input::MemchrMiss(bytes) => {
-            arena.write(DATA, &vec![b'a'; bytes]);
-            state.x[..3].copy_from_slice(&[data, u64::from(b'z'), bytes as u64]);
-            0
-        }
-        Input::StrncmpEqual(bytes) => {
-            let text = vec![b'a'; bytes];
-            arena.write(DATA, &text);
-            arena.write(DATA + PAGE, &text);
-            state.x[..3].copy_from_slice(&[data, data + PAGE as u64, bytes as u64]);
-            0
-        }
-        Input::Atol(text) => {
-            arena.write(DATA, text.as_bytes());
-            state.x[0] = data;
-            text.parse::<i64>()? as u64
-        }
-        Input::AllocatorMiss(regions) => {
-            // Region: next at 0x10, start at 0x20, size at 0x28.
-            const NODE: usize = 0x40;
-            const POINTER: u64 = 0x10_0000;
-            let first = DATA + NODE;
-            arena.write_u64(DATA + 8, arena.address(first));
-            for index in 0..regions {
-                let node = first + index * NODE;
-                let next = if index + 1 == regions {
-                    0
-                } else {
-                    arena.address(node + NODE)
-                };
-                let (start, size) = if index % 2 == 0 {
-                    (POINTER + 0x1000, 0x100)
-                } else {
-                    (0x1000, 0x100)
-                };
-                arena.write_u64(node + 0x10, next);
-                arena.write_u64(node + 0x20, start);
-                arena.write_u64(node + 0x28, size);
-            }
-            state.x[..3].copy_from_slice(&[data, POINTER, 0x10]);
-            0
-        }
-        Input::PermanentRangeMiss(ranges) => {
-            // State: chunk list at 0x468. Chunk: next at 0, count at 8,
-            // 32-byte ranges (start, end, ...) from 0x10.
-            const START: u64 = 0x8000;
-            let chunks = [DATA + PAGE, DATA + 2 * PAGE];
-            arena.write_u64(DATA + 0x468, arena.address(chunks[0]));
-            for (index, &chunk) in chunks.iter().enumerate() {
-                let next = chunks.get(index + 1).map_or(0, |&next| arena.address(next));
-                arena.write_u64(chunk, next);
-                arena.write_u64(chunk + 8, ranges as u64);
-                for range in 0..ranges {
-                    let entry = chunk + 0x10 + range * 0x20;
-                    let start = if range % 2 == 0 { START + 1 } else { 0x1000 };
-                    arena.write_u64(entry, start);
-                    arena.write_u64(entry + 8, 0x2000);
-                }
-            }
-            state.x[..3].copy_from_slice(&[data, START, u64::MAX]);
-            0
-        }
-        Input::Murmur(bytes) => {
-            let text: Vec<u8> = (0..bytes).map(|index| (index * 131 + 7) as u8).collect();
-            arena.write(DATA, &text);
-            const SEED: u64 = 0x5bd1_e995_1234_5678;
-            state.x[..3].copy_from_slice(&[data, bytes as u64, SEED]);
-            murmur(&text, SEED)
-        }
-        Input::Micro { iterations, bytes } => {
-            let (first, second) = (0x0123_4567_89ab_cdef_u64, 0xfedc_ba98_7654_3210_u64);
-            let mask = u64::MAX >> (64 - 8 * bytes);
-            arena.write_u64(DATA + bytes, first);
-            arena.write_u64(DATA + 2 * bytes, second);
-            let (first, second) = (first & mask, second & mask);
-            state.x[..2].copy_from_slice(&[data, iterations as u64]);
-            (0..iterations).fold(0u64, |sum, _| sum.wrapping_add(first) ^ second)
-        }
-    };
-    Ok((arena, state, expected))
-}
-
-/// dyld's `murmurHash(const void*, int, uint64_t)`, as its 26A434 code
-/// computes it (MurmurHash64A, multiplying once more before the
-/// finalization).
-fn murmur(data: &[u8], seed: u64) -> u64 {
-    const M: u64 = 0xc6a4_a793_5bd1_e995;
-    const R: u32 = 47;
-    let mut hash = (data.len() as i64 as u64).wrapping_mul(M) ^ seed;
-    let (blocks, tail) = data.split_at(data.len() / 8 * 8);
-    for block in blocks.as_chunks::<8>().0 {
-        let mut k = u64::from_le_bytes(*block).wrapping_mul(M);
-        k ^= k >> R;
-        hash ^= k.wrapping_mul(M);
-        hash = hash.wrapping_mul(M);
-    }
-    for (index, &byte) in tail.iter().enumerate() {
-        hash ^= u64::from(byte) << (8 * index);
-    }
-    hash = hash.wrapping_mul(M);
-    hash ^= hash >> R;
-    hash = hash.wrapping_mul(M);
-    hash ^ (hash >> R)
-}
-
-fn state_digest(state: &GuestState) -> String {
-    let mut bytes = vec![];
-    for value in state.x.iter().chain([&state.sp]) {
-        bytes.extend(value.to_le_bytes());
-    }
-    bytes.extend(state.nzcv.to_le_bytes());
-    stela_runtime::sha256(&bytes)
 }
 
 fn thread_cpu_ns() -> u64 {
@@ -758,205 +548,35 @@ fn thread_cpu_ns() -> u64 {
     time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
 }
 
-/// One prepared function in one engine.
-trait Runner {
-    /// Run one call from `state`; the final state and executed blocks.
-    fn call(&mut self, state: &GuestState) -> Result<(GuestState, u64)>;
-    /// The bytes and digest of the native code it runs, where the engine
-    /// tells.
-    fn native(&self) -> Option<(usize, String)>;
-}
-
-struct Hosted {
-    machine: Box<Machine<ProcessHost, NoDevices>>,
-    entry: u64,
-    stop: u64,
-    /// The native bytes and digest of the function's blocks.
-    native: (usize, String),
-}
-
-/// The code the hosted engine compiles for `code` at `entry`: every block
-/// statically reachable from the entry, compiled as the engine compiles
-/// them, in the system-mode profile with the checks of the hosted PE's
-/// SCTLR_EL1 at EL0 (SA0 set, A and nAA clear).
-fn hosted_code(code: &[u8], entry: u64) -> Result<(usize, String)> {
-    use stela_compiler::block::{CompilationPlan, analyze_with_profile};
-    use stela_compiler::x86_64::MemoryChecks;
-    let checks = MemoryChecks::system(true, false, true);
-    let target = TargetCpu::detect();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut pending = vec![entry];
-    let (mut bytes, mut digests) = (0, String::new());
-    while let Some(pc) = pending.pop() {
-        if !(entry..entry + code.len() as u64).contains(&pc) || !seen.insert(pc) {
-            continue;
-        }
-        let source = &code[(pc - entry) as usize..];
-        let analysis = analyze_with_profile(source, GuestAddress(pc), BlockProfile::SystemModeV1)
-            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        let compiled =
-            CompilationPlan::new(source, GuestAddress(pc), BlockProfile::SystemModeV1, target)
-                .and_then(|plan| plan.with_memory_checks(checks))
-                .and_then(CompilationPlan::compile)
-                .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        bytes += compiled.native.x86_64_code.len();
-        digests.push_str(&stela_runtime::sha256(&compiled.native.x86_64_code));
-        pending.extend(
-            analysis
-                .static_successors
-                .iter()
-                .map(|successor| successor.target.0),
-        );
-    }
-    Ok((bytes, stela_runtime::sha256(digests.as_bytes())))
-}
-
-impl Hosted {
-    /// The engine, its code arena already holding the code of a padding
-    /// function the round sizes: the hosted engine places each block after
-    /// the last, so this spreads the workload's code over different
-    /// alignments in different rounds, the same in both builds.
-    fn new(entry: u64, stop: u64, code: &[u8], arena: &mut Arena, round: usize) -> Result<Self> {
-        let chip = Chip::AppleM2;
-        let target = TargetCpu::detect();
-        let tables = Arc::new(Tables::new()?);
-        let keys = pe::Keys::random()?;
-        let cpu = pe::user_thread(chip, entry, &tables, &keys);
-        let mut machine = Box::new(Machine::new(
-            cpu,
-            ProcessHost::new(tables)?,
-            NoDevices,
-            pe::profile(chip, target),
-            target,
-        ));
-        let mut breakpoints = pe::vectors().to_vec();
-        breakpoints.push(stop);
-        machine.set_breakpoints(&breakpoints);
-        let mut hosted = Self {
-            machine,
-            entry: arena.address(PADDING),
-            stop,
-            native: hosted_code(code, entry)?,
-        };
-        const ADD_X0_ONE: u32 = 0x9100_0400;
-        let padding: Vec<u8> = std::iter::repeat_n(ADD_X0_ONE, round * PADDING_STEP % PADDING_SPAN)
-            .chain([RET])
-            .flat_map(u32::to_le_bytes)
-            .collect();
-        arena.write(PADDING, &padding);
-        let mut state = GuestState::default();
-        state.x[30] = stop;
-        hosted.call(&state)?;
-        hosted.entry = entry;
-        Ok(hosted)
-    }
-}
-
-impl Runner for Hosted {
-    fn call(&mut self, state: &GuestState) -> Result<(GuestState, u64)> {
-        let blocks = self.machine.statistics.blocks;
-        self.machine.cpu.state = state.clone();
-        self.machine.cpu.pc = self.entry;
-        match self.machine.run(0) {
-            Stop::Breakpoint(pc) if pc == self.stop => {}
-            stop => bail!(
-                "hosted run stopped with {stop:?} at {:#x}",
-                self.machine.cpu.pc
-            ),
-        }
-        Ok((
-            self.machine.cpu.state.clone(),
-            self.machine.statistics.blocks - blocks,
-        ))
-    }
-
-    fn native(&self) -> Option<(usize, String)> {
-        Some(self.native.clone())
-    }
-}
-
-struct Blocks {
-    runtime: BlockRuntime,
-    entry: u64,
-    stop: u64,
-    code_bytes: usize,
-    _cache: tempfile::TempDir,
-}
-
-impl Blocks {
-    fn new(entry: u64, stop: u64, code: &[u8]) -> Result<Self> {
-        let cache = tempfile::tempdir()?;
-        let mut runtime = BlockRuntime::new_for_target(
-            ADDRESS_SPACE,
-            cache.path().to_owned(),
-            BlockProfile::Ordinary,
-            TargetCpu::detect(),
-        );
-        runtime.register_code(GuestAddress(entry), code.to_vec())?;
-        Ok(Self {
-            runtime,
-            entry,
-            stop,
-            code_bytes: code.len(),
-            _cache: cache,
-        })
-    }
-}
-
-impl Runner for Blocks {
-    fn call(&mut self, state: &GuestState) -> Result<(GuestState, u64)> {
-        let mut thread = ThreadState {
-            registers: state.clone(),
-            pc: GuestAddress(self.entry),
-        };
-        // SAFETY: the unchanged function reads only the arena's prepared
-        // inputs and returns to the stop address.
-        let outcome = unsafe {
-            self.runtime
-                .run(&mut thread, Some(GuestAddress(self.stop)), usize::MAX)?
-        };
-        ensure!(
-            outcome.reason == StopReason::StopAddress,
-            "block run stopped with {:?}",
-            outcome.reason
-        );
-        Ok((thread.registers, outcome.blocks_executed as u64))
-    }
-
-    fn native(&self) -> Option<(usize, String)> {
-        let manifests: Vec<_> = (0..self.code_bytes as u64)
-            .step_by(4)
-            .filter_map(|offset| {
-                self.runtime
-                    .loaded_manifest(GuestAddress(self.entry + offset))
-            })
-            .collect();
-        let digests: String = manifests
-            .iter()
-            .map(|manifest| manifest.native_sha256.as_str())
-            .collect();
-        Some((
-            manifests.iter().map(|manifest| manifest.native_bytes).sum(),
-            stela_runtime::sha256(digests.as_bytes()),
-        ))
-    }
-}
-
-/// Time every fixture in both engines once, or calibrate when `calls` is
-/// empty, printing one JSON line each.
-fn worker(fixtures: &Path, calls: &[u64], target_ms: u64, round: usize) -> Result<()> {
+/// Time every fixture in each engine of `mode` once, or calibrate when
+/// `calls` is empty, printing one JSON line each.
+fn worker(fixtures: &Path, mode: Mode, calls: &[u64], target_ms: u64, round: usize) -> Result<()> {
     let fixtures: Vec<Value> = serde_json::from_slice(&std::fs::read(fixtures)?)?;
+    let (engines, dump): (_, Vec<Value>) = match mode {
+        Mode::Process => (PROCESS_ENGINES, vec![]),
+        Mode::Native(path) => (
+            NATIVE_ENGINES,
+            serde_json::from_slice(&std::fs::read(path)?)?,
+        ),
+    };
     let mut next = calls.iter();
     for fixture in &fixtures {
-        let workload = &WORKLOADS[fixture["index"].as_u64().context("index")? as usize];
+        let index = fixture["index"].as_u64().context("index")?;
+        let workload = &WORKLOADS[index as usize];
         let code = unhex(fixture["code"].as_str().context("code")?)?;
-        for engine in ENGINES {
+        for engine in engines {
             let (mut arena, state, expected) = prepare(workload.input, &code)?;
             let entry = arena.address(CODE);
             let stop = arena.address(STOP);
             let mut runner: Box<dyn Runner> = match engine {
                 Engine::Hosted => Box::new(Hosted::new(entry, stop, &code, &mut arena, round)?),
                 Engine::Blocks => Box::new(Blocks::new(entry, stop, &code)?),
+                Engine::NativeBlocks | Engine::NativeHosted => Box::new(Native::new(
+                    &dumped_blocks(&dump, index, engine, entry)?,
+                    entry,
+                    stop,
+                    round,
+                )?),
             };
             // Translation and the first dispatches stay outside the clocks.
             let (result, blocks) = runner.call(&state)?;
