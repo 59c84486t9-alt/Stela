@@ -329,11 +329,10 @@ impl Mux {
         let protocol = u32::from_be_bytes(packet[..4].try_into().unwrap());
         let header = self.header();
         if self.version == 2 {
-            if u32::from_be_bytes(packet[8..12].try_into().unwrap()) != MAGIC {
-                return Err("invalid usbmux v2 magic");
-            }
-            // Match the pinned usbmuxd: the reply echo is the incoming rx_seq
-            // field (device.c:797), not its tx_seq field.
+            // Match the pinned usbmuxd, which sets the magic only on what it
+            // sends (device.c:222) and ignores it on input: the 26A434 device
+            // mux sends 0 there. The reply echo is the incoming rx_seq field
+            // (device.c:797), not its tx_seq field.
             self.rx_sequence = u16::from_be_bytes(packet[14..16].try_into().unwrap());
         }
         let payload = &packet[header..];
@@ -553,7 +552,7 @@ pub(crate) mod tests {
         assert!(mux.read(id, &mut [0]).is_err());
     }
     #[test]
-    fn malformed_lengths_magic_and_acks_fail_connection() {
+    fn malformed_lengths_and_acks_fail_connection_but_magic_is_ignored() {
         for length in [0, 7, (MAX_FRAME + 1) as u32, u32::MAX] {
             let mut mux = Mux::new();
             let mut bytes = [0; 8];
@@ -566,10 +565,11 @@ pub(crate) mod tests {
             mux.receive(&wire(TCP, &tcp_header(62078, id.port, 1, 123, ACK, 1), 2))
                 .is_err()
         );
+        // The device's magic field is not checked: 26A434 sends 0.
         let (mut mux, _) = connected();
-        let mut bad = wire(CONTROL, b"log", 2);
-        bad[8] = 0;
-        assert!(mux.receive(&bad).is_err());
+        let mut zero = wire(CONTROL, b"log", 2);
+        zero[8..12].fill(0);
+        mux.receive(&zero).unwrap();
         let mut mux = Mux::new();
         mux.take_packet();
         mux.receive(&version(1)).unwrap();
