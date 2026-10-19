@@ -305,8 +305,8 @@ impl Kernel {
                 }
                 bail!(
                     "guest {} abort at pc {elr:#x}, address {address:#x} (ISS {iss:#x}, lr {:#x}, \
-                     fp {:#x}, sp {:#x}, frames {:x?}): EXC_BAD_ACCESS signal delivery is not \
-                     implemented",
+                     fp {:#x}, sp {:#x}, frames {:x?}, shared cache slide {:#x}): EXC_BAD_ACCESS \
+                     signal delivery is not implemented",
                     if class == EC_DATA_ABORT_LOWER {
                         "data"
                     } else {
@@ -316,11 +316,21 @@ impl Kernel {
                     pe.cpu.state.x[29],
                     pe.cpu.sp(0),
                     frames(pe.cpu.state.x[29]),
+                    lock(&self.process.shared_region)
+                        .as_ref()
+                        .map_or(0, |region| region.slide()),
                 )
             }
             _ => bail!(
-                "guest exception class {class:#x} (ESR {esr:#x}) at pc {elr:#x}: \
-                 Mach exception and signal delivery are not implemented"
+                "guest exception class {class:#x} (ESR {esr:#x}) at pc {elr:#x} (lr {:#x}, fp \
+                 {:#x}, frames {:x?}, shared cache slide {:#x}): Mach exception and signal \
+                 delivery are not implemented",
+                pe.cpu.state.x[30],
+                pe.cpu.state.x[29],
+                frames(pe.cpu.state.x[29]),
+                lock(&self.process.shared_region)
+                    .as_ref()
+                    .map_or(0, |region| region.slide()),
             ),
         }
     }
