@@ -892,8 +892,8 @@ pub struct Board {
     /// SEP placement if the input tree explicitly keeps it. Production
     /// `models()` admission remains closed while sepOS boot services refuse.
     pub sep: Option<SepDevice>,
-    /// DWC3 placement for an explicitly visible input node. Not admitted by models().
-    pub usb: Option<UsbController>,
+    /// DWC3 placements of the visible `usb-drd,t8112` nodes, in DeviceTree order.
+    pub usbs: Vec<UsbController>,
     /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows a
     /// `pmgr1,t8112`.
     pub power_states: Option<PowerStates>,
@@ -2832,32 +2832,54 @@ fn aes_engine(
     }))
 }
 
-/// J473AP usb-drd0: ADT reg/interrupts/iommu-parent (research transport
-/// section 1). Resolve all arm-io ranges, including the identity USB window;
-/// no fixed 8 GiB bias. The separate USB-DART worker owns multi-instance
-/// DART parsing; this consumer uses the mapper stream that it publishes.
-fn usb_controller(
+/// Every `usb-drd,t8112` (J473AP usb-drd0 and usb-drd1), in DeviceTree
+/// order: ADT reg/interrupts/iommu-parent (research transport section 1).
+fn usb_controllers(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
     darts: &[Iommu],
-) -> Result<Option<UsbController>, String> {
-    let Some(node) = io.child("usb-drd0").filter(|node| node.compatible(USB_DRD)) else {
-        return Ok(None);
-    };
+) -> Result<Vec<UsbController>, String> {
+    let mut controllers = Vec::new();
+    let mut failure = None;
+    io.visit(&mut |node| {
+        if failure.is_none() && node.compatible(USB_DRD) {
+            match usb_controller(node, translate, darts) {
+                Ok(controller) => controllers.push(controller),
+                Err(error) => failure = Some(error),
+            }
+        }
+    })
+    .ok_or("USB controller walk failed")?;
+    failure.map_or(Ok(controllers), Err)
+}
+
+/// Resolve all arm-io ranges, including the identity USB window; no fixed
+/// 8 GiB bias. The separate USB-DART worker owns multi-instance DART
+/// parsing; this consumer uses the mapper stream that it publishes.
+fn usb_controller(
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    darts: &[Iommu],
+) -> Result<UsbController, String> {
+    let name = node
+        .property("name")
+        .and_then(|name| core::str::from_utf8(name.split(|&b| b == 0).next()?).ok())
+        .unwrap_or("usb-drd");
+    let err = |why: &str| format!("{name} {why}");
     let raw: [(u64, u64); 9] = node
         .pairs("reg")
         .unwrap_or_default()
         .try_into()
-        .map_err(|_| "usb-drd0 requires nine register windows")?;
+        .map_err(|_| err("requires nine register windows"))?;
     let mut ranges = [(0, 0); 9];
     for (slot, (offset, bytes)) in ranges.iter_mut().zip(raw) {
         if bytes == 0 {
-            return Err("usb-drd0 has an empty register extent".into());
+            return Err(err("has an empty register extent"));
         }
-        let physical = translate(offset).ok_or("usb-drd0 lies outside arm-io ranges")?;
+        let physical = translate(offset).ok_or_else(|| err("lies outside arm-io ranges"))?;
         let last = offset.checked_add(bytes - 1).and_then(translate);
         if last.is_none() || last != physical.checked_add(bytes - 1) {
-            return Err("usb-drd0 extent crosses arm-io ranges".into());
+            return Err(err("extent crosses arm-io ranges"));
         }
         *slot = (physical, bytes);
     }
@@ -2865,22 +2887,22 @@ fn usb_controller(
         || ranges[2] != (ranges[0].0 + 0xc000, 0x5800)
         || ranges[8] != (ranges[0].0 + 0xd000, 0x4000)
     {
-        return Err("usb-drd0 has an undescribed DWC3 alias layout".into());
+        return Err(err("has an undescribed DWC3 alias layout"));
     }
     if [1, 3, 4, 5, 6, 7].iter().any(|&n| ranges[n].1 != 0x4000) {
-        return Err("usb-drd0 platform window is not 16 KiB".into());
+        return Err(err("platform window is not 16 KiB"));
     }
     let irqs: [u32; 5] = node
         .cells32("interrupts")
         .unwrap_or_default()
         .try_into()
-        .map_err(|_| "usb-drd0 requires five ADT interrupts")?;
+        .map_err(|_| err("requires five ADT interrupts"))?;
     if irqs.iter().any(|&irq| u16::try_from(irq).is_err()) {
-        return Err("usb-drd0 interrupt exceeds AIC input encoding".into());
+        return Err(err("interrupt exceeds AIC input encoding"));
     }
     let parent = node
         .first_u32("iommu-parent")
-        .ok_or("usb-drd0 has no iommu-parent")?;
+        .ok_or_else(|| err("has no iommu-parent"))?;
     let mut matching = darts.iter().enumerate().flat_map(|(index, dart)| {
         dart.mappers
             .iter()
@@ -2889,24 +2911,24 @@ fn usb_controller(
     });
     let (iommu, stream) = matching
         .next()
-        .ok_or("usb-drd0 iommu-parent is no modeled DART mapper")?;
+        .ok_or_else(|| err("iommu-parent is no modeled DART mapper"))?;
     if matching.next().is_some() {
-        return Err("usb-drd0 iommu-parent is ambiguous".into());
+        return Err(err("iommu-parent is ambiguous"));
     }
     if stream >= u32::from(darts[iommu].streams) {
-        return Err("usb-drd0 mapper stream exceeds DART capacity".into());
+        return Err(err("mapper stream exceeds DART capacity"));
     }
     let port = node
         .first_u32("port-number")
         .filter(|&port| port != 0)
-        .ok_or("usb-drd0 has no Type-C port number")?;
-    Ok(Some(UsbController {
+        .ok_or_else(|| err("has no Type-C port number"))?;
+    Ok(UsbController {
         ranges,
         irqs,
         iommu,
         stream,
         port,
-    }))
+    })
 }
 
 /// J473AP `/arm-io/sep` supplies two ranges and four mailbox lines. Its
@@ -3144,7 +3166,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let ans = ans_controller(&io, &translate)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
-    let usb = usb_controller(&io, &translate, &darts)?;
+    let usbs = usb_controllers(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
     let PmgrRegisters {
         cluster_events,
@@ -3183,7 +3205,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         aes,
         ans,
         sep,
-        usb,
+        usbs,
         power_states,
         memory_cache,
         clusters,
@@ -5148,16 +5170,59 @@ mod tests {
         };
         let found = board(&tree(usb(&ranges, 0xa4, &irqs))).unwrap();
         assert_eq!(
-            found.usb,
-            Some(UsbController {
+            found.usbs,
+            [UsbController {
                 ranges,
                 irqs,
                 iommu: 0,
                 stream: 1,
                 port: 1,
-            })
+            }]
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);
+        // Every controller is placed, in DeviceTree order; a malformed
+        // second one names itself.
+        let second = encode(
+            &[
+                ("name", b"usb-drd1 "),
+                ("compatible", b"usb-drd,t8112 "),
+                ("reg", &pairs(&ranges)),
+                ("iommu-parent", &words(&[0xa4])),
+                ("interrupts", &words(&irqs)),
+                ("port-number", &words(&[2])),
+            ],
+            &[],
+        );
+        let pair = |second| {
+            tree_with_io(
+                0x8112,
+                "Apple M2",
+                [UART, WATCHDOG, "aic,2"],
+                &[],
+                &[dart.clone(), usb(&ranges, 0xa4, &irqs), second],
+            )
+        };
+        let ports: Vec<_> = board(&pair(second))
+            .unwrap()
+            .usbs
+            .iter()
+            .map(|u| u.port)
+            .collect();
+        assert_eq!(ports, [1, 2]);
+        let unnumbered = encode(
+            &[
+                ("name", b"usb-drd1 "),
+                ("compatible", b"usb-drd,t8112 "),
+                ("reg", &pairs(&ranges)),
+                ("iommu-parent", &words(&[0xa4])),
+                ("interrupts", &words(&irqs)),
+            ],
+            &[],
+        );
+        assert_eq!(
+            board(&pair(unnumbered)).unwrap_err(),
+            "usb-drd1 has no Type-C port number"
+        );
         assert!(models(USB_DRD, |_| None));
         assert!(board(&tree(usb(&ranges, 0xff, &irqs))).is_err());
         assert!(board(&tree(usb(&ranges, 0xa4, &irqs[..4]))).is_err());

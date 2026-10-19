@@ -532,11 +532,17 @@ fn devices<'f>(
         )?;
     }
     let mut restore_usb = None;
-    if let Some(usb) = board.and_then(|board| board.usb) {
+    for (index, usb) in board.iter().flat_map(|board| &board.usbs).enumerate() {
         // The controller's stream translates through the group's first TRAD
         // instance, as SEP and AES masters do; per-instance selection is the
         // bus master's contract (`soc::Iommu`).
-        let id = devices.add_usb(&usb, darts[usb.iommu][0])?;
+        let id = devices.add_usb(usb, darts[usb.iommu][0])?;
+        // The first controller (J473AP usb-drd0, the back-left connector) is
+        // the one a restore host or the native client uses; the others are
+        // left uncabled.
+        if index != 0 {
+            continue;
+        }
         if restore {
             // A restore host is cabled to this connector from power-on: it
             // is the USB host and sources VBUS, so the Mac is a USB2 device.
