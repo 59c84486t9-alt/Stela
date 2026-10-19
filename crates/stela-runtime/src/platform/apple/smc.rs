@@ -63,6 +63,13 @@
 //!   `PEHaltRestart(kPEHaltCPU)` and panics "SMCFW failed to handle
 //!   suspend/lpem request" a second later. `lpem` (low-power emergency
 //!   mode, on battery systems) refuses: the board has no battery.
+//! - `slpa` and `hiba` put the SoC to sleep or into hibernation: the key
+//!   endpoint writes one itself when its power state drops to 0
+//!   (`AppleSMCKeysEndpoint::_powerStateActionGated` file 0x2da492c,
+//!   `hiba` when `_getHibernateState` reports hibernation). Both refuse:
+//!   the SoC's sleep and its wake through the SMC are not modeled, and
+//!   accepting the command would leave the AP waiting for a wake no model
+//!   can deliver.
 //!
 //! AppleSMCPMU only takes the system-event path when `MBSE` reports a
 //! 4-byte value (`AppleSMCPMU::start` file 0x2d9bfd8). Any other command
@@ -146,6 +153,8 @@ const RESTART: u32 = code(b"phra");
 const SYSTEM_RESET: u32 = code(b"sysr");
 const STANDBY: u32 = code(b"susp");
 const LOW_POWER_EMERGENCY: u32 = code(b"lpem");
+const SLEEP: u32 = code(b"slpa");
+const HIBERNATE: u32 = code(b"hiba");
 
 /// Notification classes and subclasses, in the event's top two bytes.
 const SYSTEM_STATE: u8 = 0x70;
@@ -407,6 +416,9 @@ impl Smc {
             }
             LOW_POWER_EMERGENCY => {
                 return Err("SMC low-power emergency mode needs a battery the board does not have");
+            }
+            SLEEP | HIBERNATE => {
+                return Err("SMC sleep needs the SoC sleep and wake path, which is not modeled");
             }
             _ => return Err("SMC MBSE command is not modeled"),
         }
@@ -730,7 +742,7 @@ mod tests {
             Transition::PowerOff
         );
         // Low-power emergency mode and unknown commands refuse.
-        for command in [b"lpem", b"zzzz"] {
+        for command in [b"lpem", b"slpa", b"hiba", b"zzzz"] {
             sram.put(&code(command).to_le_bytes());
             assert!(
                 smc.receive(request(WRITE, 0, 4, 0, code(b"MBSE")), &mut Vec::new())
