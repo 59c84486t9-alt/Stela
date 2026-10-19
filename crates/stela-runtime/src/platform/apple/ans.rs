@@ -16,12 +16,14 @@
 //!
 //! Stela's die choices: NVMe 1.3, one I/O queue, 64 tags, 4/16 KiB memory
 //! pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
-//! optional encryption/SHA/firmware download or asynchronous events. Identity
+//! optional encryption/SHA/firmware-slot updates or asynchronous events.
+//! The restore mode's boot-from-host image download is recorded, not run. Identity
 //! strings identify Stela rather than impersonating a physical Apple SSD.
 //! The boot stage starts RTKit before handoff. NVMe itself uses MMIO; the
 //! RTKit coprocessor lists one application endpoint, [`RTKIT_ENDPOINT`],
 //! which carries no messages but must exist for the driver to start.
 //! Undescribed registers, commands, fields and cryptographic effects refuse.
+mod bfh;
 mod commands;
 mod die;
 mod namespace;
@@ -33,6 +35,7 @@ use super::{
 };
 use crate::platform::{apple::sart::Sart, dma::Port, pc::block::BlockDevice};
 use alloc::{boxed::Box, collections::VecDeque};
+pub use bfh::BootImage;
 pub use namespace::Description;
 use namespace::Medium;
 use prp::dma_error;
@@ -208,6 +211,10 @@ pub struct Ans {
     features: [u32; 12],
     timestamp: u64,
     os_build: [u8; 16],
+    /// The uncommitted boot-from-host download and the last image it
+    /// committed, which survives controller resets.
+    download: bfh::Download,
+    boot_image: Option<BootImage>,
     last_submission: Option<Submission>,
 }
 
@@ -239,8 +246,15 @@ impl Ans {
             features: [0; 12],
             timestamp: 0,
             os_build: [0; 16],
+            download: bfh::Download::default(),
+            boot_image: None,
             last_submission: None,
         })
+    }
+
+    /// The identity of the last committed boot-from-host image.
+    pub fn boot_image(&self) -> Option<&BootImage> {
+        self.boot_image.as_ref()
     }
 
     pub fn last_submission(&self) -> Option<&Submission> {
@@ -364,6 +378,9 @@ impl Ans {
             self.queues = [Queue::default(); 2];
             self.valid.fill(false);
             self.shutdown = false;
+            // NVMe 1.4 section 5.11: a controller-level reset discards an
+            // uncommitted image download.
+            self.download = bfh::Download::default();
         }
         self.config = value;
         self.refresh_auto_queue();
@@ -711,7 +728,7 @@ mod tests {
         dma::{Memory, Physical, tests::Ram},
         pc::block::tests::RamDisk,
     };
-    use alloc::vec;
+    use alloc::{vec, vec::Vec};
     const RAM: u64 = 0x8_0000_0000;
     const SQ: u64 = RAM;
     const CQ: u64 = RAM + 0x1000;
@@ -1123,6 +1140,92 @@ mod tests {
             .unwrap()
             .handed_off_linear();
         assert!(ans.linear);
+    }
+
+    /// Disable, select MODESEL 4 and re-enable, as the restore boot does.
+    fn restore_mode(rig: &mut Rig) {
+        rig.write(CC, 0).unwrap();
+        for (base, address) in [(ASQ, SQ), (ACQ, CQ)] {
+            rig.ans
+                .write(
+                    base,
+                    Width::Double,
+                    address,
+                    &mut Access::new(0, 0, &mut rig.latch),
+                )
+                .unwrap();
+        }
+        rig.write(MODESEL, u64::from(MODE_RESTORE)).unwrap();
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+    }
+
+    #[test]
+    fn boot_from_host_download_is_ordered_crc_checked_and_recorded() {
+        let image: Vec<u8> = (0..0x1800u32).map(|i| (i * 7 + 3) as u8).collect();
+        let chunk = |rig: &mut Rig, tag, offset: usize, len: usize, crc: u32| {
+            assert!(rig.ram.write(DATA, &image[offset..offset + len]));
+            let words = [len as u32 / 4 - 1, offset as u32 / 4, 0, 0, 0, crc];
+            rig.submit(0, tag, 0x11, 0, DATA, words)
+        };
+        let crc = |offset: usize, len: usize| bfh::crc32c(&image[offset..offset + len]);
+        // Outside the restore mode the commands refuse.
+        let mut rig = Rig::new();
+        assert!(chunk(&mut rig, 0, 0, 0x1000, crc(0, 0x1000)).is_err());
+        let mut rig = Rig::new();
+        restore_mode(&mut rig);
+        // The parameter block, then the loader in two chunks.
+        assert!(rig.ram.write(DATA + 0x2000, b"FWUP"));
+        rig.submit(0, 0, 0xd1, 0, DATA + 0x2000, [0, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(rig.bytes(CQ + 14, 2), [1, 0]);
+        rig.retire(0, 0);
+        chunk(&mut rig, 1, 0, 0x1000, crc(0, 0x1000)).unwrap();
+        assert_eq!(rig.bytes(CQ + 16 + 14, 2), [1, 0]);
+        rig.retire(0, 1);
+        // The two-entry ring wraps: success with the inverted phase.
+        chunk(&mut rig, 2, 0x1000, 0x800, crc(0x1000, 0x800)).unwrap();
+        assert_eq!(rig.bytes(CQ + 14, 2), [0, 0]);
+        rig.retire(0, 2);
+        // Slot 0, commit action 1 records the identity and succeeds.
+        rig.submit(0, 3, 0x10, 0, 0, [1 << 3, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(rig.bytes(CQ + 16 + 14, 2), [0, 0]);
+        rig.retire(0, 3);
+        let recorded = rig.ans.boot_image().unwrap();
+        assert_eq!(recorded.sections.len(), 1);
+        assert_eq!(recorded.sections[0].0, 0);
+        assert_eq!(recorded.sections[0].1.bytes, 0x1800);
+        assert_eq!(recorded.sections[0].1.crc32c, crc(0, 0x1800));
+        assert_eq!(recorded.params.as_ref().unwrap().bytes, 4);
+        // The identity survives a controller reset.
+        restore_mode(&mut rig);
+        assert!(rig.ans.boot_image().is_some());
+
+        // A CRC mismatch, a gap, an out-of-order section and an
+        // unsupported commit action each stop without completing.
+        let refused = |words: [u32; 6], opcode| {
+            let mut rig = Rig::new();
+            restore_mode(&mut rig);
+            assert!(rig.ram.write(DATA, &image[..0x1000]));
+            rig.submit(0, 0, opcode, 0, DATA, words).is_err()
+        };
+        assert!(refused([0x3ff, 0, 0, 0, 0, crc(0, 0x1000) ^ 1], 0x11));
+        assert!(refused([0x3ff, 4, 0, 0, 0, crc(0, 0x1000)], 0x11));
+        assert!(refused([0x3ff, 0, 0, 0, 1, crc(0, 0x1000)], 0x11));
+        assert!(refused([0x3ff, 0, 0, 0, 3, crc(0, 0x1000)], 0x11));
+        assert!(refused([0x3ff, 0, 1, 0, 0, crc(0, 0x1000)], 0x11));
+        assert!(refused([2 << 3, 0, 0, 0, 0, 0], 0x10));
+        assert!(refused([1 << 3, 0, 0, 0, 0, 0], 0x10));
+        // A controller reset discards an uncommitted download.
+        let mut rig = Rig::new();
+        restore_mode(&mut rig);
+        chunk(&mut rig, 0, 0, 0x1000, crc(0, 0x1000)).unwrap();
+        rig.retire(0, 0);
+        restore_mode(&mut rig);
+        assert!(
+            rig.submit(0, 0, 0x10, 0, 0, [1 << 3, 0, 0, 0, 0, 0])
+                .is_err()
+        );
     }
 
     #[test]

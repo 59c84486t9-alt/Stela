@@ -3,9 +3,11 @@
 //! (delete CQ/SQ, CDW10 the queue ID), 0x3deb654 (Identify),
 //! 0x3deb7ac..0x3deba30 (flush/read/write), 0x3debc88..0x3dec1dc
 //! (logs/features), 0x3dec394 (Apple time), 0x3dec794 (namespace records),
-//! and 0x3dec980 (tunnel). Unknown vendor effects stop before completion.
+//! 0x3dec980 (tunnel), and 0x3dec1e0/0x3dec2ac/0x3dec35c (boot-from-host
+//! activate, download and parameters, see [`super::bfh`]). Unknown vendor
+//! effects stop before completion.
 use super::{
-    Ans, QUEUE_ENTRIES, Queue, die,
+    Ans, MODE_RESTORE, QUEUE_ENTRIES, Queue, bfh, die,
     namespace::BLOCK_BYTES,
     prp::{MAX_TRANSFER, Prps, dma_error},
 };
@@ -35,8 +37,11 @@ const CREATE_CQ: u8 = 5;
 const IDENTIFY: u8 = 6;
 const SET_FEATURES: u8 = 9;
 const GET_FEATURES: u8 = 0xa;
+const FIRMWARE_COMMIT: u8 = 0x10;
+const FIRMWARE_DOWNLOAD: u8 = 0x11;
 const APPLE_TIME: u8 = 0xc0;
 const APPLE_NAMESPACES: u8 = 0xc6;
+const APPLE_BFH_PARAMS: u8 = 0xd1;
 const APPLE_TUNNEL: u8 = 0xd8;
 const FLUSH: u8 = 0;
 const WRITE: u8 = 1;
@@ -77,6 +82,8 @@ impl Command {
                 IDENTIFY => Ok(1),
                 SET_FEATURES | GET_FEATURES if self.long(24) == 0 => Ok(0),
                 APPLE_NAMESPACES => Ok(2),
+                FIRMWARE_DOWNLOAD | APPLE_BFH_PARAMS => Ok(2),
+                FIRMWARE_COMMIT => Ok(0),
                 // Tunnel addresses are in CDW11-14, not the PRPs. It is
                 // authorized by SART, with an NVMMU entry but no PRP DMA.
                 APPLE_TUNNEL => Ok(0),
@@ -167,8 +174,66 @@ impl Ans {
             }
             APPLE_NAMESPACES => self.verify_namespaces(cmd, port),
             APPLE_TUNNEL => self.tunnel(cmd, port, sart),
+            FIRMWARE_DOWNLOAD | FIRMWARE_COMMIT | APPLE_BFH_PARAMS => {
+                self.boot_from_host(cmd, port)
+            }
             _ => Err("ANS admin command is not modeled"),
         }
+    }
+
+    /// The restore controller's boot-from-host commands ([`bfh`]). Only
+    /// MODESEL 4 accepts them: the kernel issues them only while its BFH
+    /// flag is set (`IsBFHRequired` 0x3dbe014), the flag that also selects
+    /// that mode (`PreCCEnableHook` 0x3dbdfb8). Standard firmware slots
+    /// stay read-only and OACS still reports no firmware commands.
+    fn boot_from_host(
+        &mut self,
+        cmd: &Command,
+        port: &mut Port<'_, '_>,
+    ) -> Result<Outcome, &'static str> {
+        if self.modesel != MODE_RESTORE {
+            return Err("ANS boot-from-host command outside MODESEL 4");
+        }
+        if cmd.nsid() != 0 {
+            return Err("ANS boot-from-host command names a namespace");
+        }
+        if cmd.opcode() == FIRMWARE_COMMIT {
+            if cmd.long(24) != 0
+                || cmd.long(32) != 0
+                || cmd.word(40) != bfh::ACTIVATE_SLOT0_REPLACE
+                || !cmd.zero_words(44)
+            {
+                return Err("ANS firmware commit other than slot 0, action 1 is not modeled");
+            }
+            self.boot_image = Some(self.download.activate()?);
+            return Ok(Outcome::status(SUCCESS));
+        }
+        let bytes = (u64::from(cmd.word(40)) + 1) * 4;
+        if bytes > MAX_TRANSFER as u64 {
+            return Err("ANS boot-from-host transfer exceeds MDTS");
+        }
+        let mut data = vec![0; bytes as usize];
+        if cmd.opcode() == APPLE_BFH_PARAMS {
+            if !cmd.zero_words(44) {
+                return Err("ANS BFH parameter command fields are not modeled");
+            }
+            cmd.prps(port, data.len(), self.page())?
+                .read(port, &mut data)?;
+            self.download.params(&data)?;
+            return Ok(Outcome::status(SUCCESS));
+        }
+        if cmd.word(48) != 0 || cmd.word(52) != 0 {
+            return Err("ANS BFH download CDW12/CDW13 are not modeled");
+        }
+        cmd.prps(port, data.len(), self.page())?
+            .read(port, &mut data)?;
+        self.download.chunk(
+            cmd.word(56),
+            u64::from(cmd.word(44)) * 4,
+            &data,
+            cmd.word(60),
+        )?;
+        Ok(Outcome::status(SUCCESS))
     }
 
     fn identify(
