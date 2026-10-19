@@ -56,6 +56,10 @@ struct Roles {
     ramdisk: Option<Ramdisk>,
     /// The sealed volume the kernel roots from, by its root-hash component.
     root_hash: Option<(&'static str, SealedVolume)>,
+    /// Whether the identity's global manifest admits every boot object of
+    /// the mode. The restore objects sit outside it: that manifest is the
+    /// installed system's root ticket, which the restore host answers with.
+    manifest_admits_all: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -75,6 +79,7 @@ const INSTALLED: Roles = Roles {
     sep: "SEP",
     ramdisk: None,
     root_hash: Some(("SystemVolume", SealedVolume::System)),
+    manifest_admits_all: true,
 };
 
 const RESTORE: Roles = Roles {
@@ -86,6 +91,7 @@ const RESTORE: Roles = Roles {
     sep: "RestoreSEP",
     ramdisk: Some(Ramdisk::Image4("RestoreRamDisk", "rdsk")),
     root_hash: None,
+    manifest_admits_all: false,
 };
 
 /// recoveryOS: the installed system's kernel, monitors and DeviceTree, the
@@ -99,6 +105,7 @@ const RECOVERY: Roles = Roles {
     sep: "SEP",
     ramdisk: Some(Ramdisk::BaseSystem),
     root_hash: Some(("BaseSystemVolume", SealedVolume::BaseSystem)),
+    manifest_admits_all: true,
 };
 
 #[derive(Subcommand)]
@@ -306,28 +313,49 @@ fn manifest_member(cryptex1: bool, variant: &str, device_class: &str) -> String 
     format!("Firmware/Manifests/restore/{scope}{variant}/apticket.{device_class}.im4m")
 }
 
-/// Every boot object the manifest admits must carry the BuildManifest digest.
-fn check_digests(manifest: &im4m::Manifest, decoded: &[&Decoded]) -> Result<()> {
-    for item in decoded {
-        let (Some(object), Some(declared)) = (
-            manifest.object(&item.source.payload_type),
-            &item.declared_digest,
-        ) else {
-            continue;
-        };
-        let digest = object
+/// The boot objects the manifest does not admit, by component. A manifest
+/// admits an object when one of its entries' `DGST` is the object's
+/// BuildManifest digest. When `admits_all`, an object it does not admit
+/// fails, naming the entry of the object's IM4P type when there is one.
+fn check_digests(
+    manifest: &im4m::Manifest,
+    decoded: &[&Decoded],
+    admits_all: bool,
+) -> Result<Vec<String>> {
+    let digest = |object: &im4m::Object| {
+        object
             .properties
             .iter()
             .find(|p| p.name == "DGST")
-            .with_context(|| format!("manifest {} has no DGST", object.tag))?;
+            .map(|p| p.value.clone())
+    };
+    let mut outside = vec![];
+    for item in decoded {
+        let Some(declared) = &item.declared_digest else {
+            continue;
+        };
+        let declared = im4m::Value::Data(hex::decode(declared)?);
+        if manifest
+            .objects
+            .iter()
+            .any(|object| digest(object).as_ref() == Some(&declared))
+        {
+            continue;
+        }
         ensure!(
-            digest.value == im4m::Value::Data(hex::decode(declared)?),
-            "manifest {} digest differs from the BuildManifest {}",
-            object.tag,
-            item.source.component
+            !admits_all,
+            "{}",
+            match manifest.object(&item.source.payload_type) {
+                Some(object) => format!(
+                    "manifest {} digest differs from the BuildManifest {}",
+                    object.tag, item.source.component
+                ),
+                None => format!("the manifest does not admit {}", item.source.component),
+            }
         );
+        outside.push(item.source.component.clone());
     }
-    Ok(())
+    Ok(outside)
 }
 
 /// BaseSystem's APFS partition: the AEA member is copied out, decrypted
@@ -561,15 +589,17 @@ impl Prepare {
                 }
             }
         }
+        let mut outside_manifest = vec![];
         if let Some(manifest) = &boot_manifest {
-            check_digests(
+            outside_manifest = check_digests(
                 &im4m::parse(&manifest.bytes)?,
                 &[&kernel, &sptm, &txm, &device_tree, &trust_cache],
+                roles.manifest_admits_all,
             )?;
         }
         if let Some(manifest) = &cryptex1_manifest {
             let decoded: Vec<_> = cryptex_trust_caches.iter().collect();
-            check_digests(&im4m::parse(&manifest.bytes)?, &decoded)?;
+            check_digests(&im4m::parse(&manifest.bytes)?, &decoded, true)?;
         }
         fn input(decoded: &Decoded) -> Input<'_> {
             Input {
@@ -638,7 +668,13 @@ impl Prepare {
                 .collect(),
         };
         let options = self.options(inputs.dram_base()?)?;
-        let bundle = boot_bundle::prepare(&inputs, &options)?;
+        let mut bundle = boot_bundle::prepare(&inputs, &options)?;
+        bundle
+            .manifest
+            .unresolved
+            .extend(outside_manifest.iter().map(|component| {
+                format!("{component}: outside the boot manifest, which is the installed system's")
+            }));
         let provenance = serde_json::json!({
             "archive": {
                 "path": ipsw.canonicalize()?.display().to_string(),
@@ -736,6 +772,52 @@ impl Prepare {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_manifest_admits_objects_by_digest_and_restore_objects_may_sit_outside() {
+        let object = |tag: &str, digest: u8| im4m::Object {
+            tag: tag.into(),
+            properties: vec![im4m::Property {
+                name: "DGST".into(),
+                value: im4m::Value::Data(vec![digest; 48]),
+            }],
+        };
+        let manifest = im4m::Manifest {
+            version: 0,
+            properties: vec![],
+            objects: vec![object("krnl", 1), object("rdtr", 2)],
+            sha384: String::new(),
+            digest: [0; 48],
+            signature_validated: false,
+        };
+        let decoded = |component: &str, payload_type: &str, digest: u8| Decoded {
+            bytes: vec![],
+            source: Source {
+                component: component.into(),
+                member: String::new(),
+                container_sha256: String::new(),
+                payload_type: payload_type.into(),
+                description: String::new(),
+                decoded_bytes: 0,
+                decoded_sha256: String::new(),
+            },
+            declared_digest: Some(hex::encode([digest; 48])),
+        };
+        let kernel = decoded("KernelCache", "krnl", 1);
+        let restore_kernel = decoded("RestoreKernelCache", "krnl", 3);
+        let restore_tree = decoded("RestoreDeviceTree", "dtre", 2);
+        assert!(
+            check_digests(&manifest, &[&kernel], true)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            check_digests(&manifest, &[&restore_kernel, &restore_tree], false).unwrap(),
+            ["RestoreKernelCache"]
+        );
+        let error = check_digests(&manifest, &[&restore_kernel], true).unwrap_err();
+        assert!(error.to_string().contains("manifest krnl digest differs"));
+    }
 
     #[test]
     fn boot_modes_add_their_arguments_after_the_console_arguments() {
