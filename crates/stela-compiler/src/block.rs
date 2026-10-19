@@ -438,7 +438,7 @@ pub struct CompilationPlan {
     profile: BlockProfile,
     resident: Option<crate::x86_64::block::ResidentLoopPlan>,
     checks: crate::x86_64::MemoryChecks,
-    zero_block: Option<u16>,
+    native: crate::x86_64::NativeSystem,
 }
 impl CompilationPlan {
     pub fn new(
@@ -493,7 +493,7 @@ impl CompilationPlan {
             profile,
             resident,
             checks: crate::x86_64::MemoryChecks::DEFAULT,
-            zero_block: None,
+            native: crate::x86_64::NativeSystem::NONE,
         })
     }
 
@@ -545,7 +545,25 @@ impl CompilationPlan {
                 )));
             }
         }
-        self.zero_block = bytes;
+        self.native.zero_block = bytes;
+        Ok(self)
+    }
+    /// Complete a terminal DC CVAC, DC CVAU or DC CIVAC among `operations`
+    /// natively, checking that Xt translates for a read and falling through
+    /// (`x86_64::cache_clean`): the system-mode engine compiles separate
+    /// blocks for the contexts where those operations neither trap nor are
+    /// UNDEFINED. Other operations keep their System exit.
+    pub fn with_cache_clean(
+        mut self,
+        operations: crate::x86_64::cache_clean::Operations,
+    ) -> Result<Self, CompileError> {
+        if !operations.is_empty() && self.profile != BlockProfile::SystemModeV1 {
+            return Err(CompileError(format!(
+                "{:?} keeps the DC clean operations' System exit",
+                self.profile
+            )));
+        }
+        self.native.cache_clean = operations;
         Ok(self)
     }
     /// Allow the ordinary runtime to retain eligible internal loop edges. Other
@@ -623,7 +641,7 @@ impl CompilationPlan {
                 self.parsed.next_pc,
                 self.target,
                 self.checks,
-                self.zero_block,
+                self.native,
             );
             let direct_exits = crate::x86_64::block::successor_exits(
                 &native.x86_64_code,
@@ -983,6 +1001,66 @@ mod tests {
                 .is_err()
         );
         assert!(plan(BlockProfile::SystemV1).with_zero_block(None).is_ok());
+    }
+
+    /// A DC clean operation in the plan's set reads the byte at Xt and falls
+    /// through; one outside it, and DC IVAC, keep the System exit.
+    #[test]
+    fn planned_dc_clean_operations_check_xt_and_fall_through() {
+        use crate::x86_64::cache_clean::Operations;
+        use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+        const BASE: u64 = 0x4000;
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const DC_CIVAC: u32 = 0xd50b_7e20; // dc civac, x0
+        const DC_CVAU: u32 = 0xd50b_7b20; // dc cvau, x0
+        const DC_IVAC: u32 = 0xd508_7620; // dc ivac, x0
+        let compile = |word: u32, operations| {
+            let source: Vec<u8> = [ADD, word, ADD]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            CompilationPlan::new(
+                &source,
+                GuestAddress(BASE),
+                BlockProfile::SystemModeV1,
+                crate::TargetCpu::Baseline,
+            )
+            .and_then(|plan| plan.with_cache_clean(operations))
+            .and_then(CompilationPlan::compile)
+            .unwrap()
+        };
+        let native = compile(DC_CIVAC, Operations::CIVAC);
+        assert_eq!(native.source_bytes, 8, "the DC still ends the block");
+        let code = &native.native.x86_64_code;
+        let at = native.native.source_map[1].1;
+        let mut check = Vec::new();
+        crate::x86_64::cache_clean::emit(&mut check, 0);
+        assert_eq!(code[at..at + check.len()], check);
+        let next = GuestAddress(BASE + 8);
+        assert_eq!(
+            code[at + check.len()..],
+            direct_exit(next, ExitKind::Fallthrough)
+        );
+        assert_eq!(native.direct_exits.len(), 1);
+        assert_eq!(native.direct_exits[0].target, next);
+        let system = direct_exit(GuestAddress(BASE + 4), ExitKind::System);
+        for (word, operations) in [
+            (DC_CIVAC, Operations::CVAC.with(Operations::CVAU)),
+            (DC_CVAU, Operations::NONE),
+            (DC_IVAC, Operations::ALL),
+        ] {
+            let compiled = compile(word, operations);
+            let code = &compiled.native.x86_64_code;
+            assert_eq!(code[code.len() - DIRECT_EXIT_BYTES..], system, "{word:#x}");
+        }
+        let plan = CompilationPlan::new(
+            &ADD.to_le_bytes(),
+            GuestAddress(BASE),
+            BlockProfile::SystemV1,
+            crate::TargetCpu::Baseline,
+        )
+        .unwrap();
+        assert!(plan.with_cache_clean(Operations::CVAC).is_err());
     }
 
     #[test]

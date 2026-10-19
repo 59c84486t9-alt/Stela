@@ -50,7 +50,7 @@ use stela_compiler::{
         system::{GuardedOperation, SystemOperation},
     },
     x86_64::{
-        MemoryChecks,
+        MemoryChecks, NativeSystem, cache_clean,
         chain::{self, ChainControl},
         pointer as x86_64_pointer, register_read, zero_block,
     },
@@ -674,10 +674,11 @@ struct Variant {
     /// instruction an SVE or SME access check (or, in streaming mode, any
     /// access check) applies to.
     scalable: Option<bool>,
-    /// The DC ZVA block size while DC ZVA completes without a trap
-    /// (`system::native_zero_block`): a block ending in DC ZVA zeroes it
-    /// natively instead of exiting.
-    zero_block: Option<u16>,
+    /// The System instructions that complete natively at the end of a
+    /// block: DC ZVA while it zeroes without a trap
+    /// (`system::native_zero_block`), and the DC clean operations while
+    /// they only check the translation of Xt (`system::native_cache_clean`).
+    system: NativeSystem,
 }
 
 /// Xt of `word` at `pc` if it is MRS Xt, TPIDR_EL1.
@@ -694,12 +695,17 @@ fn thread_pointer_read(pc: u64, word: u32) -> Option<u8> {
     }
 }
 
-/// Whether `word` at `pc` is DC ZVA.
-fn zeroes_block(pc: u64, word: u32) -> bool {
+/// Whether `word` at `pc` is a System instruction blocks compiled for
+/// `system` complete natively: DC ZVA or one of its DC clean operations.
+fn completes_natively(pc: u64, word: u32, system: NativeSystem) -> bool {
     block::decode_system_mode_instruction(GuestAddress(pc), word)
         .ok()
         .flatten()
-        .is_some_and(|instruction| zero_block::operand(&instruction).is_some())
+        .is_some_and(|instruction| {
+            system.zero_block.is_some() && zero_block::operand(&instruction).is_some()
+                || cache_clean::operand(&instruction)
+                    .is_some_and(|(operation, _)| system.cache_clean.contains(operation))
+        })
 }
 
 /// A load or store addressed through Rn (bits 9:5) that names SP; literal
@@ -749,8 +755,8 @@ pub struct Machine<H: Host, D: Devices> {
     floating_point: Option<Option<u8>>,
     /// The memory checks of the current regime's SCTLR_ELx, while valid.
     memory_checks: Option<MemoryChecks>,
-    /// [`Variant::zero_block`] for the current EL, while valid.
-    zero_block: Option<Option<u16>>,
+    /// [`Variant::system`] for the current EL, while valid.
+    native_system: Option<NativeSystem>,
     /// The physical count up to which the event streams have set the event
     /// register; `None` before the first sample.
     event_sample: Option<u64>,
@@ -858,7 +864,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             timers: None,
             floating_point: None,
             memory_checks: None,
-            zero_block: None,
+            native_system: None,
             event_sample: None,
             debug: None,
             device_lines: None,
@@ -910,7 +916,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.timers = None;
         self.floating_point = None;
         self.memory_checks = None;
-        self.zero_block = None;
+        self.native_system = None;
         self.debug = None;
         self.pointer.close();
         self.thread_pointer.readable = 0;
@@ -971,10 +977,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
-    fn native_zero_block(&mut self) -> Option<u16> {
-        *self
-            .zero_block
-            .get_or_insert_with(|| system::native_zero_block(&self.cpu, &self.profile_missing))
+    fn native_system(&mut self) -> NativeSystem {
+        *self.native_system.get_or_insert_with(|| NativeSystem {
+            zero_block: system::native_zero_block(&self.cpu, &self.profile_missing),
+            cache_clean: system::native_cache_clean(&self.cpu),
+        })
     }
 
     fn sync_regime(&mut self) {
@@ -1948,7 +1955,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .scalable
                 .is_some()
                 .then(|| self.cpu.svcr() & 1 != 0),
-            zero_block: self.native_zero_block(),
+            system: self.native_system(),
         };
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
@@ -1985,7 +1992,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             checks,
             single,
             scalable,
-            zero_block,
+            system,
         } = variant;
         let available = if single {
             INSTRUCTION
@@ -2061,7 +2068,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
             };
-        let compiled = self.compile_prefix(&source[..consumed], pc, checks, zero_block)?;
+        let compiled = self.compile_prefix(&source[..consumed], pc, checks, system)?;
         let last = compiled.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         let code = match self.host.install(&compiled.native.x86_64_code) {
@@ -2195,12 +2202,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         source: &[u8],
         pc: u64,
         checks: MemoryChecks,
-        zero_block: Option<u16>,
+        system: NativeSystem,
     ) -> Result<stela_compiler::block::CompiledBlock, Stop> {
         let attempt = |bytes: &[u8]| {
             CompilationPlan::new(bytes, GuestAddress(pc), PROFILE, self.target)
                 .and_then(|plan| plan.with_memory_checks(checks))
-                .and_then(|plan| plan.with_zero_block(zero_block))
+                .and_then(|plan| plan.with_zero_block(system.zero_block))
+                .and_then(|plan| plan.with_cache_clean(system.cache_clean))
                 .and_then(CompilationPlan::compile)
         };
         match attempt(source) {
@@ -3065,15 +3073,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if pc != self.blocks[index].pc {
             self.cpu.pstate.btype = 0;
         }
-        // A native DC ZVA's first store faulted with nothing written (its
-        // block is in one page): the engine completes it, reporting Xt as
-        // the fault address and watching the whole block (Arm
-        // `AArch64_DataMemZero`), whatever stopped the store.
+        // A native DC ZVA's first store, or a native DC clean's read of Xt,
+        // faulted with nothing written (a DC ZVA block is in one page): the
+        // engine completes the instruction, reporting Xt as the fault
+        // address with a cache maintenance syndrome and watching the whole
+        // DC ZVA block (Arm `AArch64_DataMemZero`), whatever stopped the
+        // access.
         let (terminal, word) = self.blocks[index].terminal;
-        if self.blocks[index].variant.zero_block.is_some()
-            && pc == terminal
-            && zeroes_block(pc, word)
-        {
+        if pc == terminal && completes_natively(pc, word, self.blocks[index].variant.system) {
             self.statistics.system_exits += 1;
             let word = self.exit_word(index, pc)?;
             return self.completing(pc, |machine| machine.system_instruction(word));
@@ -5157,6 +5164,163 @@ mod tests {
         assert_eq!(machine.cpu.read(SystemRegister::PAR_EL1) & 1, 0);
     }
 
+    /// The DC clean operations native code completes are exactly those the
+    /// generated accessors complete as a plain translation check: across
+    /// ELs, the host, UCI, the HCR_EL2 traps and HFGITR_EL2, an operation in
+    /// `native_cache_clean` completes with PC + 4 or takes the Data Abort of
+    /// its translation, and one outside it traps.
+    #[test]
+    fn native_dc_clean_operations_are_the_untrapped_ones() {
+        const WORDS: [(cache_clean::Operations, u32); 3] = [
+            (cache_clean::Operations::CVAC, 0xd50b_7a22), // dc cvac, x2
+            (cache_clean::Operations::CVAU, 0xd50b_7b22), // dc cvau, x2
+            (cache_clean::Operations::CIVAC, 0xd50b_7e22), // dc civac, x2
+        ];
+        const HCR_BITS: [u32; 4] = [23, 24, 52, crate::machine::cpu::HCR_TGE];
+        const HFGITR_BITS: [u32; 3] = [54, 10, 7];
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut covered = [[0; 2]; 3];
+        for _ in 0..192 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let el = (seed % 3) as u8;
+            let bit = |index: u32| seed >> (8 + index) & 1;
+            let hcr = HCR_BITS
+                .iter()
+                .enumerate()
+                .fold(1 << 34, |hcr, (index, &field)| {
+                    hcr | bit(index as u32) << field
+                });
+            let hfgitr = HFGITR_BITS
+                .iter()
+                .enumerate()
+                .fold(0, |value, (index, &field)| {
+                    value | bit(4 + index as u32) << field
+                });
+            let uci = (bit(7) << 26, bit(8) << 26);
+            for (position, (operation, word)) in WORDS.into_iter().enumerate() {
+                let mut machine = machine(&[]);
+                normal_memory(&mut machine, true);
+                let registers = &mut machine.cpu.registers;
+                registers.set(SystemRegister::HCR_EL2, 0, hcr);
+                registers.set(SystemRegister::HFGITR_EL2, 0, hfgitr);
+                for (sctlr, uci) in [
+                    (SystemRegister::SCTLR_EL1, uci.0),
+                    (SystemRegister::SCTLR_EL2, uci.1),
+                ] {
+                    let value = registers.get(sctlr, 0) | uci;
+                    registers.set(sctlr, 0, value);
+                }
+                registers.set(SystemRegister::VBAR_EL1, 0, BASE + 0x8000);
+                registers.set(SystemRegister::VBAR_EL2, 0, BASE + 0x8000);
+                machine.cpu.pstate.el = el;
+                machine.derived_changed();
+                let native = machine.native_system().cache_clean.contains(operation);
+                machine.cpu.pc = BASE + 0x100;
+                machine.cpu.state.x[2] = 0x2040;
+                let exceptions = machine.statistics.exceptions;
+                machine.system_instruction(word).unwrap();
+                // A plain completion, or the Data Abort of the translation
+                // check (a cache maintenance syndrome), rather than a trap.
+                let target = machine.cpu.pstate.el.max(1);
+                let esr = machine.cpu.read(if target == 2 {
+                    SystemRegister::ESR_EL2
+                } else {
+                    SystemRegister::ESR_EL1
+                });
+                let checked = matches!(esr >> 26, 0x24 | 0x25) && esr & 1 << 8 != 0;
+                let plain = machine.statistics.exceptions == exceptions
+                    && machine.cpu.pc == BASE + 0x104
+                    || machine.statistics.exceptions == exceptions + 1 && checked;
+                assert_eq!(
+                    native, plain,
+                    "{word:#x} EL{el} HCR {hcr:#x} HFGITR {hfgitr:#x}"
+                );
+                covered[position][usize::from(native)] += 1;
+            }
+        }
+        // Each operation was seen both completed natively and trapped.
+        assert!(
+            covered.iter().flatten().all(|&count| count > 0),
+            "{covered:?}"
+        );
+    }
+
+    /// A block ending in DC CIVAC checks Xt natively and falls through where
+    /// it cannot trap, and exits where HCR_EL2.TPCP traps it; a fault in the
+    /// native check completes DC CIVAC in the engine, which takes the Data
+    /// Abort with a cache maintenance syndrome.
+    #[test]
+    fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const DC_CIVAC: u32 = 0xd50b_7e23; // dc civac, x3
+        let mut machine = machine(&[ADD, DC_CIVAC, ADD]);
+        normal_memory(&mut machine, false);
+        let base = machine.cpu.pc;
+        let next = GuestAddress(base + 8);
+        let fallthrough = NativeExit::Exit {
+            next_pc: next.0,
+            kind: ExitKind::Fallthrough as u64,
+        };
+        machine.host.exits = vec![fallthrough];
+        machine.step().unwrap();
+        let block = &machine.blocks[0];
+        assert_eq!(
+            block.variant.system.cache_clean,
+            cache_clean::Operations::ALL
+        );
+        let code = &machine.host.installed[block.code.0 - 1];
+        let tail = chain::direct_exit(next, ExitKind::Fallthrough);
+        assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
+        assert_eq!(block.successors.len(), 1);
+        // HCR_EL2.TPCP traps DC CIVAC at EL1: the PC gets a block that exits.
+        let hcr = machine.cpu.read(SystemRegister::HCR_EL2);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, hcr | 1 << 23);
+        machine.derived_changed();
+        machine.cpu.pc = base;
+        machine.host.exits = vec![fallthrough];
+        machine.step().unwrap();
+        let trapped = &machine.blocks[1];
+        assert!(
+            !trapped
+                .variant
+                .system
+                .cache_clean
+                .contains(cache_clean::Operations::CIVAC)
+        );
+        let code = &machine.host.installed[trapped.code.0 - 1];
+        assert_eq!(
+            code[code.len() - chain::DIRECT_EXIT_BYTES..],
+            chain::direct_exit(GuestAddress(base + 4), ExitKind::System)
+        );
+        // Without TPCP, an unmapped Xt faults the native read; the engine
+        // takes the level-1 translation fault as a cache maintenance one.
+        machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
+        machine.derived_changed();
+        machine.cpu.pc = base;
+        machine.cpu.state.x[3] = 0x4000_0040;
+        let offset = machine.blocks[0].source_map[1].1;
+        machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            offset,
+            address: 0x4000_0040,
+            write: false,
+            cause: FaultCause::Device { physical: 0 },
+        })];
+        let exits = machine.statistics.system_exits;
+        machine.step().unwrap();
+        let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+        // EC 0x25, CM (bit 8) and WnR (bit 6), a level-1 translation fault.
+        assert_eq!(esr >> 26, 0x25, "{esr:#x}");
+        assert_eq!(esr & (1 << 8 | 1 << 6 | 0x3f), 1 << 8 | 1 << 6 | 0b000101);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x4000_0040);
+        assert_eq!(machine.statistics.system_exits, exits + 1);
+        assert_eq!(machine.exit_words().get(&DC_CIVAC), Some(&1));
+    }
+
     #[test]
     fn epan_makes_pan_cover_el0_execute_only_memory_on_the_chips_with_pan3() {
         const MSR_SCTLR_EL1_X0: u32 = 0xd518_1000;
@@ -6127,7 +6291,7 @@ mod tests {
         }];
         machine.step().unwrap();
         let block = &machine.blocks[0];
-        assert_eq!(block.variant.zero_block, Some(64));
+        assert_eq!(block.variant.system.zero_block, Some(64));
         let code = &machine.host.installed[block.code.0 - 1];
         let tail = chain::direct_exit(next, ExitKind::Fallthrough);
         assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
@@ -6147,7 +6311,7 @@ mod tests {
         }];
         machine.step().unwrap();
         let trapped = &machine.blocks[1];
-        assert_eq!(trapped.variant.zero_block, None);
+        assert_eq!(trapped.variant.system.zero_block, None);
         let code = &machine.host.installed[trapped.code.0 - 1];
         assert_eq!(
             code[code.len() - chain::DIRECT_EXIT_BYTES..],

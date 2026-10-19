@@ -28,6 +28,7 @@ use crate::machine::{
 use alloc::vec::Vec;
 use core::cell::Cell;
 use stela_compiler::aarch64::system::registers::{Encoding, RegisterAccess};
+use stela_compiler::x86_64::cache_clean;
 
 /// The FPCR fields of every chip: AHP, DN, FZ, RMode and FZ16 (FEAT_FP16).
 /// The trap enables IOE, DZE, OFE, UFE, IXE and IDE are RAZ/WI because the M2
@@ -251,6 +252,69 @@ pub(super) fn native_zero_block(cpu: &Cpu, missing: &[Register]) -> Option<u16> 
     (bytes <= ZEROES.len() as u64).then_some(bytes as u16)
 }
 static ZEROES: [u8; 2048] = [0; 2048];
+
+/// SCTLR_ELx.UCI: EL0 may execute the DC clean operations and IC IVAU.
+const SCTLR_UCI: u32 = 26;
+/// HCR_EL2.TPCP, TPU and TOCU: trap the clean operations to the Point of
+/// Coherency (and Persistence), and to the Point of Unification.
+const HCR_TPCP: u32 = 23;
+const HCR_TPU: u32 = 24;
+const HCR_TOCU: u32 = 52;
+/// HFGITR_EL2.DCCVAC, DCCIVAC and DCCVAU (FEAT_FGT).
+const HFGITR_DCCVAC: u32 = 54;
+const HFGITR_DCCIVAC: u32 = 10;
+const HFGITR_DCCVAU: u32 = 7;
+
+/// The DC clean operations at the current EL that only check that Xt
+/// translates for a read, as [`Access::operation`] completes them on the
+/// coherent host: those the generated `DC CVAC`, `DC CVAU` and `DC CIVAC`
+/// accessors neither trap (SCTLR_EL1.UCI, then HCR_EL2.TPCP, or TPU and
+/// TOCU for DC CVAU, then the HFGITR_EL2 bit with FEAT_FGT, outside the
+/// host at EL0 and, without UCI, at EL1; SCTLR_EL2.UCI at EL0 in the host)
+/// nor treat as a NOP (`treat_dc_as_nop` never does). Native code completes
+/// these by reading the byte at Xt (`x86_64::cache_clean`).
+pub(super) fn native_cache_clean(cpu: &Cpu) -> cache_clean::Operations {
+    let Ok(fine_grained) = cpu.registers.chip().implemented(Feature::FEAT_FGT) else {
+        return cache_clean::Operations::NONE;
+    };
+    let hcr = |bit| cpu.hcr(bit);
+    let fgt = |bit| fine_grained && cpu.field(Register::HFGITR_EL2, bit, 1) != 0;
+    let guest = |el0: bool| {
+        let uci = !el0 || cpu.field(Register::SCTLR_EL1, SCTLR_UCI, 1) != 0;
+        [
+            (
+                cache_clean::Operations::CVAC,
+                !hcr(HCR_TPCP) && !fgt(HFGITR_DCCVAC),
+            ),
+            (
+                cache_clean::Operations::CVAU,
+                !hcr(HCR_TPU) && !hcr(HCR_TOCU) && !fgt(HFGITR_DCCVAU),
+            ),
+            (
+                cache_clean::Operations::CIVAC,
+                !hcr(HCR_TPCP) && !fgt(HFGITR_DCCIVAC),
+            ),
+        ]
+        .into_iter()
+        .filter(|&(_, untrapped)| uci && untrapped)
+        .fold(cache_clean::Operations::NONE, |set, (operation, _)| {
+            set.with(operation)
+        })
+    };
+    match cpu.pstate.el {
+        0 if cpu.in_host() => {
+            if cpu.field(Register::SCTLR_EL2, SCTLR_UCI, 1) != 0 {
+                cache_clean::Operations::ALL
+            } else {
+                cache_clean::Operations::NONE
+            }
+        }
+        0 => guest(true),
+        1 => guest(false),
+        2 => cache_clean::Operations::ALL,
+        _ => cache_clean::Operations::NONE,
+    }
+}
 const ISR_A: u64 = 1 << 8;
 const ISR_I: u64 = 1 << 7;
 const ISR_F: u64 = 1 << 6;

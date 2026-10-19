@@ -84,7 +84,7 @@ pub(crate) fn emit(
         terminal,
         fallthrough,
         target,
-        None,
+        crate::x86_64::NativeSystem::NONE,
     );
     Ok(block)
 }
@@ -141,7 +141,7 @@ fn emit_scalar(
         None,
         GuestAddress(next),
         target,
-        None,
+        crate::x86_64::NativeSystem::NONE,
     );
     Ok(block)
 }
@@ -197,7 +197,7 @@ fn emit_pair(
         None,
         GuestAddress(next),
         target,
-        None,
+        crate::x86_64::NativeSystem::NONE,
     );
     Ok(block)
 }

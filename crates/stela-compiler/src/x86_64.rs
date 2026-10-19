@@ -96,12 +96,30 @@ mod scalable;
 mod scalable_matrix;
 mod simd;
 pub(crate) use simd::memory_checked::CheckedOperand as CheckedFixedMemoryOperand;
+pub mod cache_clean;
 pub(crate) mod sme;
 pub(crate) mod sve;
 mod system;
 mod tag_arithmetic;
 mod unprivileged;
 pub mod zero_block;
+
+/// The System instructions a system-mode block ending in one completes
+/// natively instead of exiting: DC ZVA zeroing a block of `zero_block`
+/// bytes, and the DC clean operations of `cache_clean`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NativeSystem {
+    pub zero_block: Option<u16>,
+    pub cache_clean: cache_clean::Operations,
+}
+
+impl NativeSystem {
+    /// Every System instruction exits.
+    pub const NONE: Self = Self {
+        zero_block: None,
+        cache_clean: cache_clean::Operations::NONE,
+    };
+}
 
 fn offset(register: Register) -> Option<u32> {
     match register {

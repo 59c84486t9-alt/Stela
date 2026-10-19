@@ -32,7 +32,7 @@ pub(crate) fn emit(
         terminal,
         fallthrough,
         target,
-        None,
+        crate::x86_64::NativeSystem::NONE,
     );
     Ok(block)
 }

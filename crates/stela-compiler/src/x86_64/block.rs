@@ -68,7 +68,7 @@ pub(crate) fn emit_ordinary_for_target(
         target,
         true,
         super::MemoryChecks::DEFAULT,
-        None,
+        super::NativeSystem::NONE,
     )
 }
 
@@ -102,20 +102,21 @@ pub(crate) fn emit_for_target(
         target,
         false,
         checks,
-        None,
+        super::NativeSystem::NONE,
     )
 }
 
 /// [`emit_for_target`] for the system-mode engine, which may also complete
-/// a terminal DC ZVA natively by zeroing `zero_block` bytes
-/// (`x86_64::zero_block`) and falling through.
+/// a terminal System instruction natively and fall through: DC ZVA by
+/// zeroing its block (`x86_64::zero_block`) and DC CVAC, DC CVAU and DC
+/// CIVAC by reading the byte at Xt (`x86_64::cache_clean`).
 pub(crate) fn emit_system_mode(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
-    zero_block: Option<u16>,
+    native: super::NativeSystem,
 ) -> NativeBlock {
     emit_selected(
         instructions,
@@ -124,7 +125,7 @@ pub(crate) fn emit_system_mode(
         target,
         false,
         checks,
-        zero_block,
+        native,
     )
 }
 
@@ -135,7 +136,7 @@ fn emit_selected(
     target: crate::TargetCpu,
     optimize_regions: bool,
     checks: super::MemoryChecks,
-    zero_block: Option<u16>,
+    native: super::NativeSystem,
 ) -> NativeBlock {
     let mut block = NativeBlock {
         x86_64_code: vec![],
@@ -229,7 +230,7 @@ fn emit_selected(
         terminal,
         fallthrough,
         target,
-        zero_block,
+        native,
     );
     block
 }
@@ -252,8 +253,9 @@ pub(crate) fn successor_exits(
             | Operation::BranchZero { target, .. }
             | Operation::BranchBit { target, .. },
         )) => (*target, ExitKind::Direct, true),
-        // A DC ZVA completed natively falls through; any other System
-        // instruction exits at itself, which the stub check below rejects.
+        // A DC ZVA or DC clean completed natively falls through; any other
+        // System instruction exits at itself, which the stub check below
+        // rejects.
         Some(Terminator::System(request)) => (request.next_pc, ExitKind::Fallthrough, false),
         Some(_) => return vec![],
     };
@@ -284,7 +286,7 @@ fn emit_terminal(
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
-    zero_block: Option<u16>,
+    native: super::NativeSystem,
 ) {
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
@@ -313,12 +315,17 @@ fn emit_terminal(
                 );
             }
             Terminator::System(request) => {
-                match zero_block.zip(super::zero_block::operand(request)) {
-                    Some((bytes, rt)) => {
-                        super::zero_block::emit(code, rt, bytes);
-                        direct_exit(code, request.next_pc, ExitKind::Fallthrough);
-                    }
-                    None => direct_exit(code, request.instruction_pc, ExitKind::System),
+                let zero = native.zero_block.zip(super::zero_block::operand(request));
+                let clean = super::cache_clean::operand(request)
+                    .filter(|(operation, _)| native.cache_clean.contains(*operation));
+                if let Some((bytes, rt)) = zero {
+                    super::zero_block::emit(code, rt, bytes);
+                    direct_exit(code, request.next_pc, ExitKind::Fallthrough);
+                } else if let Some((_, rt)) = clean {
+                    super::cache_clean::emit(code, rt);
+                    direct_exit(code, request.next_pc, ExitKind::Fallthrough);
+                } else {
+                    direct_exit(code, request.instruction_pc, ExitKind::System);
                 }
             }
             Terminator::Trap(trap) => {
