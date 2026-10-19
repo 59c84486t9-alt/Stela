@@ -9,13 +9,15 @@
 //! ([`input`]) and every virtio-net adapter ([`virtio_net`]);
 //! [`storage::open`] selects the one disk and GPT partition that `stela.cfg`
 //! names and returns a [`gpt::PartitionDevice`] that cannot reach any other
-//! block.
+//! block. [`boot_log`] keeps the mount's output on the machine-state
+//! partition, and `stela` reads it back.
 use alloc::vec::Vec;
 use core::ops::Range;
 
 pub mod acpi;
 pub mod ahci;
 pub mod block;
+pub mod boot_log;
 pub mod dma;
 pub mod gpt;
 pub mod input;
