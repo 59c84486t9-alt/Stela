@@ -40,6 +40,43 @@ pub(super) enum Reply {
     Failure(u32),
     /// The host kernel's answer is the arm64 kernel's: forward the request.
     Forward,
+    /// A complex reply (`MACH_MSGH_BITS_COMPLEX`, no `RetCode`): its
+    /// descriptors, then the body after the NDR record.
+    Complex {
+        descriptors: Vec<Descriptor>,
+        body: Vec<u8>,
+    },
+}
+
+/// One descriptor of a complex reply. Further forms join as routines
+/// need them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Descriptor {
+    /// An out-of-line array of rights of this space, each carried with
+    /// `disposition` (`mach_msg_ool_ports_descriptor64_t`,
+    /// `MACH_MSG_VIRTUAL_COPY`).
+    Ports { names: Vec<u32>, disposition: u8 },
+}
+
+/// `MACH_MSG_TYPE_COPY_SEND`.
+pub(super) const COPY_SEND: u8 = 19;
+
+impl Descriptor {
+    /// The descriptor as an LP64 sender lays it out; a port array's
+    /// address is its names', valid while the descriptor lives.
+    pub(super) fn bytes(&self) -> Vec<u8> {
+        const OOL_PORTS: u8 = 2;
+        const VIRTUAL_COPY: u8 = 1;
+        let mut out = Vec::with_capacity(16);
+        match self {
+            Self::Ports { names, disposition } => {
+                out.extend((names.as_ptr() as u64).to_le_bytes());
+                out.extend([0, VIRTUAL_COPY, *disposition, OOL_PORTS]);
+                out.extend((names.len() as u32).to_le_bytes());
+            }
+        }
+        out
+    }
 }
 
 pub(super) const KERN_INVALID_ARGUMENT: u32 = 4;
@@ -101,6 +138,7 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         Some("the IOKit main port is the host's: its registry describes the x86 host"),
     ),
     (Object::Task, "task_create_identity_token", None),
+    (Object::Task, "task_threads_from_user", None),
     (
         Object::Task,
         "task_info_from_user",
@@ -209,6 +247,20 @@ pub(super) fn serve(
         }
         // `flavor`, `task_info_outCnt`. The audit token is this process's
         // identity, the same in either ABI.
+        // The process's guest threads, each as a new send right, in
+        // creation order; the host task's other threads are the hosted
+        // runtime's own.
+        (Object::Task, "task_threads_from_user", false) => {
+            let names = kernel.process.runtime.registry.ports();
+            let count = names.len() as u32;
+            Reply::Complex {
+                descriptors: vec![Descriptor::Ports {
+                    names,
+                    disposition: COPY_SEND,
+                }],
+                body: count.to_le_bytes().to_vec(),
+            }
+        }
         // A send right naming this task's identity (pid, version and audit
         // token), the same in either ABI.
         (Object::Task, "task_create_identity_token", false) => Reply::Forward,
@@ -608,6 +660,18 @@ mod tests {
             .iter()
             .map(|word| u32::from_le_bytes(*word))
             .collect()
+    }
+
+    #[test]
+    fn reply_descriptors_have_the_lp64_layout() {
+        let ports = Descriptor::Ports {
+            names: vec![0x1303, 0x1403],
+            disposition: COPY_SEND,
+        };
+        let bytes = ports.bytes();
+        let Descriptor::Ports { names, .. } = &ports;
+        assert_eq!(bytes[..8], (names.as_ptr() as u64).to_le_bytes());
+        assert_eq!(bytes[8..], [0, 1, COPY_SEND, 2, 2, 0, 0, 0]);
     }
 
     #[test]

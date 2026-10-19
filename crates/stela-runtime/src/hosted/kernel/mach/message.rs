@@ -295,18 +295,38 @@ fn answer(
     let disposition = (request.bits >> 8) & 0x1f;
     if request.reply_port != 0 && disposition != 0 {
         let right = carry_reply_right(kernel, name, request.reply_port, disposition)?;
-        let mut body = NDR_RECORD.to_vec();
+        let mut body = Vec::new();
+        let mut bits = right.1;
+        // A port array's names stay in place until the reply is sent.
+        let mut _kept = Vec::new();
         match reply {
             Reply::Success(out) => {
+                body.extend(NDR_RECORD);
                 body.extend(0u32.to_le_bytes());
                 body.extend(out);
             }
-            Reply::Failure(code) => body.extend(code.to_le_bytes()),
+            Reply::Failure(code) => {
+                body.extend(NDR_RECORD);
+                body.extend(code.to_le_bytes());
+            }
+            Reply::Complex {
+                descriptors,
+                body: out,
+            } => {
+                bits |= MACH_MSGH_BITS_COMPLEX;
+                body.extend((descriptors.len() as u32).to_le_bytes());
+                for descriptor in &descriptors {
+                    body.extend(descriptor.bytes());
+                }
+                body.extend(NDR_RECORD);
+                body.extend(out);
+                _kept = descriptors;
+            }
             Reply::Forward => unreachable!("forwarded requests are not answered"),
         }
         let size = HEADER_BYTES as u32 + body.len() as u32;
         let mut message = Vec::with_capacity(size as usize);
-        for word in [right.1, size, right.0, 0, 0, id + mig::REPLY_OFFSET] {
+        for word in [bits, size, right.0, 0, 0, id + mig::REPLY_OFFSET] {
             message.extend(word.to_le_bytes());
         }
         message.extend(body);

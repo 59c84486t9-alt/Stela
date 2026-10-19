@@ -193,6 +193,14 @@ impl Registry {
         lock(&self.members).remove(&id);
     }
 
+    /// The thread ports of the process's threads, in creation order.
+    pub(super) fn ports(&self) -> Vec<u32> {
+        lock(&self.members)
+            .values()
+            .map(|member| member.port)
+            .collect()
+    }
+
     /// Whether `port` names one of the process's threads.
     pub(super) fn contains_port(&self, port: u32) -> bool {
         lock(&self.members)
