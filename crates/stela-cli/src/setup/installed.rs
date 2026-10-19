@@ -10,6 +10,7 @@
 //! Apple region, as on a Mac; a region that holds anything but a guest disk
 //! or zeros is used only with `--erase-target`, so no host data is lost by
 //! accident. Every later Stela or macOS update keeps both partitions.
+use super::ecid::Ecid;
 use super::host::{Host, PartitionInfo};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -43,12 +44,16 @@ pub(super) struct InstalledDisk {
 
 impl InstalledDisk {
     /// The engine options that boot it: macOS from its Preboot volume, or
-    /// recoveryOS from `recovery` as NVRAM chooses.
-    pub(super) fn options(&self, recovery: &str, dram_bytes: u64) -> String {
+    /// recoveryOS from `recovery` as NVRAM chooses. The bundle `stela.efi`
+    /// builds from Preboot carries the machine's `ecid`.
+    pub(super) fn options(&self, recovery: &str, dram_bytes: u64, ecid: Option<Ecid>) -> String {
         let region = self.region_target();
+        let ecid = ecid
+            .map(|ecid| format!(" --ecid {ecid}"))
+            .unwrap_or_default();
         format!(
             "--system --storage {region} --nor {} --preboot {region} --recovery-bundle \
-             {recovery} --ram-bytes {dram_bytes:#x}",
+             {recovery} --ram-bytes {dram_bytes:#x}{ecid}",
             self.nor_target()
         )
     }
@@ -56,9 +61,17 @@ impl InstalledDisk {
     /// The options of its System Recovery, as `stela.efi` routes a
     /// recoveryOS choice of NVRAM (`boot_selection::route`): the disk and
     /// NVRAM stay, `--bundle` replaces `--preboot`.
-    pub(super) fn recovery_options(&self, recovery: &str, dram_bytes: u64) -> String {
+    pub(super) fn recovery_options(
+        &self,
+        recovery: &str,
+        dram_bytes: u64,
+        ecid: Option<Ecid>,
+    ) -> String {
+        let ecid = ecid
+            .map(|ecid| format!(" --ecid {ecid}"))
+            .unwrap_or_default();
         format!(
-            "--system --storage {} --nor {} --bundle {recovery} --ram-bytes {dram_bytes:#x}",
+            "--system --storage {} --nor {} --bundle {recovery} --ram-bytes {dram_bytes:#x}{ecid}",
             self.region_target(),
             self.nor_target()
         )

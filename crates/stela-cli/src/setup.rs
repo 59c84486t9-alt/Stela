@@ -350,11 +350,11 @@ impl Record {
     fn boot_line(&self, install: Option<&machines::Install>) -> String {
         let dram_bytes = BundleOptions::default().dram_size;
         match install {
-            Some(install) => self.line(
-                install
-                    .disk
-                    .options(&self.recovery(install.ecid), dram_bytes),
-            ),
+            Some(install) => self.line(install.disk.options(
+                &self.recovery(install.ecid),
+                dram_bytes,
+                install.ecid,
+            )),
             None => self.line(format!(
                 "--system --bundle {} --ram-bytes {dram_bytes:#x}",
                 self.recovery(self.ecid)
@@ -382,11 +382,11 @@ impl Record {
             entries.push(Choice {
                 name: format!("{} - System Recovery", install.name),
                 options: self
-                    .line(
-                        install
-                            .disk
-                            .recovery_options(&self.recovery(install.ecid), dram_bytes),
-                    )
+                    .line(install.disk.recovery_options(
+                        &self.recovery(install.ecid),
+                        dram_bytes,
+                        install.ecid,
+                    ))
                     .trim()
                     .into(),
             });
@@ -2085,7 +2085,7 @@ mod tests {
         );
         let line = format!(
             "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --preboot {region} \
-             --recovery-bundle {recovery} --ram-bytes 0x200000000 --tss"
+             --recovery-bundle {recovery} --ram-bytes 0x200000000 --ecid {ecid} --tss"
         );
         assert_eq!(
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
@@ -2103,7 +2103,7 @@ mod tests {
             choices.entries[1].options,
             format!(
                 "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --bundle {recovery} \
-                 --ram-bytes 0x200000000 --tss"
+                 --ram-bytes 0x200000000 --ecid {ecid} --tss"
             )
         );
         // That line is what stela.efi routes a System Recovery choice to.

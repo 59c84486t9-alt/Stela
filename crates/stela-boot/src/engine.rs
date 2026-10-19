@@ -108,6 +108,9 @@ struct Options {
     /// --tss`): the restore host may send this machine's ECID and component
     /// hashes to gs.apple.com for the recoveryOS LocalPolicy. Off by default.
     tss: bool,
+    /// The machine's ECID for a bundle built from the Preboot volume
+    /// (`--ecid HEX`, nonzero; `boot_bundle::Options::ecid`).
+    ecid: Option<u64>,
     /// POST once to this `http://` URL at start and report the reply
     /// (`--network-check URL`).
     network_check: Option<String>,
@@ -201,6 +204,7 @@ impl Options {
             idle_skip: false,
             input: false,
             tss: false,
+            ecid: None,
             network_check: None,
             sep_observe: false,
             breakpoints: Vec::new(),
@@ -272,6 +276,13 @@ impl Options {
                 network::split_url(url)?;
                 if options.network_check.replace(String::from(url)).is_some() {
                     return Err("duplicate network check");
+                }
+                continue;
+            }
+            if name == "--ecid" {
+                let ecid = number(words.next().ok_or("missing ECID")?)?;
+                if ecid == 0 || options.ecid.replace(ecid).is_some() {
+                    return Err("--ecid takes one nonzero ECID");
                 }
                 continue;
             }
@@ -1108,7 +1119,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                  System Recovery bundle for it",
             );
         }
-        let defaults = boot_bundle::Options::default();
+        let defaults = boot_bundle::Options {
+            ecid: options.ecid,
+            ..boot_bundle::Options::default()
+        };
         let result = if options.upgrade {
             bundle::upgrade_from_disk(&storage, target, options.boot_volume, &defaults)
         } else {
