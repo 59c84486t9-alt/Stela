@@ -323,6 +323,10 @@ fn load(
     let before = rdtsc();
     boot::stall(core::time::Duration::from_millis(50));
     let tsc_hz = (rdtsc() - before) * 20;
+    let wall_tsc = rdtsc();
+    let wall_seconds = uefi::runtime::get_time()
+        .ok()
+        .and_then(|time| unix_seconds(&time));
     let apic_base: u64 = {
         let (low, high): (u32, u32);
         // SAFETY: IA32_APIC_BASE exists on every x86-64 CPU.
@@ -506,6 +510,8 @@ fn load(
             screen,
             tsc_hz,
             apic_base,
+            wall_seconds,
+            wall_tsc,
             guest,
             guest_count: count,
             storage,
@@ -527,4 +533,34 @@ fn load(
             options(noreturn),
         )
     }
+}
+
+/// UEFI `Time` as Unix seconds. A specified `TimeZone` is the local time's
+/// offset from UTC in minutes (UEFI 2.7 and later: UTC = local − zone); an
+/// unspecified zone is taken as UTC, as QEMU and Macs keep their RTC.
+fn unix_seconds(time: &uefi::runtime::Time) -> Option<u64> {
+    let (year, month, day) = (
+        i64::from(time.year()),
+        i64::from(time.month()),
+        i64::from(time.day()),
+    );
+    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's days_from_civil).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut seconds = days * 86_400
+        + i64::from(time.hour()) * 3600
+        + i64::from(time.minute()) * 60
+        + i64::from(time.second());
+    if let Some(zone) = time.time_zone() {
+        seconds -= i64::from(zone) * 60;
+    }
+    u64::try_from(seconds).ok()
 }

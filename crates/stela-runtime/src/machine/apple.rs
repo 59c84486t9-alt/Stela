@@ -7,6 +7,7 @@ use super::{
     engine::{DeviceError, Devices, Memory, Start},
     registers::Lines,
 };
+pub use crate::platform::apple::pmu::WallClock;
 use crate::platform::apple::{
     aes::{self, Aes},
     aic::{Aic2, Aic2Config},
@@ -35,6 +36,7 @@ use crate::platform::apple::{
     lockdown::{self, Lockdown},
     perf::PerfCounters,
     pmgr::{ACTIVE, POWER_GATED, Pmgr, PowerState},
+    pmu::{self, Pmu},
     power::{self, Power},
     ptd::{self, Ptd},
     rtkit::{Management, RtKit},
@@ -42,6 +44,7 @@ use crate::platform::apple::{
     sep::{self, Sep},
     smc::{self, Smc},
     spi::Spi,
+    spmi::{self, Spmi},
     uart::S5lUart,
     wake::{self, WakeMasks},
     wdt::{self, AppleWdt},
@@ -672,6 +675,35 @@ impl AppleDevices {
             self.bus
                 .map(watchdog, base, bytes.min(smc::WATCHDOG_BYTES), 0)
                 .map_err(|e| format!("SMC watchdog placement: {e:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// Place a visible SPMI controller and its PMUs. Bank B is the device's
+    /// second 16 KiB. A primary PMU's RTC starts at `wall` when the engine
+    /// knows the host's time.
+    pub fn add_spmi(
+        &mut self,
+        placement: &super::soc::SpmiController,
+        wall: Option<pmu::WallClock>,
+    ) -> Result<(), String> {
+        let irq = u16::try_from(placement.irq).map_err(|_| "SPMI AIC line above 65535")?;
+        let mut controller = Spmi::new(AicInput::new(0, irq));
+        for pmu in &placement.pmus {
+            let model = Pmu::new(
+                pmu.windows.clone(),
+                pmu.rtc,
+                wall.filter(|_| pmu.rtc.is_some()),
+            );
+            controller
+                .attach(pmu.sid, Box::new(model))
+                .map_err(String::from)?;
+        }
+        let id = self.bus.add(Box::new(controller));
+        for (bank, &(base, bytes)) in placement.banks.iter().enumerate() {
+            self.bus
+                .map(id, base, bytes, bank as u64 * spmi::BANK_B)
+                .map_err(|e| format!("SPMI bank placement: {e:?}"))?;
         }
         Ok(())
     }

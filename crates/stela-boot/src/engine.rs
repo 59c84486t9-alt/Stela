@@ -27,6 +27,7 @@ use core::{
 };
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
+use stela_runtime::machine::apple::WallClock;
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Machine, PeerState, Stop,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
@@ -431,13 +432,19 @@ struct Cables {
     input: bool,
 }
 
+/// The system counter at placement and the host's wall time at it.
+struct Clock {
+    now: u64,
+    wall: Option<WallClock>,
+}
+
 /// The board's devices. `reset` is the entry point a boot bundle hands off
 /// to, on which boot firmware locks every PE's RVBAR.
 fn devices<'f>(
     board: Option<&soc::Board>,
     read_only_region: Option<(u64, u64)>,
     reset: Option<u64>,
-    now: u64,
+    clock: Clock,
     backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
     cables: Cables,
     firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
@@ -478,7 +485,7 @@ fn devices<'f>(
             wdt.0,
             board.and_then(|b| b.watchdog_side.as_ref()),
             Some(wdt.1),
-            now,
+            clock.now,
         )
         .map_err(|error| alloc::format!("watchdog placement: {error:?}"))?;
     devices.add_aic(aic.physical, aic.inputs, aic.layout)?;
@@ -509,6 +516,9 @@ fn devices<'f>(
     }
     if let Some(smc) = board.and_then(|b| b.smc.as_ref()) {
         devices.add_smc(smc)?;
+    }
+    for spmi in board.map_or(&[][..], |board| &board.spmis) {
+        devices.add_spmi(spmi, clock.wall)?;
     }
     for &physical in board.map_or(&[][..], |board| &board.coresight) {
         devices
@@ -1061,7 +1071,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         board.as_ref(),
         read_only_region,
         reset,
-        now,
+        Clock {
+            now,
+            wall: handoff.wall_seconds.map(|seconds| WallClock {
+                // The firmware's time, carried forward to the counter's `now`.
+                unix_seconds: seconds + (host::rdtsc() - handoff.wall_tsc) / handoff.tsc_hz,
+                counter: now,
+            }),
+        },
         backing,
         Cables {
             restore: options.restore,

@@ -136,6 +136,10 @@ pub struct Handoff {
     pub tsc_hz: u64,
     /// IA32_APIC_BASE as the firmware left it.
     pub apic_base: u64,
+    /// The firmware's real-time clock as Unix seconds, read at TSC
+    /// `wall_tsc`; `None` when the firmware has no valid time.
+    pub wall_seconds: Option<u64>,
+    pub wall_tsc: u64,
     /// Free host RAM after boot services, in 2 MiB-aligned ranges.
     pub guest: [Region; MAX_GUEST_RANGES],
     pub guest_count: usize,

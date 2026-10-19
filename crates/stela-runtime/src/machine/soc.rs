@@ -20,7 +20,7 @@ use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     amcc, ans, asc, atc_phy, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse,
-    i2c, nor, power, ptd, sart, smc, spi, wake,
+    i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -748,6 +748,9 @@ pub const ATC_PHY: &str = "atc-phy,t8112";
 /// nub. With the node hidden, each of those starts stalled about 30 s and
 /// the xHCI then failed to find its PHY (restore study ru-s17).
 pub const DOCK_PORT: &str = "dock,usb-c";
+/// The SPMI Gen2 controller and the Dialog PMU on it (`spmi`, `pmu`).
+pub const SPMI: &str = "aapl,spmi";
+pub const PMU: &str = "pmu,spmi";
 /// A NOR partition read by AppleDiagnosticDataAccessReadOnly (kernel file
 /// 0x235ecb8 start, 0x235f1e8 lazy whole-region read, 0x235f788 forwarding).
 pub const SYSCFG: &str = "diagnostic-data,format1";
@@ -830,6 +833,8 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         ATC_PHY,
         DOCK_PORT,
         USB_DRD,
+        SPMI,
+        PMU,
     ]
     .contains(&name)
         || AICS.contains(&name)
@@ -938,6 +943,26 @@ pub struct Board {
     /// The CPU start registers' guest PA and the clusters they start, under
     /// the same conditions.
     pub cpu_start: Option<(u64, u8)>,
+    /// Visible SPMI controllers and the PMUs on them.
+    pub spmis: Vec<SpmiController>,
+}
+
+/// A Dialog PMU's slave ID and the register windows its `info-*`
+/// properties name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpmiPmu {
+    pub sid: u8,
+    pub windows: Vec<pmu::Window>,
+    pub rtc: Option<pmu::Rtc>,
+}
+
+/// An SPMI Gen2 controller: bank A (`reg[0]`), bank B (`reg[1]`), its AIC
+/// line and its visible PMUs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpmiController {
+    pub banks: [(u64, u64); 2],
+    pub irq: u32,
+    pub pmus: Vec<SpmiPmu>,
 }
 
 /// An I2C child address is the first 32-bit `reg` cell followed by bus
@@ -1668,6 +1693,139 @@ fn smc_controller(
         gpio_keys,
         quiesced: nub.property("quiesced").is_some(),
     }))
+}
+
+/// Every visible `aapl,spmi` controller under `/arm-io`. The `interrupts`
+/// cells pair with `interrupt-parent` entries in order, the last parent
+/// covering the remaining cells; the one whose parent is the AIC is the
+/// controller's line, the others its own vectors.
+fn spmi_controllers(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    aic: u32,
+) -> Result<Vec<SpmiController>, String> {
+    let mut controllers = Vec::new();
+    for node in io.children().ok_or("/arm-io children are malformed")? {
+        if !node.compatible(SPMI) {
+            continue;
+        }
+        if node.first_u32("gen") != Some(2) {
+            return Err("SPMI controller generation other than 2".into());
+        }
+        let regs = node.pairs("reg").ok_or("SPMI controller has no reg")?;
+        let bank = |index: usize| -> Result<(u64, u64), String> {
+            let &(offset, bytes) = regs
+                .get(index)
+                .filter(|(_, bytes)| *bytes == spmi::BANK_BYTES)
+                .ok_or("SPMI controller needs two 16 KiB banks")?;
+            Ok((
+                translate(offset).ok_or("SPMI bank outside arm-io ranges")?,
+                bytes,
+            ))
+        };
+        let parents = node
+            .cells32("interrupt-parent")
+            .ok_or("SPMI controller has no interrupt-parent")?;
+        let cells = node
+            .cells32("interrupts")
+            .ok_or("SPMI controller has no interrupts")?;
+        let irq = parents
+            .iter()
+            .position(|&parent| parent == aic)
+            .and_then(|index| cells.get(index).copied())
+            .ok_or("SPMI controller has no AIC line")?;
+        let mut pmus = Vec::new();
+        for child in node.children().ok_or("SPMI children are malformed")? {
+            if child.compatible(PMU) {
+                pmus.push(spmi_pmu(&child)?);
+            }
+        }
+        controllers.push(SpmiController {
+            banks: [bank(0)?, bank(1)?],
+            irq,
+            pmus,
+        });
+    }
+    Ok(controllers)
+}
+
+/// A PMU's slave ID (`reg` cell 0) and its `info-*` windows: pairs are
+/// `<base bytes>`, single cells one byte, except the legacy scratchpad.
+fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
+    let sid = node
+        .first_u32("reg")
+        .and_then(|sid| u8::try_from(sid).ok())
+        .filter(|&sid| sid <= 0xf)
+        .ok_or("PMU has no four-bit SPMI slave ID")?;
+    let address = |value: u32| u16::try_from(value).map_err(|_| "PMU address above 16 bits");
+    let pair = |name: &str| -> Result<Option<pmu::Window>, String> {
+        match node.cells32(name).as_deref() {
+            None => Ok(None),
+            Some(&[base, bytes]) => Ok(Some(pmu::Window {
+                base: address(base)?,
+                bytes: address(bytes)?,
+            })),
+            Some(_) => Err(format!("PMU {name} is not <base bytes>")),
+        }
+    };
+    let single = |name: &str| node.first_u32(name).map(address).transpose();
+    let mut windows = Vec::new();
+    for name in ["info-scrpad", "info-fault_log", "info-fault_shadow"] {
+        windows.extend(pair(name)?);
+    }
+    if let Some(base) = single("info-leg_scrpad")? {
+        windows.push(pmu::Window {
+            base,
+            bytes: pmu::LEGACY_SCRATCH_BYTES,
+        });
+    }
+    if let Some(base) = single("info-pm_setting")? {
+        windows.push(pmu::Window { base, bytes: 1 });
+    }
+    // The SOCD and LPM windows lie inside the scratchpad.
+    let inside = |base: u16, bytes: u16| {
+        windows.iter().any(|w| {
+            base >= w.base
+                && u32::from(base) + u32::from(bytes) <= u32::from(w.base) + u32::from(w.bytes)
+        })
+    };
+    if let Some(socd) = pair("info-scrpad_socd")?
+        && !inside(socd.base, socd.bytes)
+    {
+        return Err("PMU SOCD scratchpad outside its scratchpad".into());
+    }
+    for name in ["info-scrpad_lpm_log", "info-scrpad_lpm_ctrl"] {
+        if let Some(base) = single(name)?
+            && !inside(base, 1)
+        {
+            return Err(format!("PMU {name} outside its scratchpad"));
+        }
+    }
+    let rtc = match single("info-rtc")? {
+        None => None,
+        Some(upcount) => {
+            let need = |name: &str| -> Result<u16, String> {
+                single(name)?.ok_or_else(|| format!("PMU RTC has no {name}"))
+            };
+            let clock_offset = pair("info-clock_offset")?
+                .filter(|w| w.bytes == 6)
+                .ok_or("PMU RTC clock offset is not six bytes")?;
+            let alarm_enable = node
+                .first_u32("info-rtc_alarm_ctrl_en_mask")
+                .and_then(|mask| u8::try_from(mask).ok())
+                .ok_or("PMU RTC has no alarm enable mask")?;
+            Some(pmu::Rtc {
+                upcount,
+                clock_offset: clock_offset.base,
+                alarm_control: need("info-rtc_alarm_ctrl")?,
+                alarm_enable,
+                alarm_offset: need("info-rtc_alarm_offset")?,
+                alarm_event: need("info-rtc_alarm_event")?,
+                irq_mask: need("info-rtc_irq_mask_offset")?,
+            })
+        }
+    };
+    Ok(SpmiPmu { sid, windows, rtc })
 }
 
 fn cells_of(value: &[u8]) -> Option<[u32; 4]> {
@@ -3309,7 +3467,9 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     let spi_nor = spi_nor(&root, &io, &translate, phandle, gpio.as_ref())?;
+    let spmis = spmi_controllers(&io, &translate, phandle)?;
     Ok(Board {
+        spmis,
         gpio,
         i2cs,
         typec_phys,
@@ -3802,6 +3962,100 @@ mod tests {
         let root = Node::root(&small).unwrap();
         let io = root.child("arm-io").unwrap();
         assert!(smc_controller(&root, &io, &translate).is_err());
+    }
+
+    #[test]
+    fn spmi_placement_reads_banks_aic_line_and_pmu_windows() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        // The J473AP pmu-main and its controller, trimmed.
+        let tree = |offset: &[u32]| {
+            let pmu = encode(
+                &[
+                    ("name", &z("pmu-main")),
+                    ("compatible", b"pmu,spmi\0pmu,stowe\0"),
+                    ("reg", &cells(&[0xe, 3, 0, 4, 0, 0])),
+                    ("info-scrpad", &cells(&[0x8000, 0x2800])),
+                    ("info-scrpad_socd", &cells(&[0x8b00, 0x1800])),
+                    ("info-scrpad_lpm_ctrl", &cells(&[0xa7dc])),
+                    ("info-leg_scrpad", &cells(&[0xf700])),
+                    ("info-fault_log", &cells(&[0xfa00, 5])),
+                    ("info-pm_setting", &cells(&[0xf801])),
+                    ("info-rtc", &cells(&[0xf802])),
+                    ("info-clock_offset", &cells(offset)),
+                    ("info-rtc_alarm_ctrl", &cells(&[0xf800])),
+                    ("info-rtc_alarm_ctrl_en_mask", &cells(&[0x40])),
+                    ("info-rtc_alarm_offset", &cells(&[0xf808])),
+                    ("info-rtc_alarm_event", &cells(&[0xf80c])),
+                    ("info-rtc_irq_mask_offset", &cells(&[0xf80e])),
+                ],
+                &[],
+            );
+            // Hidden: the loader removed its compatible.
+            let btm = encode(&[("name", &z("btm")), ("reg", &cells(&[0xe]))], &[]);
+            let spmi = encode(
+                &[
+                    ("name", &z("nub-spmi0")),
+                    ("compatible", &z(SPMI)),
+                    ("gen", &cells(&[2])),
+                    (
+                        "reg",
+                        &pairs(&[(0x3d71_4000, 0x4000), (0x3d70_4000, 0x4000)]),
+                    ),
+                    ("interrupt-parent", &cells(&[0xae, 0x63, 0xae])),
+                    ("interrupts", &cells(&[0x100, 0x180, 0x119, 0x104])),
+                ],
+                &[pmu, btm],
+            );
+            encode(&[("name", &z("arm-io"))], &[spmi])
+        };
+        let translate = |offset| Some(0x2_0000_0000 + offset);
+        let bytes = tree(&[0xf900, 6]);
+        let io = Node::root(&bytes).unwrap();
+        let [controller] = &spmi_controllers(&io, &translate, 0x63).unwrap()[..] else {
+            panic!("one controller");
+        };
+        assert_eq!(
+            controller.banks,
+            [(0x2_3d71_4000, 0x4000), (0x2_3d70_4000, 0x4000)]
+        );
+        assert_eq!(controller.irq, 0x180);
+        let [pmu] = &controller.pmus[..] else {
+            panic!("one visible PMU");
+        };
+        assert_eq!(pmu.sid, 0xe);
+        let window = |base, bytes| pmu::Window { base, bytes };
+        assert_eq!(
+            pmu.windows,
+            [
+                window(0x8000, 0x2800),
+                window(0xfa00, 5),
+                window(0xf700, pmu::LEGACY_SCRATCH_BYTES),
+                window(0xf801, 1),
+            ]
+        );
+        let rtc = pmu.rtc.unwrap();
+        assert_eq!(
+            (rtc.upcount, rtc.clock_offset, rtc.alarm_enable),
+            (0xf802, 0xf900, 0x40)
+        );
+        // A clock offset that is not six bytes refuses.
+        let bytes = tree(&[0xf900, 4]);
+        let io = Node::root(&bytes).unwrap();
+        assert!(spmi_controllers(&io, &translate, 0x63).is_err());
     }
 
     #[test]

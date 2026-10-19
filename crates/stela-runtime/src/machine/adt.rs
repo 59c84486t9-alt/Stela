@@ -122,6 +122,18 @@ impl<'a> Node<'a> {
         )
     }
 
+    /// The node's direct children, in tree order.
+    pub fn children(&self) -> Option<Vec<Self>> {
+        let (_, mut offset) = self.walk_properties()?;
+        let mut children = Vec::with_capacity(self.children);
+        for _ in 0..self.children {
+            let child = Self::at(self.data, offset)?;
+            offset = child.end()?;
+            children.push(child);
+        }
+        Some(children)
+    }
+
     /// Visit this node and every descendant, depth first.
     pub fn visit(&self, visitor: &mut dyn FnMut(&Node<'a>)) -> Option<()> {
         visitor(self);

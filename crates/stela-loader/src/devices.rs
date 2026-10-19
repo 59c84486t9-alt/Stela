@@ -291,12 +291,20 @@ mod tests {
                     None,
                     vec![
                         node("wdt", Some(b"wdt,t8101\0wdt,s5l8960x\0"), vec![]),
-                        node("nub-spmi0", None, vec![node("pmu-main", pmu, vec![])]),
+                        node(
+                            "nub-spmi0",
+                            Some(b"aapl,spmi\0"),
+                            vec![node("pmu-main", pmu, vec![])],
+                        ),
                     ],
                 )],
             ),
         };
-        let mut hidden = tree(Some(b"pmu,spmi\0pmu,stowe\0"));
+        // The modeled Dialog PMU stays visible and the watchdog waits for it.
+        let mut modeled = tree(Some(b"pmu,spmi\0pmu,stowe\0"));
+        assert_eq!(hide_unmodeled(&mut modeled), Vec::<String>::new());
+        assert!(modeled.property("/arm-io/wdt", NO_PMU).is_none());
+        let mut hidden = tree(Some(b"pmu,acme\0"));
         let paths = hide_unmodeled(&mut hidden);
         assert_eq!(paths, ["/arm-io/nub-spmi0/pmu-main", "/arm-io/wdt +no-pmu"]);
         let no_pmu = hidden.property("/arm-io/wdt", NO_PMU).unwrap();
