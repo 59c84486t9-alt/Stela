@@ -172,6 +172,8 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     ),
     (Object::Task, "task_create_identity_token", None),
     (Object::Task, "task_threads_from_user", None),
+    (Object::Task, "task_policy_set", None),
+    (Object::Task, "task_policy_get", None),
     (Object::Task, "_kernelrpc_mach_ports_register3", None),
     (Object::Task, "_kernelrpc_mach_ports_lookup3", None),
     (
@@ -304,6 +306,11 @@ pub(super) fn serve(
                 body: count.to_le_bytes().to_vec(),
             }
         }
+        // This task's scheduling policies (role, QoS, latency and
+        // throughput tiers): integer structures of one layout in both
+        // ABIs, which the host scheduler applies to the host threads that
+        // run the guest's.
+        (Object::Task, "task_policy_set" | "task_policy_get", false) => Reply::Forward,
         // This task's three registered ports (`itk_registered`): IPC state
         // of its own, which the host task keeps and children inherit as
         // the arm64 kernel's do.
