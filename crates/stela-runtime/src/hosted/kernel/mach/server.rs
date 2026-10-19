@@ -79,9 +79,12 @@ pub(super) fn serve(
         (Object::Task, "_kernelrpc_mach_vm_map_external", true) => vm_map(request)?,
         // `which_port`. The bootstrap port is the host's launchd, as for
         // any process of this user; the kernel and host ports are this
-        // task's own kernel objects, whose names the reply repeats.
+        // task's own kernel objects, whose names the reply repeats; the
+        // debug-control port is the one this task set, if any.
         (Object::Task, "task_get_special_port_from_user", false) => match request.word(8) {
-            Some(TASK_KERNEL_PORT | TASK_HOST_PORT | TASK_BOOTSTRAP_PORT) => Reply::Forward,
+            Some(
+                TASK_KERNEL_PORT | TASK_HOST_PORT | TASK_BOOTSTRAP_PORT | TASK_DEBUG_CONTROL_PORT,
+            ) => Reply::Forward,
             Some(which) => bail!("task_get_special_port({which}) is not implemented"),
             None => Reply::Failure(MIG_BAD_ARGUMENTS),
         },
