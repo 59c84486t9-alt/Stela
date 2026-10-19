@@ -100,6 +100,7 @@ pub(crate) mod sve;
 mod system;
 mod tag_arithmetic;
 mod unprivileged;
+pub mod zero_block;
 
 fn offset(register: Register) -> Option<u32> {
     match register {

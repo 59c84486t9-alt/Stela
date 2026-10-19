@@ -84,6 +84,7 @@ pub(crate) fn emit(
         terminal,
         fallthrough,
         target,
+        None,
     );
     Ok(block)
 }
@@ -140,6 +141,7 @@ fn emit_scalar(
         None,
         GuestAddress(next),
         target,
+        None,
     );
     Ok(block)
 }
@@ -195,6 +197,7 @@ fn emit_pair(
         None,
         GuestAddress(next),
         target,
+        None,
     );
     Ok(block)
 }

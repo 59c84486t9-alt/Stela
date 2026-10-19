@@ -68,6 +68,7 @@ pub(crate) fn emit_ordinary_for_target(
         target,
         true,
         super::MemoryChecks::DEFAULT,
+        None,
     )
 }
 
@@ -94,7 +95,37 @@ pub(crate) fn emit_for_target(
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
 ) -> NativeBlock {
-    emit_selected(instructions, terminal, fallthrough, target, false, checks)
+    emit_selected(
+        instructions,
+        terminal,
+        fallthrough,
+        target,
+        false,
+        checks,
+        None,
+    )
+}
+
+/// [`emit_for_target`] for the system-mode engine, which may also complete
+/// a terminal DC ZVA natively by zeroing `zero_block` bytes
+/// (`x86_64::zero_block`) and falling through.
+pub(crate) fn emit_system_mode(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+    checks: super::MemoryChecks,
+    zero_block: Option<u16>,
+) -> NativeBlock {
+    emit_selected(
+        instructions,
+        terminal,
+        fallthrough,
+        target,
+        false,
+        checks,
+        zero_block,
+    )
 }
 
 fn emit_selected(
@@ -104,6 +135,7 @@ fn emit_selected(
     target: crate::TargetCpu,
     optimize_regions: bool,
     checks: super::MemoryChecks,
+    zero_block: Option<u16>,
 ) -> NativeBlock {
     let mut block = NativeBlock {
         x86_64_code: vec![],
@@ -191,7 +223,14 @@ fn emit_selected(
         fixups.is_empty(),
         "ordinary instruction prefix cannot branch"
     );
-    emit_terminal(code, &mut block.source_map, terminal, fallthrough, target);
+    emit_terminal(
+        code,
+        &mut block.source_map,
+        terminal,
+        fallthrough,
+        target,
+        zero_block,
+    );
     block
 }
 /// The direct exits to static successors that [`emit_terminal`] ended
@@ -213,6 +252,9 @@ pub(crate) fn successor_exits(
             | Operation::BranchZero { target, .. }
             | Operation::BranchBit { target, .. },
         )) => (*target, ExitKind::Direct, true),
+        // A DC ZVA completed natively falls through; any other System
+        // instruction exits at itself, which the stub check below rejects.
+        Some(Terminator::System(request)) => (request.next_pc, ExitKind::Fallthrough, false),
         Some(_) => return vec![],
     };
     let candidates = [
@@ -242,6 +284,7 @@ fn emit_terminal(
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
+    zero_block: Option<u16>,
 ) {
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
@@ -270,7 +313,13 @@ fn emit_terminal(
                 );
             }
             Terminator::System(request) => {
-                direct_exit(code, request.instruction_pc, ExitKind::System);
+                match zero_block.zip(super::zero_block::operand(request)) {
+                    Some((bytes, rt)) => {
+                        super::zero_block::emit(code, rt, bytes);
+                        direct_exit(code, request.next_pc, ExitKind::Fallthrough);
+                    }
+                    None => direct_exit(code, request.instruction_pc, ExitKind::System),
+                }
             }
             Terminator::Trap(trap) => {
                 // SVC and BRK stop at the trapping instruction; the runtime

@@ -438,6 +438,7 @@ pub struct CompilationPlan {
     profile: BlockProfile,
     resident: Option<crate::x86_64::block::ResidentLoopPlan>,
     checks: crate::x86_64::MemoryChecks,
+    zero_block: Option<u16>,
 }
 impl CompilationPlan {
     pub fn new(
@@ -492,6 +493,7 @@ impl CompilationPlan {
             profile,
             resident,
             checks: crate::x86_64::MemoryChecks::DEFAULT,
+            zero_block: None,
         })
     }
 
@@ -521,6 +523,29 @@ impl CompilationPlan {
             }
         }
         self.checks = checks;
+        Ok(self)
+    }
+    /// Complete a terminal DC ZVA natively, zeroing the aligned `bytes`
+    /// block holding Xt (DCZID_EL0.BS: a power of two from 4 to 2048) and
+    /// falling through: the system-mode engine compiles separate blocks for
+    /// the contexts where DC ZVA neither traps nor is UNDEFINED. `None`
+    /// keeps its System exit.
+    pub fn with_zero_block(mut self, bytes: Option<u16>) -> Result<Self, CompileError> {
+        use crate::x86_64::zero_block::{MAX_BYTES, MIN_BYTES};
+        if let Some(bytes) = bytes {
+            if self.profile != BlockProfile::SystemModeV1 {
+                return Err(CompileError(format!(
+                    "{:?} keeps DC ZVA's System exit",
+                    self.profile
+                )));
+            }
+            if !bytes.is_power_of_two() || !(MIN_BYTES..=MAX_BYTES).contains(&bytes) {
+                return Err(CompileError(format!(
+                    "a {bytes}-byte DC ZVA block is not a DCZID_EL0.BS size"
+                )));
+            }
+        }
+        self.zero_block = bytes;
         Ok(self)
     }
     /// Allow the ordinary runtime to retain eligible internal loop edges. Other
@@ -592,12 +617,13 @@ impl CompilationPlan {
                 self.target,
             )
         } else {
-            let native = crate::x86_64::block::emit_for_target(
+            let native = crate::x86_64::block::emit_system_mode(
                 &self.parsed.instructions,
                 self.parsed.terminal.as_ref(),
                 self.parsed.next_pc,
                 self.target,
                 self.checks,
+                self.zero_block,
             );
             let direct_exits = crate::x86_64::block::successor_exits(
                 &native.x86_64_code,
@@ -879,6 +905,84 @@ mod tests {
                 assert_eq!(last.offset + DIRECT_EXIT_BYTES, code.len(), "{word:#x}");
             }
         }
+    }
+
+    /// With a DC ZVA block size, a terminal DC ZVA zeroes natively and falls
+    /// through a chainable direct exit; every other System instruction, and
+    /// DC ZVA without one, keeps its System exit.
+    #[test]
+    fn system_mode_blocks_complete_dc_zva_natively_only_with_a_block_size() {
+        use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+        const BASE: u64 = 0x4000;
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const DC_ZVA: u32 = 0xd50b_7423; // dc zva, x3
+        const DC_GVA: u32 = 0xd50b_7463; // dc gva, x3
+        const MRS: u32 = 0xd538_d080; // mrs x0, tpidr_el1
+        let compile = |word: u32, bytes| {
+            let source: Vec<u8> = [ADD, word, ADD]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            CompilationPlan::new(
+                &source,
+                GuestAddress(BASE),
+                BlockProfile::SystemModeV1,
+                crate::TargetCpu::Baseline,
+            )
+            .and_then(|plan| plan.with_zero_block(bytes))
+            .and_then(CompilationPlan::compile)
+            .unwrap()
+        };
+        let native = compile(DC_ZVA, Some(64));
+        assert_eq!(native.source_bytes, 8, "DC ZVA still ends the block");
+        let code = &native.native.x86_64_code;
+        let at = native.native.source_map[1].1;
+        let mut zeroing = Vec::new();
+        crate::x86_64::zero_block::emit(&mut zeroing, 3, 64);
+        assert_eq!(code[at..at + zeroing.len()], zeroing);
+        let next = GuestAddress(BASE + 8);
+        assert_eq!(
+            code[at + zeroing.len()..],
+            direct_exit(next, ExitKind::Fallthrough)
+        );
+        assert_eq!(native.direct_exits.len(), 1);
+        assert_eq!(
+            (native.direct_exits[0].target, native.direct_exits[0].kind),
+            (next, ExitKind::Fallthrough)
+        );
+        assert_eq!(
+            native.direct_exits[0].offset + DIRECT_EXIT_BYTES,
+            code.len()
+        );
+        let system = direct_exit(GuestAddress(BASE + 4), ExitKind::System);
+        for (word, bytes) in [(DC_ZVA, None), (DC_GVA, Some(64)), (MRS, Some(64))] {
+            let compiled = compile(word, bytes);
+            let code = &compiled.native.x86_64_code;
+            assert_eq!(code[code.len() - DIRECT_EXIT_BYTES..], system, "{word:#x}");
+            assert!(compiled.direct_exits.is_empty(), "{word:#x}");
+        }
+        let plan = |profile| {
+            CompilationPlan::new(
+                &ADD.to_le_bytes(),
+                GuestAddress(BASE),
+                profile,
+                crate::TargetCpu::Baseline,
+            )
+            .unwrap()
+        };
+        for bytes in [2, 48, 4096] {
+            assert!(
+                plan(BlockProfile::SystemModeV1)
+                    .with_zero_block(Some(bytes))
+                    .is_err()
+            );
+        }
+        assert!(
+            plan(BlockProfile::SystemV1)
+                .with_zero_block(Some(64))
+                .is_err()
+        );
+        assert!(plan(BlockProfile::SystemV1).with_zero_block(None).is_ok());
     }
 
     #[test]

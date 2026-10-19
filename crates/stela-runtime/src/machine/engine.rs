@@ -48,7 +48,7 @@ use stela_compiler::{
     x86_64::{
         MemoryChecks,
         chain::{self, ChainControl},
-        pointer,
+        pointer, zero_block,
     },
 };
 
@@ -671,6 +671,18 @@ struct Variant {
     /// instruction an SVE or SME access check (or, in streaming mode, any
     /// access check) applies to.
     scalable: Option<bool>,
+    /// The DC ZVA block size while DC ZVA completes without a trap
+    /// (`system::native_zero_block`): a block ending in DC ZVA zeroes it
+    /// natively instead of exiting.
+    zero_block: Option<u16>,
+}
+
+/// Whether `word` at `pc` is DC ZVA.
+fn zeroes_block(pc: u64, word: u32) -> bool {
+    block::decode_system_mode_instruction(GuestAddress(pc), word)
+        .ok()
+        .flatten()
+        .is_some_and(|instruction| zero_block::operand(&instruction).is_some())
 }
 
 /// A load or store addressed through Rn (bits 9:5) that names SP; literal
@@ -720,6 +732,8 @@ pub struct Machine<H: Host, D: Devices> {
     floating_point: Option<Option<u8>>,
     /// The memory checks of the current regime's SCTLR_ELx, while valid.
     memory_checks: Option<MemoryChecks>,
+    /// [`Variant::zero_block`] for the current EL, while valid.
+    zero_block: Option<Option<u16>>,
     /// The physical count up to which the event streams have set the event
     /// register; `None` before the first sample.
     event_sample: Option<u64>,
@@ -835,6 +849,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             timers: None,
             floating_point: None,
             memory_checks: None,
+            zero_block: None,
             event_sample: None,
             debug: None,
             pointer: None,
@@ -890,6 +905,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.timers = None;
         self.floating_point = None;
         self.memory_checks = None;
+        self.zero_block = None;
         self.debug = None;
         self.pointer = None;
         *self.pointer_tags = [0; 4];
@@ -948,6 +964,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 ordered_granule: sctlr & mmu::alignment::SCTLR_NAA == 0,
             }
         })
+    }
+
+    fn native_zero_block(&mut self) -> Option<u16> {
+        *self
+            .zero_block
+            .get_or_insert_with(|| system::native_zero_block(&self.cpu, &self.profile_missing))
     }
 
     fn sync_regime(&mut self) {
@@ -1858,6 +1880,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .scalable
                 .is_some()
                 .then(|| self.cpu.svcr() & 1 != 0),
+            zero_block: self.native_zero_block(),
         };
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
@@ -1894,6 +1917,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             checks,
             single,
             scalable,
+            zero_block,
         } = variant;
         let available = if single {
             INSTRUCTION
@@ -1969,7 +1993,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
             };
-        let compiled = self.compile_prefix(&source[..consumed], pc, checks)?;
+        let compiled = self.compile_prefix(&source[..consumed], pc, checks, zero_block)?;
         let last = compiled.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         let code = match self.host.install(&compiled.native.x86_64_code) {
@@ -2067,10 +2091,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         source: &[u8],
         pc: u64,
         checks: MemoryChecks,
+        zero_block: Option<u16>,
     ) -> Result<stela_compiler::block::CompiledBlock, Stop> {
         let attempt = |bytes: &[u8]| {
             CompilationPlan::new(bytes, GuestAddress(pc), PROFILE, self.target)
                 .and_then(|plan| plan.with_memory_checks(checks))
+                .and_then(|plan| plan.with_zero_block(zero_block))
                 .and_then(CompilationPlan::compile)
         };
         match attempt(source) {
@@ -3043,6 +3069,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.pc = pc;
         if pc != self.blocks[index].pc {
             self.cpu.pstate.btype = 0;
+        }
+        // A native DC ZVA's first store faulted with nothing written (its
+        // block is in one page): the engine completes it, reporting Xt as
+        // the fault address and watching the whole block (Arm
+        // `AArch64_DataMemZero`), whatever stopped the store.
+        let (terminal, word) = self.blocks[index].terminal;
+        if self.blocks[index].variant.zero_block.is_some()
+            && pc == terminal
+            && zeroes_block(pc, word)
+        {
+            self.statistics.system_exits += 1;
+            let word = self.exit_word(index, pc)?;
+            return self.completing(pc, |machine| machine.system_instruction(word));
         }
         match fault.cause {
             FaultCause::Guest(guest) => self.data_abort(fault.address, guest, fault.write, false),
@@ -5902,6 +5941,75 @@ mod tests {
         assert_eq!(machine.pointer_tags[usize::from(ib)], open);
         machine.derived_changed();
         assert_eq!(*machine.pointer_tags, [0; 4]);
+    }
+
+    /// Where DC ZVA cannot trap, a block ending in it zeroes natively and
+    /// falls through; elsewhere the same PC compiles a block that exits. A
+    /// fault in the native zeroing completes DC ZVA in the engine.
+    #[test]
+    fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const DC_ZVA: u32 = 0xd50b_7423; // dc zva, x3
+        let mut machine = machine(&[ADD, DC_ZVA, ADD]);
+        let base = machine.cpu.pc;
+        machine.cpu.state.x[3] = BASE + 0x108;
+        machine.host.ram[0x100..0x180].fill(0xaa);
+        let next = GuestAddress(base + 8);
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: next.0,
+            kind: ExitKind::Fallthrough as u64,
+        }];
+        machine.step().unwrap();
+        let block = &machine.blocks[0];
+        assert_eq!(block.variant.zero_block, Some(64));
+        let code = &machine.host.installed[block.code.0 - 1];
+        let tail = chain::direct_exit(next, ExitKind::Fallthrough);
+        assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
+        assert_eq!(block.successors.len(), 1);
+        assert_eq!(block.successors[0].target, next);
+        // HCR_EL2.TDZ traps DC ZVA at EL1: the PC gets a block that exits.
+        let hcr = machine.cpu.read(SystemRegister::HCR_EL2);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, hcr | 1 << 28);
+        machine.derived_changed();
+        machine.cpu.pc = base;
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: next.0,
+            kind: ExitKind::Fallthrough as u64,
+        }];
+        machine.step().unwrap();
+        let trapped = &machine.blocks[1];
+        assert_eq!(trapped.variant.zero_block, None);
+        let code = &machine.host.installed[trapped.code.0 - 1];
+        assert_eq!(
+            code[code.len() - chain::DIRECT_EXIT_BYTES..],
+            chain::direct_exit(GuestAddress(base + 4), ExitKind::System)
+        );
+        // Back without TDZ, a store fault in the zeroing hands DC ZVA to the
+        // engine, which zeroes the block and continues.
+        machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
+        machine.derived_changed();
+        machine.cpu.pc = base;
+        let offset = machine.blocks[0].source_map[1].1;
+        machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            offset,
+            address: BASE + 0x100,
+            write: true,
+            cause: FaultCause::Watched,
+        })];
+        let exits = machine.statistics.system_exits;
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.pc, next.0);
+        assert!(machine.host.ram[0x100..0x140].iter().all(|&byte| byte == 0));
+        assert!(
+            machine.host.ram[0x140..0x180]
+                .iter()
+                .all(|&byte| byte == 0xaa)
+        );
+        assert_eq!(machine.statistics.system_exits, exits + 1);
+        assert_eq!(machine.exit_words().get(&DC_ZVA), Some(&1));
     }
 
     /// A return to earlier keys finds their generation, and its entries,

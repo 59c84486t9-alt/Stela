@@ -195,6 +195,34 @@ fn zero_block_prohibited(cpu: &crate::machine::cpu::Cpu) -> bool {
 }
 /// DCZID_EL0.BS: log2 of the DC ZVA block in words, at most 9 (2 KiB).
 const DCZID_BS: u64 = 0xf;
+/// HFGITR_EL2.DCZVA (FEAT_FGT).
+const HFGITR_DCZVA: u32 = 11;
+
+/// The DC ZVA block, in bytes, while DC ZVA at the current EL completes by
+/// zeroing it: the generated `DC ZVA` accessor neither traps (SCTLR_EL1.DZE
+/// and HCR_EL2.TDZ, and HFGITR_EL2.DCZVA with FEAT_FGT, outside the host at
+/// EL0 and at EL1; SCTLR_EL2.DZE at EL0 in the host) nor stops, and
+/// [`Access::zero_block`] accepts the profile's DCZID_EL0. Native code
+/// completes DC ZVA only then (`x86_64::zero_block`).
+pub(super) fn native_zero_block(cpu: &Cpu, missing: &[Register]) -> Option<u16> {
+    let fine_grained = || {
+        let implemented = cpu.registers.chip().implemented(Feature::FEAT_FGT).ok()?;
+        Some(implemented && cpu.field(Register::HFGITR_EL2, HFGITR_DCZVA, 1) != 0)
+    };
+    let enabled = |register| cpu.field(register, SCTLR_DZE, 1) != 0;
+    let permitted = match cpu.pstate.el {
+        0 if cpu.in_host() => enabled(Register::SCTLR_EL2),
+        0 => enabled(Register::SCTLR_EL1) && !cpu.hcr(HCR_TDZ) && !fine_grained()?,
+        1 => !cpu.hcr(HCR_TDZ) && !fine_grained()?,
+        2 => true,
+        _ => false,
+    };
+    if !permitted || missing.contains(&Register::DCZID_EL0) {
+        return None;
+    }
+    let bytes = 4u64 << (cpu.read(Register::DCZID_EL0) & DCZID_BS);
+    (bytes <= ZEROES.len() as u64).then_some(bytes as u16)
+}
 static ZEROES: [u8; 2048] = [0; 2048];
 const ISR_A: u64 = 1 << 8;
 const ISR_I: u64 = 1 << 7;
@@ -1734,6 +1762,76 @@ mod tests {
         machine.cpu.registers.set(Register::SCTLR_EL2, 0, sctlr2);
         run(&mut machine, Pstate::reset(2), dczid);
         assert_eq!(machine.cpu.state.x[1], 0x4);
+    }
+
+    /// The contexts the native-completion tests below run in: each EL, in
+    /// and outside the host, under every combination of five
+    /// controls (HCR_EL2.TDZ, SCTLR_EL1.DZE, SCTLR_EL2.DZE, HFGITR_EL2.DCZVA
+    /// and HFGRTR_EL2.TPIDR_EL1, by bit of `controls`).
+    fn native_completion_contexts(mut each: impl FnMut(&mut TestMachine, Pstate, String)) {
+        const DZE: u64 = 1 << 14;
+        const TDZ: u64 = 1 << 28;
+        const E2H: u64 = 1 << 34;
+        const HFGITR_DCZVA: u64 = 1 << 11;
+        const HFGRTR_TPIDR_EL1: u64 = 1 << 33;
+        let mut machine = machine(&[]);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        let user = Pstate {
+            el: 0,
+            sp: false,
+            daif: 0,
+            ..Pstate::reset(1)
+        };
+        let sctlr = [Register::SCTLR_EL1, Register::SCTLR_EL2]
+            .map(|register| machine.cpu.read(register) & !DZE);
+        for (pstate, host) in [
+            (user, false),
+            (user, true),
+            (Pstate::reset(1), false),
+            (Pstate::reset(2), false),
+            (Pstate::reset(2), true),
+        ] {
+            for controls in 0..32u32 {
+                let bit =
+                    |index: u32, value: u64| if controls & 1 << index != 0 { value } else { 0 };
+                let hcr = if host { 1 << HCR_TGE | E2H } else { E2H } | bit(0, TDZ);
+                for (register, value) in [
+                    (Register::HCR_EL2, hcr),
+                    (Register::SCTLR_EL1, sctlr[0] | bit(1, DZE)),
+                    (Register::SCTLR_EL2, sctlr[1] | bit(2, DZE)),
+                    (Register::HFGITR_EL2, bit(3, HFGITR_DCZVA)),
+                    (Register::HFGRTR_EL2, bit(4, HFGRTR_TPIDR_EL1)),
+                ] {
+                    machine.cpu.registers.set(register, 0, value);
+                }
+                machine.derived_changed();
+                machine.cpu.pstate = pstate;
+                machine.cpu.pc = BASE;
+                let case = format!("EL{} host {host} controls {controls:#b}", pstate.el);
+                each(&mut machine, pstate, case);
+            }
+        }
+    }
+
+    /// Native code zeroes DC ZVA's block in exactly the contexts where the
+    /// generated accessor completes DC ZVA with no trap or stop.
+    #[test]
+    fn native_dc_zva_is_exactly_the_untrapped_dc_zva() {
+        const DC_ZVA_X0: u32 = 0xd50b_7420;
+        let mut zeroes = 0;
+        native_completion_contexts(|machine, pstate, case| {
+            machine.cpu.state.x[0] = BASE + 0x108;
+            machine.host.ram[0x100..0x140].fill(0xaa);
+            let native = super::native_zero_block(&machine.cpu, &machine.profile_missing);
+            machine.system_instruction(DC_ZVA_X0).unwrap();
+            let zeroed = (machine.cpu.pstate.el, machine.cpu.pc) == (pstate.el, BASE + 4)
+                && machine.host.ram[0x100..0x140].iter().all(|&byte| byte == 0);
+            assert_eq!(native, zeroed.then_some(64), "{case}");
+            zeroes += usize::from(zeroed);
+        });
+        // DZE, TDZ and, with FEAT_FGT, HFGITR_EL2.DCZVA leave some contexts.
+        assert!(zeroes > 0 && zeroes < 5 * 32, "{zeroes}");
     }
 
     #[test]
