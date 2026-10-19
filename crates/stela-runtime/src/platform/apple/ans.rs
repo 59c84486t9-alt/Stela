@@ -11,7 +11,8 @@
 //! (0x3de51d0) returns 6. The register accessors at 0x3ddee24..64 use ANS
 //! `reg[3]`; its `nvme-interrupt-idx` selects the completion interrupt.
 //! docs/research/ans2.md owns the SPTM NVMe validation matrix this
-//! controller's values must satisfy.
+//! controller's values must satisfy, and the matrix of every register the
+//! drivers reach through restore, boot, sleep, wake and shutdown.
 //!
 //! Stela's die choices: NVMe 1.3, one I/O queue, 64 tags, 4/16 KiB memory
 //! pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
@@ -77,6 +78,7 @@ const MAX_PENDING: u64 = 0x1210;
 const BOOT_STATUS: u64 = 0x1300;
 const MODESEL: u64 = 0x1304;
 const BASE_CID: u64 = 0x1308;
+const SLEEP_NOTIFY: u64 = 0x1314;
 const AUTO_QUEUE: u64 = 0x13c8;
 const LINEAR: u64 = 0x24908;
 const ADMIN_SUBMIT: u64 = 0x2490c;
@@ -88,6 +90,11 @@ const TCB_INVALIDATE: u64 = 0x28118;
 const TCB_STATUS: u64 = 0x28120;
 const ENABLE: u32 = 1;
 const SHUTDOWN: u32 = 3 << 14;
+/// MODESEL values `PreCCEnableHook` writes before enabling: 0 regular, 4
+/// in the restore environment (`AppleANS2NVMeController::PreCCEnableHook`
+/// 0x3dbdfb8: 4 when `-restore` set its boot-from-host flag, 0x3dbb6b8).
+const MODE_REGULAR: u32 = 0;
+const MODE_RESTORE: u32 = 4;
 const CONFIG_MASK: u32 = ENABLE | (0xf << 7) | SHUTDOWN | (0xf << 16) | (0xf << 20);
 const ENTRY_SIZES: u32 = (6 << 16) | (4 << 20);
 const READY: u32 = 1;
@@ -296,10 +303,17 @@ impl Ans {
         }
     }
 
+    /// The boot chain's hand-off under `/defaults nvme-iboot-sptm-security`:
+    /// the boot stage has put the controller in linear submission mode, so
+    /// the kernel never writes LINEAR (`AppleANS3CGv2Controller::EnableLinearSQ`
+    /// 0x3db9064 returns at once with that flag) and SPTM, which also reads
+    /// it, writes no linear register either.
+    pub fn handed_off_linear(mut self) -> Self {
+        self.linear = true;
+        self
+    }
+
     fn configure(&mut self, value: u32) -> Result<(), &'static str> {
-        if value & SHUTDOWN == SHUTDOWN {
-            return Err("ANS reserved shutdown notification");
-        }
         if value & !CONFIG_MASK != 0 {
             return Err("ANS CC fields without a model");
         }
@@ -335,10 +349,11 @@ impl Ans {
                 };
                 self.status = READY;
             }
-            if value & SHUTDOWN == SHUTDOWN {
-                return Err("ANS reserved shutdown notification");
-            }
-            if value & SHUTDOWN != 0 {
+            // Normal (01b), abrupt (10b, `HandleAbruptShutdown` 0x3ddbb14)
+            // and suspend (11b) notifications all complete once every
+            // accepted command has and the backing has flushed: the die
+            // keeps no volatile state that one would lose and another not.
+            if value & SHUTDOWN != 0 && self.config & SHUTDOWN == 0 {
                 self.shutdown = true;
             }
         } else {
@@ -553,6 +568,10 @@ impl MmioDevice for Ans {
             (IO_TCB, Width::Double) => self.tcb_bases[1],
             (BOOT_STATUS, Width::Word) => BOOT_OK,
             (BASE_CID, Width::Word) => 0, // Stela assigns tags starting at zero.
+            // `SetupANS2SleepNotifier` (0x3dbc540) subscribes to system power
+            // changes and tunnels sleep notices to the controller only when
+            // bits 1:0 read 1. Stela's die takes no such notices.
+            (SLEEP_NOTIFY, Width::Word) => 0,
             (MODESEL, Width::Word) => u64::from(self.modesel),
             (AUTO_QUEUE, Width::Word) => u64::from(self.auto_queue),
             (MAX_PENDING, Width::Word) => u64::from(self.queue_attributes.unwrap_or(0)),
@@ -642,7 +661,15 @@ impl MmioDevice for Ans {
             {
                 self.queue_attributes = Some(value)
             }
-            MODESEL if value == 0 => self.modesel = value,
+            MODESEL
+                if matches!(value, MODE_REGULAR | MODE_RESTORE) && self.config & ENABLE == 0 =>
+            {
+                // A die choice: Stela's controller runs no host-loaded
+                // firmware, so the restore mode serves the same commands;
+                // its boot-from-host image download stays an unmodeled
+                // admin command.
+                self.modesel = value
+            }
             AUTO_QUEUE if value <= 1 => self.auto_queue = value != 0,
             TCB_COUNT if value < u32::from(TAGS) && self.config & ENABLE == 0 => {
                 self.tcb_count = value as u16
@@ -685,6 +712,11 @@ mod tests {
     const IOTCB: u64 = RAM + 0x6000;
     const DATA: u64 = RAM + 0x9000;
     const IRQ: AicInput = AicInput::new(0, 724);
+    /// CC.SHN for a suspend: `IONVMeController::ShutdownNVMe(inSuspend)`
+    /// (0x3ddbb48) passes `inSuspend` to `SendShutdownNotification`
+    /// (0x3ddb908), which writes 11b (0x3ddb9dc) for it and 01b otherwise.
+    /// NVMe reserves 11b; Apple's controllers take it as the suspend notice.
+    const SUSPEND: u32 = 3 << 14;
 
     struct Rig {
         ans: Ans,
@@ -728,6 +760,11 @@ mod tests {
                 rig.ans.write(offset, width, value, &mut access).unwrap();
             }
             rig
+        }
+        fn read(&mut self, offset: u64) -> u64 {
+            self.ans
+                .read(offset, Width::Word, &mut Access::new(0, 0, &mut self.latch))
+                .unwrap()
         }
         fn write(&mut self, offset: u64, value: u64) -> Result<(), MmioError> {
             self.ans.write(
@@ -1025,6 +1062,81 @@ mod tests {
     }
 
     #[test]
+    fn restore_mode_suspend_shutdown_and_the_sleep_notice_capability() {
+        let mut rig = Rig::new();
+        // The restore boot's MODESEL 4 before enabling, then CC.EN.
+        rig.write(CC, 0).unwrap();
+        for (base, address) in [(ASQ, SQ), (ACQ, CQ)] {
+            rig.ans
+                .write(
+                    base,
+                    Width::Double,
+                    address,
+                    &mut Access::new(0, 0, &mut rig.latch),
+                )
+                .unwrap();
+        }
+        rig.write(MODESEL, u64::from(MODE_RESTORE)).unwrap();
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+        assert_eq!(rig.read(CSTS), u64::from(READY));
+        assert_eq!(rig.read(MODESEL), u64::from(MODE_RESTORE));
+        assert_eq!(rig.read(SLEEP_NOTIFY), 0);
+        // A suspend notification completes like a normal one.
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | SUSPEND))
+            .unwrap();
+        rig.run().unwrap();
+        assert_eq!(rig.read(CSTS), u64::from(READY | SHUTDOWN_COMPLETE));
+        // Clearing SHN keeps the completed status (`HandleAbruptShutdown`
+        // 0x3dc0fc8 clears it and polls SHST for 2).
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+        rig.run().unwrap();
+        assert_eq!(rig.read(CSTS), u64::from(READY | SHUTDOWN_COMPLETE));
+        // The abrupt notification after it completes again.
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | 2 << 14))
+            .unwrap();
+        rig.run().unwrap();
+        assert_eq!(rig.read(CSTS), u64::from(READY | SHUTDOWN_COMPLETE));
+        // The hand-off leaves a fresh controller in linear mode.
+        let disk = Box::new(RamDisk::new("partition-id", 32, 4096));
+        let namespaces = [Description {
+            id: 1,
+            kind: 1,
+            blocks: 0,
+        }];
+        assert!(!Ans::new(disk, &namespaces, None).unwrap().linear);
+        let disk = Box::new(RamDisk::new("partition-id", 32, 4096));
+        let ans = Ans::new(disk, &namespaces, None)
+            .unwrap()
+            .handed_off_linear();
+        assert!(ans.linear);
+    }
+
+    #[test]
+    fn shutdown_deletes_the_io_sq_before_its_cq() {
+        let mut rig = Rig::new();
+        rig.io_queues();
+        // The status of admin command `tag`, retired after it completes.
+        let delete = |rig: &mut Rig, tag: u16, opcode: u8, id: u32| {
+            let slot = rig.ans.queues[0].tail;
+            rig.submit(0, tag, opcode, 0, 0, [id, 0, 0, 0, 0, 0])
+                .unwrap();
+            let status = rig.bytes(CQ + u64::from(slot) * 16 + 14, 2);
+            rig.retire(0, tag);
+            u16::from_le_bytes([status[0], status[1]]) >> 1
+        };
+        // The CQ cannot go while its SQ exists; queue 2 does not exist.
+        assert_eq!(delete(&mut rig, 2, 4, 1), 0x10c);
+        assert_eq!(delete(&mut rig, 3, 0, 2), 0x101);
+        assert_eq!(delete(&mut rig, 4, 0, 1), 0);
+        assert!(!rig.ans.queues[1].sq_enabled);
+        assert_eq!(delete(&mut rig, 5, 0, 1), 0x101);
+        assert_eq!(delete(&mut rig, 6, 4, 1), 0);
+        assert!(!rig.ans.queues[1].cq_enabled);
+        // A deletion carrying a data pointer is outside the contract.
+        assert!(rig.submit(0, 7, 4, 0, DATA, [1, 0, 0, 0, 0, 0]).is_err());
+    }
+
+    #[test]
     fn full_queues_do_not_overwrite_and_invalid_config_has_no_effect() {
         let mut rig = Rig::new();
         rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
@@ -1033,11 +1145,13 @@ mod tests {
         assert!(rig.submit(0, 2, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).is_err());
         assert_eq!(rig.bytes(CQ, 32), before);
         assert!(
-            rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | 3 << 14))
+            rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | 1 << 12))
                 .is_err()
         );
         assert_eq!(rig.ans.config, ENTRY_SIZES | ENABLE);
         assert!(rig.write(MODESEL, 1).is_err());
+        // MODESEL applies at enable.
+        assert!(rig.write(MODESEL, u64::from(MODE_RESTORE)).is_err());
         assert!(rig.write(AUTO_QUEUE, 2).is_err());
         assert!(rig.write(ADMIN_HEAD, 3).is_err());
     }

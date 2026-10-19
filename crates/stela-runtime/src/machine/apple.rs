@@ -681,12 +681,15 @@ impl AppleDevices {
             AscLines::from_interrupts(placement.interrupts.map(irq)),
         )
         .map_err(String::from)?;
+        // The placement requires the boot stage's NVMe security hand-off,
+        // which leaves the controller in linear submission mode.
         let controller = Ans::new(
             backing,
             &placement.namespaces,
             Some(irq(placement.completion_irq)),
         )
-        .map_err(String::from)?;
+        .map_err(String::from)?
+        .handed_off_linear();
         let asc = self.bus.add(Box::new(wrapper));
         self.coprocessors.push(("ANS", asc));
         self.bus

@@ -1,5 +1,6 @@
 //! NVMe command effects. Kernel evidence: `AppleNVMeRequest::BuildCommand*`
-//! at 26A434 file 0x3deb4f8 (CQ), 0x3deb598 (SQ), 0x3deb654 (Identify),
+//! at 26A434 file 0x3deb4f8 (CQ), 0x3deb598 (SQ), 0x3deb56c/0x3deb62c
+//! (delete CQ/SQ, CDW10 the queue ID), 0x3deb654 (Identify),
 //! 0x3deb7ac..0x3deba30 (flush/read/write), 0x3debc88..0x3dec1dc
 //! (logs/features), 0x3dec394 (Apple time), 0x3dec794 (namespace records),
 //! and 0x3dec980 (tunnel). Unknown vendor effects stop before completion.
@@ -21,9 +22,15 @@ const SUCCESS: u16 = 0;
 const INVALID_FIELD: u16 = 2;
 const DATA_TRANSFER_ERROR: u16 = 4;
 const INVALID_NAMESPACE: u16 = 0xb;
+/// Command-specific status (SCT 1): Invalid Queue Identifier and Invalid
+/// Queue Deletion (NVMe 1.4 figures 145 and 151).
+const INVALID_QUEUE: u16 = 0x101;
+const INVALID_DELETION: u16 = 0x10c;
 const LBA_RANGE: u16 = 0x80;
 const WRITE_PROTECTED: u16 = 0x20;
+const DELETE_SQ: u8 = 0;
 const CREATE_SQ: u8 = 1;
+const DELETE_CQ: u8 = 4;
 const CREATE_CQ: u8 = 5;
 const IDENTIFY: u8 = 6;
 const SET_FEATURES: u8 = 9;
@@ -63,6 +70,7 @@ impl Command {
         if queue == 0 {
             match self.opcode() {
                 CREATE_SQ | CREATE_CQ => Ok(2),
+                DELETE_SQ | DELETE_CQ => Ok(0),
                 APPLE_TIME => Ok(0),
                 IDENTIFY => Ok(1),
                 SET_FEATURES | GET_FEATURES if self.long(24) == 0 => Ok(0),
@@ -139,6 +147,7 @@ impl Ans {
         match cmd.opcode() {
             IDENTIFY => self.identify(cmd, port),
             CREATE_CQ | CREATE_SQ => self.create_queue(cmd),
+            DELETE_CQ | DELETE_SQ => self.delete_queue(cmd),
             SET_FEATURES | GET_FEATURES => self.feature(cmd),
             APPLE_TIME => {
                 if cmd.nsid() != 0
@@ -266,6 +275,39 @@ impl Ans {
             q.sq = cmd.long(24);
             q.sq_entries = depth as u16;
             q.sq_enabled = true;
+        }
+        Ok(Outcome::status(SUCCESS))
+    }
+
+    /// `IONVMeController::ShutdownNVMe` deletes the I/O SQ, then its CQ
+    /// (`DisableSubmissionQueues` 0x3ddbc78, `DisableCompletionQueue`
+    /// 0x3ddbcb4), before the shutdown notification.
+    fn delete_queue(&mut self, cmd: &Command) -> Result<Outcome, &'static str> {
+        if cmd.nsid() != 0 || cmd.long(24) != 0 || cmd.long(32) != 0 || !cmd.zero_words(44) {
+            return Err("ANS queue deletion fields are not modeled");
+        }
+        let q = &mut self.queues[1];
+        if cmd.word(40) != 1 {
+            return Ok(Outcome::status(INVALID_QUEUE));
+        }
+        if cmd.opcode() == DELETE_SQ {
+            if !q.sq_enabled {
+                return Ok(Outcome::status(INVALID_QUEUE));
+            }
+            if self.pending.iter().any(|&(queue, _)| queue == 1) {
+                return Err("ANS SQ deletion with commands outstanding is not modeled");
+            }
+            q.sq = 0;
+            q.sq_entries = 0;
+            q.sq_enabled = false;
+        } else {
+            if !q.cq_enabled {
+                return Ok(Outcome::status(INVALID_QUEUE));
+            }
+            if q.sq_enabled {
+                return Ok(Outcome::status(INVALID_DELETION));
+            }
+            *q = Queue::default();
         }
         Ok(Outcome::status(SUCCESS))
     }

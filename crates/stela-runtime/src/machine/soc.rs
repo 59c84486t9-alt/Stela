@@ -2140,15 +2140,30 @@ fn cells_of(value: &[u8]) -> Option<[u32; 4]> {
 /// Only explicitly visible ANS2 hardware is placed. Do not preserve all
 /// ASC compatibles in the loader: SIO, AOP and others need their own
 /// native application protocols before they can be exposed.
+/// `iboot_security` is `/defaults nvme-iboot-sptm-security`: the boot
+/// stage has configured the controller, linear submission mode included,
+/// so the kernel and SPTM leave its linear-SQ, PRP-check and command
+/// permission registers alone (`AppleANS3CGv2Controller::EnableLinearSQ`
+/// 0x3db9064, `AppleANS2CGv2Controller::DisablePRPNullCheck` 0x3de5b3c,
+/// `AppleANS2CGv2Controller::EnableAutoQueueManage` 0x3de5adc, read by
+/// `AppleANS2NVMeController::CheckEDTProperties` 0x3dc1740). Without it
+/// the kernel read-modify-writes 0x24004 and 0x24008, which have no model.
 fn ans_controller(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
+    iboot_security: bool,
 ) -> Result<Option<AnsController>, String> {
     let Some(node) = io.child("ans").filter(|n| n.compatible(ASC)) else {
         return Ok(None);
     };
     if node.property("role") != Some(b"ANS2\0".as_slice()) {
         return Err("/arm-io/ans role is not the modeled ANS2".into());
+    }
+    if !iboot_security {
+        return Err(
+            "ANS2 without /defaults nvme-iboot-sptm-security selects kernel-programmed ANS2 registers the model does not carry"
+                .into(),
+        );
     }
     // SPTM INIT compares the kernel's queue entries, MQES, with this
     // property (`ans::QUEUE_ENTRIES`).
@@ -3888,7 +3903,10 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let (i2cs, typec_phys) = typec_devices(&io, &translate, phandle, gpio.as_ref())?;
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
-    let ans = ans_controller(&io, &translate)?;
+    let iboot_security = root
+        .child("defaults")
+        .is_some_and(|defaults| defaults.property("nvme-iboot-sptm-security").is_some());
+    let ans = ans_controller(&io, &translate, iboot_security)?;
     let smc = smc_controller(&root, &io, &translate)?;
     let pmp = pmp_controller(&io, &translate)?;
     let gfx = gfx_controller(&io, &translate)?;
@@ -4344,7 +4362,7 @@ mod tests {
             |version, parent, interrupt_index| flagged(&[], version, parent, interrupt_index);
         let bytes = tree(3, 0x8e, 4);
         let io = Node::root(&bytes).unwrap();
-        let placed = ans_controller(&io, &|offset| Some(0x2_0000_0000 + offset))
+        let placed = ans_controller(&io, &|offset| Some(0x2_0000_0000 + offset), true)
             .unwrap()
             .unwrap();
         assert_eq!(placed.wrapper, (0x2_7740_0000, 0x6c000));
@@ -4365,13 +4383,14 @@ mod tests {
         // reg[13] is SPTM's VDMA cache only under nvme-vdma-wa.
         assert_eq!(placed.vdma, None);
         let vdma = flagged(&["nvme-vdma-wa"], 3, 0x8e, 4);
-        let placed = ans_controller(&Node::root(&vdma).unwrap(), &|a| Some(a))
+        let placed = ans_controller(&Node::root(&vdma).unwrap(), &|a| Some(a), true)
             .unwrap()
             .unwrap();
         assert_eq!(placed.vdma, Some((0x7b10_0000, 0x44000)));
         for flag in UNMODELED_ANS_SPTM {
             let bytes = flagged(&[flag], 3, 0x8e, 4);
-            let error = ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a)).unwrap_err();
+            let error =
+                ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a), true).unwrap_err();
             assert!(error.contains(flag), "{error}");
         }
         for bytes in [
@@ -4380,9 +4399,12 @@ mod tests {
             tree(3, 0x8e, 3),
             tree(3, 0x8e, 5),
         ] {
-            assert!(ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a)).is_err());
+            assert!(ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a), true).is_err());
         }
-        assert!(ans_controller(&io, &|_| None).is_err());
+        assert!(ans_controller(&io, &|_| None, true).is_err());
+        // Without the boot stage's security hand-off the kernel programs
+        // registers the model does not carry.
+        assert!(ans_controller(&io, &|offset| Some(0x2_0000_0000 + offset), false).is_err());
         // These compatibles are shared by other hardware. The partial ANS
         // controller cannot authorize advertising every ASC/RTBuddy/SART.
         assert!(!models(ASC, |_| None));
