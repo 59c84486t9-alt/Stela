@@ -83,6 +83,29 @@ impl Image {
             .map(|(_, bank)| bank)
             .ok_or("the NOR image holds no valid NVRAM bank")
     }
+    /// Save `bank` as XNU's `IONVRAMCHRPHandler` does: into the bank after
+    /// the current one, round robin. `bank` must be valid and newer than the
+    /// current bank. Returns the bank written and the offsets of the erase
+    /// sectors it changed, for the host to store.
+    pub fn save_bank(&mut self, bank: &[u8]) -> Result<(u32, Vec<usize>), &'static str> {
+        nvram::validate(bank)?;
+        let current = self.current_bank()?;
+        let old = nvram::generation(self.bank(current)?);
+        if nvram::generation(bank) <= old {
+            return Err("a saved NVRAM bank must be newer than the current one");
+        }
+        let next = (current + 1) % nvram::BANK_COUNT;
+        let start = ANVRAM.0 as usize + next as usize * nvram::BANK_SIZE;
+        let changed = (start..start + nvram::BANK_SIZE)
+            .step_by(SECTOR_SIZE)
+            .filter(|&sector| {
+                self.0[sector..sector + SECTOR_SIZE] != bank[sector - start..][..SECTOR_SIZE]
+            })
+            .collect();
+        self.0[start..start + nvram::BANK_SIZE].copy_from_slice(bank);
+        Ok((next, changed))
+    }
+
     pub fn with_proxy(mut self, bank: u32, proxy: &[u8]) -> Result<Self, &'static str> {
         nvram::validate(proxy)?;
         self.bank(bank)?;

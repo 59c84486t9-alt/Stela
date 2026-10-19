@@ -50,6 +50,21 @@ pub fn store(device: &mut dyn BlockDevice, offset: usize, sector: &[u8]) -> Resu
         })
 }
 
+/// Save `bank` into `image`'s next NVRAM bank ([`Image::save_bank`]) and
+/// store every sector it changed; returns the bank written.
+pub fn save_bank(
+    device: &mut dyn BlockDevice,
+    image: &mut Image,
+    bank: &[u8],
+) -> Result<u32, String> {
+    let (written, sectors) = image.save_bank(bank).map_err(String::from)?;
+    for offset in sectors {
+        let sector = image.bytes()[offset..offset + SECTOR_SIZE].to_vec();
+        store(device, offset, &sector)?;
+    }
+    Ok(written)
+}
+
 /// Blocks per sector and the block size; the partition must hold the image
 /// in whole sectors.
 fn sector_blocks(device: &dyn BlockDevice) -> Result<(u64, u32), String> {
@@ -85,6 +100,24 @@ mod tests {
         assert_eq!(again.bytes()[0x2000], 0x42);
         assert!(store(&mut disk, 0x2001, &sector).is_err());
         assert!(store(&mut disk, CAPACITY, &sector).is_err());
+    }
+
+    #[test]
+    fn a_saved_bank_goes_to_the_next_bank_and_survives_a_reload() {
+        use super::super::nvram::{Partition, Variables};
+        let mut disk = RamDisk::new("nor", 2048, 512);
+        let (mut image, _) = load(&mut disk).unwrap();
+        let mut variables = Variables::parse(image.bank(0).unwrap()).unwrap();
+        variables
+            .set(Partition::System, b"boot-volume", b"x:y:z")
+            .unwrap();
+        let bank = variables.encode().unwrap();
+        assert_eq!(save_bank(&mut disk, &mut image, &bank).unwrap(), 1);
+        let (again, _) = load(&mut disk).unwrap();
+        assert_eq!(again.current_bank().unwrap(), 1);
+        assert_eq!(again.bank(1).unwrap(), bank.as_slice());
+        // An older or equal generation is refused.
+        assert!(save_bank(&mut disk, &mut image, &bank).is_err());
     }
 
     #[test]

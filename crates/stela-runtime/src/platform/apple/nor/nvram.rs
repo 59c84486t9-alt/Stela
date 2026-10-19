@@ -5,6 +5,9 @@
 //! system partitions follow it. Adler-32 covers generation through bank end.
 use alloc::{vec, vec::Vec};
 
+pub mod variables;
+pub use variables::{Partition, Variables};
+
 pub const BANK_SIZE: usize = 0x10000;
 pub const BANK_COUNT: u32 = 2;
 pub const CURRENT_BANK: u32 = 0;
@@ -84,6 +87,14 @@ pub(crate) fn empty_bank_of(generation: u32) -> Vec<u8> {
     bank
 }
 
+/// A CHRP partition header's NUL-terminated name.
+fn partition_name(header: &[u8]) -> &[u8] {
+    header[4..HEADER_SIZE]
+        .split(|&b| b == 0)
+        .next()
+        .expect("one slice")
+}
+
 /// Validate the bounded CHRP image before accepting boot firmware's proxy.
 /// XNU accepts both v1 and v2 names; Stela creates v1 and preserves either.
 pub fn validate(bank: &[u8]) -> Result<(), &'static str> {
@@ -108,7 +119,7 @@ pub fn validate(bank: &[u8]) -> Result<(), &'static str> {
         if length < HEADER_SIZE || offset + length > BANK_SIZE || h[1] != checksum(h) {
             return Err("invalid CHRP partition length or checksum");
         }
-        let name = h[4..].split(|&b| b == 0).next().expect("one slice");
+        let name = partition_name(h);
         common |= matches!(name, b"common" | b"2common");
         system |= matches!(name, b"system" | b"2system");
         offset += length;
