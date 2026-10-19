@@ -20,6 +20,7 @@ use crate::mach::catalog::{self, Reserved};
 use anyhow::{Result, bail};
 
 mod message;
+mod server;
 
 /// The fast traps `handle_svc` answers before the table.
 const MACH_ABSOLUTE_TIME_FAST: u32 = 3;

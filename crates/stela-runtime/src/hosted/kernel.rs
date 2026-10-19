@@ -58,6 +58,7 @@ pub(super) struct Kernel {
     pub(super) shared_region: Option<SharedRegion>,
     pub(super) signer: pauth::Context,
     pub(super) executable: Executable,
+    pub(super) hardware: Hardware,
     pub(super) trace: bool,
     pub(super) counts: BTreeMap<&'static str, u64>,
     pub(super) termination: Option<Termination>,
@@ -73,6 +74,8 @@ pub(super) struct Kernel {
     pub(super) signatures: bsd::signatures::Signatures,
     /// This task's, its thread's and the host's kernel-object port names.
     pub(super) kernel_objects: Vec<u32>,
+    /// The port MIG reply rights are carried through, once allocated.
+    pub(super) mig_relay: Option<u32>,
 }
 
 /// The trapped guest thread as the exception left it: X0..X30 in the
@@ -141,6 +144,7 @@ impl Kernel {
             signer: config.signer,
             sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features),
             executable: config.executable,
+            hardware: config.hardware,
             trace: config.trace,
             counts: BTreeMap::new(),
             termination: None,
@@ -151,6 +155,7 @@ impl Kernel {
             signatures: Default::default(),
             map_with_linking_ended: false,
             kernel_objects,
+            mig_relay: None,
         }
     }
 

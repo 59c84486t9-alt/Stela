@@ -120,6 +120,45 @@ impl Protection {
     }
 }
 
+/// `mach_vm_map` of anonymous memory as the guest requests it, in 16 KiB
+/// pages: the size rounded up and the alignment at least a page. Returns
+/// the host's `kern_return_t` and the placed address.
+#[allow(clippy::too_many_arguments)]
+pub fn map_anonymous(
+    address: u64,
+    bytes: u64,
+    mask: u64,
+    flags: i32,
+    copy: bool,
+    current: Protection,
+    maximum: Protection,
+    inheritance: u32,
+) -> (i32, u64) {
+    const KERN_INVALID_ARGUMENT: i32 = 4;
+    let Some(size) = round_page(bytes) else {
+        return (KERN_INVALID_ARGUMENT, address);
+    };
+    let mut at = address;
+    // SAFETY: anonymous memory placed as the guest asked; overwriting is
+    // the guest's own request (`VM_FLAGS_OVERWRITE`).
+    let status = unsafe {
+        mach_vm_map(
+            task(),
+            &mut at,
+            size,
+            mask | PAGE_MASK,
+            flags,
+            0,
+            0,
+            i32::from(copy),
+            current.0,
+            maximum.0,
+            inheritance,
+        )
+    };
+    (status, at)
+}
+
 /// Allocate zeroed guest pages: at `address` when `anywhere` is false
 /// (refusing an occupied range), else wherever the host finds room, 16 KiB
 /// aligned either way.
