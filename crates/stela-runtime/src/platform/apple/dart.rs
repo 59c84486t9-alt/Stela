@@ -14,7 +14,8 @@
 //!   SPTM's `t8110dart_init_instance` also 3.2; SPTM requires a VA space
 //!   above 40 bits from version 2 on, so this two-level DART of 36-bit VAs
 //!   (and 42-bit PAs, its entries' address field) reports version 1.0.
-//! - TLB_CMD (0x80): BUSY 31, OP [10:8] (0 flush all, 1 flush one stream),
+//! - TLB_CMD (0x80): BUSY 31, OP [10:8] (0 flush all, 1 flush one stream;
+//!   SPTM also issues 2 and 4, see `TLB_OPS`),
 //!   STREAM [7:0].
 //! - ERROR (0x100): FLAG 31, STREAM [27:20], CODE [14:0] (READ_FAULT 5,
 //!   WRITE_FAULT 4, NO_PTE 3, NO_PMD 2, NO_PGD 1, NO_TTBR 0) and region
@@ -126,6 +127,15 @@ const TLB_OP: u32 = 0x7 << 8;
 const TLB_OP_FLUSH_ALL: u32 = 0;
 const TLB_OP_FLUSH_STREAM: u32 = 1 << 8;
 const TLB_STREAM: u32 = 0xff;
+/// SPTM's invalidation requests (file 0xc8618..0xc8718): OP 0 and 4 on
+/// every instance, OP 1 for one stream, optionally (bit 14) bounded by the
+/// range words at +0x98/+0xa0, and OP 2 with its parameter at +0x84; bit
+/// 15 qualifies the request further. With no translation cached, each
+/// completes at once whatever subset it names; the words are retained.
+const TLB_OPS: [u32; 4] = [TLB_OP_FLUSH_ALL, TLB_OP_FLUSH_STREAM, 2 << 8, 4 << 8];
+const TLB_QUALIFIERS: u32 = 1 << 14 | 1 << 15;
+const TLB_PARAMETER: u64 = 0x84;
+const TLB_RANGE: [u64; 2] = [0x98, 0xa0];
 const ERROR: u64 = 0x100;
 const ERROR_MASK: u64 = 0x104;
 const ERROR_ADDRESS_LOW: u64 = 0x170;
@@ -227,6 +237,7 @@ pub struct Dart {
     streams: usize,
     powered: bool,
     tlimits: [u32; 2],
+    tlb_words: [u32; 3],
     tcr: Vec<u32>,
     ttbr: Vec<u32>,
     enabled: [u32; STREAM_WORDS as usize],
@@ -278,6 +289,7 @@ impl Dart {
             streams,
             powered: true,
             tlimits: [0; 2],
+            tlb_words: [0; 3],
             tcr: vec![0; streams],
             ttbr: vec![0; streams],
             enabled: [0; STREAM_WORDS as usize],
@@ -327,6 +339,7 @@ impl Dart {
     pub fn set_power(&mut self, powered: bool, retention: bool, access: &mut Access<'_>) {
         if self.powered && !powered && !retention {
             self.tlimits.fill(0);
+            self.tlb_words.fill(0);
             self.tcr.fill(0);
             self.ttbr.fill(0);
             self.enabled.fill(0);
@@ -534,6 +547,10 @@ impl MmioDevice for Dart {
             PARAMS3 => PARAMS3_VALUE,
             PARAMS4 => self.streams as u32,
             TLB_CMD => 0,
+            TLB_PARAMETER => self.tlb_words[0],
+            _ if TLB_RANGE.contains(&offset) => {
+                self.tlb_words[1 + usize::from(offset == TLB_RANGE[1])]
+            }
             ERROR => self.error,
             ERROR_MASK => self.error_mask,
             ERROR_ADDRESS_LOW => self.error_address as u32,
@@ -606,10 +623,17 @@ impl MmioDevice for Dart {
             return Err(fail("DART protection domain without a model"));
         }
         match offset {
-            TLB_CMD => match value & !TLB_STREAM & !TLB_OP {
-                0 if matches!(value & TLB_OP, TLB_OP_FLUSH_ALL | TLB_OP_FLUSH_STREAM) => {}
-                _ => return Err(fail("unknown DART TLB command")),
-            },
+            TLB_CMD => {
+                if value & !(TLB_STREAM | TLB_OP | TLB_QUALIFIERS) != 0
+                    || !TLB_OPS.contains(&(value & TLB_OP))
+                {
+                    return Err(fail("unknown DART TLB command"));
+                }
+            }
+            TLB_PARAMETER => self.tlb_words[0] = value,
+            _ if TLB_RANGE.contains(&offset) => {
+                self.tlb_words[1 + usize::from(offset == TLB_RANGE[1])] = value
+            }
             ERROR => {
                 if value & ERROR_FLAG != 0 {
                     self.error = 0;
@@ -749,6 +773,20 @@ mod tests {
         d.write(STREAM_INTERRUPTS + 4, Width::Word, 0x5, &mut a)
             .unwrap();
         assert_eq!(d.read(STREAM_INTERRUPTS + 4, Width::Word, &mut a), Ok(5));
+        // Every invalidation SPTM issues completes; OP 3 is undefined.
+        for (offset, value) in [
+            (TLB_RANGE[0], 0x40),
+            (TLB_RANGE[1], 0x80),
+            (TLB_CMD, 1 << 14 | 1 << 8 | 3),
+            (TLB_PARAMETER, 7),
+            (TLB_CMD, 2 << 8),
+            (TLB_CMD, 1 << 15 | 4 << 8),
+        ] {
+            d.write(offset, Width::Word, value, &mut a).unwrap();
+        }
+        assert_eq!(d.read(TLB_RANGE[1], Width::Word, &mut a), Ok(0x80));
+        assert_eq!(d.read(TLB_CMD, Width::Word, &mut a), Ok(0));
+        assert!(d.write(TLB_CMD, Width::Word, 3 << 8, &mut a).is_err());
         // The counters themselves are absent.
         assert!(d.read(0x760, Width::Word, &mut a).is_err());
         // Power-down disables each stream and reads the word back.
