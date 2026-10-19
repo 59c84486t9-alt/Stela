@@ -20,8 +20,8 @@ use alloc::{vec, vec::Vec};
 use stela_compiler::{
     GuestAddress, Lifter,
     aarch64::{
-        AddressMode, Decoder, MemoryTransfer, Operation, Register, Width, atomic, literal, ordered,
-        register_offset::IndexExtend, simd,
+        AddressMode, Decoder, MemoryTransfer, Operation, Register, Width, atomic, literal,
+        non_temporal, ordered, register_offset::IndexExtend, simd,
     },
 };
 
@@ -31,6 +31,90 @@ const PAGE: u64 = super::FETCH_PAGE;
 /// or all set, as `x86_64::GUEST_RANGE_CHECK` tests.
 fn in_guest_range(address: u64) -> bool {
     matches!(address >> 48, 0 | 0xffff)
+}
+
+/// `address` with its top byte replaced by bit 55's sign, as translation
+/// regards it under TBI (Arm `AddrTop` and `AArch64_TranslateAddress`).
+fn without_tag(address: u64) -> u64 {
+    (((address << 8) as i64) >> 8) as u64
+}
+
+/// How an instruction's base register is untagged for a retry: the base
+/// and whether the instruction loads into it. None when the retry could
+/// change what the instruction does: an SP base, which exception entry
+/// banks, a base the instruction also stores or swaps, or a form without
+/// a base register.
+fn untagging(operation: &Operation) -> Option<(Register, bool)> {
+    let load = |transfer: MemoryTransfer| matches!(transfer, MemoryTransfer::Load { .. });
+    let (base, data, loads): (Register, &[Register], bool) = match operation {
+        Operation::Memory {
+            transfer,
+            data,
+            base,
+            ..
+        } => (*base, core::slice::from_ref(data), load(*transfer)),
+        Operation::MemoryPair {
+            transfer,
+            data,
+            base,
+            ..
+        } => (*base, data, load(*transfer)),
+        Operation::MemoryRegisterOffset(operand) => (
+            operand.base,
+            core::slice::from_ref(&operand.data),
+            load(operand.transfer),
+        ),
+        Operation::MemoryUnprivileged(operand) => (
+            operand.base,
+            core::slice::from_ref(&operand.data),
+            load(operand.transfer),
+        ),
+        Operation::MemoryNonTemporal(operand) => match &operand.data {
+            non_temporal::Data::Integer(data) => (operand.base, data, operand.load),
+            non_temporal::Data::Vector(_) => (operand.base, &[], operand.load),
+        },
+        Operation::Atomic(operand) => {
+            let registers = match operand.kind {
+                atomic::Kind::CompareExchange { compare, source } => vec![compare, source],
+                atomic::Kind::CompareExchangePair { compare, source } => {
+                    vec![compare[0], compare[1], source[0], source[1]]
+                }
+                atomic::Kind::ReadModifyWrite {
+                    source,
+                    destination,
+                    ..
+                } => vec![source, destination],
+            };
+            return (operand.base != Register::Sp && !registers.contains(&operand.base))
+                .then_some((operand.base, false));
+        }
+        Operation::Ordered(ordered::Operand::Transfer {
+            kind, data, base, ..
+        }) => (
+            *base,
+            core::slice::from_ref(data),
+            *kind != ordered::Kind::Release,
+        ),
+        Operation::Simd(
+            simd::Operand::Memory { base, .. } | simd::Operand::MemoryPair { base, .. },
+        ) => (*base, &[], false),
+        Operation::Simd(simd::Operand::MemoryRegisterOffset(operand)) => (operand.base, &[], false),
+        Operation::Simd(simd::Operand::StructureMemory(operand)) => (operand.base, &[], false),
+        _ => return None,
+    };
+    let overlaps = data.contains(&base);
+    (base != Register::Sp && !(overlaps && !loads)).then_some((base, overlaps))
+}
+
+/// The base register's value after an untagged retry that moved it by
+/// `delta`: what the instruction loaded into it, or else its tagged value
+/// with any writeback applied.
+fn retagged(value: u64, delta: u64, loaded: bool) -> u64 {
+    if loaded {
+        value
+    } else {
+        value.wrapping_sub(delta)
+    }
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
@@ -268,8 +352,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         Err(self.unsupported(RequirementKind::Translation(unsupported)))
                     }
                     // TBI, or a 52-bit range: the shadow maps 48-bit
-                    // untagged addresses only.
+                    // untagged addresses only. A tagged base runs again
+                    // with its tag cleared.
                     mmu::Outcome::Mapped(_) => {
+                        if let Some(step) = self.retry_untagged(pc, word, access.address) {
+                            return step;
+                        }
                         let mut requirement = self.requirement(RequirementKind::Native(
                             "a tagged or 52-bit data address in native code",
                         ));
@@ -282,6 +370,51 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Err(self.unsupported(RequirementKind::Native(
             "a native address check failed where no access faults",
         )))
+    }
+
+    /// Run the instruction at `pc`, whose access to the tagged `address`
+    /// translates under TBI, once with its base register moved to the
+    /// untagged address, which the shadow maps, then put the tag back on
+    /// the base (Arm `AddrTop`: translation ignores the top byte, and
+    /// writeback keeps it). None when the retry does not apply: the
+    /// untagged address is outside the guest's ranges, or [`untagging`]
+    /// refuses the base.
+    fn retry_untagged(&mut self, pc: u64, word: u32, address: u64) -> Option<Step> {
+        let untagged = without_tag(address);
+        if untagged == address || !in_guest_range(untagged) {
+            return None;
+        }
+        let operation = Decoder.lift(GuestAddress(pc), word).ok()?.operation;
+        let (base, loads_base) = untagging(&operation)?;
+        let delta = untagged.wrapping_sub(address);
+        let original = self.read_register(base);
+        self.write_register(base, original.wrapping_add(delta));
+        let in_range = self.data_accesses(pc, word).is_ok_and(|accesses| {
+            accesses
+                .iter()
+                .all(|(access, _)| in_guest_range(access.address))
+        });
+        if !in_range {
+            self.write_register(base, original);
+            return None;
+        }
+        let el = self.cpu.pstate.el;
+        let result = match self.fetch_block(pc, true) {
+            Ok(super::Fetched::Block(index)) => self.execute(index, 0),
+            Ok(super::Fetched::Exception(exception)) => {
+                self.take(exception);
+                Ok(())
+            }
+            Ok(super::Fetched::Checked(word)) => self.checked_instruction(pc, word),
+            Err(stop) => Err(stop),
+        };
+        // An exception or a stop leaves the instruction unretired and its
+        // base as it was.
+        let retired =
+            result.is_ok() && self.cpu.pc == pc + super::INSTRUCTION && self.cpu.pstate.el == el;
+        let value = self.read_register(base);
+        self.write_register(base, retagged(value, delta, retired && loads_base));
+        Some(result)
     }
 
     /// A native access reached a watched page: take the watchpoint exception
@@ -361,5 +494,47 @@ impl<H: Host, D: Devices> Machine<H, D> {
             word,
             detail: detail.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operation(word: u32) -> Operation {
+        Decoder.lift(GuestAddress(0), word).unwrap().operation
+    }
+
+    #[test]
+    fn untagged_retries_keep_the_tag_on_the_base() {
+        let tagged = 0x8000_0001_0425_6e90;
+        assert_eq!(without_tag(tagged), 0x0000_0001_0425_6e90);
+        assert_eq!(without_tag(0x5aff_fe00_0000_1000), 0xffff_fe00_0000_1000);
+        let delta = without_tag(tagged).wrapping_sub(tagged);
+        // STP W8, W19, [X0]: X0 keeps its tag.
+        assert_eq!(
+            untagging(&operation(0x2900_4c08)),
+            Some((Register::X(0), false))
+        );
+        assert_eq!(retagged(without_tag(tagged), delta, false), tagged);
+        // LDR X1, [X0, #16]! writes the tagged sum back.
+        assert_eq!(
+            untagging(&operation(0xf841_0c01)),
+            Some((Register::X(0), false))
+        );
+        assert_eq!(
+            retagged(without_tag(tagged) + 16, delta, false),
+            tagged + 16
+        );
+        // LDR X0, [X0] keeps what it loads.
+        assert_eq!(
+            untagging(&operation(0xf940_0000)),
+            Some((Register::X(0), true))
+        );
+        assert_eq!(retagged(0x1234, delta, true), 0x1234);
+        // STR X0, [X0] would store the untagged base, and exception entry
+        // banks SP.
+        assert_eq!(untagging(&operation(0xf900_0000)), None);
+        assert_eq!(untagging(&operation(0xf940_03e0)), None);
     }
 }
