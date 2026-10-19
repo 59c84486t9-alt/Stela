@@ -1704,8 +1704,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // system-mode block ABI; chained blocks and thunks too.
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
         let control = *self.chain;
-        // A thunk that found no transfer left wrapped the budget.
-        let chained = budget - control.budget.min(budget);
+        // A thunk that found no transfer left wrapped the budget, after
+        // using all of it.
+        let chained = budget.checked_sub(control.budget).unwrap_or(budget);
         let last = control.block as usize;
         self.cpu.retired += control.retired;
         self.statistics.blocks += 1 + chained;
@@ -4908,6 +4909,22 @@ mod tests {
         assert_eq!(machine.statistics.chained, 1);
         assert_eq!(machine.cpu.retired, retired + 4);
         assert_eq!(machine.cpu.pc, base);
+        // A run whose last thunk found no transfer left, wrapping the
+        // budget, chained the whole budget.
+        let budget = machine.chain_budget();
+        let (blocks, chained) = (machine.statistics.blocks, machine.statistics.chained);
+        machine.host.chained = Some((
+            &mut *machine.chain,
+            ChainControl {
+                budget: u64::MAX,
+                retired: 2 * budget,
+                block: 0,
+            },
+        ));
+        machine.host.exits = vec![direct(base + 12)];
+        machine.step().unwrap();
+        assert_eq!(machine.statistics.chained, chained + budget);
+        assert_eq!(machine.statistics.blocks, blocks + 1 + budget);
     }
 
     #[test]
