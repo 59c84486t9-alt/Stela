@@ -13,7 +13,7 @@ mod images;
 mod input;
 mod loader;
 pub mod registry;
-mod restore;
+pub mod restore;
 mod run;
 mod setup;
 

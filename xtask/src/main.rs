@@ -10,6 +10,7 @@ mod differential;
 mod dit;
 mod oracle;
 mod progress;
+mod soc_facts;
 mod system_matrix;
 mod tools;
 
@@ -41,6 +42,9 @@ enum Task {
     SystemMatrix(system_matrix::SystemMatrix),
     /// Generate the BSD system-call and Mach-trap catalogs from xnu sources.
     DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
+    /// Derive the per-SoC facts of a universal macOS IPSW's SPTM, TXM,
+    /// kernelcache and DeviceTree builds.
+    SocFacts(soc_facts::SocFacts),
     /// Audit the native code of Arm's data-independent-time instructions
     /// against Intel's data operand independent timing list.
     DitAudit(dit::DitAudit),
@@ -62,6 +66,7 @@ fn main() -> ExitCode {
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::SystemMatrix(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::SocFacts(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
