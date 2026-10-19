@@ -276,6 +276,10 @@ pub(crate) const GUEST_RANGE_CHECK: [u8; 16] = [
     0x0f, 0x0b, // ud2
 ];
 
+/// The end of each of the six host instructions of [`GUEST_RANGE_CHECK`],
+/// which the region cost gates count one by one.
+pub(crate) const GUEST_RANGE_CHECK_ENDS: [usize; 6] = [3, 7, 9, 12, 14, 16];
+
 fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks) {
     if checks.guest_range {
         code.extend(GUEST_RANGE_CHECK);
@@ -922,6 +926,8 @@ mod tests {
         const PAGE: usize = 4096;
         let (check, trap) = GUEST_RANGE_CHECK.split_at(GUEST_RANGE_CHECK.len() - 2);
         assert_eq!(trap, [0x0f, 0x0b]);
+        assert_eq!(GUEST_RANGE_CHECK_ENDS[4], check.len());
+        assert_eq!(GUEST_RANGE_CHECK_ENDS[5], GUEST_RANGE_CHECK.len());
         // mov rax,rdi; the check with `xor eax,eax` (a failure, also two
         // bytes) where its UD2 is; ret.
         let mut code = vec![0x48, 0x89, 0xf8];

@@ -287,6 +287,12 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     let mut cursor = 0usize;
     let mut ends = vec![];
     while cursor < code.len() {
+        // The exact system-mode guest range check of an access address.
+        if code[cursor..].starts_with(&super::super::GUEST_RANGE_CHECK) {
+            ends.extend(super::super::GUEST_RANGE_CHECK_ENDS.map(|end| cursor + end));
+            cursor += super::super::GUEST_RANGE_CHECK.len();
+            continue;
+        }
         let word = code.get(cursor).copied() == Some(OPERAND_SIZE);
         cursor += usize::from(word);
         let rex = code

@@ -1421,6 +1421,27 @@ mod tests {
             checked.code.len(),
             unchecked.code.len() + 3 * GUEST_RANGE_CHECK.len()
         );
+        // The cost gate counts each check's six instructions on both sides.
+        let mut baseline = vec![];
+        for instruction in &instructions {
+            super::super::emit_instruction(
+                &mut baseline,
+                instruction,
+                &mut vec![],
+                crate::TargetCpu::Baseline,
+                super::super::MemoryChecks {
+                    guest_range: true,
+                    ..super::super::MemoryChecks::DEFAULT
+                },
+            );
+        }
+        let count = analysis::selected_output_instruction_count(&baseline).unwrap();
+        assert_eq!(
+            checked.stats.native_instructions,
+            unchecked.stats.native_instructions + 3 * super::super::GUEST_RANGE_CHECK_ENDS.len()
+        );
+        assert!(checked.stats.native_instructions <= count);
+        assert!(admits_ordinary(&checked, &baseline));
     }
 
     #[test]

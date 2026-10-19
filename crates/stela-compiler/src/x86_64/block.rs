@@ -560,4 +560,209 @@ mod tests {
             assert_eq!(native.source_map, [(pc, 0)]);
         }
     }
+
+    /// Region census of real code, run by hand:
+    /// `STELA_CENSUS=PATH:FILE_OFFSET:BYTES:BASE` names a raw image, the
+    /// executable range to sweep and the guest address of file offset 0
+    /// (all hexadecimal). It sweeps maximal straight-line runs the decoder
+    /// lifts, replays the region selection of [`emit_selected`] on each,
+    /// with its cost gates, and prints the summed allocator statistics, the
+    /// share of instructions each emission path takes, and the categories
+    /// of the instructions that end a region or run outside one.
+    /// `STELA_CENSUS_SYSTEM=1` replays system mode, whose accesses check
+    /// the guest range (`guest_range`), instead of the process profiles.
+    #[test]
+    #[ignore = "measurement over a local image"]
+    fn region_census_of_real_code() {
+        use crate::Lifter;
+        use std::collections::BTreeMap;
+        let spec = std::env::var("STELA_CENSUS").expect("STELA_CENSUS=PATH:OFFSET:BYTES:BASE");
+        let system = std::env::var_os("STELA_CENSUS_SYSTEM").is_some();
+        let parts: Vec<&str> = spec.split(':').collect();
+        let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+        let image = std::fs::read(parts[0]).unwrap();
+        let (offset, bytes, base) = (hex(parts[1]), hex(parts[2]), hex(parts[3]));
+        let text = &image[offset as usize..(offset + bytes) as usize];
+        let category = |op: &Operation| {
+            let name = std::format!("{op:?}");
+            let end = name.find(['(', ' ', '{']).unwrap_or(name.len());
+            std::string::String::from(&name[..end])
+        };
+        let mut stats = super::super::region::AllocationStats::default();
+        let add = |total: &mut super::super::region::AllocationStats,
+                   s: &super::super::region::AllocationStats| {
+            total.state_loads += s.state_loads;
+            total.pressure_stores += s.pressure_stores;
+            total.exit_stores += s.exit_stores;
+            total.lifetime_stores += s.lifetime_stores;
+            total.commits += s.commits;
+            total.native_instructions += s.native_instructions;
+            total.load_boundary_stores += s.load_boundary_stores;
+            total.clean_loads += s.clean_loads;
+            total.pair_loads += s.pair_loads;
+            total.flag_loads += s.flag_loads;
+            total.flag_stores += s.flag_stores;
+        };
+        let (mut allocated, mut clean, mut rejected, mut plain, mut runs) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
+        let (mut region_bytes, mut plain_bytes) = (0usize, 0usize);
+        let mut outside: BTreeMap<std::string::String, usize> = BTreeMap::new();
+        let mut breakers: BTreeMap<std::string::String, usize> = BTreeMap::new();
+        let mut run: Vec<Instruction> = vec![];
+        let mut flush = |run: &mut Vec<Instruction>| {
+            if run.is_empty() {
+                return;
+            }
+            runs += 1;
+            let ranges = if system {
+                super::super::guest_range::checks(run)
+            } else {
+                vec![false; run.len()]
+            };
+            let checks_at = |index: usize| super::super::MemoryChecks {
+                guest_range: ranges[index],
+                single_agent: system,
+                ..super::super::MemoryChecks::DEFAULT
+            };
+            let mut cursor = 0;
+            while cursor < run.len() {
+                let rest = &run[cursor..];
+                // Replays the system-mode selection with its cost gates: a
+                // rejected chunk is emitted as baseline and skipped whole.
+                let baseline = |count: usize| {
+                    let mut code = vec![];
+                    let mut fixups = vec![];
+                    for (index, instruction) in rest[..count].iter().enumerate() {
+                        super::super::emit_instruction(
+                            &mut code,
+                            instruction,
+                            &mut fixups,
+                            crate::TargetCpu::Baseline,
+                            checks_at(cursor + index),
+                        );
+                    }
+                    (code, fixups.is_empty())
+                };
+                let allocated_region = super::super::region::emit_allocated_prefix(rest)
+                    .ok()
+                    .flatten()
+                    .filter(|region| {
+                        let (code, no_fixups) = baseline(region.consumed_instructions);
+                        no_fixups && super::super::region::admits_allocated(region, &code)
+                    });
+                let clean_region = || {
+                    super::super::region::emit_clean_load_prefix(
+                        rest,
+                        system.then(|| &ranges[cursor..]),
+                    )
+                    .ok()
+                    .filter(|region| region.consumed_instructions != 0)
+                };
+                if let Some(region) = allocated_region {
+                    allocated += region.consumed_instructions;
+                    region_bytes += region.code.len();
+                    add(&mut stats, &region.stats);
+                    cursor += region.consumed_instructions;
+                } else if let Some(region) = clean_region() {
+                    let (code, _) = baseline(region.consumed_instructions);
+                    if super::super::region::admits_ordinary(&region, &code) {
+                        clean += region.consumed_instructions;
+                        region_bytes += region.code.len();
+                        add(&mut stats, &region.stats);
+                    } else {
+                        rejected += region.consumed_instructions;
+                        plain_bytes += code.len();
+                    }
+                    cursor += region.consumed_instructions;
+                } else {
+                    let instruction = &run[cursor];
+                    let detail = match &instruction.operation {
+                        Operation::Memory {
+                            transfer,
+                            bytes,
+                            mode,
+                            base,
+                            ..
+                        }
+                        | Operation::MemoryPair {
+                            transfer,
+                            bytes,
+                            mode,
+                            base,
+                            ..
+                        } => std::format!(
+                            "{} {transfer:?} {bytes} {mode:?} {}",
+                            category(&instruction.operation),
+                            if *base == Register::Sp { "sp" } else { "x" }
+                        ),
+                        operation => category(operation),
+                    };
+                    *outside.entry(detail).or_default() += 1;
+                    let mut code = vec![];
+                    let mut fixups = vec![];
+                    if let Operation::FloatingPoint(operand) = &instruction.operation {
+                        super::super::simd::emit_numerical(
+                            &mut code,
+                            operand,
+                            instruction.pc,
+                            crate::TargetCpu::Baseline,
+                        );
+                    } else if super::super::validate_target_with(
+                        instruction,
+                        crate::TargetCpu::Baseline,
+                        checks_at(cursor),
+                    )
+                    .is_ok()
+                    {
+                        super::super::emit_instruction(
+                            &mut code,
+                            instruction,
+                            &mut fixups,
+                            crate::TargetCpu::Baseline,
+                            checks_at(cursor),
+                        );
+                    }
+                    plain_bytes += code.len();
+                    plain += 1;
+                    cursor += 1;
+                    continue;
+                }
+                if let Some(next) = run.get(cursor) {
+                    *breakers.entry(category(&next.operation)).or_default() += 1;
+                }
+            }
+            run.clear();
+        };
+        for (index, word) in text.as_chunks::<4>().0.iter().enumerate() {
+            let pc = GuestAddress(base + offset + 4 * index as u64);
+            match crate::aarch64::Decoder.lift(pc, u32::from_le_bytes(*word)) {
+                Ok(instruction)
+                    if !category(&instruction.operation).starts_with("Branch")
+                        && category(&instruction.operation) != "Return" =>
+                {
+                    run.push(instruction);
+                    if run.len() == crate::block::MAX_BLOCK_INSTRUCTIONS {
+                        flush(&mut run);
+                    }
+                }
+                _ => flush(&mut run),
+            }
+        }
+        flush(&mut run);
+        let top = |map: &BTreeMap<std::string::String, usize>| {
+            let mut v: Vec<_> = map.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1));
+            v.into_iter()
+                .take(40)
+                .map(|(k, n)| std::format!("{k} {n}"))
+                .collect::<Vec<_>>()
+        };
+        std::println!(
+            "runs {runs} allocated {allocated} clean {clean} rejected {rejected} plain {plain}"
+        );
+        std::println!("region bytes {region_bytes} plain bytes {plain_bytes}");
+        std::println!("{stats:?}");
+        std::println!("outside {:?}", top(&outside));
+        std::println!("breakers {:?}", top(&breakers));
+    }
 }

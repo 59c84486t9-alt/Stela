@@ -332,7 +332,7 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
     // A system-mode access checks the address against the guest's ranges.
     let checked = ORDINARY_ADDRESS_BYTES + super::super::GUEST_RANGE_CHECK.len();
     if code.get(ORDINARY_ADDRESS_BYTES..checked) == Some(&super::super::GUEST_RANGE_CHECK[..]) {
-        ends.push(checked);
+        ends.extend(super::super::GUEST_RANGE_CHECK_ENDS.map(|end| ORDINARY_ADDRESS_BYTES + end));
     }
     Some(ends)
 }
