@@ -12,6 +12,7 @@
 //! every system case runs under a random HCR_EL2 and stage 2, with
 //! exceptions taken to EL2 compared with HPFAR_EL2.
 mod matrix;
+mod regions;
 
 use crate::oracle::{
     CODE_PAGE, CODE_REGION, CODE_REGION_BYTES, Case, DATA_BYTES, DATA_WINDOW, Hypervisor, Oracle,
@@ -93,6 +94,9 @@ pub struct Differential {
     /// selects.
     #[arg(long)]
     data_independent_timing: bool,
+    /// Random straight-line region sequences ([`regions`]).
+    #[arg(long, default_value_t = 2048)]
+    regions: usize,
 }
 
 /// HCR_EL2 controls the EL2 lane adds at random: PTW, DC and FWB. QEMU does
@@ -547,6 +551,8 @@ struct Subject {
     /// 0 steps the code at EL0; 1 and 2 run it at EL1t or EL2t (system-mode
     /// words only, EL2 in the EL2 lane only).
     el: u8,
+    /// X registers each case starts with window pointers in.
+    pointers: u32,
     translation: Translation,
 }
 
@@ -699,6 +705,11 @@ impl Differential {
                 let mut state = random.state();
                 if let Some(register) = zero_block {
                     state.x[register] = random.pointer();
+                }
+                for register in 0..state.x.len() {
+                    if subject.pointers & (1 << register) != 0 {
+                        state.x[register] = random.pointer();
+                    }
                 }
                 Case {
                     code: subject.code.clone(),
@@ -900,6 +911,42 @@ impl Differential {
                 }
             }
         }
+        self.region_subjects(random, skipped, each)
+    }
+
+    /// Random region sequences ([`regions`]), translated as ordinary blocks.
+    fn region_subjects(
+        &self,
+        random: &mut Random,
+        skipped: &mut usize,
+        mut each: impl FnMut(&mut Random, Subject) -> Result<()>,
+    ) -> Result<()> {
+        if self.profile.is_some()
+            || self
+                .form
+                .as_ref()
+                .is_some_and(|filter| !regions::FORM.contains(filter.as_str()))
+        {
+            return Ok(());
+        }
+        for _ in 0..self.regions {
+            let (code, pointers) = regions::sequence(random);
+            let Ok(translation) = Translation::block(&code) else {
+                *skipped += 1;
+                continue;
+            };
+            let subject = Subject {
+                form: regions::FORM.into(),
+                code,
+                scalable: None,
+                system: false,
+                draft: false,
+                el: 0,
+                pointers,
+                translation,
+            };
+            each(random, subject)?;
+        }
         Ok(())
     }
 }
@@ -921,6 +968,7 @@ fn subjects_for(
         system,
         draft: is_draft(form),
         el,
+        pointers: 0,
         code,
         translation,
     };

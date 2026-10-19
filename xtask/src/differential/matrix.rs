@@ -394,6 +394,7 @@ pub(super) fn subjects(
                         system: true,
                         draft,
                         el,
+                        pointers: 0,
                         translation: Translation::system(&[word, read])?,
                     });
                 }
@@ -409,6 +410,7 @@ pub(super) fn subjects(
                         system: true,
                         draft,
                         el,
+                        pointers: 0,
                         translation: Translation::system(&[word, word])?,
                     });
                 }
@@ -421,6 +423,7 @@ pub(super) fn subjects(
                     system: true,
                     draft,
                     el,
+                    pointers: 0,
                     translation: Translation::system(&[word])?,
                 });
             }
