@@ -4777,11 +4777,14 @@ mod tests {
         };
         let mut machine = machine(&[LDADD_W1_W0_X2, SVC_0]);
         // Without a host that gives the guarantee, PSTATE.DIT changes no code.
+        // The engine runs one PE at a time, so its atomics are plain accesses
+        // either way, which load first and so report WnR as Arm requires.
         machine.cpu.pstate.dit = true;
         let Ok(Fetched::Block(untimed)) = machine.fetch_block(BASE, false) else {
             panic!("block")
         };
-        assert!(has(&machine, untimed, &LOCK_XADD));
+        assert!(!machine.blocks[untimed].variant.timing);
+        assert!(has(&machine, untimed, &PLAIN_ADD_STORE) && !has(&machine, untimed, &LOCK_XADD));
         machine.cpu.pstate.dit = false;
         assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == untimed));
         // With one, PSTATE.DIT selects a block of its own.
@@ -4791,6 +4794,7 @@ mod tests {
             panic!("timed block")
         };
         assert_ne!(timed, untimed);
+        assert!(machine.blocks[timed].variant.timing);
         assert!(has(&machine, timed, &PLAIN_ADD_STORE) && !has(&machine, timed, &LOCK_XADD));
         machine.cpu.pstate.dit = false;
         assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == untimed));

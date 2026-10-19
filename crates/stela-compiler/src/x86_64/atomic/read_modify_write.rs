@@ -1,13 +1,11 @@
 //! LDADD-family atomics: direct LOCK operations where x86 has them, otherwise a
 //! CMPXCHG retry loop. The old value is written only after the update succeeds.
-//! For PSTATE.DIT they are a plain load, update and store ([`plain`]).
+//! For a single agent or PSTATE.DIT they are a plain load, update and store
+//! ([`plain`]).
 use super::{ValueRegister, commit_rax, input_rax, input_rcx, locked_compare_exchange, read_rax};
-use crate::{
-    TargetCpu,
-    aarch64::{
-        Register,
-        atomic::{Kind, Operand, Rmw},
-    },
+use crate::aarch64::{
+    Register,
+    atomic::{Kind, Operand, Rmw},
 };
 use alloc::vec::Vec;
 
@@ -52,7 +50,7 @@ const MOV_R8_EAX_OPERANDS: &[u8] = &[0x89, 0xc0];
 const NOT_ECX: &[u8] = &[0xf7, 0xd1];
 const MODRM_EAX_ECX: u8 = 0xc8;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, plain_access: bool) {
     let Kind::ReadModifyWrite {
         operation,
         source,
@@ -61,7 +59,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     else {
         unreachable!("root dispatches only read-modify-write operands");
     };
-    if target.data_independent_timing() {
+    if plain_access {
         plain(code, operand.bytes, operation, source, destination);
         return;
     }
@@ -91,13 +89,15 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     }
 }
 
-/// The data-independent-timing lowering: load the old value into RAX, form
-/// the new one in R8 with MOV, ADD, AND (of the inverted operand), XOR, OR,
-/// or CMP and CMOVcc, store it, then commit the old value. Every instruction
-/// is on Intel's data operand independent timing list and nothing branches.
+/// The single-agent and data-independent-timing lowering: load the old value
+/// into RAX, form the new one in R8 with MOV, ADD, AND (of the inverted
+/// operand), XOR, OR, or CMP and CMOVcc, store it, then commit the old value.
+/// Every instruction is on Intel's data operand independent timing list and
+/// nothing branches.
 ///
 /// The pair is atomic only while no other agent accesses guest memory, which
-/// the mode requires ([`TargetCpu::data_independent_timing`]). The load comes
+/// both modes require ([`crate::TargetCpu::data_independent_timing`],
+/// [`super::super::MemoryChecks::single_agent`]). The load comes
 /// first, so an address a read would fault on faults there with WnR 0 and a
 /// read-only one at the store with WnR 1, as Arm requires of an atomic that
 /// both reads and writes; nothing is committed before the store completes.

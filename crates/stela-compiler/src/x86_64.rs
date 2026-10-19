@@ -46,7 +46,7 @@ pub(crate) fn validate_target_with(
         });
     }
     if let Operation::Ordered(operand) = &instruction.operation
-        && ordered::requires_atomic_load16(operand, checks)
+        && ordered::requires_atomic_load16(operand, target, checks)
         && !target.supports(crate::TargetCpu::AtomicLoad16)
     {
         return Err(UnsupportedReason::HostCapabilityRequired {
@@ -55,7 +55,7 @@ pub(crate) fn validate_target_with(
         });
     }
     if let Operation::Atomic(operand) = &instruction.operation
-        && atomic::requires_cx16(operand)
+        && atomic::requires_cx16(operand, target, checks)
         && !target.supports(crate::TargetCpu::Cx16)
     {
         return Err(UnsupportedReason::HostCapabilityRequired {
@@ -220,6 +220,13 @@ pub struct MemoryChecks {
     /// ([`GUEST_RANGE_CHECK`]). `SystemModeV1` sets it for every block,
     /// whatever the engine asks, and no other profile does.
     pub(crate) guest_range: bool,
+    /// No other agent accesses guest memory while the block runs: the
+    /// system engine runs one PE at a time, and no device or host agent
+    /// writes guest RAM meanwhile. Atomics, ordered accesses and barriers
+    /// then need no LOCK, XCHG, MFENCE or 16-byte snapshot
+    /// ([`plain_ordering`]). `SystemModeV1` sets it for every block, and no
+    /// other profile does.
+    pub(crate) single_agent: bool,
 }
 
 impl MemoryChecks {
@@ -230,6 +237,7 @@ impl MemoryChecks {
         alignment: false,
         ordered_granule: true,
         guest_range: false,
+        single_agent: false,
     };
     /// SCTLR_ELx's checks, as the system-mode engine selects them.
     pub const fn system(stack_alignment: bool, alignment: bool, ordered_granule: bool) -> Self {
@@ -238,8 +246,18 @@ impl MemoryChecks {
             alignment,
             ordered_granule,
             guest_range: false,
+            single_agent: false,
         }
     }
+}
+
+/// Whether atomics, ordered accesses and barriers lower to plain accesses:
+/// for a single agent ([`MemoryChecks::single_agent`]), and in the
+/// data-independent-timing mode, which requires one
+/// ([`crate::TargetCpu::data_independent_timing`]) because LOCK, XCHG and
+/// MFENCE are not on Intel's data operand independent timing list.
+fn plain_ordering(target: crate::TargetCpu, checks: MemoryChecks) -> bool {
+    checks.single_agent || target.data_independent_timing()
 }
 
 /// The system-mode check of the access address in RAX against the guest's

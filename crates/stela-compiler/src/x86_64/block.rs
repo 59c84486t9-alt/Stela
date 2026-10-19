@@ -121,7 +121,8 @@ pub(crate) fn emit_system_mode(
     // Allocated and clean-load regions settle the frame before every
     // access and exit, so a fault inside one finds it exact. Their loads
     // carry no SCTLR_ELx.A check. Accesses check the guest range
-    // (`x86_64::guest_range`).
+    // (`x86_64::guest_range`). One PE runs at a time, so ordering and
+    // atomicity need no locked instructions or fences.
     emit_selected(
         instructions,
         terminal,
@@ -130,6 +131,7 @@ pub(crate) fn emit_system_mode(
         !checks.alignment,
         super::MemoryChecks {
             guest_range: true,
+            single_agent: true,
             ..checks
         },
         native,

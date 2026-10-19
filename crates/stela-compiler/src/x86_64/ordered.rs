@@ -1,9 +1,12 @@
 //! Acquire/release accesses and DMB on write-back memory.
 //!
-//! Release stores use XCHG so a later acquire load cannot pass them, except
-//! for PSTATE.DIT, where they are plain stores. Checked loads crossing eight
-//! bytes read one aligned 16-byte snapshot.
-use super::atomic::{address_offset, commit_rax, input_rcx, read_rax};
+//! Release stores use XCHG so a later acquire load cannot pass them, and a
+//! full DMB is MFENCE. Checked loads crossing eight bytes read one aligned
+//! 16-byte snapshot. For a single agent or PSTATE.DIT
+//! ([`super::plain_ordering`]) every access is a plain load or store and a
+//! DMB emits nothing: no other agent observes guest memory, and one PE
+//! observes its own accesses in program order.
+use super::atomic::{address_offset, commit_rax, input_rcx, read_rax, store_rcx};
 use crate::{
     TargetCpu,
     aarch64::{
@@ -55,8 +58,6 @@ const MOV_EAX_EDX: &[u8] = &[0x89, 0xd0];
 const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
 const CMP_AL_IMM8: u8 = 0x3c;
 const JBE_REL8: u8 = 0x76;
-const MOV_STORE: u8 = 0x89;
-const MOV_STORE_BYTE: u8 = 0x88;
 const ATOMIC_QUANTITY_MASK: u8 = ATOMIC_QUANTITY_BYTES - 1;
 
 /// Whether an ordered access crosses its 16-byte granule, which it may only
@@ -109,8 +110,16 @@ fn patch(code: &mut [u8], at: usize) {
 
 /// Generic wider loads can cross eight bytes. A checked, so aligned, SP makes
 /// the effective residue known; a statically faulting access never needs a
-/// snapshot capability.
-pub(super) fn requires_atomic_load16(operand: &Operand, checks: super::MemoryChecks) -> bool {
+/// snapshot capability, and neither does a plain load
+/// ([`super::plain_ordering`]).
+pub(super) fn requires_atomic_load16(
+    operand: &Operand,
+    target: TargetCpu,
+    checks: super::MemoryChecks,
+) -> bool {
+    if super::plain_ordering(target, checks) {
+        return false;
+    }
     let Operand::Transfer {
         kind: Kind::Acquire | Kind::AcquirePc,
         bytes: bytes @ (HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES),
@@ -135,13 +144,15 @@ pub(super) fn emit(
     target: TargetCpu,
     checks: super::MemoryChecks,
 ) {
+    let plain = super::plain_ordering(target, checks);
     match *operand {
         Operand::Barrier { requirement, .. } => {
             // Cached ordinary WB accesses already preserve reads→reads/writes
-            // and writes→writes. Full barriers additionally close store→load.
+            // and writes→writes. Full barriers additionally close store→load,
+            // which only another agent could observe.
             match requirement {
-                Barrier::All => code.extend(MFENCE),
-                Barrier::Reads | Barrier::Writes => code.push(NOP),
+                Barrier::All if !plain => code.extend(MFENCE),
+                Barrier::All | Barrier::Reads | Barrier::Writes => code.push(NOP),
             }
         }
         Operand::Transfer {
@@ -163,13 +174,19 @@ pub(super) fn emit(
             // An access that crosses its granule needs no single-copy
             // atomicity: it takes a plain load, or a store and a full fence.
             let crossing = crossing(base, bytes, displacement, checks);
-            if kind == Kind::Release && target.data_independent_timing() {
-                // XCHG and MFENCE are not on Intel's data operand independent
-                // timing list. The mode requires that no other agent
-                // accesses guest memory, so a plain store is ordered after
-                // every earlier access and before every later one.
-                input_rcx(code, bytes, data);
-                plain_store(code, bytes);
+            if plain {
+                // With no other agent, a plain access is single-copy atomic
+                // and ordered after every earlier access and before every
+                // later one, wherever it lies in its granule. (XCHG and
+                // MFENCE are also not on Intel's data operand independent
+                // timing list.)
+                if kind == Kind::Release {
+                    input_rcx(code, bytes, data);
+                    store_rcx(code, bytes);
+                } else {
+                    read_extended(code, bytes, extension);
+                    commit_rax(code, bytes, data);
+                }
             } else if kind == Kind::Release {
                 input_rcx(code, bytes, data);
                 match crossing {
@@ -194,7 +211,7 @@ pub(super) fn emit(
                 }
                 if crossing == Crossing::Always {
                     read_extended(code, bytes, extension);
-                } else if requires_atomic_load16(operand, checks) {
+                } else if requires_atomic_load16(operand, target, checks) {
                     // The compiler validates this requirement before emission.
                     debug_assert!(target.supports(TargetCpu::AtomicLoad16));
                     if base == Register::Sp && checks.stack_alignment {
@@ -221,25 +238,8 @@ pub(super) fn emit(
 /// in order after earlier accesses, and MFENCE, which keeps later
 /// load-acquires after it (RCsc).
 fn crossing_release(code: &mut Vec<u8>, bytes: u8) {
-    plain_store(code, bytes);
+    store_rcx(code, bytes);
     code.extend(MFENCE);
-}
-
-/// MOV of RCX's low `bytes` to [RDX].
-fn plain_store(code: &mut Vec<u8>, bytes: u8) {
-    if bytes == HALFWORD_BYTES {
-        code.push(OPERAND_SIZE_PREFIX);
-    } else if bytes == QWORD_BYTES {
-        code.push(REX_W_PREFIX);
-    }
-    code.extend([
-        if bytes == BYTE_BYTES {
-            MOV_STORE_BYTE
-        } else {
-            MOV_STORE
-        },
-        RCX_RDX_MEMORY,
-    ]);
 }
 
 fn release(code: &mut Vec<u8>, bytes: u8) {
@@ -358,12 +358,16 @@ mod tests {
                         extension: LoadExtension::Zero,
                     };
                     assert_eq!(
-                        requires_atomic_load16(&operand, MemoryChecks::DEFAULT),
+                        requires_atomic_load16(
+                            &operand,
+                            TargetCpu::detect(),
+                            MemoryChecks::DEFAULT
+                        ),
                         kind != Kind::Release && bytes != BYTE_BYTES && base != Register::Sp
                     );
                     // An unchecked SP is an ordinary base.
                     assert_eq!(
-                        requires_atomic_load16(&operand, UNCHECKED),
+                        requires_atomic_load16(&operand, TargetCpu::detect(), UNCHECKED),
                         kind != Kind::Release && bytes != BYTE_BYTES
                     );
                 }
@@ -384,7 +388,7 @@ mod tests {
                 let inside_quantity = effective / 16 == last / 16;
                 let crosses_baseline = effective / 8 != last / 8;
                 assert_eq!(
-                    requires_atomic_load16(&operand, MemoryChecks::DEFAULT),
+                    requires_atomic_load16(&operand, TargetCpu::detect(), MemoryChecks::DEFAULT),
                     inside_quantity && crosses_baseline
                 );
             }
@@ -394,8 +398,70 @@ mod tests {
                 option: 15,
                 requirement: Barrier::All,
             },
+            TargetCpu::detect(),
             MemoryChecks::DEFAULT,
         ));
+        // A single agent's acquire loads are plain loads.
+        let single = MemoryChecks {
+            single_agent: true,
+            ..MemoryChecks::DEFAULT
+        };
+        let operand = Operand::Transfer {
+            kind: Kind::Acquire,
+            bytes: QWORD_BYTES,
+            data: Register::X(0),
+            base: Register::X(1),
+            displacement: 0,
+            extension: LoadExtension::Zero,
+        };
+        assert!(!requires_atomic_load16(
+            &operand,
+            TargetCpu::detect(),
+            single
+        ));
+    }
+
+    #[test]
+    fn a_single_agent_takes_plain_ordered_accesses_and_drops_dmb() {
+        let single = MemoryChecks {
+            single_agent: true,
+            ordered_granule: false,
+            ..MemoryChecks::DEFAULT
+        };
+        let has =
+            |code: &[u8], bytes: &[u8]| code.windows(bytes.len()).any(|window| window == bytes);
+        let mut barrier = Vec::new();
+        emit(
+            &mut barrier,
+            &Operand::Barrier {
+                option: 15,
+                requirement: Barrier::All,
+            },
+            TargetCpu::detect(),
+            single,
+        );
+        assert_eq!(barrier, [NOP]);
+        for kind in [Kind::Acquire, Kind::AcquirePc, Kind::Release] {
+            let operand = Operand::Transfer {
+                kind,
+                bytes: QWORD_BYTES,
+                data: Register::X(1),
+                base: Register::X(2),
+                displacement: 0,
+                extension: LoadExtension::Zero,
+            };
+            let mut code = Vec::new();
+            emit(&mut code, &operand, TargetCpu::detect(), single);
+            // No XCHG, MFENCE, 16-byte snapshot or granule branch.
+            assert!(!has(&code, &[0x48, 0x87, 0x0a]) && !has(&code, MFENCE));
+            assert!(!has(&code, MOVDQA_XMM0_RDX) && !has(&code, &[0x89, 0xd0, 0x83, 0xe0]));
+            if kind == Kind::Release {
+                assert!(code.ends_with(&[0x48, 0x89, 0x0a]));
+            } else {
+                // mov rax,[rdx], then the commit to X1.
+                assert!(code.ends_with(&[0x48, 0x8b, 0x02, 0x48, 0x89, 0x87, 8, 0, 0, 0]));
+            }
+        }
     }
 
     #[test]

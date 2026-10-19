@@ -41,9 +41,10 @@ pub struct TargetCpu {
     /// Lower for FEAT_DIT's PSTATE.DIT: the listed instructions that have a
     /// data-independent lowering (CLZ, CLS, CTZ, CNT, CRC32, CRC32C) compile
     /// to instructions on Intel's list, without a branch on or a memory index
-    /// by their data, at a cost in speed. The LSE read-modify-write atomics
-    /// and the store-releases become plain loads and stores (no LOCK, XCHG or
-    /// MFENCE), so the mode requires that no other agent accesses guest
+    /// by their data, at a cost in speed. The LSE atomics, acquire loads,
+    /// store-releases and barriers become plain loads and stores (no LOCK,
+    /// XCHG or MFENCE), as for a single agent, so the mode requires that no
+    /// other agent accesses guest
     /// memory while its code runs: the system engine runs one PE at a time,
     /// and a multi-threaded process must not use it. A compilation mode, not
     /// a host capability; `isa/dit-timing-audit.json` records each listed

@@ -448,13 +448,19 @@ impl CompilationPlan {
         target: crate::TargetCpu,
     ) -> Result<Self, CompileError> {
         let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+        // System mode emits for a single agent, whose atomics and acquire
+        // loads need neither CMPXCHG16B nor a 16-byte snapshot.
+        let validated = crate::x86_64::MemoryChecks {
+            single_agent: profile == BlockProfile::SystemModeV1,
+            ..crate::x86_64::MemoryChecks::DEFAULT
+        };
         for instruction in &parsed.instructions {
             if !matches!(
                 instruction.operation,
                 Operation::Exclusive(_) | Operation::CheckedPointer(_)
             ) || profile.checked_memory().is_none()
             {
-                crate::x86_64::validate_target(instruction, target)
+                crate::x86_64::validate_target_with(instruction, target, validated)
                     .map_err(|error| CompileError(format!("{error:?}")))?;
             }
         }
@@ -517,8 +523,12 @@ impl CompilationPlan {
             )));
         }
         if !checks.stack_alignment {
+            let single_agent = crate::x86_64::MemoryChecks {
+                single_agent: true,
+                ..checks
+            };
             for instruction in &self.parsed.instructions {
-                crate::x86_64::validate_target_with(instruction, self.target, checks)
+                crate::x86_64::validate_target_with(instruction, self.target, single_agent)
                     .map_err(|error| CompileError(format!("{error:?}")))?;
             }
         }
@@ -1240,6 +1250,7 @@ mod tests {
             crate::TargetCpu::Baseline,
             crate::x86_64::MemoryChecks {
                 guest_range: true,
+                single_agent: true,
                 ..aligned
             },
         );
@@ -1256,6 +1267,41 @@ mod tests {
             analyze_with_profile(&0xd508_8723_u32.to_le_bytes(), BASE, BlockProfile::SystemV1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn system_mode_compiles_for_a_single_agent_without_cmpxchg16b_or_locks() {
+        const BASE: GuestAddress = GuestAddress(0x1000);
+        // casp x2, x3, x2, x3, [x4] (Rs = Rt), ldar x0, [x1], dmb sy, b .
+        const CASP_X2_X3_X4: u32 = 0x4822_7c82;
+        const LDAR_X0_X1: u32 = 0xc8df_fc20;
+        const DMB_SY: u32 = 0xd503_3fbf;
+        const B_SELF: u32 = 0x1400_0000;
+        const LOCK: u8 = 0xf0;
+        const MFENCE: [u8; 3] = [0x0f, 0xae, 0xf0];
+        let source: Vec<u8> = [CASP_X2_X3_X4, LDAR_X0_X1, DMB_SY, B_SELF]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        // The baseline target has neither CMPXCHG16B nor the aligned 16-byte
+        // load, which only another agent could tell apart.
+        for profile in [BlockProfile::Ordinary, BlockProfile::SystemModeV1] {
+            let plan = CompilationPlan::new(&source, BASE, profile, crate::TargetCpu::Baseline);
+            assert_eq!(plan.is_ok(), profile == BlockProfile::SystemModeV1);
+        }
+        let code = CompilationPlan::new(
+            &source,
+            BASE,
+            BlockProfile::SystemModeV1,
+            crate::TargetCpu::Baseline,
+        )
+        .unwrap()
+        .compile()
+        .unwrap()
+        .native
+        .x86_64_code;
+        assert!(!code.contains(&LOCK), "{code:02x?}");
+        assert!(!code.windows(MFENCE.len()).any(|window| window == MFENCE));
     }
 
     #[test]

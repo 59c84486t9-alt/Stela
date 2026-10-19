@@ -43,6 +43,12 @@ const STATE_RCX: u8 = 0x8f;
 const MOVZX_BYTE: u8 = 0xb6;
 const MOVZX_HALFWORD: u8 = 0xb7;
 const MOV: u8 = 0x8b;
+const MOV_STORE_BYTE: u8 = 0x88;
+const MOV_STORE: u8 = 0x89;
+/// `[rdx], rcx`.
+const RCX_RDX_MEMORY: u8 = 0x0a;
+const MOV_EAX_IMM32: u8 = 0xb8;
+const MOV_ECX_IMM32: u8 = 0xb9;
 
 #[derive(Clone, Copy)]
 enum InputRegister {
@@ -56,22 +62,37 @@ pub(super) enum ValueRegister {
     R8,
 }
 
-pub(super) fn requires_cx16(operand: &Operand) -> bool {
+/// A CASP of two doublewords needs CMPXCHG16B, unless it is a plain access
+/// ([`super::plain_ordering`]).
+pub(super) fn requires_cx16(
+    operand: &Operand,
+    target: crate::TargetCpu,
+    checks: super::MemoryChecks,
+) -> bool {
     matches!(operand.kind, Kind::CompareExchangePair { .. })
         && operand.bytes == DOUBLEWORD_PAIR_BYTES
+        && !super::plain_ordering(target, checks)
 }
 
+/// Locked x86 updates, or for a single agent ([`super::plain_ordering`]) a
+/// plain load, the update and a plain store. The plain recipes load first,
+/// so a translation, Access flag or read-permission fault reports WnR 0 and
+/// a store to read-only memory WnR 1, as Arm requires of an atomic that
+/// reads and writes (ESR_ELx.WnR); a locked x86 update faults as a write.
 pub(super) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
 ) {
+    let plain = super::plain_ordering(target, checks);
     address(code, operand.base, operand.bytes, checks);
     match operand.kind {
-        Kind::CompareExchange { .. } => compare_exchange::emit(code, operand),
-        Kind::CompareExchangePair { .. } => compare_exchange_pair::emit(code, operand, target),
-        Kind::ReadModifyWrite { .. } => read_modify_write::emit(code, operand, target),
+        Kind::CompareExchange { .. } => compare_exchange::emit(code, operand, plain),
+        Kind::CompareExchangePair { .. } => {
+            compare_exchange_pair::emit(code, operand, target, plain)
+        }
+        Kind::ReadModifyWrite { .. } => read_modify_write::emit(code, operand, plain),
     }
 }
 
@@ -149,14 +170,63 @@ pub(super) fn input_rcx(code: &mut Vec<u8>, bytes: u8, register: Register) {
     input(code, bytes, register, InputRegister::Rcx);
 }
 
+/// [`input_rcx`] without changing the host flags: ZR is a MOV of zero.
+pub(super) fn input_rcx_keeping_flags(code: &mut Vec<u8>, bytes: u8, register: Register) {
+    if register == Register::Zero {
+        code.push(MOV_ECX_IMM32);
+        code.extend(0u32.to_le_bytes());
+    } else {
+        input_rcx(code, bytes, register);
+    }
+}
+
+/// [`input_rax`] without changing the host flags: ZR is a MOV of zero.
+pub(super) fn input_rax_keeping_flags(code: &mut Vec<u8>, bytes: u8, register: Register) {
+    if register == Register::Zero {
+        code.push(MOV_EAX_IMM32);
+        code.extend(0u32.to_le_bytes());
+    } else {
+        input_rax(code, bytes, register);
+    }
+}
+
 pub(super) fn read_rax(code: &mut Vec<u8>, bytes: u8) {
+    read(code, bytes, 0);
+}
+
+/// [RDX] at `bytes` into R8, zero-extended.
+pub(super) fn read_r8(code: &mut Vec<u8>, bytes: u8) {
+    read(code, bytes, REX_R_BIT);
+}
+
+fn read(code: &mut Vec<u8>, bytes: u8, rex: u8) {
+    let wide = if bytes == QWORD_BYTES { REX_W_BIT } else { 0 };
+    if rex | wide != 0 {
+        code.push(REX_PREFIX | rex | wide);
+    }
     match bytes {
         BYTE_BYTES => code.extend([TWO_BYTE_OPCODE, MOVZX_BYTE, RDX_ADDRESS]),
         HALFWORD_BYTES => code.extend([TWO_BYTE_OPCODE, MOVZX_HALFWORD, RDX_ADDRESS]),
-        DWORD_BYTES => code.extend([MOV, RDX_ADDRESS]),
-        QWORD_BYTES => code.extend([REX_PREFIX | REX_W_BIT, MOV, RDX_ADDRESS]),
+        DWORD_BYTES | QWORD_BYTES => code.extend([MOV, RDX_ADDRESS]),
         _ => unreachable!("decoder validates atomic widths"),
     }
+}
+
+/// MOV of RCX's low `bytes` to [RDX].
+pub(super) fn store_rcx(code: &mut Vec<u8>, bytes: u8) {
+    match bytes {
+        HALFWORD_BYTES => code.push(OPERAND_SIZE_PREFIX),
+        QWORD_BYTES => code.push(REX_PREFIX | REX_W_BIT),
+        _ => {}
+    }
+    code.extend([
+        if bytes == BYTE_BYTES {
+            MOV_STORE_BYTE
+        } else {
+            MOV_STORE
+        },
+        RCX_RDX_MEMORY,
+    ]);
 }
 
 /// Input staging and exact-width updates keep the complete old value zero-extended.
