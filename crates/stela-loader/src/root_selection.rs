@@ -24,8 +24,12 @@
 //!
 //! Inferred: a recovery boot removes `apfs-preboot-uuid` so the kernel
 //! reads `associated-volume-group`, and its `boot-uuid` is the Recovery
-//! volume's UUID; a ramdisk boot (restore, or recoveryOS from Stela's
-//! recovery bundle) removes all three, rooting from the ramdisk alone.
+//! volume's UUID.
+//!
+//! Known: with `rd=` in its boot-args iBoot skips this writer (0x244f8..
+//! 0x24530), so a ramdisk boot keeps the template's 38 zero bytes. Stela
+//! removes them instead, which TXM's darwin expert reads as the null volume
+//! UUID rather than an invalid length (docs/research/iboot-handoff.md).
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, ensure};
