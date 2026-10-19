@@ -354,6 +354,30 @@ fn system_oracle_limit(form: &str, case: &Case) -> bool {
     let el2_absent = case.el == 2
         && ((op1, crn, crm, op2) == (5, 1, 0, 1) || (op1, crn, crm, op2) == (4, 3, 1, 6));
     let absent_registers = register_access && (mpam || records || el2_absent) || debug;
+    // QEMU's GICv3 has the physical CPU interface, which Apple's cores lack:
+    // the engine makes every physical ICC_* access at EL1 and EL2 UNDEFINED
+    // (ICC_PMR_EL1 at CRn=4, CRm=6, op2=0, the rest at CRn=12, CRm=8..12)
+    // except ICC_SRE_EL1 (CRm=12, op2=5), which both read as one. Its virtual
+    // interface has 4 list registers where the M2's ICH_VTR_EL2 has 8, so
+    // ICH_LR4_EL2 and above (op1=4, CRn=12, CRm=12 and 13) are UNDEFINED there.
+    let physical_gic = op1 == 0
+        && (crn == 12 && (8..=12).contains(&crm) && (crm, op2) != (12, 5)
+            || (crn, crm, op2) == (4, 6, 0));
+    let list_register = case.el == 2
+        && op1 == 4
+        && crn == 12
+        && matches!(crm, 12 | 13)
+        && (crm - 12) * 8 + op2 >= QEMU_LIST_REGISTERS;
+    let gic = register_access && case.el != 0 && (physical_gic || list_register);
+    // The lane's machine has no board, so RVBAR_EL2 (op1=4, CRn=12, CRm=0,
+    // op2=1) has no reset address to read and the engine refuses it; a write
+    // of RMR_EL2 (op2=2) setting RR requests the Warm reset the engine
+    // refuses.
+    let read = (word >> 21) & 1 == 1;
+    let reset = register_access
+        && case.el == 2
+        && (op1, crn, crm) == (4, 12, 0)
+        && (op2 == 1 && read || op2 == 2 && !read && address & RMR_RR != 0);
     // QEMU zeroes DC ZVA on Device memory, where Arm takes an Alignment fault
     // (`AArch64_S1HasAlignmentFaultDueToMemType`); the EL2 harness runs with
     // SCTLR_EL2.M clear, so all of its data is Device-nGnRnE.
@@ -361,6 +385,8 @@ fn system_oracle_limit(form: &str, case: &Case) -> bool {
     wfi || absent
         || device_zero
         || absent_registers
+        || gic
+        || reset
         || sme
         || pstate
         || flags
@@ -373,6 +399,10 @@ fn system_oracle_limit(form: &str, case: &Case) -> bool {
         || by_address
 }
 
+/// The list registers of QEMU's GICv3 virtual CPU interface (`virt`).
+const QEMU_LIST_REGISTERS: u32 = 4;
+/// RMR_EL2.RR, the Warm reset request.
+const RMR_RR: u64 = 1 << 1;
 /// MSR CNTFRQ_EL0, Xt (op0=3, op1=3, CRn=14, CRm=0, op2=0) without Rt.
 const MSR_CNTFRQ_EL0: u32 = 0xd51b_e000;
 /// MSR DAIFSet, #imm (op1=3, CRn=4, op2=6) without CRm; op2 bit 0 adds DAIFClr.

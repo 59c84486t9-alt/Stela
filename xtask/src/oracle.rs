@@ -318,9 +318,9 @@ impl Oracle {
         fs::write(&harness, HARNESS)?;
         fs::write(&batch, encode(cases, layout)?)?;
         let machine = if self.el2 {
-            "virt,mte=on,virtualization=on"
+            "virt,mte=on,virtualization=on,gic-version=3"
         } else {
-            "virt,mte=on"
+            "virt,mte=on,gic-version=3"
         };
         let output = Command::new(&self.qemu)
             .current_dir(directory.path())
