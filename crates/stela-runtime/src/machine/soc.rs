@@ -20,7 +20,7 @@ use crate::platform::apple::{
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     amcc, ans, asc, atc_phy, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse,
-    i2c, nor, power, ptd, sart, spi, wake,
+    i2c, nor, power, ptd, sart, smc, spi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -759,25 +759,33 @@ pub struct ChildModel {
     pub compatible: &'static str,
     pub boot_properties: &'static [(&'static str, &'static [u8])],
 }
-const ROLE_MODELS: &[ModelClaim] = &[ModelClaim {
-    compatible: ASC,
-    property: ("role", b"ANS2\0"),
-    children: &[ChildModel {
-        compatible: RTBUDDY,
-        // Native RTKit is already running before SPTM and uses no ARM
-        // firmware memory. RTBuddy::_initConfigEDT (0x4661408..14b4)
-        // reads pre-loaded/running/no-firmware-service; getSegmentMap
-        // (0x4661d68/1df8) accepts empty segment-ranges/segment-names.
-        // _handlePreloadFirmware (0x465a488) consumes that segment map.
-        boot_properties: &[
-            ("pre-loaded", b""),
-            ("running", b""),
-            ("no-firmware-service", b""),
-            ("segment-ranges", b""),
-            ("segment-names", b""),
-        ],
-    }],
-}];
+/// Native RTKit is already running before SPTM and uses no ARM firmware
+/// memory. RTBuddy::_initConfigEDT (0x4661408..14b4) reads
+/// pre-loaded/running/no-firmware-service; getSegmentMap (0x4661d68/1df8)
+/// accepts empty segment-ranges/segment-names. _handlePreloadFirmware
+/// (0x465a488) consumes that segment map.
+const NATIVE_RTKIT: ChildModel = ChildModel {
+    compatible: RTBUDDY,
+    boot_properties: &[
+        ("pre-loaded", b""),
+        ("running", b""),
+        ("no-firmware-service", b""),
+        ("segment-ranges", b""),
+        ("segment-names", b""),
+    ],
+};
+const ROLE_MODELS: &[ModelClaim] = &[
+    ModelClaim {
+        compatible: ASC,
+        property: ("role", b"ANS2\0"),
+        children: &[NATIVE_RTKIT],
+    },
+    ModelClaim {
+        compatible: ASC,
+        property: ("role", b"SMC\0"),
+        children: &[NATIVE_RTKIT],
+    },
+];
 
 /// Child compatibles claimed by a matching parent model. The loader uses
 /// this relationship before changing the tree, without relying on paths.
@@ -889,6 +897,8 @@ pub struct Board {
     /// ANS2 and its SART, if an input tree explicitly presents the device.
     /// Prepared bundles still hide its compatibles until its vendor ABI is complete.
     pub ans: Option<AnsController>,
+    /// The SMC coprocessor, when the DeviceTree shows its `iop,ascwrap-v4`.
+    pub smc: Option<SmcController>,
     /// SEP placement if the input tree explicitly keeps it. Production
     /// `models()` admission remains closed while sepOS boot services refuse.
     pub sep: Option<SepDevice>,
@@ -1548,6 +1558,109 @@ pub struct AnsController {
     pub namespaces: Vec<ans::Description>,
     pub clock_gates: Vec<u32>,
     pub power_gates: Vec<u32>,
+}
+
+/// The SMC's DT placement: `reg[0]` is the ASC wrapper, its four
+/// interrupts the mailbox lines, `reg[timers-reg-index]` the hardware
+/// watchdog AppleSMC maps, and its RTBuddy nub's `region-base`/`region-size`
+/// the window AppleSMCKeysEndpoint accepts the shared page in
+/// (`_keyEndpointHandler`, 0xfffffe0009da5a20). `gpio_keys` are the keys
+/// the tree's `pKW4` platform functions write through the nub's `smc-pmu`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmcController {
+    pub wrapper: (u64, u64),
+    pub interrupts: [u16; 4],
+    pub watchdog: Option<(u64, u64)>,
+    pub region: (u64, u64),
+    pub gpio_keys: Vec<u32>,
+}
+
+/// A platform function property is the provider's phandle, the function's
+/// four-character code and its arguments, all little-endian u32 cells
+/// (`function-reg_on` = smc-pmu, `pKW4`, `gP0d`, 0x8000).
+const SMC_GPIO_WRITE: u32 = smc::code(b"pKW4");
+
+fn smc_controller(
+    root: &Node<'_>,
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<SmcController>, String> {
+    let Some(node) = io
+        .child("smc")
+        .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"SMC\0".as_slice()))
+    else {
+        return Ok(None);
+    };
+    let nub = node
+        .child("iop-smc-nub")
+        .filter(|nub| nub.compatible(RTBUDDY))
+        .ok_or("SMC has no RTBuddy v2 nub")?;
+    let regs = node.pairs("reg").ok_or("SMC has no reg pairs")?;
+    let place = |index: usize, minimum: u64, what: &str| -> Result<(u64, u64), String> {
+        let &(offset, bytes) = regs
+            .get(index)
+            .filter(|(_, bytes)| *bytes >= minimum)
+            .ok_or_else(|| format!("SMC {what} bank is absent or too short"))?;
+        let physical =
+            translate(offset).ok_or_else(|| format!("SMC {what} outside arm-io ranges"))?;
+        Ok((physical, bytes))
+    };
+    let wrapper = place(0, asc::WRAPPER_BYTES, "wrapper")?;
+    let watchdog = node
+        .first_u32("timers-reg-index")
+        .map(|index| place(index as usize, smc::WATCHDOG_BYTES, "watchdog"))
+        .transpose()?;
+    let irqs = node.cells32("interrupts").ok_or("SMC has no interrupts")?;
+    let irq = |index: usize| -> Result<u16, String> {
+        irqs.get(index)
+            .and_then(|&n| u16::try_from(n).ok())
+            .ok_or_else(|| "SMC needs four valid mailbox interrupts".into())
+    };
+    let interrupts = [irq(0)?, irq(1)?, irq(2)?, irq(3)?];
+    let read64 = |name: &str| {
+        nub.property(name)
+            .and_then(|value| value.try_into().ok())
+            .map(u64::from_le_bytes)
+    };
+    let (base, size) = read64("region-base")
+        .zip(read64("region-size"))
+        .ok_or("SMC nub has no region-base/region-size")?;
+    if size < smc::SRAM_BYTES {
+        return Err("SMC region is smaller than the shared page".into());
+    }
+    let mut gpio_keys = Vec::new();
+    if let Some(pmu) = nub.child("smc-pmu").filter(|pmu| pmu.compatible("smc-pmu")) {
+        let phandle = pmu
+            .first_u32("AAPL,phandle")
+            .ok_or("smc-pmu has no phandle")?;
+        root.visit(&mut |candidate| {
+            for (name, value) in candidate.properties().unwrap_or_default() {
+                if name.starts_with(b"function-")
+                    && let Some([provider, function, key, _]) = cells_of(value)
+                    && provider == phandle
+                    && function == SMC_GPIO_WRITE
+                {
+                    gpio_keys.push(key);
+                }
+            }
+        })
+        .ok_or("DeviceTree walk failed")?;
+    }
+    gpio_keys.sort_unstable();
+    gpio_keys.dedup();
+    Ok(Some(SmcController {
+        wrapper,
+        interrupts,
+        watchdog,
+        region: (base, size),
+        gpio_keys,
+    }))
+}
+
+fn cells_of(value: &[u8]) -> Option<[u32; 4]> {
+    let cells = value.as_chunks::<4>().0;
+    let cell = |i: usize| cells.get(i).map(|c| u32::from_le_bytes(*c));
+    Some([cell(0)?, cell(1)?, cell(2)?, cell(3)?])
 }
 
 /// Only explicitly visible ANS2 hardware is placed. Do not preserve all
@@ -3165,6 +3278,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
     let ans = ans_controller(&io, &translate)?;
+    let smc = smc_controller(&root, &io, &translate)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
     let usbs = usb_controllers(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
@@ -3204,6 +3318,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         darts,
         aes,
         ans,
+        smc,
         sep,
         usbs,
         power_states,
@@ -3569,6 +3684,112 @@ mod tests {
         assert!(!models(ASC, |_| None));
         assert!(!models(RTBUDDY, |_| None));
         assert!(!models(SART, |_| None));
+    }
+
+    /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
+    /// shared-page region and the `pKW4` functions other nodes route
+    /// through `smc-pmu`.
+    #[test]
+    fn smc_placement_reads_its_banks_region_and_function_keys() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        let function =
+            |key: &[u8; 4], value: u32| cells(&[0x91, smc::code(b"pKW4"), smc::code(key), value]);
+        let tree = |region_size: u64| {
+            let pmu = encode(
+                &[
+                    ("name", &z("smc-pmu")),
+                    ("compatible", &z("smc-pmu")),
+                    ("AAPL,phandle", &cells(&[0x91])),
+                ],
+                &[],
+            );
+            let nub = encode(
+                &[
+                    ("name", &z("iop-smc-nub")),
+                    ("compatible", &z(RTBUDDY)),
+                    ("region-base", &0x2_3fe0_0000u64.to_le_bytes()),
+                    ("region-size", &region_size.to_le_bytes()),
+                ],
+                &[pmu],
+            );
+            let smc = encode(
+                &[
+                    ("name", &z("smc")),
+                    ("compatible", &z(ASC)),
+                    ("role", &z("SMC")),
+                    (
+                        "reg",
+                        &pairs(&[
+                            (0x3e40_0000, 0x6c000),
+                            (0x3e05_0000, 0x4000),
+                            (0x3e81_0000, 0x14),
+                        ]),
+                    ),
+                    ("interrupts", &cells(&[0x1f4, 0x1f3, 0x1f6, 0x1f5])),
+                    ("timers-reg-index", &cells(&[2])),
+                ],
+                &[nub],
+            );
+            let hdmi = encode(
+                &[
+                    ("name", &z("dp2hdmi-gpio")),
+                    ("function-reset", &function(b"gP09", 0x100)),
+                    ("function-hdmi_pwr_en", &function(b"gP16", 0x8000)),
+                ],
+                &[],
+            );
+            let standby = encode(
+                &[
+                    ("name", &z("pmu-main")),
+                    (
+                        "function-external_standby",
+                        &cells(&[0x91, smc::code(b"keyW"), smc::code(b"MBSE")]),
+                    ),
+                ],
+                &[],
+            );
+            let io = encode(&[("name", &z("arm-io"))], &[smc, hdmi, standby]);
+            let amfm = encode(
+                &[
+                    ("name", &z("amfm")),
+                    ("function-reg_on", &function(b"gP0d", 0x8000)),
+                ],
+                &[],
+            );
+            encode(&[("name", &z("device-tree"))], &[io, amfm])
+        };
+        let bytes = tree(0x10_0000);
+        let root = Node::root(&bytes).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let translate = |offset| Some(0x2_0000_0000 + offset);
+        let placed = smc_controller(&root, &io, &translate).unwrap().unwrap();
+        assert_eq!(placed.wrapper, (0x2_3e40_0000, 0x6c000));
+        assert_eq!(placed.watchdog, Some((0x2_3e81_0000, 0x14)));
+        assert_eq!(placed.interrupts, [0x1f4, 0x1f3, 0x1f6, 0x1f5]);
+        assert_eq!(placed.region, (0x2_3fe0_0000, 0x10_0000));
+        // Sorted; `keyW` is not a GPIO write.
+        assert_eq!(
+            placed.gpio_keys,
+            [smc::code(b"gP09"), smc::code(b"gP0d"), smc::code(b"gP16")]
+        );
+        let small = tree(0x1000);
+        let root = Node::root(&small).unwrap();
+        let io = root.child("arm-io").unwrap();
+        assert!(smc_controller(&root, &io, &translate).is_err());
     }
 
     #[test]

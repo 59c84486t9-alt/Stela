@@ -43,6 +43,7 @@ pub mod regfile;
 pub mod rtkit;
 pub mod sart;
 pub mod sep;
+pub mod smc;
 pub mod spi;
 pub mod timer;
 pub mod typec;

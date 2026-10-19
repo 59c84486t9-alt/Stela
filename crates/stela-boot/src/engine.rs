@@ -496,6 +496,9 @@ fn devices<'f>(
         }
         (None, None) => (),
     }
+    if let Some(smc) = board.and_then(|b| b.smc.as_ref()) {
+        devices.add_smc(smc)?;
+    }
     for &physical in board.map_or(&[][..], |board| &board.coresight) {
         devices
             .add_coresight_lock(physical)
@@ -1227,8 +1230,8 @@ fn run(
             }
             sample_report(&mut samples, user);
             timer_report(machine);
-            for state in machine.devices.storage_diagnostics() {
-                output::arguments(format_args!("STORAGE ASC {state}\n"));
+            for state in machine.devices.coprocessor_diagnostics() {
+                output::arguments(format_args!("ASC {state}\n"));
             }
             survey_report(machine);
             user = 0;

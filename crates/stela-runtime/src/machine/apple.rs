@@ -40,6 +40,7 @@ use crate::platform::apple::{
     rtkit::{Management, RtKit},
     sart::{self, Sart},
     sep::{self, Sep},
+    smc::{self, Smc},
     spi::Spi,
     uart::S5lUart,
     wake::{self, WakeMasks},
@@ -57,7 +58,7 @@ pub use crate::platform::usb::{
     session::Log as UsbLog,
 };
 use crate::system::access::{AccessKind, Encoding};
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 pub use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
@@ -90,7 +91,7 @@ pub struct AppleDevices {
     memory_controller: Option<DeviceId>,
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
-    storage_wrappers: Vec<DeviceId>,
+    coprocessors: Vec<(&'static str, DeviceId)>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
     usb_masters: Vec<UsbMaster>,
@@ -293,7 +294,7 @@ impl AppleDevices {
             ipi: None,
             masters: Vec::new(),
             storage_masters: Vec::new(),
-            storage_wrappers: Vec::new(),
+            coprocessors: Vec::new(),
             sep_masters: Vec::new(),
             usb_masters: Vec::new(),
             cpu_start: None,
@@ -307,15 +308,13 @@ impl AppleDevices {
         }
     }
 
-    /// State of native storage coprocessors, without register side effects.
-    pub fn storage_diagnostics(&self) -> Vec<String> {
-        self.storage_wrappers
+    /// State of native RTKit coprocessors, without register side effects.
+    pub fn coprocessor_diagnostics(&self) -> Vec<String> {
+        self.coprocessors
             .iter()
-            .map(|&id| {
-                self.bus
-                    .device::<Asc>(id)
-                    .expect("storage wrapper")
-                    .diagnostic()
+            .map(|&(role, id)| {
+                let asc = self.bus.device::<Asc>(id).expect("coprocessor wrapper");
+                format!("{role} {}", asc.diagnostic())
             })
             .collect()
     }
@@ -593,7 +592,7 @@ impl AppleDevices {
         )
         .map_err(String::from)?;
         let asc = self.bus.add(Box::new(wrapper));
-        self.storage_wrappers.push(asc);
+        self.coprocessors.push(("ANS", asc));
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("ANS ASC placement: {e:?}"))?;
@@ -622,6 +621,43 @@ impl AppleDevices {
             }
         }
         self.storage_masters.push((ans, sart));
+        Ok(())
+    }
+
+    /// Place an explicitly described SMC: its started, user-power-managed
+    /// RTKit with the native key endpoint, the shared page at the nub's
+    /// region base, and the hardware watchdog bank AppleSMC disarms. The
+    /// rest of the nub region, the coprocessor's own memory, stays unmapped.
+    pub fn add_smc(&mut self, placement: &super::soc::SmcController) -> Result<(), String> {
+        let sram = smc::Sram::default();
+        let keys = placement
+            .gpio_keys
+            .iter()
+            .map(|&name| (name, smc::Key::gpio()))
+            .collect();
+        let endpoint = Smc::new(sram.clone(), placement.region.0, keys).map_err(String::from)?;
+        let rtkit = RtKit::new(vec![(smc::ENDPOINT, Box::new(endpoint))], Management::User)
+            .map_err(String::from)?;
+        let wrapper = Asc::booted(
+            Box::new(rtkit),
+            AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
+        )
+        .map_err(String::from)?;
+        let asc = self.bus.add(Box::new(wrapper));
+        self.coprocessors.push(("SMC", asc));
+        self.bus
+            .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
+            .map_err(|e| format!("SMC ASC placement: {e:?}"))?;
+        let window = self.bus.add(Box::new(smc::SramWindow(sram)));
+        self.bus
+            .map(window, placement.region.0, smc::SRAM_BYTES, 0)
+            .map_err(|e| format!("SMC shared page placement: {e:?}"))?;
+        if let Some((base, bytes)) = placement.watchdog {
+            let watchdog = self.bus.add(Box::new(smc::Watchdog));
+            self.bus
+                .map(watchdog, base, bytes.min(smc::WATCHDOG_BYTES), 0)
+                .map_err(|e| format!("SMC watchdog placement: {e:?}"))?;
+        }
         Ok(())
     }
 
@@ -1857,6 +1893,34 @@ mod tests {
         let mut model = [0; 10];
         assert!(Memory::read(&mut ram, RAM + 0x4000 + 24, &mut model));
         assert_eq!(&model, b"Stela ANS2");
+    }
+
+    #[test]
+    fn smc_places_a_running_wrapper_its_shared_page_and_watchdog() {
+        use crate::machine::soc::SmcController;
+        const WRAPPER: u64 = 0x2_3e40_0000;
+        const WATCHDOG: u64 = 0x2_3e81_0000;
+        const REGION: u64 = 0x2_3fe0_0000;
+        let placement = SmcController {
+            wrapper: (WRAPPER, 0x6c000),
+            interrupts: [0x1f4, 0x1f3, 0x1f6, 0x1f5],
+            watchdog: Some((WATCHDOG, 0x14)),
+            region: (REGION, 0x10_0000),
+            gpio_keys: alloc::vec![smc::code(b"gP16")],
+        };
+        let mut devices = AppleDevices::new();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        devices.add_smc(&placement).unwrap();
+        assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        devices.write(0, REGION + 8, 8, 0x1122_3344, 0).unwrap();
+        assert_eq!(devices.read(0, REGION + 8, 8, 0), Ok(0x1122_3344));
+        // The coprocessor's own memory past the shared page has no model.
+        assert!(devices.read(0, REGION + smc::SRAM_BYTES, 4, 0).is_err());
+        assert_eq!(devices.read(0, WATCHDOG + 0xc, 4, 0), Ok(0));
+        devices.write(0, WATCHDOG + 0xc, 4, 0, 0).unwrap();
+        assert_eq!(devices.coprocessor_diagnostics().len(), 1);
     }
 
     #[test]

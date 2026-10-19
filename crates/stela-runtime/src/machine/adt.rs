@@ -68,6 +68,11 @@ impl<'a> Node<'a> {
         Some(offset)
     }
 
+    /// Every property as (name, value), in tree order.
+    pub fn properties(&self) -> Option<Properties<'a>> {
+        Some(self.walk_properties()?.0)
+    }
+
     pub fn property(&self, name: &str) -> Option<&'a [u8]> {
         let (properties, _) = self.walk_properties()?;
         properties
