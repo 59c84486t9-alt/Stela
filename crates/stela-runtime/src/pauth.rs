@@ -4,9 +4,10 @@
 //! TBI on. Signing a pointer with an invalid extension corrupts the PAC; a failed
 //! authentication returns the classic poisoned pointer. Optional profiles add
 //! PAuth2 XOR insertion and FPAC/FPACCOMBINE faults. The caller owns the keys and
-//! binds the context to its address space. QARMA substitution uses Boolean
-//! polynomials rather than secret-indexed tables (Arm pseudocode
-//! `ComputePACQARMA`, `InsertPAC`, `Authenticate`).
+//! binds the context to its address space. QARMA (`qarma`) never indexes memory
+//! with secret data: its S-box is Boolean polynomials or, with SSSE3, PSHUFB
+//! register lookups (Arm pseudocode `ComputePACQARMA`, `InsertPAC`,
+//! `Authenticate`).
 use anyhow::Result;
 use core::fmt;
 use serde::Serialize;
@@ -324,134 +325,8 @@ impl Context {
 const MIN_TNSZ: u64 = 16;
 const MAX_TNSZ: u64 = 39;
 
-const CELL_MASK: u64 = 0x1111_1111_1111_1111;
-const SHUFFLE: [u8; 16] = [13, 6, 11, 0, 7, 12, 1, 10, 8, 3, 14, 5, 2, 9, 4, 15];
-const INV_SHUFFLE: [u8; 16] = [3, 6, 12, 9, 14, 11, 1, 4, 8, 13, 7, 2, 5, 0, 10, 15];
-const TWEAK_SHUFFLE: [u8; 16] = [4, 5, 6, 7, 11, 2, 3, 8, 12, 13, 14, 15, 0, 1, 10, 9];
-const TWEAK_ROTATED: u16 = 0xd894;
-const ROUND_CONSTANTS: [u64; 5] = [
-    0,
-    0x1319_8a2e_0370_7344,
-    0xa409_3822_299f_31d0,
-    0x082e_fa98_ec4e_6c89,
-    0x4528_21e6_38d0_1377,
-];
-
-/// Sixteen independent four-bit substitutions in parallel bitplanes. The
-/// polynomials are the algebraic normal form of Arm's factual PRINCE tables.
-fn substitute(value: u64, inverse: bool) -> u64 {
-    let m = CELL_MASK;
-    let a = value & m;
-    let b = (value >> 1) & m;
-    let c = (value >> 2) & m;
-    let d = (value >> 3) & m;
-    let ab = a & b;
-    let ac = a & c;
-    let ad = a & d;
-    let bc = b & c;
-    let bd = b & d;
-    let cd = c & d;
-    let abc = ab & c;
-    let abd = ab & d;
-    let acd = ac & d;
-    let bcd = bc & d;
-    let planes = if inverse {
-        [
-            m ^ a ^ c ^ bc ^ abc ^ d ^ ad ^ bd ^ abd ^ cd ^ bcd,
-            a ^ ab ^ c ^ ac ^ bc ^ abc ^ d ^ ad ^ acd,
-            m ^ ab ^ c ^ abc ^ d ^ ad ^ bd ^ abd ^ acd ^ bcd,
-            a ^ b ^ ab ^ c ^ ac ^ ad ^ cd ^ bcd,
-        ]
-    } else {
-        [
-            m ^ a ^ b ^ c ^ ac ^ abc ^ ad ^ abd ^ cd ^ bcd,
-            m ^ b ^ ab ^ c ^ bc ^ abd ^ acd,
-            a ^ c ^ bc ^ bd ^ abd ^ bcd,
-            m ^ a ^ ab ^ d ^ ad ^ abd ^ cd ^ acd ^ bcd,
-        ]
-    };
-    planes[0] | (planes[1] << 1) | (planes[2] << 2) | (planes[3] << 3)
-}
-
-fn cell(value: u64, index: usize) -> u64 {
-    (value >> (index * 4)) & 15
-}
-fn permute(value: u64, order: &[u8; 16]) -> u64 {
-    order.iter().enumerate().fold(0, |out, (index, source)| {
-        out | (cell(value, usize::from(*source)) << (index * 4))
-    })
-}
-fn rotate_cell(value: u64, count: u32) -> u64 {
-    ((value << count) | (value >> (4 - count))) & 15
-}
-fn mix(value: u64) -> u64 {
-    let mut out = 0;
-    for column in 0..4 {
-        let [a, b, c, d] = core::array::from_fn(|row| cell(value, column + row * 4));
-        let rows = [
-            rotate_cell(d, 1) ^ rotate_cell(c, 2) ^ rotate_cell(b, 1),
-            rotate_cell(d, 2) ^ rotate_cell(c, 1) ^ rotate_cell(a, 1),
-            rotate_cell(d, 1) ^ rotate_cell(b, 1) ^ rotate_cell(a, 2),
-            rotate_cell(c, 1) ^ rotate_cell(b, 2) ^ rotate_cell(a, 1),
-        ];
-        for (row, value) in rows.into_iter().enumerate() {
-            out |= value << ((column + row * 4) * 4);
-        }
-    }
-    out
-}
-fn tweak_rotation(value: u64, inverse: bool) -> u64 {
-    if inverse {
-        ((value << 1) & 15) | ((value ^ (value >> 3)) & 1)
-    } else {
-        (value >> 1) | (((value ^ (value >> 1)) & 1) << 3)
-    }
-}
-fn tweak(value: u64, inverse: bool) -> u64 {
-    let mut out = 0;
-    for (destination, source) in TWEAK_SHUFFLE.into_iter().enumerate() {
-        let (input, output) = if inverse {
-            (destination, usize::from(source))
-        } else {
-            (usize::from(source), destination)
-        };
-        let mut nibble = cell(value, input);
-        if TWEAK_ROTATED & (1 << destination) != 0 {
-            nibble = tweak_rotation(nibble, inverse);
-        }
-        out |= nibble << (output * 4);
-    }
-    out
-}
-
-fn qarma5(data: u64, modifier: u64, key: &[u64; 2]) -> u64 {
-    let [key_low, key_high] = *key;
-    let reflected_key = key_high.rotate_right(1) ^ (key_high >> 63);
-    let mut state = data ^ key_high;
-    let mut running = modifier;
-    for (round, constant) in ROUND_CONSTANTS.into_iter().enumerate() {
-        state ^= key_low ^ running ^ constant;
-        if round != 0 {
-            state = mix(permute(state, &SHUFFLE));
-        }
-        state = substitute(state, false);
-        running = tweak(running, false);
-    }
-    state ^= reflected_key ^ running;
-    state = substitute(mix(permute(state, &SHUFFLE)), false);
-    state = mix(permute(state, &SHUFFLE)) ^ key_low;
-    state = substitute(permute(state, &INV_SHUFFLE), true);
-    state = permute(mix(state), &INV_SHUFFLE) ^ key_high ^ running;
-    for (round, constant) in ROUND_CONSTANTS.into_iter().rev().enumerate() {
-        state = substitute(state, true);
-        if round != 4 {
-            state = permute(mix(state), &INV_SHUFFLE);
-        }
-        running = tweak(running, true);
-        state ^= constant ^ key_low ^ running ^ 0xc0ac_29b7_c97c_50dd;
-    }
-    state ^ reflected_key
-}
+mod qarma;
+use qarma::compute as qarma5;
 
 pub(crate) mod features;
 pub use features::UnsupportedInstructionProfile;
@@ -808,22 +683,6 @@ mod tests {
             }
         }
         Ok(())
-    }
-
-    #[test]
-    fn substitution_permutations_and_tweaks_match_factual_cells_and_are_invertible() {
-        let forward = [11u64, 6, 8, 15, 12, 0, 9, 14, 3, 7, 4, 5, 13, 2, 1, 10];
-        for (nibble, expected) in forward.into_iter().enumerate() {
-            let repeated = (nibble as u64) * CELL_MASK;
-            assert_eq!(substitute(repeated, false), expected * CELL_MASK);
-            assert_eq!(substitute(expected * CELL_MASK, true), repeated);
-        }
-        for value in [0, 1, u64::MAX, 0x0123456789abcdef, 0xfedcba9876543210] {
-            assert_eq!(permute(permute(value, &SHUFFLE), &INV_SHUFFLE), value);
-            assert_eq!(substitute(substitute(value, false), true), value);
-            assert_eq!(tweak(tweak(value, false), true), value);
-            assert_eq!(tweak(tweak(value, true), false), value);
-        }
     }
 
     #[test]
