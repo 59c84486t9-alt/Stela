@@ -118,16 +118,15 @@ pub fn mapped(address: u64) -> bool {
     status == KERN_SUCCESS && start <= address
 }
 
-/// Whether the mapping holding `address` grants every protection bit of
-/// `access` now.
-pub fn permits(address: u64, access: Protection) -> bool {
+/// The current and maximum protections of the mapping holding `address`.
+fn protections(address: u64) -> Option<(Protection, Protection)> {
     let mut start = address;
     let mut size = 0u64;
     let mut info = [0i32; VM_REGION_BASIC_INFO_COUNT_64 as usize];
     let mut count = VM_REGION_BASIC_INFO_COUNT_64;
     let mut object = 0u32;
     // SAFETY: out-parameters sized for VM_REGION_BASIC_INFO_64, whose
-    // first field is the current protection.
+    // first fields are the current and maximum protections.
     let status = unsafe {
         mach_vm_region(
             task(),
@@ -139,7 +138,13 @@ pub fn permits(address: u64, access: Protection) -> bool {
             &mut object,
         )
     };
-    status == KERN_SUCCESS && start <= address && info[0] & access.0 == access.0
+    (status == KERN_SUCCESS && start <= address).then(|| (Protection(info[0]), Protection(info[1])))
+}
+
+/// Whether the mapping holding `address` grants every protection bit of
+/// `access` now.
+pub fn permits(address: u64, access: Protection) -> bool {
+    protections(address).is_some_and(|(current, _)| current.0 & access.0 == access.0)
 }
 
 /// Guest protections as `VM_PROT_*` bits.
@@ -272,6 +277,22 @@ pub fn map_object(
     if status != KERN_SUCCESS && anywhere {
         // SAFETY: the reservation made above.
         unsafe { mach_vm_deallocate(task(), at, size) };
+    }
+    if status == KERN_SUCCESS
+        && anywhere
+        && size > object_size
+        && let Some((current, maximum)) = protections(at)
+    {
+        // The arm64 kernel maps the last guest page whole: the reserved
+        // tail takes the object's own protections, which the host may
+        // have lowered from the request (a read-only entry), maximum
+        // first.
+        let tail = at + object_size;
+        // SAFETY: the tail of the reservation made above.
+        unsafe {
+            mach_vm_protect(task(), tail, size - object_size, 1, maximum.0);
+            mach_vm_protect(task(), tail, size - object_size, 0, current.0);
+        }
     }
     (status, at)
 }
@@ -457,6 +478,48 @@ mod tests {
         assert_eq!(round_page(1), Some(PAGE_BYTES));
         assert_eq!(trunc_page(PAGE_BYTES + 5), PAGE_BYTES);
         assert_eq!(round_page(u64::MAX), None);
+    }
+
+    #[test]
+    fn an_object_mapped_anywhere_fills_its_last_guest_page() {
+        unsafe extern "C" {
+            fn mach_make_memory_entry_64(
+                task: u32,
+                size: *mut u64,
+                offset: u64,
+                permission: i32,
+                entry: *mut u32,
+                parent: u32,
+            ) -> i32;
+        }
+        let source = allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        let (mut size, mut entry) = (0x1000u64, 0u32);
+        // SAFETY: a read-only entry over the first host page of `source`.
+        let status = unsafe {
+            mach_make_memory_entry_64(task(), &mut size, source, VM_PROT_READ, &mut entry, 0)
+        };
+        assert_eq!((status, size), (KERN_SUCCESS, 0x1000));
+        let (status, at) = map_object(
+            0,
+            0x1000,
+            0,
+            VM_FLAGS_ANYWHERE,
+            entry,
+            0,
+            false,
+            Protection::READ,
+            Protection::READ,
+            VM_INHERIT_COPY,
+        );
+        assert_eq!(status, KERN_SUCCESS);
+        assert_eq!(at & PAGE_MASK, 0);
+        assert_eq!(
+            protections(at + PAGE_BYTES - 8),
+            Some((Protection::READ, Protection::READ))
+        );
+        assert!(read_u64(at + PAGE_BYTES - 8).is_some());
+        deallocate(at, PAGE_BYTES).unwrap();
+        deallocate(source, PAGE_BYTES).unwrap();
     }
 
     #[test]
