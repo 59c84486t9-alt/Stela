@@ -28,6 +28,7 @@ mod commands;
 mod die;
 mod namespace;
 mod prp;
+mod tunables;
 
 use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
@@ -39,7 +40,7 @@ use crate::platform::{
     pc::block::{BlockDevice, BlockError},
 };
 use alloc::{boxed::Box, collections::VecDeque};
-pub use bfh::BootImage;
+pub use bfh::{BootImage, Identity};
 pub use namespace::Description;
 use namespace::Medium;
 use prp::dma_error;
@@ -221,6 +222,8 @@ pub struct Ans {
     /// committed, which survives controller resets.
     download: bfh::Download,
     boot_image: Option<BootImage>,
+    /// NAND tunable tables accepted over the tunnel ([`tunables`]).
+    tunables: tunables::Tables,
     last_submission: Option<Submission>,
 }
 
@@ -254,6 +257,7 @@ impl Ans {
             os_build: [0; 16],
             download: bfh::Download::default(),
             boot_image: None,
+            tunables: tunables::Tables::default(),
             last_submission: None,
         })
     }
@@ -261,6 +265,12 @@ impl Ans {
     /// The identity of the last committed boot-from-host image.
     pub fn boot_image(&self) -> Option<&BootImage> {
         self.boot_image.as_ref()
+    }
+
+    /// The identity of the last tunable table of each accepted kind,
+    /// keyed by its tunnel request type.
+    pub fn tunable_tables(&self) -> &[(u32, Identity)] {
+        self.tunables.recorded()
     }
 
     pub fn last_submission(&self) -> Option<&Submission> {

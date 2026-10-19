@@ -3,13 +3,15 @@
 //! (delete CQ/SQ, CDW10 the queue ID), 0x3deb654 (Identify),
 //! 0x3deb7ac..0x3deba30 (flush/read/write), 0x3debc88..0x3dec1dc
 //! (logs/features), 0x3dec394 (Apple time), 0x3dec794 (namespace records),
-//! 0x3dec980 (tunnel), and 0x3dec1e0/0x3dec2ac/0x3dec35c (boot-from-host
-//! activate, download and parameters, see [`super::bfh`]). Unknown vendor
-//! effects stop before completion.
+//! 0x3dec980 (tunnel, with the tunable tables of [`super::tunables`]), and
+//! 0x3dec1e0/0x3dec2ac/0x3dec35c (boot-from-host activate, download and
+//! parameters, see [`super::bfh`]). Unknown vendor effects stop before
+//! completion.
 use super::{
     Ans, MODE_RESTORE, QUEUE_ENTRIES, Queue, bfh, die,
     namespace::BLOCK_BYTES,
     prp::{MAX_TRANSFER, Prps, dma_error},
+    tunables,
 };
 use crate::platform::{apple::sart::Sart, dma::Port, pc::block::BlockError};
 use alloc::vec;
@@ -663,6 +665,33 @@ impl Ans {
             .map_err(dma_error)?;
             return Ok(Outcome::status(SUCCESS));
         }
+        if let Some(table) = tunables::classify(kind) {
+            table?;
+            // `SendANS2Table` (0x3dfbefc): the type alone in a zeroed
+            // request, and the table at the start of one zeroed tunnel
+            // buffer. A table beyond one 16 KiB buffer is not modeled.
+            let output = cmd.long(52);
+            if output == 0
+                || cmd.word(60) != tunnel_buffer(1)
+                || request[..12]
+                    .iter()
+                    .chain(&request[16..76])
+                    .any(|&b| b != 0)
+            {
+                return Err("ANS tunable-table tunnel fields are not modeled");
+            }
+            let mut data = vec![0; cmd.word(60) as usize];
+            port.read(output, &mut data).map_err(dma_error)?;
+            port.write(
+                address
+                    .checked_add(0x4c)
+                    .ok_or("ANS tunnel status address wraps")?,
+                &0u32.to_le_bytes(),
+            )
+            .map_err(dma_error)?;
+            self.tunables.record(kind, &data);
+            return Ok(Outcome::status(SUCCESS));
+        }
         if kind != 0x120 || cmd.long(52) != 0 || cmd.word(60) != 0 {
             return Err("ANS tunnel request type or output is not modeled");
         }
@@ -867,6 +896,83 @@ mod tests {
         // Another output size refuses.
         command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
         assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    }
+
+    #[test]
+    fn tunable_table_tunnel_records_its_buffer_and_refuses_other_shapes() {
+        use crate::platform::apple::bus::{MmioDevice, Width};
+        let mut ans = Ans::new(
+            Box::new(RamDisk::new("", 4, 4096)),
+            &[Description {
+                id: 1,
+                kind: 1,
+                blocks: 0,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = tunnel_buffer(1) as usize;
+        let mut memory = Ram::new(0x1000, 0x1000 + bytes + 0x1000);
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (offset, value) in [(0x40, 1), (0x80, 6), (0, 0xff)] {
+            sart.write(offset, Width::Word, value, &mut access).unwrap();
+        }
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        // A synthetic 40-byte table at the start of a zeroed buffer, as
+        // `SendANS2Table` places it; the type is TT's request type.
+        let mut buffer = alloc::vec![0u8; bytes];
+        for (i, byte) in buffer[..40].iter_mut().enumerate() {
+            *byte = i as u8 ^ 0x5a;
+        }
+        port.write(0x2000, &buffer).unwrap();
+        let mut request = [0; 80];
+        request[12..16].copy_from_slice(&110u32.to_le_bytes());
+        request[0x4c..].fill(0xff);
+        port.write(0x1000, &request).unwrap();
+        let mut command = Command([0; 64]);
+        command.0[0] = APPLE_TUNNEL;
+        command.0[40] = 1;
+        command.0[44..52].copy_from_slice(&0x1000u64.to_le_bytes());
+        command.0[52..60].copy_from_slice(&0x2000u64.to_le_bytes());
+        command.0[60..64].copy_from_slice(&tunnel_buffer(1).to_le_bytes());
+        let outcome = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+        assert_eq!(outcome.status, SUCCESS);
+        let mut status = [1; 4];
+        port.read(0x104c, &mut status).unwrap();
+        assert_eq!(status, [0; 4]);
+        assert_eq!(ans.tunable_tables(), &[(110, bfh::identity(&buffer))]);
+        // The table is only read: the buffer is unchanged.
+        let mut after = alloc::vec![0u8; bytes];
+        port.read(0x2000, &mut after).unwrap();
+        assert_eq!(after, buffer);
+        // Another length, a request extension field, a V5 kind and a
+        // buffer outside the allow-list each refuse without a record.
+        let refused = |ans: &mut Ans, port: &mut Port<'_, '_>, sart: &mut Sart, command| {
+            assert!(ans.execute(0, &command, port, sart).is_err());
+            assert_eq!(ans.tunable_tables().len(), 1);
+        };
+        let mut other = Command(command.0);
+        other.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
+        refused(&mut ans, &mut port, &mut sart, other);
+        request[20] = 1;
+        port.write(0x1000, &request).unwrap();
+        refused(&mut ans, &mut port, &mut sart, Command(command.0));
+        request[20] = 0;
+        request[12..16].copy_from_slice(&332u32.to_le_bytes());
+        port.write(0x1000, &request).unwrap();
+        refused(&mut ans, &mut port, &mut sart, Command(command.0));
+        request[12..16].copy_from_slice(&110u32.to_le_bytes());
+        port.write(0x1000, &request).unwrap();
+        let mut outside = Command(command.0);
+        outside.0[52..60].copy_from_slice(&0x5000u64.to_le_bytes());
+        refused(&mut ans, &mut port, &mut sart, outside);
     }
 
     #[test]

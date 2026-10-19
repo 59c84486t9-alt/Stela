@@ -106,7 +106,8 @@ impl Section {
     }
 }
 
-fn identity(data: &[u8]) -> Identity {
+/// The identity of a whole transferred byte string.
+pub(super) fn identity(data: &[u8]) -> Identity {
     let mut section = Section::new();
     section.crc = crc_update(section.crc, data);
     section.sha.update(data);
