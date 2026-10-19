@@ -28,7 +28,11 @@
 //! the estimate states no energy rather than an invented one. Every other
 //! domain gets one state, `(0, 0)`: the machine does not scale its clock, so
 //! the domain has a single operating point. The optional `-sram` and
-//! `-extra` tables are not published.
+//! `-extra` tables are not published. A CPU cluster of a SoC without
+//! operating-point evidence keeps no table: inventing clocks would be a
+//! placeholder, so the bundle records the gap and the driver's own stop
+//! ("voltage-states1 not found") remains the explicit failure, after the
+//! monitors and the kernel's earlier boot have run.
 use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, bail, ensure};
@@ -40,18 +44,29 @@ const DOMAIN: usize = 28;
 /// The period unit: a state's period is this over its clock in Hz.
 const PERIOD_SCALE: u64 = 65_536 * 1_000_000_000;
 
-/// A table [`publish`] wrote.
+/// What [`publish`] did for one domain without a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Contents {
+    /// A CPU cluster's operating points.
+    OperatingPoints,
+    /// A single state, for a domain whose clock the machine does not scale.
+    SingleState,
+    /// Nothing: the SoC has no operating-point evidence for this cluster.
+    Unpublished,
+}
+
+/// A domain table [`publish`] wrote or left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub name: String,
     /// The domain's name in `perf-domains`.
     pub domain: String,
-    /// A CPU cluster's operating points, rather than a single state.
-    pub cpu: bool,
+    pub contents: Contents,
 }
 
-/// A CPU cluster's table: its operating points as periods, voltages 0.
-fn cluster(domain: &str, chip_id: u32) -> Result<Vec<u8>> {
+/// A CPU cluster's table: its operating points as periods, voltages 0, or
+/// `None` when the SoC with `chip_id` has none.
+fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
     let cluster_type = match domain {
         "ECPU" => b'E',
         "PCPU" => b'P',
@@ -61,7 +76,7 @@ fn cluster(domain: &str, chip_id: u32) -> Result<Vec<u8>> {
         .and_then(|clusters| clusters.into_iter().find(|(kind, _)| *kind == cluster_type))
         .map(|(_, points)| points)
     else {
-        bail!("ApChipID {chip_id:#x} has no {domain} operating points");
+        return Ok(None);
     };
     ensure!(!points.is_empty(), "{domain} has no operating points");
     let mut value = Vec::with_capacity(points.len() * 8);
@@ -70,7 +85,7 @@ fn cluster(domain: &str, chip_id: u32) -> Result<Vec<u8>> {
         value.extend_from_slice(&period.to_le_bytes());
         value.extend_from_slice(&0u32.to_le_bytes());
     }
-    Ok(value)
+    Ok(Some(value))
 }
 
 /// Add the table of each `perf-domains` domain that lacks one. Returns the
@@ -92,14 +107,22 @@ pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Vec<Table>> {
         let label = &entry[12..];
         let label = &label[..label.iter().position(|&b| b == 0).unwrap_or(label.len())];
         let domain = String::from(core::str::from_utf8(label)?);
-        let cpu = entry[2] == 1;
-        let value = if cpu {
-            cluster(&domain, chip_id)?
+        let (contents, value) = if entry[2] == 1 {
+            match cluster(&domain, chip_id)? {
+                Some(value) => (Contents::OperatingPoints, Some(value)),
+                None => (Contents::Unpublished, None),
+            }
         } else {
-            [0u8; 8].to_vec()
+            (Contents::SingleState, Some([0u8; 8].to_vec()))
         };
-        tree.set_property(PMGR, &name, value)?;
-        written.push(Table { name, domain, cpu });
+        if let Some(value) = value {
+            tree.set_property(PMGR, &name, value)?;
+        }
+        written.push(Table {
+            name,
+            domain,
+            contents,
+        });
     }
     Ok(written)
 }
@@ -157,7 +180,8 @@ mod tests {
             vec!["voltage-states1", "voltage-states5", "voltage-states8"]
         );
         assert_eq!(written[2].domain, "ANE");
-        assert!(written[0].cpu && !written[2].cpu);
+        assert_eq!(written[0].contents, Contents::OperatingPoints);
+        assert_eq!(written[2].contents, Contents::SingleState);
         // 600 MHz is period 109,226, which the driver reads back as 600 MHz.
         let e = &tree.property(PMGR, "voltage-states1").unwrap().value;
         assert_eq!(e.len(), 7 * 8);
@@ -178,8 +202,13 @@ mod tests {
     }
 
     #[test]
-    fn a_cpu_domain_without_operating_points_refuses() {
-        assert!(publish(&mut tree(), 0x8122).is_err());
+    fn a_cpu_domain_without_operating_points_keeps_no_table() {
+        // The M3 (0x8122) has no public operating points.
+        let mut m3 = tree();
+        let written = publish(&mut m3, 0x8122).unwrap();
+        assert_eq!(written[0].contents, Contents::Unpublished);
+        assert!(m3.property(PMGR, "voltage-states1").is_none());
+        assert_eq!(written[2].contents, Contents::SingleState);
         assert!(publish(&mut with_domains(None), 0x8122).unwrap().is_empty());
         assert!(publish(&mut with_domains(Some(&[0; 27])), 0x8112).is_err());
     }

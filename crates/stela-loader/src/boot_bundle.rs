@@ -779,16 +779,18 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     darts::publish(&mut tree)?;
     if let Some(chip_id) = inputs.target.chip_id {
         for table in dvfs::publish(&mut tree, chip_id)? {
-            unresolved.push(if table.cpu {
-                format!(
-                    "/arm-io/pmgr {}: {} operating points without calibrated voltages (0)",
-                    table.name, table.domain
-                )
-            } else {
-                format!(
-                    "/arm-io/pmgr {}: {} has one state; its clock is not modeled",
-                    table.name, table.domain
-                )
+            let (name, domain) = (&table.name, &table.domain);
+            unresolved.push(match table.contents {
+                dvfs::Contents::OperatingPoints => format!(
+                    "/arm-io/pmgr {name}: {domain} operating points without calibrated voltages (0)"
+                ),
+                dvfs::Contents::SingleState => {
+                    format!("/arm-io/pmgr {name}: {domain} has one state; its clock is not modeled")
+                }
+                dvfs::Contents::Unpublished => format!(
+                    "/arm-io/pmgr {name}: ApChipID {chip_id:#x} has no {domain} operating points; \
+                     the table is left out and ApplePMGR stops on it"
+                ),
             });
         }
     }

@@ -1,6 +1,11 @@
-//! iBoot's NOR hand-off. The IPSW J473AP template supplies a 64 KiB
-//! `/chosen/nvram-proxy-data` slot and empty `spinor` child `reg`s. Stela
-//! assigns its emulated die's partitions and copies its current CHRP bank.
+//! iBoot's NOR hand-off. The IPSW templates supply a zero-filled
+//! `/chosen/nvram-proxy-data` slot (64 KiB on J473AP, 8 KiB on the M1 Pro,
+//! M2 Pro and M3 Max and later laptop templates such as J414sAP), zero
+//! `nvram-bank-*` placeholders and empty `spinor` child `reg`s. iBoot
+//! replaces the slot with its NOR's current bank and states that bank's
+//! geometry, so the slot's template size is a reservation, not the bank's.
+//! Stela assigns its emulated die's partitions and copies its current CHRP
+//! bank, whose geometry the published `nvram-bank-*` values state.
 //!
 //! 26A434 `AppleARMNORNVRAM::getNVRAMProperties` file
 //! 0x1c92f48 reads the three 32-bit bank properties; `select` 0x1ca1d40
@@ -26,8 +31,8 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
         return Ok(false);
     };
     ensure!(
-        slot.value.len() == nvram::BANK_SIZE,
-        "NVRAM proxy is not a 64 KiB bank"
+        !slot.value.is_empty(),
+        "NVRAM proxy slot is empty, not a template reservation"
     );
     if let Some(spinor) = tree.node(SPINOR) {
         let ranges: Vec<u8> = [0u32, 0, nor::CAPACITY as u32]
@@ -178,16 +183,32 @@ mod tests {
         assert!(tree.property(CHOSEN, "nvram-raw").is_none());
     }
     #[test]
-    fn absent_proxy_is_unchanged_and_wrong_size_refuses() {
+    fn absent_proxy_is_unchanged_and_an_empty_slot_refuses() {
         let mut tree = DeviceTree {
             root: Node::named("device-tree").unwrap(),
         };
         assert!(!publish(&mut tree).unwrap());
         let mut chosen = Node::named("chosen").unwrap();
-        chosen.set_property(PROXY, vec![0; 32]).unwrap();
+        chosen.set_property(PROXY, vec![]).unwrap();
         tree.root.children.push(chosen);
         let before = tree.serialize();
         assert!(publish(&mut tree).is_err());
         assert_eq!(tree.serialize(), before);
+    }
+
+    #[test]
+    fn a_smaller_template_slot_takes_the_dies_whole_bank() {
+        /// The slot J414sAP's 26A434 template reserves.
+        const J414S_SLOT: usize = 8 << 10;
+        let mut chosen = Node::named("chosen").unwrap();
+        chosen.set_property(PROXY, vec![0; J414S_SLOT]).unwrap();
+        let mut root = Node::named("device-tree").unwrap();
+        root.children.push(chosen);
+        let mut tree = DeviceTree { root };
+        assert!(publish(&mut tree).unwrap());
+        assert_eq!(
+            tree.property(CHOSEN, PROXY).unwrap().value.len(),
+            nvram::BANK_SIZE
+        );
     }
 }
