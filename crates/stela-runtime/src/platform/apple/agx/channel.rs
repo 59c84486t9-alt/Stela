@@ -45,8 +45,10 @@
 //!   `AGXTAChannelG14::encodeTACommandSKUStream` 0x1b68168), 3D start 0x8
 //!   (0xbc, `AGX3DChannelG14::encode3DCommandSKUStream` 0x1b622ec), fast blit
 //!   0xa (0x7c, `encodeFastBlitSKUStream` 0x1b61e24), CL start 0xc (0x84,
-//!   `AGXCLChannelG14::encodeCLCommandSKUStream` 0x1b65ef8), 0x4 (0x14,
-//!   flags 0x08 or 0x88, written twice after each start), timestamp 0x3
+//!   `AGXCLChannelG14::encodeCLCommandSKUStream` 0x1b65ef8), each opened by
+//!   a setup record (TA 0x5 0x19c bytes, 3D 0x7 0x1b4, fast blit 0x9 0x174,
+//!   CL 0xb 0x16c), 0x4 (0x14 bytes; flags the pipe in bits 4:3, TA 0, 3D
+//!   and fast blit 1, CL 2, with bit 7 on the copy before the start), timestamp 0x3
 //!   (0x4c, flag 0x80 optional, `encodeTimeStamp` 0x1b9040c), shared-event
 //!   signal 0xe (0x4c, `AGXChannel::encodeSharedEventSignalCommandSKUStream`
 //!   0x1b0d02c), dashboard signal 0xf (0x54,
@@ -260,7 +262,16 @@ pub struct Stamp {
 pub enum Record {
     End,
     Timestamp,
-    Record4,
+    /// The 0x4 record with its flag byte: the pipe in bits 4:3 (TA 0, 3D
+    /// and fast blit 1, CL 2), bit 7 set on the copy written before the
+    /// start (`encode*SKUStream`).
+    Record4(u8),
+    /// The record each work stream opens with, ahead of its start: TA 0x5,
+    /// 3D 0x7, fast blit 0x9, CL 0xb.
+    SetupTa,
+    Setup3d,
+    SetupFastBlit,
+    SetupCl,
     StartTa,
     Start3d,
     FastBlit,
@@ -279,7 +290,11 @@ impl Record {
         let record = match header & 0xffff {
             0x2 => Record::End,
             0x3 => Record::Timestamp,
-            0x4 => Record::Record4,
+            0x4 => Record::Record4(flags as u8),
+            0x5 => Record::SetupTa,
+            0x7 => Record::Setup3d,
+            0x9 => Record::SetupFastBlit,
+            0xb => Record::SetupCl,
             0x6 => Record::StartTa,
             0x8 => Record::Start3d,
             0xa => Record::FastBlit,
@@ -291,7 +306,7 @@ impl Record {
         let allowed: &[u32] = match record {
             Record::End => &[0x40],
             Record::Timestamp => &[0, 0x80],
-            Record::Record4 => &[0x08, 0x88],
+            Record::Record4(_) => &[0x00, 0x80, 0x08, 0x88, 0x10, 0x90],
             _ => &[0],
         };
         if !allowed.contains(&flags) {
@@ -305,7 +320,11 @@ impl Record {
         match self {
             Record::End => 0x4,
             Record::Timestamp => 0x4c,
-            Record::Record4 => 0x14,
+            Record::Record4(_) => 0x14,
+            Record::SetupTa => 0x19c,
+            Record::Setup3d => 0x1b4,
+            Record::SetupFastBlit => 0x174,
+            Record::SetupCl => 0x16c,
             Record::StartTa => 0x9c,
             Record::Start3d => 0xbc,
             Record::FastBlit => 0x7c,
@@ -361,12 +380,24 @@ pub(crate) mod tests {
         assert_eq!(Record::decode(0x4000_0002), Ok(Record::End));
         assert_eq!(Record::decode(0x8000_0003), Ok(Record::Timestamp));
         assert_eq!(Record::decode(3), Ok(Record::Timestamp));
-        assert_eq!(Record::decode(0x8800_0004), Ok(Record::Record4));
-        assert_eq!(Record::decode(0x0800_0004), Ok(Record::Record4));
+        assert_eq!(Record::decode(0x8800_0004), Ok(Record::Record4(0x88)));
+        assert_eq!(Record::decode(0x0800_0004), Ok(Record::Record4(0x08)));
+        // CL and TA streams carry the 0x4 record with their own pipe bits.
+        assert_eq!(Record::decode(0x9000_0004), Ok(Record::Record4(0x90)));
+        assert_eq!(Record::decode(0x1000_0004), Ok(Record::Record4(0x10)));
+        assert_eq!(Record::decode(0x8000_0004), Ok(Record::Record4(0x80)));
+        assert_eq!(Record::decode(0x4), Ok(Record::Record4(0)));
+        assert!(Record::decode(0x1800_0004).is_err());
+        // Each work stream's setup record.
+        assert_eq!(Record::decode(0xb).map(Record::bytes), Ok(0x16c));
+        assert_eq!(Record::decode(0x5).map(Record::bytes), Ok(0x19c));
+        assert_eq!(Record::decode(0x7).map(Record::bytes), Ok(0x1b4));
+        assert_eq!(Record::decode(0x9).map(Record::bytes), Ok(0x174));
+        assert!(Record::decode(0x8000_000b).is_err());
         assert_eq!(Record::decode(8).map(Record::bytes), Ok(0xbc));
         assert_eq!(Record::decode(0xe).map(Record::bytes), Ok(0x4c));
         // Unwritten types, flags or middle bits refuse.
-        assert!(Record::decode(0x5).is_err());
+        assert!(Record::decode(0xd).is_err());
         assert!(Record::decode(0x2).is_err());
         assert!(Record::decode(0x8000_0008).is_err());
         assert!(Record::decode(0x0001_0008).is_err());
