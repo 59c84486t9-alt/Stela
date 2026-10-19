@@ -94,6 +94,7 @@ impl PendingCall {
     }
 }
 
+pub mod catalog;
 pub mod ports;
 pub(crate) use ports::host::current_thread_identifier;
 pub use ports::{HostPorts, PortKind, PortRight};
