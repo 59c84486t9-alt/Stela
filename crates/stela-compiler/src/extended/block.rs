@@ -285,6 +285,7 @@ pub fn compile_for_profile(
         },
         source_bytes,
         direct_exits: Vec::new(),
+        fault_recovery: Vec::new(),
     })
 }
 

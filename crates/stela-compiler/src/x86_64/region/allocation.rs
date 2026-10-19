@@ -405,6 +405,7 @@ pub(super) fn emitter<'a>(
             consumed_instructions: gprs.len(),
             source_map: vec![],
             stats: super::AllocationStats::default(),
+            fault_recovery: vec![],
         },
         resident: [None; encoding::ALLOCATABLE_SLOTS],
         locations: super::FRAME_LOCATIONS,
@@ -421,6 +422,7 @@ pub(super) fn emitter<'a>(
         range_checks: None,
         // No loads.
         stack_alignment: true,
+        fault_table: false,
     }
 }
 

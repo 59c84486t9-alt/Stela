@@ -351,6 +351,44 @@ pub struct CompiledBlock {
     /// The native code's direct exits to static successors, which the
     /// system-mode engine may chain (`x86_64::chain`).
     pub direct_exits: alloc::vec::Vec<crate::x86_64::chain::DirectExit>,
+    /// Where the native code keeps guest GPRs out of their frame slots
+    /// across a faultable access. Only `SystemModeV1` emits entries, and
+    /// an engine that recovers from a native fault must apply them
+    /// ([`FaultRecovery::apply`]) before it reads the frame.
+    pub fault_recovery: alloc::vec::Vec<FaultRecovery>,
+}
+
+/// While native code at offsets `start..end` of its block runs, each
+/// `(guest, host)` pair's guest GPR (31 is SP) holds the value of host
+/// register `host` (its x86 number) rather than its frame slot. A fault
+/// there finds the architectural state of every earlier instruction in the
+/// frame once these values are written to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultRecovery {
+    pub start: usize,
+    pub end: usize,
+    pub registers: alloc::vec::Vec<(u8, u8)>,
+}
+
+impl FaultRecovery {
+    /// Write the values `table` names for a fault at native `offset` from
+    /// the host GPRs at the fault, RAX through R15, into `state`.
+    pub fn apply(table: &[Self], offset: usize, host: &[u64; 16], state: &mut crate::GuestState) {
+        const SP: u8 = 31;
+        for entry in table
+            .iter()
+            .filter(|entry| (entry.start..entry.end).contains(&offset))
+        {
+            for &(guest, register) in &entry.registers {
+                let value = host[usize::from(register)];
+                if guest == SP {
+                    state.sp = value;
+                } else {
+                    state.x[usize::from(guest)] = value;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,7 +686,7 @@ impl CompilationPlan {
             // Only system mode runs one agent at a time and checks the
             // guest's ranges; every other profile keeps the locked recipes
             // and the default checks (`with_memory_checks`).
-            let native = if self.profile == BlockProfile::SystemModeV1 {
+            let (native, fault_recovery) = if self.profile == BlockProfile::SystemModeV1 {
                 crate::x86_64::block::emit_system_mode(
                     &self.parsed.instructions,
                     self.parsed.terminal.as_ref(),
@@ -658,11 +696,14 @@ impl CompilationPlan {
                     self.native,
                 )
             } else {
-                crate::x86_64::block::emit_ordinary_for_target(
-                    &self.parsed.instructions,
-                    self.parsed.terminal.as_ref(),
-                    self.parsed.next_pc,
-                    self.target,
+                (
+                    crate::x86_64::block::emit_ordinary_for_target(
+                        &self.parsed.instructions,
+                        self.parsed.terminal.as_ref(),
+                        self.parsed.next_pc,
+                        self.target,
+                    ),
+                    alloc::vec::Vec::new(),
                 )
             };
             let direct_exits = crate::x86_64::block::successor_exits(
@@ -674,12 +715,14 @@ impl CompilationPlan {
                 native,
                 source_bytes: self.parsed.source_bytes,
                 direct_exits,
+                fault_recovery,
             });
         };
         Ok(CompiledBlock {
             native,
             source_bytes: self.parsed.source_bytes,
             direct_exits: alloc::vec::Vec::new(),
+            fault_recovery: alloc::vec::Vec::new(),
         })
     }
 }
@@ -1314,6 +1357,33 @@ mod tests {
         .x86_64_code;
         assert!(!code.contains(&LOCK), "{code:02x?}");
         assert!(!code.windows(MFENCE.len()).any(|window| window == MFENCE));
+    }
+
+    /// A fault applies exactly the entries covering its offset, SP as 31.
+    #[test]
+    fn fault_recovery_applies_the_covering_entries() {
+        let table = [
+            FaultRecovery {
+                start: 4,
+                end: 10,
+                registers: vec![(3, 9), (31, 6)],
+            },
+            FaultRecovery {
+                start: 10,
+                end: 20,
+                registers: vec![(4, 10)],
+            },
+        ];
+        let host: [u64; 16] = core::array::from_fn(|register| 0x100 + register as u64);
+        let mut state = crate::GuestState::default();
+        FaultRecovery::apply(&table, 9, &host, &mut state);
+        assert_eq!((state.x[3], state.sp, state.x[4]), (0x109, 0x106, 0));
+        let mut state = crate::GuestState::default();
+        FaultRecovery::apply(&table, 10, &host, &mut state);
+        assert_eq!((state.x[3], state.sp, state.x[4]), (0, 0, 0x10a));
+        let mut state = crate::GuestState::default();
+        FaultRecovery::apply(&table, 3, &host, &mut state);
+        assert_eq!(state, crate::GuestState::default());
     }
 
     /// The process and service profiles share the Ordinary emission of an

@@ -187,7 +187,9 @@ pub struct NativeFault {
     pub write: bool,
     pub cause: FaultCause,
     /// The host GPRs at the faulting instruction, RAX through R15 by x86
-    /// register number.
+    /// register number: guest registers whose frame slots a region has not
+    /// yet written back live there, where the block's fault recovery table
+    /// (`stela_compiler::block::FaultRecovery`) names them.
     pub registers: [u64; 16],
 }
 
@@ -818,6 +820,11 @@ pub struct Machine<H: Host, D: Devices> {
     exit_words: BTreeMap<u32, u64>,
     target: TargetCpu,
     blocks: Vec<Block>,
+    /// The fault recovery tables of the blocks that have entries, by block
+    /// index: where their regions keep guest GPRs out of the frame across a
+    /// faultable access, which a native fault applies first. Kept apart
+    /// from [`Block`], whose fields every exit reads.
+    fault_recovery: BTreeMap<usize, Vec<stela_compiler::block::FaultRecovery>>,
     /// Blocks by PC, PA, FP enablement and SP alignment checking.
     index: BTreeMap<(u64, u64, Variant), usize>,
     /// The `index` keys of the blocks compiled from each physical page.
@@ -951,6 +958,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             exit_words: BTreeMap::new(),
             target,
             blocks: Vec::new(),
+            fault_recovery: BTreeMap::new(),
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
             fetch: vec![None; FETCH_CACHE],
@@ -1296,6 +1304,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.exit_words = self.exit_words();
         self.host.discard_code();
         self.blocks.clear();
+        self.fault_recovery.clear();
         self.index.clear();
         self.code_pages.clear();
         self.code_generation += 1;
@@ -2405,6 +2414,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 terminal,
             ));
         }
+        if !compiled.fault_recovery.is_empty() {
+            self.fault_recovery
+                .insert(self.blocks.len(), compiled.fault_recovery);
+        }
         self.blocks.push(Block {
             pc,
             physical,
@@ -3382,6 +3395,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn native_fault(&mut self, index: usize, fault: NativeFault) -> Step {
+        // Guest registers a region kept in host registers across the access.
+        if let Some(table) = self.fault_recovery.get(&index) {
+            stela_compiler::block::FaultRecovery::apply(
+                table,
+                fault.offset,
+                &fault.registers,
+                &mut self.cpu.state,
+            );
+        }
         let pc = self.faulting_pc(index, fault.offset);
         self.retire_before(index, pc);
         self.cpu.pc = pc;

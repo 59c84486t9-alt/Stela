@@ -69,6 +69,8 @@ pub struct OptimizedRegion {
     pub consumed_instructions: usize,
     pub source_map: Vec<(GuestAddress, usize)>,
     pub stats: AllocationStats,
+    /// Offsets in `code`; empty unless emitted with a fault table.
+    pub fault_recovery: Vec<crate::block::FaultRecovery>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,6 +100,9 @@ struct Emitter<'a> {
     /// The block's SCTLR_ELx.SA: whether a clean load through SP checks its
     /// alignment ([`super::MemoryChecks::stack_alignment`]).
     stack_alignment: bool,
+    /// The engine recovers dirty values from host registers at a fault
+    /// ([`crate::block::FaultRecovery`]), so accesses need not settle.
+    fault_table: bool,
 }
 
 impl Emitter<'_> {
@@ -335,15 +340,23 @@ impl Emitter<'_> {
         let (ends, data_segment) = selected.ok_or(RegionError::ChangedMemoryEncoding)?;
         let cached_base = self.cached(base);
         // The guest range check and the first element overwrite RCX, and
-        // the second element R8, before a staged value would be read.
-        let cached_data: Vec<Option<HostGpr>> = data
-            .iter()
-            .map(|&register| self.cached(register).filter(|host| !STAGING.contains(host)))
-            .collect();
+        // the second element R8, before a staged value would be read: a
+        // value there is read from its frame slot, which the access's
+        // preparation writes when it is dirty. Any other register holding
+        // an element is copied, as with a fault table it may hold a value
+        // the frame does not yet have.
         let clobbers = STAGING[..data.len()]
             .iter()
             .fold(0, |mask, host| mask | host.mask());
-        self.settle_before_load(clobbers, &[]);
+        let cached_data: Vec<Option<HostGpr>> = data
+            .iter()
+            .map(|&register| {
+                self.cached(register)
+                    .filter(|host| clobbers & host.mask() == 0)
+            })
+            .collect();
+        let live = self.prepare_access(clobbers, &[]);
+        let access_start = self.output.code.len();
         let address = self.access_address(base, displacement, &raw, &ends, cached_base);
         for segment in address + 1..ends.len() {
             let (start, end) = (ends[segment - 1], ends[segment]);
@@ -358,6 +371,7 @@ impl Emitter<'_> {
                 self.emit(|code| code.extend_from_slice(&raw[start..end]));
             }
         }
+        self.finish_access(access_start, live, &[]);
         for (index, &register) in data.iter().enumerate() {
             if cached_data[index].is_none()
                 && !data[..index].contains(&register)
@@ -407,9 +421,11 @@ impl Emitter<'_> {
         )
         .ok_or(RegionError::ChangedMemoryEncoding)?;
         let cached_base = self.cached(base);
-        self.settle_before_load(HostGpr::Rcx.mask(), &[data]);
+        let live = self.prepare_access(HostGpr::Rcx.mask(), &[data]);
+        let start = self.output.code.len();
         let address = self.access_address(base, displacement, &raw, &ends, cached_base);
         self.emit_segments(&raw, &ends[address..]);
+        self.finish_access(start, live, &[data]);
         self.retain_clean_result(data, HostGpr::Rcx);
         self.output.stats.clean_loads += 1;
         self.output.stats.commits += 1;
@@ -444,8 +460,12 @@ impl Emitter<'_> {
             raw[ends[BASE_LOAD]..].starts_with(&super::STACK_ALIGNMENT_CHECK)
         );
         let guest = slot(base).expect("eligible base");
+        let free = POOL
+            .iter()
+            .any(|host| (self.reserved_hosts | self.pinned_hosts) & host.mask() == 0);
         let host = cached.or_else(|| {
-            (self.effects[self.current].writes & (1 << guest) == 0
+            (free
+                && self.effects[self.current].writes & (1 << guest) == 0
                 && next_use(self.effects, self.current + 1, guest) != usize::MAX)
                 .then(|| {
                     let host = POOL[self.allocate(guest)];
@@ -492,6 +512,67 @@ impl Emitter<'_> {
                 .range_checks
                 .is_some_and(|ranges| ranges.get(self.current).copied().unwrap_or(true)),
             ..super::MemoryChecks::DEFAULT
+        }
+    }
+
+    /// Before a faultable access whose host clobbers are `clobbers`: settle
+    /// the frame, or, with a fault table, write back only the dirty values
+    /// in clobbered registers and return where every other dirty value
+    /// lives, pinned until the access is emitted. Clobbered residents are
+    /// dropped, and those of `destinations`: without a table now, with one
+    /// after the access ([`Self::finish_access`]), as their old values are
+    /// the architectural ones if it faults.
+    fn prepare_access(&mut self, clobbers: u16, destinations: &[Register]) -> Vec<(u8, u8)> {
+        if !self.fault_table {
+            self.settle_before_load(clobbers, destinations);
+            return vec![];
+        }
+        let mut live = vec![];
+        for (index, host) in POOL.iter().copied().enumerate() {
+            let Some(resident) = self.resident[index] else {
+                continue;
+            };
+            if clobbers & host.mask() != 0 {
+                if resident.dirty {
+                    self.emit(|code| encoding::store(code, host, resident.guest));
+                    self.output.stats.load_boundary_stores += 1;
+                }
+                self.locations[resident.guest] = FRAME_LOCATIONS[resident.guest];
+                self.resident[index] = None;
+            } else if resident.dirty {
+                live.push((resident.guest as u8, host as u8));
+                self.pinned_hosts |= host.mask();
+            }
+        }
+        live
+    }
+
+    /// After an access emitted from code offset `start`, with a fault
+    /// table: record where `live` values are during it, and drop the
+    /// residents of `destinations`, whose new values it committed to their
+    /// frame slots.
+    fn finish_access(&mut self, start: usize, live: Vec<(u8, u8)>, destinations: &[Register]) {
+        if !self.fault_table {
+            return;
+        }
+        if !live.is_empty() {
+            self.output
+                .fault_recovery
+                .push(crate::block::FaultRecovery {
+                    start,
+                    end: self.output.code.len(),
+                    registers: live,
+                });
+        }
+        for index in 0..POOL.len() {
+            if let Some(resident) = self.resident[index]
+                && destinations
+                    .iter()
+                    .any(|&data| slot(data) == Some(resident.guest))
+            {
+                self.locations[resident.guest] = FRAME_LOCATIONS[resident.guest];
+                self.resident[index] = None;
+            }
         }
     }
 
@@ -568,9 +649,11 @@ impl Emitter<'_> {
         )
         .ok_or(RegionError::ChangedMemoryEncoding)?;
         let cached_base = self.cached(base);
-        self.settle_before_load(HostGpr::Rcx.mask() | HostGpr::R8.mask(), &data);
+        let live = self.prepare_access(HostGpr::Rcx.mask() | HostGpr::R8.mask(), &data);
+        let start = self.output.code.len();
         let address = self.access_address(base, displacement, &raw, &ends, cached_base);
         self.emit_segments(&raw, &ends[address..]);
+        self.finish_access(start, live, &data);
         // Both accesses precede either destination commit in the unchanged
         // shared emitter. A second-access fault leaves both old values intact.
         self.retain_clean_result(data[0], HostGpr::Rcx);
@@ -983,7 +1066,7 @@ impl Emitter<'_> {
 /// `consumed_instructions`, with the full frame written back and `exit_pc` set.
 #[cfg(test)]
 pub fn emit_prefix(instructions: &[Instruction]) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, false, true, None)
+    emit_prefix_selected(instructions, false, true, false, None)
 }
 
 /// Transactional nonfaulting GPR/NZCV span candidate.
@@ -998,18 +1081,38 @@ pub fn emit_allocated_prefix(
 /// [`super::MemoryChecks::stack_alignment`]). With `range_checks`, the loads
 /// the system-mode analysis selects check their address
 /// ([`super::GUEST_RANGE_CHECK`]).
+#[cfg(test)]
 pub fn emit_clean_load_prefix<'a>(
     instructions: &'a [Instruction],
     stack_alignment: bool,
     range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, true, stack_alignment, range_checks)
+    emit_prefix_selected(instructions, true, stack_alignment, false, range_checks)
+}
+
+/// [`emit_clean_load_prefix`], and with `fault_table` its accesses keep
+/// dirty values in registers and [`OptimizedRegion::fault_recovery`] says
+/// where, for an engine that applies it at a fault.
+pub fn emit_clean_load_prefix_with<'a>(
+    instructions: &'a [Instruction],
+    stack_alignment: bool,
+    fault_table: bool,
+    range_checks: Option<&'a [bool]>,
+) -> Result<OptimizedRegion, RegionError> {
+    emit_prefix_selected(
+        instructions,
+        true,
+        stack_alignment,
+        fault_table,
+        range_checks,
+    )
 }
 
 fn emit_prefix_selected<'a>(
     instructions: &'a [Instruction],
     clean_loads: bool,
     stack_alignment: bool,
+    fault_table: bool,
     range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
     if instructions.len() > MAX_INSTRUCTIONS {
@@ -1063,6 +1166,7 @@ fn emit_prefix_selected<'a>(
             consumed_instructions: consumed,
             source_map: vec![],
             stats: AllocationStats::default(),
+            fault_recovery: vec![],
         },
         resident: [None; encoding::ALLOCATABLE_SLOTS],
         locations: FRAME_LOCATIONS,
@@ -1089,6 +1193,7 @@ fn emit_prefix_selected<'a>(
         allocating_output: false,
         range_checks,
         stack_alignment,
+        fault_table,
     };
     for instruction in instructions.iter().take(consumed) {
         emitter.instruction(instruction)?;
@@ -2165,6 +2270,113 @@ mod tests {
                 })
                 .is_none()
             );
+        }
+    }
+
+    /// With a fault table, a dirty value stays in its register across a
+    /// load and a store, whose entries name it over their code; a load's
+    /// destination leaves the table once the load commits it.
+    #[test]
+    fn fault_tables_keep_dirty_values_across_accesses() {
+        let load = |data, base| Operation::Memory {
+            transfer: MemoryTransfer::Load {
+                signed: false,
+                width: Width::X64,
+            },
+            bytes: DOUBLEWORD_LOAD_BYTES,
+            data,
+            base,
+            displacement: 8,
+            mode: AddressMode::Offset,
+        };
+        // add x9,x9,#1; ldr x12,[x1,#8]; add x9,x9,#1; add x10,x11,#1;
+        // ldr x10,[x10,#8]; strb w9,[x2,#8]
+        let instructions = [
+            instruction(0, add(Register::X(9), Register::X(9))),
+            instruction(1, load(Register::X(12), Register::X(1))),
+            instruction(2, add(Register::X(9), Register::X(9))),
+            instruction(3, add(Register::X(10), Register::X(11))),
+            instruction(4, load(Register::X(10), Register::X(10))),
+            instruction(5, store(BYTE_LOAD_BYTES, Register::X(9), Register::X(2), 8)),
+        ];
+        let settled = emit_clean_load_prefix_with(&instructions, true, false, None).unwrap();
+        assert!(settled.fault_recovery.is_empty());
+        assert!(settled.stats.load_boundary_stores >= 2);
+        let region = emit_clean_load_prefix_with(&instructions, true, true, None).unwrap();
+        assert_eq!(region.consumed_instructions, instructions.len());
+        assert_eq!(region.stats.load_boundary_stores, 0);
+        assert!(region.code.len() < settled.code.len());
+        let guests = |entry: &crate::block::FaultRecovery| {
+            let mut guests: Vec<u8> = entry.registers.iter().map(|&(guest, _)| guest).collect();
+            guests.sort_unstable();
+            guests
+        };
+        let entries = &region.fault_recovery;
+        assert_eq!(entries.len(), 3);
+        // X9 across the first load; X9 and the changed X10, the second's
+        // base and destination, whose old value a fault keeps, across the
+        // second; X9 across the store.
+        assert_eq!(guests(&entries[0]), [9]);
+        assert_eq!(guests(&entries[1]), [9, 10]);
+        assert_eq!(guests(&entries[2]), [9]);
+        for pair in entries.windows(2) {
+            assert!(pair[0].end <= pair[1].start);
+        }
+        for entry in entries {
+            assert!(entry.start < entry.end && entry.end <= region.code.len());
+            for &(_, host) in &entry.registers {
+                assert!(POOL.iter().any(|pool| *pool as u8 == host));
+                // The access clobbers RCX, so nothing live stays there.
+                assert_ne!(host, HostGpr::Rcx as u8);
+            }
+        }
+    }
+
+    /// With a fault table, a store whose data is dirty in a register the
+    /// access does not clobber, R8 among them, takes it from there: its
+    /// frame slot is stale. Only a value written back first is read from
+    /// the frame.
+    #[test]
+    fn fault_table_stores_read_dirty_data_from_its_register() {
+        let mut instructions: Vec<_> = (3..8)
+            .map(|guest| {
+                instruction(
+                    guest - 3,
+                    add(Register::X(guest as u8), Register::X(guest as u8)),
+                )
+            })
+            .collect();
+        for guest in 3..8u8 {
+            let index = instructions.len() as u64;
+            instructions.push(instruction(
+                index,
+                store(BYTE_LOAD_BYTES, Register::X(guest), Register::X(2), 8),
+            ));
+        }
+        let region = emit_clean_load_prefix_with(&instructions, true, true, None).unwrap();
+        assert_eq!(region.consumed_instructions, instructions.len());
+        let code = &region.code;
+        // A frame access `op reg, [rdi+offset]` (disp8 or disp32) whose
+        // opcode byte is at `at`. The store's staging load is the one into
+        // RCX; the additions read the initial values into RAX.
+        let frame = |at: usize, opcode: u8, offset: u8| {
+            code[at] == opcode
+                && match code.get(at + 1).map(|modrm| modrm & 0xc7) {
+                    Some(0x47) => code.get(at + 2) == Some(&offset),
+                    Some(0x87) => code.get(at + 2..at + 6) == Some(&[offset, 0, 0, 0][..]),
+                    _ => false,
+                }
+        };
+        for guest in 3..8u8 {
+            let offset = guest * 8;
+            for load in (1..code.len()).filter(|&at| {
+                code[at - 1] == 0x48 && frame(at, 0x8b, offset) && code[at + 1] & 0x38 == 0x08
+            }) {
+                assert!(
+                    (0..load).any(|at| frame(at, 0x89, offset)),
+                    "X{guest} read from a stale frame slot"
+                );
+            }
         }
     }
 

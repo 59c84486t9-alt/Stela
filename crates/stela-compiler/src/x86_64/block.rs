@@ -67,9 +67,11 @@ pub(crate) fn emit_ordinary_for_target(
         fallthrough,
         target,
         true,
+        false,
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
     )
+    .0
 }
 
 /// Every artifact in this profile accepts the same invocation-local budget ABI.
@@ -101,9 +103,11 @@ pub(crate) fn emit_for_target(
         fallthrough,
         target,
         false,
+        false,
         checks,
         super::NativeSystem::NONE,
     )
+    .0
 }
 
 /// [`emit_for_target`] for the system-mode engine, which may also complete
@@ -117,10 +121,11 @@ pub(crate) fn emit_system_mode(
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
     native: super::NativeSystem,
-) -> NativeBlock {
-    // Allocated and clean-load regions settle the frame before every
-    // access and exit, so a fault inside one finds it exact. Their loads
-    // carry no SCTLR_ELx.A check. Accesses check the guest range
+) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
+    // Allocated and clean-load regions settle the frame at exits; across
+    // an access they may keep guest registers in host registers, which
+    // the fault recovery table names, so the engine finds the frame exact
+    // at a fault inside one. Their loads carry no SCTLR_ELx.A check. Accesses check the guest range
     // (`x86_64::guest_range`). One PE runs at a time, so ordering and
     // atomicity need no locked instructions or fences.
     emit_selected(
@@ -129,6 +134,7 @@ pub(crate) fn emit_system_mode(
         fallthrough,
         target,
         !checks.alignment,
+        true,
         super::MemoryChecks {
             guest_range: true,
             single_agent: true,
@@ -138,15 +144,20 @@ pub(crate) fn emit_system_mode(
     )
 }
 
+/// With `fault_table`, region accesses keep dirty values in registers and
+/// the returned table says where ([`crate::block::FaultRecovery`]).
+#[allow(clippy::too_many_arguments)]
 fn emit_selected(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
     optimize_regions: bool,
+    fault_table: bool,
     checks: super::MemoryChecks,
     native: super::NativeSystem,
-) -> NativeBlock {
+) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
+    let mut fault_recovery = vec![];
     let mut block = NativeBlock {
         x86_64_code: vec![],
         source_map: vec![],
@@ -198,9 +209,10 @@ fn emit_selected(
             }
         }
         if optimize_regions
-            && let Ok(region) = super::region::emit_clean_load_prefix(
+            && let Ok(region) = super::region::emit_clean_load_prefix_with(
                 &instructions[cursor..],
                 checks.stack_alignment,
+                fault_table,
                 ranges.map(|ranges| &ranges[cursor..]),
             )
             && region.consumed_instructions != 0
@@ -225,6 +237,13 @@ fn emit_selected(
                 block
                     .source_map
                     .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
+                fault_recovery.extend(region.fault_recovery.into_iter().map(|entry| {
+                    crate::block::FaultRecovery {
+                        start: offset + entry.start,
+                        end: offset + entry.end,
+                        ..entry
+                    }
+                }));
                 code.extend(region.code);
             } else {
                 // Reject the complete eligible chunk. Rescanning its suffix
@@ -260,7 +279,7 @@ fn emit_selected(
         target,
         native,
     );
-    block
+    (block, fault_recovery)
 }
 /// The direct exits to static successors that [`emit_terminal`] ended
 /// `code` with: the target's last, after a conditional branch's fallthrough.
@@ -653,9 +672,10 @@ mod tests {
                         no_fixups && super::super::region::admits_allocated(region, &code)
                     });
                 let clean_region = || {
-                    super::super::region::emit_clean_load_prefix(
+                    super::super::region::emit_clean_load_prefix_with(
                         rest,
                         true,
+                        system,
                         system.then(|| &ranges[cursor..]),
                     )
                     .ok()

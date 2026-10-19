@@ -225,6 +225,7 @@ impl LegacyPlan {
                 consumed_instructions: instructions.len(),
                 source_map: vec![],
                 stats: AllocationStats::default(),
+                fault_recovery: vec![],
             },
             resident: [None; encoding::ALLOCATABLE_SLOTS],
             locations: FRAME_LOCATIONS,
@@ -241,6 +242,7 @@ impl LegacyPlan {
             range_checks: None,
             // No loads.
             stack_alignment: true,
+            fault_table: false,
         };
         for (guest, index) in (0..GPR_SLOTS)
             .filter(|&guest| used & (1 << guest) != 0)

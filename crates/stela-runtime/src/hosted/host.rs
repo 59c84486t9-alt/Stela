@@ -94,7 +94,8 @@ struct UserContext {
 }
 
 /// A fault that stopped native code: where, why, and the host GPRs at the
-/// faulting instruction.
+/// faulting instruction, which a block's fault recovery table reads
+/// (`stela_compiler::block::FaultRecovery`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostFault {
     pub rip: u64,
