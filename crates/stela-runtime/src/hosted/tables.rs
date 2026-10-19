@@ -33,7 +33,9 @@ const ACCESS_FLAG: u64 = 1 << 10;
 /// PXN: EL1 never executes guest memory.
 const PRIVILEGED_EXECUTE_NEVER: u64 = 1 << 53;
 
-/// The translation tables, in host memory the guest never maps.
+/// The translation tables, in host memory the guest never maps: built once
+/// at exec and shared by every thread's PE, as the threads of a task share
+/// its translation table base.
 pub struct Tables {
     base: *mut u64,
 }
@@ -111,6 +113,13 @@ impl Tables {
         true
     }
 }
+
+// SAFETY: the tables are written only in `new`, before any engine reads
+// them; afterwards every PE of the process walks the same immutable bytes,
+// and the mapping lives until the last owner drops it.
+unsafe impl Send for Tables {}
+// SAFETY: as for `Send`: shared access only reads.
+unsafe impl Sync for Tables {}
 
 impl Drop for Tables {
     fn drop(&mut self) {

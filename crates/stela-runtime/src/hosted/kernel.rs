@@ -10,20 +10,28 @@
 //! implements stops the process with its name rather than returning a
 //! made-up result.
 use super::{
-    Termination, forward, hardware::Hardware, host::ProcessHost, shared_region::SharedRegion,
+    Termination, forward,
+    hardware::Hardware,
+    host::ProcessHost,
+    shared_region::SharedRegion,
+    threads::{Engine, Runtime, lock},
 };
 use crate::{
     machine::{Cpu, Machine, NoDevices, system::Register},
     pauth,
 };
 use anyhow::{Result, bail};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, atomic::AtomicBool},
+};
 
 mod bsd;
 mod mach;
 mod platform;
 
 pub use bsd::Signature;
+pub(super) use bsd::{EAGAIN, ENOMEM};
 
 pub(super) type Pe = Machine<ProcessHost, NoDevices>;
 
@@ -49,40 +57,77 @@ pub struct Executable {
     pub header: u64,
 }
 
-/// `task_self_trap`, `host_self_trap`, `thread_self_trap`.
+/// `task_self_trap`, `host_self_trap`.
 const TASK_SELF_TRAP: u32 = 28;
 const HOST_SELF_TRAP: u32 = 29;
-const THREAD_SELF_TRAP: u32 = 27;
 
-pub(super) struct Kernel {
-    pub(super) shared_region: Option<SharedRegion>,
+/// The process's kernel state, shared by its threads: what exec fixed, and
+/// each mutable family behind its own lock. No lock here is held while a
+/// thread waits for the execution lock; [`Kernel::page_in`] takes the
+/// execution lock before the shared region's.
+pub(super) struct Process {
     pub(super) signer: pauth::Context,
-    pub(super) executable: Executable,
     pub(super) hardware: Hardware,
-    pub(super) trace: bool,
-    pub(super) counts: BTreeMap<&'static str, u64>,
-    pub(super) termination: Option<Termination>,
-    pub(super) threads: bsd::thread::Threads,
     pub(super) sysctl: bsd::sysctl::Model,
-    pub(super) signals: bsd::signal::Signals,
     /// The main thread's stack top (`p_usrstack`).
     pub(super) user_stack: u64,
-    pub(super) map_with_linking_ended: bool,
     /// Guest system roots read-only absolute lookups resolve under first.
     pub(super) roots: Vec<std::path::PathBuf>,
     /// The host command `execve` activates the new image with.
     pub(super) reexec: Vec<std::ffi::OsString>,
+    pub(super) trace: bool,
+    /// This task's and the host's kernel-object port names.
+    pub(super) task_port: u32,
+    pub(super) host_port: u32,
+    pub(super) engine: Engine,
+    pub(super) runtime: Runtime,
+    pub(super) shared_region: Mutex<Option<SharedRegion>>,
+    pub(super) executable: Mutex<Executable>,
+    pub(super) counts: Mutex<BTreeMap<&'static str, u64>>,
+    pub(super) threads: bsd::thread::Threads,
+    pub(super) workqueue: bsd::workqueue::Workqueue,
+    /// The workqueue kqueue (`fd_wqkqueue`), once used.
+    pub(super) kqworkq: bsd::kqworkq::Slot,
+    /// The workloops (`fd_kqhash`).
+    pub(super) workloops: bsd::kqworkloop::Workloops,
+    pub(super) actions: Mutex<bsd::signal::Actions>,
+    pub(super) map_with_linking_ended: AtomicBool,
     /// Code signatures attached to files.
-    pub(super) signatures: bsd::signatures::Signatures,
-    /// This task's, its thread's and the host's kernel-object port names.
-    pub(super) kernel_objects: Vec<u32>,
+    pub(super) signatures: Mutex<bsd::signatures::Signatures>,
+    /// The task's restartable ranges (`t_rr_ranges`).
+    pub(super) restartable_ranges: Mutex<Option<Vec<RestartableRange>>>,
+    /// The deferred-reclamation ring, once libmalloc registers one.
+    pub(super) reclaim: Mutex<Option<mach::reclaim::Ring>>,
+}
+
+/// One `task_restartable_range_t`: location, length, recovery offset and
+/// flags.
+pub(super) type RestartableRange = (u64, u16, u16, u32);
+
+/// How a thread's last call ended it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum End {
+    /// `exit`: the whole process.
+    Process(Termination),
+    /// `bsdthread_terminate`: this thread.
+    Thread,
+}
+
+/// One thread's view of the kernel: the process it belongs to and the
+/// state XNU keeps in its uthread.
+pub(super) struct Kernel {
+    pub(super) process: Arc<Process>,
+    /// The thread's identifier in the process's registry.
+    pub(super) thread: u64,
+    /// Its port name: its host thread's.
+    pub(super) thread_port: u32,
+    pub(super) trace: bool,
+    pub(super) signals: bsd::signal::ThreadSignals,
     /// The port MIG reply rights are carried through, once allocated.
     pub(super) mig_relay: Option<u32>,
-    /// The task's restartable ranges (`t_rr_ranges`): location, length,
-    /// recovery offset and flags.
-    pub(super) restartable_ranges: Option<Vec<(u64, u16, u16, u32)>>,
-    /// The deferred-reclamation ring, once libmalloc registers one.
-    pub(super) reclaim: Option<mach::reclaim::Ring>,
+    /// Its workqueue thread state, when the workqueue created it.
+    pub(super) worker: Option<bsd::workqueue::Worker>,
+    pub(super) end: Option<End>,
 }
 
 /// The trapped guest thread as the exception left it: X0..X30 in the
@@ -122,6 +167,45 @@ pub(super) struct Config {
     pub(super) roots: Vec<std::path::PathBuf>,
     pub(super) reexec: Vec<std::ffi::OsString>,
     pub(super) trace: bool,
+    pub(super) engine: Engine,
+}
+
+impl Process {
+    pub(super) fn new(config: Config) -> Arc<Self> {
+        let port = |trap| forward::mach(trap, &[]).rax as u32;
+        Arc::new(Self {
+            sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features),
+            signer: config.signer,
+            hardware: config.hardware,
+            user_stack: config.user_stack,
+            roots: config.roots,
+            reexec: config.reexec,
+            trace: config.trace,
+            task_port: port(TASK_SELF_TRAP),
+            host_port: port(HOST_SELF_TRAP),
+            engine: config.engine,
+            runtime: Runtime::default(),
+            shared_region: Mutex::new(config.shared_region),
+            executable: Mutex::new(config.executable),
+            counts: Mutex::new(BTreeMap::new()),
+            threads: Default::default(),
+            workqueue: Default::default(),
+            kqworkq: Default::default(),
+            workloops: Default::default(),
+            actions: Mutex::new(bsd::signal::Actions::inherit()),
+            map_with_linking_ended: AtomicBool::new(false),
+            signatures: Default::default(),
+            restartable_ranges: Mutex::new(None),
+            reclaim: Mutex::new(None),
+        })
+    }
+
+    /// Pages of the shared region slid so far.
+    pub(super) fn slid_pages(&self) -> u64 {
+        lock(&self.shared_region)
+            .as_ref()
+            .map_or(0, SharedRegion::slid_pages)
+    }
 }
 
 /// The return addresses of the frame records from `fp`, without their
@@ -142,36 +226,59 @@ fn frames(mut fp: u64) -> Vec<u64> {
 }
 
 impl Kernel {
-    pub(super) fn new(config: Config) -> Self {
-        let kernel_objects = [TASK_SELF_TRAP, THREAD_SELF_TRAP, HOST_SELF_TRAP]
-            .iter()
-            .map(|&trap| forward::mach(trap, &[]).rax as u32)
-            .collect();
+    pub(super) fn new(process: Arc<Process>, thread: u64, thread_port: u32) -> Self {
         Self {
-            shared_region: config.shared_region,
-            signer: config.signer,
-            sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features),
-            executable: config.executable,
-            hardware: config.hardware,
-            trace: config.trace,
-            counts: BTreeMap::new(),
-            termination: None,
-            threads: bsd::thread::Threads::default(),
-            signals: bsd::signal::Signals::inherit(),
-            user_stack: config.user_stack,
-            roots: config.roots,
-            reexec: config.reexec,
-            signatures: Default::default(),
-            map_with_linking_ended: false,
-            kernel_objects,
+            trace: process.trace,
+            process,
+            thread,
+            thread_port,
+            signals: bsd::signal::ThreadSignals::inherit(),
             mig_relay: None,
-            restartable_ranges: None,
-            reclaim: None,
+            worker: None,
+            end: None,
         }
     }
 
     pub(super) fn count(&mut self, name: &'static str) {
-        *self.counts.entry(name).or_default() += 1;
+        *lock(&self.process.counts).entry(name).or_default() += 1;
+    }
+
+    /// This task's, this thread's and the host's kernel-object ports.
+    pub(super) fn kernel_objects(&self) -> [u32; 3] {
+        [
+            self.process.task_port,
+            self.thread_port,
+            self.process.host_port,
+        ]
+    }
+
+    /// Drop the compiled blocks of guest memory the hosted kernel changed:
+    /// in this thread's engine now, in the others' before they next run.
+    pub(super) fn invalidate_code(&self, pe: &mut Pe, address: u64, bytes: u64) {
+        pe.invalidate_code(address, bytes);
+        self.process
+            .runtime
+            .registry
+            .invalidate(self.thread, address, bytes);
+    }
+
+    /// Before a new thread first executes guest code: a workqueue thread
+    /// parks until it is bound to a request and enters `wqthread`.
+    pub(super) fn begin(&mut self, pe: &mut Pe) -> Result<Option<End>> {
+        bsd::workqueue::begin(self, pe)
+    }
+
+    /// The thread entered (`true`) or left a kernel call, during which the
+    /// workqueue counts it blocked.
+    pub(super) fn blocked(&self, blocked: bool) {
+        if let Some(worker) = &self.worker {
+            self.process.workqueue.blocked(worker, blocked);
+        }
+    }
+
+    /// Run `section` while no thread executes guest code.
+    pub(super) fn exclusive<T>(&self, section: impl FnOnce() -> T) -> T {
+        self.process.runtime.exclusive(self.thread, section)
     }
 
     /// Service the synchronous exception the guest took to EL1.
@@ -216,11 +323,14 @@ impl Kernel {
     }
 
     /// Slide in a shared-region page the guest or a forwarded call touched.
+    /// No thread executes guest code meanwhile, so none observes the page
+    /// between its unprotection and its slid contents.
     pub(super) fn page_in(&mut self, address: u64) -> Result<bool> {
-        match &mut self.shared_region {
-            Some(region) => region.resolve(address, &self.signer),
+        let process = &self.process;
+        self.exclusive(|| match lock(&process.shared_region).as_mut() {
+            Some(region) => region.resolve(address, &process.signer),
             None => Ok(false),
-        }
+        })
     }
 
     /// The runs of a range whose host pages a protection change applies
@@ -232,7 +342,7 @@ impl Kernel {
         size: u64,
         change: impl FnMut(super::memory::Protection) -> Option<super::memory::Protection>,
     ) -> Vec<(u64, u64)> {
-        match &mut self.shared_region {
+        match lock(&self.process.shared_region).as_mut() {
             Some(region) => region.update(address, size, change),
             None => vec![(address, size)],
         }
@@ -242,14 +352,17 @@ impl Kernel {
     /// before the host kernel copies through them: the host cannot fault
     /// them in itself.
     pub(super) fn page_in_arguments(&mut self, arguments: &[u64]) -> Result<()> {
-        let Some(region) = &self.shared_region else {
-            return Ok(());
+        let pending: Vec<u64> = {
+            let region = lock(&self.process.shared_region);
+            let Some(region) = region.as_ref() else {
+                return Ok(());
+            };
+            arguments
+                .iter()
+                .flat_map(|&argument| [argument, argument.wrapping_add(super::memory::PAGE_BYTES)])
+                .filter(|&address| region.pending(address))
+                .collect()
         };
-        let pending: Vec<u64> = arguments
-            .iter()
-            .flat_map(|&argument| [argument, argument.wrapping_add(super::memory::PAGE_BYTES)])
-            .filter(|&address| region.pending(address))
-            .collect();
         for address in pending {
             self.page_in(address)?;
         }

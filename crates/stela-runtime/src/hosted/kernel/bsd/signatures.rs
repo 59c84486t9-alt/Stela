@@ -16,7 +16,7 @@
 use super::codesign::{CS_PLATFORM_BINARY, CS_REQUIRE_LV, CS_RUNTIME};
 use super::{Call, EFAULT, EINVAL, ENOENT, EPERM, Kernel, Outcome};
 use crate::code_signature::{self, CodeSignature};
-use crate::hosted::memory;
+use crate::hosted::{memory, threads::lock};
 use anyhow::{Result, bail};
 
 const F_ADDSIGS: u64 = 59;
@@ -133,7 +133,7 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
             };
             let start = i64::from_le_bytes(bytes[..8].try_into().unwrap());
             let request = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-            match kernel.signatures.find(file, start) {
+            match lock(&kernel.process.signatures).find(file, start) {
                 None => Outcome::Error(ENOENT),
                 Some(_) if request != GETSIGSINFO_PLATFORM_BINARY => Outcome::Error(EINVAL),
                 Some(blob) => {
@@ -167,7 +167,10 @@ fn add_file_signatures(
     let field =
         |index: usize| u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap());
     let (base, blob_start, blob_size) = (field(0), field(1), field(2));
-    if kernel.signatures.find(file, base as i64).is_none() {
+    if lock(&kernel.process.signatures)
+        .find(file, base as i64)
+        .is_none()
+    {
         if blob_size > MAX_BLOB_BYTES {
             return Ok(Outcome::Error(E2BIG));
         }
@@ -195,14 +198,15 @@ fn add_file_signatures(
         if signature.start_offset >= signature.end_offset {
             return Ok(Outcome::Error(EINVAL));
         }
-        kernel.signatures.attached.push(Attached {
+        lock(&kernel.process.signatures).attached.push(Attached {
             device: file.0,
             inode: file.1,
             base,
             signature,
         });
     }
-    let Some(blob) = kernel.signatures.find(file, base as i64) else {
+    let signatures = lock(&kernel.process.signatures);
+    let Some(blob) = signatures.find(file, base as i64) else {
         return Ok(Outcome::Error(EINVAL));
     };
     // The end offset overwrites `fs_file_start`.
@@ -234,7 +238,7 @@ fn check_library(kernel: &mut Kernel, file: (u64, u64), argument: u64) -> Result
     let field =
         |index: usize| u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap());
     let (start, message_size, message) = (field(0) as i64, field(1), field(2));
-    let flags = kernel.executable.code_signing_flags;
+    let flags = lock(&kernel.process.executable).code_signing_flags;
     let platform_process = flags & CS_PLATFORM_BINARY != 0;
     if !platform_process && flags & CS_REQUIRE_LV == 0 {
         if flags & CS_RUNTIME != 0 {
@@ -245,12 +249,11 @@ fn check_library(kernel: &mut Kernel, file: (u64, u64), argument: u64) -> Result
         }
         return Ok(Outcome::value(0));
     }
-    let own_team = kernel
-        .executable
+    let own_team = lock(&kernel.process.executable)
         .signature
         .as_ref()
         .and_then(|signature| signature.team_identifier.clone());
-    let refusal = match kernel.signatures.find(file, start) {
+    let refusal = match lock(&kernel.process.signatures).find(file, start) {
         None => Some("code signature not found"),
         Some(blob) if blob.signature.platform != 0 => None,
         Some(_) if platform_process => Some("platform binaries may only load platform code"),

@@ -16,15 +16,19 @@ use anyhow::{Result, bail};
 
 mod codesign;
 mod forwarded;
+pub(super) mod kqworkloop;
+pub(super) mod kqworkq;
 mod linking;
 mod memory;
 mod paths;
+mod priority;
 mod process;
 pub(super) mod signal;
 pub(super) mod signatures;
 pub(super) mod sysctl;
 pub(super) mod thread;
 mod time;
+pub(super) mod workqueue;
 
 pub use codesign::Signature;
 
@@ -33,9 +37,10 @@ pub(super) const ENOSYS: u64 = 78;
 const ENOSYS_ROUTINE: &str = "enosys";
 pub(super) const EINVAL: u64 = 22;
 pub(super) const EFAULT: u64 = 14;
-pub(super) const ENOMEM: u64 = 12;
+pub(crate) const ENOMEM: u64 = 12;
 pub(super) const ENOENT: u64 = 2;
 pub(super) const EPERM: u64 = 1;
+pub(crate) const EAGAIN: u64 = 35;
 
 /// How a call completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +72,15 @@ impl Call {
     pub(super) fn arguments(&self) -> &[u64] {
         &self.arguments[..self.entry.argument_count]
     }
+}
+
+/// A call's number in the pinned catalog.
+pub(super) fn number_of(name: &str) -> u16 {
+    (0..=u16::MAX)
+        .map_while(catalog::entry)
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.number)
+        .expect("the call is in the pinned catalog")
 }
 
 /// Forward `call` to the host kernel.
@@ -118,7 +132,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
                 .join(", ")
         );
     }
-    if kernel.termination.is_some() {
+    if kernel.end.is_some() {
         return Ok(());
     }
     complete(&mut Trap { cpu: &mut pe.cpu }, entry.return_type, outcome)
@@ -172,6 +186,9 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         return Ok(outcome);
     }
     if let Some(outcome) = thread::call(kernel, pe, call)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = workqueue::call(kernel, pe, call)? {
         return Ok(outcome);
     }
     if let Some(outcome) = signal::call(kernel, call)? {

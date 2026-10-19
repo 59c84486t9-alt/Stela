@@ -13,6 +13,7 @@
 //! needs the hosted runtime in the child and stays refused by name.
 use super::{Call, EFAULT, Kernel, Outcome, Pe, paths};
 use crate::hosted::activation::{self, Activator};
+use crate::hosted::kernel::End;
 use crate::hosted::{Termination, memory};
 use anyhow::{Result, bail};
 use std::ffi::{CString, OsStr};
@@ -31,7 +32,7 @@ const EACCES: u64 = 13;
 pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(match call.entry.name {
         "exit" => {
-            kernel.termination = Some(Termination::Exited(call.argument(0) as i32));
+            kernel.end = Some(End::Process(Termination::Exited(call.argument(0) as i32)));
             Some(Outcome::JustReturn)
         }
         "execve" => Some(execve(kernel, call)?),
@@ -62,7 +63,7 @@ fn strings(mut vector: u64, total: &mut usize) -> Result<Vec<Vec<u8>>, u64> {
 
 /// The host file a guest path names, and the errno its lookup fails with.
 fn lookup(kernel: &Kernel, path: &[u8]) -> Result<PathBuf, u64> {
-    let host = paths::resolve(&kernel.roots, path)
+    let host = paths::resolve(&kernel.process.roots, path)
         .unwrap_or_else(|| Path::new(OsStr::from_bytes(path)).to_owned());
     let name =
         CString::new(host.as_os_str().as_bytes()).map_err(|_| u64::from(libc::ENOENT as u32))?;
@@ -128,7 +129,7 @@ fn execve(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         }
         Err(errno) => return Ok(Outcome::Error(errno)),
     }
-    let Some((program, prefix)) = kernel.reexec.split_first() else {
+    let Some((program, prefix)) = kernel.process.reexec.split_first() else {
         bail!("execve: the hosted runtime has no activation command");
     };
     let argv0 = arguments.first().cloned().unwrap_or_default();

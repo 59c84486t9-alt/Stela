@@ -12,6 +12,7 @@
 //! are serviced here by routine, and a routine not serviced stops the
 //! process naming it.
 use super::{Kernel, Pe, Trap};
+use crate::hosted::threads::lock;
 use crate::hosted::{
     forward, host,
     memory::{PAGE_MASK, Protection},
@@ -88,7 +89,7 @@ fn forward_trap(kernel: &mut Kernel, index: u32, arguments: &[u64]) -> Result<u6
     Ok(forward::mach(index, arguments).rax)
 }
 
-fn index_of(name: &str) -> u32 {
+pub(super) fn index_of(name: &str) -> u32 {
     (0..)
         .map_while(catalog::entry)
         .find(|entry| entry.name == name)
@@ -231,13 +232,13 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
         "mach_vm_reclaim_update_kernel_accounting_trap" => {
             // `(target_task, bytes_reclaimed_out, next_deadline_out)`.
             let (bytes_out, deadline_out) = (arguments[1], arguments[2]);
-            if arguments[0] != u64::from(kernel.kernel_objects[0]) {
+            if arguments[0] != u64::from(kernel.process.task_port) {
                 return Ok(MACH_SEND_INVALID_DEST);
             }
             if bytes_out == 0 || deadline_out == 0 {
                 return Ok(KERN_INVALID_ARGUMENT);
             }
-            match reclaim::update_accounting(&mut kernel.reclaim) {
+            match reclaim::update_accounting(&mut lock(&kernel.process.reclaim)) {
                 Ok((bytes, deadline)) => {
                     // The kernel ignores copy-out faults here.
                     crate::hosted::memory::write_u64(bytes_out, bytes);

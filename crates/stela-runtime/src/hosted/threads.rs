@@ -1,0 +1,559 @@
+//! The guest's threads: each is one host thread running its own engine (PE
+//! registers, block cache and native code arena) over the process's shared
+//! memory and identity stage 1, as the threads of a task share its map.
+//!
+//! The engine performs a store-exclusive as a check of its own PE's monitor
+//! followed by a plain copy, so two engines executing at once could both
+//! pass an LDXR/STXR pair and lose an update. Guest code therefore runs
+//! under one [`ExecutionLock`]: one thread executes translated code at a
+//! time, which orders every guest memory effect totally, a valid execution
+//! of the Arm memory model. A thread gives the lock up at each exception it
+//! takes to the kernel (the hosted kernel's services run concurrently with
+//! other threads' guest code, as XNU's do), in a WFE or WFI wait and at the
+//! end of a time slice another thread waits for. As at the engine's own PE
+//! switch, a thread that resumes after another ran has lost its exclusive
+//! reservation, and a thread preempted inside a registered restartable
+//! range resumes at its recovery address (XNU `thread_reset_pcs_in_range`).
+//!
+//! Guest memory the hosted kernel maps, unmaps or rewrites drops compiled
+//! blocks in the calling thread's engine at once and, through the
+//! [`Registry`], in every other engine before it next executes guest code.
+//! Process exit closes the execution lock for good and wakes the host
+//! thread waiting in [`Lifetime::wait`]; the host process's exit then ends
+//! every thread.
+use super::{
+    Termination,
+    host::ProcessHost,
+    kernel::{End, Kernel, Pe, Process},
+    pe,
+    tables::Tables,
+};
+use crate::machine::{Chip, CpuProfile, Machine, NoDevices, Stop, system::Register};
+use anyhow::{Context as _, Result, anyhow, bail};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        mpsc,
+    },
+};
+use stela_compiler::TargetCpu;
+
+/// Blocks a thread runs before it yields the execution lock to a waiting
+/// thread: the engine's own PE time slice (`processors::QUANTUM`).
+pub(super) const SLICE_BLOCKS: u64 = 1 << 14;
+/// How long, in counter ticks, the engine waits in a WFE or WFI before it
+/// returns to the thread's loop, which then gives the execution lock up.
+const WAIT_LIMIT_TICKS: u64 = 1;
+/// The host stack of a thread running an engine: the engine and the hosted
+/// kernel run on it, never guest code.
+const HOST_STACK_BYTES: usize = 16 << 20;
+/// `thread_self_trap`: the calling host thread's port, with a new user
+/// reference.
+const THREAD_SELF_TRAP: u32 = 27;
+const MACH_PORT_DEALLOCATE_TRAP: u32 = 18;
+
+/// Lock a process mutex. A thread that panicked while holding one leaves
+/// state the kernel personality cannot trust, but the process is ending
+/// with that failure already, so its last value serves the report.
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What builds one thread's engine: every PE of the process has the same
+/// chip, identification, translation tables and PAC keys.
+pub(super) struct Engine {
+    pub(super) chip: Chip,
+    pub(super) profile: CpuProfile,
+    pub(super) target: TargetCpu,
+    pub(super) tables: Arc<Tables>,
+    pub(super) keys: pe::Keys,
+}
+
+impl Engine {
+    /// A PE at EL0t entering at `pc`, with the hosted vectors as host
+    /// breakpoints and waits returned to the thread's loop.
+    fn machine(&self, pc: u64) -> Result<Box<Pe>> {
+        let cpu = pe::user_thread(self.chip, pc, &self.tables, &self.keys);
+        let host = ProcessHost::new(self.tables.clone())?;
+        let mut machine = Box::new(Machine::new(
+            cpu,
+            host,
+            NoDevices,
+            self.profile.clone(),
+            self.target,
+        ));
+        machine.set_breakpoints(&pe::vectors());
+        machine.set_wait_limit(Some(WAIT_LIMIT_TICKS));
+        Ok(machine)
+    }
+}
+
+/// FIFO ownership of guest execution. `closed` is set once the process
+/// ends: no thread executes guest code after it.
+#[derive(Default)]
+struct LockState {
+    next_ticket: u64,
+    serving: u64,
+    holder: Option<u64>,
+    /// The thread that held the lock last, to tell a resuming thread
+    /// whether another ran since.
+    last: Option<u64>,
+    closed: bool,
+}
+
+#[derive(Default)]
+pub(super) struct ExecutionLock {
+    state: Mutex<LockState>,
+    turn: Condvar,
+    waiting: AtomicU32,
+}
+
+impl ExecutionLock {
+    /// Wait for the lock in arrival order. True when another thread held
+    /// it since `thread` last did. Never returns once the process ended.
+    fn acquire(&self, thread: u64) -> bool {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let mut state = lock(&self.state);
+        let ticket = state.next_ticket;
+        state.next_ticket += 1;
+        while state.closed || state.serving != ticket {
+            state = self
+                .turn
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        state.holder = Some(thread);
+        state.last != Some(thread)
+    }
+
+    fn release(&self, thread: u64) {
+        let mut state = lock(&self.state);
+        debug_assert_eq!(state.holder, Some(thread));
+        state.holder = None;
+        state.last = Some(thread);
+        state.serving += 1;
+        drop(state);
+        self.turn.notify_all();
+    }
+
+    /// Whether a thread waits for the lock.
+    fn contended(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst) != 0
+    }
+
+    /// Take the lock (unless `thread` holds it) and close it for good.
+    fn close(&self, thread: u64) {
+        let held = lock(&self.state).holder == Some(thread);
+        if !held {
+            self.acquire(thread);
+        }
+        lock(&self.state).closed = true;
+    }
+}
+
+/// One live guest thread as the other threads see it.
+pub(super) struct Member {
+    /// Its port name, the host thread's.
+    pub(super) port: u32,
+    /// Guest ranges whose compiled blocks it must drop before it next
+    /// executes guest code.
+    stale: Mutex<Vec<(u64, u64)>>,
+    has_stale: AtomicBool,
+}
+
+/// The registry identifier of the main thread, the first one spawned.
+pub(super) const MAIN_THREAD: u64 = 0;
+
+/// The process's live threads.
+#[derive(Default)]
+pub(super) struct Registry {
+    members: Mutex<BTreeMap<u64, Arc<Member>>>,
+    next_id: AtomicU64,
+}
+
+impl Registry {
+    fn insert(&self, port: u32) -> (u64, Arc<Member>) {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let member = Arc::new(Member {
+            port,
+            stale: Mutex::new(Vec::new()),
+            has_stale: AtomicBool::new(false),
+        });
+        lock(&self.members).insert(id, member.clone());
+        (id, member)
+    }
+
+    fn remove(&self, id: u64) {
+        lock(&self.members).remove(&id);
+    }
+
+    /// Whether `port` names one of the process's threads.
+    pub(super) fn contains_port(&self, port: u32) -> bool {
+        lock(&self.members)
+            .values()
+            .any(|member| member.port == port)
+    }
+
+    /// Record a range the hosted kernel changed for every thread but
+    /// `from`, whose own engine it already invalidated.
+    pub(super) fn invalidate(&self, from: u64, address: u64, bytes: u64) {
+        for (&id, member) in lock(&self.members).iter() {
+            if id != from {
+                lock(&member.stale).push((address, bytes));
+                member.has_stale.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+/// How the process ended, for the host thread that waits for it.
+#[derive(Default)]
+pub(super) struct Lifetime {
+    end: Mutex<Option<Result<Termination>>>,
+    ended: Condvar,
+}
+
+impl Lifetime {
+    fn end(&self, outcome: Result<Termination>) {
+        let mut end = lock(&self.end);
+        if end.is_none() {
+            *end = Some(outcome);
+        }
+        drop(end);
+        self.ended.notify_all();
+    }
+
+    /// Block until a guest thread ends the process.
+    pub(super) fn wait(&self) -> Result<Termination> {
+        let mut end = lock(&self.end);
+        loop {
+            if let Some(outcome) = end.take() {
+                return outcome;
+            }
+            end = self
+                .ended
+                .wait(end)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+/// The threads of one process.
+#[derive(Default)]
+pub(super) struct Runtime {
+    pub(super) execution: ExecutionLock,
+    pub(super) registry: Registry,
+    pub(super) lifetime: Lifetime,
+}
+
+impl Runtime {
+    /// Run `section` with no guest code executing anywhere: for changes to
+    /// guest memory no thread may observe half done.
+    pub(super) fn exclusive<T>(&self, thread: u64, section: impl FnOnce() -> T) -> T {
+        self.execution.acquire(thread);
+        let result = section();
+        self.execution.release(thread);
+        result
+    }
+
+    /// End the process with `outcome`: no guest code runs after it.
+    fn end(&self, thread: u64, outcome: Result<Termination>) {
+        self.execution.close(thread);
+        self.lifetime.end(outcome);
+    }
+
+    /// End the process with the failure of one of the hosted kernel's own
+    /// service threads (the workqueue's monitors).
+    pub(super) fn fail(&self, error: anyhow::Error) {
+        self.end(SERVICE_THREAD, Err(error));
+    }
+}
+
+/// The identifier a service thread ends the process under; the registry
+/// never reaches it.
+const SERVICE_THREAD: u64 = u64::MAX;
+
+/// The calling host thread's port, with a user reference for the guest.
+fn own_port() -> u32 {
+    super::forward::mach(THREAD_SELF_TRAP, &[]).rax as u32
+}
+
+/// Start a guest thread on a new host thread. `prepare` runs there first,
+/// with the thread's kernel (its port already its own) and its PE entering
+/// at `pc`; it sets the entry registers or refuses with an errno, which
+/// ends the thread before it runs. The creator waits for `prepare` and
+/// receives the new thread's port or that errno.
+pub(super) fn spawn<F>(process: &Arc<Process>, pc: u64, prepare: F) -> Result<Result<u32, u64>>
+where
+    F: FnOnce(&mut Kernel, &mut Pe) -> Result<Result<(), u64>> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel::<Result<Result<u32, u64>>>();
+    let process = process.clone();
+    let spawned = std::thread::Builder::new()
+        .name("stela-guest".into())
+        .stack_size(HOST_STACK_BYTES)
+        .spawn(move || {
+            let port = own_port();
+            let (id, member) = process.runtime.registry.insert(port);
+            let mut kernel = Kernel::new(process.clone(), id, port);
+            let prepared = process
+                .engine
+                .machine(pc)
+                .and_then(|mut pe| Ok((prepare(&mut kernel, &mut pe)?, pe)));
+            let pe = match prepared {
+                Ok((Ok(()), pe)) => {
+                    let _ = sender.send(Ok(Ok(port)));
+                    pe
+                }
+                Ok((Err(errno), _)) => {
+                    process.runtime.registry.remove(id);
+                    super::forward::mach(
+                        MACH_PORT_DEALLOCATE_TRAP,
+                        &[u64::from(process.task_port), u64::from(port)],
+                    );
+                    let _ = sender.send(Ok(Err(errno)));
+                    return;
+                }
+                Err(error) => {
+                    process.runtime.registry.remove(id);
+                    let _ = sender.send(Err(error));
+                    return;
+                }
+            };
+            drop(sender);
+            let outcome = run(&mut kernel, pe, &member);
+            process.runtime.registry.remove(id);
+            match outcome {
+                Ok(None) => {}
+                Ok(Some(termination)) => process.runtime.end(id, Ok(termination)),
+                Err(error) => process.runtime.end(id, Err(error)),
+            }
+        });
+    if let Err(error) = spawned {
+        return Ok(Err(if error.kind() == std::io::ErrorKind::OutOfMemory {
+            super::kernel::ENOMEM
+        } else {
+            super::kernel::EAGAIN
+        }));
+    }
+    receiver
+        .recv()
+        .map_err(|_| anyhow!("a new guest thread ended before it was prepared"))?
+}
+
+/// Take the execution lock for `thread` and bring its engine up to date:
+/// the reservation another thread's execution may have broken and the
+/// compiled blocks the hosted kernel made stale.
+fn resume(process: &Process, thread: u64, member: &Member, pe: &mut Pe) {
+    if process.runtime.execution.acquire(thread) {
+        pe.cpu.monitor = None;
+    }
+    if member.has_stale.swap(false, Ordering::SeqCst) {
+        let ranges = std::mem::take(&mut *lock(&member.stale));
+        for (address, bytes) in ranges {
+            pe.invalidate_code(address, bytes);
+        }
+    }
+}
+
+/// A thread preempted inside a restartable range resumes at its recovery
+/// address (`thread_reset_pcs_in_range`).
+fn restart_ranges(process: &Process, pe: &mut Pe) {
+    let ranges = lock(&process.restartable_ranges);
+    let Some(ranges) = ranges.as_ref() else {
+        return;
+    };
+    let pc = pe.cpu.pc;
+    if let Some(&(location, _, recovery, _)) = ranges
+        .iter()
+        .find(|&&(location, length, _, _)| (location..location + u64::from(length)).contains(&pc))
+    {
+        pe.cpu.pc = location + u64::from(recovery);
+    }
+}
+
+/// Execute the thread until it ends: `Some` when it ended the process.
+fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<Termination>> {
+    let process = kernel.process.clone();
+    let thread = kernel.thread;
+    let execution = &process.runtime.execution;
+    if let Some(end) = kernel.begin(&mut pe)? {
+        return Ok(ended(end));
+    }
+    resume(&process, thread, member, &mut pe);
+    loop {
+        match pe.run(pe.statistics.blocks + SLICE_BLOCKS) {
+            Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) => {
+                execution.release(thread);
+                kernel.blocked(true);
+                kernel.synchronous(&mut pe)?;
+                kernel.blocked(false);
+                match kernel.end.take() {
+                    Some(End::Process(termination)) => return Ok(Some(termination)),
+                    Some(End::Thread) => return Ok(None),
+                    None => {}
+                }
+                resume(&process, thread, member, &mut pe);
+                pe.return_from_exception();
+            }
+            Stop::Budget => {
+                if execution.contended() {
+                    restart_ranges(&process, &mut pe);
+                    execution.release(thread);
+                    resume(&process, thread, member, &mut pe);
+                }
+            }
+            Stop::Waiting => {
+                execution.release(thread);
+                std::thread::yield_now();
+                resume(&process, thread, member, &mut pe);
+            }
+            Stop::Breakpoint(pc) => {
+                execution.release(thread);
+                bail!(
+                    "the guest took an exception to EL1 vector {pc:#x} (ESR {:#x}, ELR {:#x}): \
+                     only synchronous exceptions from EL0 are serviced",
+                    pe.cpu.read(Register::ESR_EL1),
+                    pe.cpu.read(Register::ELR_EL1)
+                )
+            }
+            other => {
+                execution.release(thread);
+                bail!("the guest PE stopped at pc {:#x}: {other:?}", pe.cpu.pc)
+            }
+        }
+    }
+}
+
+fn ended(end: End) -> Option<Termination> {
+    match end {
+        End::Process(termination) => Some(termination),
+        End::Thread => None,
+    }
+}
+
+/// The guest thread's initial integer registers, SP and thread pointer.
+pub(super) struct Entry {
+    /// X0 upward.
+    pub(super) arguments: Vec<u64>,
+    pub(super) sp: u64,
+    /// TPIDRRO_EL0, the TSD base.
+    pub(super) thread_pointer: Option<u64>,
+}
+
+impl Entry {
+    /// Give a PE at its entry these registers.
+    pub(super) fn apply(&self, pe: &mut Pe) {
+        for (index, &value) in self.arguments.iter().enumerate() {
+            pe.cpu.state.x[index] = value;
+        }
+        pe.cpu.set_sp(0, self.sp);
+        if let Some(pointer) = self.thread_pointer {
+            pe.cpu.registers.set_raw(Register::TPIDRRO_EL0, 0, pointer);
+        }
+    }
+}
+
+/// Build what the threads of a new process share: the engine description
+/// and the PAC signer of its PEs.
+pub(super) fn engine(
+    chip: Chip,
+    profile: CpuProfile,
+    target: TargetCpu,
+    keys: pe::Keys,
+) -> Result<(Engine, crate::pauth::Context)> {
+    let engine = Engine {
+        chip,
+        profile,
+        target,
+        tables: Arc::new(Tables::new()?),
+        keys,
+    };
+    let signer = engine
+        .machine(0)?
+        .pointer_signer()
+        .map_err(|stop| anyhow!("the PE cannot sign pointers: {stop:?}"))
+        .context("the process's pointer-authentication context")?;
+    Ok((engine, signer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_execution_lock_is_fifo_and_reports_other_holders() {
+        let lock = Arc::new(ExecutionLock::default());
+        assert!(lock.acquire(1));
+        assert!(!lock.contended());
+        lock.release(1);
+        assert!(!lock.acquire(1), "only this thread held it since");
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let waiters: Vec<_> = [2u64, 3]
+            .into_iter()
+            .map(|thread| {
+                let (shared, order) = (lock.clone(), order.clone());
+                let handle = std::thread::spawn(move || {
+                    assert!(shared.acquire(thread));
+                    order.lock().unwrap().push(thread);
+                    shared.release(thread);
+                });
+                while lock.waiting.load(Ordering::SeqCst) < (thread - 1) as u32 {
+                    std::thread::yield_now();
+                }
+                handle
+            })
+            .collect();
+        assert!(lock.contended());
+        lock.release(1);
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec![2, 3]);
+        assert!(lock.acquire(1), "threads 2 and 3 ran since");
+        lock.release(1);
+    }
+
+    #[test]
+    fn closing_the_lock_stops_every_later_holder() {
+        let lock = Arc::new(ExecutionLock::default());
+        lock.close(1);
+        let blocked = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                lock.acquire(2);
+                unreachable!("a closed lock is never granted");
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!blocked.is_finished());
+        assert!(lock.contended());
+    }
+
+    #[test]
+    fn invalidations_reach_every_other_member() {
+        let registry = Registry::default();
+        let (first, first_member) = registry.insert(0x103);
+        let (_, second_member) = registry.insert(0x203);
+        registry.invalidate(first, 0x4000, 0x8000);
+        assert!(!first_member.has_stale.load(Ordering::SeqCst));
+        assert!(second_member.has_stale.load(Ordering::SeqCst));
+        assert_eq!(*second_member.stale.lock().unwrap(), vec![(0x4000, 0x8000)]);
+        assert!(registry.contains_port(0x203));
+        registry.remove(first);
+        assert!(!registry.contains_port(0x103));
+    }
+
+    #[test]
+    fn the_lifetime_returns_the_first_end() {
+        let lifetime = Lifetime::default();
+        lifetime.end(Ok(Termination::Exited(3)));
+        lifetime.end(Ok(Termination::Exited(4)));
+        assert_eq!(lifetime.wait().unwrap(), Termination::Exited(3));
+    }
+}

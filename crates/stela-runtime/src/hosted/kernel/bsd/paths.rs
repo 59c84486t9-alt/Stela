@@ -62,7 +62,7 @@ fn reported_path(kernel: &mut Kernel, call: &Call, buffer: u64) -> Result<Option
     let Some(host) = memory::read_string(buffer, MAX_PATH) else {
         return Ok(Some(outcome));
     };
-    let Some(mut guest) = unroot(&kernel.roots, &host) else {
+    let Some(mut guest) = unroot(&kernel.process.roots, &host) else {
         return Ok(Some(outcome));
     };
     guest.push(0);
@@ -89,7 +89,7 @@ pub(super) fn resolve(roots: &[PathBuf], path: &[u8]) -> Option<PathBuf> {
 }
 
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
-    if kernel.roots.is_empty() {
+    if kernel.process.roots.is_empty() {
         return Ok(None);
     }
     if matches!(call.entry.name, "sys_fcntl" | "sys_fcntl_nocancel")
@@ -115,7 +115,7 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
     let Some(path) = memory::read_string(call.argument(path_index), MAX_PATH) else {
         return Ok(None);
     };
-    let Some(resolved) = resolve(&kernel.roots, &path) else {
+    let Some(resolved) = resolve(&kernel.process.roots, &path) else {
         return Ok(None);
     };
     let Ok(host_path) = CString::new(resolved.as_os_str().as_bytes()) else {

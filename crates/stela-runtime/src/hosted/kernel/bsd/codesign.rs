@@ -12,7 +12,7 @@
 //! (`cs_process_enforcement`). Page hashes are not validated; the
 //! signature's trust is the host file system's.
 use super::{Call, EFAULT, EINVAL, ENOENT, Kernel, Outcome, forward};
-use crate::hosted::memory;
+use crate::hosted::{memory, threads::lock};
 use anyhow::{Result, bail};
 
 const ESRCH: u64 = 3;
@@ -120,10 +120,11 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
 }
 
 fn own_process(kernel: &mut Kernel, operation: u64, address: u64, size: u64) -> Result<Outcome> {
-    let Some(signature) = kernel.executable.signature.as_ref() else {
+    let executable = lock(&kernel.process.executable).clone();
+    let Some(signature) = executable.signature.as_ref() else {
         bail!("csops on an unsigned executable: exec admits only signed arm64 images");
     };
-    let flags = kernel.executable.code_signing_flags;
+    let flags = executable.code_signing_flags;
     let valid = flags & (CS_VALID | CS_DEBUGGED) != 0;
     let write = |bytes: &[u8]| {
         if memory::write(address, bytes) {
@@ -213,7 +214,7 @@ fn own_process(kernel: &mut Kernel, operation: u64, address: u64, size: u64) -> 
             write(&CS_VALIDATION_CATEGORY_PLATFORM.to_le_bytes())
         }
         CS_OPS_MARKRESTRICT => {
-            kernel.executable.code_signing_flags |= CS_RESTRICT;
+            lock(&kernel.process.executable).code_signing_flags |= CS_RESTRICT;
             Outcome::value(0)
         }
         CS_OPS_MARKHARD | CS_OPS_MARKKILL => {
@@ -222,7 +223,7 @@ fn own_process(kernel: &mut Kernel, operation: u64, address: u64, size: u64) -> 
             } else {
                 CS_KILL
             };
-            kernel.executable.code_signing_flags |= flag;
+            lock(&kernel.process.executable).code_signing_flags |= flag;
             // A process already invalid becomes killed or fails here.
             if flags & CS_VALID == 0 {
                 bail!("csops marking an invalid process is not modeled");
@@ -239,7 +240,7 @@ fn own_process(kernel: &mut Kernel, operation: u64, address: u64, size: u64) -> 
             if flags & CS_VALID == 0 {
                 return Ok(Outcome::Error(EINVAL));
             }
-            kernel.executable.code_signing_flags |= requested & SETTABLE;
+            lock(&kernel.process.executable).code_signing_flags |= requested & SETTABLE;
             Outcome::value(0)
         }
         CS_OPS_MARKINVALID => {

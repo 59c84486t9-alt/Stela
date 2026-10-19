@@ -5,6 +5,7 @@
 //! failing `RetCode` for the short `mig_reply_error_t`.
 use super::super::Kernel;
 use super::reclaim;
+use crate::hosted::threads::lock;
 use crate::hosted::{
     hardware,
     memory::{self, Protection},
@@ -73,7 +74,7 @@ pub(super) fn serve(
             let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
-            host_info(&kernel.hardware, flavor, count.min(HOST_INFO_MAX))
+            host_info(&kernel.process.hardware, flavor, count.min(HOST_INFO_MAX))
         }
         (Object::Task, "_kernelrpc_mach_vm_map_external", true) => vm_map(request)?,
         // `which_port`. The bootstrap port is the host's launchd, as for
@@ -132,29 +133,34 @@ pub(super) fn serve(
         (Object::Task, "task_restartable_ranges_register", false) => {
             restartable_ranges_register(kernel, request)
         }
-        // The process runs one thread, which is making this call outside
-        // any range: no thread has a PC to reset.
+        // Every thread off the execution lock was reset out of its range
+        // when it was preempted, and the caller is outside one: no PC is
+        // left to reset.
         (Object::Task, "task_restartable_ranges_synchronize", false) => Reply::Success(Vec::new()),
         // `len`, `max_len`; out `address`, `next_deadline`.
         (Object::Task, "mach_vm_deferred_reclamation_buffer_allocate", false) => {
             let (Some(len), Some(max_len)) = (request.word(8), request.word(12)) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
-            pair(reclaim::allocate(&mut kernel.reclaim, len, max_len))
+            pair(reclaim::allocate(
+                &mut lock(&kernel.process.reclaim),
+                len,
+                max_len,
+            ))
         }
         // `num_entries_to_reclaim`; out `bytes_reclaimed`, `next_deadline`.
         (Object::Task, "mach_vm_deferred_reclamation_buffer_flush", false) => {
             let Some(entries) = request.word(8) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
-            pair(reclaim::flush(&kernel.reclaim, entries))
+            pair(reclaim::flush(&lock(&kernel.process.reclaim), entries))
         }
         // `new_len`; out `bytes_reclaimed`, `next_deadline`.
         (Object::Task, "mach_vm_deferred_reclamation_buffer_resize", false) => {
             let Some(len) = request.word(8) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
-            pair(reclaim::resize(&mut kernel.reclaim, len))
+            pair(reclaim::resize(&mut lock(&kernel.process.reclaim), len))
         }
         _ => return Ok(None),
     }))
@@ -177,9 +183,9 @@ const RESTARTABLE_RANGES_MAX: u32 = 64;
 const TASK_RESTARTABLE_OFFSET_MAX: u16 = 4096;
 
 /// `task_restartable_ranges_register(ranges, count)`: validated and kept
-/// once, as a release kernel allows. The hosted kernel interrupts a guest
-/// thread only at its own exceptions, which a range never contains, and
-/// delivers no signals, so no PC is ever reset into a recovery path yet.
+/// once, as a release kernel allows. A thread preempted inside a range
+/// resumes at its recovery address (`crate::hosted::threads`); signals,
+/// which would also reset it, are not delivered.
 fn restartable_ranges_register(kernel: &mut Kernel, request: &Request) -> Reply {
     let Some(count) = request
         .word(8)
@@ -225,10 +231,11 @@ fn restartable_ranges_register(kernel: &mut Kernel, request: &Request) -> Reply 
             return Reply::Failure(KERN_INVALID_ARGUMENT);
         }
     }
-    if kernel.restartable_ranges.is_some() {
+    let mut registered = lock(&kernel.process.restartable_ranges);
+    if registered.is_some() {
         return Reply::Failure(KERN_NOT_SUPPORTED);
     }
-    kernel.restartable_ranges = Some(ranges);
+    *registered = Some(ranges);
     Reply::Success(Vec::new())
 }
 

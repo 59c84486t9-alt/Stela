@@ -10,6 +10,7 @@
 //! implemented yet.
 use super::{Call, EFAULT, EINVAL, Kernel, Outcome, forward};
 use crate::hosted::memory;
+use crate::hosted::threads::lock;
 use anyhow::{Result, bail};
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -45,7 +46,7 @@ extern "C" fn record(signal: libc::c_int) {
     PENDING.fetch_or(1 << signal, Ordering::SeqCst);
 }
 
-fn bit(signal: u64) -> u32 {
+const fn bit(signal: u64) -> u32 {
     1 << (signal - 1)
 }
 
@@ -56,17 +57,13 @@ struct Action {
     flags: u32,
 }
 
-/// The process's signal state.
+/// The process's signal actions (`p_sigacts`).
 #[derive(Debug, Clone)]
-pub(crate) struct Signals {
-    actions: [Action; SIGNALS],
-    mask: u32,
-    alternate: (u64, u64, u32),
-}
+pub(crate) struct Actions([Action; SIGNALS]);
 
-impl Signals {
-    /// The state exec leaves: ignored signals stay ignored, every other
-    /// signal is defaulted, and the mask is the creating thread's.
+impl Actions {
+    /// The actions exec leaves: ignored signals stay ignored, every other
+    /// signal is defaulted.
     pub(crate) fn inherit() -> Self {
         let mut actions = [Action {
             flags: SA_RESTART,
@@ -80,11 +77,25 @@ impl Signals {
                 action.handler = SIG_IGN;
             }
         }
+        Self(actions)
+    }
+}
+
+/// One thread's signal state (`uu_sigmask`, `uu_sigstk`).
+#[derive(Debug, Clone)]
+pub(crate) struct ThreadSignals {
+    mask: u32,
+    alternate: (u64, u64, u32),
+}
+
+impl ThreadSignals {
+    /// The state of a thread whose mask its host thread already holds: the
+    /// main thread's from exec, a created thread's from its creator.
+    pub(crate) fn inherit() -> Self {
         let mut mask: libc::sigset_t = 0;
         // SAFETY: a query of the calling thread's mask.
         unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, core::ptr::null(), &raw mut mask) };
         Self {
-            actions,
             mask,
             alternate: (0, 0, SS_DISABLE),
         }
@@ -95,16 +106,54 @@ impl Signals {
         let pending = PENDING.load(Ordering::SeqCst) >> 1 & !self.mask;
         (pending != 0).then(|| pending.trailing_zeros() + 1)
     }
+
+    /// Block every signal outside `allowed` that a workqueue thread may
+    /// block (`~workq_threadmask`), as a new workqueue thread starts and
+    /// as one returns to the pool (`workq_thread_return`).
+    pub(crate) fn reset_for_workqueue(&mut self, allowed: u32) {
+        self.set_mask(self.mask | (!WORKQ_THREADMASK & !allowed));
+    }
+
+    /// Set the mask, mirrored to the host thread except the signals the
+    /// hosted runtime's fault recovery owns.
+    pub(crate) fn set_mask(&mut self, mask: u32) {
+        let mask = mask & !CANT_MASK;
+        let owned = OWNED
+            .iter()
+            .fold(0, |bits, &signal| bits | bit(signal as u64));
+        let host: libc::sigset_t = mask & !owned;
+        // SAFETY: the set is this frame's.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const host, core::ptr::null_mut()) };
+        self.mask = mask;
+    }
 }
+
+/// Signals that are always delivered to a workqueue thread
+/// (`workq_threadmask`: `threadmask`, `sigcantmask` and SIGPROF, less
+/// SIGABRT).
+pub(crate) const WORKQ_THREADMASK: u32 = (bit(4) // SIGILL
+    | bit(5) // SIGTRAP
+    | bit(7) // SIGEMT
+    | bit(8) // SIGFPE
+    | bit(10) // SIGBUS
+    | bit(11) // SIGSEGV
+    | bit(12) // SIGSYS
+    | bit(13) // SIGPIPE
+    | bit(SIGKILL)
+    | bit(SIGSTOP)
+    | bit(27)) // SIGPROF
+    & !bit(6); // SIGABRT
+/// `sigcantmask`.
+const CANT_MASK: u32 = bit(SIGKILL) | bit(SIGSTOP);
 
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "sigaction" => sigaction(kernel, call)?,
         "sigprocmask" | "__pthread_sigmask" => mask(kernel, call)?,
+        "__pthread_kill" => thread_kill(kernel, call)?,
         "sigaltstack" => alternate_stack(kernel, call)?,
         "sigpending"
         | "kill"
-        | "__pthread_kill"
         | "__sigwait"
         | "__sigwait_nocancel"
         | "__disable_threadsignal"
@@ -127,7 +176,7 @@ fn sigaction(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         return Ok(Outcome::Error(EINVAL));
     }
     let index = signal as usize;
-    let previous = kernel.signals.actions[index];
+    let previous = lock(&kernel.process.actions).0[index];
     if new != 0 {
         // `struct __user64_sigaction`: handler, trampoline, mask, flags. The
         // trampoline matters only to delivery.
@@ -142,7 +191,7 @@ fn sigaction(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
             flags: half(20) & SA_USERSPACE_MASK,
         };
         mirror(signal as i32, action.handler)?;
-        kernel.signals.actions[index] = action;
+        lock(&kernel.process.actions).0[index] = action;
     }
     if old != 0 {
         // `struct user64_sigaction`: handler, mask, flags.
@@ -177,8 +226,8 @@ fn mirror(signal: i32, handler: u64) -> Result<()> {
     Ok(())
 }
 
-/// `sigprocmask(how, set, oset)`; `__pthread_sigmask` is the same for the
-/// single guest thread.
+/// `sigprocmask(how, set, oset)` and `__pthread_sigmask`: both change the
+/// calling thread's mask.
 fn mask(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let [how, set, old, ..] = call.arguments;
     let previous = kernel.signals.mask;
@@ -186,21 +235,13 @@ fn mask(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         let Some(requested) = memory::read_u32(set) else {
             return Ok(Outcome::Error(EFAULT));
         };
-        // SIGKILL and SIGSTOP cannot be blocked.
-        let requested = requested & !(bit(SIGKILL) | bit(SIGSTOP));
         let mask = match how {
             SIG_BLOCK => previous | requested,
             SIG_UNBLOCK => previous & !requested,
             SIG_SETMASK => requested,
             _ => return Ok(Outcome::Error(EINVAL)),
         };
-        let owned = OWNED
-            .iter()
-            .fold(0, |bits, &signal| bits | bit(signal as u64));
-        let host: libc::sigset_t = mask & !owned;
-        // SAFETY: the set is this frame's.
-        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const host, core::ptr::null_mut()) };
-        kernel.signals.mask = mask;
+        kernel.signals.set_mask(mask);
     }
     if old != 0 && !memory::write_u32(old, previous) {
         return Ok(Outcome::Error(EFAULT));
@@ -241,4 +282,32 @@ fn alternate_stack(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         kernel.signals.alternate = (base, size, flags);
     }
     Ok(Outcome::value(0))
+}
+
+/// `__pthread_kill(thread_port, signal)`: a workqueue thread takes signals
+/// only once it allowed them (`BSDTHREAD_CTL_WORKQ_ALLOW_KILL`); otherwise
+/// the host kernel signals the thread the port names, which is the guest
+/// thread's host thread.
+fn thread_kill(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
+    let port = call.argument(0) as u32;
+    if call.argument(1) as usize >= SIGNALS {
+        return Ok(Outcome::Error(EINVAL));
+    }
+    if kernel.process.workqueue.refuses_kill(port) {
+        return Ok(Outcome::Error(ENOTSUP));
+    }
+    forward(kernel, call)
+}
+
+const ENOTSUP: u64 = 45;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_workqueue_thread_mask_is_xnus() {
+        assert_eq!(WORKQ_THREADMASK, 0x0401_1fd8);
+        assert_eq!(CANT_MASK & WORKQ_THREADMASK, CANT_MASK);
+    }
 }

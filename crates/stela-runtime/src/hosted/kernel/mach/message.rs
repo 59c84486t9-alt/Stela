@@ -1,10 +1,10 @@
 //! Mach message sends. A message to a port in another task's or the host
 //! kernel's IPC space is forwarded unchanged: its bytes have one layout on
-//! both LP64 ABIs. A message to this task's, its thread's or the host's own
-//! kernel object is a MIG request the host kernel would serve with x86
-//! semantics; those requests are identified by the pinned MIG catalog
-//! ([`crate::mach::mig`]) and answered by [`server`] or refused by
-//! routine name.
+//! both LP64 ABIs. A message to this task's, any of its threads' or the
+//! host's own kernel object is a MIG request the host kernel would serve
+//! with x86 semantics; those requests are identified by the pinned MIG
+//! catalog ([`crate::mach::mig`]) and answered by [`server`] or refused
+//! by routine name.
 //!
 //! An answered request's reply goes to its reply port as the kernel sends
 //! it: the request's reply right is first carried, with the request's
@@ -58,12 +58,8 @@ pub(super) fn send(
     arguments: &[u64],
 ) -> Result<u64> {
     if let Some((port, id)) = destination(name, arguments)
-        && let Some(object) = kernel
-            .kernel_objects
-            .iter()
-            .position(|&object| object == port)
+        && let Some(object) = kernel_object(kernel, port)
     {
-        let object = [Object::Task, Object::Thread, Object::Host][object];
         match (mig::subsystem(id), mig::routine(id)) {
             (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {}
             (Some(_), Some(routine))
@@ -112,6 +108,21 @@ pub(super) fn send(
         }
     }
     forward_trap(kernel, index, arguments)
+}
+
+/// The kernel object `port` names in this task: the task, the host, or
+/// any of the task's threads.
+fn kernel_object(kernel: &Kernel, port: u32) -> Option<Object> {
+    let [task, thread, host] = kernel.kernel_objects();
+    if port == task {
+        Some(Object::Task)
+    } else if port == host {
+        Some(Object::Host)
+    } else if port == thread || kernel.process.runtime.registry.contains_port(port) {
+        Some(Object::Thread)
+    } else {
+        None
+    }
 }
 
 /// The destination port and message id of a send, if the call sends and
@@ -248,7 +259,7 @@ fn carry_reply_right(
             let status = forward::mach(
                 index_of("_kernelrpc_mach_port_allocate_trap"),
                 &[
-                    u64::from(kernel.kernel_objects[0]),
+                    u64::from(kernel.process.task_port),
                     MACH_PORT_RIGHT_RECEIVE,
                     &raw mut relay as u64,
                 ],

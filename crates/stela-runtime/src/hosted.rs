@@ -2,17 +2,18 @@
 //! this x86-64 macOS process above the host's kernel, as the arm64 XNU
 //! kernel would run it.
 //!
-//! The guest thread is a [`Machine`] PE at EL0 over an identity stage 1, so
+//! A guest thread is a `Machine` PE at EL0 over an identity stage 1, so
 //! guest addresses are this process's addresses and translated code reaches
 //! guest memory directly. Exec is performed here as `execve` performs it:
 //! the commpage, the empty shared region of the first process to use the
 //! cache (dyld maps and the kernel slides it), the executable and its
 //! unchanged dynamic linker at their slides, and the main stack with the
-//! kernel's argument block. The PE
-//! enters dyld at its entry point; every exception it takes to EL1 stops at
-//! the vector, where [`kernel`] services it as XNU's exception handlers do
-//! and returns through ERET. The run ends at the guest's `exit`.
-use crate::machine::{Chip, Machine, NoDevices, Stop, system::Register};
+//! kernel's argument block. The main thread's PE enters dyld at its entry
+//! point; every exception a thread takes to EL1 stops at the vector, where
+//! [`kernel`] services it as XNU's exception handlers do and returns
+//! through ERET. Each guest thread is a host thread with its own PE
+//! (`threads`). The run ends at the guest's `exit`.
+use crate::machine::Chip;
 use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::BTreeMap;
 use stela_compiler::TargetCpu;
@@ -29,6 +30,7 @@ pub mod memory;
 pub mod pe;
 pub mod shared_region;
 pub mod tables;
+mod threads;
 
 pub use kernel::{Executable, Signature};
 
@@ -158,11 +160,9 @@ pub fn run(launch: Launch) -> Result<Report> {
         .context("the executable has no segment holding its Mach header")?
         + executable.slide;
     let stack = exec::map_stack()?;
-    let tables = tables::Tables::new()?;
     let keys = pe::Keys::random()?;
     let [guard0, guard1, guard2, guard3, entropy0, entropy1, munge] = random_words::<7>()?;
-    let thread_port = forward::mach(THREAD_SELF_TRAP, &[]).rax as u32;
-    let apple = exec::AppleStrings {
+    let mut apple = exec::AppleStrings {
         pfz: commpage::TEXT_ADDRESS,
         stack_guard: [guard0, guard1, guard2, guard3],
         malloc_entropy: [entropy0, entropy1],
@@ -172,17 +172,9 @@ pub fn run(launch: Launch) -> Result<Report> {
         dyld_file: exec::file_identity(&launch.dylinker.image.path),
         cdhash: Some(launch.signature.cdhash),
         boot_hash: None,
-        thread_port: Some(thread_port),
+        thread_port: None,
         security_config: 0,
     };
-    let arguments = exec::install_arguments(
-        &stack,
-        header,
-        &launch.executable_path,
-        &launch.argv,
-        &launch.environment,
-        &apple,
-    )?;
     let entry = launch.dylinker.entry + dylinker.slide;
     if launch.trace {
         eprintln!(
@@ -191,15 +183,8 @@ pub fn run(launch: Launch) -> Result<Report> {
             executable.slide, dylinker.slide, stack.top
         );
     }
-    let mut cpu = pe::user_thread(launch.chip, entry, &tables, &keys);
-    cpu.set_sp(0, arguments.raw_sp);
-    let host = host::ProcessHost::new(tables)?;
-    let mut machine = Machine::new(cpu, host, NoDevices, profile, target);
-    machine.set_breakpoints(&pe::vectors());
-    let signer = machine
-        .pointer_signer()
-        .map_err(|stop| anyhow::anyhow!("the PE cannot sign pointers: {stop:?}"))?;
-    let mut kernel = kernel::Kernel::new(kernel::Config {
+    let (engine, signer) = threads::engine(launch.chip, profile, target, keys)?;
+    let process = kernel::Process::new(kernel::Config {
         shared_region,
         signer,
         hardware,
@@ -214,38 +199,40 @@ pub fn run(launch: Launch) -> Result<Report> {
         roots: launch.roots.clone(),
         reexec: launch.reexec.clone(),
         trace: launch.trace,
+        engine,
     });
-    loop {
-        match machine.run(0) {
-            Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) => {
-                kernel.synchronous(&mut machine)?;
-                if let Some(termination) = kernel.termination {
-                    return Ok(Report {
-                        termination,
-                        calls: kernel.counts.clone(),
-                        slid_pages: kernel
-                            .shared_region
-                            .as_ref()
-                            .map_or(0, shared_region::SharedRegion::slid_pages),
-                    });
-                }
-                machine.return_from_exception();
-            }
-            Stop::Breakpoint(pc) => bail!(
-                "the guest took an exception to EL1 vector {pc:#x} (ESR {:#x}, ELR {:#x}): \
-                 only synchronous exceptions from EL0 are serviced",
-                machine.cpu.read(Register::ESR_EL1),
-                machine.cpu.read(Register::ELR_EL1)
-            ),
-            other => bail!(
-                "the guest PE stopped at pc {:#x}: {other:?}",
-                machine.cpu.pc
-            ),
-        }
+    // The main thread is a host thread of its own like every other, so the
+    // host thread that waits for the process's end is never one the guest
+    // blocks. Its port, which the apple strings carry, is that thread's.
+    let Launch {
+        executable_path,
+        argv,
+        environment,
+        ..
+    } = launch;
+    let started = threads::spawn(&process, entry, move |kernel, pe| {
+        apple.thread_port = Some(kernel.thread_port);
+        let arguments = exec::install_arguments(
+            &stack,
+            header,
+            &executable_path,
+            &argv,
+            &environment,
+            &apple,
+        )?;
+        pe.cpu.set_sp(0, arguments.raw_sp);
+        Ok(Ok(()))
+    })?;
+    if let Err(errno) = started {
+        bail!("the main thread could not be created: errno {errno}");
     }
+    let termination = process.runtime.lifetime.wait()?;
+    Ok(Report {
+        termination,
+        calls: threads::lock(&process.counts).clone(),
+        slid_pages: process.slid_pages(),
+    })
 }
-
-const THREAD_SELF_TRAP: u32 = 27;
 
 fn host_memory() -> Result<u64> {
     let mut value = 0u64;

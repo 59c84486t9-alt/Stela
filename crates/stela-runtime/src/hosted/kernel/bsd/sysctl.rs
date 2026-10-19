@@ -492,8 +492,8 @@ fn by_name(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let name = String::from_utf8_lossy(&bytes)
         .trim_end_matches('\0')
         .to_owned();
-    Ok(match lookup(&kernel.sysctl, &name)? {
-        Lookup::Modeled(index) => Request::of(call).answer(&kernel.sysctl.entries[index].1),
+    Ok(match lookup(&kernel.process.sysctl, &name)? {
+        Lookup::Modeled(index) => Request::of(call).answer(&kernel.process.sysctl.entries[index].1),
         Lookup::Host => forward(kernel, call)?,
         Lookup::Absent => Outcome::Error(ENOENT),
     })
@@ -517,8 +517,8 @@ fn by_number(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     if oid[0] == CTL_UNSPEC {
         return meta(kernel, call, &oid, &request);
     }
-    if let Some(index) = kernel.sysctl.synthetic(&oid) {
-        return Ok(request.answer(&kernel.sysctl.entries[index].1));
+    if let Some(index) = kernel.process.sysctl.synthetic(&oid) {
+        return Ok(request.answer(&kernel.process.sysctl.entries[index].1));
     }
     if ![CTL_KERN, CTL_HW, CTL_MACHDEP].contains(&oid[0]) {
         return forward(kernel, call);
@@ -526,8 +526,8 @@ fn by_number(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let Some(name) = host_name(&oid)? else {
         return forward(kernel, call);
     };
-    Ok(match lookup(&kernel.sysctl, &name)? {
-        Lookup::Modeled(index) => request.answer(&kernel.sysctl.entries[index].1),
+    Ok(match lookup(&kernel.process.sysctl, &name)? {
+        Lookup::Modeled(index) => request.answer(&kernel.process.sysctl.entries[index].1),
         Lookup::Host => forward(kernel, call)?,
         Lookup::Absent => Outcome::Error(ENOENT),
     })
@@ -573,7 +573,7 @@ fn catalog_number(name: &str) -> Result<u16> {
 /// synthetic numbers and modeled names; enumeration would walk the host's
 /// machine namespaces and is refused.
 fn meta(kernel: &mut Kernel, call: &Call, oid: &[i32], request: &Request) -> Result<Outcome> {
-    let model = &kernel.sysctl;
+    let model = &kernel.process.sysctl;
     match oid[1] {
         META_NAME => {
             if let Some(index) = model.synthetic(&oid[2..]) {
@@ -602,7 +602,7 @@ fn meta(kernel: &mut Kernel, call: &Call, oid: &[i32], request: &Request) -> Res
                     if outcome != Outcome::Error(ENOENT) {
                         return Ok(outcome);
                     }
-                    let oid = kernel.sysctl.synthetic_oid(index);
+                    let oid = kernel.process.sysctl.synthetic_oid(index);
                     let bytes: Vec<u8> = oid.iter().flat_map(|part| part.to_le_bytes()).collect();
                     let reply = Request {
                         old: call.argument(2),

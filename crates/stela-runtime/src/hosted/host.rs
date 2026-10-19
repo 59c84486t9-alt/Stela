@@ -299,17 +299,18 @@ pub fn host_nanoseconds() -> u64 {
     unsafe { mach_absolute_time() }
 }
 
-/// The host of one hosted PE.
+/// The host of one hosted PE, owned by the host thread that runs it: its
+/// native code arena and fault recovery are that thread's alone.
 pub struct ProcessHost {
     arena: *mut u8,
     used: usize,
-    tables: Tables,
+    tables: std::sync::Arc<Tables>,
     recovery: Box<Recovery>,
     deadline: Option<u64>,
 }
 
 impl ProcessHost {
-    pub fn new(tables: Tables) -> anyhow::Result<Self> {
+    pub fn new(tables: std::sync::Arc<Tables>) -> anyhow::Result<Self> {
         install_handlers();
         // SAFETY: a fresh private anonymous mapping the host never shares.
         let arena = unsafe {

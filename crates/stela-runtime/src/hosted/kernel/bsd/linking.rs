@@ -94,7 +94,10 @@ impl LinkInfo<'_> {
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let [regions, count, info, size, ..] = call.arguments;
     let (count, size) = (count as u32 as u64, size as u32 as u64);
-    if kernel.map_with_linking_ended
+    if kernel
+        .process
+        .map_with_linking_ended
+        .load(core::sync::atomic::Ordering::SeqCst)
         || count == 0
         || count > MWL_MAX_REGION_COUNT
         || size <= HEADER_BYTES as u64
@@ -130,31 +133,40 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outc
         if (region.address | region.size | region.file_offset) & memory::PAGE_MASK != 0 {
             return Ok(Outcome::Error(EINVAL));
         }
-        // The private overmapping, writable while its pages are linked.
-        // SAFETY: a fixed private mapping over the image's own region.
-        let mapped = unsafe {
-            libc::mmap(
-                region.address as *mut libc::c_void,
-                region.size as usize,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_FIXED,
-                region.descriptor,
-                region.file_offset as libc::off_t,
-            )
-        };
-        if mapped as u64 != region.address {
+        // No thread executes guest code while the region is writable and
+        // its pages are not yet linked.
+        let signer = &kernel.process.signer;
+        let linked = kernel.exclusive(|| -> Result<bool> {
+            // The private overmapping, writable while its pages are linked.
+            // SAFETY: a fixed private mapping over the image's own region.
+            let mapped = unsafe {
+                libc::mmap(
+                    region.address as *mut libc::c_void,
+                    region.size as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_FIXED,
+                    region.descriptor,
+                    region.file_offset as libc::off_t,
+                )
+            };
+            if mapped as u64 != region.address {
+                return Ok(false);
+            }
+            let mut page = region.address;
+            while page < end {
+                if let Some((segment, index)) = link.segment(page) {
+                    fix_page(&link, signer, page, segment, index);
+                }
+                page += PAGE_BYTES;
+            }
+            let protection = Protection((region.protections & VM_PROT_DEFAULT) as i32);
+            memory::protect(region.address, region.size, protection)?;
+            Ok(true)
+        })?;
+        if !linked {
             return Ok(Outcome::Error(ENOMEM));
         }
-        let mut page = region.address;
-        while page < end {
-            if let Some((segment, index)) = link.segment(page) {
-                fix_page(&link, &kernel.signer, page, segment, index);
-            }
-            page += PAGE_BYTES;
-        }
-        let protection = Protection((region.protections & VM_PROT_DEFAULT) as i32);
-        memory::protect(region.address, region.size, protection)?;
-        pe.invalidate_code(region.address, region.size);
+        kernel.invalidate_code(pe, region.address, region.size);
     }
     if kernel.trace {
         eprintln!(

@@ -11,8 +11,9 @@
 //! has mapped the cache, and fails with ENOMEM before.
 use super::{Call, EFAULT, EINVAL, ENOMEM, Kernel, Outcome, Pe, forward};
 use crate::hosted::memory::{self, PAGE_BYTES, PAGE_MASK, Protection, round_page};
-use crate::hosted::shared_region;
+use crate::hosted::{shared_region, threads::lock};
 use anyhow::{Result, bail};
+use core::sync::atomic::Ordering;
 
 const MAP_FIXED: u64 = 0x0010;
 /// `DYLD_VM_END_MWL`: dyld ends `map_with_linking_np` for the process.
@@ -33,7 +34,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
             };
             kernel.unslid_change(address, bytes, |_| None);
             let outcome = forward_range(kernel, call, address, bytes)?;
-            pe.invalidate_code(address, bytes);
+            kernel.invalidate_code(pe, address, bytes);
             outcome
         }
         "mprotect" => {
@@ -116,7 +117,7 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let outcome = forward(kernel, &placed)?;
     match outcome {
         Outcome::Return(mapped, _) if mapped == start => {
-            pe.invalidate_code(start, size);
+            kernel.invalidate_code(pe, start, size);
             Ok(Outcome::value(start + offset))
         }
         Outcome::Return(mapped, _) => bail!("host mmap placed {mapped:#x}, not {start:#x}"),
@@ -166,10 +167,14 @@ fn mincore(call: &Call) -> Result<Outcome> {
 fn shared_region_check(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let pointer = call.argument(0);
     if pointer == DYLD_VM_END_MWL {
-        kernel.map_with_linking_ended = true;
+        kernel
+            .process
+            .map_with_linking_ended
+            .store(true, Ordering::SeqCst);
         return Ok(Outcome::value(0));
     }
-    let Some(region) = &kernel.shared_region else {
+    let region = lock(&kernel.process.shared_region);
+    let Some(region) = region.as_ref() else {
         return Ok(Outcome::Error(EINVAL));
     };
     if pointer == 0 {
@@ -250,12 +255,19 @@ fn map_and_slide(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcom
         unsafe { libc::getentropy((&raw mut random).cast(), 4) };
         (u64::from(random) % maximum) & !PAGE_MASK
     };
-    let Some(region) = kernel.shared_region.as_mut() else {
+    // No thread executes guest code while the cache's pages appear.
+    let process = kernel.process.clone();
+    let mapped = kernel.exclusive(|| {
+        lock(&process.shared_region)
+            .as_mut()
+            .map(|region| region.map(&grouped, slide))
+    });
+    let Some(mapped) = mapped else {
         return Ok(Outcome::Error(KERN_FAILURE));
     };
-    Ok(match region.map(&grouped, slide)? {
+    Ok(match mapped? {
         Ok(()) => {
-            pe.invalidate_code(shared_region::REGION_START, shared_region::REGION_SIZE);
+            kernel.invalidate_code(pe, shared_region::REGION_START, shared_region::REGION_SIZE);
             if kernel.trace {
                 eprintln!("stela: shared region mapped at slide {slide:#x}");
             }

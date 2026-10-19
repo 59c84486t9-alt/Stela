@@ -165,16 +165,27 @@ pub fn profile(chip: Chip, target: TargetCpu) -> CpuProfile {
     }
 }
 
-/// A PE of `chip` at EL0t, entering at `pc` with the process's keys, its
-/// identity stage 1 and EL1's intercepted vectors.
-pub fn user_thread(chip: Chip, pc: u64, tables: &Tables, keys: &Keys) -> Cpu {
-    let user = Pstate {
+/// A new user thread's PSTATE, XNU's `PSR64_USER64_DEFAULT`: EL0t in
+/// AArch64 with every flag and mask clear.
+fn user_pstate() -> Pstate {
+    Pstate {
         el: 0,
         sp: false,
         daif: 0,
         ..Pstate::reset(0)
-    };
-    let mut cpu = Cpu::of(chip, pc, user);
+    }
+}
+
+/// The SPSR_EL1 an exception return to a fresh user state takes, as the
+/// kernel sets it for a workqueue thread's upcall (`thread_set_wq_state64`).
+pub fn user_spsr() -> u64 {
+    user_pstate().to_spsr(0)
+}
+
+/// A PE of `chip` at EL0t, entering at `pc` with the process's keys, its
+/// identity stage 1 and EL1's intercepted vectors.
+pub fn user_thread(chip: Chip, pc: u64, tables: &Tables, keys: &Keys) -> Cpu {
+    let mut cpu = Cpu::of(chip, pc, user_pstate());
     let registers = &mut cpu.registers;
     for (register, value) in [
         (Register::SCTLR_EL1, SCTLR_EL1),
