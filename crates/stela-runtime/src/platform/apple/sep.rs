@@ -17,6 +17,7 @@ pub mod control;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;
+pub mod inline_key;
 pub mod keys;
 pub mod message;
 pub mod observe;

@@ -473,14 +473,22 @@ impl Ans {
                 || u16::from(tcb[2]) != tag
                 || tcb[3] != 0
                 || mirror != [0; 8] && mirror != &command.0[56..64]
-                || tcb[6..24]
-                    .iter()
-                    .chain(&tcb[40..56])
-                    .chain(&tcb[64..])
-                    .any(|&b| b != 0)
+                || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
             {
                 return Err(error(
                     "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled",
+                ));
+            }
+            // The key area (bytes 0x40..) names the inline AES-XTS key for the
+            // sector (`sep::inline_key`). The SEP installs those keys over the
+            // unrecovered `sks` service, and the key area's slot/wrapped-key
+            // encoding is itself unrecovered (docs/research/ans2.md), so until
+            // both are recovered no key is installed and an inline-keyed
+            // command refuses here rather than passing data in the clear.
+            if tcb[64..].iter().any(|&b| b != 0) {
+                return Err(error(
+                    "ANS NVMMU inline AES-XTS key area is set, but no SEP key is installed for it \
+                     (sep::inline_key); its slot/wrapped-key encoding is not recovered",
                 ));
             }
             let flags = tcb[1];
