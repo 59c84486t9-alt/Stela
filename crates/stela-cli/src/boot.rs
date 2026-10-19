@@ -6,8 +6,9 @@ use std::{fs::OpenOptions, io::Write, path::PathBuf};
 use stela_loader::boot_bundle::{
     self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
 };
-use stela_loader::boot_policy::{SealedVolume, SecurityMode, SecurityPolicy};
+use stela_loader::boot_policy::{OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy};
 use stela_loader::im4m;
+use stela_loader::root_selection::Root;
 
 mod disk;
 
@@ -17,9 +18,10 @@ const COMPONENT_LIMIT: u64 = 64 * 1024 * 1024;
 const RAMDISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const INSTALLED_VARIANT: &str = "macOS Customer";
 const RESTORE_VARIANT: &str = "Customer Erase Install (IPSW)";
-/// The `/osenvironments` child for a restore ramdisk: it turns off the SEP
-/// firmware load and protected data access and selects ephemeral storage.
-const RESTORE_ENVIRONMENT: &str = "darwinos-ramdisk-environment";
+/// The OS environment of a restore ramdisk: its `/osenvironments` child
+/// turns off the SEP firmware load and protected data access and selects
+/// ephemeral storage.
+const RESTORE_ENVIRONMENT: OsEnvironment = OsEnvironment::DarwinosRamdisk;
 /// The console boot-args when `--boot-args` gives none.
 const DEFAULT_BOOT_ARGS: &str = "-v";
 /// The boot-args a restore host has iBoot pass to the restore ramdisk
@@ -35,8 +37,10 @@ const RESTORE_MODE_ARGS: &[&str] = &[
 ];
 /// recoveryOS roots from its BaseSystem ramdisk.
 const RECOVERY_MODE_ARGS: &[&str] = &["rd=md0"];
-/// recoveryOS from the installed-system identity: BaseSystem as the ramdisk.
-const RECOVERY_ENVIRONMENT: &str = "recovery-environment";
+/// recoveryOS from the installed-system identity, BaseSystem as the
+/// ramdisk: `recovery`, whose child also turns off the SEP firmware load,
+/// rather than the `recoveryos` a Mac's iBoot enters for recoveryOS on disk.
+const RECOVERY_ENVIRONMENT: OsEnvironment = OsEnvironment::Recovery;
 const BASE_SYSTEM: &str = "BaseSystem";
 /// The BaseSystem image's APFS partition, which becomes the ramdisk.
 const BASE_SYSTEM_PARTITION: &str = "Apple_APFS";
@@ -137,10 +141,11 @@ pub(crate) struct Prepare {
     /// system, `Customer Erase Install (IPSW)` with `--restore`.
     #[arg(long)]
     variant: Option<String>,
-    /// The `/osenvironments` child to apply; `darwinos-ramdisk-environment`
-    /// with `--restore`.
-    #[arg(long)]
-    osenvironment: Option<String>,
+    /// The OS environment iBoot enters (`/chosen osenvironment` and its
+    /// `/osenvironments` child): `darwinos-ramdisk` with `--restore`,
+    /// `recovery` with `--recovery`, none (macOS) otherwise.
+    #[arg(long, value_parser = |name: &str| OsEnvironment::parse(name).map_err(|e| e.to_string()))]
+    osenvironment: Option<OsEnvironment>,
     /// Guest DRAM base; the target SoC's by default (0x800000000 on the M1
     /// and M2, 0x10000000000 on their Pro and Max).
     #[arg(long, value_parser = parse_address)]
@@ -652,14 +657,14 @@ impl Prepare {
                     (false, false) => &[],
                 },
             ),
-            osenvironment: self.osenvironment.clone().or_else(|| {
-                match (self.restore, self.recovery) {
-                    (true, _) => Some(RESTORE_ENVIRONMENT),
-                    (false, true) => Some(RECOVERY_ENVIRONMENT),
-                    (false, false) => None,
-                }
-                .map(Into::into)
+            osenvironment: self.osenvironment.or(match (self.restore, self.recovery) {
+                (true, _) => Some(RESTORE_ENVIRONMENT),
+                (false, true) => Some(RECOVERY_ENVIRONMENT),
+                (false, false) => None,
             }),
+            // A ramdisk roots from itself; an installed system's root is
+            // named from its disk (`stela_loader::installed`).
+            root: (self.restore || self.recovery).then_some(Root::Ramdisk),
             boot_cpu: self.boot_cpu.clone(),
             timebase_frequency: self.timebase_frequency,
             syscfg: self.syscfg.iter().cloned().collect(),

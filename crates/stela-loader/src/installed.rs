@@ -32,6 +32,7 @@ use crate::{
     boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
     boot_policy::SealedVolume,
     im4m, im4p,
+    root_selection::Root,
 };
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -492,7 +493,11 @@ pub fn prepare<R: ReadAt>(
             im4p: root_hash.as_ref().map(Decoded::input),
         }),
     };
-    let options = options.placed_at(inputs.dram_base()?);
+    let mut options = options.placed_at(inputs.dram_base()?);
+    options.root = Some(Root::System {
+        volume_group: disk.set.volume_group.clone(),
+        boot_hash: disk.set.boot_hash.clone(),
+    });
     let mut bundle = boot_bundle::prepare(&inputs, &options)?;
     bundle.manifest.unresolved.push(format!(
         "paused: the SEP-signed LocalPolicy is not read, so neither its nsih nor its other \

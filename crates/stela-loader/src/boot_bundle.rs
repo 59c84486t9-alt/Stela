@@ -22,6 +22,7 @@ use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::lock_regs::{self, Programmed};
 use crate::nvram;
+use crate::root_selection;
 use crate::trust_cache;
 use alloc::collections::BTreeMap;
 use anyhow::{Context, Result, bail, ensure};
@@ -161,9 +162,13 @@ pub struct Options {
     /// MAC addresses by provider name, such as `wifiaddr` or `ethaddr`.
     pub mac_addresses: BTreeMap<String, Vec<u8>>,
     pub security: SecurityPolicy,
-    /// The `/osenvironments` child whose values apply, such as
-    /// `darwinos-ramdisk-environment` for a restore ramdisk.
-    pub osenvironment: Option<String>,
+    /// The OS environment iBoot enters, such as `darwinos-ramdisk` for a
+    /// restore ramdisk; `None` is macOS.
+    pub osenvironment: Option<boot_policy::OsEnvironment>,
+    /// The volume the kernel roots from (`/chosen apfs-preboot-uuid`,
+    /// `boot-uuid`, `associated-volume-group`, `boot-objects-path`); `None`
+    /// keeps the template's values.
+    pub root: Option<root_selection::Root>,
     /// Applied after every other DeviceTree change.
     pub overlay: Vec<OverlayProperty>,
 }
@@ -206,6 +211,7 @@ impl Default for Options {
                 sepfw_load_at_boot: None,
             },
             osenvironment: None,
+            root: None,
             overlay: Vec::new(),
         }
     }
@@ -706,10 +712,18 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         security.extend(decisions);
         unresolved.extend(gaps);
     }
-    if let Some(environment) = &options.osenvironment {
+    if let Some(environment) = options.osenvironment {
         let (decisions, gaps) = boot_policy::apply_environment(&mut tree, environment)?;
         security.extend(decisions);
         unresolved.extend(gaps);
+    }
+    match &options.root {
+        Some(root) => security.extend(root_selection::apply(&mut tree, root)?),
+        None => unresolved.push(
+            "/chosen apfs-preboot-uuid, boot-uuid, boot-objects-path: no root volume was named; \
+             template values kept"
+                .into(),
+        ),
     }
     carveouts::publish(&mut tree, &carveouts)?;
     if let Some(chip_id) = inputs.target.chip_id {
@@ -1607,6 +1621,7 @@ mod tests {
             boot_args: "-v".into(),
             boot_cpu: "cpu0".into(),
             osenvironment: None,
+            root: None,
             timebase_frequency: 24_000_000,
             syscfg: BTreeMap::from([("SwBh".to_owned(), vec![7; 4])]),
             mac_addresses: BTreeMap::from([("wifiaddr".to_owned(), vec![2, 0, 0, 0, 0, 1])]),

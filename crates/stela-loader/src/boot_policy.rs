@@ -348,27 +348,105 @@ pub fn apply_root_hash(
 }
 
 const ENVIRONMENTS: &str = "/osenvironments";
+const OSENVIRONMENT: &str = "osenvironment";
+
+/// An OS environment iBoot boots. iBoot's setter (26A434 J473 iBoot
+/// 0x24e60) writes the name as `/chosen osenvironment` and applies the
+/// `/osenvironments/<name>-environment` child; its callers pass
+/// `diagnostics`, `kcgen`, `recoveryos`, `upgrade` and, by darwinOS boot
+/// kind, `darwinos-ramdisk` or `macos-darwinos` (table 0x170838). The
+/// kernel and TXM also compare `recovery`, whose child the J473 DeviceTree
+/// has, but no J473 iBoot caller passes it. macOS itself is the absence of
+/// an environment: the template's empty value stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OsEnvironment {
+    /// The Mac's recoveryOS, paired or System Recovery.
+    Recoveryos,
+    /// `recovery-environment`: ephemeral storage and no SEP firmware load,
+    /// used by Stela's recovery bundle (BaseSystem as a ramdisk).
+    Recovery,
+    /// A restore ramdisk.
+    DarwinosRamdisk,
+    MacosDarwinos,
+    /// A macOS update's ramdisk.
+    Upgrade,
+    Diagnostics,
+    Kcgen,
+}
+
+impl OsEnvironment {
+    pub const ALL: [Self; 7] = [
+        Self::Recoveryos,
+        Self::Recovery,
+        Self::DarwinosRamdisk,
+        Self::MacosDarwinos,
+        Self::Upgrade,
+        Self::Diagnostics,
+        Self::Kcgen,
+    ];
+
+    /// The `/chosen osenvironment` value, without its NUL.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Recoveryos => "recoveryos",
+            Self::Recovery => "recovery",
+            Self::DarwinosRamdisk => "darwinos-ramdisk",
+            Self::MacosDarwinos => "macos-darwinos",
+            Self::Upgrade => "upgrade",
+            Self::Diagnostics => "diagnostics",
+            Self::Kcgen => "kcgen",
+        }
+    }
+
+    /// The `/osenvironments` child iBoot applies.
+    pub fn node(self) -> String {
+        format!("{}-environment", self.name())
+    }
+
+    pub fn parse(name: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|e| e.name() == name)
+            .with_context(|| {
+                format!(
+                    "{name:?} is not an OS environment ({})",
+                    Self::ALL.map(Self::name).join(", ")
+                )
+            })
+    }
+}
 
 fn text_value(bytes: &[u8]) -> Result<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     Ok(core::str::from_utf8(&bytes[..end])?.to_owned())
 }
 
-/// Apply one `/osenvironments` child as iBoot does for that OS environment.
-/// Each entry either sets `node_path` `property_name` to `value`, or, with
+/// Enter an OS environment as iBoot does: `/chosen osenvironment` becomes
+/// its NUL-terminated name and its `/osenvironments` child applies. Each
+/// entry either sets `node_path` `property_name` to `value`, or, with
 /// `node`, `replacement` and `parent`, replaces the `node` child of `parent`
 /// with its `replacement` sibling. An entry whose target is absent from this
 /// tree is reported rather than invented.
 pub fn apply_environment(
     tree: &mut DeviceTree,
-    name: &str,
+    os_environment: OsEnvironment,
 ) -> Result<(Vec<Decision>, Vec<String>)> {
+    let name = os_environment.node();
     let path = format!("{ENVIRONMENTS}/{name}");
     let environment = tree
         .node(&path)
         .with_context(|| format!("DeviceTree has no {path}"))?
         .clone();
-    let mut decisions = vec![];
+    let mut value = os_environment.name().as_bytes().to_vec();
+    value.push(0);
+    let mut decisions = vec![Decision {
+        path: CHOSEN.into(),
+        property: OSENVIRONMENT.into(),
+        value_hex: hex::encode(&value),
+        source: format!("OS environment {}", os_environment.name()),
+    }];
+    tree.set_property(CHOSEN, OSENVIRONMENT, value)?;
     let mut unresolved = vec![];
     for entry in &environment.children {
         let label = entry.name().unwrap_or("?").to_owned();
@@ -519,6 +597,18 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn os_environments_are_named_as_iboot_names_them() {
+        for environment in OsEnvironment::ALL {
+            assert_eq!(
+                OsEnvironment::parse(environment.name()).unwrap(),
+                environment
+            );
+        }
+        assert_eq!(OsEnvironment::Recoveryos.node(), "recoveryos-environment");
+        assert!(OsEnvironment::parse("recovery-environment").is_err());
+    }
+
     fn environment_entry(tree: &mut DeviceTree, entry: &str, values: &[(&str, &[u8])]) {
         let path = format!("{ENVIRONMENTS}/darwinos-ramdisk-environment");
         tree.ensure_child(&path, entry).unwrap();
@@ -565,19 +655,23 @@ mod tests {
         tree.ensure_child("/filesystems", "fstab-ephemeral")?;
         tree.set_property("/filesystems/fstab-ephemeral", "marker", vec![1])?;
         tree.set_property("/chosen", "sepfw-load-at-boot", boolean(true))?;
-        let (decisions, unresolved) = apply_environment(&mut tree, "darwinos-ramdisk-environment")?;
+        let (decisions, unresolved) = apply_environment(&mut tree, OsEnvironment::DarwinosRamdisk)?;
         assert_eq!(
             tree.property(CHOSEN, "sepfw-load-at-boot").unwrap().value,
             boolean(false)
+        );
+        assert_eq!(
+            tree.property(CHOSEN, OSENVIRONMENT).unwrap().value,
+            b"darwinos-ramdisk\0"
         );
         assert_eq!(
             tree.property("/filesystems/fstab", "marker").unwrap().value,
             vec![1]
         );
         assert!(tree.node("/filesystems/fstab-ephemeral").is_none());
-        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions.len(), 3);
         assert_eq!(unresolved.len(), 1);
-        assert!(apply_environment(&mut tree, "missing-environment").is_err());
+        assert!(apply_environment(&mut tree, OsEnvironment::Kcgen).is_err());
         Ok(())
     }
 
