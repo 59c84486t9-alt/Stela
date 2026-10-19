@@ -23,6 +23,7 @@ pub(super) fn sequence(random: &mut Random) -> (Vec<u32>, u32) {
     let mut generator = Generator {
         random,
         pointers: 0,
+        loaded: 0,
     };
     while generator.pointers.count_ones() < POINTERS as u32 {
         generator.pointers |= 1 << generator.any();
@@ -37,6 +38,9 @@ struct Generator<'a> {
     random: &'a mut Random,
     /// Registers that still hold window pointers.
     pointers: u32,
+    /// The last load's destination, which the next operations read more
+    /// often, so values regions keep from loads are used.
+    loaded: u32,
 }
 
 impl Generator<'_> {
@@ -46,6 +50,15 @@ impl Generator<'_> {
 
     fn any(&mut self) -> u32 {
         self.below(31)
+    }
+
+    /// A source operand: the last load's destination half the time.
+    fn source(&mut self) -> u32 {
+        if self.below(2) == 0 {
+            self.loaded
+        } else {
+            self.any()
+        }
     }
 
     /// A register that is not a live pointer: any destination but a base.
@@ -88,7 +101,7 @@ impl Generator<'_> {
 
     fn arithmetic(&mut self) -> u32 {
         let sf = self.below(4).min(1) << 31;
-        let (d, n, m) = (self.data(), self.any(), self.any());
+        let (d, n, m) = (self.data(), self.source(), self.source());
         // Rd 31 of ADD and SUB immediate is SP, which stays a pointer.
         let sp_safe = if d == ZR { self.destination() } else { d };
         match self.below(11) {
@@ -187,6 +200,7 @@ impl Generator<'_> {
         } else {
             self.data()
         };
+        self.loaded = t;
         let head = size << 30 | 0x3800_0000 | opc << 22;
         match self.below(4) {
             0 | 1 => head | 1 << 24 | self.below(256) << 10 | n << 5 | t,
