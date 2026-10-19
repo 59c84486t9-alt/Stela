@@ -4,7 +4,9 @@
 //! kernel's argument block and apple strings, and the dynamic linker's
 //! entry state. The caller supplies the images' load commands already
 //! parsed; this module owns their placement in the process.
-use super::memory::{self, PAGE_BYTES, PAGE_MASK, Protection, round_page, trunc_page};
+use super::memory::{
+    self, PAGE_BYTES, PAGE_MASK, Protection, round_host_page, round_page, trunc_page,
+};
 use crate::process::{KernelArgsPlan, ProcessArguments, plan_kernel_args};
 use anyhow::{Context as _, Result, ensure};
 use std::{fs::File, os::fd::AsRawFd, path::PathBuf};
@@ -107,7 +109,10 @@ pub fn map_image(image: &Image, hint: u64) -> Result<Mapped> {
             "{}: file bytes exceed the segment",
             segment.name
         );
-        let file_pages = round_page(segment.file_bytes).context("segment size overflow")?;
+        // The file's bytes in whole host pages: a host page wholly past
+        // the file's end cannot be mapped from it, and the rest of the
+        // segment's last guest page is the reservation's zeroed memory.
+        let file_pages = round_host_page(segment.file_bytes).context("segment size overflow")?;
         if segment.file_bytes != 0 {
             ensure!(
                 segment.file_offset & PAGE_MASK == 0,
@@ -340,6 +345,53 @@ mod tests {
         assert_eq!(memory::read(data + 0xff, 2).unwrap(), [0xcd, 0]);
         assert_eq!(memory::read(data + PAGE_BYTES, 4).unwrap(), [0; 4]);
         assert!(memory::write(data + PAGE_BYTES, &[1]));
+        memory::deallocate(mapped.start, mapped.end - mapped.start).unwrap();
+    }
+
+    #[test]
+    fn a_segment_ending_at_the_files_end_maps_in_host_pages() {
+        // A thin image whose last segment ends 0x1a50 bytes into its last
+        // 16 KiB page, at the end of the file: the host pages past the
+        // file's end come from the reservation, zeroed.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image");
+        let tail = 0x1a50;
+        let mut data = vec![0xabu8; PAGE_BYTES as usize + tail];
+        data[PAGE_BYTES as usize..].fill(0xcd);
+        std::fs::write(&path, &data).unwrap();
+        let segment = |name: &str, address, file_offset, file_bytes, initial| Segment {
+            name: name.into(),
+            address,
+            bytes: PAGE_BYTES,
+            file_offset,
+            file_bytes,
+            initial,
+            maximum: initial,
+        };
+        let image = Image {
+            path,
+            segments: vec![
+                segment(
+                    "__TEXT",
+                    0x1_0000_0000,
+                    0,
+                    PAGE_BYTES,
+                    Protection::READ_EXECUTE,
+                ),
+                segment(
+                    "__LINKEDIT",
+                    0x1_0000_4000,
+                    PAGE_BYTES,
+                    tail as u64,
+                    Protection::READ,
+                ),
+            ],
+        };
+        let mapped = map_executable(&image).unwrap();
+        let linkedit = 0x1_0000_4000 + mapped.slide;
+        let last = linkedit + tail as u64 - 1;
+        assert_eq!(memory::read(last, 2).unwrap(), [0xcd, 0]);
+        assert_eq!(memory::read(linkedit + PAGE_BYTES - 4, 4).unwrap(), [0; 4]);
         memory::deallocate(mapped.start, mapped.end - mapped.start).unwrap();
     }
 

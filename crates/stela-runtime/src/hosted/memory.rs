@@ -36,6 +36,16 @@ pub const fn round_page(address: u64) -> Option<u64> {
     }
 }
 
+/// The x86 host's 4 KiB page, the granule of its file mappings.
+pub const HOST_PAGE_MASK: u64 = 0xfff;
+
+pub const fn round_host_page(address: u64) -> Option<u64> {
+    match address.checked_add(HOST_PAGE_MASK) {
+        Some(end) => Some(end & !HOST_PAGE_MASK),
+        None => None,
+    }
+}
+
 unsafe extern "C" {
     fn mach_vm_region(
         task: u32,
@@ -179,13 +189,7 @@ pub fn map_object(
 ) -> (i32, u64) {
     const KERN_INVALID_ARGUMENT: i32 = 4;
     const VM_FLAGS_OVERWRITE: i32 = 0x4000;
-    const HOST_PAGE_MASK: u64 = 0xfff;
-    let (Some(size), Some(object_size)) = (
-        round_page(bytes),
-        bytes
-            .checked_add(HOST_PAGE_MASK)
-            .map(|end| end & !HOST_PAGE_MASK),
-    ) else {
+    let (Some(size), Some(object_size)) = (round_page(bytes), round_host_page(bytes)) else {
         return (KERN_INVALID_ARGUMENT, address);
     };
     let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
