@@ -1,0 +1,489 @@
+//! The x86-64 macOS process beneath the hosted PE: guest memory is this
+//! process's own memory at the same addresses, native blocks run on the
+//! calling host thread, and a fault inside native code ends the block
+//! precisely through a signal handler, as the bare-metal mount's #PF
+//! handler does.
+//!
+//! The guest's stage 1 is the identity map of [`super::tables`], so a guest
+//! physical address is the host virtual address. Native code reaches guest
+//! memory directly; the engine's own accesses copy through the kernel
+//! (`mach_vm_read_overwrite`, `mach_vm_write`), which refuses an unmapped or
+//! protected page instead of faulting the host.
+use super::tables::Tables;
+use crate::machine::{
+    FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
+    mmu::{Fault, FaultKind},
+};
+use core::{
+    arch::global_asm,
+    cell::Cell,
+    sync::atomic::{AtomicBool, Ordering},
+};
+use stela_compiler::{GuestState, block::BlockExit};
+
+/// Bytes reserved for native blocks and chain thunks. Chained jumps are
+/// rel32, so the arena stays below 2 GiB.
+const ARENA_BYTES: usize = 512 << 20;
+/// The exit kind the recovery path returns; no block exit uses it.
+const FAULT_KIND: u64 = 0xffff;
+/// The guest's system counter: 24 MHz, the M2's (`CNTFRQ_EL0`).
+pub const COUNTER_HZ: u64 = 24_000_000;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+/// x86 exception vectors in the signal context's `__trapno`.
+const TRAP_INVALID_OPCODE: u16 = 6;
+const TRAP_GENERAL_PROTECTION: u16 = 13;
+const TRAP_PAGE_FAULT: u16 = 14;
+/// #PF error code bit 1: the access was a write.
+const PAGE_FAULT_WRITE: u32 = 1 << 1;
+/// The longest a WFE/WFI wait sleeps before the engine looks again.
+const LONGEST_WAIT_NANOSECONDS: u64 = 1_000_000;
+const KERN_SUCCESS: i32 = 0;
+
+/// `<i386/_mcontext.h>` `__darwin_x86_exception_state64`.
+#[repr(C)]
+struct ExceptionState {
+    trapno: u16,
+    cpu: u16,
+    err: u32,
+    faultvaddr: u64,
+}
+
+/// `<mach/i386/_structs.h>` `__darwin_x86_thread_state64`.
+#[repr(C)]
+struct ThreadState {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rdi: u64,
+    rsi: u64,
+    rbp: u64,
+    rsp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rip: u64,
+    rflags: u64,
+    cs: u64,
+    fs: u64,
+    gs: u64,
+}
+
+/// The leading `__darwin_mcontext64` fields the handler reads and redirects.
+#[repr(C)]
+struct MachineContext {
+    exception: ExceptionState,
+    thread: ThreadState,
+}
+
+/// `<sys/_types/_ucontext.h>` `__darwin_ucontext` (LP64).
+#[repr(C)]
+struct UserContext {
+    onstack: i32,
+    sigmask: u32,
+    stack_pointer: u64,
+    stack_size: u64,
+    stack_flags: i32,
+    link: u64,
+    machine_context_size: u64,
+    machine_context: *mut MachineContext,
+}
+
+/// The fault the signal handler recorded for the native run in progress.
+#[derive(Clone, Copy)]
+struct Recorded {
+    rip: u64,
+    address: u64,
+    write: bool,
+    trap: u16,
+}
+
+/// Per host thread: where a native run started, its recovery stack and the
+/// fault that ended it. The handler finds it through [`ACTIVE`].
+struct Recovery {
+    /// RSP after the entry pushed the callee-saved registers; the recovery
+    /// path returns from there.
+    stack: u64,
+    arena: (u64, u64),
+    recorded: Option<Recorded>,
+}
+
+std::thread_local! {
+    static ACTIVE: Cell<*mut Recovery> = const { Cell::new(core::ptr::null_mut()) };
+}
+
+static HANDLERS: AtomicBool = AtomicBool::new(false);
+
+global_asm!(
+    ".global _stela_hosted_enter",
+    "_stela_hosted_enter:",
+    "push rbp",
+    "push rbx",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "mov [rdx], rsp",
+    "call rsi",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop rbx",
+    "pop rbp",
+    "ret",
+    ".global _stela_hosted_recover",
+    "_stela_hosted_recover:",
+    "mov rsp, [rdi]",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop rbx",
+    "pop rbp",
+    "xor eax, eax",
+    "mov edx, 0xffff",
+    "ret",
+);
+
+unsafe extern "sysv64" {
+    fn stela_hosted_enter(state: *mut GuestState, code: usize, stack: *mut u64) -> BlockExit;
+    fn stela_hosted_recover();
+}
+
+/// SIGSEGV, SIGBUS and SIGILL: inside native code, end the block at the
+/// faulting instruction; elsewhere the host's default action follows.
+extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+    let recovery = ACTIVE.with(Cell::get);
+    // SAFETY: the kernel passes a valid ucontext; ACTIVE is set only while
+    // this thread runs native code with that Recovery alive.
+    unsafe {
+        let context = &mut *(context as *mut UserContext);
+        let machine = &mut *context.machine_context;
+        let rip = machine.thread.rip;
+        if let Some(recovery) = recovery.as_mut()
+            && (recovery.arena.0..recovery.arena.1).contains(&rip)
+            && recovery.recorded.is_none()
+        {
+            recovery.recorded = Some(Recorded {
+                rip,
+                address: machine.exception.faultvaddr,
+                write: machine.exception.err & PAGE_FAULT_WRITE != 0,
+                trap: machine.exception.trapno,
+            });
+            machine.thread.rdi = &raw mut recovery.stack as u64;
+            machine.thread.rip = stela_hosted_recover as *const () as u64;
+            return;
+        }
+        // Not ours: take the default action at the same instruction.
+        libc::signal(signal, libc::SIG_DFL);
+    }
+}
+
+fn install_handlers() {
+    if HANDLERS.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    for signal in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL] {
+        // SAFETY: a zeroed sigaction with a SA_SIGINFO handler.
+        unsafe {
+            let mut action: libc::sigaction = core::mem::zeroed();
+            action.sa_sigaction = fault_handler as *const () as usize;
+            action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, core::ptr::null_mut());
+        }
+    }
+}
+
+/// `mach_vm_read_overwrite`/`mach_vm_write`/`mach_vm_region` on this task.
+mod kernel {
+    unsafe extern "C" {
+        pub fn mach_vm_read_overwrite(
+            task: u32,
+            address: u64,
+            size: u64,
+            data: u64,
+            out: *mut u64,
+        ) -> i32;
+        pub fn mach_vm_write(task: u32, address: u64, data: usize, count: u32) -> i32;
+    }
+}
+
+/// `mach_timebase_info_data_t`.
+#[repr(C)]
+struct Timebase {
+    numer: u32,
+    denom: u32,
+}
+
+unsafe extern "C" {
+    static mach_task_self_: u32;
+    fn mach_absolute_time() -> u64;
+    fn mach_continuous_time() -> u64;
+    fn mach_timebase_info(info: *mut Timebase) -> i32;
+}
+
+/// This task's port name (`mach_task_self()`).
+pub fn task() -> u32 {
+    // SAFETY: libSystem initializes the name before any Rust code runs.
+    unsafe { mach_task_self_ }
+}
+
+/// The host's `mach_timebase_info` numerator and denominator.
+pub fn timebase() -> (u32, u32) {
+    let mut info = Timebase { numer: 0, denom: 0 };
+    // SAFETY: the out-parameter is this frame's.
+    unsafe { mach_timebase_info(&raw mut info) };
+    (info.numer, info.denom)
+}
+
+/// The host's `mach_continuous_time`, in nanoseconds on x86.
+pub fn continuous_nanoseconds() -> u64 {
+    // SAFETY: no arguments.
+    unsafe { mach_continuous_time() }
+}
+
+/// Copy `buffer.len()` bytes of this process's memory at `address`, or
+/// false when any page is unmapped or unreadable.
+pub fn copy_in(address: u64, buffer: &mut [u8]) -> bool {
+    if buffer.is_empty() {
+        return true;
+    }
+    let mut copied = 0u64;
+    // SAFETY: the kernel copies into the distinct buffer and checks the source.
+    let status = unsafe {
+        kernel::mach_vm_read_overwrite(
+            task(),
+            address,
+            buffer.len() as u64,
+            buffer.as_mut_ptr() as u64,
+            &mut copied,
+        )
+    };
+    status == KERN_SUCCESS && copied == buffer.len() as u64
+}
+
+/// Write `data` to this process's memory at `address`, or false when any
+/// page is unmapped or not writable.
+pub fn copy_out(address: u64, data: &[u8]) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+    let Ok(count) = u32::try_from(data.len()) else {
+        return false;
+    };
+    // SAFETY: the kernel checks the destination's mapping and protection.
+    let status = unsafe { kernel::mach_vm_write(task(), address, data.as_ptr() as usize, count) };
+    status == KERN_SUCCESS
+}
+
+/// The guest's counter at host time `nanoseconds` of `mach_absolute_time`,
+/// whose x86 timebase is 1/1.
+pub fn counter_at(nanoseconds: u64) -> u64 {
+    (u128::from(nanoseconds) * u128::from(COUNTER_HZ) / u128::from(NANOSECONDS_PER_SECOND)) as u64
+}
+
+/// Host nanoseconds for guest counter value `ticks`.
+pub fn nanoseconds_at(ticks: u64) -> u64 {
+    (u128::from(ticks) * u128::from(NANOSECONDS_PER_SECOND) / u128::from(COUNTER_HZ)) as u64
+}
+
+pub fn host_nanoseconds() -> u64 {
+    // SAFETY: no arguments; x86 macOS reports nanoseconds.
+    unsafe { mach_absolute_time() }
+}
+
+/// The host of one hosted PE.
+pub struct ProcessHost {
+    arena: *mut u8,
+    used: usize,
+    tables: Tables,
+    recovery: Box<Recovery>,
+    deadline: Option<u64>,
+}
+
+impl ProcessHost {
+    pub fn new(tables: Tables) -> anyhow::Result<Self> {
+        install_handlers();
+        // SAFETY: a fresh private anonymous mapping the host never shares.
+        let arena = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                ARENA_BYTES,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        anyhow::ensure!(
+            arena != libc::MAP_FAILED,
+            "cannot map the native code arena: {}",
+            std::io::Error::last_os_error()
+        );
+        let start = arena as u64;
+        Ok(Self {
+            arena: arena.cast(),
+            used: 0,
+            tables,
+            recovery: Box::new(Recovery {
+                stack: 0,
+                arena: (start, start + ARENA_BYTES as u64),
+                recorded: None,
+            }),
+            deadline: None,
+        })
+    }
+
+    pub fn tables(&self) -> &Tables {
+        &self.tables
+    }
+
+    /// Classify a native fault the way the guest's translation would have:
+    /// an unmapped page is a level-3 translation fault and a mapped page
+    /// without the access's permission a level-3 permission fault.
+    fn classify(recorded: &Recorded) -> FaultCause {
+        match recorded.trap {
+            TRAP_PAGE_FAULT => {
+                let kind = if super::memory::mapped(recorded.address) {
+                    FaultKind::Permission
+                } else {
+                    FaultKind::Translation
+                };
+                FaultCause::Guest(Fault {
+                    kind,
+                    level: 3,
+                    second_stage: None,
+                })
+            }
+            TRAP_GENERAL_PROTECTION => FaultCause::NonCanonical,
+            TRAP_INVALID_OPCODE => FaultCause::InvalidOpcode,
+            _ => FaultCause::NonCanonical,
+        }
+    }
+}
+
+impl Drop for ProcessHost {
+    fn drop(&mut self) {
+        // SAFETY: the arena this host mapped; no native run is in progress.
+        unsafe { libc::munmap(self.arena.cast(), ARENA_BYTES) };
+    }
+}
+
+impl Host for ProcessHost {
+    fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
+        self.tables.read(physical, buffer) || copy_in(physical, buffer)
+    }
+
+    fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool {
+        !self.tables.contains(physical, data.len()) && copy_out(physical, data)
+    }
+
+    fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError> {
+        let offset = self.used.next_multiple_of(16);
+        let end = offset + code.len();
+        if end > ARENA_BYTES {
+            return Err(InstallError::Full);
+        }
+        // SAFETY: arena bytes no native run executes while the engine installs.
+        unsafe {
+            core::ptr::copy_nonoverlapping(code.as_ptr(), self.arena.add(offset), code.len());
+        }
+        self.used = end;
+        Ok(NativeCode(self.arena as usize + offset))
+    }
+
+    fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
+        let offset = code.0 - self.arena as usize;
+        assert!(
+            offset + bytes.len() <= self.used,
+            "a patch outside the installed code"
+        );
+        // SAFETY: installed arena bytes; no native run is in progress.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.arena.add(offset), bytes.len());
+        }
+    }
+
+    fn discard_code(&mut self) {
+        self.used = 0;
+    }
+
+    unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit {
+        let recovery: *mut Recovery = &mut *self.recovery;
+        ACTIVE.with(|active| active.set(recovery));
+        // SAFETY: the engine passes installed system-mode block code; the
+        // recovery slot outlives the run.
+        let exit = unsafe { stela_hosted_enter(state, code.0, &raw mut (*recovery).stack) };
+        ACTIVE.with(|active| active.set(core::ptr::null_mut()));
+        if exit.kind == FAULT_KIND
+            && let Some(recorded) = self.recovery.recorded.take()
+        {
+            return NativeExit::Fault(NativeFault {
+                offset: recorded.rip.wrapping_sub(code.0 as u64) as usize,
+                address: recorded.address,
+                write: recorded.write,
+                cause: Self::classify(&recorded),
+            });
+        }
+        NativeExit::Exit {
+            next_pc: exit.next_pc,
+            kind: exit.kind,
+        }
+    }
+
+    fn set_regime(&mut self, _regime: &Regime) {}
+
+    fn invalidate_translations(&mut self) {}
+
+    fn counter(&mut self) -> u64 {
+        counter_at(host_nanoseconds())
+    }
+
+    fn arm_timer(&mut self, deadline: Option<u64>) {
+        self.deadline = deadline;
+    }
+
+    fn wait_for_interrupt(&mut self) {
+        let now = self.counter();
+        let wait = self
+            .deadline
+            .map_or(LONGEST_WAIT_NANOSECONDS, |deadline| {
+                nanoseconds_at(deadline.saturating_sub(now))
+            })
+            .clamp(1, LONGEST_WAIT_NANOSECONDS);
+        std::thread::sleep(std::time::Duration::from_nanos(wait));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counter_conversion_is_the_24_mhz_timebase() {
+        assert_eq!(counter_at(NANOSECONDS_PER_SECOND), COUNTER_HZ);
+        assert_eq!(counter_at(125), 3);
+        assert_eq!(nanoseconds_at(3), 125);
+        assert_eq!(nanoseconds_at(COUNTER_HZ), NANOSECONDS_PER_SECOND);
+    }
+
+    #[test]
+    fn copies_refuse_unmapped_memory_and_follow_mapped_memory() {
+        let mut word = [0u8; 8];
+        assert!(!copy_in(0x10, &mut word));
+        assert!(!copy_out(0x10, &word));
+        let mut source = [1u8, 2, 3, 4];
+        let address = source.as_mut_ptr() as u64;
+        assert!(copy_in(address, &mut word[..4]));
+        assert_eq!(&word[..4], &source);
+        assert!(copy_out(address, &[9, 8]));
+        assert_eq!(source[..2], [9, 8]);
+    }
+}

@@ -1,0 +1,286 @@
+//! The hosted Darwin process: an unchanged arm64e Mach-O executable runs in
+//! this x86-64 macOS process above the host's kernel, as the arm64 XNU
+//! kernel would run it.
+//!
+//! The guest thread is a [`Machine`] PE at EL0 over an identity stage 1, so
+//! guest addresses are this process's addresses and translated code reaches
+//! guest memory directly. Exec is performed here as `execve` performs it:
+//! the commpage, the shared region (mapped as an earlier process left it,
+//! slid lazily), the executable and its unchanged dynamic linker at their
+//! slides, and the main stack with the kernel's argument block. The PE
+//! enters dyld at its entry point; every exception it takes to EL1 stops at
+//! the vector, where [`kernel`] services it as XNU's exception handlers do
+//! and returns through ERET. The run ends at the guest's `exit`.
+use crate::machine::{Chip, Machine, NoDevices, Stop, system::Register};
+use anyhow::{Context as _, Result, bail, ensure};
+use std::collections::BTreeMap;
+use stela_compiler::TargetCpu;
+
+pub mod commpage;
+pub mod exec;
+pub mod features;
+pub mod forward;
+pub mod hardware;
+pub mod host;
+pub mod kernel;
+pub mod memory;
+pub mod pe;
+pub mod shared_region;
+pub mod tables;
+
+pub use kernel::{Executable, Signature};
+
+/// How the guest process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Termination {
+    /// `exit(status)`: the host process exits with the status's low byte.
+    Exited(i32),
+}
+
+/// The shared cache the process finds already mapped.
+#[derive(Debug, Clone)]
+pub struct SharedCacheLaunch {
+    pub mappings: Vec<shared_region::MappingRequest>,
+    /// The unslid region `[start, start + size)` and the cache's largest
+    /// slide.
+    pub start: u64,
+    pub size: u64,
+    pub max_slide: u64,
+    /// A fixed slide, or `None` for a random one as the kernel chooses.
+    pub slide: Option<u64>,
+}
+
+/// The dynamic linker `LC_LOAD_DYLINKER` names.
+#[derive(Debug, Clone)]
+pub struct Dylinker {
+    pub image: exec::Image,
+    /// Its unslid `LC_UNIXTHREAD` entry point.
+    pub entry: u64,
+}
+
+/// Everything exec needs for one process.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    pub chip: Chip,
+    pub executable: exec::Image,
+    /// The image's slice offset in its file, where its Mach header lies.
+    pub slice_offset: u64,
+    /// The path exec was asked to run, as `executable_path=` reports it.
+    pub executable_path: Vec<u8>,
+    pub signature: Signature,
+    pub dylinker: Dylinker,
+    pub shared_cache: Option<SharedCacheLaunch>,
+    pub argv: Vec<Vec<u8>>,
+    pub environment: Vec<Vec<u8>>,
+    pub trace: bool,
+}
+
+/// What a run produced.
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub termination: Termination,
+    pub calls: BTreeMap<&'static str, u64>,
+    pub slid_pages: u64,
+}
+
+/// The x86 host's `mach_absolute_time` must count nanoseconds: the guest's
+/// 24 MHz counter is derived from it.
+fn check_host_timebase() -> Result<()> {
+    let (numerator, denominator) = host::timebase();
+    ensure!(
+        numerator == 1 && denominator == 1,
+        "the host timebase is {numerator}/{denominator}, not nanoseconds"
+    );
+    Ok(())
+}
+
+fn random_words<const N: usize>() -> Result<[u64; N]> {
+    let mut bytes = vec![0u8; N * 8];
+    // SAFETY: the buffer is at most 256 bytes and this frame's.
+    let status = unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) };
+    ensure!(status == 0, "getentropy failed");
+    let mut words = [0u64; N];
+    for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
+    }
+    Ok(words)
+}
+
+/// The commpage's time fields, in guest ticks.
+fn commpage_time() -> Result<commpage::Time> {
+    let (absolute, continuous) = (host::host_nanoseconds(), host::continuous_nanoseconds());
+    let mut boot = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut length = size_of::<libc::timeval>();
+    // SAFETY: the name is NUL-terminated and the buffer is this frame's.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            (&raw mut boot).cast(),
+            &raw mut length,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    ensure!(status == 0, "kern.boottime is unavailable");
+    Ok(commpage::Time {
+        continuous_offset: host::counter_at(continuous - absolute),
+        boot_microseconds: boot.tv_sec as u64 * 1_000_000 + boot.tv_usec as u64,
+    })
+}
+
+/// Run the process to its exit.
+pub fn run(launch: Launch) -> Result<Report> {
+    check_host_timebase()?;
+    // A process exec'd from a shell starts with SIGPIPE defaulted; the
+    // host runtime's own start-up ignored it.
+    // SAFETY: restores a default disposition.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    let target = TargetCpu::detect();
+    let profile = pe::profile(launch.chip, target);
+    let identification = features::Identification(&profile.fixed);
+    let memory_bytes = host_memory()?;
+    let hardware = hardware::Hardware::of(launch.chip, memory_bytes)?;
+    let features = identification.optional_features();
+    commpage::map(&commpage::data_page(
+        &hardware,
+        &identification,
+        commpage_time()?,
+    ))?;
+    let shared_region = match &launch.shared_cache {
+        Some(cache) => {
+            let slide = match cache.slide {
+                Some(slide) => slide,
+                None if cache.max_slide == 0 => 0,
+                None => {
+                    let pages = cache.max_slide / memory::PAGE_BYTES;
+                    (random_words::<1>()?[0] % (pages + 1)) * memory::PAGE_BYTES
+                }
+            };
+            Some(shared_region::SharedRegion::map(
+                &cache.mappings,
+                cache.start,
+                cache.size,
+                slide,
+            )?)
+        }
+        None => None,
+    };
+    let executable = exec::map_executable(&launch.executable)?;
+    let dylinker = exec::map_dylinker(&launch.dylinker.image)?;
+    let header = launch
+        .executable
+        .header_address(launch.slice_offset)
+        .context("the executable has no segment holding its Mach header")?
+        + executable.slide;
+    let stack = exec::map_stack()?;
+    let tables = tables::Tables::new()?;
+    let keys = pe::Keys::random()?;
+    let [guard0, guard1, guard2, guard3, entropy0, entropy1, munge] = random_words::<7>()?;
+    let thread_port = forward::mach(THREAD_SELF_TRAP, &[]).rax as u32;
+    let apple = exec::AppleStrings {
+        pfz: commpage::TEXT_ADDRESS,
+        stack_guard: [guard0, guard1, guard2, guard3],
+        malloc_entropy: [entropy0, entropy1],
+        ptr_munge: munge,
+        stack: Some(stack),
+        executable_file: exec::file_identity(&launch.executable.path),
+        dyld_file: exec::file_identity(&launch.dylinker.image.path),
+        cdhash: Some(launch.signature.cdhash),
+        boot_hash: None,
+        thread_port: Some(thread_port),
+        security_config: 0,
+    };
+    let arguments = exec::install_arguments(
+        &stack,
+        header,
+        &launch.executable_path,
+        &launch.argv,
+        &launch.environment,
+        &apple,
+    )?;
+    let entry = launch.dylinker.entry + dylinker.slide;
+    if launch.trace {
+        eprintln!(
+            "stela: executable slide {:#x}, dyld slide {:#x} (entry {entry:#x}), shared region \
+             {:#x?}, stack top {:#x}",
+            executable.slide,
+            dylinker.slide,
+            shared_region
+                .as_ref()
+                .map(shared_region::SharedRegion::base),
+            stack.top
+        );
+    }
+    let mut cpu = pe::user_thread(launch.chip, entry, &tables, &keys);
+    cpu.set_sp(0, arguments.raw_sp);
+    let host = host::ProcessHost::new(tables)?;
+    let mut machine = Machine::new(cpu, host, NoDevices, profile, target);
+    machine.set_breakpoints(&pe::vectors());
+    let signer = machine
+        .pointer_signer()
+        .map_err(|stop| anyhow::anyhow!("the PE cannot sign pointers: {stop:?}"))?;
+    let mut kernel = kernel::Kernel::new(kernel::Config {
+        shared_region,
+        signer,
+        hardware,
+        features,
+        executable: Executable {
+            path: launch.executable_path.clone(),
+            code_signing_flags: launch.signature.exec_flags(),
+            signature: Some(launch.signature.clone()),
+            header,
+        },
+        user_stack: stack.top,
+        trace: launch.trace,
+    });
+    loop {
+        match machine.run(0) {
+            Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) => {
+                kernel.synchronous(&mut machine)?;
+                if let Some(termination) = kernel.termination {
+                    return Ok(Report {
+                        termination,
+                        calls: kernel.counts.clone(),
+                        slid_pages: kernel
+                            .shared_region
+                            .as_ref()
+                            .map_or(0, shared_region::SharedRegion::slid_pages),
+                    });
+                }
+                machine.return_from_exception();
+            }
+            Stop::Breakpoint(pc) => bail!(
+                "the guest took an exception to EL1 vector {pc:#x} (ESR {:#x}, ELR {:#x}): \
+                 only synchronous exceptions from EL0 are serviced",
+                machine.cpu.read(Register::ESR_EL1),
+                machine.cpu.read(Register::ELR_EL1)
+            ),
+            other => bail!(
+                "the guest PE stopped at pc {:#x}: {other:?}",
+                machine.cpu.pc
+            ),
+        }
+    }
+}
+
+const THREAD_SELF_TRAP: u32 = 27;
+
+fn host_memory() -> Result<u64> {
+    let mut value = 0u64;
+    let mut length = size_of::<u64>();
+    // SAFETY: the name is NUL-terminated and the buffer is this frame's.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut value).cast(),
+            &raw mut length,
+            core::ptr::null_mut(),
+            0,
+        )
+    };
+    ensure!(status == 0, "hw.memsize is unavailable");
+    Ok(value)
+}

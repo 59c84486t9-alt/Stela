@@ -21,6 +21,8 @@ pub mod dispatch;
 pub mod execution;
 mod floating;
 mod hash;
+#[cfg(all(feature = "std", target_os = "macos", target_arch = "x86_64"))]
+pub mod hosted;
 pub mod img4;
 #[cfg(feature = "std")]
 mod json;
