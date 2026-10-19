@@ -268,8 +268,10 @@ impl Ans {
                 ..Queue::default()
             };
         } else {
-            if flags != (1 << 16) | 1 {
-                return Err("ANS SQ must be contiguous, round-robin and use CQ 1");
+            // QPRIO (bits 2:1) is ignored under the round-robin arbitration
+            // CC.AMS 0 selects (NVMe 1.4 5.4); the driver sends medium.
+            if flags & 1 == 0 || flags & 0xfff8 != 0 || flags >> 16 != 1 {
+                return Err("ANS SQ must be contiguous and use CQ 1");
             }
             let q = &mut self.queues[1];
             if q.sq_enabled || !q.cq_enabled {
