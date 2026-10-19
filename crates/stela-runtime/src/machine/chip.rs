@@ -344,7 +344,10 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_XS
         | Feature::FEAT_SME
         | Feature::FEAT_SME2 => true,
-        Feature::FEAT_FP8
+        // The M4 and later keep FEAT_AMUv1 from Apple clang's export; the
+        // engine counts no activity, so their AMU accesses stop.
+        Feature::FEAT_AMUv1
+        | Feature::FEAT_FP8
         | Feature::FEAT_FPMR
         | Feature::FEAT_MTE
         | Feature::FEAT_MTE2

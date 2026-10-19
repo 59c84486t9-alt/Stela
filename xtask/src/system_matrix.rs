@@ -114,7 +114,7 @@ const ALL: &[&str] = &[];
 /// Features a profile does not have, the chips it applies to (`ALL` for
 /// every one) and the reason. Features implied only by these are excluded
 /// with them.
-const EXCLUDED: [(&str, &[&str], &str); 18] = [
+const EXCLUDED: [(&str, &[&str], &str); 20] = [
     ("FEAT_EL3", ALL, "the profile has no EL3"),
     ("FEAT_AA64EL3", ALL, "the profile has no EL3"),
     ("FEAT_SEL2", ALL, "Secure EL2 needs EL3"),
@@ -147,7 +147,17 @@ const EXCLUDED: [(&str, &[&str], &str); 18] = [
          M3 and later (VZGenericPlatformConfiguration.isNestedVirtualizationSupported)",
     ),
     ("FEAT_NV2", &["apple-m1", "apple-m2"], "no FEAT_NV"),
+    ("FEAT_AMUv1", NO_AMU, NO_AMU_REASON),
+    ("FEAT_AMUv1p1", NO_AMU, "no FEAT_AMUv1"),
 ];
+
+/// The chips whose profile has no activity monitors.
+const NO_AMU: &[&str] = &["apple-m1", "apple-m2", "apple-m3"];
+const NO_AMU_REASON: &str = "no Arm activity monitors (inference, which a hardware reading \
+    of ID_AA64PFR0_EL1.AMU can overturn): AARCHMRS makes FEAT_AMUv1 optional at every \
+    version and Apple clang lists it only as an Armv8.4 default, Apple implements its own \
+    IMPLEMENTATION DEFINED performance counters, the 26A434 kernelcache accesses no AMU \
+    register, and Stela's ID_AA64PFR0_EL1.AMU already reads 0";
 
 /// AARCHMRS constraints an Apple CPU profile does not meet, as rendered, the
 /// chips it applies to and why. Any other violated constraint is an error.

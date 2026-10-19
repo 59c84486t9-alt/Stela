@@ -348,11 +348,9 @@ fn system_oracle_limit(form: &str, case: &Case) -> bool {
     // QEMU also leaves DBGAUTHSTATUS_EL1 and DBGPRCR_EL1 UNDEFINED, which
     // every AArch64 PE implements.
     let debug = matches!(word & 0xffdf_ffe0, 0xd510_7ec0 | 0xd510_1480);
-    // At EL2, QEMU lacks the ACTLR_EL12 alias (op1=5, CRn=1, CRm=0, op2=1)
-    // and FEAT_AMUv1, which HAFGRTR_EL2 (op1=4, CRn=3, CRm=1, op2=6) needs;
-    // the profile has both.
-    let el2_absent = case.el == 2
-        && ((op1, crn, crm, op2) == (5, 1, 0, 1) || (op1, crn, crm, op2) == (4, 3, 1, 6));
+    // At EL2, QEMU lacks the ACTLR_EL12 alias (op1=5, CRn=1, CRm=0, op2=1),
+    // which the profile has.
+    let el2_absent = case.el == 2 && (op1, crn, crm, op2) == (5, 1, 0, 1);
     let absent_registers = register_access && (mpam || records || el2_absent) || debug;
     // QEMU's GICv3 has the physical CPU interface, which Apple's cores lack:
     // the engine makes every physical ICC_* access at EL1 and EL2 UNDEFINED

@@ -2228,14 +2228,24 @@ mod tests {
             assert_eq!(machine.cpu.pc, BASE + 8);
             machine.cpu.state.x[1]
         };
-        // CPTR_EL2 has its E2H layout: FPEN, TAM and TCPAC; CPACR_EL1 keeps
-        // FPEN alone. With FEAT_SME (from the M4) both also hold SMEN.
-        let smen = if Feature::FEAT_SME.on(machine.profile.chip) {
+        // CPTR_EL2 has its E2H layout: FPEN, TAM (with FEAT_AMUv1, from the
+        // M4) and TCPAC; CPACR_EL1 keeps FPEN alone. With FEAT_SME (from the
+        // M4) both also hold SMEN.
+        let chip = machine.profile.chip;
+        let smen = if Feature::FEAT_SME.on(chip) {
             0b11 << 24
         } else {
             0
         };
-        assert_eq!(round_trip(&mut machine, 2, CPTR_EL2), 0xc030_0000 | smen);
+        let tam = if Feature::FEAT_AMUv1.on(chip) {
+            1 << 30
+        } else {
+            0
+        };
+        assert_eq!(
+            round_trip(&mut machine, 2, CPTR_EL2),
+            0x8030_0000 | tam | smen
+        );
         machine.cpu.registers.set(Register::CPTR_EL2, 0, 0b11 << 20);
         machine.derived_changed();
         assert_eq!(round_trip(&mut machine, 1, CPACR_EL1), 0x0030_0000 | smen);
@@ -3083,13 +3093,22 @@ mod tests {
         write(&mut machine, Encoding::new(3, 0, 5, 4, 1), u64::MAX);
         assert_eq!(read(&mut machine, Encoding::new(3, 0, 5, 4, 1)), 0);
         assert_eq!(read(&mut machine, Encoding::new(3, 0, 5, 4, 2)), 0);
-        // An AMU access stops: its counters would never count.
-        let Err(super::super::Stop::Unsupported(requirement)) =
-            machine.system_instruction(access(true, Encoding::new(3, 3, 13, 2, 0), 2))
-        else {
-            panic!("AMCR_EL0 read")
-        };
-        assert!(format!("{:?}", requirement.kind).contains("activity monitors"));
+        // Without activity monitors (the M1 to M3) an AMU access is
+        // UNDEFINED. Where the chip has them, it stops: its counters would
+        // never count.
+        let amcr = access(true, Encoding::new(3, 3, 13, 2, 0), 2);
+        if Feature::FEAT_AMUv1.on(machine.profile.chip) {
+            let Err(super::super::Stop::Unsupported(requirement)) =
+                machine.system_instruction(amcr)
+            else {
+                panic!("AMCR_EL0 read")
+            };
+            assert!(format!("{:?}", requirement.kind).contains("AMUv1"));
+        } else {
+            machine.cpu.pstate = Pstate::reset(1);
+            machine.system_instruction(amcr).unwrap();
+            assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+        }
     }
 
     #[test]

@@ -1652,9 +1652,9 @@ impl Register {
                 0xfffffffffccfffff,
             ][chip as usize],
             Register::CPTR_EL2 => [
-                0xffffffff3fcfffff,
-                0xffffffff3fcfffff,
-                0xffffffff3fcfffff,
+                0xffffffff7fcfffff,
+                0xffffffff7fcfffff,
+                0xffffffff7fcfffff,
                 0xffffffff3ccfffff,
                 0xffffffff3ccfffff,
                 0xffffffff3ccfffff,
@@ -1719,8 +1719,8 @@ impl Register {
             Register::HAFGRTR_EL2 => 0xfffc00000001ffe0,
             Register::HCR_EL2 => [
                 0xff093cc000008000,
-                0xff013cc000008000,
-                0xff0108c000008000,
+                0xff093cc000008000,
+                0xff0908c000008000,
                 0xff0108c000008000,
                 0xf80108c000008000,
                 0xf80108c000008000,
@@ -2016,8 +2016,8 @@ impl Register {
             Register::AMCNTENSET1_EL0 => 0xffffffffffff0000,
             Register::AMCR_EL0 => [
                 0xfffffffffffffbff,
-                0xfffffffffffdfbff,
-                0xfffffffffffdfbff,
+                0xfffffffffffffbff,
+                0xfffffffffffffbff,
                 0xfffffffffffdfbff,
                 0xfffffffffffdfbff,
                 0xfffffffffffdfbff,
@@ -3123,6 +3123,7 @@ pub const CAPS: [&[&str]; 6] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
     FEAT_AFP,
+    FEAT_AMUv1,
     FEAT_AMUv1p1,
     FEAT_BF16,
     FEAT_CPA,
@@ -3169,8 +3170,9 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 44] = [
+    pub const ALL: [Feature; 45] = [
         Feature::FEAT_AFP,
+        Feature::FEAT_AMUv1,
         Feature::FEAT_AMUv1p1,
         Feature::FEAT_BF16,
         Feature::FEAT_CPA,
@@ -3219,6 +3221,7 @@ impl Feature {
     pub const fn name(self) -> &'static str {
         match self {
             Feature::FEAT_AFP => "FEAT_AFP",
+            Feature::FEAT_AMUv1 => "FEAT_AMUv1",
             Feature::FEAT_AMUv1p1 => "FEAT_AMUv1p1",
             Feature::FEAT_BF16 => "FEAT_BF16",
             Feature::FEAT_CPA => "FEAT_CPA",
@@ -3270,6 +3273,7 @@ impl Feature {
     pub const fn unimplemented(self) -> &'static str {
         match self {
             Feature::FEAT_AFP => "FEAT_AFP of the chip is not implemented",
+            Feature::FEAT_AMUv1 => "FEAT_AMUv1 of the chip is not implemented",
             Feature::FEAT_AMUv1p1 => "FEAT_AMUv1p1 of the chip is not implemented",
             Feature::FEAT_BF16 => "FEAT_BF16 of the chip is not implemented",
             Feature::FEAT_CPA => "FEAT_CPA of the chip is not implemented",
@@ -3320,7 +3324,8 @@ impl Feature {
     pub const fn on(self, chip: Chip) -> bool {
         match self {
             Feature::FEAT_AFP => [false, false, false, true, true, true][chip as usize],
-            Feature::FEAT_AMUv1p1 => [false, true, true, true, true, true][chip as usize],
+            Feature::FEAT_AMUv1 => [false, false, false, true, true, true][chip as usize],
+            Feature::FEAT_AMUv1p1 => [false, false, false, true, true, true][chip as usize],
             Feature::FEAT_BF16 => [false, true, true, true, true, true][chip as usize],
             Feature::FEAT_CPA => [false, false, false, false, false, true][chip as usize],
             Feature::FEAT_CSSC => [false, false, false, false, true, true][chip as usize],
@@ -21962,7 +21967,7 @@ fn a233(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS HAFGRTR_EL2 (HAFGRTR_EL2)
 fn a234(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
-    if !(c.implemented(Feature::FEAT_FGT)?) {
+    if !((c.implemented(Feature::FEAT_AMUv1)?) && (c.implemented(Feature::FEAT_FGT)?)) {
         return Ok(Effect::Undefined);
     }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -22003,7 +22008,7 @@ fn a234(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister HAFGRTR_EL2 (HAFGRTR_EL2)
 fn a235(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
-    if !(c.implemented(Feature::FEAT_FGT)?) {
+    if !((c.implemented(Feature::FEAT_AMUv1)?) && (c.implemented(Feature::FEAT_FGT)?)) {
         return Ok(Effect::Undefined);
     }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
@@ -38165,6 +38170,9 @@ fn a700(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMCFGR_EL0 (AMCFGR_EL0)
 fn a701(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
             return Ok(trap_el1_or_el2(c, 24u64));
@@ -38252,6 +38260,9 @@ fn a702(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMCGCR_EL0 (AMCGCR_EL0)
 fn a703(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
             return Ok(trap_el1_or_el2(c, 24u64));
@@ -38294,6 +38305,9 @@ fn a703(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMCNTENCLR0_EL0 (AMCNTENCLR0_EL0)
 fn a704(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
             return Ok(trap_el1_or_el2(c, 24u64));
@@ -38350,6 +38364,9 @@ fn a704(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMCNTENCLR0_EL0 (AMCNTENCLR0_EL0)
 fn a705(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
     }
@@ -38366,6 +38383,9 @@ fn a705(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMCNTENCLR1_EL0 (AMCNTENCLR1_EL0)
 fn a706(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
             return Ok(trap_el1_or_el2(c, 24u64));
@@ -38422,6 +38442,9 @@ fn a706(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMCNTENCLR1_EL0 (AMCNTENCLR1_EL0)
 fn a707(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
     }
@@ -38438,6 +38461,9 @@ fn a707(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMCNTENSET0_EL0 (AMCNTENSET0_EL0)
 fn a708(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
             return Ok(trap_el1_or_el2(c, 24u64));
@@ -38494,6 +38520,9 @@ fn a708(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMCNTENSET0_EL0 (AMCNTENSET0_EL0)
 fn a709(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
     }
@@ -38510,6 +38539,9 @@ fn a709(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMCNTENSET1_EL0 (AMCNTENSET1_EL0)
 fn a710(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
             return Ok(trap_el1_or_el2(c, 24u64));
@@ -38566,6 +38598,9 @@ fn a710(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMCNTENSET1_EL0 (AMCNTENSET1_EL0)
 fn a711(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
     }
@@ -38582,6 +38617,9 @@ fn a711(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMCR_EL0 (AMCR_EL0)
 fn a712(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::AMUSERENR_EL0, 0), 0, 1)) & 0x1) == 0x0 {
             return Ok(trap_el1_or_el2(c, 24u64));
@@ -38624,6 +38662,9 @@ fn a712(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMCR_EL0 (AMCR_EL0)
 fn a713(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
     }
@@ -38640,6 +38681,9 @@ fn a713(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMEVCNTR0<m>_EL0 (AMEVCNTR0<n>_EL0)
 fn a714(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
     }
@@ -38701,6 +38745,9 @@ fn a714(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMEVCNTR0<m>_EL0 (AMEVCNTR0<n>_EL0)
 fn a715(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
     }
@@ -38720,6 +38767,9 @@ fn a715(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMEVCNTR1<m>_EL0 (AMEVCNTR1<n>_EL0)
 fn a716(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
     }
@@ -38815,6 +38865,9 @@ fn a716(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMEVCNTR1<m>_EL0 (AMEVCNTR1<n>_EL0)
 fn a717(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
     }
@@ -39031,6 +39084,9 @@ fn a721(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMEVTYPER0<m>_EL0 (AMEVTYPER0<n>_EL0)
 fn a722(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (m) >= (4u64) {
         return Ok(Effect::Undefined);
     }
@@ -39076,6 +39132,9 @@ fn a722(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMEVTYPER1<m>_EL0 (AMEVTYPER1<n>_EL0)
 fn a723(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
     }
@@ -39150,6 +39209,9 @@ fn a723(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMEVTYPER1<m>_EL0 (AMEVTYPER1<n>_EL0)
 fn a724(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (m) >= (c.limit(Limit::AuxiliaryMonitors)) {
         return Ok(Effect::Undefined);
     }
@@ -39172,6 +39234,9 @@ fn a724(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MRS AMUSERENR_EL0 (AMUSERENR_EL0)
 fn a725(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         if ((bits(c.read(Register::CPTR_EL2, 0), 30, 1)) & 0x1) == 0x1 {
             return Ok(Effect::Trap {
@@ -39211,6 +39276,9 @@ fn a725(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
 /// MSRregister AMUSERENR_EL0 (AMUSERENR_EL0)
 fn a726(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     let _ = m;
+    if !(c.implemented(Feature::FEAT_AMUv1)?) {
+        return Ok(Effect::Undefined);
+    }
     if (at_el0_in_host(c)) || (at_el0_not_in_host(c)) {
         return Ok(Effect::Undefined);
     }
