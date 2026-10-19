@@ -265,11 +265,15 @@ impl Session {
                 let kind = m.required("DataType")?.string()?;
                 if !self.route.allows(kind) {
                     return Err(super::refuse(
-                        "Stela firmware option study: required request remains outside qualified global coverage; NORData may still be needed for RestoreSEP independently of FlashNOR",
+                        "Stela firmware option study: required request remains outside qualified global coverage",
                         m,
                     ));
                 }
-                let plan = answers.plan(m)?;
+                let plan = if kind == "NORData" && !self.route.flashes_nor() {
+                    answers.sep_firmware(m)?
+                } else {
+                    answers.plan(m)?
+                };
                 let port = m
                     .get("DataPort")
                     .map(Value::uint)

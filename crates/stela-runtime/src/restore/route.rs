@@ -32,6 +32,12 @@ impl Route {
         }
         Ok(())
     }
+    /// Whether restored may flash the NOR firmware set. The study turns
+    /// `FlashNOR` off, which leaves `load_sep_os` as `NORData`'s only
+    /// consumer (R 0x2d51c..0x2d660, `docs/research/stela-firmware-route.md`).
+    pub fn flashes_nor(self) -> bool {
+        self == Self::Stock
+    }
     pub fn allows(self, kind: &str) -> bool {
         self == Self::Stock
             || matches!(
@@ -52,6 +58,7 @@ impl Route {
                     | "StreamedImageDecryptionKey"
                     | "RestoreAttestation"
                     | "HostSystemTime"
+                    | "NORData"
             )
     }
 }
@@ -84,7 +91,8 @@ mod tests {
         );
         assert!(options.get("RecoveryOSMacDFUFactoryInstall").is_none());
         // Requests outside the study refuse when they arrive.
-        assert!(!Route::StelaFirmwareStudy.allows("NORData"));
+        assert!(Route::StelaFirmwareStudy.allows("NORData"));
+        assert!(!Route::StelaFirmwareStudy.flashes_nor());
         assert!(!Route::StelaFirmwareStudy.allows("RecoveryOSLocalPolicy"));
         assert!(Route::StelaFirmwareStudy.allows("RootTicket"));
         assert!(Route::StelaFirmwareStudy.allows("HostSystemTime"));

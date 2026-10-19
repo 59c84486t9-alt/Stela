@@ -506,6 +506,50 @@ impl<R: ReadAt> Answers<R> {
         }
         Ok(Plan::Reply(Value::Dict(response)))
     }
+    /// `NORData` when nothing flashes NOR: only the restore SEP images, each its
+    /// identity's IM4P unchanged and digest-verified. No global ticket covers
+    /// them (the root ticket has no `rsep` or `sepi`), and Stela's SEP model
+    /// is their authenticator (`docs/research/sep.md`), as SEPROM is a Mac's.
+    /// The firmware set and LLB are absent, so a reader of them fails.
+    pub fn sep_firmware(&mut self, request: &Value) -> Result<Plan> {
+        self.sep_firmware_inner(request)
+            .map_err(|e| super::refuse(format!("{e}"), request))
+    }
+    fn sep_firmware_inner(&mut self, request: &Value) -> Result<Plan> {
+        let empty = Value::dict([]);
+        let identity = self.identity(request.get("Arguments").unwrap_or(&empty))?;
+        let mut response = BTreeMap::new();
+        let mut total = 0usize;
+        // `load_sep_os` reads only these (R 0x2d514); the installed `SEP`
+        // image is not sent.
+        for (component, key) in [
+            ("RestoreSEP", "RestoreSEPImageData"),
+            ("SepStage1", "SEPPatchImageData"),
+        ] {
+            if identity.component(component).is_err() {
+                continue;
+            }
+            let path = identity.path(component)?.to_string();
+            let bytes = self.member_bytes(&path)?;
+            let digest = identity.component(component)?.required("Digest")?.data()?;
+            let parts = crate::img4::parse(&bytes)
+                .map_err(|_| Error::Invalid("SEP firmware is not an IM4P"))?;
+            if parts.manifest.is_some() || Sha384::digest(parts.payload).as_slice() != digest {
+                return Err(Error::Invalid(
+                    "SEP firmware differs from its BuildManifest digest",
+                ));
+            }
+            total += bytes.len();
+            if total > MAX_REPLY_BYTES {
+                return Err(Error::Limit("NOR response bytes"));
+            }
+            response.insert(key.to_string(), Value::Data(bytes));
+        }
+        if !response.contains_key("RestoreSEPImageData") {
+            return Err(Error::Invalid("identity has no RestoreSEP image"));
+        }
+        Ok(Plan::Reply(Value::Dict(response)))
+    }
     fn updater(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
         let updater = args.required("MessageArgUpdaterName")?.string()?;
         if updater != "Cryptex1" {
@@ -703,6 +747,38 @@ fn cpio_header(name: &str, mode: u64, size: u64) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nor_data_without_flashing_carries_only_the_unchanged_restore_sep_image() {
+        let sep = [
+            0x30, 0x11, 0x16, 0x04, b'I', b'M', b'4', b'P', 0x16, 0x04, b'r', b's', b'e', b'p',
+            0x16, 0x00, 0x04, 0x01, 0x07,
+        ];
+        let store = super::super::store::tests::with_components(
+            b"x",
+            false,
+            &[("RestoreSEP", "sep.im4p", &sep)],
+        );
+        let mut answers = Answers::new(store);
+        let request = Value::dict([("DataType", Value::from("NORData"))]);
+        let Plan::Reply(reply) = answers.sep_firmware(&request).unwrap() else {
+            panic!()
+        };
+        let Value::Dict(fields) = &reply else {
+            panic!()
+        };
+        assert_eq!(fields.keys().collect::<Vec<_>>(), ["RestoreSEPImageData"]);
+        assert_eq!(
+            reply
+                .required("RestoreSEPImageData")
+                .unwrap()
+                .data()
+                .unwrap(),
+            sep
+        );
+        let mut bare = Answers::new(super::super::store::tests::fixture(b"x", false));
+        assert!(bare.sep_firmware(&request).is_err());
+    }
     #[test]
     fn exact_http_arguments_digest_and_post_body_are_bound() {
         let args = Value::dict([

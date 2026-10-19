@@ -327,6 +327,33 @@ pub(crate) mod tests {
         zip::tests::archive,
     };
     pub(crate) fn fixture(data: &[u8], deflate: bool) -> Store<Memory> {
+        with_components(data, deflate, &[])
+    }
+    /// The fixture with more BuildManifest components, each `(name, path,
+    /// bytes)` with its SHA-384 as the Digest.
+    pub(crate) fn with_components(
+        data: &[u8],
+        deflate: bool,
+        extra: &[(&str, &str, &[u8])],
+    ) -> Store<Memory> {
+        use sha2::{Digest, Sha384};
+        let mut components: BTreeMap<String, Value> = [(
+            "OS".into(),
+            Value::dict([
+                ("Info", Value::dict([("Path", Value::from("os.dmg"))])),
+                ("Digest", Value::Data(vec![1; 48])),
+            ]),
+        )]
+        .into();
+        for (name, path, bytes) in extra {
+            components.insert(
+                (*name).into(),
+                Value::dict([
+                    ("Info", Value::dict([("Path", Value::from(*path))])),
+                    ("Digest", Value::Data(Sha384::digest(bytes).to_vec())),
+                ]),
+            );
+        }
         let identity = Value::dict([
             (
                 "Info",
@@ -340,16 +367,7 @@ pub(crate) mod tests {
             ("ApChipID", Value::from("0x8112")),
             ("ApBoardID", Value::from("0x24")),
             ("ApSecurityDomain", Value::from("0x1")),
-            (
-                "Manifest",
-                Value::dict([(
-                    "OS",
-                    Value::dict([
-                        ("Info", Value::dict([("Path", Value::from("os.dmg"))])),
-                        ("Digest", Value::Data(vec![1; 48])),
-                    ]),
-                )]),
-            ),
+            ("Manifest", Value::Dict(components)),
         ]);
         let build = plist::encode_xml(
             &Value::dict([("BuildIdentities", Value::Array(vec![identity]))]),
@@ -361,29 +379,28 @@ pub(crate) mod tests {
         m.source.build_manifest_sha256 = crate::sha256(&build);
         m.global_manifests.clear();
         m.aea_keys.clear();
-        m.members = vec![Member {
-            name: "os.dmg".into(),
-            bytes: data.len() as u64,
-            sha256: crate::sha256(data),
-        }];
+        let files: Vec<(&str, &[u8])> = core::iter::once(("os.dmg", data))
+            .chain(extra.iter().map(|(_, path, bytes)| (*path, *bytes)))
+            .collect();
+        m.members = files
+            .iter()
+            .map(|(name, bytes)| Member {
+                name: (*name).into(),
+                bytes: bytes.len() as u64,
+                sha256: crate::sha256(bytes),
+            })
+            .collect();
         m.identities = vec![IdentitySet {
             index: 0,
             variant: "Customer Erase Install (IPSW)".into(),
             purpose: Purpose::Erase,
-            members: vec!["os.dmg".into()],
+            members: files.iter().map(|(name, _)| (*name).into()).collect(),
         }];
-        Store::open(
-            Memory(archive(
-                &[
-                    ("BuildManifest.plist", &build, false),
-                    ("os.dmg", data, deflate),
-                ],
-                true,
-            )),
-            m,
-            0,
-        )
-        .unwrap()
+        let entries: Vec<(&str, &[u8], bool)> =
+            core::iter::once(("BuildManifest.plist", build.as_slice(), false))
+                .chain(files.iter().map(|(name, bytes)| (*name, *bytes, deflate)))
+                .collect();
+        Store::open(Memory(archive(&entries, true)), m, 0).unwrap()
     }
     #[test]
     fn random_reads_cover_stored_and_deflated_zip64_and_refuse_changed_bytes() {
