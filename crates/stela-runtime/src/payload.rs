@@ -70,6 +70,20 @@ pub trait ReadAt {
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error>;
 }
 
+/// A borrowed source, so one disk can be opened as several containers in
+/// turn.
+impl<R: ReadAt + ?Sized> ReadAt for &mut R {
+    type Error = R::Error;
+
+    fn len(&self) -> u64 {
+        (**self).len()
+    }
+
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        (**self).read_at(offset, buffer)
+    }
+}
+
 /// A member's bytes in order. `Ok(0)` ends the member.
 pub trait MemberRead {
     fn read(&mut self, buffer: &mut [u8]) -> Result<usize, PayloadError>;

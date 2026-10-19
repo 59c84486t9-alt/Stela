@@ -36,6 +36,14 @@ pub const SYSTEM_VERSION: &str = "System/Library/CoreServices/SystemVersion.plis
 /// A SHA-384 in hexadecimal.
 const BOOT_HASH_CHARACTERS: usize = 96;
 const PEEK_BYTES: usize = 64;
+const ACTIVE: &str = "active";
+/// The hash and a line ending, with room for padding.
+const ACTIVE_LIMIT: u64 = 256;
+const LOCAL_POLICY: &str = "LocalPolicy";
+const IMG4_SUFFIX: &str = ".img4";
+const RECOVERY_POLICY_SUFFIX: &str = ".recovery.img4";
+/// LocalPolicy files are a signed manifest of a few kilobytes.
+const LOCAL_POLICY_LIMIT: u64 = 1024 * 1024;
 const MAX_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +227,77 @@ pub fn candidates<R: ReadAt>(container: &mut Container<R>) -> Result<(Volume, Ve
     Ok((preboot, sets))
 }
 
+/// The boot directory `<group>/boot/active` names: the 26A434 J473 LLB
+/// (0xd3a80) opens `<group>/boot/<nsih>` and, when that fails, reads the
+/// 96 hexadecimal characters of `<group>/boot/active` and opens the
+/// directory they name. `None` when the file is absent.
+pub fn active<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    group: &str,
+) -> Result<Option<String>> {
+    let path = format!("{group}/boot/{ACTIVE}");
+    let device = &mut container.device;
+    let Ok(inode) = preboot.lookup(device, &path, true) else {
+        return Ok(None);
+    };
+    if inode.kind != FileKind::Regular || inode.size > ACTIVE_LIMIT {
+        return Err(PrebootError::Object(format!(
+            "{path} is not a boot hash file"
+        )));
+    }
+    active_text(&preboot.read(device, &inode)?)
+        .map(Some)
+        .ok_or_else(|| {
+            PrebootError::Object(format!("{path} does not hold a 96-character boot hash"))
+        })
+}
+
+/// The boot hash an `active` file holds, ignoring surrounding whitespace
+/// and NULs.
+fn active_text(bytes: &[u8]) -> Option<String> {
+    let text = core::str::from_utf8(bytes)
+        .ok()?
+        .trim_matches(|c: char| c.is_ascii_whitespace() || c == '\0');
+    is_boot_hash(text).then(|| text.into())
+}
+
+/// Every LocalPolicy of the volume group: the `<name>.img4` files of
+/// `<group>/LocalPolicy/` other than `<name>.recovery.img4`, with their
+/// bytes (LLB's `%s/%s/LocalPolicy`, `%s/%s.img4` and `%s/%s.recovery.img4`).
+pub fn local_policies<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    group: &str,
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let path = format!("{group}/{LOCAL_POLICY}");
+    let device = &mut container.device;
+    let Ok(directory) = preboot.lookup(device, &path, true) else {
+        return Ok(Vec::new());
+    };
+    let mut policies = Vec::new();
+    for entry in preboot.entries(device, directory.oid)? {
+        if entry.kind != FileKind::Regular
+            || !entry.name.ends_with(IMG4_SUFFIX)
+            || entry.name.ends_with(RECOVERY_POLICY_SUFFIX)
+        {
+            continue;
+        }
+        let inode = preboot.inode(device, entry.oid)?;
+        if inode.size > LOCAL_POLICY_LIMIT {
+            return Err(PrebootError::Object(format!(
+                "{path}/{} is larger than a LocalPolicy",
+                entry.name
+            )));
+        }
+        policies.push((
+            format!("{path}/{}", entry.name),
+            preboot.read(device, &inode)?,
+        ));
+    }
+    Ok(policies)
+}
+
 /// The seal of the file system the volume group's System volume roots from
 /// (`apfs_root_to_xid`); `None` when it is not sealed.
 pub fn system_seal<R: ReadAt>(container: &mut Container<R>, group: &str) -> Result<Option<Seal>> {
@@ -287,6 +366,21 @@ mod tests {
     use crate::apfs::tests::fixture;
 
     #[test]
+    fn an_active_file_names_one_boot_hash() {
+        let hash = "0a".repeat(48);
+        assert_eq!(
+            active_text(format!("{hash}\n").as_bytes()),
+            Some(hash.clone())
+        );
+        assert_eq!(
+            active_text(format!("{hash}\0").as_bytes()),
+            Some(hash.clone())
+        );
+        assert_eq!(active_text(&hash.as_bytes()[..94]), None);
+        assert_eq!(active_text(&[0xff; 96]), None);
+    }
+
+    #[test]
     fn lists_the_fixture_boot_directory_and_its_objects_by_payload_type() -> Result<()> {
         let mut container = Container::open(fixture(), 0)?;
         let (preboot, sets) = candidates(&mut container)?;
@@ -308,6 +402,9 @@ mod tests {
             manifest(&mut container, &preboot, kernel)?.as_deref(),
             parts.manifest
         );
+        // The fixture names its directory by neither file.
+        assert_eq!(active(&mut container, &preboot, &set.volume_group)?, None);
+        assert!(local_policies(&mut container, &preboot, &set.volume_group)?.is_empty());
         // The fixture has a Preboot volume only.
         assert!(matches!(
             system_seal(&mut container, &set.volume_group),

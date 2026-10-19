@@ -411,6 +411,100 @@ pub fn choose(variables: &mut Variables, volume: &BootVolume, once: bool) -> Res
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// `stela.cfg`'s installed-system option: the disk the bundle is built from.
+pub const PREBOOT_OPTION: &str = "--preboot";
+/// `stela.cfg`'s recoveryOS option: the ESP directory of Stela's recovery
+/// bundle (`stela boot prepare --recovery`), booted for System Recovery.
+pub const RECOVERY_BUNDLE_OPTION: &str = "--recovery-bundle";
+pub const BUNDLE_OPTION: &str = "--bundle";
+/// Options `stela.efi` passes its engine: the boot volume to build from and
+/// a safe-mode boot.
+pub const BOOT_VOLUME_OPTION: &str = "--boot-volume";
+pub const SAFE_BOOT_OPTION: &str = "--safe-boot";
+
+/// The engine options for `selection` (none when NVRAM was not read): a
+/// macOS boot keeps `--preboot` and adds the boot volume and safe mode; a
+/// recoveryOS boot replaces `--preboot` with `--bundle` of the
+/// `--recovery-bundle` directory, and is refused without one.
+/// `--recovery-bundle` never reaches the engine. Returns the options and
+/// what the boot log should say.
+pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, String)> {
+    let mut words: Vec<&str> = options.split_ascii_whitespace().collect();
+    let take = |words: &mut Vec<&str>, name: &str| -> Result<Option<String>> {
+        let Some(at) = words.iter().position(|w| *w == name) else {
+            return Ok(None);
+        };
+        ensure!(at + 1 < words.len(), "{name} has no value");
+        let value = words[at + 1].into();
+        words.drain(at..at + 2);
+        ensure!(
+            !words.contains(&name),
+            "{name} appears more than once in stela.cfg"
+        );
+        Ok(Some(value))
+    };
+    for option in [BOOT_VOLUME_OPTION, SAFE_BOOT_OPTION] {
+        ensure!(
+            !words.contains(&option),
+            "{option} is chosen from NVRAM, not stela.cfg"
+        );
+    }
+    let recovery = take(&mut words, RECOVERY_BUNDLE_OPTION)?;
+    let Some(selection) = selection else {
+        return Ok((words.join(" "), "NVRAM not read".into()));
+    };
+    let reasons = if selection.reasons.is_empty() {
+        "no boot variables".into()
+    } else {
+        selection.reasons.join(", ")
+    };
+    let mut extra: Vec<String> = Vec::new();
+    let log = match selection.target {
+        Target::MacOs { safe } => {
+            ensure!(
+                words.contains(&PREBOOT_OPTION),
+                "NVRAM boots macOS, which needs {PREBOOT_OPTION}"
+            );
+            if let Some(volume) = &selection.volume {
+                extra.push(BOOT_VOLUME_OPTION.into());
+                extra.push(String::from_utf8(volume.encode()).expect("ASCII"));
+            }
+            if safe {
+                extra.push(SAFE_BOOT_OPTION.into());
+            }
+            format!(
+                "macOS{} ({reasons})",
+                if safe { " in safe mode" } else { "" }
+            )
+        }
+        target @ (Target::PairedRecovery | Target::SystemRecovery) => {
+            let Some(directory) = recovery else {
+                bail!(
+                    "NVRAM boots recoveryOS ({reasons}), but stela.cfg names no \
+                     {RECOVERY_BUNDLE_OPTION}"
+                );
+            };
+            take(&mut words, PREBOOT_OPTION)?;
+            ensure!(
+                !words.contains(&BUNDLE_OPTION),
+                "stela.cfg names both {BUNDLE_OPTION} and {RECOVERY_BUNDLE_OPTION}"
+            );
+            extra.push(BUNDLE_OPTION.into());
+            extra.push(directory);
+            match target {
+                Target::PairedRecovery => format!(
+                    "recoveryOS ({reasons}): the paired recoveryOS on the Recovery volume is not \
+                     read, so Stela's System Recovery bundle boots"
+                ),
+                _ => format!("System Recovery ({reasons})"),
+            }
+        }
+    };
+    let mut text: Vec<String> = words.into_iter().map(String::from).collect();
+    text.extend(extra);
+    Ok((text.join(" "), log))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +648,51 @@ mod tests {
         choose(&mut chosen, &target, true).unwrap();
         assert_eq!(select(&chosen).unwrap().volume, Some(target));
         assert_eq!(select(&chosen).unwrap().consumed, [ALT_BOOT_VOLUME]);
+    }
+
+    const CONFIG: &str = "--system --storage S:G --nor S:N --preboot S:G \
+                          --recovery-bundle \\EFI\\stela\\recovery --ram-bytes 0x200000000";
+
+    #[test]
+    fn macos_boots_keep_the_preboot_disk_and_name_the_volume() {
+        let vars = variables(&[
+            (Partition::System, BOOT_VOLUME, &volume(VolumeType::Apfs)),
+            (Partition::System, BOOT_COMMAND, b"fsboot-safe"),
+        ]);
+        let (options, log) = route(CONFIG, Some(&select(&vars).unwrap())).unwrap();
+        let expected = format!(
+            "--system --storage S:G --nor S:N --preboot S:G --ram-bytes 0x200000000 \
+             --boot-volume {} --safe-boot",
+            String::from_utf8(volume(VolumeType::Apfs)).unwrap()
+        );
+        assert_eq!(options, expected);
+        assert!(log.starts_with("macOS in safe mode"));
+        // Without NVRAM only the recovery bundle option is removed.
+        let (plain, _) = route(CONFIG, None).unwrap();
+        assert!(!plain.contains(RECOVERY_BUNDLE_OPTION) && plain.contains("--preboot S:G"));
+    }
+
+    #[test]
+    fn recovery_boots_read_the_recovery_bundle_instead() {
+        let vars = variables(&[(Partition::Common, BOOT_COMMAND, b"recover-system")]);
+        let selection = select(&vars).unwrap();
+        let (options, log) = route(CONFIG, Some(&selection)).unwrap();
+        assert_eq!(
+            options,
+            "--system --storage S:G --nor S:N --ram-bytes 0x200000000 \
+             --bundle \\EFI\\stela\\recovery"
+        );
+        assert!(log.starts_with("System Recovery"));
+        let paired = select(&variables(&[(Partition::System, RECOVERY_BOOT_MODE, b"x")])).unwrap();
+        assert!(
+            route(CONFIG, Some(&paired))
+                .unwrap()
+                .1
+                .contains("paired recoveryOS")
+        );
+        let without = "--system --preboot S:G";
+        assert!(route(without, Some(&selection)).is_err());
+        assert!(route("--system --safe-boot", None).is_err());
+        assert!(route("--system --recovery-bundle", None).is_err());
     }
 }

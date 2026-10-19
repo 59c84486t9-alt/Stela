@@ -2,9 +2,15 @@
 //! container's Preboot volume (`stela_runtime::preboot`), in `no_std` so
 //! `stela.efi` builds the same bundle `stela boot prepare --disk` writes.
 //!
-//! The boot directory is chosen by evidence, since the LocalPolicy that
-//! names it (`nsih`) is paused. A candidate `<volume-group>/boot/<hash>/`
-//! qualifies when all three hold, and exactly one candidate must:
+//! The volume group is the one NVRAM's boot volume names
+//! (`stela_loader::boot_selection`), else any. Within a group the boot
+//! directory is named as LLB names it: by the LocalPolicy's `nsih`
+//! (`stela_loader::local_policy`), and when no such directory exists by
+//! `boot/active`; a `--boot-hash` names it instead. The LocalPolicy's
+//! signature is the SEP's, so without a [`PolicyAuthority`] its `nsih` only
+//! narrows the choice. Whatever names it, a candidate
+//! `<volume-group>/boot/<hash>/` qualifies by evidence when all three hold,
+//! and exactly one candidate must:
 //!
 //! - its Image4 objects carry one manifest whose SHA-384 is the directory's
 //!   name: `nsih` is the SHA-384 of the next stage's Image4 manifest (Apple
@@ -31,13 +37,15 @@ use crate::{
     apple_device_tree::DeviceTree,
     boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
     boot_policy::SealedVolume,
+    boot_selection::{BootVolume, VolumeType, uuid_text},
     im4m, im4p,
+    local_policy::{LocalPolicy, PolicyAuthority},
     root_selection::Root,
 };
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use stela_runtime::{
-    apfs::{Container, Volume, btree::Hash},
+    apfs::{self, Container, Volume, btree::Hash},
     img4,
     payload::ReadAt,
     preboot::{self, BootSet, SYSTEM_VERSION},
@@ -65,8 +73,24 @@ pub struct Evidence {
     pub root_hash: Option<String>,
     /// The seal root of its System volume's root file system.
     pub system_seal: Option<String>,
+    /// What named the directory: a LocalPolicy, `boot/active`, the
+    /// `--boot-hash`, or nothing (evidence alone).
+    pub named_by: Option<String>,
     /// Every requirement that failed; empty when the directory qualifies.
     pub problems: Vec<String>,
+}
+
+/// What to boot from a disk: everything is optional.
+#[derive(Default, Clone, Copy)]
+pub struct Request<'a> {
+    /// The `boot/<hash>` directory, overriding every other name.
+    pub boot_hash: Option<&'a str>,
+    /// The model the system must be, such as `Mac14,3`.
+    pub model: Option<&'a str>,
+    /// NVRAM's boot volume: its partition and volume group.
+    pub volume: Option<BootVolume>,
+    /// Verifies LocalPolicy signatures; the SEP model's.
+    pub authority: Option<&'a dyn PolicyAuthority>,
 }
 
 /// The hash type and hash of an `isys` root-hash record.
@@ -107,6 +131,7 @@ fn evaluate<R: ReadAt>(
         manifest_sha384: None,
         root_hash: None,
         system_seal: None,
+        named_by: None,
         problems: Vec::new(),
     };
     let mut manifests: Vec<Vec<u8>> = Vec::new();
@@ -208,31 +233,141 @@ fn evaluate<R: ReadAt>(
     Ok(evidence)
 }
 
-/// The boot directory the evidence shows to be the installed system's; with
-/// `boot_hash`, only that directory is considered.
+/// The directory LLB would boot in `group`, and what named it: the
+/// LocalPolicy's `nsih` when that directory exists, else `boot/active`.
+fn named<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    group: &str,
+    sets: &[BootSet],
+    authority: Option<&dyn PolicyAuthority>,
+    notes: &mut Vec<String>,
+) -> Result<Option<(String, String)>> {
+    let exists = |hash: &str| {
+        sets.iter()
+            .any(|s| s.volume_group == group && s.boot_hash.eq_ignore_ascii_case(hash))
+    };
+    let files = preboot::local_policies(container, preboot, group).map_err(|e| anyhow!("{e}"))?;
+    let mut policies = Vec::new();
+    for (path, bytes) in &files {
+        match LocalPolicy::parse(path, bytes) {
+            Ok(policy) => policies.push(policy),
+            Err(error) => notes.push(format!("{path}: {error:#}")),
+        }
+    }
+    match &mut policies[..] {
+        [] => {}
+        [policy] => {
+            let label = match authority {
+                Some(authority) => match policy.verify(authority) {
+                    Ok(()) => Some("verified"),
+                    Err(error) => {
+                        notes.push(format!("{error:#}; its nsih is not used"));
+                        None
+                    }
+                },
+                None => Some("signature not verified"),
+            };
+            let group_matches = policy
+                .volume_group
+                .is_none_or(|vuid| uuid_text(&vuid).eq_ignore_ascii_case(group));
+            if !group_matches {
+                notes.push(format!("{} names another volume group", policy.path));
+            }
+            if let (Some(label), Some(nsih), true) = (label, &policy.nsih, group_matches) {
+                if exists(nsih) {
+                    return Ok(Some((
+                        nsih.clone(),
+                        format!("LocalPolicy {} ({label})", policy.path),
+                    )));
+                }
+                notes.push(format!("{}: no boot/{nsih} directory", policy.path));
+            }
+        }
+        several => notes.push(format!(
+            "{group} has {} LocalPolicies; none names the boot directory",
+            several.len()
+        )),
+    }
+    match preboot::active(container, preboot, group).map_err(|e| anyhow!("{e}"))? {
+        Some(hash) if exists(&hash) => Ok(Some((hash, format!("{group}/boot/active")))),
+        Some(hash) => {
+            notes.push(format!("{group}/boot/active names a missing boot/{hash}"));
+            Ok(None)
+        }
+        None => Ok(None),
+    }
+}
+
+/// The boot directory the evidence shows to be the installed system's,
+/// among those `request` names.
 pub fn select<R: ReadAt>(
     container: &mut Container<R>,
-    boot_hash: Option<&str>,
+    request: &Request,
 ) -> Result<(Volume, BootSet, Evidence)> {
     let (preboot, sets) = preboot::candidates(container).map_err(|e| anyhow!("{e}"))?;
-    let named: Vec<BootSet> = sets
-        .iter()
-        .filter(|set| boot_hash.is_none_or(|hash| set.boot_hash.eq_ignore_ascii_case(hash)))
-        .cloned()
-        .collect();
-    ensure!(
-        !named.is_empty(),
-        "no boot directory is named {}; the candidates are {}",
-        boot_hash.unwrap_or_default(),
+    let listed = || {
         sets.iter()
             .map(BootSet::directory)
             .collect::<Vec<_>>()
             .join(", ")
+    };
+    let wanted = request.volume.map(|v| uuid_text(&v.volume_group));
+    let mut groups: Vec<String> = Vec::new();
+    for set in &sets {
+        if wanted
+            .as_ref()
+            .is_none_or(|g| g.eq_ignore_ascii_case(&set.volume_group))
+            && !groups.contains(&set.volume_group)
+        {
+            groups.push(set.volume_group.clone());
+        }
+    }
+    ensure!(
+        !groups.is_empty(),
+        "NVRAM boots volume group {}, which has no boot directory here; the candidates are {}",
+        wanted.unwrap_or_default(),
+        listed()
+    );
+    let mut notes = Vec::new();
+    let mut chosen: Vec<(BootSet, Option<String>)> = Vec::new();
+    for group in &groups {
+        let in_group = sets.iter().filter(|s| &s.volume_group == group);
+        if let Some(hash) = request.boot_hash {
+            chosen.extend(
+                in_group
+                    .filter(|s| s.boot_hash.eq_ignore_ascii_case(hash))
+                    .map(|s| (s.clone(), Some("--boot-hash".into()))),
+            );
+            continue;
+        }
+        match named(
+            container,
+            &preboot,
+            group,
+            &sets,
+            request.authority,
+            &mut notes,
+        )? {
+            Some((hash, by)) => chosen.extend(
+                in_group
+                    .filter(|s| s.boot_hash.eq_ignore_ascii_case(&hash))
+                    .map(|s| (s.clone(), Some(by.clone()))),
+            ),
+            None => chosen.extend(in_group.map(|s| (s.clone(), None))),
+        }
+    }
+    ensure!(
+        !chosen.is_empty(),
+        "no boot directory is named {}; the candidates are {}",
+        request.boot_hash.unwrap_or_default(),
+        listed()
     );
     let mut qualified = Vec::new();
     let mut refused = Vec::new();
-    for set in named {
-        let evidence = evaluate(container, &preboot, &set)?;
+    for (set, by) in chosen {
+        let mut evidence = evaluate(container, &preboot, &set)?;
+        evidence.named_by = by;
         if evidence.problems.is_empty() {
             qualified.push((set, evidence));
         } else {
@@ -243,6 +378,7 @@ pub fn select<R: ReadAt>(
             ));
         }
     }
+    refused.extend(notes);
     match qualified.len() {
         1 => {
             let (set, evidence) = qualified.remove(0);
@@ -253,13 +389,14 @@ pub fn select<R: ReadAt>(
             refused.join(" | ")
         ),
         count => bail!(
-            "{count} boot directories ({}) each match their System volume; choosing one needs \
-             the LocalPolicy nsih, which is paused",
+            "{count} boot directories ({}) each match their System volume, and neither a \
+             LocalPolicy nor boot/active names one ({})",
             qualified
                 .iter()
                 .map(|(set, _)| set.directory())
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            refused.join(" | ")
         ),
     }
 }
@@ -420,16 +557,15 @@ fn manifest_id(manifest: Option<&im4m::Manifest>, key: &str) -> Result<Option<u3
     }
 }
 
-/// Build the boot bundle of the installed system on `container`. `boot_hash`
-/// names the boot directory when there are several; `model`, when given,
-/// must match the DeviceTree's.
+/// Build the boot bundle of the installed system on `container`, as
+/// `request` names it; its `model`, when given, must match the DeviceTree's.
 pub fn prepare<R: ReadAt>(
     container: &mut Container<R>,
-    boot_hash: Option<&str>,
-    model: Option<&str>,
+    request: &Request,
     options: &Options,
 ) -> Result<Installed> {
-    let (preboot, set, evidence) = select(container, boot_hash)?;
+    let model = request.model;
+    let (preboot, set, evidence) = select(container, request)?;
     let mut disk = Disk {
         container,
         preboot,
@@ -499,18 +635,73 @@ pub fn prepare<R: ReadAt>(
         boot_hash: disk.set.boot_hash.clone(),
     });
     let mut bundle = boot_bundle::prepare(&inputs, &options)?;
-    bundle.manifest.unresolved.push(format!(
-        "paused: the SEP-signed LocalPolicy is not read, so neither its nsih nor its other \
-         hashes are inputs; {} was chosen by evidence (its manifest's SHA-384, its isys \
-         digest and its System volume's seal)",
-        disk.set.directory()
-    ));
+    if !evidence
+        .named_by
+        .as_deref()
+        .is_some_and(|by| by.ends_with("(verified)"))
+    {
+        bundle.manifest.unresolved.push(format!(
+            "no SEP-verified LocalPolicy names {}: it was chosen by {} and its evidence (its \
+             manifest's SHA-384, its isys digest and its System volume's seal); the \
+             LocalPolicy's other hashes are not inputs",
+            disk.set.directory(),
+            evidence.named_by.as_deref().unwrap_or("evidence alone")
+        ));
+    }
     Ok(Installed {
         bundle,
         preboot: disk.preboot,
         set: disk.set,
         evidence,
     })
+}
+
+/// The installed system on `source`: a disk with a GUID partition table or
+/// one APFS container. With a boot volume, only its partition is read and
+/// its type must be APFS; otherwise exactly one container must hold a
+/// bootable system. Returns the container's byte offset and the bundle.
+pub fn prepare_disk<R: ReadAt>(
+    source: &mut R,
+    request: &Request,
+    options: &Options,
+) -> Result<(u64, Installed)> {
+    let mut partitions = apfs::container_partitions(source).map_err(|e| anyhow!("{e}"))?;
+    if let Some(volume) = &request.volume {
+        ensure!(
+            volume.kind == VolumeType::Apfs,
+            "NVRAM boots a {:?} partition, not an APFS container",
+            volume.kind
+        );
+        partitions.retain(|(_, guid)| guid.is_none_or(|g| g.0 == volume.partition));
+        ensure!(
+            !partitions.is_empty(),
+            "NVRAM boots partition {}, which this disk does not have",
+            uuid_text(&volume.partition)
+        );
+    }
+    let mut found = Vec::new();
+    let mut failures = Vec::new();
+    for (offset, _) in partitions {
+        let result = Container::open(&mut *source, offset)
+            .map_err(|e| anyhow!("{e}"))
+            .and_then(|mut container| prepare(&mut container, request, options));
+        match result {
+            Ok(installed) => found.push((offset, installed)),
+            Err(error) => failures.push(format!("container at {offset:#x}: {error:#}")),
+        }
+    }
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => bail!("no installed system to boot: {}", failures.join("; ")),
+        count => bail!(
+            "{count} containers hold a bootable system (at {}); NVRAM's boot-volume must name one",
+            found
+                .iter()
+                .map(|(offset, _)| format!("{offset:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 #[cfg(test)]

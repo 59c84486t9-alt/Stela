@@ -91,7 +91,11 @@ pub fn prepare(path: &Path) -> Result<Preboot> {
         0,
     )
     .map_err(|e| anyhow::anyhow!("APFS container: {e}"))?;
-    let installed = installed::prepare(&mut container, None, None, &Options::default())?;
+    let installed = installed::prepare(
+        &mut container,
+        &installed::Request::default(),
+        &Options::default(),
+    )?;
     Ok(Preboot {
         path: path.to_owned(),
         partition: partition.unique_guid.to_string(),

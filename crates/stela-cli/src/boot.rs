@@ -122,6 +122,10 @@ pub(crate) struct Prepare {
     /// The `boot/<hash>` directory to use when the Preboot volume has several.
     #[arg(long, requires = "disk")]
     boot_hash: Option<String>,
+    /// The NVRAM `boot-volume` to boot, `TYPE:PARTITION:GROUP`, choosing the
+    /// disk's container and volume group as LLB does.
+    #[arg(long, requires = "disk")]
+    boot_volume: Option<String>,
     /// A new directory for the bundle.
     #[arg(long)]
     output: PathBuf,

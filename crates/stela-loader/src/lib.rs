@@ -35,6 +35,7 @@ pub mod kernel_collection;
 pub mod linked_images;
 #[cfg(feature = "std")]
 pub mod load_plan;
+pub mod local_policy;
 pub mod lock_regs;
 #[cfg(feature = "std")]
 pub mod mapped_image;

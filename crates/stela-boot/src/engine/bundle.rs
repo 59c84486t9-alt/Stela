@@ -25,7 +25,6 @@ use core::arch::{
 };
 use stela_loader::{boot_bundle::Options, installed};
 use stela_runtime::{
-    apfs::Container,
     boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
     machine::Host,
     payload::ReadAt,
@@ -238,11 +237,18 @@ impl<D: BlockDevice> ReadAt for Bytes<D> {
     }
 }
 
-/// Build the boot bundle of the installed system whose APFS container is
-/// `target`'s partition, with the defaults of `stela boot prepare`; returns
-/// `bundle.json` first and then every file it lists. Runs after boot
-/// services end, on the controllers `storage` describes.
-pub fn from_disk(storage: &pc::Handoff, target: &Target) -> Result<Vec<(String, Vec<u8>)>, String> {
+/// Build the boot bundle of the installed system on `target`'s partition,
+/// an APFS container or a disk image with a GUID partition table, as
+/// `request` names it, with `options` (`stela boot prepare`'s defaults and
+/// the boot's own boot-args); returns `bundle.json` first and then every
+/// file it lists. Runs after boot services end, on the controllers
+/// `storage` describes.
+pub fn from_disk(
+    storage: &pc::Handoff,
+    target: &Target,
+    request: &installed::Request,
+    options: &Options,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     // SAFETY: the DMA pages were reserved for the storage drivers alone.
     let mut dma = unsafe { RegionAllocator::new(storage.dma.clone()) };
     // SAFETY: `storage` describes this machine after ExitBootServices, with
@@ -253,15 +259,18 @@ pub fn from_disk(storage: &pc::Handoff, target: &Target) -> Result<Vec<(String, 
     }
     let partition = storage::open(&mut disks.devices, target)
         .map_err(|e| format!("{}:{}: {e}", target.serial, target.partition))?;
-    let mut container =
-        Container::open(Bytes::new(partition), 0).map_err(|e| format!("APFS container: {e}"))?;
-    let installed = installed::prepare(&mut container, None, None, &Options::default())
+    let (offset, installed) = installed::prepare_disk(&mut Bytes::new(partition), request, options)
         .map_err(|e| format!("{e:#}"))?;
     output::arguments(format_args!(
-        "PREBOOT {} volume={:?} objects={}\n",
+        "PREBOOT {} volume={:?} container={offset:#x} objects={} named-by={}\n",
         installed.set.directory(),
         installed.preboot.name,
-        installed.set.objects.len()
+        installed.set.objects.len(),
+        installed
+            .evidence
+            .named_by
+            .as_deref()
+            .unwrap_or("evidence alone")
     ));
     let manifest =
         serde_json::to_vec(&installed.bundle.manifest).map_err(|e| format!("bundle.json: {e}"))?;

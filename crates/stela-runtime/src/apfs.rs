@@ -129,6 +129,15 @@ const SECTOR_SIZES: [u64; 2] = [512, 4096];
 /// it starts with a container, else every APFS partition of its GUID
 /// partition table.
 pub fn containers<R: ReadAt>(source: &mut R) -> Result<Vec<u64>> {
+    Ok(container_partitions(source)?
+        .into_iter()
+        .map(|(offset, _)| offset)
+        .collect())
+}
+
+/// [`containers`] with each one's GPT unique partition GUID, `None` for a
+/// source that is itself a container.
+pub fn container_partitions<R: ReadAt>(source: &mut R) -> Result<Vec<(u64, Option<gpt::Guid>)>> {
     let io = |error: R::Error| ApfsError::Io(format!("{error:?}"));
     let mut head = [0u8; 36];
     if source.len() < head.len() as u64 {
@@ -136,7 +145,7 @@ pub fn containers<R: ReadAt>(source: &mut R) -> Result<Vec<u64>> {
     }
     source.read_at(0, &mut head).map_err(io)?;
     if &head[32..36] == NX_MAGIC {
-        return Ok(vec![0]);
+        return Ok(vec![(0, None)]);
     }
     let apfs = gpt::Guid::parse(PARTITION_TYPE).expect("constant GUID");
     for sector in SECTOR_SIZES {
@@ -162,7 +171,7 @@ pub fn containers<R: ReadAt>(source: &mut R) -> Result<Vec<u64>> {
             .partitions
             .iter()
             .filter(|partition| partition.type_guid == apfs)
-            .map(|partition| partition.first_lba * sector)
+            .map(|partition| (partition.first_lba * sector, Some(partition.unique_guid)))
             .collect());
     }
     Err(ApfsError::NotFound("an APFS container".into()))
@@ -281,6 +290,50 @@ pub(crate) mod tests {
             start += data[start..].iter().position(|&b| b == 0).unwrap() + 1;
         }
         miniz_oxide::inflate::decompress_to_vec(&data[start..data.len() - 8]).unwrap()
+    }
+
+    /// `container` as the only partition of a synthetic 512-byte-block GPT
+    /// disk, starting at block 2048, with unique GUID `unique`.
+    pub(crate) fn on_gpt(container: &[u8], unique: gpt::Guid) -> Memory {
+        const BLOCK: u64 = 512;
+        const FIRST: u64 = 2048;
+        let blocks = FIRST + (container.len() as u64).div_ceil(BLOCK) + FIRST;
+        let disk = gpt::Disk {
+            block_bytes: BLOCK,
+            blocks,
+        };
+        let table = gpt::Table {
+            disk_guid: gpt::Guid::from_entropy([7; 16]),
+            partitions: alloc::vec![gpt::Partition {
+                type_guid: gpt::Guid::parse(PARTITION_TYPE).unwrap(),
+                unique_guid: unique,
+                first_lba: FIRST,
+                last_lba: FIRST + (container.len() as u64).div_ceil(BLOCK) - 1,
+                attributes: 0,
+                name: "Container".into(),
+            }],
+        };
+        let mut bytes = alloc::vec![0u8; (blocks * BLOCK) as usize];
+        for write in gpt::encode(disk, &table).unwrap() {
+            let at = (write.lba * BLOCK) as usize;
+            bytes[at..at + write.bytes.len()].copy_from_slice(&write.bytes);
+        }
+        let at = (FIRST * BLOCK) as usize;
+        bytes[at..at + container.len()].copy_from_slice(container);
+        Memory(bytes)
+    }
+
+    #[test]
+    fn containers_are_found_bare_and_in_a_partition_table_with_their_guids() {
+        let bare = fixture();
+        let unique = gpt::Guid::parse("A1B2C3D4-0000-1111-2222-333344445555").unwrap();
+        let mut disk = on_gpt(&bare.0, unique);
+        assert_eq!(container_partitions(&mut fixture()).unwrap(), [(0, None)]);
+        let found = container_partitions(&mut disk).unwrap();
+        assert_eq!(found, [(2048 * 512, Some(unique))]);
+        // A borrowed disk opens as the container at that offset.
+        let mut container = Container::open(&mut disk, found[0].0).unwrap();
+        assert!(!container.volumes().unwrap().is_empty());
     }
 
     #[test]
