@@ -1116,6 +1116,13 @@ mod tests {
         );
         assert_eq!(field(ID_AA64PFR0_EL1, 40), 1);
         assert_eq!(field(ID_AA64PFR0_EL1, 44), 0);
+        // DIT, CSV2 and CSV3 (PFR0 48, 56, 60) and CSV2_frac (PFR1 32) are
+        // withheld on every chip: translated code gives neither the timing
+        // nor the speculation guarantee they promise.
+        for shift in [48, 56, 60] {
+            assert_eq!(field(ID_AA64PFR0_EL1, shift), 0, "PFR0 {shift}");
+        }
+        assert_eq!(field(ID_AA64PFR1_EL1, 32), 0);
         assert_eq!(field(ID_AA64MMFR1_EL1, 16), 1);
         assert_eq!(field(ID_AA64MMFR4_EL1, 24), 0b1110);
         for register in [

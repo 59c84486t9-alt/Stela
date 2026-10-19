@@ -2979,4 +2979,130 @@ mod tests {
         };
         assert!(format!("{:?}", requirement.kind).contains("activity monitors"));
     }
+
+    #[test]
+    fn sctlr_tscxt_traps_el0_scxtnum_to_el1_or_to_el2_in_the_host() {
+        const SCXTNUM_EL0: Encoding = Encoding::new(3, 3, 13, 0, 7);
+        const SCTLR_EL2: Encoding = Encoding::new(3, 4, 1, 0, 0);
+        const TSCXT: u64 = 1 << 20;
+        const HCR_ENSCXT: u64 = 1 << 53;
+        const EC_SYSTEM: u64 = 0x18;
+        let mut machine = machine(&[]);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        machine.cpu.registers.set(Register::SCXTNUM_EL0, 0, 0x5c);
+        let user = Pstate {
+            el: 0,
+            sp: false,
+            daif: 0,
+            ..Pstate::reset(1)
+        };
+        let write_read = |machine: &mut TestMachine, el: u8, encoding: Encoding, value: u64| {
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.state.x[0] = value;
+            machine
+                .system_instruction(access(false, encoding, 0))
+                .unwrap();
+            machine
+                .system_instruction(access(true, encoding, 1))
+                .unwrap();
+            machine.cpu.state.x[1]
+        };
+        let el0_read = |machine: &mut TestMachine| {
+            machine.cpu.pstate = user;
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[2] = 0;
+            machine
+                .system_instruction(access(true, SCXTNUM_EL0, 2))
+                .unwrap();
+            (
+                machine.cpu.pstate.el,
+                machine.cpu.pc,
+                machine.cpu.state.x[2],
+            )
+        };
+        // Outside the host with HCR_EL2.EnSCXT set, EL0 reads the number
+        // until SCTLR_EL1.TSCXT, which holds what EL1 writes, traps it to
+        // EL1 with EC 0x18.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_ENSCXT);
+        assert_eq!(el0_read(&mut machine), (0, BASE + 4, 0x5c));
+        assert_eq!(write_read(&mut machine, 1, SCTLR_EL1, TSCXT) & TSCXT, TSCXT);
+        assert_eq!(el0_read(&mut machine), (1, 0x1_0400, 0));
+        assert_eq!(machine.cpu.read(Register::ESR_EL1) >> 26, EC_SYSTEM);
+        // TSCXT is checked before EnSCXT: with both, the trap is EL1's.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
+        assert_eq!(el0_read(&mut machine).0, 1);
+        // Without TSCXT, a clear EnSCXT traps EL0 to EL2.
+        assert_eq!(write_read(&mut machine, 1, SCTLR_EL1, 0) & TSCXT, 0);
+        assert_eq!(el0_read(&mut machine), (2, 0x4_0400, 0));
+        assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, EC_SYSTEM);
+        // In the host, SCTLR_EL1 and EnSCXT do not apply: SCTLR_EL2.TSCXT
+        // traps EL0 to EL2.
+        machine
+            .cpu
+            .registers
+            .set(Register::HCR_EL2, 0, 1 << HCR_TGE);
+        machine.cpu.registers.set(Register::SCTLR_EL1, 0, TSCXT);
+        assert_eq!(el0_read(&mut machine), (0, BASE + 4, 0x5c));
+        assert_eq!(write_read(&mut machine, 2, SCTLR_EL2, TSCXT) & TSCXT, TSCXT);
+        assert_eq!(el0_read(&mut machine), (2, 0x4_0400, 0));
+        assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, EC_SYSTEM);
+    }
+
+    #[test]
+    fn pstate_dit_is_written_read_and_kept_across_exceptions() {
+        const DIT: Encoding = Encoding::new(3, 3, 4, 2, 5);
+        const DIT_BIT: u64 = 1 << 24;
+        const MSR_DIT_ONE: u32 = 0xd503_415f;
+        const MSR_DIT_ZERO: u32 = 0xd503_405f;
+        const ERET: u32 = 0xd69f_03e0;
+        let mut machine = machine(&[]);
+        let read = |machine: &mut TestMachine| {
+            machine.system_instruction(access(true, DIT, 1)).unwrap();
+            machine.cpu.state.x[1]
+        };
+        machine.cpu.pstate = Pstate::reset(1);
+        machine.cpu.pc = BASE;
+        // MSR DIT, #imm and MRS DIT: the bit reads at its PSTATE position.
+        machine.system_instruction(MSR_DIT_ONE).unwrap();
+        assert!(machine.cpu.pstate.dit);
+        assert_eq!(read(&mut machine), DIT_BIT);
+        machine.system_instruction(MSR_DIT_ZERO).unwrap();
+        assert_eq!(read(&mut machine), 0);
+        // MSR DIT, Xt keeps only bit 24.
+        machine.cpu.state.x[0] = u64::MAX;
+        machine.system_instruction(access(false, DIT, 0)).unwrap();
+        assert_eq!(read(&mut machine), DIT_BIT);
+        // EL0 reaches it too.
+        machine.cpu.pstate = Pstate {
+            el: 0,
+            sp: false,
+            dit: false,
+            ..Pstate::reset(1)
+        };
+        machine.system_instruction(MSR_DIT_ONE).unwrap();
+        assert_eq!((machine.cpu.pstate.el, read(&mut machine)), (0, DIT_BIT));
+        // An exception keeps DIT and saves it in SPSR_ELx.DIT; ERET restores
+        // it from there.
+        machine.cpu.pstate = Pstate {
+            dit: true,
+            ..Pstate::reset(1)
+        };
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        machine.system_instruction(HVC).unwrap();
+        assert_eq!(machine.cpu.pstate.el, 2);
+        assert!(machine.cpu.pstate.dit);
+        let spsr = machine.cpu.read(Register::SPSR_EL2);
+        assert_eq!(spsr & DIT_BIT, DIT_BIT);
+        machine
+            .cpu
+            .registers
+            .set(Register::SPSR_EL2, 0, spsr & !DIT_BIT);
+        machine.system_instruction(ERET).unwrap();
+        assert_eq!(machine.cpu.pstate.el, 1);
+        assert!(!machine.cpu.pstate.dit);
+        // The engine withholds the feature: translated code gives no
+        // data-independent timing guarantee.
+        assert_eq!(machine.cpu.read(Register::ID_AA64PFR0_EL1) >> 48 & 0xf, 0);
+    }
 }
