@@ -45,13 +45,78 @@ impl InstalledDisk {
     /// The engine options that boot it: macOS from its Preboot volume, or
     /// recoveryOS from `recovery` as NVRAM chooses.
     pub(super) fn options(&self, recovery: &str, dram_bytes: u64) -> String {
-        let region = format!("{}:{}", self.apple_region_serial, self.apple_region_guid);
+        let region = self.region_target();
         format!(
-            "--system --storage {region} --nor {}:{} --preboot {region} --recovery-bundle \
-             {recovery} --ram-bytes {dram_bytes:#x}\n",
-            self.nor_serial, self.nor_guid
+            "--system --storage {region} --nor {} --preboot {region} --recovery-bundle \
+             {recovery} --ram-bytes {dram_bytes:#x}",
+            self.nor_target()
         )
     }
+
+    /// The options of its System Recovery, as `stela.efi` routes a
+    /// recoveryOS choice of NVRAM (`boot_selection::route`): the disk and
+    /// NVRAM stay, `--bundle` replaces `--preboot`.
+    pub(super) fn recovery_options(&self, recovery: &str, dram_bytes: u64) -> String {
+        format!(
+            "--system --storage {} --nor {} --bundle {recovery} --ram-bytes {dram_bytes:#x}",
+            self.region_target(),
+            self.nor_target()
+        )
+    }
+
+    fn region_target(&self) -> String {
+        format!("{}:{}", self.apple_region_serial, self.apple_region_guid)
+    }
+
+    fn nor_target(&self) -> String {
+        format!("{}:{}", self.nor_serial, self.nor_guid)
+    }
+}
+
+/// Which of an installed disk's partitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Role {
+    Nor,
+}
+
+/// The partition identifier that is still `disk`'s partition in `role`:
+/// `explicit` when the user names one, else the recorded identifier, which
+/// must carry the recorded GUID, sit on a disk with the recorded serial (when
+/// this computer reports one) and be unmounted. Every write setup makes to a
+/// partition goes through this, so a renumbered disk or another partition
+/// is never written.
+pub(super) fn confirm(
+    host: &dyn Host,
+    disk: &InstalledDisk,
+    role: Role,
+    explicit: Option<&str>,
+) -> Result<String> {
+    let (recorded, serial, guid, what) = match role {
+        Role::Nor => (&disk.nor, &disk.nor_serial, &disk.nor_guid, "NOR partition"),
+    };
+    let identifier = explicit.unwrap_or(recorded);
+    let info = host
+        .partition(identifier)
+        .with_context(|| format!("cannot inspect {identifier}"))?;
+    ensure!(
+        info.guid.eq_ignore_ascii_case(guid),
+        "{identifier} is not this install's {what} (partition {guid}); its identifier may have \
+         changed. Find the partition with that GUID (`diskutil info`) and pass it with {}",
+        match role {
+            Role::Nor => "--nor",
+        }
+    );
+    if let Some(found) = host.serial(&info.disk)? {
+        ensure!(
+            found == *serial,
+            "{identifier} is on a disk with serial {found:?}, not this install's {serial:?}"
+        );
+    }
+    ensure!(
+        info.mount.is_none(),
+        "{identifier} is mounted; this install's {what} is a raw partition Stela owns"
+    );
+    Ok(identifier.to_owned())
 }
 
 /// What `stela.efi` will find in the Apple region.
@@ -83,6 +148,9 @@ pub(super) struct Request<'a> {
 pub(super) struct Checked {
     pub(super) disk: InstalledDisk,
     pub(super) nor_image: Option<Vec<u8>>,
+    /// The SEP area holds an earlier machine's state, which is bound to
+    /// that machine's ECID.
+    pub(super) sep_provisioned: bool,
     pub(super) notes: Vec<String>,
 }
 
@@ -247,9 +315,11 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
             nor.identifier
         ),
     };
+    let mut sep_provisioned = false;
     let sep_foreign = match sep_state::blank(&sep_area[..sep_state::ROOTS_BYTES]) {
         Ok(true) => false,
         Ok(false) => {
+            sep_provisioned = true;
             notes.push(format!(
                 "{} holds SEP state; its anti-replay store is kept",
                 nor.identifier
@@ -301,6 +371,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     Ok(Checked {
         disk,
         nor_image,
+        sep_provisioned,
         notes,
     })
 }
@@ -308,8 +379,9 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
 /// Write the machine-state bytes `check` planned: a fresh NOR image, a
 /// blank SEP area, or both.
 pub(super) fn initialize_nor(host: &dyn Host, disk: &InstalledDisk, image: &[u8]) -> Result<()> {
-    host.write(&disk.nor, 0, image)
-        .with_context(|| format!("writing a fresh NOR image to {}", disk.nor))
+    let nor = confirm(host, disk, Role::Nor, None)?;
+    host.write(&nor, 0, image)
+        .with_context(|| format!("writing a fresh NOR image to {nor}"))
 }
 
 /// What the next boot is.
@@ -331,7 +403,8 @@ pub(super) fn next_boot(
     next: NextBoot,
     dry_run: bool,
 ) -> Result<Vec<String>> {
-    let bytes = host.read(&disk.nor, 0, CAPACITY)?;
+    let nor = confirm(host, disk, Role::Nor, None)?;
+    let bytes = host.read(&nor, 0, CAPACITY)?;
     let blank = bytes.iter().all(|&b| b == 0);
     let mut image = if blank {
         Image::fresh()
@@ -373,11 +446,11 @@ pub(super) fn next_boot(
     let bank = variables.encode().map_err(anyhow::Error::msg)?;
     let (_, sectors) = image.save_bank(&bank).map_err(anyhow::Error::msg)?;
     if blank {
-        host.write(&disk.nor, 0, image.bytes())?;
+        host.write(&nor, 0, image.bytes())?;
     } else {
         for offset in sectors {
             host.write(
-                &disk.nor,
+                &nor,
                 offset as u64,
                 &image.bytes()[offset..offset + SECTOR_SIZE],
             )?;
