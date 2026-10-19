@@ -568,6 +568,11 @@ pub fn operating_points(chip_id: u32) -> Option<[(u8, &'static [u32]); 2]> {
     Some([(soc.parts[0].0, points[0]), (soc.parts[1].0, points[1])])
 }
 
+/// The CPU of the SoC with `chip_id`, for the SoCs with a row.
+pub fn chip(chip_id: u32) -> Option<Chip> {
+    Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.chip)
+}
+
 /// The guest DRAM base of the SoC with `chip_id`.
 pub fn dram_base(chip_id: u32) -> Result<u64, String> {
     SOCS.iter()

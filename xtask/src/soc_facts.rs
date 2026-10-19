@@ -10,8 +10,10 @@
 //! ([`sysreg`]); each kernelcache for the SoC drivers it links; and each
 //! board's DeviceTree for its SoC name, CPU topology, AIC, PMGR and NVRAM
 //! slot ([`board`]). Every row carries its member, the decoded payload's
-//! SHA-256 and the offset of its evidence; no Apple bytes are written.
-//! `--check` fails when the checked-in facts differ from a fresh pass.
+//! SHA-256 and the offset of its evidence; no Apple bytes are written. From
+//! the census it also generates `machine::impdef`'s per-chip census
+//! ([`impdef`]). `--check` fails when either checked-in output differs from a
+//! fresh pass.
 //! A later pass adds a fact by adding an analysis to the matching loop.
 use crate::tools::root;
 use anyhow::{Context, Result, ensure};
@@ -25,6 +27,7 @@ use stela_runtime::sha256;
 
 mod a64;
 mod board;
+mod impdef;
 mod macho;
 mod sptm;
 mod sysreg;
@@ -276,17 +279,23 @@ impl SocFacts {
             "kernels": kernels,
             "boards": trees,
         });
-        let text = render(&facts, 0) + "\n";
-        let path = root().join(OUTPUT);
+        self.update(OUTPUT, render(&facts, 0) + "\n")?;
+        self.update(impdef::OUTPUT, impdef::rust(&facts)?)
+    }
+
+    /// Write `text` to the repository's `output`, or with `--check` fail
+    /// when it differs.
+    fn update(&self, output: &str, text: String) -> Result<()> {
+        let path = root().join(output);
         let current = std::fs::read_to_string(&path).unwrap_or_default();
         if current == text {
-            println!("{OUTPUT}: up to date");
+            println!("{output}: up to date");
         } else if self.check {
-            anyhow::bail!("{OUTPUT} differs from the IPSW's facts; rerun without --check");
+            anyhow::bail!("{output} differs from the IPSW's facts; rerun without --check");
         } else {
             std::fs::write(&path, text)
                 .with_context(|| format!("cannot write {}", path.display()))?;
-            println!("{OUTPUT}: written");
+            println!("{output}: written");
         }
         Ok(())
     }

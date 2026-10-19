@@ -557,7 +557,7 @@ impl Cpu {
             return outcome
                 .unwrap_or_else(|reason| Outcome::Refused(Refusal::UnsupportedSetting(reason)));
         }
-        if let Some(entry) = impdef::lookup(encoding) {
+        if let Some(entry) = impdef::lookup(encoding, self.registers.chip()) {
             if entry.el2 && self.pstate.el != 2 {
                 return Outcome::Undefined;
             }
