@@ -564,9 +564,6 @@ fn devices<'f>(
     if let Some(pmp) = board.and_then(|b| b.pmp.as_ref()) {
         devices.add_pmp(pmp)?;
     }
-    if let Some(gfx) = board.and_then(|b| b.gfx.as_ref()) {
-        devices.add_gfx(gfx)?;
-    }
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
         devices.add_spmi(spmi, clock.wall)?;
     }
@@ -828,6 +825,11 @@ fn devices<'f>(
         darts.len(),
         board.and_then(|board| board.aes).is_some()
     ));
+    // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
+    // bridge) and owns only the bytes they leave.
+    if let Some(gfx) = board.and_then(|b| b.gfx.as_ref()) {
+        devices.add_gfx(gfx)?;
+    }
     if cables.restore && restore_usb.is_none() {
         return Err("restore study requires a DT-placed USB device".into());
     }

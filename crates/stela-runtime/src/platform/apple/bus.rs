@@ -247,6 +247,50 @@ impl Bus {
         );
         Ok(())
     }
+    /// Maps the parts of guest PAs `[start, start + len)` that no device
+    /// owns yet, each at its own offset from `device_offset`: a window whose
+    /// span the DeviceTree shares with smaller register banks (the `sgx`
+    /// window around `gfx-asc` and a fabric bridge) owns only what they leave.
+    /// A window with no free byte refuses.
+    pub fn map_gaps(
+        &mut self,
+        device: DeviceId,
+        start: u64,
+        len: u64,
+        device_offset: u64,
+    ) -> Result<(), MapError> {
+        if len == 0 {
+            return Err(MapError::Empty);
+        }
+        let end = start.checked_add(len).ok_or(MapError::Overflow)?;
+        device_offset.checked_add(len).ok_or(MapError::Overflow)?;
+        let owned: Vec<(u64, u64, DeviceId)> = self
+            .regions
+            .iter()
+            .filter(|region| region.start < end && start < region.end)
+            .map(|region| (region.start.max(start), region.end.min(end), region.device))
+            .collect();
+        let mut cursor = start;
+        let mut gaps = Vec::new();
+        for &(first, last, _) in &owned {
+            if first > cursor {
+                gaps.push((cursor, first));
+            }
+            cursor = cursor.max(last);
+        }
+        if cursor < end {
+            gaps.push((cursor, end));
+        }
+        if gaps.is_empty() {
+            return Err(MapError::Overlap {
+                existing: owned[0].2,
+            });
+        }
+        for (first, last) in gaps {
+            self.map(device, first, last - first, device_offset + (first - start))?;
+        }
+        Ok(())
+    }
     /// The device and device offset for a guest PA access.
     fn route(&self, address: u64, width: Width) -> Result<(DeviceId, u64), MmioError> {
         if !address.is_multiple_of(width.bytes()) {
@@ -355,6 +399,29 @@ mod tests {
             self.0[range].copy_from_slice(&value.to_le_bytes()[..len]);
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_window_maps_only_the_bytes_smaller_banks_leave() {
+        let mut bus = Bus::new();
+        let small = bus.add(Box::new(Scratch([0; 16])));
+        let window = bus.add(Box::new(Scratch([0; 16])));
+        bus.map(small, 0x1400, 0x100, 0).unwrap();
+        bus.map(small, 0x1000, 0x10, 0x100).unwrap();
+        bus.map_gaps(window, 0x1000, 0x1000, 0).unwrap();
+        let route = |bus: &Bus, address| bus.route(address, Width::Word).unwrap();
+        assert_eq!(route(&bus, 0x1000), (small, 0x100));
+        assert_eq!(route(&bus, 0x1010), (window, 0x10));
+        assert_eq!(route(&bus, 0x1404), (small, 0x4));
+        assert_eq!(route(&bus, 0x1500), (window, 0x500));
+        assert_eq!(route(&bus, 0x1ffc), (window, 0xffc));
+        assert!(bus.route(0x2000, Width::Word).is_err());
+        // A window that is already wholly owned refuses.
+        let other = bus.add(Box::new(Scratch([0; 16])));
+        assert!(matches!(
+            bus.map_gaps(other, 0x1400, 0x100, 0),
+            Err(MapError::Overlap { .. })
+        ));
     }
 
     #[test]

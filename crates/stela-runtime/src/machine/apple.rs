@@ -785,23 +785,14 @@ impl AppleDevices {
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("GFX ASC placement: {e:?}"))?;
-        // The 64 MiB `sgx` window spans the `gfx-asc` wrapper; each physical
-        // byte has one owner, so the block is mapped around it.
+        // The 64 MiB `sgx` window spans the `gfx-asc` wrapper and a PMGR
+        // fabric bridge; each physical byte has one owner, so the block owns
+        // only what the smaller banks placed before it leave.
         let block = self.bus.add(Box::new(Sgx::new(sgx::T8112)));
         let (base, bytes) = placement.sgx;
-        let (asc_base, asc_bytes) = placement.wrapper;
-        let mut pieces = vec![(base, bytes)];
-        if asc_base >= base && asc_base + asc_bytes <= base + bytes {
-            pieces = vec![
-                (base, asc_base - base),
-                (asc_base + asc_bytes, base + bytes - asc_base - asc_bytes),
-            ];
-        }
-        for (start, len) in pieces.into_iter().filter(|&(_, len)| len != 0) {
-            self.bus
-                .map(block, start, len, start - base)
-                .map_err(|e| format!("sgx placement: {e:?}"))?;
-        }
+        self.bus
+            .map_gaps(block, base, bytes, 0)
+            .map_err(|e| format!("sgx placement: {e:?}"))?;
         self.gfx_masters.push((asc, block));
         Ok(())
     }
