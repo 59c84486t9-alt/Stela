@@ -5,6 +5,7 @@ use std::process::ExitCode;
 mod amx;
 mod boot;
 mod check;
+mod darwin_catalogs;
 mod differential;
 mod oracle;
 mod progress;
@@ -37,6 +38,8 @@ enum Task {
     AmxKernels(amx::kernels::AmxKernels),
     /// Derive the system platform requirement matrix from the pinned AARCHMRS.
     SystemMatrix(system_matrix::SystemMatrix),
+    /// Generate the BSD system-call and Mach-trap catalogs from xnu sources.
+    DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
     /// Merge the instruction and system registries into their matrices and
     /// the README.
     Progress {
@@ -54,6 +57,7 @@ fn main() -> ExitCode {
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::SystemMatrix(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
             .map(|()| ExitCode::SUCCESS),
