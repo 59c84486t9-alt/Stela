@@ -444,7 +444,8 @@ const ABSENT_SECURE_KERNEL: [&str; 3] = ["CL4-entry", "CL4-rx", "CL4-virt"];
 const KERNEL_FILE: &str = "kernelcache.img";
 const SPTM_FILE: &str = "sptm.img";
 const TXM_FILE: &str = "txm.img";
-const DEVICE_TREE_FILE: &str = "devicetree.adt";
+/// The bundle file holding the prepared DeviceTree.
+pub const DEVICE_TREE_FILE: &str = "devicetree.adt";
 const TRUST_CACHE_FILE: &str = "trustcache.bin";
 const SEP_FILE: &str = "sepfw.im4p";
 const RAMDISK_FILE: &str = "ramdisk.img";
@@ -773,8 +774,14 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     }
     let nvram_published = nvram::publish(&mut tree)?;
     let memory_controller = inputs.target.chip_id.and_then(lock_regs::table);
-    if let Some(controller) = memory_controller {
-        lock_regs::publish(&mut tree, controller)?;
+    match memory_controller {
+        Some(controller) => lock_regs::publish(&mut tree, controller)?,
+        None if tree.node(lock_regs::AMCC).is_some() => unresolved.push(format!(
+            "{}: no iBoot AMCC map for this SoC; the template stays empty and SPTM's CTRR \
+             setup stops on it",
+            lock_regs::AMCC
+        )),
+        None => {}
     }
     darts::publish(&mut tree)?;
     if let Some(chip_id) = inputs.target.chip_id {

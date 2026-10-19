@@ -112,7 +112,54 @@ const RECOVERY: Roles = Roles {
 pub(crate) enum BootCommand {
     /// Lay out a model's kernel collection, SPTM, TXM, DeviceTree and trust
     /// cache in guest physical memory for `stela.efi`.
-    Prepare(Prepare),
+    Prepare(Box<Prepare>),
+    /// Check a prepared bundle's DeviceTree against the engine's board
+    /// models (`machine::soc::board`), as `stela.efi` does before entry, and
+    /// print the board the engine would run or the reason it refuses.
+    Check(Check),
+}
+
+#[derive(Args)]
+pub(crate) struct Check {
+    /// A directory `boot prepare` wrote.
+    bundle: PathBuf,
+}
+
+impl Check {
+    fn run(self) -> Result<()> {
+        let tree = std::fs::read(
+            self.bundle
+                .join(stela_loader::boot_bundle::DEVICE_TREE_FILE),
+        )
+        .with_context(|| format!("{} has no DeviceTree", self.bundle.display()))?;
+        let board = stela_runtime::machine::soc::board(&tree)
+            .map_err(|reason| anyhow::anyhow!("the engine refuses this board: {reason}"))?;
+        let hex = |value: u64| format!("{value:#x}");
+        let report = serde_json::json!({
+            "chip": board.cpus.chip.name(),
+            "processors": board.cpus.processors.iter().map(|pe| serde_json::json!({
+                "midr": hex(pe.midr),
+                "mpidr": hex(pe.mpidr),
+                "clock_hz": pe.clock,
+                "caches": pe.caches.is_some(),
+            })).collect::<Vec<_>>(),
+            "aic": { "physical": hex(board.aic.physical), "inputs": board.aic.inputs },
+            "lockdown": board.lockdown.iter().map(|block| serde_json::json!({
+                "block": block.name,
+                "physical": hex(block.physical),
+                "control": hex(block.control),
+            })).collect::<Vec<_>>(),
+            "cpu_start": board.cpu_start.map(|(physical, clusters)| serde_json::json!({
+                "physical": hex(physical),
+                "clusters": clusters,
+            })),
+            "power_states": board.power_states.as_ref().map(|states| states.registers.len()),
+            "clusters": board.clusters.len(),
+            "memory_cache": board.memory_cache.is_some(),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        Ok(())
+    }
 }
 
 #[derive(Args)]
@@ -257,7 +304,8 @@ pub(crate) fn prepare(arguments: &[String]) -> Result<()> {
 impl BootCommand {
     pub(crate) fn run(self) -> Result<()> {
         match self {
-            Self::Prepare(command) => command.run(),
+            Self::Prepare(command) => (*command).run(),
+            Self::Check(command) => command.run(),
         }
     }
 }

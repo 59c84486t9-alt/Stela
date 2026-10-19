@@ -37,13 +37,19 @@ use alloc::{format, string::String, vec::Vec};
 /// `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and `t600x-j375.dtsi`, which the
 /// t602x boards include); the SoCs without a public memory node have none,
 /// and their boards state it in their DeviceTree ([`board_dram_base`]).
-/// `lockdown` is the CONTROL offset of the lockdown registers in each PE's
-/// `cpu-impl-reg` and each cluster's `cpm-impl-reg` (`platform::apple::
-/// lockdown`), on the SoCs whose SPTM shows them: the T8112's 26A434 SPTM.
+/// `pmgr` is the `compatible` of the SoC's `/arm-io/pmgr` in its boards'
+/// DeviceTrees (`isa/apple-soc-facts.json` `boards[].pmgr`), modeled once
+/// the row has its clusters and bridge layouts ([`Soc::pmgr_modeled`]).
+/// `lockdown` is
+/// the CONTROL offset of the lockdown registers in each PE's `cpu-impl-reg`
+/// and each cluster's `cpm-impl-reg` (`platform::apple::lockdown`), on the
+/// SoCs whose SPTM writes them ([`LOCKDOWN`]); the M4 and later SPTMs write
+/// none, so their boards map no lockdown block.
 /// `operating_points` is each cluster type's core clocks in MHz, lowest
-/// first, in `parts` order: the `ecluster_opp` and `pcluster_opp` tables of
-/// Linux `arch/arm64/boot/dts/apple/t8112.dtsi`, including the three P
-/// states it leaves disabled until CPU deep sleep. The highest paces the
+/// first, in `parts` order: the opp tables of Linux
+/// `arch/arm64/boot/dts/apple/t8112.dtsi` (`ecluster_opp`, `pcluster_opp`)
+/// and the other files [`M1_POINTS`] names, including the P states they
+/// leave disabled until CPU deep sleep. The highest paces the
 /// cycle counter of Apple's performance monitor (`machine::pmu`), and the
 /// bundle publishes them as iBoot's `voltage-states` tables, which the IPSW
 /// DeviceTree leaves to it; the SoCs without that evidence have none. `memory_cache` is the memory
@@ -56,11 +62,12 @@ use alloc::{format, string::String, vec::Vec};
 /// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
 /// readPMGRAONFuseReg` reads `reg[36]`. `cpu_start` is the offset of the
 /// CPU start registers (`platform::apple::cpustart`) from `/arm-io/pmgr`
-/// `reg[0]`: m1n1 `src/smp.c` `CPU_START_OFF_T8112`. `caches` is each
+/// `reg[0]` ([`CPU_START_T8112`] and its siblings). `caches` is each
 /// cluster type's caches ([`CoreCaches`]), in `parts` order, where known.
 struct Soc {
     chip_id: u32,
     name: &'static str,
+    pmgr: &'static str,
     chip: Chip,
     parts: [(u8, u16); 2],
     aic: Option<(&'static str, u64)>,
@@ -111,8 +118,13 @@ const fn cache(bytes: u32, ways: u32) -> Cache {
     }
 }
 
-/// The T8112's Blizzard and Avalanche cores.
-const T8112_CACHES: [CoreCaches; 2] = [
+/// The level 1 caches of every core pair with public capacities: the M1,
+/// M1 Pro and Max (Icestorm and Firestorm: Linux `t8103.dtsi`,
+/// `t600x-common.dtsi`), the M2 and M2 Pro and Max (Blizzard and Avalanche:
+/// `t8112.dtsi`, `t602x-common.dtsi`) and the M3 (Sawtooth and Everest:
+/// `t8122.dtsi`) give E cores 128 KiB instruction and 64 KiB data caches
+/// and P cores 192 KiB and 128 KiB.
+const L1_CACHES: [CoreCaches; 2] = [
     CoreCaches {
         instruction: cache(128 << 10, 8),
         data: cache(64 << 10, 8),
@@ -177,21 +189,61 @@ const T8112_CLUSTERS: [CpuCluster; 2] = [
     },
 ];
 
+/// The CONTROL offsets of the lockdown pairs in `cpu-impl-reg` and
+/// `cpm-impl-reg` that every SPTM from the M1 to the M3 families writes
+/// (`isa/apple-soc-facts.json` `socs[].lockdown`; the T8112's at
+/// `__text+0x1b0e4..0x1b14c`). The M4 and later SPTMs write none.
+const LOCKDOWN: [u64; 2] = [0x5000, 0x9000];
+
+/// The CPU start registers' offsets from `/arm-io/pmgr` `reg[0]`, m1n1
+/// `src/smp.c` `CPU_START_OFF_*` and the chips its `smp_init` gives each.
+const CPU_START_T8103: u64 = 0x54000;
+const CPU_START_T8112: u64 = 0x34000;
+const CPU_START_T6020: u64 = 0x28000;
+const CPU_START_T6031: u64 = 0x88000;
+
+/// Operating points in MHz from Linux `arch/arm64/boot/dts/apple`, each
+/// cluster type lowest first with the P states the files leave disabled
+/// until CPU deep sleep: `t8103.dtsi` (`ecluster_opp`, `pcluster_opp`),
+/// `t600x-common.dtsi` (`icestorm_opp`, `firestorm_opp`) and
+/// `t602x-common.dtsi` (`blizzard_opp`, whose "pstate #1 is a dummy clone of
+/// #2", and `avalanche_opp`).
+const M1_POINTS: [&[u32]; 2] = [
+    &[600, 972, 1332, 1704, 2064],
+    &[
+        600, 828, 1056, 1284, 1500, 1728, 1956, 2184, 2388, 2592, 2772, 2988, 3096, 3144, 3204,
+    ],
+];
+const M1_PRO_POINTS: [&[u32]; 2] = [
+    &[600, 972, 1332, 1704, 2064],
+    &[
+        600, 828, 1056, 1296, 1524, 1752, 1980, 2208, 2448, 2676, 2904, 3036, 3132, 3168, 3228,
+    ],
+];
+const M2_PRO_POINTS: [&[u32]; 2] = [
+    &[912, 1284, 1752, 2004, 2256, 2424],
+    &[
+        702, 948, 1188, 1452, 1704, 1968, 2208, 2400, 2568, 2724, 2868, 3000, 3132, 3264, 3360,
+        3408, 3504,
+    ],
+];
+
 const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x8103,
         name: "Apple M1",
+        pmgr: "pmgr1,t8103",
         chip: Chip::AppleM1,
         parts: [(b'E', 0x022), (b'P', 0x023)],
         aic: Some(("aic,1", AIC1_EVENT)),
         dram_base: Some(0x8_0000_0000),
-        lockdown: None,
-        operating_points: None,
+        lockdown: Some(LOCKDOWN),
+        operating_points: Some(M1_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
-        caches: None,
+        cpu_start: Some(CPU_START_T8103),
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -200,17 +252,18 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6000,
         name: "Apple M1 Pro",
+        pmgr: "pmgr1,t6000",
         chip: Chip::AppleM1,
         parts: [(b'E', 0x024), (b'P', 0x025)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
-        lockdown: None,
-        operating_points: None,
+        lockdown: Some(LOCKDOWN),
+        operating_points: Some(M1_PRO_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
-        caches: None,
+        cpu_start: Some(CPU_START_T8103),
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -219,17 +272,18 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6001,
         name: "Apple M1 Max",
+        pmgr: "pmgr1,t6001",
         chip: Chip::AppleM1,
         parts: [(b'E', 0x028), (b'P', 0x029)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
-        lockdown: None,
-        operating_points: None,
+        lockdown: Some(LOCKDOWN),
+        operating_points: Some(M1_PRO_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
-        caches: None,
+        cpu_start: Some(CPU_START_T8103),
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -238,11 +292,12 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x8112,
         name: "Apple M2",
+        pmgr: "pmgr1,t8112",
         chip: Chip::AppleM2,
         parts: [(b'E', 0x032), (b'P', 0x033)],
         aic: Some(("aic,2", 0x8000)),
         dram_base: Some(0x8_0000_0000),
-        lockdown: Some([0x5000, 0x9000]),
+        lockdown: Some(LOCKDOWN),
         operating_points: Some([
             &[600, 912, 1284, 1752, 2004, 2256, 2424],
             &[
@@ -253,8 +308,8 @@ const SOCS: [Soc; 14] = [
         memory_cache: Some((8 << 20, 16)),
         clusters: Some(T8112_CLUSTERS),
         aon_fuses: Some(36),
-        cpu_start: Some(0x34000),
-        caches: Some(T8112_CACHES),
+        cpu_start: Some(CPU_START_T8112),
+        caches: Some(L1_CACHES),
         // setAPWakeupSources: RegMap 0x42 -> reg[4], kernel file
         // 0x2fa31bc..0x2fa3620. Compiled valid masks at 0x7957ec;
         // the DeviceTree does not carry this capability bitmap.
@@ -286,17 +341,18 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6020,
         name: "Apple M2 Pro",
+        pmgr: "pmgr1,t6020",
         chip: Chip::AppleM2,
         parts: [(b'E', 0x034), (b'P', 0x035)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
-        lockdown: None,
-        operating_points: None,
+        lockdown: Some(LOCKDOWN),
+        operating_points: Some(M2_PRO_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
-        caches: None,
+        cpu_start: Some(CPU_START_T6020),
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -305,17 +361,18 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6021,
         name: "Apple M2 Max",
+        pmgr: "pmgr1,t6021",
         chip: Chip::AppleM2,
         parts: [(b'E', 0x038), (b'P', 0x039)],
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
-        lockdown: None,
-        operating_points: None,
+        lockdown: Some(LOCKDOWN),
+        operating_points: Some(M2_PRO_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
-        caches: None,
+        cpu_start: Some(CPU_START_T6020),
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -324,17 +381,18 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x8122,
         name: "Apple M3",
+        pmgr: "pmgr1,t8122",
         chip: Chip::AppleM3,
         parts: [(b'E', 0x042), (b'P', 0x043)],
         aic: Some(("aic,3", 0x40000)),
         dram_base: None,
-        lockdown: None,
+        lockdown: Some(LOCKDOWN),
         operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
-        caches: None,
+        cpu_start: Some(CPU_START_T8112),
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -343,16 +401,17 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6030,
         name: "Apple M3 Pro",
+        pmgr: "pmgr1,t6030",
         chip: Chip::AppleM3,
         parts: [(b'E', 0x044), (b'P', 0x045)],
         aic: None,
         dram_base: None,
-        lockdown: None,
+        lockdown: Some(LOCKDOWN),
         operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
+        cpu_start: Some(CPU_START_T8112),
         caches: None,
         wake_masks: None,
         power_banks: &[],
@@ -362,16 +421,17 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6031,
         name: "Apple M3 Max",
+        pmgr: "pmgr1,t6031",
         chip: Chip::AppleM3,
         parts: [(b'E', 0x048), (b'P', 0x049)],
         aic: None,
         dram_base: None,
-        lockdown: None,
+        lockdown: Some(LOCKDOWN),
         operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
+        cpu_start: Some(CPU_START_T6031),
         caches: None,
         wake_masks: None,
         power_banks: &[],
@@ -381,6 +441,7 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x8132,
         name: "Apple M4",
+        pmgr: "pmgr1,t8132",
         chip: Chip::AppleM4,
         parts: [(b'E', 0x052), (b'P', 0x053)],
         aic: None,
@@ -390,7 +451,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
+        cpu_start: Some(CPU_START_T8112),
         caches: None,
         wake_masks: None,
         power_banks: &[],
@@ -400,6 +461,7 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6040,
         name: "Apple M4 Pro",
+        pmgr: "pmgr1,t6041",
         chip: Chip::AppleM4,
         parts: [(b'E', 0x054), (b'P', 0x055)],
         aic: None,
@@ -409,7 +471,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
+        cpu_start: Some(CPU_START_T6031),
         caches: None,
         wake_masks: None,
         power_banks: &[],
@@ -419,6 +481,7 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x6041,
         name: "Apple M4 Max",
+        pmgr: "pmgr1,t6041",
         chip: Chip::AppleM4,
         parts: [(b'E', 0x058), (b'P', 0x059)],
         aic: None,
@@ -428,7 +491,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
+        cpu_start: Some(CPU_START_T6031),
         caches: None,
         wake_masks: None,
         power_banks: &[],
@@ -438,6 +501,7 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x8142,
         name: "Apple M5",
+        pmgr: "pmgr1,t8142",
         chip: Chip::AppleM5,
         parts: [(b'E', 0x062), (b'P', 0x063)],
         aic: None,
@@ -447,7 +511,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
+        cpu_start: Some(CPU_START_T8112),
         caches: None,
         wake_masks: None,
         power_banks: &[],
@@ -457,6 +521,7 @@ const SOCS: [Soc; 14] = [
     Soc {
         chip_id: 0x8152,
         name: "Apple M6",
+        pmgr: "pmgr2,arch",
         chip: Chip::AppleM6,
         parts: [(b'E', 0x072), (b'P', 0x073)],
         aic: None,
@@ -466,7 +531,7 @@ const SOCS: [Soc; 14] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: None,
+        cpu_start: Some(CPU_START_T8112),
         caches: None,
         wake_masks: None,
         power_banks: &[],
@@ -713,10 +778,29 @@ pub const DART: &str = "dart,t8110";
 /// The `compatible` of a DART child naming one client's stream (its `reg`),
 /// which XNU's IODARTMapper binds and clients name as `iommu-parent`.
 pub const IOMMU_MAPPER: &str = "iommu-mapper";
-/// The `compatible` of the PMGR whose registers `platform::apple::pmgr` and
-/// the PMGR family models place (power states, clusters, CPU start, energy,
-/// performance counters, wake masks, voltage, DPE, fabric bridges).
-pub const PMGR: &str = "pmgr1,t8112";
+/// The `compatible` of the SoC's PMGR (each row's `pmgr`) when the machine
+/// models it ([`Soc::pmgr_modeled`]): `platform::apple::pmgr` and the PMGR
+/// family models place its power states and CPU start registers (m1n1
+/// `src/pmgr.c` and `src/smp.c` read them alike on every SoC), clusters,
+/// eFuses, energy, performance counters, wake masks, voltage, DPE and
+/// fabric bridges.
+pub fn pmgr(chip_id: u32) -> Option<&'static str> {
+    SOCS.iter()
+        .find(|soc| soc.chip_id == chip_id)
+        .filter(|soc| soc.pmgr_modeled())
+        .map(|soc| soc.pmgr)
+}
+
+impl Soc {
+    /// Whether the row has the facts the PMGR models need beyond the power
+    /// states and CPU start: its CPU clusters' registers and its fabric
+    /// bridges' register layouts. Without them the PMGR's cluster and bridge
+    /// windows would have no model, so the PMGR stays hidden (`models`), as
+    /// every unmodeled device does, rather than present a partial one.
+    const fn pmgr_modeled(&self) -> bool {
+        self.clusters.is_some() && self.bridge_fields.is_some()
+    }
+}
 /// The `compatible` of the AES engine the engine models
 /// (`platform::apple::aes`).
 pub const AES: &str = "aes,s8000";
@@ -973,7 +1057,6 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         IOMMU_MAPPER,
         AES,
         MCC,
-        PMGR,
         SPI,
         NOR,
         NVRAM,
@@ -992,6 +1075,9 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
     .contains(&name)
         || GPU_ADMITTED && [SGX, GFX_MAPPER].contains(&name)
         || AICS.contains(&name)
+        || SOCS
+            .iter()
+            .any(|soc| soc.pmgr == name && soc.pmgr_modeled())
         || ROLE_MODELS.iter().any(|claim| {
             claim.admitted
                 && claim.compatible == name
@@ -1119,13 +1205,13 @@ pub struct Board {
     pub sep: Option<SepDevice>,
     /// DWC3 placements of the visible `usb-drd,t8112` nodes, in DeviceTree order.
     pub usbs: Vec<UsbController>,
-    /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows a
-    /// `pmgr1,t8112`.
+    /// `/arm-io/pmgr`'s power-state registers, when the DeviceTree shows the
+    /// SoC's PMGR ([`pmgr`]).
     pub power_states: Option<PowerStates>,
     /// `/arm-io/mcc`, when the DeviceTree shows an `mcc,t8112`.
     pub memory_cache: Option<MemoryCache>,
-    /// The CPU clusters' PMGR registers, when the DeviceTree shows a
-    /// `pmgr1,t8112` and the SoC's are known.
+    /// The CPU clusters' PMGR registers, when the DeviceTree shows the SoC's
+    /// PMGR and the SoC row describes them.
     pub clusters: Vec<CpuCluster>,
     /// The always-on eFuse block, under the same conditions.
     pub aon_fuses: Option<(u64, u64)>,
@@ -2437,6 +2523,8 @@ pub struct MemoryController {
 }
 
 const LOCK_GROUP: &str = "amcc-ctrr-a";
+/// The property iBoot's AMCC map always states.
+const APERTURE_COUNT: &str = "aperture-count";
 /// Lock groups iBoot's map names but leaves empty; one with registers is
 /// refused, as the model implements CTRR-A alone.
 const EMPTY_GROUPS: [&str; 3] = ["amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d"];
@@ -2465,11 +2553,16 @@ fn lock_register(
     })
 }
 
-/// The AMCC map of `/chosen/lock-regs/amcc`, or `None` without one.
+/// The AMCC map of `/chosen/lock-regs/amcc`, or `None` without one. The
+/// IPSW templates carry the node and its group children empty; a node the
+/// boot chain left so (no `aperture-count`, on a SoC whose iBoot map the
+/// loader lacks, `stela_loader::lock_regs`) describes no controller, and
+/// SPTM's own `ctrr_dt_get_lock_group` stops on it.
 fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, String> {
     let Some(node) = chosen
         .child("lock-regs")
         .and_then(|regs| regs.child("amcc"))
+        .filter(|node| node.property(APERTURE_COUNT).is_some())
     else {
         return Ok(None);
     };
@@ -2478,7 +2571,7 @@ fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, Stri
         node.first_u32(name)
             .ok_or_else(|| format!("{PATH} has no {name}"))
     };
-    let count = number("aperture-count")? as usize;
+    let count = number(APERTURE_COUNT)? as usize;
     let apertures: Vec<u64> = node
         .property("aperture-phys-addr")
         .map(|value| {
@@ -2750,12 +2843,17 @@ const PMGR_DEVICE: usize = 48;
 /// `PMGR_FLAG_VIRTUAL`).
 const PMGR_VIRTUAL: u32 = 0x10;
 
-/// The power-state registers of `/arm-io/pmgr`, if it is a modeled PMGR.
+/// The power-state registers of `/arm-io/pmgr`, if it is the PMGR of the
+/// SoC with `chip_id`.
 fn power_states(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
+    chip_id: u32,
 ) -> Result<Option<PowerStates>, String> {
-    let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
+    let Some(node) = io
+        .child("pmgr")
+        .filter(|node| pmgr(chip_id).is_some_and(|model| node.compatible(model)))
+    else {
         return Ok(None);
     };
     const PATH: &str = "/arm-io/pmgr";
@@ -2804,26 +2902,45 @@ fn power_states(
         registers,
         devices: ids
             .iter()
-            .map(|&(id, _, _)| Ok((id, resolve_supplies(id, &ids, &mut Vec::new())?)))
+            .filter_map(
+                |&(id, _, _)| match resolve_supplies(id, &ids, &mut Vec::new()) {
+                    Ok(supplies) => Some(Ok((id, supplies))),
+                    Err(Unresolved::Absent) => None,
+                    Err(Unresolved::Cycle) => Some(Err(String::from(
+                        "PMGR virtual supply graph contains a cycle",
+                    ))),
+                },
+            )
             .collect::<Result<Vec<_>, String>>()?,
     }))
 }
 
+/// Why a PMGR device's supplies do not resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unresolved {
+    /// A parent ID this PMGR does not list: J504AP's `ISP_CPU_CORE0` and
+    /// `CORE1` name 176, which its `devices` lack. Such a device has no
+    /// supplies here, so a client gated by it refuses where it is used.
+    Absent,
+    Cycle,
+}
+
 /// Virtual PMGR devices have no register; their nonzero parent IDs select
 /// the physical supplies (`devices` parents at bytes 4..8, m1n1 pmgr_device).
-/// Reject cycles/missing parents instead of silently dropping a dependency.
+/// A cycle or a missing parent leaves the device unresolved rather than
+/// silently dropping a dependency.
 fn resolve_supplies(
     id: u16,
     devices: &[(u16, Option<u64>, [u16; 2])],
     visiting: &mut Vec<u16>,
-) -> Result<Vec<u64>, String> {
+) -> Result<Vec<u64>, Unresolved> {
     if visiting.contains(&id) {
-        return Err("PMGR virtual supply graph contains a cycle".into());
+        return Err(Unresolved::Cycle);
     }
     let (_, address, parents) = devices
         .iter()
         .find(|(device, _, _)| *device == id)
-        .ok_or("PMGR virtual supply has an absent parent")?;
+        .ok_or(Unresolved::Absent)?;
     if let Some(address) = address {
         return Ok(alloc::vec![*address]);
     }
@@ -2918,8 +3035,9 @@ fn place_coresight(pairs: &[(u64, u64)]) -> Result<u64, String> {
     Ok(*physical)
 }
 
-/// The SoC's CPU clusters and always-on eFuses, when the DeviceTree shows a
-/// `pmgr1,t8112` whose `reg` places each cluster's register window and
+/// The SoC's CPU start registers, and its CPU clusters and always-on eFuses
+/// where its row describes them, when the DeviceTree shows the SoC's PMGR
+/// ([`pmgr`]) and its `reg` places each cluster's register window and
 /// performance-state table and the eFuse block.
 fn pmgr_registers(
     io: &Node<'_>,
@@ -2939,10 +3057,13 @@ fn pmgr_registers(
         bridges: Vec::new(),
         cluster_events: Vec::new(),
     };
-    let Some(node) = io.child("pmgr").filter(|node| node.compatible(PMGR)) else {
+    let Some(soc) = SOCS
+        .iter()
+        .find(|soc| soc.chip_id == chip_id && soc.pmgr_modeled())
+    else {
         return Ok(none);
     };
-    let Some(soc) = SOCS.iter().find(|soc| soc.chip_id == chip_id) else {
+    let Some(node) = io.child("pmgr").filter(|node| node.compatible(soc.pmgr)) else {
         return Ok(none);
     };
     // Each `reg` entry in guest PA, by index; None outside `/arm-io` ranges.
@@ -4067,7 +4188,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let gfx = gfx_controller(&io, &translate)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
     let usbs = usb_controllers(&io, &translate, &darts)?;
-    let power_states = power_states(&io, &translate)?;
+    let power_states = power_states(&io, &translate, chip_id)?;
     let PmgrRegisters {
         cluster_events,
         bridges,
@@ -4131,6 +4252,9 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
 mod tests {
     use super::*;
 
+    /// The T8112 row's PMGR compatible.
+    const PMGR: &str = "pmgr1,t8112";
+
     fn layout_of(layout: &[(u8, u32)]) -> Vec<Processor> {
         layout
             .iter()
@@ -4176,9 +4300,13 @@ mod tests {
             resolve_supplies(4, &graph, &mut Vec::new()).unwrap(),
             vec![physical, physical + 8]
         );
-        assert!(resolve_supplies(9, &graph, &mut Vec::new()).is_err());
-        assert!(
-            resolve_supplies(1, &[(1, None, [2, 0]), (2, None, [1, 0])], &mut Vec::new()).is_err()
+        assert_eq!(
+            resolve_supplies(9, &graph, &mut Vec::new()),
+            Err(Unresolved::Absent)
+        );
+        assert_eq!(
+            resolve_supplies(1, &[(1, None, [2, 0]), (2, None, [1, 0])], &mut Vec::new()),
+            Err(Unresolved::Cycle)
         );
     }
 
@@ -5302,8 +5430,9 @@ mod tests {
             (m1.cpus.chip, m1.aic.layout),
             (Chip::AppleM1, AicLayout::V1)
         );
-        // No SPTM shows the M1's lockdown registers.
-        assert!(m1.lockdown.is_empty());
+        // The M1's SPTM locks the same blocks at the same offsets
+        // (isa/apple-soc-facts.json).
+        assert_eq!(m1.lockdown, found.lockdown);
         assert_eq!(
             board(&tree(0x8103, "Apple M1", MODELED)),
             Err("/arm-io/aic is not aic,1, the modeled device".into())
@@ -5749,9 +5878,13 @@ mod tests {
             &[],
         );
         let bytes = encode(&[("name", b"arm-io")], &[pmgr]);
-        let found = power_states(&Node::root(&bytes).unwrap(), &|a| Some(a + 0x2_0000_0000))
-            .unwrap()
-            .unwrap();
+        let found = power_states(
+            &Node::root(&bytes).unwrap(),
+            &|a| Some(a + 0x2_0000_0000),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             found.registers,
             [0x2_3b70_01a8, 0x2_3b70_0348, 0x2_3b70_0428, 0x2_3b70_0450]
