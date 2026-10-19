@@ -16,18 +16,51 @@
 //! little-endian payload length, byte 5 flags and byte 6 a slot.
 //! `_xmsgSendLocked` 0x2d7eba8 tags an AP request with its command-pool
 //! index plus one (0x2d7ed40..0x2d7ed48), copies at most 0x8000 input bytes
-//! into the AP-to-SEP buffer, and waits for the reply with that tag. A reply
+//! into the AP-to-SEP buffer, and waits up to 0x13880 ms (80 s) for the
+//! reply with that tag. Every AP request travels on `xars`; the AP treats
+//! whatever arrives on `xarm` as a SEP-driven request and answers there. A reply
 //! status of zero is success and its length (at most 0x8000) is the count of
 //! result bytes the AP copies from the SEP-to-AP buffer (0x2d7ef20..0x2d7ef5c);
 //! any other status is returned to the caller as its error.
 //! `_xmsgReceived` 0x2d7e7e4 matches replies by tag (0x2d7e8a4..0x2d7e8d0).
 //!
 //! The operations are the AP's own senders (their `_block_invoke` bodies set
-//! byte 2). Each is implemented here or refuses, naming what it needs; none
-//! is answered with an invented success. The anti-replay operations need the
-//! persistent SEP store and refuse until it is installed.
-use super::{endpoint::Service, message::Frame};
-use alloc::vec::Vec;
+//! byte 2), with the payloads each sender passes:
+//!
+//! - setup_OS_UUID (8): exactly 16 bytes in;
+//! - flush (12): a one-byte Boolean in; unmount (13) and disable for EACS
+//!   (20): nothing;
+//! - nonce generate (15) and read (16): at least 20 bytes out, the nonce;
+//!   byte 6 set to 1 asks for a Sandcat slot instead; invalidate (17):
+//!   nothing;
+//! - commit hash (18): byte 6 the hash type, byte 7 a flag, the caller's
+//!   hash or `/chosen/boot-manifest-hash` in;
+//! - boot nonce (21): exactly 8 bytes out; commit epochs (22): 16 bytes in
+//!   although the length field is 0; get epochs (23): exactly 32 bytes out;
+//!   AP slot info (24): exactly 56 bytes out (8 nonce, 48 hash); set and get
+//!   provisional AP (27, 28) must succeed.
+//!
+//! `AppleMobileApNonce` uses the AP slots and the boot nonce only when the
+//! DeviceTree has `/arm-io/sep/iop-sep-nub/Sandcat`; J473AP has none, so
+//! this SEP has no Sandcat slots and refuses those operations by name.
+//! The nonce lives in the SEP's anti-replay store ([`super::store`]). The
+//! store is durable on every commit, so a flush has nothing left to write.
+//! Each other operation is implemented here or refuses, naming what it
+//! needs; none is answered with an invented success.
+use super::{
+    Entropy,
+    endpoint::Service,
+    message::Frame,
+    store::{Backend, NONCE_BYTES, Nonces},
+};
+use alloc::{boxed::Box, vec::Vec};
+
+/// The SEP's boot nonce slot outside Sandcat.
+const NONCE_SLOT: u8 = 0;
+/// `nonce_generate_with_slot` sets byte 6 to ask for a Sandcat slot.
+const SANDCAT_SLOT_REQUEST: u8 = 1;
+/// setup_OS_UUID carries exactly one UUID.
+const UUID_BYTES: usize = 16;
 
 /// The master instance's fourcc (`AppleSEPXARTService::start` 0x2d7f690).
 pub const MASTER: u32 = u32::from_be_bytes(*b"xarm");
@@ -164,19 +197,37 @@ pub trait Payload {
 }
 
 /// The SEP's xART state.
-#[derive(Default)]
 pub struct Xart {
     os_uuid: Option<Vec<u8>>,
+    store: Nonces<Box<dyn Backend>>,
+    /// The AP unmounted the xART volume for shutdown, or disabled xART for
+    /// Erase All Content and Settings: the anti-replay state is frozen.
+    frozen: Option<&'static str>,
 }
 
 impl Xart {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(store: Nonces<Box<dyn Backend>>) -> Self {
+        Self {
+            os_uuid: None,
+            store,
+            frozen: None,
+        }
     }
 
     /// The OS UUID the AP handed over with `setup_OS_UUID`, if any.
     pub fn os_uuid(&self) -> Option<&[u8]> {
         self.os_uuid.as_deref()
+    }
+
+    pub fn store_mut(&mut self) -> &mut Nonces<Box<dyn Backend>> {
+        &mut self.store
+    }
+
+    fn live(&self) -> Result<(), &'static str> {
+        match self.frozen {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
     }
 
     /// Answer one AP request on either instance. The reply carries the
@@ -185,6 +236,7 @@ impl Xart {
         &mut self,
         frame: Frame,
         payload: &mut dyn Payload,
+        entropy: &mut dyn Entropy,
     ) -> Result<Frame, &'static str> {
         let message = XartMessage::from_frame(frame);
         if message.service != MASTER_ID && message.service != SLAVE_ID {
@@ -199,31 +251,72 @@ impl Xart {
         }
         let result = match Operation::decode(message.op)? {
             Operation::SetupOsUuid => {
-                if length == 0 {
-                    return Err("xART OS UUID request carries no UUID");
+                if length != UUID_BYTES {
+                    return Err("xART OS UUID request is not one 16-byte UUID");
                 }
                 let mut uuid = alloc::vec![0; length];
                 payload.input(&mut uuid)?;
                 self.os_uuid = Some(uuid);
                 0
             }
+            Operation::FlushCached => {
+                if length != 1 {
+                    return Err("xART flush request is not one Boolean");
+                }
+                payload.input(&mut [0])?;
+                0
+            }
+            Operation::ShutdownUnmount | Operation::DisableForEacs => {
+                if length != 0 {
+                    return Err("xART volume request carries a payload");
+                }
+                self.frozen.get_or_insert(if message.op == 13 {
+                    "the AP unmounted the xART volume for shutdown"
+                } else {
+                    "the AP disabled xART for Erase All Content and Settings"
+                });
+                0
+            }
+            Operation::NonceGenerate | Operation::NonceRead => {
+                if message.slot == SANDCAT_SLOT_REQUEST {
+                    return Err("xART nonce slots exist only on boards with a Sandcat SEP nub");
+                }
+                self.live()?;
+                let nonce = if message.op == 15 {
+                    self.store.generate(NONCE_SLOT, entropy)?
+                } else {
+                    self.store.read(NONCE_SLOT)?
+                };
+                payload.output(&nonce)?;
+                NONCE_BYTES as u16
+            }
+            Operation::NonceInvalidate => {
+                if length != 0 {
+                    return Err("xART nonce invalidation carries a payload");
+                }
+                self.live()?;
+                // Killing a nonce that was never generated leaves none,
+                // which is what the AP asks for.
+                if self.store.read(NONCE_SLOT).is_ok() {
+                    self.store.invalidate(NONCE_SLOT)?;
+                }
+                0
+            }
+            Operation::BootNonceGenerate | Operation::ApSlot(_) => {
+                return Err(
+                    "xART boot nonces and AP slots exist only on boards with a Sandcat SEP nub",
+                );
+            }
+            Operation::CommitHash => {
+                return Err("xART commit-hash types are not recovered");
+            }
+            Operation::CommitEpochs | Operation::GetFullEpochs => {
+                return Err("xART epoch records are not recovered");
+            }
             Operation::EraseSessionSeeds
             | Operation::EraseAllSeeds
             | Operation::FetchKnownSessions => {
-                return Err("xART session seeds need the persistent SEP store");
-            }
-            Operation::NonceGenerate
-            | Operation::NonceRead
-            | Operation::NonceInvalidate
-            | Operation::BootNonceGenerate
-            | Operation::CommitHash => {
-                return Err("xART nonces and commitments need the persistent SEP store");
-            }
-            Operation::CommitEpochs | Operation::GetFullEpochs | Operation::ApSlot(_) => {
-                return Err("xART epochs and AP slots need the persistent SEP store");
-            }
-            Operation::FlushCached | Operation::ShutdownUnmount | Operation::DisableForEacs => {
-                return Err("xART volume lifecycle needs the persistent SEP store");
+                return Err("xART session seeds are not recovered");
             }
             Operation::Lynx(_) => {
                 return Err("xART Lynx operations need a Lynx secure element");
@@ -309,37 +402,76 @@ mod tests {
         assert_eq!(XartMessage::from_frame(frame), message);
     }
 
+    fn xart() -> Xart {
+        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32]).unwrap();
+        let backend: Box<dyn Backend> = Box::new(super::super::store::Volatile::default());
+        Xart::new(Nonces::provision(&roots, backend).unwrap())
+    }
+
+    fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
+        bytes.fill(0x5a);
+        Ok(())
+    }
+
+    fn ask(xart: &mut Xart, frame: Frame, buffers: &mut Buffers) -> Result<Frame, &'static str> {
+        xart.request(frame, buffers, &mut entropy)
+    }
+
     #[test]
     fn the_os_uuid_is_recorded_and_answered_with_the_tag() {
-        let mut xart = Xart::new();
+        let mut xart = xart();
         let mut buffers = Buffers {
             input: (0..16).collect(),
             output: Vec::new(),
         };
-        let reply = xart
-            .request(request(SLAVE_ID, 2, 8, 16), &mut buffers)
-            .unwrap();
+        let reply = ask(&mut xart, request(SLAVE_ID, 2, 8, 16), &mut buffers).unwrap();
         assert_eq!(reply, request(SLAVE_ID, 2, 0, 0));
         assert_eq!(xart.os_uuid(), Some(&(0..16).collect::<Vec<u8>>()[..]));
-        assert!(
-            xart.request(request(SLAVE_ID, 2, 8, 0), &mut buffers)
-                .is_err()
-        );
+        assert!(ask(&mut xart, request(SLAVE_ID, 2, 8, 0), &mut buffers).is_err());
+        assert!(ask(&mut xart, request(SLAVE_ID, 2, 8, 15), &mut buffers).is_err());
     }
 
     #[test]
-    fn unimplemented_and_malformed_requests_refuse() {
-        let mut xart = Xart::new();
+    fn the_nonce_is_generated_read_and_killed_in_the_store() {
+        let mut xart = xart();
+        let mut buffers = Buffers {
+            input: vec![1],
+            output: Vec::new(),
+        };
+        // The restore kills the nonce before one exists.
+        ask(&mut xart, request(SLAVE_ID, 1, 17, 0), &mut buffers).unwrap();
+        assert!(ask(&mut xart, request(SLAVE_ID, 1, 16, 0), &mut buffers).is_err());
+        let generated = ask(&mut xart, request(SLAVE_ID, 1, 15, 0), &mut buffers).unwrap();
+        assert_eq!(XartMessage::from_frame(generated).length, 20);
+        assert_eq!(buffers.output, [0x5a; 20]);
+        buffers.output.clear();
+        ask(&mut xart, request(SLAVE_ID, 1, 16, 0), &mut buffers).unwrap();
+        assert_eq!(buffers.output, [0x5a; 20]);
+        ask(&mut xart, request(SLAVE_ID, 1, 17, 0), &mut buffers).unwrap();
+        assert!(ask(&mut xart, request(SLAVE_ID, 1, 16, 0), &mut buffers).is_err());
+        // A Sandcat slot request refuses on a board without Sandcat.
+        let slotted = XartMessage {
+            slot: 1,
+            ..XartMessage::from_frame(request(SLAVE_ID, 1, 15, 0))
+        };
+        assert!(ask(&mut xart, slotted.frame(), &mut buffers).is_err());
+        // A flush takes one Boolean; the volume freezes at unmount.
+        ask(&mut xart, request(SLAVE_ID, 1, 12, 1), &mut buffers).unwrap();
+        assert!(ask(&mut xart, request(SLAVE_ID, 1, 12, 0), &mut buffers).is_err());
+        ask(&mut xart, request(SLAVE_ID, 1, 13, 0), &mut buffers).unwrap();
+        assert!(ask(&mut xart, request(SLAVE_ID, 1, 15, 0), &mut buffers).is_err());
+    }
+
+    #[test]
+    fn unrecovered_and_malformed_requests_refuse() {
+        let mut xart = xart();
         let mut buffers = Buffers {
             input: vec![0; 64],
             output: Vec::new(),
         };
-        for op in [
-            2, 3, 4, 9, 10, 11, 12, 13, 15, 16, 17, 18, 20, 21, 22, 23, 24, 28, 32,
-        ] {
+        for op in [2, 3, 4, 9, 10, 11, 18, 21, 22, 23, 24, 28, 32] {
             assert!(
-                xart.request(request(SLAVE_ID, 1, op, 0), &mut buffers)
-                    .is_err(),
+                ask(&mut xart, request(SLAVE_ID, 1, op, 0), &mut buffers).is_err(),
                 "{op}"
             );
         }
@@ -347,15 +479,9 @@ mod tests {
             assert!(Operation::decode(op).is_err(), "{op}");
         }
         // Untagged, oversized and misaddressed requests.
-        assert!(
-            xart.request(request(SLAVE_ID, 0, 8, 16), &mut buffers)
-                .is_err()
-        );
-        assert!(
-            xart.request(request(SLAVE_ID, 1, 8, 0x8001), &mut buffers)
-                .is_err()
-        );
-        assert!(xart.request(request(0x12, 1, 8, 16), &mut buffers).is_err());
+        assert!(ask(&mut xart, request(SLAVE_ID, 0, 8, 16), &mut buffers).is_err());
+        assert!(ask(&mut xart, request(SLAVE_ID, 1, 8, 0x8001), &mut buffers).is_err());
+        assert!(ask(&mut xart, request(0x12, 1, 8, 16), &mut buffers).is_err());
         assert!(buffers.output.is_empty());
     }
 }

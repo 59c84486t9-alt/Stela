@@ -43,6 +43,39 @@ pub trait Backend {
     fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str>;
 }
 
+impl Backend for alloc::boxed::Box<dyn Backend> {
+    fn load(&mut self) -> Result<Option<Head>, &'static str> {
+        (**self).load()
+    }
+    fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str> {
+        (**self).commit(expected, next)
+    }
+}
+
+/// A store that lives as long as the machine: for a boot without a host
+/// partition for SEP state. It keeps the full contract within one power
+/// cycle and loses everything at power-off, which the boot reports.
+#[derive(Default)]
+pub struct Volatile {
+    head: Option<Head>,
+}
+
+impl Backend for Volatile {
+    fn load(&mut self) -> Result<Option<Head>, &'static str> {
+        Ok(self.head.as_ref().map(|head| Head {
+            generation: head.generation,
+            record: head.record.clone(),
+        }))
+    }
+    fn commit(&mut self, expected: u64, next: Head) -> Result<(), &'static str> {
+        if self.head.as_ref().map_or(0, |head| head.generation) != expected {
+            return Err("SEP nonce store generation conflict");
+        }
+        self.head = Some(next);
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct State {
     generation: u64,
@@ -165,6 +198,17 @@ impl<B: Backend> Nonces<B> {
 
     pub fn firmware(&self) -> Result<Option<[u8; HASH_BYTES]>, &'static str> {
         Ok(self.state()?.firmware)
+    }
+
+    /// Erase every nonce and the firmware commitment, as an Erase Install
+    /// erases the SEP's anti-replay state; the generation keeps counting.
+    pub fn erase(&mut self) -> Result<(), &'static str> {
+        self.state()?;
+        self.update(State {
+            generation: 0,
+            slots: BTreeMap::new(),
+            firmware: None,
+        })
     }
 
     pub fn into_backend(self) -> B {

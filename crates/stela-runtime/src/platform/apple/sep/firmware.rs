@@ -15,12 +15,15 @@ use super::super::asc::{Firmware, Message};
 use super::{
     Entropy, SecurityMode,
     image::{self, signature},
+    keys::{ROOT_BYTES, Roots},
     message::{self, Frame},
     os::SepOs,
     rom::Rom,
+    store::{Backend, Nonces, Volatile},
 };
 use crate::platform::dma::{DmaError, Port};
 use alloc::{boxed::Box, vec::Vec};
+use zeroize::Zeroizing;
 
 /// `_bootAction` 0x2d72d68 accepts opcode 106 ("SEP accepted IMG4") and moves
 /// the AP BootStatus to 101. SEPROM replies with it once Stela's policy
@@ -42,7 +45,7 @@ pub struct Evidence {
 
 enum Phase {
     Rom,
-    Active(SepOs),
+    Active(Box<SepOs>),
 }
 
 pub struct SepFirmware {
@@ -137,7 +140,7 @@ impl Firmware for SepFirmware {
         outbox: &mut Vec<Message>,
     ) -> Result<(), &'static str> {
         if let Phase::Active(os) = &mut self.phase {
-            return os.dma(port, outbox);
+            return os.dma(port, self.rom.entropy(), outbox);
         }
         let Some(request) = self.rom.image_request() else {
             return Ok(());
@@ -159,9 +162,23 @@ impl Firmware for SepFirmware {
             }
             .mailbox(),
         );
-        self.phase = Phase::Active(SepOs::new(self.security).with_services()?);
+        let store = volatile_store(self.rom.entropy())?;
+        self.phase = Phase::Active(Box::new(SepOs::new(self.security).with_services(store)?));
         Ok(())
     }
+}
+
+/// The anti-replay store of a SEP with no host partition for its state:
+/// roots drawn fresh for this power cycle and a store that ends with it.
+/// The boot reports the SEP's state as volatile.
+fn volatile_store(entropy: &mut dyn Entropy) -> Result<Nonces<Box<dyn Backend>>, &'static str> {
+    let mut machine = Zeroizing::new([0; ROOT_BYTES]);
+    let mut group = Zeroizing::new([0; ROOT_BYTES]);
+    entropy.fill(&mut *machine)?;
+    entropy.fill(&mut *group)?;
+    let roots = Roots::provisioned(*machine, *group)?;
+    let backend: Box<dyn Backend> = Box::new(Volatile::default());
+    Nonces::provision(&roots, backend)
 }
 
 #[cfg(test)]
@@ -198,7 +215,7 @@ mod tests {
 
     fn entropy() -> Box<dyn Entropy> {
         Box::new(|b: &mut [u8]| {
-            b.fill(0);
+            b.fill(0xa5);
             Ok(())
         })
     }

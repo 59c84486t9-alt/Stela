@@ -2901,7 +2901,7 @@ mod tests {
                     asc::Lines::default(),
                     (dart, 0),
                     Box::new(|b: &mut [u8]| {
-                        b.fill(0);
+                        b.fill(0xa5);
                         Ok(())
                     }),
                     None,

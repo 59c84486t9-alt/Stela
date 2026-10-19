@@ -676,6 +676,11 @@ fn devices<'f>(
             alloc::boxed::Box::new(bundle::entropy),
             sep.security,
         )?;
+        // No host partition holds SEP state yet: its anti-replay store
+        // lasts this power cycle.
+        output::arguments(format_args!(
+            "SEP state volatile: nonces end at power-off\n"
+        ));
     }
     let mut restore_usb = None;
     let usbs = board.map_or(0, |board| board.usbs.len());

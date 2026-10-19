@@ -35,10 +35,11 @@ use super::{
     message::{self, Frame},
     ool::Buffers,
     shared::Region,
+    store::{Backend, Nonces},
     xart::{self, Payload, Xart},
 };
 use crate::platform::dma::{DmaError, Port};
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 
 /// The SEP's power state as the control endpoint drives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,10 +85,10 @@ impl SepOs {
     }
 
     /// The SEP's native services: the xART pair, advertised once OS active
-    /// is reported.
-    pub fn with_services(mut self) -> Result<Self, &'static str> {
+    /// is reported, over the anti-replay store `store`.
+    pub fn with_services(mut self, store: Nonces<Box<dyn Backend>>) -> Result<Self, &'static str> {
         self.catalog = Catalog::new(xart::services().to_vec())?;
-        self.xart = Some(Xart::new());
+        self.xart = Some(Xart::new(store));
         Ok(self)
     }
 
@@ -106,6 +107,7 @@ impl SepOs {
     pub fn dma(
         &mut self,
         port: &mut Port<'_, '_>,
+        entropy: &mut dyn Entropy,
         outbox: &mut Vec<Message>,
     ) -> Result<(), &'static str> {
         for frame in core::mem::take(&mut self.pending) {
@@ -118,7 +120,7 @@ impl SepOs {
                 port: &mut *port,
                 read: 0,
             };
-            let reply = xart.request(frame, &mut payload)?;
+            let reply = xart.request(frame, &mut payload, entropy)?;
             outbox.push(reply.mailbox());
         }
         Ok(())
@@ -283,8 +285,16 @@ impl SepOs {
                 entropy.fill(&mut bytes)?;
                 Some(u32::from_le_bytes(bytes))
             }
+            // restored_external announces an Erase Install before it
+            // initializes the gigalocker: the SEP erases its anti-replay
+            // state.
             Request::EraseInstall => {
-                return Err("SEP erase-install needs the persistent SEP store");
+                self.xart
+                    .as_mut()
+                    .ok_or("SEP erase-install needs the xART store")?
+                    .store_mut()
+                    .erase()?;
+                Some(0)
             }
             Request::SelfTest => return Err("SEP self test is not modeled"),
             Request::TtyIn(_) => return Err("SEP console input is not modeled"),
@@ -382,6 +392,12 @@ mod tests {
             capacities: [1, 2, 1, 2],
         }])
         .unwrap()
+    }
+
+    fn store() -> Nonces<Box<dyn Backend>> {
+        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32]).unwrap();
+        let backend: Box<dyn Backend> = Box::new(super::super::store::Volatile::default());
+        Nonces::provision(&roots, backend).unwrap()
     }
 
     fn active(security: Option<SecurityMode>) -> SepOs {
@@ -523,7 +539,14 @@ mod tests {
             access: &mut access,
         };
         let mut outbox = Vec::new();
-        os.dma(&mut port, &mut outbox)?;
+        os.dma(
+            &mut port,
+            &mut |bytes: &mut [u8]| {
+                bytes.fill(0x5a);
+                Ok(())
+            },
+            &mut outbox,
+        )?;
         Ok(outbox
             .into_iter()
             .map(|m| Frame::from_mailbox(m).unwrap())
@@ -532,7 +555,7 @@ mod tests {
 
     #[test]
     fn xart_requests_are_answered_after_their_ool_input_is_read() {
-        let mut os = SepOs::new(None).with_services().unwrap();
+        let mut os = SepOs::new(None).with_services(store()).unwrap();
         let advertised = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
         // OS active, then name and capacities for each of xarm and xars.
         assert_eq!(advertised.len(), 5);
@@ -576,14 +599,34 @@ mod tests {
         );
         assert_eq!(os.xart().unwrap().os_uuid(), Some(&[0x5a; 16][..]));
         assert!(!os.dma_pending());
-        // A request needing the persistent store refuses with no reply.
-        let nonce = xart::XartMessage {
-            op: 0x0f,
-            length: 0,
-            ..xart::XartMessage::from_frame(request)
-        }
-        .frame();
-        reply(&mut os, nonce).unwrap();
+        // The nonce comes from the store; the Erase Install announcement
+        // erases it.
+        let nonce = |op| {
+            xart::XartMessage {
+                op,
+                length: 0,
+                ..xart::XartMessage::from_frame(request)
+            }
+            .frame()
+        };
+        reply(&mut os, nonce(0x0f)).unwrap();
+        assert_eq!(
+            xart::XartMessage::from_frame(dma(&mut os, &mut ram).unwrap()[0]).length,
+            20
+        );
+        assert_eq!(ram.bytes[0x8000..0x8014], [0x5a; 20]);
+        assert_eq!(
+            reply(&mut os, control(5, control::ERASE_INSTALL, 0, 0)).unwrap(),
+            [control::reply(
+                control(5, control::ERASE_INSTALL, 0, 0),
+                Status::Success,
+                0
+            )]
+        );
+        reply(&mut os, nonce(0x10)).unwrap();
+        assert!(dma(&mut os, &mut ram).is_err());
+        // An unrecovered operation refuses with no reply.
+        reply(&mut os, nonce(18)).unwrap();
         assert!(dma(&mut os, &mut ram).is_err());
     }
 
