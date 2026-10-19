@@ -1631,7 +1631,9 @@ fn smc_controller(
         return Err("SMC region is smaller than the shared page".into());
     }
     let mut gpio_keys = Vec::new();
-    if let Some(pmu) = nub.child("smc-pmu").filter(|pmu| pmu.compatible("smc-pmu")) {
+    // By name: the loader removes a hidden `smc-pmu`'s compatible, but the
+    // keys its functions name are the SMC's whatever the AP binds.
+    if let Some(pmu) = nub.child("smc-pmu") {
         let phandle = pmu
             .first_u32("AAPL,phandle")
             .ok_or("smc-pmu has no phandle")?;
@@ -3713,11 +3715,8 @@ mod tests {
             |key: &[u8; 4], value: u32| cells(&[0x91, smc::code(b"pKW4"), smc::code(key), value]);
         let tree = |region_size: u64| {
             let pmu = encode(
-                &[
-                    ("name", &z("smc-pmu")),
-                    ("compatible", &z("smc-pmu")),
-                    ("AAPL,phandle", &cells(&[0x91])),
-                ],
+                // Hidden: the loader removed its compatible.
+                &[("name", &z("smc-pmu")), ("AAPL,phandle", &cells(&[0x91]))],
                 &[],
             );
             let nub = encode(
