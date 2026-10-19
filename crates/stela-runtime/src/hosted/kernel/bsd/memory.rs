@@ -64,6 +64,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
         "mincore" => mincore(call)?,
         "shared_region_check_np" => shared_region_check(kernel, call)?,
         "shared_region_map_and_slide_2_np" => map_and_slide(kernel, pe, call)?,
+        "map_with_linking_np" => super::linking::call(kernel, pe, call)?,
         _ => return Ok(None),
     }))
 }

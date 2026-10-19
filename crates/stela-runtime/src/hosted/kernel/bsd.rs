@@ -16,6 +16,7 @@ use anyhow::{Result, bail};
 
 mod codesign;
 mod forwarded;
+mod linking;
 mod memory;
 mod paths;
 mod process;
