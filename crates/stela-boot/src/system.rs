@@ -203,13 +203,22 @@ fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
 /// pages. The bundle reader opens the volumes itself, so the configured
 /// volume is closed first. With `--preboot SERIAL:GUID` nothing is read: the
 /// engine builds the bundle from that disk with the host storage drivers,
-/// whose ranges are found here.
+/// whose ranges are found here, as they are for every other option that
+/// opens a host controller: disks, the NOR store, input and the network.
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let host_devices = ["--storage", "--preboot", "--restore-source"]
-        .iter()
-        .any(|key| option(text, key).is_some())
-        || text.split_ascii_whitespace().any(|word| word == "--input");
+    let host_devices = [
+        "--storage",
+        "--preboot",
+        "--restore-source",
+        "--nor",
+        "--network-check",
+    ]
+    .iter()
+    .any(|key| option(text, key).is_some())
+        || text
+            .split_ascii_whitespace()
+            .any(|word| word == "--input" || word == "--tss");
     let storage = if host_devices {
         Some(storage::discover()?)
     } else {
