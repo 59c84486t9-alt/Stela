@@ -8,6 +8,8 @@
 //! Records are authenticated with a purpose-separated `keys::Roots::uid`
 //! key. The store must protect its committed generation against rollback;
 //! an HMAC alone cannot detect replacement by an older valid snapshot.
+pub mod persist;
+
 use super::{Entropy, keys::Roots};
 use alloc::{collections::BTreeMap, vec::Vec};
 use hmac::{Hmac, Mac};
