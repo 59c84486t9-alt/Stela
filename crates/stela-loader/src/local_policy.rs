@@ -27,10 +27,33 @@ const UUID_BYTES: usize = 16;
 
 /// Verifies a LocalPolicy's signature: implemented by the SEP model, which
 /// signs and checks LocalPolicies with the machine's own SEP keys.
+///
+/// The SEP owner (root, on the main thread) provides the real implementation
+/// against Stela's own SEP keys; `stela_loader::installed` and
+/// `stela_loader::upgrade` take `Option<&dyn PolicyAuthority>` and, with
+/// one, use the `nsih` and manifest signature as authority instead of
+/// narrowing by evidence alone. [`Unverified`] is the placeholder until it
+/// is wired: it refuses by name so a verified boot never silently succeeds.
 pub trait PolicyAuthority {
     /// `Ok` only when `manifest`, an `IM4M`, is a LocalPolicy this
     /// machine's SEP signed.
     fn verify(&self, manifest: &[u8]) -> core::result::Result<(), String>;
+}
+
+/// The SEP keys are not yet wired, so no LocalPolicy signature can be
+/// checked. Passing this where a [`PolicyAuthority`] is wanted refuses every
+/// policy by name rather than accepting an unverified one; a boot without an
+/// authority falls back to evidence (`stela_loader::installed`).
+pub struct Unverified;
+
+impl PolicyAuthority for Unverified {
+    fn verify(&self, _manifest: &[u8]) -> core::result::Result<(), String> {
+        Err(
+            "LocalPolicy signature verification needs the SEP owner's keys, which are not \
+             wired into stela_loader::local_policy::PolicyAuthority yet"
+                .into(),
+        )
+    }
 }
 
 /// The fields Stela reads from a LocalPolicy.
@@ -144,5 +167,14 @@ mod tests {
         assert!(parsed.verified);
         assert!(LocalPolicy::parse("x", &policy(&[0xab; 47], &[0x11; 16])).is_err());
         assert!(LocalPolicy::parse("x", b"not a manifest").is_err());
+    }
+
+    #[test]
+    fn the_unverified_authority_refuses_every_policy_by_name() {
+        let bytes = policy(&[0xab; 48], &[0x11; 16]);
+        let mut parsed = LocalPolicy::parse("G/LocalPolicy/x.img4", &bytes).unwrap();
+        let error = format!("{:#}", parsed.verify(&Unverified).unwrap_err());
+        assert!(error.contains("SEP"), "{error}");
+        assert!(!parsed.verified);
     }
 }
