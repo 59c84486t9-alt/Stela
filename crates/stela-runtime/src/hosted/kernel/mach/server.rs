@@ -53,11 +53,61 @@ pub(super) const NDR_RECORD: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
 
 /// Which kernel object a request names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Object {
+pub(crate) enum Object {
     Task,
     Thread,
     Host,
 }
+
+/// The routines [`serve`] answers or forwards, by object, with the named
+/// limit of a routine served only in part (other arguments stop the run
+/// naming them).
+pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
+    (Object::Host, "host_info", None),
+    (
+        Object::Task,
+        "_kernelrpc_mach_vm_map_external",
+        Some("a memory object is mapped in host pages over a reserved guest range"),
+    ),
+    (
+        Object::Task,
+        "task_get_special_port_from_user",
+        Some("the kernel, host, bootstrap and debug-control ports"),
+    ),
+    (
+        Object::Task,
+        "task_set_special_port_from_user",
+        Some("the bootstrap and debug-control ports"),
+    ),
+    (
+        Object::Task,
+        "_mach_make_memory_entry",
+        Some("ranges in whole guest pages"),
+    ),
+    (Object::Host, "host_get_special_port", Some("the host port")),
+    (
+        Object::Task,
+        "task_info_from_user",
+        Some("the TASK_AUDIT_TOKEN flavor"),
+    ),
+    (Object::Task, "task_restartable_ranges_register", None),
+    (Object::Task, "task_restartable_ranges_synchronize", None),
+    (
+        Object::Task,
+        "mach_vm_deferred_reclamation_buffer_allocate",
+        None,
+    ),
+    (
+        Object::Task,
+        "mach_vm_deferred_reclamation_buffer_flush",
+        None,
+    ),
+    (
+        Object::Task,
+        "mach_vm_deferred_reclamation_buffer_resize",
+        None,
+    ),
+];
 
 /// Answer `routine` sent to `object`, or `None` when the hosted kernel
 /// does not serve it. `complex` is the request's `MACH_MSGH_BITS_COMPLEX`.

@@ -412,6 +412,8 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
     Ok(Lookup::Absent)
 }
 
+pub(super) const CALLS: &[&str] = &["sysctl", "sys_sysctlbyname"];
+
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "sysctl" => by_number(kernel, call)?,

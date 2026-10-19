@@ -84,6 +84,137 @@ const FORWARDED: &[&str] = &[
     "debug_control_port_for_pid",
 ];
 
+/// Traps the hosted kernel models: virtual memory in guest pages, the
+/// guest's timebase and its deadlines, and messages to kernel objects.
+const MODELED: &[&str] = &[
+    "_kernelrpc_mach_vm_allocate_trap",
+    "_kernelrpc_mach_vm_map_trap",
+    "_kernelrpc_mach_vm_deallocate_trap",
+    "_kernelrpc_mach_vm_protect_trap",
+    "mach_vm_reclaim_update_kernel_accounting_trap",
+    "mach_timebase_info_trap",
+    "mach_wait_until_trap",
+    "mk_timer_arm_trap",
+    "mk_timer_arm_leeway_trap",
+    "mk_timer_cancel_trap",
+    "mach_msg_trap",
+    "mach_msg_overwrite_trap",
+    "mach_msg2_trap",
+];
+
+/// Traps serviced with a named limit.
+pub(crate) const LIMITS: &[(&str, &str)] = &[
+    (
+        "mach_msg2_trap",
+        "requests to this task's, its threads' and the host's kernel objects are served by \
+         routine (the MIG rows); received trailers carry this process's audit token",
+    ),
+    (
+        "mach_msg_trap",
+        "requests to this task's, its threads' and the host's kernel objects are served by \
+         routine (the MIG rows)",
+    ),
+    (
+        "mach_msg_overwrite_trap",
+        "requests to this task's, its threads' and the host's kernel objects are served by \
+         routine (the MIG rows)",
+    ),
+];
+
+/// Traps the hosted kernel refuses, with the reason.
+pub(crate) const REFUSED: &[(&str, &str)] = &[
+    (
+        "iokit_user_client_trap",
+        "IOKit user clients are not modeled",
+    ),
+    ("_exclaves_ctl_trap", "exclaves are not modeled"),
+    ("macx_swapon", "a system administration call"),
+    ("macx_swapoff", "a system administration call"),
+    ("macx_triggers", "a system administration call"),
+    ("macx_backing_store_suspend", "a system administration call"),
+    (
+        "macx_backing_store_recovery",
+        "a system administration call",
+    ),
+];
+
+/// The kernel object a subsystem's requests address in this task: the
+/// task port carries task, VM, restartable-range and port-space requests,
+/// a thread port thread requests, the host port host requests.
+pub(crate) fn object_of(subsystem: &str) -> Option<server::Object> {
+    Some(match subsystem {
+        "task" | "mach_vm" | "task_restartable" | "mach_port" => server::Object::Task,
+        "thread_act" => server::Object::Thread,
+        "mach_host" | "host_priv" => server::Object::Host,
+        _ => return None,
+    })
+}
+
+pub(crate) fn object_name(object: server::Object) -> &'static str {
+    match object {
+        server::Object::Task => "task",
+        server::Object::Thread => "thread",
+        server::Object::Host => "host",
+    }
+}
+
+/// Subsystems whose objects are not this process's and whose requests are
+/// forwarded, with what of the arm64 kernel's answer the host's differs in.
+const OTHER_OBJECT_LIMITS: &[(&str, &str)] = &[
+    ("processor", "describes the x86 host's processors"),
+    ("processor_set", "describes the x86 host's processors"),
+];
+
+/// How a MIG request is serviced: to this process's kernel objects as the
+/// message dispatcher routes it, to any other object forwarded.
+pub(crate) fn mig_service(
+    subsystem: &str,
+    routine: &str,
+) -> (super::services::Service, Option<&'static str>) {
+    use super::services::Service;
+    let Some(object) = object_of(subsystem) else {
+        let limit = OTHER_OBJECT_LIMITS
+            .iter()
+            .find(|(name, _)| *name == subsystem)
+            .map(|&(_, limit)| limit);
+        return (Service::Forwarded { overlay: None }, limit);
+    };
+    if message::IPC_ONLY.contains(&subsystem)
+        || message::FORWARDED_ROUTINES.contains(&(subsystem, routine))
+    {
+        return (Service::Forwarded { overlay: None }, None);
+    }
+    match server::SERVED
+        .iter()
+        .find(|&&(served, name, _)| served == object && name == routine)
+    {
+        Some(&(_, _, limit)) => (
+            Service::Modeled {
+                family: "kernel objects",
+            },
+            limit,
+        ),
+        None => (
+            Service::Refused {
+                reason: "this process's kernel object does not serve it",
+            },
+            None,
+        ),
+    }
+}
+
+/// Whether the trap `name` is forwarded (`Some(true)`), modeled
+/// (`Some(false)`) or refused (`None`).
+pub(crate) fn forwarded(name: &str) -> Option<bool> {
+    if FORWARDED.contains(&name) {
+        Some(true)
+    } else if MODELED.contains(&name) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn forward_trap(kernel: &mut Kernel, index: u32, arguments: &[u64]) -> Result<u64> {
     kernel.page_in_arguments(arguments)?;
     Ok(forward::mach(index, arguments).rax)
@@ -295,9 +426,15 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
         "mach_msg_trap" | "mach_msg_overwrite_trap" | "mach_msg2_trap" => {
             message::send(kernel, name, index, arguments)?
         }
-        other => bail!(
-            "Mach trap {other} (-{index}) is not implemented by the hosted kernel \
-             (arguments {arguments:x?})"
-        ),
+        other => {
+            let reason = REFUSED
+                .iter()
+                .find(|(refused, _)| *refused == other)
+                .map_or("no family services it", |&(_, reason)| reason);
+            bail!(
+                "Mach trap {other} (-{index}) is not implemented by the hosted kernel: {reason} \
+                 (arguments {arguments:x?})"
+            )
+        }
     })
 }

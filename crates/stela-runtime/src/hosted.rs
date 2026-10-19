@@ -28,6 +28,7 @@ pub mod host;
 pub mod kernel;
 pub mod memory;
 pub mod pe;
+pub mod requirements;
 pub mod shared_region;
 pub mod tables;
 mod threads;

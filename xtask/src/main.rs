@@ -9,6 +9,7 @@ mod check;
 mod darwin_catalogs;
 mod differential;
 mod dit;
+mod hosted_matrix;
 mod oracle;
 mod progress;
 mod soc_facts;
@@ -75,6 +76,7 @@ fn main() -> ExitCode {
         Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
+            .and_then(|()| hosted_matrix::run(check))
             .map(|()| ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|error| {

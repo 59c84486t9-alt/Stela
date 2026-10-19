@@ -23,6 +23,14 @@ const O_TRUNC: u64 = 0x400;
 const F_GETPATH: u64 = 50;
 const F_GETPATH_NOFIRMLINK: u64 = 102;
 
+pub(super) const OVERLAY: &str =
+    "absolute read-only lookups resolve under the guest roots, and reported paths are the guest's";
+
+/// Whether the guest-root lookups apply to the call `name`.
+pub(super) fn overlays(name: &str) -> bool {
+    shape(name).is_some() || matches!(name, "fsgetpath" | "fsgetpath_ext")
+}
+
 /// Which argument is the path and, for an open, which the flags.
 fn shape(name: &str) -> Option<(usize, Option<usize>)> {
     Some(match name {

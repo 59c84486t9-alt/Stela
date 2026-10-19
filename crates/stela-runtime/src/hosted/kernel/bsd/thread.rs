@@ -126,6 +126,13 @@ pub(crate) struct Registration {
     pub(crate) stack_hint: u64,
 }
 
+pub(super) const CALLS: &[&str] = &[
+    "bsdthread_register",
+    "bsdthread_create",
+    "bsdthread_terminate",
+    "bsdthread_ctl",
+];
+
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "bsdthread_register" => register(kernel, call)?,

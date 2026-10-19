@@ -874,6 +874,8 @@ fn clear_voucher() {
     let _ = super::thread::set_self(0, 0, SET_SELF_VOUCHER_FLAG);
 }
 
+pub(super) const CALLS: &[&str] = &["workq_open", "workq_kernreturn", "kevent_qos", "kevent_id"];
+
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "workq_open" => open(kernel),
@@ -892,11 +894,6 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
             Ok(count) => Outcome::value(count),
             Err(errno) => Outcome::Error(errno),
         },
-        "kqueue_workloop_ctl" => bail!(
-            "kqueue_workloop_ctl (arguments {:x?}): workloop scheduling parameters are not \
-             implemented",
-            call.arguments()
-        ),
         _ => return Ok(None),
     }))
 }

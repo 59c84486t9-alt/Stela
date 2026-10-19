@@ -91,8 +91,13 @@ fn identity(descriptor: u64) -> Option<(u64, u64)> {
         .then_some((status.st_dev as u64, status.st_ino))
 }
 
+/// The calls whose code-signature commands are kept here.
+pub(super) const CALLS: &[&str] = &["sys_fcntl", "sys_fcntl_nocancel"];
+pub(super) const OVERLAY: &str =
+    "file code signatures (F_ADDFILESIGS*, F_CHECK_LV, F_GETSIGSINFO) are kept here";
+
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
-    if !matches!(call.entry.name, "sys_fcntl" | "sys_fcntl_nocancel") {
+    if !CALLS.contains(&call.entry.name) {
         return Ok(None);
     }
     let [descriptor, command, argument, ..] = call.arguments;

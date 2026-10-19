@@ -146,6 +146,23 @@ pub(crate) const WORKQ_THREADMASK: u32 = (bit(4) // SIGILL
 /// `sigcantmask`.
 const CANT_MASK: u32 = bit(SIGKILL) | bit(SIGSTOP);
 
+pub(super) const CALLS: &[&str] = &[
+    "sigaction",
+    "sigprocmask",
+    "__pthread_sigmask",
+    "__pthread_kill",
+    "sigaltstack",
+    "sigpending",
+    "kill",
+    "__sigwait",
+    "__sigwait_nocancel",
+    "__disable_threadsignal",
+    "__pthread_markcancel",
+    "__pthread_canceled",
+    "setitimer",
+    "getitimer",
+];
+
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "sigaction" => sigaction(kernel, call)?,
@@ -161,10 +178,6 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
         | "__pthread_canceled"
         | "setitimer"
         | "getitimer" => forward(kernel, call)?,
-        "sigsuspend" | "sigsuspend_nocancel" | "sigreturn" => bail!(
-            "{}: delivering signals to guest handlers is not implemented",
-            call.entry.name
-        ),
         _ => return Ok(None),
     }))
 }

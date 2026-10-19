@@ -21,6 +21,17 @@ const DYLD_VM_END_MWL: u64 = u64::MAX;
 const HOST_PAGE_BYTES: u64 = 4096;
 const HOST_PAGES_PER_PAGE: usize = (PAGE_BYTES / HOST_PAGE_BYTES) as usize;
 
+pub(super) const CALLS: &[&str] = &[
+    "mmap",
+    "munmap",
+    "mprotect",
+    "madvise",
+    "mincore",
+    "shared_region_check_np",
+    "shared_region_map_and_slide_2_np",
+    "map_with_linking_np",
+];
+
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "mmap" => mmap(kernel, pe, call)?,

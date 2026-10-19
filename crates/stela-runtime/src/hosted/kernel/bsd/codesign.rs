@@ -95,8 +95,10 @@ impl Signature {
     }
 }
 
+pub(super) const CALLS: &[&str] = &["csops", "csops_audittoken"];
+
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
-    if !matches!(call.entry.name, "csops" | "csops_audittoken") {
+    if !CALLS.contains(&call.entry.name) {
         return Ok(None);
     }
     let [pid, operation, address, size, token, ..] = call.arguments;

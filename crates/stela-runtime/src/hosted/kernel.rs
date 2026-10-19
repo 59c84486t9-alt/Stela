@@ -29,6 +29,7 @@ use std::{
 mod bsd;
 mod mach;
 mod platform;
+pub mod services;
 
 pub use bsd::Signature;
 pub(super) use bsd::{EAGAIN, ENOMEM};

@@ -37,7 +37,7 @@ const MACH_MSG_TYPE_MOVE_SEND: u32 = 17;
 
 /// Subsystems whose requests act only on IPC state, which this task shares
 /// with the host task, and are forwarded.
-const IPC_ONLY: &[&str] = &["mach_port"];
+pub(super) const IPC_ONLY: &[&str] = &["mach_port"];
 
 /// Kernel-object routines whose answer is the same for an arm64 process:
 /// forwarded unchanged. `host_get_clock_service` names a clock whose
@@ -45,7 +45,7 @@ const IPC_ONLY: &[&str] = &["mach_port"];
 /// requests to the clock port it returns are the host kernel's.
 /// `semaphore_create` and `semaphore_destroy` make and drop this task's own
 /// semaphores, which the forwarded semaphore traps then use.
-const FORWARDED_ROUTINES: &[(&str, &str)] = &[
+pub(super) const FORWARDED_ROUTINES: &[(&str, &str)] = &[
     ("mach_host", "host_get_clock_service"),
     ("task", "semaphore_create"),
     ("task", "semaphore_destroy"),

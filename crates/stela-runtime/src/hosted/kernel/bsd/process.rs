@@ -29,6 +29,8 @@ const ENAMETOOLONG: u64 = 63;
 const E2BIG: u64 = 7;
 const EACCES: u64 = 13;
 
+pub(super) const CALLS: &[&str] = &["exit", "execve", "posix_spawn"];
+
 pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(match call.entry.name {
         "exit" => {

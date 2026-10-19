@@ -12,7 +12,7 @@
 use super::{Kernel, Pe, Trap};
 use crate::darwin::{BsdReturnType, catalog};
 use crate::hosted::forward;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
 mod codesign;
 mod forwarded;
@@ -160,6 +160,249 @@ fn complete(trap: &mut Trap, return_type: BsdReturnType, outcome: Outcome) -> Re
     Ok(())
 }
 
+/// Who services a BSD call: the host kernel unchanged, or one family of
+/// the hosted kernel's own models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Family {
+    Forwarded,
+    Process,
+    Memory,
+    Time,
+    Sysctl,
+    CodeSigning,
+    Threads,
+    Workqueue,
+    Signals,
+}
+
+impl Family {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Forwarded => "forwarded",
+            Self::Process => "process",
+            Self::Memory => "memory",
+            Self::Time => "time",
+            Self::Sysctl => "sysctl",
+            Self::CodeSigning => "code signing",
+            Self::Threads => "threads",
+            Self::Workqueue => "workqueue",
+            Self::Signals => "signals",
+        }
+    }
+}
+
+/// The modeled families and the calls each services.
+const MODELED: &[(Family, &[&str])] = &[
+    (Family::Process, process::CALLS),
+    (Family::Memory, memory::CALLS),
+    (Family::Time, time::CALLS),
+    (Family::Sysctl, sysctl::CALLS),
+    (Family::CodeSigning, codesign::CALLS),
+    (Family::Threads, thread::CALLS),
+    (Family::Workqueue, workqueue::CALLS),
+    (Family::Signals, signal::CALLS),
+];
+
+/// The family servicing the call `name`, or `None` for a call the hosted
+/// kernel refuses.
+pub(crate) fn family(name: &str) -> Option<Family> {
+    if forwarded::forwarded(name) {
+        return Some(Family::Forwarded);
+    }
+    MODELED
+        .iter()
+        .find(|(_, calls)| calls.contains(&name))
+        .map(|&(family, _)| family)
+}
+
+/// The calls whose forwarding a model of part of their arguments
+/// precedes, with that model: guest-root path resolution and file code
+/// signatures.
+pub(crate) fn overlay(name: &str) -> Option<&'static str> {
+    if signatures::CALLS.contains(&name) {
+        Some(signatures::OVERLAY)
+    } else if paths::overlays(name) {
+        Some(paths::OVERLAY)
+    } else {
+        None
+    }
+}
+
+/// Calls serviced with a named limit: what of the arm64 kernel's contract
+/// the hosted kernel does not provide.
+pub(crate) const LIMITS: &[(&str, &str)] = &[
+    (
+        "kevent",
+        "NOTE_MACHTIME timer deadlines are taken in host nanoseconds",
+    ),
+    (
+        "kevent64",
+        "NOTE_MACHTIME timer deadlines are taken in host nanoseconds",
+    ),
+    (
+        "sigaction",
+        "actions are kept, but no signal is delivered to a guest handler",
+    ),
+    (
+        "kill",
+        "a signal to this process stops the run when a guest handler would take it",
+    ),
+    (
+        "__pthread_kill",
+        "a signal to a guest thread stops the run when a guest handler would take it",
+    ),
+    (
+        "sysctl",
+        "kern.version and kern.osrelease are the host kernel's",
+    ),
+    (
+        "posix_spawn",
+        "binary preferences naming an x86-64 slice (Rosetta) are refused",
+    ),
+    ("bsdthread_create", "PTHREAD_START_SUSPENDED is refused"),
+    (
+        "bsdthread_ctl",
+        "REALTIME and DISPATCH_APPLY_ATTR are refused",
+    ),
+];
+
+/// Calls the hosted kernel refuses, stopping the run with the reason.
+pub(crate) const REFUSED: &[(&str, &str)] = &[
+    (
+        "fork",
+        "the child needs its own copy of the hosted runtime's threads and engines",
+    ),
+    (
+        "vfork",
+        "the child needs its own copy of the hosted runtime's threads and engines",
+    ),
+    ("ptrace", "debugging another process is not modeled"),
+    ("__mac_execve", "exec under a MAC label is not modeled"),
+    (
+        "sigsuspend",
+        "delivering signals to guest handlers is not implemented",
+    ),
+    (
+        "sigsuspend_nocancel",
+        "delivering signals to guest handlers is not implemented",
+    ),
+    (
+        "sigreturn",
+        "delivering signals to guest handlers is not implemented",
+    ),
+    (
+        "kqueue_workloop_ctl",
+        "workloop scheduling parameters are not implemented",
+    ),
+    ("acct", "process accounting is a system administration call"),
+    ("reboot", "a system administration call"),
+    ("swapon", "a system administration call"),
+    ("setprivexec", "a system administration call"),
+    (
+        "nfssvc",
+        "the NFS server is a system administration service",
+    ),
+    ("funmount", "a system administration call"),
+    ("sys_panic_with_data", "panicking the kernel is not modeled"),
+    ("pid_suspend", "suspending another process is not modeled"),
+    ("pid_resume", "resuming another process is not modeled"),
+    ("pid_hibernate", "a system administration call"),
+    ("pid_shutdown_sockets", "a system administration call"),
+    ("kas_info", "the kernel address space is not described"),
+    ("usrctl", "a system administration call"),
+    ("system_override", "a system administration call"),
+    ("vfs_purge", "a system administration call"),
+    ("sfi_ctl", "selective forced idle is not modeled"),
+    ("sfi_pidctl", "selective forced idle is not modeled"),
+    ("proc_trace_log", "process trace logging is not modeled"),
+    ("mremap_encrypted", "encrypted image pages are not modeled"),
+    (
+        "stack_snapshot_with_config",
+        "kernel stackshots are not modeled",
+    ),
+    ("microstackshot", "kernel stackshots are not modeled"),
+    ("grab_pgo_data", "kernel profile data is not modeled"),
+    ("__nexus_open", "Skywalk nexus and channels are not modeled"),
+    (
+        "__nexus_register",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__nexus_deregister",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__nexus_create",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__nexus_destroy",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__nexus_get_opt",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__nexus_set_opt",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__channel_open",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__channel_get_info",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__channel_sync",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__channel_get_opt",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__channel_set_opt",
+        "Skywalk nexus and channels are not modeled",
+    ),
+    (
+        "__mach_bridge_remote_time",
+        "no bridge (T2) clock exists on this machine",
+    ),
+    (
+        "objc_bp_assist_cfg_np",
+        "the Objective-C branch-prediction assist is not modeled",
+    ),
+    ("pivot_root", "a system administration call"),
+    ("tracker_action", "tracker domain policy is not modeled"),
+    (
+        "debug_syscall_reject",
+        "system-call rejection policy is not modeled",
+    ),
+    (
+        "sys_debug_syscall_reject_config",
+        "system-call rejection policy is not modeled",
+    ),
+    ("graftdmg", "grafting disk images is not modeled"),
+    ("ungraftdmg", "grafting disk images is not modeled"),
+    (
+        "sys_record_system_event",
+        "system event recording is not modeled",
+    ),
+    (
+        "sys_coalition_policy_set",
+        "coalition policies are not modeled",
+    ),
+    (
+        "sys_coalition_policy_get",
+        "coalition policies are not modeled",
+    ),
+    ("oslog_coproc_reg", "coprocessor logging is not modeled"),
+    ("oslog_coproc", "coprocessor logging is not modeled"),
+];
+
 fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let name = call.entry.name;
     if let Some(outcome) = paths::call(kernel, call)? {
@@ -168,36 +411,28 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     if let Some(outcome) = signatures::call(kernel, call)? {
         return Ok(outcome);
     }
-    if forwarded::forwarded(name) {
-        return forward(kernel, call);
-    }
-    if let Some(outcome) = process::call(kernel, pe, call)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = memory::call(kernel, pe, call)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = time::call(kernel, call)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = sysctl::call(kernel, call)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = codesign::call(kernel, call)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = thread::call(kernel, pe, call)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = workqueue::call(kernel, pe, call)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = signal::call(kernel, call)? {
-        return Ok(outcome);
-    }
-    bail!(
-        "BSD system call {name} ({}) is not implemented by the hosted kernel (arguments {:x?})",
-        call.entry.number,
-        call.arguments()
-    )
+    let outcome = match family(name) {
+        Some(Family::Forwarded) => Some(forward(kernel, call)?),
+        Some(Family::Process) => process::call(kernel, pe, call)?,
+        Some(Family::Memory) => memory::call(kernel, pe, call)?,
+        Some(Family::Time) => time::call(kernel, call)?,
+        Some(Family::Sysctl) => sysctl::call(kernel, call)?,
+        Some(Family::CodeSigning) => codesign::call(kernel, call)?,
+        Some(Family::Threads) => thread::call(kernel, pe, call)?,
+        Some(Family::Workqueue) => workqueue::call(kernel, pe, call)?,
+        Some(Family::Signals) => signal::call(kernel, call)?,
+        None => None,
+    };
+    outcome.ok_or_else(|| {
+        let reason = REFUSED
+            .iter()
+            .find(|(refused, _)| *refused == name)
+            .map_or("no family services it", |&(_, reason)| reason);
+        anyhow!(
+            "BSD system call {name} ({}) is not implemented by the hosted kernel: {reason} \
+             (arguments {:x?})",
+            call.entry.number,
+            call.arguments()
+        )
+    })
 }
