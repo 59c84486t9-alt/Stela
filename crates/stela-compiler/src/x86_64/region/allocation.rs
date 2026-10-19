@@ -419,6 +419,8 @@ pub(super) fn emitter<'a>(
         coalesced: None,
         allocating_output: false,
         range_checks: None,
+        // No loads.
+        stack_alignment: true,
     }
 }
 

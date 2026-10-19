@@ -239,6 +239,8 @@ impl LegacyPlan {
             coalesced: None,
             allocating_output: false,
             range_checks: None,
+            // No loads.
+            stack_alignment: true,
         };
         for (guest, index) in (0..GPR_SLOTS)
             .filter(|&guest| used & (1 << guest) != 0)

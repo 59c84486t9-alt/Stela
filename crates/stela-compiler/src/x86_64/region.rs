@@ -93,6 +93,9 @@ struct Emitter<'a> {
     /// For each instruction, whether its clean load checks the guest range
     /// (`x86_64::guest_range`); none in process profiles.
     range_checks: Option<&'a [bool]>,
+    /// The block's SCTLR_ELx.SA: whether a clean load through SP checks its
+    /// alignment ([`super::MemoryChecks::stack_alignment`]).
+    stack_alignment: bool,
 }
 
 impl Emitter<'_> {
@@ -304,7 +307,7 @@ impl Emitter<'_> {
         let ends = encoding::ordinary_load_ends(
             &raw,
             bytes,
-            slot(base).expect("eligible X base"),
+            slot(base).expect("eligible base"),
             slot(data),
             displacement,
         )
@@ -330,9 +333,12 @@ impl Emitter<'_> {
     }
 
     /// The checks of the shared memory emitter whose bytes the current
-    /// clean load reuses: the default ones, with its guest range check.
+    /// clean load reuses: the block's SP alignment check and the access's
+    /// guest range check. Regions are never selected under SCTLR_ELx.A, and
+    /// clean loads are never ordered.
     fn memory_checks(&self) -> super::MemoryChecks {
         super::MemoryChecks {
+            stack_alignment: self.stack_alignment,
             guest_range: self
                 .range_checks
                 .is_some_and(|ranges| ranges.get(self.current).copied().unwrap_or(true)),
@@ -406,7 +412,8 @@ impl Emitter<'_> {
         );
         let ends = encoding::ordinary_pair_load_ends(
             &raw,
-            slot(base).expect("eligible X base"),
+            bytes,
+            slot(base).expect("eligible base"),
             data.map(slot),
             displacement,
         )
@@ -817,7 +824,7 @@ impl Emitter<'_> {
 /// `consumed_instructions`, with the full frame written back and `exit_pc` set.
 #[cfg(test)]
 pub fn emit_prefix(instructions: &[Instruction]) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, false, None)
+    emit_prefix_selected(instructions, false, true, None)
 }
 
 /// Transactional nonfaulting GPR/NZCV span candidate.
@@ -828,18 +835,22 @@ pub fn emit_allocated_prefix(
 }
 
 /// Ordinary direct-RAM load retention; pure ALU allocation keeps six slots.
-/// With `range_checks`, the loads the system-mode analysis selects check
-/// their address ([`super::GUEST_RANGE_CHECK`]).
+/// Loads through SP check its alignment if `stack_alignment` (the block's
+/// [`super::MemoryChecks::stack_alignment`]). With `range_checks`, the loads
+/// the system-mode analysis selects check their address
+/// ([`super::GUEST_RANGE_CHECK`]).
 pub fn emit_clean_load_prefix<'a>(
     instructions: &'a [Instruction],
+    stack_alignment: bool,
     range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, true, range_checks)
+    emit_prefix_selected(instructions, true, stack_alignment, range_checks)
 }
 
 fn emit_prefix_selected<'a>(
     instructions: &'a [Instruction],
     clean_loads: bool,
+    stack_alignment: bool,
     range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
     if instructions.len() > MAX_INSTRUCTIONS {
@@ -918,6 +929,7 @@ fn emit_prefix_selected<'a>(
         coalesced: None,
         allocating_output: false,
         range_checks,
+        stack_alignment,
     };
     for instruction in instructions.iter().take(consumed) {
         emitter.instruction(instruction)?;
@@ -1346,7 +1358,7 @@ mod tests {
             instruction(3, add(Register::X(9), Register::X(9))),
             instruction(4, add(Register::X(8), Register::X(8))),
         ];
-        let output = emit_clean_load_prefix(&instructions, None).unwrap();
+        let output = emit_clean_load_prefix(&instructions, true, None).unwrap();
         assert_eq!(output.consumed_instructions, 5);
         assert_eq!(output.stats.clean_loads, 1);
         assert_eq!(output.stats.load_boundary_stores, 2);
@@ -1400,13 +1412,14 @@ mod tests {
                 .filter(|bytes| *bytes == GUEST_RANGE_CHECK)
                 .count()
         };
-        let unchecked = emit_clean_load_prefix(&instructions, None).unwrap();
-        let checked = emit_clean_load_prefix(&instructions, Some(&[true; 5])).unwrap();
+        let unchecked = emit_clean_load_prefix(&instructions, true, None).unwrap();
+        let checked = emit_clean_load_prefix(&instructions, true, Some(&[true; 5])).unwrap();
         assert_eq!(checks(&unchecked.code), 0);
         assert_eq!(checks(&checked.code), 3);
         // Each load takes its own instruction's decision.
         let second =
-            emit_clean_load_prefix(&instructions, Some(&[true, false, true, false, true])).unwrap();
+            emit_clean_load_prefix(&instructions, true, Some(&[true, false, true, false, true]))
+                .unwrap();
         assert_eq!(checks(&second.code), 1);
         assert_eq!(
             checked.consumed_instructions,
@@ -1508,6 +1521,7 @@ mod tests {
                 instruction(2, load(11)),
                 instruction(3, add(Register::X(0), Register::X(10))),
             ],
+            true,
             None,
         )
         .unwrap();
@@ -1517,14 +1531,15 @@ mod tests {
     #[test]
     fn clean_load_tier_declines_unselected_memory_forms() {
         for (base, signed, width, bytes, mode) in [
-            (Register::Sp, false, Width::W32, 1, AddressMode::Offset),
+            (Register::Sp, false, Width::W32, 1, AddressMode::PreIndex),
             (Register::X(0), true, Width::W32, 1, AddressMode::Offset),
             (Register::X(0), false, Width::X64, 1, AddressMode::Offset),
             (Register::X(0), false, Width::W32, 8, AddressMode::Offset),
             (Register::X(0), true, Width::X64, 4, AddressMode::Offset),
             (Register::X(0), false, Width::W32, 1, AddressMode::PostIndex),
             (Register::X(0), false, Width::X64, 8, AddressMode::PreIndex),
-            (Register::Sp, false, Width::X64, 8, AddressMode::Offset),
+            (Register::Sp, true, Width::X64, 4, AddressMode::Offset),
+            (Register::Zero, false, Width::X64, 8, AddressMode::Offset),
         ] {
             let operation = Operation::Memory {
                 transfer: MemoryTransfer::Load { signed, width },
@@ -1586,7 +1601,7 @@ mod tests {
                 instruction(1, load(data, Register::X(15))),
                 instruction(2, add(Register::X(9), Register::X(9))),
             ];
-            let region = emit_clean_load_prefix(&instructions, None).unwrap();
+            let region = emit_clean_load_prefix(&instructions, true, None).unwrap();
             assert_eq!(region.consumed_instructions, instructions.len());
             assert_eq!(region.stats.clean_loads, 1);
             assert_eq!(region.stats.load_boundary_stores, 1);
@@ -1667,7 +1682,7 @@ mod tests {
             instruction(2, add(Register::X(9), Register::X(9))),
             instruction(3, add(Register::X(8), Register::X(8))),
         ];
-        let region = emit_clean_load_prefix(&instructions, None).unwrap();
+        let region = emit_clean_load_prefix(&instructions, true, None).unwrap();
         assert_eq!(region.consumed_instructions, instructions.len());
         assert_eq!(region.stats.clean_loads, 2);
         assert_eq!(region.stats.address_cache_hits, 1);
@@ -1736,7 +1751,7 @@ mod tests {
             instruction(2, add(Register::X(9), Register::X(16))),
             instruction(3, add(Register::X(10), Register::X(17))),
         ];
-        let region = emit_clean_load_prefix(&source, None).unwrap();
+        let region = emit_clean_load_prefix(&source, true, None).unwrap();
         assert_eq!(region.consumed_instructions, source.len());
         assert_eq!(region.stats.pair_loads, 1);
         let mut raw = vec![];
@@ -1753,15 +1768,123 @@ mod tests {
             -8,
             AddressMode::Offset,
         );
-        assert!(encoding::ordinary_pair_load_ends(&raw, 15, [Some(16), Some(17)], -8).is_some());
-        for index in 0..raw.len() {
-            let mut changed = raw.clone();
-            changed[index] ^= 1;
-            assert!(
-                encoding::ordinary_pair_load_ends(&changed, 15, [Some(16), Some(17)], -8).is_none()
-            );
+        let ends = |raw: &[u8], bytes, base, data| {
+            encoding::ordinary_pair_load_ends(raw, bytes, base, data, -8)
+        };
+        assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(17)]).is_some());
+        assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(16)]).is_none());
+        assert!(ends(&raw, DOUBLEWORD_LOAD_BYTES, 15, [Some(16), Some(17)]).is_none());
+        for (width, bytes) in [
+            (Width::W32, WORD_LOAD_BYTES),
+            (Width::X64, DOUBLEWORD_LOAD_BYTES),
+        ] {
+            for (base, stack_alignment) in [
+                (Register::X(15), true),
+                (Register::Sp, true),
+                (Register::Sp, false),
+            ] {
+                let mut raw = vec![];
+                super::super::memory_pair(
+                    &mut raw,
+                    super::super::MemoryChecks::system(stack_alignment, false, true),
+                    MemoryTransfer::Load {
+                        signed: false,
+                        width,
+                    },
+                    bytes,
+                    data,
+                    base,
+                    -8,
+                    AddressMode::Offset,
+                );
+                let base = slot(base).unwrap();
+                assert!(ends(&raw, bytes, base, [Some(16), Some(17)]).is_some());
+                for index in 0..raw.len() {
+                    let mut changed = raw.clone();
+                    changed[index] ^= 1;
+                    assert!(ends(&changed, bytes, base, [Some(16), Some(17)]).is_none());
+                }
+            }
         }
-        assert!(encoding::ordinary_pair_load_ends(&raw, 15, [Some(16), Some(16)], -8).is_none());
+    }
+
+    /// Loads and pairs through SP carry exactly the block's SP alignment
+    /// check, before the address addition, and a resident SP supplies the
+    /// base.
+    #[test]
+    fn stack_pointer_loads_carry_the_blocks_alignment_check() {
+        // sub sp,sp,#32; ldr x8,[sp,#8]; ldp x9,x10,[sp,#16];
+        // add x8,x8,#1; add x9,x9,#1; add x10,x10,#1
+        let instructions = [
+            instruction(
+                0,
+                Operation::AddSub {
+                    width: Width::X64,
+                    subtract: true,
+                    flags: false,
+                    destination: Register::Sp,
+                    source: Register::Sp,
+                    immediate: 32,
+                },
+            ),
+            instruction(
+                1,
+                Operation::Memory {
+                    transfer: MemoryTransfer::Load {
+                        signed: false,
+                        width: Width::X64,
+                    },
+                    bytes: DOUBLEWORD_LOAD_BYTES,
+                    data: Register::X(8),
+                    base: Register::Sp,
+                    displacement: 8,
+                    mode: AddressMode::Offset,
+                },
+            ),
+            instruction(
+                2,
+                Operation::MemoryPair {
+                    transfer: MemoryTransfer::Load {
+                        signed: false,
+                        width: Width::X64,
+                    },
+                    bytes: DOUBLEWORD_LOAD_BYTES,
+                    data: [Register::X(9), Register::X(10)],
+                    base: Register::Sp,
+                    displacement: 16,
+                    mode: AddressMode::Offset,
+                },
+            ),
+            instruction(3, add(Register::X(8), Register::X(8))),
+            instruction(4, add(Register::X(9), Register::X(9))),
+            instruction(5, add(Register::X(10), Register::X(10))),
+        ];
+        let check = super::super::STACK_ALIGNMENT_CHECK;
+        for stack_alignment in [true, false] {
+            let region = emit_clean_load_prefix(&instructions, stack_alignment, None).unwrap();
+            assert_eq!(region.consumed_instructions, instructions.len());
+            assert_eq!(region.stats.clean_loads, 1);
+            assert_eq!(region.stats.pair_loads, 1);
+            assert_eq!(region.stats.address_cache_hits, 2);
+            let checks = region
+                .code
+                .windows(check.len())
+                .filter(|bytes| *bytes == check)
+                .count();
+            assert_eq!(checks, if stack_alignment { 2 } else { 0 });
+            let mut baseline = vec![];
+            for instruction in &instructions {
+                super::super::emit_instruction(
+                    &mut baseline,
+                    instruction,
+                    &mut vec![],
+                    crate::TargetCpu::Baseline,
+                    super::super::MemoryChecks::system(stack_alignment, false, true),
+                );
+            }
+            assert!(analysis::selected_output_instruction_count(&baseline).is_some());
+            assert!(admits_ordinary(&region, &baseline));
+        }
     }
 
     #[test]
@@ -1778,6 +1901,29 @@ mod tests {
             mode: AddressMode::Offset,
         };
         assert!(analysis::clean_load_effects(&selected).is_some());
+        for (width, bytes, base) in [
+            (Width::X64, DOUBLEWORD_LOAD_BYTES, Register::X(2)),
+            (Width::W32, WORD_LOAD_BYTES, Register::Sp),
+            (Width::X64, DOUBLEWORD_LOAD_BYTES, Register::Sp),
+        ] {
+            let Operation::MemoryPair { displacement, .. } = selected else {
+                unreachable!()
+            };
+            assert!(
+                analysis::clean_load_effects(&Operation::MemoryPair {
+                    transfer: MemoryTransfer::Load {
+                        signed: false,
+                        width
+                    },
+                    bytes,
+                    data: [Register::X(0), Register::X(1)],
+                    base,
+                    displacement,
+                    mode: AddressMode::Offset,
+                })
+                .is_some()
+            );
+        }
         for (transfer, bytes, data, base, mode) in [
             (
                 MemoryTransfer::Store,
@@ -1801,10 +1947,20 @@ mod tests {
                     signed: false,
                     width: Width::X64,
                 },
-                8,
+                WORD_LOAD_BYTES,
                 [Register::X(0), Register::X(1)],
                 Register::X(2),
                 AddressMode::Offset,
+            ),
+            (
+                MemoryTransfer::Load {
+                    signed: false,
+                    width: Width::X64,
+                },
+                DOUBLEWORD_LOAD_BYTES,
+                [Register::X(0), Register::X(1)],
+                Register::Sp,
+                AddressMode::PreIndex,
             ),
             (
                 MemoryTransfer::Load {
@@ -1822,8 +1978,8 @@ mod tests {
                     width: Width::W32,
                 },
                 WORD_LOAD_BYTES,
-                [Register::X(0), Register::X(1)],
-                Register::Sp,
+                [Register::X(0), Register::Sp],
+                Register::X(2),
                 AddressMode::Offset,
             ),
             (
@@ -1974,7 +2130,7 @@ mod tests {
             instruction(2, add(Register::X(2), Register::X(2))),
         ];
         assert!(emit_allocated_prefix(&instructions).unwrap().is_none());
-        let legacy = emit_clean_load_prefix(&instructions, None).unwrap();
+        let legacy = emit_clean_load_prefix(&instructions, true, None).unwrap();
         let target = crate::TargetCpu::Baseline;
         let fallthrough = GuestAddress(0x100c);
         let baseline = super::super::block::emit_for_target(

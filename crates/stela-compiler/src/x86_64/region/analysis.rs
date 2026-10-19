@@ -126,26 +126,29 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
     })
 }
 
-/// Only unsigned W pairs and zero-extending byte, halfword and word loads
-/// and doubleword loads with an X-register base and no writeback. Every
-/// other memory form ends a region.
+/// Only unsigned W and X pairs and zero-extending byte, halfword and word
+/// loads and doubleword loads with an X-register or SP base and no
+/// writeback. Every other memory form ends a region.
 pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
     if let Operation::MemoryPair {
-        transfer:
-            MemoryTransfer::Load {
-                signed: false,
-                width: Width::W32,
-            },
-        bytes: WORD_LOAD_BYTES,
+        transfer: MemoryTransfer::Load {
+            signed: false,
+            width,
+        },
+        bytes,
         data,
-        base: Register::X(base),
+        base,
         displacement,
         mode: AddressMode::Offset,
     } = *operation
-        && base < 31
-        && displacement % i32::from(WORD_LOAD_BYTES) == 0
+        && matches!(
+            (width, bytes),
+            (Width::W32, WORD_LOAD_BYTES) | (Width::X64, DOUBLEWORD_LOAD_BYTES)
+        )
+        && let Some(base) = slot(base)
+        && displacement % i32::from(bytes) == 0
         && (-PAIR_OFFSET_HALF_RANGE..PAIR_OFFSET_HALF_RANGE)
-            .contains(&(displacement / i32::from(WORD_LOAD_BYTES)))
+            .contains(&(displacement / i32::from(bytes)))
         && data[0] != data[1]
         && data
             .iter()
@@ -168,7 +171,7 @@ pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
         },
         bytes,
         data,
-        base: Register::X(base),
+        base,
         mode: AddressMode::Offset,
         ..
     } = *operation
@@ -179,7 +182,7 @@ pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
                 BYTE_LOAD_BYTES | HALFWORD_LOAD_BYTES | WORD_LOAD_BYTES
             ) | (Width::X64, DOUBLEWORD_LOAD_BYTES)
         )
-        && base < 31
+        && let Some(base) = slot(base)
         && valid(data)
         && data != Register::Sp
     {
@@ -290,6 +293,7 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     const SHRD_IMMEDIATE: u8 = 0xac;
     const ECX_FROM_RAX_MEMORY: u8 = 0x08;
     const REX_R8_WORD: u8 = 0x44;
+    const REX_R8_DOUBLEWORD: u8 = 0x4c;
     const R8D_FROM_RAX_DISP8: u8 = 0x40;
 
     let mut cursor = 0usize;
@@ -299,6 +303,12 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
         if code[cursor..].starts_with(&super::super::GUEST_RANGE_CHECK) {
             ends.extend(super::super::GUEST_RANGE_CHECK_ENDS.map(|end| cursor + end));
             cursor += super::super::GUEST_RANGE_CHECK.len();
+            continue;
+        }
+        // The exact SCTLR_ELx.SA check of an SP base.
+        if code[cursor..].starts_with(&super::super::STACK_ALIGNMENT_CHECK) {
+            ends.extend(super::super::STACK_ALIGNMENT_CHECK_ENDS.map(|end| cursor + end));
+            cursor += super::super::STACK_ALIGNMENT_CHECK.len();
             continue;
         }
         let word = code.get(cursor).copied() == Some(OPERAND_SIZE);
@@ -381,10 +391,18 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
             cursor += 1;
         } else if opcode == MOV_LOAD
             && !word
-            && rex == Some(REX_R8_WORD)
-            && code.get(cursor..cursor + 2)? == [R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES]
+            && matches!(
+                (rex, code.get(cursor..cursor + 2)),
+                (
+                    Some(REX_R8_WORD),
+                    Some([R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES])
+                ) | (
+                    Some(REX_R8_DOUBLEWORD),
+                    Some([R8D_FROM_RAX_DISP8, DOUBLEWORD_LOAD_BYTES])
+                )
+            )
         {
-            // Exact second unsigned W pair load into R8D.
+            // Exact second unsigned W or X pair load into R8.
             cursor += 2;
         } else if opcode == NOP && !word && rex.is_none() {
             // Exact single-byte NOP only.

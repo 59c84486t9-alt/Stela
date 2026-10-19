@@ -200,6 +200,7 @@ fn emit_selected(
         if optimize_regions
             && let Ok(region) = super::region::emit_clean_load_prefix(
                 &instructions[cursor..],
+                checks.stack_alignment,
                 ranges.map(|ranges| &ranges[cursor..]),
             )
             && region.consumed_instructions != 0
@@ -653,6 +654,7 @@ mod tests {
                 let clean_region = || {
                     super::super::region::emit_clean_load_prefix(
                         rest,
+                        true,
                         system.then(|| &ranges[cursor..]),
                     )
                     .ok()

@@ -280,6 +280,18 @@ pub(crate) const GUEST_RANGE_CHECK: [u8; 16] = [
 /// which the region cost gates count one by one.
 pub(crate) const GUEST_RANGE_CHECK_ENDS: [usize; 6] = [3, 7, 9, 12, 14, 16];
 
+/// SCTLR_ELx.SA's check of an SP base in RAX, before the address addition
+/// as Arm checks it ([`MemoryChecks::stack_alignment`]).
+pub(crate) const STACK_ALIGNMENT_CHECK: [u8; 6] = [
+    0xa8, 15, // test al,15
+    0x74, 2, // jz +2
+    0x0f, 0x0b, // ud2
+];
+
+/// The end of each of the three host instructions of
+/// [`STACK_ALIGNMENT_CHECK`], which the region cost gates count.
+pub(crate) const STACK_ALIGNMENT_CHECK_ENDS: [usize; 3] = [2, 4, 6];
+
 fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks) {
     if checks.guest_range {
         code.extend(GUEST_RANGE_CHECK);
@@ -316,7 +328,7 @@ fn memory_address(
     if base == Register::Sp && checks.stack_alignment {
         // Arm checks SP alignment before address addition. A native UD2 is a
         // mapped fault boundary, not guest exception delivery.
-        code.extend([0xa8, 15, 0x74, 2, 0x0f, 0x0b]); // test al,15; jz +2; ud2
+        code.extend(STACK_ALIGNMENT_CHECK);
     }
     code.extend([0x48, 0x8d, 0x90]); // lea rdx,[rax+disp32]: potential writeback
     code.extend(displacement.to_le_bytes());

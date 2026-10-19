@@ -313,26 +313,42 @@ const FRAME_DISP32_FROM_R8: u8 = 0x87;
 const R8D_FROM_RAX_DISP8: u8 = 0x40;
 
 fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<Vec<usize>> {
+    use super::super::{
+        GUEST_RANGE_CHECK, GUEST_RANGE_CHECK_ENDS, STACK_ALIGNMENT_CHECK,
+        STACK_ALIGNMENT_CHECK_ENDS,
+    };
     const LEA: u8 = 0x8d;
     const RAX_FROM_FRAME_DISP32: u8 = 0x87;
     const RDX_FROM_RAX_DISP32: u8 = 0x90;
     const RAX_FROM_RDX: u8 = 0xd0;
+    const BASE_LOAD_BYTES: usize = 7;
+    const SP: usize = 31;
     if code.get(0..3)? != [REX | REX_W, MOV_LOAD, RAX_FROM_FRAME_DISP32]
-        || code.get(3..7)?
+        || code.get(3..BASE_LOAD_BYTES)?
             != u32::try_from(base.checked_mul(GPR_BYTES)?)
                 .ok()?
                 .to_le_bytes()
-        || code.get(7..10)? != [REX | REX_W, LEA, RDX_FROM_RAX_DISP32]
-        || code.get(10..14)? != displacement.to_le_bytes()
-        || code.get(14..ORDINARY_ADDRESS_BYTES)? != [REX | REX_W, MOV_STORE, RAX_FROM_RDX]
     {
         return None;
     }
-    let mut ends = vec![7, 14, ORDINARY_ADDRESS_BYTES];
+    let mut ends = vec![BASE_LOAD_BYTES];
+    let mut cursor = BASE_LOAD_BYTES;
+    // SCTLR_ELx.SA checks an SP base before the address addition.
+    if base == SP && code[cursor..].starts_with(&STACK_ALIGNMENT_CHECK) {
+        ends.extend(STACK_ALIGNMENT_CHECK_ENDS.map(|end| cursor + end));
+        cursor += STACK_ALIGNMENT_CHECK.len();
+    }
+    if code.get(cursor..cursor + 3)? != [REX | REX_W, LEA, RDX_FROM_RAX_DISP32]
+        || code.get(cursor + 3..cursor + 7)? != displacement.to_le_bytes()
+        || code.get(cursor + 7..cursor + 10)? != [REX | REX_W, MOV_STORE, RAX_FROM_RDX]
+    {
+        return None;
+    }
+    cursor += ORDINARY_ADDRESS_BYTES - BASE_LOAD_BYTES;
+    ends.extend([cursor - 3, cursor]);
     // A system-mode access checks the address against the guest's ranges.
-    let checked = ORDINARY_ADDRESS_BYTES + super::super::GUEST_RANGE_CHECK.len();
-    if code.get(ORDINARY_ADDRESS_BYTES..checked) == Some(&super::super::GUEST_RANGE_CHECK[..]) {
-        ends.extend(super::super::GUEST_RANGE_CHECK_ENDS.map(|end| ORDINARY_ADDRESS_BYTES + end));
+    if code[cursor..].starts_with(&GUEST_RANGE_CHECK) {
+        ends.extend(GUEST_RANGE_CHECK_ENDS.map(|end| cursor + end));
     }
     Some(ends)
 }
@@ -385,22 +401,36 @@ pub fn ordinary_load_ends(
     (code.len() == end).then_some(ends)
 }
 
-/// Unsigned W pair recipe: RCX/R8 results, both accesses before either commit.
-/// SP/writeback, signed/X pairs and duplicate destinations are not selected.
+/// Unsigned W and X pair recipe: RCX/R8 results, both accesses before either
+/// commit. Writeback, signed pairs and duplicate destinations are not selected.
 pub fn ordinary_pair_load_ends(
     code: &[u8],
+    bytes: u8,
     base: usize,
     data: [Option<usize>; 2],
     displacement: i32,
 ) -> Option<Vec<usize>> {
+    let (first, second): (&[u8], [u8; 4]) = match bytes {
+        WORD_LOAD_BYTES => (
+            &[MOV_LOAD, ECX_FROM_RAX_MEMORY],
+            [REX | REX_R, MOV_LOAD, R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES],
+        ),
+        DOUBLEWORD_LOAD_BYTES => (
+            &[REX | REX_W, MOV_LOAD, ECX_FROM_RAX_MEMORY],
+            [
+                REX | REX_W | REX_R,
+                MOV_LOAD,
+                R8D_FROM_RAX_DISP8,
+                DOUBLEWORD_LOAD_BYTES,
+            ],
+        ),
+        _ => return None,
+    };
     let mut ends = ordinary_address_ends(code, base, displacement)?;
     let address_end = *ends.last()?;
-    let first_end = address_end + 2;
-    let second_end = first_end + 4;
-    if code.get(address_end..first_end)? != [MOV_LOAD, ECX_FROM_RAX_MEMORY]
-        || code.get(first_end..second_end)?
-            != [REX | REX_R, MOV_LOAD, R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES]
-    {
+    let first_end = address_end + first.len();
+    let second_end = first_end + second.len();
+    if code.get(address_end..first_end)? != first || code.get(first_end..second_end)? != second {
         return None;
     }
     ends.extend([first_end, second_end]);
