@@ -1,7 +1,7 @@
 //! The per-chip IMPLEMENTATION DEFINED census that `machine::impdef` keys
 //! its table by: for each [`Chip`], every System register encoding (op0 3,
-//! CRn 11 and 15) that the SPTM, TXM or kernelcache of one of its SoCs
-//! accesses, from the facts' `impdef` rows. Only SoCs with a `machine::soc`
+//! CRn 11 and 15) that the SPTM, TXM, kernelcache or system kext collection
+//! of one of its SoCs accesses, from the facts' `impdef` rows. Only SoCs with a `machine::soc`
 //! row ([`soc::chip`]) count.
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -12,7 +12,7 @@ use stela_runtime::machine::{Chip, soc};
 /// The generated module, relative to the repository root.
 pub const OUTPUT: &str = "crates/stela-runtime/src/machine/impdef/census.rs";
 /// The fact groups whose rows name a component's accesses.
-const GROUPS: [&str; 3] = ["socs", "monitors", "kernels"];
+const GROUPS: [&str; 4] = ["socs", "monitors", "kernels", "collections"];
 /// Selectors per generated line.
 const PER_LINE: usize = 10;
 /// The System register op0.
@@ -87,9 +87,10 @@ pub fn rust(facts: &Value) -> Result<String> {
          //! {manifest}); do not edit.\n\
          //!\n\
          //! For each chip, in `Chip::ALL` order, the IMPLEMENTATION DEFINED System\n\
-         //! register encodings (op0 3, CRn 11 and 15) that the SPTM, TXM or\n\
-         //! kernelcache of one of its SoCs (`machine::soc` rows) reads or writes,\n\
-         //! as sorted `Encoding::selector` values.\n\
+         //! register encodings (op0 3, CRn 11 and 15) that the SPTM, TXM,\n\
+         //! kernelcache or system kext collection of one of its SoCs\n\
+         //! (`machine::soc` rows) reads or writes, as sorted `Encoding::selector`\n\
+         //! values.\n\
          \n\
          #[rustfmt::skip]\n\
          pub const CONSUMED: [&[u16]; {}] = [",
@@ -133,11 +134,18 @@ mod tests {
             "kernels": [{"chip_ids": ["0x8103", "0x6050"], "impdef": [
                 ["S3_7_C15_C1_1", "read", 2, "com.apple.kernel", "0x0", "0x0"],
             ]}],
+            "collections": [{"chip_ids": ["0x8112"], "impdef": [
+                ["S3_5_C15_C2_0", "write", 1, "com.apple.driver.Example", "0x0", "0x0"],
+            ]}],
         });
         let consumed = consumed(&facts).unwrap();
         let hid0 = Encoding::new(3, 0, 15, 0, 0).selector();
         let energy = Encoding::new(3, 7, 15, 1, 1).selector();
-        assert_eq!(consumed[Chip::AppleM2 as usize], BTreeSet::from([hid0]));
+        let collection = Encoding::new(3, 5, 15, 2, 0).selector();
+        assert_eq!(
+            consumed[Chip::AppleM2 as usize],
+            BTreeSet::from([hid0, collection])
+        );
         // A chip without a row (0x6050) adds nothing; the M1 has the kernel's.
         assert_eq!(consumed[Chip::AppleM1 as usize], BTreeSet::from([energy]));
         assert!(consumed[Chip::AppleM5 as usize].is_empty());

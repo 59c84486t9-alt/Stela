@@ -12,15 +12,19 @@
 //! slot ([`board`]). Every row carries its member, the decoded payload's
 //! SHA-256 and the offset of its evidence; no Apple bytes are written. From
 //! the census it also generates `machine::impdef`'s per-chip census
-//! ([`impdef`]). `--check` fails when either checked-in output differs from a
-//! fresh pass.
+//! ([`impdef`]). `--system-extensions` adds the kexts of the installed
+//! system's `/System/Library/Extensions` (from the decrypted OS image), which
+//! macOS 27 links into its system kext collection on the machine itself and
+//! loads on every chip after boot; without it the checked-in collection rows
+//! are kept. `--check` fails when either
+//! checked-in output differs from a fresh pass.
 //! A later pass adds a fact by adding an analysis to the matching loop.
 use crate::tools::root;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use stela_cli::restore::{archive, manifest::Identity};
 use stela_runtime::sha256;
@@ -44,6 +48,13 @@ const DEVICE_TREE: &str = "DeviceTree";
 /// Member and decoded size limits (the kernelcaches decode to about 125 MB).
 const MEMBER_LIMIT: u64 = 64 << 20;
 const DECODED_LIMIT: u64 = 512 << 20;
+/// The size limit of one kext binary.
+const KEXT_LIMIT: u64 = 256 << 20;
+const FAT_MAGIC: u32 = 0xcafe_babe;
+const MH_MAGIC_64: u32 = 0xfeed_facf;
+const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+const CPU_SUBTYPE_ARM64E: u32 = 2;
+const CPU_SUBTYPE_MASK: u32 = 0xff;
 /// Fileset entries whose names identify the SoC's AIC and PMGR drivers.
 const DRIVER_PREFIXES: [&str; 2] = [
     "com.apple.driver.AppleInterruptController",
@@ -55,6 +66,10 @@ pub struct SocFacts {
     /// The universal macOS restore IPSW.
     #[arg(long)]
     ipsw: PathBuf,
+    /// The OS image's `/System/Library/Extensions`, such as a read-only
+    /// mount of the decrypted image.
+    #[arg(long)]
+    system_extensions: Option<PathBuf>,
     /// Fail instead of writing when the checked-in facts differ.
     #[arg(long)]
     check: bool,
@@ -140,6 +155,120 @@ fn drivers(data: &[u8]) -> Result<Vec<String>> {
                 && (name.contains("InterruptController") || name.ends_with("PMGR"))
         })
         .collect())
+}
+
+/// Every arm64 Mach-O file under `directory`, by path relative to it, in
+/// path order. Symbolic links are not followed.
+fn binaries(directory: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut found = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        for entry in
+            std::fs::read_dir(&path).with_context(|| format!("cannot list {}", path.display()))?
+        {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let mut magic = [0; 4];
+                let mut file = std::fs::File::open(entry.path())?;
+                if std::io::Read::read_exact(&mut file, &mut magic).is_ok()
+                    && (u32::from_le_bytes(magic) == MH_MAGIC_64
+                        || u32::from_be_bytes(magic) == FAT_MAGIC)
+                {
+                    let relative = entry.path().strip_prefix(directory)?.to_path_buf();
+                    found.push((relative.to_string_lossy().into_owned(), entry.path()));
+                }
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// The arm64e slice of a thin or universal Mach-O, else its arm64 one.
+fn arm64_slice(data: &[u8]) -> Result<Option<&[u8]>> {
+    let word = |at: usize| -> Result<u32> {
+        let bytes = data.get(at..at + 4).context("truncated fat header")?;
+        Ok(u32::from_be_bytes(bytes.try_into()?))
+    };
+    if data.get(..4) != Some(&FAT_MAGIC.to_be_bytes()) {
+        let cpu = u32::from_le_bytes(data.get(4..8).context("truncated header")?.try_into()?);
+        return Ok((cpu == CPU_TYPE_ARM64).then_some(data));
+    }
+    let mut best: Option<(bool, usize, usize)> = None;
+    for index in 0..word(4)? as usize {
+        let at = 8 + index * 20;
+        if word(at)? != CPU_TYPE_ARM64 {
+            continue;
+        }
+        let arm64e = word(at + 4)? & CPU_SUBTYPE_MASK == CPU_SUBTYPE_ARM64E;
+        let (offset, size) = (word(at + 8)? as usize, word(at + 12)? as usize);
+        if best.is_none_or(|(chosen, ..)| arm64e && !chosen) {
+            best = Some((arm64e, offset, size));
+        }
+    }
+    best.map(|(_, offset, size)| {
+        data.get(offset..offset + size)
+            .context("fat slice outside the file")
+    })
+    .transpose()
+}
+
+/// The census of every kext binary under `directory`, merged: a row counts
+/// all sites and names the first file, in path order, that has one. The
+/// source digest covers each file's path and SHA-256.
+fn extensions(
+    directory: &Path,
+) -> Result<(
+    Value,
+    BTreeMap<(sysreg::Encoding, sysreg::Direction), sysreg::Row>,
+)> {
+    let mut rows: BTreeMap<_, sysreg::Row> = BTreeMap::new();
+    let mut listing = String::new();
+    let mut files = 0;
+    for (relative, path) in binaries(directory)? {
+        let bytes = std::fs::read(&path)?;
+        ensure!(
+            bytes.len() as u64 <= KEXT_LIMIT,
+            "{relative} exceeds the kext limit"
+        );
+        listing.push_str(&format!(
+            "{relative} {}
+",
+            sha256(&bytes)
+        ));
+        let Some(slice) = arm64_slice(&bytes)? else {
+            continue;
+        };
+        let image = macho::parse(slice, 0).with_context(|| format!("{relative}: Mach-O"))?;
+        files += 1;
+        for (key, row) in sysreg::census(&image, slice) {
+            rows.entry(key)
+                .and_modify(|merged| merged.count += row.count)
+                .or_insert(sysreg::Row {
+                    entry: Some(relative.clone()),
+                    ..row
+                });
+        }
+    }
+    ensure!(files > 0, "{} holds no arm64 kexts", directory.display());
+    let source = json!({
+        "directory": "/System/Library/Extensions",
+        "arm64_files": files,
+        "listing_sha256": sha256(listing.as_bytes()),
+    });
+    Ok((source, rows))
+}
+
+/// The checked-in facts, or `null` before the first pass.
+fn checked_in() -> Result<Value> {
+    match std::fs::read_to_string(root().join(OUTPUT)) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("{OUTPUT} is not JSON")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
+        Err(error) => Err(error).with_context(|| format!("cannot read {OUTPUT}")),
+    }
 }
 
 /// The widest line [`render`] keeps a value on.
@@ -248,6 +377,23 @@ impl SocFacts {
             }));
         }
 
+        let all_chips = chip_ids(&boards);
+        let collections = match &self.system_extensions {
+            Some(directory) => {
+                let (source, rows) = extensions(directory)?;
+                println!("{}: every chip", directory.display());
+                vec![json!({
+                    "source": source,
+                    "chip_ids": all_chips,
+                    "impdef": sysreg::json(&rows),
+                })]
+            }
+            None => checked_in()?["collections"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        };
+
         let mut trees = Vec::new();
         for identity in &boards {
             let member = component(identity, DEVICE_TREE).context("a board has no DeviceTree")?;
@@ -277,6 +423,7 @@ impl SocFacts {
             "socs": socs,
             "monitors": monitors,
             "kernels": kernels,
+            "collections": collections,
             "boards": trees,
         });
         self.update(OUTPUT, render(&facts, 0) + "\n")?;
@@ -304,6 +451,29 @@ impl SocFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_universal_kext_gives_its_arm64e_slice_and_a_thin_one_itself() {
+        let mut fat = FAT_MAGIC.to_be_bytes().to_vec();
+        fat.extend(3u32.to_be_bytes());
+        // x86_64, arm64, arm64e: (cputype, subtype, offset, size, align).
+        for (cpu, subtype, offset) in [
+            (0x0100_0007u32, 3u32, 68u32),
+            (CPU_TYPE_ARM64, 0, 72),
+            (CPU_TYPE_ARM64, 0x8000_0002, 76),
+        ] {
+            for value in [cpu, subtype, offset, 4, 0] {
+                fat.extend(value.to_be_bytes());
+            }
+        }
+        fat.extend(b"x86_a64_a64e");
+        assert_eq!(arm64_slice(&fat).unwrap(), Some(&b"a64e"[..]));
+        let mut thin = MH_MAGIC_64.to_le_bytes().to_vec();
+        thin.extend(CPU_TYPE_ARM64.to_le_bytes());
+        assert_eq!(arm64_slice(&thin).unwrap(), Some(&thin[..]));
+        thin[4] = 7;
+        assert_eq!(arm64_slice(&thin).unwrap(), None);
+    }
 
     #[test]
     fn short_values_stay_on_one_line_and_long_ones_break() {

@@ -142,9 +142,8 @@ fn sign_extend(value: u64, bits: u32) -> i64 {
 /// Arm `DecodeBitMasks` for a logical immediate (`immediate` true), the
 /// `wmask` element replicated across the register.
 pub fn bit_mask(n: u32, imms: u32, immr: u32, width: u32) -> Option<u64> {
-    let combined = n << 6 | (!imms & 0x3f);
-    let length = 31 - combined.leading_zeros();
-    if combined == 0 || length < 1 {
+    let length = (n << 6 | (!imms & 0x3f)).checked_ilog2()?;
+    if length < 1 {
         return None;
     }
     let size = 1u32 << length;
@@ -471,5 +470,7 @@ mod tests {
         assert_eq!(bit_mask(1, 0b11_1111, 0, 64), None);
         // A 32-bit element: 0xffff0000.
         assert_eq!(bit_mask(0, 0b00_1111, 16, 32), Some(0xffff_0000));
+        // N 0 with imms all ones has no element size: reserved, not a panic.
+        assert_eq!(bit_mask(0, 0b11_1111, 0, 64), None);
     }
 }

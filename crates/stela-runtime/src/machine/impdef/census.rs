@@ -3,9 +3,10 @@
 //! 2585e3bd35a2491773bdf8c40803e0b10aa6ed222a27c790b34d25b5fa6842af); do not edit.
 //!
 //! For each chip, in `Chip::ALL` order, the IMPLEMENTATION DEFINED System
-//! register encodings (op0 3, CRn 11 and 15) that the SPTM, TXM or
-//! kernelcache of one of its SoCs (`machine::soc` rows) reads or writes,
-//! as sorted `Encoding::selector` values.
+//! register encodings (op0 3, CRn 11 and 15) that the SPTM, TXM,
+//! kernelcache or system kext collection of one of its SoCs
+//! (`machine::soc` rows) reads or writes, as sorted `Encoding::selector`
+//! values.
 
 #[rustfmt::skip]
 pub const CONSUMED: [&[u16]; 6] = [
