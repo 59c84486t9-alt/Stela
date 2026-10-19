@@ -383,6 +383,36 @@ impl AppleDevices {
         lines
     }
 
+    /// 4 KiB blocks that ANS2 namespace re-creations erased and the host
+    /// backing still holds stale. The guest already reads them as zeros.
+    pub fn ans_erase_pending(&self) -> u64 {
+        self.storage_masters
+            .iter()
+            .map(|&(id, _)| {
+                let ans = self.bus.device::<Ans>(id).expect("ANS controller");
+                ans.erase_pending()
+            })
+            .sum()
+    }
+
+    /// Write zeros over up to `blocks` of those blocks, making the erase
+    /// durable for the next boot ([`Ans::zero_erased`]), and return the
+    /// blocks still pending.
+    pub fn ans_zero_erased(
+        &mut self,
+        mut blocks: u64,
+    ) -> Result<u64, crate::platform::pc::block::BlockError> {
+        let mut pending = 0;
+        for &(id, _) in &self.storage_masters {
+            let ans = self.bus.device_mut::<Ans>(id).expect("ANS controller");
+            let before = ans.erase_pending();
+            let left = ans.zero_erased(blocks)?;
+            blocks -= (before - left).min(blocks);
+            pending += left;
+        }
+        Ok(pending)
+    }
+
     /// State of native RTKit coprocessors, without register side effects.
     pub fn coprocessor_diagnostics(&self) -> Vec<String> {
         self.coprocessors

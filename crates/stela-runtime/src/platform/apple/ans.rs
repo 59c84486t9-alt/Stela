@@ -33,7 +33,11 @@ use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
 };
-use crate::platform::{apple::sart::Sart, dma::Port, pc::block::BlockDevice};
+use crate::platform::{
+    apple::sart::Sart,
+    dma::Port,
+    pc::block::{BlockDevice, BlockError},
+};
 use alloc::{boxed::Box, collections::VecDeque};
 pub use bfh::BootImage;
 pub use namespace::Description;
@@ -265,6 +269,19 @@ impl Ans {
 
     pub fn pending(&self) -> bool {
         self.shutdown || !self.pending.is_empty()
+    }
+
+    /// Logical blocks a namespace re-creation erased that still hold stale
+    /// bytes on the backing. The guest already reads them as zeros.
+    pub fn erase_pending(&self) -> u64 {
+        self.medium.erase_pending()
+    }
+
+    /// Make up to `blocks` erased logical blocks durable on the backing,
+    /// which is host work between engine slices and at the stop, never
+    /// part of a guest command. Returns the blocks still pending.
+    pub fn zero_erased(&mut self, blocks: u64) -> Result<u64, BlockError> {
+        self.medium.zero_erased(blocks)
     }
 
     fn page(&self) -> u64 {

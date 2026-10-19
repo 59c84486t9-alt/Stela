@@ -515,8 +515,14 @@ impl Ans {
         if data[4 + count * 12..].iter().any(|&byte| byte != 0) {
             return Err("ANS namespace request extension fields are not modeled");
         }
-        // An idempotent request for the already provisioned layout has the
-        // requested effect; destructive changes require a recovered ABI.
+        // Re-creating the provisioned layout re-creates every namespace,
+        // and a controller re-creating one drops its FTL mappings: each
+        // reads erased until written. Other layouts need a recovered ABI.
+        // Only doFormatMedia's CDW10 of 0 (0x3dff8a0) gets here; the update
+        // client's 1 (0x3dcac64, 0x3dc9cb0) refuses above.
+        for id in 1..=count as u32 {
+            self.medium.erase(id).expect("IDs are consecutive from 1");
+        }
         Ok(Outcome::status(SUCCESS))
     }
 
@@ -846,6 +852,85 @@ mod tests {
         // Another output size refuses.
         command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
         assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    }
+
+    #[test]
+    fn recreating_the_provisioned_layout_erases_every_namespace() {
+        let records =
+            [(1, 1, 0), (2, 8, 3)].map(|(id, kind, blocks)| Description { id, kind, blocks });
+        let mut ans = Ans::new(Box::new(RamDisk::new("", 10, 4096)), &records, None).unwrap();
+        let mut memory = Ram::new(0x1000, 0x2000);
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        let io = |ans: &mut Ans, port: &mut Port<'_, '_>, opcode, nsid: u32, lba: u64| {
+            let mut command = Command([0; 64]);
+            command.0[0] = opcode;
+            command.0[4..8].copy_from_slice(&nsid.to_le_bytes());
+            command.0[24..32].copy_from_slice(&0x2000u64.to_le_bytes());
+            command.0[40..48].copy_from_slice(&lba.to_le_bytes());
+            let mut sart = Sart::new(Bounds::Exclusive);
+            ans.execute(1, &command, port, &mut sart).unwrap().status
+        };
+        let mut block = [0; 4096];
+        for (nsid, lba, fill) in [(1, 6, 0x11), (2, 0, 0x22), (2, 2, 0x33)] {
+            port.write(0x2000, &[fill; 4096]).unwrap();
+            assert_eq!(io(&mut ans, &mut port, WRITE, nsid, lba), SUCCESS);
+        }
+        let mut create = Command([0; 64]);
+        create.0[0] = APPLE_NAMESPACES;
+        create.0[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
+        // The provisioned layout, the growable namespace sized either as
+        // zero (doFormatMedia without a burn-in count) or its extent.
+        let request = |sizes: [u32; 2]| {
+            let mut data = alloc::vec![0; 4096];
+            data[..4].copy_from_slice(&2u32.to_le_bytes());
+            for (i, (record, blocks)) in records.iter().zip(sizes).enumerate() {
+                for (j, word) in [record.id, record.kind, blocks].into_iter().enumerate() {
+                    let at = 4 + 12 * i + 4 * j;
+                    data[at..at + 4].copy_from_slice(&word.to_le_bytes());
+                }
+            }
+            data
+        };
+        // Another layout, or creation options, refuse without an erase.
+        for (sizes, cdw10) in [([0, 4], 0), ([6, 4], 0), ([0, 3], 1)] {
+            port.write(0x1000, &request(sizes)).unwrap();
+            create.0[40] = cdw10;
+            assert!(ans.execute(0, &create, &mut port, &mut sart).is_err());
+            assert_eq!(ans.medium.erase_pending(), 0);
+        }
+        create.0[40] = 0;
+        for sizes in [[0, 3], [7, 3]] {
+            port.write(0x1000, &request(sizes)).unwrap();
+            let outcome = ans.execute(0, &create, &mut port, &mut sart).unwrap();
+            assert_eq!(outcome.status, SUCCESS);
+            assert_eq!(ans.medium.erase_pending(), 10);
+        }
+        for (nsid, lba) in [(1, 6), (2, 0), (2, 2)] {
+            port.write(0x2000, &[0xff; 4096]).unwrap();
+            assert_eq!(io(&mut ans, &mut port, READ, nsid, lba), SUCCESS);
+            port.read(0x2000, &mut block).unwrap();
+            assert_eq!(block, [0; 4096], "namespace {nsid} block {lba}");
+        }
+        port.write(0x2000, &[0x44; 4096]).unwrap();
+        assert_eq!(io(&mut ans, &mut port, WRITE, 2, 1), SUCCESS);
+        port.write(0x2000, &[0; 4096]).unwrap();
+        assert_eq!(io(&mut ans, &mut port, READ, 2, 1), SUCCESS);
+        port.read(0x2000, &mut block).unwrap();
+        assert_eq!(block, [0x44; 4096]);
+        assert_eq!(ans.zero_erased(u64::MAX), Ok(0));
+        for (nsid, lba, fill) in [(2, 0, 0), (2, 1, 0x44), (2, 2, 0)] {
+            assert_eq!(io(&mut ans, &mut port, READ, nsid, lba), SUCCESS);
+            port.read(0x2000, &mut block).unwrap();
+            assert_eq!(block, [fill; 4096]);
+        }
     }
 
     #[test]

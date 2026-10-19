@@ -7,6 +7,7 @@
 
 pub(crate) mod bundle;
 mod display;
+mod erase;
 mod host;
 mod input;
 mod interrupts;
@@ -1492,8 +1493,9 @@ const WAIT_POLLS_PER_SECOND: u64 = 20;
 const BEAT_SECONDS: u64 = 10;
 
 /// Run up to `budget` blocks (0: no limit), showing the guest framebuffer
-/// about twice a second and at the stop, and reporting the PE's position
-/// every [`BEAT_SECONDS`].
+/// about twice a second and at the stop, reporting the PE's position
+/// every [`BEAT_SECONDS`], and making ANS namespace erases durable on the
+/// host between slices and before the stop ([`erase`]).
 #[allow(clippy::too_many_arguments)]
 fn run(
     machine: &mut Machine<BareHost, AppleDevices>,
@@ -1523,6 +1525,7 @@ fn run(
     let mut samples: Vec<[u64; CHAIN]> = Vec::new();
     let mut user = 0;
     let mut beats = 0u64;
+    let mut host_erase = erase::HostErase::default();
     loop {
         let slice = machine.statistics.blocks + SLICE;
         let limit = if budget == 0 {
@@ -1614,6 +1617,11 @@ fn run(
         machine.exclude_host_time(|devices| host_power.poll(devices));
 
         let sliced = waiting || matches!(stop, Stop::Budget) && limit != budget;
+        if sliced {
+            machine.exclude_host_time(|devices| host_erase.poll(devices));
+        } else {
+            machine.exclude_host_time(|devices| host_erase.finish(devices));
+        }
         let now = host::rdtsc();
         if let Some(display) = display.as_deref_mut()
             && (!sliced || now - shown >= tsc_hz / 2)
