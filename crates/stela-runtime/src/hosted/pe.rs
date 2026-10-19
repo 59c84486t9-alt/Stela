@@ -66,17 +66,24 @@ pub const SCTLR_EL1: u64 = SCTLR_M
     | SCTLR_EN_DA
     | SCTLR_EN_IB
     | SCTLR_EN_IA;
-/// `SCTLR_JOP_KEYS_ENABLED`: the keys XNU disables on the return to EL0 of
-/// a thread whose user JOP is disabled (xnu-7195 `locore.s`
-/// `Ldisable_jop`), leaving IB for return addresses.
-pub const SCTLR_JOP_KEYS: u64 = SCTLR_EN_IA | SCTLR_EN_DA | SCTLR_EN_DB;
+/// The keys a process whose user JOP is disabled runs without: all four.
+/// xnu-7195 cleared only `SCTLR_JOP_KEYS_ENABLED` (IA, DA and DB) and kept
+/// IB for return addresses, but the 26A434 shared cache's libunwind
+/// (`UnwindCursor::step`) authenticates every frame's saved return address
+/// with IB and traps on failure, and an arm64 image saves its return
+/// addresses unsigned: such a process unwinds through its own frames only
+/// with IB's PAC and AUT returning their input too. The SPTM-era kernels
+/// keep how they disable the keys (`SPTM_ROOT_PT_FLAG_JOP`,
+/// `ml_non_arm64e_user_jop_pid`) out of the published sources.
+pub const SCTLR_USER_JOP_KEYS: u64 = SCTLR_EN_IA | SCTLR_EN_IB | SCTLR_EN_DA | SCTLR_EN_DB;
 
-/// Whether a process's user JOP keys (IA, DA and DB) are enabled. Exec
+/// Whether a process's pointer authentication keys are enabled. Exec
 /// disables them for an image whose CPU subtype does not use pointer
 /// authentication (`IMGPF_NOJOP`, `arm64_cpusubtype_uses_ptrauth`): its
-/// PAC and AUT instructions with those keys return their input, and the
-/// kernel signs nothing for it with them (the shared region's slide, the
-/// dyld pager and `bsdthread_register`'s entry points).
+/// PAC and AUT instructions return their input
+/// ([`SCTLR_USER_JOP_KEYS`]), and the kernel signs nothing for it (the
+/// shared region's slide, the dyld pager and `bsdthread_register`'s entry
+/// points).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserJop {
     Enabled,
@@ -106,7 +113,7 @@ impl UserJop {
     pub fn sctlr(self) -> u64 {
         match self {
             Self::Enabled => SCTLR_EL1,
-            Self::Disabled => SCTLR_EL1 & !SCTLR_JOP_KEYS,
+            Self::Disabled => SCTLR_EL1 & !SCTLR_USER_JOP_KEYS,
         }
     }
 }
@@ -307,7 +314,7 @@ mod tests {
         let keys = Keys::random().unwrap();
         let cpu = user_thread(Chip::AppleM2, 0x1000, &tables, &keys, UserJop::Disabled);
         let sctlr = cpu.read(Register::SCTLR_EL1);
-        assert_eq!(sctlr & SCTLR_JOP_KEYS, 0);
-        assert_ne!(sctlr & SCTLR_EN_IB, 0, "return addresses stay signed");
+        assert_eq!(sctlr & SCTLR_USER_JOP_KEYS, 0);
+        assert_eq!(sctlr | SCTLR_USER_JOP_KEYS, SCTLR_EL1);
     }
 }
