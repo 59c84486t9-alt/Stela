@@ -100,6 +100,7 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         "host_get_io_main",
         Some("the IOKit main port is the host's: its registry describes the x86 host"),
     ),
+    (Object::Task, "task_create_identity_token", None),
     (
         Object::Task,
         "task_info_from_user",
@@ -208,6 +209,9 @@ pub(super) fn serve(
         }
         // `flavor`, `task_info_outCnt`. The audit token is this process's
         // identity, the same in either ABI.
+        // A send right naming this task's identity (pid, version and audit
+        // token), the same in either ABI.
+        (Object::Task, "task_create_identity_token", false) => Reply::Forward,
         (Object::Task, "task_info_from_user", false) => {
             let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
