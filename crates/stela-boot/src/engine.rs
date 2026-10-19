@@ -72,6 +72,9 @@ struct Options {
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
+    /// Leap the counter over waits of every PE (`--idle-skip`;
+    /// `Machine::set_idle_skip`): boot and install runs, not interactive use.
+    idle_skip: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
     breakpoints: Vec<u64>,
@@ -147,6 +150,7 @@ impl Options {
             restore_manifest: false,
             restore_identity: None,
             survey: false,
+            idle_skip: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             dumps: Vec::new(),
@@ -196,6 +200,10 @@ impl Options {
             }
             if name == "--survey" {
                 options.survey = true;
+                continue;
+            }
+            if name == "--idle-skip" {
+                options.idle_skip = true;
                 continue;
             }
             if name == "--storage" {
@@ -1013,6 +1021,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ));
         machine.begin_survey();
     }
+    machine.set_idle_skip(options.idle_skip);
     if !options.breakpoints.is_empty() {
         machine.set_breakpoints(&options.breakpoints);
     }

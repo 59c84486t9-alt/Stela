@@ -101,8 +101,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Release the PEs devices started, then keep the running PE until its
     /// time slice ends or it waits. Otherwise run the next PE that can, round
-    /// robin from the running one, or wait on the host until one can; with
-    /// nothing left to wake any PE the machine is idle.
+    /// robin from the running one, or wait on the host until one can (or,
+    /// with idle skip, leap the counter to the next deadline); with nothing
+    /// left to wake any PE the machine is idle.
     pub(super) fn schedule(&mut self) -> Step {
         while let Some(start) = self.devices.take_start() {
             self.start(start)?;
@@ -142,6 +143,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Err(Stop::Idle);
             };
             self.statistics.waits += 1;
+            if self.idle_skip {
+                let host = self.host.counter();
+                self.clock.skip_to(host, deadline);
+                continue;
+            }
             self.host
                 .arm_timer(Some(self.clock.host_deadline(deadline)));
             self.host.wait_for_interrupt();

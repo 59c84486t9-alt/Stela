@@ -771,6 +771,8 @@ pub struct Machine<H: Host, D: Devices> {
     slice_deadline: u64,
     /// The system counter the PEs observe (`clock`).
     clock: clock::Clock,
+    /// End waits of every PE by leaping the counter (`clock::Clock::skip_to`).
+    idle_skip: bool,
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.
     pacm_written: bool,
@@ -855,6 +857,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
             clock: clock::Clock::default(),
+            idle_skip: false,
             pacm_written: false,
             completing: None,
             chain: alloc::boxed::Box::default(),
@@ -976,6 +979,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.breakpoints.sort_unstable();
         self.breakpoints.dedup();
         self.discard_code();
+    }
+
+    /// End every wait of all PEs at once by leaping the system counter to
+    /// the next deadline instead of waiting on the host: guest sleeps cost no
+    /// host time, and time of day runs ahead of the host's (`clock`).
+    pub fn set_idle_skip(&mut self, skip: bool) {
+        self.idle_skip = skip;
     }
 
     /// Record, without stopping, when a PE reaches one of these guest PCs
