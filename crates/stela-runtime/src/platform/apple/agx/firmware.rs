@@ -82,6 +82,17 @@ pub const INITDATA_MAGIC: u64 = initdata::MAGIC;
 /// The device-control power-transition notice (`AGXAccelerator::
 /// powerStateDidChangeTo`/`WillChangeTo` 0x1af8508/0x1af861c).
 const DEVICE_CONTROL_POWER: u32 = 0x28;
+/// The device-state query (`AGXAccelerator::getPropertyCoreConfigImpl`
+/// 0x1b07768, reporting `device_state`).
+const DEVICE_CONTROL_DEVICE_STATE: u32 = 0x7;
+/// The device-state report's offset in the root's +0xb0 object
+/// (`AGXFirmware+0x918` + 0xe000, register x27 of the query).
+const DEVICE_STATE: u64 = 0xe000;
+/// The report's section mask, a byte: bit 0 the PI controller and OMU metric
+/// configuration at +0x31c, the others the counter list and RIF shadow at
+/// +0x824. The kext reads only the sections whose bit is set and clears the
+/// byte afterwards.
+const DEVICE_STATE_SECTIONS: u64 = 0x82c;
 /// The event type the firmware would send on 0x20 (`0x42`).
 pub const EVENT_TYPE: u64 = 0x42;
 
@@ -113,6 +124,13 @@ impl Pipe {
             Pipe::Compute => "GFX CL channel work execution is not modeled",
         }
     }
+}
+
+/// A device-control command the model carries out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Power(PowerNotice),
+    DeviceState,
 }
 
 /// A power-transition notice the AP sent on the device-control ring.
@@ -147,6 +165,8 @@ pub struct State {
     pub fwctl: u64,
     /// Power-transition notices consumed, in order.
     pub power: Vec<PowerNotice>,
+    /// Device-state queries answered.
+    pub device_state_queries: u64,
     jobs: VecDeque<Job>,
 }
 
@@ -228,7 +248,15 @@ impl State {
         let (mut read, write) = control.indices(memory)?;
         while read != write {
             let entry = control.entry(memory, Kind::DeviceControl, read)?;
-            self.power.push(device_control_entry(&entry)?);
+            match device_control_entry(&entry)? {
+                Command::Power(notice) => self.power.push(notice),
+                Command::DeviceState => {
+                    // The model runs no PI controller, OMU metrics, counter
+                    // list or RIF shadow, so the report states no section.
+                    memory.write(root.object_928 + DEVICE_STATE + DEVICE_STATE_SECTIONS, &[0])?;
+                    self.device_state_queries += 1;
+                }
+            }
             read = ring::next(read);
             control.retire(memory, read)?;
         }
@@ -258,9 +286,10 @@ impl State {
 }
 
 /// Decode one device-control entry (`AGFIAcceleratorDeviceControlEntry`,
-/// 0x40 bytes, the type at +0). Only the power notice is modeled; it is the
-/// type and one word with the rest zero, as the kext builds it.
-fn device_control_entry(entry: &[u8]) -> Result<PowerNotice, &'static str> {
+/// 0x40 bytes, the type at +0). The power notice is the type and one word,
+/// the device-state query the type alone; the rest is zero, as the kext builds
+/// them.
+fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
     let word = |at: usize| u32::from_le_bytes(entry[at..at + 4].try_into().unwrap());
     match word(0) {
         DEVICE_CONTROL_POWER => {
@@ -268,14 +297,22 @@ fn device_control_entry(entry: &[u8]) -> Result<PowerNotice, &'static str> {
                 return Err("GFX device-control power notice has fields beyond its word");
             }
             match word(4) {
-                0 => Ok(PowerNotice::PoweredOn),
-                1 => Ok(PowerNotice::PoweringOff),
+                0 => Ok(Command::Power(PowerNotice::PoweredOn)),
+                1 => Ok(Command::Power(PowerNotice::PoweringOff)),
                 _ => Err("GFX device-control power notice names no transition"),
             }
         }
-        0x7 => Err("GFX device control 0x7 (core configuration query) is not modeled"),
-        0x8 => Err("GFX device control 0x8 (memory event, allocateMemoryEvent) is not modeled"),
-        0x26 => Err("GFX device control 0x26 (memory event, allocateMemoryEvent) is not modeled"),
+        DEVICE_CONTROL_DEVICE_STATE => {
+            if entry[4..].iter().any(|&b| b != 0) {
+                return Err("GFX device-state query has fields beyond its type");
+            }
+            Ok(Command::DeviceState)
+        }
+        // AGXAccelerator::allocateMemoryEvent answers a host-allocation
+        // request the firmware raised; the model raises none.
+        0x8 | 0x26 => Err(
+            "GFX device control 0x8/0x26 answers a firmware host-allocation request the model never makes",
+        ),
         _ => Err("GFX device-control type is not one the 26A434 kext sends"),
     }
 }
@@ -491,18 +528,41 @@ mod tests {
     }
 
     #[test]
-    fn unmodeled_device_control_stays_unconsumed_and_refuses_by_name() {
+    fn the_device_state_query_reports_no_section() {
         let mut query = [0; 0x40];
         query[0] = 7;
-        let (mut state, mut memory) = with_device_control(&[power(0), query]);
+        let (mut state, mut memory) = with_device_control(&[query]);
+        // A stale mask from an earlier report.
+        let sections = BASE + 0x5000 + DEVICE_STATE + DEVICE_STATE_SECTIONS;
+        memory.put(sections, &[1]);
         state
             .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
             .unwrap();
-        assert_eq!(
-            state.dma(&mut memory),
-            Err("GFX device control 0x7 (core configuration query) is not modeled")
+        state.dma(&mut memory).unwrap();
+        let mut mask = [0xff];
+        memory.read(sections, &mut mask).unwrap();
+        assert_eq!(mask, [0]);
+        assert_eq!(state.device_state_queries, 1);
+        assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(1));
+        query[8] = 1;
+        assert!(device_control_entry(&query).is_err());
+    }
+
+    #[test]
+    fn unmodeled_device_control_stays_unconsumed_and_refuses_by_name() {
+        let mut event = [0; 0x40];
+        event[0] = 8;
+        let (mut state, mut memory) = with_device_control(&[power(0), event]);
+        state
+            .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
+            .unwrap();
+        assert!(
+            state
+                .dma(&mut memory)
+                .unwrap_err()
+                .contains("host-allocation")
         );
-        // The power notice before it was retired; the query was not.
+        // The power notice before it was retired; the memory event was not.
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(1));
         let mut extra = power(0);
         extra[0x20] = 1;
