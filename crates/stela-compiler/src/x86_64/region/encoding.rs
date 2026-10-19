@@ -107,6 +107,35 @@ pub fn copy(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, width: Wi
     ]);
 }
 
+/// `lea destination, [base + displacement]`, 64-bit, with the shortest
+/// displacement.
+pub fn lea(code: &mut Vec<u8>, destination: HostGpr, base: HostGpr, displacement: i32) {
+    const SIB_BASE: u8 = 4;
+    debug_assert!(base as u8 & 7 != SIB_BASE, "an RSP or R12 base needs a SIB");
+    rex(code, Width::X64, destination, base);
+    let registers = ((destination as u8 & 7) << 3) | (base as u8 & 7);
+    if let Ok(short) = i8::try_from(displacement) {
+        code.extend([LEA, DISP8_MODE | registers, short as u8]);
+    } else {
+        code.extend([LEA, DISP32_MODE | registers]);
+        code.extend(displacement.to_le_bytes());
+    }
+}
+
+/// `test register8, immediate`: the low byte of any GPR.
+pub fn test_low_byte(code: &mut Vec<u8>, register: HostGpr, immediate: u8) {
+    const TEST_BYTE_IMMEDIATE: u8 = 0xf6;
+    const FIRST_REX_BYTE_REGISTER: u8 = 4;
+    let number = register as u8;
+    if number >= 8 {
+        code.push(REX | REX_B);
+    } else if number >= FIRST_REX_BYTE_REGISTER {
+        // SPL, BPL, SIL and DIL rather than AH, CH, DH and BH.
+        code.push(REX);
+    }
+    code.extend([TEST_BYTE_IMMEDIATE, REGISTER_MODE | (number & 7), immediate]);
+}
+
 fn frame_access(code: &mut Vec<u8>, register: HostGpr, slot: usize, opcode: u8) {
     rex(code, Width::X64, register, FRAME);
     let offset = (slot * GPR_BYTES) as u32;
@@ -734,4 +763,44 @@ pub fn decrement_stored_budget(code: &mut Vec<u8>) {
         INC_DEC_GROUP,
         (DEC_EXTENSION << 3) | HostGpr::Rsi as u8,
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_address_forms_encode_as_the_assembler_does() {
+        let encode = |emit: &dyn Fn(&mut Vec<u8>)| {
+            let mut code = vec![];
+            emit(&mut code);
+            code
+        };
+        // lea rax,[rsi+8]; lea rax,[r9+0x1000]; lea rax,[rax-1]
+        assert_eq!(
+            encode(&|code| lea(code, HostGpr::Rax, HostGpr::Rsi, 8)),
+            [0x48, 0x8d, 0x46, 0x08]
+        );
+        assert_eq!(
+            encode(&|code| lea(code, HostGpr::Rax, HostGpr::R9, 0x1000)),
+            [0x49, 0x8d, 0x81, 0x00, 0x10, 0x00, 0x00]
+        );
+        assert_eq!(
+            encode(&|code| lea(code, HostGpr::Rax, HostGpr::Rax, -1)),
+            [0x48, 0x8d, 0x40, 0xff]
+        );
+        // test cl,15; test sil,15; test r10b,15
+        assert_eq!(
+            encode(&|code| test_low_byte(code, HostGpr::Rcx, 15)),
+            [0xf6, 0xc1, 0x0f]
+        );
+        assert_eq!(
+            encode(&|code| test_low_byte(code, HostGpr::Rsi, 15)),
+            [0x40, 0xf6, 0xc6, 0x0f]
+        );
+        assert_eq!(
+            encode(&|code| test_low_byte(code, HostGpr::R10, 15)),
+            [0x41, 0xf6, 0xc2, 0x0f]
+        );
+    }
 }

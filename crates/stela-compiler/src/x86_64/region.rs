@@ -344,25 +344,19 @@ impl Emitter<'_> {
             .iter()
             .fold(0, |mask, host| mask | host.mask());
         self.settle_before_load(clobbers, &[]);
-        let mut start = 0;
-        for (segment, end) in ends.into_iter().enumerate() {
+        let address = self.access_address(base, displacement, &raw, &ends, cached_base);
+        for segment in address + 1..ends.len() {
+            let (start, end) = (ends[segment - 1], ends[segment]);
             let element = segment
                 .checked_sub(data_segment)
                 .filter(|&index| index < data.len());
-            let copy = match element {
-                _ if segment == 0 => cached_base.map(|host| (HostGpr::Rax, host)),
-                Some(index) => cached_data[index].map(|host| (STAGING[index], host)),
-                None => None,
-            };
-            if let Some((destination, host)) = copy {
-                self.emit(|code| encoding::copy(code, destination, host, Width::X64));
-                if segment == 0 {
-                    self.output.stats.address_cache_hits += 1;
-                }
+            if let Some(index) = element
+                && let Some(host) = cached_data[index]
+            {
+                self.emit(|code| encoding::copy(code, STAGING[index], host, Width::X64));
             } else {
                 self.emit(|code| code.extend_from_slice(&raw[start..end]));
             }
-            start = end;
         }
         for (index, &register) in data.iter().enumerate() {
             if cached_data[index].is_none()
@@ -414,22 +408,77 @@ impl Emitter<'_> {
         .ok_or(RegionError::ChangedMemoryEncoding)?;
         let cached_base = self.cached(base);
         self.settle_before_load(HostGpr::Rcx.mask(), &[data]);
-        let mut start = 0;
-        for end in ends {
-            if start == 0
-                && let Some(host) = cached_base
-            {
-                self.emit(|code| encoding::copy(code, HostGpr::Rax, host, Width::X64));
-                self.output.stats.address_cache_hits += 1;
-            } else {
-                self.emit(|code| code.extend_from_slice(&raw[start..end]));
-            }
-            start = end;
-        }
+        let address = self.access_address(base, displacement, &raw, &ends, cached_base);
+        self.emit_segments(&raw, &ends[address..]);
         self.retain_clean_result(data, HostGpr::Rcx);
         self.output.stats.clean_loads += 1;
         self.output.stats.commits += 1;
         Ok(())
+    }
+
+    /// The address of an Offset access in RAX, in place of the shared
+    /// recipe's base load, SP alignment check, LEA and move, which end at
+    /// `ends[index]` for the returned `index`. A base in a register (`cached`,
+    /// or loaded into a free pool register when the region reads it again)
+    /// has its own low byte tested and one LEA adds the offset; otherwise
+    /// the shared base load and check stay, followed by one LEA. Without
+    /// writeback the shared recipe's RDX copy of the address is dead, and
+    /// a fault still finds the frame exact: every dirty value has settled.
+    fn access_address(
+        &mut self,
+        base: Register,
+        displacement: i32,
+        raw: &[u8],
+        ends: &[usize],
+        cached: Option<HostGpr>,
+    ) -> usize {
+        // The ends of the shared base load and, when checked, of its SP
+        // check's TEST, JZ and UD2.
+        const BASE_LOAD: usize = 0;
+        const TEST: usize = 1;
+        const TRAP: usize = 3;
+        let checked = base == Register::Sp && self.stack_alignment;
+        let index = if checked { 5 } else { 2 };
+        debug_assert_eq!(
+            checked,
+            raw[ends[BASE_LOAD]..].starts_with(&super::STACK_ALIGNMENT_CHECK)
+        );
+        let guest = slot(base).expect("eligible base");
+        let host = cached.or_else(|| {
+            (self.effects[self.current].writes & (1 << guest) == 0
+                && next_use(self.effects, self.current + 1, guest) != usize::MAX)
+                .then(|| {
+                    let host = POOL[self.allocate(guest)];
+                    self.emit(|code| encoding::load(code, host, guest));
+                    self.locations[guest] = Location::Host(host);
+                    self.output.stats.state_loads += 1;
+                    self.output.stats.input_cache_loads += 1;
+                    host
+                })
+        });
+        if let Some(host) = host {
+            if checked {
+                self.emit(|code| encoding::test_low_byte(code, host, 15));
+                // The shared JZ and UD2.
+                self.emit_segments(raw, &ends[TEST..=TRAP]);
+            }
+            self.emit(|code| encoding::lea(code, HostGpr::Rax, host, displacement));
+            self.output.stats.address_cache_hits += 1;
+        } else {
+            let last = if checked { TRAP } else { BASE_LOAD };
+            self.emit_segments(raw, &[&[0][..], &ends[..=last]].concat());
+            if displacement != 0 {
+                self.emit(|code| encoding::lea(code, HostGpr::Rax, HostGpr::Rax, displacement));
+            }
+        }
+        index
+    }
+
+    /// Each shared instruction `raw[ends[k - 1]..ends[k]]`.
+    fn emit_segments(&mut self, raw: &[u8], ends: &[usize]) {
+        for pair in ends.windows(2) {
+            self.emit(|code| code.extend_from_slice(&raw[pair[0]..pair[1]]));
+        }
     }
 
     /// The checks of the shared memory emitter whose bytes the current
@@ -520,18 +569,8 @@ impl Emitter<'_> {
         .ok_or(RegionError::ChangedMemoryEncoding)?;
         let cached_base = self.cached(base);
         self.settle_before_load(HostGpr::Rcx.mask() | HostGpr::R8.mask(), &data);
-        let mut start = 0;
-        for end in ends {
-            if start == 0
-                && let Some(host) = cached_base
-            {
-                self.emit(|code| encoding::copy(code, HostGpr::Rax, host, Width::X64));
-                self.output.stats.address_cache_hits += 1;
-            } else {
-                self.emit(|code| code.extend_from_slice(&raw[start..end]));
-            }
-            start = end;
-        }
+        let address = self.access_address(base, displacement, &raw, &ends, cached_base);
+        self.emit_segments(&raw, &ends[address..]);
         // Both accesses precede either destination commit in the unchanged
         // shared emitter. A second-access fault leaves both old values intact.
         self.retain_clean_result(data[0], HostGpr::Rcx);
@@ -1979,7 +2018,9 @@ mod tests {
             instruction(4, add(Register::X(9), Register::X(9))),
             instruction(5, add(Register::X(10), Register::X(10))),
         ];
-        let check = super::super::STACK_ALIGNMENT_CHECK;
+        // The resident SP's own low byte is tested, then the shared JZ and
+        // UD2 of `STACK_ALIGNMENT_CHECK`.
+        let check = &super::super::STACK_ALIGNMENT_CHECK[2..];
         for stack_alignment in [true, false] {
             let region = emit_clean_load_prefix(&instructions, stack_alignment, None).unwrap();
             assert_eq!(region.consumed_instructions, instructions.len());
