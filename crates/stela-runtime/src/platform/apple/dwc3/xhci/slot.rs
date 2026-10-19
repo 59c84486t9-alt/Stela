@@ -23,8 +23,13 @@
 //! its function has something to say, an asynchronous one at the next
 //! microframe.
 //!
-//! Every slot is on a root port: a route string names a hub, and no hub
-//! ever attaches. The controller assigns USB address `slot ID`. Refused
+//! A slot's Route String (4.5.2, 8.9) selects its device below the root
+//! port: each nibble is a hub's downstream port, so a hub function that
+//! enables the port (`usb::Function::downstream`) reaches the device;
+//! otherwise it is missing, as a disconnected device is. Configure
+//! Endpoint records a hub's Hub, MTT, Number of Ports and TT Think Time;
+//! split transactions are the hub function's concern, not the
+//! controller's. The controller assigns USB address `slot ID`. Refused
 //! rather than modeled: streams (MaxPSASize 0), isochronous TRBs (no
 //! function has an isochronous endpoint), Link TRBs with IOC on transfer
 //! rings, and TDs of more than `MAX_TD_TRBS` TRBs.
@@ -34,7 +39,7 @@ use super::{
 };
 use crate::platform::{
     dma::Port,
-    usb::{Function, Reply, Token},
+    usb::{self, Function, Reply, Token},
 };
 use alloc::{boxed::Box, vec::Vec};
 
@@ -234,6 +239,11 @@ impl Slot {
         (self.context[1] >> 16 & 0xff) as usize
     }
 
+    /// The route string from the root port through hubs (6.2.2).
+    fn route(&self) -> u32 {
+        self.context[0] & 0xf_ffff
+    }
+
     fn output_context(&self) -> [u32; 8] {
         let mut context = self.context;
         context[3] = context[3] & 0xff | (self.state as u32) << 27;
@@ -353,9 +363,11 @@ impl Xhci {
             return Ok(PARAMETER_ERROR);
         }
         let root = (context[1] >> 16 & 0xff) as usize;
-        if context[0] & 0xf_ffff != 0 || !self.port_ready(root) {
+        if !self.port_ready(root) {
             return Ok(TRANSACTION_ERROR);
         }
+        // A route through a hub port that is not enabled reaches nothing.
+        let device = function.and_then(|f| usb::route(f, context[0]));
         let mut entry = [0u8; 8];
         port.read(self.dcbaap + 8 * id as u64, &mut entry)
             .map_err(|_| "xHCI DCBAA DMA fault")?;
@@ -363,7 +375,7 @@ impl Xhci {
         if output == 0 || output & 0x3f != 0 {
             return Err("xHCI Address Device: DCBAA names no aligned output Device Context");
         }
-        if !bsr && !Self::set_address(function, id as u8)? {
+        if !bsr && !Self::set_address(device, id as u8)? {
             return Ok(TRANSACTION_ERROR);
         }
         let slot = self.slot_mut(id).unwrap();
@@ -485,7 +497,12 @@ impl Xhci {
             Self::write_endpoint_context(port, slot, dci)?;
         }
         if let Some(context) = slot_context {
-            slot.context[0] = slot.context[0] & !(0x1f << 27) | context[0] & 0x1f << 27;
+            // Context Entries, and a hub's Hub, MTT, Number of Ports and TT
+            // Think Time (6.2.2.3).
+            const ENTRIES_HUB_MTT: u32 = 0x1f << 27 | 1 << 26 | 1 << 25;
+            slot.context[0] = slot.context[0] & !ENTRIES_HUB_MTT | context[0] & ENTRIES_HUB_MTT;
+            slot.context[1] = slot.context[1] & 0x00ff_ffff | context[1] & 0xff00_0000;
+            slot.context[2] = slot.context[2] & !(3 << 16) | context[2] & 3 << 16;
         }
         let configured = slot.endpoints[1..]
             .iter()
@@ -696,13 +713,14 @@ impl Xhci {
     pub(super) fn transfer_deadline(&self, function: Option<&(dyn Function + '_)>) -> Option<u64> {
         let mut deadline: Option<u64> = None;
         for slot in self.slots.iter().flatten() {
+            let device = function.and_then(|f| usb::route_ref(f, slot.route()));
             for (n, endpoint) in slot.endpoints.iter().enumerate() {
                 if endpoint.state != EpState::Running || !endpoint.waiting {
                     continue;
                 }
                 let dci = n + 1;
                 let ready = if dci % 2 == 1 && dci > 1 {
-                    function.and_then(|f| f.ready_at(address(dci)))
+                    device.and_then(|f| f.ready_at(address(dci)))
                 } else {
                     Some(0)
                 };
@@ -731,8 +749,8 @@ impl Xhci {
                 let Some(slot) = self.slot_mut(id) else {
                     break;
                 };
+                let (root, route) = (slot.port(), slot.route());
                 // A suspended link schedules nothing.
-                let root = slot.port();
                 if self.port_ready(root) && !self.ports[root - 1].active() {
                     break;
                 }
@@ -742,7 +760,10 @@ impl Xhci {
                 }
                 if endpoint.waiting {
                     let ready = if dci % 2 == 1 && dci > 1 {
-                        function.as_deref().and_then(|f| f.ready_at(address(dci)))
+                        function
+                            .as_deref()
+                            .and_then(|f| usb::route_ref(f, route))
+                            .and_then(|f| f.ready_at(address(dci)))
                     } else {
                         Some(0)
                     };
@@ -771,7 +792,8 @@ impl Xhci {
         budget: &mut usize,
     ) -> Result<(), &'static str> {
         let now = port.access.now;
-        let root = self.slot_mut(id).unwrap().port();
+        let slot = self.slot_mut(id).unwrap();
+        let (root, route) = (slot.port(), slot.route());
         let present = self.port_ready(root);
         while *budget > 0 {
             let endpoint = &mut self.slot_mut(id).unwrap().endpoints[dci - 1];
@@ -784,7 +806,10 @@ impl Xhci {
                     }
                 }
             }
-            let device = function.as_deref_mut().filter(|_| present);
+            let device = function
+                .as_deref_mut()
+                .filter(|_| present)
+                .and_then(|f| usb::route(f, route));
             match self.run_td(port, device, id, dci, budget)? {
                 Step::Done => {
                     let endpoint = &mut self.slot_mut(id).unwrap().endpoints[dci - 1];

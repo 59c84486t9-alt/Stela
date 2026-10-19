@@ -1705,4 +1705,100 @@ mod tests {
         let e = b.command([0, 0, 0, DISABLE_SLOT << 10 | 1 << 24 | CYCLE]);
         assert_eq!(e[2] >> 24, SUCCESS);
     }
+
+    #[test]
+    fn route_strings_reach_functions_behind_an_enabled_hub_port() {
+        use crate::platform::usb::{
+            Speed,
+            control::tests::{setup, transfer},
+            hid::Peripheral,
+            hub::{Hub, Ports},
+        };
+        struct One(Peripheral);
+        impl Ports for One {
+            fn count(&self) -> usize {
+                1
+            }
+            fn speed(&self, _: usize) -> Speed {
+                Speed::Full
+            }
+            fn function(&mut self, _: usize) -> &mut dyn Function {
+                &mut self.0
+            }
+            fn function_ref(&self, _: usize) -> &dyn Function {
+                &self.0
+            }
+        }
+        let mut hub = Hub::new(One(Peripheral::new()), "HUB").unwrap();
+        let mut b = Bench::new();
+        b.x.attach(Some(Usb2Speed::High)).unwrap();
+        service_with(&mut b.x, &mut b.ram, 0, Some(&mut hub));
+        assert_eq!(b.event()[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
+        wr(&mut b.x, PORTSC1, PP | CSC | PR);
+        assert_eq!(rd(&mut b.x, PORTSC1) & SPEED, HIGH_SPEED << SPEED_SHIFT);
+        service_with(&mut b.x, &mut b.ram, 0, Some(&mut hub));
+        assert_eq!(b.event()[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
+        // The hub as its driver leaves it: configured, port 1 powered and
+        // reset, so the keyboard behind it answers at address 0.
+        for request in [
+            setup(0, 5, 1, 0, 0),
+            setup(0, 9, 1, 0, 0),
+            setup(0x23, 3, 8, 1, 0),
+            setup(0x23, 3, 4, 1, 0),
+        ] {
+            transfer(&mut hub, request, &[]).unwrap();
+        }
+        let command = |b: &mut Bench, hub: &mut Hub<One>, words: [u32; 4]| {
+            trb(&mut b.ram, b.commands, words);
+            b.commands += 16;
+            wr(&mut b.x, DOORBELLS, 0);
+            service_with(&mut b.x, &mut b.ram, 0, Some(hub));
+            b.event()
+        };
+        let address = |b: &mut Bench, hub: &mut Hub<One>, slot: u32, route: u32| {
+            b.ram.put_u64(
+                DCBAA + 8 * u64::from(slot),
+                OUTPUT + 0x400 * u64::from(slot),
+            );
+            b.put_context(INPUT, [0, 3, 0, 0, 0, 0, 0, 0]);
+            b.put_context(
+                INPUT + 0x20,
+                [1 << 27 | 1 << 20 | route, 1 << 16, 0, 0, 0, 0, 0, 0],
+            );
+            b.put_context(
+                INPUT + 0x40,
+                [
+                    0,
+                    3 << 1 | 4 << 3 | 64 << 16,
+                    EP0_RING as u32 | 1,
+                    (EP0_RING >> 32) as u32,
+                    8,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+            let e = command(b, hub, [0, 0, 0, ENABLE_SLOT << 10 | CYCLE]);
+            assert_eq!((e[2] >> 24, e[3] >> 24), (SUCCESS, slot));
+            let e = command(
+                b,
+                hub,
+                [
+                    INPUT as u32,
+                    (INPUT >> 32) as u32,
+                    0,
+                    ADDRESS_DEVICE << 10 | slot << 24 | CYCLE,
+                ],
+            );
+            e[2] >> 24
+        };
+        assert_eq!(address(&mut b, &mut hub, 1, 1), SUCCESS);
+        let slot = b.context(OUTPUT + 0x400);
+        assert_eq!((slot[0] & 0xf_ffff, slot[3] & 0xff), (1, 1));
+        // No port 2: the device is missing, as a disconnected one is.
+        assert_eq!(address(&mut b, &mut hub, 2, 2), TRANSACTION_ERROR);
+        // Disabling the hub's port hides the keyboard too.
+        transfer(&mut hub, setup(0x23, 1, 1, 1, 0), &[]).unwrap();
+        assert_eq!(address(&mut b, &mut hub, 3, 1), TRANSACTION_ERROR);
+    }
 }
