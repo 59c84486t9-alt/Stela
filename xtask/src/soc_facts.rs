@@ -216,16 +216,14 @@ fn arm64_slice(data: &[u8]) -> Result<Option<&[u8]>> {
     .transpose()
 }
 
+/// IMPLEMENTATION DEFINED accesses by encoding and direction.
+type Census = BTreeMap<(sysreg::Encoding, sysreg::Direction), sysreg::Row>;
+
 /// The census of every kext binary under `directory`, merged: a row counts
 /// all sites and names the first file, in path order, that has one. The
 /// source digest covers each file's path and SHA-256.
-fn extensions(
-    directory: &Path,
-) -> Result<(
-    Value,
-    BTreeMap<(sysreg::Encoding, sysreg::Direction), sysreg::Row>,
-)> {
-    let mut rows: BTreeMap<_, sysreg::Row> = BTreeMap::new();
+fn extensions(directory: &Path) -> Result<(Value, Census)> {
+    let mut rows = Census::new();
     let mut listing = String::new();
     let mut files = 0;
     for (relative, path) in binaries(directory)? {
