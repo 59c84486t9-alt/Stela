@@ -9,6 +9,7 @@
 //! nothing reads as a silent zero. Doc comments mark what the cited sources
 //! document and what the model infers.
 pub mod aes;
+pub mod agx;
 pub mod aic;
 pub mod aic1;
 pub mod amcc;
