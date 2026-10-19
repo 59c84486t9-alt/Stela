@@ -852,20 +852,26 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
                 },
                 None => continue,
             },
-            "SEPFW" => match &inputs.sep_firmware {
-                Some(sep) => Content {
-                    name: (*name).into(),
-                    file: SEP_FILE.into(),
-                    file_offset: 0,
-                    bytes: sep.bytes.len() as u64,
-                    memory_bytes: page_round(sep.bytes.len() as u64),
-                    virtual_address: None,
-                },
-                None => {
-                    unresolved.push("SEPFW: no SEP firmware input; the region is absent".into());
-                    continue;
-                }
-            },
+            // Stela's SEP has no `fromPreload` path: it stays in SEPROM and
+            // boots via the ROM runtime path, where restored delivers the
+            // firmware through `load_sep_os` (opcode 6) and the SEP model
+            // authenticates it. iBoot only ever maps SEPFW together with
+            // `/arm-io/sep` `sepfw-loaded`/`sepfw-booted`/`sep-boot-slot`/
+            // `rsepfirmware` (docs/research/iboot-handoff.md), and
+            // `AppleSEPManager::start` takes `fromPreload` only when
+            // `sepfw-loaded` exists, so a SEPFW region mapped without those
+            // properties is a pairing iBoot never produces. Keep SEPFW
+            // unmapped (and those properties unpublished) until the model
+            // admits a preloaded sepOS image. The `sepfw.im4p` input still
+            // travels in the bundle as the runtime-load source.
+            "SEPFW" => {
+                unresolved.push(
+                    "SEPFW: Stela delivers SEP firmware at runtime (load_sep_os), not preloaded; \
+                     the region is absent"
+                        .into(),
+                );
+                continue;
+            }
             "BootArgs" => Content {
                 name: (*name).into(),
                 file: BOOT_ARGS_FILE.into(),
