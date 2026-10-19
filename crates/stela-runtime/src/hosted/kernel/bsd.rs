@@ -25,6 +25,7 @@ mod priority;
 mod process;
 pub(super) mod signal;
 pub(super) mod signatures;
+mod spawn;
 pub(super) mod sysctl;
 pub(super) mod thread;
 mod time;

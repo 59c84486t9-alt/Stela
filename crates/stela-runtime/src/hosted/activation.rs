@@ -68,6 +68,33 @@ pub fn activator(head: &[u8]) -> Result<Activator, i32> {
     Err(ENOEXEC)
 }
 
+/// The CPU type and subtype (capability bits included) of each Mach-O
+/// slice in a file whose first bytes are `head`: the thin image's own, or
+/// each fat architecture's in header order. Empty for anything else.
+pub fn slices(head: &[u8]) -> Vec<(u32, u32)> {
+    let word = |at: usize, big: bool| {
+        head.get(at..at + 4).map(|bytes| {
+            let bytes: [u8; 4] = bytes.try_into().unwrap();
+            if big {
+                u32::from_be_bytes(bytes)
+            } else {
+                u32::from_le_bytes(bytes)
+            }
+        })
+    };
+    if word(0, false) == Some(MH_MAGIC_64) {
+        return word(4, false).zip(word(8, false)).into_iter().collect();
+    }
+    let Some(magic @ (FAT_MAGIC | FAT_MAGIC_64)) = word(0, true) else {
+        return Vec::new();
+    };
+    let stride = if magic == FAT_MAGIC { 20 } else { 32 };
+    let count = word(4, true).unwrap_or(0) as usize;
+    (0..count)
+        .map_while(|index| word(8 + index * stride, true).zip(word(12 + index * stride, true)))
+        .collect()
+}
+
 /// `exec_shell_imgact`'s line, split as `exec_extract_strings` splits it:
 /// on spaces and tabs, ending at a newline or `#`, within the first
 /// `IMG_SHSIZE` bytes.
@@ -123,5 +150,14 @@ mod tests {
         fat.extend(CPU_TYPE_ARM64.to_be_bytes());
         fat.extend([0; 16]);
         assert_eq!(activator(&fat), Ok(Activator::MachO));
+        assert_eq!(
+            slices(&fat),
+            [(0x0100_0007, 0), (CPU_TYPE_ARM64, 0)],
+            "fat architectures in order"
+        );
+        let mut thin_e = thin.clone();
+        thin_e.extend(0x8000_0002u32.to_le_bytes());
+        assert_eq!(slices(&thin_e), [(CPU_TYPE_ARM64, 0x8000_0002)]);
+        assert!(slices(b"#! /bin/sh\n").is_empty());
     }
 }

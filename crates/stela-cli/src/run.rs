@@ -39,6 +39,10 @@ pub(crate) struct Run {
     /// `execve` passes it).
     #[arg(long)]
     argv0: Option<OsString>,
+    /// The arm64 slice exec chose by subtype (as `posix_spawn`'s binary
+    /// preferences choose it), instead of the regular grading.
+    #[arg(long)]
+    cpu_subtype: Option<u32>,
     /// Print every serviced call to standard error.
     #[arg(long)]
     trace: bool,
@@ -53,13 +57,21 @@ fn cpu_subtype(slice: &[u8]) -> Result<u32> {
     Ok(u32::from_le_bytes(word.try_into()?))
 }
 
-/// The slice exec would choose on an arm64e machine.
-fn select_slice(data: &[u8]) -> Result<(u64, &[u8])> {
+/// The slice exec would choose on an arm64e machine: the one of
+/// `subtype` when exec chose by subtype, else the regular grading.
+fn select_slice(data: &[u8], subtype: Option<u32>) -> Result<(u64, &[u8])> {
     let slices = split_slices(data)?;
     let kind = |slice: &[u8]| -> Option<(u32, u32)> {
         let word = |at: usize| Some(u32::from_le_bytes(slice.get(at..at + 4)?.try_into().ok()?));
         Some((word(4)?, word(8)? & !CPU_SUBTYPE_MASK))
     };
+    if let Some(subtype) = subtype {
+        return slices
+            .iter()
+            .find(|(_, slice)| kind(slice) == Some((CPU_TYPE_ARM64, subtype & !CPU_SUBTYPE_MASK)))
+            .copied()
+            .with_context(|| format!("the file has no arm64 slice of subtype {subtype}"));
+    }
     let arm64e = slices
         .iter()
         .find(|(_, slice)| kind(slice) == Some((CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E)));
@@ -210,7 +222,7 @@ impl Run {
             argv,
             data,
         } = activate(&self.root, &self.program, argv)?;
-        let (slice_offset, slice) = select_slice(&data)?;
+        let (slice_offset, slice) = select_slice(&data, self.cpu_subtype)?;
         let plan = load_plan::plan(slice)?;
         let signature = signature(slice)?;
         let dylinker_path = plan
@@ -220,7 +232,7 @@ impl Run {
         let dylinker_file = guest_path(&self.root, Path::new(dylinker_path));
         let dylinker_data = std::fs::read(&dylinker_file)
             .with_context(|| format!("cannot read {}", dylinker_file.display()))?;
-        let (dylinker_offset, dylinker_slice) = select_slice(&dylinker_data)?;
+        let (dylinker_offset, dylinker_slice) = select_slice(&dylinker_data, None)?;
         let dylinker_plan = load_plan::plan_dynamic_linker(dylinker_slice)?;
         let environment = std::env::vars_os()
             .map(|(key, value)| {

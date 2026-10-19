@@ -9,8 +9,8 @@
 //! activation command on the host with the new path, arguments and
 //! environment. The host kernel's exec keeps what exec keeps: the process
 //! ID, descriptors not marked close-on-exec, the signal mask and ignored
-//! signals, the working directory and the credentials. Creating processes
-//! needs the hosted runtime in the child and stays refused by name.
+//! signals, the working directory and the credentials. `posix_spawn`
+//! ([`super::spawn`]) creates a process with the same activation command.
 use super::{Call, EFAULT, Kernel, Outcome, Pe, paths};
 use crate::hosted::activation::{self, Activator};
 use crate::hosted::kernel::End;
@@ -36,12 +36,13 @@ pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Opt
             Some(Outcome::JustReturn)
         }
         "execve" => Some(execve(kernel, call)?),
+        "posix_spawn" => Some(super::spawn::posix_spawn(kernel, call)?),
         _ => None,
     })
 }
 
 /// A NULL-terminated guest vector of strings, or the errno reading it.
-fn strings(mut vector: u64, total: &mut usize) -> Result<Vec<Vec<u8>>, u64> {
+pub(super) fn strings(mut vector: u64, total: &mut usize) -> Result<Vec<Vec<u8>>, u64> {
     let mut strings = Vec::new();
     if vector == 0 {
         return Ok(strings);
@@ -78,24 +79,107 @@ fn lookup(kernel: &Kernel, path: &[u8]) -> Result<PathBuf, u64> {
     Ok(host)
 }
 
-/// The activator of the host file `path`, or the errno exec fails with.
-fn activate(path: &Path) -> Result<Activator, u64> {
+/// The first page of the host file `path` (all of a shorter file), which
+/// exec's activators read, or the errno reading it fails with.
+pub(super) fn first_page(path: &Path) -> Result<Vec<u8>, u64> {
     let mut head = vec![0u8; memory::PAGE_BYTES as usize];
     let read = std::fs::File::open(path)
         .and_then(|mut file| std::io::Read::read(&mut file, &mut head))
         .map_err(|error| error.raw_os_error().unwrap_or(0) as u64)?;
     head.truncate(read);
-    activation::activator(&head).map_err(|errno| errno as u64)
+    Ok(head)
+}
+
+/// The activator of the host file `path`, or the errno exec fails with.
+fn activate(path: &Path) -> Result<Activator, u64> {
+    activation::activator(&first_page(path)?).map_err(|errno| errno as u64)
+}
+
+/// The path an exec names, or the errno reading it fails with.
+pub(super) fn exec_path(address: u64) -> Result<Vec<u8>, u64> {
+    memory::read_string(address, MAX_PATH).ok_or(if memory::read(address, 1).is_some() {
+        ENAMETOOLONG
+    } else {
+        EFAULT
+    })
+}
+
+/// The host file guest `path` names and the host file of the Mach-O exec
+/// activates for it: the same file, or for an interpreter script the
+/// interpreter, which must be a Mach-O (nested interpreters fail with
+/// ENOEXEC). Or the errno exec fails with.
+pub(super) fn check_image(kernel: &Kernel, path: &[u8]) -> Result<(PathBuf, PathBuf), u64> {
+    let host = lookup(kernel, path)?;
+    if let Activator::Interpreter(tokens) = activate(&host)? {
+        let interpreter = lookup(kernel, &tokens[0])?;
+        if let Activator::Interpreter(_) = activate(&interpreter)? {
+            return Err(activation::ENOEXEC as u64);
+        }
+        return Ok((host, interpreter));
+    }
+    Ok((host.clone(), host))
+}
+
+/// A host vector of strings: the strings and the NULL-terminated pointers
+/// to them, valid while it lives.
+pub(super) struct HostVector {
+    strings: Vec<CString>,
+    pointers: Vec<*const libc::c_char>,
+}
+
+impl HostVector {
+    pub(super) fn new(strings: Vec<CString>) -> Self {
+        let mut pointers: Vec<_> = strings.iter().map(|string| string.as_ptr()).collect();
+        pointers.push(std::ptr::null());
+        Self { strings, pointers }
+    }
+
+    pub(super) fn as_ptr(&self) -> *const *const libc::c_char {
+        self.pointers.as_ptr()
+    }
+
+    /// The program the vector's first string names.
+    pub(super) fn program(&self) -> &CString {
+        &self.strings[0]
+    }
+}
+
+/// The host command that activates guest image `path` with `arguments`
+/// (argv[0] first) in a host process: the hosted runtime's activation
+/// command, the new image's argv[0] and, when exec chose one, the slice's
+/// CPU subtype.
+pub(super) fn activation_command(
+    kernel: &Kernel,
+    path: &[u8],
+    arguments: &[Vec<u8>],
+    cpu_subtype: Option<u32>,
+) -> Result<HostVector> {
+    let Some((program, prefix)) = kernel.process.reexec.split_first() else {
+        bail!("exec: the hosted runtime has no activation command");
+    };
+    let mut command = vec![CString::new(program.as_bytes())?];
+    for word in prefix {
+        command.push(CString::new(word.as_bytes())?);
+    }
+    let mut flag = b"--argv0=".to_vec();
+    flag.extend(arguments.first().map(Vec::as_slice).unwrap_or_default());
+    command.push(CString::new(flag)?);
+    if let Some(subtype) = cpu_subtype {
+        command.push(CString::new(format!("--cpu-subtype={subtype}"))?);
+    }
+    command.push(CString::new("--")?);
+    command.push(CString::new(path)?);
+    for argument in arguments.iter().skip(1) {
+        command.push(CString::new(argument.clone())?);
+    }
+    Ok(HostVector::new(command))
 }
 
 fn execve(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let [path, argv, envp, ..] = call.arguments;
-    let Some(path) = memory::read_string(path, MAX_PATH) else {
-        return Ok(Outcome::Error(if memory::read(path, 1).is_some() {
-            ENAMETOOLONG
-        } else {
-            EFAULT
-        }));
+    let path = match exec_path(path) {
+        Ok(path) => path,
+        Err(errno) => return Ok(Outcome::Error(errno)),
     };
     let mut total = path.len() + 1;
     let arguments = match strings(argv, &mut total) {
@@ -106,58 +190,17 @@ fn execve(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         Ok(environment) => environment,
         Err(errno) => return Ok(Outcome::Error(errno)),
     };
-    let host = match lookup(kernel, &path) {
-        Ok(host) => host,
+    let (host, _) = match check_image(kernel, &path) {
+        Ok(files) => files,
         Err(errno) => return Ok(Outcome::Error(errno)),
     };
-    match activate(&host) {
-        Ok(Activator::MachO) => {}
-        Ok(Activator::Interpreter(tokens)) => {
-            // The interpreter must itself be a Mach-O: nested interpreters
-            // fail with ENOEXEC.
-            let interpreter = match lookup(kernel, &tokens[0]) {
-                Ok(interpreter) => interpreter,
-                Err(errno) => return Ok(Outcome::Error(errno)),
-            };
-            match activate(&interpreter) {
-                Ok(Activator::MachO) => {}
-                Ok(Activator::Interpreter(_)) => {
-                    return Ok(Outcome::Error(activation::ENOEXEC as u64));
-                }
-                Err(errno) => return Ok(Outcome::Error(errno)),
-            }
-        }
-        Err(errno) => return Ok(Outcome::Error(errno)),
-    }
-    let Some((program, prefix)) = kernel.process.reexec.split_first() else {
-        bail!("execve: the hosted runtime has no activation command");
-    };
-    let argv0 = arguments.first().cloned().unwrap_or_default();
-    let mut command: Vec<CString> = Vec::new();
-    for word in prefix {
-        command.push(CString::new(word.as_bytes())?);
-    }
-    let mut flag = b"--argv0=".to_vec();
-    flag.extend(&argv0);
-    command.push(CString::new(flag)?);
-    command.push(CString::new("--")?);
-    command.push(CString::new(path.clone())?);
-    for argument in arguments.iter().skip(1) {
-        command.push(CString::new(argument.clone())?);
-    }
-    let program = CString::new(program.as_bytes())?;
-    let mut argv0_program = vec![program.clone()];
-    argv0_program.extend(command);
-    let environment: Vec<CString> = environment
-        .into_iter()
-        .map(CString::new)
-        .collect::<Result<_, _>>()?;
-    let mut argv_pointers: Vec<*const libc::c_char> =
-        argv0_program.iter().map(|word| word.as_ptr()).collect();
-    argv_pointers.push(std::ptr::null());
-    let mut envp_pointers: Vec<*const libc::c_char> =
-        environment.iter().map(|entry| entry.as_ptr()).collect();
-    envp_pointers.push(std::ptr::null());
+    let command = activation_command(kernel, &path, &arguments, None)?;
+    let environment = HostVector::new(
+        environment
+            .into_iter()
+            .map(CString::new)
+            .collect::<Result<_, _>>()?,
+    );
     if kernel.trace {
         eprintln!(
             "stela: execve {} -> {}",
@@ -169,9 +212,9 @@ fn execve(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     // across the call; on success the host replaces this process.
     unsafe {
         libc::execve(
-            program.as_ptr(),
-            argv_pointers.as_ptr(),
-            envp_pointers.as_ptr(),
+            command.program().as_ptr(),
+            command.as_ptr(),
+            environment.as_ptr(),
         )
     };
     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
