@@ -9,17 +9,26 @@
 //! - rail 7: `0x4d8` bits 31:19;
 //! - rail 12: `0x4cc` bits 29:21.
 //!
-//! The driver uses them only in its power estimates. An emulated die has no
-//! leakage to calibrate, so each field reads 0: the estimates count no
-//! leakage power rather than an invented one. The registers' other bits are
-//! fields no reader of this kernel is known to take, so they read 0 as well,
-//! and every other register refuses. Fuses are read-only.
+//! `AGXAcceleratorG14G::populatePowerEstimationConfigData` (KC file
+//! 0x1b6a1f0..0x1b6a3b0) reads the GPU's power-estimation calibration. When
+//! a 128-bit configuration it holds has ten bits set it takes `0x4e0`:`0x4dc`
+//! bits 42:30 and `0x4b0` bits 23:15, otherwise `0x4dc` bits 29:17 and `0x4e0`
+//! bits 19:11 (field tables at file 0x13c618 and 0x13c640). It stores
+//! float(first + 2) and a table scale times (second + 1) in the firmware's
+//! power-estimation configuration, with no division or validity check.
+//!
+//! The drivers use these fields only in power estimates. An emulated die has
+//! no leakage or power characteristic to calibrate, so each field reads 0:
+//! the estimates count the smallest calibrated values rather than invented
+//! ones. The registers' other bits are fields no reader of this kernel is
+//! known to take, so they read 0 as well, and every other register refuses.
+//! Fuses are read-only.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 
 const NAME: &str = "aon-fuse";
 
 /// The calibration registers a model describes.
-const DESCRIBED: [u64; 3] = [0x4c4, 0x4cc, 0x4d8];
+const DESCRIBED: [u64; 6] = [0x4b0, 0x4c4, 0x4cc, 0x4d8, 0x4dc, 0x4e0];
 
 /// The block's span.
 pub const FUSE_BYTES: u64 = 0x4000;
@@ -69,7 +78,7 @@ mod tests {
     use crate::platform::apple::interrupt::InterruptLatch;
 
     #[test]
-    fn the_rail_leakage_fields_read_uncalibrated() {
+    fn the_rail_leakage_and_gpu_power_fields_read_uncalibrated() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut fuses = AonFuses;
