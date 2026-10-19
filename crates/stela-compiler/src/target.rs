@@ -179,6 +179,7 @@ impl TargetCpu {
         self.data_independent_timing
     }
     /// True only when every required feature is present in this target.
+    /// The data-independent-timing mode is not a host feature.
     pub fn supports(self, required: Self) -> bool {
         self.tier >= required.tier
             && (!required.pclmulqdq || self.pclmulqdq)
@@ -194,7 +195,6 @@ impl TargetCpu {
             && (!required.avx2 || self.avx2)
             && (!required.avx512f || self.avx512f)
             && (!required.doit || self.doit)
-            && (!required.data_independent_timing || self.data_independent_timing)
     }
     /// Detect the host's usable CPU features. Freestanding callers supply a
     /// target explicitly.
@@ -356,10 +356,16 @@ fn darwin_on_demand_avx512f() -> bool {
     false
 }
 
-// Ordering means feature containment, not an arbitrary rank.
+// Ordering means feature containment, not an arbitrary rank. The timing
+// mode orders as one more feature, so a target compares equal only to
+// itself, while `supports` leaves the mode out of the host requirements.
 impl PartialOrd for TargetCpu {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        match (self.supports(*other), other.supports(*self)) {
+        let contains = |outer: &Self, inner: &Self| {
+            outer.supports(*inner)
+                && (outer.data_independent_timing || !inner.data_independent_timing)
+        };
+        match (contains(self, other), contains(other, self)) {
             (true, true) => Some(core::cmp::Ordering::Equal),
             (true, false) => Some(core::cmp::Ordering::Greater),
             (false, true) => Some(core::cmp::Ordering::Less),
@@ -422,7 +428,7 @@ mod tests {
             "x86_64-baseline+ssse3+sse4.1+sse4.2",
         ),
     ];
-    const FEATURES: [TargetCpu; 14] = [
+    const FEATURES: [TargetCpu; 13] = [
         TargetCpu::Pclmulqdq,
         TargetCpu::Fma,
         TargetCpu::F16c,
@@ -436,7 +442,6 @@ mod tests {
         TargetCpu::Avx2,
         TargetCpu::Avx512f,
         TargetCpu::Doit,
-        TargetCpu::DataIndependentTiming,
     ];
 
     fn profiles() -> impl Iterator<Item = TargetCpu> {
@@ -588,11 +593,16 @@ mod tests {
                 host.avx2,
                 host.avx512f,
                 host.doit,
-                host.data_independent_timing,
             ]) {
                 assert_eq!(host.supports(required), present);
                 assert_eq!(host >= required, present);
             }
+            // The timing mode is no host requirement, but orders as a
+            // feature: equality stays identity.
+            let timed = host.with_data_independent_timing();
+            assert!(host.supports(timed) && timed.supports(host));
+            assert!(timed >= host);
+            assert_eq!(host >= timed, host.data_independent_timing);
             for (required, _, _) in TIERS {
                 assert_eq!(host.supports(required), host.tier >= required.tier);
             }
