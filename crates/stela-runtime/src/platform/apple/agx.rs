@@ -17,8 +17,8 @@
 //!   directory.
 //! - [`ring`]: the shared-memory ring layout (state block, 256 entries,
 //!   descriptors) and the firmware's consume.
-//! - [`channel`]: a channel's command queue and the command-stream records
-//!   the firmware reads.
+//! - [`channel`]: a channel's command queue, the commands it names (type,
+//!   stream, completion stamp) and the command-stream records.
 //! - [`isa`]: a bit-exact decoder and x86-host interpreter for a bounded
 //!   subset of the AGX2 shader ISA.
 //! - [`exec`]: a compute-style dispatch that runs a shader over a surface grid

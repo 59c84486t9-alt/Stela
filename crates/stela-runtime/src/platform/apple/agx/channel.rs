@@ -14,24 +14,47 @@
 //!   `AGXChannel::writeChannelCommandPointer` 0x1b0d120, which waits while
 //!   `(write + 1) % length == read`, stores an 8-byte firmware VA at
 //!   `array[write]` and advances the write index modulo the length).
-//! - Each pointer names a command stream `AGXSKUEncoder` built
-//!   (`beginEncoding` 0x1b90088, `finishEncode` 0x1b902d0, which appends the
-//!   end word `0x4000_0002` and returns the stream's firmware VA). A record
-//!   starts with a 32-bit header whose low 16 bits are its type and whose high
-//!   byte carries flags. The types and sizes the 26A434 encoders write:
-//!   TA start 0x6 (0x9c bytes, `AGXTAChannelG14::encodeTACommandSKUStream`
-//!   0x1b68168), 3D start 0x8 (0xbc, `AGX3DChannelG14::encode3DCommandSKUStream`
-//!   0x1b622ec), fast blit 0xa (0x7c, `encodeFastBlitSKUStream` 0x1b61e24), CL
-//!   start 0xc (0x84, `AGXCLChannelG14::encodeCLCommandSKUStream` 0x1b65ef8),
-//!   0x4 (0x14, flags 0x08 or 0x88, written twice after each start), timestamp
-//!   0x3 (0x4c, flag 0x80 optional, `encodeTimeStamp` 0x1b9040c), shared-event
+//! - Each pointer is the firmware VA of an `AGFIChannelCommand*` structure
+//!   whose first word is its command type (`writeChannelCommandPointer`
+//!   takes the VA and the `AGFIChannelCommandType*`; the GFX firmware's
+//!   `AGFAcceleratorGetStampInfoForCommand` reads `array[index]` and switches
+//!   on the word, accepting the types in mask 0x1128f). The types the 26A434
+//!   kext writes: TA 0 (`AGXTAChannelSKU::submitBuffer` 0x1b98b04), 3D 1 and
+//!   fast blit 2 (`AGX3DChannelSKU::submitBuffer` 0x1aeb49c, which also
+//!   writes barrier 4 entries), CL 3 (`AGXCLChannelSKU::submitBuffer`
+//!   0x1b0fc48), remote node 7 (`submitRemoteNodeCommand` 0x1b0f3c8),
+//!   shared-event signal 9 (`submitSharedEventSignal` 0x1b0b7d8) and
+//!   dashboard signal 0xc (`submitDashboardSignalCommand` 0x1b0b240).
+//! - Each stamped command carries its completion stamp as two firmware VAs,
+//!   then the stamp value and the stamp index (the `IOGPUEvent` pair). The
+//!   firmware's per-type tables (`armfw_g14g` +0x593e0 and +0x59468) place
+//!   the value at TA +0x594, 3D +0x8f8, fast blit +0x5cc, CL +0x2a8, remote
+//!   node and shared-event signal +0x40, dashboard signal +0x30 and the index
+//!   4 bytes after it; the kext writes the addresses 0x10 and 8 bytes before
+//!   the value (`submitSharedEventSignal` +0x30/+0x38,
+//!   `submitDashboardSignalCommand` +0x20/+0x28, and the firmware's TA
+//!   completion entry at +0x584).
+//! - The command's stream is the one `AGXSKUEncoder` built (`beginEncoding`
+//!   0x1b90088 writes no record; `finishEncode` 0x1b902d0 appends the end
+//!   word `0x4000_0002` and returns the stream's firmware VA, which the
+//!   encoder stores in the command: 3D +0x14, fast blit +0x498, CL +0x1e8,
+//!   shared-event signal +0x1c, dashboard signal +0x10). A record starts with
+//!   a 32-bit header whose low 16 bits are its type and whose high byte
+//!   carries flags; the firmware dispatches on the low six bits. The types
+//!   and sizes the 26A434 encoders write: TA start 0x6 (0x9c bytes,
+//!   `AGXTAChannelG14::encodeTACommandSKUStream` 0x1b68168), 3D start 0x8
+//!   (0xbc, `AGX3DChannelG14::encode3DCommandSKUStream` 0x1b622ec), fast blit
+//!   0xa (0x7c, `encodeFastBlitSKUStream` 0x1b61e24), CL start 0xc (0x84,
+//!   `AGXCLChannelG14::encodeCLCommandSKUStream` 0x1b65ef8), 0x4 (0x14,
+//!   flags 0x08 or 0x88, written twice after each start), timestamp 0x3
+//!   (0x4c, flag 0x80 optional, `encodeTimeStamp` 0x1b9040c), shared-event
 //!   signal 0xe (0x4c, `AGXChannel::encodeSharedEventSignalCommandSKUStream`
 //!   0x1b0d02c), dashboard signal 0xf (0x54,
 //!   `encodeDashboardSignalCommandSKUStream` 0x1b0cf30) and the end 0x2 (4,
 //!   flag 0x40).
 //!
-//! The firmware model reads the queue and decodes the next command's first
-//! record. It executes none of them yet: a decoded record refuses by name.
+//! The firmware model reads the queue and the next command and refuses by
+//! the command's type: executing commands is a later layer.
 
 use super::ring::Shared;
 
@@ -67,23 +90,169 @@ impl Queue {
         Ok(Self { ring, commands })
     }
 
-    /// The firmware VA of the next pending command stream, if any.
-    pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>, &'static str> {
+    /// The (read, length) of the command ring, with the write index checked.
+    fn indices(&self, memory: &mut dyn Shared) -> Result<(u32, u32, u32), &'static str> {
         let read = memory.read_u32(self.ring + RING_READ)?;
         let write = memory.read_u32(self.ring + RING_WRITE)?;
         let length = memory.read_u32(self.ring + RING_LENGTH)?;
         if length == 0 || read >= length || write >= length {
             return Err("GFX channel command ring index out-of-bounds");
         }
+        Ok((read, write, length))
+    }
+
+    /// The firmware VA of the next pending command, if any.
+    pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>, &'static str> {
+        let (read, write, _) = self.indices(memory)?;
         if read == write {
             return Ok(None);
         }
-        let stream = memory.read_u64(self.commands + u64::from(read) * 8)?;
-        if stream == 0 {
+        let command = memory.read_u64(self.commands + u64::from(read) * 8)?;
+        if command == 0 {
             return Err("GFX channel command pointer is empty");
         }
-        Ok(Some(stream))
+        Ok(Some(command))
     }
+
+    /// Retire the command at the read index: the firmware's consume, which
+    /// frees the slot `writeChannelCommandPointer` waits on.
+    pub fn retire(&self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        let (read, write, length) = self.indices(memory)?;
+        if read == write {
+            return Err("GFX channel command ring has no command to retire");
+        }
+        memory.write(self.ring + RING_READ, &((read + 1) % length).to_le_bytes())
+    }
+}
+
+/// An `AGFIChannelCommand*` type the 26A434 kext writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Ta,
+    ThreeD,
+    FastBlit,
+    Cl,
+    Barrier,
+    RemoteNode,
+    SharedEventSignal,
+    DashboardSignal,
+}
+
+impl Kind {
+    /// Decode the command's type word.
+    pub fn decode(word: u32) -> Result<Self, &'static str> {
+        Ok(match word {
+            0 => Kind::Ta,
+            1 => Kind::ThreeD,
+            2 => Kind::FastBlit,
+            3 => Kind::Cl,
+            4 => Kind::Barrier,
+            7 => Kind::RemoteNode,
+            9 => Kind::SharedEventSignal,
+            0xc => Kind::DashboardSignal,
+            _ => return Err("GFX channel command type is not one the 26A434 kext writes"),
+        })
+    }
+
+    /// The stamp value's offset, from the firmware's per-type table; barriers
+    /// carry no stamp.
+    pub const fn stamp_value(self) -> Option<u64> {
+        match self {
+            Kind::Ta => Some(0x594),
+            Kind::ThreeD => Some(0x8f8),
+            Kind::FastBlit => Some(0x5cc),
+            Kind::Cl => Some(0x2a8),
+            Kind::Barrier => None,
+            Kind::RemoteNode | Kind::SharedEventSignal => Some(0x40),
+            Kind::DashboardSignal => Some(0x30),
+        }
+    }
+
+    /// Where the encoder stores the command's stream VA, where recovered.
+    pub const fn stream(self) -> Option<u64> {
+        match self {
+            Kind::ThreeD => Some(0x14),
+            Kind::FastBlit => Some(0x498),
+            Kind::Cl => Some(0x1e8),
+            Kind::SharedEventSignal => Some(0x1c),
+            Kind::DashboardSignal => Some(0x10),
+            Kind::Ta | Kind::Barrier | Kind::RemoteNode => None,
+        }
+    }
+
+    /// Why the model does not execute a command of this type.
+    pub const fn unexecuted(self) -> &'static str {
+        match self {
+            Kind::Ta => "GFX TA command (type 0) is not executed",
+            Kind::ThreeD => "GFX 3D command (type 1) is not executed",
+            Kind::FastBlit => "GFX fast-blit command (type 2) is not executed",
+            Kind::Cl => "GFX CL command (type 3) is not executed",
+            Kind::Barrier => "GFX barrier command (type 4) is not executed",
+            Kind::RemoteNode => "GFX remote-node command (type 7) is not executed",
+            Kind::SharedEventSignal => "GFX shared-event signal command (type 9) is not executed",
+            Kind::DashboardSignal => "GFX dashboard signal command (type 0xc) is not executed",
+        }
+    }
+}
+
+/// A channel command: its firmware VA and type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Command {
+    pub va: u64,
+    pub kind: Kind,
+}
+
+impl Command {
+    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self, &'static str> {
+        Ok(Self {
+            va,
+            kind: Kind::decode(memory.read_u32(va)?)?,
+        })
+    }
+
+    /// The firmware VA of the command's stream.
+    pub fn stream(&self, memory: &mut dyn Shared) -> Result<u64, &'static str> {
+        let at = self
+            .kind
+            .stream()
+            .ok_or("GFX channel command's stream location is not recovered")?;
+        match memory.read_u64(self.va + at)? {
+            0 => Err("GFX channel command names no stream"),
+            stream => Ok(stream),
+        }
+    }
+
+    /// The command's completion stamp.
+    pub fn stamp(&self, memory: &mut dyn Shared) -> Result<Stamp, &'static str> {
+        let value = self
+            .kind
+            .stamp_value()
+            .ok_or("GFX channel command carries no stamp")?;
+        let stamp = Stamp {
+            driver: memory.read_u64(self.va + value - 0x10)?,
+            firmware: memory.read_u64(self.va + value - 0x8)?,
+            value: memory.read_u32(self.va + value)?,
+            index: memory.read_u32(self.va + value + 4)?,
+        };
+        if stamp.index >= STAMPS {
+            return Err("GFX command stamp index is outside the firmware's 128 stamps");
+        }
+        Ok(stamp)
+    }
+}
+
+/// Stamps the firmware tracks: the Flag event's 128-bit mask.
+pub const STAMPS: u32 = 128;
+
+/// A command's completion stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    /// The stamp the completion writes before its Flag event (the first VA).
+    pub driver: u64,
+    /// The stamp a signal record writes (the second VA, the record's +0x30).
+    pub firmware: u64,
+    pub value: u32,
+    pub index: u32,
 }
 
 /// A command-stream record type the 26A434 encoders write.
@@ -146,25 +315,10 @@ impl Record {
         }
     }
 
-    /// Why the model does not execute this record.
-    pub const fn unexecuted(self) -> &'static str {
-        match self {
-            Record::End => "GFX command stream ends before any record the model executes",
-            Record::Timestamp => "GFX timestamp record (0x3) is not executed",
-            Record::Record4 => "GFX command record 0x4 is not executed",
-            Record::StartTa => "GFX TA start record (0x6) is not executed",
-            Record::Start3d => "GFX 3D start record (0x8) is not executed",
-            Record::FastBlit => "GFX fast-blit record (0xa) is not executed",
-            Record::StartCl => "GFX CL start record (0xc) is not executed",
-            Record::SharedEventSignal => "GFX shared-event signal record (0xe) is not executed",
-            Record::DashboardSignal => "GFX dashboard signal record (0xf) is not executed",
-        }
+    /// Read the record header at `va`.
+    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self, &'static str> {
+        Self::decode(memory.read_u32(va)?)
     }
-}
-
-/// Decode the first record of the stream at `stream`.
-pub fn first_record(memory: &mut dyn Shared, stream: u64) -> Result<Record, &'static str> {
-    Record::decode(memory.read_u32(stream)?)
 }
 
 #[cfg(test)]
@@ -174,25 +328,27 @@ pub(crate) mod tests {
 
     const BASE: u64 = 0xffff_ffa0_0000_0000;
 
-    /// A channel state at `state` whose queue holds one command at `stream`.
-    pub(crate) fn one_command(memory: &mut Flat, state: u64, stream: u64) {
+    /// A channel state at `state` whose queue holds one command at `command`.
+    pub(crate) fn one_command(memory: &mut Flat, state: u64, command: u64) {
         let (ring, commands) = (state + 0x1000, state + 0x2000);
         memory.put_u64(state, ring);
         memory.put_u64(state + 8, commands);
         memory.put_u32(ring + 0x50, 0x80);
         memory.put_u32(ring + 0x40, 1);
-        memory.put_u64(commands, stream);
+        memory.put_u64(commands, command);
     }
 
     #[test]
-    fn the_queue_names_the_next_command_stream() {
+    fn the_queue_names_the_next_command_and_retires_it() {
         let mut memory = Flat::new(BASE, 0x8000);
         one_command(&mut memory, BASE, BASE + 0x4000);
         let queue = Queue::read(&mut memory, BASE).unwrap();
         assert_eq!(queue.next(&mut memory), Ok(Some(BASE + 0x4000)));
-        // Read reaching write: nothing pending.
-        memory.put_u32(BASE + 0x1000, 1);
+        // Retiring advances the read index to the write index: nothing pending.
+        queue.retire(&mut memory).unwrap();
+        assert_eq!(memory.read_u32(BASE + 0x1000), Ok(1));
         assert_eq!(queue.next(&mut memory), Ok(None));
+        assert!(queue.retire(&mut memory).is_err());
         // An index past the ring's length refuses.
         memory.put_u32(BASE + 0x1040, 0x80);
         assert!(queue.next(&mut memory).is_err());
@@ -214,5 +370,46 @@ pub(crate) mod tests {
         assert!(Record::decode(0x2).is_err());
         assert!(Record::decode(0x8000_0008).is_err());
         assert!(Record::decode(0x0001_0008).is_err());
+    }
+
+    #[test]
+    fn command_types_and_layouts_follow_the_kext_and_firmware_tables() {
+        assert_eq!(Kind::decode(9), Ok(Kind::SharedEventSignal));
+        assert_eq!(Kind::decode(0xc), Ok(Kind::DashboardSignal));
+        assert_eq!(Kind::decode(3).map(Kind::stamp_value), Ok(Some(0x2a8)));
+        assert_eq!(Kind::Barrier.stamp_value(), None);
+        assert_eq!(Kind::Ta.stream(), None);
+        // The firmware accepts 0x10, which no 26A434 writer produces.
+        assert!(Kind::decode(0x10).is_err());
+        assert!(Kind::decode(5).is_err());
+    }
+
+    #[test]
+    fn a_signal_command_names_its_stream_and_stamp() {
+        let mut memory = Flat::new(BASE, 0x1000);
+        memory.put_u32(BASE, 9);
+        memory.put_u64(BASE + 0x1c, BASE + 0x800);
+        memory.put_u64(BASE + 0x30, BASE + 0x900);
+        memory.put_u64(BASE + 0x38, BASE + 0xa00);
+        memory.put_u32(BASE + 0x40, 0x300);
+        memory.put_u32(BASE + 0x44, 5);
+        let command = Command::read(&mut memory, BASE).unwrap();
+        assert_eq!(command.kind, Kind::SharedEventSignal);
+        assert_eq!(command.stream(&mut memory), Ok(BASE + 0x800));
+        assert_eq!(
+            command.stamp(&mut memory),
+            Ok(Stamp {
+                driver: BASE + 0x900,
+                firmware: BASE + 0xa00,
+                value: 0x300,
+                index: 5,
+            })
+        );
+        // A stamp index past the Flag mask refuses.
+        memory.put_u32(BASE + 0x44, STAMPS);
+        assert!(command.stamp(&mut memory).is_err());
+        // So does a command with no stream.
+        memory.put_u64(BASE + 0x1c, 0);
+        assert!(command.stream(&mut memory).is_err());
     }
 }

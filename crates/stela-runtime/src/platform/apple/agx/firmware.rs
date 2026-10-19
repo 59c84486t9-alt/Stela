@@ -36,8 +36,8 @@
 //! device-control doorbell it consumes the device-control ring: the
 //! power-transition notice (type 0x28) is recorded and retired; every other
 //! type refuses by name and stays unconsumed. On a work doorbell it reads the
-//! named data-master ring and refuses the first pending entry, since channel
-//! execution is a later layer: no work is retired and no completion event is
+//! named data-master ring and refuses the first pending entry by its
+//! channel command's type, since command execution is a later layer: no work is retired and no completion event is
 //! fabricated.
 
 use super::super::asc::{Firmware, Message as Mail};
@@ -256,9 +256,9 @@ impl State {
         Ok(())
     }
 
-    /// Read a data-master ring's pending work down to the first record of the
-    /// channel's next command stream. Executing it is a later layer, so a
-    /// pending entry refuses by that record's name and nothing is retired.
+    /// Read a data-master ring's pending work down to the channel's next
+    /// command. Executing it is a later layer, so a pending entry refuses by
+    /// the command's type and nothing is retired.
     fn work_ring(
         memory: &mut dyn Shared,
         root: &Root,
@@ -277,10 +277,10 @@ impl State {
         }
         let state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
         let queue = channel::Queue::read(memory, state)?;
-        let stream = queue
+        let command = queue
             .next(memory)?
             .ok_or("GFX data-master entry names a channel with no pending command")?;
-        Err(channel::first_record(memory, stream)?.unexecuted())
+        Err(channel::Command::read(memory, command)?.kind.unexecuted())
     }
 }
 
@@ -583,18 +583,18 @@ mod tests {
             state.dma(&mut memory),
             Err("GFX data-master entry names no channel state")
         );
-        // A channel whose next command stream starts with a 3D start record.
-        let (channel_state, stream) = (BASE + 0xd000, BASE + 0x10000);
+        // A channel whose next command is a 3D command.
+        let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
         crate::platform::apple::agx::channel::tests::one_command(
             &mut memory,
             channel_state,
-            stream,
+            command,
         );
         memory.put_u64(entries + 0x08, channel_state);
-        memory.put_u32(stream, 0x8);
+        memory.put_u32(command, 1);
         assert_eq!(
             state.dma(&mut memory),
-            Err("GFX 3D start record (0x8) is not executed")
+            Err("GFX 3D command (type 1) is not executed")
         );
         assert_eq!(memory.read_u32(ring_state + READ), Ok(0));
         // An empty ring has nothing to refuse.
