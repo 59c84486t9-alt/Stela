@@ -24,7 +24,7 @@ mod checks;
 mod codegen;
 mod expression;
 mod fold;
-mod resets;
+pub(crate) mod resets;
 pub mod runs;
 
 pub const MATRIX: &str = "isa/a64-system-requirements.json";

@@ -7,6 +7,7 @@ mod boot;
 mod check;
 mod darwin_catalogs;
 mod differential;
+mod dit;
 mod oracle;
 mod progress;
 mod system_matrix;
@@ -40,6 +41,9 @@ enum Task {
     SystemMatrix(system_matrix::SystemMatrix),
     /// Generate the BSD system-call and Mach-trap catalogs from xnu sources.
     DarwinCatalogs(darwin_catalogs::DarwinCatalogs),
+    /// Audit the native code of Arm's data-independent-time instructions
+    /// against Intel's data operand independent timing list.
+    DitAudit(dit::DitAudit),
     /// Merge the instruction and system registries into their matrices and
     /// the README.
     Progress {
@@ -58,6 +62,7 @@ fn main() -> ExitCode {
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::SystemMatrix(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
             .map(|()| ExitCode::SUCCESS),

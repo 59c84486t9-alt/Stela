@@ -185,7 +185,7 @@ fn name(kernel: Kernel) -> String {
     )
 }
 
-fn objdump() -> Option<PathBuf> {
+pub(crate) fn objdump() -> Option<PathBuf> {
     which("llvm-objdump").or_else(|| {
         let output = Command::new("xcrun")
             .args(["-f", "llvm-objdump"])
@@ -201,6 +201,16 @@ fn objdump() -> Option<PathBuf> {
 /// One line per instruction. The bytes are wrapped in an ELF object with the
 /// C compiler's assembler, since not every `llvm-objdump` reads raw binaries.
 fn disassemble(objdump: &PathBuf, directory: &tempfile::TempDir, bytes: &[u8]) -> Result<String> {
+    listing(objdump, directory, bytes, false)
+}
+
+/// One line per instruction, each led by its offset when `addresses` is set.
+pub(crate) fn listing(
+    objdump: &PathBuf,
+    directory: &tempfile::TempDir,
+    bytes: &[u8],
+    addresses: bool,
+) -> Result<String> {
     let source = directory.path().join("kernel.s");
     let object = directory.path().join("kernel.o");
     let data = bytes
@@ -217,13 +227,8 @@ fn disassemble(objdump: &PathBuf, directory: &tempfile::TempDir, bytes: &[u8]) -
             .arg(&source),
     )?;
     let output = Command::new(objdump)
-        .args([
-            "-d",
-            "--no-show-raw-insn",
-            "--no-leading-addr",
-            "-M",
-            "intel",
-        ])
+        .args(["-d", "--no-show-raw-insn", "-M", "intel"])
+        .args((!addresses).then_some("--no-leading-addr"))
         .arg(&object)
         .output()
         .with_context(|| format!("cannot run {}", objdump.display()))?;
