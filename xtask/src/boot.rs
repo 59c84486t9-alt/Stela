@@ -39,6 +39,7 @@ use stela_runtime::payload::{
 };
 
 mod disks;
+mod lan;
 mod preboot;
 
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
@@ -205,9 +206,11 @@ pub struct Run {
     /// `--input`.
     #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
     input: bool,
-    /// Give the mount a host network adapter: QEMU user networking behind
-    /// a `virtio-net-pci`, which the mount drives after ExitBootServices
-    /// for its own requests (`--tss`, `--network-check`).
+    /// Give the mount a host network adapter: a `virtio-net-pci`, which the
+    /// mount drives after ExitBootServices for its own requests (`--tss`,
+    /// `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
+    /// peer (`boot/lan.rs`): DHCP, DNS and TCP relayed to the host, logged
+    /// to `network.log`. QEMU needs no slirp.
     #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
     network: bool,
     /// Have the mount POST once to this `http://` URL over the host network
@@ -579,12 +582,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         ]);
     }
     if arguments.network {
-        command.args([
-            "-netdev",
-            "user,id=host-net",
-            "-device",
-            "virtio-net-pci,netdev=host-net",
-        ]);
+        let port = lan::listen(output.join("network.log")).context("start the network peer")?;
+        command
+            .arg("-netdev")
+            .arg(format!(
+                "stream,id=host-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
+            ))
+            .args(["-device", "virtio-net-pci,netdev=host-net"]);
     }
     match arguments.display {
         Display::None => command
