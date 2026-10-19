@@ -224,7 +224,7 @@ fn evaluate(plane: [f32; 3], at: [f32; 2]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::super::machine::tests::{Flat, finish, setup};
-    use super::super::machine::{ExecError, Fault};
+    use super::super::machine::{ExecError, Fault, Memory};
     use super::*;
     use alloc::vec::Vec;
 
@@ -237,13 +237,16 @@ mod tests {
         depth: Vec<(usize, Option<f32>, Option<u8>)>,
     }
 
-    impl Env for Fragment {
+    impl Memory for Fragment {
         fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), Fault> {
             self.memory.read(address, buffer)
         }
         fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Fault> {
             self.memory.write(address, data)
         }
+    }
+
+    impl Env for Fragment {
         fn coefficient(&mut self, cf: u32) -> Result<[f32; 3], &'static str> {
             self.planes
                 .get(cf as usize)

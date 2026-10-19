@@ -47,6 +47,15 @@ pub struct Fault {
     pub write: bool,
 }
 
+/// A GPU virtual address space as the GPU reaches it (through the job's
+/// UAT context).
+pub trait Memory {
+    /// Read GPU memory at a virtual address.
+    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), Fault>;
+    /// Write GPU memory at a virtual address.
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Fault>;
+}
+
 /// Why a SIMD group stopped before finishing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecError {
@@ -121,12 +130,7 @@ pub struct Specials {
 /// The effects a SIMD group has outside its own state. Memory is required;
 /// every stage-specific effect defaults to a named refusal, and each stage
 /// implements the ones it has.
-pub trait Env {
-    /// Read GPU memory at a virtual address.
-    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), Fault>;
-    /// Write GPU memory at a virtual address.
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Fault>;
-
+pub trait Env: Memory {
     /// The threadgroup's memory (compute; the imageblock in fragment).
     fn threadgroup(&mut self) -> Option<&mut [u8]> {
         None
@@ -641,7 +645,9 @@ pub(crate) mod tests {
         }
     }
 
-    impl Env for Flat {
+    impl Env for Flat {}
+
+    impl Memory for Flat {
         fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), Fault> {
             let fault = Fault {
                 address,
