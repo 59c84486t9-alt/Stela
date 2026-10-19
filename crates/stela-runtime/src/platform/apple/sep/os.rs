@@ -23,6 +23,10 @@
 //! is not gated. Only services with a native implementation are cataloged:
 //! a guessed advertisement would make the kernel create a nub it then blocks
 //! on. docs/research/sep.md owns the recovered contract.
+//!
+//! Application-service frames wait for the SEP's DMA step, where the service
+//! reads its request from, and writes its result to, the OOL buffers its AP
+//! client registered; the reply follows only once that has succeeded.
 use super::super::asc::Message;
 use super::{
     Entropy, SecurityMode,
@@ -31,7 +35,9 @@ use super::{
     message::{self, Frame},
     ool::Buffers,
     shared::Region,
+    xart::{self, Payload, Xart},
 };
+use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
 
 /// The SEP's power state as the control endpoint drives it.
@@ -52,6 +58,9 @@ pub struct SepOs {
     ap_sleep_ready: bool,
     buffers: Vec<Buffers>,
     catalog: Catalog,
+    xart: Option<Xart>,
+    /// Application-service requests awaiting the DMA step, in arrival order.
+    pending: Vec<Frame>,
 }
 
 /// The SEP page that scales discovery capacities: 16 KiB, since
@@ -69,7 +78,50 @@ impl SepOs {
             ap_sleep_ready: false,
             buffers: Vec::new(),
             catalog: Catalog::empty(),
+            xart: None,
+            pending: Vec::new(),
         }
+    }
+
+    /// The SEP's native services: the xART pair, advertised once OS active
+    /// is reported.
+    pub fn with_services(mut self) -> Result<Self, &'static str> {
+        self.catalog = Catalog::new(xart::services().to_vec())?;
+        self.xart = Some(Xart::new());
+        Ok(self)
+    }
+
+    /// The xART service state, when installed.
+    pub fn xart(&self) -> Option<&Xart> {
+        self.xart.as_ref()
+    }
+
+    /// Whether application-service requests await the DMA step.
+    pub fn dma_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Answer the queued application-service requests through `port`. A
+    /// refusal or DMA fault stops before that request's reply.
+    pub fn dma(
+        &mut self,
+        port: &mut Port<'_, '_>,
+        outbox: &mut Vec<Message>,
+    ) -> Result<(), &'static str> {
+        for frame in core::mem::take(&mut self.pending) {
+            let xart = self
+                .xart
+                .as_mut()
+                .ok_or("SEP application service has no native handler")?;
+            let mut payload = Ool {
+                buffers: self.buffers.iter().find(|b| b.service() == frame.service),
+                port: &mut *port,
+                read: 0,
+            };
+            let reply = xart.request(frame, &mut payload)?;
+            outbox.push(reply.mailbox());
+        }
+        Ok(())
     }
 
     /// Advertise `catalog` once OS active is reported. Its services' frames
@@ -133,6 +185,16 @@ impl SepOs {
                 Err("SEP discovery is advertised by the SEP, not received from the AP")
             }
             message::ROM => Err("SEPROM commands are not valid once sepOS is active"),
+            service if self.xart.is_some() && self.catalog.service(service).is_ok() => {
+                if !self.os_active_sent {
+                    return Err("SEP service request before sepOS reported OS active");
+                }
+                if self.power != Power::Awake {
+                    return Err("SEP service request while the SEP sleeps or naps");
+                }
+                self.pending.push(frame);
+                Ok(())
+            }
             _ => Err("SEP application service is not modeled"),
         }
     }
@@ -235,6 +297,44 @@ impl SepOs {
             outbox.push(control::reply(frame, Status::Success, data).mailbox());
         }
         Ok(())
+    }
+}
+
+/// A service's OOL buffers as its request payload. Input is read in order
+/// from the start of the AP-to-SEP buffer; output starts the SEP-to-AP one.
+struct Ool<'a, 'p, 'm, 'n> {
+    buffers: Option<&'a Buffers>,
+    port: &'p mut Port<'m, 'n>,
+    read: u64,
+}
+
+fn dma_refusal(error: DmaError) -> &'static str {
+    match error {
+        DmaError::Unsupported(reason) => reason,
+        DmaError::Fault(_) => "SEP service OOL DMA fault in dart-sep",
+        DmaError::Memory => "SEP service OOL buffer is outside guest RAM",
+    }
+}
+
+impl Payload for Ool<'_, '_, '_, '_> {
+    fn input(&mut self, bytes: &mut [u8]) -> Result<(), &'static str> {
+        let buffers = self
+            .buffers
+            .ok_or("SEP service request before its OOL buffers are registered")?;
+        buffers
+            .read_input(self.port, self.read, bytes)
+            .map_err(dma_refusal)?;
+        self.read += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn output(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        let buffers = self
+            .buffers
+            .ok_or("SEP service reply before its OOL buffers are registered")?;
+        buffers
+            .write_output(self.port, 0, bytes)
+            .map_err(dma_refusal)
     }
 }
 
@@ -390,6 +490,101 @@ mod tests {
                 .is_empty()
         );
         assert!(os.ap_sleep_ready());
+    }
+
+    struct Identity;
+    impl crate::platform::dma::Iommu for Identity {
+        fn page(&self) -> u64 {
+            0x4000
+        }
+        fn translate(
+            &mut self,
+            _: &mut dyn crate::platform::dma::Memory,
+            _: usize,
+            iova: u64,
+            _: u64,
+            _: bool,
+            _: &mut crate::platform::apple::bus::Access<'_>,
+        ) -> Result<u64, DmaError> {
+            Ok(iova)
+        }
+    }
+
+    fn dma(
+        os: &mut SepOs,
+        ram: &mut crate::platform::dma::tests::Ram,
+    ) -> Result<Vec<Frame>, &'static str> {
+        let mut latch = crate::platform::apple::interrupt::InterruptLatch::new();
+        let mut access = crate::platform::apple::bus::Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Identity,
+            stream: 0,
+            memory: ram,
+            access: &mut access,
+        };
+        let mut outbox = Vec::new();
+        os.dma(&mut port, &mut outbox)?;
+        Ok(outbox
+            .into_iter()
+            .map(|m| Frame::from_mailbox(m).unwrap())
+            .collect())
+    }
+
+    #[test]
+    fn xart_requests_are_answered_after_their_ool_input_is_read() {
+        let mut os = SepOs::new(None).with_services().unwrap();
+        let advertised = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        // OS active, then name and capacities for each of xarm and xars.
+        assert_eq!(advertised.len(), 5);
+        assert_eq!(advertised[1].data, xart::MASTER);
+        assert_eq!(advertised[3].data, xart::SLAVE);
+        let request = xart::XartMessage {
+            service: xart::SLAVE_ID,
+            tag: 4,
+            op: 8,
+            length: 16,
+            flags: 0,
+            slot: 0,
+            reserved: 0,
+        }
+        .frame();
+        // Without registered buffers the request is queued, then refuses.
+        assert!(reply(&mut os, request).unwrap().is_empty());
+        assert!(os.dma_pending());
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        assert!(dma(&mut os, &mut ram).is_err());
+        // The AP registers one 0x8000-byte buffer each way, then sends.
+        for (tag, opcode, data) in [
+            (1, control::SET_OOL_IN_LENGTH, 0x8000),
+            (2, control::SET_OOL_IN_ADDRESS, 0x100),
+            (3, control::SET_OOL_OUT_LENGTH, 0x8000),
+            (4, control::SET_OOL_OUT_ADDRESS, 0x108),
+        ] {
+            reply(&mut os, control(tag, opcode, xart::SLAVE_ID, data)).unwrap();
+        }
+        ram.bytes[..16].copy_from_slice(&[0x5a; 16]);
+        assert!(reply(&mut os, request).unwrap().is_empty());
+        let answer = dma(&mut os, &mut ram).unwrap();
+        assert_eq!(
+            answer,
+            [xart::XartMessage {
+                op: 0,
+                length: 0,
+                ..xart::XartMessage::from_frame(request)
+            }
+            .frame()]
+        );
+        assert_eq!(os.xart().unwrap().os_uuid(), Some(&[0x5a; 16][..]));
+        assert!(!os.dma_pending());
+        // A request needing the persistent store refuses with no reply.
+        let nonce = xart::XartMessage {
+            op: 0x0f,
+            length: 0,
+            ..xart::XartMessage::from_frame(request)
+        }
+        .frame();
+        reply(&mut os, nonce).unwrap();
+        assert!(dma(&mut os, &mut ram).is_err());
     }
 
     #[test]

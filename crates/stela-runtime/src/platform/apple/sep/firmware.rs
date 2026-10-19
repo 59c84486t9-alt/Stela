@@ -125,7 +125,10 @@ impl Firmware for SepFirmware {
     }
 
     fn dma_pending(&self) -> bool {
-        matches!(self.phase, Phase::Rom) && self.rom.image_request().is_some()
+        match &self.phase {
+            Phase::Rom => self.rom.image_request().is_some(),
+            Phase::Active(os) => os.dma_pending(),
+        }
     }
 
     fn dma(
@@ -133,9 +136,9 @@ impl Firmware for SepFirmware {
         port: &mut Port<'_, '_>,
         outbox: &mut Vec<Message>,
     ) -> Result<(), &'static str> {
-        let Phase::Rom = self.phase else {
-            return Ok(());
-        };
+        if let Phase::Active(os) = &mut self.phase {
+            return os.dma(port, outbox);
+        }
         let Some(request) = self.rom.image_request() else {
             return Ok(());
         };
@@ -156,7 +159,7 @@ impl Firmware for SepFirmware {
             }
             .mailbox(),
         );
-        self.phase = Phase::Active(SepOs::new(self.security));
+        self.phase = Phase::Active(SepOs::new(self.security).with_services()?);
         Ok(())
     }
 }
