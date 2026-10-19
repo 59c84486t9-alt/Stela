@@ -415,7 +415,7 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "sysctl" => by_number(kernel, call)?,
-        "sysctlbyname" => by_name(kernel, call)?,
+        "sys_sysctlbyname" => by_name(kernel, call)?,
         _ => return Ok(None),
     }))
 }
