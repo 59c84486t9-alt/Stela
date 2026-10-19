@@ -114,3 +114,39 @@ pub fn map_range(
     }
     Ok(())
 }
+
+/// Unmap `first..=last`, an address range inside one entry of the PML5
+/// `root`: clear each entry that maps only addresses in the range, and
+/// descend into the tables of the entries that straddle its ends. Tables
+/// the cleared entries pointed to stay allocated; the TLB is the caller's.
+pub fn unmap(frames: &dyn Frames, root: u64, first: u64, last: u64) {
+    clear(frames, root, 4, first, last);
+}
+
+fn clear(frames: &dyn Frames, table: u64, level: u32, first: u64, last: u64) {
+    let shift = 12 + 9 * level;
+    // The table maps the aligned region holding the range.
+    let region = first & !((1u64 << (shift + 9)) - 1);
+    for slot in index(first, level)..=index(last, level) {
+        let start = region | (slot as u64) << shift;
+        let end = start | ((1u64 << shift) - 1);
+        let entry = frames.table(table).wrapping_add(slot);
+        // SAFETY: `table` is a live table page of these frames.
+        let value = unsafe { entry.read_volatile() };
+        if value & PRESENT == 0 {
+            continue;
+        }
+        if level == 0 || value & HUGE != 0 || (first <= start && end <= last) {
+            // SAFETY: as above.
+            unsafe { entry.write_volatile(0) };
+        } else {
+            clear(
+                frames,
+                value & ADDRESS,
+                level - 1,
+                first.max(start),
+                last.min(end),
+            );
+        }
+    }
+}

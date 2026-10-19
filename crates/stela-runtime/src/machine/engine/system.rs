@@ -10,18 +10,24 @@
 //!   has no FEAT_MixedEnd.
 use super::{
     Devices, Host, Machine, RequirementKind, Step, Stop,
-    mmu::{self, Access as MemoryAccess, Outcome as Translated},
+    mmu::{
+        self, Access as MemoryAccess, Outcome as Translated,
+        tlbi::{self, Reach, Scope},
+    },
 };
 use crate::machine::{
     CpuProfile,
-    cpu::{Cpu, Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_VF, HCR_VI, HCR_VSE, TranslationRegime},
+    cpu::{
+        Cpu, Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE,
+        TranslationRegime,
+    },
     debug::{self, DCC_FULL},
     exception::{self, Class, DAIF_A, DAIF_D, DAIF_F, DAIF_I, Pstate as PstateBits},
     pmu::Pmu,
     registers::{Lines, Refusal, trap_iss},
     system::{
         ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
-        Feature, Limit, Operation, Pstate, Register, Stage, helpers::sign_extend,
+        Feature, Limit, Operation, Pstate, Register, Stage, Tlbi, helpers::sign_extend,
     },
     timer::Channel,
 };
@@ -339,14 +345,38 @@ pub(super) struct Access<'a, H: Host, D: Devices> {
     refusal: Cell<Option<&'static str>>,
 }
 
-/// The cached translations an access makes stale, least first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// The cached translations an access makes stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Translation {
     Unchanged,
     /// A TTBR0 write: the lower half's ([`table_base`]).
     TableBase,
-    /// Another translation control, or TLB maintenance: all.
+    /// Another translation control: all.
     All,
+    /// TLB maintenance: every fetch translation, and of the shadow what
+    /// the TLBI reaches.
+    Maintenance(Reach),
+}
+
+/// HCR_EL2.FB: EL1 TLBIs broadcast Inner Shareable.
+const HCR_FB: u32 = 9;
+
+/// What `tlbi` removes from the shadow of `cpu`'s current context. EL2 is
+/// enabled and HCR_EL2.E2H is RES1 (`cpu`).
+fn reach(cpu: &Cpu, tlbi: &Tlbi) -> Reach {
+    let controls = cpu.controls(cpu.regime());
+    let context = tlbi::Context {
+        el: cpu.pstate.el,
+        el2: true,
+        e2h: true,
+        tge: cpu.hcr(HCR_TGE),
+        fb: cpu.hcr(HCR_FB),
+    };
+    let current = tlbi::Current {
+        regime: controls.regime,
+        asid: (controls.regime != mmu::Regime::El2).then(|| mmu::current_asid(&controls)),
+    };
+    Scope::new(tlbi, context).reach(&current)
 }
 
 /// The compiled code an instruction-cache invalidation makes stale.
@@ -702,7 +732,9 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             .profile_missing
             .retain(|missing| *missing != register);
         if table_base(register) {
-            self.translation = self.translation.max(Translation::TableBase);
+            if self.translation == Translation::Unchanged {
+                self.translation = Translation::TableBase;
+            }
         } else if translates(register) {
             self.translation = Translation::All;
         }
@@ -728,10 +760,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
 
     fn operation(&mut self, operation: Operation) -> Result<(), Effect> {
         match operation {
-            // Every TLB maintenance operation discards all translations, a
-            // superset of what any scope or level requires.
-            Operation::Tlbi(_) => {
-                self.translation = Translation::All;
+            // Fetch translations go whole; the shadow, a cache of the
+            // current context alone, loses what the TLBI reaches of it, a
+            // superset of its scope and level.
+            Operation::Tlbi(tlbi) => {
+                self.translation = Translation::Maintenance(reach(&self.machine.cpu, &tlbi));
                 Ok(())
             }
             Operation::At {
@@ -1077,6 +1110,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match translation {
             Translation::All => self.translations_changed(),
             Translation::TableBase => self.table_base_changed(),
+            Translation::Maintenance(reach) => self.tlb_maintained(reach),
             Translation::Unchanged if regime => self.sync_regime(),
             Translation::Unchanged => {}
         }

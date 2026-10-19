@@ -4,9 +4,10 @@
 //! Shadow roots are PML5 pages whose entry 0 and 511 hold the guest's two
 //! halves and whose entry 64 is the shared window. There is one root per
 //! permission view (EL0, EL1, EL1 with PAN, GL1), filled on demand by the #PF
-//! handler from the software walk of the guest's tables. Each half takes its
-//! tables from its own part of the pool, so a change of TTBR0 alone (a
-//! context switch) drops the lower half and keeps the upper half's.
+//! handler from the software walk of the guest's tables. Each half takes its tables from its own part of the
+//! pool, so a change of TTBR0 alone (a context switch) drops the lower half
+//! and keeps the upper half's, and records the leaves it was filled from
+//! (`mmu::shadow::Extents`), so a TLBI unmaps only the ranges it reaches.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
 use crate::{
     layout,
@@ -21,7 +22,11 @@ use core::{
 use stela_compiler::{GuestState, block::BlockExit};
 use stela_runtime::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
-    mmu::{self, Access, Outcome},
+    mmu::{
+        self, Access, Outcome,
+        shadow::Extents,
+        tlbi::Reach,
+    },
 };
 
 /// Guest DRAM backed by one contiguous host range.
@@ -104,6 +109,10 @@ const ROOTS: usize = 4;
 const PERMANENT_FRAMES: u64 = 64;
 const GUEST_LOW: usize = 0;
 const GUEST_HIGH: usize = 511;
+/// The addresses of each half's root entry.
+const HALVES: [(u64, u64); 2] = [(0, (1 << 48) - 1), (0xffff_0000_0000_0000, u64::MAX)];
+/// Pages a scoped invalidation flushes one by one; more reload CR3.
+const INVLPG_PAGES: u64 = 16;
 const FAULT_KIND: u64 = 0xffff;
 const COUNTER_HZ: u64 = 24_000_000;
 
@@ -189,6 +198,10 @@ pub struct State {
     pub resets: u64,
     /// Resets of the lower half alone.
     pub lower_resets: u64,
+    /// The leaves each half was filled from.
+    extents: [Extents; 2],
+    /// TLBIs that unmapped ranges rather than whole halves.
+    pub scoped: u64,
     pub stray: u64,
     /// TSC ticks spent in compiled guest code, its exits and faults.
     pub native_ticks: u64,
@@ -295,6 +308,8 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             native_ticks: 0,
             resets: 0,
             lower_resets: 0,
+            extents: [Extents::new(), Extents::new()],
+            scoped: 0,
             stray: 0,
         });
     }
@@ -326,17 +341,30 @@ fn start_apic() {
     apic.hz = (u128::from(elapsed) * u128::from(state.tsc_hz) / u128::from(tsc.max(1))) as u64;
 }
 
-/// Shadow fills, full resets, lower-half resets, stray interrupts and the
-/// APIC timer frequency.
-pub fn statistics() -> (u64, u64, u64, u64, u64) {
+/// The host's counters for the statistics line.
+pub struct Statistics {
+    /// Shadow faults filled.
+    pub fills: u64,
+    /// Resets of the whole shadow, of the lower half alone, and TLBIs that
+    /// unmapped ranges instead.
+    pub resets: u64,
+    pub lower_resets: u64,
+    pub scoped: u64,
+    pub stray: u64,
+    /// The APIC timer frequency.
+    pub apic_hz: u64,
+}
+
+pub fn statistics() -> Statistics {
     let state = state();
-    (
-        state.fills,
-        state.resets,
-        state.lower_resets,
-        state.stray,
-        state.apic.hz,
-    )
+    Statistics {
+        fills: state.fills,
+        resets: state.resets,
+        lower_resets: state.lower_resets,
+        scoped: state.scoped,
+        stray: state.stray,
+        apic_hz: state.apic.hz,
+    }
 }
 
 /// TSC ticks spent in compiled guest code so far.
@@ -389,6 +417,7 @@ impl State {
     /// Unmap `half` from every root and free its frames.
     fn clear(&mut self, half: usize) {
         self.pool.reset_half(half);
+        self.extents[half].clear();
         let entry = if half == LOWER { GUEST_LOW } else { GUEST_HIGH };
         for root in self.roots {
             // SAFETY: permanent root frames through the physmap.
@@ -541,15 +570,22 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     let rights = PRESENT | NX | if translation.writable { WRITABLE } else { 0 };
     let root = state.roots[state.current];
     let virtual_page = address & !(PAGE - 1);
-    state.pool.half = if address >> 63 == 0 { LOWER } else { UPPER };
+    let half = if address >> 63 == 0 { LOWER } else { UPPER };
+    // Only the two halves' root entries are shadow; the rest is the engine's.
+    if tables::index(address, 4) != [GUEST_LOW, GUEST_HIGH][half] {
+        return abandon(state, frame, address, write, FaultCause::NonCanonical);
+    }
+    state.pool.half = half;
     if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
         // The shadow pool is exhausted: start over and map again.
         state.reset_shadow();
+        state.pool.half = half;
         if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
             super::interrupts::fatal(frame);
         }
     }
     invlpg(virtual_page);
+    state.extents[half].record(address, translation.size, translation.global);
     state.fills += 1;
 }
 
@@ -678,12 +714,14 @@ impl Host for BareHost {
         if let Some(current) = state.regime
             && current.controls != regime.controls
         {
-            // TTBR0 alone translates only the lower half.
+            // TTBR0 alone translates only the lower half, but it can name
+            // the ASID the upper half's non-global entries were made in.
             let ttbr0 = mmu::Controls {
                 ttbr0: regime.controls.ttbr0,
                 ..current.controls
             };
-            if ttbr0 == regime.controls {
+            let asid = mmu::current_asid(&current.controls) == mmu::current_asid(&regime.controls);
+            if ttbr0 == regime.controls && (asid || !state.extents[UPPER].private()) {
                 state.reset_lower();
             } else {
                 state.reset_shadow();
@@ -709,6 +747,50 @@ impl Host for BareHost {
 
     fn invalidate_translations(&mut self) {
         state().reset_shadow();
+    }
+
+    fn invalidate_reach(&mut self, reach: Reach) {
+        let state = state();
+        if reach == Reach::All {
+            return state.reset_shadow();
+        }
+        let mut unmapped = Vec::new();
+        let mut whole = false;
+        for half in [LOWER, UPPER] {
+            match state.extents[half].ranges(reach, HALVES[half]) {
+                None => {
+                    state.clear(half);
+                    whole = true;
+                }
+                Some(ranges) => unmapped.extend(ranges),
+            }
+        }
+        let mut pages = 0u64;
+        for &(first, last) in &unmapped {
+            for root in state.roots {
+                tables::unmap(&state.pool, root, first, last);
+            }
+            pages = pages.saturating_add(((last - first) >> 12) + 1);
+        }
+        if whole || pages > INVLPG_PAGES {
+            state.reload();
+        } else {
+            for &(first, last) in &unmapped {
+                let mut page = first & !(PAGE - 1);
+                loop {
+                    invlpg(page);
+                    if page >= last & !(PAGE - 1) {
+                        break;
+                    }
+                    page += PAGE;
+                }
+            }
+        }
+        if whole {
+            state.resets += 1;
+        } else {
+            state.scoped += 1;
+        }
     }
 
     fn counter(&mut self) -> u64 {

@@ -223,8 +223,15 @@ pub trait Host {
     /// its controls translates differently (a TTBR0 write arrives only
     /// here, not through [`Host::invalidate_translations`]).
     fn set_regime(&mut self, regime: &Regime);
-    /// Drop every cached translation (TLB maintenance).
+    /// Drop every cached translation.
     fn invalidate_translations(&mut self);
+    /// Drop the cached translations a TLBI reaches in the current context,
+    /// as [`Host::set_regime`] last gave it; a superset is always correct.
+    fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach) {
+        if reach != mmu::tlbi::Reach::Nothing {
+            self.invalidate_translations();
+        }
+    }
     /// The guest's system counter.
     fn counter(&mut self) -> u64;
     /// Interrupt the host at this counter value, or never.
@@ -595,9 +602,12 @@ pub struct Statistics {
     pub waits: u64,
     /// Changes of the running PE.
     pub switches: u64,
-    /// TLB maintenance and translation control writes that dropped every
-    /// cached translation.
+    /// Translation control writes that dropped every cached translation.
     pub translation_changes: u64,
+    /// TLBIs, and those of them whose reach in the shadow was less than
+    /// everything.
+    pub tlb_maintenance: u64,
+    pub scoped_maintenance: u64,
     /// TTBR0 writes, which drop the lower half's.
     pub table_base_changes: u64,
 }
@@ -1147,6 +1157,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.translation_changes += 1;
         self.host.invalidate_translations();
         self.sync_regime();
+    }
+
+    /// A TLBI: the fetch translations of every regime go, and the host
+    /// drops what `reach` names of its shadow. No control changed, so the
+    /// regime and what derives from System registers stay.
+    fn tlb_maintained(&mut self, reach: mmu::tlbi::Reach) {
+        self.translation_generation += 1;
+        self.statistics.tlb_maintenance += 1;
+        if reach != mmu::tlbi::Reach::All {
+            self.statistics.scoped_maintenance += 1;
+        }
+        self.host.invalidate_reach(reach);
     }
 
     /// A TTBR0 write, which changes the translation of the lower half
@@ -4105,6 +4127,7 @@ mod tests {
         pub(super) now: u64,
         regimes: Vec<Regime>,
         invalidations: usize,
+        reaches: Vec<mmu::tlbi::Reach>,
         installed: Vec<Vec<u8>>,
         patches: Vec<(usize, Vec<u8>)>,
         /// The chaining state the next native run leaves, as thunks would.
@@ -4164,6 +4187,12 @@ mod tests {
         }
         fn invalidate_translations(&mut self) {
             self.invalidations += 1;
+        }
+        fn invalidate_reach(&mut self, reach: mmu::tlbi::Reach) {
+            self.reaches.push(reach);
+            if reach == mmu::tlbi::Reach::All {
+                self.invalidations += 1;
+            }
         }
         fn counter(&mut self) -> u64 {
             self.now
@@ -4251,6 +4280,7 @@ mod tests {
             now: 0,
             regimes: Vec::new(),
             invalidations: 0,
+            reaches: Vec::new(),
             installed: Vec::new(),
             patches: Vec::new(),
             chained: None,
@@ -4891,8 +4921,8 @@ mod tests {
 
     /// A TTBR0 write reaches the host only as the regime's new controls,
     /// which differ from the old in TTBR0 alone, so the host keeps the upper
-    /// half's shadow; any other translation control and TLB maintenance
-    /// invalidate everything. Both make the fetch translations stale.
+    /// half's shadow; any other translation control invalidates everything.
+    /// Both make the fetch translations stale.
     #[test]
     fn ttbr0_writes_change_only_the_regime_and_other_controls_invalidate() {
         const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
@@ -4924,6 +4954,59 @@ mod tests {
         machine.system_instruction(MSR_TCR_EL1_X0).unwrap();
         assert_eq!(machine.host.invalidations, 1);
         assert_eq!(machine.statistics.translation_changes, 1);
+    }
+
+    /// A TLBI hands the host what it reaches of the current context and
+    /// makes every fetch translation stale, but changes no control: the
+    /// regime is not sent again and what derives from System registers
+    /// stays.
+    #[test]
+    fn tlbis_reach_their_address_range_or_asid_without_a_regime_change() {
+        use mmu::tlbi::Reach;
+        const TLBI_VAE1_X0: u32 = 0xd508_8720;
+        const TLBI_ASIDE1_X0: u32 = 0xd508_8740;
+        const TLBI_RVAE1_X0: u32 = 0xd508_8620;
+        const TLBI_VMALLE1: u32 = 0xd508_871f;
+        let mut machine = machine(&[]);
+        let regimes = machine.host.regimes.len();
+        machine.native_system();
+        let generation = machine.translation_generation;
+        let high = 0xffff_fe00_0123_4000_u64;
+        machine.cpu.state.x[0] = 3 << 48 | (high & ((1 << 56) - 1)) >> 12;
+        machine.system_instruction(TLBI_VAE1_X0).unwrap();
+        // ASID 0 is the one TTBR0_EL1 names; 3 is another.
+        machine.cpu.state.x[0] = 3 << 48;
+        machine.system_instruction(TLBI_ASIDE1_X0).unwrap();
+        machine.cpu.state.x[0] = 0;
+        machine.system_instruction(TLBI_ASIDE1_X0).unwrap();
+        // Four 16 KiB pages from 0x10_0000.
+        machine.cpu.state.x[0] = 2 << 46 | 1 << 39 | 0x10_0000 >> 14;
+        machine.system_instruction(TLBI_RVAE1_X0).unwrap();
+        machine.system_instruction(TLBI_VMALLE1).unwrap();
+        assert_eq!(
+            machine.host.reaches,
+            [
+                Reach::Containing(high),
+                Reach::Nothing,
+                Reach::All,
+                Reach::Overlapping {
+                    first: 0x10_0000,
+                    last: 0x10_ffff
+                },
+                Reach::All,
+            ]
+        );
+        assert_eq!(machine.translation_generation, generation + 5);
+        assert_eq!(machine.host.regimes.len(), regimes);
+        assert!(machine.native_system.is_some());
+        assert_eq!(
+            (
+                machine.statistics.tlb_maintenance,
+                machine.statistics.scoped_maintenance,
+                machine.statistics.translation_changes
+            ),
+            (5, 3, 0)
+        );
     }
 
     #[test]

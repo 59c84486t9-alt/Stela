@@ -3,7 +3,9 @@
 //! the profile: no FEAT_XS, FEAT_D128, FEAT_LPA2, FEAT_RME or FEAT_TLBID.
 //!
 //! Removing more than the scope is always permitted, so a cache that keeps
-//! no translation context may discard everything instead.
+//! no translation context may discard everything instead, and one that
+//! holds a single context's translations may discard what [`Scope::reach`]
+//! names.
 
 use super::Regime;
 use crate::machine::system::{Broadcast, Regime as Named, Tlbi, TlbiKind, TlbiLevel};
@@ -270,6 +272,77 @@ impl Scope {
                 };
                 stage2_only && self.vmid_covers(entry) && address && self.level_matches(entry)
             }
+        }
+    }
+}
+
+/// The one context a cache that keeps no context per entry holds
+/// translations of: the regime the PE translates in now, under the VMID it
+/// uses now (the one every TLBI that names a VMID takes from VTTBR_EL2), with
+/// non-global entries of one ASID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Current {
+    pub regime: Regime,
+    /// The ASID of its non-global entries; `None` in the EL2 regime.
+    pub asid: Option<u16>,
+}
+
+/// What a TLBI removes from a cache of the [`Current`] context's
+/// stage-1 (or combined) translations, as a superset of its scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    Nothing,
+    /// The entries whose input range holds this VA, canonical.
+    Containing(u64),
+    /// The entries whose input range overlaps `first..=last`, canonical VAs.
+    Overlapping {
+        first: u64,
+        last: u64,
+    },
+    All,
+}
+
+/// VA[55:0] with bit 55 copied above: the address of either half.
+fn canonical(address: u64) -> u64 {
+    (((address << 8) as i64) >> 8) as u64
+}
+
+impl Scope {
+    /// What this TLBI removes from a cache of `current`'s translations: no
+    /// entry of another regime, nothing of ASID forms for another ASID, all
+    /// for the forms without an address, and for the address forms the
+    /// entries at their address or range whatever their ASID, level or
+    /// size. The IPA forms remove only stage-2-only entries
+    /// ([`Scope::covers`]); they remove everything here, which the
+    /// combined stage-1 and stage-2 entries a VMALLS12E1 must follow make
+    /// harmless.
+    pub fn reach(self, current: &Current) -> Reach {
+        if !self.valid {
+            return Reach::Nothing;
+        }
+        let same_regime = self.regime == current.regime;
+        let all = |reaches: bool| if reaches { Reach::All } else { Reach::Nothing };
+        match self.kind {
+            TlbiKind::ALL => {
+                let el2 = |regime| matches!(regime, Regime::El20 | Regime::El2);
+                all(same_regime || el2(self.regime) && el2(current.regime))
+            }
+            TlbiKind::VMALL | TlbiKind::VMALLS12 | TlbiKind::IPAS2 | TlbiKind::RIPAS2 => {
+                all(same_regime)
+            }
+            TlbiKind::ASID => all(same_regime && current.asid == Some(self.asid)),
+            TlbiKind::VA | TlbiKind::VAA if same_regime => {
+                Reach::Containing(canonical(self.address))
+            }
+            TlbiKind::RVA | TlbiKind::RVAA if same_regime => Reach::Overlapping {
+                first: canonical(self.address),
+                last: if self.end == u64::MAX {
+                    u64::MAX
+                } else {
+                    canonical(self.end.wrapping_sub(1))
+                },
+            },
+            TlbiKind::VA | TlbiKind::VAA | TlbiKind::RVA | TlbiKind::RVAA => Reach::Nothing,
         }
     }
 }
@@ -572,6 +645,187 @@ mod tests {
             super::range(2 << 46 | (1 << 36)),
             Some((2, 0xfffc_0000_0000_0000, 0xfffc_0000_0000_8000))
         );
+    }
+
+    /// Every entry of the current context a TLBI covers is in its reach,
+    /// over random forms, operands, contexts and entries of each size.
+    #[test]
+    fn the_reach_holds_every_current_entry_the_scope_covers() {
+        super::super::test_translation_chip();
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let kinds = [
+            TlbiKind::ALL,
+            TlbiKind::VMALL,
+            TlbiKind::VMALLS12,
+            TlbiKind::ASID,
+            TlbiKind::VA,
+            TlbiKind::VAA,
+            TlbiKind::RVA,
+            TlbiKind::RVAA,
+            TlbiKind::IPAS2,
+            TlbiKind::RIPAS2,
+        ];
+        let named = [Named::EL10, Named::EL20, Named::EL2];
+        let regimes = [Regime::El10, Regime::El20, Regime::El2];
+        let sizes = [
+            (12, 12, 3),
+            (14, 14, 3),
+            (16, 16, 3),
+            (21, 12, 2),
+            (25, 14, 2),
+            (36, 14, 1),
+        ];
+        let (mut covered, mut reaches) = ([0; 3], [0; 4]);
+        for _ in 0..400_000 {
+            let random = next();
+            let context = Context {
+                el: 1 + (random & 1) as u8,
+                el2: true,
+                e2h: true,
+                tge: random & 2 != 0,
+                fb: random & 4 != 0,
+            };
+            let regime = regimes[(random >> 3) as usize % 3];
+            let current = Current {
+                regime,
+                asid: (regime != Regime::El2).then_some((random >> 8) as u16 & 3),
+            };
+            let (size_bits, granule_bits, level) = sizes[(random >> 16) as usize % sizes.len()];
+            // Addresses near each other, in either half.
+            let address = (next() & 0x3f_ffff_ffff) << 12 & !((1u64 << size_bits) - 1);
+            let address = if random & 1 << 24 != 0 {
+                address | 0xffff_ff00_0000_0000
+            } else {
+                address
+            };
+            let entry = Entry {
+                regime,
+                vmid: (regime == Regime::El10).then_some(5),
+                asid: current.asid.filter(|_| random & 1 << 25 != 0),
+                address,
+                size_bits,
+                granule_bits,
+                level,
+                stage1: true,
+                stage2: random & 1 << 26 != 0,
+                table: random & 1 << 27 != 0,
+            };
+            let kind = kinds[(random >> 32) as usize % kinds.len()];
+            // The operand aims inside the entry or near it: its ASID and TTL
+            // fields drawn small, range fields at random.
+            let spread = if random & 1 << 28 != 0 {
+                (1 << size_bits) - 1
+            } else {
+                0x3ff_ffff
+            };
+            let near = entry.address.wrapping_add(next() & spread) & ADDRESS_BITS;
+            let operand = match kind {
+                TlbiKind::RVA | TlbiKind::RVAA | TlbiKind::RIPAS2 => {
+                    let tg = next() % 4;
+                    let bits = granule(tg as u8).unwrap_or(12);
+                    // Ranges start up to 1 MiB before the entry.
+                    let below = entry.address.wrapping_sub(next() & 0xf_ffff);
+                    let base = (canonical(below & ADDRESS_BITS) >> bits) & RANGE_BASE;
+                    (random >> 40 & 3) << 48 | tg << 46 | (next() & 0x7f) << 37 | base
+                }
+                _ => (random >> 40 & 3) << 48 | (random >> 44 & 0xf) << 44 | near >> 12,
+            };
+            let tlbi = Tlbi {
+                kind,
+                regime: named[(random >> 48) as usize % 3],
+                vmid: Some(5),
+                broadcast: Broadcast::NSH,
+                level: if random & 1 << 52 != 0 {
+                    TlbiLevel::Last
+                } else {
+                    TlbiLevel::Any
+                },
+                attr: TlbiAttr::AllAttr,
+                operand,
+            };
+            let scope = Scope::new(&tlbi, context);
+            let reach = scope.reach(&current);
+            reaches[match reach {
+                Reach::Nothing => 0,
+                Reach::Containing(_) => 1,
+                Reach::Overlapping { .. } => 2,
+                Reach::All => 3,
+            }] += 1;
+            if !scope.covers(&entry) {
+                continue;
+            }
+            covered[match reach {
+                Reach::Containing(_) => 1,
+                Reach::Overlapping { .. } => 2,
+                _ => 0,
+            }] += 1;
+            let last = entry.address | ((1 << size_bits) - 1);
+            let held = match reach {
+                Reach::Nothing => false,
+                Reach::Containing(address) => (entry.address..=last).contains(&address),
+                Reach::Overlapping { first, last: end } => first <= last && entry.address <= end,
+                Reach::All => true,
+            };
+            assert!(held, "{tlbi:?} {context:?} {current:?} {entry:?} {reach:?}");
+        }
+        assert!(covered.iter().all(|count| *count > 1000), "{covered:?}");
+        assert!(reaches.iter().all(|count| *count > 1000), "{reaches:?}");
+    }
+
+    #[test]
+    fn reaches_name_the_address_the_range_or_nothing_of_other_contexts() {
+        super::super::test_translation_chip();
+        let host = Current {
+            regime: Regime::El20,
+            asid: Some(7),
+        };
+        let reach = |kind, regime, operand| {
+            Scope::new(&tlbi(kind, regime, TlbiLevel::Any, operand), HOST).reach(&host)
+        };
+        let high = 0xffff_fe00_0123_4000_u64;
+        assert_eq!(
+            reach(
+                TlbiKind::VA,
+                Named::EL10,
+                9 << 48 | (high & ADDRESS_BITS) >> 12
+            ),
+            Reach::Containing(high)
+        );
+        assert_eq!(
+            reach(TlbiKind::VAA, Named::EL10, 0x8),
+            Reach::Containing(0x8000)
+        );
+        // ASIDE1 of another ASID reaches no entry: the global ones stay.
+        assert_eq!(reach(TlbiKind::ASID, Named::EL10, 8 << 48), Reach::Nothing);
+        assert_eq!(reach(TlbiKind::ASID, Named::EL10, 7 << 48), Reach::All);
+        // Four 16 KiB pages from 0x10_0000.
+        assert_eq!(
+            reach(
+                TlbiKind::RVA,
+                Named::EL10,
+                2 << 46 | 1 << 39 | 0x10_0000 >> 14
+            ),
+            Reach::Overlapping {
+                first: 0x10_0000,
+                last: 0x10_ffff
+            }
+        );
+        // From EL2 without TGE, EL1 forms act on the guest's EL1&0 regime.
+        let guest = Scope::new(
+            &tlbi(TlbiKind::VA, Named::EL10, TlbiLevel::Any, 0x8),
+            Context { tge: false, ..HOST },
+        );
+        assert_eq!(guest.reach(&host), Reach::Nothing);
+        // A range of TG 0b00 is invalid.
+        assert_eq!(reach(TlbiKind::RVA, Named::EL10, 0x8), Reach::Nothing);
+        assert_eq!(reach(TlbiKind::ALL, Named::EL2, 0), Reach::All);
+        assert_eq!(reach(TlbiKind::ALL, Named::EL10, 0), Reach::Nothing);
     }
 
     #[test]

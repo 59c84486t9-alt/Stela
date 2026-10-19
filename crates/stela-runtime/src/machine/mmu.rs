@@ -9,6 +9,7 @@
 pub mod alignment;
 mod attributes;
 mod geometry;
+pub mod shadow;
 mod sprr;
 mod stage1;
 mod stage2;
