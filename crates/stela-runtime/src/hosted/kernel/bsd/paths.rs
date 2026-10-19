@@ -6,7 +6,9 @@
 //! the host's own. Relative paths follow the host working directory, and a
 //! symbolic link inside a root resolves as the host kernel resolves it.
 //! A path the kernel reports (`fcntl` `F_GETPATH`, `fsgetpath`) under a
-//! root reads back as the guest path below it.
+//! root reads back as the guest path below it. The attributes of `/`
+//! itself are the host root directory's, the volume root that walks up a
+//! path end at; opening `/` opens the first root's top directory.
 use super::{Call, Kernel, Outcome, forward};
 use crate::hosted::memory;
 use anyhow::Result;
@@ -84,6 +86,18 @@ fn reported_path(kernel: &mut Kernel, call: &Call, buffer: u64) -> Result<Option
     }))
 }
 
+/// Whether the absolute `path` names the root directory itself. Its
+/// attributes are the host's root directory's, a volume root, which walks
+/// up a path (mount lookups) end at: a guest root's top directory is an
+/// ordinary directory of a host volume. Opening it opens the first root's
+/// top directory, so lookups relative to it see the guest's files.
+fn names_the_root(path: &[u8]) -> bool {
+    path.first() == Some(&b'/')
+        && !Path::new(std::ffi::OsStr::from_bytes(path))
+            .components()
+            .any(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
 /// The first root holding `path`, as the host path to look up instead.
 pub(super) fn resolve(roots: &[PathBuf], path: &[u8]) -> Option<PathBuf> {
     if path.first() != Some(&b'/') {
@@ -123,6 +137,9 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
     let Some(path) = memory::read_string(call.argument(path_index), MAX_PATH) else {
         return Ok(None);
     };
+    if flags_index.is_none() && names_the_root(&path) {
+        return Ok(None);
+    }
     let Some(resolved) = resolve(&kernel.process.roots, &path) else {
         return Ok(None);
     };
@@ -165,6 +182,10 @@ mod tests {
         );
         assert_eq!(resolve(&roots, b"/usr"), Some(first.path().join("usr")));
         assert_eq!(resolve(&roots, b"/etc/hosts"), None);
+        assert!(names_the_root(b"/"));
+        assert!(names_the_root(b"//./"));
+        assert!(!names_the_root(b"/usr"));
+        assert!(!names_the_root(b"."));
         assert_eq!(resolve(&roots, b"usr/lib/dyld"), None);
         assert_eq!(shape("openat"), Some((1, Some(2))));
         assert_eq!(shape("write"), None);
