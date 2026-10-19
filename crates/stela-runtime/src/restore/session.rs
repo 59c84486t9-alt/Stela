@@ -356,8 +356,13 @@ impl Session {
             )),
             "StatusMsg" => {
                 let status = m.required("Status")?.uint()?;
-                let amr = m.get("AMRError").map(Value::uint).transpose()?.unwrap_or(0);
-                if status != 0 || amr != 0 {
+                // Restored reports unconverted ramrod errors as AMRError -1.
+                let failed = match m.get("AMRError") {
+                    None | Some(Value::Integer(0)) => false,
+                    Some(Value::Integer(_) | Value::Signed(_)) => true,
+                    Some(_) => return Err(Error::Invalid("AMRError is not an integer")),
+                };
+                if status != 0 || failed {
                     return Err(super::refuse("device final status is failure", m));
                 }
                 if !self.outstanding.is_empty() {
@@ -591,6 +596,19 @@ mod tests {
             ("DataPort", Value::Integer(2345)),
             ("Arguments", Value::dict([])),
         ])
+    }
+    #[test]
+    fn a_signed_amr_error_is_a_reported_failure() {
+        let (mut session, mut answers) = ready();
+        let status = Value::dict([
+            ("MsgType", Value::from("StatusMsg")),
+            ("Status", Value::Integer(0)),
+            ("AMRError", Value::Signed(-1)),
+        ]);
+        let Err(Error::Refused { reason, .. }) = session.receive(status, &mut answers) else {
+            panic!("a failed status must refuse")
+        };
+        assert_eq!(reason, "device final status is failure");
     }
     #[test]
     fn device_reports_continue_and_baseband_or_provisioning_messages_refuse() {
