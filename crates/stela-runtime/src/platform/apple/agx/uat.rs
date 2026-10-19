@@ -27,11 +27,21 @@
 //! 2 uncached. The walk indexes bits 36, 25 and 14 with 8, 2048 and 2048
 //! entries.
 //!
-//! This module owns the encodings and a walk over guest RAM; wiring it to a
-//! stream's [`Iommu`](crate::platform::dma::Iommu) is the integration layer
-//! and is not done here.
+//! [`Uat`] is the translator itself: a stream [`Iommu`] whose stream number
+//! is a context, rooted at the TTBAT the AP programs through the `sgx` MMU
+//! configuration registers ([`super::sgx`]). One [`Agent`] (firmware or GPU)
+//! translates through a [`Uat::agent`] view.
+//!
+//! Inferred (Asahi): the firmware runs in context 0 and reaches its shared
+//! objects through the TTBR1 half; a VA's bits above bit 39 repeat bit 39
+//! (kernel objects at `0xffff_ffa0_0000_0000`). The firmware addresses the
+//! kext sends are 44 bits wide ([`canonical_firmware_va`]).
+//!
+//! The model walks the tables on every access and caches nothing, so a TLB or
+//! TTBA-cache invalidation has nothing to discard.
 
-use crate::platform::dma::Memory;
+use super::super::bus::Access as BusAccess;
+use crate::platform::dma::{DmaError, Iommu, Memory};
 
 /// Page shift and size (`UAT_PGBIT`/`UAT_PGSZ`).
 pub const PAGE_SHIFT: u32 = 14;
@@ -183,6 +193,27 @@ pub enum Fault {
     BadAddress { level: u32 },
     /// A table could not be read from guest RAM.
     Memory { level: u32 },
+    /// The leaf does not permit the access.
+    Permission,
+}
+
+/// Contexts in the TTBAT (Asahi `UAT_NUM_CTX`).
+pub const CONTEXTS: usize = 64;
+/// TTBAT bytes per context: the TTBR0 then the TTBR1 word.
+const TTBAT_ENTRY_BYTES: u64 = 16;
+/// The context tag of a TTBAT word, bits 55:48 (`mapTaskIdIntoGPTBAT`).
+const CONTEXT_SHIFT: u32 = 48;
+const CONTEXT_MASK: u64 = 0xff;
+/// The context the GFX firmware runs in.
+pub const FIRMWARE_CONTEXT: usize = 0;
+/// Width of the firmware VAs the kext hands the firmware (the 0x81 initdata
+/// message's 44-bit field).
+const FIRMWARE_VA_BITS: u32 = 44;
+
+/// The full VA of a 44-bit firmware address: bits 63:44 repeat bit 43.
+pub fn canonical_firmware_va(va: u64) -> u64 {
+    let shift = 64 - FIRMWARE_VA_BITS;
+    (((va << shift) as i64) >> shift) as u64
 }
 
 /// Which half (translation table base register) an input address selects.
@@ -228,8 +259,15 @@ pub struct Mapping {
 
 /// Walk the table rooted at `ttbr` for `input`, reading entries from guest
 /// RAM. `ttbr` is the 16 KiB-aligned base of the top-level (PCE) table.
+/// `input`'s bits above [`IAS`] must all equal its TTBR-select bit.
 pub fn translate(memory: &mut dyn Memory, ttbr: u64, input: u64) -> Result<Mapping, Fault> {
-    if input & !(TTBR_SELECT_BIT - 1) & !TTBR_SELECT_BIT != 0 {
+    let upper = input >> (IAS + 1);
+    let expected = if input & TTBR_SELECT_BIT != 0 {
+        u64::MAX >> (IAS + 1)
+    } else {
+        0
+    };
+    if upper != expected {
         return Err(Fault::OutOfRange);
     }
     let (_, idx) = indices(input);
@@ -259,6 +297,198 @@ pub fn translate(memory: &mut dyn Memory, ttbr: u64, input: u64) -> Result<Mappi
         physical: base | (input & PAGE_MASK),
         flags,
     })
+}
+
+/// Who reaches memory through the UAT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    /// The GFX coprocessor's firmware.
+    Firmware,
+    /// The GPU's own units.
+    Gpu,
+}
+
+/// What a leaf permits one agent: reads and writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Permits {
+    read: bool,
+    write: bool,
+}
+
+const NONE: Option<Permits> = Some(Permits {
+    read: false,
+    write: false,
+});
+const RO: Option<Permits> = Some(Permits {
+    read: true,
+    write: false,
+});
+const WO: Option<Permits> = Some(Permits {
+    read: false,
+    write: true,
+});
+const RW: Option<Permits> = Some(Permits {
+    read: true,
+    write: true,
+});
+
+/// The permissions of `(AP, UXN, PXN)` with the GPU-access bit set, as
+/// (firmware, GPU), for the combinations whose meaning Asahi's working
+/// mappings establish (`pgtable.rs` `prot`: FW_GPU_NA, FW_GPU_RW, FW_RO,
+/// FW_RW, FW_RW_GPU_RO, GPU_RO, GPU_WO, GPU_RW). `None` is an agent whose
+/// access to such a page no source states; it refuses rather than guesses.
+fn permits(flags: &Flags, agent: Agent) -> Option<Permits> {
+    if !flags.gpu_access {
+        return None;
+    }
+    let (firmware, gpu) = match (flags.access, flags.uxn, flags.pxn) {
+        (Access::FirmwareGpu, false, false) => (NONE, NONE),
+        (Access::FirmwareGpu, true, true) => (RW, RW),
+        (Access::Firmware, false, false) => (RO, None),
+        (Access::Firmware, true, false) => (RW, None),
+        (Access::Firmware, true, true) => (RW, RO),
+        (Access::Gpu, false, false) => (None, RO),
+        (Access::Gpu, false, true) => (None, WO),
+        (Access::Gpu, true, false) => (None, RW),
+        _ => (None, None),
+    };
+    match agent {
+        Agent::Firmware => firmware,
+        Agent::Gpu => gpu,
+    }
+}
+
+/// A recorded translation fault, for diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultRecord {
+    pub agent: Agent,
+    pub context: usize,
+    pub address: u64,
+    pub write: bool,
+    pub fault: Fault,
+}
+
+/// Fault codes a [`DmaError::Fault`] carries.
+const FAULT_TRANSLATION: u32 = 1;
+const FAULT_PERMISSION: u32 = 2;
+
+/// The GPU address translator: per-context TTBR pairs in the TTBAT at a
+/// physical base the AP programs.
+#[derive(Debug, Default)]
+pub struct Uat {
+    ttbat: Option<u64>,
+    last_fault: Option<FaultRecord>,
+}
+
+impl Uat {
+    /// The TTBAT's physical base, once configured.
+    pub fn ttbat(&self) -> Option<u64> {
+        self.ttbat
+    }
+
+    /// Root the translator at a 16 KiB-aligned TTBAT.
+    pub fn configure(&mut self, ttbat: u64) -> Result<(), &'static str> {
+        if ttbat & PHYSICAL_INVALID != 0 {
+            return Err("UAT TTBAT base outside bits 39:14");
+        }
+        self.ttbat = Some(ttbat);
+        Ok(())
+    }
+
+    /// The last fault, if any.
+    pub fn last_fault(&self) -> Option<FaultRecord> {
+        self.last_fault
+    }
+
+    /// The translator as `agent` sees it, for a [`crate::platform::dma::Port`].
+    pub fn agent(&mut self, agent: Agent) -> AgentView<'_> {
+        AgentView { uat: self, agent }
+    }
+
+    /// The table root of `context`'s half for `iova`.
+    fn root(&self, memory: &mut dyn Memory, context: usize, iova: u64) -> Result<u64, DmaError> {
+        let ttbat = self.ttbat.ok_or(DmaError::Unsupported(
+            "UAT access before the TTBAT is configured",
+        ))?;
+        if context >= CONTEXTS {
+            return Err(DmaError::Unsupported("UAT context outside the TTBAT"));
+        }
+        let half = u64::from(iova & TTBR_SELECT_BIT != 0);
+        let address = ttbat + context as u64 * TTBAT_ENTRY_BYTES + half * ENTRY_BYTES;
+        let mut bytes = [0; 8];
+        if !memory.read(address, &mut bytes) {
+            return Err(DmaError::Memory);
+        }
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn walk(
+        &mut self,
+        memory: &mut dyn Memory,
+        agent: Agent,
+        context: usize,
+        iova: u64,
+        write: bool,
+    ) -> Result<u64, DmaError> {
+        let ttbr = self.root(memory, context, iova)?;
+        let mut record = |fault, code| {
+            self.last_fault = Some(FaultRecord {
+                agent,
+                context,
+                address: iova,
+                write,
+                fault,
+            });
+            DmaError::Fault(code)
+        };
+        if ttbr & VALID == 0 {
+            return Err(record(Fault::NotPresent { level: 0 }, FAULT_TRANSLATION));
+        }
+        if (ttbr >> CONTEXT_SHIFT) & CONTEXT_MASK != context as u64 {
+            return Err(DmaError::Unsupported(
+                "UAT TTBAT entry tagged with another context",
+            ));
+        }
+        let mapping = match translate(memory, ttbr & ADDRESS_MASK, iova) {
+            Ok(mapping) => mapping,
+            Err(Fault::Memory { .. }) => return Err(DmaError::Memory),
+            Err(fault) => return Err(record(fault, FAULT_TRANSLATION)),
+        };
+        let permits = permits(&mapping.flags, agent).ok_or(DmaError::Unsupported(
+            "UAT leaf permission encoding not modeled for this agent",
+        ))?;
+        if !(if write { permits.write } else { permits.read }) {
+            return Err(record(Fault::Permission, FAULT_PERMISSION));
+        }
+        Ok(mapping.physical)
+    }
+}
+
+/// One agent's view of the [`Uat`]; the stream number is the context.
+pub struct AgentView<'a> {
+    uat: &'a mut Uat,
+    agent: Agent,
+}
+
+impl Iommu for AgentView<'_> {
+    fn page(&self) -> u64 {
+        PAGE_BYTES
+    }
+
+    /// A fault is recorded in the translator. The GFX firmware handles GPU
+    /// faults itself; it raises no AP interrupt line.
+    fn translate(
+        &mut self,
+        memory: &mut dyn Memory,
+        stream: usize,
+        iova: u64,
+        last: u64,
+        write: bool,
+        _access: &mut BusAccess<'_>,
+    ) -> Result<u64, DmaError> {
+        debug_assert!(last >= iova && last >> PAGE_SHIFT == iova >> PAGE_SHIFT);
+        self.uat.walk(memory, self.agent, stream, iova, write)
+    }
 }
 
 #[cfg(test)]
@@ -349,8 +579,12 @@ mod tests {
             translate(&mut ram, pce, PAGE_BYTES),
             Err(Fault::NotPresent { level: 2 })
         );
-        // An input above the 39-bit space is out of range.
+        // Bits above the 39-bit space must repeat the TTBR-select bit.
         assert_eq!(translate(&mut ram, pce, 1 << 40), Err(Fault::OutOfRange));
+        assert_eq!(
+            translate(&mut ram, pce, TTBR_SELECT_BIT),
+            Err(Fault::OutOfRange)
+        );
         // A missing top-level table reads as zero and faults present at 0.
         ram.put_u64(pce, 0);
         assert_eq!(
@@ -368,5 +602,141 @@ mod tests {
             translate(&mut ram, 0x8_0000_0000, 0),
             Err(Fault::Memory { level: 1 })
         );
+    }
+
+    /// RAM holding a TTBAT at its base and one firmware page mapped at the
+    /// TTBR1 VA `0xffff_ffa0_0000_4000` of context 0 with `flags`.
+    fn firmware_space(flags: Flags) -> (Ram, Uat, u64, u64) {
+        let base = 0x8_0000_0000;
+        let mut ram = Ram::new(base, 0x4000 * 6);
+        let (ttbat, pce, pde, pte, page) = (
+            base,
+            base + 0x4000,
+            base + 0x8000,
+            base + 0xc000,
+            base + 0x1_0000,
+        );
+        let [ttbr0, ttbr1] = encode_gptbat(0, 0, pce);
+        ram.put_u64(ttbat, ttbr0 & !VALID);
+        ram.put_u64(ttbat + 8, ttbr1);
+        let va = 0xffff_ffa0_0000_4000;
+        let (_, idx) = indices(va);
+        ram.put_u64(pce + idx[0] as u64 * 8, encode_table(pde));
+        ram.put_u64(pde + idx[1] as u64 * 8, encode_table(pte));
+        ram.put_u64(pte + idx[2] as u64 * 8, encode_pte(page, &flags));
+        let mut uat = Uat::default();
+        uat.configure(ttbat).unwrap();
+        (ram, uat, va, page)
+    }
+
+    fn port_read(
+        uat: &mut Uat,
+        agent: Agent,
+        ram: &mut Ram,
+        context: usize,
+        va: u64,
+    ) -> Result<u64, DmaError> {
+        use crate::platform::apple::interrupt::InterruptLatch;
+        use crate::platform::dma::Port;
+        let mut latch = InterruptLatch::new();
+        let mut access = BusAccess::new(0, 0, &mut latch);
+        let mut view = uat.agent(agent);
+        let mut port = Port {
+            iommu: &mut view,
+            stream: context,
+            memory: ram,
+            access: &mut access,
+        };
+        let mut word = [0; 8];
+        port.read(va, &mut word)?;
+        Ok(u64::from_le_bytes(word))
+    }
+
+    fn shared(access: Access, uxn: bool, pxn: bool) -> Flags {
+        Flags {
+            access,
+            memory: MemoryAttr::Uncached,
+            global: true,
+            pxn,
+            uxn,
+            gpu_access: true,
+        }
+    }
+
+    #[test]
+    fn the_firmware_reads_its_ttbr1_objects_through_the_ttbat() {
+        let (mut ram, mut uat, va, page) = firmware_space(shared(Access::Firmware, true, false));
+        ram.put_u64(page + 0x10, 0x0c8a_6342_8392_04c8);
+        // The 44-bit address the kext sends widens to the TTBR1 VA.
+        assert_eq!(canonical_firmware_va(va & ((1 << 44) - 1)), va);
+        assert_eq!(
+            port_read(
+                &mut uat,
+                Agent::Firmware,
+                &mut ram,
+                FIRMWARE_CONTEXT,
+                va + 0x10
+            ),
+            Ok(0x0c8a_6342_8392_04c8)
+        );
+        // Context 0's TTBR0 is invalid: a user-half access faults and is recorded.
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, 0, 0x4000),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        );
+        let fault = uat.last_fault().unwrap();
+        assert_eq!((fault.context, fault.address), (0, 0x4000));
+        // A firmware-RW page's GPU access is stated nowhere: it refuses.
+        assert!(matches!(
+            port_read(&mut uat, Agent::Gpu, &mut ram, 0, va),
+            Err(DmaError::Unsupported(_))
+        ));
+        // A context past the TTBAT refuses.
+        assert!(matches!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, CONTEXTS, va),
+            Err(DmaError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn leaf_permissions_follow_the_established_encodings() {
+        let fw_ro = shared(Access::Firmware, false, false);
+        assert_eq!(permits(&fw_ro, Agent::Firmware), RO);
+        let fw_rw_gpu_ro = shared(Access::Firmware, true, true);
+        assert_eq!(permits(&fw_rw_gpu_ro, Agent::Gpu), RO);
+        assert_eq!(permits(&shared(Access::Gpu, false, true), Agent::Gpu), WO);
+        assert_eq!(
+            permits(&shared(Access::FirmwareGpu, true, true), Agent::Firmware),
+            RW
+        );
+        // Without the GPU-access bit no source states the meaning.
+        let hidden = Flags {
+            gpu_access: false,
+            ..fw_ro
+        };
+        assert_eq!(permits(&hidden, Agent::Firmware), None);
+        // A firmware write to a read-only page faults on permission.
+        let (mut ram, mut uat, va, _) = firmware_space(fw_ro);
+        use crate::platform::apple::interrupt::InterruptLatch;
+        let mut latch = InterruptLatch::new();
+        let mut access = BusAccess::new(0, 0, &mut latch);
+        let mut view = uat.agent(Agent::Firmware);
+        assert_eq!(
+            view.translate(&mut ram, 0, va, va + 7, true, &mut access),
+            Err(DmaError::Fault(FAULT_PERMISSION))
+        );
+        assert_eq!(uat.last_fault().unwrap().fault, Fault::Permission);
+    }
+
+    #[test]
+    fn an_unconfigured_or_misaligned_ttbat_refuses() {
+        let mut uat = Uat::default();
+        let mut ram = Ram::new(0x8_0000_0000, 0x4000);
+        assert!(matches!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, 0, 0),
+            Err(DmaError::Unsupported(_))
+        ));
+        assert!(uat.configure(0x8_0000_0100).is_err());
+        assert!(uat.configure(1 << 40).is_err());
     }
 }
