@@ -804,6 +804,13 @@ const ROLE_MODELS: &[ModelClaim] = &[
         property: ("role", b"SMC\0"),
         children: &[NATIVE_RTKIT],
     },
+    // The AGX GPU's coprocessor: AGXFirmwareKextRTBuddy::bootFirmware
+    // (0x1ae9c88) panics unless its nub reads as iBoot-loaded.
+    ModelClaim {
+        compatible: ASC,
+        property: ("role", b"GFX\0"),
+        children: &[NATIVE_RTKIT],
+    },
     // The SEP: a native model whose ASC wrapper uses `iop-sep,ascwrap-v4` and
     // whose nub is `iop-nub,sep`. Distinguished by its `role = SEP`, so it
     // never collides with the ANS2/SMC `iop,ascwrap-v4` coprocessors.
@@ -857,6 +864,8 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         USB_DRD,
         SPMI,
         PMU,
+        SGX,
+        GFX_MAPPER,
     ]
     .contains(&name)
         || AICS.contains(&name)
@@ -4268,9 +4277,6 @@ mod tests {
         assert!(!models(SART, |_| None));
     }
 
-    /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
-    /// shared-page region and the `pKW4` functions other nodes route
-    /// through `smc-pmu`.
     #[test]
     fn pmp_placement_reads_its_wrapper_and_needs_a_user_managed_nub() {
         use crate::machine::adt::encode;
@@ -4336,9 +4342,28 @@ mod tests {
         assert!(models(ASC, |key| (key == "role").then_some(b"PMP\0".as_slice())));
     }
 
-    /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
-    /// shared-page region and the `pKW4` functions other nodes route
-    /// through `smc-pmu`.
+    #[test]
+    fn the_gfx_role_is_modeled_and_claims_a_native_rtkit_nub() {
+        let gfx_role = |key: &str| (key == "role").then_some(b"GFX\0".as_slice());
+        assert!(models(ASC, gfx_role));
+        assert!(!models(ASC, |key| (key == "role").then_some(b"GFX2\0".as_slice())));
+        let children = model_children(ASC, gfx_role);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].compatible, RTBUDDY);
+        let preloaded = |name| {
+            children[0]
+                .boot_properties
+                .iter()
+                .any(|&(key, _)| key == name)
+        };
+        assert!(preloaded("pre-loaded") && preloaded("running"));
+        // The GPU and its firmware mapper are modeled with it; the SEP and
+        // SMC claims are untouched.
+        assert!(models(SGX, |_| None) && models(GFX_MAPPER, |_| None));
+        assert!(models(SEP, |key| (key == "role").then_some(b"SEP\0".as_slice())));
+        assert!(models(ASC, |key| (key == "role").then_some(b"SMC\0".as_slice())));
+    }
+
     #[test]
     fn gfx_placement_needs_the_coprocessor_and_the_gpu_together() {
         use crate::machine::adt::encode;
@@ -4405,6 +4430,9 @@ mod tests {
         assert!(placed(false, true).is_err());
     }
 
+    /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
+    /// shared-page region and the `pKW4` functions other nodes route
+    /// through `smc-pmu`.
     #[test]
     fn smc_placement_reads_its_banks_region_and_function_keys() {
         use crate::machine::adt::encode;
