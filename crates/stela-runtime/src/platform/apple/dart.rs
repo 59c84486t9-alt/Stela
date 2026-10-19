@@ -538,7 +538,11 @@ impl MmioDevice for Dart {
             ERROR_MASK => self.error_mask,
             ERROR_ADDRESS_LOW => self.error_address as u32,
             ERROR_ADDRESS_HIGH => (self.error_address >> 32) as u32,
-            PROTECT => self.protect,
+            // UNPROTECT and DISABLE_STREAMS are clear-side views of the
+            // protection and enable state. SPTM reads each register back
+            // after writing it to order the write (file 0xcd75c), ignoring
+            // the value; inferred: the view reads the state it clears.
+            PROTECT | UNPROTECT => self.protect,
             PROTECT_LOCK => self.locked,
             // The boot stage leaves protected-write reporting disabled and
             // there is no pending protected-write violation.
@@ -551,7 +555,9 @@ impl MmioDevice for Dart {
             _ => {
                 if let Some(word) = bitmap_word(offset, ERROR_STREAMS) {
                     self.error_streams[word]
-                } else if let Some(word) = bitmap_word(offset, ENABLE_STREAMS) {
+                } else if let Some(word) = bitmap_word(offset, ENABLE_STREAMS)
+                    .or_else(|| bitmap_word(offset, DISABLE_STREAMS))
+                {
                     self.enabled[word]
                 } else if let Some(word) = bitmap_word(offset, STREAM_INTERRUPTS) {
                     self.stream_interrupts[word]
@@ -745,6 +751,13 @@ mod tests {
         assert_eq!(d.read(STREAM_INTERRUPTS + 4, Width::Word, &mut a), Ok(5));
         // The counters themselves are absent.
         assert!(d.read(0x760, Width::Word, &mut a).is_err());
+        // Power-down disables each stream and reads the word back.
+        d.write(ENABLE_STREAMS + 4, Width::Word, 0x3, &mut a)
+            .unwrap();
+        d.write(DISABLE_STREAMS + 4, Width::Word, 0x1, &mut a)
+            .unwrap();
+        assert_eq!(d.read(DISABLE_STREAMS + 4, Width::Word, &mut a), Ok(2));
+        assert_eq!(d.read(UNPROTECT, Width::Word, &mut a), Ok(0));
         d.set_power(false, false, &mut a);
         d.set_power(true, false, &mut a);
         assert_eq!(d.read(STREAM_INTERRUPTS + 4, Width::Word, &mut a), Ok(0));
