@@ -23,7 +23,9 @@ use encoding::{HostGpr, POOL, RESULT, RIGHT};
 use location::{FRAME_LOCATIONS, GPR_SLOTS, Location};
 
 const BYTE_LOAD_BYTES: u8 = 1;
+const HALFWORD_LOAD_BYTES: u8 = 2;
 const WORD_LOAD_BYTES: u8 = 4;
+const DOUBLEWORD_LOAD_BYTES: u8 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionError {
@@ -1518,8 +1520,11 @@ mod tests {
             (Register::Sp, false, Width::W32, 1, AddressMode::Offset),
             (Register::X(0), true, Width::W32, 1, AddressMode::Offset),
             (Register::X(0), false, Width::X64, 1, AddressMode::Offset),
-            (Register::X(0), false, Width::W32, 2, AddressMode::Offset),
+            (Register::X(0), false, Width::W32, 8, AddressMode::Offset),
+            (Register::X(0), true, Width::X64, 4, AddressMode::Offset),
             (Register::X(0), false, Width::W32, 1, AddressMode::PostIndex),
+            (Register::X(0), false, Width::X64, 8, AddressMode::PreIndex),
+            (Register::Sp, false, Width::X64, 8, AddressMode::Offset),
         ] {
             let operation = Operation::Memory {
                 transfer: MemoryTransfer::Load { signed, width },
@@ -1590,38 +1595,100 @@ mod tests {
     }
 
     #[test]
-    fn shared_word_load_recipe_rejects_any_clobber_or_offset_change() {
-        for data in [Register::X(16), Register::Zero] {
-            let mut raw = vec![];
-            super::super::memory(
-                &mut raw,
-                super::super::MemoryChecks::DEFAULT,
-                MemoryTransfer::Load {
-                    signed: false,
-                    width: Width::W32,
-                },
-                WORD_LOAD_BYTES,
-                data,
-                Register::X(15),
-                -255,
-                AddressMode::Offset,
-            );
-            let selected = slot(data);
-            let ends =
-                encoding::ordinary_load_ends(&raw, WORD_LOAD_BYTES, 15, selected, -255).unwrap();
-            assert_eq!(ends.last(), Some(&raw.len()));
-            for index in 0..raw.len() {
-                let mut mutated = raw.clone();
-                mutated[index] ^= 1;
-                assert!(
-                    encoding::ordinary_load_ends(&mutated, WORD_LOAD_BYTES, 15, selected, -255)
-                        .is_none()
+    fn shared_load_recipes_reject_any_clobber_or_offset_change() {
+        let sizes = [
+            (Width::W32, HALFWORD_LOAD_BYTES),
+            (Width::W32, WORD_LOAD_BYTES),
+            (Width::X64, DOUBLEWORD_LOAD_BYTES),
+        ];
+        for (width, bytes) in sizes {
+            for data in [Register::X(16), Register::Zero] {
+                let mut raw = vec![];
+                super::super::memory(
+                    &mut raw,
+                    super::super::MemoryChecks::DEFAULT,
+                    MemoryTransfer::Load {
+                        signed: false,
+                        width,
+                    },
+                    bytes,
+                    data,
+                    Register::X(15),
+                    -255,
+                    AddressMode::Offset,
                 );
+                let selected = slot(data);
+                let ends = encoding::ordinary_load_ends(&raw, bytes, 15, selected, -255).unwrap();
+                assert_eq!(ends.last(), Some(&raw.len()));
+                for index in 0..raw.len() {
+                    let mut mutated = raw.clone();
+                    mutated[index] ^= 1;
+                    assert!(
+                        encoding::ordinary_load_ends(&mutated, bytes, 15, selected, -255).is_none()
+                    );
+                }
+                for other in [BYTE_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES]
+                    .into_iter()
+                    .chain([DOUBLEWORD_LOAD_BYTES])
+                    .filter(|&other| other != bytes)
+                {
+                    assert!(
+                        encoding::ordinary_load_ends(&raw, other, 15, selected, -255).is_none()
+                    );
+                }
             }
-            assert!(
-                encoding::ordinary_load_ends(&raw, BYTE_LOAD_BYTES, 15, selected, -255).is_none()
+        }
+    }
+
+    /// A doubleword load keeps its full 64-bit result resident in RCX, and
+    /// the cost gate counts the shared REX.W load it splices.
+    #[test]
+    fn doubleword_loads_stay_resident_and_pass_the_cost_gate() {
+        let load = |pc, data, base, displacement| {
+            instruction(
+                pc,
+                Operation::Memory {
+                    transfer: MemoryTransfer::Load {
+                        signed: false,
+                        width: Width::X64,
+                    },
+                    bytes: DOUBLEWORD_LOAD_BYTES,
+                    data,
+                    base,
+                    displacement,
+                    mode: AddressMode::Offset,
+                },
+            )
+        };
+        // ldr x8,[x0,#16]; ldr x9,[x8,#8]; add x9,x9,x9; add x8,x8,x8
+        let instructions = [
+            load(0, Register::X(8), Register::X(0), 16),
+            load(1, Register::X(9), Register::X(8), 8),
+            instruction(2, add(Register::X(9), Register::X(9))),
+            instruction(3, add(Register::X(8), Register::X(8))),
+        ];
+        let region = emit_clean_load_prefix(&instructions, None).unwrap();
+        assert_eq!(region.consumed_instructions, instructions.len());
+        assert_eq!(region.stats.clean_loads, 2);
+        assert_eq!(region.stats.address_cache_hits, 1);
+        assert!(
+            region
+                .code
+                .windows(3)
+                .any(|bytes| bytes == [0x48, 0x8b, 0x08])
+        );
+        let mut baseline = vec![];
+        for instruction in &instructions {
+            super::super::emit_instruction(
+                &mut baseline,
+                instruction,
+                &mut vec![],
+                crate::TargetCpu::Baseline,
+                super::super::MemoryChecks::DEFAULT,
             );
         }
+        assert!(analysis::selected_output_instruction_count(&baseline).is_some());
+        assert!(admits_ordinary(&region, &baseline));
     }
 
     #[test]

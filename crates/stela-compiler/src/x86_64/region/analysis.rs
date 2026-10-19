@@ -1,6 +1,6 @@
 //! Liveness analysis. Every GPR is live at a region exit.
 use super::location::GPR_SLOTS;
-use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
+use super::{BYTE_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::integer_math::Kind as IntegerMath;
 use crate::aarch64::{
     AddressMode, Instruction, MemoryTransfer, Operation, Register, Shift, WideMove, Width,
@@ -126,8 +126,9 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
     })
 }
 
-/// Only unsigned byte and halfword loads with an X-register base. Every other
-/// memory form ends a region.
+/// Only unsigned W pairs and zero-extending byte, halfword and word loads
+/// and doubleword loads with an X-register base and no writeback. Every
+/// other memory form ends a region.
 pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
     if let Operation::MemoryPair {
         transfer:
@@ -161,17 +162,23 @@ pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
     }
 
     if let Operation::Memory {
-        transfer:
-            MemoryTransfer::Load {
-                signed: false,
-                width: Width::W32,
-            },
-        bytes: BYTE_LOAD_BYTES | WORD_LOAD_BYTES,
+        transfer: MemoryTransfer::Load {
+            signed: false,
+            width,
+        },
+        bytes,
         data,
         base: Register::X(base),
         mode: AddressMode::Offset,
         ..
     } = *operation
+        && matches!(
+            (width, bytes),
+            (
+                Width::W32,
+                BYTE_LOAD_BYTES | HALFWORD_LOAD_BYTES | WORD_LOAD_BYTES
+            ) | (Width::X64, DOUBLEWORD_LOAD_BYTES)
+        )
         && base < 31
         && valid(data)
         && data != Register::Sp
@@ -278,6 +285,7 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     const LEA_RDX_RDX_DISP8: u8 = 0x52;
     const TWO_BYTE_OPCODE: u8 = 0x0f;
     const MOVZX_BYTE: u8 = 0xb6;
+    const MOVZX_WORD: u8 = 0xb7;
     const IMUL: u8 = 0xaf;
     const SHRD_IMMEDIATE: u8 = 0xac;
     const ECX_FROM_RAX_MEMORY: u8 = 0x08;
@@ -335,9 +343,9 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
             }
         } else if opcode == TWO_BYTE_OPCODE && !word {
             let second = *code.get(cursor)?;
-            if second == MOVZX_BYTE && rex.is_none() {
-                // Exact existing LDRB data access MOVZX ECX,byte [RAX].
-                if code.get(cursor..cursor + 2)? != [MOVZX_BYTE, ECX_FROM_RAX_MEMORY] {
+            if matches!(second, MOVZX_BYTE | MOVZX_WORD) && rex.is_none() {
+                // Exact existing LDRB/LDRH data access MOVZX ECX,[RAX].
+                if code.get(cursor + 1).copied() != Some(ECX_FROM_RAX_MEMORY) {
                     return None;
                 }
                 cursor += 2;
@@ -366,10 +374,10 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
             }
         } else if opcode == MOV_LOAD
             && !word
-            && rex.is_none()
+            && rex.is_none_or(|rex| rex == REX_X64_LOW_REGISTERS)
             && code.get(cursor).copied() == Some(ECX_FROM_RAX_MEMORY)
         {
-            // Exact selected unsigned W load into ECX.
+            // Exact selected W load into ECX or X load into RCX.
             cursor += 1;
         } else if opcode == MOV_LOAD
             && !word

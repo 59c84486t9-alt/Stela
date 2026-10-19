@@ -1,5 +1,5 @@
 //! Integer encodings, including flag-preserving variants.
-use super::{BYTE_LOAD_BYTES, WORD_LOAD_BYTES};
+use super::{BYTE_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES};
 use crate::aarch64::{Logical, Shift, Width};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -360,9 +360,12 @@ pub fn ordinary_load_ends(
     displacement: i32,
 ) -> Option<Vec<usize>> {
     const MOVZX_BYTE: u8 = 0xb6;
+    const MOVZX_WORD: u8 = 0xb7;
     let memory_recipe: &[u8] = match bytes {
         BYTE_LOAD_BYTES => &[TWO_BYTE_OPCODE, MOVZX_BYTE, ECX_FROM_RAX_MEMORY],
+        HALFWORD_LOAD_BYTES => &[TWO_BYTE_OPCODE, MOVZX_WORD, ECX_FROM_RAX_MEMORY],
         WORD_LOAD_BYTES => &[MOV_LOAD, ECX_FROM_RAX_MEMORY],
+        DOUBLEWORD_LOAD_BYTES => &[REX | REX_W, MOV_LOAD, ECX_FROM_RAX_MEMORY],
         _ => return None,
     };
     let mut ends = ordinary_address_ends(code, base, displacement)?;
