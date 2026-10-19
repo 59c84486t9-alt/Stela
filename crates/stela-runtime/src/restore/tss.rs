@@ -295,6 +295,27 @@ mod tests {
     }
 
     #[test]
+    fn host_system_time_answers_from_the_host_clock_or_refuses() {
+        use super::super::answers::{Answers, Plan};
+        let store = super::super::store::tests::fixture(b"x", false);
+        let mut answers = Answers::new(store);
+        let request = Value::dict([("DataType", Value::from("HostSystemTime"))]);
+        assert!(answers.plan(&request).is_err());
+        answers.clock = Some(alloc::boxed::Box::new(|| 1_792_437_226));
+        let Plan::Reply(reply) = answers.plan(&request).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            reply
+                .required("SetHostTimeOnDevice")
+                .unwrap()
+                .uint()
+                .unwrap(),
+            1_792_437_226
+        );
+    }
+
+    #[test]
     fn only_a_successful_response_yields_its_ticket() {
         let body = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>ApImg4Ticket</key><data>AQID</data></dict></plist>";
         assert_eq!(ticket(body).unwrap(), [1, 2, 3]);

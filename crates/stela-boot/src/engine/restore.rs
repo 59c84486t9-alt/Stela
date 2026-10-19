@@ -43,8 +43,15 @@ impl Experiment {
             manifest.source.bytes
         ));
         let store = Store::open(reader, manifest, identity).map_err(|e| format!("{e}"))?;
-        let driver = Driver::new(Answers::new(store), Route::StelaFirmwareStudy)
-            .map_err(|e| format!("{e}"))?;
+        let mut answers = Answers::new(store);
+        if let Some(seconds) = handoff.wall_seconds {
+            // The firmware's time at the handoff, carried forward on the TSC.
+            let (tsc, hz) = (handoff.wall_tsc, handoff.tsc_hz);
+            answers.clock = Some(Box::new(move || {
+                seconds + (super::host::rdtsc() - tsc) / hz
+            }));
+        }
+        let driver = Driver::new(answers, Route::StelaFirmwareStudy).map_err(|e| format!("{e}"))?;
         Ok(Self {
             usb,
             driver,

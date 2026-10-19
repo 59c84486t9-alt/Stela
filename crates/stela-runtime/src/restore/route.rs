@@ -51,6 +51,7 @@ impl Route {
                     | "URLAsset"
                     | "StreamedImageDecryptionKey"
                     | "RestoreAttestation"
+                    | "HostSystemTime"
             )
     }
 }
@@ -86,6 +87,7 @@ mod tests {
         assert!(!Route::StelaFirmwareStudy.allows("NORData"));
         assert!(!Route::StelaFirmwareStudy.allows("RecoveryOSLocalPolicy"));
         assert!(Route::StelaFirmwareStudy.allows("RootTicket"));
+        assert!(Route::StelaFirmwareStudy.allows("HostSystemTime"));
         assert!(!Route::StelaFirmwareStudy.allows("Unknown"));
     }
 }

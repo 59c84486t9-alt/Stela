@@ -11,6 +11,7 @@ use super::{
 };
 use crate::payload::{ReadAt, safe_path};
 use alloc::{
+    boxed::Box,
     collections::BTreeMap,
     format,
     string::{String, ToString},
@@ -199,6 +200,8 @@ pub struct Answers<R> {
     pub staged: Staged,
     /// Apple's signing service, only when the user enables it (`tss`).
     pub signer: Option<tss::Signer>,
+    /// The host's wall clock, in seconds since the Unix epoch.
+    pub clock: Option<Box<dyn FnMut() -> u64>>,
 }
 impl<R: ReadAt> Answers<R> {
     pub fn new(store: Store<R>) -> Self {
@@ -206,6 +209,7 @@ impl<R: ReadAt> Answers<R> {
             store,
             staged: Staged::default(),
             signer: None,
+            clock: None,
         }
     }
     pub fn supported(&self) -> Value {
@@ -348,6 +352,19 @@ impl<R: ReadAt> Answers<R> {
             )]))),
             "FDRTrustData" => Ok(Plan::Reply(Value::dict([]))),
             "RecoveryOSLocalPolicy" => self.recovery_local_policy(&identity, args),
+            // restored's `set_device_time` (R 0x10003172c..0x100031778) reads
+            // `SetHostTimeOnDevice` as a 64-bit CFNumber and keeps it only
+            // within a day after its own estimate.
+            "HostSystemTime" => {
+                let clock = self
+                    .clock
+                    .as_mut()
+                    .ok_or(Error::Invalid("the host has no wall clock"))?;
+                Ok(Plan::Reply(Value::dict([(
+                    "SetHostTimeOnDevice",
+                    Value::Integer(clock()),
+                )])))
+            }
             "RestoreAttestation" => Ok(Plan::Reply(Value::dict([(
                 "RestoreShouldAttest",
                 Value::Boolean(false),
