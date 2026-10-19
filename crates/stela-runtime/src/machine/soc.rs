@@ -741,6 +741,13 @@ pub const HPM_MANAGER: &str = "usbc,manager";
 pub const HPM: &str = "usbc,cd3217";
 pub const RETIMER: &str = "atcrt";
 pub const ATC_PHY: &str = "atc-phy,t8112";
+/// A Type-C connector description (`/port-usb-c-N`): no IOKit personality
+/// binds it and it has no registers. The ATC PHY, `usb-drd` and ACIO name
+/// it as `function-dock_parent`, which `AppleARMFunction::withProvider`
+/// (0xfffffe0008c53aac) resolves through the node's registered platform
+/// nub. With the node hidden, each of those starts stalled about 30 s and
+/// the xHCI then failed to find its PHY (restore study ru-s17).
+pub const DOCK_PORT: &str = "dock,usb-c";
 /// A NOR partition read by AppleDiagnosticDataAccessReadOnly (kernel file
 /// 0x235ecb8 start, 0x235f1e8 lazy whole-region read, 0x235f788 forwarding).
 pub const SYSCFG: &str = "diagnostic-data,format1";
@@ -821,6 +828,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         HPM_MANAGER,
         HPM,
         ATC_PHY,
+        DOCK_PORT,
         USB_DRD,
     ]
     .contains(&name)
