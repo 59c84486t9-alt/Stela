@@ -794,6 +794,9 @@ struct ModelClaim {
     compatible: &'static str,
     property: (&'static str, &'static [u8]),
     children: &'static [ChildModel],
+    /// Boot-chain facts the claimed node itself carries, as
+    /// [`ChildModel::boot_properties`] do for a child.
+    boot_properties: &'static [(&'static str, &'static [u8])],
 }
 /// A child owned by a native coprocessor model and its boot-chain facts.
 /// Properties describe model state, never a guest image or a driver patch.
@@ -824,16 +827,40 @@ const SEP_NUB_MODEL: ChildModel = ChildModel {
     compatible: SEP_NUB,
     boot_properties: &[],
 };
+/// The register tunings the ANS2 driver requires before it re-powers the
+/// coprocessor. `AppleANS2NVMeController::ApplyTunables` (0x3dbfc48), from
+/// `PowerStateAction` (0x3dbf740), fails with 0xe00002c9 when any of these
+/// `/arm-io/ans` properties is missing (0x3dbfeec..0x3dbff40). The IPSW
+/// DeviceTree has none of them, so the boot chain supplies them. Each is a
+/// list of 24-byte entries: register offset, width (4), mask and value.
+/// The command accelerator's offsets are relative to reg[3] + 0x20000. The
+/// others are relative to reg[4], reg[5] and reg[6]
+/// (`mapDeviceMemoryWithIndex` 4..6 at 0x3dbf36c..0x3dbf448).
+/// `ApplyTunablesFromData` (0x3dbf914) accepts an empty list without any
+/// access. Emulated die: Stela's choice. The die has no analog or fabric
+/// trim to set, so each list is empty. The ECC and parity shadow lists are
+/// read only when reg[7], reg[8] or `gib-pcie-up` exist, and J473AP has none
+/// of them. The `tunable-table-bundle` is unrelated: it names the restore
+/// updater's NAND tables, which reach the MSP through tunnel commands
+/// (`AppleNVMeUpdateUC::TunableTableDownload`, selector 14).
+const ANS2_TUNABLES: &[(&str, &[u8])] = &[
+    ("afc-aiu-ans-dual-tunables", b""),
+    ("command-accelerator-tunables", b""),
+    ("storage-lane-common-tunables", b""),
+    ("ccu-security-interrupt-tunables", b""),
+];
 const ROLE_MODELS: &[ModelClaim] = &[
     ModelClaim {
         compatible: ASC,
         property: ("role", b"ANS2\0"),
         children: &[NATIVE_RTKIT],
+        boot_properties: ANS2_TUNABLES,
     },
     ModelClaim {
         compatible: ASC,
         property: ("role", b"SMC\0"),
         children: &[NATIVE_RTKIT],
+        boot_properties: &[],
     },
     // The AGX GPU's coprocessor: AGXFirmwareKextRTBuddy::bootFirmware
     // (0x1ae9c88) panics unless its nub reads as iBoot-loaded.
@@ -841,6 +868,7 @@ const ROLE_MODELS: &[ModelClaim] = &[
         compatible: ASC,
         property: ("role", b"GFX\0"),
         children: &[NATIVE_RTKIT],
+        boot_properties: &[],
     },
     // The SEP: a native model whose ASC wrapper uses `iop-sep,ascwrap-v4` and
     // whose nub is `iop-nub,sep`. Distinguished by its `role = SEP`, so it
@@ -849,11 +877,13 @@ const ROLE_MODELS: &[ModelClaim] = &[
         compatible: SEP,
         property: ("role", b"SEP\0"),
         children: &[SEP_NUB_MODEL],
+        boot_properties: &[],
     },
     ModelClaim {
         compatible: ASC,
         property: ("role", b"PMP\0"),
         children: &[NATIVE_RTKIT],
+        boot_properties: &[],
     },
 ];
 
@@ -869,6 +899,19 @@ pub fn model_children<'a>(
             claim.compatible == name && property(claim.property.0) == Some(claim.property.1)
         })
         .map_or(&[], |claim| claim.children)
+}
+
+/// Boot-chain properties a matching claimed node carries itself.
+pub fn model_boot_properties<'a>(
+    name: &str,
+    property: impl Fn(&str) -> Option<&'a [u8]>,
+) -> &'static [(&'static str, &'static [u8])] {
+    ROLE_MODELS
+        .iter()
+        .find(|claim| {
+            claim.compatible == name && property(claim.property.0) == Some(claim.property.1)
+        })
+        .map_or(&[], |claim| claim.boot_properties)
 }
 
 /// Whether a compatible and its distinguishing properties name a modeled

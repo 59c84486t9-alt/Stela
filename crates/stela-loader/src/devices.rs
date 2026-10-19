@@ -45,6 +45,11 @@
 //! hidden, that wait never ends, `IOWatchdog` never registers and
 //! `restored_external` fails its `disable_watchdog` step, so a visible
 //! watchdog gets an empty `no-pmu`, the board fact the kernel tests for.
+//!
+//! A role-claimed coprocessor node, and each child its model owns, also gets
+//! the boot-chain facts that model declares (`soc::model_boot_properties`,
+//! `soc::ChildModel`), such as a native RTKit's preloaded state or ANS2's
+//! empty register tuning lists.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
 use stela_runtime::machine::soc;
@@ -279,6 +284,17 @@ fn visit(
                 .expect("static native boot property");
         }
     }
+    let own: Vec<(&str, &[u8])> = compatibles(node)
+        .flat_map(|name| {
+            soc::model_boot_properties(name, |key| node.property(key).map(|p| p.value.as_slice()))
+                .iter()
+                .copied()
+        })
+        .collect();
+    for (key, value) in own {
+        node.set_property(key, value.to_vec())
+            .expect("static native boot property");
+    }
     let owned: Vec<&soc::ChildModel> = compatibles(node)
         .flat_map(|name| {
             soc::model_children(name, |key| node.property(key).map(|p| p.value.as_slice())).iter()
@@ -406,6 +422,17 @@ mod tests {
                     .is_empty()
             );
             assert!(tree.property("/arm-io/other/nub", key).is_none());
+        }
+        // The claimed ANS2 node carries its own boot-chain facts: the empty
+        // register tuning lists its driver requires.
+        for key in [
+            "afc-aiu-ans-dual-tunables",
+            "command-accelerator-tunables",
+            "storage-lane-common-tunables",
+            "ccu-security-interrupt-tunables",
+        ] {
+            assert!(tree.property("/arm-io/ans", key).unwrap().value.is_empty());
+            assert!(tree.property("/arm-io/other", key).is_none());
         }
         tree.node_mut("/arm-io/ans")
             .unwrap()
