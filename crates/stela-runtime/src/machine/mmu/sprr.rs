@@ -43,24 +43,31 @@ impl Sprr {
     }
 }
 
-/// The SPRR_PERM bits that stay writable after the locks under `fields`
-/// (`S3_6_C15_C3_1` for SPRR_PERM_EL1, `S3_6_C15_C3_0` for SPRR_PERM_EL0):
-/// the EL field of every index whose field is 1. SPTM 26A434 sets fields 2
-/// and 9 of `S3_6_C15_C3_1` before locking SPRR (`__text+0xbe2c`), and every
-/// SPRR_PERM_EL1 write of the 26A434 kernel changes only the EL field of
-/// index 2 (`0xa` to `0xb`, `0xfffffe000bd68db4`) or of index 9 (`0x2` to
-/// `0x3`, `0xfffffe000bd72344`); SPTM writes `S3_6_C15_C3_0` per thread
-/// and the kernel rewrites SPRR_PERM_EL0 per thread (inference from that
-/// pairing; no public description).
-pub fn sprr_unlocked(fields: u64) -> u64 {
-    (0..16)
-        .filter(|index| (fields >> (2 * index)) & 3 == 1)
-        .fold(0, |mask, index| mask | 3 << (4 * index))
-}
+/// A field bit that keeps index's EL half (bits 1:0) of its SPRR_PERM
+/// nibble writable after the locks.
+const UNLOCK_EL: u64 = 1;
+/// A field bit that keeps the index's GL half (bits 3:2) writable.
+const UNLOCK_GL: u64 = 2;
 
-/// Whether every field is 0 or 1, the only values seen; others stop.
-pub fn sprr_fields_valid(fields: u64) -> bool {
-    (0..16).all(|index| (fields >> (2 * index)) & 3 <= 1)
+/// The SPRR_PERM bits that stay writable after the locks under `fields`
+/// (`S3_6_C15_C3_1` for SPRR_PERM_EL1, `S3_6_C15_C3_0` for SPRR_PERM_EL0).
+/// SPTM 26A434 sets fields 2 and 9 of `S3_6_C15_C3_1` to 1 before locking
+/// SPRR (`__text+0xbe2c`), and every SPRR_PERM_EL1 write of the 26A434
+/// kernel changes only the EL half of index 2 (`0xa` to `0xb`,
+/// `0xfffffe000bd68db4`) or of index 9 (`0x2` to `0x3`,
+/// `0xfffffe000bd72344`): bit 0 unlocks the EL half. SPTM writes
+/// `S3_6_C15_C3_0` per thread and the kernel rewrites SPRR_PERM_EL0 per
+/// thread (inference from that pairing; no public description). Under
+/// `-restore` SPTM writes `0x40800` there, field 5 = 2; bit 1 is taken to
+/// unlock the GL half, the other half of the same nibble (inference: the
+/// two field bits match the nibble's two permission halves).
+pub fn sprr_unlocked(fields: u64) -> u64 {
+    (0..16).fold(0, |mask, index| {
+        let field = (fields >> (2 * index)) & 3;
+        let el = if field & UNLOCK_EL != 0 { 3 } else { 0 };
+        let gl = if field & UNLOCK_GL != 0 { 3 << 2 } else { 0 };
+        mask | (el | gl) << (4 * index)
+    })
 }
 
 /// (readable, writable, executable) of a 2-bit SPRR permission: `---`,
@@ -176,6 +183,16 @@ mod tests {
             unprivileged: false,
             guarded,
         }
+    }
+
+    #[test]
+    fn unlock_fields_keep_the_el_and_gl_halves_of_their_index() {
+        assert_eq!(sprr_unlocked(0), 0);
+        assert_eq!(sprr_unlocked(1 << 4), 0x3 << 8);
+        assert_eq!(sprr_unlocked(2 << 10), 0xc << 20);
+        assert_eq!(sprr_unlocked(3 << 30), 0xf << 60);
+        // SPTM's restore-mode value: field 5 GL, field 9 EL.
+        assert_eq!(sprr_unlocked(0x40800), 0xc << 20 | 0x3 << 36);
     }
 
     #[test]

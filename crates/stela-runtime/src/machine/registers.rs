@@ -773,9 +773,6 @@ impl Apple {
                 apple.sprr_perm[index] = value;
                 changes.translation = true;
             }
-            Self::SprrFields(_) if !super::mmu::sprr_fields_valid(value) => {
-                return refuse("S3_6_C15_C3_x field value other than 0 or 1");
-            }
             Self::SprrFields(which) => apple.sprr_fields[which] = value,
             Self::GxfConfig(level) => {
                 if value & !(GXF_CONFIG_EN | GXF_CONFIG_LOCKS | GXF_CONFIG_EL1_LOCK) != 0 {
@@ -1095,12 +1092,7 @@ mod tests {
         ));
         assert_eq!(cpu.apple.sprr_fields[0], 1 << 18);
         // SPTM's lockdown: fields 2 and 9 of S3_6_C15_C3_1 keep those EL
-        // fields of SPRR_PERM_EL1 writable outside GL; field values above 1
-        // stop.
-        assert!(matches!(
-            write(&mut cpu, SPRR_FIELDS_1, 0b10),
-            Outcome::Refused(_)
-        ));
+        // fields of SPRR_PERM_EL1 writable outside GL.
         write(&mut cpu, SPRR_FIELDS_1, 0x40010);
         write(&mut cpu, SPRR_PERM_EL1, 0x2020_a52a_302a_bae6);
         cpu.pstate.guarded = false;
@@ -1123,6 +1115,19 @@ mod tests {
         ));
         assert!(matches!(
             write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 1),
+            Outcome::Refused(_)
+        ));
+        // A field of 2 (SPTM's restore-mode field 5) unlocks only the GL
+        // half of its index.
+        cpu.pstate.guarded = true;
+        write(&mut cpu, SPRR_FIELDS_0, 2 << 10 | 1 << 18);
+        cpu.pstate.guarded = false;
+        assert!(matches!(
+            write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 0xc << 20),
+            Outcome::Written(_)
+        ));
+        assert!(matches!(
+            write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 0xf << 20),
             Outcome::Refused(_)
         ));
     }

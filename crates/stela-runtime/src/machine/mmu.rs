@@ -16,7 +16,7 @@ pub mod tlbi;
 
 pub use sprr::{
     SPRR_CONFIG_EN, SPRR_CONFIG_LOCK_CONFIG, SPRR_CONFIG_LOCK_PERM_EL0, SPRR_CONFIG_LOCK_PERM_EL1,
-    SPRR_CONFIG_UNDOCUMENTED, Sprr, sprr_fields_valid, sprr_unlocked,
+    SPRR_CONFIG_UNDOCUMENTED, Sprr, sprr_unlocked,
 };
 
 /// The stage-1 translation regime the controls describe.
