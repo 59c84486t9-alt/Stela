@@ -11,8 +11,9 @@
 //! arm64 kernel would affect: every range is first widened to whole
 //! 16 KiB pages (`vm_map_trunc_page`/`vm_map_round_page` over the task's
 //! page mask) and every placement the kernel chooses is 16 KiB aligned. A
-//! range over host regions that split a guest page, which the host would
-//! treat apart from the rest of that page, is refused by name. Shared-region
+//! range over a guest page the host maps in parts it would treat apart
+//! (of differing protections, or around a hole) is refused by name.
+//! Shared-region
 //! pages not yet slid are slid before their bytes are read, shared or
 //! copied, and keep a protection change or forget an unmapping as the
 //! slide pager's pages do. Changed guest ranges drop their compiled blocks
@@ -30,19 +31,25 @@ use crate::hosted::shared_region::{REGION_SIZE, REGION_START};
 use crate::hosted::threads::lock;
 use anyhow::{Result, bail};
 
+/// The limit of a routine over guest pages the host may map in parts.
+const SPLIT_PAGE: &str =
+    "a range over a guest page the host maps in parts of differing protections is refused";
+
 /// The routines [`serve`] answers or forwards, with the named limit of a
 /// routine served only in part.
 pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     (
         "_kernelrpc_mach_vm_remap_external",
         Some(
-            "from this task's own address space; a source over host regions that split a guest page is refused",
+            "from this task's own address space; a source over a guest page the host maps in \
+             parts of differing protections is refused",
         ),
     ),
     (
         "_kernelrpc_mach_vm_remap_new_external",
         Some(
-            "from this task's own address space; a source over host regions that split a guest page is refused",
+            "from this task's own address space; a source over a guest page the host maps in \
+             parts of differing protections is refused",
         ),
     ),
     (
@@ -55,17 +62,12 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     (
         "mach_vm_write",
         Some(
-            "a destination over host regions that split a guest page, or unreadable out-of-line data, is refused",
+            "a destination over a guest page the host maps in parts of differing protections, \
+             or unreadable out-of-line data, is refused",
         ),
     ),
-    (
-        "mach_vm_copy",
-        Some("a range over host regions that split a guest page is refused"),
-    ),
-    (
-        "mach_vm_read_overwrite",
-        Some("a range over host regions that split a guest page is refused"),
-    ),
+    ("mach_vm_copy", Some(SPLIT_PAGE)),
+    ("mach_vm_read_overwrite", Some(SPLIT_PAGE)),
     (
         "mach_vm_msync",
         Some("VM_SYNC_KILLPAGES and VM_SYNC_REUSABLEPAGES over the shared region are refused"),
@@ -93,13 +95,15 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     (
         "mach_vm_page_query",
         Some(
-            "a guest page's disposition is the union of its host pages', its reference count their largest",
+            "a guest page's disposition is the union of its host pages', its reference count \
+             their largest",
         ),
     ),
     (
         "mach_vm_page_info",
         Some(
-            "a guest page's disposition is the union of its host pages', its reference count their largest",
+            "a guest page's disposition is the union of its host pages', its reference count \
+             their largest",
         ),
     ),
     (
@@ -420,12 +424,23 @@ fn in_shared_region(start: u64, size: u64) -> bool {
     start < REGION_START + REGION_SIZE && start.saturating_add(size) > REGION_START
 }
 
-/// Refuse a range of whole guest pages over host regions that begin or
-/// end inside one of its guest pages: the host would treat that page's
-/// parts apart, where the arm64 kernel treats the page as one.
+/// Refuse a range of whole guest pages any of which the host maps in
+/// parts it would treat apart, where the arm64 kernel maps the page whole:
+/// host regions meeting inside a guest page must be contiguous and of the
+/// same protections, and no hole may begin or end inside one.
 fn whole_pages(what: &str, start: u64, size: u64) -> Result<()> {
     let end = start.saturating_add(size);
     let mut cursor = start;
+    // The previous region's end and protections.
+    let mut previous: Option<(u64, i32, i32)> = None;
+    let refuse = |at: u64, parts: String| {
+        bail!(
+            "{what} over guest pages {start:#x}..{end:#x}: the host maps the guest page at \
+             {:#x} in parts it treats apart ({parts}), where the arm64 kernel maps it whole; a \
+             partial guest page is not implemented",
+            memory::trunc_page(at)
+        )
+    };
     while cursor < end {
         let (mut at, mut bytes) = (cursor, 0u64);
         let mut info = [0i32; VM_REGION_BASIC_INFO_COUNT_64 as usize];
@@ -443,20 +458,33 @@ fn whole_pages(what: &str, start: u64, size: u64) -> Result<()> {
                 &mut object,
             )
         };
-        // No region at or after the cursor: the rest is one hole, which
-        // the host reports as the arm64 kernel would.
+        let open = previous.filter(|&(previous_end, ..)| previous_end & PAGE_MASK != 0);
+        // No region at or after the cursor in the range: the rest is a
+        // hole, which must begin on a guest page.
         if found != KERN_SUCCESS || at >= end {
-            return Ok(());
+            return match open {
+                Some((previous_end, ..)) => {
+                    refuse(previous_end, format!("a hole from {previous_end:#x}"))
+                }
+                None => Ok(()),
+            };
+        }
+        let (protection, maximum) = (info[0], info[1]);
+        let joined = previous.is_some_and(|(previous_end, current, max)| {
+            previous_end == at && current == protection && max == maximum
+        });
+        if ((at > start && at & PAGE_MASK != 0) || open.is_some()) && !joined {
+            let parts = match previous {
+                Some((previous_end, current, max)) if previous_end == at => format!(
+                    "protections {current}/{max} before {at:#x}, {protection}/{maximum} after"
+                ),
+                Some((previous_end, ..)) => format!("a hole from {previous_end:#x} to {at:#x}"),
+                None => format!("a hole before {at:#x}"),
+            };
+            return refuse(open.map_or(at, |(previous_end, ..)| previous_end), parts);
         }
         let region_end = at.saturating_add(bytes);
-        if (at > start && at & PAGE_MASK != 0) || (region_end < end && region_end & PAGE_MASK != 0)
-        {
-            bail!(
-                "{what} over guest pages {start:#x}..{end:#x}: the host region \
-                 {at:#x}..{region_end:#x} splits a guest page, which the arm64 kernel maps whole; \
-                 a partial guest page is not implemented"
-            );
-        }
+        previous = Some((region_end, protection, maximum));
         cursor = region_end;
     }
     Ok(())
@@ -1267,7 +1295,7 @@ mod tests {
         match reply {
             Reply::Success(body) => body,
             Reply::Failure(code) => panic!("kern_return {code:#x}"),
-            Reply::Forward => panic!("forwarded"),
+            _ => panic!("not a simple success"),
         }
     }
 
@@ -1433,13 +1461,29 @@ mod tests {
     fn a_source_splitting_a_guest_page_is_refused() {
         let mut task = bare();
         let source = allocate_pages(&mut task, 1);
-        // A host page of its own inside the guest page.
-        memory::protect(source + HOST_PAGE_BYTES, HOST_PAGE_BYTES, Protection::READ).unwrap();
-        let body = remap_body(0, 8, VM_FLAGS_ANYWHERE, source, false);
-        let error = call(&mut task, "_kernelrpc_mach_vm_remap_external", true, &body)
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("splits a guest page"), "{error}");
+        let remap = |task: &mut Bare| {
+            let body = remap_body(0, 8, VM_FLAGS_ANYWHERE, source, false);
+            call(task, "_kernelrpc_mach_vm_remap_external", true, &body)
+        };
+        // A host page of another object but the same protections inside
+        // the guest page: the host treats the page as one.
+        let mut part = source + HOST_PAGE_BYTES;
+        // SAFETY: a host page of the test's own allocation.
+        let code =
+            unsafe { mach_vm_allocate(host(), &mut part, HOST_PAGE_BYTES, VM_FLAGS_OVERWRITE) };
+        assert_eq!(code, KERN_SUCCESS);
+        let alias = u64_at(&success(remap(&mut task).unwrap()), 0);
+        memory::deallocate(alias, PAGE_BYTES).unwrap();
+        // Differing protections, or a hole, inside it are refused.
+        memory::protect(part, HOST_PAGE_BYTES, Protection::READ).unwrap();
+        let error = remap(&mut task).err().unwrap();
+        assert!(
+            error.to_string().contains("protections 3/7 before"),
+            "{error}"
+        );
+        memory::deallocate(part, HOST_PAGE_BYTES).unwrap();
+        let error = remap(&mut task).err().unwrap();
+        assert!(error.to_string().contains("a hole from"), "{error}");
         memory::deallocate(source, PAGE_BYTES).unwrap();
     }
 
