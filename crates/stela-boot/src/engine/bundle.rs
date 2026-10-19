@@ -23,7 +23,7 @@ use core::arch::{
     asm,
     x86_64::{__cpuid, __cpuid_count},
 };
-use stela_loader::{boot_bundle::Options, installed};
+use stela_loader::{boot_bundle::Options, boot_selection::BootVolume, installed, upgrade};
 use stela_runtime::{
     boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
     machine::Host,
@@ -277,6 +277,60 @@ pub fn from_disk(
     let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
     files.extend(installed.bundle.files);
     Ok(files)
+}
+
+/// Build the boot bundle of the macOS update staged on `target`'s Update
+/// volume (`stela_loader::upgrade`), with `options` plus the update's own
+/// boot-args and OS environment; returns `bundle.json` first. Runs after
+/// boot services end.
+pub fn upgrade_from_disk(
+    storage: &pc::Handoff,
+    target: &Target,
+    volume: Option<BootVolume>,
+    options: &Options,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    // SAFETY: the DMA pages were reserved for the storage drivers alone.
+    let mut dma = unsafe { RegionAllocator::new(storage.dma.clone()) };
+    // SAFETY: `storage` describes this machine after ExitBootServices, with
+    // its ranges mapped uncached, and nothing else drives the controllers.
+    let mut disks = unsafe { storage::probe(storage, &mut dma) };
+    for (address, error) in &disks.failures {
+        output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
+    }
+    let partition = storage::open(&mut disks.devices, target)
+        .map_err(|e| format!("{}:{}: {e}", target.serial, target.partition))?;
+    let mut options = options.clone();
+    options.boot_args = upgrade_boot_args(&options.boot_args);
+    options.osenvironment = Some(upgrade::ENVIRONMENT);
+    let (offset, staged) =
+        upgrade::prepare_disk(&mut Bytes::new(partition), volume, None, &options)?;
+    output::arguments(format_args!(
+        "UPGRADE {} container={offset:#x} objects={} firmware-set-aside={}\n",
+        staged.volume.name,
+        staged.update.root.len(),
+        staged.update.other_firmware.len()
+    ));
+    let manifest =
+        serde_json::to_vec(&staged.bundle.manifest).map_err(|e| format!("bundle.json: {e}"))?;
+    let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
+    files.extend(staged.bundle.files);
+    Ok(files)
+}
+
+/// The update ramdisk's boot-args: the console args kept, plus iBoot's
+/// `rd=md0`, `-progress` and `-restore` that the restore kexts read.
+fn upgrade_boot_args(console: &str) -> String {
+    let mut args: Vec<&str> = console.split_ascii_whitespace().collect();
+    for extra in upgrade::BOOT_ARGS {
+        let key = extra.split('=').next().unwrap_or(extra);
+        if !args
+            .iter()
+            .any(|a| *a == key || a.split('=').next() == Some(key))
+        {
+            args.push(extra);
+        }
+    }
+    args.join(" ")
 }
 
 /// Fill `buffer` from RDSEED, or from RDRAND on a CPU without RDSEED. A CPU

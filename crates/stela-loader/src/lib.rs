@@ -48,6 +48,7 @@ pub mod root_selection;
 pub mod shared_cache;
 mod thread_state;
 pub mod trust_cache;
+pub mod upgrade;
 #[cfg(feature = "std")]
 use anyhow::{Context, Result, ensure};
 #[cfg(feature = "std")]

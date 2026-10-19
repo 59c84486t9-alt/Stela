@@ -126,6 +126,10 @@ pub(crate) struct Prepare {
     /// disk's container and volume group as LLB does.
     #[arg(long, requires = "disk")]
     boot_volume: Option<String>,
+    /// Boot the macOS update staged on the disk's Update volume
+    /// (`stela_loader::upgrade`) instead of its installed system.
+    #[arg(long, requires = "disk", conflicts_with_all = ["boot_hash"])]
+    upgrade: bool,
     /// A new directory for the bundle.
     #[arg(long)]
     output: PathBuf,
@@ -376,7 +380,7 @@ fn parse_id(value: Option<&str>) -> Result<Option<u32>> {
 
 /// `console` followed by each of the boot mode's arguments whose name it does
 /// not already give, so an explicit `name=value` keeps its value.
-fn boot_args(console: &str, mode: &[&str]) -> String {
+pub(super) fn boot_args(console: &str, mode: &[&str]) -> String {
     let name = |argument: &str| argument.split('=').next().unwrap_or(argument).to_owned();
     let given: Vec<String> = console.split_whitespace().map(name).collect();
     let mut line = console.trim().to_owned();

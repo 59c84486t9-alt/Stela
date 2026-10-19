@@ -77,6 +77,12 @@ struct Options {
     boot_volume: Option<BootVolume>,
     /// NVRAM asked for a safe-mode boot (`--safe-boot`).
     safe_boot: bool,
+    /// NVRAM chose a staged macOS update (`--upgrade`): build from the
+    /// Preboot disk's Update volume.
+    upgrade: bool,
+    /// NVRAM chose the paired recoveryOS (`--paired-recovery`): build from
+    /// the Preboot disk's Recovery volume.
+    paired_recovery: bool,
     /// One host partition backing all ANS namespaces.
     storage: Option<Target>,
     /// The host partition holding the NOR flash image (`--nor`).
@@ -168,6 +174,8 @@ impl Options {
             preboot: None,
             boot_volume: None,
             safe_boot: false,
+            upgrade: false,
+            paired_recovery: false,
             storage: None,
             nor: None,
             restore: false,
@@ -279,6 +287,14 @@ impl Options {
                 options.safe_boot = true;
                 continue;
             }
+            if name == boot_selection::UPGRADE_OPTION {
+                options.upgrade = true;
+                continue;
+            }
+            if name == boot_selection::PAIRED_RECOVERY_OPTION {
+                options.paired_recovery = true;
+                continue;
+            }
             if name == "--dump" {
                 let range = words.next().ok_or("missing dump range")?;
                 let (base, bytes) = range.split_once(',').ok_or("a dump is BASE,BYTES")?;
@@ -320,8 +336,18 @@ impl Options {
         if !options.restore && restore_inputs {
             return Err("restore inputs require explicit --restore-study");
         }
-        if options.preboot.is_none() && (options.boot_volume.is_some() || options.safe_boot) {
-            return Err("--boot-volume and --safe-boot choose a --preboot boot");
+        if options.preboot.is_none()
+            && (options.boot_volume.is_some()
+                || options.safe_boot
+                || options.upgrade
+                || options.paired_recovery)
+        {
+            return Err(
+                "--boot-volume, --safe-boot, --upgrade and --paired-recovery choose a --preboot boot",
+            );
+        }
+        if options.upgrade && (options.paired_recovery || options.safe_boot) {
+            return Err("--upgrade is neither a safe-mode boot nor the paired recoveryOS");
         }
         if !options.dram_base.is_multiple_of(LARGE) || options.ram_bytes < LARGE {
             return Err("guest DRAM base must be 2 MiB aligned and hold at least 2 MiB");
@@ -934,15 +960,27 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .storage
             .handoff()
             .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-        let request = installed::Request {
-            volume: options.boot_volume,
-            ..installed::Request::default()
-        };
-        let mut defaults = boot_bundle::Options::default();
-        if options.safe_boot {
-            defaults.boot_args.push_str(" -x");
+        if options.paired_recovery {
+            output::fatal(
+                "the paired recoveryOS is not built from disk yet; stela.efi boots Stela's \
+                 System Recovery bundle for it",
+            );
         }
-        bundle::from_disk(&storage, target, &request, &defaults).unwrap_or_else(|error| {
+        let defaults = boot_bundle::Options::default();
+        let result = if options.upgrade {
+            bundle::upgrade_from_disk(&storage, target, options.boot_volume, &defaults)
+        } else {
+            let request = installed::Request {
+                volume: options.boot_volume,
+                ..installed::Request::default()
+            };
+            let mut defaults = defaults;
+            if options.safe_boot {
+                defaults.boot_args.push_str(" -x");
+            }
+            bundle::from_disk(&storage, target, &request, &defaults)
+        };
+        result.unwrap_or_else(|error| {
             output::arguments(format_args!("preboot refusal: {error}\n"));
             output::fatal("no boot bundle could be built from the Preboot volume")
         })
