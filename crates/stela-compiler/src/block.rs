@@ -645,14 +645,26 @@ impl CompilationPlan {
                 self.target,
             )
         } else {
-            let native = crate::x86_64::block::emit_system_mode(
-                &self.parsed.instructions,
-                self.parsed.terminal.as_ref(),
-                self.parsed.next_pc,
-                self.target,
-                self.checks,
-                self.native,
-            );
+            // Only system mode runs one agent at a time and checks the
+            // guest's ranges; every other profile keeps the locked recipes
+            // and the default checks (`with_memory_checks`).
+            let native = if self.profile == BlockProfile::SystemModeV1 {
+                crate::x86_64::block::emit_system_mode(
+                    &self.parsed.instructions,
+                    self.parsed.terminal.as_ref(),
+                    self.parsed.next_pc,
+                    self.target,
+                    self.checks,
+                    self.native,
+                )
+            } else {
+                crate::x86_64::block::emit_ordinary_for_target(
+                    &self.parsed.instructions,
+                    self.parsed.terminal.as_ref(),
+                    self.parsed.next_pc,
+                    self.target,
+                )
+            };
             let direct_exits = crate::x86_64::block::successor_exits(
                 &native.x86_64_code,
                 self.parsed.terminal.as_ref(),
@@ -1302,6 +1314,41 @@ mod tests {
         .x86_64_code;
         assert!(!code.contains(&LOCK), "{code:02x?}");
         assert!(!code.windows(MFENCE.len()).any(|window| window == MFENCE));
+    }
+
+    /// The process and service profiles share the Ordinary emission of an
+    /// ordinary prefix: locked atomics and no guest range checks, which
+    /// belong to the system-mode engine alone.
+    #[test]
+    fn only_system_mode_compiles_for_a_single_agent_with_range_checks() {
+        const BASE: GuestAddress = GuestAddress(0x1000);
+        // ldaddal x1, x0, [x2]; ldr x3, [x4]; add x0, x0, #1; b .
+        let source: Vec<u8> = [0xf8e1_0040_u32, 0xf940_0083, 0x9100_0400, 0x1400_0000]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let code = |profile| {
+            compile_for_target(&source, BASE, profile, crate::TargetCpu::Baseline)
+                .unwrap()
+                .native
+                .x86_64_code
+        };
+        let ordinary = code(BlockProfile::Ordinary);
+        for profile in [
+            BlockProfile::DarwinArm64ThreadV1,
+            BlockProfile::AppleArm64eSoftwarePauthV1,
+            BlockProfile::AppleArm64eSoftwarePauthClockV1,
+            BlockProfile::AppleArm64eSoftwarePauthThreadV1,
+            BlockProfile::AppleArm64eSoftwarePauthClockThreadV1,
+        ] {
+            assert_eq!(code(profile), ordinary, "{profile:?}");
+        }
+        let check = crate::x86_64::GUEST_RANGE_CHECK;
+        let has_check = |code: &[u8]| code.windows(check.len()).any(|bytes| bytes == check);
+        assert!(!has_check(&ordinary));
+        let system = code(BlockProfile::SystemModeV1);
+        assert!(has_check(&system));
+        assert_ne!(system, ordinary);
     }
 
     #[test]
