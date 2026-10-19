@@ -19,6 +19,7 @@ use crate::darts;
 use crate::devices;
 use crate::dvfs;
 use crate::gpu_dvfs;
+use crate::handoff;
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::lock_regs::{self, Programmed};
@@ -744,6 +745,11 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         security.extend(decisions);
         unresolved.extend(gaps);
     }
+    // iBoot deletes the environments once one is applied.
+    security.extend(handoff::remove_environments(&mut tree));
+    let (decisions, gaps) = handoff::apply(&mut tree, inputs.target.chip_id)?;
+    security.extend(decisions);
+    unresolved.extend(gaps);
     match &options.root {
         Some(root) => security.extend(root_selection::apply(&mut tree, root)?),
         None => unresolved.push(
@@ -1245,7 +1251,8 @@ fn shape_device_tree(
     );
     unresolved.push("preoslog: iBoot log region omitted".into());
     unresolved.push(
-        "unflagged template values iBoot fills (such as / platform-name, /chosen firmware-version) stay as shipped"
+        "other rows iBoot writes stay as the template ships them or absent \
+         (docs/research/iboot-handoff.md lists each with its reason)"
             .into(),
     );
     Ok(unresolved)
