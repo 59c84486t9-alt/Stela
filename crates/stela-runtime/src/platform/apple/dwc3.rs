@@ -94,7 +94,7 @@ const PRTCAP_HOST: u32 = 1 << 12;
 const PRTCAP_DEVICE: u32 = 2 << 12;
 
 /// Minimal port boundary until the independent Type-C model lands. A new
-/// connection generation cancels old resources before any bus transaction.
+/// connection generation is a detach: the driver ends its own transfers.
 /// The provider must derive readiness from its actual PHY/role lifecycle.
 pub trait PortState {
     fn generation(&self) -> u64;
@@ -229,7 +229,9 @@ impl Dwc3 {
         Ok(())
     }
 
-    fn cancel(&mut self) {
+    /// A core soft reset or a switch away from device mode: the device
+    /// controller loses its transfers, transfer resources and queued events.
+    fn release(&mut self) {
         for ep in &mut self.endpoints {
             ep.active = None;
             ep.resource = false;
@@ -238,13 +240,26 @@ impl Dwc3 {
         }
         self.pending.clear();
         self.dcfg &= !(0x7f << 3);
+        self.connected = false;
+    }
+
+    /// A bus event (USB reset, detach, PHY reset, Run/Stop clear) leaves
+    /// endpoint state to software: transfer resources stay assigned until
+    /// Start Configuration, started transfers until End Transfer, and the
+    /// driver itself zeroes DCFG.DevAddr and clears halts on USB reset
+    /// (DWC3 databook "Initialization on USB Reset"; Linux
+    /// `dwc3_gadget_reset_interrupt`). Only XferNotReady reporting rearms.
+    fn bus_event(&mut self) {
+        for ep in &mut self.endpoints {
+            ep.not_ready = false;
+        }
     }
 
     pub fn sync_port(&mut self, state: &impl PortState) -> Result<(), &'static str> {
         let ready = state.high_speed_device_ready();
         if self.port_generation != state.generation() || self.port_ready != ready {
             let disconnected = self.connected;
-            self.cancel();
+            self.bus_event();
             self.connected = false;
             self.port_generation = state.generation();
             self.port_ready = ready;
@@ -707,7 +722,7 @@ impl BusPeer for Peer<'_, '_, '_> {
         if !controller.available() {
             return Err("DWC3 port or controller is not ready for USB2 reset");
         }
-        controller.cancel();
+        controller.bus_event();
         controller.connected = true;
         controller.device_event(1)?;
         controller.device_event(2)?;
@@ -853,8 +868,7 @@ impl MmioDevice for Dwc3 {
                     ));
                 }
                 if value & CORE_RESET != 0 || value & PRTCAP != PRTCAP_DEVICE {
-                    self.cancel();
-                    self.connected = false;
+                    self.release();
                 }
                 if value & CORE_RESET != 0 {
                     self.host = xhci::Xhci::new();
@@ -869,7 +883,7 @@ impl MmioDevice for Dwc3 {
                     return Err(err("DWC3 requires documented UTMI PHY configuration"));
                 }
                 if value & (1 << 31) != 0 {
-                    self.cancel();
+                    self.bus_event();
                     self.connected = false;
                 }
                 self.usb2 = value;
@@ -896,7 +910,7 @@ impl MmioDevice for Dwc3 {
                     self.reset(access);
                 } else {
                     if value & RUN == 0 {
-                        self.cancel();
+                        self.bus_event();
                         self.connected = false;
                     }
                     self.dctl = value;
@@ -1354,7 +1368,7 @@ mod tests {
         assert_eq!(dwc.rings[0].count, 8);
     }
     #[test]
-    fn in_link_trbs_stall_update_end_and_detach_cancel_work() {
+    fn in_link_trbs_stall_update_end_and_detach_leaves_transfers_to_software() {
         let (mut dwc, mut dart, mut ram, mut latch) = setup();
         let mut access = Access::new(0, 0, &mut latch);
         configure(&mut dwc, 3, 0, &mut access);
@@ -1395,8 +1409,9 @@ mod tests {
         assert!(dwc.endpoints[3].active.is_none());
         start(&mut dwc, 3, TRB, &mut access);
         dwc.sync_port(&Attached(2, false)).unwrap();
-        assert!(dwc.pending.is_empty());
-        assert!(dwc.endpoints[3].active.is_none());
+        // Detach leaves the started transfer to software's End Transfer.
+        assert!(dwc.endpoints[3].active.is_some());
+        assert!(dwc.endpoints[3].resource);
         {
             let mut port = Port {
                 iommu: &mut dart,
@@ -1408,9 +1423,64 @@ mod tests {
                 dwc.peer(&mut port).packet(0x81, Token::In, &mut bytes),
                 Ok(Reply::Nak)
             );
-            dwc.flush(&mut port).unwrap();
         }
-        assert_eq!(dwc.rings[0].count, 0);
+        write(
+            &mut dwc,
+            DEP + 3 * STRIDE + 12,
+            CMDACT | 8 | 1 << 11 | 1 << 16,
+            &mut access,
+        );
+        assert!(dwc.endpoints[3].active.is_none());
+        assert_eq!(dwc.endpoints[3].command & CMD_FAILURE, 0);
+    }
+    #[test]
+    fn usb_reset_keeps_ep0_transfer_resources_for_the_next_setup_transfer() {
+        let (mut dwc, mut dart, mut ram, mut latch) = setup();
+        let mut access = Access::new(0, 0, &mut latch);
+        configure(&mut dwc, 0, 0, &mut access);
+        configure(&mut dwc, 1, 0, &mut access);
+        trb(&mut ram, TRB, 8, HWO | LST | IOC | 2 << 4);
+        start(&mut dwc, 0, TRB, &mut access);
+        {
+            let mut port = Port {
+                iommu: &mut dart,
+                stream: SID,
+                memory: &mut ram,
+                access: &mut access,
+            };
+            dwc.peer(&mut port).reset().unwrap();
+        }
+        // The SETUP transfer started before the reset is still armed.
+        assert!(dwc.endpoints[0].active.is_some());
+        // The driver ends it and restarts EP0 OUT on the same resource.
+        write(
+            &mut dwc,
+            DEP + 12,
+            CMDACT | 8 | 1 << 11 | 1 << 16,
+            &mut access,
+        );
+        assert_eq!(dwc.endpoints[0].command & CMD_FAILURE, 0);
+        start(&mut dwc, 0, TRB, &mut access);
+        assert_eq!(dwc.endpoints[0].command & CMD_FAILURE, 0);
+        // A detach and reattach also keeps the resource.
+        write(
+            &mut dwc,
+            DEP + 12,
+            CMDACT | 8 | 1 << 11 | 1 << 16,
+            &mut access,
+        );
+        dwc.sync_port(&Attached(2, true)).unwrap();
+        start(&mut dwc, 0, TRB, &mut access);
+        // Only Start Configuration or a core reset releases it.
+        write(
+            &mut dwc,
+            DEP + 12,
+            CMDACT | 8 | 1 << 11 | 1 << 16,
+            &mut access,
+        );
+        let gctl = dwc.gctl;
+        write(&mut dwc, GCTL, gctl | CORE_RESET, &mut access);
+        assert!(!dwc.endpoints[0].resource);
     }
     #[test]
     fn setup_data_status_trbs_and_zero_length_packet() {
