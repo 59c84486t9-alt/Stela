@@ -2244,19 +2244,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 kind: exit.kind,
             })
             .collect();
-        // RET X<n> ends the code with its exit to the target in RAX.
+        // RET X<n> ends the code with its exit to the target in RAX; a
+        // RETAA or RETAB's PAC thunk has one too.
         let code_bytes = &compiled.native.x86_64_code;
-        let return_site = (!single
+        let mut return_site = (!single
             && terminal & 0xffff_fc1f == 0xd65f_0000
             && code_bytes.ends_with(&chain::dynamic_exit(ExitKind::Return)))
         .then(|| (code.0 + code_bytes.len() - chain::DYNAMIC_EXIT_BYTES) as u64);
         if !single {
-            successors.extend(self.complete_pointer_natively(
-                code,
-                &compiled.native.x86_64_code,
-                terminal_pc,
-                terminal,
-            ));
+            let (successor, returns) = self
+                .complete_pointer_natively(
+                    code,
+                    &compiled.native.x86_64_code,
+                    terminal_pc,
+                    terminal,
+                )
+                .unwrap_or_default();
+            successors.extend(successor);
+            return_site = return_site.or(returns);
             successors.extend(self.complete_thread_pointer_natively(
                 code,
                 &compiled.native.x86_64_code,
@@ -2302,7 +2307,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         native: &[u8],
         pc: u64,
         word: u32,
-    ) -> Option<Successor> {
+    ) -> Option<(Option<Successor>, Option<u64>)> {
         let exit = chain::direct_exit(GuestAddress(pc), ExitKind::PointerAuthentication);
         let site = native.len().checked_sub(chain::DIRECT_EXIT_BYTES)?;
         if native[site..] != exit {
@@ -2316,11 +2321,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
         self.host.patch(NativeCode(site as usize), &jump);
-        thunk.next.map(|next| Successor {
+        let successor = thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
             kind: ExitKind::Fallthrough,
-        })
+        });
+        let returns = thunk
+            .returns
+            .map(|returns| installed.0 as u64 + returns as u64);
+        Some((successor, returns))
     }
 
     /// Redirect the System exit ending a block's `native` code, installed at
@@ -6566,6 +6575,46 @@ mod tests {
         assert_eq!(machine.pointer.tags[usize::from(ib)], open);
         machine.derived_changed();
         assert_eq!(machine.pointer.tags, [0; 4]);
+    }
+
+    /// A RETAB's PAC thunk ends its completion with the exit to the target
+    /// in RAX, which the first return through it redirects into a lookup.
+    #[test]
+    fn pac_returns_go_through_a_lookup_thunk() {
+        const RETAB: u32 = 0xd65f_0fff;
+        let mut machine = machine(&[RETAB]);
+        let base = machine.cpu.pc;
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: base + 0x2000,
+            kind: ExitKind::Return as u64,
+        }];
+        machine.step().unwrap();
+        let (memo, tags, service) = machine.pointer.addresses();
+        let thunk = x86_64_pointer::thunk(
+            x86_64_pointer::Form::of(block::PointerAuthenticationOperation::ReturnIbSp).unwrap(),
+            GuestAddress(base),
+            memo,
+            tags,
+            service,
+        );
+        let at = machine
+            .host
+            .installed
+            .iter()
+            .position(|code| *code == thunk.code)
+            .unwrap()
+            + 1;
+        let site = (at + thunk.returns.unwrap()) as u64;
+        let control = &*machine.chain as *const ChainControl as u64;
+        let lookup = chain::lookup_thunk(control, 1, None, ExitKind::Return).unwrap();
+        assert_eq!(machine.host.installed.last(), Some(&lookup));
+        let jump = chain::jump(site, machine.host.installed.len() as u64).unwrap();
+        assert_eq!(
+            machine.host.patches.last(),
+            Some(&(site as usize, jump.to_vec()))
+        );
+        assert_eq!(machine.statistics.lookups, 1);
+        assert_eq!(machine.blocks[0].return_site, None);
     }
 
     /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading
