@@ -464,12 +464,25 @@ mod tests {
                             node("uart0", Some(b"uart-1,samsung\0"), vec![]),
                             node("wdt", Some(b"wdt,t8101\0wdt,s5l8960x\0"), vec![]),
                             node("aic", Some(b"aic,2\0"), vec![]),
+                            {
+                                let mut sep = node(
+                                    "sep",
+                                    Some(b"iop-sep,ascwrap-v4\0"),
+                                    vec![node("iop-sep-nub", Some(b"iop-nub,sep\0"), vec![])],
+                                );
+                                sep.set_property("role", b"SEP\0".to_vec()).unwrap();
+                                sep.set_property(IOMMU_PARENT, 0x84u32.to_le_bytes().to_vec())
+                                    .unwrap();
+                                sep
+                            },
                             node(
-                                "sep",
-                                Some(b"iop-sep,ascwrap-v4\0"),
-                                vec![node("iop-sep-nub", Some(b"iop-nub,sep\0"), vec![])],
+                                "dart-sep",
+                                Some(b"dart,t8110\0"),
+                                vec![phandle(
+                                    node("mapper-sep", Some(b"iommu-mapper\0"), vec![]),
+                                    0x84,
+                                )],
                             ),
-                            node("dart-sep", Some(b"dart,t8110\0"), vec![]),
                             aes(b"aes,s5l8960x\0"),
                             phandle(
                                 node("dockchannel-uart", Some(b"aapl,dock-channels\0"), vec![]),
@@ -486,9 +499,6 @@ mod tests {
         assert_eq!(
             hidden,
             [
-                "/arm-io/sep",
-                "/arm-io/sep/iop-sep-nub",
-                "/arm-io/dart-sep",
                 "/arm-io/aes",
                 "/arm-io/dockchannel-uart",
                 "/buttons",
@@ -504,11 +514,14 @@ mod tests {
             "/arm-io/uart0",
             "/arm-io/wdt",
             "/arm-io/aic",
+            // The SEP (role = SEP), its native nub and its DART are admitted.
+            "/arm-io/sep",
+            "/arm-io/sep/iop-sep-nub",
+            "/arm-io/dart-sep",
+            "/arm-io/dart-sep/mapper-sep",
         ] {
             assert!(tree.property(kept, COMPATIBLE).is_some(), "{kept}");
         }
-        assert!(tree.property("/arm-io/dart-sep", COMPATIBLE).is_none());
-        assert!(tree.node("/arm-io/sep/iop-sep-nub").is_some());
         assert!(tree.property(DEFAULTS, SERIAL_DEVICE).is_none());
         assert!(tree.root.property(SECURE_ROOT_PREFIX).is_none());
     }

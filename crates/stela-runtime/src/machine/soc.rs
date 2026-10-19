@@ -784,6 +784,14 @@ const NATIVE_RTKIT: ChildModel = ChildModel {
         ("segment-names", b""),
     ],
 };
+/// The SEP's native nub (`iop-nub,sep`, kept so `AppleSEPManager`'s
+/// `A7IOPNub` personality binds). Unlike RTBuddy coprocessors, the SEP is not
+/// an RTKit preload: it boots through its SEPROM mailbox handshake, so no
+/// pre-loaded/running firmware-segment markers are injected.
+const SEP_NUB_MODEL: ChildModel = ChildModel {
+    compatible: SEP_NUB,
+    boot_properties: &[],
+};
 const ROLE_MODELS: &[ModelClaim] = &[
     ModelClaim {
         compatible: ASC,
@@ -794,6 +802,14 @@ const ROLE_MODELS: &[ModelClaim] = &[
         compatible: ASC,
         property: ("role", b"SMC\0"),
         children: &[NATIVE_RTKIT],
+    },
+    // The SEP: a native model whose ASC wrapper uses `iop-sep,ascwrap-v4` and
+    // whose nub is `iop-nub,sep`. Distinguished by its `role = SEP`, so it
+    // never collides with the ANS2/SMC `iop,ascwrap-v4` coprocessors.
+    ModelClaim {
+        compatible: SEP,
+        property: ("role", b"SEP\0"),
+        children: &[SEP_NUB_MODEL],
     },
 ];
 
@@ -843,8 +859,9 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         })
 }
 
-/// SEP's wrapper and native nub, from the J473AP IPSW DeviceTree. They are
-/// deliberately absent from `models()` until the complete boot path exists.
+/// SEP's wrapper and native nub, from the J473AP IPSW DeviceTree. Admitted
+/// through [`ROLE_MODELS`] (matched by `role = SEP`), so the loader keeps the
+/// sep node and its nub and `AppleSEPManager` binds and boots the native SEP.
 pub const SEP: &str = "iop-sep,ascwrap-v4";
 pub const SEP_NUB: &str = "iop-nub,sep";
 
@@ -5478,7 +5495,7 @@ mod tests {
         );
     }
     #[test]
-    fn sep_placement_uses_the_native_nub_and_its_single_dart_stream_without_admitting_it() {
+    fn sep_placement_uses_the_native_nub_and_is_admitted_by_its_sep_role() {
         use crate::machine::adt::encode;
         const MODELED: [&str; 3] = [UART, WATCHDOG, "aic,2"];
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
@@ -5544,8 +5561,19 @@ mod tests {
             })
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x25d2c0000);
+        // Admitted only with its distinguishing `role = SEP`; the nub is kept
+        // as a modeled child, and neither is a bare flat-list compatible.
+        let sep_role = |key: &str| (key == "role").then_some(b"SEP\0".as_slice());
+        assert!(models(SEP, sep_role));
         assert!(!models(SEP, |_| None));
         assert!(!models(SEP_NUB, |_| None));
+        assert_eq!(
+            model_children(SEP, sep_role)
+                .iter()
+                .map(|child| child.compatible)
+                .collect::<Vec<_>>(),
+            [SEP_NUB]
+        );
         assert!(board(&tree("iop-nub,rtbuddy-v2", &irqs, 0x84, 0)).is_err());
         assert!(board(&tree(SEP_NUB, &irqs[..3], 0x84, 0)).is_err());
         assert!(board(&tree(SEP_NUB, &irqs, 0x85, 0)).is_err());
