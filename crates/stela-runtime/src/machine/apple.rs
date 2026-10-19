@@ -78,6 +78,7 @@ pub use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     asc::Lines as AscLines,
+    dcp::Log as DisplayLog,
     interrupt::AicInput,
     nor,
     scanout::{Mode as ScanoutMode, PixelFormat as ScanoutFormat, Scanout},
@@ -223,11 +224,14 @@ struct SepMaster {
     stream: usize,
 }
 
-/// The DCPEXT coprocessor's ASC and the DART stream it masters through.
+/// The DCPEXT coprocessor's ASC, the DART stream it masters its shared
+/// memory through, and the display pipe's DART stream its swap surfaces are
+/// mapped in, once placed.
 struct DcpMaster {
     asc: DeviceId,
     dart: DeviceId,
     stream: usize,
+    surface: Option<(DeviceId, usize)>,
 }
 
 /// A DART on the bus, for [`AppleDevices::add_aes`].
@@ -847,11 +851,14 @@ impl AppleDevices {
     /// common ASC wrapper) carrying the IOMFB link endpoint and the AFK/EPIC
     /// endpoints, presenting one fixed connected monitor to `scanout`, and
     /// mastering the AP's link region through `dart` stream `stream`
-    /// (`window` as `dcp::Coprocessor::new` takes it). The DCPEXT nub is
-    /// `quiesced`, so (like the SMC) the coprocessor acknowledges the AP's
-    /// wake once RTKit enumeration completes behind the boot-chain handoff.
-    /// This does not admit DCPEXT in `soc::models` (see
+    /// (`window` as `dcp::Coprocessor::new` takes it) and reading swap
+    /// surfaces through `surface`, the display pipe's DART stream
+    /// (`dart-dispext0` stream 0 on J473AP), when it is placed. The DCPEXT
+    /// nub is `quiesced`, so (like the SMC) the coprocessor acknowledges the
+    /// AP's wake once RTKit enumeration completes behind the boot-chain
+    /// handoff. This does not admit DCPEXT in `soc::models` (see
     /// `platform::apple::dcp`).
+    #[allow(clippy::too_many_arguments)]
     pub fn add_dcpext(
         &mut self,
         wrapper: Range,
@@ -860,6 +867,7 @@ impl AppleDevices {
         scanout: Box<dyn Scanout>,
         (dart, stream): (DartId, usize),
         window: Option<u64>,
+        surface: Option<(DartId, usize)>,
     ) -> Result<(), String> {
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
@@ -879,6 +887,7 @@ impl AppleDevices {
             asc,
             dart: dart.0,
             stream,
+            surface: surface.map(|(dart, stream)| (dart.0, stream)),
         });
         self.bus
             .map(asc, wrapper.physical, wrapper.bytes, 0)
@@ -1227,6 +1236,18 @@ impl AppleDevices {
             .ok_or("unknown USB controller")?;
         Ok(UsbClient(&mut master.session))
     }
+    /// The next entry of a display coprocessor's log: what the guest sent
+    /// the DCP model and what it answered or refused.
+    pub fn take_display_log(&mut self) -> Option<DisplayLog> {
+        let ids: Vec<DeviceId> = self.dcp_masters.iter().map(|master| master.asc).collect();
+        ids.into_iter().find_map(|id| {
+            self.bus
+                .device_mut::<Asc>(id)
+                .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
+                .and_then(dcp::Coprocessor::take_log)
+        })
+    }
+
     pub fn take_usb_log(&mut self) -> Option<UsbLog> {
         self.usb_masters
             .iter_mut()
@@ -1947,6 +1968,36 @@ impl Devices for AppleDevices {
             sep.transfer(&mut port).map_err(describe)?;
         }
         for master in &self.dcp_masters {
+            let presenting = self
+                .bus
+                .device_mut::<Asc>(master.asc)
+                .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
+                .is_some_and(|coprocessor| coprocessor.frame_pending());
+            if presenting {
+                let (surface, stream) = master.surface.ok_or_else(|| {
+                    DeviceError::TransferRefused(
+                        "DCPEXT swap surface: the display pipe's DART (dart-dispext0) is not placed"
+                            .into(),
+                    )
+                })?;
+                let (asc, dart) = self
+                    .bus
+                    .pair_mut::<Asc, Dart>(master.asc, surface)
+                    .expect("a DCP master names its ASC and surface DART");
+                let coprocessor = asc
+                    .firmware_mut::<dcp::Coprocessor>()
+                    .expect("a DCP master's ASC runs the DCP model");
+                let mut access = Access::new(cpu, now, &mut self.latch);
+                let mut port = Port {
+                    iommu: dart,
+                    stream,
+                    memory,
+                    access: &mut access,
+                };
+                coprocessor.present(&mut port).map_err(|reason| {
+                    DeviceError::TransferRefused(format!("DCPEXT swap surface: {reason}"))
+                })?;
+            }
             let (asc, dart) = self
                 .bus
                 .pair_mut::<Asc, Dart>(master.asc, master.dart)
@@ -2584,6 +2635,7 @@ mod tests {
                 Box::new(Screen),
                 (dart, 5),
                 Some(0x8_0000_0000),
+                None,
             )
             .unwrap();
         devices

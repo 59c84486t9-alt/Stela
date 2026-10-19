@@ -751,6 +751,10 @@ fn devices<'f>(
             alloc::boxed::Box::new(display::GopScanout::new(screen)),
             (darts[dcp.iommu][0], dcp.stream as usize),
             dcp.window,
+            // The display pipe's DART (dart-dispext0, TRAD plus SMMU) is
+            // not parsed by `soc::board` yet, so swap surfaces cannot be
+            // read and a presented swap refuses by name.
+            None,
         )?;
         let regions: Vec<(&'static str, Range)> = dcp
             .regions
