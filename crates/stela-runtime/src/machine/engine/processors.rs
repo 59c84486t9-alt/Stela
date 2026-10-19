@@ -466,12 +466,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let shared = (0..self.peers.len())
             .filter(|&other| other != pe && cluster(other) == cluster(pe))
             .find_map(|other| match &self.peers[other] {
-                Peer::Running if !down(self.waiting) => Some(self.cpu.ctrr.clone()),
-                Peer::Parked(parked) if !down(parked.waiting) => Some(parked.cpu.ctrr.clone()),
+                Peer::Running if !down(self.waiting) => Some(&self.cpu),
+                Peer::Parked(parked) if !down(parked.waiting) => Some(&parked.cpu),
                 Peer::Running | Peer::Parked(_) | Peer::Off => None,
             });
-        if let Some(shared) = shared {
-            cpu.ctrr = shared;
+        // Its cluster-scoped implementation-defined registers too
+        // (`impdef::Scope::Cluster`).
+        if let Some(peer) = shared {
+            cpu.ctrr = peer.ctrr.clone();
+            cpu.apple.impdef.join(&peer.apple.impdef);
         }
         cpu.memory_lock = self.cpu.memory_lock;
         if pe == self.current {

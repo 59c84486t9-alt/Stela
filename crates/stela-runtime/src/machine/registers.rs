@@ -14,8 +14,8 @@
 //! IMPLEMENTATION DEFINED space from EL1 to EL2.
 use super::{
     cpu::{
-        Cpu, GXF_CONFIG_EL1_LOCK, GXF_CONFIG_EN, GXF_CONFIG_LOCKS, GuardedBank, PERM_EL0_10,
-        PERM_EL0_20, PERM_EL1, PERM_EL2, TranslationRegime, VM_TIMER_FIQ_PHYSICAL,
+        Cpu, GXF_CONFIG_EL1_LOCK, GXF_CONFIG_EN, GXF_CONFIG_LOCKS, GuardedBank, HCR_VM,
+        PERM_EL0_10, PERM_EL0_20, PERM_EL1, PERM_EL2, TranslationRegime, VM_TIMER_FIQ_PHYSICAL,
         VM_TIMER_FIQ_VIRTUAL,
     },
     exception::Pstate,
@@ -134,6 +134,11 @@ pub mod encodings {
         ASPSR_GL12 = 3, 6, 15, 9, 4;
         ESR_GL12 = 3, 6, 15, 9, 5;
         ELR_GL12 = 3, 6, 15, 9, 6;
+        // No public name: GL1's FAR from EL2, where FAR_GL1's encoding
+        // (C10_7) follows ELR_GL1's (C10_6) as C9_7 follows ELR_GL12's;
+        // 26A434 XNU's hypervisor saves and restores it with the other GL12
+        // registers (0xfffffe000bd9edbc, 0xfffffe000bda2b94; inference).
+        FAR_GL12 = 3, 6, 15, 9, 7;
         // Apple PAC (XNU `xnu-6153.141.1` `pexpert/pexpert/arm64/arm64_common.h`).
         APCTL_EL1 = 3, 4, 15, 0, 4;
         APCTL_EL2 = 3, 6, 15, 12, 2;
@@ -428,7 +433,7 @@ impl Cpu {
             }
             TPIDR_GL1 => Apple::TpidrGl(0),
             TPIDR_GL2 => return el2(Apple::TpidrGl(1)),
-            VBAR_GL12 | SPSR_GL12 | ASPSR_GL12 | ESR_GL12 | ELR_GL12 | SP_GL12 => {
+            VBAR_GL12 | SPSR_GL12 | ASPSR_GL12 | ESR_GL12 | ELR_GL12 | FAR_GL12 | SP_GL12 => {
                 return el2(Apple::GuardedOne(encoding));
             }
             APSTS_EL1 => Apple::ApStatus,
@@ -553,12 +558,20 @@ impl Cpu {
                 .unwrap_or_else(|reason| Outcome::Refused(Refusal::UnsupportedSetting(reason)));
         }
         if let Some(entry) = impdef::lookup(encoding) {
+            if entry.el2 && self.pstate.el != 2 {
+                return Outcome::Undefined;
+            }
+            // The guarded level's HPFAR would hold a stage-2 fault's IPA,
+            // which can arise only while stage 2 is enabled.
+            if entry.encoding == impdef::GUARDED_HPFAR && self.hcr(HCR_VM) {
+                return Outcome::Refused(Refusal::UnsupportedSetting(
+                    "the guarded level's HPFAR while HCR_EL2.VM enables stage 2",
+                ));
+            }
             return if read {
                 match self.apple.impdef.read(entry) {
-                    Some(value) => Outcome::Read(value),
-                    None => Outcome::Refused(Refusal::UnsupportedSetting(
-                        "read of an implementation-defined storage register before its first write",
-                    )),
+                    Ok(value) => Outcome::Read(value),
+                    Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
                 }
             } else {
                 match self.apple.impdef.write(entry, value) {

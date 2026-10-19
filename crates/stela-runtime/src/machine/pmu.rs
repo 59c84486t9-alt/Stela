@@ -52,6 +52,11 @@ pub const OPMAT0: Encoding = monitor(1, 7, 0);
 pub const OPMAT1: Encoding = monitor(1, 8, 0);
 pub const OPMSK0: Encoding = monitor(1, 9, 0);
 pub const OPMSK1: Encoding = monitor(1, 10, 0);
+/// Two further controls without a public name that 26A434 XNU's kpc saves
+/// after OPMSK1 (`kpc_get_config`, 0xfffffe000bd41050) and restores with the
+/// others (0xfffffe000bd8db14); they configure nothing at 0.
+pub const PMCR_C0_4: Encoding = monitor(1, 0, 4);
+pub const PMCR_C1_4: Encoding = monitor(1, 1, 4);
 /// Written with PMCR1's value (`S3_1_C15_C7_2`, no public name).
 pub const PMCR1_ALTERNATE: Encoding = monitor(1, 7, 2);
 pub const PMSR: Encoding = monitor(1, 13, 0);
@@ -73,7 +78,10 @@ pub const PMC: [Encoding; COUNTERS] = [
 ];
 /// The registers that store a configuration and accept only 0, which
 /// configures nothing, in [`Pmu::extension`] order.
-const EXTENSION: [Encoding; 7] = [PMCR2, PMCR3, PMCR4, OPMAT0, OPMAT1, OPMSK0, OPMSK1];
+const EXTENSION: [Encoding; EXTENSIONS] = [
+    PMCR2, PMCR3, PMCR4, OPMAT0, OPMAT1, OPMSK0, OPMSK1, PMCR_C0_4, PMCR_C1_4,
+];
+const EXTENSIONS: usize = 9;
 
 pub const COUNTERS: usize = 10;
 const CYCLES: usize = 0;
@@ -120,7 +128,7 @@ pub struct Pmu {
     pmcr1: u64,
     alternate: Option<u64>,
     pmesr: [Option<u64>; 2],
-    extension: [Option<u64>; 7],
+    extension: [Option<u64>; EXTENSIONS],
     /// The counts as of `synced_count` and `synced_retired`.
     counters: [u64; COUNTERS],
     synced_count: u64,
@@ -145,7 +153,7 @@ impl Pmu {
             pmcr1: 0,
             alternate: None,
             pmesr: [None; 2],
-            extension: [None; 7],
+            extension: [None; EXTENSIONS],
             counters: [0; COUNTERS],
             synced_count: 0,
             synced_retired: 0,
@@ -355,7 +363,9 @@ impl Pmu {
                         .position(|&register| register == encoding)
                         .expect("owned");
                     if value != 0 {
-                        return Err("PMCR2-4, OPMAT and OPMSK settings are not modelled");
+                        return Err(
+                            "PMCR2-4, OPMAT, OPMSK and S3_1_C15_C0_4/C1_4 settings are not modelled",
+                        );
                     }
                     self.extension[index] = Some(0);
                 }
@@ -483,6 +493,10 @@ mod tests {
         assert!(pmu.write(OPMSK0, 1, 0, 0, KERNEL).is_err());
         pmu.write(OPMSK0, 0, 0, 0, KERNEL).unwrap();
         assert_eq!(pmu.read(OPMSK0, 0, 0, KERNEL), Ok(0));
+        assert!(pmu.read(PMCR_C1_4, 0, 0, KERNEL).is_err());
+        assert!(pmu.write(PMCR_C0_4, 1, 0, 0, KERNEL).is_err());
+        pmu.write(PMCR_C1_4, 0, 0, 0, KERNEL).unwrap();
+        assert_eq!(pmu.read(PMCR_C1_4, 0, 0, KERNEL), Ok(0));
         pmu.write(PMESR1, 0x8c, 0, 0, KERNEL).unwrap();
         assert_eq!(pmu.read(PMESR1, 0, 0, KERNEL), Ok(0x8c));
         assert!(pmu.write(PMSR, 0, 0, 0, KERNEL).is_err());
