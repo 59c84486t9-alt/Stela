@@ -92,6 +92,8 @@ pub struct AppleDevices {
     ipi: Option<FastIpi>,
     masters: Vec<Master>,
     coprocessors: Vec<(&'static str, DeviceId)>,
+    /// The SPI controller holding the NOR die.
+    nor: Option<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
     usb_masters: Vec<UsbMaster>,
@@ -295,6 +297,7 @@ impl AppleDevices {
             masters: Vec::new(),
             storage_masters: Vec::new(),
             coprocessors: Vec::new(),
+            nor: None,
             sep_masters: Vec::new(),
             usb_masters: Vec::new(),
             cpu_start: None,
@@ -306,6 +309,14 @@ impl AppleDevices {
             pmgr: None,
             dart_power: Vec::new(),
         }
+    }
+
+    /// The NOR sectors the guest changed since the last call, as (offset,
+    /// bytes), for the host to persist.
+    pub fn nor_dirty(&mut self) -> Vec<(usize, Vec<u8>)> {
+        self.nor
+            .and_then(|id| self.bus.device_mut::<Spi>(id))
+            .map_or_else(Vec::new, Spi::take_dirty)
     }
 
     /// State of native RTKit coprocessors, without register side effects.
@@ -387,7 +398,7 @@ impl AppleDevices {
         port
     }
 
-    /// Installs the DT-derived SPI controller, one in-memory NOR die and
+    /// Installs the DT-derived SPI controller, one NOR die and
     /// its external GPIO CS wire (or the internal PIN.CS connection). An
     /// external CS requires the placed GPIO bank.
     pub fn add_spi_nor(&mut self, placement: &super::soc::SpiNor) -> Result<(), String> {
@@ -400,6 +411,7 @@ impl AppleDevices {
         self.bus
             .map(spi, device.physical, device.bytes, 0)
             .map_err(|e| format!("SPI placement: {e:?}"))?;
+        self.nor = Some(spi);
         if let Some(pin) = placement.select {
             let (base, _) = self.gpio.as_ref().ok_or("SPI CS requires the GPIO bank")?;
             self.selects.push(SelectWire {

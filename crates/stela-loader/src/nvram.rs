@@ -19,7 +19,8 @@ const SPINOR: &str = "/arm-io/spi1/spinor";
 
 /// Publish one image's current bank; the engine reconstructs the erased
 /// regions and installs these exact proxy bytes into its NOR before entry.
-/// No host-backed persistence is claimed: a new boot gets a new image.
+/// A machine with a persistent NOR replaces this bank through the bundle's
+/// `nvram` patch slots.
 pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
     let Some(slot) = tree.property(CHOSEN, PROXY) else {
         return Ok(false);

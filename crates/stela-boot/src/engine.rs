@@ -10,6 +10,7 @@ mod display;
 mod host;
 mod input;
 mod interrupts;
+mod nor;
 mod restore;
 mod storage;
 
@@ -66,6 +67,8 @@ struct Options {
     preboot: Option<Target>,
     /// One host partition backing all ANS namespaces.
     storage: Option<Target>,
+    /// The host partition holding the NOR flash image (`--nor`).
+    nor: Option<Target>,
     restore: bool,
     restore_source: Option<Target>,
     restore_manifest: bool,
@@ -149,6 +152,7 @@ impl Options {
             bundle: false,
             preboot: None,
             storage: None,
+            nor: None,
             restore: false,
             restore_source: None,
             restore_manifest: false,
@@ -222,6 +226,13 @@ impl Options {
                     .parse()?;
                 if options.storage.replace(target).is_some() {
                     return Err("system mode accepts exactly one ANS backing partition");
+                }
+                continue;
+            }
+            if name == "--nor" {
+                let target = words.next().ok_or("missing NOR partition")?.parse()?;
+                if options.nor.replace(target).is_some() {
+                    return Err("duplicate NOR partition");
                 }
                 continue;
             }
@@ -869,6 +880,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .storage
         .iter()
         .chain(options.restore_source.iter())
+        .chain(options.nor.iter())
         .collect();
     let (services, host_input) = if targets.is_empty() && !options.input {
         (Vec::new(), None)
@@ -894,6 +906,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .restore_source
         .as_ref()
         .map(|_| services.next().unwrap());
+    let nor = options
+        .nor
+        .as_ref()
+        .map(|_| nor::HostNor::open(services.next().unwrap()));
+    let (mut host_nor, nor_image, nvram) = match nor {
+        Some((host_nor, image, nvram)) => (Some(host_nor), Some(image), Some(nvram)),
+        None => (None, None, None),
+    };
     let config = Config {
         ram,
         pool_physical: handoff.pool.physical,
@@ -925,8 +945,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         let framebuffer = display.as_ref().map(display::Display::framebuffer);
         let (dram_base, ram_bytes) = (options.dram_base, options.ram_bytes);
         let loaded = match &built {
-            Some(built) => bundle::load_built(&mut bare, built, dram_base, ram_bytes, framebuffer),
-            None => bundle::load(&mut bare, files, dram_base, ram_bytes, framebuffer),
+            Some(built) => {
+                bundle::load_built(&mut bare, built, dram_base, ram_bytes, framebuffer, nvram)
+            }
+            None => bundle::load(&mut bare, files, dram_base, ram_bytes, framebuffer, nvram),
         };
         let loaded = match loaded {
             Ok(loaded) => loaded,
@@ -983,12 +1005,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Some(Some(tree)) => Some(tree),
         None => None,
     };
-    let board = tree.map(|tree| {
+    let mut board = tree.map(|tree| {
         soc::board(tree).unwrap_or_else(|error| {
             output::arguments(format_args!("board refusal: {error}\n"));
             output::fatal("the board could not be modeled")
         })
     });
+    if let Some(image) = nor_image {
+        match board.as_mut().and_then(|board| board.spi_nor.as_mut()) {
+            Some(spi) => spi.image = image,
+            None => output::fatal("--nor was supplied but this DeviceTree exposes no modeled NOR"),
+        }
+    }
     let profile = match &board {
         Some(board) => board_profile(board, target),
         None => test_profile(),
@@ -1083,6 +1111,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         handoff.tsc_hz,
         restore.as_mut(),
         host_input.as_mut(),
+        host_nor.as_mut(),
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds, &options.dumps)
@@ -1108,6 +1137,7 @@ fn run(
     tsc_hz: u64,
     mut restore: Option<&mut restore::Experiment>,
     mut host_input: Option<&mut input::HostInput>,
+    mut host_nor: Option<&mut nor::HostNor>,
 ) -> Stop {
     let mut shown = host::rdtsc();
     let mut beat = (
@@ -1174,6 +1204,9 @@ fn run(
         }
         if let Some(input) = host_input.as_deref_mut() {
             machine.exclude_host_time(|devices| input.poll(devices));
+        }
+        if let Some(nor) = host_nor.as_deref_mut() {
+            machine.exclude_host_time(|devices| nor.poll(devices));
         }
 
         let sliced = matches!(stop, Stop::Budget) && limit != budget;

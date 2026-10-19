@@ -265,6 +265,8 @@ pub enum PatchSource {
     BootArgs,
     /// The generic timer rate the machine presents.
     Timebase,
+    /// The current bank of the machine's persistent NOR, when it has one.
+    Nvram,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -713,12 +715,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     if let Some(chip_id) = inputs.target.chip_id {
         aic::publish(&mut tree, chip_id)?;
     }
-    if nvram::publish(&mut tree)? {
-        unresolved.push(
-            "/chosen nvram-proxy-data: a CHRP bank from the in-memory NOR; variables do not persist across boots"
-                .into(),
-        );
-    }
+    let nvram_published = nvram::publish(&mut tree)?;
     let memory_controller = inputs.target.chip_id.and_then(lock_regs::table);
     if let Some(controller) = memory_controller {
         lock_regs::publish(&mut tree, controller)?;
@@ -962,6 +959,9 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
 
     let mut patches = device_tree_patches(&tree, device_tree_region)?;
     patches.extend(cpu_frequency_patches(&tree, device_tree_region)?);
+    if nvram_published {
+        patches.extend(nvram_patches(&tree, device_tree_region)?);
+    }
     patches.extend(boot_args_patches(boot_args_region, &boot_args_bytes));
 
     let entry_point = |image: &LoadedImage| -> Result<Entry> {
@@ -1295,6 +1295,33 @@ fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>>
         });
     }
     Ok(patches)
+}
+
+/// iBoot's NOR hand-off: the machine replaces the prepared empty bank with
+/// its persistent NOR's current bank; without one the prepared bank stands
+/// and variables last one boot.
+fn nvram_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
+    let bytes = tree.serialize();
+    ["nvram-proxy-data", "nvram-current-bank"]
+        .into_iter()
+        .map(|property| {
+            let at = tree.locate("/chosen", property)?;
+            Ok(Patch {
+                source: PatchSource::Nvram,
+                required: false,
+                region: region.name.clone(),
+                file: region.file.clone(),
+                file_offset: at.value_offset as u64,
+                bytes: at.value_bytes as u64,
+                encoding: Encoding::Bytes,
+                field: format!("/chosen {property}"),
+                prepared_hex: hex::encode(
+                    &bytes[at.value_offset..at.value_offset + at.value_bytes],
+                ),
+                rule: "the persistent NOR's newest valid NVRAM bank and its index".into(),
+            })
+        })
+        .collect()
 }
 
 fn boot_args_patches(region: &Region, bytes: &[u8]) -> Vec<Patch> {
@@ -1794,6 +1821,7 @@ mod tests {
             timebase_hz: 24_000_000,
             framebuffer: None,
             boot_args: None,
+            nvram: None,
         };
         let image = verified.load(
             &machine,

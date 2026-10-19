@@ -26,7 +26,7 @@ use core::arch::{
 use stela_loader::{boot_bundle::Options, installed};
 use stela_runtime::{
     apfs::Container,
-    boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest},
+    boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
     machine::Host,
     payload::ReadAt,
     pc::{
@@ -315,9 +315,10 @@ pub fn load(
     dram_base: u64,
     ram_bytes: u64,
     framebuffer: Option<Framebuffer>,
+    nvram: Option<Nvram>,
 ) -> Result<Entry, String> {
     let named = |name: &str| files.iter().find(|file| file.name() == name).map(contents);
-    load_named(host, &named, dram_base, ram_bytes, framebuffer)
+    load_named(host, &named, dram_base, ram_bytes, framebuffer, nvram)
 }
 
 /// Load a bundle built in the heap, as [`from_disk`] returns it.
@@ -327,6 +328,7 @@ pub fn load_built(
     dram_base: u64,
     ram_bytes: u64,
     framebuffer: Option<Framebuffer>,
+    nvram: Option<Nvram>,
 ) -> Result<Entry, String> {
     let named = |name: &str| {
         files
@@ -334,7 +336,7 @@ pub fn load_built(
             .find(|(file, _)| file == name)
             .map(|(_, bytes)| bytes.as_slice())
     };
-    load_named(host, &named, dram_base, ram_bytes, framebuffer)
+    load_named(host, &named, dram_base, ram_bytes, framebuffer, nvram)
 }
 
 fn load_named<'a>(
@@ -343,6 +345,7 @@ fn load_named<'a>(
     dram_base: u64,
     ram_bytes: u64,
     framebuffer: Option<Framebuffer>,
+    nvram: Option<Nvram>,
 ) -> Result<Entry, String> {
     let json = named(MANIFEST_FILE).ok_or("bundle.json was not read")?;
     let manifest = Manifest::parse(json).map_err(|e| format!("{e}"))?;
@@ -355,6 +358,7 @@ fn load_named<'a>(
         timebase_hz: TIMEBASE_HZ,
         framebuffer,
         boot_args: None,
+        nvram,
     };
     let image = verified
         .load(&machine, &mut entropy, &mut |pa, data| {

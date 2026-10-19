@@ -92,7 +92,7 @@ pub unsafe fn open(
         .enumerate()
         .any(|(i, t)| targets[..i].iter().any(|other| other.serial == t.serial))
     {
-        return Err("ANS and restore source must use distinct host disks".into());
+        return Err("ANS, restore source and NOR partitions must be on distinct host disks".into());
     }
     let root: u64;
     // SAFETY: engine CPL0, before switching away from the loader root.

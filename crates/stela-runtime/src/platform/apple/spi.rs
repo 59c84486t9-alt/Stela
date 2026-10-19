@@ -25,7 +25,7 @@ use super::{
     interrupt::{AicInput, Wire},
     nor::{Image, Nor},
 };
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, vec::Vec};
 
 pub const BYTES: u64 = 0x4000;
 const NAME: &str = "Apple SPI v1";
@@ -100,6 +100,10 @@ impl Spi {
     }
     pub fn image(&self) -> &Image {
         self.nor.image()
+    }
+    /// The NOR sectors changed since the last call (`Nor::take_dirty`).
+    pub fn take_dirty(&mut self) -> Vec<(usize, Vec<u8>)> {
+        self.nor.take_dirty()
     }
     /// Board wiring, independent of command/transfer boundaries. External
     /// GPIO's output is active low, just as PIN.CS is for internal selection.

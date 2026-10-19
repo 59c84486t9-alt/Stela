@@ -159,6 +159,18 @@ pub struct Machine {
     pub framebuffer: Option<Framebuffer>,
     /// Replaces the prepared kernel command line.
     pub boot_args: Option<String>,
+    /// The persistent NOR's current NVRAM bank, replacing the prepared
+    /// empty one.
+    pub nvram: Option<Nvram>,
+}
+
+/// The NVRAM bank iBoot hands the kernel in `/chosen`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nvram {
+    /// `nvram-current-bank`.
+    pub bank: u32,
+    /// `nvram-proxy-data`: the bank's bytes.
+    pub proxy: Vec<u8>,
 }
 
 impl Machine {
@@ -407,6 +419,13 @@ impl<'a> Verified<'a> {
                     })
                 }
             },
+            ("nvram", "/chosen nvram-proxy-data") => {
+                machine.nvram.as_ref().map(|nvram| nvram.proxy.clone())
+            }
+            ("nvram", "/chosen nvram-current-bank") => machine
+                .nvram
+                .as_ref()
+                .map(|nvram| nvram.bank.to_le_bytes().to_vec()),
             ("boot-args", _) => match &machine.boot_args {
                 None => None,
                 Some(line) => {
@@ -555,7 +574,16 @@ mod tests {
 
     const BASE: u64 = 0x8_0000_0000;
 
+    const PATCHES: &str = r#"
+    {"source": "dram-size", "required": false, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 0, "bytes": 8, "encoding": "u64-le", "field": "/chosen dram-size", "prepared_hex": ""},
+    {"source": "entropy", "required": true, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 8, "bytes": 4, "encoding": "bytes", "field": "/chosen random-seed", "prepared_hex": ""},
+    {"source": "framebuffer", "required": false, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 12, "bytes": 8, "encoding": "u64-le", "field": "boot_args.Video.v_display", "prepared_hex": ""}"#;
+
     fn manifest_json(kernel: &[u8], tree: &[u8]) -> String {
+        manifest_with(kernel, tree, PATCHES)
+    }
+
+    fn manifest_with(kernel: &[u8], tree: &[u8], patches: &str) -> String {
         let sha = crate::sha256;
         format!(
             r#"{{
@@ -573,10 +601,7 @@ mod tests {
   "entry_x0": {dt},
   "boot_args": {{"command_line": "-v"}},
   "top_of_kernel_data": {top},
-  "patches": [
-    {{"source": "dram-size", "required": false, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 0, "bytes": 8, "encoding": "u64-le", "field": "/chosen dram-size", "prepared_hex": ""}},
-    {{"source": "entropy", "required": true, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 8, "bytes": 4, "encoding": "bytes", "field": "/chosen random-seed", "prepared_hex": ""}},
-    {{"source": "framebuffer", "required": false, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 12, "bytes": 8, "encoding": "u64-le", "field": "boot_args.Video.v_display", "prepared_hex": ""}}
+  "patches": [{patches}
   ]
 }}"#,
             kb = kernel.len(),
@@ -608,6 +633,7 @@ mod tests {
             timebase_hz: 24_000_000,
             framebuffer: None,
             boot_args: None,
+            nvram: None,
         }
     }
 
@@ -654,6 +680,56 @@ mod tests {
         })?;
         assert!(image.kept.is_empty());
         assert_eq!(&ram[dt + 12..dt + 20], &0u64.to_le_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn a_persistent_nor_hands_off_its_current_bank() -> Result<(), BundleError> {
+        let kernel = [0xaa; 100];
+        let tree = [0x11; 20];
+        let json = manifest_with(
+            &kernel,
+            &tree,
+            r#"
+    {"source": "nvram", "required": false, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 0, "bytes": 16, "encoding": "bytes", "field": "/chosen nvram-proxy-data", "prepared_hex": ""},
+    {"source": "nvram", "required": false, "region": "DeviceTree", "file": "devicetree.adt", "file_offset": 16, "bytes": 4, "encoding": "bytes", "field": "/chosen nvram-current-bank", "prepared_hex": ""}"#,
+        );
+        let manifest = Manifest::parse(json.as_bytes())?;
+        let files: BTreeMap<&str, &[u8]> =
+            BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
+        let verified = manifest.verify(&|name| files.get(name).copied())?;
+        let mut ram = vec![0u8; FRAME_BYTES as usize];
+        let mut entropy = |_: &mut [u8]| Err("unused");
+        // Without a persistent NOR the prepared bank stands.
+        let image = verified.load(&machine(), &mut entropy, &mut |pa, bytes| {
+            write_into(&mut ram, pa, bytes)
+        })?;
+        assert_eq!(image.kept.len(), 2);
+        assert_eq!(&ram[0x4000..0x4014], &[0x11; 20]);
+        let persistent = Machine {
+            nvram: Some(Nvram {
+                bank: 1,
+                proxy: vec![7; 16],
+            }),
+            ..machine()
+        };
+        verified.load(&persistent, &mut entropy, &mut |pa, bytes| {
+            write_into(&mut ram, pa, bytes)
+        })?;
+        assert_eq!(&ram[0x4000..0x4010], &[7; 16]);
+        assert_eq!(&ram[0x4010..0x4014], &1u32.to_le_bytes());
+        let short = Machine {
+            nvram: Some(Nvram {
+                bank: 0,
+                proxy: vec![7; 4],
+            }),
+            ..machine()
+        };
+        assert!(
+            verified
+                .load(&short, &mut entropy, &mut |_, _| true)
+                .is_err()
+        );
         Ok(())
     }
 

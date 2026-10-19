@@ -68,6 +68,22 @@ pub fn empty_bank() -> Vec<u8> {
     bank
 }
 
+/// A bank's generation, which XNU's `IONVRAMCHRPHandler` and iBoot
+/// increment on every save; the newest valid bank is current.
+pub fn generation(bank: &[u8]) -> u32 {
+    u32::from_le_bytes(bank[20..24].try_into().expect("a bank holds its header"))
+}
+
+/// An empty bank of generation `generation`, for tests.
+#[cfg(test)]
+pub(crate) fn empty_bank_of(generation: u32) -> Vec<u8> {
+    let mut bank = empty_bank();
+    bank[20..24].copy_from_slice(&generation.to_le_bytes());
+    let sum = adler(&bank[20..]);
+    bank[16..20].copy_from_slice(&sum.to_le_bytes());
+    bank
+}
+
 /// Validate the bounded CHRP image before accepting boot firmware's proxy.
 /// XNU accepts both v1 and v2 names; Stela creates v1 and preserves either.
 pub fn validate(bank: &[u8]) -> Result<(), &'static str> {

@@ -14,8 +14,9 @@
 //! erase at that boundary (zero busy latency), so WIP is always clear;
 //! status WEL follows WREN/WRDI and is consumed by program/erase/WRSR.
 //! Unsupported commands refuse before their byte is accepted.
-use alloc::{vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 pub mod nvram;
+pub mod persist;
 
 pub const CAPACITY: usize = 0x100000;
 pub const PAGE_SIZE: usize = 256;
@@ -39,9 +40,11 @@ const WRITE_ENABLE: u8 = 0x06;
 const WRITE_DISABLE: u8 = 0x04;
 const READ_ID: u8 = 0x9f;
 
-/// In-memory NOR image. A future persistent backend attaches here: load a
-/// whole image before boot, derive the proxy from it, and flush committed
-/// dirty erase units after CS rises; never maintain an independent proxy.
+/// The NOR image. [`persist`] loads a whole image from a host partition
+/// before boot, the proxy is derived from it ([`Image::current_bank`]), and
+/// the die reports the sectors each committed program or erase changed
+/// ([`Nor::take_dirty`]) for the host to store; there is no independent
+/// proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image(Vec<u8>);
 impl Image {
@@ -67,6 +70,19 @@ impl Image {
         let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
         Ok(&self.0[start..start + nvram::BANK_SIZE])
     }
+    /// The newest valid NVRAM bank, by generation; the lower bank wins a
+    /// tie.
+    pub fn current_bank(&self) -> Result<u32, &'static str> {
+        (0..nvram::BANK_COUNT)
+            .filter_map(|bank| {
+                let bytes = self.bank(bank).ok()?;
+                nvram::validate(bytes).ok()?;
+                Some((nvram::generation(bytes), bank))
+            })
+            .max_by_key(|&(generation, bank)| (generation, core::cmp::Reverse(bank)))
+            .map(|(_, bank)| bank)
+            .ok_or("the NOR image holds no valid NVRAM bank")
+    }
     pub fn with_proxy(mut self, bank: u32, proxy: &[u8]) -> Result<Self, &'static str> {
         nvram::validate(proxy)?;
         self.bank(bank)?;
@@ -91,6 +107,9 @@ pub struct Nor {
     enabled: bool,
     selected: bool,
     transaction: Option<Transaction>,
+    /// Sectors committed programs and erases changed since the host last
+    /// took them.
+    dirty: BTreeSet<usize>,
 }
 impl Nor {
     pub fn new(image: Image) -> Self {
@@ -99,7 +118,18 @@ impl Nor {
             enabled: false,
             selected: false,
             transaction: None,
+            dirty: BTreeSet::new(),
         }
+    }
+    /// The changed sectors, each as (offset, its current bytes).
+    pub fn take_dirty(&mut self) -> Vec<(usize, Vec<u8>)> {
+        core::mem::take(&mut self.dirty)
+            .into_iter()
+            .map(|sector| {
+                let offset = sector * SECTOR_SIZE;
+                (offset, self.image.0[offset..offset + SECTOR_SIZE].to_vec())
+            })
+            .collect()
     }
     pub(crate) fn checkpoint(&self) -> Checkpoint {
         Checkpoint(self.transaction.clone())
@@ -149,8 +179,9 @@ impl Nor {
                 PROGRAM if self.enabled => {
                     let base = t.address & !(PAGE_SIZE - 1);
                     for (i, byte) in t.data.into_iter().enumerate() {
-                        let offset = base | ((t.address + i) & (PAGE_SIZE - 1));
-                        self.image.0[offset % CAPACITY] &= byte;
+                        let offset = (base | ((t.address + i) & (PAGE_SIZE - 1))) % CAPACITY;
+                        self.image.0[offset] &= byte;
+                        self.dirty.insert(offset / SECTOR_SIZE);
                     }
                     self.enabled = false;
                 }
@@ -162,6 +193,8 @@ impl Nor {
                     };
                     let base = (t.address % CAPACITY) & !(size - 1);
                     self.image.0[base..base + size].fill(ERASED);
+                    self.dirty
+                        .extend(base / SECTOR_SIZE..(base + size) / SECTOR_SIZE);
                     self.enabled = false;
                 }
                 WRITE_STATUS if self.enabled => self.enabled = false,
@@ -304,6 +337,37 @@ mod tests {
                 .all(|&b| b == ERASED)
         );
     }
+    #[test]
+    fn committed_programs_and_erases_report_their_sectors_once() {
+        let mut nor = Nor::new(Image::fresh());
+        command(&mut nor, &[PROGRAM, 0, 0x10, 0, 0]);
+        assert!(nor.take_dirty().is_empty());
+        command(&mut nor, &[WRITE_ENABLE]);
+        command(&mut nor, &[PROGRAM, 0, 0x10, 0, 0x5a]);
+        let dirty = nor.take_dirty();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!((dirty[0].0, dirty[0].1[0]), (0x1000, 0x5a));
+        assert!(nor.take_dirty().is_empty());
+        command(&mut nor, &[WRITE_ENABLE]);
+        command(&mut nor, &[ERASE_BLOCK, 0x01, 0, 0]);
+        let erased: Vec<usize> = nor.take_dirty().into_iter().map(|(o, _)| o).collect();
+        assert_eq!(
+            erased,
+            (0x10000..0x20000).step_by(SECTOR_SIZE).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_newest_valid_bank_is_current() {
+        let image = Image::fresh();
+        assert_eq!(image.current_bank(), Ok(0));
+        let newer = nvram::empty_bank_of(2);
+        let image = image.with_proxy(1, &newer).unwrap();
+        assert_eq!(image.current_bank(), Ok(1));
+        let blank = Image::from_bytes(vec![ERASED; CAPACITY]).unwrap();
+        assert!(blank.current_bank().is_err());
+    }
+
     #[test]
     fn nvram_image_has_one_valid_bank_and_other_regions_are_erased() {
         let image = Image::fresh();
