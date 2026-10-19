@@ -1203,8 +1203,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut host_network = host_network;
     if let (Some(url), Some(network)) = (&options.network_check, host_network.as_mut()) {
         let (host, path) = network::split_url(url).unwrap_or_else(|error| output::fatal(error));
-        if network.post(host, path, "text/plain", b"").is_err() {
-            output::fatal("the network check failed");
+        // Any HTTP status proves the path end to end; only a transport
+        // failure (link, DHCP, DNS, TCP, malformed reply) fails the check.
+        match network.post(host, path, "text/plain", b"") {
+            Ok(_) | Err(stela_runtime::net::NetError::Status(_)) => {
+                output::arguments(format_args!("NETWORK CHECK passed\n"))
+            }
+            Err(_) => output::fatal("the network check failed"),
         }
     }
     // The restore client's signing-server transport (`restore::tss`)
