@@ -42,7 +42,9 @@ const SHL_ECX_IMM8: &[u8] = &[0xc1, 0xe1];
 const AND_RDX_IMM8: &[u8] = &[0x48, 0x83, 0xe2];
 const MOVDQA_XMM0_RDX: &[u8] = &[0x66, 0x0f, 0x6f, 0x02];
 const MOVQ_RAX_XMM0: &[u8] = &[0x66, 0x48, 0x0f, 0x7e, 0xc0];
-const MOVHLPS_XMM0_XMM0: &[u8] = &[0x0f, 0x12, 0xc0];
+/// The high quadword to the low one. (MOVHLPS is not on Intel's data operand
+/// independent timing list.)
+const PUNPCKHQDQ_XMM0_XMM0: &[u8] = &[0x66, 0x0f, 0x6d, 0xc0];
 const MOVQ_R8_XMM0: &[u8] = &[0x66, 0x49, 0x0f, 0x7e, 0xc0];
 const SHRD_RAX_R8_CL: &[u8] = &[0x4c, 0x0f, 0xad, 0xc0];
 const SHRD_RAX_R8_IMM8: &[u8] = &[0x4c, 0x0f, 0xac, 0xc0];
@@ -292,7 +294,7 @@ fn snapshot_value(code: &mut Vec<u8>, bytes: u8, extension: LoadExtension, shift
     code.push(0u8.wrapping_sub(ATOMIC_QUANTITY_BYTES));
     code.extend(MOVDQA_XMM0_RDX);
     code.extend(MOVQ_RAX_XMM0);
-    code.extend(MOVHLPS_XMM0_XMM0);
+    code.extend(PUNPCKHQDQ_XMM0_XMM0);
     code.extend(MOVQ_R8_XMM0);
     if let Some(shift) = shift {
         code.extend(SHRD_RAX_R8_IMM8);
