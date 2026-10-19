@@ -13,8 +13,15 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Map, Value, to_string as json};
 use std::{collections::BTreeMap, fs};
 
-/// Best first.
-pub const STATUSES: [&str; 5] = ["implemented", "partial", "refused", "paused", "open"];
+/// Best first; `excluded` rows are not requirements of the chip.
+pub const STATUSES: [&str; 6] = [
+    "implemented",
+    "partial",
+    "refused",
+    "paused",
+    "open",
+    "excluded",
+];
 const DEFAULT_OWNER: &str = "system-engine";
 const HEADER_KEYS: [&str; 9] = [
     "schema_version",
@@ -414,38 +421,43 @@ pub fn run(check: bool) -> Result<()> {
 fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
     let assessment = &matrix["assessment"];
     let count = |kind: &str, status: &str| assessment[kind][status].as_u64().unwrap_or(0);
+    // Excluded rows are listed but are not requirements: the totals and
+    // percentages leave them out.
     let mut table = String::from(
-        "| System platform requirement | Implemented | Partial | Open, refused or paused | Total |\n\
-         | --- | --- | --- | --- | --- |\n",
+        "| System platform requirement | Implemented | Partial | Open, refused or paused | Total | Excluded |\n\
+         | --- | --- | --- | --- | --- | --- |\n",
     );
     for (kind, title) in KINDS {
-        let total = count(kind, "total");
-        if total == 0 {
+        let excluded = count(kind, "excluded");
+        let total = count(kind, "total") - excluded;
+        if total + excluded == 0 {
             continue;
         }
         let done = count(kind, "implemented");
         let partial = count(kind, "partial");
         table.push_str(&format!(
-            "| {title} | {done} | {partial} | {} | {total} |\n",
+            "| {title} | {done} | {partial} | {} | {total} | {excluded} |\n",
             total - done - partial
         ));
     }
-    let total = count("total", "total");
+    let excluded = count("total", "excluded");
+    let total = count("total", "total") - excluded;
     let done = count("total", "implemented");
     let partial = count("total", "partial");
     table.push_str(&format!(
-        "| **All** | **{done} / {total} ({:.1}%)** | {partial} | {} | {total} |\n\n",
+        "| **All** | **{done} / {total} ({:.1}%)** | {partial} | {} | {total} | {excluded} |\n\n",
         100.0 * done as f64 / total.max(1) as f64,
         total - done - partial,
     ));
     table.push_str(
-        "| Apple CPU profile | Implemented | Partial | Open, refused or paused | Total |\n\
-         | --- | --- | --- | --- | --- |\n",
+        "| Apple CPU profile | Implemented | Partial | Open, refused or paused | Total | Excluded |\n\
+         | --- | --- | --- | --- | --- | --- |\n",
     );
     for chip in &CHIPS {
         let counts = &assessment["chips"][chip.name];
         let count = |status: &str| counts[status].as_u64().unwrap_or(0);
-        let (done, partial, total) = (count("implemented"), count("partial"), count("total"));
+        let (done, partial, excluded) = (count("implemented"), count("partial"), count("excluded"));
+        let total = count("total") - excluded;
         let name = chip.name.replace("apple-m", "Apple M");
         let marker = if chip.name == DEFAULT_CHIP {
             " (Mac14,3, above)"
@@ -453,7 +465,7 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
             ""
         };
         table.push_str(&format!(
-            "| {name}{marker} | {done} / {total} ({:.1}%) | {partial} | {} | {total} |\n",
+            "| {name}{marker} | {done} / {total} ({:.1}%) | {partial} | {} | {total} | {excluded} |\n",
             100.0 * done as f64 / total.max(1) as f64,
             total - done - partial,
         ));
@@ -463,7 +475,9 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
          {}; the first table is the Mac14,3 (M2) profile. A row counts on a chip only \
          when its tests have run on that chip: the M2's tests rerun on every chip \
          ([runs]({LEDGER})) and a chip's own rows need tests of their own. Partial \
-         rows earn no credit. [System matrix]({MATRIX})\n",
+         rows earn no credit. Excluded rows are outside the chip's \
+         requirements: the feature their condition names is absent from its \
+         identification, as each row's note gives. [System matrix]({MATRIX})\n",
         matrix["source"]["release"].as_str().unwrap_or("?"),
     ));
     let block = format!("{README_START}\n{table}{README_END}");
