@@ -1128,23 +1128,43 @@ mod tests {
             expected.push(0xc3);
             assert_eq!(&compiled.native.x86_64_code[at..], expected, "{word:#x}");
         }
-        // Ordinary-only prefixes use the frame-exact emitter, never allocated regions.
+        // Ordinary-only prefixes use the ordinary emitter and its regions,
+        // which settle the frame before every access and exit, except under
+        // SCTLR_ELx.A, whose checks their loads lack.
         let ordinary: Vec<u8> = [ADD, LDR, ADD, ADD, ADD, 0x1400_0000]
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
         let parsed = analysis::parse(&ordinary, BASE, profile).unwrap();
-        let expected = crate::x86_64::block::emit_for_target(
+        let expected = crate::x86_64::block::emit_ordinary_for_target(
             &parsed.instructions,
             parsed.terminal.as_ref(),
             parsed.next_pc,
             crate::TargetCpu::Baseline,
-            crate::x86_64::MemoryChecks::DEFAULT,
         );
         let compiled =
             compile_for_target(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();
         assert_eq!(compiled.native.x86_64_code, expected.x86_64_code);
         assert_eq!(compiled.native.source_map, expected.source_map);
+        let aligned = crate::x86_64::MemoryChecks {
+            alignment: true,
+            ..crate::x86_64::MemoryChecks::DEFAULT
+        };
+        let expected = crate::x86_64::block::emit_for_target(
+            &parsed.instructions,
+            parsed.terminal.as_ref(),
+            parsed.next_pc,
+            crate::TargetCpu::Baseline,
+            aligned,
+        );
+        let compiled = CompilationPlan::new(&ordinary, BASE, profile, crate::TargetCpu::Baseline)
+            .unwrap()
+            .with_memory_checks(aligned)
+            .unwrap()
+            .compile()
+            .unwrap();
+        assert_eq!(compiled.native.x86_64_code, expected.x86_64_code);
+        assert_ne!(expected.x86_64_code.len(), 0);
         // The trap and system decoders of other profiles do not see SYS.
         assert!(
             analyze_with_profile(&0xd508_8723_u32.to_le_bytes(), BASE, BlockProfile::SystemV1)

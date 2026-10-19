@@ -118,12 +118,15 @@ pub(crate) fn emit_system_mode(
     checks: super::MemoryChecks,
     native: super::NativeSystem,
 ) -> NativeBlock {
+    // Allocated and clean-load regions settle the frame before every
+    // access and exit, so a fault inside one finds it exact. Their loads
+    // carry no SCTLR_ELx.A check.
     emit_selected(
         instructions,
         terminal,
         fallthrough,
         target,
-        false,
+        !checks.alignment,
         checks,
         native,
     )
