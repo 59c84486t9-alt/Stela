@@ -42,6 +42,13 @@
 //!   value refuses. Enabling it roots the [`Uat`] at the programmed TTBAT;
 //!   reconfiguring an enabled MMU refuses. The UAT caches no walk, so a
 //!   TTBA-cache invalidation has nothing to discard.
+//! - The boot stage hands the GPU off with its MMU enabled at the TTBAT in
+//!   `gpu-region-base` ([`Sgx::handed_off`]), as iBoot does for the GFX
+//!   firmware it starts: the nub is `pre-loaded` and `running`, the kext sends
+//!   the initdata pointer (`notifyFirmwareStarted`) without writing these
+//!   registers, and SPTM's `uat_bootstrap` and Asahi's driver take the TTBAT
+//!   from `gpu-region-base`. 0xd08000 then reads nonzero and `setupMMUConfig`
+//!   returns at once.
 //! - The model has one performance state (0), no GPC power transitions and
 //!   so no GPC host interrupts; none of the five `sgx` interrupt lines is
 //!   raised. Enables and dynamic gating are held as written.
@@ -158,6 +165,21 @@ impl Sgx {
             last_invalidate: 0,
             uat: Uat::default(),
         }
+    }
+
+    /// The GPU as the boot stage hands it off: the MMU configured as
+    /// `setupMMUConfig` would and enabled at the 16 KiB-aligned `ttbat`.
+    pub fn handed_off(identity: Identity, ttbat: u64) -> Result<Self, &'static str> {
+        let page = ttbat >> uat::PAGE_SHIFT;
+        if ttbat == 0 || page >> TTBAT_PAGE_BITS != 0 {
+            return Err("GPU TTBAT outside the MMU's 26-bit page field");
+        }
+        let mut sgx = Self::new(identity);
+        sgx.uat.configure(ttbat)?;
+        sgx.ttbat_page = page as u32;
+        sgx.configuration = MMU_CONFIGURATION.map(|(_, value)| value);
+        sgx.mmu_enabled = true;
+        Ok(sgx)
     }
 
     /// The GPU address translator, for the GFX firmware's and the GPU's DMA.
@@ -366,6 +388,25 @@ mod tests {
         // TTBA-cache invalidations are accepted and read back.
         write(&mut sgx, MMU_TTBA_INVALIDATE, 3 << 8 | 1).unwrap();
         assert_eq!(read(&mut sgx, MMU_TTBA_INVALIDATE).unwrap(), 0x301);
+    }
+
+    #[test]
+    fn the_boot_stage_hands_off_the_mmu_setup_would_have_configured() {
+        let mut configured = Sgx::new(T8112);
+        setup_mmu(&mut configured, 0x8_0004_4000).unwrap();
+        let mut handed = Sgx::handed_off(T8112, 0x8_0004_4000).unwrap();
+        for offset in [MMU_ENABLE, MMU_TTBAT]
+            .into_iter()
+            .chain(MMU_CONFIGURATION.map(|(offset, _)| offset))
+        {
+            assert_eq!(read(&mut handed, offset), read(&mut configured, offset));
+        }
+        assert_eq!(handed.uat().ttbat(), Some(0x8_0004_4000));
+        // setupMMUConfig then returns at once; a rewrite refuses.
+        assert!(write(&mut handed, MMU_TTBAT, 0x1).is_err());
+        assert!(Sgx::handed_off(T8112, 0).is_err());
+        assert!(Sgx::handed_off(T8112, 0x8_0004_4001).is_err());
+        assert!(Sgx::handed_off(T8112, 1 << 40).is_err());
     }
 
     #[test]

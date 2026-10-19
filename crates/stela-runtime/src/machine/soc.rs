@@ -1865,6 +1865,9 @@ pub struct GfxController {
     pub wrapper: (u64, u64),
     pub interrupts: [u16; 4],
     pub sgx: (u64, u64),
+    /// The GPU's TTBAT, `sgx` `gpu-region-base`: the boot stage hands the MMU
+    /// off rooted there ([`agx::sgx::Sgx::handed_off`]).
+    pub ttbat: u64,
 }
 
 fn gfx_controller(
@@ -1908,10 +1911,23 @@ fn gfx_controller(
             .and_then(|&n| u16::try_from(n).ok())
             .ok_or_else(|| "gfx-asc needs four valid mailbox interrupts".into())
     };
+    let ttbat = sgx
+        .property("gpu-region-base")
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .map(u64::from_le_bytes)
+        .filter(|base| base.is_multiple_of(agx::uat::PAGE_BYTES))
+        .ok_or("sgx has no 16 KiB-aligned 64-bit gpu-region-base")?;
+    if sgx
+        .first_u32("gpu-region-size")
+        .is_none_or(|size| u64::from(size) < agx::uat::PAGE_BYTES)
+    {
+        return Err("sgx gpu-region-size does not hold a TTBAT page".into());
+    }
     Ok(Some(GfxController {
         wrapper,
         interrupts: [irq(0)?, irq(1)?, irq(2)?, irq(3)?],
         sgx: (block.0, agx::sgx::BYTES),
+        ttbat,
     }))
 }
 
@@ -4554,7 +4570,14 @@ mod tests {
             }
             let (sgx_name, sgx_compatible) = (z("sgx"), z(SGX));
             let sgx_reg = pairs(&[(0x400_0000, 0x400_0000), (0x4d0_0000, 0x2_0000)]);
-            let mut sgx: Vec<(&str, &[u8])> = vec![("name", &sgx_name), ("reg", &sgx_reg)];
+            let region_base = 0x8_0004_4000u64.to_le_bytes();
+            let region_size = cells(&[0x4000]);
+            let mut sgx: Vec<(&str, &[u8])> = vec![
+                ("name", &sgx_name),
+                ("reg", &sgx_reg),
+                ("gpu-region-base", &region_base),
+                ("gpu-region-size", &region_size),
+            ];
             if sgx_visible {
                 sgx.push(("compatible", &sgx_compatible));
             }
@@ -4577,6 +4600,7 @@ mod tests {
                 wrapper: (0x2_0640_0000, 0x6c000),
                 interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
                 sgx: (0x2_0400_0000, 0x400_0000),
+                ttbat: 0x8_0004_4000,
             })
         );
         assert_eq!(placed(false, false).unwrap(), None);

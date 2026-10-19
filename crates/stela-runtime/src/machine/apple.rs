@@ -824,7 +824,9 @@ impl AppleDevices {
         // The 64 MiB `sgx` window spans the `gfx-asc` wrapper and a PMGR
         // fabric bridge; each physical byte has one owner, so the block owns
         // only what the smaller banks placed before it leave.
-        let block = self.bus.add(Box::new(Sgx::new(sgx::T8112)));
+        let block = self.bus.add(Box::new(
+            Sgx::handed_off(sgx::T8112, placement.ttbat).map_err(String::from)?,
+        ));
         let (base, bytes) = placement.sgx;
         self.bus
             .map_gaps(block, base, bytes, 0)
@@ -2343,6 +2345,7 @@ mod tests {
             wrapper: (WRAPPER, 0x6c000),
             interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
             sgx: (SGX, sgx::BYTES),
+            ttbat: RAM,
         };
         let mut devices = AppleDevices::new();
         devices
@@ -2389,23 +2392,10 @@ mod tests {
         for field in [0x08, 0x18, 0x20, 0xa8, 0xb0, 0xb8, 0xc0] {
             ram.put_u64(RAM + 0x1_0000 + field, va + 0x1000);
         }
-        // setupMMUConfig's writes.
-        devices.write(0, SGX + 0xd0_802c, 4, RAM >> 14, 0).unwrap();
-        for (offset, value) in [
-            (0xd0_8014, 0x80d8),
-            (0xd0_8018, 0x80d8),
-            (0xd0_800c, 0),
-            (0xd0_8010, 0),
-            (0xd0_801c, 0),
-            (0xd0_8020, 0),
-            (0xd0_8024, 0),
-            (0xd0_8028, 0),
-            (0xd0_8008, 1),
-            (0xd0_8004, 0x3ff),
-            (0xd0_8000, 1),
-        ] {
-            devices.write(0, SGX + offset, 4, value, 0).unwrap();
-        }
+        // The boot stage handed the MMU off enabled at the TTBAT, so
+        // setupMMUConfig returns at once.
+        assert_eq!(devices.read(0, SGX + 0xd0_8000, 4, 0), Ok(1));
+        assert_eq!(devices.read(0, SGX + 0xd0_802c, 4, 0), Ok(RAM >> 14));
 
         // RTKit start-up over the mailbox.
         let send = |devices: &mut AppleDevices, endpoint: u64, payload: u64| {
