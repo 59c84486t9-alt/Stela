@@ -71,7 +71,7 @@ pub(super) fn emit(
     match operand.kind {
         Kind::CompareExchange { .. } => compare_exchange::emit(code, operand),
         Kind::CompareExchangePair { .. } => compare_exchange_pair::emit(code, operand, target),
-        Kind::ReadModifyWrite { .. } => read_modify_write::emit(code, operand),
+        Kind::ReadModifyWrite { .. } => read_modify_write::emit(code, operand, target),
     }
 }
 

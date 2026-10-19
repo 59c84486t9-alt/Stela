@@ -151,6 +151,9 @@ fn emit_selected(
     };
     let code = &mut block.x86_64_code;
     let mut fixups = vec![];
+    // The DIT audit covers each instruction's own lowering, not the
+    // register-allocated and clean-load regions' recipes.
+    let optimize_regions = optimize_regions && !target.data_independent_timing();
     // Which accesses check the guest range (`guest_range`), and each
     // instruction's checks.
     let ranges = if checks.guest_range {

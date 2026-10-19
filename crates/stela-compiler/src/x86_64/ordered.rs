@@ -1,7 +1,8 @@
 //! Acquire/release accesses and DMB on write-back memory.
 //!
-//! Release stores use XCHG so a later acquire load cannot pass them. Checked loads
-//! crossing eight bytes read one aligned 16-byte snapshot.
+//! Release stores use XCHG so a later acquire load cannot pass them, except
+//! for PSTATE.DIT, where they are plain stores. Checked loads crossing eight
+//! bytes read one aligned 16-byte snapshot.
 use super::atomic::{address_offset, commit_rax, input_rcx, read_rax};
 use crate::{
     TargetCpu,
@@ -55,6 +56,7 @@ const AND_EAX_IMM8: &[u8] = &[0x83, 0xe0];
 const CMP_AL_IMM8: u8 = 0x3c;
 const JBE_REL8: u8 = 0x76;
 const MOV_STORE: u8 = 0x89;
+const MOV_STORE_BYTE: u8 = 0x88;
 const ATOMIC_QUANTITY_MASK: u8 = ATOMIC_QUANTITY_BYTES - 1;
 
 /// Whether an ordered access crosses its 16-byte granule, which it may only
@@ -161,7 +163,14 @@ pub(super) fn emit(
             // An access that crosses its granule needs no single-copy
             // atomicity: it takes a plain load, or a store and a full fence.
             let crossing = crossing(base, bytes, displacement, checks);
-            if kind == Kind::Release {
+            if kind == Kind::Release && target.data_independent_timing() {
+                // XCHG and MFENCE are not on Intel's data operand independent
+                // timing list. The mode requires that no other agent
+                // accesses guest memory, so a plain store is ordered after
+                // every earlier access and before every later one.
+                input_rcx(code, bytes, data);
+                plain_store(code, bytes);
+            } else if kind == Kind::Release {
                 input_rcx(code, bytes, data);
                 match crossing {
                     Crossing::Never => release(code, bytes),
@@ -212,13 +221,25 @@ pub(super) fn emit(
 /// in order after earlier accesses, and MFENCE, which keeps later
 /// load-acquires after it (RCsc).
 fn crossing_release(code: &mut Vec<u8>, bytes: u8) {
+    plain_store(code, bytes);
+    code.extend(MFENCE);
+}
+
+/// MOV of RCX's low `bytes` to [RDX].
+fn plain_store(code: &mut Vec<u8>, bytes: u8) {
     if bytes == HALFWORD_BYTES {
         code.push(OPERAND_SIZE_PREFIX);
     } else if bytes == QWORD_BYTES {
         code.push(REX_W_PREFIX);
     }
-    code.extend([MOV_STORE, RCX_RDX_MEMORY]);
-    code.extend(MFENCE);
+    code.extend([
+        if bytes == BYTE_BYTES {
+            MOV_STORE_BYTE
+        } else {
+            MOV_STORE
+        },
+        RCX_RDX_MEMORY,
+    ]);
 }
 
 fn release(code: &mut Vec<u8>, bytes: u8) {
@@ -422,5 +443,43 @@ mod tests {
         ));
         let inside = emitted(Kind::Release, Register::Sp, 4, relaxed);
         assert!(!has(&inside, &within) && !has(&inside, &[0x0f, 0xae, 0xf0]));
+    }
+
+    #[test]
+    fn data_independent_timing_store_releases_are_plain_stores() {
+        let relaxed = MemoryChecks {
+            ordered_granule: false,
+            ..MemoryChecks::DEFAULT
+        };
+        let has =
+            |code: &[u8], bytes: &[u8]| code.windows(bytes.len()).any(|window| window == bytes);
+        for (bytes, store) in [
+            (BYTE_BYTES, &[0x88, 0x0a][..]),
+            (HALFWORD_BYTES, &[0x66, 0x89, 0x0a]),
+            (DWORD_BYTES, &[0x89, 0x0a]),
+            (QWORD_BYTES, &[0x48, 0x89, 0x0a]),
+        ] {
+            for checks in [MemoryChecks::DEFAULT, relaxed] {
+                let operand = Operand::Transfer {
+                    kind: Kind::Release,
+                    bytes,
+                    data: Register::X(1),
+                    base: Register::X(2),
+                    displacement: 0,
+                    extension: LoadExtension::Zero,
+                };
+                let mut code = Vec::new();
+                emit(
+                    &mut code,
+                    &operand,
+                    TargetCpu::DataIndependentTiming,
+                    checks,
+                );
+                // No XCHG with [rdx] and no MFENCE, even for a crossing.
+                assert!(code.ends_with(store), "{bytes}");
+                assert!(!has(&code, &[0x86, 0x0a]) && !has(&code, &[0x87, 0x0a]));
+                assert!(!has(&code, MFENCE));
+            }
+        }
     }
 }

@@ -41,8 +41,13 @@ pub struct TargetCpu {
     /// Lower for FEAT_DIT's PSTATE.DIT: the listed instructions that have a
     /// data-independent lowering (CLZ, CLS, CTZ, CNT, CRC32, CRC32C) compile
     /// to instructions on Intel's list, without a branch on or a memory index
-    /// by their data, at a cost in speed. A compilation mode, not a host
-    /// capability; `isa/dit-timing-audit.json` records what remains.
+    /// by their data, at a cost in speed. The LSE read-modify-write atomics
+    /// and the store-releases become plain loads and stores (no LOCK, XCHG or
+    /// MFENCE), so the mode requires that no other agent accesses guest
+    /// memory while its code runs: the system engine runs one PE at a time,
+    /// and a multi-threaded process must not use it. A compilation mode, not
+    /// a host capability; `isa/dit-timing-audit.json` records each listed
+    /// form's verdict on the [`Self::DATA_INDEPENDENT_TIMING_TIERS`].
     data_independent_timing: bool,
 }
 
@@ -114,6 +119,28 @@ impl TargetCpu {
     pub const Doit: Self = Self::Baseline.with_doit();
     /// Code lowered for PSTATE.DIT ([`Self::data_independent_timing`]).
     pub const DataIndependentTiming: Self = Self::Baseline.with_data_independent_timing();
+    /// SSE4.2 with every other feature the compiler uses that needs no
+    /// OS-enabled AVX state: the bare-metal boot's target on a current host.
+    pub const Sse42Complete: Self = Self::Sse42
+        .with_pclmulqdq()
+        .with_popcnt()
+        .with_bmi1()
+        .with_aes()
+        .with_sha()
+        .with_cx8()
+        .with_cx16()
+        .with_atomic_load16();
+    /// [`Self::Sse42Complete`] with FMA, F16C and AVX2.
+    pub const Avx2Complete: Self = Self::Sse42Complete.with_fma().with_f16c().with_avx2();
+    /// [`Self::Avx2Complete`] with AVX-512F.
+    pub const Avx512Complete: Self = Self::Avx2Complete.with_avx512f();
+    /// The host tiers whose data-independent-timing lowerings `cargo xtask
+    /// dit-audit` checks, largest first.
+    pub const DATA_INDEPENDENT_TIMING_TIERS: [Self; 3] = [
+        Self::Avx512Complete,
+        Self::Avx2Complete,
+        Self::Sse42Complete,
+    ];
 
     pub const fn with_pclmulqdq(self) -> Self {
         Self {
@@ -177,6 +204,20 @@ impl TargetCpu {
     }
     pub const fn data_independent_timing(self) -> bool {
         self.data_independent_timing
+    }
+    /// The target to compile PSTATE.DIT code for on this host: the largest
+    /// audited tier ([`Self::DATA_INDEPENDENT_TIMING_TIERS`]) it supports, in
+    /// the data-independent-timing mode. `None` unless the host declares
+    /// Intel's data operand independent timing ([`Self::doit`]) and supports
+    /// one of them, as no audit covers another tier's lowerings.
+    pub fn data_independent_timing_target(self) -> Option<Self> {
+        if !self.doit {
+            return None;
+        }
+        Self::DATA_INDEPENDENT_TIMING_TIERS
+            .into_iter()
+            .find(|tier| self.supports(*tier))
+            .map(|tier| tier.with_doit().with_data_independent_timing())
     }
     /// True only when every required feature is present in this target.
     /// The data-independent-timing mode is not a host feature.
@@ -635,6 +676,35 @@ mod tests {
         assert_eq!(
             TargetCpu::Aes.partial_cmp(&combined),
             Some(core::cmp::Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn dit_code_compiles_for_the_largest_audited_tier_of_a_doit_host() {
+        for host in profiles() {
+            let expected = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS
+                .into_iter()
+                .find(|tier| host.supports(*tier))
+                .filter(|_| host.doit);
+            let target = host.data_independent_timing_target();
+            assert_eq!(target.is_some(), expected.is_some(), "{host:?}");
+            if let (Some(target), Some(tier)) = (target, expected) {
+                assert_eq!(target, tier.with_doit().with_data_independent_timing());
+                assert!(host.supports(target));
+            }
+        }
+        // The tiers nest, largest first.
+        let [avx512, avx2, sse42] = TargetCpu::DATA_INDEPENDENT_TIMING_TIERS;
+        assert!(avx512 > avx2 && avx2 > sse42 && sse42 > TargetCpu::Sse42);
+        assert_eq!(
+            TargetCpu::Avx2Complete
+                .with_doit()
+                .data_independent_timing_target(),
+            Some(avx2.with_doit().with_data_independent_timing())
+        );
+        assert_eq!(
+            TargetCpu::Avx2Complete.data_independent_timing_target(),
+            None
         );
     }
 
