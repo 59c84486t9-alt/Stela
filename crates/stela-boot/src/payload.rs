@@ -423,7 +423,7 @@ pub unsafe extern "C" fn wcslen(text: *const u16) -> usize {
     length
 }
 
-fn device_path(handle: Handle) -> Option<String> {
+pub(crate) fn device_path(handle: Handle) -> Option<String> {
     // SAFETY: the path is only read, while no driver changes this handle.
     let path = unsafe {
         boot::open_protocol::<DevicePath>(
@@ -442,14 +442,14 @@ fn device_path(handle: Handle) -> Option<String> {
 }
 
 /// A page-aligned buffer, which every block device's IoAlign accepts.
-struct Aligned {
+pub(crate) struct Aligned {
     storage: Vec<u8>,
     start: usize,
     length: usize,
 }
 
 impl Aligned {
-    fn new(length: usize) -> Self {
+    pub(crate) fn new(length: usize) -> Self {
         let storage = vec![0u8; length + 4096];
         let start = storage.as_ptr().align_offset(4096);
         Self {
@@ -458,7 +458,7 @@ impl Aligned {
             length,
         }
     }
-    fn bytes(&mut self) -> &mut [u8] {
+    pub(crate) fn bytes(&mut self) -> &mut [u8] {
         &mut self.storage[self.start..self.start + self.length]
     }
 }
@@ -625,7 +625,7 @@ fn trimmed(bytes: &[u8]) -> Option<String> {
 
 /// A whole disk's serial number, from its NVMe controller or its ATA
 /// IDENTIFY data. Other buses, such as virtio and USB, report none.
-fn disk_serial(handle: Handle, path: &str) -> Option<String> {
+pub(crate) fn disk_serial(handle: Handle, path: &str) -> Option<String> {
     nvme_serial(path).or_else(|| ata_serial(handle))
 }
 

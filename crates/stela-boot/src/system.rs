@@ -272,6 +272,8 @@ fn map_devices(
 
 /// Run the engine; never returns.
 pub fn boot(options: Vec<u8>, volume: FileSystem) -> ! {
+    // NVRAM chooses macOS or recoveryOS before any input is read.
+    let options = crate::selection::route(options).unwrap_or_else(|error| output::fatal(error));
     // `inputs` closes the volume: protocols must be closed before boot
     // services end.
     let inputs = inputs(&options, volume);
