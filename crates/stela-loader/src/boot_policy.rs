@@ -3,7 +3,11 @@
 //! After verifying a LocalPolicy, iBoot publishes it as `/chosen/asmb`
 //! `lp-*` values, summarizes the boot manifest as `/chosen`
 //! `boot-manifest-hash`, the `effective-*-ap` state and
-//! `/chosen/manifest-properties`, and records the SEP load decision. The names
+//! `/chosen/manifest-properties`, and records the SEP load decision. With
+//! them go the chip's fused state (`certificate-*`, `chip-epoch`, the unit
+//! flags) and the rows iBoot derives from the LocalPolicy
+//! (`kernel-ctrr-to-be-enabled`, `/product allow-hactivation`); the full
+//! contract is `docs/research/iboot-handoff.md`. The names
 //! are those SPTM, TXM and the kernel read (their own strings); LocalPolicy
 //! fields and types follow Apple Platform Security, "Contents of a LocalPolicy
 //! file for a Mac with Apple silicon". Integers are 8 bytes, as m1n1 writes
@@ -21,6 +25,7 @@ use serde::Serialize;
 const ASMB: &str = "/chosen/asmb";
 const CHOSEN: &str = "/chosen";
 const MANIFEST_PROPERTIES: &str = "/chosen/manifest-properties";
+const PRODUCT: &str = "/product";
 /// Template `UnusedStringProperty` slots hold 64 bytes. A slot takes the
 /// octet string's own bytes, not padded to the slot: TXM 26A434 copies
 /// `love` with a bounds check that its length is at most the length of its
@@ -98,6 +103,21 @@ impl Writer<'_> {
         self.set(path, property, value, source)
     }
 
+    /// Replace a template value as [`Self::fill`] does, when the template
+    /// has it: iBoot writes these in place only (`GETPROP` then store).
+    fn fill_present(
+        &mut self,
+        path: &str,
+        property: &str,
+        value: Vec<u8>,
+        source: &str,
+    ) -> Result<()> {
+        if self.tree.property(path, property).is_some() {
+            self.fill(path, property, value, source)?;
+        }
+        Ok(())
+    }
+
     fn keep(&mut self, path: &str, property: &str, source: &str) -> Result<()> {
         let value = self
             .tree
@@ -165,6 +185,34 @@ fn manifest_properties(writer: &mut Writer, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+/// The unit-class flags iBoot writes from the chip's security fuses after it
+/// publishes the LocalPolicy (26A434 J473 iBoot 0x2db6c..0x2dc00): each is
+/// set only on an internal, engineering or prerelease unit.
+const UNIT_FLAGS: [&str; 4] = [
+    "internal-use-only-unit",
+    "engineering-use-only-unit",
+    "factory-prerelease-global-trust",
+    "sfr-internal-use-only-sw",
+];
+
+/// iBoot's `kernel-ctrr-to-be-enabled` (0x35eb4): the kernel's CTRR region
+/// stays off when the LocalPolicy carries a custom kernel hash (`lp-coih`)
+/// or sets `lp-sip2` or `lp-sip3`. SPTM reads a present 0 as "kernel CTRR
+/// off" (26A434 SPTM `__text` 0xbd770).
+fn kernel_ctrr(tree: &DeviceTree) -> (bool, &'static str) {
+    let set = |name: &str| {
+        tree.property(ASMB, name)
+            .is_some_and(|p| p.value.iter().any(|&byte| byte != 0))
+    };
+    if tree.property(ASMB, "lp-coih").is_some() {
+        (false, "LocalPolicy lp-coih: a custom kernel")
+    } else if set("lp-sip2") || set("lp-sip3") {
+        (false, "LocalPolicy lp-sip2 or lp-sip3")
+    } else {
+        (true, "LocalPolicy has no lp-coih, lp-sip2 or lp-sip3")
+    }
+}
+
 /// Apply the policy and manifest summaries; returns the decisions and the
 /// inputs that remain unknown.
 pub fn apply(
@@ -209,9 +257,28 @@ pub fn apply(
         }
         None => unresolved.push("/chosen/asmb lp-spih, lp-stng: no Cryptex1 manifest".into()),
     }
+    let (ctrr, why) = kernel_ctrr(writer.tree);
+    writer.set(CHOSEN, "kernel-ctrr-to-be-enabled", boolean(ctrr), why)?;
+    // iBoot looks up `asmb`/`hack` in the LocalPolicy's store (0x2dcc4).
+    if writer.tree.node(PRODUCT).is_some() {
+        writer.set(
+            PRODUCT,
+            "allow-hactivation",
+            boolean(false),
+            "LocalPolicy has no hacktivation (asmb hack) entry",
+        )?;
+    }
+    writer.set(
+        CHOSEN,
+        "boot-nonce-hash-method",
+        b"sha2-384\0".to_vec(),
+        "iBoot's constant (0x23764)",
+    )?;
 
     match boot_manifest {
         Some(manifest) => {
+            let production = manifest_flag(manifest, "CPRO")?;
+            let secure = manifest_flag(manifest, "CSEC")?;
             writer.fill(
                 CHOSEN,
                 "boot-manifest-hash",
@@ -221,15 +288,53 @@ pub fn apply(
             writer.fill(
                 CHOSEN,
                 "effective-production-status-ap",
-                boolean(manifest_flag(manifest, "CPRO")?),
+                boolean(production),
                 "boot manifest CPRO",
             )?;
             writer.fill(
                 CHOSEN,
                 "effective-security-mode-ap",
-                boolean(manifest_flag(manifest, "CSEC")?),
+                boolean(secure),
                 "boot manifest CSEC",
             )?;
+            // The fused values: the emulated chip is not demoted, so they
+            // equal the effective ones.
+            writer.fill_present(
+                CHOSEN,
+                "certificate-production-status",
+                boolean(production),
+                "the emulated chip's production fuse: boot manifest CPRO, undemoted",
+            )?;
+            writer.fill_present(
+                CHOSEN,
+                "certificate-security-mode",
+                boolean(secure),
+                "the emulated chip's security-mode fuse: boot manifest CSEC, undemoted",
+            )?;
+            match manifest.property("CEPO") {
+                Some(Value::Integer(epoch)) => writer.set(
+                    CHOSEN,
+                    "chip-epoch",
+                    u32::try_from(*epoch)?.to_le_bytes().to_vec(),
+                    "the emulated chip's epoch: boot manifest CEPO",
+                )?,
+                _ => unresolved.push("/chosen chip-epoch: the boot manifest has no CEPO".into()),
+            }
+            if production {
+                for flag in UNIT_FLAGS {
+                    writer.set(
+                        CHOSEN,
+                        flag,
+                        boolean(false),
+                        "a production customer unit (boot manifest CPRO)",
+                    )?;
+                }
+            } else {
+                unresolved.push(format!(
+                    "/chosen {}: a development chip's unit fuses are not modeled",
+                    UNIT_FLAGS.join(", ")
+                ));
+            }
             let domain = u32::try_from(manifest_integer(manifest, "SDOM")?)?;
             writer.set(
                 CHOSEN,
@@ -240,7 +345,8 @@ pub fn apply(
             manifest_properties(&mut writer, manifest)?;
         }
         None => unresolved.push(
-            "/chosen boot-manifest-hash, effective-*-ap, security-domain, manifest-properties: no boot manifest"
+            "/chosen boot-manifest-hash, effective-*-ap, certificate-*, chip-epoch, security-domain, \
+             unit flags, manifest-properties: no boot manifest"
                 .into(),
         ),
     }
@@ -521,19 +627,22 @@ mod tests {
         };
         tree.ensure_child("/", "chosen").unwrap();
         tree.ensure_child("/chosen", "manifest-properties").unwrap();
+        tree.ensure_child("/", "product").unwrap();
         for (name, bytes) in [
             ("boot-manifest-hash", 48),
             ("effective-production-status-ap", 4),
             ("effective-security-mode-ap", 4),
             ("sepfw-load-at-boot", 4),
             ("osenvironment", 32),
+            ("certificate-production-status", 4),
+            ("certificate-security-mode", 4),
         ] {
             tree.set_property("/chosen", name, vec![0; bytes]).unwrap();
         }
         tree.set_property("/chosen", "cs-system-policy", b"default\0".to_vec())
             .unwrap();
         for (slot, bytes) in [(INTEGER_SLOT, 8), (BOOLEAN_SLOT, 4), (STRING_SLOT, 0x40)] {
-            for index in 0..2 {
+            for index in 0..3 {
                 tree.set_property(
                     MANIFEST_PROPERTIES,
                     &format!("{slot}{index}"),
@@ -551,6 +660,7 @@ mod tests {
                 entry("CPRO", &der(&[0x01], &[0xff])),
                 entry("CSEC", &der(&[0x01], &[0xff])),
                 entry("SDOM", &der(&[0x02], &[1])),
+                entry("CEPO", &der(&[0x02], &[1])),
                 entry("love", &der(&[0x04], b"26.1.434.0.0,0")),
             ],
             &[],
@@ -583,6 +693,19 @@ mod tests {
         assert_eq!(value(CHOSEN, "security-domain"), 1u32.to_le_bytes());
         assert_eq!(value(CHOSEN, "sepfw-load-at-boot"), boolean(false));
         assert_eq!(value(MANIFEST_PROPERTIES, "CPRO"), boolean(true));
+        // The fused state and epoch of an undemoted production chip.
+        assert_eq!(
+            value(CHOSEN, "certificate-production-status"),
+            boolean(true)
+        );
+        assert_eq!(value(CHOSEN, "certificate-security-mode"), boolean(true));
+        assert_eq!(value(CHOSEN, "chip-epoch"), 1u32.to_le_bytes());
+        for flag in UNIT_FLAGS {
+            assert_eq!(value(CHOSEN, flag), boolean(false));
+        }
+        assert_eq!(value(CHOSEN, "kernel-ctrr-to-be-enabled"), boolean(true));
+        assert_eq!(value(PRODUCT, "allow-hactivation"), boolean(false));
+        assert_eq!(value(CHOSEN, "boot-nonce-hash-method"), b"sha2-384\0");
         assert_eq!(value(MANIFEST_PROPERTIES, "love"), b"26.1.434.0.0,0");
         // The slots keep their place; one of each kind remains.
         assert!(
@@ -590,10 +713,55 @@ mod tests {
                 .is_none()
         );
         assert!(
-            tree.property(MANIFEST_PROPERTIES, "UnusedIntegerProperty1")
+            tree.property(MANIFEST_PROPERTIES, "UnusedIntegerProperty2")
                 .is_some()
         );
         assert!(decisions.iter().any(|d| d.property == "cs-system-policy"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_custom_kernel_or_sip2_turns_kernel_ctrr_off() {
+        let mut tree = tree();
+        tree.ensure_child(CHOSEN, "asmb").unwrap();
+        assert!(kernel_ctrr(&tree).0);
+        tree.set_property(ASMB, "lp-sip2", boolean(true)).unwrap();
+        assert!(!kernel_ctrr(&tree).0);
+        tree.set_property(ASMB, "lp-sip2", boolean(false)).unwrap();
+        tree.set_property(ASMB, "lp-coih", vec![0; 48]).unwrap();
+        assert!(!kernel_ctrr(&tree).0);
+    }
+
+    #[test]
+    fn a_development_chip_leaves_its_unit_fuses_and_epoch_unresolved() -> Result<()> {
+        let development = im4m::parse(&manifest(
+            &[
+                entry("CPRO", &der(&[0x01], &[0x00])),
+                entry("CSEC", &der(&[0x01], &[0xff])),
+                entry("SDOM", &der(&[0x02], &[1])),
+            ],
+            &[],
+        ))?;
+        let mut tree = tree();
+        let policy = SecurityPolicy {
+            mode: SecurityMode::Reduced,
+            sip_bits: 0,
+            sepfw_load_at_boot: None,
+        };
+        let (_, unresolved) = apply(&mut tree, &policy, Some(&development), None)?;
+        assert!(unresolved.iter().any(|gap| gap.contains("chip-epoch")));
+        assert!(
+            unresolved
+                .iter()
+                .any(|gap| gap.contains("internal-use-only-unit"))
+        );
+        assert!(tree.property(CHOSEN, "internal-use-only-unit").is_none());
+        assert_eq!(
+            tree.property(CHOSEN, "certificate-production-status")
+                .unwrap()
+                .value,
+            boolean(false)
+        );
         Ok(())
     }
 
