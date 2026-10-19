@@ -34,8 +34,12 @@ impl BootLog {
     pub(crate) fn run(&self) -> Result<()> {
         let log = self.load()?;
         eprint!("{}", summary(&log));
-        std::io::stdout().write_all(&log.stream)?;
-        Ok(())
+        match std::io::stdout().write_all(&log.stream) {
+            // A reader that closed the pipe early (`| head`) has what it
+            // asked for.
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            result => Ok(result?),
+        }
     }
 
     fn load(&self) -> Result<Log> {
