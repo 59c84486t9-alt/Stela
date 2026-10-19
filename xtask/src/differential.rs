@@ -553,8 +553,15 @@ struct Subject {
     el: u8,
     /// X registers each case starts with window pointers in.
     pointers: u32,
+    /// Of those, the ones that start at [`FAULT_POINTER`] instead.
+    faulting: u32,
     translation: Translation,
 }
+
+/// An address in the data window's 2 MiB block that the harness's tables
+/// leave unmapped at level 3, as the host does: an access near it takes a
+/// translation fault on both.
+const FAULT_POINTER: u64 = DATA_WINDOW + 0x10_0000;
 
 /// How one registry form is translated for comparison.
 struct Lane<'a> {
@@ -707,7 +714,9 @@ impl Differential {
                     state.x[register] = random.pointer();
                 }
                 for register in 0..state.x.len() {
-                    if subject.pointers & (1 << register) != 0 {
+                    if subject.faulting & (1 << register) != 0 {
+                        state.x[register] = FAULT_POINTER + random.next() % 0x100;
+                    } else if subject.pointers & (1 << register) != 0 {
                         state.x[register] = random.pointer();
                     }
                 }
@@ -790,7 +799,8 @@ impl Differential {
                 Err(error) => return Err(error),
             };
             report.compared += 1;
-            let system_word = subject.system.then_some(case.code[0]);
+            let system_word =
+                (subject.system && subject.form != regions::SYSTEM_FORM).then_some(case.code[0]);
             let matched = comparable(&translated, case, system_word)
                 == comparable(original, case, system_word);
             if let Some(tally) = report.rows.tally(&subject.form, case.el) {
@@ -935,6 +945,24 @@ impl Differential {
                 *skipped += 1;
                 continue;
             };
+            // Half the system twins fault through one of their pointers.
+            let faulting = if random.next().is_multiple_of(2) {
+                let live: Vec<u32> = (0..31).filter(|r| pointers & (1 << r) != 0).collect();
+                1 << live[(random.next() % live.len() as u64) as usize]
+            } else {
+                0
+            };
+            let twin = Subject {
+                form: regions::SYSTEM_FORM.into(),
+                code: code.clone(),
+                scalable: None,
+                system: true,
+                draft: false,
+                el: 1,
+                pointers,
+                faulting,
+                translation: Translation::System,
+            };
             let subject = Subject {
                 form: regions::FORM.into(),
                 code,
@@ -943,9 +971,11 @@ impl Differential {
                 draft: false,
                 el: 0,
                 pointers,
+                faulting: 0,
                 translation,
             };
             each(random, subject)?;
+            each(random, twin)?;
         }
         Ok(())
     }
@@ -969,6 +999,7 @@ fn subjects_for(
         draft: is_draft(form),
         el,
         pointers: 0,
+        faulting: 0,
         code,
         translation,
     };

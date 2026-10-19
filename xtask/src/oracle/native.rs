@@ -154,6 +154,12 @@ impl Executable {
         (self.address()..self.address() + self.bytes).contains(&address)
     }
 
+    /// The host addresses of the mapping, first and one past the last.
+    pub(super) fn range(&self) -> (u64, u64) {
+        let start = self.address() as u64;
+        (start, start + self.bytes as u64)
+    }
+
     /// Overwrite the code at `address` with `bytes`.
     pub(super) fn patch(&mut self, address: usize, bytes: &[u8]) -> Result<()> {
         ensure!(
@@ -209,7 +215,8 @@ pub enum Translation {
     ScalableLeaf(PreparedScalableLeaf, ScalableProfile),
     /// A contextual scalable block whose numerical exits the runtime completes.
     ScalableBlock(PreparedScalableBlock, ExtendedBlockProfile),
-    /// One System word run by the system-mode engine at EL0.
+    /// Words run by the system-mode engine: one System word, or a region
+    /// sequence at EL1 whose accesses may fault.
     System,
 }
 

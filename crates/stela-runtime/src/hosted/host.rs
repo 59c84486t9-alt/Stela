@@ -31,7 +31,6 @@ pub const COUNTER_HZ: u64 = 24_000_000;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 /// x86 exception vectors in the signal context's `__trapno`.
 const TRAP_INVALID_OPCODE: u16 = 6;
-const TRAP_GENERAL_PROTECTION: u16 = 13;
 const TRAP_PAGE_FAULT: u16 = 14;
 /// #PF error code bit 1: the access was a write.
 const PAGE_FAULT_WRITE: u32 = 1 << 1;
@@ -94,23 +93,63 @@ struct UserContext {
     machine_context: *mut MachineContext,
 }
 
-/// The fault the signal handler recorded for the native run in progress.
-#[derive(Clone, Copy)]
-struct Recorded {
-    rip: u64,
-    address: u64,
-    write: bool,
-    trap: u16,
+/// A fault that stopped native code: where, why, and the host GPRs at the
+/// faulting instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostFault {
+    pub rip: u64,
+    pub address: u64,
+    pub write: bool,
+    /// The x86 exception vector (`__trapno`).
+    pub trap: u16,
+    /// RAX through R15, by x86 register number.
+    pub registers: [u64; 16],
 }
 
-/// Per host thread: where a native run started, its recovery stack and the
-/// fault that ended it. The handler finds it through [`ACTIVE`].
+impl HostFault {
+    /// The cause of a fault other than a page fault; a page fault's guest
+    /// fault is the host's translation to decide.
+    pub fn check_cause(&self) -> Option<FaultCause> {
+        match self.trap {
+            TRAP_PAGE_FAULT => None,
+            TRAP_INVALID_OPCODE => Some(FaultCause::InvalidOpcode),
+            // #GP and anything else: a non-canonical guest address.
+            _ => Some(FaultCause::NonCanonical),
+        }
+    }
+
+    /// The fault as the engine takes it, at `offset` in the entered code.
+    pub fn native(&self, offset: usize, cause: FaultCause) -> NativeFault {
+        NativeFault {
+            offset,
+            address: self.address,
+            write: self.write,
+            cause,
+            registers: self.registers,
+        }
+    }
+}
+
+/// The native run in progress on this host thread: its recovery stack, the
+/// code ranges whose faults end it, and the fault that did. The handler
+/// finds it through [`ACTIVE`].
 struct Recovery {
     /// RSP after the entry pushed the callee-saved registers; the recovery
     /// path returns from there.
     stack: u64,
-    arena: (u64, u64),
-    recorded: Option<Recorded>,
+    ranges: *const (u64, u64),
+    count: usize,
+    recorded: Option<HostFault>,
+}
+
+impl Recovery {
+    fn covers(&self, rip: u64) -> bool {
+        // SAFETY: the ranges of the run in progress, which outlive it.
+        let ranges = unsafe { core::slice::from_raw_parts(self.ranges, self.count) };
+        ranges
+            .iter()
+            .any(|&(start, end)| (start..end).contains(&rip))
+    }
 }
 
 std::thread_local! {
@@ -167,14 +206,20 @@ extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *
         let machine = &mut *context.machine_context;
         let rip = machine.thread.rip;
         if let Some(recovery) = recovery.as_mut()
-            && (recovery.arena.0..recovery.arena.1).contains(&rip)
+            && recovery.covers(rip)
             && recovery.recorded.is_none()
         {
-            recovery.recorded = Some(Recorded {
+            let thread = &machine.thread;
+            recovery.recorded = Some(HostFault {
                 rip,
                 address: machine.exception.faultvaddr,
                 write: machine.exception.err & PAGE_FAULT_WRITE != 0,
                 trap: machine.exception.trapno,
+                registers: [
+                    thread.rax, thread.rcx, thread.rdx, thread.rbx, thread.rsp, thread.rbp,
+                    thread.rsi, thread.rdi, thread.r8, thread.r9, thread.r10, thread.r11,
+                    thread.r12, thread.r13, thread.r14, thread.r15,
+                ],
             });
             machine.thread.rdi = &raw mut recovery.stack as u64;
             machine.thread.rip = stela_hosted_recover as *const () as u64;
@@ -182,6 +227,71 @@ extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *
         }
         // Not ours: take the default action at the same instruction.
         libc::signal(signal, libc::SIG_DFL);
+    }
+}
+
+/// Runs native block code on the host thread with fault recovery: a
+/// SIGSEGV, SIGBUS or SIGILL whose RIP lies in one of its code ranges (all
+/// the code a run may reach, chained blocks and thunks too) ends the run at
+/// that instruction and is returned. Its recovery slot is allocated once
+/// and the run is inlined into its caller with no allocation on any path,
+/// as every block entry goes through it: a run that built its slot on the
+/// stack, or that boxed the fault it returns, made the hosted engine's
+/// block entries measurably slower.
+pub struct NativeRunner {
+    recovery: Box<Recovery>,
+    ranges: Vec<(u64, u64)>,
+}
+
+impl NativeRunner {
+    pub fn new(ranges: Vec<(u64, u64)>) -> Self {
+        install_handlers();
+        let mut runner = Self {
+            recovery: Box::new(Recovery {
+                stack: 0,
+                ranges: core::ptr::null(),
+                count: 0,
+                recorded: None,
+            }),
+            ranges: Vec::new(),
+        };
+        runner.set_ranges(ranges);
+        runner
+    }
+
+    /// Replace the code ranges whose faults end a run.
+    pub fn set_ranges(&mut self, ranges: Vec<(u64, u64)>) {
+        self.ranges = ranges;
+        self.recovery.ranges = self.ranges.as_ptr();
+        self.recovery.count = self.ranges.len();
+    }
+
+    /// Run the native block code at `code` on `state` on this thread: its
+    /// exit, or the fault that ended it.
+    ///
+    /// # Safety
+    /// `code` must be native code for the system-mode block ABI, whose
+    /// memory accesses either succeed or fault inside the runner's ranges.
+    #[inline(always)]
+    // Inlined, the fault moves straight into the caller's exit.
+    #[allow(clippy::result_large_err)]
+    pub unsafe fn run(
+        &mut self,
+        code: usize,
+        state: &mut GuestState,
+    ) -> Result<BlockExit, HostFault> {
+        let recovery: *mut Recovery = &mut *self.recovery;
+        ACTIVE.with(|active| active.set(recovery));
+        // SAFETY: the caller passes block code; the recovery slot and the
+        // ranges it points to outlive the run.
+        let exit = unsafe { stela_hosted_enter(state, code, &raw mut (*recovery).stack) };
+        ACTIVE.with(|active| active.set(core::ptr::null_mut()));
+        if exit.kind == FAULT_KIND
+            && let Some(fault) = self.recovery.recorded.take()
+        {
+            return Err(fault);
+        }
+        Ok(exit)
     }
 }
 
@@ -305,13 +415,12 @@ pub struct ProcessHost {
     arena: *mut u8,
     used: usize,
     tables: std::sync::Arc<Tables>,
-    recovery: Box<Recovery>,
     deadline: Option<u64>,
+    runner: NativeRunner,
 }
 
 impl ProcessHost {
     pub fn new(tables: std::sync::Arc<Tables>) -> anyhow::Result<Self> {
-        install_handlers();
         // SAFETY: a fresh private anonymous mapping the host never shares.
         let arena = unsafe {
             libc::mmap(
@@ -333,12 +442,9 @@ impl ProcessHost {
             arena: arena.cast(),
             used: 0,
             tables,
-            recovery: Box::new(Recovery {
-                stack: 0,
-                arena: (start, start + ARENA_BYTES as u64),
-                recorded: None,
-            }),
             deadline: None,
+            // Installed blocks, chained ones and thunks lie in the arena.
+            runner: NativeRunner::new(vec![(start, start + ARENA_BYTES as u64)]),
         })
     }
 
@@ -349,24 +455,19 @@ impl ProcessHost {
     /// Classify a native fault the way the guest's translation would have:
     /// an unmapped page is a level-3 translation fault and a mapped page
     /// without the access's permission a level-3 permission fault.
-    fn classify(recorded: &Recorded) -> FaultCause {
-        match recorded.trap {
-            TRAP_PAGE_FAULT => {
-                let kind = if super::memory::mapped(recorded.address) {
-                    FaultKind::Permission
-                } else {
-                    FaultKind::Translation
-                };
-                FaultCause::Guest(Fault {
-                    kind,
-                    level: 3,
-                    second_stage: None,
-                })
-            }
-            TRAP_GENERAL_PROTECTION => FaultCause::NonCanonical,
-            TRAP_INVALID_OPCODE => FaultCause::InvalidOpcode,
-            _ => FaultCause::NonCanonical,
-        }
+    fn classify(fault: &HostFault) -> FaultCause {
+        fault.check_cause().unwrap_or_else(|| {
+            let kind = if super::memory::mapped(fault.address) {
+                FaultKind::Permission
+            } else {
+                FaultKind::Translation
+            };
+            FaultCause::Guest(Fault {
+                kind,
+                level: 3,
+                second_stage: None,
+            })
+        })
     }
 }
 
@@ -417,25 +518,17 @@ impl Host for ProcessHost {
     }
 
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit {
-        let recovery: *mut Recovery = &mut *self.recovery;
-        ACTIVE.with(|active| active.set(recovery));
-        // SAFETY: the engine passes installed system-mode block code; the
-        // recovery slot outlives the run.
-        let exit = unsafe { stela_hosted_enter(state, code.0, &raw mut (*recovery).stack) };
-        ACTIVE.with(|active| active.set(core::ptr::null_mut()));
-        if exit.kind == FAULT_KIND
-            && let Some(recorded) = self.recovery.recorded.take()
-        {
-            return NativeExit::Fault(NativeFault {
-                offset: recorded.rip.wrapping_sub(code.0 as u64) as usize,
-                address: recorded.address,
-                write: recorded.write,
-                cause: Self::classify(&recorded),
-            });
-        }
-        NativeExit::Exit {
-            next_pc: exit.next_pc,
-            kind: exit.kind,
+        // SAFETY: the engine passes installed system-mode block code, which
+        // with its chained blocks and thunks lies in the arena.
+        match unsafe { self.runner.run(code.0, state) } {
+            Ok(exit) => NativeExit::Exit {
+                next_pc: exit.next_pc,
+                kind: exit.kind,
+            },
+            Err(fault) => NativeExit::Fault(fault.native(
+                fault.rip.wrapping_sub(code.0 as u64) as usize,
+                Self::classify(&fault),
+            )),
         }
     }
 

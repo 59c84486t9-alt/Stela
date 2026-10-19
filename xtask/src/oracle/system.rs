@@ -23,11 +23,14 @@ use super::{
 };
 use anyhow::{Result, bail};
 use stela_compiler::{GuestState, TargetCpu};
+use stela_runtime::hosted::host::{HostFault, NativeRunner};
 use stela_runtime::machine::{
-    Chip, Cpu, Host, InstallError, Machine, NativeCode, NativeExit, NoDevices, Regime, Stop,
+    Chip, Cpu, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit, NoDevices, Regime,
+    Stop,
     cpu::HCR_HCD,
     exception::Pstate,
     identification,
+    mmu::{self, Access, Outcome as Translated, TableMemory},
     registers::{
         CpuProfile,
         encodings::{DCZID_EL0, MIDR_EL1, MPIDR_EL1},
@@ -163,13 +166,6 @@ fn harness_tables(hypervisor: Option<&Hypervisor>) -> Vec<u8> {
     tables
 }
 
-/// The native block exit in RAX:RDX.
-#[repr(C)]
-struct BlockExit {
-    next_pc: u64,
-    kind: u64,
-}
-
 /// Guest RAM is the oracle's code region and data window at their guest
 /// addresses; installed native code lives in owned executable mappings.
 struct OracleHost {
@@ -178,6 +174,61 @@ struct OracleHost {
     /// The harness's translation tables, read-only.
     tables: Vec<u8>,
     installed: Vec<Executable>,
+    runner: NativeRunner,
+    /// The translation regime the engine runs under, which classifies a
+    /// native page fault.
+    regime: Option<Regime>,
+}
+
+/// The harness's tables, as the guest's translation walks them.
+struct HarnessTables<'a>(&'a mut OracleHost);
+
+impl TableMemory for HarnessTables<'_> {
+    fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
+        let mut bytes = [0u8; 8];
+        self.0
+            .read_ram(physical, &mut bytes)
+            .then(|| u64::from_le_bytes(bytes))
+    }
+
+    fn update_descriptor(&mut self, _: u64, _: u64, _: u64) -> Option<bool> {
+        None
+    }
+}
+
+impl OracleHost {
+    /// A native fault's cause: a check's own, or for a page fault what the
+    /// guest's translation of the address gives. A page the guest maps but
+    /// the host has no memory at is a device access, which the lane has
+    /// none of, so the engine refuses it.
+    fn cause(&mut self, fault: &HostFault) -> FaultCause {
+        if let Some(cause) = fault.check_cause() {
+            return cause;
+        }
+        let Some(regime) = self.regime else {
+            return FaultCause::Device {
+                physical: fault.address,
+            };
+        };
+        let access = if fault.write {
+            Access::Write
+        } else {
+            Access::Read
+        };
+        match mmu::translate(
+            &regime.controls,
+            fault.address,
+            access,
+            regime.requester,
+            &mut HarnessTables(self),
+        ) {
+            Translated::Fault(fault) => FaultCause::Guest(fault),
+            Translated::Unsupported(unsupported) => FaultCause::Translation(unsupported),
+            Translated::Mapped(translation) => FaultCause::Device {
+                physical: translation.physical,
+            },
+        }
+    }
 }
 
 impl OracleHost {
@@ -243,20 +294,29 @@ impl Host for OracleHost {
     }
 
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit {
+        self.runner
+            .set_ranges(self.installed.iter().map(Executable::range).collect());
         // SAFETY: the engine passes code it installed for the system-mode
-        // block ABI; the lane admits only blocks that exit before any native
-        // memory access, or zero a DC ZVA block in the data window, mapped
-        // at its guest address.
-        let block: extern "sysv64" fn(*mut GuestState) -> BlockExit =
-            unsafe { std::mem::transmute(code.0) };
-        let exit = block(state);
-        NativeExit::Exit {
-            next_pc: exit.next_pc,
-            kind: exit.kind,
+        // block ABI. Its accesses reach the windows, mapped at their guest
+        // addresses, or fault, which ends the run at the faulting
+        // instruction.
+        match unsafe { self.runner.run(code.0, state) } {
+            Ok(exit) => NativeExit::Exit {
+                next_pc: exit.next_pc,
+                kind: exit.kind,
+            },
+            Err(fault) => {
+                let cause = self.cause(&fault);
+                NativeExit::Fault(
+                    fault.native(fault.rip.wrapping_sub(code.0 as u64) as usize, cause),
+                )
+            }
         }
     }
 
-    fn set_regime(&mut self, _: &Regime) {}
+    fn set_regime(&mut self, regime: &Regime) {
+        self.regime = Some(*regime);
+    }
 
     fn invalidate_translations(&mut self) {}
 
@@ -298,8 +358,8 @@ fn profile(target: TargetCpu, el2: bool) -> CpuProfile {
 /// would: registers, SP_EL0, NZCV, the data window and any exception.
 ///
 /// # Safety
-/// The case's words must compile to blocks that exit before any native memory
-/// access, as System instructions do in the system-mode profile.
+/// The case's native memory accesses must reach the windows or fault, as
+/// System instructions and the region lane's sequences do.
 pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
     let windows = windows()?.lock().expect("native windows lock");
     // SAFETY: the windows are owned mappings; the code page is installed below.
@@ -370,6 +430,8 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         data: windows.data_pointer(),
         tables: harness_tables(hypervisor),
         installed: Vec::new(),
+        runner: NativeRunner::new(Vec::new()),
+        regime: None,
     };
     let profile = profile(target, hypervisor.is_some());
     let mut machine = Machine::new(cpu, host, NoDevices, profile, target);

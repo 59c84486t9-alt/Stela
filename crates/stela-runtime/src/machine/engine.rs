@@ -186,6 +186,9 @@ pub struct NativeFault {
     pub address: u64,
     pub write: bool,
     pub cause: FaultCause,
+    /// The host GPRs at the faulting instruction, RAX through R15 by x86
+    /// register number.
+    pub registers: [u64; 16],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4905,6 +4908,7 @@ mod tests {
             .set(SystemRegister::CPTR_EL2, 0, 0b11 << 20);
         let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) & !(SCTLR_A | SCTLR_NAA);
         let ud = NativeExit::Fault(NativeFault {
+            registers: [0; 16],
             offset: 0,
             address: 0,
             write: false,
@@ -5321,6 +5325,7 @@ mod tests {
             .0
             .wrapping_sub(machine.blocks[0].code.0);
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            registers: [0; 16],
             offset,
             address: 0x40,
             write: false,
@@ -5521,6 +5526,7 @@ mod tests {
             .0
             .wrapping_sub(machine.blocks[0].code.0);
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            registers: [0; 16],
             offset,
             address: 0x40,
             write: false,
@@ -6094,6 +6100,7 @@ mod tests {
         machine.cpu.state.x[3] = 0x4000_0040;
         let offset = machine.blocks[0].source_map[1].1;
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            registers: [0; 16],
             offset,
             address: 0x4000_0040,
             write: false,
@@ -7167,6 +7174,7 @@ mod tests {
         machine.cpu.pc = base;
         let offset = machine.blocks[0].source_map[1].1;
         machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            registers: [0; 16],
             offset,
             address: BASE + 0x100,
             write: true,
@@ -8209,6 +8217,7 @@ mod tests {
         machine.cpu.state.x[0] = BASE + 0x100;
         let watched = |address, write| {
             NativeExit::Fault(NativeFault {
+                registers: [0; 16],
                 offset: 0,
                 address,
                 write,

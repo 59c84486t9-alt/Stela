@@ -12,6 +12,11 @@ use super::Random;
 
 /// The lane's form id; `--form` selects it by any part of this name.
 pub(super) const FORM: &str = "region_sequence";
+/// The same sequences on the system-mode engine at EL1, whose regions keep
+/// guest registers in host registers across accesses: some cases start a
+/// pointer register at [`super::FAULT_POINTER`], so an access through it
+/// takes a translation fault and the exception's registers compare.
+pub(super) const SYSTEM_FORM: &str = "region_sequence_system";
 const MAX_LENGTH: u64 = 24;
 const SP: u32 = 31;
 const ZR: u32 = 31;

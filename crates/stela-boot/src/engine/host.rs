@@ -127,6 +127,8 @@ struct Recorded {
     address: u64,
     write: bool,
     cause: FaultCause,
+    /// RAX through R15 at the faulting instruction, by x86 register number.
+    registers: [u64; 16],
 }
 
 struct Apic {
@@ -525,6 +527,10 @@ fn abandon(state: &mut State, frame: &mut Frame, address: u64, write: bool, caus
         address,
         write,
         cause,
+        registers: [
+            frame.rax, frame.rcx, frame.rdx, frame.rbx, frame.rsp, frame.rbp, frame.rsi, frame.rdi,
+            frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
+        ],
     });
     frame.rip = stela_native_recover as *const () as u64;
 }
@@ -736,6 +742,7 @@ impl Host for BareHost {
                 address: recorded.address,
                 write: recorded.write,
                 cause: recorded.cause,
+                registers: recorded.registers,
             });
         }
         NativeExit::Exit {

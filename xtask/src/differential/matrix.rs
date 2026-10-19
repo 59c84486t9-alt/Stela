@@ -395,6 +395,7 @@ pub(super) fn subjects(
                         draft,
                         el,
                         pointers: 0,
+                        faulting: 0,
                         translation: Translation::system(&[word, read])?,
                     });
                 }
@@ -411,6 +412,7 @@ pub(super) fn subjects(
                         draft,
                         el,
                         pointers: 0,
+                        faulting: 0,
                         translation: Translation::system(&[word, word])?,
                     });
                 }
@@ -424,6 +426,7 @@ pub(super) fn subjects(
                     draft,
                     el,
                     pointers: 0,
+                    faulting: 0,
                     translation: Translation::system(&[word])?,
                 });
             }
