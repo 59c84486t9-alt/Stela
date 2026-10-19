@@ -653,4 +653,196 @@ mod tests {
         assert!(machine.devices.irq[0]);
         assert_eq!(machine.devices.dma_deadline(), None);
     }
+
+    /// Switch to the next PE that can run, which must be `pe`.
+    fn turn(machine: &mut Machine<FakeHost, Board>, pe: usize) {
+        end_slice(machine);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), pe);
+    }
+
+    #[test]
+    fn a_store_exclusive_fails_once_another_pe_wrote_the_granule_and_its_retry_counts_both() {
+        const LDXR_X1_X2: u32 = 0xc85f_7c41;
+        const STXR_W3_X4_X2: u32 = 0xc803_7c44;
+        let data = 0x400;
+        let mut machine = pair();
+        let value = |machine: &Machine<FakeHost, Board>| {
+            u64::from_le_bytes(machine.host.ram[data..data + 8].try_into().unwrap())
+        };
+        let load = |machine: &mut Machine<FakeHost, Board>| {
+            machine.cpu.state.x[2] = BASE + data as u64;
+            machine.system_instruction(LDXR_X1_X2).unwrap();
+            machine.cpu.state.x[1]
+        };
+        let store = |machine: &mut Machine<FakeHost, Board>, value| {
+            machine.cpu.state.x[4] = value;
+            machine.system_instruction(STXR_W3_X4_X2).unwrap();
+            machine.cpu.state.x[3]
+        };
+        // Two PEs increment one counter with LDXR/STXR loops. PE 0 loads 0
+        // and is preempted before its store; PE 1's whole increment passes.
+        assert_eq!(load(&mut machine), 0);
+        turn(&mut machine, 1);
+        let seen = load(&mut machine);
+        assert_eq!((seen, store(&mut machine, seen + 1)), (0, 0));
+        // PE 0's store fails without writing; its retry loads PE 1's value
+        // and passes, so neither increment is lost.
+        turn(&mut machine, 0);
+        assert_eq!((store(&mut machine, 1), value(&machine)), (1, 1));
+        let seen = load(&mut machine);
+        assert_eq!((seen, store(&mut machine, seen + 1)), (1, 0));
+        assert_eq!(value(&machine), 2);
+        // An LSE atomic (LDADD) runs natively and writes RAM directly: PE 1's
+        // clears PE 0's reservation too, and PE 0's store fails.
+        assert_eq!(load(&mut machine), 2);
+        turn(&mut machine, 1);
+        machine.host.ram[data..data + 8].copy_from_slice(&3u64.to_le_bytes());
+        turn(&mut machine, 0);
+        assert_eq!(machine.cpu.monitor, None);
+        assert_eq!((store(&mut machine, 3), value(&machine)), (1, 3));
+    }
+
+    const LEVEL1: usize = 0xf000;
+    const LEVEL2: usize = 0xe000;
+    const LEVEL3: usize = 0xd000;
+
+    /// Write `value` to entry `index` of the translation table at `table`.
+    fn descriptor(machine: &mut Machine<FakeHost, Board>, table: usize, index: usize, value: u64) {
+        let at = table + index * 8;
+        machine.host.ram[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// The level 3 page descriptor of the test RAM page at `output`.
+    fn page(output: u64) -> u64 {
+        const AF_INNER_SHAREABLE_PAGE: u64 = 1 << 10 | 3 << 8 | 0b11;
+        output | AF_INNER_SHAREABLE_PAGE
+    }
+
+    /// Stage 1 of the running PE's EL1&0 regime with 4 KiB pages: VA = PA
+    /// for the test RAM's 16 pages.
+    fn map_pages(machine: &mut Machine<FakeHost, Board>) {
+        const TABLE: u64 = 0b11;
+        const TCR: u64 = 25 | 1 << 8 | 1 << 10 | 3 << 12 | 1 << 23 | 5 << 32;
+        const SCTLR_M_C: u64 = 1 | 1 << 2;
+        descriptor(
+            machine,
+            LEVEL1,
+            (BASE >> 30) as usize,
+            (BASE + LEVEL2 as u64) | TABLE,
+        );
+        descriptor(machine, LEVEL2, 0, (BASE + LEVEL3 as u64) | TABLE);
+        for index in 0..16 {
+            descriptor(machine, LEVEL3, index, page(BASE + index as u64 * 0x1000));
+        }
+        let registers = &mut machine.cpu.registers;
+        registers.set(Register::TTBR0_EL1, 0, BASE + LEVEL1 as u64);
+        registers.set(Register::TCR_EL1, 0, TCR);
+        registers.set(Register::MAIR_EL1, 0, 0xff);
+        let sctlr = registers.get(Register::SCTLR_EL1, 0) | SCTLR_M_C;
+        registers.set(Register::SCTLR_EL1, 0, sctlr);
+        machine.translations_changed();
+    }
+
+    #[test]
+    fn a_tlbi_broadcast_by_one_pe_reaches_the_cached_fetch_translations_of_every_pe() {
+        const TLBI_VAE1IS_X0: u32 = 0xd508_8320;
+        let code = BASE + 0x1000;
+        let mut machine = pair();
+        let fetch = |machine: &mut Machine<FakeHost, Board>| machine.fetch_physical(code).ok();
+        // Both PEs run EL1 code through the same tables.
+        map_pages(&mut machine);
+        assert_eq!(fetch(&mut machine), Some(code));
+        turn(&mut machine, 1);
+        machine.cpu.pstate = Pstate::reset(1);
+        map_pages(&mut machine);
+        assert_eq!(fetch(&mut machine), Some(code));
+        // PE 1 remaps the page. Its cached translation stands until it
+        // invalidates the VA, as a TLB entry may.
+        descriptor(&mut machine, LEVEL3, 1, page(BASE + 0x2000));
+        assert_eq!(fetch(&mut machine), Some(code));
+        machine.cpu.state.x[0] = code >> 12;
+        machine.system_instruction(TLBI_VAE1IS_X0).unwrap();
+        assert_eq!(fetch(&mut machine), Some(BASE + 0x2000));
+        // The Inner Shareable invalidation reached PE 0, whose earlier
+        // translation of the page is gone too.
+        turn(&mut machine, 0);
+        assert_eq!(fetch(&mut machine), Some(BASE + 0x2000));
+    }
+
+    #[test]
+    fn ic_ivau_by_one_pe_makes_every_pe_compile_the_new_code() {
+        const RET: u32 = 0xd65f_03c0;
+        const ADD_X0: u32 = 0x9100_0400;
+        const IC_IVAU_X0: u32 = 0xd50b_7520;
+        let code = 0x1000;
+        let mut machine = pair();
+        machine.host.ram[code..code + 4].copy_from_slice(&RET.to_le_bytes());
+        let compiled = |machine: &mut Machine<FakeHost, Board>| {
+            let Ok(super::super::Fetched::Block(index)) =
+                machine.fetch_block(BASE + code as u64, false)
+            else {
+                panic!("no block at the code");
+            };
+            (
+                machine.blocks[index].source_hash,
+                machine.statistics.compiled,
+            )
+        };
+        let (old, count) = compiled(&mut machine);
+        // PE 1, in the same regime, runs the shared compiled block.
+        turn(&mut machine, 1);
+        machine.cpu.pstate = Pstate::reset(1);
+        assert_eq!(compiled(&mut machine), (old, count));
+        // It rewrites the code: until it invalidates the instruction cache
+        // to the PoU the old block may still run, as stale instructions may.
+        machine.host.ram[code..code + 8]
+            .copy_from_slice(&[ADD_X0.to_le_bytes(), RET.to_le_bytes()].concat());
+        assert_eq!(compiled(&mut machine), (old, count));
+        machine.cpu.state.x[0] = BASE + code as u64;
+        machine.system_instruction(IC_IVAU_X0).unwrap();
+        // The invalidation is broadcast: PE 0 compiles the new code.
+        turn(&mut machine, 0);
+        let (new, recompiled) = compiled(&mut machine);
+        assert_ne!(new, old);
+        assert_eq!(recompiled, count + 1);
+    }
+
+    #[test]
+    fn a_pes_interrupt_waits_for_its_turn_and_unmasking_and_preempts_where_it_stopped() {
+        const MSR_DAIFCLR_I: u32 = 0xd503_42ff;
+        const IRQ_CURRENT_SPX: u64 = 0x280;
+        const HCR_TGE: u64 = 1 << 27;
+        let mut machine = pair();
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        // PE 1's line does not interrupt PE 0, unmasked.
+        machine.devices.irq = [false, true];
+        machine.cpu.pstate.daif = 0;
+        assert!(!machine.deliver_interrupts());
+        // PE 1 runs in the host, at EL2 with every interrupt masked from
+        // reset: its IRQ stays pending until it clears PSTATE.I.
+        turn(&mut machine, 1);
+        let hcr = machine.cpu.read(Register::HCR_EL2) | HCR_TGE;
+        machine.cpu.registers.set(Register::HCR_EL2, 0, hcr);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        assert!(!machine.deliver_interrupts());
+        machine.system_instruction(MSR_DAIFCLR_I).unwrap();
+        assert!(machine.deliver_interrupts());
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.pc),
+            (2, 0x4_0000 + IRQ_CURRENT_SPX)
+        );
+        assert_eq!(machine.cpu.read(Register::ELR_EL2), START + 4);
+        assert_eq!(machine.cpu.pstate.daif, DAIF_ALL);
+        // PE 0's line rises while it is preempted; it takes the IRQ when it
+        // runs again, returning to where its slice ended.
+        machine.devices.irq = [true, false];
+        turn(&mut machine, 0);
+        assert!(machine.deliver_interrupts());
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.pc),
+            (1, 0x1_0000 + IRQ_CURRENT_SPX)
+        );
+        assert_eq!(machine.cpu.read(Register::ELR_EL1), BASE);
+    }
 }
