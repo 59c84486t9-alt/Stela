@@ -376,7 +376,11 @@ impl Session {
                 m,
             )),
             "StatusMsg" => {
-                let status = m.required("Status")?.uint()?;
+                // A failure may come as a negative status.
+                let status = match m.required("Status")? {
+                    Value::Signed(status) => *status,
+                    status => i64::try_from(status.uint()?).unwrap_or(i64::MAX),
+                };
                 // Restored reports unconverted ramrod errors as AMRError -1.
                 let failed = match m.get("AMRError") {
                     None | Some(Value::Integer(0)) => false,
@@ -628,6 +632,15 @@ mod tests {
         ]);
         let Err(Error::Refused { reason, .. }) = session.receive(status, &mut answers) else {
             panic!("a failed status must refuse")
+        };
+        assert_eq!(reason, "device final status is failure");
+        let (mut session, mut answers) = ready();
+        let status = Value::dict([
+            ("MsgType", Value::from("StatusMsg")),
+            ("Status", Value::Signed(-1)),
+        ]);
+        let Err(Error::Refused { reason, .. }) = session.receive(status, &mut answers) else {
+            panic!("a negative status must refuse as a failure")
         };
         assert_eq!(reason, "device final status is failure");
     }
