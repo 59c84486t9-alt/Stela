@@ -4306,8 +4306,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// SYS and SYSL: the generated accessor of an architectural System
-    /// instruction. IMPLEMENTATION DEFINED encodings (CRn 11 and 15) stop
-    /// with the paused Apple inventory; every other encoding is UNDEFINED.
+    /// instruction. IMPLEMENTATION DEFINED encodings (CRn 11 and 15) stop by
+    /// name: no 26A434 SPTM, TXM or kernelcache of any chip executes one
+    /// (`isa/apple-soc-facts.json` has no `S1_` row), so none has Apple
+    /// semantics to model. Every other encoding is UNDEFINED.
     fn maintenance(&mut self, word: u32, access: RegisterAccess) -> Step {
         if let Some(step) = self.system_access(word, access) {
             return step;
@@ -4315,7 +4317,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if matches!(access.encoding().crn(), 11 | 15) {
             return Err(self.refuse_system(
                 word,
-                "IMPLEMENTATION DEFINED System instruction (Apple inventory paused)",
+                "IMPLEMENTATION DEFINED System instruction no censused Apple component executes",
             ));
         }
         self.undefined()
@@ -8007,8 +8009,9 @@ mod tests {
                 "{word:#x}"
             );
         }
-        // CRn 11 and 15 are the IMPLEMENTATION DEFINED space.
-        for word in [0xd528_b000, 0xd52f_f3e0] {
+        // CRn 11 and 15 are the IMPLEMENTATION DEFINED space, for SYSL and
+        // SYS (sys #0, C11, C0, #0, x0 and sys #7, C15, C15, #7).
+        for word in [0xd528_b000, 0xd52f_f3e0, 0xd508_b000, 0xd50f_ffff] {
             machine.cpu.set_pstate(Pstate::reset(1));
             machine.cpu.pc = BASE;
             assert!(
