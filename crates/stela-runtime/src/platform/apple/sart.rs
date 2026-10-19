@@ -28,8 +28,10 @@ const ENTRY_BYTES: u64 = 0xc0;
 /// with version-3 layout at 0xfffffff027019ac0: three nonzero boot
 /// configuration words, snapshotted before mappings can be installed.
 /// Emulated die / boot-chain choice: one synchronous transaction per
-/// channel. There is no buffered work to throttle. Changes to this reset
-/// configuration refuse until their field semantics are recovered.
+/// channel. There is no buffered work to throttle. SPTM also writes 0
+/// while it changes entries and then restores the snapshot; the model
+/// stores 0 and refuses translated DMA until every word is restored,
+/// since what 0 does to traffic is not recovered. Other values refuse.
 const THROTTLES: [u64; 3] = [0x8014, 0x801c, 0x8024];
 const SYNCHRONOUS_CHANNEL: u32 = 1;
 /// Bus-local offset used to map the separate, DT-placed idle word.
@@ -59,6 +61,7 @@ pub struct Sart {
     entries: [Entry; ENTRIES],
     bounds: Bounds,
     idle: bool,
+    throttles: [u32; 3],
 }
 
 impl Sart {
@@ -67,6 +70,7 @@ impl Sart {
             entries: [Entry::default(); ENTRIES],
             bounds,
             idle: false,
+            throttles: [SYNCHRONOUS_CHANNEL; 3],
         }
     }
 
@@ -113,6 +117,11 @@ impl Iommu for Sart {
         if stream != 0 {
             return Err(DmaError::Unsupported("SART has no stream selector"));
         }
+        if self.throttles.contains(&0) {
+            return Err(DmaError::Unsupported(
+                "SART DMA while a throttle word is 0 is not modeled",
+            ));
+        }
         if !self.allows(iova, last) {
             // No fault syndrome/interrupt is documented for this hardware.
             return Err(DmaError::Unsupported("DMA outside the SART allow-list"));
@@ -128,8 +137,8 @@ impl MmioDevice for Sart {
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         if width == Width::Word {
-            if THROTTLES.contains(&offset) {
-                return Ok(u64::from(SYNCHRONOUS_CHANNEL));
+            if let Some(channel) = THROTTLES.iter().position(|&o| o == offset) {
+                return Ok(u64::from(self.throttles[channel]));
             }
             if offset == IDLE {
                 return Ok(u64::from(self.idle));
@@ -158,12 +167,13 @@ impl MmioDevice for Sart {
         if width != Width::Word || value > u64::from(u32::MAX) {
             return Err(fail("SART requires a 32-bit word"));
         }
-        if THROTTLES.contains(&offset) {
-            return if value == u64::from(SYNCHRONOUS_CHANNEL) {
-                Ok(()) // Idempotent restore of Stela's boot configuration.
-            } else {
-                Err(fail("SART throttle configuration change is not modeled"))
-            };
+        if let Some(channel) = THROTTLES.iter().position(|&o| o == offset) {
+            // 0 while SPTM changes entries, or a restore of the snapshot.
+            if value > u64::from(SYNCHRONOUS_CHANNEL) {
+                return Err(fail("SART throttle configuration change is not modeled"));
+            }
+            self.throttles[channel] = value as u32;
+            return Ok(());
         }
         if offset == IDLE {
             if value > 1 {
@@ -198,18 +208,33 @@ mod tests {
     };
 
     #[test]
-    fn synchronous_channel_configuration_is_nonzero_and_never_grants_dma() {
+    fn throttle_words_hold_the_boot_value_or_zero_and_never_grant_dma() {
         let mut sart = Sart::new(Bounds::Exclusive);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         for offset in THROTTLES {
             assert_eq!(sart.read(offset, Width::Word, &mut access), Ok(1));
             sart.write(offset, Width::Word, 1, &mut access).unwrap();
-            assert!(sart.write(offset, Width::Word, 0, &mut access).is_err());
             assert!(sart.write(offset, Width::Word, 2, &mut access).is_err());
             assert!(sart.read(offset, Width::Double, &mut access).is_err());
         }
-        assert!(!sart.allows(0x1000, 0x1fff));
+        // A word held at 0 stops translated DMA until it is restored.
+        for (offset, value) in [(BASE, 1), (SIZE, 1), (0, u64::from(ALLOW))] {
+            sart.write(offset, Width::Word, value, &mut access).unwrap();
+        }
+        let mut memory = Ram::new(0, 0x3000);
+        let mut translate = |sart: &mut Sart, access: &mut Access<'_>| {
+            sart.translate(&mut memory, 0, 0x1000, 0x1fff, false, access)
+        };
+        assert_eq!(translate(&mut sart, &mut access), Ok(0x1000));
+        sart.write(THROTTLES[1], Width::Word, 0, &mut access)
+            .unwrap();
+        assert_eq!(sart.read(THROTTLES[1], Width::Word, &mut access), Ok(0));
+        assert!(translate(&mut sart, &mut access).is_err());
+        sart.write(THROTTLES[1], Width::Word, 1, &mut access)
+            .unwrap();
+        assert_eq!(translate(&mut sart, &mut access), Ok(0x1000));
+        assert!(!Sart::new(Bounds::Exclusive).allows(0x1000, 0x1fff));
     }
 
     #[test]
