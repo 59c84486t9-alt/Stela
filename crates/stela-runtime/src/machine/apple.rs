@@ -83,6 +83,7 @@ pub use crate::platform::apple::{
         Evidence as SepSignatureEvidence, ManifestEvidence as SepManifestEvidence,
         inspect as inspect_sep_signature, verify_manifest as verify_sep_manifest_signature,
     },
+    sep::state as sep_state,
     typec,
     uart::{ConsoleBusy, ConsoleSink},
 };
@@ -1054,6 +1055,7 @@ impl AppleDevices {
         (dart, stream): (DartId, usize),
         entropy: Box<dyn sep::Entropy>,
         security: Option<sep::SecurityMode>,
+        state: sep::state::Location,
     ) -> Result<(), String> {
         if wrapper.bytes < asc::WRAPPER_BYTES || auxiliary.bytes == 0 {
             return Err("SEP register apertures are incomplete".into());
@@ -1062,7 +1064,7 @@ impl AppleDevices {
             return Err("SEP requires dart-sep stream zero".into());
         }
         let device = self.bus.add(Box::new(
-            Sep::new(entropy, lines, security).map_err(String::from)?,
+            Sep::new(entropy, lines, security, state).map_err(String::from)?,
         ));
         self.bus
             .map(device, wrapper.physical, wrapper.bytes, 0)
@@ -2905,6 +2907,7 @@ mod tests {
                         Ok(())
                     }),
                     None,
+                    sep::state::Location::Volatile,
                 )
                 .unwrap();
             devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap(); // enable outbox

@@ -14,7 +14,7 @@
 //! the PC's own disk (`setup::installed`): the entry then boots the
 //! installed macOS from that disk, or recoveryOS when NVRAM asks for it or
 //! the disk holds no system yet, as a Mac does. Setup writes no disk but
-//! the USB, except a fresh NOR image with `--initialize-nor` and NVRAM with
+//! the USB, except fresh machine state with `--initialize-nor` and NVRAM with
 //! `--next-boot`.
 //!
 //! An existing setup is updated in place (`setup::update`): `--update-stela`
@@ -676,7 +676,8 @@ fn describe(plan: &Plan) -> Result<String> {
             match checked.nor_image {
                 Some(_) => writeln!(
                     text,
-                    "  disks          this USB, and a fresh NOR image on {}",
+                    "  disks          this USB, and fresh machine state (NOR image or SEP area) \
+                     on {}",
                     disk.nor
                 )?,
                 None => writeln!(text, "  disks          none are written but this USB")?,
@@ -1418,6 +1419,22 @@ mod tests {
                 .target,
             stela_loader::boot_selection::Target::MacOs { safe: false }
         );
+        // So does a SEP area after the NOR image that holds other bytes; the
+        // flag blanks it and keeps the NOR image.
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let capacity = stela_runtime::machine::apple::nor::CAPACITY;
+        let path = f.host.partitions[NOR].1.clone();
+        let mut image = fs::read(&path).unwrap();
+        image[capacity..capacity + 8].copy_from_slice(b"not SEP!");
+        fs::write(&path, image).unwrap();
+        assert!(refusal(&f, &|_| {}).contains("--initialize-nor"));
+        let mut initialize = installed_command(&f);
+        initialize.initialize_nor = true;
+        setup(&environment(&f.host), initialize).unwrap();
+        let bytes = partition_bytes(&f, NOR);
+        assert!(bytes[capacity..].iter().all(|&b| b == 0));
+        assert!(bytes[..capacity].iter().all(|&b| b == 0));
         // A guest disk is kept and booted.
         let mut gpt = vec![0u8; 520];
         gpt[512..520].copy_from_slice(b"EFI PART");

@@ -505,6 +505,14 @@ struct Clock {
     wall: Option<WallClock>,
 }
 
+/// The host disks the board's devices keep: the internal SSD's backing
+/// (`--storage`) and the SEP's state on the machine-state partition
+/// (`--nor`).
+struct Disks {
+    backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
+    sep_state: Option<stela_runtime::machine::apple::sep_state::Location>,
+}
+
 /// The board's devices. `reset` is the entry point a boot bundle hands off
 /// to, on which boot firmware locks every PE's RVBAR.
 fn devices<'f>(
@@ -512,7 +520,7 @@ fn devices<'f>(
     read_only_region: Option<(u64, u64)>,
     reset: Option<u64>,
     clock: Clock,
-    backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
+    disks: Disks,
     cables: Cables,
     firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
 ) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
@@ -574,6 +582,7 @@ fn devices<'f>(
     if let Some(spi) = board.and_then(|board| board.spi_nor.as_ref()) {
         devices.add_spi_nor(spi)?;
     }
+    let Disks { backing, sep_state } = disks;
     match (board.and_then(|b| b.ans.as_ref()), backing) {
         (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
         (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
@@ -675,12 +684,21 @@ fn devices<'f>(
             (darts[sep.iommu][0], sep.stream as usize),
             alloc::boxed::Box::new(bundle::entropy),
             sep.security,
+            match sep_state {
+                Some(location) => {
+                    output::arguments(format_args!("SEP state on the machine-state partition\n"));
+                    location
+                }
+                None => {
+                    // Without `--nor` no host partition holds it: the roots
+                    // and anti-replay store last this power cycle.
+                    output::arguments(format_args!(
+                        "SEP state volatile: nonces end at power-off\n"
+                    ));
+                    stela_runtime::machine::apple::sep_state::Location::Volatile
+                }
+            },
         )?;
-        // No host partition holds SEP state yet: its anti-replay store
-        // lasts this power cycle.
-        output::arguments(format_args!(
-            "SEP state volatile: nonces end at power-off\n"
-        ));
     }
     let mut restore_usb = None;
     let usbs = board.map_or(0, |board| board.usbs.len());
@@ -1048,9 +1066,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .nor
         .as_ref()
         .map(|_| nor::HostNor::open(services.next().unwrap()));
-    let (mut host_nor, nor_image, nvram) = match nor {
-        Some((host_nor, image, nvram)) => (Some(host_nor), Some(image), Some(nvram)),
-        None => (None, None, None),
+    let (mut host_nor, nor_image, nvram, sep_state) = match nor {
+        Some((host_nor, image, nvram, sep_state)) => {
+            (Some(host_nor), Some(image), Some(nvram), Some(sep_state))
+        }
+        None => (None, None, None, None),
     };
     let config = Config {
         ram,
@@ -1207,7 +1227,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 counter: now,
             }),
         },
-        backing,
+        Disks { backing, sep_state },
         Cables {
             restore: options.restore,
             input: options.input,

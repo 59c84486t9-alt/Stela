@@ -23,6 +23,7 @@ pub mod ool;
 pub mod os;
 pub mod rom;
 pub mod shared;
+pub mod state;
 pub mod store;
 pub mod xart;
 
@@ -73,10 +74,11 @@ impl Sep {
         entropy: Box<dyn Entropy>,
         lines: Lines,
         security: Option<SecurityMode>,
+        state: state::Location,
     ) -> Result<Self, &'static str> {
         Ok(Self {
             mailbox: Asc::new(
-                Box::new(firmware::SepFirmware::new(entropy, security)),
+                Box::new(firmware::SepFirmware::new(entropy, security, state)),
                 true,
                 lines,
             )?,
@@ -189,6 +191,7 @@ mod tests {
             Box::new(|_: &mut [u8]| Err("unused entropy")),
             Lines::from_interrupts(irqs),
             None,
+            state::Location::Volatile,
         )
         .unwrap();
         let mut latch = InterruptLatch::new();

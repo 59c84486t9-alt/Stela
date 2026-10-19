@@ -1,5 +1,6 @@
 //! Block devices addressed by logical block, with explicit errors.
-use alloc::{boxed::Box, string::String};
+use alloc::{boxed::Box, rc::Rc, string::String};
+use core::cell::RefCell;
 use core::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +144,64 @@ pub(crate) fn ascii(bytes: &[u8]) -> String {
     String::from(text.trim())
 }
 
+/// One disk several owners share, each through its own [`Window`].
+#[derive(Clone)]
+pub struct Shared(Rc<RefCell<Box<dyn BlockDevice>>>);
+
+impl Shared {
+    pub fn new(device: Box<dyn BlockDevice>) -> Self {
+        Self(Rc::new(RefCell::new(device)))
+    }
+
+    /// The `blocks` blocks from `first`, as a device of their own.
+    pub fn window(&self, first: u64, blocks: u64) -> Result<Window, BlockError> {
+        let mut identity = self.0.borrow().identity().clone();
+        match first.checked_add(blocks) {
+            Some(end) if end <= identity.blocks => (),
+            _ => {
+                return Err(BlockError::OutOfRange {
+                    lba: first,
+                    blocks,
+                    capacity: identity.blocks,
+                });
+            }
+        }
+        identity.blocks = blocks;
+        Ok(Window {
+            disk: self.clone(),
+            first,
+            identity,
+        })
+    }
+}
+
+/// A run of blocks of a [`Shared`] disk.
+pub struct Window {
+    disk: Shared,
+    first: u64,
+    identity: Identity,
+}
+
+impl BlockDevice for Window {
+    fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.identity.check(lba, buffer.len())?;
+        self.disk.0.borrow_mut().read(self.first + lba, buffer)
+    }
+
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.identity.check_write(lba, data.len())?;
+        self.disk.0.borrow_mut().write(self.first + lba, data)
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.disk.0.borrow_mut().flush()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -233,6 +292,24 @@ pub(crate) mod tests {
         let mut read_only = disk.identity.clone();
         read_only.read_only = true;
         assert_eq!(read_only.check_write(0, 512), Err(BlockError::ReadOnly));
+    }
+
+    #[test]
+    fn windows_share_one_disk_and_stay_inside_their_blocks() {
+        let shared = Shared::new(Box::new(RamDisk::new("s", 8, 512)));
+        let mut low = shared.window(0, 4).unwrap();
+        let mut high = shared.window(4, 4).unwrap();
+        assert!(shared.window(6, 3).is_err());
+        assert_eq!(high.identity().blocks, 4);
+        high.write(0, &[7; 512]).unwrap();
+        let mut block = [0; 512];
+        low.read(3, &mut block).unwrap();
+        assert_eq!(block, [0; 512]);
+        assert!(low.read(4, &mut block).is_err());
+        let mut whole = shared.window(0, 8).unwrap();
+        whole.read(4, &mut block).unwrap();
+        assert_eq!(block, [7; 512]);
+        low.flush().unwrap();
     }
 
     #[test]

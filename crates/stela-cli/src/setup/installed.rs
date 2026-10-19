@@ -1,11 +1,12 @@
 //! The PC's own disk for an installed macOS: the partition whose bytes are
 //! the Mac's internal SSD (ANS2 backing, `--storage`, and the disk the
 //! installed system's Preboot volume is read from, `--preboot`) and the
-//! partition that holds its NOR flash (`--nor`), where NVRAM persists.
+//! machine-state partition (`--nor`): its NOR flash, where NVRAM persists,
+//! then the SEP's state.
 //!
 //! Setup checks them and writes neither, except that `--initialize-nor`
-//! writes a fresh NOR image over a NOR partition that is neither blank nor
-//! a NOR image. recoveryOS's Disk Utility and Reinstall macOS write the
+//! writes a fresh NOR image over a NOR area that is neither blank nor a NOR
+//! image, and blanks a SEP area that is neither blank nor a SEP roots record. recoveryOS's Disk Utility and Reinstall macOS write the
 //! Apple region, as on a Mac; a region that holds anything but a guest disk
 //! or zeros is used only with `--erase-target`, so no host data is lost by
 //! accident. Every later Stela or macOS update keeps both partitions.
@@ -17,6 +18,7 @@ use stela_loader::boot_selection::{
 };
 use stela_runtime::{
     machine::apple::nor::{CAPACITY, Image, SECTOR_SIZE, nvram::Partition, nvram::Variables},
+    machine::apple::sep_state,
     payload::gpt::DEFAULT_MIN_APPLE_BYTES,
 };
 
@@ -75,7 +77,8 @@ pub(super) struct Request<'a> {
     pub(super) usb_disk: Option<&'a str>,
 }
 
-/// The checked disk, what setup will write to its NOR partition, and notes.
+/// The checked disk, what setup will write to its machine-state partition
+/// from its start, and notes.
 #[derive(Debug)]
 pub(super) struct Checked {
     pub(super) disk: InstalledDisk,
@@ -203,28 +206,32 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         ),
     }
     let nor = usable(host, request.nor, "NOR", request.usb_disk)?;
+    let state_bytes = CAPACITY + sep_state::BYTES as usize;
     ensure!(
-        nor.bytes >= CAPACITY as u64,
-        "{} is smaller than the 1 MiB NOR image",
+        nor.bytes >= state_bytes as u64,
+        "{} is smaller than the {state_bytes:#x} bytes of the 1 MiB NOR image and the SEP's state",
         nor.identifier
     );
-    let bytes = host.read(&nor.identifier, 0, CAPACITY)?;
-    let blank = bytes.iter().all(|&b| b == 0);
-    let image = (!blank).then(|| Image::from_bytes(bytes)).transpose();
-    let nor_image = match image {
+    let bytes = host.read(&nor.identifier, 0, state_bytes)?;
+    let (nor_bytes, sep_area) = bytes.split_at(CAPACITY);
+    let blank = nor_bytes.iter().all(|&b| b == 0);
+    let image = (!blank)
+        .then(|| Image::from_bytes(nor_bytes.to_vec()))
+        .transpose();
+    let nor_foreign = match image {
         _ if blank => {
             notes.push(format!(
                 "{} is blank: stela.efi writes a fresh NOR image there at its first boot",
                 nor.identifier
             ));
-            None
+            false
         }
         Ok(Some(image)) if image.current_bank().is_ok() => {
             notes.push(format!(
                 "{} holds a NOR image; its NVRAM is kept",
                 nor.identifier
             ));
-            None
+            false
         }
         _ if request.initialize_nor => {
             notes.push(format!(
@@ -232,7 +239,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
                  (--initialize-nor)",
                 nor.identifier
             ));
-            Some(Image::fresh().bytes().to_vec())
+            true
         }
         _ => bail!(
             "{} is neither blank nor a NOR image, so stela.efi would refuse it. Pass \
@@ -240,6 +247,42 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
             nor.identifier
         ),
     };
+    let sep_foreign = match sep_state::blank(&sep_area[..sep_state::ROOTS_BYTES]) {
+        Ok(true) => false,
+        Ok(false) => {
+            notes.push(format!(
+                "{} holds SEP state; its anti-replay store is kept",
+                nor.identifier
+            ));
+            false
+        }
+        Err(_) if request.initialize_nor => {
+            notes.push(format!(
+                "{} holds other bytes after its NOR image: setup blanks the SEP's state \
+                 (--initialize-nor)",
+                nor.identifier
+            ));
+            true
+        }
+        Err(error) => bail!(
+            "{}: {error}, so stela.efi would refuse it. Pass --initialize-nor to blank the \
+             SEP's state.",
+            nor.identifier
+        ),
+    };
+    let nor_image = (nor_foreign || sep_foreign).then(|| {
+        let mut plan = if nor_foreign {
+            Image::fresh().bytes().to_vec()
+        } else {
+            nor_bytes.to_vec()
+        };
+        if sep_foreign {
+            plan.resize(state_bytes, 0);
+        } else {
+            plan.extend_from_slice(sep_area);
+        }
+        plan
+    });
     let same_disk = region.disk == nor.disk;
     ensure!(
         request.serial.is_none() || same_disk,
@@ -262,7 +305,8 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     })
 }
 
-/// Write the fresh NOR image `check` planned.
+/// Write the machine-state bytes `check` planned: a fresh NOR image, a
+/// blank SEP area, or both.
 pub(super) fn initialize_nor(host: &dyn Host, disk: &InstalledDisk, image: &[u8]) -> Result<()> {
     host.write(&disk.nor, 0, image)
         .with_context(|| format!("writing a fresh NOR image to {}", disk.nor))
