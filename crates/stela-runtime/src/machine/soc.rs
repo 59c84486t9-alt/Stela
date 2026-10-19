@@ -25,6 +25,13 @@ use crate::platform::apple::{
 };
 use alloc::{format, string::String, vec::Vec};
 
+mod handoff;
+pub use handoff::{
+    BOOT_CLOCK_HZ, CHIP_REVISION, Carveout, DRAM_VENDOR, DramVendor, Evidence, HANDOFF_REGION,
+    Handoff, IBOOT_PAGE_BYTES, PANIC_REGION_BYTES, PANIC_REGION_ID, PANIC_WINDOW_BYTES,
+    PANIC_WINDOW_MEMBERS, SOCD_TRACE_KEYS, USB_PHY_HZ, handoff,
+};
+
 /// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part
 /// number of each `cluster-type`, and the `aic` node's `compatible` with the
 /// offset of its event register from its `reg`: for the M1's `aic,1` the
