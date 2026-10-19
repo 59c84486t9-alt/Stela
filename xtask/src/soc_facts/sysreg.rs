@@ -97,18 +97,9 @@ pub fn impdef(insn: &Insn) -> Option<(Encoding, Direction)> {
 }
 
 /// The census of `data`, whose code is `image`'s executable segments; a
-/// fileset's rows name the entry whose header precedes their first site.
+/// fileset's rows name the entry whose own executable segment holds their
+/// first site ([`macho::Image::owner`]).
 pub fn census(image: &macho::Image, data: &[u8]) -> BTreeMap<(Encoding, Direction), Row> {
-    let mut owners: Vec<(u64, String)> = image
-        .entries
-        .iter()
-        .map(|entry| (entry.offset, entry.name.clone()))
-        .collect();
-    owners.sort();
-    let owner = |offset: u64| {
-        let index = owners.partition_point(|(start, _)| *start <= offset);
-        index.checked_sub(1).map(|index| owners[index].1.clone())
-    };
     let mut rows = BTreeMap::new();
     for (address, offset, word) in macho::words(image, data) {
         let Some(key) = impdef(&a64::decode(address, word)) else {
@@ -118,15 +109,10 @@ pub fn census(image: &macho::Image, data: &[u8]) -> BTreeMap<(Encoding, Directio
             .and_modify(|row: &mut Row| row.count += 1)
             .or_insert_with(|| Row {
                 count: 1,
-                entry: None,
+                entry: image.owner(address).map(|entry| entry.name.clone()),
                 address,
                 offset,
             });
-    }
-    if !owners.is_empty() {
-        for row in rows.values_mut() {
-            row.entry = owner(row.offset);
-        }
     }
     rows
 }

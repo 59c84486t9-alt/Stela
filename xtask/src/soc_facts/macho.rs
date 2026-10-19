@@ -29,11 +29,15 @@ pub struct Segment {
     pub executable: bool,
 }
 
-/// A fileset entry: its identifier and the file offset of its header.
+/// A fileset entry: its identifier, the file offset of its header and the
+/// virtual address ranges of its own executable segments. A kernelcache
+/// packs every entry's header into its first segment and their code into a
+/// shared one, so only the entry's segments say which code is its.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub name: String,
     pub offset: u64,
+    pub code: Vec<core::ops::Range<u64>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -109,11 +113,23 @@ pub fn parse(data: &[u8], base: usize) -> Result<Image> {
                 image.entries.push(Entry {
                     name: c_string(data, offset + name_offset),
                     offset: u64_at(data, offset + 16)?,
+                    code: Vec::new(),
                 });
             }
             _ => {}
         }
         offset += size;
+    }
+    for entry in &mut image.entries {
+        let header = usize::try_from(entry.offset).context("fileset entry offset")?;
+        let own = parse(data, header)
+            .with_context(|| format!("fileset entry {} has no Mach-O header", entry.name))?;
+        entry.code = own
+            .segments
+            .iter()
+            .filter(|segment| segment.executable && segment.file_size != 0)
+            .map(|segment| segment.address..segment.address + segment.file_size)
+            .collect();
     }
     Ok(image)
 }
@@ -131,6 +147,13 @@ impl Image {
             .iter()
             .find(|s| (s.address..s.address + s.file_size).contains(&address))
             .map(|s| s.offset + (address - s.address))
+    }
+
+    /// The fileset entry whose executable segments hold `address`.
+    pub fn owner(&self, address: u64) -> Option<&Entry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.code.iter().any(|range| range.contains(&address)))
     }
 
     /// The executable segments' (address, file offset, bytes).
@@ -206,5 +229,47 @@ mod tests {
             vec![(0x1000, 0x100, 0xd503_201f), (0x1004, 0x104, 0xd65f_03c0)]
         );
         assert!(parse(&file, 4).is_err());
+    }
+
+    /// A fileset's code belongs to the entry whose own segment holds it,
+    /// not to the entry whose header precedes it in the file.
+    #[test]
+    fn fileset_code_belongs_to_the_entry_whose_segment_holds_it() {
+        const NAME: &[u8] = b"com.example.kext\0";
+        const ENTRY_HEADER: u64 = 0x200;
+        let own = segment("__TEXT_EXEC", 0x1004, 0x104, 4, VM_PROT_EXECUTE);
+        let shared = segment("__TEXT_EXEC", 0x1000, 0x100, 8, VM_PROT_EXECUTE);
+        let mut entry = Vec::new();
+        let entry_bytes = (32 + NAME.len()).next_multiple_of(8);
+        for value in [LC_FILESET_ENTRY, entry_bytes as u32] {
+            entry.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [0x1004, ENTRY_HEADER] {
+            entry.extend_from_slice(&u64::to_le_bytes(value));
+        }
+        entry.extend_from_slice(&32u32.to_le_bytes());
+        entry.extend_from_slice(&0u32.to_le_bytes());
+        entry.extend_from_slice(NAME);
+        entry.resize(entry_bytes, 0);
+        let mut file = Vec::new();
+        let commands = (shared.len() + entry.len()) as u32;
+        for value in [MH_MAGIC_64, 0x0100_000c, 0, 0xc, 2, commands, 0, 0] {
+            file.extend_from_slice(&value.to_le_bytes());
+        }
+        file.extend(shared);
+        file.extend(entry);
+        file.resize(0x108, 0);
+        file.resize(ENTRY_HEADER as usize, 0);
+        for value in [MH_MAGIC_64, 0x0100_000c, 0, 0xb, 1, own.len() as u32, 0, 0] {
+            file.extend_from_slice(&value.to_le_bytes());
+        }
+        file.extend(own);
+        let image = parse(&file, 0).unwrap();
+        assert_eq!(image.entries[0].code, vec![0x1004..0x1008]);
+        assert_eq!(
+            image.owner(0x1004).map(|e| e.name.as_str()),
+            Some("com.example.kext")
+        );
+        assert!(image.owner(0x1000).is_none());
     }
 }
