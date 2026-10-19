@@ -54,6 +54,11 @@ const FIRMWARE_DOWNLOAD: u8 = 0x11;
 const APPLE_TIME: u8 = 0xc0;
 const APPLE_NAMESPACES: u8 = 0xc6;
 const APPLE_BFH_PARAMS: u8 = 0xd1;
+/// `BuildCommandIdentifyStorageDevice` (0x3dec950): CDW13 the selector and a
+/// 4 KiB response whose +0x200 holds the running NAND firmware's UUID.
+/// Only `AppleANS2NVMeController::FirmwareVersionCheck` (0x3dc0c68, from
+/// user-client selector 12) sends it, on the updater's `--update` path.
+const APPLE_IDENTIFY_STORAGE: u8 = 0xc8;
 const APPLE_TUNNEL: u8 = 0xd8;
 const FLUSH: u8 = 0;
 const WRITE: u8 = 1;
@@ -99,6 +104,10 @@ impl Command {
                 // Tunnel addresses are in CDW11-14, not the PRPs. It is
                 // authorized by SART, with an NVMMU entry but no PRP DMA.
                 APPLE_TUNNEL => Ok(0),
+                APPLE_IDENTIFY_STORAGE => Err(
+                    "ANS Identify Storage Device (0xc8) is not modeled: the die runs no NAND \
+                     firmware whose UUID it could report",
+                ),
                 _ => Err("ANS admin opcode or DMA contract is not modeled"),
             }
         } else {
@@ -1052,6 +1061,14 @@ mod tests {
             port.read(0x2000, &mut block).unwrap();
             assert_eq!(block, [fill; 4096]);
         }
+    }
+
+    #[test]
+    fn firmware_uuid_identify_refuses_by_name() {
+        let mut command = Command([0; 64]);
+        command.0[0] = APPLE_IDENTIFY_STORAGE;
+        let refusal = command.direction(0).unwrap_err();
+        assert!(refusal.contains("Identify Storage Device (0xc8)"));
     }
 
     #[test]
