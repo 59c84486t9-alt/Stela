@@ -2836,7 +2836,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let context = self.pointer_context()?;
         if let PointerAuthenticationOperation::Load(load) = instruction.operation {
-            return self.authenticated_load(word, &context, load);
+            return self.authenticated_load(word, Some(&context), load);
         }
         match crate::blocks::services::complete_pauth_with_memory(
             &context,
@@ -3221,22 +3221,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 self.cpu.pc = destination;
             }
-            _ => {
-                return Err(self.unsupported(RequirementKind::Instruction {
-                    word,
-                    detail: "PAC load or LR form with its key disabled".into(),
-                }));
+            Operation::Load(load) => return self.authenticated_load(word, None, load),
+            Operation::Strip { .. } | Operation::GenericCode(_) => {
+                unreachable!("XPAC and PACGA use no key that SCTLR disables")
             }
         }
         Ok(())
     }
 
     /// LDRAA/LDRAB: authenticate the base, then read through the guest's
-    /// translation like any data load.
+    /// translation like any data load. Without a context the key is
+    /// disabled, and AuthDA/AuthDB return the base unchanged (Arm `Auth`).
     fn authenticated_load(
         &mut self,
         word: u32,
-        context: &pauth::Context,
+        context: Option<&pauth::Context>,
         load: stela_compiler::block::pauth_memory::Load,
     ) -> Step {
         let pc = self.cpu.pc;
@@ -3271,9 +3270,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     stela_compiler::block::pauth_memory::DataKey::A => pauth::Key::Da,
                     stela_compiler::block::pauth_memory::DataKey::B => pauth::Key::Db,
                 };
-                context
-                    .authenticate_operation(key, pointer, 0, true)
-                    .map(|result| result.pointer)
+                match context {
+                    Some(context) => context
+                        .authenticate_operation(key, pointer, 0, true)
+                        .map(|result| result.pointer),
+                    None => Ok(pointer),
+                }
             },
             |address| {
                 let shape = mmu::alignment::Shape {
@@ -6854,6 +6856,20 @@ mod tests {
         machine.system_instruction_for_test(LDRAA_X0_X1);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x7200_0002);
         assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), pc);
+        // With EnDA clear AuthDA returns the unsigned base unchanged:
+        // LDRAA reads through it, here an unmapped address, whose data
+        // abort (EC 0x25) reports the base itself.
+        let mut machine = pac_machine_for(crate::machine::Chip::AppleM6, &[]);
+        let registers = &mut machine.cpu.registers;
+        let sctlr = registers.get(SystemRegister::SCTLR_EL1, 0) & !(1 << 27);
+        registers.set(SystemRegister::SCTLR_EL1, 0, sctlr);
+        machine.cpu.state.x[1] = 0xffff_ff80_0000_8000;
+        machine.system_instruction_for_test(LDRAA_X0_X1);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1) >> 26, 0x25);
+        assert_eq!(
+            machine.cpu.read(SystemRegister::FAR_EL1),
+            0xffff_ff80_0000_8000
+        );
     }
 
     #[test]
