@@ -3,6 +3,7 @@
 mod amx;
 mod clock;
 mod exclusive;
+mod hosted;
 mod processors;
 mod system;
 mod unprivileged;
