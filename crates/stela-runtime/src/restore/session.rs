@@ -323,11 +323,28 @@ impl Session {
                     )])),
                 ))))
             }
+            // `Progress` is a percentage, or -1 for an operation without one,
+            // such as the `OperationWeights` announcement of the progress
+            // bar's weights (idevicerestore logs the operation alone).
             "ProgressMsg" => {
                 m.required("Operation")?.uint()?;
-                let progress = m.required("Progress")?.uint()?;
-                if progress > 100 {
-                    return Err(Error::Invalid("restore progress outside 0..=100"));
+                match m.required("Progress")? {
+                    Value::Signed(-1) => {}
+                    progress if progress.uint()? <= 100 => {}
+                    _ => return Err(Error::Invalid("restore progress outside 0..=100 or -1")),
+                }
+                if let Some(weights) = m.get("OperationWeights") {
+                    weights.required("weight_count")?.uint()?;
+                    for table in ["operation_ids", "operation_weights", "operation_progresses"] {
+                        let Value::Dict(entries) = weights.required(table)? else {
+                            return Err(Error::Invalid(
+                                "operation weight table is not a dictionary",
+                            ));
+                        };
+                        for value in entries.values() {
+                            value.uint()?;
+                        }
+                    }
                 }
                 Ok(Action::Event(m.clone()))
             }
@@ -613,6 +630,40 @@ mod tests {
             panic!("a failed status must refuse")
         };
         assert_eq!(reason, "device final status is failure");
+    }
+    #[test]
+    fn progress_is_a_percentage_or_minus_one_with_the_operation_weights() {
+        let progress = |value: Value, weights: Option<Value>| {
+            let (mut session, mut answers) = ready();
+            let mut message = Value::dict([
+                ("MsgType", Value::from("ProgressMsg")),
+                ("Operation", Value::Integer(30)),
+                ("Progress", value),
+            ]);
+            if let (Value::Dict(fields), Some(weights)) = (&mut message, weights) {
+                fields.insert("OperationWeights".into(), weights);
+            }
+            session.receive(message, &mut answers).is_ok()
+        };
+        // 26A434 restored's announcement of the progress bar's weights.
+        let weights = Value::dict([
+            (
+                "operation_ids",
+                Value::dict([("id_18", Value::Integer(18))]),
+            ),
+            ("operation_progresses", Value::dict([])),
+            (
+                "operation_weights",
+                Value::dict([("id_18", Value::Integer(200))]),
+            ),
+            ("weight_count", Value::Integer(98)),
+        ]);
+        assert!(progress(Value::Signed(-1), Some(weights)));
+        assert!(progress(Value::Integer(100), None));
+        assert!(!progress(Value::Integer(101), None));
+        assert!(!progress(Value::Signed(-2), None));
+        let malformed = Value::dict([("weight_count", Value::Integer(1))]);
+        assert!(!progress(Value::Signed(-1), Some(malformed)));
     }
     #[test]
     fn device_reports_continue_and_baseband_or_provisioning_messages_refuse() {
