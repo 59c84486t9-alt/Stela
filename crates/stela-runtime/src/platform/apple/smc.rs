@@ -26,7 +26,8 @@
 //! writes six bytes to the shared page, RW 0x20 writes then reads.
 //!
 //! The table holds the keys whose meaning a DeviceTree or kernel client
-//! establishes: `#KEY`, and the PMU GPIO keys the DeviceTree's `pKW4`
+//! establishes: `#KEY`, the `NTAP` notification-enable flag, and the PMU
+//! GPIO keys the DeviceTree's `pKW4`
 //! platform functions on `smc-pmu` name (on J473AP `gP09` DP-to-HDMI
 //! reset, `gP0d` Wi-Fi/BT regulator, `gP0f` NFC, `gP10` HDMI CEC,
 //! `gP15`/`gP16` HDMI power, `gP18` USB-A controller power and the CIO
@@ -58,6 +59,8 @@ const NOT_WRITABLE: u8 = 0x86;
 const SIZE_MISMATCH: u8 = 0x87;
 const BAD_ARGUMENT: u8 = 0x89;
 const INDEX_RANGE: u8 = 0xb8;
+
+const NOTIFICATIONS: u32 = code(b"NTAP");
 
 pub const READABLE: u8 = 0x80;
 pub const WRITABLE: u8 = 0x40;
@@ -133,12 +136,22 @@ pub struct Smc {
 
 impl Smc {
     /// An SMC whose shared page is at physical `sram_address`, holding
-    /// `keys` besides `#KEY`.
+    /// `keys` besides its own `#KEY` and `NTAP`.
     pub fn new(sram: Sram, sram_address: u64, keys: Vec<(u32, Key)>) -> Result<Self, &'static str> {
         let mut table = BTreeMap::new();
+        // The notification enable: AppleSMC::_smcInitNotifications
+        // (0xfffffe0009dac3c0) and Linux macsmc write the one-byte flag 1.
+        table.insert(
+            NOTIFICATIONS,
+            Key {
+                kind: code(b"flag"),
+                flags: READABLE | WRITABLE,
+                value: vec![0],
+            },
+        );
         for (name, key) in keys {
-            if name == code(b"#KEY") {
-                return Err("#KEY is the SMC's own count");
+            if name == code(b"#KEY") || name == NOTIFICATIONS {
+                return Err("#KEY and NTAP are the SMC's own keys");
             }
             if key.value.is_empty() || key.value.len() > MAX_VALUE {
                 return Err("SMC key value size outside 1..=120");
@@ -161,6 +174,11 @@ impl Smc {
             sram_address,
             keys: table,
         })
+    }
+
+    /// Whether the AP has enabled unsolicited notifications.
+    pub fn notifications_enabled(&self) -> bool {
+        self.value(NOTIFICATIONS) == Some(&[1])
     }
 
     /// Key `name`'s current value.
@@ -394,7 +412,7 @@ mod tests {
         assert_eq!(reply & 0xff, u64::from(SUCCESS));
         assert_eq!(reply >> 12 & 0xf, 3);
         assert_eq!(reply >> 16 & 0xff, 4);
-        assert_eq!((reply >> 32) as u32, u32::from_be(9));
+        assert_eq!((reply >> 32) as u32, u32::from_be(10));
         // Unknown keys, short reads and bad sizes answer SMC errors.
         assert_eq!(
             send(&mut smc, request(READ, 0, 4, 0, code(b"RGEN"))) & 0xff,
@@ -417,13 +435,26 @@ mod tests {
         let first = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 0));
         assert_eq!((first >> 32) as u32, code(b"#KEY"));
         let second = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 1));
-        assert_eq!((second >> 32) as u32, code(b"gP09"));
+        assert_eq!((second >> 32) as u32, code(b"NTAP"));
+        let third = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 2));
+        assert_eq!((third >> 32) as u32, code(b"gP09"));
         assert_eq!(
-            send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 9)) & 0xff,
+            send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 10)) & 0xff,
             u64::from(INDEX_RANGE)
         );
         send(&mut smc, request(KEY_INFO, 0, 0, 0, code(b"gP16")));
         assert_eq!(sram.get(6), [4, b'2', b'3', b'i', b'u', 0xd0]);
+    }
+
+    #[test]
+    fn the_ap_enables_notifications_with_the_ntap_flag() {
+        let (mut smc, sram) = smc();
+        assert!(!smc.notifications_enabled());
+        sram.put(&[1]);
+        let reply = send(&mut smc, request(WRITE, 0, 1, 0, code(b"NTAP")));
+        assert_eq!(reply & 0xff, u64::from(SUCCESS));
+        assert!(smc.notifications_enabled());
+        assert!(Smc::new(Sram::default(), BASE, vec![(code(b"NTAP"), Key::gpio())]).is_err());
     }
 
     #[test]
