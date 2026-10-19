@@ -1190,12 +1190,7 @@ mod tests {
             clock: None,
             caches: Some(caches),
         };
-        let mut machine = super::super::tests::board_on(
-            Chip::AppleM2,
-            &[],
-            super::super::NoDevices,
-            vec![identity],
-        );
+        let mut machine = super::super::tests::board(&[], super::super::NoDevices, vec![identity]);
         let run = |machine: &mut TestMachine, word| {
             machine.cpu.pc = BASE;
             machine.cpu.pstate = Pstate::reset(1);

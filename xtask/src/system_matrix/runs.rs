@@ -30,10 +30,11 @@ const RUNTIME_SOURCE: &str = "crates/stela-runtime/src/";
 /// reset derivation, which reads only the profile that generation builds
 /// for each chip, and the vGIC CPU interface, which takes no chip (every
 /// PE's is the same model).
-const CHIP_INDEPENDENT: [&str; 3] = [
+const CHIP_INDEPENDENT: [&str; 4] = [
     "crates/stela-compiler/src/",
     "xtask/src/system_matrix/resets.rs#",
     "crates/stela-runtime/src/machine/vgic",
+    "crates/stela-runtime/src/machine/caches.rs#",
 ];
 
 /// Each chip's credited tests, by libtest name.
