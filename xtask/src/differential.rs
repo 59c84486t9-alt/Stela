@@ -354,7 +354,12 @@ fn system_oracle_limit(form: &str, case: &Case) -> bool {
     let el2_absent = case.el == 2
         && ((op1, crn, crm, op2) == (5, 1, 0, 1) || (op1, crn, crm, op2) == (4, 3, 1, 6));
     let absent_registers = register_access && (mpam || records || el2_absent) || debug;
+    // QEMU zeroes DC ZVA on Device memory, where Arm takes an Alignment fault
+    // (`AArch64_S1HasAlignmentFaultDueToMemType`); the EL2 harness runs with
+    // SCTLR_EL2.M clear, so all of its data is Device-nGnRnE.
+    let device_zero = case.el == 2 && zero_block_register(word).is_some();
     wfi || absent
+        || device_zero
         || absent_registers
         || sme
         || pstate

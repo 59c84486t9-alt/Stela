@@ -4228,6 +4228,41 @@ mod tests {
         board_on(chip, words, NoDevices, Vec::new())
     }
 
+    /// Identity-map the test RAM as Normal Write-Back through stage 1 of
+    /// both regimes (4 KiB granule, T0SZ 25, one 1 GiB block, EL0 access
+    /// with `el0`, whose writable mapping EL1 cannot execute), for DC ZVA,
+    /// which faults on the Device memory of a disabled stage 1.
+    pub(super) fn normal_memory(machine: &mut Machine<FakeHost, NoDevices>, el0: bool) {
+        const TABLE: usize = 0xf000;
+        const TCR: u64 = 25 | 1 << 8 | 1 << 10 | 3 << 12 | 1 << 23 | 5 << 32;
+        const SCTLR_M_C: u64 = 1 | 1 << 2;
+        let block = BASE | 1 << 10 | 3 << 8 | if el0 { 1 << 6 } else { 0 } | 0b01;
+        let entry = TABLE + (BASE >> 30) as usize * 8;
+        machine.host.ram[entry..entry + 8].copy_from_slice(&block.to_le_bytes());
+        let registers = &mut machine.cpu.registers;
+        for (table, control, attributes, sctlr) in [
+            (
+                SystemRegister::TTBR0_EL1,
+                SystemRegister::TCR_EL1,
+                SystemRegister::MAIR_EL1,
+                SystemRegister::SCTLR_EL1,
+            ),
+            (
+                SystemRegister::TTBR0_EL2,
+                SystemRegister::TCR_EL2,
+                SystemRegister::MAIR_EL2,
+                SystemRegister::SCTLR_EL2,
+            ),
+        ] {
+            registers.set(table, 0, BASE + TABLE as u64);
+            registers.set(control, 0, TCR);
+            registers.set(attributes, 0, 0xff);
+            let value = registers.get(sctlr, 0) | SCTLR_M_C;
+            registers.set(sctlr, 0, value);
+        }
+        machine.translations_changed();
+    }
+
     /// [`machine`] with `devices` and the PEs of `processors`.
     pub(super) fn board<D: Devices>(
         words: &[u32],
@@ -5129,6 +5164,7 @@ mod tests {
     #[test]
     fn dc_zva_zeroes_one_profile_block_and_at_reports_par() {
         let mut machine = machine(&[]);
+        normal_memory(&mut machine, false);
         machine.host.ram[0x100..0x180].fill(0xaa);
         machine.cpu.state.x[2] = BASE + 0x108;
         machine.system_instruction(0xd50b_7422).unwrap(); // dc zva, x2
@@ -5328,11 +5364,33 @@ mod tests {
         let par = machine.cpu.read(SystemRegister::PAR_EL1);
         assert_eq!((par & 1, par & 0x0000_ffff_ffff_f000), (0, unmapped));
 
-        // At EL1, DC ZVA to an IPA stage 2 does not map is a Data Abort
-        // taken to EL2 from the lower EL, with FAR and HPFAR.
+        // At EL1 with stage 1 off, data is Device-nGnRnE, so DC ZVA takes
+        // the stage-1 Alignment fault (DFSC 0b100001, WnR) to EL1 with FAR
+        // Xt, before stage 2 sees the IPA (Arm `AArch64_S1DisabledOutput`).
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
         machine.cpu.set_pstate(Pstate::reset(1));
         let pc = machine.cpu.pc;
         machine.system_instruction(0xd50b_7422).unwrap(); // dc zva, x2
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x1_0200));
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x9600_0061);
+        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), unmapped);
+        // Under HCR_EL2.DC stage 1 output is Normal: DC ZVA to an IPA stage
+        // 2 does not map is a Data Abort taken to EL2 from the lower EL,
+        // with FAR and HPFAR.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, 1 << 34 | 1 << 12 | 1);
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.pc = pc;
+        machine.system_instruction(0xd50b_7422).unwrap(); // dc zva, x2
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, 1 << 34 | 1);
         assert_eq!(machine.cpu.pstate.el, 2);
         assert_eq!(machine.cpu.pc, 0x2_0400);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL2), 0x9200_0045);
@@ -6077,6 +6135,7 @@ mod tests {
         const ADD: u32 = 0x9100_0400; // add x0, x0, #1
         const DC_ZVA: u32 = 0xd50b_7423; // dc zva, x3
         let mut machine = machine(&[ADD, DC_ZVA, ADD]);
+        normal_memory(&mut machine, false);
         let base = machine.cpu.pc;
         machine.cpu.state.x[3] = BASE + 0x108;
         machine.host.ram[0x100..0x180].fill(0xaa);
@@ -7125,6 +7184,7 @@ mod tests {
         );
         assert_eq!(machine.host.regimes.last().unwrap().watch.pass, [None; 2]);
         // DC ZVA writes its whole block: the same watchpoint matches.
+        normal_memory(&mut machine, false);
         machine.cpu.pc = BASE;
         machine.cpu.state.x[3] = BASE + 0x120;
         machine.system_instruction(0xd50b_7423).unwrap(); // dc zva, x3

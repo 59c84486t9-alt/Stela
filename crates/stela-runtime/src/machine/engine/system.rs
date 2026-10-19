@@ -180,6 +180,8 @@ const MPAMEN: u64 = 1 << 63;
 const RMR_RR: u64 = 1 << 1;
 const SCTLR_DZE: u32 = 14;
 const HCR_TDZ: u32 = 28;
+/// HCR_EL2.DC: EL1&0 stage 1 behaves as disabled with Normal output.
+const HCR_DC: u32 = 12;
 const DCZID_DZP: u64 = 1 << 4;
 
 /// Whether DC ZVA traps at the current EL, which DCZID_EL0.DZP reports:
@@ -223,7 +225,10 @@ pub(super) fn thread_pointer_readable(cpu: &Cpu) -> bool {
 /// and HCR_EL2.TDZ, and HFGITR_EL2.DCZVA with FEAT_FGT, outside the host at
 /// EL0 and at EL1; SCTLR_EL2.DZE at EL0 in the host) nor stops, and
 /// [`Access::zero_block`] accepts the profile's DCZID_EL0. Native code
-/// completes DC ZVA only then (`x86_64::zero_block`).
+/// completes DC ZVA only then (`x86_64::zero_block`), and only while stage 1
+/// is enabled or HCR_EL2.DC makes EL1&0 data Normal: otherwise every data
+/// access is Device-nGnRnE (Arm `AArch64_S1DisabledOutput`), where DC ZVA
+/// takes an Alignment fault.
 pub(super) fn native_zero_block(cpu: &Cpu, missing: &[Register]) -> Option<u16> {
     let fine_grained = || {
         let implemented = cpu.registers.chip().implemented(Feature::FEAT_FGT).ok()?;
@@ -237,7 +242,9 @@ pub(super) fn native_zero_block(cpu: &Cpu, missing: &[Register]) -> Option<u16> 
         2 => true,
         _ => false,
     };
-    if !permitted || missing.contains(&Register::DCZID_EL0) {
+    let normal = cpu.regime_sctlr() & mmu::SCTLR_M != 0
+        || cpu.regime() == TranslationRegime::El10 && !cpu.in_host() && cpu.hcr(HCR_DC);
+    if !permitted || !normal || missing.contains(&Register::DCZID_EL0) {
         return None;
     }
     let bytes = 4u64 << (cpu.read(Register::DCZID_EL0) & DCZID_BS);
@@ -818,9 +825,25 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
             return Err(Effect::Refused("DCZID_EL0.BS above Arm's 2 KiB maximum"));
         }
         let start = address & !(bytes - 1);
-        let regime = self.machine.cpu.regime();
+        let controls = self.machine.cpu.controls(self.machine.cpu.regime());
         let requester = self.machine.cpu.requester();
-        match self.translate(regime, requester, start, MemoryAccess::Write) {
+        // DC ZVA to Device memory takes an Alignment fault at the stage that
+        // makes it Device (Arm `AArch64_S1HasAlignmentFaultDueToMemType` and
+        // the stage-2 equivalent), with stage 1 disabled too.
+        let shape = mmu::alignment::Shape {
+            kind: mmu::alignment::Kind::Zero,
+            bytes,
+            pair: false,
+        };
+        let outcome = mmu::translate_checked(
+            &controls,
+            start,
+            MemoryAccess::Write,
+            requester,
+            shape,
+            &mut super::RamTables(&mut self.machine.host),
+        );
+        match outcome {
             Translated::Mapped(translation) => {
                 let access = debug::Access {
                     address: start,
@@ -1083,7 +1106,7 @@ pub(super) fn identify(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{BASE, machine, machine_on};
+    use super::super::tests::{BASE, machine, machine_on, normal_memory};
     use super::Code;
     use crate::machine::{
         Chip, Stop,
@@ -1684,6 +1707,7 @@ mod tests {
         const UCI: u64 = 1 << 26;
         const TDZ: u64 = 1 << 28;
         let mut machine = machine(&[]);
+        normal_memory(&mut machine, true);
         let user = Pstate {
             el: 0,
             sp: false,
@@ -1795,6 +1819,7 @@ mod tests {
         const HFGITR_DCZVA: u64 = 1 << 11;
         const HFGRTR_TPIDR_EL1: u64 = 1 << 33;
         let mut machine = machine(&[]);
+        normal_memory(&mut machine, true);
         machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
         machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
         let user = Pstate {
@@ -1852,6 +1877,20 @@ mod tests {
         });
         // DZE, TDZ and, with FEAT_FGT, HFGITR_EL2.DCZVA leave some contexts.
         assert!(zeroes > 0 && zeroes < 5 * 32, "{zeroes}");
+        // With stage 1 off, data is Device-nGnRnE: DC ZVA takes the
+        // Alignment fault (DFSC 0b100001, WnR) with FAR Xt, never natively.
+        let mut machine = machine(&[]);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.state.x[0] = BASE + 0x108;
+        assert_eq!(machine.cpu.read(Register::SCTLR_EL1) & 1, 0);
+        assert_eq!(
+            super::native_zero_block(&machine.cpu, &machine.profile_missing),
+            None
+        );
+        machine.system_instruction(DC_ZVA_X0).unwrap();
+        assert_eq!(machine.cpu.pc, 0x1_0200);
+        assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x9600_0061);
+        assert_eq!(machine.cpu.read(Register::FAR_EL1), BASE + 0x108);
     }
 
     /// MRS TPIDR_EL1 completes natively in exactly the contexts where the
