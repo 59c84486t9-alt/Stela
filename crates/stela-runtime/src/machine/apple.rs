@@ -1014,12 +1014,15 @@ impl AppleDevices {
     /// by physical address; no length concatenation or duplicate storage.
     pub fn add_atc_phy(&mut self, placement: &super::soc::TypecPhy) -> Result<(), MapError> {
         let id = self.bus.add(Box::new(AtcPhy::new()));
+        let pipe = placement.pipe.map(|pipe| (pipe, atc_phy::PIPE));
         for ((physical, bytes), offset) in [
             (placement.usb2, atc_phy::USB2),
             (placement.core, 0),
-            (placement.pipe, atc_phy::PIPE),
             (placement.events, atc_phy::EVENTS),
-        ] {
+        ]
+        .into_iter()
+        .chain(pipe)
+        {
             self.bus.map(id, physical, bytes, offset)?;
         }
         Ok(())

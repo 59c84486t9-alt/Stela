@@ -870,6 +870,19 @@ pub const HPM_MANAGER: &str = "usbc,manager";
 pub const HPM: &str = "usbc,cd3217";
 pub const RETIMER: &str = "atcrt";
 pub const ATC_PHY: &str = "atc-phy,t8112";
+/// The ATC PHY register layouts, by the first compatible a node lists that
+/// names one: `AppleT8103TypeCPhy` binds all of them. The T8103 (J274AP) and
+/// T6020 (J414sAP, `atc-phy,t6020` then `atc-phy,t8112`) views are the
+/// T8112 (J473AP) views without its last, core+0x4c000, which is beyond the
+/// canonical core window. The views the model places (USB2, event block,
+/// core+0x20000, core) are views 0 to 3 in each.
+const ATC_PHY_LAYOUTS: [(&str, usize); 3] = [
+    (ATC_PHY, ATC_PHY_BASE_VIEWS + 1),
+    ("atc-phy,t6020", ATC_PHY_BASE_VIEWS),
+    ("atc-phy,t8103", ATC_PHY_BASE_VIEWS),
+];
+/// The ADT views every [`ATC_PHY_LAYOUTS`] layout starts with.
+const ATC_PHY_BASE_VIEWS: usize = 28;
 /// A Type-C connector description (`/port-usb-c-N`): no IOKit personality
 /// binds it and it has no registers. The ATC PHY, `usb-drd` and ACIO name
 /// it as `function-dock_parent`, which `AppleARMFunction::withProvider`
@@ -1065,7 +1078,6 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         I2C,
         HPM_MANAGER,
         HPM,
-        ATC_PHY,
         DOCK_PORT,
         USB_DRD,
         SPMI,
@@ -1075,6 +1087,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
     .contains(&name)
         || GPU_ADMITTED && [SGX, GFX_MAPPER].contains(&name)
         || AICS.contains(&name)
+        || ATC_PHY_LAYOUTS.iter().any(|&(layout, _)| layout == name)
         || SOCS
             .iter()
             .any(|soc| soc.pmgr == name && soc.pmgr_modeled())
@@ -1284,13 +1297,15 @@ pub struct I2cController {
 /// via `usb-drd*/atc-phy-parent`, whose `reg[3]` supplies its aperture; its
 /// `reg[4]` is the PHY's own view 1, the core event block
 /// (`AppleT8103TypeCPhy::initRegisterSpaces` keeps view n at +0x158 + 16n).
+/// A PHY no `usb-drd` names (J414sAP `atc-phy3`, whose port has no USB
+/// controller) has no pipehandler.
 /// Unqualified shared fuse, AXI and analog-only views are not claimed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypecPhy {
     pub views: Vec<(u64, u64)>,
     pub usb2: (u64, u64),
     pub core: (u64, u64),
-    pub pipe: (u64, u64),
+    pub pipe: Option<(u64, u64)>,
     pub events: (u64, u64),
     pub port: u32,
 }
@@ -1448,10 +1463,21 @@ fn typec_devices(
                     targets,
                 });
             }
-            if node.compatible(ATC_PHY) {
+            if let Some(&(layout, count)) = node
+                .property("compatible")
+                .into_iter()
+                .flat_map(|list| list.split(|byte| *byte == 0))
+                .find_map(|entry| {
+                    ATC_PHY_LAYOUTS
+                        .iter()
+                        .find(|(layout, _)| layout.as_bytes() == entry)
+                })
+            {
                 let reg = node.pairs("reg").ok_or("ATC PHY has no reg pairs")?;
-                if reg.len() != 29 {
-                    return Err("T8112 ATC PHY requires its 29 register views".into());
+                if reg.len() != count {
+                    return Err(format!(
+                        "{layout} ATC PHY requires its {count} register views"
+                    ));
                 }
                 let views = reg.into_iter().map(place).collect::<Result<Vec<_>, _>>()?;
                 let usb2 = views[0];
@@ -1463,7 +1489,9 @@ fn typec_devices(
                             .checked_add(0x20000)
                             .ok_or("ATC core address overflows")?
                 {
-                    return Err("ATC USB2/core views disagree with the T8112 layout".into());
+                    return Err(format!(
+                        "ATC USB2/core views disagree with the {layout} layout"
+                    ));
                 }
                 let phandle = node
                     .first_u32("AAPL,phandle")
@@ -1485,15 +1513,21 @@ fn typec_devices(
                     }
                 })
                 .ok_or("ATC controller walk failed")?;
-                let (pipe, events) =
-                    controller_views.ok_or("ATC PHY has no controller pipehandler view")?;
-                let (pipe, events) = (place(pipe)?, place(events)?);
-                if duplicate
-                    || pipe.1 != atc_phy::WINDOW_BYTES
-                    || events != views[1]
-                    || events.1 != atc_phy::WINDOW_BYTES
-                {
-                    return Err("ambiguous or incomplete ATC pipehandler or event view".into());
+                let events = views[1];
+                let pipe = match controller_views {
+                    Some((pipe, controller_events)) => {
+                        let pipe = place(pipe)?;
+                        if pipe.1 != atc_phy::WINDOW_BYTES || place(controller_events)? != events {
+                            return Err(
+                                "ATC controller's pipehandler or event view disagrees".into()
+                            );
+                        }
+                        Some(pipe)
+                    }
+                    None => None,
+                };
+                if duplicate || events.1 != atc_phy::WINDOW_BYTES {
+                    return Err("ambiguous ATC controller or incomplete event view".into());
                 }
                 phys.push(TypecPhy {
                     views,
@@ -5658,7 +5692,7 @@ mod tests {
         views[1] = (0x382800000, 0x4000);
         views[2] = (0x383020000, 0x4000);
         views[4] = (0x383002000, 0x4000);
-        let phy = |compatible: &[u8]| {
+        let phy_views = |compatible: &[u8], views: &[(u64, u64)]| {
             encode(
                 &[
                     ("name", b"atc-phy0\0"),
@@ -5673,6 +5707,7 @@ mod tests {
                 &[],
             )
         };
+        let phy = |compatible: &[u8]| phy_views(compatible, &views);
         let usb = encode(
             &[
                 ("name", b"usb-drd0\0"),
@@ -5743,16 +5778,48 @@ mod tests {
         assert!(place(&io, 0x63, None).is_err());
         assert_eq!(phys[0].usb2, (0x382a90000, 0x4000));
         assert_eq!(phys[0].core, (0x383000000, atc_phy::CORE_BYTES));
-        assert_eq!(phys[0].pipe, (0x382a84000, 0x4000));
+        assert_eq!(phys[0].pipe, Some((0x382a84000, 0x4000)));
         assert_eq!(phys[0].events, (0x382800000, 0x4000));
         assert_eq!(phys[0].views, views);
         assert!(place(&io, 0x99, Some(&gpio)).is_err());
         assert!(typec_devices(&Node::root(&io).unwrap(), &|_| None, 0x63, Some(&gpio)).is_err());
-        let io = encode(&[("name", b"arm-io\0")], &[phy(b"atc-phy,t8112\0")]);
-        assert!(place(&io, 0x63, Some(&gpio)).is_err());
-        for compatible in [I2C, HPM_MANAGER, HPM, ATC_PHY] {
+        for compatible in [
+            I2C,
+            HPM_MANAGER,
+            HPM,
+            ATC_PHY,
+            "atc-phy,t6020",
+            "atc-phy,t8103",
+        ] {
             assert!(models(compatible, |_| None));
         }
+        // The T6020 layout has the 28 views the T8112's starts with; its
+        // first compatible, not the T8112 one it also lists, selects it.
+        let t6020 = |views: &[(u64, u64)]| {
+            encode(
+                &[("name", b"arm-io\0")],
+                &[
+                    i2c.clone(),
+                    phy_views(b"atc-phy,t6020\0atc-phy,t8112\0", views),
+                    usb.clone(),
+                ],
+            )
+        };
+        let (_, phys) = place(&t6020(&views[..ATC_PHY_BASE_VIEWS]), 0x63, Some(&gpio)).unwrap();
+        assert_eq!(phys[0].core, (0x383000000, atc_phy::CORE_BYTES));
+        assert_eq!(phys[0].events, (0x382800000, 0x4000));
+        assert!(place(&t6020(&views), 0x63, Some(&gpio)).is_err());
+        // A PHY no controller names keeps its event block, without a
+        // pipehandler.
+        let alone = encode(
+            &[("name", b"arm-io\0")],
+            &[i2c.clone(), phy(b"atc-phy,t8112\0")],
+        );
+        let (_, phys) = place(&alone, 0x63, Some(&gpio)).unwrap();
+        assert_eq!(
+            (phys[0].pipe, phys[0].events),
+            (None, (0x382800000, 0x4000))
+        );
         // The retimer's register protocol is undetermined: hidden, not refused.
         assert!(!models(RETIMER, |_| None));
         // Hidden PHYs are not parsed or mapped merely because reg survives.
