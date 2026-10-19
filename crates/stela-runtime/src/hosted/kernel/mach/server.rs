@@ -56,6 +56,14 @@ pub(super) enum Descriptor {
     /// `disposition` (`mach_msg_ool_ports_descriptor64_t`,
     /// `MACH_MSG_VIRTUAL_COPY`).
     Ports { names: Vec<u32>, disposition: u8 },
+    /// Out-of-line memory of this space (`mach_msg_ool_descriptor64_t`,
+    /// `MACH_MSG_VIRTUAL_COPY`), released from it with the reply when
+    /// `deallocate`.
+    Memory {
+        address: u64,
+        size: u32,
+        deallocate: bool,
+    },
 }
 
 /// `MACH_MSG_TYPE_COPY_SEND`.
@@ -65,6 +73,7 @@ impl Descriptor {
     /// The descriptor as an LP64 sender lays it out; a port array's
     /// address is its names', valid while the descriptor lives.
     pub(super) fn bytes(&self) -> Vec<u8> {
+        const OOL: u8 = 1;
         const OOL_PORTS: u8 = 2;
         const VIRTUAL_COPY: u8 = 1;
         let mut out = Vec::with_capacity(16);
@@ -73,6 +82,15 @@ impl Descriptor {
                 out.extend((names.as_ptr() as u64).to_le_bytes());
                 out.extend([0, VIRTUAL_COPY, *disposition, OOL_PORTS]);
                 out.extend((names.len() as u32).to_le_bytes());
+            }
+            Self::Memory {
+                address,
+                size,
+                deallocate,
+            } => {
+                out.extend(address.to_le_bytes());
+                out.extend([u8::from(*deallocate), VIRTUAL_COPY, 0, OOL]);
+                out.extend(size.to_le_bytes());
             }
         }
         out
@@ -669,9 +687,22 @@ mod tests {
             disposition: COPY_SEND,
         };
         let bytes = ports.bytes();
-        let Descriptor::Ports { names, .. } = &ports;
+        let Descriptor::Ports { names, .. } = &ports else {
+            unreachable!()
+        };
         assert_eq!(bytes[..8], (names.as_ptr() as u64).to_le_bytes());
         assert_eq!(bytes[8..], [0, 1, COPY_SEND, 2, 2, 0, 0, 0]);
+        let memory = Descriptor::Memory {
+            address: 0x1_2345_6789,
+            size: 0x10,
+            deallocate: true,
+        };
+        assert_eq!(
+            memory.bytes(),
+            [
+                0x89, 0x67, 0x45, 0x23, 1, 0, 0, 0, 1, 1, 0, 1, 0x10, 0, 0, 0
+            ]
+        );
     }
 
     #[test]

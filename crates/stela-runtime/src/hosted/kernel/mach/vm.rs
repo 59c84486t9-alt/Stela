@@ -19,13 +19,14 @@
 //! slide pager's pages do. Changed guest ranges drop their compiled blocks
 //! in every thread before it next runs guest code.
 //!
-//! The `object_name` port of `mach_vm_region`'s reply and the out-of-line
-//! data of `mach_vm_read` and `mach_vm_read_list` need complex replies,
-//! which [`super::server`]'s replies are not: `mach_vm_region` is forwarded
-//! where the host's answer is the arm64 kernel's, and the two reads are
-//! left to the reply path that builds complex replies.
+//! `mach_vm_read`'s data travels out of line in its reply, which the host
+//! kernel copies into the guest's new memory and the reply path moves into
+//! guest pages of its own; `mach_vm_read_list` copies each range into new
+//! guest pages of this task. `mach_vm_region`'s reply carries its
+//! `object_name` port and is forwarded where the host's answer is the
+//! arm64 kernel's.
 use super::super::Kernel;
-use super::server::{KERN_INVALID_ARGUMENT, MIG_BAD_ARGUMENTS, Reply, Request};
+use super::server::{Descriptor, KERN_INVALID_ARGUMENT, MIG_BAD_ARGUMENTS, Reply, Request};
 use crate::hosted::memory::{self, HOST_PAGE_MASK, PAGE_BYTES, PAGE_MASK, Protection};
 use crate::hosted::shared_region::{REGION_SIZE, REGION_START};
 use crate::hosted::threads::lock;
@@ -66,6 +67,15 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
              or unreadable out-of-line data, is refused",
         ),
     ),
+    (
+        "_kernelrpc_mach_vm_read",
+        Some(
+            "a range over a guest page the host maps in parts of differing protections is \
+             refused; the data's offset in its guest page is its offset in its host page, and \
+             the rest of its guest pages is zero",
+        ),
+    ),
+    ("mach_vm_read_list", Some(SPLIT_PAGE)),
     ("mach_vm_copy", Some(SPLIT_PAGE)),
     ("mach_vm_read_overwrite", Some(SPLIT_PAGE)),
     (
@@ -152,6 +162,8 @@ fn route(
         "_kernelrpc_mach_vm_protect" => protect(task, request),
         "mach_vm_inherit" => inherit(request),
         "mach_vm_write" => write(task, request)?,
+        "_kernelrpc_mach_vm_read" => read(task, request)?,
+        "mach_vm_read_list" => read_list(task, request)?,
         "mach_vm_copy" => copy(task, request)?,
         "mach_vm_read_overwrite" => read_overwrite(task, request)?,
         "mach_vm_msync" => msync(request)?,
@@ -308,6 +320,8 @@ unsafe extern "C" {
     fn mach_vm_inherit(task: u32, address: u64, size: u64, inheritance: u32) -> i32;
     fn mach_vm_write(task: u32, address: u64, data: usize, count: u32) -> i32;
     fn mach_vm_copy(task: u32, source: u64, size: u64, destination: u64) -> i32;
+    fn mach_vm_read(task: u32, address: u64, size: u64, data: *mut usize, count: *mut u32) -> i32;
+    fn mach_vm_read_list(task: u32, list: *mut u64, count: u32) -> i32;
     fn mach_vm_read_overwrite(
         task: u32,
         address: u64,
@@ -817,6 +831,123 @@ fn write(task: &mut dyn Task, request: &Request) -> Result<Reply> {
         task.invalidate(source, source_bytes);
     }
     Ok(status(code))
+}
+
+/// `mach_vm_read` (`address`, `size`): the bytes copied in
+/// (`vm_map_copyin`) and sent out of line; out `dataCnt`. The host's copy
+/// of them is the reply's data, released from this task as the reply is
+/// sent.
+fn read(task: &mut dyn Task, request: &Request) -> Result<Reply> {
+    let Some((address, size)) =
+        fields(|| Some((request.double(SIMPLE)?, request.double(SIMPLE + 8)?)))
+    else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    let Some((start, bytes)) = pages(address, size) else {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    };
+    whole_pages("mach_vm_read", start, bytes)?;
+    task.page_in(start, start + bytes)?;
+    let (mut data, mut count) = (0usize, 0u32);
+    // SAFETY: the host copies this task's bytes into new memory of it.
+    let code = unsafe { mach_vm_read(host(), address, size, &mut data, &mut count) };
+    if code != KERN_SUCCESS {
+        return Ok(Reply::Failure(code as u32));
+    }
+    Ok(Reply::Complex {
+        descriptors: vec![Descriptor::Memory {
+            address: data as u64,
+            size: count,
+            deallocate: count != 0,
+        }],
+        body: count.to_le_bytes().to_vec(),
+    })
+}
+
+/// `mach_vm_read_entry_t`'s bound (`VM_MAP_ENTRY_MAX`) and size.
+const READ_LIST_MAX: u32 = 256;
+const READ_ENTRY_BYTES: usize = 16;
+
+/// `mach_vm_read_list` (`data_list`, `count`): each nonempty range's guest
+/// pages copied in and out to new guest pages of this task
+/// (`vm_map_copyout`, which maps them with the default protections),
+/// each entry's address becoming its bytes' new address, or the entry
+/// zeroed when its copy fails. The routine's status is the last nonempty
+/// entry's.
+fn read_list(task: &mut dyn Task, request: &Request) -> Result<Reply> {
+    let list_bytes = READ_LIST_MAX as usize * READ_ENTRY_BYTES;
+    let (Some(list), Some(count)) = (
+        request.body.get(SIMPLE..SIMPLE + list_bytes),
+        request.word(SIMPLE + list_bytes),
+    ) else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    if count > READ_LIST_MAX {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    }
+    let mut entries: Vec<[u64; 2]> = list
+        .as_chunks::<READ_ENTRY_BYTES>()
+        .0
+        .iter()
+        .map(|entry| {
+            [
+                u64::from_le_bytes(entry[..8].try_into().unwrap()),
+                u64::from_le_bytes(entry[8..].try_into().unwrap()),
+            ]
+        })
+        .collect();
+    let mut code = KERN_SUCCESS;
+    for entry in &mut entries[..count as usize] {
+        let [address, size] = *entry;
+        if size != 0 {
+            let (status, placed) = read_into_guest_pages(task, address, size)?;
+            code = status;
+            if status == KERN_SUCCESS {
+                entry[0] = placed;
+                continue;
+            }
+        }
+        *entry = [0, 0];
+    }
+    if code != KERN_SUCCESS {
+        return Ok(Reply::Failure(code as u32));
+    }
+    Ok(Reply::Success(
+        entries
+            .iter()
+            .flatten()
+            .flat_map(|word| word.to_le_bytes())
+            .collect(),
+    ))
+}
+/// One `mach_vm_read_list` entry: the guest pages of
+/// `[address, address + size)` copied by the host into new memory, moved
+/// to guest pages of their own; the status and the bytes' new address.
+/// their own; the status and the bytes' new address.
+fn read_into_guest_pages(task: &mut dyn Task, address: u64, size: u64) -> Result<(i32, u64)> {
+    let mut list = [[0u64; 2]; READ_LIST_MAX as usize];
+    let Some((start, bytes)) = pages(address, size) else {
+        // A wrapping range: the host's refusal is the kernel's.
+        list[0] = [address, size];
+        // SAFETY: the list holds VM_MAP_ENTRY_MAX entries.
+        let code = unsafe { mach_vm_read_list(host(), list.as_mut_ptr().cast(), 1) };
+        if code == KERN_SUCCESS {
+            bail!("mach_vm_read_list: the host copied the wrapping range {address:#x}+{size:#x}");
+        }
+        return Ok((code, 0));
+    };
+    whole_pages("mach_vm_read_list", start, bytes)?;
+    task.page_in(start, start + bytes)?;
+    list[0] = [start, bytes];
+    // SAFETY: the list holds VM_MAP_ENTRY_MAX entries; the host copies
+    // this task's pages into new memory of it.
+    let code = unsafe { mach_vm_read_list(host(), list.as_mut_ptr().cast(), 1) };
+    if code != KERN_SUCCESS {
+        return Ok((code, 0));
+    }
+    let copied = list[0][0];
+    let placed = memory::own_guest_pages(copied, bytes)?.unwrap_or(copied);
+    Ok((KERN_SUCCESS, placed + (address & PAGE_MASK)))
 }
 
 /// `mach_vm_copy`: `[source, source + size)` overwrites the range at
@@ -1704,6 +1835,62 @@ mod tests {
         )
         .unwrap();
         memory::deallocate(base, 2 * PAGE_BYTES).unwrap();
+    }
+
+    #[test]
+    fn reads_copy_guest_pages() {
+        let mut task = bare();
+        let base = allocate_pages(&mut task, 2);
+        assert!(memory::write(base + 0x10, b"before"));
+        assert!(memory::write(base + PAGE_BYTES + 0x2345, b"listed"));
+        // The data travels out of line from the host's copy, which the
+        // reply's send releases.
+        let body = simple(&[&(base + 0x10).to_le_bytes(), &6u64.to_le_bytes()]);
+        let Reply::Complex { descriptors, body } =
+            call(&mut task, "_kernelrpc_mach_vm_read", false, &body).unwrap()
+        else {
+            panic!("not a complex reply");
+        };
+        assert_eq!(body, 6u32.to_le_bytes());
+        let [
+            Descriptor::Memory {
+                address,
+                size: 6,
+                deallocate: true,
+            },
+        ] = descriptors[..]
+        else {
+            panic!("{descriptors:?}");
+        };
+        assert_eq!(memory::read(address, 6).unwrap(), b"before");
+        memory::deallocate(address & !HOST_PAGE_MASK, HOST_PAGE_BYTES).unwrap();
+        // Each listed range's guest pages land in new guest pages, at the
+        // range's offset in them; an empty entry is zeroed.
+        let mut list = vec![0u8; READ_LIST_MAX as usize * READ_ENTRY_BYTES];
+        list[..8].copy_from_slice(&(base + PAGE_BYTES + 0x2345).to_le_bytes());
+        list[8..16].copy_from_slice(&6u64.to_le_bytes());
+        list[16..24].copy_from_slice(&base.to_le_bytes());
+        let body = simple(&[&list, &2u32.to_le_bytes()]);
+        let reply = success(call(&mut task, "mach_vm_read_list", false, &body).unwrap());
+        let (copied, size) = (u64_at(&reply, 0), u64_at(&reply, 8));
+        assert_eq!((copied & PAGE_MASK, size), (0x2345, 6));
+        assert_eq!(memory::read(copied, 6).unwrap(), b"listed");
+        assert!(memory::write(copied - 0x2345, b"writable"));
+        assert_eq!(u64_at(&reply, 16), 0);
+        memory::deallocate(copied & !PAGE_MASK, PAGE_BYTES).unwrap();
+        // An unmapped last range fails the routine.
+        memory::deallocate(base + PAGE_BYTES, PAGE_BYTES).unwrap();
+        list[8..16].copy_from_slice(&0u64.to_le_bytes());
+        list[16..24].copy_from_slice(&(base + PAGE_BYTES).to_le_bytes());
+        list[24..32].copy_from_slice(&8u64.to_le_bytes());
+        let body = simple(&[&list, &2u32.to_le_bytes()]);
+        failure(call(&mut task, "mach_vm_read_list", false, &body).unwrap());
+        let body = simple(&[&list, &(READ_LIST_MAX + 1).to_le_bytes()]);
+        assert_eq!(
+            failure(call(&mut task, "mach_vm_read_list", false, &body).unwrap()),
+            KERN_INVALID_ARGUMENT
+        );
+        memory::deallocate(base, PAGE_BYTES).unwrap();
     }
 
     #[test]
