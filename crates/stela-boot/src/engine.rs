@@ -22,7 +22,10 @@ use crate::{
 };
 use alloc::{string::String, vec::Vec};
 use core::{
-    arch::x86_64::{__cpuid, __cpuid_count},
+    arch::{
+        asm,
+        x86_64::{__cpuid, __cpuid_count},
+    },
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -356,7 +359,8 @@ impl Options {
     }
 }
 
-/// The host CPU's compiler target, from CPUID.
+/// The host CPU's compiler target, from CPUID, after setting Intel's data
+/// operand independent timing mode where the CPU has it ([`enable_doit`]).
 fn target() -> TargetCpu {
     let (basic, extended) = (__cpuid(1), __cpuid_count(7, 0));
     let (ssse3, sse41, sse42) = (
@@ -388,7 +392,68 @@ fn target() -> TargetCpu {
             target = with(target);
         }
     }
+    // SAFETY: once on the one CPU, before any guest code runs.
+    if unsafe { enable_doit(extended.edx) } {
+        target = target.with_doit();
+    }
     target
+}
+
+/// CPUID.(EAX=07H,ECX=0):EDX bit 29: IA32_ARCH_CAPABILITIES exists.
+const CPUID_ARCH_CAPABILITIES: u32 = 1 << 29;
+const IA32_ARCH_CAPABILITIES: u32 = 0x10a;
+/// IA32_ARCH_CAPABILITIES bit 12: IA32_UARCH_MISC_CTL.DOITM exists.
+const ARCH_CAPABILITIES_DOITM: u64 = 1 << 12;
+const IA32_UARCH_MISC_CTL: u32 = 0x1b01;
+/// IA32_UARCH_MISC_CTL bit 0: data operand independent timing mode.
+const UARCH_MISC_CTL_DOITM: u64 = 1;
+
+/// Set Intel's data operand independent timing mode where the CPU
+/// enumerates it, and whether it is now set (Intel, "Data Operand
+/// Independent Timing Instruction Guidance"). Stela runs guest code on this
+/// CPU alone. Without the control there is no guarantee Stela can
+/// establish: AMD documents none, and the Intel cores before Ice Lake and
+/// Gracemont that always behave so are not told apart. The engine then
+/// advertises no FEAT_DIT (`TargetCpu::data_independent_timing_target`).
+///
+/// # Safety
+/// Ring 0, with no other code depending on IA32_UARCH_MISC_CTL.
+unsafe fn enable_doit(leaf7_edx: u32) -> bool {
+    if leaf7_edx & CPUID_ARCH_CAPABILITIES == 0 {
+        return false;
+    }
+    // SAFETY: CPUID enumerates the MSR; ring 0.
+    if unsafe { read_msr(IA32_ARCH_CAPABILITIES) } & ARCH_CAPABILITIES_DOITM == 0 {
+        return false;
+    }
+    // SAFETY: IA32_ARCH_CAPABILITIES enumerates the control; ring 0.
+    unsafe {
+        let control = read_msr(IA32_UARCH_MISC_CTL);
+        write_msr(IA32_UARCH_MISC_CTL, control | UARCH_MISC_CTL_DOITM);
+        read_msr(IA32_UARCH_MISC_CTL) & UARCH_MISC_CTL_DOITM != 0
+    }
+}
+
+/// # Safety
+/// Ring 0, and the CPU implements `msr`.
+unsafe fn read_msr(msr: u32) -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: the caller's contract.
+    unsafe {
+        asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high,
+            options(nomem, nostack, preserves_flags));
+    }
+    u64::from(high) << 32 | u64::from(low)
+}
+
+/// # Safety
+/// Ring 0, the CPU implements `msr` and `value` is valid for it.
+unsafe fn write_msr(msr: u32, value: u64) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32,
+            options(nostack, preserves_flags));
+    }
 }
 
 /// Assign guest DRAM from the free host ranges, lowest first.

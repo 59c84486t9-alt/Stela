@@ -749,6 +749,10 @@ struct Variant {
     /// fixes the BTYPE its BR forms through other than X16 and X17 set.
     /// Contexts leave it out, as it belongs to a page, not to the PE.
     guarded_page: bool,
+    /// PSTATE.DIT on a host that gives the timing guarantee: the block is
+    /// compiled for the host's data-independent-timing tier
+    /// ([`Machine::timing_target`]).
+    timing: bool,
 }
 
 /// Xt of `word` at `pc` if it is MRS Xt, TPIDR_EL1.
@@ -2182,6 +2186,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .then(|| self.cpu.svcr() & 1 != 0),
             system: self.native_system(),
             guarded_page: self.fetch_guarded(pc),
+            timing: self.cpu.pstate.dit && self.timing_target().is_some(),
         };
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         self.chain.context = self.context(
@@ -2255,7 +2260,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             scalable,
             system,
             guarded_page: _,
+            timing,
         } = variant;
+        let target = match timing {
+            true => self
+                .timing_target()
+                .expect("a timing variant has its target"),
+            false => self.target,
+        };
         let available = if single {
             INSTRUCTION
         } else {
@@ -2330,7 +2342,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
             };
-        let compiled = self.compile_prefix(&source[..consumed], pc, checks, system)?;
+        let compiled = self.compile_prefix(&source[..consumed], pc, target, checks, system)?;
         let last = compiled.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         let code = match self.host.install(&compiled.native.x86_64_code) {
@@ -2477,16 +2489,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
-    /// Compile the longest prefix the host target can emit.
+    /// The target PSTATE.DIT code compiles for
+    /// (`TargetCpu::data_independent_timing_target`). Without one,
+    /// ID_AA64PFR0_EL1.DIT reads 0 (`identification::Basis::Timing`) and
+    /// PSTATE.DIT changes no code.
+    fn timing_target(&self) -> Option<TargetCpu> {
+        self.target.data_independent_timing_target()
+    }
+
+    /// Compile the longest prefix `target` can emit.
     fn compile_prefix(
         &self,
         source: &[u8],
         pc: u64,
+        target: TargetCpu,
         checks: MemoryChecks,
         system: NativeSystem,
     ) -> Result<stela_compiler::block::CompiledBlock, Stop> {
         let attempt = |bytes: &[u8]| {
-            CompilationPlan::new(bytes, GuestAddress(pc), PROFILE, self.target)
+            CompilationPlan::new(bytes, GuestAddress(pc), PROFILE, target)
                 .and_then(|plan| plan.with_memory_checks(checks))
                 .and_then(|plan| plan.with_zero_block(system.zero_block))
                 .and_then(|plan| plan.with_cache_clean(system.cache_clean))
@@ -4741,6 +4762,38 @@ mod tests {
             machine.fetch_block(BASE + 4, false),
             Ok(Fetched::Checked(0x04a0_0000))
         ));
+    }
+
+    #[test]
+    fn pstate_dit_selects_blocks_compiled_for_the_data_independent_timing_target() {
+        const LDADD_W1_W0_X2: u32 = 0xb821_0040;
+        const SVC_0: u32 = 0xd400_0001;
+        const LOCK_XADD: [u8; 3] = [0xf0, 0x0f, 0xc1];
+        // add r8d,ecx; mov [rdx],r8d: the plain update and store.
+        const PLAIN_ADD_STORE: [u8; 6] = [0x41, 0x01, 0xc8, 0x44, 0x89, 0x02];
+        let has = |machine: &Machine<FakeHost, NoDevices>, index: usize, bytes: &[u8]| {
+            let code = &machine.host.installed[machine.blocks[index].code.0 - 1];
+            code.windows(bytes.len()).any(|window| window == bytes)
+        };
+        let mut machine = machine(&[LDADD_W1_W0_X2, SVC_0]);
+        // Without a host that gives the guarantee, PSTATE.DIT changes no code.
+        machine.cpu.pstate.dit = true;
+        let Ok(Fetched::Block(untimed)) = machine.fetch_block(BASE, false) else {
+            panic!("block")
+        };
+        assert!(has(&machine, untimed, &LOCK_XADD));
+        machine.cpu.pstate.dit = false;
+        assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == untimed));
+        // With one, PSTATE.DIT selects a block of its own.
+        machine.target = TargetCpu::Sse42Complete.with_doit();
+        machine.cpu.pstate.dit = true;
+        let Ok(Fetched::Block(timed)) = machine.fetch_block(BASE, false) else {
+            panic!("timed block")
+        };
+        assert_ne!(timed, untimed);
+        assert!(has(&machine, timed, &PLAIN_ADD_STORE) && !has(&machine, timed, &LOCK_XADD));
+        machine.cpu.pstate.dit = false;
+        assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == untimed));
     }
 
     #[test]

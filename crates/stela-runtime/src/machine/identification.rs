@@ -32,6 +32,11 @@ pub enum Basis {
     /// Holds when the profile has EL2, which runs only as a VHE host
     /// (HCR_EL2.E2H set, EL1 never executing).
     Host(&'static str),
+    /// Holds when the host target has a data-independent-timing target
+    /// ([`TargetCpu::data_independent_timing_target`]: it declares Intel's
+    /// data operand independent timing and supports a tier the DIT audit
+    /// covers), which the engine compiles PSTATE.DIT code for.
+    Timing(&'static str),
 }
 
 /// One level of one field. A field's rows are listed in increasing level;
@@ -89,7 +94,10 @@ const NESTING: &str = "HCR_EL2.NV traps and reports EL2 to a guest hypervisor at
 const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
 const STAGE2_HOST: &str = "stage-2 translation of the EL1&0 regime";
 const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
-const NO_GUARANTEE: &str = "translated code gives no such timing or speculation guarantee";
+const NO_GUARANTEE: &str = "translated code gives no such speculation guarantee";
+const DATA_INDEPENDENT_TIMING: &str = "PSTATE.DIT blocks compile for the host's audited \
+     data-independent-timing tier, whose lowerings of every listed instruction use only \
+     Intel's data operand independent timing instructions (isa/dit-timing-audit.json)";
 const PAUTH_LR: &str = "PACM sets PSTATE.PACM for the next instruction, as IsPACMEnabled \
      allows, and the two-modifier forms and the PACM-modified PAC*SP, AUT*SP, RETA* and \
      *1716 forms compute ComputePAC2QARMA";
@@ -234,7 +242,7 @@ pub const TABLE: &[Row] = &[
         48,
         1,
         "FEAT_DIT",
-        engine(false, NO_GUARANTEE),
+        Basis::Timing(DATA_INDEPENDENT_TIMING),
     ),
     feature(
         ID_AA64PFR0_EL1,
@@ -995,6 +1003,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
     match row.basis {
         Basis::Engine(holds, _) => holds,
         Basis::Host(_) => el2,
+        Basis::Timing(_) => target.data_independent_timing_target().is_some(),
         Basis::Instructions(samples) => samples.iter().all(|word| {
             CompilationPlan::new(
                 &word.to_le_bytes(),
@@ -1116,9 +1125,10 @@ mod tests {
         );
         assert_eq!(field(ID_AA64PFR0_EL1, 40), 1);
         assert_eq!(field(ID_AA64PFR0_EL1, 44), 0);
-        // DIT, CSV2 and CSV3 (PFR0 48, 56, 60) and CSV2_frac (PFR1 32) are
-        // withheld on every chip: translated code gives neither the timing
-        // nor the speculation guarantee they promise.
+        // CSV2 and CSV3 (PFR0 56, 60) and CSV2_frac (PFR1 32) are withheld
+        // on every chip: translated code gives no speculation guarantee. DIT
+        // (PFR0 48) needs a host that declares DOIT, which a hosted
+        // process's detected target never does.
         for shift in [48, 56, 60] {
             assert_eq!(field(ID_AA64PFR0_EL1, shift), 0, "PFR0 {shift}");
         }
@@ -1145,6 +1155,29 @@ mod tests {
             assert_eq!(value(ID_AA64ISAR3_EL1), 0);
         }
         assert_eq!(value(DBGAUTHSTATUS_EL1), 0b1010);
+    }
+
+    #[test]
+    fn dit_is_advertised_only_with_a_data_independent_timing_target() {
+        const DIT_SHIFT: u32 = 48;
+        let dit = |chip, target| {
+            let values = derive(chip, target, true);
+            let pfr0 = values
+                .iter()
+                .find(|(r, _)| *r == ID_AA64PFR0_EL1)
+                .unwrap()
+                .1;
+            (pfr0 >> DIT_SHIFT) & 0xf
+        };
+        let chip = crate::machine::test_chip();
+        let expected = u64::from(has(chip, "FEAT_DIT"));
+        // A host that declares DOIT and supports an audited tier.
+        for tier in TargetCpu::DATA_INDEPENDENT_TIMING_TIERS {
+            assert_eq!(dit(chip, tier.with_doit()), expected, "{tier:?}");
+            assert_eq!(dit(chip, tier), 0, "{tier:?} without DOIT");
+        }
+        // DOIT below every audited tier.
+        assert_eq!(dit(chip, TargetCpu::Sse42.with_doit()), 0);
     }
 
     #[test]
