@@ -177,16 +177,28 @@ impl Context {
         self
     }
 
-    fn layout(&self, domain: policy::Domain, pointer: u64) -> policy::Layout {
+    /// The PAC field of `pointer` for an `operation` in `domain`. Arm
+    /// `AddPAC` selects the range whose TnSZ bounds the field by bit 55 when
+    /// either range ignores the domain's top byte and by bit 63 otherwise;
+    /// `Auth` and `Strip` always select by bit 55
+    /// (`CalculateBottomPACBit(ptr<55>)`), since a signed pointer's bit 63 is
+    /// PAC whenever the top byte is not ignored.
+    fn layout(&self, domain: policy::Domain, pointer: u64, signing: bool) -> policy::Layout {
         let Some(tcr) = self.regime else {
             return domain.layout();
         };
-        // CalculateTBI selects TBI0/TBI1 by bit 55; TBIDn exempts instructions.
-        let upper = pointer & (1 << 55) != 0;
-        let (tbi, tbid) = if upper { (38, 52) } else { (37, 51) };
-        let tbi = tcr & (1 << tbi) != 0
-            && !(domain == policy::Domain::Instruction && tcr & (1 << tbid) != 0);
-        let select = if tbi { 55 } else { 63 };
+        // EffectiveTBI selects TBI0/TBI1 by bit 55; TBIDn exempts instructions.
+        let ignores_top_byte = |upper: bool| {
+            let (tbi, tbid) = if upper { (38, 52) } else { (37, 51) };
+            tcr & (1 << tbi) != 0
+                && !(domain == policy::Domain::Instruction && tcr & (1 << tbid) != 0)
+        };
+        let tbi = ignores_top_byte(pointer & (1 << 55) != 0);
+        let select = if signing && !ignores_top_byte(false) && !ignores_top_byte(true) {
+            63
+        } else {
+            55
+        };
         let tnsz = if pointer & (1 << select) != 0 {
             (tcr >> 16) & 63
         } else {
@@ -228,7 +240,7 @@ impl Context {
     /// than the older Unicorn invalid-extension behavior. Enhanced profiles XOR the PAC field.
     pub fn sign(&self, key: Key, pointer: u64, modifier: u64) -> Result<u64> {
         let words = self.keys.get(key)?;
-        let layout = self.layout(key.domain(), pointer);
+        let layout = self.layout(key.domain(), pointer, true);
         let input = policy::signing_input(layout, pointer);
         Ok(policy::sign(
             self.version,
@@ -254,7 +266,7 @@ impl Context {
             .as_ref()
             .ok_or(AuthenticationError::KeyUnavailable { key })?;
         let domain = key.domain();
-        let layout = self.layout(domain, pointer);
+        let layout = self.layout(domain, pointer, false);
         let input = policy::authentication_input(layout, pointer);
         let result = policy::authenticate(
             self.version,
@@ -294,7 +306,7 @@ impl Context {
     /// even when that domain's cryptographic key was not provided.
     pub fn strip(&self, key: Key, pointer: u64) -> Result<u64> {
         Ok(policy::authentication_input(
-            self.layout(key.domain(), pointer),
+            self.layout(key.domain(), pointer, false),
             pointer,
         ))
     }
@@ -472,15 +484,18 @@ mod tests {
         // TTBR1 walks disabled with T1SZ=0, as a TTBR0-only EL1 leaves it.
         let tcr = 25 | 1 << 23;
         let context = Context::new(1, all_keys()).with_translation_regime(tcr);
-        let upper = context.layout(policy::Domain::Data, 0xffff_0000_0000_1000);
+        let upper = context.layout(policy::Domain::Data, 0xffff_0000_0000_1000, false);
         assert_eq!(upper.address_bits, 64 - MIN_TNSZ as u32);
         assert_eq!(
-            context.layout(policy::Domain::Data, 0x1000).address_bits,
+            context
+                .layout(policy::Domain::Data, 0x1000, false)
+                .address_bits,
             39
         );
         let wide = Context::new(1, all_keys()).with_translation_regime(48);
         assert_eq!(
-            wide.layout(policy::Domain::Data, 0x1000).address_bits,
+            wide.layout(policy::Domain::Data, 0x1000, false)
+                .address_bits,
             64 - MAX_TNSZ as u32
         );
         // Signing an upper pointer no longer overflows.
@@ -1133,6 +1148,43 @@ mod tests {
                 Err(AuthenticationError::KeyUnavailable { key: Key::Da })
             );
         }
+        Ok(())
+    }
+
+    /// XNU's user TCR_EL1: T0SZ 17, T1SZ 0 (EPD1), TBI0 with TBID0, so an
+    /// instruction pointer's PAC reaches bit 63. Authentication must still
+    /// take its field from T0SZ when that PAC bit is set.
+    #[test]
+    fn a_set_pac_bit_63_does_not_move_the_field_to_the_upper_range() -> Result<()> {
+        const TCR: u64 = 17 | 1 << 23 | 5 << 32 | 1 << 37 | 1 << 51;
+        let keys = Keys::from_words(
+            [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210],
+            [0x1111_2222_3333_4444, 0x5555_6666_7777_8888],
+            [0x9999_aaaa_bbbb_cccc, 0xdddd_eeee_ffff_0001],
+            [0x0f0f_0f0f_f0f0_f0f0, 0x3c3c_3c3c_c3c3_c3c3],
+        );
+        let context =
+            Context::new_with_version(0, keys, Version::Classic).with_translation_regime(TCR);
+        let (mut upper, mut lower) = (0, 0);
+        for index in 0..256u64 {
+            let pointer = 0x3_40ee_0000 + index * 4;
+            let modifier = 0x16fd_fe850;
+            for key in [Key::Ib, Key::Da] {
+                let signed = context.sign(key, pointer, modifier)?;
+                if signed >> 63 == 1 {
+                    upper += 1;
+                } else {
+                    lower += 1;
+                }
+                let result = context.authenticate_operation(key, signed, modifier, true);
+                assert!(
+                    matches!(result, Ok(AuthResult { pointer: p, authenticated: true }) if p == pointer),
+                    "{key:?} {pointer:#x} signed {signed:#x}: {result:?}"
+                );
+                assert_eq!(context.strip(key, signed)?, pointer);
+            }
+        }
+        assert!(upper > 0 && lower > 0, "both PAC bit-63 values occur");
         Ok(())
     }
 }
