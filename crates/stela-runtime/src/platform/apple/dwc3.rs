@@ -78,7 +78,16 @@ const FIFO_WORDS: u32 = 4096;
 const CORE_RESET: u32 = 1 << 11;
 const HALTED: u32 = 1 << 22;
 const RX_EMPTY: u32 = 1 << 17;
-const MAX_PACKET_CONTROL: usize = 64;
+/// EP0's largest configurable packet. Before Connect Done reports the
+/// link speed, drivers configure EP0 for SuperSpeed's 512 bytes (Linux
+/// `dwc3_gadget_ep0_desc`, `AppleUSBXDCI::initDeviceController` step 11),
+/// then modify it to the connected speed's 64. The host peer's own
+/// high-speed packets bound every transaction in between.
+const MAX_PACKET_CONTROL: usize = 512;
+/// DEPCFG parameter 0 burst size (25:22). Bursts are SuperSpeed-only; a
+/// high-speed link never observes them, so a bulk endpoint's value is
+/// retained only. Apple's driver sets 15 on every bulk endpoint.
+const BURST: u32 = 0xf << 22;
 const CMD_FAILURE: u32 = 1 << 12;
 const PRTCAP: u32 = 3 << 12;
 const PRTCAP_HOST: u32 = 1 << 12;
@@ -359,12 +368,13 @@ impl Dwc3 {
                 let kind = (p0 >> 1) & 3;
                 let packet = ((p0 >> 3) & 0x7ff) as usize;
                 let ring = (p1 & 0x1f) as usize;
-                // No burst/stream/isochronous state can be discarded.
-                // An interrupt endpoint's bInterval-1 (16..23) sets its
+                // No stream/isochronous state can be discarded. An
+                // interrupt endpoint's bInterval-1 (16..23) sets its
                 // service interval, which only the host's polling observes.
                 let interval = if kind == INTERRUPT { 0xff << 16 } else { 0 };
+                let burst = if kind == 2 { BURST } else { 0 };
                 if p2 != 0
-                    || p0 & !((3 << 1) | (0x7ff << 3) | (0x1f << 17) | (3 << 30)) != 0
+                    || p0 & !((3 << 1) | (0x7ff << 3) | (0x1f << 17) | burst | (3 << 30)) != 0
                     || p0 >> 30 == 1
                     || p0 >> 30 == 3
                     || p1
@@ -390,7 +400,10 @@ impl Dwc3 {
                         }
                     || ring >= RINGS
                     || (p1 >> 25) & 0x1f != n as u32
-                    || ep.active.is_some()
+                    // Connect Done modifies EP0 with its SETUP transfer
+                    // started (Linux `dwc3_gadget_conndone_interrupt`);
+                    // only initialization requires an idle endpoint.
+                    || (ep.active.is_some() && p0 >> 30 != 2)
                 {
                     failed = true;
                 } else {
@@ -1223,6 +1236,39 @@ mod tests {
             dwc.write(base + 12, Width::Word, u64::from(CMDACT | 1), &mut access)
                 .is_err()
         );
+        // A bulk endpoint retains its SuperSpeed burst; an interrupt
+        // endpoint's burst field refuses.
+        write(&mut dwc, base + 4, 5 << 25 | CFG_COMPLETE, &mut access);
+        write(&mut dwc, base + 8, BURST | 512 << 3 | 2 << 1, &mut access);
+        write(&mut dwc, base + 12, CMDACT | 1, &mut access);
+        assert_eq!(dwc.endpoints[5].command & CMD_FAILURE, 0);
+        write(
+            &mut dwc,
+            base + 8,
+            BURST | 16 << 3 | INTERRUPT << 1,
+            &mut access,
+        );
+        assert!(
+            dwc.write(base + 12, Width::Word, u64::from(CMDACT | 1), &mut access)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ep0_configures_for_superspeed_then_modifies_to_the_connected_speed() {
+        let (mut dwc, _, _, mut latch) = setup();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (packet, action) in [(512, 0), (64, 2 << 30)] {
+            write(&mut dwc, DEP, 0, &mut access);
+            write(&mut dwc, DEP + 4, CFG_COMPLETE | CFG_NOT_READY, &mut access);
+            write(&mut dwc, DEP + 8, action | packet << 3, &mut access);
+            write(&mut dwc, DEP + 12, CMDACT | 1, &mut access);
+            assert_eq!(dwc.endpoints[0].command & CMD_FAILURE, 0);
+            assert_eq!(dwc.endpoints[0].packet, packet as usize);
+        }
+        write(&mut dwc, DEP + 8, 1024 << 3, &mut access);
+        write(&mut dwc, DEP + 12, CMDACT | 1, &mut access);
+        assert_eq!(dwc.endpoints[0].command & CMD_FAILURE, CMD_FAILURE);
     }
     #[test]
     fn bulk_dma_partial_short_and_events_precede_aic() {
