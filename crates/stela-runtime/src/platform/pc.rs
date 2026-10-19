@@ -5,10 +5,11 @@
 //! 4 GiB, the MMIO ranges it mapped uncached and a TSC rate in a [`Handoff`]
 //! before it leaves boot services. [`storage::probe`] then enumerates PCI
 //! through ECAM and brings up every virtio-blk, NVMe and AHCI controller
-//! with polled completion, and every virtio-input keyboard and pointer
-//! ([`input`]); [`storage::open`] selects the one disk and GPT partition
-//! that `stela.cfg` names and returns a [`gpt::PartitionDevice`] that cannot
-//! reach any other block.
+//! with polled completion, every virtio-input keyboard and pointer
+//! ([`input`]) and every virtio-net adapter ([`virtio_net`]);
+//! [`storage::open`] selects the one disk and GPT partition that `stela.cfg`
+//! names and returns a [`gpt::PartitionDevice`] that cannot reach any other
+//! block.
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -24,6 +25,7 @@ pub mod pci;
 pub mod power;
 pub mod storage;
 pub mod virtio;
+pub mod virtio_net;
 
 /// What `stela.efi` records for the host storage drivers before it leaves
 /// boot services.

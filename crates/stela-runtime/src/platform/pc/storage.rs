@@ -12,6 +12,7 @@ use super::{
     input, nvme,
     pci::{Address, Function},
     virtio,
+    virtio_net::{self, VirtioNet},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
@@ -46,13 +47,15 @@ impl core::str::FromStr for Target {
 pub struct Disks {
     pub devices: Vec<Box<dyn BlockDevice>>,
     pub inputs: Vec<input::VirtioInput>,
+    /// Network adapters, as raw Ethernet links.
+    pub links: Vec<VirtioNet>,
     pub failures: Vec<(Address, BlockError)>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<super::pci::EcamWindow>,
 }
 
-/// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller
-/// and every virtio-input device.
+/// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
+/// every virtio-input device and every virtio-net adapter.
 ///
 /// # Safety
 ///
@@ -79,6 +82,12 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
                         .map(|device| Box::new(device) as Box<dyn BlockDevice>)
                         .collect()
                 })
+            } else if virtio_net::matches(&function) {
+                match VirtioNet::new(&mut function, handoff, dma) {
+                    Ok(device) => disks.links.push(device),
+                    Err(error) => disks.failures.push((address, error)),
+                }
+                continue;
             } else if input::matches(&function) {
                 match input::VirtioInput::new(&mut function, handoff, dma) {
                     Ok(device) => disks.inputs.push(device),
