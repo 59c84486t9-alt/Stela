@@ -10,10 +10,18 @@
 //!   firmware-control doorbells).
 //! - [`uat`]: the GPU address translator (16 KiB pages, three levels, paired
 //!   TTBRs per context) and its page-table encodings and faults.
+//! - [`isa`]: a bit-exact decoder and x86-host interpreter for a bounded
+//!   subset of the AGX2 shader ISA.
+//! - [`exec`]: a compute-style dispatch that runs a shader over a surface grid
+//!   and stores checked pixels, with an in-order fence.
 //!
 //! Still to come (docs/research/agx.md §2, §4, §5): the initdata and ring
-//! field layouts, the GFX MMIO register inventory, the shader-ISA interpreter
-//! and command-stream executor, and the pixel-checked render harness.
+//! field layouts, the GFX MMIO register inventory, the rest of the shader ISA
+//! (ffma, memory/PBE, control flow, immediates/uniforms), the VDM/CDM/PPP
+//! control streams, the tiler/rasterizer, texture formats and compression, and
+//! driving the executor from a real firmware work queue.
 
+pub mod exec;
 pub mod firmware;
+pub mod isa;
 pub mod uat;
