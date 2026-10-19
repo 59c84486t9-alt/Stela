@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod amx;
+mod bench;
 mod boot;
 mod check;
 mod darwin_catalogs;
@@ -34,6 +35,9 @@ enum Task {
     Boot(boot::Command),
     /// Compare native translations with the QEMU original, form by form.
     Differential(differential::Differential),
+    /// Time unchanged real-program functions in the process engines, against
+    /// a baseline build (release builds only).
+    Bench(bench::Bench),
     /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
     AmxReference(amx::AmxReference),
     /// Disassemble, size and time the native AMX kernels against the model.
@@ -62,6 +66,7 @@ fn main() -> ExitCode {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
         Task::Differential(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::Bench(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::SystemMatrix(task) => task.run().map(|()| ExitCode::SUCCESS),
