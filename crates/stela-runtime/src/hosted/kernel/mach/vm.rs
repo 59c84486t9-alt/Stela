@@ -1684,8 +1684,9 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(memory::read(base + 2 * PAGE_BYTES, 1).is_none());
-        assert!(memory::read(base + 3 * PAGE_BYTES - 1, 1).is_none());
+        // (The freed page may be reused by a concurrent test at once; the
+        // page before it is still the test's own.)
+        assert!(memory::read(base + 2 * PAGE_BYTES - 1, 1).is_some());
         // A wrapping range is refused.
         let body = range(u64::MAX - 4, 8, &[]);
         assert_eq!(
@@ -1878,10 +1879,10 @@ mod tests {
         assert!(memory::write(copied - 0x2345, b"writable"));
         assert_eq!(u64_at(&reply, 16), 0);
         memory::deallocate(copied & !PAGE_MASK, PAGE_BYTES).unwrap();
-        // An unmapped last range fails the routine.
-        memory::deallocate(base + PAGE_BYTES, PAGE_BYTES).unwrap();
+        // An unreadable last range (this process's __PAGEZERO) fails the
+        // routine.
         list[8..16].copy_from_slice(&0u64.to_le_bytes());
-        list[16..24].copy_from_slice(&(base + PAGE_BYTES).to_le_bytes());
+        list[16..24].copy_from_slice(&PAGE_BYTES.to_le_bytes());
         list[24..32].copy_from_slice(&8u64.to_le_bytes());
         let body = simple(&[&list, &2u32.to_le_bytes()]);
         failure(call(&mut task, "mach_vm_read_list", false, &body).unwrap());
@@ -1890,7 +1891,7 @@ mod tests {
             failure(call(&mut task, "mach_vm_read_list", false, &body).unwrap()),
             KERN_INVALID_ARGUMENT
         );
-        memory::deallocate(base, PAGE_BYTES).unwrap();
+        memory::deallocate(base, 2 * PAGE_BYTES).unwrap();
     }
 
     #[test]
