@@ -224,6 +224,17 @@ struct SepMaster {
     stream: usize,
 }
 
+/// The per-machine inputs the SEP binds its own trust and key state to: the
+/// AP's effective security mode (shared fuses), the ECID (`/chosen`
+/// `unique-chip-id`), and where its durable state lives.
+pub struct SepProvisioning {
+    pub security: Option<sep::SecurityMode>,
+    pub ecid: u64,
+    /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
+    pub observe: bool,
+    pub state: sep::state::Location,
+}
+
 /// The DCPEXT coprocessor's ASC, the DART stream it masters its shared
 /// memory through, and the display pipe's DART stream its swap surfaces are
 /// mapped in, once placed.
@@ -357,6 +368,19 @@ impl AppleDevices {
         self.nor
             .and_then(|id| self.bus.device_mut::<Spi>(id))
             .map_or_else(Vec::new, Spi::take_dirty)
+    }
+
+    /// Drain the `sks`/`pnon`/`scrd` traffic the SEP observed this run under
+    /// `--sep-observe`, as log lines. Empty when observation is off.
+    pub fn sep_observations(&mut self) -> Vec<String> {
+        let ids: Vec<DeviceId> = self.sep_masters.iter().map(|master| master.sep).collect();
+        let mut lines = Vec::new();
+        for id in ids {
+            if let Some(sep) = self.bus.device_mut::<Sep>(id) {
+                lines.extend(sep.observations());
+            }
+        }
+        lines
     }
 
     /// State of native RTKit coprocessors, without register side effects.
@@ -1101,9 +1125,14 @@ impl AppleDevices {
         lines: asc::Lines,
         (dart, stream): (DartId, usize),
         entropy: Box<dyn sep::Entropy>,
-        security: Option<sep::SecurityMode>,
-        state: sep::state::Location,
+        provisioning: SepProvisioning,
     ) -> Result<(), String> {
+        let SepProvisioning {
+            security,
+            ecid,
+            observe,
+            state,
+        } = provisioning;
         if wrapper.bytes < asc::WRAPPER_BYTES || auxiliary.bytes == 0 {
             return Err("SEP register apertures are incomplete".into());
         }
@@ -1111,7 +1140,7 @@ impl AppleDevices {
             return Err("SEP requires dart-sep stream zero".into());
         }
         let device = self.bus.add(Box::new(
-            Sep::new(entropy, lines, security, state).map_err(String::from)?,
+            Sep::new(entropy, lines, security, ecid, observe, state).map_err(String::from)?,
         ));
         self.bus
             .map(device, wrapper.physical, wrapper.bytes, 0)
@@ -3049,8 +3078,12 @@ mod tests {
                         b.fill(0xa5);
                         Ok(())
                     }),
-                    None,
-                    sep::state::Location::Volatile,
+                    SepProvisioning {
+                        security: None,
+                        ecid: 0xa5a5_0006,
+                        observe: false,
+                        state: sep::state::Location::Volatile,
+                    },
                 )
                 .unwrap();
             devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap(); // enable outbox

@@ -403,7 +403,7 @@ mod tests {
     }
 
     fn xart() -> Xart {
-        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32]).unwrap();
+        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32], 0xa5a5_0002).unwrap();
         let backend: Box<dyn Backend> = Box::new(super::super::store::Volatile::default());
         Xart::new(Nonces::provision(&roots, backend).unwrap())
     }

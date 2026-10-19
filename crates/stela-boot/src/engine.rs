@@ -111,6 +111,10 @@ struct Options {
     /// POST once to this `http://` URL at start and report the reply
     /// (`--network-check URL`).
     network_check: Option<String>,
+    /// Advertise and log the SEP `sks`/`pnon`/`scrd` services whose contracts
+    /// are not recovered (`--sep-observe`): each request is recorded and
+    /// refused by name, never answered. A diagnostic mode.
+    sep_observe: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
     breakpoints: Vec<u64>,
@@ -198,6 +202,7 @@ impl Options {
             input: false,
             tss: false,
             network_check: None,
+            sep_observe: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             watches: Vec::new(),
@@ -268,6 +273,10 @@ impl Options {
                 if options.network_check.replace(String::from(url)).is_some() {
                     return Err("duplicate network check");
                 }
+                continue;
+            }
+            if name == "--sep-observe" {
+                options.sep_observe = true;
                 continue;
             }
             if name == "--storage" {
@@ -598,6 +607,8 @@ struct Clock {
 struct Disks {
     backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
     sep_state: Option<stela_runtime::machine::apple::sep_state::Location>,
+    /// Advertise and log the SEP `sks`/`pnon`/`scrd` services (`--sep-observe`).
+    sep_observe: bool,
 }
 
 /// The board's devices. `reset` is the entry point a boot bundle hands off
@@ -669,7 +680,11 @@ fn devices<'f>(
     if let Some(spi) = board.and_then(|board| board.spi_nor.as_ref()) {
         devices.add_spi_nor(spi)?;
     }
-    let Disks { backing, sep_state } = disks;
+    let Disks {
+        backing,
+        sep_state,
+        sep_observe,
+    } = disks;
     match (board.and_then(|b| b.ans.as_ref()), backing) {
         (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
         (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
@@ -772,25 +787,33 @@ fn devices<'f>(
             .ranges
             .map(|(physical, bytes)| Range { physical, bytes });
         let lines = AscLines::from_interrupts(sep.irqs.map(|irq| AicInput::new(0, irq as u16)));
+        let ecid = sep
+            .ecid
+            .ok_or("SEP needs /chosen unique-chip-id (the machine ECID); none in the tree")?;
+        let state = match sep_state {
+            Some(location) => {
+                output::arguments(format_args!("SEP state on the machine-state partition\n"));
+                location
+            }
+            None => {
+                // Without `--nor` no host partition holds it: the roots
+                // and anti-replay store last this power cycle.
+                output::arguments(format_args!(
+                    "SEP state volatile: nonces end at power-off\n"
+                ));
+                stela_runtime::machine::apple::sep_state::Location::Volatile
+            }
+        };
         devices.add_sep(
             ranges,
             lines,
             (darts[sep.iommu][0], sep.stream as usize),
             alloc::boxed::Box::new(bundle::entropy),
-            sep.security,
-            match sep_state {
-                Some(location) => {
-                    output::arguments(format_args!("SEP state on the machine-state partition\n"));
-                    location
-                }
-                None => {
-                    // Without `--nor` no host partition holds it: the roots
-                    // and anti-replay store last this power cycle.
-                    output::arguments(format_args!(
-                        "SEP state volatile: nonces end at power-off\n"
-                    ));
-                    stela_runtime::machine::apple::sep_state::Location::Volatile
-                }
+            stela_runtime::machine::apple::SepProvisioning {
+                security: sep.security,
+                ecid,
+                observe: sep_observe,
+                state,
             },
         )?;
     }
@@ -1342,7 +1365,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 counter: now,
             }),
         },
-        Disks { backing, sep_state },
+        Disks {
+            backing,
+            sep_state,
+            sep_observe: options.sep_observe,
+        },
         Cables {
             restore: options.restore,
             input: options.input,
@@ -2034,6 +2061,9 @@ fn finish(
         ));
     }
     general_registers(cpu);
+    for line in machine.devices.sep_observations() {
+        output::arguments(format_args!("SEP OBSERVE {line}\n"));
+    }
     match stop {
         Stop::Idle => {
             output::arguments(format_args!(

@@ -50,6 +50,12 @@ impl Buffers {
         self.service
     }
 
+    /// The registered AP-to-SEP (input) buffer length in bytes, or zero when
+    /// no input buffer has been registered yet. For observation only.
+    pub fn input_len(&self) -> u64 {
+        self.input.region.map_or(0, |region| region.bytes)
+    }
+
     pub fn new(service: u8) -> Result<Self, &'static str> {
         if service == message::CONTROL || service >= message::DISCOVERY {
             return Err("SEP OOL owner is not an application service");

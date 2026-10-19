@@ -170,6 +170,15 @@ impl<'a> Node<'a> {
     pub fn first_u32(&self, name: &str) -> Option<u32> {
         u32_at(self.property(name)?, 0)
     }
+
+    /// A property's first 64 bits, little-endian, when it is at least eight
+    /// bytes (e.g. `/chosen` `unique-chip-id`).
+    pub fn first_u64(&self, name: &str) -> Option<u64> {
+        let value = self.property(name)?;
+        value
+            .get(..8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("eight bytes")))
+    }
 }
 
 /// An ADT image of one node: `properties` as (name, value) and its encoded

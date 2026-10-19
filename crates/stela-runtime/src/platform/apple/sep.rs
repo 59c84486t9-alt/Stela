@@ -19,8 +19,10 @@ pub mod firmware;
 pub mod image;
 pub mod keys;
 pub mod message;
+pub mod observe;
 pub mod ool;
 pub mod os;
+pub mod policy;
 pub mod rom;
 pub mod shared;
 pub mod state;
@@ -74,15 +76,27 @@ impl Sep {
         entropy: Box<dyn Entropy>,
         lines: Lines,
         security: Option<SecurityMode>,
+        ecid: u64,
+        observe: bool,
         state: state::Location,
     ) -> Result<Self, &'static str> {
         Ok(Self {
             mailbox: Asc::new(
-                Box::new(firmware::SepFirmware::new(entropy, security, state)),
+                Box::new(firmware::SepFirmware::new(
+                    entropy, security, ecid, observe, state,
+                )),
                 true,
                 lines,
             )?,
         })
+    }
+
+    /// Drain the `sks`/`pnon`/`scrd` traffic observed this run (`--sep-observe`).
+    pub fn observations(&mut self) -> alloc::vec::Vec<alloc::string::String> {
+        self.mailbox
+            .firmware_mut::<firmware::SepFirmware>()
+            .expect("SEP owns its firmware engine")
+            .drain_observations()
     }
 
     pub fn pending(&self) -> bool {
@@ -191,6 +205,8 @@ mod tests {
             Box::new(|_: &mut [u8]| Err("unused entropy")),
             Lines::from_interrupts(irqs),
             None,
+            0xa5a5_0005,
+            false,
             state::Location::Volatile,
         )
         .unwrap();

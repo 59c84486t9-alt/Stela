@@ -16,7 +16,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8; 8] = b"STSEPN01";
+const MAGIC: &[u8; 8] = b"STSEPN02";
 const PURPOSE: &[u8] = b"sepos/nonce-store/v1";
 const MAC_BYTES: usize = 32;
 const HEADER_BYTES: usize = 18;
@@ -24,7 +24,14 @@ pub const NONCE_BYTES: usize = 20;
 const RECORD_BYTES: usize = 1 + NONCE_BYTES;
 const MAX_SLOTS: usize = 256;
 const HASH_BYTES: usize = 48;
-const MAX_BYTES: usize = HEADER_BYTES + MAX_SLOTS * RECORD_BYTES + 1 + HASH_BYTES + MAC_BYTES;
+/// A BootPolicy nonce (recoveryOS and macOS LocalPolicy): the SEP keeps the
+/// raw nonce; its SHA-384 digest is the policy's `ronh`/`lpnh`.
+pub const POLICY_NONCE_BYTES: usize = 32;
+/// Two optional policy nonces follow the firmware commitment, each a presence
+/// byte and, when present, [`POLICY_NONCE_BYTES`].
+const POLICY_TAIL_BYTES: usize = 2 * (1 + POLICY_NONCE_BYTES);
+const MAX_BYTES: usize =
+    HEADER_BYTES + MAX_SLOTS * RECORD_BYTES + 1 + HASH_BYTES + POLICY_TAIL_BYTES + MAC_BYTES;
 
 /// A protected committed head. Generation is separate from the record so
 /// loading a valid but stale HMAC record can be detected.
@@ -76,11 +83,22 @@ impl Backend for Volatile {
     }
 }
 
+/// Which BootPolicy nonce a policy mutation touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyNonce {
+    /// The host-signed recoveryOS LocalPolicy's nonce (`ronh`).
+    Recovery,
+    /// The Stela-signed macOS default LocalPolicy's nonce (`lpnh`).
+    MacOs,
+}
+
 #[derive(Clone)]
 struct State {
     generation: u64,
     slots: BTreeMap<u8, [u8; NONCE_BYTES]>,
     firmware: Option<[u8; HASH_BYTES]>,
+    recovery_policy: Option<[u8; POLICY_NONCE_BYTES]>,
+    macos_policy: Option<[u8; POLICY_NONCE_BYTES]>,
 }
 
 pub struct Nonces<B: Backend> {
@@ -101,6 +119,8 @@ impl<B: Backend> Nonces<B> {
             generation: 1,
             slots: BTreeMap::new(),
             firmware: None,
+            recovery_policy: None,
+            macos_policy: None,
         };
         let record = encode(&state, &key);
         backend.commit(
@@ -200,14 +220,44 @@ impl<B: Backend> Nonces<B> {
         Ok(self.state()?.firmware)
     }
 
-    /// Erase every nonce and the firmware commitment, as an Erase Install
-    /// erases the SEP's anti-replay state; the generation keeps counting.
+    /// Commit a BootPolicy nonce (the SEP keeps the raw nonce; its SHA-384
+    /// digest is the policy's `ronh`/`lpnh`). `None` clears it.
+    pub fn commit_policy_nonce(
+        &mut self,
+        which: PolicyNonce,
+        nonce: Option<[u8; POLICY_NONCE_BYTES]>,
+    ) -> Result<(), &'static str> {
+        let mut next = self.state()?.clone();
+        match which {
+            PolicyNonce::Recovery => next.recovery_policy = nonce,
+            PolicyNonce::MacOs => next.macos_policy = nonce,
+        }
+        self.update(next)
+    }
+
+    /// The committed BootPolicy nonce, if any.
+    pub fn policy_nonce(
+        &self,
+        which: PolicyNonce,
+    ) -> Result<Option<[u8; POLICY_NONCE_BYTES]>, &'static str> {
+        let state = self.state()?;
+        Ok(match which {
+            PolicyNonce::Recovery => state.recovery_policy,
+            PolicyNonce::MacOs => state.macos_policy,
+        })
+    }
+
+    /// Erase every nonce, the firmware commitment and the policy nonces, as an
+    /// Erase Install erases the SEP's anti-replay state; the generation keeps
+    /// counting.
     pub fn erase(&mut self) -> Result<(), &'static str> {
         self.state()?;
         self.update(State {
             generation: 0,
             slots: BTreeMap::new(),
             firmware: None,
+            recovery_policy: None,
+            macos_policy: None,
         })
     }
 
@@ -229,15 +279,45 @@ fn encode(state: &State, key: &[u8; MAC_BYTES]) -> Vec<u8> {
     if let Some(hash) = state.firmware {
         record.extend_from_slice(&hash);
     }
+    for nonce in [state.recovery_policy, state.macos_policy] {
+        record.push(u8::from(nonce.is_some()));
+        if let Some(nonce) = nonce {
+            record.extend_from_slice(&nonce);
+        }
+    }
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts 256-bit keys");
     mac.update(&record);
     record.extend_from_slice(&mac.finalize().into_bytes());
     record
 }
 
+/// Parse one optional policy nonce (presence byte, then the nonce), advancing
+/// `at`.
+fn take_policy(
+    bytes: &[u8],
+    at: &mut usize,
+    end: usize,
+) -> Result<Option<[u8; POLICY_NONCE_BYTES]>, &'static str> {
+    match bytes.get(*at) {
+        Some(0) => {
+            *at += 1;
+            Ok(None)
+        }
+        Some(1) if *at + 1 + POLICY_NONCE_BYTES <= end => {
+            let nonce = bytes[*at + 1..*at + 1 + POLICY_NONCE_BYTES]
+                .try_into()
+                .unwrap();
+            *at += 1 + POLICY_NONCE_BYTES;
+            Ok(Some(nonce))
+        }
+        _ => Err("SEP nonce store policy nonce is invalid"),
+    }
+}
+
 fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State, &'static str> {
     let bytes = head.record.as_slice();
-    if !(HEADER_BYTES + 1 + MAC_BYTES..=MAX_BYTES).contains(&bytes.len()) {
+    // Minimum: header, firmware-absent byte, two policy-absent bytes, MAC.
+    if !(HEADER_BYTES + 3 + MAC_BYTES..=MAX_BYTES).contains(&bytes.len()) {
         return Err("SEP nonce store record length is invalid");
     }
     let end = bytes.len() - MAC_BYTES;
@@ -268,15 +348,29 @@ fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State, &'static str> {
         slots.insert(slot, bytes[at + 1..at + RECORD_BYTES].try_into().unwrap());
         at += RECORD_BYTES;
     }
-    let firmware = match bytes[at] {
-        0 if at + 1 == end => None,
-        1 if at + 1 + HASH_BYTES == end => Some(bytes[at + 1..end].try_into().unwrap()),
-        _ => return Err("SEP nonce store commitment or trailing data is invalid"),
+    let firmware = match bytes.get(at) {
+        Some(0) => {
+            at += 1;
+            None
+        }
+        Some(1) if at + 1 + HASH_BYTES <= end => {
+            let hash = bytes[at + 1..at + 1 + HASH_BYTES].try_into().unwrap();
+            at += 1 + HASH_BYTES;
+            Some(hash)
+        }
+        _ => return Err("SEP nonce store commitment is invalid"),
     };
+    let recovery_policy = take_policy(bytes, &mut at, end)?;
+    let macos_policy = take_policy(bytes, &mut at, end)?;
+    if at != end {
+        return Err("SEP nonce store has trailing data");
+    }
     Ok(State {
         generation,
         slots,
         firmware,
+        recovery_policy,
+        macos_policy,
     })
 }
 
@@ -311,7 +405,7 @@ mod tests {
         }
     }
     fn roots() -> Roots {
-        Roots::provisioned([1; 32], [2; 32]).unwrap()
+        Roots::provisioned([1; 32], [2; 32], 0xa5a5_0002).unwrap()
     }
     fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
         bytes.fill(0x5a);
@@ -336,7 +430,7 @@ mod tests {
     fn wrong_machine_tampering_and_rollback_refuse_instead_of_reprovisioning() {
         let store = Nonces::provision(&roots(), Memory::default()).unwrap();
         let mut backend = store.into_backend();
-        let other = Roots::provisioned([2; 32], [2; 32]).unwrap();
+        let other = Roots::provisioned([2; 32], [2; 32], 0xa5a5_0002).unwrap();
         assert!(
             Nonces::open(
                 &other,

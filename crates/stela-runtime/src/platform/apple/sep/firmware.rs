@@ -51,6 +51,10 @@ pub struct SepFirmware {
     phase: Phase,
     evidence: Option<Evidence>,
     security: Option<SecurityMode>,
+    /// The machine's `/chosen` `unique-chip-id`, bound into the key hierarchy.
+    ecid: u64,
+    /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
+    observe: bool,
     /// Where sepOS finds its state, until it activates.
     state: Option<state::Location>,
 }
@@ -59,6 +63,8 @@ impl SepFirmware {
     pub fn new(
         entropy: Box<dyn Entropy>,
         security: Option<SecurityMode>,
+        ecid: u64,
+        observe: bool,
         state: state::Location,
     ) -> Self {
         Self {
@@ -66,6 +72,8 @@ impl SepFirmware {
             phase: Phase::Rom,
             evidence: None,
             security,
+            ecid,
+            observe,
             state: Some(state),
         }
     }
@@ -81,6 +89,15 @@ impl SepFirmware {
     /// succeeds.
     pub fn booted(&self) -> bool {
         matches!(&self.phase, Phase::Active(os) if os.os_active_sent())
+    }
+
+    /// Drain the observed `sks`/`pnon`/`scrd` traffic as log lines, if
+    /// `--sep-observe` and sepOS is active.
+    pub fn drain_observations(&mut self) -> alloc::vec::Vec<alloc::string::String> {
+        match &mut self.phase {
+            Phase::Active(os) => os.observations(),
+            Phase::Rom => alloc::vec::Vec::new(),
+        }
     }
 
     /// Measure the container, bind its payload type to the request, and record
@@ -168,8 +185,10 @@ impl Firmware for SepFirmware {
             .mailbox(),
         );
         let location = self.state.take().ok_or("sepOS activated twice")?;
-        let (store, _) = state::open(location, self.rom.entropy())?;
-        self.phase = Phase::Active(Box::new(SepOs::new(self.security).with_services(store)?));
+        let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
+        self.phase = Phase::Active(Box::new(
+            SepOs::new(self.security).with_services(store, self.observe)?,
+        ));
         Ok(())
     }
 }
@@ -270,7 +289,13 @@ mod tests {
 
     #[test]
     fn stela_policy_accepts_a_bare_sepi_and_reaches_os_active() {
-        let mut fw = SepFirmware::new(entropy(), None, state::Location::Volatile);
+        let mut fw = SepFirmware::new(
+            entropy(),
+            None,
+            0xa5a5_0004,
+            false,
+            state::Location::Volatile,
+        );
         booted(&mut fw);
         let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
         let acks = deliver(&mut fw, &image, false).unwrap();
@@ -299,7 +324,13 @@ mod tests {
 
     #[test]
     fn a_signed_container_records_signature_evidence() {
-        let mut fw = SepFirmware::new(entropy(), None, state::Location::Volatile);
+        let mut fw = SepFirmware::new(
+            entropy(),
+            None,
+            0xa5a5_0004,
+            false,
+            state::Location::Volatile,
+        );
         booted(&mut fw);
         let (payload, manifest) = signature::tests::inputs();
         let image = crate::img4::compose(&payload, &manifest);
@@ -325,7 +356,13 @@ mod tests {
             ),
             (sepi.as_slice(), true, "SEP firmware DMA fault in dart-sep"),
         ] {
-            let mut fw = SepFirmware::new(entropy(), None, state::Location::Volatile);
+            let mut fw = SepFirmware::new(
+                entropy(),
+                None,
+                0xa5a5_0004,
+                false,
+                state::Location::Volatile,
+            );
             booted(&mut fw);
             assert_eq!(deliver(&mut fw, image, fault), Err(refusal));
             assert!(fw.evidence().is_none());

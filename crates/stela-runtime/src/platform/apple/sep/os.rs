@@ -33,13 +33,14 @@ use super::{
     control::{self, Request, Status},
     endpoint::Catalog,
     message::{self, Frame},
+    observe::{self, Journal},
     ool::Buffers,
     shared::Region,
     store::{Backend, Nonces},
     xart::{self, Payload, Xart},
 };
 use crate::platform::dma::{DmaError, Port};
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 /// The SEP's power state as the control endpoint drives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,10 @@ pub struct SepOs {
     xart: Option<Xart>,
     /// Application-service requests awaiting the DMA step, in arrival order.
     pending: Vec<Frame>,
+    /// When observing (`--sep-observe`), the recorded `sks`/`pnon`/`scrd`
+    /// traffic. Those services are then advertised and their requests logged
+    /// and refused by name, never answered.
+    observe: Option<Journal>,
 }
 
 /// The SEP page that scales discovery capacities: 16 KiB, since
@@ -81,15 +86,36 @@ impl SepOs {
             catalog: Catalog::empty(),
             xart: None,
             pending: Vec::new(),
+            observe: None,
         }
     }
 
     /// The SEP's native services: the xART pair, advertised once OS active
-    /// is reported, over the anti-replay store `store`.
-    pub fn with_services(mut self, store: Nonces<Box<dyn Backend>>) -> Result<Self, &'static str> {
-        self.catalog = Catalog::new(xart::services().to_vec())?;
+    /// is reported, over the anti-replay store `store`. With `observe`, the
+    /// `sks`/`pnon`/`scrd` services are also advertised so their kernel
+    /// clients bind; their requests are recorded and refused by name, never
+    /// answered (a diagnostic mode: it qualifies nothing beyond its log).
+    pub fn with_services(
+        mut self,
+        store: Nonces<Box<dyn Backend>>,
+        observe: bool,
+    ) -> Result<Self, &'static str> {
+        let mut services = xart::services().to_vec();
+        if observe {
+            services.extend(observe::services());
+            self.observe = Some(Journal::default());
+        }
+        self.catalog = Catalog::new(services)?;
         self.xart = Some(Xart::new(store));
         Ok(self)
+    }
+
+    /// Drain the observed `sks`/`pnon`/`scrd` traffic recorded this run.
+    pub fn observations(&mut self) -> Vec<String> {
+        self.observe
+            .as_mut()
+            .map(|journal| journal.drain().collect())
+            .unwrap_or_default()
     }
 
     /// The xART service state, when installed.
@@ -111,6 +137,12 @@ impl SepOs {
         outbox: &mut Vec<Message>,
     ) -> Result<(), &'static str> {
         for frame in core::mem::take(&mut self.pending) {
+            if let Some(name) = observe::name(frame.service) {
+                // Record the request (frame plus a bounded prefix of its OOL
+                // input) and refuse by name; observation never answers.
+                self.record(name, frame, &mut *port);
+                return Err(observe::refusal(frame.service));
+            }
             let xart = self
                 .xart
                 .as_mut()
@@ -124,6 +156,37 @@ impl SepOs {
             outbox.push(reply.mailbox());
         }
         Ok(())
+    }
+
+    /// Record one observed `sks`/`pnon`/`scrd` request: its frame fields and,
+    /// when its OOL input buffer is registered, a bounded hex prefix of the
+    /// bytes the kernel placed there. This reads memory only; it writes no
+    /// reply.
+    fn record(&mut self, name: &str, frame: Frame, port: &mut Port<'_, '_>) {
+        let mut line = format!(
+            "{name} tag={} op={} param={:#x} data={:#010x}",
+            frame.tag, frame.opcode, frame.parameter, frame.data
+        );
+        if let Some(buffers) = self.buffers.iter().find(|b| b.service() == frame.service) {
+            let available = buffers.input_len();
+            if available == 0 {
+                line.push_str(" input=unregistered");
+            } else {
+                let take = available.min(observe::INPUT_PREFIX as u64) as usize;
+                let mut bytes = alloc::vec![0; take];
+                match buffers.read_input(port, 0, &mut bytes) {
+                    Ok(()) => {
+                        line.push_str(&format!(" input[{available}]={}", observe::hex(&bytes)));
+                    }
+                    Err(_) => line.push_str(" input=unreadable"),
+                }
+            }
+        } else {
+            line.push_str(" input=unregistered");
+        }
+        if let Some(journal) = self.observe.as_mut() {
+            journal.record(line);
+        }
     }
 
     /// Advertise `catalog` once OS active is reported. Its services' frames
@@ -395,7 +458,7 @@ mod tests {
     }
 
     fn store() -> Nonces<Box<dyn Backend>> {
-        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32]).unwrap();
+        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32], 0xa5a5_0002).unwrap();
         let backend: Box<dyn Backend> = Box::new(super::super::store::Volatile::default());
         Nonces::provision(&roots, backend).unwrap()
     }
@@ -555,7 +618,7 @@ mod tests {
 
     #[test]
     fn xart_requests_are_answered_after_their_ool_input_is_read() {
-        let mut os = SepOs::new(None).with_services(store()).unwrap();
+        let mut os = SepOs::new(None).with_services(store(), false).unwrap();
         let advertised = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
         // OS active, then name and capacities for each of xarm and xars.
         assert_eq!(advertised.len(), 5);
@@ -628,6 +691,66 @@ mod tests {
         // An unrecovered operation refuses with no reply.
         reply(&mut os, nonce(18)).unwrap();
         assert!(dma(&mut os, &mut ram).is_err());
+    }
+
+    #[test]
+    fn observed_services_are_advertised_logged_and_refused_without_a_reply() {
+        use super::observe;
+        let mut os = SepOs::new(None).with_services(store(), true).unwrap();
+        let advertised = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        // OS active, then the xART pair and the three observed services.
+        assert_eq!(advertised.len(), 1 + 2 * (2 + 3));
+        let names: Vec<u32> = advertised[1..]
+            .iter()
+            .filter(|f| f.opcode == 0)
+            .map(|f| f.data)
+            .collect();
+        assert!(names.contains(&u32::from_be_bytes(*b"sks\0")));
+        assert!(names.contains(&u32::from_be_bytes(*b"pnon")));
+        assert!(names.contains(&u32::from_be_bytes(*b"scrd")));
+        // The kernel registers a pnon input buffer, then sends a request.
+        reply(
+            &mut os,
+            control(
+                1,
+                control::SET_OOL_IN_LENGTH,
+                observe::BOOT_POLICY_ID,
+                0x4000,
+            ),
+        )
+        .unwrap();
+        reply(
+            &mut os,
+            control(
+                2,
+                control::SET_OOL_IN_ADDRESS,
+                observe::BOOT_POLICY_ID,
+                0x100,
+            ),
+        )
+        .unwrap();
+        let request = Frame {
+            service: observe::BOOT_POLICY_ID,
+            tag: 2,
+            opcode: 0,
+            parameter: 0,
+            data: 24,
+        };
+        assert!(reply(&mut os, request).unwrap().is_empty());
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x10000);
+        ram.bytes[..24].copy_from_slice(&[0xc3; 24]);
+        // The request is recorded then refused; no reply is produced.
+        assert!(dma(&mut os, &mut ram).is_err());
+        let lines = os.observations();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("pnon tag=2 op=0"), "{}", lines[0]);
+        assert!(
+            lines[0].contains(&observe::hex(&[0xc3; 24])),
+            "{}",
+            lines[0]
+        );
+        // Draining empties the journal.
+        assert!(os.observations().is_empty());
     }
 
     #[test]

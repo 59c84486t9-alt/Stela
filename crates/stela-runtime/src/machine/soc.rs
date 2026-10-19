@@ -1162,6 +1162,10 @@ pub struct SepDevice {
     /// The AP's effective production status and security mode in `/chosen`,
     /// which the SEP, sharing its fuses, reports as its own.
     pub security: Option<crate::platform::apple::sep::SecurityMode>,
+    /// The machine's `/chosen` `unique-chip-id` (Stela's per-machine ECID,
+    /// set at setup and written by bundle preparation), bound into the SEP
+    /// key hierarchy. `None` when `/chosen` does not carry it.
+    pub ecid: Option<u64>,
 }
 
 /// The `dcpext` display coprocessor and the register apertures around it,
@@ -4042,6 +4046,10 @@ fn sep_device(
         .map(
             |(production, secure)| crate::platform::apple::sep::SecurityMode { production, secure },
         );
+    let ecid = chosen
+        .as_ref()
+        .and_then(|n| n.first_u64("unique-chip-id"))
+        .filter(|&value| value != 0);
     Ok(Some(SepDevice {
         ranges: [place(first)?, place(second)?],
         irqs,
@@ -4049,6 +4057,7 @@ fn sep_device(
         stream,
         firmware,
         security,
+        ecid,
     }))
 }
 
@@ -6775,6 +6784,7 @@ mod tests {
                 stream: 0,
                 firmware: None,
                 security: None,
+                ecid: None,
             })
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x25d2c0000);

@@ -54,14 +54,21 @@ fn record(machine: &[u8; ROOT_BYTES], group: &[u8; ROOT_BYTES]) -> Zeroizing<Vec
     bytes
 }
 
-fn parse(bytes: &[u8]) -> Result<Roots, &'static str> {
+/// Check the record's magic and checksum; the roots themselves bind to the
+/// ECID only when opened for use ([`parse`]).
+fn well_formed(bytes: &[u8]) -> Result<(), &'static str> {
     let sum: [u8; 32] = Sha256::digest(&bytes[..8 + 2 * ROOT_BYTES]).into();
     if &bytes[..8] != MAGIC || bytes[8 + 2 * ROOT_BYTES..RECORD_BYTES] != sum {
         return Err("the SEP state area is neither blank nor a Stela SEP roots record");
     }
+    Ok(())
+}
+
+fn parse(bytes: &[u8], ecid: u64) -> Result<Roots, &'static str> {
+    well_formed(bytes)?;
     let root =
         |at: usize| -> [u8; ROOT_BYTES] { bytes[at..at + ROOT_BYTES].try_into().expect("root") };
-    Roots::provisioned(root(8), root(8 + ROOT_BYTES))
+    Roots::provisioned(root(8), root(8 + ROOT_BYTES), ecid)
 }
 
 /// Whether `roots`, the first [`ROOTS_BYTES`] of an area, are blank (an area
@@ -74,7 +81,7 @@ pub fn blank(roots: &[u8]) -> Result<bool, &'static str> {
     if roots.iter().all(|&b| b == 0) {
         return Ok(true);
     }
-    parse(roots).map(|_| false)
+    well_formed(roots).map(|()| false)
 }
 
 fn fresh_roots(entropy: &mut dyn Entropy) -> Result<[Root; 2], &'static str> {
@@ -86,12 +93,19 @@ fn fresh_roots(entropy: &mut dyn Entropy) -> Result<[Root; 2], &'static str> {
 }
 
 /// The anti-replay store at `location`, provisioning a never-used one, and
-/// whether it was provisioned now.
-pub fn open(location: Location, entropy: &mut dyn Entropy) -> Result<Opened, &'static str> {
+/// whether it was provisioned now. `ecid` is the machine's `/chosen`
+/// `unique-chip-id`, bound into the key hierarchy ([`Roots`]); it is not
+/// stored in the roots record (it is public and comes from `/chosen` on every
+/// boot), so the roots record alone cannot reconstruct the keys.
+pub fn open(
+    location: Location,
+    ecid: u64,
+    entropy: &mut dyn Entropy,
+) -> Result<Opened, &'static str> {
     let (disk, first) = match location {
         Location::Volatile => {
             let [machine, group] = fresh_roots(entropy)?;
-            let roots = Roots::provisioned(*machine, *group)?;
+            let roots = Roots::provisioned(*machine, *group, ecid)?;
             let backend: Box<dyn Backend> = Box::new(Volatile::default());
             return Ok((Nonces::provision(&roots, backend)?, true));
         }
@@ -116,7 +130,7 @@ pub fn open(location: Location, entropy: &mut dyn Entropy) -> Result<Opened, &'s
     let backend: Box<dyn Backend> = Box::new(store);
     if bytes.iter().all(|&b| b == 0) {
         let [machine, group] = fresh_roots(entropy)?;
-        let roots = Roots::provisioned(*machine, *group)?;
+        let roots = Roots::provisioned(*machine, *group, ecid)?;
         // The store first: a store without roots refuses on the next boot,
         // while roots without a store would read as a lost store.
         let nonces = Nonces::provision(&roots, backend)?;
@@ -126,7 +140,7 @@ pub fn open(location: Location, entropy: &mut dyn Entropy) -> Result<Opened, &'s
             .map_err(|_| "the SEP roots record could not be written")?;
         return Ok((nonces, true));
     }
-    let roots = parse(&bytes)?;
+    let roots = parse(&bytes, ecid)?;
     Ok((Nonces::open(&roots, backend)?, false))
 }
 
@@ -134,6 +148,8 @@ pub fn open(location: Location, entropy: &mut dyn Entropy) -> Result<Opened, &'s
 mod tests {
     use super::*;
     use crate::platform::pc::block::tests::RamDisk;
+
+    const ECID: u64 = 0xa5a5_0001;
 
     fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
         for (n, byte) in bytes.iter_mut().enumerate() {
@@ -156,11 +172,11 @@ mod tests {
     #[test]
     fn the_state_is_provisioned_once_and_reopened_across_power_cycles() {
         let disk = disk();
-        let (mut store, fresh) = open(at(&disk), &mut entropy).unwrap();
+        let (mut store, fresh) = open(at(&disk), ECID, &mut entropy).unwrap();
         assert!(fresh);
         let nonce = store.generate(0, &mut entropy).unwrap();
         drop(store);
-        let (store, fresh) = open(at(&disk), &mut entropy).unwrap();
+        let (store, fresh) = open(at(&disk), ECID, &mut entropy).unwrap();
         assert!(!fresh);
         assert_eq!(store.read(0).unwrap(), nonce);
         // The NOR image before the area is untouched.
@@ -172,13 +188,13 @@ mod tests {
     #[test]
     fn a_damaged_or_foreign_area_refuses() {
         let disk = disk();
-        open(at(&disk), &mut entropy).unwrap();
+        open(at(&disk), ECID, &mut entropy).unwrap();
         let mut roots = disk.window(2048, 8).unwrap();
         let mut block = [0u8; 512];
         roots.read(0, &mut block).unwrap();
         block[20] ^= 1;
         roots.write(0, &block).unwrap();
-        assert!(open(at(&disk), &mut entropy).is_err());
+        assert!(open(at(&disk), ECID, &mut entropy).is_err());
         // Roots without their store read as a lost store.
         let lost = Shared::new(Box::new(RamDisk::new("nor", 2048 + 128, 512)));
         let [machine, group] = fresh_roots(&mut entropy).unwrap();
@@ -186,7 +202,7 @@ mod tests {
             .unwrap()
             .write(0, &record(&machine, &group))
             .unwrap();
-        assert!(open(at(&lost), &mut entropy).is_err());
+        assert!(open(at(&lost), ECID, &mut entropy).is_err());
         // Setup tells the three apart from the roots area alone.
         let mut area = vec![0u8; ROOTS_BYTES];
         assert_eq!(blank(&area), Ok(true));
@@ -198,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_volatile_store_is_fresh_each_time() {
-        let (store, fresh) = open(Location::Volatile, &mut entropy).unwrap();
+        let (store, fresh) = open(Location::Volatile, ECID, &mut entropy).unwrap();
         assert!(fresh);
         assert!(store.read(0).is_err());
     }

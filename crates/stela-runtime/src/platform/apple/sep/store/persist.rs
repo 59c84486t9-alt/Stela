@@ -171,7 +171,7 @@ mod tests {
     use crate::platform::pc::block::tests::RamDisk;
 
     fn roots() -> Roots {
-        Roots::provisioned([9; 32], [8; 32]).unwrap()
+        Roots::provisioned([9; 32], [8; 32], 0xa5a5_0003).unwrap()
     }
     fn entropy(bytes: &mut [u8]) -> Result<(), &'static str> {
         bytes.fill(0x5a);
@@ -201,7 +201,7 @@ mod tests {
         let device = reopened.into_backend().into_device();
         assert!(
             Nonces::open(
-                &Roots::provisioned([1; 32], [8; 32]).unwrap(),
+                &Roots::provisioned([1; 32], [8; 32], 0xa5a5_0003).unwrap(),
                 HostStore::new(device).unwrap(),
             )
             .is_err()
