@@ -20,6 +20,7 @@
 use super::decode::{DecodeError, Instr, MAX_BYTES, Operand, Value, decode};
 use super::float::{f64_to_f32_ftz, f64_to_half, half_to_f32, minifloat};
 use super::generated::Op;
+use crate::platform::apple::agx::format::image::ImageError;
 use crate::platform::apple::agx::format::isa::IsaFormat;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -191,6 +192,33 @@ pub trait Env: Memory {
     ) -> Result<(), &'static str> {
         Err("zs_emit outside a fragment shader")
     }
+
+    /// Entry `index` of the job's sampler heap (8-byte samplers), for a
+    /// sample whose sampler is a register index.
+    fn sampler_heap(&mut self, _index: u32) -> Result<[u8; 8], &'static str> {
+        Err("a sampler-heap index in a job without a sampler heap")
+    }
+
+    /// `imgwblk`: store a render target of the current tile into the image
+    /// a PBE descriptor names.
+    fn block_store(&mut self, _store: &BlockStore) -> Result<(), ImageError> {
+        Err(ImageError::Refused(
+            "imgwblk outside an end-of-tile program",
+        ))
+    }
+}
+
+/// One `imgwblk`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockStore {
+    /// Byte offset of the render target within a tilebuffer sample.
+    pub offset: u32,
+    /// The tilebuffer's physical format of the target.
+    pub format: IsaFormat,
+    /// The PBE descriptor.
+    pub pbe: [u8; TEXTURE_STATE_BYTES],
+    /// The layer of a layered render.
+    pub layer: u32,
 }
 
 /// Where `iter` evaluates.
