@@ -127,7 +127,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// time slice ends or it waits. Otherwise run the next PE that can, round
     /// robin from the running one, or wait on the host until one can (or,
     /// with idle skip, leap the counter to the next deadline); with nothing
-    /// left to wake any PE the machine is idle.
+    /// left to wake any PE the machine is idle. A wait that reaches the wait
+    /// limit, or that only the host's inputs can end, returns to the host.
     pub(super) fn schedule(&mut self) -> Step {
         self.take_starts()?;
         if self.waiting.is_none()
@@ -139,6 +140,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let host = self.host.counter();
         self.clock.end_slice(host, self.statistics.blocks);
         let mut waited = false;
+        let mut wait_start = None;
         loop {
             self.observe_writes();
             let now = self.now();
@@ -163,17 +165,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.clock.start_slice(host, self.statistics.blocks, share);
                 return self.wake();
             }
-            let Some(deadline) = self.next_deadline(now) else {
+            let deadline = self.next_deadline(now);
+            if deadline.is_none() && !self.devices.waits_on_host() {
                 return Err(Stop::Idle);
-            };
-            self.statistics.waits += 1;
-            if self.idle_skip {
+            }
+            if let (Some(deadline), true) = (deadline, self.idle_skip) {
+                self.statistics.waits += 1;
                 let host = self.host.counter();
                 self.clock.skip_to(host, deadline);
                 continue;
             }
-            self.host
-                .arm_timer(Some(self.clock.host_deadline(deadline)));
+            let limit = self
+                .wait_limit
+                .map(|limit| wait_start.get_or_insert(now).saturating_add(limit));
+            let until = match (deadline, limit) {
+                (_, Some(limit)) if now >= limit => None,
+                (Some(deadline), Some(limit)) => Some(deadline.min(limit)),
+                (deadline, limit) => deadline.or(limit),
+            };
+            let Some(until) = until else {
+                if waited {
+                    self.host.arm_timer(None);
+                }
+                return Err(Stop::Waiting);
+            };
+            self.statistics.waits += 1;
+            self.host.arm_timer(Some(self.clock.host_deadline(until)));
             self.host.wait_for_interrupt();
             waited = true;
         }
@@ -500,6 +517,8 @@ mod tests {
         reset: Option<u64>,
         /// The power-downs and power-ups the engine reported.
         power: Vec<(usize, bool)>,
+        /// Something outside the board can still wake a PE.
+        host_wake: bool,
     }
 
     impl Devices for Board {
@@ -546,6 +565,9 @@ mod tests {
         fn processor_power(&mut self, cpu: usize, on: bool) {
             self.power.push((cpu, on));
         }
+        fn waits_on_host(&self) -> bool {
+            self.host_wake
+        }
     }
 
     fn identity(cpu: u64) -> Identity {
@@ -580,6 +602,36 @@ mod tests {
             Peer::Parked(parked) => &parked.cpu,
             _ => panic!("PE {pe} is not parked"),
         }
+    }
+
+    #[test]
+    fn a_wait_only_the_host_can_end_or_that_reaches_the_limit_returns_to_the_host() {
+        let mut machine = board(&[], Board::default(), alloc::vec![identity(0)]);
+        machine.system_instruction(WFI).unwrap();
+        // Nothing can wake the PE: idle.
+        assert_eq!(machine.schedule(), Err(Stop::Idle));
+        // Only the host's inputs can: without a limit, back to the host at
+        // once, waiting on nothing.
+        machine.devices.host_wake = true;
+        assert_eq!(machine.schedule(), Err(Stop::Waiting));
+        assert_eq!(machine.host.now, 0);
+        // With a limit, after waiting that long (the fake host's waits last
+        // 1000 ticks), and idle skip has no deadline to leap to.
+        machine.set_wait_limit(Some(2500));
+        machine.set_idle_skip(true);
+        assert_eq!(machine.schedule(), Err(Stop::Waiting));
+        assert_eq!(machine.host.now, 3000);
+        // The limit bounds a wait for a deadline too; the deadline still
+        // ends the wait it falls in.
+        machine.set_idle_skip(false);
+        machine.devices.host_wake = false;
+        machine.devices.dma = Some(10_000);
+        assert_eq!(machine.schedule(), Err(Stop::Waiting));
+        assert_eq!(machine.host.now, 6000);
+        machine.set_wait_limit(None);
+        machine.schedule().unwrap();
+        assert!(machine.host.now >= 10_000);
+        assert_eq!(machine.processor(), 0);
     }
 
     #[test]

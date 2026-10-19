@@ -1250,6 +1250,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         machine.begin_survey();
     }
     machine.set_idle_skip(options.idle_skip);
+    // Waits return to this loop often enough that a press of the host's
+    // power button reaches a sleeping SoC, and other host inputs a waiting
+    // guest, promptly.
+    machine.set_wait_limit(Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND));
     if !options.breakpoints.is_empty() {
         machine.set_breakpoints(&options.breakpoints);
     }
@@ -1294,6 +1298,10 @@ fn level_name(guarded: bool) -> &'static str {
 
 /// Blocks between checks of whether the screen or a heartbeat is due.
 const SLICE: u64 = 1 << 18;
+
+/// How often a wait of every PE returns to the run loop to take host
+/// inputs (`Machine::set_wait_limit`).
+const WAIT_POLLS_PER_SECOND: u64 = 20;
 
 /// Seconds between heartbeats, which locate a guest that runs without output.
 const BEAT_SECONDS: u64 = 10;
@@ -1386,7 +1394,9 @@ fn run(
             }
         }
 
-        if matches!(stop, Stop::Budget)
+        // A wait the limit or the host's inputs ended goes on like a slice.
+        let waiting = matches!(stop, Stop::Waiting);
+        if (waiting || matches!(stop, Stop::Budget))
             && let Some(experiment) = restore.as_deref_mut()
         {
             machine.exclude_host_time(|devices| experiment.poll(devices));
@@ -1399,7 +1409,7 @@ fn run(
         }
         machine.exclude_host_time(|devices| host_power.poll(devices));
 
-        let sliced = matches!(stop, Stop::Budget) && limit != budget;
+        let sliced = waiting || matches!(stop, Stop::Budget) && limit != budget;
         let now = host::rdtsc();
         if let Some(display) = display.as_deref_mut()
             && (!sliced || now - shown >= tsc_hz / 2)
@@ -1865,6 +1875,12 @@ fn finish(
         Stop::Idle => {
             output::arguments(format_args!(
                 "STOP idle: every PE is off or waits with no wake source\n"
+            ));
+            output::terminate(0x10)
+        }
+        Stop::Waiting => {
+            output::arguments(format_args!(
+                "STOP waiting: every PE waits for an input from outside the board\n"
             ));
             output::terminate(0x10)
         }

@@ -119,7 +119,7 @@ const FILL_WINDOW: u64 = 64 * 1024;
 /// Pages a scoped invalidation flushes one by one; more reload CR3.
 const INVLPG_PAGES: u64 = 16;
 const FAULT_KIND: u64 = 0xffff;
-const COUNTER_HZ: u64 = 24_000_000;
+pub(crate) const COUNTER_HZ: u64 = 24_000_000;
 
 #[derive(Clone, Copy)]
 struct Recorded {

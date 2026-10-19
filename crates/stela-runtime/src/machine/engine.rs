@@ -303,6 +303,13 @@ pub trait Devices {
     /// PE `cpu` powered down (`false`: a WFI in CYC_OVRD's power-down
     /// mode) or left reset again (`true`: a start or a wake from power-down).
     fn processor_power(&mut self, _cpu: usize, _on: bool) {}
+    /// Whether an input from outside the board, which the host delivers
+    /// between runs, can still wake a PE when no device deadline will:
+    /// a sleeping SoC's power button. Then a wait of every PE with no
+    /// deadline is [`Stop::Waiting`] rather than [`Stop::Idle`].
+    fn waits_on_host(&self) -> bool {
+        false
+    }
     /// The physical region a memory controller has locked against writes,
     /// first and last byte.
     fn memory_lock(&self) -> Option<(u64, u64)> {
@@ -524,6 +531,11 @@ pub enum Stop {
     Budget,
     /// Every PE is off or waits in WFI or WFE with nothing able to wake it.
     Idle,
+    /// Every PE is off or waits, and the wait reached the wait limit
+    /// (`Machine::set_wait_limit`), or only something outside the board can
+    /// end it (`Devices::waits_on_host`) and no limit is set. The host
+    /// takes its inputs and runs the machine again to go on waiting.
+    Waiting,
     /// A device carried out the guest's reset or power-off request.
     Reset(Reset),
     Unsupported(Requirement),
@@ -870,6 +882,9 @@ pub struct Machine<H: Host, D: Devices> {
     clock: clock::Clock,
     /// End waits of every PE by leaping the counter (`clock::Clock::skip_to`).
     idle_skip: bool,
+    /// The longest one wait of every PE lasts in system counter ticks
+    /// before `run` returns [`Stop::Waiting`] (`set_wait_limit`).
+    wait_limit: Option<u64>,
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.
     pacm_written: bool,
@@ -956,6 +971,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             slice_deadline: u64::MAX,
             clock: clock::Clock::default(),
             idle_skip: false,
+            wait_limit: None,
             pacm_written: false,
             completing: None,
             chain: alloc::boxed::Box::default(),
@@ -1104,6 +1120,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// host time, and time of day runs ahead of the host's (`clock`).
     pub fn set_idle_skip(&mut self, skip: bool) {
         self.idle_skip = skip;
+    }
+
+    /// Bound each wait of every PE on the host to `limit` system counter
+    /// ticks, after which `run` returns [`Stop::Waiting`] so the host can
+    /// take inputs that reach the board from outside it, such as its power
+    /// button. The counter keeps following the host's meanwhile; an idle
+    /// skip, which leaps to a deadline at once, is not bounded. Without a
+    /// limit a wait lasts until a deadline.
+    pub fn set_wait_limit(&mut self, limit: Option<u64>) {
+        self.wait_limit = limit.map(|limit| limit.max(1));
     }
 
     /// Record, without stopping, when a PE reaches one of these guest PCs
