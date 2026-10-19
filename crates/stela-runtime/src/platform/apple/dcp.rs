@@ -278,6 +278,110 @@ mod tests {
     }
 
     #[test]
+    fn start_signal_nests_start_hardware_boot_through_the_coprocessor() {
+        // The AP's real start path: hello -> region -> ready -> A401
+        // start_signal (which the coprocessor answers by nesting D120
+        // start_hardware_boot), inside which the AP nests A451 display_width,
+        // then answers D120 so A401 returns success. Driven end to end through
+        // dcp::Coprocessor and its DART, as the AP library would.
+        let screen = TestScreen(Mode {
+            width: 1920,
+            height: 1080,
+            format: PixelFormat::Bgra8888,
+        });
+        let mut coprocessor = Coprocessor::new(Box::new(screen), Some(RAM)).unwrap();
+        let mut endpoint = Iomfb(coprocessor.link.clone());
+        let mut sent = Vec::new();
+        endpoint.start(&mut sent).unwrap();
+        let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
+        ram.bytes[0x4000 + 12] = 4;
+        endpoint
+            .receive(link::Word::Region { dva: 0x4000 }.encode(), &mut sent)
+            .unwrap();
+        dma(&mut coprocessor, &mut ram).unwrap();
+
+        let ap1 = link::Stream {
+            owner: link::Owner::Ap,
+            index: 1,
+        };
+        // A401 start_signal (in=0 out=4), opening AP stream 1 at its base.
+        let a401_at = 0x4000 + ap1.calls() as usize;
+        ram.bytes[a401_at..a401_at + 12].copy_from_slice(
+            &link::Header {
+                tag: *b"A401",
+                input: 0,
+                output: 4,
+            }
+            .bytes(),
+        );
+        let a401 = link::Rpc {
+            answer: false,
+            stream: ap1,
+            opens: true,
+            offset: 0,
+            length: 16,
+            token: 0,
+        };
+        endpoint
+            .receive(link::Word::Rpc(a401).encode(), &mut sent)
+            .unwrap();
+        // The coprocessor nests D120 start_hardware_boot into the AP, written
+        // into the coprocessor's buffer of AP stream 1 (0x60000 + 0x8000),
+        // not opening anything.
+        let out = dma(&mut coprocessor, &mut ram).unwrap();
+        let d120 = match link::Word::decode(out[0].payload).unwrap() {
+            link::Word::Rpc(rpc) => rpc,
+            other => panic!("expected the D120 callback, got {other:?}"),
+        };
+        assert!(!d120.answer && !d120.opens && d120.stream == ap1);
+        let d120_at = 0x4000 + ap1.nested() as usize + d120.offset as usize;
+        assert_eq!(
+            &link::Header::parse(ram.bytes[d120_at..d120_at + 12].try_into().unwrap()).tag,
+            b"D120"
+        );
+
+        // Serving D120, the AP nests A451 display_width above A401 in its own
+        // stream-1 calls buffer; the coprocessor answers it in place.
+        let a451_at = 0x4000 + ap1.calls() as usize + 0x40;
+        ram.bytes[a451_at..a451_at + 12].copy_from_slice(
+            &link::Header {
+                tag: *b"A451",
+                input: 0,
+                output: 4,
+            }
+            .bytes(),
+        );
+        let a451 = link::Rpc {
+            offset: 0x40,
+            opens: false,
+            ..a401
+        };
+        endpoint
+            .receive(link::Word::Rpc(a451).encode(), &mut sent)
+            .unwrap();
+        let out = dma(&mut coprocessor, &mut ram).unwrap();
+        assert_eq!(out[0].payload, link::Word::Rpc(a451.answer()).encode());
+        assert_eq!(
+            &ram.bytes[a451_at + 12..a451_at + 16],
+            &1920u32.to_le_bytes()
+        );
+
+        // The AP answers D120 with success; A401 then returns success.
+        ram.bytes[d120_at + 12..d120_at + 16].copy_from_slice(&1u32.to_le_bytes());
+        endpoint
+            .receive(link::Word::Rpc(d120.answer()).encode(), &mut sent)
+            .unwrap();
+        let out = dma(&mut coprocessor, &mut ram).unwrap();
+        let a401_answer = match link::Word::decode(out[0].payload).unwrap() {
+            link::Word::Rpc(rpc) => rpc,
+            other => panic!("expected the A401 answer, got {other:?}"),
+        };
+        assert!(a401_answer.answer && a401_answer.opens);
+        assert_eq!(&ram.bytes[a401_at + 12..a401_at + 16], &1u32.to_le_bytes());
+        assert!(!coprocessor.dma_pending());
+    }
+
+    #[test]
     fn an_afk_endpoint_refuses_every_message() {
         let mut afk = Afk::new("test");
         let mut outbox = Vec::new();
