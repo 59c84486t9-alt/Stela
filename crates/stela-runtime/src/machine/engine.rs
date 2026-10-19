@@ -5017,11 +5017,12 @@ mod tests {
         machine.system_instruction(0xd538_d080).unwrap();
         assert_eq!(machine.cpu.pc, 0x1_0400);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
-        // An Apple IMPDEF register is an explicit refusal.
-        let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd53f_f200) else {
+        // An IMPDEF register outside the table (S3_5_C15_C15_7) is an
+        // explicit refusal.
+        let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd53d_ffe0) else {
             panic!("refusal")
         };
-        assert_eq!(requirement.syndrome, Some(0x6231_fc05));
+        assert_eq!(requirement.syndrome, Some(0x623f_7c1f));
     }
 
     #[test]

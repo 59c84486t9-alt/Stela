@@ -29,8 +29,13 @@
 //! - `Record`: information about such an event. It reads 0, and since no
 //!   consumer writes it, a write stops.
 //! - `Counter`: an event counter whose controls (`Control` entries) accept
-//!   only their disabled value here, so it never counts. It holds what
-//!   software writes, 0 from reset (inference).
+//!   only their disabled value here, or whose events the emulated die never
+//!   has, so it never counts. It holds what software writes, 0 from reset
+//!   (inference).
+//! - `Energy`: a core energy accumulator of the emulated die
+//!   ([`Registers::energy`]): it counts, in its consumer's units, the energy
+//!   of a fixed modeled power per core type over the system counter's time
+//!   since the PE first read it, so it never decreases. Writes stop.
 //! - `Guest`: a VM's copy of Apple EL1 state, which the kernel's hypervisor
 //!   loads before it runs a vCPU and saves afterwards. It is stored like
 //!   `Storage`, but this machine applies none of it to a guest, so entering
@@ -78,16 +83,27 @@ macro_rules! encodings {
 // Names from m1n1 `cpu_regs.h` where it has one, from XNU where its strings
 // or headers give one, else the encoding.
 encodings! {
+    HID0 = 0, 0, 0;
     EHID0 = 0, 0, 1;
     HID26 = 0, 0, 3;
     HID27 = 0, 0, 4;
     HID1 = 0, 1, 0;
+    EHID1 = 0, 1, 1;
+    EHID20 = 0, 1, 2;
     HID21 = 0, 1, 3;
+    TUNING_C1_6 = 0, 1, 6;
+    TUNING_C2_0 = 0, 2, 0;
+    TUNING_C2_1 = 0, 2, 1;
+    TUNING_C2_3 = 0, 2, 3;
+    TUNING_C2_4 = 0, 2, 4;
+    TUNING_C2_5 = 0, 2, 5;
     HID3 = 0, 3, 0;
     HID4 = 0, 4, 0;
     EHID4 = 0, 4, 1;
     HID5 = 0, 5, 0;
+    HID6 = 0, 6, 0;
     HID7 = 0, 7, 0;
+    EHID7 = 0, 7, 1;
     HID9 = 0, 9, 0;
     EHID9 = 0, 9, 1;
     HID10 = 0, 10, 0;
@@ -98,13 +114,21 @@ encodings! {
     HID13 = 0, 14, 0;
     HID14 = 0, 15, 0;
     HID16 = 0, 15, 2;
+    TUNING_C15_5 = 0, 15, 5;
     MEM_STALL_SELECT_0 = 1, 0, 3;
     MEM_STALL_SELECT_1 = 1, 1, 3;
+    MEM_STALL_SELECT_2 = 1, 2, 3;
+    MEM_STALL_SELECT_3 = 1, 3, 3;
     VM_CONTEXT = 1, 8, 2;
     MEM_STALL_COUNTER_0 = 1, 8, 3;
     MEM_STALL_COUNTER_1 = 1, 9, 3;
     MEM_STALL_COUNTER_2 = 1, 10, 3;
     MEM_STALL_COUNTER_3 = 1, 11, 3;
+    VM_COUNTER_OFFSET = 1, 9, 4;
+    MEM_STALL_COUNTER_4 = 1, 12, 3;
+    MEM_STALL_COUNTER_5 = 1, 13, 3;
+    MEM_STALL_COUNTER_6 = 1, 14, 3;
+    MEM_STALL_COUNTER_7 = 1, 15, 3;
     LSU_ERR_STS = 3, 0, 0;
     E_LSU_ERR_STS = 3, 2, 0;
     L2C_ERR_STS = 3, 8, 0;
@@ -180,6 +204,7 @@ encodings! {
     GUEST_C12_7 = 6, 12, 7;
     APVMKEYLO_EL2 = 6, 14, 4;
     APVMKEYHI_EL2 = 6, 14, 5;
+    ACTLR_EL12 = 6, 14, 6;
     APSTS_EL12 = 6, 14, 7;
     GUEST_SPRR_C15_4 = 6, 15, 4;
     GUEST_SPRR_C15_5 = 6, 15, 5;
@@ -474,6 +499,44 @@ const ENERGY_EVIDENCE: &str = "m1n1 cpu_regs.h names this core energy accumulato
     AppleT8112PMGR reports them (0xfffffe0009fa45d4, 0xfffffe0009fa8ad0). The emulated die \
     accumulates a fixed modeled core power (Registers::energy), all of it on CORE_NRG_ACC_DAT";
 
+const SPTM_HID_TUNING: &str = "no public name; the 26A434 SPTMs set or clear its bits with \
+    read-modify-write in their HID tuning sequences beside the m1n1-named HIDs, each under a \
+    MIDR part-number or revision test: the T8103's and T6000's (sptm.t8103 file 0xaba4c, \
+    0xabad0, 0xaba68 for C2_0, C2_1 and C15_5) and the T8122's (sptm.t8122 file 0xac050, \
+    0xabd88, 0xac1bc and 0xac138 for C2_3, C2_4, C2_5 and C1_6); no other component touches it";
+
+const SPTM_TUNING_SELECT_EVIDENCE: &str = "no public name; the 26A434 T8122 SPTM reads it in its \
+    HID tuning sequence on MIDR part number 0x43 and sets S3_0_C15_C2_5 bit 0, HID7 bit 2 and \
+    three more HID bits only when its bit 0 is set (sptm.t8122 file 0xac204, 0xac270); no \
+    consumer writes it. It reads 0, so that optional tuning is not applied (inference)";
+
+const MEM_STALL_WIDE_SELECT_EVIDENCE: &str = "no public name; the 26A434 CoreMemStallSampler of \
+    AppleT6000CLPCv3, AppleT6020CLPC and every M3-and-later CLPC (S3_1_C15_C2_3; \
+    kernelcache.release.mac14j 0xfffffe0009efa63c) and of the Ultras' AppleT6002CLPC and \
+    AppleT6022CLPC (S3_1_C15_C3_3; mac14j 0xfffffe0009f7dab0) writes two more 32-bit selectors \
+    into it, with the read-modify-write AppleT8112CLPC uses for S3_1_C15_C0_3 and C1_3, and 0 \
+    to stop them. The events are not documented, so only 0 is accepted";
+
+const MEM_STALL_WIDE_COUNTER_EVIDENCE: &str = "no public name; the same samplers read it as a \
+    48-bit count after S3_1_C15_C8_3 to C11_3 and clear its overflow bit 47 by writing 0 \
+    (C12_3 and C13_3: mac14j 0xfffffe0009efa7b0; C14_3 and C15_3: mac14j \
+    0xfffffe0009f7c420). It counts only under its selectors, which accept only 0 here, so it \
+    holds what software wrote, 0 from reset (inference)";
+
+const ACTLR_EL12_EVIDENCE: &str = "m1n1 cpu_regs.h names it ACTLR_EL12; the 26A434 T8103 \
+    and T6000 SPTMs save it with the EL12 bank when an EL1 guest exits and load it before \
+    entering one (sptm.t8103 file 0xe5a74, 0xe51e0), as the T8103 kernel's hypervisor does \
+    (kernelcache.release.mac13g file 0x4af9fc0, 0x4af9fcc). A VM's copy of Apple EL1 state \
+    this machine does not apply to a guest: stored; entering an EL1&0 guest while it is \
+    nonzero stops at the ERET or GEXIT";
+
+const VM_COUNTER_OFFSET_EVIDENCE: &str = "no public name; the 26A434 T8122 SPTM writes 0 to it \
+    right after CNTVOFF_EL2 when it starts at EL2 (sptm.t8122 file 0xab0cc, 0xab670), and the \
+    T8122 kernel's hypervisor loads a vCPU's saved value less a global offset into it beside \
+    MDCR_EL2 and APVMKEYLO_EL2 (kernelcache.release.mac15g file 0x4d1a91c) and reads it back \
+    adding that offset (0x4d195e8); inference: a VM's counter offset. Stored; entering an EL1&0 \
+    guest while it is nonzero stops at the ERET or GEXIT";
+
 const TSO_THREAD_EVIDENCE: &str = "no public name; 26A434 XNU saves S3_6_C15_C8_3 (bits 1-2) \
     and S3_6_C15_C2_5 in the exception frame of a thread that runs with ACTLR_EL1's EnTSO and \
     EnAPFLG and restores them on return (0xfffffe000bb9ad7c, 0xfffffe000bb9b96c), swaps a \
@@ -596,7 +659,60 @@ pub const TABLE: &[Entry] = &[
         Class::Tuning,
         SPTM_CORE_TUNING,
     ),
+    entry(HID0, "HID0", Class::Tuning, M1N1_TUNING),
     entry(EHID0, "EHID0", Class::Tuning, M1N1_TUNING),
+    entry(EHID1, "EHID1", Class::Tuning, M1N1_TUNING),
+    entry(EHID20, "EHID20", Class::Tuning, M1N1_TUNING),
+    entry(HID6, "HID6", Class::Tuning, M1N1_TUNING),
+    entry(EHID7, "EHID7", Class::Tuning, M1N1_TUNING),
+    entry(
+        TUNING_C1_6,
+        "S3_0_C15_C1_6 (unnamed)",
+        Class::Tuning,
+        SPTM_HID_TUNING,
+    ),
+    entry(
+        TUNING_C2_0,
+        "S3_0_C15_C2_0 (unnamed)",
+        Class::Tuning,
+        SPTM_HID_TUNING,
+    ),
+    entry(
+        TUNING_C2_1,
+        "S3_0_C15_C2_1 (unnamed)",
+        Class::Tuning,
+        SPTM_HID_TUNING,
+    ),
+    entry(
+        TUNING_C2_3,
+        "S3_0_C15_C2_3 (unnamed)",
+        Class::Tuning,
+        SPTM_HID_TUNING,
+    ),
+    entry(
+        TUNING_C2_4,
+        "S3_0_C15_C2_4 (unnamed)",
+        Class::Tuning,
+        SPTM_HID_TUNING,
+    ),
+    entry(
+        TUNING_C2_5,
+        "S3_0_C15_C2_5 (unnamed)",
+        Class::Tuning,
+        SPTM_HID_TUNING,
+    ),
+    entry(
+        TUNING_C15_5,
+        "S3_0_C15_C15_5 (unnamed)",
+        Class::Tuning,
+        SPTM_HID_TUNING,
+    ),
+    entry(
+        SPTM_TUNING_SELECT,
+        "S3_7_C15_C2_0 (unnamed)",
+        Class::Record,
+        SPTM_TUNING_SELECT_EVIDENCE,
+    ),
     entry(HID26, "HID26", Class::Tuning, M1N1_TUNING),
     entry(HID27, "HID27", Class::Tuning, M1N1_TUNING),
     entry(HID1, "HID1", Class::Tuning, M1N1_TUNING),
@@ -760,6 +876,42 @@ pub const TABLE: &[Entry] = &[
         MEM_STALL_SELECT_EVIDENCE,
     ),
     entry(
+        MEM_STALL_SELECT_2,
+        "S3_1_C15_C2_3 (unnamed)",
+        Class::Control,
+        MEM_STALL_WIDE_SELECT_EVIDENCE,
+    ),
+    entry(
+        MEM_STALL_SELECT_3,
+        "S3_1_C15_C3_3 (unnamed)",
+        Class::Control,
+        MEM_STALL_WIDE_SELECT_EVIDENCE,
+    ),
+    entry(
+        MEM_STALL_COUNTER_4,
+        "S3_1_C15_C12_3 (unnamed)",
+        Class::Counter,
+        MEM_STALL_WIDE_COUNTER_EVIDENCE,
+    ),
+    entry(
+        MEM_STALL_COUNTER_5,
+        "S3_1_C15_C13_3 (unnamed)",
+        Class::Counter,
+        MEM_STALL_WIDE_COUNTER_EVIDENCE,
+    ),
+    entry(
+        MEM_STALL_COUNTER_6,
+        "S3_1_C15_C14_3 (unnamed)",
+        Class::Counter,
+        MEM_STALL_WIDE_COUNTER_EVIDENCE,
+    ),
+    entry(
+        MEM_STALL_COUNTER_7,
+        "S3_1_C15_C15_3 (unnamed)",
+        Class::Counter,
+        MEM_STALL_WIDE_COUNTER_EVIDENCE,
+    ),
+    entry(
         MEM_STALL_COUNTER_0,
         "S3_1_C15_C8_3 (unnamed)",
         Class::Counter,
@@ -902,6 +1054,14 @@ pub const TABLE: &[Entry] = &[
     )
     .el2(),
     entry(APSTS_EL12, "APSTS_EL12", Class::Storage, VM_STATUS_EVIDENCE).el2(),
+    entry(ACTLR_EL12, "ACTLR_EL12", Class::Guest, ACTLR_EL12_EVIDENCE).el2(),
+    entry(
+        VM_COUNTER_OFFSET,
+        "S3_1_C15_C9_4 (unnamed)",
+        Class::Guest,
+        VM_COUNTER_OFFSET_EVIDENCE,
+    )
+    .el2(),
     entry(
         GUEST_RANGE_COMMAND,
         "S3_4_C15_C15_1 (unnamed)",
@@ -1122,7 +1282,11 @@ mod tests {
     #[test]
     fn the_table_applies_where_each_chips_census_shows_the_encoding() {
         for entry in TABLE {
-            assert!(consumed(entry.encoding, Chip::AppleM2), "{}", entry.name);
+            assert!(
+                Chip::ALL.iter().any(|&chip| consumed(entry.encoding, chip)),
+                "{}",
+                entry.name
+            );
         }
         for selectors in census::CONSUMED {
             assert!(selectors.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1151,8 +1315,8 @@ mod tests {
         registers.write(control, 0).unwrap();
         assert!(registers.write(control, 2).is_err());
         let tuning = entry(
-            Encoding::new(3, 0, IMPDEF_CRN, 0, 0),
-            "HID0",
+            Encoding::new(3, 5, IMPDEF_CRN, 15, 7),
+            "S3_5_C15_C15_7 (outside the table)",
             Class::Tuning,
             "test",
         );
