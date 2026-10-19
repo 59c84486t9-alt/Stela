@@ -1887,12 +1887,24 @@ impl Devices for AppleDevices {
             let mut port = Port {
                 iommu: &mut view,
                 stream: uat::FIRMWARE_CONTEXT,
-                memory,
+                memory: &mut *memory,
                 access: &mut access,
             };
-            asc.service_dma(&mut port).map_err(|reason| {
-                DeviceError::TransferRefused(format!("GFX firmware DMA: {reason}"))
-            })?;
+            if let Err(reason) = asc.service_dma(&mut port) {
+                // The walk's evidence: the last fault and the firmware
+                // context's TTBAT words, as the guest left them.
+                let uat = block.uat();
+                let words = uat.ttbat().map(|base| {
+                    let address = base + uat::FIRMWARE_CONTEXT as u64 * 16;
+                    let mut bytes = [0u8; 16];
+                    memory.read(address, &mut bytes).then(|| (address, bytes))
+                });
+                return Err(DeviceError::TransferRefused(format!(
+                    "GFX firmware DMA: {reason}; last UAT fault {:x?}; context TTBAT {:x?}",
+                    uat.last_fault(),
+                    words
+                )));
+            }
         }
         for master in &self.sep_masters {
             let (sep, dart) = self
