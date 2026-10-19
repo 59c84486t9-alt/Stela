@@ -1897,12 +1897,35 @@ impl Devices for AppleDevices {
                 let words = uat.ttbat().map(|base| {
                     let address = base + uat::FIRMWARE_CONTEXT as u64 * 16;
                     let mut bytes = [0u8; 16];
-                    memory.read(address, &mut bytes).then(|| (address, bytes))
+                    memory.read(address, &mut bytes).then_some((address, bytes))
                 });
+                // The nonzero entries of the faulting half's root table.
+                let root = |words: &[u8; 16], half: usize| {
+                    u64::from_le_bytes(words[half * 8..half * 8 + 8].try_into().unwrap())
+                        & 0xff_ffff_c000
+                };
+                let half = uat
+                    .last_fault()
+                    .map_or(1, |fault| usize::from(fault.address >> uat::IAS & 1 != 0));
+                let mut entries = Vec::new();
+                if let Some(Some((_, words))) = words {
+                    let table = root(&words, half);
+                    for index in 0..2048u64 {
+                        if entries.len() == 8 {
+                            break;
+                        }
+                        let mut entry = [0u8; 8];
+                        if memory.read(table + index * 8, &mut entry) && entry != [0; 8] {
+                            entries.push((index, u64::from_le_bytes(entry)));
+                        }
+                    }
+                }
                 return Err(DeviceError::TransferRefused(format!(
-                    "GFX firmware DMA: {reason}; last UAT fault {:x?}; context TTBAT {:x?}",
+                    "GFX firmware DMA: {reason}; last UAT fault {:x?}; context TTBAT {:x?}; \
+                     root entries {:x?}",
                     uat.last_fault(),
-                    words
+                    words,
+                    entries
                 )));
             }
         }
