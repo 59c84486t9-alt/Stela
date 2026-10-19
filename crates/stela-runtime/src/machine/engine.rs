@@ -4494,6 +4494,37 @@ mod tests {
     }
 
     #[test]
+    fn watched_device_ranges_record_each_access_and_its_value() {
+        const DEVICE: u64 = 0x3_8228_c80c;
+        let mut machine = board(&[], Recorder::default(), Vec::new());
+        machine.set_watches(&[(0x3_8228_0000, 0x10_0000)]);
+        // ldr w2, [x1]; str w2, [x1]
+        machine.write_register(Register::X(1), DEVICE);
+        machine
+            .device_access(0xb940_0022, DEVICE, DEVICE, false)
+            .unwrap();
+        machine
+            .device_access(0xb900_0022, DEVICE, DEVICE, true)
+            .unwrap();
+        // An access outside every watch is not recorded.
+        machine.write_register(Register::X(1), 0x2_3b3c_0a00);
+        machine
+            .device_access(0xb940_0022, 0x2_3b3c_0a00, 0x2_3b3c_0a00, false)
+            .unwrap();
+        let hits = machine.take_watch_hits();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.physical, hit.bytes, hit.value, hit.write, hit.completed))
+                .collect::<Vec<_>>(),
+            [
+                (DEVICE, 4, 0x8000_c80c, false, true),
+                (DEVICE, 4, 0x8000_c80c, true, true)
+            ]
+        );
+        assert!(machine.take_watch_hits().is_empty());
+    }
+
+    #[test]
     fn host_breakpoints_end_blocks_and_stop_before_their_instruction() {
         // add x0, x0, #1 (three times); svc #0
         let add = 0x9100_0400;
