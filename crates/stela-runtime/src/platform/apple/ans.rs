@@ -181,6 +181,8 @@ pub struct Submission {
     pub tag: u16,
     pub command: [u8; 64],
     pub tcb: [u8; 128],
+    /// The tunnel request the command named, once it was read.
+    pub tunnel: Option<[u8; 80]>,
 }
 
 pub struct Ans {
@@ -460,6 +462,7 @@ impl Ans {
                 tag,
                 command: command.0,
                 tcb,
+                tunnel: None,
             });
             // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
             // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier

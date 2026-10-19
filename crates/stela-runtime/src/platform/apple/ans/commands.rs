@@ -547,6 +547,9 @@ impl Ans {
         }
         let mut request = [0; 80];
         port.read(address, &mut request).map_err(dma_error)?;
+        if let Some(submission) = &mut self.last_submission {
+            submission.tunnel = Some(request);
+        }
         let kind = u32::from_le_bytes(request[12..16].try_into().unwrap());
         if kind == 0xba {
             if cmd.long(52) == 0
@@ -731,6 +734,20 @@ mod tests {
         // Tunnel buffers outside the SART's allow-list refuse.
         sart.write(0, Width::Word, 0, port.access).unwrap();
         assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+        // An unknown request type refuses and leaves the request it read
+        // in the submission record.
+        sart.write(0, Width::Word, 0xff, port.access).unwrap();
+        request[12..16].copy_from_slice(&0x77u32.to_le_bytes());
+        port.write(0x1000, &request).unwrap();
+        ans.last_submission = Some(super::super::Submission {
+            queue: 0,
+            tag: 0,
+            command: command.0,
+            tcb: [0; 128],
+            tunnel: None,
+        });
+        assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+        assert_eq!(ans.last_submission.as_ref().unwrap().tunnel, Some(request));
     }
 
     #[test]
