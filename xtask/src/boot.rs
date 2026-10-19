@@ -211,11 +211,11 @@ pub struct Run {
     /// `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
     /// peer (`boot/lan.rs`): DHCP, DNS and TCP relayed to the host, logged
     /// to `network.log`. QEMU needs no slirp.
-    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
     network: bool,
     /// Have the mount POST once to this `http://` URL over the host network
     /// at start and report the reply: adds `--network-check URL`.
-    #[arg(long, requires = "network")]
+    #[arg(long, requires = "network_adapter")]
     network_check: Option<String>,
     /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
     /// on a LAN peer of its own (logged to `guest-network.log`), which the
@@ -227,6 +227,21 @@ pub struct Run {
     /// more disks (at most six). Adds `--usb-storage STELAUSBn`.
     #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
     usb_storage_disk: Vec<PathBuf>,
+    /// Feed the guest's keyboard and pointer from USB HID devices the mount
+    /// drives itself: a `qemu-xhci` with `usb-kbd`, `usb-tablet` and
+    /// `usb-mouse`, and the mount's `--input`.
+    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    usb_input: bool,
+    /// Give the mount its host network adapter as a USB CDC-ECM device on
+    /// the `qemu-xhci` (`usb-net`), on a LAN peer of its own
+    /// (`usb-network.log`), for `--tss` and `--network-check`.
+    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    usb_network: bool,
+    /// Attach a raw disk as a QEMU `usb-storage` device on the `qemu-xhci`,
+    /// with serial `STELAUSBDISKn`, preserving writes; the mount drives it
+    /// over Bulk-Only and selects it by that serial like any host disk.
+    #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
+    usb_disk: Vec<PathBuf>,
     /// Run install mode on a synthetic restore payload.
     #[arg(long, value_enum, conflicts_with_all = ["opencore", "module", "append"])]
     payload: Option<PayloadMode>,
@@ -388,8 +403,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         false => Vec::new(),
     };
     options.extend(disks.iter().map(disks::Disk::option));
-    if arguments.input {
+    if arguments.input || arguments.usb_input {
         options.push_str(" --input");
+    }
+    for path in &arguments.usb_disk {
+        ensure!(path.is_file(), "USB disk is not a file: {}", path.display());
     }
     ensure!(
         arguments.usb_storage_disk.len() <= 6,
@@ -632,6 +650,39 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 "stream,id=guest-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
             ))
             .args(["-device", "virtio-net-pci,netdev=guest-net"]);
+    }
+    let host_usb = arguments.usb_input || arguments.usb_network || !arguments.usb_disk.is_empty();
+    if host_usb {
+        command.args(["-device", "qemu-xhci,id=host-usb"]);
+    }
+    if arguments.usb_input {
+        for device in ["usb-kbd", "usb-tablet", "usb-mouse"] {
+            command
+                .arg("-device")
+                .arg(format!("{device},bus=host-usb.0"));
+        }
+    }
+    if arguments.usb_network {
+        let port =
+            lan::listen(output.join("usb-network.log")).context("start the USB network peer")?;
+        command
+            .arg("-netdev")
+            .arg(format!(
+                "stream,id=usb-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
+            ))
+            .args(["-device", "usb-net,netdev=usb-net,bus=host-usb.0"]);
+    }
+    for (index, path) in arguments.usb_disk.iter().enumerate() {
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=usbdisk{index},format=raw,file={}",
+                option_path(path)
+            ))
+            .arg("-device")
+            .arg(format!(
+                "usb-storage,drive=usbdisk{index},serial=STELAUSBDISK{index},bus=host-usb.0"
+            ));
     }
     for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
         command
@@ -1089,6 +1140,8 @@ mod tests {
             vec!["--network-check", "http://example.test/"],
             vec!["--usb-storage-disk", "/tmp/disk", "--storage-check"],
             vec!["--guest-network", "--opencore", "/tmp/oc"],
+            vec!["--network", "--usb-network"],
+            vec!["--usb-disk", "/tmp/disk", "--storage-check"],
             vec![
                 "--storage-disk",
                 "/tmp/disk",
