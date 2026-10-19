@@ -16,6 +16,8 @@ pub mod boot_selection;
 pub mod carveouts;
 #[cfg(feature = "std")]
 pub mod chained_fixups;
+#[cfg(feature = "std")]
+pub mod code_signature;
 pub mod darts;
 #[cfg(feature = "std")]
 pub mod dependency_graph;
@@ -41,6 +43,8 @@ pub mod lock_regs;
 pub mod mapped_image;
 pub mod nvram;
 pub mod root_selection;
+#[cfg(feature = "std")]
+pub mod shared_cache;
 mod thread_state;
 pub mod trust_cache;
 #[cfg(feature = "std")]

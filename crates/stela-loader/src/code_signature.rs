@@ -1,0 +1,234 @@
+//! An image's embedded code signature (`LC_CODE_SIGNATURE`), as the kernel
+//! reads it at exec (`bsd/kern/ubc_subr.c`, `osfmk/kern/cs_blobs.h`): the
+//! best code directory's flags, platform and identifiers, its cdhash, and
+//! the entitlements blobs. Reading a signature is not validating it; page
+//! hashes and the signature's trust are not checked here.
+use anyhow::{Context, Result, ensure};
+use serde::Serialize;
+use sha1::{Digest as _, Sha1};
+use sha2::Sha256;
+
+const LC_CODE_SIGNATURE: u32 = 0x1d;
+const MH_MAGIC_64: u32 = 0xfeed_facf;
+const MACH_HEADER_64_BYTES: usize = 32;
+const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
+const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
+const CSMAGIC_EMBEDDED_ENTITLEMENTS: u32 = 0xfade_7171;
+const CSMAGIC_EMBEDDED_DER_ENTITLEMENTS: u32 = 0xfade_7172;
+const CSSLOT_CODEDIRECTORY: u32 = 0;
+/// `CSSLOT_ALTERNATE_CODEDIRECTORIES` through its last slot.
+const CSSLOT_ALTERNATE_FIRST: u32 = 0x1000;
+const CSSLOT_ALTERNATE_LAST: u32 = 0x1004;
+pub const CS_HASHTYPE_SHA1: u8 = 1;
+pub const CS_HASHTYPE_SHA256: u8 = 2;
+pub const CS_HASHTYPE_SHA256_TRUNCATED: u8 = 3;
+pub const CS_HASHTYPE_SHA384: u8 = 4;
+/// `CS_CDHASH_LEN`.
+pub const CDHASH_BYTES: usize = 20;
+/// CodeDirectory field offsets (`CS_CodeDirectory`, big-endian).
+const CD_VERSION: usize = 8;
+const CD_FLAGS: usize = 12;
+const CD_IDENT_OFFSET: usize = 20;
+const CD_HASH_TYPE: usize = 37;
+const CD_PLATFORM: usize = 38;
+const CD_TEAM_OFFSET: usize = 48;
+const CS_SUPPORTSTEAMID: u32 = 0x20200;
+
+fn be32(bytes: &[u8], at: usize) -> Result<u32> {
+    Ok(u32::from_be_bytes(
+        bytes
+            .get(at..at + 4)
+            .context("truncated code signature")?
+            .try_into()?,
+    ))
+}
+
+fn le32(bytes: &[u8], at: usize) -> Result<u32> {
+    Ok(u32::from_le_bytes(
+        bytes
+            .get(at..at + 4)
+            .context("truncated load command")?
+            .try_into()?,
+    ))
+}
+
+fn c_string(bytes: &[u8], at: usize) -> Option<String> {
+    let tail = bytes.get(at..)?;
+    let end = tail.iter().position(|&b| b == 0)?;
+    String::from_utf8(tail[..end].to_vec()).ok()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeSignature {
+    /// The chosen code directory's `flags`.
+    pub flags: u32,
+    pub platform: u8,
+    pub hash_type: u8,
+    pub identifier: Option<String>,
+    pub team_identifier: Option<String>,
+    #[serde(with = "hex_bytes")]
+    pub cdhash: [u8; CDHASH_BYTES],
+    pub entitlements: Option<Vec<u8>>,
+    pub der_entitlements: Option<Vec<u8>>,
+}
+
+mod hex_bytes {
+    pub fn serialize<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+}
+
+/// XNU's preference among a signature's code directories
+/// (`hash_rank`): SHA-256 over truncated SHA-256 over SHA-1; SHA-384 last
+/// among the supported ones.
+fn rank(hash_type: u8) -> u8 {
+    match hash_type {
+        CS_HASHTYPE_SHA1 => 1,
+        CS_HASHTYPE_SHA256_TRUNCATED => 2,
+        CS_HASHTYPE_SHA256 => 3,
+        CS_HASHTYPE_SHA384 => 4,
+        _ => 0,
+    }
+}
+
+fn cdhash(hash_type: u8, directory: &[u8]) -> Option<[u8; CDHASH_BYTES]> {
+    let digest: Vec<u8> = match hash_type {
+        CS_HASHTYPE_SHA1 => Sha1::digest(directory).to_vec(),
+        CS_HASHTYPE_SHA256 | CS_HASHTYPE_SHA256_TRUNCATED => Sha256::digest(directory).to_vec(),
+        CS_HASHTYPE_SHA384 => sha2::Sha384::digest(directory).to_vec(),
+        _ => return None,
+    };
+    digest[..CDHASH_BYTES].try_into().ok()
+}
+
+/// The signature of a thin 64-bit Mach-O slice, or `None` without one.
+pub fn read(slice: &[u8]) -> Result<Option<CodeSignature>> {
+    ensure!(le32(slice, 0)? == MH_MAGIC_64, "not a 64-bit Mach-O slice");
+    let count = le32(slice, 16)? as usize;
+    let mut offset = MACH_HEADER_64_BYTES;
+    let mut blob = None;
+    for _ in 0..count {
+        let command = le32(slice, offset)?;
+        let size = le32(slice, offset + 4)? as usize;
+        ensure!(size >= 8, "load command too small");
+        if command == LC_CODE_SIGNATURE {
+            blob = Some((
+                le32(slice, offset + 8)? as usize,
+                le32(slice, offset + 12)? as usize,
+            ));
+        }
+        offset += size;
+    }
+    let Some((start, size)) = blob else {
+        return Ok(None);
+    };
+    let blob = slice
+        .get(start..start + size)
+        .context("code signature outside the slice")?;
+    ensure!(
+        be32(blob, 0)? == CSMAGIC_EMBEDDED_SIGNATURE,
+        "code signature is not an embedded signature superblob"
+    );
+    let slots = be32(blob, 8)? as usize;
+    let mut best: Option<(u8, &[u8])> = None;
+    let mut entitlements = None;
+    let mut der_entitlements = None;
+    for index in 0..slots {
+        let slot = be32(blob, 12 + index * 8)?;
+        let at = be32(blob, 16 + index * 8)? as usize;
+        let magic = be32(blob, at)?;
+        let length = be32(blob, at + 4)? as usize;
+        let body = blob
+            .get(at..at + length)
+            .context("truncated signature blob")?;
+        match magic {
+            CSMAGIC_CODEDIRECTORY
+                if slot == CSSLOT_CODEDIRECTORY
+                    || (CSSLOT_ALTERNATE_FIRST..=CSSLOT_ALTERNATE_LAST).contains(&slot) =>
+            {
+                let hash_type = *body.get(CD_HASH_TYPE).context("truncated code directory")?;
+                if best.is_none_or(|(kind, _)| rank(hash_type) > rank(kind)) {
+                    best = Some((hash_type, body));
+                }
+            }
+            CSMAGIC_EMBEDDED_ENTITLEMENTS => entitlements = Some(body[8..].to_vec()),
+            CSMAGIC_EMBEDDED_DER_ENTITLEMENTS => der_entitlements = Some(body[8..].to_vec()),
+            _ => {}
+        }
+    }
+    let (hash_type, directory) = best.context("code signature has no code directory")?;
+    let version = be32(directory, CD_VERSION)?;
+    let identifier = c_string(directory, be32(directory, CD_IDENT_OFFSET)? as usize);
+    let team_identifier = if version >= CS_SUPPORTSTEAMID {
+        match be32(directory, CD_TEAM_OFFSET)? {
+            0 => None,
+            at => c_string(directory, at as usize),
+        }
+    } else {
+        None
+    };
+    Ok(Some(CodeSignature {
+        flags: be32(directory, CD_FLAGS)?,
+        platform: *directory
+            .get(CD_PLATFORM)
+            .context("truncated code directory")?,
+        hash_type,
+        identifier,
+        team_identifier,
+        cdhash: cdhash(hash_type, directory).context("unsupported code directory hash")?,
+        entitlements,
+        der_entitlements,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn directory(hash_type: u8, platform: u8, flags: u32) -> Vec<u8> {
+        let mut cd = vec![0u8; 64];
+        cd[..4].copy_from_slice(&CSMAGIC_CODEDIRECTORY.to_be_bytes());
+        cd[CD_VERSION..CD_VERSION + 4].copy_from_slice(&0x20400u32.to_be_bytes());
+        cd[CD_FLAGS..CD_FLAGS + 4].copy_from_slice(&flags.to_be_bytes());
+        cd[CD_IDENT_OFFSET..CD_IDENT_OFFSET + 4].copy_from_slice(&56u32.to_be_bytes());
+        cd[CD_HASH_TYPE] = hash_type;
+        cd[CD_PLATFORM] = platform;
+        cd[56..63].copy_from_slice(b"com.ex\0");
+        let length = cd.len() as u32;
+        cd[4..8].copy_from_slice(&length.to_be_bytes());
+        cd
+    }
+
+    #[test]
+    fn best_directory_supplies_flags_and_cdhash() {
+        let sha1 = directory(CS_HASHTYPE_SHA1, 0, 1);
+        let sha256 = directory(CS_HASHTYPE_SHA256, 13, 0x2_0000);
+        let mut superblob = Vec::new();
+        let header = 12 + 2 * 8;
+        superblob.extend(CSMAGIC_EMBEDDED_SIGNATURE.to_be_bytes());
+        superblob.extend(0u32.to_be_bytes());
+        superblob.extend(2u32.to_be_bytes());
+        superblob.extend(CSSLOT_CODEDIRECTORY.to_be_bytes());
+        superblob.extend((header as u32).to_be_bytes());
+        superblob.extend(CSSLOT_ALTERNATE_FIRST.to_be_bytes());
+        superblob.extend(((header + sha1.len()) as u32).to_be_bytes());
+        superblob.extend(&sha1);
+        superblob.extend(&sha256);
+        let total = superblob.len() as u32;
+        superblob[4..8].copy_from_slice(&total.to_be_bytes());
+        let mut slice = vec![0u8; 32 + 16];
+        slice[..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes());
+        slice[16..20].copy_from_slice(&1u32.to_le_bytes());
+        slice[32..36].copy_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
+        slice[36..40].copy_from_slice(&16u32.to_le_bytes());
+        slice[40..44].copy_from_slice(&48u32.to_le_bytes());
+        slice[44..48].copy_from_slice(&total.to_le_bytes());
+        slice.extend(&superblob);
+        let signature = read(&slice).unwrap().unwrap();
+        assert_eq!(signature.hash_type, CS_HASHTYPE_SHA256);
+        assert_eq!(signature.platform, 13);
+        assert_eq!(signature.flags, 0x2_0000);
+        assert_eq!(signature.identifier.as_deref(), Some("com.ex"));
+        assert_eq!(signature.cdhash[..], Sha256::digest(&sha256)[..20]);
+    }
+}
