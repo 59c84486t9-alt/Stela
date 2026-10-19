@@ -27,6 +27,7 @@ pub mod devices;
 pub mod dvfs;
 #[cfg(feature = "std")]
 pub mod exports;
+pub mod gpu_dvfs;
 pub mod im4m;
 pub mod im4p;
 pub mod installed;

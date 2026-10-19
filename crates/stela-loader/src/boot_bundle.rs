@@ -18,6 +18,7 @@ use crate::carveouts::{self, Placed};
 use crate::darts;
 use crate::devices;
 use crate::dvfs;
+use crate::gpu_dvfs;
 use crate::im4m::{self, Value};
 use crate::kernel_collection::{KernelCollection, PAGE_BYTES};
 use crate::lock_regs::{self, Programmed};
@@ -755,6 +756,15 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
         unresolved.push(format!(
             "{} devices have no model; their compatible is removed (hidden_devices)",
             hidden_devices.len()
+        ));
+    }
+    if let Some(chip_id) = inputs.target.chip_id
+        && let Some(tables) = gpu_dvfs::publish(&mut tree, chip_id)?
+    {
+        unresolved.push(format!(
+            "/arm-io/sgx perf-states, perf-states-sram: {} GPU operating points in {} table \
+             without calibrated voltages (0)",
+            tables.states, tables.tables
         ));
     }
     apply_overlay(&mut tree, &options.overlay)?;
