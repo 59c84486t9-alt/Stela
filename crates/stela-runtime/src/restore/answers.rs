@@ -115,32 +115,83 @@ fn validate_http_args(kind: &str, args: &Value) -> Result<()> {
     }
     Ok(())
 }
-const DATA_TYPES: [(&str, bool); 21] = [
+/// Every data type the host understands, with the value the public host
+/// sends for it (idevicerestore 4b3e847e `restore_supported_data_types`,
+/// "extracted from ac2"). Restored's `is_host_compatible` checkpoint fails
+/// the restore (AMRError 10) when a type it marks required is missing, so
+/// this is the host's vocabulary, not a promise of an answer: a request
+/// Stela cannot answer refuses with the whole request when it arrives.
+const DATA_TYPES: [(&str, bool); 69] = [
+    ("AuthInstallCACert", true),
+    ("BasebandBootData", false),
+    ("BasebandData", false),
+    ("BasebandStackData", false),
+    ("BasebandUpdaterOutputData", false),
     ("BootabilityBundle", false),
     ("BootabilityBundleV2", false),
     ("BuildIdentityDict", false),
+    ("BuildIdentityDictV2", false),
+    ("Cryptex1LocalPolicy", true),
     ("DataType", false),
+    ("DeviceRestoreInfoPreflight", false),
+    ("DiagData", false),
+    ("EANData", false),
+    ("FDRMemoryCommit", false),
     ("FDRTrustData", false),
     ("FUDData", false),
     ("FileData", false),
-    ("FileDataDone", true),
+    ("FileDataDone", false),
     ("FirmwareUpdaterData", false),
+    ("FirmwareUpdaterDataV2", false),
+    ("FirmwareUpdaterDataV3", true),
+    ("FirmwareUpdaterPreflight", true),
+    ("GrapeFWData", false),
+    ("HPMFWData", false),
+    ("HostSystemTime", true),
+    ("KernelCache", false),
+    ("MessageUseStreamedImageFile", true),
     ("NORData", false),
+    ("NitrogenFWData", true),
+    ("OpalFWData", false),
+    ("OverlayRootDataCount", false),
+    ("OverlayRootDataForKey", true),
+    ("OverlayRootDataForKeyIndex", true),
+    ("PeppyFWData", true),
     ("PersonalizedBootObjectV3", false),
     ("PersonalizedData", true),
+    ("ProvisioningData", false),
+    ("RamdiskFWData", true),
     ("ReceiptManifest", true),
     ("RecoveryOSASRImage", true),
+    ("RecoveryOSAppleLogo", true),
+    ("RecoveryOSDeviceTree", true),
+    ("RecoveryOSFileAssetImage", true),
+    ("RecoveryOSIBEC", true),
+    ("RecoveryOSIBootFWFilesImages", true),
+    ("RecoveryOSImage", true),
+    ("RecoveryOSKernelCache", true),
+    ("RecoveryOSLocalPolicy", true),
+    ("RecoveryOSOverlayRootDataCount", false),
     ("RecoveryOSRootTicketData", true),
+    ("RecoveryOSStaticTrustCache", true),
+    ("RecoveryOSVersionData", true),
+    ("RestoreLocalPolicy", true),
+    ("RootData", false),
     ("RootTicket", false),
+    ("S3EOverride", false),
+    ("SourceBootObjectV3", false),
     ("SourceBootObjectV4", false),
     ("SourceBootObjectV5", false),
+    ("SsoServiceTicket", false),
+    ("StockholmPostflight", false),
     ("SystemImageCanonicalMetadata", false),
     ("SystemImageData", false),
     ("SystemImageRootHash", false),
+    ("URLAsset", true),
+    ("USBCFWData", false),
+    ("USBCOverride", false),
+    ("UpdateVolumeOverlayRootDataCount", true),
 ];
-/// Advertised only when the embedding host staged an answer for them.
-const STAGED_DATA_TYPES: [(&str, bool); 2] =
-    [("URLAsset", true), ("StreamedImageDecryptionKey", false)];
 pub struct Answers<R> {
     pub store: Store<R>,
     pub staged: Staged,
@@ -152,21 +203,13 @@ impl<R: ReadAt> Answers<R> {
             staged: Staged::default(),
         }
     }
-    /// The data types this host answers, with the value the public host
-    /// sends for each (idevicerestore 4b3e847e `restore_supported_data_types`,
-    /// "extracted from ac2"), including the FileData framing keys and the
-    /// DataType key the public table lists.
     pub fn supported(&self) -> Value {
-        let mut d: BTreeMap<String, Value> = DATA_TYPES
-            .into_iter()
-            .map(|(name, value)| (name.into(), Value::Boolean(value)))
-            .collect();
-        for (kind, value) in STAGED_DATA_TYPES {
-            if self.staged.answers.keys().any(|(k, _)| k == kind) {
-                d.insert(kind.into(), Value::Boolean(value));
-            }
-        }
-        Value::Dict(d)
+        Value::Dict(
+            DATA_TYPES
+                .into_iter()
+                .map(|(name, value)| (name.into(), Value::Boolean(value)))
+                .collect(),
+        )
     }
     fn identity(&self, args: &Value) -> Result<Identity> {
         let current = self.store.identity();

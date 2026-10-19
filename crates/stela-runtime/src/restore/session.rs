@@ -176,10 +176,7 @@ impl Session {
         if let Some(v) = info.get("MinimumSystemPartition") {
             opts.insert("SystemPartitionSize".into(), v.clone());
         }
-        opts.insert(
-            "SupportedDataTypes".into(),
-            route.supported(answers.supported()),
-        );
+        opts.insert("SupportedDataTypes".into(), answers.supported());
         opts.insert(
             "SupportedMessageTypes".into(),
             Value::Dict(

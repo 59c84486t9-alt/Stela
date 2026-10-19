@@ -462,8 +462,10 @@ mod tests {
         let opts = responses[2].required("RestoreOptions").unwrap();
         assert!(!opts.required("FlashNOR").unwrap().boolean().unwrap());
         let data = opts.required("SupportedDataTypes").unwrap();
-        assert!(data.get("NORData").is_none());
-        assert!(data.required("FileDataDone").unwrap().boolean().unwrap());
+        // The whole vocabulary is advertised; the study route refuses a
+        // NORData request when it arrives.
+        assert!(!data.required("NORData").unwrap().boolean().unwrap());
+        assert!(!data.required("FileDataDone").unwrap().boolean().unwrap());
         let messages = opts.required("SupportedMessageTypes").unwrap();
         for name in [
             "ProvisioningInfo",

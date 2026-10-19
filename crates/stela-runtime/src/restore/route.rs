@@ -4,9 +4,6 @@
 //! `docs/research/stela-firmware-route.md`. No application/build keys.
 use super::{Error, Result, plist::Value};
 
-/// Data-type keys of the transfer framing rather than requests.
-const FRAMING: [&str; 3] = ["DataType", "FileData", "FileDataDone"];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
     #[default]
@@ -56,14 +53,6 @@ impl Route {
                     | "RestoreAttestation"
             )
     }
-    /// Requests outside the route are withheld; the framing keys every
-    /// streamed answer uses are not requests and always stay advertised.
-    pub fn supported(self, mut supported: Value) -> Value {
-        if let Value::Dict(d) = &mut supported {
-            d.retain(|k, _| FRAMING.contains(&k.as_str()) || self.allows(k));
-        }
-        supported
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -93,14 +82,10 @@ mod tests {
                 .unwrap()
         );
         assert!(options.get("RecoveryOSMacDFUFactoryInstall").is_none());
-        let types = Route::StelaFirmwareStudy.supported(Value::dict([
-            ("NORData", Value::Boolean(true)),
-            ("RootTicket", Value::Boolean(true)),
-            ("RecoveryOSLocalPolicy", Value::Boolean(true)),
-        ]));
-        assert!(types.get("NORData").is_none());
-        assert!(types.get("RecoveryOSLocalPolicy").is_none());
-        assert!(types.get("RootTicket").is_some());
+        // Requests outside the study refuse when they arrive.
+        assert!(!Route::StelaFirmwareStudy.allows("NORData"));
+        assert!(!Route::StelaFirmwareStudy.allows("RecoveryOSLocalPolicy"));
+        assert!(Route::StelaFirmwareStudy.allows("RootTicket"));
         assert!(!Route::StelaFirmwareStudy.allows("Unknown"));
     }
 }
