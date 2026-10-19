@@ -118,6 +118,30 @@ pub fn mapped(address: u64) -> bool {
     status == KERN_SUCCESS && start <= address
 }
 
+/// Whether the mapping holding `address` grants every protection bit of
+/// `access` now.
+pub fn permits(address: u64, access: Protection) -> bool {
+    let mut start = address;
+    let mut size = 0u64;
+    let mut info = [0i32; VM_REGION_BASIC_INFO_COUNT_64 as usize];
+    let mut count = VM_REGION_BASIC_INFO_COUNT_64;
+    let mut object = 0u32;
+    // SAFETY: out-parameters sized for VM_REGION_BASIC_INFO_64, whose
+    // first field is the current protection.
+    let status = unsafe {
+        mach_vm_region(
+            task(),
+            &mut start,
+            &mut size,
+            VM_REGION_BASIC_INFO_64,
+            info.as_mut_ptr(),
+            &mut count,
+            &mut object,
+        )
+    };
+    status == KERN_SUCCESS && start <= address && info[0] & access.0 == access.0
+}
+
 /// Guest protections as `VM_PROT_*` bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Protection(pub i32);
@@ -421,6 +445,8 @@ mod tests {
         assert_eq!(read_string(address + PAGE_BYTES - 3, 64).unwrap(), b"ab");
         protect(address, PAGE_BYTES, Protection::READ).unwrap();
         assert!(!write(address, b"x"));
+        assert!(permits(address, Protection::READ));
+        assert!(!permits(address, Protection::READ_WRITE));
         assert_eq!(read_u32(address).unwrap(), u32::from_le_bytes(*b"hell"));
         assert!(allocate(address, PAGE_BYTES, false, Protection::READ).is_err());
         // Inaccessible pages refuse copies (a freed page could be reused by

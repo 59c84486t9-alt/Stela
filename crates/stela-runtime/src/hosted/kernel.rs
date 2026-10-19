@@ -42,6 +42,8 @@ const ISS_MASK: u64 = (1 << 25) - 1;
 const EC_SVC64: u64 = 0x15;
 const EC_INSTRUCTION_ABORT_LOWER: u64 = 0x20;
 const EC_DATA_ABORT_LOWER: u64 = 0x24;
+/// A data abort's ISS WnR: the access was a write.
+const ISS_WRITE_NOT_READ: u64 = 1 << 6;
 /// SPSR's C flag, which a BSD call's error sets (`PSR64_CF`).
 const SPSR_CARRY: u64 = 1 << 29;
 /// `PLATFORM_SYSCALL_TRAP_NO`.
@@ -301,6 +303,20 @@ impl Kernel {
             EC_DATA_ABORT_LOWER | EC_INSTRUCTION_ABORT_LOWER => {
                 let address = pe.cpu.read(Register::FAR_EL1);
                 if self.page_in(address)? {
+                    return Ok(());
+                }
+                // Another thread changed the mapping while this one
+                // accessed it (a protection change, or `VM_PROT_COPY`
+                // replacing the range): as `vm_fault` after the map
+                // settles, an access the mapping now permits runs again.
+                let access = if class == EC_INSTRUCTION_ABORT_LOWER {
+                    super::memory::Protection::READ_EXECUTE
+                } else if iss & ISS_WRITE_NOT_READ != 0 {
+                    super::memory::Protection::READ_WRITE
+                } else {
+                    super::memory::Protection::READ
+                };
+                if super::memory::permits(address, access) {
                     return Ok(());
                 }
                 bail!(
