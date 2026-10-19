@@ -14,6 +14,7 @@ mod input;
 mod loader;
 pub mod registry;
 mod restore;
+mod run;
 mod setup;
 
 #[derive(Parser)]
@@ -45,6 +46,8 @@ pub(crate) enum Command {
     RunLinkedImages(execute::RunLinkedImages),
     /// Run original dyld's startup prefix.
     ProbeDyldEntry(execute::ProbeDyldEntry),
+    /// Run an unchanged arm64e program as a hosted Darwin process.
+    Run(run::Run),
     /// Validate an Apple executable's guest mappings and unresolved loader work.
     PlanExecutable(loader::PlanExecutable),
     /// Validate and plan supported chained rebases without mapping or execution.
@@ -97,6 +100,7 @@ impl Command {
             Self::RunMappedImage(command) => command.run(),
             Self::RunLinkedImages(command) => command.run(),
             Self::ProbeDyldEntry(command) => command.run(),
+            Self::Run(command) => command.run(),
             Self::PlanExecutable(command) => command.run(),
             Self::PlanFixups(command) => command.run(),
             Self::DiscoverImages(command) => command.run(),
