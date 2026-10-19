@@ -797,7 +797,19 @@ struct ModelClaim {
     /// Boot-chain facts the claimed node itself carries, as
     /// [`ChildModel::boot_properties`] do for a child.
     boot_properties: &'static [(&'static str, &'static [u8])],
+    /// Whether the claim admits its node; see [`GPU_ADMITTED`].
+    admitted: bool,
 }
+
+/// Whether the GPU (`sgx`, its `gfx-asc` coprocessor and firmware mapper) is
+/// visible. Its firmware reads the initdata the kext names through
+/// kernel-half page tables nobody has populated when the kext sends it
+/// (restore boot ru-s36: the firmware context's TTBR1 root table is empty;
+/// docs/research/agx.md section 3), so who owns the GPU's page tables (the
+/// kext, SPTM, or the shared region the firmware and the AP hand off) must be
+/// specified before the GPU is admitted. Until then the loader hides it as it
+/// hides any unmodeled device.
+pub const GPU_ADMITTED: bool = false;
 /// A child owned by a native coprocessor model and its boot-chain facts.
 /// Properties describe model state, never a guest image or a driver patch.
 pub struct ChildModel {
@@ -855,12 +867,14 @@ const ROLE_MODELS: &[ModelClaim] = &[
         property: ("role", b"ANS2\0"),
         children: &[NATIVE_RTKIT],
         boot_properties: ANS2_TUNABLES,
+        admitted: true,
     },
     ModelClaim {
         compatible: ASC,
         property: ("role", b"SMC\0"),
         children: &[NATIVE_RTKIT],
         boot_properties: &[],
+        admitted: true,
     },
     // The AGX GPU's coprocessor: AGXFirmwareKextRTBuddy::bootFirmware
     // (0x1ae9c88) panics unless its nub reads as iBoot-loaded.
@@ -869,6 +883,7 @@ const ROLE_MODELS: &[ModelClaim] = &[
         property: ("role", b"GFX\0"),
         children: &[NATIVE_RTKIT],
         boot_properties: &[],
+        admitted: GPU_ADMITTED,
     },
     // The SEP: a native model whose ASC wrapper uses `iop-sep,ascwrap-v4` and
     // whose nub is `iop-nub,sep`. Distinguished by its `role = SEP`, so it
@@ -878,12 +893,14 @@ const ROLE_MODELS: &[ModelClaim] = &[
         property: ("role", b"SEP\0"),
         children: &[SEP_NUB_MODEL],
         boot_properties: &[],
+        admitted: true,
     },
     ModelClaim {
         compatible: ASC,
         property: ("role", b"PMP\0"),
         children: &[NATIVE_RTKIT],
         boot_properties: &[],
+        admitted: true,
     },
 ];
 
@@ -896,7 +913,9 @@ pub fn model_children<'a>(
     ROLE_MODELS
         .iter()
         .find(|claim| {
-            claim.compatible == name && property(claim.property.0) == Some(claim.property.1)
+            claim.admitted
+                && claim.compatible == name
+                && property(claim.property.0) == Some(claim.property.1)
         })
         .map_or(&[], |claim| claim.children)
 }
@@ -909,7 +928,9 @@ pub fn model_boot_properties<'a>(
     ROLE_MODELS
         .iter()
         .find(|claim| {
-            claim.compatible == name && property(claim.property.0) == Some(claim.property.1)
+            claim.admitted
+                && claim.compatible == name
+                && property(claim.property.0) == Some(claim.property.1)
         })
         .map_or(&[], |claim| claim.boot_properties)
 }
@@ -938,13 +959,14 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         USB_DRD,
         SPMI,
         PMU,
-        SGX,
-        GFX_MAPPER,
     ]
     .contains(&name)
+        || GPU_ADMITTED && [SGX, GFX_MAPPER].contains(&name)
         || AICS.contains(&name)
         || ROLE_MODELS.iter().any(|claim| {
-            claim.compatible == name && property(claim.property.0) == Some(claim.property.1)
+            claim.admitted
+                && claim.compatible == name
+                && property(claim.property.0) == Some(claim.property.1)
         })
 }
 
@@ -4597,23 +4619,31 @@ mod tests {
     }
 
     #[test]
-    fn the_gfx_role_is_modeled_and_claims_a_native_rtkit_nub() {
+    fn the_gfx_role_claims_a_native_rtkit_nub_and_waits_for_gpu_admission() {
         let gfx_role = |key: &str| (key == "role").then_some(b"GFX\0".as_slice());
-        assert!(models(ASC, gfx_role));
-        assert!(!models(ASC, |key| (key == "role").then_some(b"GFX2\0".as_slice())));
-        let children = model_children(ASC, gfx_role);
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].compatible, RTBUDDY);
+        let claim = ROLE_MODELS
+            .iter()
+            .find(|claim| claim.compatible == ASC && claim.property == ("role", b"GFX\0"))
+            .unwrap();
+        assert_eq!(claim.children.len(), 1);
+        assert_eq!(claim.children[0].compatible, RTBUDDY);
         let preloaded = |name| {
-            children[0]
+            claim.children[0]
                 .boot_properties
                 .iter()
                 .any(|&(key, _)| key == name)
         };
         assert!(preloaded("pre-loaded") && preloaded("running"));
-        // The GPU and its firmware mapper are modeled with it; the SEP and
-        // SMC claims are untouched.
-        assert!(models(SGX, |_| None) && models(GFX_MAPPER, |_| None));
+        // The coprocessor, the GPU and its firmware mapper are admitted
+        // together; the SEP and SMC claims are untouched.
+        assert_eq!(models(ASC, gfx_role), GPU_ADMITTED);
+        assert_eq!(
+            model_children(ASC, gfx_role).len(),
+            usize::from(GPU_ADMITTED)
+        );
+        assert_eq!(models(SGX, |_| None), GPU_ADMITTED);
+        assert_eq!(models(GFX_MAPPER, |_| None), GPU_ADMITTED);
+        assert!(!models(ASC, |key| (key == "role").then_some(b"GFX2\0".as_slice())));
         assert!(models(SEP, |key| (key == "role").then_some(b"SEP\0".as_slice())));
         assert!(models(ASC, |key| (key == "role").then_some(b"SMC\0".as_slice())));
     }

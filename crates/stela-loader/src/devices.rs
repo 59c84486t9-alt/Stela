@@ -203,6 +203,15 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
             }
         }
     }
+    publish_gpu_ttbat(tree, &mut hidden);
+    hidden
+}
+
+/// Publish on each visible GPU the TTBAT the machine hands it off with: its
+/// MMU is rooted at `gpu-region-base`, as the boot stage that starts the GFX
+/// firmware leaves it. Without the published table the kext roots its own,
+/// which the running firmware never walks.
+fn publish_gpu_ttbat(tree: &mut DeviceTree, notes: &mut Vec<String>) {
     let mut gpus = Vec::new();
     visible_paths(&tree.root, "", &|node| named(node, soc::SGX), &mut gpus);
     for path in gpus {
@@ -210,10 +219,6 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
         if node.property(GPTBAT_READY).is_some() {
             continue;
         }
-        // The machine hands the GPU off with its MMU rooted at
-        // gpu-region-base, as the boot stage that starts the GFX firmware
-        // does; without the published table the kext roots its own, which
-        // the running firmware never walks.
         let page = node
             .property(GPU_REGION_BASE)
             .and_then(|p| <[u8; 8]>::try_from(p.value.as_slice()).ok())
@@ -225,10 +230,9 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
                 .expect("empty property");
             node.set_property(TTBAT_BASE, page.to_le_bytes().to_vec())
                 .expect("u32 property");
-            hidden.push(format!("{path} +{GPTBAT_READY}"));
+            notes.push(format!("{path} +{GPTBAT_READY}"));
         }
     }
-    hidden
 }
 
 /// Whether a node under `node` that `test` selects keeps its `compatible`.
@@ -446,13 +450,18 @@ mod tests {
 
     #[test]
     fn a_visible_gpu_gets_the_handed_off_ttbat_published() {
-        let mut sgx = node("sgx", Some(soc::SGX.as_bytes()), vec![]);
-        sgx.set_property(GPU_REGION_BASE, 0x8_0004_4000u64.to_le_bytes().to_vec())
-            .unwrap();
-        let mut tree = DeviceTree {
-            root: node("", None, vec![node("arm-io", None, vec![sgx])]),
+        let gpu = |base: u64| {
+            let mut sgx = node("sgx", Some(soc::SGX.as_bytes()), vec![]);
+            sgx.set_property(GPU_REGION_BASE, base.to_le_bytes().to_vec())
+                .unwrap();
+            DeviceTree {
+                root: node("", None, vec![node("arm-io", None, vec![sgx])]),
+            }
         };
-        assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/sgx +gptbat-ready"]);
+        let mut tree = gpu(0x8_0004_4000);
+        let mut notes = Vec::new();
+        publish_gpu_ttbat(&mut tree, &mut notes);
+        assert_eq!(notes, ["/arm-io/sgx +gptbat-ready"]);
         assert!(
             tree.property("/arm-io/sgx", GPTBAT_READY)
                 .unwrap()
@@ -463,17 +472,20 @@ mod tests {
             tree.property("/arm-io/sgx", TTBAT_BASE).unwrap().value,
             0x20_0011u32.to_le_bytes()
         );
-        // Published once; a hidden GPU or a misaligned base gets nothing.
-        assert_eq!(hide_unmodeled(&mut tree), Vec::<String>::new());
-        let mut misaligned = node("sgx", Some(soc::SGX.as_bytes()), vec![]);
-        misaligned
-            .set_property(GPU_REGION_BASE, 0x8_0004_4100u64.to_le_bytes().to_vec())
-            .unwrap();
-        let mut tree = DeviceTree {
-            root: node("", None, vec![node("arm-io", None, vec![misaligned])]),
-        };
-        hide_unmodeled(&mut tree);
-        assert!(tree.property("/arm-io/sgx", GPTBAT_READY).is_none());
+        // Published once; a misaligned base gets nothing.
+        notes.clear();
+        publish_gpu_ttbat(&mut tree, &mut notes);
+        assert!(notes.is_empty());
+        let mut misaligned = gpu(0x8_0004_4100);
+        publish_gpu_ttbat(&mut misaligned, &mut notes);
+        assert!(misaligned.property("/arm-io/sgx", GPTBAT_READY).is_none());
+        // Until the GPU is admitted the loader hides it and publishes nothing.
+        let mut hidden = gpu(0x8_0004_4000);
+        hide_unmodeled(&mut hidden);
+        assert_eq!(
+            hidden.property("/arm-io/sgx", GPTBAT_READY).is_some(),
+            soc::GPU_ADMITTED
+        );
     }
 
     #[test]
