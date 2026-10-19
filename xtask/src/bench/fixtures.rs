@@ -37,6 +37,10 @@ pub(super) const fn micro_loop(first: u32, second: u32) -> [u32; 8] {
 pub(super) const MICRO_DOUBLEWORD: [u32; 8] = micro_loop(0xf940_0409, 0xf940_080b);
 /// LDRH W9, [X0, #2] and LDRH W11, [X0, #4].
 pub(super) const MICRO_HALFWORD: [u32; 8] = micro_loop(0x7940_0409, 0x7940_080b);
+/// LDR X9, [SP, #8] and LDR X11, [SP, #16]; SP addresses X0's data.
+pub(super) const MICRO_STACK_DOUBLEWORD: [u32; 8] = micro_loop(0xf940_07e9, 0xf940_0beb);
+/// LDP X9, X11, [SP, #8] and a NOP.
+pub(super) const MICRO_STACK_PAIR: [u32; 8] = micro_loop(0xa940_afe9, 0xd503_201f);
 pub(super) const MICRO_ITERATIONS: usize = 1000;
 
 /// The input a workload passes, which decides its expected result.
@@ -69,7 +73,7 @@ pub(super) struct Workload {
     pub(super) input: Input,
 }
 
-pub(super) const WORKLOADS: [Workload; 10] = [
+pub(super) const WORKLOADS: [Workload; 12] = [
     Workload {
         name: "m1n1 memchr, 257-byte miss",
         source: Source::M1n1String,
@@ -134,6 +138,24 @@ pub(super) const WORKLOADS: [Workload; 10] = [
         input: Input::Micro {
             iterations: MICRO_ITERATIONS,
             bytes: 2,
+        },
+    },
+    Workload {
+        name: "micro: LDR X SP offset loop, 1000 iterations",
+        source: Source::Words(&MICRO_STACK_DOUBLEWORD),
+        symbol: "",
+        input: Input::Micro {
+            iterations: MICRO_ITERATIONS,
+            bytes: 8,
+        },
+    },
+    Workload {
+        name: "micro: LDP X SP offset loop, 1000 iterations",
+        source: Source::Words(&MICRO_STACK_PAIR),
+        symbol: "",
+        input: Input::Micro {
+            iterations: MICRO_ITERATIONS,
+            bytes: 8,
         },
     },
 ];
