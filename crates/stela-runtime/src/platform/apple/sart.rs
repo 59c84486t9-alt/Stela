@@ -34,6 +34,14 @@ const ENTRY_BYTES: u64 = 0xc0;
 /// since what 0 does to traffic is not recovered. Other values refuse.
 const THROTTLES: [u64; 3] = [0x8014, 0x801c, 0x8024];
 const SYNCHRONOUS_CHANNEL: u32 = 1;
+/// The channel status words beside the throttles, from the same layout.
+/// SPTM's entry-change quiesce (0x270ca7a0..0x270ca944) zeroes every
+/// throttle, then reads each status once: bits 15:0 set on any channel
+/// fail the change, whatever bits 16 and 24 say; otherwise it restores the
+/// throttle snapshot. DMA here completes within the access that starts it,
+/// so no channel ever has outstanding work and each word reads 0. Bits 16
+/// and 24 are not recovered and only matter while a channel is busy.
+const STATUS: [u64; 3] = [0x8010, 0x8018, 0x8020];
 /// Bus-local offset used to map the separate, DT-placed idle word.
 pub const IDLE: u64 = 0x1000;
 const BASE: u64 = 0x40;
@@ -140,6 +148,9 @@ impl MmioDevice for Sart {
             if let Some(channel) = THROTTLES.iter().position(|&o| o == offset) {
                 return Ok(u64::from(self.throttles[channel]));
             }
+            if STATUS.contains(&offset) {
+                return Ok(0);
+            }
             if offset == IDLE {
                 return Ok(u64::from(self.idle));
             }
@@ -217,6 +228,11 @@ mod tests {
             sart.write(offset, Width::Word, 1, &mut access).unwrap();
             assert!(sart.write(offset, Width::Word, 2, &mut access).is_err());
             assert!(sart.read(offset, Width::Double, &mut access).is_err());
+        }
+        // Status words report no outstanding work and take no writes.
+        for offset in STATUS {
+            assert_eq!(sart.read(offset, Width::Word, &mut access), Ok(0));
+            assert!(sart.write(offset, Width::Word, 0, &mut access).is_err());
         }
         // A word held at 0 stops translated DMA until it is restored.
         for (offset, value) in [(BASE, 1), (SIZE, 1), (0, u64::from(ALLOW))] {
