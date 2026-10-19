@@ -12,7 +12,8 @@
 //! and page hashes are not validated: the signature's trust is the host
 //! file system's. Library validation is AMFI's policy for platform
 //! processes and `CS_REQUIRE_LV`: platform code only, or, for a process
-//! that is not a platform binary, code of its own team.
+//! that is not a platform binary, code Apple signed or code of its own
+//! team.
 use super::codesign::{CS_PLATFORM_BINARY, CS_REQUIRE_LV, CS_RUNTIME};
 use super::{Call, EFAULT, EINVAL, ENOENT, EPERM, Kernel, Outcome};
 use crate::code_signature::{self, CodeSignature};
@@ -232,6 +233,26 @@ fn add_file_signatures(
     Ok(Outcome::value(0))
 }
 
+/// Why library validation refuses `library` in a process, or `None` when
+/// it admits it: a platform process loads platform code only; another
+/// loads platform code, code Apple signed, or code of its own team.
+fn library_refusal(
+    platform_process: bool,
+    own_team: Option<&str>,
+    library: Option<&CodeSignature>,
+) -> Option<&'static str> {
+    match library {
+        None => Some("code signature not found"),
+        Some(library) if library.platform != 0 => None,
+        Some(_) if platform_process => Some("platform binaries may only load platform code"),
+        Some(library) if library.apple_signed => None,
+        Some(library) if own_team.is_some() && library.team_identifier.as_deref() == own_team => {
+            None
+        }
+        Some(_) => Some("mapping process and mapped file have different Team IDs"),
+    }
+}
+
 /// `F_CHECK_LV`: whether the slice at `lv_file_start` may be mapped
 /// executable into this process.
 fn check_library(kernel: &mut Kernel, file: (u64, u64), argument: u64) -> Result<Outcome> {
@@ -258,13 +279,13 @@ fn check_library(kernel: &mut Kernel, file: (u64, u64), argument: u64) -> Result
         .signature
         .as_ref()
         .and_then(|signature| signature.team_identifier.clone());
-    let refusal = match lock(&kernel.process.signatures).find(file, start) {
-        None => Some("code signature not found"),
-        Some(blob) if blob.signature.platform != 0 => None,
-        Some(_) if platform_process => Some("platform binaries may only load platform code"),
-        Some(blob) if own_team.is_some() && blob.signature.team_identifier == own_team => None,
-        Some(_) => Some("mapping process and mapped file have different Team IDs"),
-    };
+    let refusal = library_refusal(
+        platform_process,
+        own_team.as_deref(),
+        lock(&kernel.process.signatures)
+            .find(file, start)
+            .map(|blob| &blob.signature),
+    );
     let Some(refusal) = refusal else {
         return Ok(Outcome::value(0));
     };
@@ -283,24 +304,45 @@ fn check_library(kernel: &mut Kernel, file: (u64, u64), argument: u64) -> Result
 mod tests {
     use super::*;
 
+    fn signature(platform: u8, team: Option<&str>, apple_signed: bool) -> CodeSignature {
+        CodeSignature {
+            flags: 0,
+            platform,
+            hash_type: code_signature::CS_HASHTYPE_SHA256,
+            identifier: None,
+            team_identifier: team.map(Into::into),
+            cdhash: [0; code_signature::CDHASH_BYTES],
+            entitlements: None,
+            der_entitlements: None,
+            start_offset: 0,
+            end_offset: 0x8000,
+            apple_signed,
+        }
+    }
+
+    #[test]
+    fn library_validation_admits_platform_apple_and_own_team_code() {
+        let platform = signature(2, None, true);
+        let apple = signature(0, None, true);
+        let own = signature(0, Some("TEAM"), false);
+        let other = signature(0, Some("OTHER"), false);
+        assert_eq!(library_refusal(false, Some("TEAM"), Some(&platform)), None);
+        assert_eq!(library_refusal(false, Some("TEAM"), Some(&apple)), None);
+        assert_eq!(library_refusal(false, Some("TEAM"), Some(&own)), None);
+        assert!(library_refusal(false, Some("TEAM"), Some(&other)).is_some());
+        assert!(library_refusal(false, None, Some(&signature(0, None, false))).is_some());
+        assert!(library_refusal(true, None, Some(&apple)).is_some());
+        assert_eq!(library_refusal(true, None, Some(&platform)), None);
+        assert!(library_refusal(false, Some("TEAM"), None).is_some());
+    }
+
     #[test]
     fn a_blob_covers_its_signed_range_from_its_slice() {
         let blob = Attached {
             device: 1,
             inode: 2,
             base: 0x4000,
-            signature: CodeSignature {
-                flags: 0,
-                platform: 2,
-                hash_type: code_signature::CS_HASHTYPE_SHA256,
-                identifier: None,
-                team_identifier: None,
-                cdhash: [0; code_signature::CDHASH_BYTES],
-                entitlements: None,
-                der_entitlements: None,
-                start_offset: 0,
-                end_offset: 0x8000,
-            },
+            signature: signature(2, None, false),
         };
         assert!(blob.covers(0x4000));
         assert!(blob.covers(0xbfff));
