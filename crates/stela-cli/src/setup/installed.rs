@@ -76,6 +76,7 @@ impl InstalledDisk {
 /// Which of an installed disk's partitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Role {
+    AppleRegion,
     Nor,
 }
 
@@ -92,6 +93,12 @@ pub(super) fn confirm(
     explicit: Option<&str>,
 ) -> Result<String> {
     let (recorded, serial, guid, what) = match role {
+        Role::AppleRegion => (
+            &disk.apple_region,
+            &disk.apple_region_serial,
+            &disk.apple_region_guid,
+            "Apple region",
+        ),
         Role::Nor => (&disk.nor, &disk.nor_serial, &disk.nor_guid, "NOR partition"),
     };
     let identifier = explicit.unwrap_or(recorded);
@@ -103,6 +110,7 @@ pub(super) fn confirm(
         "{identifier} is not this install's {what} (partition {guid}); its identifier may have \
          changed. Find the partition with that GUID (`diskutil info`) and pass it with {}",
         match role {
+            Role::AppleRegion => "--target",
             Role::Nor => "--nor",
         }
     );

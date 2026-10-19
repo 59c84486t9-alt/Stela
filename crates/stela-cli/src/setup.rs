@@ -28,10 +28,12 @@
 //! interface (`stela_loader::mount_interface`) differs from this `stela`'s is
 //! refused.
 mod bundle;
+mod doctor;
 mod ecid;
 mod host;
 mod installed;
 mod machines;
+mod state;
 mod update;
 mod usb;
 
@@ -170,6 +172,27 @@ pub(crate) struct Setup {
     /// Choose the next boot of the installed disk in its NVRAM.
     #[arg(long, value_enum)]
     next_boot: Option<NextBoot>,
+    /// Report everything about the setup and check it, changing nothing;
+    /// fails when something needs fixing.
+    #[arg(long, visible_alias = "doctor")]
+    status: bool,
+    /// Put back what the setup record says (stela.efi, the entry,
+    /// stela.cfg, the startup choices); with `--ipsw` or `--fetch`, prepare
+    /// the active build's recoveryOS bundles again.
+    #[arg(long)]
+    repair: bool,
+    /// Write a fresh NVRAM to the install's NOR partition (named again with
+    /// `--nor`); its SEP state is kept.
+    #[arg(long)]
+    reset_nvram: bool,
+    /// Copy the install's machine state (NVRAM and SEP state, with its keys)
+    /// to a new private file.
+    #[arg(long, value_name = "FILE")]
+    backup_state: Option<PathBuf>,
+    /// Write a `--backup-state` file back to the install it came from (its
+    /// NOR partition named again with `--nor`).
+    #[arg(long, value_name = "FILE")]
+    restore_state: Option<PathBuf>,
 }
 
 /// What setup writes, recorded on the ESP so `--uninstall` can remove it.
@@ -676,6 +699,11 @@ impl Setup {
             ("--update-os", self.update_os),
             ("--rollback", self.rollback),
             ("--next-boot", self.next_boot.is_some()),
+            ("--status", self.status),
+            ("--repair", self.repair),
+            ("--reset-nvram", self.reset_nvram),
+            ("--backup-state", self.backup_state.is_some()),
+            ("--restore-state", self.restore_state.is_some()),
             ("--target", self.target.is_some()),
             ("--default-install, --remove-install", self.configures()),
         ];
@@ -689,6 +717,15 @@ impl Setup {
             "{} are separate commands; run them one at a time",
             chosen.join(" and ")
         );
+        ensure!(
+            self.nor.is_none()
+                || self.target.is_some()
+                || self.reset_nvram
+                || self.backup_state.is_some()
+                || self.restore_state.is_some(),
+            "--nor names a NOR partition for --target, --reset-nvram, --backup-state or \
+             --restore-state"
+        );
         Ok(())
     }
 
@@ -696,6 +733,24 @@ impl Setup {
         self.check_actions()?;
         if self.uninstall {
             return uninstall(environment, &self.usb, self.dry_run);
+        }
+        if self.status {
+            return doctor::status(environment, &self.usb);
+        }
+        if self.repair {
+            return doctor::repair(environment, &self);
+        }
+        if self.reset_nvram {
+            let record = read_record(environment, &self.usb)?;
+            return state::reset_nvram(environment, &record, &self);
+        }
+        if let Some(path) = &self.backup_state {
+            let record = read_record(environment, &self.usb)?;
+            return state::backup(environment, &record, &self, path);
+        }
+        if let Some(path) = &self.restore_state {
+            let record = read_record(environment, &self.usb)?;
+            return state::restore(environment, &record, &self, path);
         }
         if self.update_stela {
             let record = read_record(environment, &self.usb)?;
@@ -1643,6 +1698,11 @@ mod tests {
             update_os: false,
             rollback: false,
             next_boot: None,
+            status: false,
+            repair: false,
+            reset_nvram: false,
+            backup_state: None,
+            restore_state: None,
         }
     }
 
@@ -2507,5 +2567,181 @@ mod tests {
         assert_eq!(options(), first);
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert_eq!(snapshot(&f.esp), before);
+    }
+
+    #[test]
+    fn status_reports_everything_and_repair_puts_back_what_the_record_says() {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        setup(&environment(&f.host), installed_command(&f)).unwrap();
+        let status = || rerun(&f, |c| c.status = true);
+        let report = status().unwrap();
+        assert!(report.contains("No problems found."), "{report}");
+        assert!(report.contains("Install \"macOS\" (default)"), "{report}");
+        assert!(report.contains("ECID           0x"), "{report}");
+        assert!(report.contains("no installed macOS yet"), "{report}");
+        assert!(report.contains("NVRAM          blank"), "{report}");
+        assert!(report.contains("SEP state      blank"), "{report}");
+        assert!(report.contains("intact"), "{report}");
+        // Status changes nothing.
+        let before = snapshot(&f.esp);
+        status().unwrap();
+        assert_eq!(snapshot(&f.esp), before);
+
+        // A damaged bundle, tool and stela.cfg are found ...
+        let ecid = record(&f).ecid;
+        let ramdisk = bundle_of(&f, ecid).join("ramdisk.img");
+        fs::write(&ramdisk, [0u8; 10]).unwrap();
+        fs::write(f.esp.join(TOOL_PATH), b"MZ damaged").unwrap();
+        fs::write(f.esp.join("EFI/stela/stela.cfg"), b"--system\n").unwrap();
+        let error = status().unwrap_err().to_string();
+        assert!(error.contains("problems:"), "{error}");
+        assert!(error.contains("ramdisk.img"), "{error}");
+        assert!(error.contains("not the version setup installed"), "{error}");
+        assert!(error.contains("stela.cfg differs"), "{error}");
+        // ... and the bundle needs the restore image to be repaired.
+        let error = rerun(&f, |c| c.repair = true).unwrap_err().to_string();
+        assert!(error.contains("--ipsw"), "{error}");
+        let damaged = snapshot(&f.esp);
+        rerun(&f, |c| {
+            c.repair = true;
+            c.ipsw = Some(f.ipsw.clone());
+            c.dry_run = true;
+        })
+        .unwrap();
+        assert_eq!(snapshot(&f.esp), damaged);
+        rerun(&f, |c| {
+            c.repair = true;
+            c.ipsw = Some(f.ipsw.clone());
+        })
+        .unwrap();
+        // The bundle is the machine's own again, with its ECID.
+        assert_eq!(record(&f).ecid, ecid);
+        assert_eq!(
+            fs::read(&ramdisk).unwrap(),
+            vec![ecid.unwrap().0 as u8; 4096]
+        );
+        assert_eq!(snapshot(&f.esp), before);
+        status().unwrap();
+
+        // A machine an older setup made without an ECID gets one.
+        let mut old = record(&f);
+        old.installs[0].ecid = None;
+        old.ecid = None;
+        write_record(&f.esp, &old).unwrap();
+        let error = status().unwrap_err().to_string();
+        assert!(error.contains("has no ECID"), "{error}");
+        rerun(&f, |c| {
+            c.repair = true;
+            c.ipsw = Some(f.ipsw.clone());
+        })
+        .unwrap();
+        let repaired = record(&f);
+        let new = repaired.installs[0].ecid.unwrap();
+        assert_eq!(repaired.ecid, Some(new));
+        assert!(bundle_of(&f, Some(new)).join("bundle.json").is_file());
+        status().unwrap();
+    }
+
+    #[test]
+    fn nvram_resets_and_machine_state_backs_up_and_restores_to_its_own_machine() {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        add_disk(&mut f, true, &[], &[]);
+        setup(&environment(&f.host), installed_command(&f)).unwrap();
+        provision_sep(&f, NOR);
+        rerun(&f, |c| c.next_boot = Some(NextBoot::Recovery)).unwrap();
+        let capacity = stela_runtime::machine::apple::nor::CAPACITY;
+        let sep = |f: &Fixture| partition_bytes(f, NOR)[capacity..].to_vec();
+        let sep_before = sep(&f);
+
+        // A reset needs the partition named again, and keeps the SEP state.
+        let error = rerun(&f, |c| c.reset_nvram = true).unwrap_err().to_string();
+        assert!(error.contains("--nor"), "{error}");
+        let error = rerun(&f, |c| {
+            c.reset_nvram = true;
+            c.nor = Some(NOR2.into());
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not this install's NOR"), "{error}");
+        let state = partition_bytes(&f, NOR);
+        rerun(&f, |c| {
+            c.reset_nvram = true;
+            c.nor = Some(NOR.into());
+            c.dry_run = true;
+        })
+        .unwrap();
+        assert_eq!(partition_bytes(&f, NOR), state);
+        // Back up before the reset.
+        let file = f._dir.path().join("machine.state");
+        rerun(&f, |c| c.backup_state = Some(file.clone())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            rerun(&f, |c| c.backup_state = Some(file.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("exists")
+        );
+        rerun(&f, |c| {
+            c.reset_nvram = true;
+            c.nor = Some(NOR.into());
+        })
+        .unwrap();
+        assert_eq!(
+            stela_loader::boot_selection::select(&nvram(&f))
+                .unwrap()
+                .target,
+            stela_loader::boot_selection::Target::MacOs { safe: false }
+        );
+        assert_eq!(sep(&f), sep_before);
+        let status = rerun(&f, |c| c.status = true).unwrap();
+        assert!(status.contains("SEP state      provisioned"), "{status}");
+        assert!(status.contains("next boot      macOS"), "{status}");
+
+        // The backup restores only to its own machine.
+        let mut second = installed_command(&f);
+        second.target = Some(REGION2.into());
+        second.nor = Some(NOR2.into());
+        second.install = Some("Other".into());
+        second.model = None;
+        second.dispatch(&environment(&f.host)).unwrap();
+        let error = rerun(&f, |c| {
+            c.restore_state = Some(file.clone());
+            c.install = Some("Other".into());
+            c.nor = Some(NOR2.into());
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("restored only to that machine"), "{error}");
+        let damaged = f._dir.path().join("damaged.state");
+        let mut bytes = fs::read(&file).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&damaged, bytes).unwrap();
+        let error = rerun(&f, |c| {
+            c.restore_state = Some(damaged.clone());
+            c.nor = Some(NOR.into());
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("damaged"), "{error}");
+        rerun(&f, |c| {
+            c.restore_state = Some(file.clone());
+            c.nor = Some(NOR.into());
+        })
+        .unwrap();
+        assert_eq!(partition_bytes(&f, NOR), state);
+        assert_eq!(
+            stela_loader::boot_selection::select(&nvram(&f))
+                .unwrap()
+                .target,
+            stela_loader::boot_selection::Target::SystemRecovery
+        );
+        // --nor alone names nothing to do.
+        assert!(rerun(&f, |c| c.nor = Some(NOR.into())).is_err());
     }
 }

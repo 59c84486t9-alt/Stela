@@ -422,6 +422,14 @@ pub(crate) fn add_mount(
 /// Paths relative to the ESP that `install` writes, for reports.
 pub(crate) const INSTALLED: [&str; 4] = ["EFI/OC/Tools/Stela.efi", OPTIONS, SOURCE, BACKUP];
 
+/// Whether `config.plist` holds Stela's entry exactly once, as `add_mount`
+/// writes it.
+pub(crate) fn entry_installed(esp: &Path) -> Result<bool> {
+    let config = Config::read(esp)?;
+    let (edited, _, replaced) = config.with_entry()?;
+    Ok(replaced == 1 && edited == config.bytes)
+}
+
 /// Check that `uninstall` would understand this ESP, without changing it.
 pub(crate) fn check_config(esp: &Path) -> Result<()> {
     Config::read(esp).map(|_| ())
