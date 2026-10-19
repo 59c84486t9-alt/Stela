@@ -84,6 +84,16 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         "_mach_make_memory_entry",
         Some("ranges in whole guest pages"),
     ),
+    (
+        Object::Host,
+        "host_statistics_from_user",
+        Some("the x86 host's load and VM statistics, its page counts in guest pages"),
+    ),
+    (
+        Object::Host,
+        "host_statistics64_from_user",
+        Some("the x86 host's load and VM statistics, its page counts in guest pages"),
+    ),
     (Object::Host, "host_get_special_port", Some("the host port")),
     (
         Object::Host,
@@ -172,6 +182,21 @@ pub(super) fn serve(
         // registry, whose serialized properties have one layout in both
         // ABIs but describe the x86 machine.
         (Object::Host, "host_get_io_main", false) => Reply::Forward,
+        // `flavor`, `host_info_outCnt`.
+        (
+            Object::Host,
+            routine @ ("host_statistics_from_user" | "host_statistics64_from_user"),
+            false,
+        ) => {
+            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            host_statistics(
+                routine == "host_statistics64_from_user",
+                flavor,
+                count.min(HOST_INFO_MAX),
+            )
+        }
         (Object::Host, "host_get_special_port", false) => {
             let (Some(node), Some(which)) = (request.word(8), request.word(12)) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
@@ -375,6 +400,92 @@ fn vm_map(request: &Request) -> Result<Reply> {
     })
 }
 
+/// `osfmk/mach/host_info.h` statistics flavors.
+const HOST_VM_INFO: u32 = 2;
+const HOST_VM_INFO64: u32 = 4;
+/// The words of `vm_statistics` and `vm_statistics64` that count resident
+/// or compressed pages (free, active, inactive, wired, purgeable,
+/// speculative; for the 64-bit form also the compressor's, throttled,
+/// external and internal pages and, as 64-bit pairs, the uncompressed
+/// pages in the compressor and the swapped pages of rev2). Event counters
+/// stay as the host counts them.
+const VM_INFO_PAGE_WORDS: [usize; 6] = [0, 1, 2, 3, 12, 14];
+const VM_INFO64_PAGE_WORDS: [usize; 10] = [0, 1, 2, 3, 22, 23, 32, 33, 34, 35];
+const VM_INFO64_PAGE_PAIRS: [usize; 2] = [36, 38];
+/// Rev3's tag storage and tagged-page statistics, from this word on: the
+/// M2 has no memory tagging, so they are zero.
+const VM_INFO64_TAGGING: usize = 40;
+/// Host pages per guest page.
+const HOST_PAGES_PER_PAGE: u32 = (memory::PAGE_BYTES / (memory::HOST_PAGE_MASK + 1)) as u32;
+
+/// `host_statistics` and `host_statistics64` on the host port: the x86
+/// host's own answer, the same layout in both ABIs, with its page counts
+/// restated in the guest's 16 KiB pages, as an arm64 kernel counts them.
+fn host_statistics(sixty_four: bool, flavor: u32, count: u32) -> Reply {
+    let mut words = [0i32; HOST_INFO_MAX as usize];
+    let mut filled = count;
+    // SAFETY: `words` holds `count` integers, at most HOST_INFO_MAX; the
+    // host port right is released after the call.
+    unsafe extern "C" {
+        static mach_task_self_: u32;
+        fn mach_host_self() -> u32;
+        fn host_statistics(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        fn mach_port_deallocate(task: u32, name: u32) -> i32;
+    }
+    let status = unsafe {
+        let host = mach_host_self();
+        let status = if sixty_four {
+            host_statistics64(host, flavor as i32, words.as_mut_ptr(), &mut filled)
+        } else {
+            host_statistics(host, flavor as i32, words.as_mut_ptr(), &mut filled)
+        };
+        mach_port_deallocate(mach_task_self_, host);
+        status
+    };
+    if status != 0 {
+        return Reply::Failure(status as u32);
+    }
+    let mut words: Vec<u32> = words[..filled.min(HOST_INFO_MAX) as usize]
+        .iter()
+        .map(|&word| word as u32)
+        .collect();
+    restate_pages(&mut words, flavor);
+    let mut body = (words.len() as u32).to_le_bytes().to_vec();
+    for word in words {
+        body.extend(word.to_le_bytes());
+    }
+    Reply::Success(body)
+}
+
+/// Restate the page counts of a `flavor` statistics reply in guest pages.
+fn restate_pages(words: &mut [u32], flavor: u32) {
+    let pages: &[usize] = match flavor {
+        HOST_VM_INFO => &VM_INFO_PAGE_WORDS,
+        HOST_VM_INFO64 => &VM_INFO64_PAGE_WORDS,
+        _ => return,
+    };
+    for &index in pages {
+        if let Some(word) = words.get_mut(index) {
+            *word /= HOST_PAGES_PER_PAGE;
+        }
+    }
+    if flavor != HOST_VM_INFO64 {
+        return;
+    }
+    for index in VM_INFO64_PAGE_PAIRS {
+        if let Some(pair) = words.get_mut(index..index + 2) {
+            let pages =
+                (u64::from(pair[0]) | u64::from(pair[1]) << 32) / u64::from(HOST_PAGES_PER_PAGE);
+            pair[0] = pages as u32;
+            pair[1] = (pages >> 32) as u32;
+        }
+    }
+    if let Some(tagging) = words.get_mut(VM_INFO64_TAGGING..) {
+        tagging.fill(0);
+    }
+}
+
 /// `host_info_t`'s MIG bound (`array[*:68] of integer_t`).
 const HOST_INFO_MAX: u32 = 68;
 const HOST_BASIC_INFO: u32 = 1;
@@ -492,6 +603,29 @@ mod tests {
             .iter()
             .map(|word| u32::from_le_bytes(*word))
             .collect()
+    }
+
+    #[test]
+    fn vm_statistics_count_guest_pages() {
+        let mut vm = vec![400u32; 15];
+        restate_pages(&mut vm, HOST_VM_INFO);
+        assert_eq!(&vm[..5], &[100, 100, 100, 100, 400]);
+        assert_eq!((vm[12], vm[13], vm[14]), (100, 400, 100));
+        let mut vm64 = vec![8u32; 62];
+        vm64[36] = 0;
+        vm64[37] = 4;
+        restate_pages(&mut vm64, HOST_VM_INFO64);
+        assert_eq!(&vm64[..5], &[2, 2, 2, 2, 8]);
+        assert_eq!(&vm64[32..42], &[2, 2, 2, 2, 0, 1, 2, 2, 0, 0]);
+        assert!(vm64[40..].iter().all(|&word| word == 0));
+        let mut load = vec![400u32; 6];
+        restate_pages(&mut load, 1);
+        assert_eq!(load, [400; 6]);
+        // The host answers the load and VM flavors.
+        let Reply::Success(body) = host_statistics(true, HOST_VM_INFO64, HOST_INFO_MAX) else {
+            panic!("host_statistics64 failed");
+        };
+        assert!(u32::from_le_bytes(body[..4].try_into().unwrap()) >= 38);
     }
 
     #[test]
