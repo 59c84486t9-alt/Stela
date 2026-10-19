@@ -91,6 +91,7 @@ mod pointer_checks;
 mod prefetch;
 mod region;
 mod register_offset;
+pub mod register_read;
 mod scalable;
 mod scalable_matrix;
 mod simd;

@@ -48,7 +48,7 @@ use stela_compiler::{
     x86_64::{
         MemoryChecks,
         chain::{self, ChainControl},
-        pointer, zero_block,
+        pointer, register_read, zero_block,
     },
 };
 
@@ -677,6 +677,20 @@ struct Variant {
     zero_block: Option<u16>,
 }
 
+/// Xt of `word` at `pc` if it is MRS Xt, TPIDR_EL1.
+fn thread_pointer_read(pc: u64, word: u32) -> Option<u8> {
+    let instruction = block::decode_system_mode_instruction(GuestAddress(pc), word).ok()??;
+    match instruction.operation {
+        SystemOperation::Register(access)
+            if access.direction() == Direction::Read
+                && access.encoding() == registers::encodings::TPIDR_EL1 =>
+        {
+            Some(access.rt())
+        }
+        _ => None,
+    }
+}
+
 /// Whether `word` at `pc` is DC ZVA.
 fn zeroes_block(pc: u64, word: u32) -> bool {
     block::decode_system_mode_instruction(GuestAddress(pc), word)
@@ -763,6 +777,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// key enabled and untrapped under the current memo, and again whenever
     /// derived state may have changed.
     pointer_tags: alloc::boxed::Box<[u64; 4]>,
+    /// TPIDR_EL1 for native MRS reads (`x86_64::register_read`): readable
+    /// once an MRS exit finds the read plain at the current EL
+    /// (`system::thread_pointer_readable`), until derived state may change.
+    thread_pointer: alloc::boxed::Box<register_read::Cell>,
     /// The chip's `Chip::admit`, indexed.
     admit_table: AdmitTable,
     /// The watched pages the host keeps unmapped.
@@ -861,6 +879,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pointer_inputs_seen: Vec::new(),
             pointer_generations: 0,
             pointer_tags: alloc::boxed::Box::new([0; 4]),
+            thread_pointer: alloc::boxed::Box::default(),
             admit_table,
             watch: Watch::default(),
             current: 0,
@@ -909,6 +928,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.debug = None;
         self.pointer = None;
         *self.pointer_tags = [0; 4];
+        self.thread_pointer.readable = 0;
         self.device_lines = None;
     }
 
@@ -2025,6 +2045,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 terminal_pc,
                 terminal,
             ));
+            successors.extend(self.complete_thread_pointer_natively(
+                code,
+                &compiled.native.x86_64_code,
+                terminal_pc,
+                terminal,
+            ));
         }
         self.blocks.push(Block {
             pc,
@@ -2074,6 +2100,37 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let memo = self.pointer_memo.as_ptr() as u64;
         let tags = self.pointer_tags.as_ptr() as u64;
         let thunk = pointer::thunk(form, GuestAddress(pc), memo, tags);
+        let installed = self.host.install(&thunk.code).ok()?;
+        let site = code.0 as u64 + site as u64;
+        let jump = chain::jump(site, installed.0 as u64)?;
+        self.host.patch(NativeCode(site as usize), &jump);
+        thunk.next.map(|next| Successor {
+            site: installed.0 as u64 + next as u64,
+            target: GuestAddress(pc + INSTRUCTION),
+            kind: ExitKind::Fallthrough,
+        })
+    }
+
+    /// Redirect the System exit ending a block's `native` code, installed at
+    /// `code`, through a thunk that completes `word` at `pc`, if it is MRS
+    /// TPIDR_EL1, from [`Self::thread_pointer`] while it is readable
+    /// (`x86_64::register_read`); the thunk's direct exit to the next
+    /// instruction.
+    fn complete_thread_pointer_natively(
+        &mut self,
+        code: NativeCode,
+        native: &[u8],
+        pc: u64,
+        word: u32,
+    ) -> Option<Successor> {
+        let exit = chain::direct_exit(GuestAddress(pc), ExitKind::System);
+        let site = native.len().checked_sub(chain::DIRECT_EXIT_BYTES)?;
+        if native[site..] != exit {
+            return None;
+        }
+        let rt = thread_pointer_read(pc, word)?;
+        let cell = &*self.thread_pointer as *const register_read::Cell as u64;
+        let thunk = register_read::thunk(GuestAddress(pc), rt, cell);
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
@@ -3760,7 +3817,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(outcome) = vgic {
             return self.register_outcome(word, Some(access), outcome);
         }
+        // Whether the access is a plain TPIDR_EL1 read, judged before it
+        // runs: one that is UNDEFINED or traps changes the EL.
+        let thread_pointer = encoding == registers::encodings::TPIDR_EL1
+            && access.direction() == Direction::Read
+            && system::thread_pointer_readable(&self.cpu);
         if let Some(step) = self.system_access(word, access) {
+            if thread_pointer && step.is_ok() {
+                *self.thread_pointer = register_read::Cell {
+                    readable: 1,
+                    value: self.cpu.read(SystemRegister::TPIDR_EL1),
+                };
+            }
             return step;
         }
         if let Some(outcome) = self.board_register(access) {
@@ -5941,6 +6009,64 @@ mod tests {
         assert_eq!(machine.pointer_tags[usize::from(ib)], open);
         machine.derived_changed();
         assert_eq!(*machine.pointer_tags, [0; 4]);
+    }
+
+    /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading
+    /// the engine's cell takes over, chaining on to the next instruction;
+    /// the cell opens on a plain read and closes on any derived change.
+    #[test]
+    fn tpidr_el1_reads_complete_natively_from_the_open_cell() {
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        const MRS: u32 = 0xd538_d088; // mrs x8, tpidr_el1
+        let mut machine = machine(&[ADD, MRS, ADD]);
+        let base = machine.cpu.pc;
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: base + 8,
+            kind: ExitKind::Fallthrough as u64,
+        }];
+        machine.step().unwrap();
+        let block = &machine.blocks[0];
+        let code = &machine.host.installed[block.code.0 - 1];
+        let cell = &*machine.thread_pointer as *const register_read::Cell as u64;
+        let thunk = register_read::thunk(GuestAddress(base + 4), 8, cell);
+        let installed = machine.host.installed.len();
+        assert_eq!(machine.host.installed[installed - 1], thunk.code);
+        let site = block.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
+        let jump = chain::jump(site as u64, installed as u64).unwrap().to_vec();
+        assert_eq!(machine.host.patches, [(site, jump)]);
+        assert_eq!(
+            block.successors,
+            [Successor {
+                site: (installed + thunk.next.unwrap()) as u64,
+                target: GuestAddress(base + 8),
+                kind: ExitKind::Fallthrough,
+            }]
+        );
+        // Other System reads keep their exit.
+        let mut other = super::tests::machine(&[ADD, 0xd538_1008]); // mrs x8, sctlr_el1
+        other.host.exits = machine.host.exits.clone();
+        other.host.exits.push(NativeExit::Exit {
+            next_pc: base + 8,
+            kind: ExitKind::Fallthrough as u64,
+        });
+        other.step().unwrap();
+        assert!(other.host.patches.is_empty() && other.blocks[0].successors.is_empty());
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TPIDR_EL1, 0, 0x5000);
+        machine.cpu.pc = base + 4;
+        machine.system_instruction(MRS).unwrap();
+        assert_eq!(machine.cpu.state.x[8], 0x5000);
+        assert_eq!(
+            *machine.thread_pointer,
+            register_read::Cell {
+                readable: 1,
+                value: 0x5000
+            }
+        );
+        machine.derived_changed();
+        assert_eq!(machine.thread_pointer.readable, 0);
     }
 
     /// Where DC ZVA cannot trap, a block ending in it zeroes natively and

@@ -198,6 +198,26 @@ const DCZID_BS: u64 = 0xf;
 /// HFGITR_EL2.DCZVA (FEAT_FGT).
 const HFGITR_DCZVA: u32 = 11;
 
+/// HFGRTR_EL2.TPIDR_EL1 (FEAT_FGT).
+const HFGRTR_TPIDR_EL1: u32 = 33;
+
+/// Whether MRS TPIDR_EL1 at the current EL only reads the register: the
+/// generated `MRS TPIDR_EL1` accessor is UNDEFINED at EL0, traps at EL1
+/// under HFGRTR_EL2.TPIDR_EL1 with FEAT_FGT, and reads TPIDR_EL1 itself
+/// otherwise, at EL2 too (HCR_EL2.E2H redirects no TPIDR_EL1 access).
+/// Native code completes the read only then (`x86_64::register_read`).
+pub(super) fn thread_pointer_readable(cpu: &Cpu) -> bool {
+    match cpu.pstate.el {
+        1 => match cpu.registers.chip().implemented(Feature::FEAT_FGT) {
+            Ok(true) => cpu.field(Register::HFGRTR_EL2, HFGRTR_TPIDR_EL1, 1) == 0,
+            Ok(false) => true,
+            Err(_) => false,
+        },
+        2 => true,
+        _ => false,
+    }
+}
+
 /// The DC ZVA block, in bytes, while DC ZVA at the current EL completes by
 /// zeroing it: the generated `DC ZVA` accessor neither traps (SCTLR_EL1.DZE
 /// and HCR_EL2.TDZ, and HFGITR_EL2.DCZVA with FEAT_FGT, outside the host at
@@ -1832,6 +1852,41 @@ mod tests {
         });
         // DZE, TDZ and, with FEAT_FGT, HFGITR_EL2.DCZVA leave some contexts.
         assert!(zeroes > 0 && zeroes < 5 * 32, "{zeroes}");
+    }
+
+    /// MRS TPIDR_EL1 completes natively in exactly the contexts where the
+    /// generated accessor reads the register with no trap or UNDEFINED, and
+    /// only such a read opens the cell native code reads.
+    #[test]
+    fn native_tpidr_el1_reads_are_exactly_the_plain_reads() {
+        const TPIDR_EL1: Encoding = Encoding::new(3, 0, 13, 0, 4);
+        const THREAD: u64 = 0xffff_fe00_1234_5000;
+        let mut reads = 0;
+        native_completion_contexts(|machine, pstate, case| {
+            machine.cpu.registers.set(Register::TPIDR_EL1, 0, THREAD);
+            machine.cpu.state.x[1] = 0;
+            let readable = super::thread_pointer_readable(&machine.cpu);
+            machine
+                .system_instruction(access(true, TPIDR_EL1, 1))
+                .unwrap();
+            let read = (machine.cpu.pstate.el, machine.cpu.pc) == (pstate.el, BASE + 4)
+                && machine.cpu.state.x[1] == THREAD;
+            assert_eq!(readable, read, "{case}");
+            assert_eq!(
+                *machine.thread_pointer,
+                stela_compiler::x86_64::register_read::Cell {
+                    readable: u64::from(read),
+                    value: if read { THREAD } else { 0 },
+                },
+                "{case}"
+            );
+            reads += usize::from(read);
+            *machine.thread_pointer = Default::default();
+        });
+        // UNDEFINED at EL0; at EL1 HFGRTR_EL2.TPIDR_EL1 traps with FEAT_FGT.
+        let machine = machine(&[]);
+        let fine_grained = Feature::FEAT_FGT.on(machine.cpu.registers.chip());
+        assert_eq!(reads, if fine_grained { 16 + 64 } else { 32 + 64 });
     }
 
     #[test]

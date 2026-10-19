@@ -99,6 +99,7 @@ pub mod encodings {
         DCZID_EL0 = 3, 3, 0, 0, 7;
         FPCR = 3, 3, 4, 4, 0;
         FPSR = 3, 3, 4, 4, 1;
+        TPIDR_EL1 = 3, 0, 13, 0, 4;
         // Apple SPRR and GXF (m1n1 `cpu_regs.h`; Asahi "SPRR and GXF").
         SPRR_CONFIG_EL1 = 3, 6, 15, 1, 0;
         GXF_CONFIG_EL1 = 3, 6, 15, 1, 2;
