@@ -63,13 +63,16 @@
 //!   `PEHaltRestart(kPEHaltCPU)` and panics "SMCFW failed to handle
 //!   suspend/lpem request" a second later. `lpem` (low-power emergency
 //!   mode, on battery systems) refuses: the board has no battery.
-//! - `slpa` and `hiba` put the SoC to sleep or into hibernation: the key
+//! - `slpa` puts the SoC to sleep and `hiba` into hibernation: the key
 //!   endpoint writes one itself when its power state drops to 0
 //!   (`AppleSMCKeysEndpoint::_powerStateActionGated` file 0x2da492c,
-//!   `hiba` when `_getHibernateState` reports hibernation). Both refuse:
-//!   the SoC's sleep and its wake through the SMC are not modeled, and
-//!   accepting the command would leave the AP waiting for a wake no model
-//!   can deliver.
+//!   `hiba` when the root domain's `IOHibernateState` is 1, hibernating)
+//!   and then holds every other key command until its power state rises
+//!   again. `slpa` makes the sleep pending: the SoC sleeps once every PE
+//!   has powered down (`machine::apple`'s SoC sleep), and only a modeled
+//!   wake source wakes it ([`Smc::wake`]). `waka` with the sleep still
+//!   pending cancels it. `hiba` refuses: waking from hibernation needs the
+//!   boot stage to restore the hibernation image, which Stela's does not.
 //!
 //! AppleSMCPMU only takes the system-event path when `MBSE` reports a
 //! 4-byte value (`AppleSMCPMU::start` file 0x2d9bfd8). Any other command
@@ -90,6 +93,20 @@
 //! by none of the sources and has no recorded shutdown, so both read zero.
 //! `MEST`, the time of that shutdown, is absent: the driver then claims the
 //! shutdown event without a time.
+//!
+//! Wake. On its platform wake action AppleSMCPMU raises the key endpoint's
+//! power state, which reads `MBSE` (4 bytes) and unquiesces; then it reads
+//! `MBSW` and claims each set bit as a wake event named by `smc-pmu`'s
+//! `event_name-bitN` (`nameWakeReason` file 0x2da12ec), and writes `waka`
+//! (`AppleSMCPMU::callPlatformFunction` file 0x2d9d838..0x2d9de20). A wake
+//! sets `MBSW` to the bit of its source as those names give it (`pwrbtn`,
+//! `rtc`; none when the tree names none). `MBSE` stays write-only: its
+//! read fails with NOT_READABLE, which the endpoint logs as its result
+//! before unquiescing, and AppleSMCPMU, without `smc-pmu-debug-wake`, goes
+//! on to `MBSW` either way. The power button press that wakes the SoC is
+//! its wake source and not also a button event, nor is its release
+//! (inferred: otherwise one press would both wake the machine and ask it
+//! to shut down).
 //!
 //! The table holds those keys, `#KEY`, the `NTAP` notification-enable
 //! flag, and the PMU GPIO keys the DeviceTree's `pKW4` platform functions
@@ -258,6 +275,30 @@ fn own_keys() -> [(u32, Key); 6] {
     ]
 }
 
+/// The `MBSW` bits of the wake sources the board models, from `smc-pmu`'s
+/// `event_name-bitN` names `pwrbtn` and `rtc`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WakeBits {
+    pub power_button: Option<u8>,
+    pub rtc: Option<u8>,
+}
+
+/// What woke the SoC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeSource {
+    PowerButton,
+    /// The PMU's RTC alarm.
+    Rtc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sleep {
+    Awake,
+    /// `slpa` received; the SoC sleeps once every PE is down.
+    Pending,
+    Asleep,
+}
+
 pub struct Smc {
     sram: Sram,
     sram_address: u64,
@@ -267,6 +308,10 @@ pub struct Smc {
     /// The last notice `MBSE` received.
     notice: Option<u32>,
     transition: Option<TransitionRequest>,
+    sleep: Sleep,
+    wake_bits: WakeBits,
+    /// The power button woke the SoC; its release is not reported.
+    waking_press: bool,
 }
 
 impl Smc {
@@ -301,7 +346,49 @@ impl Smc {
             events: VecDeque::new(),
             notice: None,
             transition: None,
+            sleep: Sleep::Awake,
+            wake_bits: WakeBits::default(),
+            waking_press: false,
         })
+    }
+
+    /// The `MBSW` bits the board's DeviceTree names for its wake sources.
+    pub fn with_wake_bits(mut self, bits: WakeBits) -> Self {
+        self.wake_bits = bits;
+        self
+    }
+
+    /// The AP asked for sleep (`slpa`) and has not yet gone down.
+    pub fn sleep_pending(&self) -> bool {
+        self.sleep == Sleep::Pending
+    }
+
+    /// Every PE is down after `slpa`: the SoC sleeps.
+    pub fn enter_sleep(&mut self) {
+        debug_assert_eq!(self.sleep, Sleep::Pending);
+        self.sleep = Sleep::Asleep;
+    }
+
+    pub fn asleep(&self) -> bool {
+        self.sleep == Sleep::Asleep
+    }
+
+    /// The SoC wakes from `source`, which `MBSW` then reports.
+    pub fn wake(&mut self, source: WakeSource) {
+        debug_assert_eq!(self.sleep, Sleep::Asleep);
+        self.sleep = Sleep::Awake;
+        let bit = match source {
+            WakeSource::PowerButton => {
+                self.waking_press = true;
+                self.wake_bits.power_button
+            }
+            WakeSource::Rtc => self.wake_bits.rtc,
+        };
+        let sources = bit.map_or(0, |bit| 1u64 << bit);
+        self.keys
+            .get_mut(&WAKE_SOURCES)
+            .expect("MBSW is one of the SMC's own keys")
+            .value = sources.to_le_bytes().to_vec();
     }
 
     /// Whether the AP has enabled unsolicited notifications.
@@ -321,15 +408,24 @@ impl Smc {
     }
 
     /// The power button went down or up: `bHLD` follows it and the AP is
-    /// sent the HID button event.
-    pub fn power_button(&mut self, pressed: bool) {
+    /// sent the HID button event. While the SoC sleeps nothing is sent, and
+    /// a press answers true: it would wake the SoC ([`Smc::wake`]). The
+    /// release of a press that woke it is not sent either.
+    pub fn power_button(&mut self, pressed: bool) -> bool {
         let state = u8::from(pressed);
         self.keys
             .get_mut(&BUTTON_HELD)
             .expect("bHLD is one of the SMC's own keys")
             .value = vec![state];
+        if self.asleep() {
+            return pressed;
+        }
+        if !pressed && core::mem::take(&mut self.waking_press) {
+            return false;
+        }
         self.events
             .push_back(event(HID, HID_BUTTON, POWER_BUTTON, state));
+        false
     }
 
     fn reply(request: u64, result: u8, size: usize, data: u32) -> u64 {
@@ -399,9 +495,16 @@ impl Smc {
             reason,
         };
         match command {
-            WILL_POWER_OFF | WILL_RESTART | WILL_SLEEP | WAKE | PANIC_BEGIN | PANIC_END => {
+            WILL_POWER_OFF | WILL_RESTART | WILL_SLEEP | PANIC_BEGIN | PANIC_END => {
                 self.notice = Some(command);
             }
+            WAKE => {
+                self.notice = Some(command);
+                if self.sleep == Sleep::Pending {
+                    self.sleep = Sleep::Awake;
+                }
+            }
+            SLEEP => self.sleep = Sleep::Pending,
             RESTART | SYSTEM_RESET => {
                 self.transition = Some(transition(
                     Transition::Restart,
@@ -417,8 +520,10 @@ impl Smc {
             LOW_POWER_EMERGENCY => {
                 return Err("SMC low-power emergency mode needs a battery the board does not have");
             }
-            SLEEP | HIBERNATE => {
-                return Err("SMC sleep needs the SoC sleep and wake path, which is not modeled");
+            HIBERNATE => {
+                return Err(
+                    "SMC hibernation needs the boot stage to restore the hibernation image, which Stela's does not",
+                );
             }
             _ => return Err("SMC MBSE command is not modeled"),
         }
@@ -741,8 +846,8 @@ mod tests {
             smc.take_transition().unwrap().transition,
             Transition::PowerOff
         );
-        // Low-power emergency mode and unknown commands refuse.
-        for command in [b"lpem", b"slpa", b"hiba", b"zzzz"] {
+        // Low-power emergency mode, hibernation and unknown commands refuse.
+        for command in [b"lpem", b"hiba", b"zzzz"] {
             sram.put(&code(command).to_le_bytes());
             assert!(
                 smc.receive(request(WRITE, 0, 4, 0, code(b"MBSE")), &mut Vec::new())
@@ -753,6 +858,54 @@ mod tests {
             send(&mut smc, request(READ, 0, 4, 0, code(b"MBSE"))) & 0xff,
             u64::from(NOT_READABLE)
         );
+    }
+
+    #[test]
+    fn sleep_waits_for_the_ap_and_a_wake_reports_its_source_in_mbsw() {
+        let (smc, sram) = smc();
+        let mut smc = smc.with_wake_bits(WakeBits {
+            power_button: Some(0),
+            rtc: Some(48),
+        });
+        write_key(&mut smc, &sram, b"NTAP", &[1]);
+        // `slpa` makes the sleep pending; `waka` before the SoC slept
+        // cancels it.
+        write_key(&mut smc, &sram, b"MBSE", &code(b"slpa").to_le_bytes());
+        assert!(smc.sleep_pending() && !smc.asleep());
+        write_key(&mut smc, &sram, b"MBSE", &code(b"waka").to_le_bytes());
+        assert!(!smc.sleep_pending());
+        // Asleep, a press reports nothing and asks for the wake.
+        write_key(&mut smc, &sram, b"MBSE", &code(b"slpa").to_le_bytes());
+        smc.enter_sleep();
+        assert!(smc.asleep());
+        assert!(!smc.power_button(false));
+        assert!(smc.power_button(true));
+        smc.wake(WakeSource::PowerButton);
+        assert!(!smc.asleep());
+        send(&mut smc, request(READ, 0, 8, 0, code(b"MBSW")));
+        assert_eq!(sram.get(8), 1u64.to_le_bytes());
+        // Its release is not reported; the next press and release are.
+        assert!(!smc.power_button(false));
+        let mut outbox = Vec::new();
+        smc.poll(&mut outbox).unwrap();
+        assert!(outbox.is_empty());
+        smc.power_button(true);
+        smc.power_button(false);
+        smc.poll(&mut outbox).unwrap();
+        assert_eq!(outbox, [0x18 | 0x7201_0101 << 32, 0x18 | 0x7201_0100 << 32]);
+        // An RTC wake reports bit 48 alone.
+        write_key(&mut smc, &sram, b"MBSE", &code(b"slpa").to_le_bytes());
+        smc.enter_sleep();
+        smc.wake(WakeSource::Rtc);
+        send(&mut smc, request(READ, 0, 8, 0, code(b"MBSW")));
+        assert_eq!(sram.get(8), (1u64 << 48).to_le_bytes());
+        // Without a named bit a wake reports no source.
+        let (mut smc, sram) = self::smc();
+        write_key(&mut smc, &sram, b"MBSE", &code(b"slpa").to_le_bytes());
+        smc.enter_sleep();
+        smc.wake(WakeSource::Rtc);
+        send(&mut smc, request(READ, 0, 8, 0, code(b"MBSW")));
+        assert_eq!(sram.get(8), [0; 8]);
     }
 
     #[test]

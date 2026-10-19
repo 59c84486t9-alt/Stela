@@ -71,6 +71,9 @@ pub use crate::platform::usb::{
 use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
+mod sleep;
+pub use sleep::PowerLog;
+
 pub use crate::platform::apple::{
     aic::{AIC2_IRQ_CFG, AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
@@ -126,6 +129,8 @@ pub struct AppleDevices {
     typec_ports: Vec<(u32, typec::Port)>,
     pmgr: Option<DeviceId>,
     dart_power: Vec<DartPower>,
+    /// The SoC's sleep and wake (`sleep`).
+    sleep: sleep::SocSleep,
 }
 
 const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
@@ -338,6 +343,7 @@ impl AppleDevices {
             typec_ports: Vec::new(),
             pmgr: None,
             dart_power: Vec::new(),
+            sleep: sleep::SocSleep::default(),
         }
     }
 
@@ -749,7 +755,9 @@ impl AppleDevices {
             .iter()
             .map(|&name| (name, smc::Key::gpio()))
             .collect();
-        let endpoint = Smc::new(sram.clone(), placement.region.0, keys).map_err(String::from)?;
+        let endpoint = Smc::new(sram.clone(), placement.region.0, keys)
+            .map_err(String::from)?
+            .with_wake_bits(placement.wake_bits);
         let mut rtkit = RtKit::new(
             vec![(smc::ENDPOINT, Box::new(endpoint))],
             Management::Ordinary,
@@ -907,6 +915,13 @@ impl AppleDevices {
                 pmu.rtc,
                 wall.filter(|_| pmu.rtc.is_some()),
             );
+            // The primary PMU, the one with the RTC, interrupts the SMC.
+            if pmu.rtc.is_some() {
+                if self.sleep.pmu.is_some() {
+                    return Err("two PMUs hold an RTC".into());
+                }
+                self.sleep.pmu = Some(model.interrupt());
+            }
             controller
                 .attach(pmu.sid, Box::new(model))
                 .map_err(String::from)?;
@@ -1181,20 +1196,27 @@ impl AppleDevices {
     }
 
     /// The machine's power button went down or up. The SMC reports it to
-    /// the AP as a HID button notification once the AP has enabled them.
+    /// the AP as a HID button notification once the AP has enabled them;
+    /// while the SoC sleeps a press is a wake source instead (`sleep`).
     pub fn power_button(&mut self, pressed: bool) -> Result<(), &'static str> {
+        if self.smc()?.power_button(pressed) {
+            self.wake(smc::WakeSource::PowerButton);
+        }
+        Ok(())
+    }
+
+    /// The SMC's native key endpoint.
+    fn smc(&mut self) -> Result<&mut Smc, &'static str> {
         let &(_, id) = self
             .coprocessors
             .iter()
             .find(|(role, _)| *role == "SMC")
-            .ok_or("the board has no SMC to report the power button")?;
+            .ok_or("the board has no SMC")?;
         self.bus
             .device_mut::<Asc>(id)
             .and_then(Asc::firmware_mut::<RtKit>)
             .and_then(|rtkit| rtkit.endpoint_mut::<Smc>(smc::ENDPOINT))
-            .ok_or("the SMC coprocessor has no native key endpoint")?
-            .power_button(pressed);
-        Ok(())
+            .ok_or("the SMC coprocessor has no native key endpoint")
     }
 
     pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>, &'static str> {
@@ -1403,13 +1425,17 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// The eight active-low AOP wake masks at the board's `reg` bank +8.
+    /// The eight active-low AOP wake masks at the board's `reg` bank +8,
+    /// with the source number of the SMC's wake of the AP when the board
+    /// names it.
     pub fn add_wake_masks(
         &mut self,
         physical: u64,
         valid: [u32; wake::WORDS],
+        smc_wake: Option<u8>,
     ) -> Result<(), String> {
         let device = self.bus.add(Box::new(WakeMasks::new(valid)));
+        self.sleep.wake_masks = Some((device, smc_wake));
         self.bus
             .map(device, physical, wake::BYTES, 0)
             .map_err(|error| format!("AOP wake mask placement: {error:?}"))
@@ -1720,6 +1746,11 @@ impl Devices for AppleDevices {
                 reason: format!("device advance refused: {error:?}"),
             });
         }
+        self.watch_pmu();
+        // The AIC and the fast-IPI lines are the AP's, powered off with it.
+        if self.sleep.asleep {
+            return Lines::default();
+        }
         let pins = self.latch.pins(cpu);
         Lines {
             irq: pins.irq,
@@ -1736,6 +1767,7 @@ impl Devices for AppleDevices {
             .and_then(|ipi| ipi.advance(now, &mut self.latch));
         let mut access = Access::new(0, now, &mut self.latch);
         let device = self.bus.advance(&mut access).ok().flatten();
+        self.watch_pmu();
         let usb = self
             .usb_masters
             .iter()
@@ -1762,6 +1794,15 @@ impl Devices for AppleDevices {
 
     fn reset_vector(&self, cpu: usize) -> Option<u64> {
         self.locked_reset_vector(cpu)
+    }
+
+    fn processor_power(&mut self, cpu: usize, on: bool) {
+        self.processor_powered(cpu, on);
+    }
+
+    /// A sleeping SoC with no alarm due waits for the host's power button.
+    fn waits_on_host(&self) -> bool {
+        self.sleep.asleep
     }
 
     fn memory_lock(&self) -> Option<(u64, u64)> {
@@ -2443,6 +2484,7 @@ mod tests {
             region: (REGION, 0x10_0000),
             gpio_keys: alloc::vec![smc::code(b"gP16")],
             quiesced: true,
+            wake_bits: smc::WakeBits::default(),
         };
         let mut devices = AppleDevices::new();
         devices
@@ -2578,7 +2620,7 @@ mod tests {
         let base = 0x2_3d00_4008;
         let mut valid = [u32::MAX; wake::WORDS];
         valid[7] = 0x7fff_ffff;
-        devices.add_wake_masks(base, valid).unwrap();
+        devices.add_wake_masks(base, valid, None).unwrap();
         for (word, &mask) in valid.iter().enumerate() {
             let physical = base + word as u64 * 4;
             assert_eq!(devices.read(0, physical, 4, 0), Ok(u64::from(mask)));

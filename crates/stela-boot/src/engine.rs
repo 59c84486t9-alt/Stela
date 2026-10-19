@@ -804,7 +804,7 @@ fn devices<'f>(
         devices.add_soc_power(bank.physical, bank.kind)?;
     }
     if let Some(bank) = board.and_then(|board| board.wake_masks.as_ref()) {
-        devices.add_wake_masks(bank.physical, bank.valid)?;
+        devices.add_wake_masks(bank.physical, bank.valid, bank.smc_wake)?;
     }
     for bank in board.map_or(&[][..], |board| &board.performance) {
         devices.add_performance_counters(bank.physical, &bank.selectors)?;
@@ -1390,6 +1390,21 @@ fn run(
                     "USB QueryType reply bytes={:02x?} text={}\n",
                     bytes,
                     String::from_utf8_lossy(&bytes)
+                )),
+            }
+        }
+
+        while let Some(log) = machine.devices.take_power_log() {
+            use stela_runtime::machine::apple::PowerLog;
+            match log {
+                PowerLog::Sleep => output::arguments(format_args!(
+                    "POWER SoC sleep: every PE is down after slpa\n"
+                )),
+                PowerLog::Wake(source) => {
+                    output::arguments(format_args!("POWER SoC wake: {source}\n"))
+                }
+                PowerLog::Masked(source) => output::arguments(format_args!(
+                    "POWER SoC wake by the {source} masked by the AP; still asleep\n"
                 )),
             }
         }

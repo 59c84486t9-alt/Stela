@@ -1706,6 +1706,8 @@ pub struct WakeBank {
     pub physical: u64,
     pub valid: [u32; wake::WORDS],
     pub sources: Vec<u8>,
+    /// `ap-wake-sources`' `SMC.CPUWakeupAP`: the SMC waking the AP.
+    pub smc_wake: Option<u8>,
 }
 
 /// A version-1 `perf-regs` group: translated global word and the union of
@@ -1836,6 +1838,8 @@ pub struct AnsController {
 /// (`_keyEndpointHandler`, 0xfffffe0009da5a20). `gpio_keys` are the keys
 /// the tree's `pKW4` platform functions write through the nub's `smc-pmu`.
 /// `quiesced` is the nub's hand-off state (`rtkit::RtKit::quiesced`).
+/// `wake_bits` are the `MBSW` bits `smc-pmu`'s `event_name-bitN`
+/// properties name for the wake sources the board models.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmcController {
     pub wrapper: (u64, u64),
@@ -1844,6 +1848,7 @@ pub struct SmcController {
     pub region: (u64, u64),
     pub gpio_keys: Vec<u32>,
     pub quiesced: bool,
+    pub wake_bits: smc::WakeBits,
 }
 
 /// The PMP's DT placement: `reg[0]` is the ASC wrapper and its four
@@ -2028,9 +2033,27 @@ fn smc_controller(
         return Err("SMC region is smaller than the shared page".into());
     }
     let mut gpio_keys = Vec::new();
+    let mut wake_bits = smc::WakeBits::default();
     // By name: the loader removes a hidden `smc-pmu`'s compatible, but the
     // keys its functions name are the SMC's whatever the AP binds.
     if let Some(pmu) = nub.child("smc-pmu") {
+        // AppleSMCPMU names each set MBSW bit by its `event_name-bitN`
+        // (`nameWakeReason`, file 0x2da12ec).
+        for (name, value) in pmu.properties().unwrap_or_default() {
+            let Some(bit) = name
+                .strip_prefix(b"event_name-bit")
+                .and_then(|digits| core::str::from_utf8(digits).ok())
+                .and_then(|digits| digits.parse::<u8>().ok())
+                .filter(|&bit| bit < 64)
+            else {
+                continue;
+            };
+            match value.split(|&b| b == 0).next() {
+                Some(b"pwrbtn") => wake_bits.power_button = Some(bit),
+                Some(b"rtc") => wake_bits.rtc = Some(bit),
+                _ => {}
+            }
+        }
         let phandle = pmu
             .first_u32("AAPL,phandle")
             .ok_or("smc-pmu has no phandle")?;
@@ -2056,6 +2079,7 @@ fn smc_controller(
         region: (base, size),
         gpio_keys,
         quiesced: nub.property("quiesced").is_some(),
+        wake_bits,
     }))
 }
 
@@ -3175,8 +3199,12 @@ fn wake_bank(
         return Err("PMGR ap-wake-sources is not whole records".into());
     }
     let mut sources = Vec::new();
+    let mut smc_wake = None;
     for entry in data.as_chunks::<RECORD>().0 {
         let source = u32::from_le_bytes(entry[..4].try_into().expect("4 bytes"));
+        if entry[4..].split(|&b| b == 0).next() == Some(SMC_WAKE_SOURCE) {
+            smc_wake = u8::try_from(source).ok();
+        }
         let id =
             u8::try_from(source).map_err(|_| "PMGR wake source exceeds hardware mask width")?;
         if layout.valid[source as usize / u32::BITS as usize] & (1 << (source % u32::BITS)) == 0
@@ -3190,8 +3218,12 @@ fn wake_bank(
         physical,
         valid: layout.valid,
         sources,
+        smc_wake,
     })
 }
+
+/// The `ap-wake-sources` name of the SMC's wake of the AP.
+const SMC_WAKE_SOURCE: &[u8] = b"SMC.CPUWakeupAP";
 
 /// Version-1 group layout: `_initPerfCountersV1` (kernel file 0x2b79ec0),
 /// `_getPerfCounterOffset` (0x2b8e974) and the selector consumers
@@ -4684,7 +4716,13 @@ mod tests {
         let tree = |region_size: u64| {
             let pmu = encode(
                 // Hidden: the loader removed its compatible.
-                &[("name", &z("smc-pmu")), ("AAPL,phandle", &cells(&[0x91]))],
+                &[
+                    ("name", &z("smc-pmu")),
+                    ("AAPL,phandle", &cells(&[0x91])),
+                    ("event_name-bit0", &z("pwrbtn")),
+                    ("event_name-bit13", &z("wifibt")),
+                    ("event_name-bit48", &z("rtc")),
+                ],
                 &[],
             );
             let nub = encode(
@@ -4753,6 +4791,13 @@ mod tests {
         assert_eq!(placed.interrupts, [0x1f4, 0x1f3, 0x1f6, 0x1f5]);
         assert_eq!(placed.region, (0x2_3fe0_0000, 0x10_0000));
         assert!(placed.quiesced);
+        assert_eq!(
+            placed.wake_bits,
+            smc::WakeBits {
+                power_button: Some(0),
+                rtc: Some(48),
+            }
+        );
         // Sorted; `keyW` is not a GPIO write.
         assert_eq!(
             placed.gpio_keys,
@@ -5942,11 +5987,13 @@ mod tests {
             .unwrap();
         let mut reg = [None; 5];
         reg[4] = Some((0x2_3d00_4000, 0x1000));
-        let source = |id: u32| {
+        let named = |id: u32, name: &[u8]| {
             let mut entry = [0u8; 36];
             entry[..4].copy_from_slice(&id.to_le_bytes());
+            entry[4..4 + name.len()].copy_from_slice(name);
             entry
         };
+        let source = |id: u32| named(id, b"");
         let records = [source(14), source(157)].concat();
         let tree = encode(&[("ap-wake-sources", &records)], &[]);
         let found = wake_bank(&Node::root(&tree).unwrap(), &reg, layout).unwrap();
@@ -5955,9 +6002,15 @@ mod tests {
             WakeBank {
                 physical: 0x2_3d00_4008,
                 valid: layout.valid,
-                sources: vec![14, 157]
+                sources: vec![14, 157],
+                smc_wake: None,
             }
         );
+        // J473AP names the SMC's wake of the AP source 81.
+        let records = [named(14, b"AOP.GPIO.IRQ6"), named(81, b"SMC.CPUWakeupAP")].concat();
+        let tree = encode(&[("ap-wake-sources", &records)], &[]);
+        let found = wake_bank(&Node::root(&tree).unwrap(), &reg, layout).unwrap();
+        assert_eq!(found.smc_wake, Some(81));
         reg[4] = Some((0x5_0000_0000, 0x1000));
         assert_eq!(
             wake_bank(&Node::root(&tree).unwrap(), &reg, layout)
