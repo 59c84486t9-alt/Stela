@@ -18,6 +18,10 @@
 //! one of its mappers stays. SPTM initializes every DART the tree shows, and
 //! XNU starts an IODARTMapper per mapper; a DART no visible device reaches
 //! would only be programmed for clients the machine does not have.
+//! A modeled device whose `iommu-parent` names a mapper of a DART the
+//! machine does not model (`dart,t8020` on J274AP, `dart,t6000` on the M1
+//! Pro and Max) goes too, before its streams are counted: its DMA would have
+//! no translation to reach RAM through, so its driver must not bind.
 //!
 //! A selection of a hidden device goes with it: XNU `pe_serial.c` (`xnu-12377`)
 //! takes `/defaults` `serial-device`, a phandle, as its console and panics
@@ -163,15 +167,56 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
     }
 }
 
+/// The phandles of the `iommu-mapper` nodes under `node` whose DART the
+/// machine does not model.
+fn unmodeled_mappers(node: &Node, mappers: &mut Vec<u32>) {
+    for child in &node.children {
+        if !named(node, soc::DART)
+            && named(child, soc::IOMMU_MAPPER)
+            && let Some(phandle) = child.property(PHANDLE).and_then(|p| p.as_u32())
+        {
+            mappers.push(phandle);
+        }
+        unmodeled_mappers(child, mappers);
+    }
+}
+
+/// Removes `compatible` from each modeled device under `node` whose
+/// `iommu-parent` names one of `mappers`, in tree order.
+fn hide_unserved_clients(node: &mut Node, path: &str, mappers: &[u32], hidden: &mut Vec<String>) {
+    let unserved = modeled_client(node)
+        && node.property(IOMMU_PARENT).is_some_and(|property| {
+            property
+                .value
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|cell| mappers.contains(&u32::from_le_bytes(*cell)))
+        });
+    if unserved {
+        node.remove_property(COMPATIBLE);
+        hidden.push(path.into());
+    }
+    for child in &mut node.children {
+        let name = child.name().unwrap_or("?");
+        let path = format!("{path}/{name}");
+        hide_unserved_clients(child, &path, mappers, hidden);
+    }
+}
+
 /// Removes `compatible` from every device the machine does not model, a
 /// `/defaults serial-device` that selects one and a `secure-root-prefix`
 /// that no AES accelerator can acknowledge, marks visible watchdogs
-/// `no-pmu` when no PMU is visible, and returns their paths in tree order,
-/// then the selections and marks (`PATH +no-pmu`).
+/// `no-pmu` when no PMU is visible, and returns their paths, those behind
+/// an unmodeled DART first and then the rest in tree order, then the
+/// selections and marks (`PATH +no-pmu`).
 pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
+    let mut mappers = Vec::new();
+    unmodeled_mappers(&tree.root, &mut mappers);
+    let mut hidden = Vec::new();
+    hide_unserved_clients(&mut tree.root, "", &mappers, &mut hidden);
     let mut parents = Vec::new();
     client_providers(&tree.root, &mut parents);
-    let mut hidden = Vec::new();
     visit(&mut tree.root, "", &parents, &[], &mut hidden);
     hide_unprovided_buttons(tree, &mut hidden);
     let selected = tree
@@ -854,6 +899,43 @@ mod tests {
         }
         // A visible AES engine keeps the secure root prefix.
         assert!(tree.root.property(SECURE_ROOT_PREFIX).is_some());
+    }
+
+    /// J274AP's AES engine names `mapper-aes` (0x8a) of a `dart,t8020`,
+    /// a DART the machine does not model: the engine goes with it.
+    #[test]
+    fn a_device_behind_an_unmodeled_dart_is_hidden_with_it() {
+        let mut engine = aes(b"aes,s8000\0");
+        engine
+            .set_property(IOMMU_PARENT, 0x8a_u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: secure_root(node(
+                "device-tree",
+                None,
+                vec![node(
+                    "arm-io",
+                    None,
+                    vec![
+                        node(
+                            "dart-sio",
+                            Some(b"dart,t8020\0"),
+                            vec![mapper("mapper-aes", 0x8a)],
+                        ),
+                        engine,
+                    ],
+                )],
+            )),
+        };
+        assert_eq!(
+            hide_unmodeled(&mut tree),
+            [
+                "/arm-io/aes",
+                "/arm-io/dart-sio",
+                "/arm-io/dart-sio/mapper-aes",
+                "/ secure-root-prefix",
+            ]
+        );
     }
 
     #[test]
