@@ -28,9 +28,22 @@
 //! - Ready for power nap (0xa, AP to coprocessor) is a Boolean nothing
 //!   acknowledges (0x46700dc).
 //!
-//! An IOP whose nub is `user-power-managed` (the PMP) completes start-up at
-//! enumeration; any other waits for the coprocessor to announce power-on
-//! with an unsolicited type 7 0x20 (`_iopValidate` 0x465dfd8).
+//! Starting a coprocessor, `RTBuddy::_performPowerStateChangeGated`
+//! (0x465d140) sets status 4 (0x465d7b0), starts its CPU and blocks in
+//! `_iopValidate` (0x465dfd8) for 20 s until the status reaches its target,
+//! or panics "No response received" (0x465d900). The last roll-call answer
+//! sets VersionOk (6, `_handleEPRollCall` 0x46707ec), which is the target
+//! only for a nub marked `remote-only` or `automatic-rail-gating-enabled`
+//! (`_initConfigEDT` 0x4660f08 keeps them at +0x100 and +0x108). Every
+//! other nub, `user-power-managed` ones such as the PMP's included (that
+//! flag is +0x107 and only hands power policy to a client driver), waits
+//! for running (8): the coprocessor announces power-on with an unsolicited
+//! type 7 0x20 once enumeration completes, which `_handlePowerAck`
+//! (0x4670930) takes. The roll call already published each listed
+//! application endpoint as an `RTBuddyEndpointService` named after the
+//! role (`createEndpoint` 0x465dca8, `createName` 0x4665818: "ANS2" +
+//! "Endpoint" + endpoint - 0x1f), so client drivers start and enable
+//! endpoints while the AP still waits.
 //!
 //! A nub marked `quiesced` was used and quiesced by the boot chain:
 //! `RTBuddy::_initConfigEDT` (0xfffffe000b665158) starts it in power state
@@ -130,12 +143,15 @@ enum Stage {
     Ready,
 }
 
-/// How the AP manages the coprocessor's power.
+/// What completes the coprocessor's start-up for the AP (see the module
+/// comment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Management {
-    /// `user-power-managed`: start-up completes at enumeration.
-    User,
-    /// The coprocessor announces power-on after enumeration.
+    /// `remote-only` or `automatic-rail-gating-enabled`: enumeration does,
+    /// and the coprocessor announces nothing.
+    Enumeration,
+    /// Every other nub: the coprocessor announces power-on after
+    /// enumeration.
     Ordinary,
 }
 
@@ -426,7 +442,7 @@ mod tests {
 
     #[test]
     fn the_coprocessor_says_hello_rolls_call_and_serves_its_endpoints() {
-        let mut rtkit = booted(Management::User);
+        let mut rtkit = booted(Management::Enumeration);
         assert!(mgmt(&mut rtkit, HELLO_REPLY, 11 | 11 << 16).is_err());
         // Group 0 holds the management endpoint alone.
         let call = mgmt(&mut rtkit, HELLO_REPLY, 1 << 32 | 12 | 12 << 16).unwrap();
@@ -441,7 +457,8 @@ mod tests {
             vec![management(ROLL_CALL, ROLL_CALL_LAST | 2 << 32 | 2)]
         );
         assert!(step(&mut rtkit, 0x20, 1).is_err());
-        // A user-managed IOP announces nothing at the end of enumeration.
+        // An IOP the AP does not wait for announces nothing at the end of
+        // enumeration.
         assert!(
             mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32)
                 .unwrap()
@@ -504,10 +521,52 @@ mod tests {
     }
 
     #[test]
+    fn the_restore_boot_pmp_handshake_ends_with_the_power_on_announcement() {
+        // The AP's side of restore boot s25's PMP mailbox log, word for
+        // word: the AP waited 20 s for running after its last answer.
+        let mut rtkit = RtKit::new(
+            vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
+            Management::Ordinary,
+        )
+        .unwrap();
+        let raw = |rtkit: &mut RtKit, payload| step(rtkit, 0, payload).unwrap();
+        let mut outbox = Vec::new();
+        rtkit.start(&mut outbox).unwrap();
+        let payloads = |messages: Vec<Message>| -> Vec<u64> {
+            messages
+                .iter()
+                .inspect(|message| assert_eq!(message.endpoint, 0))
+                .map(|message| message.payload)
+                .collect()
+        };
+        assert_eq!(payloads(outbox), [0x0010_0000_000c_000c]);
+        assert_eq!(
+            payloads(raw(&mut rtkit, 0x0020_0000_000c_000c)),
+            [0x0080_0000_0000_0001]
+        );
+        assert_eq!(
+            payloads(raw(&mut rtkit, 0x0080_0000_0000_0001)),
+            [0x0088_0001_0000_0001]
+        );
+        assert_eq!(
+            payloads(raw(&mut rtkit, 0x0088_0001_0000_0000)),
+            [0x0070_0000_0000_0020]
+        );
+        // The client driver's STARTEP of 0x20 starts the endpoint.
+        assert_eq!(
+            raw(&mut rtkit, 0x0050_0020_0000_0002),
+            [Message {
+                endpoint: 0x20,
+                payload: 5
+            }]
+        );
+    }
+
+    #[test]
     fn a_quiesced_coprocessor_waits_for_its_wake_and_acks_it_after_enumeration() {
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
-            Management::User,
+            Management::Ordinary,
         )
         .unwrap()
         .quiesced();
@@ -563,7 +622,7 @@ mod tests {
     fn enabled_endpoints_send_board_events_and_carry_transitions() {
         let mut rtkit = RtKit::new(
             vec![(0x20, Box::new(Board::default()) as Box<dyn Endpoint>)],
-            Management::User,
+            Management::Ordinary,
         )
         .unwrap();
         rtkit.start(&mut Vec::new()).unwrap();
@@ -598,7 +657,7 @@ mod tests {
     #[test]
     fn endpoints_are_application_endpoints_once_each() {
         let one = || Box::new(Complement) as Box<dyn Endpoint>;
-        assert!(RtKit::new(vec![(0x2, one())], Management::User).is_err());
-        assert!(RtKit::new(vec![(0x20, one()), (0x20, one())], Management::User).is_err());
+        assert!(RtKit::new(vec![(0x2, one())], Management::Ordinary).is_err());
+        assert!(RtKit::new(vec![(0x20, one()), (0x20, one())], Management::Ordinary).is_err());
     }
 }

@@ -728,6 +728,24 @@ pub const ASC: &str = "iop,ascwrap-v4";
 pub const RTBUDDY: &str = "iop-nub,rtbuddy-v2";
 pub const SART: &str = "sart,coastguard";
 
+/// RTBuddy nub flags under which the AP does not wait for the coprocessor's
+/// power-on announcement and wakes it by AP power instead (`rtkit` module
+/// comment). No placed coprocessor model follows that contract.
+const UNAWAITED_NUB: [&str; 2] = ["remote-only", "automatic-rail-gating-enabled"];
+
+/// Refuse an RTBuddy nub whose start-up the RTKit model does not carry.
+fn awaited_nub(nub: &Node<'_>, role: &str) -> Result<(), String> {
+    match UNAWAITED_NUB
+        .into_iter()
+        .find(|flag| nub.property(flag).is_some())
+    {
+        Some(flag) => Err(format!(
+            "{role} nub is {flag}, a start-up the RTKit model does not carry"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// SPI controller compatible, byte-PIO version 1.
 pub const SPI: &str = "spi-1,spimc";
 /// Single-wire SPI NOR compatible.
@@ -1780,6 +1798,7 @@ fn pmp_controller(
         .child("iop-pmp-nub")
         .filter(|nub| nub.compatible(RTBUDDY))
         .ok_or("PMP has no RTBuddy v2 nub")?;
+    awaited_nub(&nub, "PMP")?;
     if nub.first_u32("user-power-managed") != Some(1) {
         return Err("PMP nub is not user-power-managed".into());
     }
@@ -1832,12 +1851,11 @@ fn gfx_controller(
         (Some(asc), Some(sgx)) => (asc, sgx),
         _ => return Err("the GFX coprocessor and the sgx GPU must be visible together".into()),
     };
-    if !asc
+    let nub = asc
         .child("iop-gfx-nub")
-        .is_some_and(|nub| nub.compatible(RTBUDDY))
-    {
-        return Err("gfx-asc has no RTBuddy v2 nub".into());
-    }
+        .filter(|nub| nub.compatible(RTBUDDY))
+        .ok_or("gfx-asc has no RTBuddy v2 nub")?;
+    awaited_nub(&nub, "GFX")?;
     let place = |node: &Node<'_>, index: usize, minimum: u64, what: &str| {
         let (offset, bytes) = node
             .pairs("reg")
@@ -1888,6 +1906,7 @@ fn smc_controller(
         .child("iop-smc-nub")
         .filter(|nub| nub.compatible(RTBUDDY))
         .ok_or("SMC has no RTBuddy v2 nub")?;
+    awaited_nub(&nub, "SMC")?;
     let regs = node.pairs("reg").ok_or("SMC has no reg pairs")?;
     let place = |index: usize, minimum: u64, what: &str| -> Result<(u64, u64), String> {
         let &(offset, bytes) = regs
@@ -2110,12 +2129,11 @@ fn ans_controller(
     {
         return Err("ANS2 requires linear submission queues with 64 entries".into());
     }
-    if !node
+    let nub = node
         .child("iop-ans-nub")
-        .is_some_and(|nub| nub.compatible(RTBUDDY))
-    {
-        return Err("ANS2 has no RTBuddy v2 nub".into());
-    }
+        .filter(|nub| nub.compatible(RTBUDDY))
+        .ok_or("ANS2 has no RTBuddy v2 nub")?;
+    awaited_nub(&nub, "ANS2")?;
     let regs = node.pairs("reg").ok_or("ANS2 has no reg pairs")?;
     let parent = node
         .first_u32("iommu-parent")
@@ -3615,9 +3633,11 @@ fn dcp_device(
     if wrapper_bytes < crate::platform::apple::asc::WRAPPER_BYTES {
         return Err(format!("{PATH} has an incomplete ASC aperture"));
     }
-    let quiesced = node
-        .child("iop-dcpext-nub")
-        .is_some_and(|nub| nub.property("quiesced").is_some());
+    let nub = node.child("iop-dcpext-nub");
+    if let Some(nub) = &nub {
+        awaited_nub(nub, "DCPEXT")?;
+    }
+    let quiesced = nub.is_some_and(|nub| nub.property("quiesced").is_some());
     let irqs: [u32; 4] = node
         .cells32("interrupts")
         .unwrap_or_default()
@@ -4340,6 +4360,20 @@ mod tests {
         let root = Node::root(&data).unwrap();
         assert!(pmp_controller(&root.child("arm-io").unwrap(), &translate).is_err());
         assert!(models(ASC, |key| (key == "role").then_some(b"PMP\0".as_slice())));
+    }
+
+    #[test]
+    fn rtbuddy_nubs_the_ap_does_not_wait_for_refuse() {
+        use crate::machine::adt::encode;
+        let name = b"iop-pmp-nub ".to_vec();
+        let set = 1u32.to_le_bytes().to_vec();
+        let plain = encode(&[("name", &name)], &[]);
+        assert!(awaited_nub(&Node::root(&plain).unwrap(), "PMP").is_ok());
+        for flag in UNAWAITED_NUB {
+            let data = encode(&[("name", &name), (flag, &set)], &[]);
+            let error = awaited_nub(&Node::root(&data).unwrap(), "PMP").unwrap_err();
+            assert!(error.contains(flag));
+        }
     }
 
     #[test]

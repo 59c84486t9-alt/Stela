@@ -9,7 +9,8 @@
 //!
 //! docs/research/display-gpu.md owns the recovered contract. The DCPEXT nub
 //! is `quiesced` and `user-power-managed`, so (like the SMC) the coprocessor
-//! completes start-up at RTKit enumeration behind the boot-chain handoff.
+//! acknowledges the AP's wake once RTKit enumeration completes behind the
+//! boot-chain handoff.
 //!
 //! What is modeled and tested here: the RTKit endpoint set, the IOMFB link
 //! message framing ([`link`]), the fixed-mode method/EDID answers ([`iomfb`])

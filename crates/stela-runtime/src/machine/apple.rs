@@ -18,7 +18,7 @@ use crate::platform::apple::{
     aic::{Aic2, Aic2Config},
     aic1::Aic1,
     amcc::{self, Amcc},
-    ans::Ans,
+    ans::{self, Ans},
     asc::{self, Asc},
     atc_phy::{self, AtcPhy},
     bridge::Bridge,
@@ -650,17 +650,22 @@ impl AppleDevices {
             .map_err(|error| format!("PTD placement: {error:?}"))
     }
 
-    /// Place an explicitly described ANS2, its started RTKit management
-    /// coprocessor and SART. Split the shared NVMe bank around SART's idle
-    /// word so each physical byte has one owner. The boot chain's choice is
-    /// to start the native RTKit service before handing off to SPTM.
+    /// Place an explicitly described ANS2, its started RTKit coprocessor
+    /// (listing [`ans::RTKIT_ENDPOINT`]) and SART. Split the shared NVMe bank
+    /// around SART's idle word so each physical byte has one owner. The boot
+    /// chain's choice is to start the native RTKit service before handing off
+    /// to SPTM.
     pub fn add_ans(
         &mut self,
         placement: &super::soc::AnsController,
         backing: Box<dyn crate::platform::pc::block::BlockDevice>,
     ) -> Result<(), String> {
         let irq = |n| AicInput::new(0, n);
-        let rtkit = RtKit::new(Vec::new(), Management::Ordinary).map_err(String::from)?;
+        let rtkit = RtKit::new(
+            vec![(ans::RTKIT_ENDPOINT, Box::new(ans::Endpoint) as Box<_>)],
+            Management::Ordinary,
+        )
+        .map_err(String::from)?;
         let wrapper = Asc::booted(
             Box::new(rtkit),
             AscLines::from_interrupts(placement.interrupts.map(irq)),
@@ -717,8 +722,11 @@ impl AppleDevices {
             .map(|&name| (name, smc::Key::gpio()))
             .collect();
         let endpoint = Smc::new(sram.clone(), placement.region.0, keys).map_err(String::from)?;
-        let mut rtkit = RtKit::new(vec![(smc::ENDPOINT, Box::new(endpoint))], Management::User)
-            .map_err(String::from)?;
+        let mut rtkit = RtKit::new(
+            vec![(smc::ENDPOINT, Box::new(endpoint))],
+            Management::Ordinary,
+        )
+        .map_err(String::from)?;
         if placement.quiesced {
             rtkit = rtkit.quiesced();
         }
@@ -751,7 +759,7 @@ impl AppleDevices {
     pub fn add_pmp(&mut self, placement: &super::soc::PmpController) -> Result<(), String> {
         let mut rtkit = RtKit::new(
             vec![(pmp::ENDPOINT, Box::new(pmp::Pmp::default()))],
-            Management::User,
+            Management::Ordinary,
         )
         .map_err(String::from)?;
         if placement.quiesced {
@@ -800,8 +808,9 @@ impl AppleDevices {
     /// Place the `dcpext` display coprocessor: its booted, user-power-managed
     /// RTKit (reusing the common ASC wrapper) carrying the IOMFB link endpoint
     /// and the AFK/EPIC endpoints, presenting one fixed connected monitor to
-    /// `scanout`. The DCPEXT nub is `quiesced`, so (like the SMC) start-up
-    /// completes at RTKit enumeration behind the boot-chain handoff. This does
+    /// `scanout`. The DCPEXT nub is `quiesced`, so (like the SMC) the
+    /// coprocessor acknowledges the AP's wake once RTKit enumeration
+    /// completes behind the boot-chain handoff. This does
     /// not admit DCPEXT in `soc::models`; the IOMFB RPC shared-region exchange
     /// is not yet modeled (see `platform::apple::dcp`).
     pub fn add_dcpext(
@@ -815,7 +824,7 @@ impl AppleDevices {
             return Err("DCPEXT register aperture is incomplete".into());
         }
         let mut rtkit =
-            RtKit::new(dcp::endpoints(scanout), Management::User).map_err(String::from)?;
+            RtKit::new(dcp::endpoints(scanout), Management::Ordinary).map_err(String::from)?;
         if quiesced {
             rtkit = rtkit.quiesced();
         }
@@ -2107,6 +2116,11 @@ mod tests {
             .add_ans(&placement, Box::new(RamDisk::new("backing", 16, 4096)))
             .unwrap();
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        // The roll call lists 0x20, which RTBuddy publishes as the
+        // ANS2Endpoint1 service the NVMe driver waits for.
+        walk_rtkit_start(&mut devices, WRAPPER);
+        devices.write(0, WRAPPER + 0x8800, 8, 1, 0).unwrap();
+        assert!(devices.write(0, WRAPPER + 0x8808, 8, 0x20, 0).is_err());
         devices.write(0, NVME + 0x13e8, 4, 1, 0).unwrap();
         assert_eq!(devices.read(0, NVME + 0x13e8, 4, 0), Ok(1));
         assert_eq!(devices.read(0, NVME + 0x1300, 4, 0), Ok(0xde71_ce55));
@@ -2183,6 +2197,47 @@ mod tests {
         assert_eq!(devices.read(0, pin, 4, 0).unwrap() & 1, 0);
     }
 
+    /// Every message waiting in an ASC wrapper's outbox, as (endpoint,
+    /// payload).
+    fn mailbox_drain(devices: &mut AppleDevices, wrapper: u64) -> Vec<(u64, u64)> {
+        let mut messages = Vec::new();
+        while devices.read(0, wrapper + 0x8114, 4, 0).unwrap() & 1 << 17 == 0 {
+            let payload = devices.read(0, wrapper + 0x8830, 8, 0).unwrap();
+            let endpoint = devices.read(0, wrapper + 0x8838, 8, 0).unwrap() & 0xff;
+            messages.push((endpoint, payload));
+        }
+        messages
+    }
+
+    /// The AP side of the RTKit start-up handshake restore boot s25 logged
+    /// for a coprocessor listing one application endpoint 0x20, word for
+    /// word, up to the client driver's STARTEP of it. The coprocessor must
+    /// end enumeration with the power-on announcement the AP waits for.
+    fn walk_rtkit_start(devices: &mut AppleDevices, wrapper: u64) {
+        let send = |devices: &mut AppleDevices, payload| {
+            devices.write(0, wrapper + 0x8800, 8, payload, 0).unwrap();
+            devices.write(0, wrapper + 0x8808, 8, 0, 0).unwrap();
+            mailbox_drain(devices, wrapper)
+        };
+        assert_eq!(
+            mailbox_drain(devices, wrapper),
+            [(0, 0x0010_0000_000c_000c)]
+        );
+        assert_eq!(
+            send(devices, 0x0020_0000_000c_000c),
+            [(0, 0x0080_0000_0000_0001)]
+        );
+        assert_eq!(
+            send(devices, 0x0080_0000_0000_0001),
+            [(0, 0x0088_0001_0000_0001)]
+        );
+        assert_eq!(
+            send(devices, 0x0088_0001_0000_0000),
+            [(0, 0x0070_0000_0000_0020)]
+        );
+        assert!(send(devices, 0x0050_0020_0000_0002).is_empty());
+    }
+
     #[test]
     fn pmp_places_a_running_user_managed_wrapper() {
         use crate::machine::soc::PmpController;
@@ -2202,6 +2257,8 @@ mod tests {
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
         assert_eq!(devices.coprocessor_diagnostics().len(), 1);
         assert!(devices.coprocessor_diagnostics()[0].starts_with("PMP "));
+        // A user-power-managed nub is still awaited to running.
+        walk_rtkit_start(&mut devices, WRAPPER);
     }
 
     #[test]

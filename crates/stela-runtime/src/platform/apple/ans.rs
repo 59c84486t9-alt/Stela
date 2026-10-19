@@ -15,8 +15,9 @@
 //! pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
 //! optional encryption/SHA/firmware download or asynchronous events. Identity
 //! strings identify Stela rather than impersonating a physical Apple SSD.
-//! The boot stage starts RTKit before handoff; the ASC uses the existing
-//! management protocol with no application endpoints (ANS NVMe uses MMIO).
+//! The boot stage starts RTKit before handoff. NVMe itself uses MMIO; the
+//! RTKit coprocessor lists one application endpoint, [`RTKIT_ENDPOINT`],
+//! which carries no messages but must exist for the driver to start.
 //! Undescribed registers, commands, fields and cryptographic effects refuse.
 mod commands;
 mod die;
@@ -75,6 +76,34 @@ const BOOT_OK: u64 = 0xde71_ce55;
 const COMMAND_BYTES: u64 = 64;
 const COMPLETION_BYTES: u64 = 16;
 const TCB_BYTES: u64 = 128;
+
+/// ANS2's RTKit application endpoint. RTBuddy publishes it at roll call as
+/// the service `ANS2Endpoint1` (`RTBuddyEndpointService::createName`
+/// 0x4665818: role + "Endpoint" + endpoint - 0x1f).
+/// `AppleANS2NVMeController::start` blocks until that service matches
+/// (`waitForMatchingService` 0x3dbb308, before `WaitDeviceActive`), binds
+/// it with no message handler (`initForOwner` 0x3dbb344) and only attaches
+/// its own power-state action to it (`InitializePowerManagement`
+/// 0x3dbf668), so no message crosses it in either direction.
+pub const RTKIT_ENDPOINT: u8 = 0x20;
+
+/// The coprocessor side of [`RTKIT_ENDPOINT`]: enabling it is accepted and
+/// any message on it refuses.
+#[derive(Debug, Default)]
+pub struct Endpoint;
+
+impl super::rtkit::Endpoint for Endpoint {
+    fn start(&mut self, _outbox: &mut alloc::vec::Vec<u64>) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn receive(
+        &mut self,
+        _payload: u64,
+        _outbox: &mut alloc::vec::Vec<u64>,
+    ) -> Result<(), &'static str> {
+        Err("ANS2 RTKit endpoint 0x20 has no AP message protocol")
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct Queue {
