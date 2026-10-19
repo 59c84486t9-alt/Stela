@@ -4,6 +4,7 @@ mod amx;
 mod clock;
 mod exclusive;
 mod hosted;
+mod pointer;
 mod processors;
 mod system;
 mod unprivileged;
@@ -29,6 +30,7 @@ pub use crate::platform::apple::bus::Transition;
 pub use crate::platform::dma::Memory;
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::fmt;
+use pointer::{PointerInputs, PointerOperation, PointerResult};
 pub use processors::PeerState;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
@@ -50,7 +52,7 @@ use stela_compiler::{
     x86_64::{
         MemoryChecks,
         chain::{self, ChainControl},
-        pointer, register_read, zero_block,
+        pointer as x86_64_pointer, register_read, zero_block,
     },
 };
 
@@ -630,24 +632,6 @@ pub struct StaleCode {
     pub first: Option<(u64, u64)>,
 }
 
-/// The distinct PAC inputs whose memo generations are kept.
-const POINTER_INPUTS_SEEN: usize = 16;
-
-/// What a PAC result depends on besides its operands: the five keys, the
-/// chip's PAC version and the regime's TCR (Arm `AddPAC`, `Auth`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct PointerInputs {
-    keys: [[u64; 2]; 5],
-    version: pauth::Version,
-    tcr: u64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PointerOperation {
-    Sign,
-    Authenticate { combined: bool },
-}
-
 /// A direct exit in native code to a static successor: its host address,
 /// the successor's PC and the exit's kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -655,33 +639,6 @@ struct Successor {
     site: u64,
     target: GuestAddress,
     kind: ExitKind,
-}
-
-/// The [`pointer::MemoEntry`] kinds of the results native code does not
-/// complete, plus 1 for a combined form: an authentication that failed
-/// without a fault, and one that faults with the code in `value`.
-const UNAUTHENTICATED: u64 = 3;
-const FAULTED: u64 = 5;
-
-/// The memo kind and value of an operation's result.
-fn memo_result(operation: PointerOperation, result: Result<(u64, bool), u8>) -> (u64, u64) {
-    let combined = u64::from(operation == PointerOperation::Authenticate { combined: true });
-    match (operation, result) {
-        (PointerOperation::Sign, Ok((value, _))) => (pointer::SIGNED, value),
-        (_, Ok((value, true))) => (pointer::AUTHENTICATED, value),
-        (_, Ok((value, false))) => (UNAUTHENTICATED + combined, value),
-        (_, Err(code)) => (FAULTED + combined, u64::from(code)),
-    }
-}
-
-/// The memo index of a key.
-fn memo_key(key: pauth::Key) -> u8 {
-    pointer::key_index(match key {
-        pauth::Key::Ia => PointerAuthenticationKey::Ia,
-        pauth::Key::Ib => PointerAuthenticationKey::Ib,
-        pauth::Key::Da => PointerAuthenticationKey::Da,
-        pauth::Key::Db => PointerAuthenticationKey::Db,
-    })
 }
 
 #[derive(Clone, Copy)]
@@ -799,30 +756,14 @@ pub struct Machine<H: Host, D: Devices> {
     event_sample: Option<u64>,
     /// What self-hosted debug needs of each instruction, while valid.
     debug: Option<DebugMode>,
-    /// The PAC keys, version and layout, while valid.
-    pointer: Option<pauth::Context>,
     /// The running PE's device lines and the count before which no device
     /// changes state by itself (`Devices::deadline`), while valid: a device
     /// or board register access, a System register write, an exception and
     /// a PE switch can change them, and clear it.
     device_lines: Option<(Lines, u64)>,
-    /// Signing and authentication results, which native code reads
-    /// (`x86_64::pointer`), each tagged with the generation of the inputs it
-    /// was computed under; `pointer_generation` is that of
-    /// `pointer_memo_inputs`.
-    pointer_memo: alloc::boxed::Box<[pointer::MemoEntry]>,
-    pointer_memo_inputs: Option<PointerInputs>,
-    pointer_generation: u64,
-    /// The generations of the most recent distinct inputs, most recent
-    /// first, so entries stay valid across a return to earlier inputs (EL0
-    /// and EL1 keys, guarded levels, PE switches).
-    pointer_inputs_seen: Vec<(PointerInputs, u64)>,
-    /// The last generation handed out; an evicted one is never reused.
-    pointer_generations: u64,
-    /// Each key's tag word for native code: zero until a PAC exit finds the
-    /// key enabled and untrapped under the current memo, and again whenever
-    /// derived state may have changed.
-    pointer_tags: alloc::boxed::Box<[u64; 4]>,
+    /// The PAC context, the memo of results and the key tag words, which
+    /// native code reads and completes misses through (`pointer`).
+    pointer: alloc::boxed::Box<pointer::PointerService>,
     /// TPIDR_EL1 for native MRS reads (`x86_64::register_read`): readable
     /// once an MRS exit finds the read plain at the current EL
     /// (`system::thread_pointer_readable`), until derived state may change.
@@ -920,15 +861,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             zero_block: None,
             event_sample: None,
             debug: None,
-            pointer: None,
             device_lines: None,
-            pointer_memo: vec![pointer::MemoEntry::default(); pointer::MEMO_ENTRIES]
-                .into_boxed_slice(),
-            pointer_memo_inputs: None,
-            pointer_generation: 0,
-            pointer_inputs_seen: Vec::new(),
-            pointer_generations: 0,
-            pointer_tags: alloc::boxed::Box::new([0; 4]),
+            pointer: alloc::boxed::Box::new(pointer::PointerService::new()),
             thread_pointer: alloc::boxed::Box::default(),
             admit_table,
             watch: Watch::default(),
@@ -978,8 +912,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.memory_checks = None;
         self.zero_block = None;
         self.debug = None;
-        self.pointer = None;
-        *self.pointer_tags = [0; 4];
+        self.pointer.close();
         self.thread_pointer.readable = 0;
         self.device_lines = None;
     }
@@ -2211,10 +2144,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return None;
         }
         let instruction = block::decode_pointer_authentication(GuestAddress(pc), word).ok()??;
-        let form = pointer::Form::of(instruction.operation)?;
-        let memo = self.pointer_memo.as_ptr() as u64;
-        let tags = self.pointer_tags.as_ptr() as u64;
-        let thunk = pointer::thunk(form, GuestAddress(pc), memo, tags);
+        let form = x86_64_pointer::Form::of(instruction.operation)?;
+        let (memo, tags, service) = self.pointer.addresses();
+        let thunk = x86_64_pointer::thunk(form, GuestAddress(pc), memo, tags, service);
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
@@ -2765,142 +2697,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// One signing or authentication with the current keys, version and
-    /// layout, remembered while they stay the same: both are pure functions
-    /// of them and the operands. The memo slot comes from the pointer and
-    /// modifier alone, so which slot is touched never depends on a key.
-    /// A signing whose result strips back to its pointer also remembers
-    /// that authenticating the result with the same key and modifier
-    /// succeeds with that pointer (Arm `Auth` recomputes the PAC of the
-    /// stripped pointer), which answers the epilogue of a signed frame; a
-    /// success answers both the combined and the plain authentication.
+    /// layout (`pointer::PointerService::result`), the key known enabled
+    /// and untrapped.
     fn pointer_result(
         &mut self,
         operation: PointerOperation,
         key: pauth::Key,
         pointer: u64,
         modifier: u64,
-    ) -> Result<Result<(u64, bool), u8>, Stop> {
-        if self.pointer.is_none() {
+    ) -> Result<PointerResult, Stop> {
+        if !self.pointer.is_open() {
             let inputs = PointerInputs {
                 keys: self.pointer_keys(),
                 version: self.pointer_version()?,
                 tcr: self.cpu.regime_tcr(),
             };
-            if self.pointer_memo_inputs != Some(inputs) {
-                self.pointer_generation = self.pointer_generation_of(inputs);
-                self.pointer_memo_inputs = Some(inputs);
-            }
-            let [ia, ib, da, db, generic] = inputs.keys;
-            self.pointer = Some(
-                pauth::Context::new_with_version(
-                    0,
-                    pauth::Keys::from_words(ia, ib, da, db).with_generic_words(generic),
-                    inputs.version,
-                )
-                .with_translation_regime(inputs.tcr),
-            );
+            self.pointer.open(inputs);
         }
-        // Callers reach here with the key enabled and untrapped.
-        self.pointer_tags[usize::from(memo_key(key))] =
-            pointer::tag(self.pointer_generation, memo_key(key), 0);
-        if let Some(result) = self.remembered(operation, key, pointer, modifier) {
-            return Ok(result);
-        }
-        let context = self.pointer.as_ref().expect("built above");
-        let result = match operation {
-            PointerOperation::Sign => match context.sign(key, pointer, modifier) {
-                Ok(signed) => Ok((signed, true)),
-                Err(_) => {
-                    return Err(self
-                        .unsupported(RequirementKind::Native("PAC key unavailable for signing")));
-                }
-            },
-            PointerOperation::Authenticate { combined } => {
-                match context.authenticate_operation(key, pointer, modifier, combined) {
-                    Ok(result) => Ok((result.pointer, result.authenticated)),
-                    Err(pauth::AuthenticationError::Failure { code }) => Err(code),
-                    Err(pauth::AuthenticationError::KeyUnavailable { .. }) => {
-                        return Err(self.unsupported(RequirementKind::Native(
-                            "PAC key unavailable for authentication",
-                        )));
+        self.pointer
+            .result(operation, key, pointer, modifier)
+            .ok_or_else(|| {
+                self.unsupported(RequirementKind::Native(match operation {
+                    PointerOperation::Sign => "PAC key unavailable for signing",
+                    PointerOperation::Authenticate { .. } => {
+                        "PAC key unavailable for authentication"
                     }
-                }
-            }
-        };
-        let strips_back = match (operation, result) {
-            (PointerOperation::Sign, Ok((signed, _))) => {
-                (context.strip(key, signed).ok() == Some(pointer)).then_some(signed)
-            }
-            _ => None,
-        };
-        self.remember(operation, key, pointer, modifier, result);
-        if let Some(signed) = strips_back {
-            let authenticate = PointerOperation::Authenticate { combined: false };
-            self.remember(authenticate, key, signed, modifier, Ok((pointer, true)));
-        }
-        Ok(result)
-    }
-
-    /// The memo generation of `inputs`: the one they had if they are among
-    /// the [`POINTER_INPUTS_SEEN`] most recent distinct inputs, else a new
-    /// one. A result depends only on its inputs and operands, so an entry
-    /// of a reused generation is still exact.
-    fn pointer_generation_of(&mut self, inputs: PointerInputs) -> u64 {
-        let seen = &mut self.pointer_inputs_seen;
-        let generation = match seen.iter().position(|&(known, _)| known == inputs) {
-            Some(index) => seen.remove(index).1,
-            None => {
-                self.pointer_generations += 1;
-                self.pointer_generations
-            }
-        };
-        seen.insert(0, (inputs, generation));
-        seen.truncate(POINTER_INPUTS_SEEN);
-        generation
-    }
-
-    /// The current memo's result of `operation` with `key` on these
-    /// operands, if it has one: a success answers both authentication forms.
-    fn remembered(
-        &self,
-        operation: PointerOperation,
-        key: pauth::Key,
-        pointer: u64,
-        modifier: u64,
-    ) -> Option<Result<(u64, bool), u8>> {
-        let entry = self.pointer_memo[pointer::slot(pointer, modifier)];
-        let tag = pointer::tag(self.pointer_generation, memo_key(key), 0);
-        if entry.pointer != pointer || entry.modifier != modifier || entry.tag & !0xf != tag {
-            return None;
-        }
-        let kind = entry.tag & 0xf;
-        let combined = u64::from(operation == PointerOperation::Authenticate { combined: true });
-        match operation {
-            PointerOperation::Sign => (kind == pointer::SIGNED).then_some(Ok((entry.value, true))),
-            PointerOperation::Authenticate { .. } => match kind {
-                pointer::AUTHENTICATED => Some(Ok((entry.value, true))),
-                kind if kind == UNAUTHENTICATED + combined => Some(Ok((entry.value, false))),
-                kind if kind == FAULTED + combined => Some(Err(entry.value as u8)),
-                _ => None,
-            },
-        }
-    }
-
-    fn remember(
-        &mut self,
-        operation: PointerOperation,
-        key: pauth::Key,
-        pointer: u64,
-        modifier: u64,
-        result: Result<(u64, bool), u8>,
-    ) {
-        let (kind, value) = memo_result(operation, result);
-        self.pointer_memo[pointer::slot(pointer, modifier)] = pointer::MemoEntry {
-            pointer,
-            modifier,
-            tag: pointer::tag(self.pointer_generation, memo_key(key), kind),
-            value,
-        };
+                }))
+            })
     }
 
     /// The two-modifier operation PSTATE.PACM makes of a PAC*SP, AUT*SP,
@@ -6193,11 +6016,13 @@ mod tests {
         machine.step().unwrap();
         let block = &machine.blocks[0];
         let code = &machine.host.installed[block.code.0 - 1];
-        let thunk = pointer::thunk(
-            pointer::Form::of(block::PointerAuthenticationOperation::SignIbSp).unwrap(),
+        let (memo, tags, service) = machine.pointer.addresses();
+        let thunk = x86_64_pointer::thunk(
+            x86_64_pointer::Form::of(block::PointerAuthenticationOperation::SignIbSp).unwrap(),
             GuestAddress(base + 4),
-            machine.pointer_memo.as_ptr() as u64,
-            machine.pointer_tags.as_ptr() as u64,
+            memo,
+            tags,
+            service,
         );
         let installed = machine.host.installed.len();
         assert_eq!(machine.host.installed[installed - 1], thunk.code);
@@ -6213,16 +6038,16 @@ mod tests {
             }]
         );
         let mut machine = pac_machine();
-        assert_eq!(*machine.pointer_tags, [0; 4]);
+        assert_eq!(machine.pointer.tags, [0; 4]);
         machine
             .pointer_result(PointerOperation::Sign, pauth::Key::Ib, 0x4000, 0x10)
             .unwrap()
             .unwrap();
-        let ib = pointer::key_index(PointerAuthenticationKey::Ib);
-        let open = pointer::tag(machine.pointer_generation, ib, 0);
-        assert_eq!(machine.pointer_tags[usize::from(ib)], open);
+        let ib = x86_64_pointer::key_index(PointerAuthenticationKey::Ib);
+        let open = x86_64_pointer::tag(machine.pointer.generation, ib, 0);
+        assert_eq!(machine.pointer.tags[usize::from(ib)], open);
         machine.derived_changed();
-        assert_eq!(*machine.pointer_tags, [0; 4]);
+        assert_eq!(machine.pointer.tags, [0; 4]);
     }
 
     /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading
@@ -6370,16 +6195,18 @@ mod tests {
                 .pointer_result(PointerOperation::Sign, pauth::Key::Ib, pointer, modifier)
                 .unwrap()
                 .unwrap();
-            (signed, machine.pointer_generation)
+            (signed, machine.pointer.generation)
         };
         let (first, generation) = sign(&mut machine, 1);
         let (other, other_generation) = sign(&mut machine, 2);
         assert_ne!((other, other_generation), (first, generation));
         assert_eq!(sign(&mut machine, 1), (first, generation));
         let remembered =
-            machine.remembered(PointerOperation::Sign, pauth::Key::Ib, pointer, modifier);
+            machine
+                .pointer
+                .remembered(PointerOperation::Sign, pauth::Key::Ib, pointer, modifier);
         assert_eq!(remembered, Some(Ok(first)));
-        for key in 0..POINTER_INPUTS_SEEN as u64 {
+        for key in 0..pointer::POINTER_INPUTS_SEEN as u64 {
             sign(&mut machine, 0x1000 + key);
         }
         let (again, renewed) = sign(&mut machine, 1);
@@ -6402,7 +6229,9 @@ mod tests {
             .pointer_result(sign, pauth::Key::Ib, pointer, modifier)
             .unwrap()
             .unwrap();
-        let remembered = machine.remembered(plain, pauth::Key::Ib, signed, modifier);
+        let remembered = machine
+            .pointer
+            .remembered(plain, pauth::Key::Ib, signed, modifier);
         assert_eq!(remembered, Some(Ok((pointer, true))));
         let context = machine.pointer_context().unwrap();
         for operation in [plain, combined] {
@@ -6424,7 +6253,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            machine.remembered(plain, pauth::Key::Ib, signed, modifier),
+            machine
+                .pointer
+                .remembered(plain, pauth::Key::Ib, signed, modifier),
             None
         );
         let computed = context.authenticate_operation(pauth::Key::Ib, signed, modifier, false);

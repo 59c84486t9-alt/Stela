@@ -1,0 +1,415 @@
+//! The PAC results the engine computes, remembers and lets native code
+//! complete (`x86_64::pointer`).
+//!
+//! A signing or authentication is a pure function of the five keys, the
+//! chip's PAC version, the regime's TCR (Arm `AddPAC`, `Auth`) and its
+//! operands, so [`PointerService`] remembers results in a memo tagged with
+//! the generation of those inputs. It lives at a fixed host address: PAC
+//! thunks read its memo and its tag words, and on a memo miss call
+//! [`complete`] with it, which computes the result exactly as the engine's
+//! exit would ([`PointerService::result`]) without leaving native code.
+//! A key's tag word is nonzero only while the service is open and the key
+//! was found enabled and untrapped under the current derived state, which
+//! is what both paths require.
+use crate::pauth;
+use alloc::{boxed::Box, vec, vec::Vec};
+use stela_compiler::{block::PointerAuthenticationKey, x86_64::pointer};
+
+/// The distinct PAC inputs whose memo generations are kept.
+pub(super) const POINTER_INPUTS_SEEN: usize = 16;
+
+/// What a PAC result depends on besides its operands: the five keys, the
+/// chip's PAC version and the regime's TCR (Arm `AddPAC`, `Auth`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct PointerInputs {
+    pub(super) keys: [[u64; 2]; 5],
+    pub(super) version: pauth::Version,
+    pub(super) tcr: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerOperation {
+    Sign,
+    Authenticate { combined: bool },
+}
+
+/// The [`pointer::MemoEntry`] kinds of the results native code does not
+/// complete, plus 1 for a combined form: an authentication that failed
+/// without a fault, and one that faults with the code in `value`.
+const UNAUTHENTICATED: u64 = 3;
+const FAULTED: u64 = 5;
+/// The tag bits of an entry's kind.
+const KIND: u64 = 0xf;
+
+/// A result: the value and whether it authenticated (signings always do),
+/// or the PAC failure code of a faulting authentication.
+pub(super) type PointerResult = Result<(u64, bool), u8>;
+
+/// The memo kind and value of an operation's result.
+fn memo_result(operation: PointerOperation, result: PointerResult) -> (u64, u64) {
+    let combined = u64::from(operation == PointerOperation::Authenticate { combined: true });
+    match (operation, result) {
+        (PointerOperation::Sign, Ok((value, _))) => (pointer::SIGNED, value),
+        (_, Ok((value, true))) => (pointer::AUTHENTICATED, value),
+        (_, Ok((value, false))) => (UNAUTHENTICATED + combined, value),
+        (_, Err(code)) => (FAULTED + combined, u64::from(code)),
+    }
+}
+
+/// The memo index of a key.
+pub(super) fn memo_key(key: pauth::Key) -> u8 {
+    pointer::key_index(match key {
+        pauth::Key::Ia => PointerAuthenticationKey::Ia,
+        pauth::Key::Ib => PointerAuthenticationKey::Ib,
+        pauth::Key::Da => PointerAuthenticationKey::Da,
+        pauth::Key::Db => PointerAuthenticationKey::Db,
+    })
+}
+
+fn key_of(key: PointerAuthenticationKey) -> pauth::Key {
+    match key {
+        PointerAuthenticationKey::Ia => pauth::Key::Ia,
+        PointerAuthenticationKey::Ib => pauth::Key::Ib,
+        PointerAuthenticationKey::Da => pauth::Key::Da,
+        PointerAuthenticationKey::Db => pauth::Key::Db,
+    }
+}
+
+/// The engine's PAC context, memo and tag words, which native code reads.
+pub(super) struct PointerService {
+    /// The keys, version and layout, while open.
+    context: Option<pauth::Context>,
+    /// Results, each tagged with the generation of the inputs it was
+    /// computed under; `generation` is that of `inputs`.
+    memo: Box<[pointer::MemoEntry]>,
+    inputs: Option<PointerInputs>,
+    pub(super) generation: u64,
+    /// The generations of the most recent distinct inputs, most recent
+    /// first, so entries stay valid across a return to earlier inputs (EL0
+    /// and EL1 keys, guarded levels, PE switches).
+    seen: Vec<(PointerInputs, u64)>,
+    /// The last generation handed out; an evicted one is never reused.
+    generations: u64,
+    /// Each key's tag word for native code: zero until a PAC exit finds the
+    /// key enabled and untrapped under the current memo, and again whenever
+    /// derived state may have changed.
+    pub(super) tags: [u64; 4],
+}
+
+impl PointerService {
+    pub(super) fn new() -> Self {
+        Self {
+            context: None,
+            memo: vec![pointer::MemoEntry::default(); pointer::MEMO_ENTRIES].into_boxed_slice(),
+            inputs: None,
+            generation: 0,
+            seen: Vec::new(),
+            generations: 0,
+            tags: [0; 4],
+        }
+    }
+
+    /// Forget the context and close every key, as derived state changed.
+    pub(super) fn close(&mut self) {
+        self.context = None;
+        self.tags = [0; 4];
+    }
+
+    pub(super) fn is_open(&self) -> bool {
+        self.context.is_some()
+    }
+
+    /// Open the service with the current `inputs`.
+    pub(super) fn open(&mut self, inputs: PointerInputs) {
+        if self.inputs != Some(inputs) {
+            self.generation = self.generation_of(inputs);
+            self.inputs = Some(inputs);
+        }
+        let [ia, ib, da, db, generic] = inputs.keys;
+        self.context = Some(
+            pauth::Context::new_with_version(
+                0,
+                pauth::Keys::from_words(ia, ib, da, db).with_generic_words(generic),
+                inputs.version,
+            )
+            .with_translation_regime(inputs.tcr),
+        );
+    }
+
+    /// The thunk's view of this service: its memo, tag words and
+    /// [`complete`] with its address.
+    pub(super) fn addresses(&self) -> (u64, u64, pointer::Service) {
+        let routine: pointer::ServiceRoutine = complete;
+        (
+            self.memo.as_ptr() as u64,
+            self.tags.as_ptr() as u64,
+            pointer::Service {
+                state: self as *const Self as u64,
+                routine: routine as usize as u64,
+            },
+        )
+    }
+
+    /// One signing or authentication with the open context, remembered
+    /// while its inputs stay the same, with `key` known enabled and
+    /// untrapped, which opens its tag word. The memo slot comes from the
+    /// pointer and modifier alone, so which slot is touched never depends on
+    /// a key. A signing whose result strips back to its pointer also
+    /// remembers that authenticating the result with the same key and
+    /// modifier succeeds with that pointer (Arm `Auth` recomputes the PAC of
+    /// the stripped pointer), which answers the epilogue of a signed frame;
+    /// a success answers both the combined and the plain authentication.
+    /// `None` when the service is closed or the context lacks the key.
+    pub(super) fn result(
+        &mut self,
+        operation: PointerOperation,
+        key: pauth::Key,
+        pointer: u64,
+        modifier: u64,
+    ) -> Option<PointerResult> {
+        self.context.as_ref()?;
+        self.tags[usize::from(memo_key(key))] = pointer::tag(self.generation, memo_key(key), 0);
+        if let Some(result) = self.remembered(operation, key, pointer, modifier) {
+            return Some(result);
+        }
+        let context = self.context.as_ref()?;
+        let result = match operation {
+            PointerOperation::Sign => Ok((context.sign(key, pointer, modifier).ok()?, true)),
+            PointerOperation::Authenticate { combined } => {
+                match context.authenticate_operation(key, pointer, modifier, combined) {
+                    Ok(result) => Ok((result.pointer, result.authenticated)),
+                    Err(pauth::AuthenticationError::Failure { code }) => Err(code),
+                    Err(pauth::AuthenticationError::KeyUnavailable { .. }) => return None,
+                }
+            }
+        };
+        let strips_back = match (operation, result) {
+            (PointerOperation::Sign, Ok((signed, _))) => {
+                (context.strip(key, signed).ok() == Some(pointer)).then_some(signed)
+            }
+            _ => None,
+        };
+        self.remember(operation, key, pointer, modifier, result);
+        if let Some(signed) = strips_back {
+            let authenticate = PointerOperation::Authenticate { combined: false };
+            self.remember(authenticate, key, signed, modifier, Ok((pointer, true)));
+        }
+        Some(result)
+    }
+
+    /// The memo generation of `inputs`: the one they had if they are among
+    /// the [`POINTER_INPUTS_SEEN`] most recent distinct inputs, else a new
+    /// one. A result depends only on its inputs and operands, so an entry
+    /// of a reused generation is still exact.
+    fn generation_of(&mut self, inputs: PointerInputs) -> u64 {
+        let generation = match self.seen.iter().position(|&(known, _)| known == inputs) {
+            Some(index) => self.seen.remove(index).1,
+            None => {
+                self.generations += 1;
+                self.generations
+            }
+        };
+        self.seen.insert(0, (inputs, generation));
+        self.seen.truncate(POINTER_INPUTS_SEEN);
+        generation
+    }
+
+    /// The current memo's result of `operation` with `key` on these
+    /// operands, if it has one: a success answers both authentication forms.
+    pub(super) fn remembered(
+        &self,
+        operation: PointerOperation,
+        key: pauth::Key,
+        pointer: u64,
+        modifier: u64,
+    ) -> Option<PointerResult> {
+        let entry = self.memo[pointer::slot(pointer, modifier)];
+        let tag = pointer::tag(self.generation, memo_key(key), 0);
+        if entry.pointer != pointer || entry.modifier != modifier || entry.tag & !KIND != tag {
+            return None;
+        }
+        let kind = entry.tag & KIND;
+        let combined = u64::from(operation == PointerOperation::Authenticate { combined: true });
+        match operation {
+            PointerOperation::Sign => (kind == pointer::SIGNED).then_some(Ok((entry.value, true))),
+            PointerOperation::Authenticate { .. } => match kind {
+                pointer::AUTHENTICATED => Some(Ok((entry.value, true))),
+                kind if kind == UNAUTHENTICATED + combined => Some(Ok((entry.value, false))),
+                kind if kind == FAULTED + combined => Some(Err(entry.value as u8)),
+                _ => None,
+            },
+        }
+    }
+
+    fn remember(
+        &mut self,
+        operation: PointerOperation,
+        key: pauth::Key,
+        pointer: u64,
+        modifier: u64,
+        result: PointerResult,
+    ) {
+        let (kind, value) = memo_result(operation, result);
+        self.memo[pointer::slot(pointer, modifier)] = pointer::MemoEntry {
+            pointer,
+            modifier,
+            tag: pointer::tag(self.generation, memo_key(key), kind),
+            value,
+        };
+    }
+}
+
+/// A PAC thunk's memo miss (`x86_64::pointer::ServiceRoutine`): the result
+/// of `request` on these operands while the requested key's tag word is
+/// open, completed when it is a signing or a successful authentication.
+/// A failed authentication is remembered for the exit the thunk then takes.
+pub(super) extern "sysv64" fn complete(
+    service: u64,
+    request: u32,
+    pointer: u64,
+    modifier: u64,
+) -> pointer::Completion {
+    // SAFETY: thunks pass the address of the machine's boxed service, which
+    // outlives every installed thunk; the engine does not touch it while
+    // native code runs.
+    let service = unsafe { &mut *(service as *mut PointerService) };
+    let (key, authenticate, combined) = pointer::requested(request);
+    let key = key_of(key);
+    if service.tags[usize::from(memo_key(key))] == 0 {
+        return pointer::Completion::default();
+    }
+    let operation = if authenticate {
+        PointerOperation::Authenticate { combined }
+    } else {
+        PointerOperation::Sign
+    };
+    match service.result(operation, key, pointer, modifier) {
+        Some(Ok((value, true))) => pointer::Completion {
+            completed: 1,
+            value,
+        },
+        _ => pointer::Completion::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inputs(version: pauth::Version, tcr: u64) -> PointerInputs {
+        let key = |index: u64| [0x1122_3344_5566_7788 ^ index, 0x99aa_bbcc_ddee_ff00 + index];
+        PointerInputs {
+            keys: [key(1), key(2), key(3), key(4), key(5)],
+            version,
+            tcr,
+        }
+    }
+
+    fn request(key: PointerAuthenticationKey, operation: PointerOperation) -> u32 {
+        let mut request = u32::from(pointer::key_index(key));
+        if let PointerOperation::Authenticate { combined } = operation {
+            request |= pointer::REQUEST_AUTHENTICATE;
+            if combined {
+                request |= pointer::REQUEST_COMBINED;
+            }
+        }
+        request
+    }
+
+    /// The native completion answers exactly what the engine's exit
+    /// computes, for every key, form and version and for kernel and user
+    /// pointers, signed, corrupted and unsigned: it completes signings and
+    /// successful authentications, refuses the rest, and refuses everything
+    /// for a key whose tag word is closed.
+    #[test]
+    fn native_completions_equal_the_engine_results() {
+        use PointerAuthenticationKey as Key;
+        // T0SZ = T1SZ = 25 (39-bit VAs), TBI0 on.
+        let tcr = 25 | 25 << 16 | 1 << 37;
+        let operations = [
+            PointerOperation::Sign,
+            PointerOperation::Authenticate { combined: false },
+            PointerOperation::Authenticate { combined: true },
+        ];
+        for version in [
+            pauth::Version::Classic,
+            pauth::Version::Enhanced,
+            pauth::Version::Faulting,
+            pauth::Version::FaultingCombined,
+        ] {
+            let inputs = inputs(version, tcr);
+            let mut native = Box::new(PointerService::new());
+            let mut engine = PointerService::new();
+            native.open(inputs);
+            engine.open(inputs);
+            let state = native.addresses().2.state;
+            for key in [Key::Ia, Key::Ib, Key::Da, Key::Db] {
+                let pauth_key = key_of(key);
+                let index = usize::from(pointer::key_index(key));
+                for (step, base) in [0xffff_ff80_0012_3450_u64, 0x0000_0001_0000_8000]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let modifier = 0xffff_ff80_0040_0000 + step as u64 * 0x10;
+                    let signed = engine.result(PointerOperation::Sign, pauth_key, base, modifier);
+                    let Some(Ok((signed, true))) = signed else {
+                        panic!("signing {base:#x}: {signed:?}");
+                    };
+                    for operand in [base, signed, signed ^ (1 << 50), signed ^ (1 << 62)] {
+                        for operation in operations {
+                            native.tags = [0; 4];
+                            let asked = complete(state, request(key, operation), operand, modifier);
+                            assert_eq!(asked, pointer::Completion::default(), "a closed key");
+                            native.tags[index] = pointer::tag(native.generation, index as u8, 0);
+                            let expected = engine.result(operation, pauth_key, operand, modifier);
+                            let asked = complete(state, request(key, operation), operand, modifier);
+                            let completed = match expected {
+                                Some(Ok((value, true))) => pointer::Completion {
+                                    completed: 1,
+                                    value,
+                                },
+                                _ => pointer::Completion::default(),
+                            };
+                            assert_eq!(asked, completed, "{version:?} {key:?} {operation:?}");
+                            // The native call remembered what the exit then finds.
+                            assert_eq!(
+                                native.remembered(operation, pauth_key, operand, modifier),
+                                expected
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A return to earlier inputs finds their generation again; other inputs
+    /// get their own, and beyond the inputs kept a generation is new.
+    #[test]
+    fn generations_follow_the_inputs() {
+        let mut service = PointerService::new();
+        let tcr = 25 | 25 << 16;
+        let (first, other) = (
+            inputs(pauth::Version::Faulting, tcr),
+            inputs(pauth::Version::Classic, tcr),
+        );
+        service.open(first);
+        let generation = service.generation;
+        service.open(other);
+        assert_ne!(service.generation, generation);
+        service.open(first);
+        assert_eq!(service.generation, generation);
+        for extra in 1..=POINTER_INPUTS_SEEN as u64 {
+            service.open(inputs(pauth::Version::Faulting, tcr + (extra << 32)));
+        }
+        service.open(first);
+        assert!(service.generation > generation);
+        service.close();
+        assert!(!service.is_open());
+        assert_eq!(service.tags, [0; 4]);
+        assert_eq!(
+            service.result(PointerOperation::Sign, pauth::Key::Ia, 1, 2),
+            None
+        );
+    }
+}
