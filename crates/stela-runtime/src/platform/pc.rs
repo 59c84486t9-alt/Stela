@@ -26,6 +26,7 @@ pub mod power;
 pub mod storage;
 pub mod virtio;
 pub mod virtio_net;
+pub mod xhci;
 
 /// What `stela.efi` records for the host storage drivers before it leaves
 /// boot services.

@@ -70,6 +70,7 @@ use crate::platform::usb::{
 };
 pub use crate::platform::usb::{
     ecm::Counters as UsbNetworkCounters,
+    hid::Input as HidInput,
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
     mux::{State as MuxState, StreamId as MuxStream, StreamState as MuxStreamState},
     session::Log as UsbLog,

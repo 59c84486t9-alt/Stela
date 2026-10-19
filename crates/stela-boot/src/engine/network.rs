@@ -5,7 +5,8 @@
 //! UEFI's Simple Network Protocol ends with boot services, and the request
 //! is made during the restore, long after ExitBootServices, so the client
 //! runs the runtime's IPv4 stack (`stela_runtime::net`) over the adapter's
-//! after-EBS driver (`pc::virtio_net`). Its registers and DMA pages are
+//! after-EBS driver (`pc::virtio_net`, or `pc::xhci::ecm` for a USB
+//! Ethernet adapter). Its registers and DMA pages are
 //! identity-mapped in the loader's root, so every frame moves inside that
 //! root (`storage::RestoreRoot`), as block and input I/O do.
 use super::storage::RestoreRoot;
@@ -14,17 +15,17 @@ use alloc::{format, string::String, vec::Vec};
 use stela_runtime::{
     machine::apple::AppleDevices,
     net::{Link, Mac, NetError, Stack},
-    pc::{self, virtio_net::VirtioNet},
+    pc::{self, storage::Adapter},
 };
 
 /// The host's network adapters and the loader root they are reached in.
 pub struct Links {
-    pub devices: Vec<VirtioNet>,
+    pub devices: Vec<Adapter>,
     pub root: u64,
 }
 
 struct RootLink {
-    device: VirtioNet,
+    device: Adapter,
     root: u64,
 }
 
@@ -60,12 +61,12 @@ impl HostNetwork {
     pub fn open(links: Links, clock: pc::Clock) -> Result<Self, String> {
         let Some(device) = links.devices.into_iter().next() else {
             return Err(String::from(
-                "no host network adapter: the mount drives virtio-net after ExitBootServices",
+                "no host network adapter: the mount drives virtio-net and USB CDC-ECM adapters after ExitBootServices",
             ));
         };
         output::arguments(format_args!(
             "NETWORK adapter {} mac={}\n",
-            device.location,
+            device.location(),
             device.mac()
         ));
         let mut stack = Stack::new(
@@ -150,7 +151,7 @@ impl GuestNetwork {
         let device = links.devices.remove(index);
         output::arguments(format_args!(
             "GUEST NETWORK adapter {} mac={}\n",
-            device.location,
+            device.location(),
             device.mac()
         ));
         Ok(Self {

@@ -13,7 +13,9 @@ use super::{
     pci::{Address, Function},
     virtio,
     virtio_net::{self, VirtioNet},
+    xhci,
 };
+use crate::platform::net::{Link, Mac, NetError};
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 
@@ -41,21 +43,72 @@ impl core::str::FromStr for Target {
     }
 }
 
+/// A host network adapter, as a raw Ethernet link.
+pub enum Adapter {
+    Virtio(VirtioNet),
+    Usb(xhci::ecm::UsbNet),
+}
+
+impl Adapter {
+    /// Where the adapter is, for logs.
+    pub fn location(&self) -> &str {
+        match self {
+            Self::Virtio(device) => &device.location,
+            Self::Usb(device) => &device.location,
+        }
+    }
+}
+
+impl Link for Adapter {
+    fn mac(&self) -> Mac {
+        match self {
+            Self::Virtio(device) => device.mac(),
+            Self::Usb(device) => device.mac(),
+        }
+    }
+    fn carrier(&mut self) -> bool {
+        match self {
+            Self::Virtio(device) => device.carrier(),
+            Self::Usb(device) => device.carrier(),
+        }
+    }
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
+        match self {
+            Self::Virtio(device) => device.transmit(frame),
+            Self::Usb(device) => device.transmit(frame),
+        }
+    }
+    fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
+        match self {
+            Self::Virtio(device) => device.receive(),
+            Self::Usb(device) => device.receive(),
+        }
+    }
+}
+
 /// Every block and input device the drivers brought up, and every
 /// controller they could not.
 #[derive(Default)]
 pub struct Disks {
     pub devices: Vec<Box<dyn BlockDevice>>,
     pub inputs: Vec<input::VirtioInput>,
+    /// USB keyboards and pointers behind xHCI controllers.
+    pub usb_inputs: Vec<xhci::hid::UsbInput>,
     /// Network adapters, as raw Ethernet links.
-    pub links: Vec<VirtioNet>,
+    pub links: Vec<Adapter>,
     pub failures: Vec<(Address, BlockError)>,
+    /// USB devices that failed to enumerate or bind, by location.
+    pub usb_failures: Vec<(String, BlockError)>,
+    /// USB interfaces no driver here takes, and why.
+    pub usb_unused: Vec<(String, &'static str)>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<super::pci::EcamWindow>,
 }
 
 /// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
-/// every virtio-input device and every virtio-net adapter.
+/// every virtio-input device, every virtio-net adapter, and every xHCI
+/// controller with the USB disks, keyboards, pointers and Ethernet
+/// adapters on it.
 ///
 /// # Safety
 ///
@@ -82,9 +135,28 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
                         .map(|device| Box::new(device) as Box<dyn BlockDevice>)
                         .collect()
                 })
+            } else if function.class == xhci::CLASS {
+                match xhci::attach(&mut function, handoff, dma) {
+                    Ok(found) => {
+                        disks.devices.extend(
+                            found
+                                .disks
+                                .into_iter()
+                                .map(|d| Box::new(d) as Box<dyn BlockDevice>),
+                        );
+                        disks.usb_inputs.extend(found.inputs);
+                        disks
+                            .links
+                            .extend(found.links.into_iter().map(Adapter::Usb));
+                        disks.usb_failures.extend(found.failures);
+                        disks.usb_unused.extend(found.unused);
+                    }
+                    Err(error) => disks.failures.push((address, error)),
+                }
+                continue;
             } else if virtio_net::matches(&function) {
                 match VirtioNet::new(&mut function, handoff, dma) {
-                    Ok(device) => disks.links.push(device),
+                    Ok(device) => disks.links.push(Adapter::Virtio(device)),
                     Err(error) => disks.failures.push((address, error)),
                 }
                 continue;

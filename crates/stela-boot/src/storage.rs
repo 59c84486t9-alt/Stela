@@ -108,7 +108,8 @@ pub fn discover() -> Result<Handoff, &'static str> {
                     || pc::input::matches(&function)
                     || pc::virtio_net::matches(&function)
                     || function.class == pc::nvme::CLASS
-                    || function.class == pc::ahci::CLASS;
+                    || function.class == pc::ahci::CLASS
+                    || function.class == pc::xhci::CLASS;
                 if storage {
                     mapped.extend(function.bars().iter().filter_map(|bar| match bar {
                         Some(bar @ Bar::Memory { .. }) => bar.memory(),

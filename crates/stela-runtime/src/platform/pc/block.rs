@@ -53,6 +53,8 @@ pub enum Transport {
     VirtioBlk,
     Nvme,
     Ahci,
+    /// USB mass storage (Bulk-Only) behind an xHCI controller.
+    Usb,
 }
 
 /// What a device reports about itself.

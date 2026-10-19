@@ -115,8 +115,15 @@ pub unsafe fn open(
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
+    for (location, error) in &disks.usb_failures {
+        output::arguments(format_args!("USB FAILED {location}: {error}\n"));
+    }
+    for (location, why) in &disks.usb_unused {
+        output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
+    }
     let inputs = Inputs {
         devices: core::mem::take(&mut disks.inputs),
+        usb: core::mem::take(&mut disks.usb_inputs),
         root,
     };
     let links = super::network::Links {
@@ -178,5 +185,6 @@ pub struct Opened {
 /// pages are reached through.
 pub struct Inputs {
     pub devices: alloc::vec::Vec<pc::input::VirtioInput>,
+    pub usb: alloc::vec::Vec<pc::xhci::hid::UsbInput>,
     pub root: u64,
 }
