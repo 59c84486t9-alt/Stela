@@ -893,6 +893,9 @@ pub struct SepDevice {
     pub iommu: usize,
     pub stream: u32,
     pub firmware: Option<(u64, u64)>,
+    /// The AP's effective production status and security mode in `/chosen`,
+    /// which the SEP, sharing its fuses, reports as its own.
+    pub security: Option<crate::platform::apple::sep::SecurityMode>,
 }
 
 /// The `dcpext` display coprocessor and the register apertures around it,
@@ -3477,12 +3480,25 @@ fn sep_device(
             Ok((base, length))
         })
         .transpose()?;
+    let chosen = root.child("chosen");
+    let flag = |name| {
+        chosen
+            .as_ref()
+            .and_then(|n| n.first_u32(name))
+            .map(|value| value != 0)
+    };
+    let security = flag("effective-production-status-ap")
+        .zip(flag("effective-security-mode-ap"))
+        .map(
+            |(production, secure)| crate::platform::apple::sep::SecurityMode { production, secure },
+        );
     Ok(Some(SepDevice {
         ranges: [place(first)?, place(second)?],
         irqs,
         iommu,
         stream,
         firmware,
+        security,
     }))
 }
 
@@ -5929,6 +5945,7 @@ mod tests {
                 iommu: 0,
                 stream: 0,
                 firmware: None,
+                security: None,
             })
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x25d2c0000);

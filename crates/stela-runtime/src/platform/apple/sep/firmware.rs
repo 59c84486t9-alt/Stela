@@ -13,7 +13,7 @@
 //! contract and the trust-policy boundary.
 use super::super::asc::{Firmware, Message};
 use super::{
-    Entropy,
+    Entropy, SecurityMode,
     image::{self, signature},
     message::{self, Frame},
     os::SepOs,
@@ -49,14 +49,16 @@ pub struct SepFirmware {
     rom: Rom,
     phase: Phase,
     evidence: Option<Evidence>,
+    security: Option<SecurityMode>,
 }
 
 impl SepFirmware {
-    pub fn new(entropy: Box<dyn Entropy>) -> Self {
+    pub fn new(entropy: Box<dyn Entropy>, security: Option<SecurityMode>) -> Self {
         Self {
             rom: Rom::new(entropy),
             phase: Phase::Rom,
             evidence: None,
+            security,
         }
     }
 
@@ -116,7 +118,7 @@ impl Firmware for SepFirmware {
 
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         if let Phase::Active(os) = &mut self.phase {
-            os.receive(Frame::from_mailbox(message)?, outbox)
+            os.receive(Frame::from_mailbox(message)?, self.rom.entropy(), outbox)
         } else {
             self.rom.receive(message, outbox)
         }
@@ -154,7 +156,7 @@ impl Firmware for SepFirmware {
             }
             .mailbox(),
         );
-        self.phase = Phase::Active(SepOs::new());
+        self.phase = Phase::Active(SepOs::new(self.security));
         Ok(())
     }
 }
@@ -255,7 +257,7 @@ mod tests {
 
     #[test]
     fn stela_policy_accepts_a_bare_sepi_and_reaches_os_active() {
-        let mut fw = SepFirmware::new(entropy());
+        let mut fw = SepFirmware::new(entropy(), None);
         booted(&mut fw);
         let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
         let acks = deliver(&mut fw, &image, false).unwrap();
@@ -284,7 +286,7 @@ mod tests {
 
     #[test]
     fn a_signed_container_records_signature_evidence() {
-        let mut fw = SepFirmware::new(entropy());
+        let mut fw = SepFirmware::new(entropy(), None);
         booted(&mut fw);
         let (payload, manifest) = signature::tests::inputs();
         let image = crate::img4::compose(&payload, &manifest);
@@ -310,7 +312,7 @@ mod tests {
             ),
             (sepi.as_slice(), true, "SEP firmware DMA fault in dart-sep"),
         ] {
-            let mut fw = SepFirmware::new(entropy());
+            let mut fw = SepFirmware::new(entropy(), None);
             booted(&mut fw);
             assert_eq!(deliver(&mut fw, image, fault), Err(refusal));
             assert!(fw.evidence().is_none());

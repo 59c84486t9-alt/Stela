@@ -45,6 +45,11 @@ pub struct Buffers {
 }
 
 impl Buffers {
+    /// The application service that owns these buffers.
+    pub fn service(&self) -> u8 {
+        self.service
+    }
+
     pub fn new(service: u8) -> Result<Self, &'static str> {
         if service == message::CONTROL || service >= message::DISCOVERY {
             return Err("SEP OOL owner is not an application service");

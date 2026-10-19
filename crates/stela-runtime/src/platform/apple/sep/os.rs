@@ -8,36 +8,51 @@
 //! notification drives `AppleSEPManager::notifyOSActive` 0x2d6c998 and
 //! `_notifyOSActiveGated` 0x2d6b38c, which publishes `sepBootedOnce`
 //! (0x2d6b558) and advances the manager to its booted state.
-//! docs/research/sep.md owns the recovered contract.
 //!
-//! Application services (`sks`, `pnon`, `xars`/`xarm`, `scrd`, ...) are **not**
-//! advertised here. Their discovery capacities and request/reply ABIs are not
-//! recovered; a guessed advertisement would mislead the kernel into creating a
-//! nub it then blocks on. Unmodeled inbound control traffic refuses explicitly
-//! rather than fake a reply.
+//! The control endpoint ([`super::control`]) then answers the AP's tagged
+//! requests and consumes its notifications. Application services (`sks`,
+//! `pnon`, `xars`/`xarm`, `scrd`, ...) are **not** advertised here; a guessed
+//! advertisement would mislead the kernel into creating a nub it then blocks
+//! on. docs/research/sep.md owns the recovered contract.
 use super::super::asc::Message;
 use super::{
+    Entropy, SecurityMode,
+    control::{self, Request, Status},
     message::{self, Frame},
+    ool::Buffers,
     shared::Region,
 };
 use alloc::vec::Vec;
 
-/// Control endpoint (service 0) tag-0 opcodes, from
-/// `AppleSEPControl::_cmsgAction` 0x2d84d90: 13 schedules OS-active, 16
-/// announces wrapping-active, 17 requests an AP reply, 21 notifies OS-active
-/// directly, 41 publishes a 32-bit field. The emulated SEP sends 21 once its
-/// shared memory has been mapped.
-const NOTIFY_OS_ACTIVE: u8 = 21;
+/// The SEP's power state as the control endpoint drives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Power {
+    Awake,
+    /// `cmsgSLEEP`'s sleep type, until `cmsgWAKE`.
+    Asleep(u8),
+    /// After the AP's `cmsgNAP`, until its nap wake word.
+    Napping,
+}
 
-#[derive(Default)]
 pub struct SepOs {
     region: Option<Region>,
     os_active_sent: bool,
+    security: Option<SecurityMode>,
+    power: Power,
+    ap_sleep_ready: bool,
+    buffers: Vec<Buffers>,
 }
 
 impl SepOs {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(security: Option<SecurityMode>) -> Self {
+        Self {
+            region: None,
+            os_active_sent: false,
+            security,
+            power: Power::Awake,
+            ap_sleep_ready: false,
+            buffers: Vec::new(),
+        }
     }
 
     /// The shared-memory aggregate the AP mapped for the SEP, once received.
@@ -50,33 +65,40 @@ impl SepOs {
         self.os_active_sent
     }
 
+    pub fn power(&self) -> Power {
+        self.power
+    }
+
+    /// Whether the AP announced it is ready to sleep (`cmsgAP_SLEEP_READY`).
+    pub fn ap_sleep_ready(&self) -> bool {
+        self.ap_sleep_ready
+    }
+
+    /// The OOL buffers an application service registered, if any.
+    pub fn buffers(&self, service: u8) -> Option<&Buffers> {
+        self.buffers.iter().find(|b| b.service() == service)
+    }
+
     /// Dispatch an AP-sent frame in the active phase. Boot (0xfe) records the
-    /// shared-memory region and reports OS active once; other inbound traffic
-    /// is not modeled and refuses, since replying would require ABIs that are
-    /// not yet recovered.
-    pub fn receive(&mut self, frame: Frame, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    /// shared-memory region and reports OS active once; control requests are
+    /// answered once that has happened; other traffic refuses.
+    pub fn receive(
+        &mut self,
+        frame: Frame,
+        entropy: &mut dyn Entropy,
+        outbox: &mut Vec<Message>,
+    ) -> Result<(), &'static str> {
         match frame.service {
             message::BOOT => {
                 let region = Region::from_message(frame.mailbox())?;
                 self.region = Some(region);
                 if !self.os_active_sent {
-                    outbox.push(
-                        Frame {
-                            service: message::CONTROL,
-                            tag: 0,
-                            opcode: NOTIFY_OS_ACTIVE,
-                            parameter: 0,
-                            data: 0,
-                        }
-                        .mailbox(),
-                    );
+                    outbox.push(control::notification(control::OS_ACTIVE, 0).mailbox());
                     self.os_active_sent = true;
                 }
                 Ok(())
             }
-            message::CONTROL => {
-                Err("SEP control request handling is not modeled in the active phase")
-            }
+            message::CONTROL => self.control(frame, entropy, outbox),
             message::DISCOVERY => {
                 Err("SEP discovery is advertised by the SEP, not received from the AP")
             }
@@ -84,13 +106,101 @@ impl SepOs {
             _ => Err("SEP application service is not modeled"),
         }
     }
+
+    fn control(
+        &mut self,
+        frame: Frame,
+        entropy: &mut dyn Entropy,
+        outbox: &mut Vec<Message>,
+    ) -> Result<(), &'static str> {
+        if !self.os_active_sent {
+            return Err("SEP control request before sepOS mapped its shared memory");
+        }
+        let request = Request::decode(frame)?;
+        if self.power != Power::Awake && !matches!(request, Request::Wake | Request::WakeFromNap) {
+            return Err("SEP control request while the SEP sleeps or naps");
+        }
+        let data = match request {
+            Request::Nop => Some(0),
+            Request::Ool => {
+                let index = match self
+                    .buffers
+                    .iter()
+                    .position(|b| b.service() == frame.parameter)
+                {
+                    Some(index) => index,
+                    None => {
+                        self.buffers.push(Buffers::new(frame.parameter)?);
+                        self.buffers.len() - 1
+                    }
+                };
+                self.buffers[index].record(frame)?;
+                Some(0)
+            }
+            Request::Sleep(kind) => {
+                self.power = Power::Asleep(kind);
+                Some(0)
+            }
+            Request::Wake => {
+                if !matches!(self.power, Power::Asleep(_)) {
+                    return Err("SEP wake without a preceding sleep");
+                }
+                self.power = Power::Awake;
+                self.ap_sleep_ready = false;
+                Some(0)
+            }
+            Request::Nap => {
+                self.power = Power::Napping;
+                None
+            }
+            Request::WakeFromNap => {
+                if self.power != Power::Napping {
+                    return Err("SEP nap wake while the SEP is not napping");
+                }
+                self.power = Power::Awake;
+                outbox.push(control::notification(control::NAP_AWAKE, 0).mailbox());
+                None
+            }
+            Request::NapOk => {
+                return Err("SEP nap acknowledgement without a SEP nap request");
+            }
+            Request::ApSleepReady => {
+                self.ap_sleep_ready = true;
+                None
+            }
+            Request::SecurityMode => {
+                let mode = self.security.ok_or(
+                    "SEP security mode is unknown: /chosen lacks the AP's effective production status and security mode",
+                )?;
+                Some(u32::from(mode.production) | u32::from(mode.secure) << 1)
+            }
+            Request::Entropy => {
+                let mut bytes = [0; 4];
+                entropy.fill(&mut bytes)?;
+                Some(u32::from_le_bytes(bytes))
+            }
+            Request::EraseInstall => {
+                return Err("SEP erase-install needs the persistent SEP store");
+            }
+            Request::SelfTest => return Err("SEP self test is not modeled"),
+            Request::TtyIn(_) => return Err("SEP console input is not modeled"),
+            Request::RelayDma(_) => {
+                return Err("SEP relay DMA exists only on boards with pcie-up-interrupts");
+            }
+            Request::Panic => return Err("the AP requested a SEP panic"),
+        };
+        if let Some(data) = data {
+            outbox.push(control::reply(frame, Status::Success, data).mailbox());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn shm(address: u64, pages: u16) -> Message {
+    fn shm(address: u64, pages: u16) -> Frame {
         Frame {
             service: message::BOOT,
             tag: 0,
@@ -98,19 +208,51 @@ mod tests {
             parameter: (pages >> 8) as u8,
             data: (address >> 12) as u32,
         }
-        .mailbox()
+    }
+
+    fn control(tag: u8, opcode: u8, parameter: u8, data: u32) -> Frame {
+        Frame {
+            service: message::CONTROL,
+            tag,
+            opcode,
+            parameter,
+            data,
+        }
+    }
+
+    fn counter() -> impl FnMut(&mut [u8]) -> Result<(), &'static str> {
+        let mut next = 0u8;
+        move |bytes: &mut [u8]| {
+            for byte in bytes {
+                next = next.wrapping_add(1);
+                *byte = next;
+            }
+            Ok(())
+        }
+    }
+
+    fn active(security: Option<SecurityMode>) -> SepOs {
+        let mut os = SepOs::new(security);
+        let mut outbox = Vec::new();
+        os.receive(shm(0x1234_5000, 0x20), &mut counter(), &mut outbox)
+            .unwrap();
+        os
+    }
+
+    fn reply(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>, &'static str> {
+        let mut outbox = Vec::new();
+        os.receive(frame, &mut counter(), &mut outbox)?;
+        Ok(outbox
+            .into_iter()
+            .map(|m| Frame::from_mailbox(m).unwrap())
+            .collect())
     }
 
     #[test]
     fn mapping_shared_memory_reports_os_active_exactly_once() {
-        let mut os = SepOs::new();
+        let mut os = SepOs::new(None);
         assert!(!os.os_active_sent());
-        let mut outbox = Vec::new();
-        os.receive(
-            Frame::from_mailbox(shm(0x1234_5000, 0x20)).unwrap(),
-            &mut outbox,
-        )
-        .unwrap();
+        let first = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
         assert_eq!(
             os.region(),
             Some(Region {
@@ -118,47 +260,105 @@ mod tests {
                 bytes: 0x20 << 12,
             })
         );
-        assert_eq!(outbox.len(), 1);
-        let active = Frame::from_mailbox(outbox[0]).unwrap();
-        assert_eq!(
-            (active.service, active.tag, active.opcode),
-            (message::CONTROL, 0, NOTIFY_OS_ACTIVE)
-        );
+        assert_eq!(first, [control::notification(control::OS_ACTIVE, 0)]);
         assert!(os.os_active_sent());
         // A second shared-memory frame (wake remap) does not re-announce.
-        let mut again = Vec::new();
-        os.receive(
-            Frame::from_mailbox(shm(0x2000_0000, 0x10)).unwrap(),
-            &mut again,
+        assert!(reply(&mut os, shm(0x2000_0000, 0x10)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tagged_control_requests_are_answered_with_their_tag_and_status() {
+        let mode = SecurityMode {
+            production: true,
+            secure: true,
+        };
+        let mut os = active(Some(mode));
+        let nop = control(3, control::NOP, 0, 0);
+        assert_eq!(
+            reply(&mut os, nop).unwrap(),
+            [control::reply(nop, Status::Success, 0)]
+        );
+        let mode_request = control(4, control::SECURITY_MODE, 0, 0);
+        assert_eq!(reply(&mut os, mode_request).unwrap()[0].data, 0b11);
+        let entropy = control(5, control::ENTROPY, 0, 0);
+        assert_eq!(
+            reply(&mut os, entropy).unwrap(),
+            [control::reply(entropy, Status::Success, 0x0403_0201)]
+        );
+        // OOL registration: length, then page address, owned by service 9.
+        reply(&mut os, control(6, control::SET_OOL_IN_LENGTH, 9, 0x4000)).unwrap();
+        reply(
+            &mut os,
+            control(7, control::SET_OOL_IN_ADDRESS, 9, 0x8_0000),
         )
         .unwrap();
-        assert!(again.is_empty());
+        assert!(os.buffers(9).is_some());
+        assert!(os.buffers(10).is_none());
+        // An unknown security mode refuses rather than guess one.
+        let mut unknown = active(None);
+        assert!(reply(&mut unknown, mode_request).is_err());
+    }
+
+    #[test]
+    fn sleep_nap_and_wake_follow_the_ap_power_sequence() {
+        let mut os = active(None);
+        reply(&mut os, control(1, control::SLEEP, 2, 0)).unwrap();
+        assert_eq!(os.power(), Power::Asleep(2));
+        // Asleep, only a wake is serviced.
+        assert!(reply(&mut os, control(2, control::NOP, 0, 0)).is_err());
+        reply(&mut os, control(3, control::WAKE, 0, 0)).unwrap();
+        assert_eq!(os.power(), Power::Awake);
+        assert!(reply(&mut os, control(4, control::WAKE, 0, 0)).is_err());
+        // AP nap: no reply; the nap wake word is answered by NAP_AWAKE.
+        assert!(
+            reply(&mut os, control(0, control::NAP, 0, 0))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(os.power(), Power::Napping);
+        assert_eq!(
+            reply(&mut os, control(0, control::WAKE_FROM_NAP, 0, 0)).unwrap(),
+            [control::notification(control::NAP_AWAKE, 0)]
+        );
+        assert!(reply(&mut os, control(0, control::WAKE_FROM_NAP, 0, 0)).is_err());
+        assert!(
+            reply(&mut os, control(0, control::AP_SLEEP_READY, 0, 0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(os.ap_sleep_ready());
     }
 
     #[test]
     fn unmodeled_inbound_traffic_refuses_without_faking_a_reply() {
-        let mut os = SepOs::new();
-        let mut outbox = Vec::new();
-        for service in [message::CONTROL, message::DISCOVERY, message::ROM, 0x12] {
-            assert!(
-                os.receive(
-                    Frame {
-                        service,
-                        tag: 1,
-                        opcode: 0,
-                        parameter: 0,
-                        data: 0,
-                    },
-                    &mut outbox,
-                )
-                .is_err()
-            );
+        // Control before shared memory is mapped refuses.
+        let mut os = SepOs::new(None);
+        assert!(reply(&mut os, control(1, control::NOP, 0, 0)).is_err());
+        let mut os = active(None);
+        for frame in [
+            control(1, control::SELF_TEST, 0, 0),
+            control(1, control::TTY_IN, 0x41, 0),
+            control(1, 26, 0, 0),
+            control(1, control::ERASE_INSTALL, 0, 0),
+            control(1, control::SEPOS_PANIC, 0, 0),
+            control(0, control::NAP_OK, 0, 0),
+            control(1, 0x40, 0, 0),
+            Frame {
+                service: message::DISCOVERY,
+                ..control(1, 0, 0, 0)
+            },
+            Frame {
+                service: message::ROM,
+                ..control(1, 0, 0, 0)
+            },
+            Frame {
+                service: 0x12,
+                ..control(1, 0, 0, 0)
+            },
+        ] {
+            assert!(reply(&mut os, frame).is_err(), "{frame:?}");
         }
-        assert!(outbox.is_empty());
         // A malformed shared-memory frame (zero length) is refused.
-        assert!(
-            os.receive(Frame::from_mailbox(shm(0x1000, 0)).unwrap(), &mut outbox)
-                .is_err()
-        );
+        assert!(reply(&mut SepOs::new(None), shm(0x1000, 0)).is_err());
     }
 }

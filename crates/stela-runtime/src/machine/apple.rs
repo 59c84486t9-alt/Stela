@@ -981,6 +981,7 @@ impl AppleDevices {
         lines: asc::Lines,
         (dart, stream): (DartId, usize),
         entropy: Box<dyn sep::Entropy>,
+        security: Option<sep::SecurityMode>,
     ) -> Result<(), String> {
         if wrapper.bytes < asc::WRAPPER_BYTES || auxiliary.bytes == 0 {
             return Err("SEP register apertures are incomplete".into());
@@ -988,9 +989,9 @@ impl AppleDevices {
         if stream != 0 {
             return Err("SEP requires dart-sep stream zero".into());
         }
-        let device = self
-            .bus
-            .add(Box::new(Sep::new(entropy, lines).map_err(String::from)?));
+        let device = self.bus.add(Box::new(
+            Sep::new(entropy, lines, security).map_err(String::from)?,
+        ));
         self.bus
             .map(device, wrapper.physical, wrapper.bytes, 0)
             .map_err(|e| format!("SEP wrapper placement: {e:?}"))?;
@@ -2608,6 +2609,7 @@ mod tests {
                         b.fill(0);
                         Ok(())
                     }),
+                    None,
                 )
                 .unwrap();
             devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap(); // enable outbox

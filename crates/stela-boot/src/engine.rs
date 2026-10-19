@@ -646,6 +646,7 @@ fn devices<'f>(
             lines,
             (darts[sep.iommu][0], sep.stream as usize),
             alloc::boxed::Box::new(bundle::entropy),
+            sep.security,
         )?;
     }
     let mut restore_usb = None;

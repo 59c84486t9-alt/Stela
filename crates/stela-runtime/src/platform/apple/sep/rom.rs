@@ -78,6 +78,11 @@ impl Rom {
         }
     }
 
+    /// The SEP's entropy source, which sepOS keeps using once it is active.
+    pub fn entropy(&mut self) -> &mut dyn Entropy {
+        &mut *self.entropy
+    }
+
     pub fn image_request(&self) -> Option<ImageRequest> {
         self.image
     }

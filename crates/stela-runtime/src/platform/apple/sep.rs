@@ -8,9 +8,11 @@
 //! The emulated SEP boots: SEPROM accepts the delivered container under
 //! Stela's own explicit, TSS-free trust policy (recording measured evidence),
 //! then the native sepOS phase maps shared memory and notifies the control
-//! endpoint that the OS is active. Application services (sks, pnon, xART,
-//! scrd, ...) are not advertised: their ABIs are not recovered, and they
-//! refuse rather than fake replies. See `firmware`/`os` and docs/research/sep.md.
+//! endpoint that the OS is active and answers its control requests.
+//! Application services (sks, pnon, xART, scrd, ...) are not advertised yet,
+//! and refuse rather than fake replies. See `firmware`/`os`/`control` and
+//! docs/research/sep.md.
+pub mod control;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;
@@ -48,6 +50,15 @@ impl<F: FnMut(&mut [u8]) -> Result<(), &'static str>> Entropy for F {
     }
 }
 
+/// The SEP's effective production status and security mode. The SEP shares
+/// the AP's fuses, so Stela's SEP reports what the boot chain set for the AP
+/// (`/chosen` `effective-production-status-ap`, `effective-security-mode-ap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityMode {
+    pub production: bool,
+    pub secure: bool,
+}
+
 pub struct Sep {
     mailbox: Asc,
 }
@@ -56,9 +67,17 @@ impl Sep {
     /// Stela's boot stage leaves SEPROM running, waiting for AP commands.
     /// This is an explicit boot-chain choice; it is not an unsolicited RTKit
     /// HELLO or a claim that sepOS already booted.
-    pub fn new(entropy: Box<dyn Entropy>, lines: Lines) -> Result<Self, &'static str> {
+    pub fn new(
+        entropy: Box<dyn Entropy>,
+        lines: Lines,
+        security: Option<SecurityMode>,
+    ) -> Result<Self, &'static str> {
         Ok(Self {
-            mailbox: Asc::new(Box::new(firmware::SepFirmware::new(entropy)), true, lines)?,
+            mailbox: Asc::new(
+                Box::new(firmware::SepFirmware::new(entropy, security)),
+                true,
+                lines,
+            )?,
         })
     }
 
@@ -167,6 +186,7 @@ mod tests {
         let mut sep = Sep::new(
             Box::new(|_: &mut [u8]| Err("unused entropy")),
             Lines::from_interrupts(irqs),
+            None,
         )
         .unwrap();
         let mut latch = InterruptLatch::new();
