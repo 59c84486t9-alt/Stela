@@ -11,11 +11,29 @@
 //! unmatched word, an unnamed bit, an operand no encoding case covers or an
 //! enumeration value the description lacks refuses (docs/research/agx.md
 //! §5.2, ISA-1 and ISA-2).
+//!
+//! [`machine`] interprets decoded instructions over a 32-thread SIMD group,
+//! dispatching by family: `alu` (arithmetic, conversions, bitfields, floats
+//! through [`math`] and [`float`]), `flow` (the nesting counter, jumps,
+//! barriers), `lanes` (derivatives, ballots, shuffles, reductions),
+//! `memory` (device, threadgroup, stack, uniform and state loads),
+//! `texture` (sampling and image writes) and `stage` (vertex outputs,
+//! coefficient iteration, the tilebuffer and coverage, reached through
+//! [`machine::Env`]). An instruction no model covers refuses with its
+//! opcode and a reason.
 
+mod alu;
 #[cfg(test)]
 pub mod assemble;
 pub mod decode;
 pub mod disasm;
 pub mod float;
+mod flow;
 pub mod generated;
+mod lanes;
+pub mod machine;
+pub mod math;
+mod memory;
 pub mod spec;
+mod stage;
+mod texture;

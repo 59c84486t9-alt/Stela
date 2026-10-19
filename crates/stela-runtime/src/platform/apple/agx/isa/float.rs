@@ -79,11 +79,18 @@ pub fn f32_to_half(value: f32) -> u16 {
 /// `a * b + c` rounded once to f32: the f64 product is exact, the f64 sum is
 /// made round-to-odd, and rounding that to f32 is then correct.
 pub fn fused_multiply_add(a: f32, b: f32, c: f32) -> f32 {
-    let product = f64::from(a) * f64::from(b);
-    let addend = f64::from(c);
+    round_to_odd_fma(f64::from(a), f64::from(b), f64::from(c)) as f32
+}
+
+/// `a * b + c` in f64 rounded to odd, for operands whose product is exact in
+/// f64 (f32 or narrower values). Rounding the result once more to f32 or f16
+/// is then correctly rounded, as applegpu's `bfma64(..., ROUND_TO_ODD)`.
+pub fn round_to_odd_fma(a: f64, b: f64, c: f64) -> f64 {
+    let product = a * b;
+    let addend = c;
     let sum = product + addend;
     if !sum.is_finite() || !product.is_finite() {
-        return sum as f32;
+        return sum;
     }
     // Two-sum: the exact error of `sum`.
     let virtual_addend = sum - product;
@@ -93,9 +100,85 @@ pub fn fused_multiply_add(a: f32, b: f32, c: f32) -> f32 {
     if error != 0.0 && bits & 1 == 0 {
         let toward_zero = (error > 0.0) != (sum > 0.0) && sum != 0.0;
         let odd = if toward_zero { bits - 1 } else { bits + 1 };
-        return f64::from_bits(odd) as f32;
+        return f64::from_bits(odd);
     }
-    sum as f32
+    sum
+}
+
+/// The quiet NaN results take (Inferred: the hardware's NaN payload is
+/// unrecorded; Metal leaves it unspecified).
+pub const F32_NAN: u32 = 0x7fc0_0000;
+pub const HALF_NAN: u16 = 0x7e00;
+
+/// An f64 result rounded to f32 (nearest even) with a subnormal result
+/// flushed to a zero of its sign.
+pub fn f64_to_f32_ftz(value: f64) -> f32 {
+    if value.is_nan() {
+        return f32::from_bits(F32_NAN);
+    }
+    let rounded = value as f32;
+    if rounded.is_subnormal() {
+        f32::from_bits(rounded.to_bits() & 0x8000_0000)
+    } else {
+        rounded
+    }
+}
+
+/// An f64 rounded to an IEEE half, nearest even, keeping subnormals.
+pub fn f64_to_half(value: f64) -> u16 {
+    if value.is_nan() {
+        return HALF_NAN;
+    }
+    let bits = value.to_bits();
+    let sign = ((bits >> 48) & 0x8000) as u16;
+    let magnitude = value.abs();
+    if magnitude >= 65520.0 {
+        // At or above the halfway point past the largest finite half.
+        return sign | 0x7c00;
+    }
+    // Scale so the half's least significant bit is 1, round to an integer
+    // (nearest even), and rebuild. Below 2^-14 the step is fixed at 2^-24.
+    let exponent = if magnitude < f64::from_bits(0x3f10_0000_0000_0000) {
+        -14
+    } else {
+        ((magnitude.to_bits() >> 52) as i32) - 1023
+    };
+    let step = pow2_f64(exponent - 10);
+    let units = round_even(magnitude / step);
+    let mut exponent_field = exponent + 15;
+    let mut mantissa = units as u64;
+    if exponent == -14 && mantissa < 1 << 10 {
+        return sign | mantissa as u16;
+    }
+    if mantissa >= 1 << 11 {
+        mantissa >>= 1;
+        exponent_field += 1;
+    }
+    if exponent_field >= 31 {
+        return sign | 0x7c00;
+    }
+    sign | (exponent_field as u16) << 10 | (mantissa as u16 & 0x3ff)
+}
+
+/// 2^`exponent` for exponents of normal f64 values.
+pub fn pow2_f64(exponent: i32) -> f64 {
+    f64::from_bits(((1023 + exponent) as u64) << 52)
+}
+
+/// Round to the nearest integer, ties to even (exact for |x| < 2^52).
+pub fn round_even(value: f64) -> f64 {
+    let magnitude = value.abs();
+    if magnitude >= 4_503_599_627_370_496.0 || value.is_nan() {
+        return value;
+    }
+    // Adding and removing 2^52 rounds to an integer in the current
+    // (nearest-even) mode.
+    let rounded = (magnitude + 4_503_599_627_370_496.0) - 4_503_599_627_370_496.0;
+    if value.is_sign_negative() {
+        -rounded
+    } else {
+        rounded
+    }
 }
 
 #[cfg(test)]

@@ -23,21 +23,17 @@
 //!   dashboard signals), run to completion.
 //! - [`event`]: the firmware event ring's producer and the entries the kext
 //!   reads (Flag, shared-event signal, CLPC notice).
-//! - [`isa`]: a bit-exact decoder and x86-host interpreter for a bounded
-//!   subset of the AGX2 shader ISA.
-//! - [`exec`]: a compute-style dispatch that runs a shader over a surface grid
-//!   and stores checked pixels, with an in-order fence.
+//! - [`isa`]: the AGX2 shader ISA, decoded from tables generated out of
+//!   Mesa's `AGX2.xml` and interpreted a SIMD group at a time.
+//! - [`format`]: pixel and texture formats.
 //!
-//! Still to come (docs/research/agx.md §2, §5): the TA, 3D, CL and blit
-//! command layouts and their start records, the rest of the shader ISA (integer,
-//! memory/PBE, texture, control flow), the VDM/CDM/PPP control streams, the
-//! tiler/rasterizer, texture formats and compression, and driving the
-//! executor from a real firmware work queue.
+//! The requirement matrix and its statuses are docs/research/agx.md §5.
 
 pub mod channel;
 pub mod event;
 
 pub mod firmware;
+pub mod format;
 pub mod initdata;
 pub mod isa;
 pub mod ring;
