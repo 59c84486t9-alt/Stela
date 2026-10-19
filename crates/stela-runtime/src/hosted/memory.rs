@@ -159,6 +159,82 @@ pub fn map_anonymous(
     (status, at)
 }
 
+/// `mach_vm_map` of a memory object (a host memory entry) as the guest
+/// requests it. The object is mapped in the host's pages, as the entry's
+/// size may be (an x86 process made it); a placement the guest leaves to
+/// the kernel reserves the whole 16 KiB range first, so no other
+/// allocation shares the guest page, and maps the object over its start.
+#[allow(clippy::too_many_arguments)]
+pub fn map_object(
+    address: u64,
+    bytes: u64,
+    mask: u64,
+    flags: i32,
+    object: u32,
+    offset: u64,
+    copy: bool,
+    current: Protection,
+    maximum: Protection,
+    inheritance: u32,
+) -> (i32, u64) {
+    const KERN_INVALID_ARGUMENT: i32 = 4;
+    const VM_FLAGS_OVERWRITE: i32 = 0x4000;
+    const HOST_PAGE_MASK: u64 = 0xfff;
+    let (Some(size), Some(object_size)) = (
+        round_page(bytes),
+        bytes
+            .checked_add(HOST_PAGE_MASK)
+            .map(|end| end & !HOST_PAGE_MASK),
+    ) else {
+        return (KERN_INVALID_ARGUMENT, address);
+    };
+    let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
+    let mut at = address;
+    if anywhere {
+        let (status, reserved) = map_anonymous(
+            address,
+            size,
+            mask,
+            flags,
+            false,
+            Protection::NONE,
+            maximum,
+            inheritance,
+        );
+        if status != KERN_SUCCESS {
+            return (status, address);
+        }
+        at = reserved;
+    }
+    let placement = if anywhere {
+        (flags & !VM_FLAGS_ANYWHERE) | VM_FLAGS_OVERWRITE
+    } else {
+        flags
+    };
+    // SAFETY: the object is mapped where the guest asked, or over the
+    // reservation just made for it.
+    let status = unsafe {
+        mach_vm_map(
+            task(),
+            &mut at,
+            object_size,
+            0,
+            placement,
+            object,
+            offset,
+            i32::from(copy),
+            current.0,
+            maximum.0,
+            inheritance,
+        )
+    };
+    if status != KERN_SUCCESS && anywhere {
+        // SAFETY: the reservation made above.
+        unsafe { mach_vm_deallocate(task(), at, size) };
+    }
+    (status, at)
+}
+
 /// Allocate zeroed guest pages: at `address` when `anywhere` is false
 /// (refusing an occupied range), else wherever the host finds room, 16 KiB
 /// aligned either way.

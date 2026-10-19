@@ -91,6 +91,33 @@ pub(super) fn serve(
             Some(which) => bail!("task_set_special_port({which}) is not implemented"),
             None => Reply::Failure(MIG_BAD_ARGUMENTS),
         },
+        // One port descriptor (the parent entry), then `size`, `offset`
+        // and `permission`. A range already in whole guest pages names the
+        // same memory under the host's 4 KiB rounding as under the arm64
+        // kernel's 16 KiB rounding.
+        (Object::Task, "_mach_make_memory_entry", true) => {
+            let (Some(size), Some(offset)) = (request.double(24), request.double(32)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            if (size | offset) & memory::PAGE_MASK != 0 {
+                bail!(
+                    "mach_make_memory_entry of {size:#x} bytes at {offset:#x}: a range in \
+                     partial guest pages is not implemented"
+                );
+            }
+            Reply::Forward
+        }
+        // `node`, `which`. The host port is the host's, already this
+        // process's host kernel object.
+        (Object::Host, "host_get_special_port", false) => {
+            let (Some(node), Some(which)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            match which {
+                HOST_PORT => Reply::Forward,
+                _ => bail!("host_get_special_port(node {node:#x}, {which}) is not implemented"),
+            }
+        }
         // `flavor`, `task_info_outCnt`. The audit token is this process's
         // identity, the same in either ABI.
         (Object::Task, "task_info_from_user", false) => {
@@ -133,6 +160,8 @@ pub(super) fn serve(
     }))
 }
 
+/// `osfmk/mach/host_special_ports.h`.
+const HOST_PORT: u32 = 1;
 /// `osfmk/mach/task_special_ports.h`.
 const TASK_KERNEL_PORT: u32 = 1;
 const TASK_HOST_PORT: u32 = 2;
@@ -218,8 +247,8 @@ fn pair(result: Result<(u64, u64), u32>) -> Reply {
 /// `mach_vm_map` on this task: one port descriptor (the memory object),
 /// then `address`, `size`, `mask`, `flags`, `offset`, `copy`,
 /// `cur_protection`, `max_protection` and `inheritance`. Anonymous memory
-/// (a null object) is mapped in the guest's pages; a memory object's
-/// mapping is refused by name.
+/// (a null object) is mapped in the guest's pages, a memory object as
+/// [`memory::map_object`] places it.
 fn vm_map(request: &Request) -> Result<Reply> {
     const DESCRIPTORS: usize = 0;
     const OBJECT: usize = 4;
@@ -245,19 +274,31 @@ fn vm_map(request: &Request) -> Result<Reply> {
     ) else {
         return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
     };
-    if object != 0 {
-        bail!("mach_vm_map of memory object {object:#x} (offset {offset:#x}) is not implemented");
-    }
-    let (status, placed) = memory::map_anonymous(
-        address,
-        size,
-        mask,
-        flags as i32,
-        copy != 0,
-        Protection(current as i32),
-        Protection(maximum as i32),
-        inheritance,
-    );
+    let (status, placed) = if object == 0 {
+        memory::map_anonymous(
+            address,
+            size,
+            mask,
+            flags as i32,
+            copy != 0,
+            Protection(current as i32),
+            Protection(maximum as i32),
+            inheritance,
+        )
+    } else {
+        memory::map_object(
+            address,
+            size,
+            mask,
+            flags as i32,
+            object,
+            offset,
+            copy != 0,
+            Protection(current as i32),
+            Protection(maximum as i32),
+            inheritance,
+        )
+    };
     Ok(if status == 0 {
         Reply::Success(placed.to_le_bytes().to_vec())
     } else {
