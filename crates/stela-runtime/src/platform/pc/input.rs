@@ -95,7 +95,10 @@ impl VirtioInput {
                 .map(|n| device.read8(DATA + n))
                 .collect::<Vec<u8>>()
         };
-        let name = String::from_utf8_lossy(&config(CONFIG_NAME, 0)).into_owned();
+        // QEMU counts the name's terminating NUL in its size.
+        let name = config(CONFIG_NAME, 0);
+        let name = name.split(|&b| b == 0).next().unwrap_or_default();
+        let name = String::from_utf8_lossy(name).into_owned();
         let absolute = config(CONFIG_EVENTS, EV_ABS as u8);
         let axis = |code: u16| {
             let bytes = config(CONFIG_ABS, code as u8);
