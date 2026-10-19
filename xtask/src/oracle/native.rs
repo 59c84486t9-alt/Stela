@@ -548,6 +548,15 @@ fn memory_thread(
     Ok(domain.thread(controls))
 }
 
+/// Compile for PSTATE.DIT (`--data-independent-timing`).
+pub static DATA_INDEPENDENT_TIMING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn target() -> TargetCpu {
-    TargetCpu::detect()
+    let target = TargetCpu::detect();
+    if DATA_INDEPENDENT_TIMING.load(std::sync::atomic::Ordering::Relaxed) {
+        target.with_data_independent_timing()
+    } else {
+        target
+    }
 }

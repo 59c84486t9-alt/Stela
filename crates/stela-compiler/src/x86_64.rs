@@ -482,7 +482,7 @@ pub(crate) fn emit_instruction(
         Operation::Flags(operand) => flags::emit(code, &operand),
         Operation::Synchronization(operand) => system::synchronization::emit(code, &operand)
             .expect("decoder admits only context-independent synchronization"),
-        Operation::IntegerMath(operand) => integer_math::emit(code, &operand),
+        Operation::IntegerMath(operand) => integer_math::emit(code, &operand, target),
         Operation::IntegerMinMax(operand) => integer_minmax::emit(code, &operand),
         Operation::IntegerUnary(operand) => integer_unary::emit(code, &operand, target),
         Operation::Literal(operand) => literal::emit(code, &operand, checks),

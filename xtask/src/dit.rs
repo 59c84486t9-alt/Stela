@@ -70,9 +70,10 @@ const LOADS_AND_STORES: &str = "Loads and Stores";
 /// Where each audited block is compiled.
 const BASE: u64 = 0x10_0000;
 
-/// The host tiers audited: the SSE2 baseline every x86-64 host has, and the
-/// AVX2 and AVX-512 tiers with every other optional feature the compiler uses.
-fn tiers() -> [(&'static str, TargetCpu); 3] {
+/// The host tiers audited: the SSE2 baseline every x86-64 host has, the
+/// AVX2 and AVX-512 tiers with every other optional feature the compiler
+/// uses, and those two compiled for PSTATE.DIT.
+fn tiers() -> [(&'static str, TargetCpu); 5] {
     let full = TargetCpu::Sse42
         .with_pclmulqdq()
         .with_popcnt()
@@ -89,6 +90,11 @@ fn tiers() -> [(&'static str, TargetCpu); 3] {
         ("baseline", TargetCpu::Baseline),
         ("avx2", full),
         ("avx512", full.with_avx512f()),
+        ("avx2-dit", full.with_data_independent_timing()),
+        (
+            "avx512-dit",
+            full.with_avx512f().with_data_independent_timing(),
+        ),
     ]
 }
 

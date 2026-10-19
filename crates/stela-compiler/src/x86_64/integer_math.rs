@@ -1,9 +1,20 @@
 //! Integer multiply, divide, shifts and bit operations. Guest NZCV is unchanged.
-use super::{Register, Shift, Width, load, right_operand, store};
-use crate::aarch64::integer_math::{Kind, Operand};
+use super::{Register, Shift, Width, integer_unary, load, right_operand, store};
+use crate::{
+    TargetCpu,
+    aarch64::integer_math::{Kind, Operand},
+};
 use alloc::vec::Vec;
 
-pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
+/// SHR RCX,imm8 and OR RAX,RCX (REX.W widens both).
+const MOV_ECX_EAX: [u8; 2] = [0x89, 0xc1];
+const SHR_ECX_IMM8: [u8; 2] = [0xc1, 0xe9];
+const OR_EAX_ECX: [u8; 2] = [0x09, 0xc8];
+const NEG_EAX: [u8; 2] = [0xf7, 0xd8];
+const ADD_EAX_IMM8: [u8; 2] = [0x83, 0xc0];
+const REX_W: u8 = 0x48;
+
+pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
     load(code, operand.left);
     match operand.kind {
         Kind::LeadingZeros { width } | Kind::LeadingSignBits { width } => {
@@ -20,6 +31,11 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
                 code.extend([0xc1, 0xf9, if width == Width::X64 { 63 } else { 31 }]); // sar sign mask
                 code.extend(rex);
                 code.extend([0x31, 0xc8]); // xor (r/e)ax,(r/e)cx: nonnegative original/complement
+            }
+            if target.data_independent_timing() {
+                leading_zeros_without_bsr(code, width, sign_bits);
+                store(code, operand.destination);
+                return;
             }
             if width == Width::X64 {
                 code.push(0x48);
@@ -176,6 +192,36 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand) {
 
 /// Swap adjacent bit groups with baseline shifts/masks. Inputs remain in RAX;
 /// only caller-saved RCX/RDX are scratch. No BMI, LZCNT, SIMD or helper calls.
+/// CLZ (or, after the sign fold, CLS) without BSR or LZCNT, neither on
+/// Intel's data operand independent timing list: every bit below the
+/// highest set one is set by shifted ORs, so the count is the width less the
+/// population count of the smear.
+fn leading_zeros_without_bsr(code: &mut Vec<u8>, width: Width, sign_bits: bool) {
+    let bits: u8 = if width == Width::X64 { 64 } else { 32 };
+    let mut shift = 1;
+    while shift < bits {
+        wide(code, width);
+        code.extend(MOV_ECX_EAX);
+        wide(code, width);
+        code.extend(SHR_ECX_IMM8);
+        code.push(shift);
+        wide(code, width);
+        code.extend(OR_EAX_ECX);
+        shift *= 2;
+    }
+    integer_unary::population_count(code, width);
+    // The count fits 32 bits: bits - popcount (less the sign bit for CLS).
+    code.extend(NEG_EAX);
+    code.extend(ADD_EAX_IMM8);
+    code.push(bits - u8::from(sign_bits));
+}
+
+fn wide(code: &mut Vec<u8>, width: Width) {
+    if width == Width::X64 {
+        code.push(REX_W);
+    }
+}
+
 fn swap_groups(code: &mut Vec<u8>, width: Width, shift: u8, mask: u64) {
     let rex = if width == Width::X64 {
         &[0x48][..]
@@ -263,5 +309,54 @@ fn divide(code: &mut Vec<u8>, signed: bool, width: Width) {
     bind(code, ordinary_done, target);
     if let Some(displacement) = minus_one_done {
         bind(code, displacement, target);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The smear-and-count model of the DIT lowering, on every leading-zero
+    /// count of both widths.
+    #[test]
+    fn the_smear_counts_leading_zeros_and_sign_bits_without_bsr() {
+        for bits in [32u32, 64] {
+            for leading in 0..=bits {
+                let value = if leading == bits {
+                    0
+                } else {
+                    u64::MAX >> (64 - bits + leading)
+                };
+                let mut smear = value;
+                let mut shift = 1;
+                while shift < bits {
+                    smear |= smear >> shift;
+                    shift *= 2;
+                }
+                assert_eq!(bits - smear.count_ones(), leading);
+            }
+        }
+        for width in [Width::W32, Width::X64] {
+            for kind in [
+                Kind::LeadingZeros { width },
+                Kind::LeadingSignBits { width },
+            ] {
+                let operand = Operand {
+                    kind,
+                    subtract: false,
+                    destination: Register::X(0),
+                    left: Register::X(1),
+                    right: Register::X(2),
+                    accumulator: Register::Zero,
+                };
+                let mut ordinary = Vec::new();
+                emit(&mut ordinary, &operand, TargetCpu::Baseline);
+                let mut timed = Vec::new();
+                emit(&mut timed, &operand, TargetCpu::DataIndependentTiming);
+                let bsr = |code: &[u8]| code.windows(2).any(|pair| pair == [0x0f, 0xbd]);
+                assert!(bsr(&ordinary));
+                assert!(!bsr(&timed));
+            }
+        }
     }
 }

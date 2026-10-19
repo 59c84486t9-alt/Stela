@@ -89,6 +89,10 @@ pub struct Differential {
     /// at EL2t, and system cases run under random HCR_EL2 and stage 2.
     #[arg(long)]
     el2: bool,
+    /// Translate with the data-independent-timing lowerings PSTATE.DIT
+    /// selects.
+    #[arg(long)]
+    data_independent_timing: bool,
 }
 
 /// HCR_EL2 controls the EL2 lane adds at random: PTW, DC and FWB. QEMU does
@@ -605,6 +609,10 @@ struct Report {
 
 impl Differential {
     pub fn run(self) -> Result<()> {
+        crate::oracle::native::DATA_INDEPENDENT_TIMING.store(
+            self.data_independent_timing,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let oracle = match &self.qemu {
             Some(qemu) => Oracle::new(qemu)?,
             None => Oracle::locate(&root().join(".tools/qemu/bin"))?,

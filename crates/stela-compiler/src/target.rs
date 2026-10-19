@@ -29,6 +29,21 @@ pub struct TargetCpu {
     cx16: bool,
     avx2: bool,
     avx512f: bool,
+    /// The host runs the instructions on Intel's data operand independent
+    /// timing list with timing independent of their data: Intel's
+    /// IA32_UARCH_MISC_CTL.DOITM (MSR 1B01H bit 0, enumerated by
+    /// IA32_ARCH_CAPABILITIES bit 12) is set on every logical processor that
+    /// runs guest code, or the processor predates Ice Lake (Core) or
+    /// Gracemont (Atom) and does not enumerate it. A hosted process can
+    /// neither read nor set it; the bare-metal boot declares it. AMD
+    /// documents no equivalent.
+    doit: bool,
+    /// Lower for FEAT_DIT's PSTATE.DIT: the listed instructions that have a
+    /// data-independent lowering (CLZ, CLS, CTZ, CNT, CRC32, CRC32C) compile
+    /// to instructions on Intel's list, without a branch on or a memory index
+    /// by their data, at a cost in speed. A compilation mode, not a host
+    /// capability; `isa/dit-timing-audit.json` records what remains.
+    data_independent_timing: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -57,6 +72,8 @@ impl TargetCpu {
         cx16: false,
         avx2: false,
         avx512f: false,
+        doit: false,
+        data_independent_timing: false,
     };
     pub const Ssse3: Self = Self {
         tier: SseTier::Ssse3,
@@ -93,6 +110,10 @@ impl TargetCpu {
     pub const Avx2: Self = Self::Baseline.with_avx2();
     /// EVEX.512 AVX-512 Foundation, including OS-enabled opmask and ZMM state.
     pub const Avx512f: Self = Self::Baseline.with_avx512f();
+    /// A host with Intel's data operand independent timing ([`Self::doit`]).
+    pub const Doit: Self = Self::Baseline.with_doit();
+    /// Code lowered for PSTATE.DIT ([`Self::data_independent_timing`]).
+    pub const DataIndependentTiming: Self = Self::Baseline.with_data_independent_timing();
 
     pub const fn with_pclmulqdq(self) -> Self {
         Self {
@@ -142,6 +163,21 @@ impl TargetCpu {
             ..self
         }
     }
+    pub const fn with_doit(self) -> Self {
+        Self { doit: true, ..self }
+    }
+    pub const fn with_data_independent_timing(self) -> Self {
+        Self {
+            data_independent_timing: true,
+            ..self
+        }
+    }
+    pub const fn doit(self) -> bool {
+        self.doit
+    }
+    pub const fn data_independent_timing(self) -> bool {
+        self.data_independent_timing
+    }
     /// True only when every required feature is present in this target.
     pub fn supports(self, required: Self) -> bool {
         self.tier >= required.tier
@@ -157,6 +193,8 @@ impl TargetCpu {
             && (!required.cx8 || self.cx8)
             && (!required.avx2 || self.avx2)
             && (!required.avx512f || self.avx512f)
+            && (!required.doit || self.doit)
+            && (!required.data_independent_timing || self.data_independent_timing)
     }
     /// Detect the host's usable CPU features. Freestanding callers supply a
     /// target explicitly.
@@ -253,6 +291,8 @@ impl TargetCpu {
             (self.cx16, "+cx16"),
             (self.avx2, "+avx2"),
             (self.avx512f, "+avx512f"),
+            (self.doit, "+doit"),
+            (self.data_independent_timing, "+dit"),
         ] {
             if enabled {
                 id.push_str(suffix);
@@ -336,6 +376,8 @@ impl core::str::FromStr for TargetCpu {
         // Strip each optional suffix once, in reverse order. A duplicate,
         // unknown or out-of-order suffix is left behind and fails parsing.
         for (suffix, enabled) in [
+            ("+dit", &mut target.data_independent_timing),
+            ("+doit", &mut target.doit),
             ("+avx512f", &mut target.avx512f),
             ("+avx2", &mut target.avx2),
             ("+cx16", &mut target.cx16),
@@ -380,7 +422,7 @@ mod tests {
             "x86_64-baseline+ssse3+sse4.1+sse4.2",
         ),
     ];
-    const FEATURES: [TargetCpu; 12] = [
+    const FEATURES: [TargetCpu; 14] = [
         TargetCpu::Pclmulqdq,
         TargetCpu::Fma,
         TargetCpu::F16c,
@@ -393,11 +435,13 @@ mod tests {
         TargetCpu::Cx16,
         TargetCpu::Avx2,
         TargetCpu::Avx512f,
+        TargetCpu::Doit,
+        TargetCpu::DataIndependentTiming,
     ];
 
     fn profiles() -> impl Iterator<Item = TargetCpu> {
         TIERS.into_iter().flat_map(|(tier, _, _)| {
-            (0..4096).map(move |bits| TargetCpu {
+            (0..16384).map(move |bits| TargetCpu {
                 pclmulqdq: bits & 1 != 0,
                 fma: bits & 2 != 0,
                 f16c: bits & 4 != 0,
@@ -410,6 +454,8 @@ mod tests {
                 cx16: bits & 512 != 0,
                 avx2: bits & 1024 != 0,
                 avx512f: bits & 2048 != 0,
+                doit: bits & 4096 != 0,
+                data_independent_timing: bits & 8192 != 0,
                 ..tier
             })
         })
@@ -451,7 +497,7 @@ mod tests {
             let suffix = id.strip_prefix(canonical).unwrap();
             assert_eq!(format!("{alias}{suffix}").parse::<TargetCpu>(), Ok(target));
         }
-        assert_eq!(ids.len(), 16384);
+        assert_eq!(ids.len(), 65536);
         assert_eq!(
             TargetCpu::Sse42
                 .with_sha()
@@ -497,6 +543,7 @@ mod tests {
             "baseline+cx16+cx8",
             "baseline+cx8+atomic-load16",
             "baseline+avx512f+avx2",
+            "baseline+dit+doit",
             "avx512f",
         ] {
             assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
@@ -514,6 +561,8 @@ mod tests {
             "cx8",
             "avx2",
             "avx512f",
+            "doit",
+            "dit",
         ] {
             for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
                 let duplicate = format!("{tier}+{suffix}+{suffix}");
@@ -538,6 +587,8 @@ mod tests {
                 host.cx16,
                 host.avx2,
                 host.avx512f,
+                host.doit,
+                host.data_independent_timing,
             ]) {
                 assert_eq!(host.supports(required), present);
                 assert_eq!(host >= required, present);

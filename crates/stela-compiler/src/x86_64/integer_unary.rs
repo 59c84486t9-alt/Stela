@@ -19,6 +19,9 @@ const PREFIX_F3: u8 = 0xf3;
 const MOV_ECX_IMM32: u8 = 0xb9;
 const CMOVZ_EAX_ECX: &[u8] = &[0x0f, 0x44, 0xc1];
 const MOV_ECX_EAX: &[u8] = &[0x89, 0xc1];
+const NEG_ECX: &[u8] = &[0xf7, 0xd9];
+const AND_EAX_ECX: &[u8] = &[0x21, 0xc8];
+const SUB_EAX_ONE: &[u8] = &[0x83, 0xe8, 0x01];
 const SHR_ECX_ONE: &[u8] = &[0xd1, 0xe9];
 const SHR_ECX_IMM8: &[u8] = &[0xc1, 0xe9];
 const SUB_EAX_ECX: &[u8] = &[0x29, 0xc8];
@@ -60,6 +63,19 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             instruction(code, operand.width, MOV_ECX_EAX);
             instruction(code, operand.width, NEG_EAX);
             instruction(code, operand.width, CMOVS_EAX_ECX);
+        }
+        // POPCNT, TZCNT and BSF are not on Intel's data operand
+        // independent timing list.
+        Kind::PopulationCount | Kind::TrailingZeros if target.data_independent_timing() => {
+            load(code, operand.source);
+            if operand.kind == Kind::TrailingZeros {
+                // (x & -x) - 1 sets exactly the trailing zeros (all bits for 0).
+                instruction(code, operand.width, MOV_ECX_EAX);
+                instruction(code, operand.width, NEG_ECX);
+                instruction(code, operand.width, AND_EAX_ECX);
+                instruction(code, operand.width, SUB_EAX_ONE);
+            }
+            population_count(code, operand.width);
         }
         Kind::PopulationCount if target.supports(TargetCpu::Popcnt) => {
             memory_count(code, operand, POPCNT_EAX_RDI_DISP32, Some(PREFIX_F3));
@@ -137,7 +153,9 @@ fn mask_accumulator(code: &mut Vec<u8>, width: Width, value: u64) {
     }
 }
 
-fn population_count(code: &mut Vec<u8>, width: Width) {
+/// The population count of RAX (EAX for W32) in EAX, from integer
+/// operations only. Clobbers RCX and RDX.
+pub(super) fn population_count(code: &mut Vec<u8>, width: Width) {
     // Each subtraction produces a two-bit count without borrowing across pairs.
     instruction(code, width, MOV_ECX_EAX);
     instruction(code, width, SHR_ECX_ONE);
@@ -192,6 +210,29 @@ mod tests {
             target,
         );
         code
+    }
+
+    #[test]
+    fn data_independent_counts_use_neither_popcnt_nor_tzcnt_nor_bsf() {
+        let source = Register::X(1);
+        for width in [Width::W32, Width::X64] {
+            for kind in [Kind::PopulationCount, Kind::TrailingZeros] {
+                let full = TargetCpu::Baseline.with_popcnt().with_bmi1();
+                let timed = emitted(kind, width, source, full.with_data_independent_timing());
+                assert_eq!(
+                    emitted(kind, width, source, TargetCpu::DataIndependentTiming),
+                    timed
+                );
+                for opcode in [POPCNT_EAX_RDI_DISP32, BSF_EAX_RDI_DISP32] {
+                    assert!(!timed.windows(2).any(|pair| pair == &opcode[..2]));
+                }
+            }
+        }
+        // (x & -x) - 1 marks the trailing zeros, all of them for zero.
+        for value in [0u64, 1, 2, 0x8000_0000_0000_0000, 0x0123_4567_89ab_cdf0] {
+            let mask = value.isolate_lowest_one().wrapping_sub(1);
+            assert_eq!(mask.count_ones(), value.trailing_zeros());
+        }
     }
 
     #[test]
