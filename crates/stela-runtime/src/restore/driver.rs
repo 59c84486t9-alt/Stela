@@ -60,10 +60,11 @@ pub struct Driver<R, H> {
     complete: bool,
 }
 impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
-    /// Preparing verifies the complete inventory before sending StartRestore.
-    /// The caller does this before entering its guest execution loop.
-    pub fn new(mut answers: Answers<R>, route: Route) -> Result<Self> {
-        answers.store.prepare()?;
+    /// The complete inventory is verified (`Store::prepare`) just before
+    /// StartRestore is sent, so a session that stops earlier never pays for
+    /// it. A caller that runs a guest meanwhile excludes the poll's host
+    /// time from the guest's clock.
+    pub fn new(answers: Answers<R>, route: Route) -> Result<Self> {
         Ok(Self {
             answers,
             session: Session::new(),
@@ -150,6 +151,7 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
                     }
                     Handshake::Hardware => {
                         self.handshake = Handshake::Started;
+                        self.answers.store.prepare()?;
                         self.session.start_for(&self.answers, self.route)?
                     }
                     Handshake::Started => {

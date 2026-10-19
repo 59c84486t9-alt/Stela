@@ -981,6 +981,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.discard_code();
     }
 
+    /// Run host-side work on the devices, such as an external peer's
+    /// computation, between steps: the host time it takes is not guest
+    /// time, so the system counter does not advance across it.
+    pub fn exclude_host_time<T>(&mut self, work: impl FnOnce(&mut D) -> T) -> T {
+        let before = self.host.counter();
+        let result = work(&mut self.devices);
+        let after = self.host.counter();
+        self.clock.exclude(after.saturating_sub(before));
+        result
+    }
+
     /// End every wait of all PEs at once by leaping the system counter to
     /// the next deadline instead of waiting on the host: guest sleeps cost no
     /// host time, and time of day runs ahead of the host's (`clock`).

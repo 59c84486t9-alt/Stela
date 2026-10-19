@@ -1133,7 +1133,7 @@ fn run(
         if matches!(stop, Stop::Budget)
             && let Some(experiment) = restore.as_deref_mut()
         {
-            experiment.poll(&mut machine.devices);
+            machine.exclude_host_time(|devices| experiment.poll(devices));
         }
 
         let sliced = matches!(stop, Stop::Budget) && limit != budget;

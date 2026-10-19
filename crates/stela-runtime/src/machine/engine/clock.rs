@@ -74,6 +74,12 @@ impl Clock {
         count.saturating_add(self.lag).saturating_sub(self.lead)
     }
 
+    /// `counts` of host time passed with no PE running and nothing in the
+    /// guest's world happening: the count does not show it.
+    pub(super) fn exclude(&mut self, counts: u64) {
+        self.lag += counts;
+    }
+
     /// While every PE waits at host counter value `host`, the count leaps to
     /// `deadline` if it is still before it.
     pub(super) fn skip_to(&mut self, host: u64, deadline: u64) {
@@ -136,6 +142,15 @@ mod tests {
         assert_eq!(clock.read(10_000), 9200);
         clock.end_slice(11_000, blocks(800));
         assert_eq!(clock.read(11_000), 10_200);
+    }
+
+    #[test]
+    fn excluded_host_time_never_reaches_the_count() {
+        let mut clock = Clock::default();
+        assert_eq!(clock.read(100), 100);
+        clock.exclude(900);
+        assert_eq!(clock.read(1000), 100);
+        assert_eq!(clock.read(1010), 110);
     }
 
     #[test]
