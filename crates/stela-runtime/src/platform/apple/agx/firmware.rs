@@ -42,6 +42,7 @@
 
 use super::super::asc::{Firmware, Message as Mail};
 use super::super::rtkit::{Endpoint, RtKit};
+use super::channel;
 use super::initdata::{self, Root};
 use super::ring::{self, Kind, Shared};
 use super::uat;
@@ -114,14 +115,6 @@ impl Pipe {
             1 => Some(Pipe::Fragment),
             2 => Some(Pipe::Compute),
             _ => None,
-        }
-    }
-
-    fn unexecuted(self) -> &'static str {
-        match self {
-            Pipe::Vertex => "GFX TA channel work execution is not modeled",
-            Pipe::Fragment => "GFX 3D channel work execution is not modeled",
-            Pipe::Compute => "GFX CL channel work execution is not modeled",
         }
     }
 }
@@ -263,8 +256,9 @@ impl State {
         Ok(())
     }
 
-    /// Read a data-master ring's pending work. Executing it is a later
-    /// layer, so a pending entry refuses and nothing is retired.
+    /// Read a data-master ring's pending work down to the first record of the
+    /// channel's next command stream. Executing it is a later layer, so a
+    /// pending entry refuses by that record's name and nothing is retired.
     fn work_ring(
         memory: &mut dyn Shared,
         root: &Root,
@@ -281,7 +275,12 @@ impl State {
         if command != pipe as u32 {
             return Err("GFX data-master entry's command type is not its ring's pipe");
         }
-        Err(pipe.unexecuted())
+        let state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
+        let queue = channel::Queue::read(memory, state)?;
+        let stream = queue
+            .next(memory)?
+            .ok_or("GFX data-master entry names a channel with no pending command")?;
+        Err(channel::first_record(memory, stream)?.unexecuted())
     }
 }
 
@@ -579,9 +578,23 @@ mod tests {
         memory.put_u32(entries + 0x10, 1);
         memory.put_u32(ring_state + WRITE, 1);
         state.doorbell(work(1, 0)).unwrap();
+        // The entry names no channel yet.
         assert_eq!(
             state.dma(&mut memory),
-            Err("GFX 3D channel work execution is not modeled")
+            Err("GFX data-master entry names no channel state")
+        );
+        // A channel whose next command stream starts with a 3D start record.
+        let (channel_state, stream) = (BASE + 0xd000, BASE + 0x10000);
+        crate::platform::apple::agx::channel::tests::one_command(
+            &mut memory,
+            channel_state,
+            stream,
+        );
+        memory.put_u64(entries + 0x08, channel_state);
+        memory.put_u32(stream, 0x8);
+        assert_eq!(
+            state.dma(&mut memory),
+            Err("GFX 3D start record (0x8) is not executed")
         );
         assert_eq!(memory.read_u32(ring_state + READ), Ok(0));
         // An empty ring has nothing to refuse.

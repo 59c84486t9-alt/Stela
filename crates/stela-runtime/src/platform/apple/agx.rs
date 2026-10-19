@@ -17,6 +17,8 @@
 //!   directory.
 //! - [`ring`]: the shared-memory ring layout (state block, 256 entries,
 //!   descriptors) and the firmware's consume.
+//! - [`channel`]: a channel's command queue and the command-stream records
+//!   the firmware reads.
 //! - [`isa`]: a bit-exact decoder and x86-host interpreter for a bounded
 //!   subset of the AGX2 shader ISA.
 //! - [`exec`]: a compute-style dispatch that runs a shader over a surface grid
@@ -28,6 +30,7 @@
 //! tiler/rasterizer, texture formats and compression, and driving the
 //! executor from a real firmware work queue.
 
+pub mod channel;
 pub mod exec;
 pub mod firmware;
 pub mod initdata;
