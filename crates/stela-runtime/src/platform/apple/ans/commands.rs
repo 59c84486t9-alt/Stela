@@ -611,6 +611,42 @@ impl Ans {
             .map_err(dma_error)?;
             return Ok(Outcome::status(SUCCESS));
         }
+        if kind == 0x0d {
+            let output = cmd.long(52);
+            if output == 0
+                || cmd.word(60) != die::SANITIZE_COUNTER_BYTES
+                || request[..12]
+                    .iter()
+                    .chain(&request[16..76])
+                    .any(|&b| b != 0)
+            {
+                return Err("ANS sanitize-counter tunnel fields are not modeled");
+            }
+            let bytes = u64::from(die::SANITIZE_COUNTER_BYTES);
+            output
+                .checked_add(bytes)
+                .ok_or("ANS sanitize-counter output wraps")?;
+            // The whole output is records, so write all of it: the
+            // counters, then empty headers.
+            let mut chunk = [0u8; 4096];
+            for (i, (key, value)) in die::SANITIZE_COUNTERS.iter().enumerate() {
+                let header = u64::from(*key) | 1 << 32;
+                chunk[16 * i..16 * i + 8].copy_from_slice(&header.to_le_bytes());
+                chunk[16 * i + 8..16 * i + 16].copy_from_slice(&value.to_le_bytes());
+            }
+            for offset in (0..bytes).step_by(chunk.len()) {
+                port.write(output + offset, &chunk).map_err(dma_error)?;
+                chunk.fill(0);
+            }
+            port.write(
+                address
+                    .checked_add(0x4c)
+                    .ok_or("ANS tunnel status address wraps")?,
+                &0u32.to_le_bytes(),
+            )
+            .map_err(dma_error)?;
+            return Ok(Outcome::status(SUCCESS));
+        }
         if kind != 0x120 || cmd.long(52) != 0 || cmd.word(60) != 0 {
             return Err("ANS tunnel request type or output is not modeled");
         }
@@ -748,6 +784,68 @@ mod tests {
         });
         assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
         assert_eq!(ans.last_submission.as_ref().unwrap().tunnel, Some(request));
+    }
+
+    #[test]
+    fn sanitize_counter_tunnel_fills_its_whole_output_with_zero_counters() {
+        use crate::platform::apple::bus::{MmioDevice, Width};
+        let mut ans = Ans::new(
+            Box::new(RamDisk::new("", 4, 4096)),
+            &[Description {
+                id: 1,
+                kind: 1,
+                blocks: 0,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = die::SANITIZE_COUNTER_BYTES as usize;
+        let mut memory = Ram::new(0x1000, 0x1000 + bytes);
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (offset, value) in [(0x40, 1), (0x80, 0x101), (0, 0xff)] {
+            sart.write(offset, Width::Word, value, &mut access).unwrap();
+        }
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        let mut request = [0; 80];
+        request[12] = 0x0d;
+        request[0x4c..].fill(0xff);
+        port.write(0x1000, &request).unwrap();
+        port.write(0x2000, &alloc::vec![0xa5; bytes]).unwrap();
+        let mut command = Command([0; 64]);
+        command.0[0] = APPLE_TUNNEL;
+        command.0[40] = 1;
+        command.0[44..52].copy_from_slice(&0x1000u64.to_le_bytes());
+        command.0[52..60].copy_from_slice(&0x2000u64.to_le_bytes());
+        command.0[60..64].copy_from_slice(&die::SANITIZE_COUNTER_BYTES.to_le_bytes());
+        let status = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+        assert_eq!(status.status, SUCCESS);
+        let mut output = alloc::vec![0xffu8; bytes];
+        port.read(0x2000, &mut output).unwrap();
+        // Walk the records as ParseSanitizeCounters does.
+        let word = |i: usize| u64::from_le_bytes(output[8 * i..8 * i + 8].try_into().unwrap());
+        let (mut i, mut found) = (0, alloc::vec::Vec::new());
+        while i < bytes / 8 {
+            let (key, count) = (word(i) as u32, (word(i) >> 32) as usize);
+            for value in 1..=count {
+                found.push((key, word(i + value)));
+            }
+            i += 1 + count;
+        }
+        assert_eq!(i, bytes / 8);
+        assert_eq!(found, die::SANITIZE_COUNTERS);
+        let mut status = [1; 4];
+        port.read(0x104c, &mut status).unwrap();
+        assert_eq!(status, [0; 4]);
+        // Another output size refuses.
+        command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
+        assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
     }
 
     #[test]

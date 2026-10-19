@@ -16,6 +16,19 @@ use super::{
 pub(super) const DESCRIPTOR: u64 = 6 | (1 << 21);
 pub(super) const NAND_ID: u64 = 0x9b;
 
+/// Output bytes of the sanitize-counter tunnel (request type 0x0d):
+/// `GetSanitizeCounters` (0x3dc29a8) allocates and sends exactly this.
+pub(super) const SANITIZE_COUNTER_BYTES: u32 = 0x10_0000;
+
+/// Emulated die: Stela's choice, consumed by `ParseSanitizeCounters`
+/// (0x3dc2c48..0x3dc2e7c) as the `SanitizeStart`, `SanitizeDone` and
+/// `SanitizeFailed` properties. The parser walks the whole output as
+/// records of a u64 header (key in the low word, value count in the
+/// high word) and that many u64 values; an empty header is one word.
+/// The model refuses the Sanitize command, so the die has never started
+/// one and every counter is zero.
+pub(super) const SANITIZE_COUNTERS: [(u32, u64); 3] = [(0x695, 0), (0x696, 0), (0x697, 0)];
+
 pub(super) fn identify(medium: &Medium, data: &mut [u8]) -> Result<(), &'static str> {
     // Emulated die: Stela's choice, consumed by
     // IdentifyNamespaces (0x3db2904..0x3db2974) as the count
