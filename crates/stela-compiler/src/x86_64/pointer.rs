@@ -205,13 +205,13 @@ impl Form {
 
 /// A [`thunk`] and the offset of the direct exit it takes after a register
 /// completion, which the engine may chain like a block's, or of the exit to
-/// the target in RAX after a return completion
+/// the target in RAX after a return or branch completion
 /// (`chain::dynamic_exit`), which the engine may redirect through a lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thunk {
     pub code: Vec<u8>,
     pub next: Option<usize>,
-    pub returns: Option<usize>,
+    pub dynamic: Option<usize>,
 }
 
 /// The thunk completing the PAC instruction of `form` at `pc` from the memo
@@ -262,7 +262,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     let complete = code.len();
     let next_pc = GuestAddress(pc.0.wrapping_add(4));
     let mut next = None;
-    let mut returns = None;
+    let mut dynamic = None;
     match form.completion {
         Finish::Register => {
             code.extend([0x48, 0x89, 0x87]); // mov [rdi+pointer],rax
@@ -271,7 +271,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
             code.extend(super::chain::direct_exit(next_pc, ExitKind::Fallthrough));
         }
         Finish::Return => {
-            returns = Some(code.len());
+            dynamic = Some(code.len());
             exit_kind(&mut code, ExitKind::Return);
         }
         Finish::Branch { link } => {
@@ -281,6 +281,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
                 code.extend([0x48, 0x89, 0x8f]); // mov [rdi+x30],rcx
                 code.extend((30u32 * 8).to_le_bytes());
             }
+            dynamic = Some(code.len());
             exit_kind(
                 &mut code,
                 if link {
@@ -320,7 +321,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     Thunk {
         code,
         next,
-        returns,
+        dynamic,
     }
 }
 
@@ -654,13 +655,13 @@ mod tests {
             }
         }
         assert_eq!((exits, calls), (2, 3));
-        assert_eq!(thunk.returns, None);
+        assert_eq!(thunk.dynamic, None);
         // A return completes at its exit to the target in RAX, which the
         // service path reaches too.
         let ret = Form::of(Operation::ReturnIaSp).unwrap();
         let ret = super::thunk(ret, pc, 0, 0, service);
         assert_eq!(ret.next, None);
-        let returns = ret.returns.unwrap();
+        let returns = ret.dynamic.unwrap();
         assert_eq!(
             ret.code[returns..returns + 6],
             super::super::chain::dynamic_exit(ExitKind::Return)

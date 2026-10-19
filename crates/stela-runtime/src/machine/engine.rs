@@ -632,9 +632,12 @@ struct Block {
     /// Direct exits to static successors not yet chained, its own and its
     /// PAC thunk's.
     successors: Vec<Successor>,
-    /// The host address of its RET's exit to the target in RAX, until a
-    /// lookup thunk serves it.
-    return_site: Option<u64>,
+    /// The host address of the exit to the target in RAX that its RET, BR
+    /// or BLR form (or that form's PAC thunk) ends with, until a lookup thunk
+    /// serves it.
+    dynamic_site: Option<u64>,
+    /// Its first instruction, for the Branch Target check of a branch to it.
+    first: u32,
     /// The PC and word of its last instruction, where it exits to the engine.
     terminal: (u64, u32),
     /// Exits to the engine at `terminal`.
@@ -642,6 +645,27 @@ struct Block {
     /// The guest bytes it was compiled from, for [`Machine::stale_code`].
     source_bytes: usize,
     source_hash: u64,
+}
+
+/// The exit kind of a branch to a register's value (RET, BR, BLR and their
+/// PAC forms RETA*, BRA*, BLRA*), and the BTYPE it sets whatever page it is
+/// in: none for a BR form through other than X16 or X17 (Arm BTypeNext).
+fn dynamic_branch(word: u32) -> Option<(ExitKind, Option<u8>)> {
+    // Bits 22:21 select BR, BLR or RET; bit 11 a PAC form, whose bit 24
+    // selects the register modifier.
+    if word & 0xfe9f_f000 != 0xd61f_0000 {
+        return None;
+    }
+    let register = (word >> 5) & 31;
+    Some(match (word >> 21) & 3 {
+        0 => (
+            ExitKind::Indirect,
+            matches!(register, 16 | 17).then_some(0b01),
+        ),
+        1 => (ExitKind::Call, Some(0b10)),
+        2 => (ExitKind::Return, Some(0)),
+        _ => return None,
+    })
 }
 
 /// FNV-1a over a block's guest bytes.
@@ -1735,15 +1759,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // A thunk that found no transfer left wrapped the budget, after
         // using all of it.
         let chained = budget.checked_sub(control.budget).unwrap_or(budget);
-        let last = control.block as usize;
+        let last = (control.block & u64::from(u32::MAX)) as usize;
         self.cpu.retired += control.retired;
         self.statistics.blocks += 1 + chained;
         self.statistics.chained += chained;
         self.statistics.lookup_hits += control.hits;
-        // A transfer entered the last block, with BTYPE 0: every thunk
-        // takes a direct branch, a fallthrough or a return.
+        // A transfer entered the last block, with the BTYPE it names: 0
+        // from every thunk but those of BR and BLR forms.
         if chained > 0 {
-            self.cpu.pstate.btype = 0;
+            self.cpu.pstate.btype = (control.block >> chain::BLOCK_BTYPE_SHIFT) as u8;
         }
         match exit {
             NativeExit::Exit { next_pc, kind } => {
@@ -1751,12 +1775,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     *count += 1;
                 }
                 self.exit(last, next_pc, kind)?;
+                let btype = self.cpu.pstate.btype;
                 match ExitKind::try_from(kind) {
-                    _ if self.cpu.pstate.btype != 0 => {}
-                    Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call)) => {
+                    Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call))
+                        if btype == 0 =>
+                    {
                         self.link(last, next_pc, kind);
                     }
-                    Ok(ExitKind::Return) => self.link_return(last),
+                    Ok(ExitKind::Return | ExitKind::Indirect | ExitKind::Call) => {
+                        self.link_dynamic(last, btype);
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -1791,7 +1819,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
             let exit = block.successors[position];
             let retired = block.source_map.len() as u32;
-            if self.redirect_through_lookup(exit.site, retired, Some(exit.target), kind) {
+            if self.redirect_through_lookup(exit.site, retired, Some(exit.target), kind, 0) {
                 self.blocks[index].successors.swap_remove(position);
             }
             return;
@@ -1829,30 +1857,42 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.links += 1;
     }
 
-    /// Redirect block `index`'s RET through a lookup thunk, whose target
-    /// any fetch may have run: RET leaves BTYPE 0.
-    fn link_return(&mut self, index: usize) {
+    /// Redirect block `index`'s exit to the target in RAX, which just left
+    /// BTYPE `btype`, through a lookup thunk, whose target any fetch may
+    /// have run. The thunk sets the BTYPE its form always sets: 0 for
+    /// RET, 0b10 for BLR forms and 0b01 for BR forms through X16 or X17; a
+    /// BR form through another register sets one that depends on its page
+    /// and keeps exiting to the engine.
+    fn link_dynamic(&mut self, index: usize, btype: u8) {
         let block = &self.blocks[index];
-        let Some(site) = block.return_site.filter(|_| !block.variant.single) else {
+        let Some(site) = block.dynamic_site.filter(|_| !block.variant.single) else {
             return;
         };
+        let Some((kind, fixed)) = dynamic_branch(block.terminal.1) else {
+            return;
+        };
+        if fixed != Some(btype) {
+            return;
+        }
         let retired = block.source_map.len() as u32;
-        if self.redirect_through_lookup(site, retired, None, ExitKind::Return) {
-            self.blocks[index].return_site = None;
+        if self.redirect_through_lookup(site, retired, None, kind, btype) {
+            self.blocks[index].dynamic_site = None;
         }
     }
 
     /// Install a lookup thunk for the exit of `kind` at host address `site`
-    /// (to `target`, or the target in RAX) and jump there from the exit.
+    /// (to `target`, or the target in RAX) by a branch that sets `btype`,
+    /// and jump there from the exit.
     fn redirect_through_lookup(
         &mut self,
         site: u64,
         retired: u32,
         target: Option<GuestAddress>,
         kind: ExitKind,
+        btype: u8,
     ) -> bool {
         let control = &*self.chain as *const ChainControl as u64;
-        let Some(code) = chain::lookup_thunk(control, retired, target, kind) else {
+        let Some(code) = chain::lookup_thunk(control, retired, target, kind, btype) else {
             return false;
         };
         let Ok(thunk) = self.host.install(&code) else {
@@ -2013,11 +2053,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// BTI with a matching target, PACIASP and PACIBSP unless BTYPE is 0b11
     /// and SCTLR_ELx.BT0 (EL0) or BT1 forbids it, BRK and HLT.
     fn branch_target_compatible(&self, word: u32) -> bool {
+        self.branch_target_accepts(word, self.cpu.pstate.btype)
+    }
+
+    /// [`Self::branch_target_compatible`] for BTYPE `btype`.
+    fn branch_target_accepts(&self, word: u32, btype: u8) -> bool {
         const PACIASP: u32 = 0xd503_233f;
         const PACIBSP: u32 = 0xd503_237f;
         const SCTLR_BT0: u64 = 1 << 35;
         const SCTLR_BT1: u64 = 1 << 36;
-        let btype = self.cpu.pstate.btype;
         if word & 0xffff_ff3f == 0xd503_241f {
             return match (word >> 6) & 3 {
                 0b00 => btype == 0,
@@ -2133,16 +2177,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Record that a fetch at `pc` runs block `index` in the current
     /// context, for lookup thunks: not single-instruction blocks, which
     /// debug checks precede, nor trace points, which the engine records.
+    /// The fetch translated `pc`, so its page's entry is in the fetch cache.
     fn remember_target(&mut self, pc: u64, index: usize) {
         let block = &self.blocks[index];
         if block.variant.single || self.traces.binary_search(&pc).is_ok() {
             return;
         }
+        let (entry, first) = (block.code.0 as u64, block.first);
+        let page = pc & !(FETCH_PAGE - 1);
+        let guarded = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
+            .is_some_and(|fetched| fetched.page == page && fetched.guarded);
+        let targets = (0..4u8)
+            .filter(|&btype| !guarded || btype == 0 || self.branch_target_accepts(first, btype))
+            .fold(0, |targets, btype| targets | 1 << btype);
         self.targets[chain::lookup_slot(pc)] = chain::LookupEntry {
             pc,
             context: self.chain.context,
-            entry: block.code.0 as u64,
-            block: index as u64,
+            entry,
+            block: index as u32,
+            targets,
         };
     }
 
@@ -2256,15 +2309,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 kind: exit.kind,
             })
             .collect();
-        // RET X<n> ends the code with its exit to the target in RAX; a
-        // RETAA or RETAB's PAC thunk has one too.
+        // RET, BR and BLR end the code with their exit to the target in
+        // RAX; the PAC thunk of a RETA*, BRA* or BLRA* has one too.
         let code_bytes = &compiled.native.x86_64_code;
-        let mut return_site = (!single
-            && terminal & 0xffff_fc1f == 0xd65f_0000
-            && code_bytes.ends_with(&chain::dynamic_exit(ExitKind::Return)))
+        let mut dynamic_site = (!single
+            && terminal & 0xff9f_fc1f == 0xd61f_0000
+            && dynamic_branch(terminal)
+                .is_some_and(|(kind, _)| code_bytes.ends_with(&chain::dynamic_exit(kind))))
         .then(|| (code.0 + code_bytes.len() - chain::DYNAMIC_EXIT_BYTES) as u64);
+        let first = self.admit(u32::from_le_bytes(source[..4].try_into().expect("a word")));
         if !single {
-            let (successor, returns) = self
+            let (successor, dynamic) = self
                 .complete_pointer_natively(
                     code,
                     &compiled.native.x86_64_code,
@@ -2273,7 +2328,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 )
                 .unwrap_or_default();
             successors.extend(successor);
-            return_site = return_site.or(returns);
+            dynamic_site = dynamic_site.or(dynamic);
             successors.extend(self.complete_thread_pointer_natively(
                 code,
                 &compiled.native.x86_64_code,
@@ -2294,7 +2349,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             checks,
             variant,
             successors,
-            return_site,
+            dynamic_site,
+            first,
             terminal: (terminal_pc, terminal),
             taken: 0,
             source_bytes: compiled.source_bytes,
@@ -2338,10 +2394,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             target: GuestAddress(pc + INSTRUCTION),
             kind: ExitKind::Fallthrough,
         });
-        let returns = thunk
-            .returns
-            .map(|returns| installed.0 as u64 + returns as u64);
-        Some((successor, returns))
+        let dynamic = thunk
+            .dynamic
+            .map(|dynamic| installed.0 as u64 + dynamic as u64);
+        Some((successor, dynamic))
     }
 
     /// Redirect the System exit ending a block's `native` code, installed at
@@ -5131,8 +5187,8 @@ mod tests {
         assert_eq!(machine.statistics.exit_kinds, kinds);
         let control = &*machine.chain as *const ChainControl as u64;
         let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
-        assert!(first.successors.is_empty() && first.return_site.is_none());
-        assert!(second.return_site.is_none());
+        assert!(first.successors.is_empty() && first.dynamic_site.is_none());
+        assert!(second.dynamic_site.is_none());
         let code = |block: &Block| &machine.host.installed[block.code.0 - 1];
         // The branch's direct exit, then the RET's exit to RAX, ends each
         // block's code.
@@ -5141,8 +5197,8 @@ mod tests {
             second.code.0 + code(second).len() - chain::DYNAMIC_EXIT_BYTES,
         ];
         let thunks = [
-            chain::lookup_thunk(control, 1, Some(GuestAddress(far)), ExitKind::Direct),
-            chain::lookup_thunk(control, 2, None, ExitKind::Return),
+            chain::lookup_thunk(control, 1, Some(GuestAddress(far)), ExitKind::Direct, 0),
+            chain::lookup_thunk(control, 2, None, ExitKind::Return, 0),
         ];
         for (index, (site, thunk)) in sites.into_iter().zip(thunks).enumerate() {
             let at = machine
@@ -5163,7 +5219,8 @@ mod tests {
                 pc,
                 context,
                 entry: machine.blocks[block].code.0 as u64,
-                block: block as u64,
+                block: block as u32,
+                targets: 0b1111,
             };
             assert_eq!(entry, expected);
         }
@@ -5179,6 +5236,106 @@ mod tests {
         assert_eq!(machine.context(el, variant), renewed);
         assert_ne!(machine.context(el ^ 1, variant), renewed);
         assert_eq!(machine.context(el, variant), renewed);
+    }
+
+    #[test]
+    fn dynamic_branches_name_their_exit_and_any_page_independent_btype() {
+        for (word, expected) in [
+            (0xd61f_0000, Some((ExitKind::Indirect, None))), // br x0
+            (0xd61f_0200, Some((ExitKind::Indirect, Some(0b01)))), // br x16
+            (0xd63f_0100, Some((ExitKind::Call, Some(0b10)))), // blr x8
+            (0xd65f_03c0, Some((ExitKind::Return, Some(0)))), // ret
+            (0xd71f_0a31, Some((ExitKind::Indirect, Some(0b01)))), // braa x17, x17
+            (0xd61f_091f, Some((ExitKind::Indirect, None))), // braaz x8
+            (0xd63f_091f, Some((ExitKind::Call, Some(0b10)))), // blraaz x8
+            (0xd65f_0fff, Some((ExitKind::Return, Some(0)))), // retab
+            (0xd69f_03e0, None),                             // eret
+            (0x1400_0000, None),                             // b .
+        ] {
+            assert_eq!(dynamic_branch(word), expected, "{word:#x}");
+        }
+    }
+
+    /// BLR and BR X16 exits are redirected through lookup thunks that set
+    /// their BTYPE; BR through another register, whose BTYPE depends on its
+    /// page, keeps exiting. A target in a guarded page accepts the BTYPEs
+    /// its first instruction is compatible with.
+    #[test]
+    fn indirect_branches_go_through_lookups_that_check_the_target() {
+        const BLR_X8: u32 = 0xd63f_0100;
+        const BR_X16: u32 = 0xd61f_0200;
+        const BR_X0: u32 = 0xd61f_0000;
+        const BTI_C: u32 = 0xd503_245f;
+        let mut words = vec![0; 1025];
+        words[0] = BLR_X8;
+        words[1] = BR_X16;
+        words[2] = BR_X0;
+        words[1024] = BTI_C;
+        let mut machine = machine(&words);
+        let base = machine.cpu.pc;
+        let far = base + 0x1000;
+        let exit = |kind: ExitKind| NativeExit::Exit {
+            next_pc: far,
+            kind: kind as u64,
+        };
+        machine.host.exits = vec![
+            exit(ExitKind::Call),
+            exit(ExitKind::Indirect),
+            exit(ExitKind::Indirect),
+        ];
+        for pc in [base, base + 4, base + 8] {
+            machine.cpu.pc = pc;
+            machine.cpu.pstate.btype = 0;
+            machine.step().unwrap();
+        }
+        let control = &*machine.chain as *const ChainControl as u64;
+        for (index, kind, btype) in [(0, ExitKind::Call, 0b10), (1, ExitKind::Indirect, 0b01)] {
+            let thunk = chain::lookup_thunk(control, 1, None, kind, btype).unwrap();
+            assert!(machine.host.installed.contains(&thunk), "{kind:?}");
+            assert_eq!(machine.blocks[index].dynamic_site, None);
+        }
+        assert!(machine.blocks[2].dynamic_site.is_some());
+        assert_eq!(machine.statistics.lookups, 2);
+        // The target outside a guarded page accepts every BTYPE; in one, the
+        // BTYPEs BTI c is compatible with.
+        machine.cpu.pc = far;
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: far + 4,
+            kind: ExitKind::Fallthrough as u64,
+        }];
+        machine.step().unwrap();
+        let target = machine.blocks.len() - 1;
+        assert_eq!(machine.blocks[target].pc, far);
+        assert_eq!(machine.targets[chain::lookup_slot(far)].targets, 0b1111);
+        let slot = (far / FETCH_PAGE) as usize % FETCH_CACHE;
+        machine.fetch[slot].as_mut().unwrap().guarded = true;
+        machine.remember_target(far, target);
+        assert_eq!(machine.targets[chain::lookup_slot(far)].targets, 0b0111);
+        // A run whose last transfer was the BLR's resumes with its BTYPE.
+        let current = *machine.chain;
+        machine.host.chained = Some((
+            &mut *machine.chain,
+            ChainControl {
+                budget: CHAIN_LIMIT - 1,
+                retired: 1,
+                block: 0b10 << chain::BLOCK_BTYPE_SHIFT | target as u64,
+                ..current
+            },
+        ));
+        let offset = machine.blocks[target]
+            .code
+            .0
+            .wrapping_sub(machine.blocks[0].code.0);
+        machine.host.exits = vec![NativeExit::Fault(NativeFault {
+            offset,
+            address: 0x40,
+            write: false,
+            cause: FaultCause::Guest(mmu::Fault::stage1(mmu::FaultKind::Translation, 3)),
+        })];
+        machine.cpu.pc = base;
+        machine.step().unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), far);
+        assert_eq!(machine.cpu.read(SystemRegister::SPSR_EL1) >> 10 & 3, 0b10);
     }
 
     #[test]
@@ -6649,9 +6806,9 @@ mod tests {
             .position(|code| *code == thunk.code)
             .unwrap()
             + 1;
-        let site = (at + thunk.returns.unwrap()) as u64;
+        let site = (at + thunk.dynamic.unwrap()) as u64;
         let control = &*machine.chain as *const ChainControl as u64;
-        let lookup = chain::lookup_thunk(control, 1, None, ExitKind::Return).unwrap();
+        let lookup = chain::lookup_thunk(control, 1, None, ExitKind::Return, 0).unwrap();
         assert_eq!(machine.host.installed.last(), Some(&lookup));
         let jump = chain::jump(site, machine.host.installed.len() as u64).unwrap();
         assert_eq!(
@@ -6659,7 +6816,7 @@ mod tests {
             Some(&(site as usize, jump.to_vec()))
         );
         assert_eq!(machine.statistics.lookups, 1);
-        assert_eq!(machine.blocks[0].return_site, None);
+        assert_eq!(machine.blocks[0].dynamic_site, None);
     }
 
     /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading

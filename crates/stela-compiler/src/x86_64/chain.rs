@@ -8,7 +8,9 @@
 //! one transfer from `budget` (or, when none is left, exits exactly as the
 //! redirected exit would), adds the instructions of the block it leaves to
 //! `retired` and names the block it enters in `block`. After the native
-//! call returns, `block` is the block whose exit or fault ended the run.
+//! call returns, `block` is the block whose exit or fault ended the run, in
+//! its low 32 bits, and the BTYPE it was entered with in bits 33:32: 0 from
+//! every thunk but a lookup thunk of a BR or BLR form.
 //! Thunks clobber only RAX, RCX, RDX and flags, which every direct exit
 //! already may.
 //!
@@ -20,7 +22,9 @@
 //! code generations, the exception level and the block variant). A hit
 //! transfers like a thunk; a miss, another context or no budget exits
 //! exactly as the redirected exit would. It also clobbers R8, which no exit
-//! keeps live.
+//! keeps live. The thunk of an exit that sets a nonzero BTYPE (BR or BLR)
+//! also requires the entry to accept that BTYPE (`LookupEntry::targets`),
+//! as a Branch Target check of the entered block's first instruction would.
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
 
@@ -56,7 +60,8 @@ pub struct ChainControl {
     pub budget: u64,
     /// Instructions of the blocks chained out of.
     pub retired: u64,
-    /// The index of the block running.
+    /// The index of the block running, and above it the BTYPE it was
+    /// entered with.
     pub block: u64,
     /// The context the engine runs in now; lookup entries of another miss.
     /// The engine never names a context 0.
@@ -76,8 +81,16 @@ pub struct LookupEntry {
     /// The block's code.
     pub entry: u64,
     /// The block's index.
-    pub block: u64,
+    pub block: u32,
+    /// The BTYPEs a branch to it may set, bit `b` for BTYPE `b`: every one
+    /// outside a guarded page, else those its first instruction is
+    /// compatible with.
+    pub targets: u32,
 }
+
+/// The bits of `ChainControl::block` above the block's index that hold the
+/// BTYPE it was entered with.
+pub const BLOCK_BTYPE_SHIFT: u32 = 32;
 
 /// The table slot of `pc`.
 pub const fn lookup_slot(pc: u64) -> usize {
@@ -96,6 +109,7 @@ const _: () = assert!(core::mem::offset_of!(LookupEntry, pc) == 0);
 const ENTRY_CONTEXT: u8 = core::mem::offset_of!(LookupEntry, context) as u8;
 const ENTRY_CODE: u8 = core::mem::offset_of!(LookupEntry, entry) as u8;
 const ENTRY_BLOCK: u8 = core::mem::offset_of!(LookupEntry, block) as u8;
+const ENTRY_TARGETS: u8 = core::mem::offset_of!(LookupEntry, targets) as u8;
 
 /// A direct exit to `target` with `kind`, as every block emits it.
 pub fn direct_exit(target: GuestAddress, kind: ExitKind) -> [u8; DIRECT_EXIT_BYTES] {
@@ -142,15 +156,20 @@ pub fn thunk(
 }
 
 /// A lookup thunk for an exit of `kind` from a block of `retired`
-/// instructions, to `target` or, for `None`, to the target in RAX. `None`
-/// when `retired` exceeds its 32-bit field.
+/// instructions, to `target` or, for `None`, to the target in RAX, by a
+/// branch that sets `btype`. `None` when `retired` exceeds its 32-bit field
+/// or `btype` is not a BTYPE.
 pub fn lookup_thunk(
     control: u64,
     retired: u32,
     target: Option<GuestAddress>,
     kind: ExitKind,
+    btype: u8,
 ) -> Option<Vec<u8>> {
     let retired = i32::try_from(retired).ok()?;
+    if btype > 3 {
+        return None;
+    }
     let mut code = Vec::with_capacity(STATIC_LOOKUP_THUNK_BYTES);
     if let Some(target) = target {
         code.extend([0x48, 0xb8]); // movabs rax,target
@@ -172,13 +191,24 @@ pub fn lookup_thunk(
     code.extend([0x4c, 0x3b, 0x42, ENTRY_CONTEXT]); // cmp r8,[rdx+context]
     code.extend([0x75, 0]); // jne miss
     misses.push(code.len());
+    if btype != 0 {
+        code.extend([0xf6, 0x42, ENTRY_TARGETS, 1 << btype]); // test byte [rdx+targets],1<<btype
+        code.extend([0x74, 0]); // jz miss
+        misses.push(code.len());
+    }
     code.extend([0x48, 0x83, 0x29, 0x01]); // sub qword [rcx],1
     code.extend([0x72, 0]); // jb miss
     misses.push(code.len());
     code.extend([0x48, 0x81, 0x41, RETIRED]); // add qword [rcx+retired],imm32
     code.extend(retired.to_le_bytes());
     code.extend([0x48, 0x83, 0x41, HITS, 0x01]); // add qword [rcx+hits],1
-    code.extend([0x4c, 0x8b, 0x42, ENTRY_BLOCK]); // mov r8,[rdx+block]
+    code.extend([0x44, 0x8b, 0x42, ENTRY_BLOCK]); // mov r8d,[rdx+block]
+    for bit in 0..2 {
+        if btype & 1 << bit != 0 {
+            // bts r8,BLOCK_BTYPE_SHIFT+bit
+            code.extend([0x49, 0x0f, 0xba, 0xe8, BLOCK_BTYPE_SHIFT as u8 + bit]);
+        }
+    }
     code.extend([0x4c, 0x89, 0x41, BLOCK]); // mov [rcx+block],r8
     code.extend([0xff, 0x62, ENTRY_CODE]); // jmp qword [rdx+entry]
     for site in misses {
@@ -187,13 +217,14 @@ pub fn lookup_thunk(
     code.push(0xba); // miss: mov edx,kind
     code.extend((kind as u32).to_le_bytes());
     code.push(0xc3); // ret
-    debug_assert_eq!(
-        code.len(),
-        if target.is_some() {
-            STATIC_LOOKUP_THUNK_BYTES
-        } else {
-            LOOKUP_THUNK_BYTES
-        }
+    debug_assert!(
+        btype != 0
+            || code.len()
+                == if target.is_some() {
+                    STATIC_LOOKUP_THUNK_BYTES
+                } else {
+                    LOOKUP_THUNK_BYTES
+                }
     );
     Some(code)
 }
@@ -305,9 +336,13 @@ mod tests {
             0xba, 99, 0, 0, 0, // mov edx,99
             0xc3,
         ];
-        let dynamic = lookup_thunk(control_at, 9, None, ExitKind::Return).unwrap();
+        let dynamic = lookup_thunk(control_at, 9, None, ExitKind::Return, 0).unwrap();
         let fixed =
-            lookup_thunk(control_at, 3, Some(GuestAddress(TARGET)), ExitKind::Call).unwrap();
+            lookup_thunk(control_at, 3, Some(GuestAddress(TARGET)), ExitKind::Call, 0).unwrap();
+        let branch = lookup_thunk(control_at, 5, None, ExitKind::Indirect, 3).unwrap();
+        assert_eq!(dynamic.len(), LOOKUP_THUNK_BYTES);
+        assert_eq!(branch.len(), LOOKUP_THUNK_BYTES + 6 + 10);
+        assert!(lookup_thunk(control_at, 5, None, ExitKind::Indirect, 4).is_none());
         assert_eq!(fixed.len(), STATIC_LOOKUP_THUNK_BYTES);
         assert_eq!(fixed[fixed.len() - 6..], dynamic_exit(ExitKind::Call));
         // SAFETY: private anonymous memory, RX after the copies, unmapped
@@ -320,18 +355,23 @@ mod tests {
             code.extend(&dynamic);
             let fixed_at = code.len();
             code.extend(&fixed);
+            let branch_at = code.len();
+            code.extend([0x48, 0x89, 0xf0]); // mov rax,rsi
+            code.extend(&branch);
             core::ptr::copy_nonoverlapping(code.as_ptr(), base, code.len());
             core::ptr::copy_nonoverlapping(block.as_ptr(), base.add(BLOCK_AT), block.len());
             assert_eq!(mprotect(page, PAGE, 5), 0);
             type Thunk = unsafe extern "sysv64" fn(u64, u64) -> u128;
             let dynamic: Thunk = core::mem::transmute(page);
             let fixed: Thunk = core::mem::transmute(base.add(fixed_at));
+            let branch: Thunk = core::mem::transmute(base.add(branch_at));
             let exit = |result: u128| (result as u64, (result >> 64) as u64);
             let entry = LookupEntry {
                 pc: TARGET,
                 context: 7,
                 entry: base.add(BLOCK_AT) as u64,
                 block: 42,
+                targets: 0b0111,
             };
             table[lookup_slot(TARGET)] = entry;
             control.budget = 2;
@@ -353,6 +393,16 @@ mod tests {
             assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
             assert_eq!(exit(fixed(0, 0)), (TARGET, ExitKind::Call as u64));
             assert_eq!((control.budget, control.hits, control.block), (5, 2, 42));
+            // A BR with BTYPE 0b11 needs the entry to accept it, and names
+            // the BTYPE beside the block.
+            table[lookup_slot(TARGET)].context = 7;
+            assert_eq!(exit(branch(0, TARGET)), (TARGET, ExitKind::Indirect as u64));
+            table[lookup_slot(TARGET)].targets = 0b1001;
+            assert_eq!(exit(branch(0, TARGET)), (0x5151, 99));
+            assert_eq!(
+                (control.budget, control.retired, control.hits, control.block),
+                (4, 17, 3, 3 << BLOCK_BTYPE_SHIFT | 42)
+            );
             assert_eq!(munmap(page, PAGE), 0);
         }
     }

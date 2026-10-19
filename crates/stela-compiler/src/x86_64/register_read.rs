@@ -54,7 +54,7 @@ pub fn thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
     Thunk {
         code,
         next: Some(next),
-        returns: None,
+        dynamic: None,
     }
 }
 
