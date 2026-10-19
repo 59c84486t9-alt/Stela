@@ -28,6 +28,9 @@ const PSTATE: u32 = 0xd500_401f;
 const REGISTER_FIELD: u32 = 0x1f;
 /// `MRS X0, PAR_EL1`, which follows each AT so its result is compared.
 pub(super) const MRS_PAR: u32 = 0xd538_7400;
+/// `MRS X0, TPIDR_EL1`, whose first plain read opens the cell the engine's
+/// native completion of the next one reads (`x86_64::register_read`).
+const MRS_TPIDR_EL1: u32 = 0xd538_d080;
 const IMMEDIATE_FIELD: u32 = 0xf;
 
 /// Whether `word` belongs to the system lane: it exits to the engine or runs
@@ -392,6 +395,21 @@ pub(super) fn subjects(
                         draft,
                         el,
                         translation: Translation::system(&[word, read])?,
+                    });
+                }
+            }
+            // MRS TPIDR_EL1 at EL1 and EL2 also runs twice, so the second
+            // read completes natively.
+            if word & !REGISTER_FIELD == MRS_TPIDR_EL1 {
+                for &el in levels.iter().filter(|&&el| el != 0) {
+                    subjects.push(Subject {
+                        form: id.into(),
+                        code: vec![word, word],
+                        scalable: None,
+                        system: true,
+                        draft,
+                        el,
+                        translation: Translation::system(&[word, word])?,
                     });
                 }
             }

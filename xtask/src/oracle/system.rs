@@ -245,7 +245,8 @@ impl Host for OracleHost {
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit {
         // SAFETY: the engine passes code it installed for the system-mode
         // block ABI; the lane admits only blocks that exit before any native
-        // memory access.
+        // memory access, or zero a DC ZVA block in the data window, mapped
+        // at its guest address.
         let block: extern "sysv64" fn(*mut GuestState) -> BlockExit =
             unsafe { std::mem::transmute(code.0) };
         let exit = block(state);

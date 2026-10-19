@@ -305,7 +305,8 @@ impl Translation {
     pub unsafe fn run(&mut self, case: &Case) -> Result<Outcome> {
         if let Self::System = self {
             // SAFETY: `system` admitted only blocks that reach their exit
-            // without a native memory access.
+            // without a native memory access, but for a DC ZVA, whose cases
+            // zero inside the data window.
             return unsafe { super::system::run(case, target()) };
         }
         let windows = windows()?.lock().expect("native windows lock");

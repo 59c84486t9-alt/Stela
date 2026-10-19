@@ -463,8 +463,9 @@ fn unmirrored_read(word: u32) -> Option<usize> {
     const MRS_MASK: u32 = 0xfff0_0000;
     const MRS: u32 = 0xd530_0000;
     // NZCV, DAIF, DIT, SSBS, FPCR and FPSR (op1=3); SPSel, CurrentEL, PAN
-    // and UAO (op1=0); as op1:CRn:CRm:op2.
-    const MIRRORED: [(u32, u32, u32, u32); 10] = [
+    // and UAO (op1=0); and TPIDR_EL1, which both harnesses set to the case's
+    // step count; as op1:CRn:CRm:op2.
+    const MIRRORED: [(u32, u32, u32, u32); 11] = [
         (3, 4, 2, 0),
         (3, 4, 2, 1),
         (3, 4, 2, 5),
@@ -475,6 +476,7 @@ fn unmirrored_read(word: u32) -> Option<usize> {
         (0, 4, 2, 2),
         (0, 4, 2, 3),
         (0, 4, 2, 4),
+        (0, 13, 0, 4),
     ];
     let field = |shift: u32, bits: u32| (word >> shift) & ((1 << bits) - 1);
     let register = field(0, 5);
@@ -650,23 +652,31 @@ impl Differential {
         let cases: Vec<Case> = batch
             .iter()
             .flat_map(|subject| std::iter::repeat_n(subject, self.states))
-            .map(|subject| Case {
-                code: subject.code.clone(),
-                steps: subject.code.len(),
-                state: random.state(),
-                data: random.bytes(DATA_BYTES).into(),
-                scalable: subject
-                    .scalable
-                    .map(|(svl, svcr)| random.scalable(svl, svcr)),
-                el: subject.el,
-                // Only the system lane's engine mirrors a changed stage 2.
-                hypervisor: self.el2.then(|| {
-                    if subject.system {
-                        random.hypervisor()
-                    } else {
-                        Hypervisor::default()
-                    }
-                }),
+            .map(|subject| {
+                let zero_block = zero_block_register(subject.code[0])
+                    .filter(|_| subject.system && subject.el != 0);
+                let mut state = random.state();
+                if let Some(register) = zero_block {
+                    state.x[register] = random.pointer();
+                }
+                Case {
+                    code: subject.code.clone(),
+                    steps: subject.code.len(),
+                    state,
+                    data: random.bytes(DATA_BYTES).into(),
+                    scalable: subject
+                        .scalable
+                        .map(|(svl, svcr)| random.scalable(svl, svcr)),
+                    el: subject.el,
+                    // Only the system lane's engine mirrors a changed stage 2.
+                    hypervisor: self.el2.then(|| {
+                        if subject.system && zero_block.is_none() {
+                            random.hypervisor()
+                        } else {
+                            Hypervisor::default()
+                        }
+                    }),
+                }
             })
             .collect();
         let originals = oracle.run(&cases)?;
@@ -693,7 +703,8 @@ impl Differential {
                 continue;
             }
             // SAFETY: the original completed, so every access stays in the
-            // windows; system-mode words exit before any access.
+            // windows; system-mode words exit before any access, or zero a
+            // DC ZVA block in the data window.
             let translated = match unsafe { subject.translation.run(case) } {
                 Ok(translated) => translated,
                 // An engine refusal of a registered form is a mismatch.
@@ -948,7 +959,9 @@ fn el2_admissible(word: u32) -> bool {
 /// it must not wait, return, take over the harness's translation, vectors,
 /// FP access, stepping or stack selection, enable PAN or streaming mode (the
 /// recording handler reads the EL0-accessible data window and FP state), zero
-/// memory at a random address, or make a semihosting call.
+/// memory or tags at a random address, or make a semihosting call. DC ZVA
+/// with a register zeroes inside the data window: its cases point Xt there
+/// ([`zero_block_register`]).
 fn el1_admissible(word: u32) -> bool {
     const WFE: u32 = 0xd503_205f;
     const WFX_TIMEOUT_MASK: u32 = 0xffff_ffc0;
@@ -1008,9 +1021,20 @@ fn el1_admissible(word: u32) -> bool {
     }
     if word & SYS_MASK == SYS {
         // DC ZVA, GVA and GZVA (op1=3, CRn=7, CRm=4).
-        return !(field(16, 3) == 3 && field(12, 4) == 7 && field(8, 4) == 4);
+        return !(field(16, 3) == 3 && field(12, 4) == 7 && field(8, 4) == 4)
+            || zero_block_register(word).is_some();
     }
     true
+}
+
+/// Xt of DC ZVA Xt, other than XZR: at EL1 and EL2 its cases point Xt into
+/// the data window, which the engine lane's native DC ZVA then zeroes, and
+/// keep the identity stage 2, as the lane's native code writes the window
+/// without translating.
+fn zero_block_register(word: u32) -> Option<usize> {
+    const DC_ZVA: u32 = 0xd50b_7420;
+    let register = word & REGISTER_FIELD;
+    (word & !REGISTER_FIELD == DC_ZVA && register != ZERO_OR_SP).then_some(register as usize)
 }
 
 fn level(case: &Case) -> String {
