@@ -461,6 +461,25 @@ impl fmt::Display for Requirement {
 /// Trace hits kept between [`Machine::take_trace_hits`] calls.
 pub const TRACE_HITS: usize = 64;
 
+/// Watch hits kept between [`Machine::take_watch_hits`] calls.
+pub const WATCH_HITS: usize = 4096;
+
+/// A device access inside a host watch range (`Machine::set_watches`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchHit {
+    pub pc: u64,
+    pub pe: usize,
+    pub physical: u64,
+    pub bytes: u8,
+    /// The value read or written; zero for a refused access.
+    pub value: u64,
+    pub write: bool,
+    /// Whether the device completed the access.
+    pub completed: bool,
+    /// Further hits dropped after this one, beyond [`WATCH_HITS`].
+    pub dropped: u64,
+}
+
 /// A PE reaching a host trace point (`Machine::set_traces`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraceHit {
@@ -797,6 +816,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// taken (`take_trace_hits`).
     traces: Vec<u64>,
     trace_hits: Vec<TraceHit>,
+    /// Host watch ranges of physical device addresses, first and last
+    /// byte (`set_watches`), and the hits not yet taken (`take_watch_hits`).
+    watches: Vec<(u64, u64)>,
+    watch_hits: Vec<WatchHit>,
     /// The block count at which the running PE's time slice ends.
     slice_end: u64,
     /// The system counter value at which it ends, whichever comes first.
@@ -888,6 +911,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             breakpoints: Vec::new(),
             traces: Vec::new(),
             trace_hits: Vec::new(),
+            watches: Vec::new(),
+            watch_hits: Vec::new(),
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
             clock: clock::Clock::default(),
@@ -1050,6 +1075,69 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.traces.sort_unstable();
         self.traces.dedup();
         self.discard_code();
+    }
+
+    /// Record, without stopping, every device access whose first byte lies
+    /// in one of these physical ranges (base, bytes). A host diagnostic
+    /// invisible to the guest.
+    pub fn set_watches(&mut self, ranges: &[(u64, u64)]) {
+        self.watches = ranges
+            .iter()
+            .filter(|&&(_, bytes)| bytes != 0)
+            .map(|&(base, bytes)| (base, base.saturating_add(bytes - 1)))
+            .collect();
+    }
+
+    /// The watch hits since the last call, oldest first, at most
+    /// [`WATCH_HITS`] of them; later hits are counted in the last one.
+    pub fn take_watch_hits(&mut self) -> Vec<WatchHit> {
+        core::mem::take(&mut self.watch_hits)
+    }
+
+    fn watch(&mut self, physical: u64, bytes: u8, value: Option<u64>, write: bool) {
+        if !self
+            .watches
+            .iter()
+            .any(|&(first, last)| (first..=last).contains(&physical))
+        {
+            return;
+        }
+        if self.watch_hits.len() == WATCH_HITS {
+            if let Some(last) = self.watch_hits.last_mut() {
+                last.dropped += 1;
+            }
+            return;
+        }
+        self.watch_hits.push(WatchHit {
+            pc: self.cpu.pc,
+            pe: self.current,
+            physical,
+            bytes,
+            value: value.unwrap_or(0),
+            write,
+            completed: value.is_some(),
+            dropped: 0,
+        });
+    }
+
+    /// A device read by the running PE, watched.
+    fn device_read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        let result = self.devices.read(self.current, physical, bytes, now);
+        self.watch(physical, bytes, result.as_ref().ok().copied(), false);
+        result
+    }
+
+    /// A device write by the running PE, watched.
+    fn device_write(
+        &mut self,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+    ) -> Result<(), DeviceError> {
+        let result = self.devices.write(self.current, physical, bytes, value, now);
+        self.watch(physical, bytes, result.is_ok().then_some(value), true);
+        result
     }
 
     /// The trace hits since the last call, oldest first, at most
@@ -3308,7 +3396,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return self.alignment_fault(address, false);
             }
             let now = self.now();
-            let raw = match self.devices.read(self.current, physical, bytes, now) {
+            let raw = match self.device_read(physical, bytes, now) {
                 Ok(value) => value,
                 Err(error) if self.surveyed(physical, bytes, None, &error) => 0,
                 Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
@@ -3348,8 +3436,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let value = self.read_register(store.source_register());
             let now = self.now();
             let written = self
-                .devices
-                .write(self.current, physical, bytes, value, now)
+                .device_write(physical, bytes, value, now)
                 .and_then(|()| {
                     let mut memory = HostMemory(&mut self.host);
                     self.devices.transfer(self.current, &mut memory, now)
@@ -3410,7 +3497,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 MemoryTransfer::Load { signed, width } => {
                     let mut values = [0; 2];
                     for (value, element) in values.iter_mut().zip(elements) {
-                        let raw = match self.devices.read(self.current, element, bytes, now) {
+                        let raw = match self.device_read(element, bytes, now) {
                             Ok(raw) => raw,
                             Err(error) if self.surveyed(element, bytes, None, &error) => 0,
                             Err(DeviceError::NoDevice) => {
@@ -3437,8 +3524,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     let values = data.map(|register| self.read_register(register));
                     for (element, value) in elements.into_iter().zip(values) {
                         let written = self
-                            .devices
-                            .write(self.current, element, bytes, value, now)
+                            .device_write(element, bytes, value, now)
                             .and_then(|()| {
                                 let mut memory = HostMemory(&mut self.host);
                                 self.devices.transfer(self.current, &mut memory, now)

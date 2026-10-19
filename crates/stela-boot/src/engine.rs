@@ -89,6 +89,9 @@ struct Options {
     /// Log, without stopping, when a PE reaches one of these guest PCs
     /// (`--trace`; `Machine::set_traces`).
     traces: Vec<u64>,
+    /// Log, without stopping, every device access in these physical ranges
+    /// (`--watch BASE,BYTES`; `Machine::set_watches`).
+    watches: Vec<(u64, u64)>,
     /// Guest virtual ranges the stop's report shows (`--dump BASE,BYTES`).
     dumps: Vec<(Base, u64)>,
 }
@@ -163,6 +166,7 @@ impl Options {
             input: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
+            watches: Vec::new(),
             dumps: Vec::new(),
         };
         let mut words = text.split_ascii_whitespace();
@@ -241,6 +245,12 @@ impl Options {
                 let target = words.next().ok_or("missing Preboot disk")?;
                 options.preboot = Some(target.parse()?);
                 options.bundle = true;
+                continue;
+            }
+            if name == "--watch" {
+                let range = words.next().ok_or("missing watch range")?;
+                let (base, bytes) = range.split_once(',').ok_or("a watch is BASE,BYTES")?;
+                options.watches.push((number(base)?, number(bytes)?));
                 continue;
             }
             if name == "--dump" {
@@ -1107,6 +1117,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     if !options.traces.is_empty() {
         machine.set_traces(&options.traces);
     }
+    if !options.watches.is_empty() {
+        machine.set_watches(&options.watches);
+    }
     let mut restore = source.map(|source| {
         restore::Experiment::new(
             source,
@@ -1193,6 +1206,19 @@ fn run(
                 hit.arguments[2],
                 hit.arguments[3],
                 hit.lr,
+                hit.dropped
+            ));
+        }
+        for hit in machine.take_watch_hits() {
+            output::arguments(format_args!(
+                "WATCH pc={:#x} pe={} {} pa={:#x} bytes={} value={:#x}{} dropped={}\n",
+                hit.pc,
+                hit.pe,
+                if hit.write { "write" } else { "read" },
+                hit.physical,
+                hit.bytes,
+                hit.value,
+                if hit.completed { "" } else { " refused" },
                 hit.dropped
             ));
         }
