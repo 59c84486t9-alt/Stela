@@ -52,7 +52,7 @@ pub fn split(options: &str) -> Result<(Vec<Target>, Vec<Target>, String), &'stat
     Ok((open, check, rest))
 }
 
-fn rsdp() -> Option<u64> {
+pub fn rsdp() -> Option<u64> {
     uefi::system::with_config_table(|entries| {
         let find = |guid| entries.iter().find(|entry| entry.guid == guid);
         find(ConfigTableEntry::ACPI2_GUID)

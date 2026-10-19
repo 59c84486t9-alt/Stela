@@ -11,6 +11,7 @@ mod host;
 mod input;
 mod interrupts;
 mod nor;
+mod power;
 mod restore;
 mod storage;
 
@@ -29,7 +30,7 @@ use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
 use stela_runtime::machine::apple::WallClock;
 use stela_runtime::machine::{
-    Chip, Cpu, CpuProfile, Event, Machine, PeerState, Stop,
+    Chip, Cpu, CpuProfile, Event, Machine, PeerState, Stop, Transition,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
     registers::encodings::DCZID_EL0,
@@ -1133,6 +1134,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         })
     });
     let mut host_input = host_input;
+    let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz);
     let started = host::rdtsc();
     let stop = run(
         &mut machine,
@@ -1142,9 +1144,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         restore.as_mut(),
         host_input.as_mut(),
         host_nor.as_mut(),
+        &mut host_power,
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
-    finish(&mut machine, stop, seconds, &options.dumps)
+    finish(&mut machine, stop, seconds, &options.dumps, &host_power)
 }
 
 fn level_name(guarded: bool) -> &'static str {
@@ -1160,6 +1163,7 @@ const BEAT_SECONDS: u64 = 10;
 /// Run up to `budget` blocks (0: no limit), showing the guest framebuffer
 /// about twice a second and at the stop, and reporting the PE's position
 /// every [`BEAT_SECONDS`].
+#[allow(clippy::too_many_arguments)]
 fn run(
     machine: &mut Machine<BareHost, AppleDevices>,
     budget: u64,
@@ -1168,6 +1172,7 @@ fn run(
     mut restore: Option<&mut restore::Experiment>,
     mut host_input: Option<&mut input::HostInput>,
     mut host_nor: Option<&mut nor::HostNor>,
+    host_power: &mut power::HostPowerControl,
 ) -> Stop {
     let mut shown = host::rdtsc();
     let mut beat = (
@@ -1251,6 +1256,7 @@ fn run(
         if let Some(nor) = host_nor.as_deref_mut() {
             machine.exclude_host_time(|devices| nor.poll(devices));
         }
+        machine.exclude_host_time(|devices| host_power.poll(devices));
 
         let sliced = matches!(stop, Stop::Budget) && limit != budget;
         let now = host::rdtsc();
@@ -1664,6 +1670,7 @@ fn finish(
     stop: Stop,
     seconds: f64,
     dumps: &[(Base, u64)],
+    host_power: &power::HostPowerControl,
 ) -> ! {
     survey_report(machine);
     stack_report(machine);
@@ -1712,9 +1719,13 @@ fn finish(
             ));
             output::terminate(0x10)
         }
-        Stop::Reset(reason) => {
-            output::arguments(format_args!("STOP reset: {reason}\n"));
-            output::terminate(0x15)
+        Stop::Reset(reset) => {
+            output::arguments(format_args!("STOP reset: {reset}\n"));
+            match reset.transition {
+                Transition::Restart => host_power.restart(),
+                Transition::PowerOff => host_power.power_off(),
+                Transition::Halt => output::terminate(power::RESTART_CODE),
+            }
         }
         Stop::Budget => {
             output::arguments(format_args!("STOP budget\n"));

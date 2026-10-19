@@ -327,6 +327,7 @@ fn load(
     let wall_seconds = uefi::runtime::get_time()
         .ok()
         .and_then(|time| unix_seconds(&time));
+    let power = host_power();
     let apic_base: u64 = {
         let (low, high): (u32, u32);
         // SAFETY: IA32_APIC_BASE exists on every x86-64 CPU.
@@ -515,6 +516,7 @@ fn load(
             guest,
             guest_count: count,
             storage,
+            power,
         });
     }
     // SAFETY: boot services are over, interrupts go off now, and the new
@@ -532,6 +534,28 @@ fn load(
             in("rdi") layout::physical(handoff as u64),
             options(noreturn),
         )
+    }
+}
+
+/// The host's ACPI power hardware, reported while the firmware's tables
+/// are still mapped; the engine gets it without the report.
+fn host_power() -> Option<pc::power::HostPower> {
+    let rsdp = storage::rsdp()?;
+    // SAFETY: the firmware's RSDP, its tables mapped while boot services last.
+    match unsafe { pc::power::discover(rsdp) } {
+        Ok(power) => {
+            if let Some(reason) = power.refused {
+                output::arguments(format_args!("POWER host refusal: {reason}\n"));
+            }
+            Some(pc::power::HostPower {
+                refused: None,
+                ..power
+            })
+        }
+        Err(error) => {
+            output::arguments(format_args!("POWER host has no usable FADT: {error:?}\n"));
+            None
+        }
     }
 }
 

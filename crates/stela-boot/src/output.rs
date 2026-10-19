@@ -22,15 +22,22 @@ pub fn arguments(args: fmt::Arguments<'_>) {
     let _ = Output(console::Color::Text).write_fmt(args);
 }
 
+/// Report `code` to QEMU's `isa-debug-exit`, which ends a harness run
+/// there; on a PC the port is unused and execution continues.
+pub fn debug_exit(code: u32) {
+    // SAFETY: an otherwise unused PC port.
+    unsafe {
+        asm!("out dx, eax", in("dx") EXIT_PORT, in("eax") code, options(nostack, preserves_flags));
+    }
+}
+
 /// Report `code` to QEMU, then halt. On a PC the screen keeps the output
 /// until the machine is powered off.
 pub fn terminate(code: u32) -> ! {
     arguments(format_args!(
         "STELA STOPPED code={code:#x}; power off to continue\n"
     ));
-    unsafe {
-        asm!("out dx, eax", in("dx") EXIT_PORT, in("eax") code, options(nostack, preserves_flags));
-    }
+    debug_exit(code);
     loop {
         unsafe {
             asm!("cli", "hlt", options(nostack));

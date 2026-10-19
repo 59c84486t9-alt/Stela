@@ -21,6 +21,7 @@ pub mod input;
 mod mmio;
 pub mod nvme;
 pub mod pci;
+pub mod power;
 pub mod storage;
 pub mod virtio;
 

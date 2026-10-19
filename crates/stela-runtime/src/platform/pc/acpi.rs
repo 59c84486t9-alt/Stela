@@ -1,5 +1,6 @@
-//! The ACPI tables the storage drivers need: the RSDP's root table and the
-//! MCFG table that locates PCI configuration space.
+//! The ACPI tables the host drivers need: the RSDP's root table, the
+//! MCFG table that locates PCI configuration space, and any table by
+//! address ([`power`](super::power) reads the FADT and DSDT).
 use super::pci::EcamWindow;
 use alloc::vec::Vec;
 
@@ -28,7 +29,7 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
 ///
 /// `address` must be readable, identity-mapped memory holding at least an
 /// SDT header, and the length that header names.
-unsafe fn table(address: u64) -> Result<&'static [u8], AcpiError> {
+pub unsafe fn table(address: u64) -> Result<&'static [u8], AcpiError> {
     // SAFETY: the caller's contract covers the header.
     let header = unsafe { core::slice::from_raw_parts(address as *const u8, HEADER) };
     let signature: [u8; 4] = header[..4].try_into().unwrap();

@@ -145,6 +145,8 @@ pub struct Handoff {
     pub guest_count: usize,
     /// The host storage drivers' ranges, for a bundle built from a disk.
     pub storage: Storage,
+    /// The host's ACPI power hardware, when its FADT is usable.
+    pub power: Option<pc::power::HostPower>,
 }
 
 const _: () = assert!(size_of::<Handoff>() <= crate::paging::PAGE);
