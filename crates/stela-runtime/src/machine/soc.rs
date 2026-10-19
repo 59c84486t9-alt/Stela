@@ -1865,8 +1865,10 @@ pub struct GfxController {
     pub wrapper: (u64, u64),
     pub interrupts: [u16; 4],
     pub sgx: (u64, u64),
-    /// The GPU's TTBAT, `sgx` `gpu-region-base`: the boot stage hands the MMU
-    /// off rooted there ([`agx::sgx::Sgx::handed_off`]).
+    /// The GPU's TTBAT as the boot stage publishes it (`gptbat-ready`,
+    /// `ttbat-phys-addr-base` in 16 KiB pages; the loader sets it to
+    /// `gpu-region-base`): the MMU is handed off rooted there
+    /// ([`agx::sgx::Sgx::handed_off`]).
     pub ttbat: u64,
 }
 
@@ -1911,18 +1913,15 @@ fn gfx_controller(
             .and_then(|&n| u16::try_from(n).ok())
             .ok_or_else(|| "gfx-asc needs four valid mailbox interrupts".into())
     };
-    let ttbat = sgx
-        .property("gpu-region-base")
-        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-        .map(u64::from_le_bytes)
-        .filter(|base| base.is_multiple_of(agx::uat::PAGE_BYTES))
-        .ok_or("sgx has no 16 KiB-aligned 64-bit gpu-region-base")?;
-    if sgx
-        .first_u32("gpu-region-size")
-        .is_none_or(|size| u64::from(size) < agx::uat::PAGE_BYTES)
-    {
-        return Err("sgx gpu-region-size does not hold a TTBAT page".into());
+    if sgx.property("gptbat-ready").is_none() {
+        return Err("sgx has no gptbat-ready: the boot stage published no GPU TTBAT".into());
     }
+    let ttbat = sgx
+        .property("ttbat-phys-addr-base")
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map(|page| u64::from(u32::from_le_bytes(page)) << agx::uat::PAGE_SHIFT)
+        .filter(|&base| base != 0)
+        .ok_or("sgx ttbat-phys-addr-base is not one nonzero 32-bit page number")?;
     Ok(Some(GfxController {
         wrapper,
         interrupts: [irq(0)?, irq(1)?, irq(2)?, irq(3)?],
@@ -4570,13 +4569,12 @@ mod tests {
             }
             let (sgx_name, sgx_compatible) = (z("sgx"), z(SGX));
             let sgx_reg = pairs(&[(0x400_0000, 0x400_0000), (0x4d0_0000, 0x2_0000)]);
-            let region_base = 0x8_0004_4000u64.to_le_bytes();
-            let region_size = cells(&[0x4000]);
+            let ttbat_page = cells(&[0x20_0011]);
             let mut sgx: Vec<(&str, &[u8])> = vec![
                 ("name", &sgx_name),
                 ("reg", &sgx_reg),
-                ("gpu-region-base", &region_base),
-                ("gpu-region-size", &region_size),
+                ("gptbat-ready", b""),
+                ("ttbat-phys-addr-base", &ttbat_page),
             ];
             if sgx_visible {
                 sgx.push(("compatible", &sgx_compatible));

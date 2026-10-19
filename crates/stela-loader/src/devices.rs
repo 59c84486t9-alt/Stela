@@ -57,6 +57,14 @@ const SECURE_ROOT_PREFIX: &str = "secure-root-prefix";
 const DEVICE_TYPE: &str = "device_type";
 const IOMMU_PARENT: &str = "iommu-parent";
 const NO_PMU: &str = "no-pmu";
+/// The GPU TTBAT the boot stage hands off (`gpu-region-base`), published as
+/// `AGXSecureMonitor::init` (KC file 0x1b8c5c4..0x1b8c6b4) reads it: the
+/// presence of `gptbat-ready`, then `ttbat-phys-addr-base` as one 32-bit
+/// page number of 16 KiB.
+const GPU_REGION_BASE: &str = "gpu-region-base";
+const GPTBAT_READY: &str = "gptbat-ready";
+const TTBAT_BASE: &str = "ttbat-phys-addr-base";
+const TTBAT_PAGE_SHIFT: u32 = 14;
 
 /// Paths that keep their `compatible` whatever it names.
 fn structural(path: &str) -> bool {
@@ -188,6 +196,31 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
                     .expect("empty property");
                 hidden.push(format!("{path} +{NO_PMU}"));
             }
+        }
+    }
+    let mut gpus = Vec::new();
+    visible_paths(&tree.root, "", &|node| named(node, soc::SGX), &mut gpus);
+    for path in gpus {
+        let node = tree.node_mut(&path).expect("visited path");
+        if node.property(GPTBAT_READY).is_some() {
+            continue;
+        }
+        // The machine hands the GPU off with its MMU rooted at
+        // gpu-region-base, as the boot stage that starts the GFX firmware
+        // does; without the published table the kext roots its own, which
+        // the running firmware never walks.
+        let page = node
+            .property(GPU_REGION_BASE)
+            .and_then(|p| <[u8; 8]>::try_from(p.value.as_slice()).ok())
+            .map(u64::from_le_bytes)
+            .filter(|base| base.trailing_zeros() >= TTBAT_PAGE_SHIFT)
+            .and_then(|base| u32::try_from(base >> TTBAT_PAGE_SHIFT).ok());
+        if let Some(page) = page {
+            node.set_property(GPTBAT_READY, Vec::new())
+                .expect("empty property");
+            node.set_property(TTBAT_BASE, page.to_le_bytes().to_vec())
+                .expect("u32 property");
+            hidden.push(format!("{path} +{GPTBAT_READY}"));
         }
     }
     hidden
@@ -382,6 +415,38 @@ mod tests {
             hide_unmodeled(&mut tree),
             ["/arm-io/ans", "/arm-io/ans/iop-ans-nub", "/arm-io/sart-ans"]
         );
+    }
+
+    #[test]
+    fn a_visible_gpu_gets_the_handed_off_ttbat_published() {
+        let mut sgx = node("sgx", Some(soc::SGX.as_bytes()), vec![]);
+        sgx.set_property(GPU_REGION_BASE, 0x8_0004_4000u64.to_le_bytes().to_vec())
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: node("", None, vec![node("arm-io", None, vec![sgx])]),
+        };
+        assert_eq!(hide_unmodeled(&mut tree), ["/arm-io/sgx +gptbat-ready"]);
+        assert!(
+            tree.property("/arm-io/sgx", GPTBAT_READY)
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        assert_eq!(
+            tree.property("/arm-io/sgx", TTBAT_BASE).unwrap().value,
+            0x20_0011u32.to_le_bytes()
+        );
+        // Published once; a hidden GPU or a misaligned base gets nothing.
+        assert_eq!(hide_unmodeled(&mut tree), Vec::<String>::new());
+        let mut misaligned = node("sgx", Some(soc::SGX.as_bytes()), vec![]);
+        misaligned
+            .set_property(GPU_REGION_BASE, 0x8_0004_4100u64.to_le_bytes().to_vec())
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: node("", None, vec![node("arm-io", None, vec![misaligned])]),
+        };
+        hide_unmodeled(&mut tree);
+        assert!(tree.property("/arm-io/sgx", GPTBAT_READY).is_none());
     }
 
     #[test]
