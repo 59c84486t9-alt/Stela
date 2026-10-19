@@ -1820,9 +1820,10 @@ fn finish(
     dump_report(machine, dumps);
     let host = host::statistics();
     output::arguments(format_args!(
-        "STATISTICS {:?} shadow_fills={} shadow_resets={} lower_resets={} scoped_invalidations={} stray_interrupts={} events={} seconds={seconds:.3}\n",
+        "STATISTICS {:?} shadow_fills={} shadow_prefills={} shadow_resets={} lower_resets={} scoped_invalidations={} stray_interrupts={} events={} seconds={seconds:.3}\n",
         machine.statistics,
         host.fills,
+        host.prefills,
         host.resets,
         host.lower_resets,
         host.scoped,

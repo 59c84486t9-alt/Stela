@@ -4,7 +4,8 @@
 //! Shadow roots are PML5 pages whose entry 0 and 511 hold the guest's two
 //! halves and whose entry 64 is the shared window. There is one root per
 //! permission view (EL0, EL1, EL1 with PAN, GL1), filled on demand by the #PF
-//! handler from the software walk of the guest's tables. Each half takes its tables from its own part of the
+//! handler from the software walk of the guest's tables, a window of the
+//! guest leaf per fault. Each half takes its tables from its own part of the
 //! pool, so a change of TTBR0 alone (a context switch) drops the lower half
 //! and keeps the upper half's, and records the leaves it was filled from
 //! (`mmu::shadow::Extents`), so a TLBI unmaps only the ranges it reaches.
@@ -24,7 +25,7 @@ use stela_runtime::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
     mmu::{
         self, Access, Outcome,
-        shadow::Extents,
+        shadow::{self, Extents},
         tlbi::Reach,
     },
 };
@@ -111,6 +112,8 @@ const GUEST_LOW: usize = 0;
 const GUEST_HIGH: usize = 511;
 /// The addresses of each half's root entry.
 const HALVES: [(u64, u64); 2] = [(0, (1 << 48) - 1), (0xffff_0000_0000_0000, u64::MAX)];
+/// The aligned bytes of a guest leaf one fault maps.
+const FILL_WINDOW: u64 = 64 * 1024;
 /// Pages a scoped invalidation flushes one by one; more reload CR3.
 const INVLPG_PAGES: u64 = 16;
 const FAULT_KIND: u64 = 0xffff;
@@ -202,6 +205,8 @@ pub struct State {
     extents: [Extents; 2],
     /// TLBIs that unmapped ranges rather than whole halves.
     pub scoped: u64,
+    /// Pages mapped beside a fault's from the same leaf.
+    pub prefills: u64,
     pub stray: u64,
     /// TSC ticks spent in compiled guest code, its exits and faults.
     pub native_ticks: u64,
@@ -310,6 +315,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             lower_resets: 0,
             extents: [Extents::new(), Extents::new()],
             scoped: 0,
+            prefills: 0,
             stray: 0,
         });
     }
@@ -343,8 +349,10 @@ fn start_apic() {
 
 /// The host's counters for the statistics line.
 pub struct Statistics {
-    /// Shadow faults filled.
+    /// Shadow faults filled, and the pages beside them mapped from the
+    /// same leaves.
     pub fills: u64,
+    pub prefills: u64,
     /// Resets of the whole shadow, of the lower half alone, and TLBIs that
     /// unmapped ranges instead.
     pub resets: u64,
@@ -359,6 +367,7 @@ pub fn statistics() -> Statistics {
     let state = state();
     Statistics {
         fills: state.fills,
+        prefills: state.prefills,
         resets: state.resets,
         lower_resets: state.lower_resets,
         scoped: state.scoped,
@@ -586,6 +595,30 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     }
     invlpg(virtual_page);
     state.extents[half].record(address, translation.size, translation.global);
+    // The rest of the leaf's window has the same translation and rights:
+    // map its RAM pages that are not watched now, as a TLB entry covers
+    // the whole leaf. Pages that were absent need no flush.
+    let (first, last) = shadow::window(address, translation.size, FILL_WINDOW);
+    let mut page = first;
+    loop {
+        if page != virtual_page && !regime.watch.blocks(page) {
+            let physical = translation
+                .physical
+                .wrapping_sub(address)
+                .wrapping_add(page);
+            if let Some(host) = state.host_physical(physical) {
+                if tables::map_page(&mut state.pool, root, page, host, rights).is_err() {
+                    // Out of frames: the rest stays to fault.
+                    break;
+                }
+                state.prefills += 1;
+            }
+        }
+        if page >= last & !(PAGE - 1) {
+            break;
+        }
+        page += PAGE;
+    }
     state.fills += 1;
 }
 
