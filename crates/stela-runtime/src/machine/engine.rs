@@ -72,6 +72,9 @@ struct Wait {
     kind: WaitKind,
     /// WFIT and WFET only.
     timeout: Option<Timeout>,
+    /// A WFI in CYC_OVRD's power-down mode: the core is off, its state
+    /// lost, and it wakes by leaving reset (`processors`).
+    down: bool,
 }
 
 /// The local timeout of WFIT and WFET (Arm `LocalTimeoutEvent`): it expires
@@ -285,6 +288,9 @@ pub trait Devices {
     fn reset_vector(&self, _cpu: usize) -> Option<u64> {
         None
     }
+    /// PE `cpu` powered down (`false`: a WFI in CYC_OVRD's power-down
+    /// mode) or left reset again (`true`: a start or a wake from power-down).
+    fn processor_power(&mut self, _cpu: usize, _on: bool) {}
     /// The physical region a memory controller has locked against writes,
     /// first and last byte.
     fn memory_lock(&self) -> Option<(u64, u64)> {
@@ -4098,18 +4104,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc).to(2));
             return Ok(());
         }
-        // CYC_OVRD lets WFI power the core down, losing its state until a
-        // restart; that lifecycle is not modelled.
-        if kind == WaitKind::Interrupt && self.cpu.wfi_mode() == registers::CYC_OVRD_WFI_POWER_DOWN
-        {
+        // CYC_OVRD's power-down mode turns the core off and loses its state
+        // (`processors`). A WFIT's local timeout is the core's own, so it
+        // could not end that wait.
+        let down = kind == WaitKind::Interrupt
+            && self.cpu.wfi_mode() == registers::CYC_OVRD_WFI_POWER_DOWN;
+        if down && timeout.is_some() {
             return Err(self.unsupported(RequirementKind::Native(
-                "WFI with CYC_OVRD's power-down mode (core power-down is not modelled)",
+                "WFIT with CYC_OVRD's power-down mode (a powered-down core has no local timeout)",
             )));
         }
         // The PE waits until the scheduler finds it woken
         // (`processors::Peer::ready`) and completes the instruction.
-        self.waiting = Some(Wait { kind, timeout });
+        self.waiting = Some(Wait {
+            kind,
+            timeout,
+            down,
+        });
         self.sync_monitor();
+        if down {
+            self.power_down();
+        }
         Ok(())
     }
 
@@ -5081,9 +5096,10 @@ mod tests {
     }
 
     #[test]
-    fn wfi_in_cyc_ovrds_power_down_mode_stops() {
+    fn wfi_in_cyc_ovrds_power_down_mode_turns_the_core_off() {
         const MSR_CYC_OVRD_X0: u32 = 0xd51d_f500;
         const WFI: u32 = 0xd503_207f;
+        const WFIT_X1: u32 = 0xd503_1021;
         let mut machine = machine(&[]);
         // Clock gating only: WFI waits as usual.
         machine.cpu.state.x[0] = 2 << 24;
@@ -5094,13 +5110,22 @@ mod tests {
         machine.system_instruction(0xd51b_e321).unwrap(); // msr cntv_ctl_el0, x1
         wait(&mut machine, WFI).unwrap();
         assert_eq!(machine.host.now, 2000);
-        // Power-down mode loses the core's state until a restart.
-        machine.cpu.state.x[1] = 0;
-        machine.system_instruction(0xd51b_e321).unwrap(); // msr cntv_ctl_el0, x1
+        // In power-down mode the core's own timer, armed again, goes down
+        // with it: nothing on this board can wake it.
         machine.cpu.state.x[0] = 3 << 24 | 1;
         machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
+        machine.cpu.state.x[1] = 1_000_000;
+        machine.system_instruction(0xd51b_e301).unwrap(); // msr cntv_tval_el0, x1
+        assert_eq!(wait(&mut machine, WFI), Err(Stop::Idle));
+        assert!(matches!(machine.peer_states()[0], PeerState::Down));
+        assert_eq!(machine.host.now, 2000);
+        // A WFIT's local timeout would be the core's too.
+        let mut machine = machine_on(crate::machine::Chip::AppleM4, &[]);
+        machine.cpu.state.x[0] = 3 << 24;
+        machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
+        machine.cpu.state.x[1] = u64::MAX;
         assert!(matches!(
-            machine.system_instruction(WFI),
+            machine.system_instruction(WFIT_X1),
             Err(Stop::Unsupported(_))
         ));
     }

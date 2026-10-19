@@ -1694,14 +1694,16 @@ fn general_registers(cpu: &Cpu) {
     }
 }
 
-/// Where every PE is: `R` running, `-` held in reset, or a parked PE's PC
-/// and its wait (`i` WFI, `e` WFE, `p` preempted), with the switch count.
+/// Where every PE is: `R` running, `-` held in reset, `d` powered down,
+/// or a parked PE's PC and its wait (`i` WFI, `e` WFE, `p` preempted), with
+/// the switch count.
 fn peers_report(machine: &Machine<BareHost, AppleDevices>) {
     output::arguments(format_args!("PES switches={}", machine.statistics.switches));
     for (number, state) in machine.peer_states().into_iter().enumerate() {
         match state {
             PeerState::Running => output::arguments(format_args!(" {number}:R")),
             PeerState::Off => output::arguments(format_args!(" {number}:-")),
+            PeerState::Down => output::arguments(format_args!(" {number}:d")),
             PeerState::Parked { cpu, wfi } => {
                 let wait = match wfi {
                     Some(true) => 'i',

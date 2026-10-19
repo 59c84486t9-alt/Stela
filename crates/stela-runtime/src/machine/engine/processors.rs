@@ -17,6 +17,20 @@
 //! `ClearExclusiveByAddress`) as it happens; `Machine::observe_writes`
 //! finds it between runs, and a PE that resumes after another ran has lost
 //! its reservation.
+//!
+//! A WFI in CYC_OVRD's power-down mode turns its core off: the core loses
+//! its state and comes back only by leaving reset at its reset vector
+//! (m1n1 `deep_wfi`, `src/utils_asm.S`, which saves its context first for
+//! that reason). XNU 26A434 powers its cores down this way for system
+//! sleep (`_ml_arm_sleep`, file 0x4d6f404) and to take a core offline
+//! (file 0x4d6ea84), both through `arm64_prepare_for_sleep` (file
+//! 0x4b99170). Its argument 0 first sets CYC_OVRD's IRQ and FIQ modes to
+//! disable, and the core then leaves reset only when a device starts it
+//! again; sleep passes 1, which keeps them. An interrupt line the core's
+//! CYC_OVRD still enables wakes it: the board's device lines, since the
+//! core's own timers, performance monitor and vGIC went down with it. Its
+//! reset vector is the board's (`Devices::reset_vector`), and the board
+//! learns of each power-down and power-up (`Devices::processor_power`).
 use super::{
     Devices, Host, Machine, RequirementKind, Start, Step, Stop, Wait, WaitKind, interrupt_pending,
     system, timer,
@@ -65,11 +79,19 @@ impl Parked {
     }
 }
 
+/// Whether a PE waiting in `waiting` is powered down.
+fn down(waiting: Option<Wait>) -> bool {
+    waiting.is_some_and(|wait| wait.down)
+}
+
 /// A PE as a report shows it.
 #[derive(Debug, Clone, Copy)]
 pub enum PeerState<'a> {
     Running,
     Off,
+    /// Powered down by a WFI in CYC_OVRD's power-down mode; its state is
+    /// lost.
+    Down,
     /// Out of reset but not running: its state, and whether it waits in
     /// WFI (`Some(true)`) or WFE (`Some(false)`).
     Parked {
@@ -89,8 +111,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.peers
             .iter()
             .map(|peer| match peer {
+                Peer::Running if down(self.waiting) => PeerState::Down,
                 Peer::Running => PeerState::Running,
                 Peer::Off => PeerState::Off,
+                Peer::Parked(parked) if down(parked.waiting) => PeerState::Down,
                 Peer::Parked(parked) => PeerState::Parked {
                     cpu: &parked.cpu,
                     wfi: parked.waiting.map(|wait| wait.kind == WaitKind::Interrupt),
@@ -105,9 +129,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// with idle skip, leap the counter to the next deadline); with nothing
     /// left to wake any PE the machine is idle.
     pub(super) fn schedule(&mut self) -> Step {
-        while let Some(start) = self.devices.take_start() {
-            self.start(start)?;
-        }
+        self.take_starts()?;
         if self.waiting.is_none()
             && self.statistics.blocks < self.slice_end
             && (self.peers.len() < 2 || self.now() < self.slice_deadline)
@@ -121,6 +143,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.observe_writes();
             let now = self.now();
             self.poll_devices(now)?;
+            // A device can start a PE while every PE waits.
+            self.take_starts()?;
             let (current, count) = (self.current, self.peers.len());
             if let Some(next) = (1..=count)
                 .map(|offset| (current + offset) % count)
@@ -155,6 +179,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    fn take_starts(&mut self) -> Step {
+        while let Some(start) = self.devices.take_start() {
+            self.start(start)?;
+        }
+        Ok(())
+    }
+
     /// The PEs that share the round with the running one, itself included:
     /// those out of reset and not waiting for an interrupt. A PE in WFE
     /// spins, so it shares the round.
@@ -169,12 +200,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Whether PE `pe` can run: it is running or preempted, or a WFI it waits
     /// in sees an interrupt pending (Arm `AArch64_InterruptPending`, masked or
     /// not), or a WFE sees that or its event register set, including by an
-    /// event stream edge, or the local timeout of a WFIT or WFET expired.
+    /// event stream edge, or the local timeout of a WFIT or WFET expired. A
+    /// powered-down PE wakes when a device line its CYC_OVRD enables
+    /// asserts.
     fn ready(&mut self, pe: usize, now: u64) -> bool {
         if pe == self.current {
             return match self.waiting {
                 None => true,
-                Some(Wait { kind, timeout }) => {
+                Some(Wait { down: true, .. }) => {
+                    let device = self.devices.lines(pe, now);
+                    self.cpu.wakes_for(device)
+                }
+                Some(Wait { kind, timeout, .. }) => {
                     if kind == WaitKind::Event {
                         self.sample_events(now);
                     }
@@ -187,9 +224,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Peer::Parked(parked) = &mut self.peers[pe] else {
             return false;
         };
-        let Some(Wait { kind, timeout }) = parked.waiting else {
+        let Some(Wait {
+            kind,
+            timeout,
+            down,
+        }) = parked.waiting
+        else {
             return true;
         };
+        if down {
+            let device = self.devices.lines(pe, now);
+            return parked.cpu.wakes_for(device);
+        }
         if timeout.is_some_and(|timeout| timeout.expired(now)) {
             return true;
         }
@@ -215,11 +261,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Complete the wait the running PE woke from. A WFE or WFET that no
-    /// interrupt woke consumes the event register (`Machine::wait`).
+    /// interrupt woke consumes the event register (`Machine::wait`). A PE
+    /// that woke from power-down leaves reset instead.
     fn wake(&mut self) -> Step {
-        let Some(Wait { kind, .. }) = self.waiting.take() else {
+        let Some(Wait { kind, down, .. }) = self.waiting.take() else {
             return Ok(());
         };
+        if down {
+            let pe = self.current;
+            let Some(address) = self.devices.reset_vector(pe) else {
+                return Err(self.unsupported(RequirementKind::Native(
+                    "a PE woke from CYC_OVRD's power-down mode, but the board holds no reset vector for it",
+                )));
+            };
+            self.restart(pe, address);
+            return Ok(());
+        }
         self.sync_monitor();
         if kind == WaitKind::Event && !self.interrupt_pending() {
             self.cpu.event = false;
@@ -229,7 +286,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The earliest counter value at which a waiting PE's timer fires, its
     /// event stream sets its event register, its local timeout expires, or a
-    /// device changes state.
+    /// device changes state. A powered-down PE has none of its own.
     fn next_deadline(&mut self, now: u64) -> Option<u64> {
         let streams = |cpu: &Cpu, waiting: Option<Wait>| {
             (waiting.map(|wait| wait.kind) == Some(WaitKind::Event))
@@ -245,14 +302,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             })
         };
-        let mut deadlines = vec![
-            self.timer_deadline(),
-            self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()),
-            streams(&self.cpu, self.waiting),
-            timeout(self.waiting),
-        ];
+        let mut deadlines = Vec::new();
+        if !down(self.waiting) {
+            deadlines.extend([
+                self.timer_deadline(),
+                self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()),
+                streams(&self.cpu, self.waiting),
+                timeout(self.waiting),
+            ]);
+        }
         for peer in &self.peers {
-            if let Peer::Parked(parked) = peer {
+            if let Peer::Parked(parked) = peer
+                && !down(parked.waiting)
+            {
                 deadlines.push(timer::deadline(&parked.cpu));
                 deadlines.push(
                     parked
@@ -321,65 +383,94 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// SEV signals an event to every PE and SEVL to this one (Arm
-    /// `SendEvent`, `SendEventLocal`). A PE held in reset takes none.
+    /// `SendEvent`, `SendEventLocal`). A PE held in reset or powered down
+    /// takes none.
     pub(super) fn send_event(&mut self, local: bool) {
         self.cpu.event = true;
         if local {
             return;
         }
         for peer in &mut self.peers {
-            if let Peer::Parked(parked) = peer {
+            if let Peer::Parked(parked) = peer
+                && !down(parked.waiting)
+            {
                 parked.cpu.event = true;
             }
         }
     }
 
+    /// The running PE's WFI in CYC_OVRD's power-down mode turned its core
+    /// off: its reservation goes with its state, and the board learns of it.
+    pub(super) fn power_down(&mut self) {
+        self.cpu.monitor = None;
+        self.device_lines = None;
+        self.devices.processor_power(self.current, false);
+    }
+
     /// Release PE `start.cpu` from reset at `start.address` in EL2h, the
     /// highest implemented EL, with the System registers' reset values and
-    /// its own identification (Arm `TakeReset`).
+    /// its own identification (Arm `TakeReset`). A powered-down PE can be
+    /// started like one held in reset.
     fn start(&mut self, start: Start) -> Step {
-        match self.peers.get(start.cpu) {
-            Some(Peer::Off) => {}
-            Some(Peer::Running | Peer::Parked(_)) => {
-                return Err(self.unsupported(RequirementKind::Native(
-                    "a device started a PE that is not held in reset",
-                )));
-            }
+        let held = match self.peers.get(start.cpu) {
+            Some(Peer::Off) => true,
+            Some(Peer::Running) => down(self.waiting),
+            Some(Peer::Parked(parked)) => down(parked.waiting),
             None => {
                 return Err(self.unsupported(RequirementKind::Native(
                     "a device started a PE the CPU profile does not have",
                 )));
             }
+        };
+        if !held {
+            return Err(self.unsupported(RequirementKind::Native(
+                "a device started a PE that is neither held in reset nor powered down",
+            )));
         }
-        let mut cpu = Cpu::of(self.profile.chip, start.address, Pstate::reset(2));
+        self.restart(start.cpu, start.address);
+        Ok(())
+    }
+
+    /// PE `pe` leaves reset at `address`.
+    fn restart(&mut self, pe: usize, address: u64) {
+        let mut cpu = Cpu::of(self.profile.chip, address, Pstate::reset(2));
         // Every PE has the registers of PE 0, the profile's missing ones
         // included.
-        system::identify(&self.profile, start.cpu, &mut cpu, &mut Vec::new());
+        system::identify(&self.profile, pe, &mut cpu, &mut Vec::new());
         // The PEs of a cluster (MPIDR_EL1 Aff2 and Aff1) share its CTRR
-        // registers; the memory controller's lock binds every PE.
-        let cluster = |pe: usize| {
+        // registers while one of them is powered; the memory controller's
+        // lock binds every PE.
+        let cluster = |other: usize| {
             self.profile
                 .processors
-                .get(pe)
+                .get(other)
                 .map(|identity| identity.mpidr & 0x00ff_ff00)
         };
         let shared = (0..self.peers.len())
-            .filter(|&pe| cluster(pe) == cluster(start.cpu))
-            .find_map(|pe| match &self.peers[pe] {
-                Peer::Running => Some(self.cpu.ctrr.clone()),
-                Peer::Parked(parked) => Some(parked.cpu.ctrr.clone()),
-                Peer::Off => None,
+            .filter(|&other| other != pe && cluster(other) == cluster(pe))
+            .find_map(|other| match &self.peers[other] {
+                Peer::Running if !down(self.waiting) => Some(self.cpu.ctrr.clone()),
+                Peer::Parked(parked) if !down(parked.waiting) => Some(parked.cpu.ctrr.clone()),
+                Peer::Running | Peer::Parked(_) | Peer::Off => None,
             });
         if let Some(shared) = shared {
             cpu.ctrr = shared;
         }
         cpu.memory_lock = self.cpu.memory_lock;
-        self.peers[start.cpu] = Peer::Parked(Box::new(Parked {
-            cpu,
-            event_sample: None,
-            waiting: None,
-        }));
-        Ok(())
+        if pe == self.current {
+            self.cpu = cpu;
+            self.waiting = None;
+            self.event_sample = None;
+            self.device_lines = None;
+            self.translations_changed();
+        } else {
+            self.peers[pe] = Peer::Parked(Box::new(Parked {
+                cpu,
+                event_sample: None,
+                waiting: None,
+            }));
+        }
+        self.devices.processor_power(pe, true);
     }
 }
 
@@ -405,6 +496,10 @@ mod tests {
         irq: [bool; 2],
         lines_asked: Vec<usize>,
         dma: Option<u64>,
+        /// Every PE's reset vector.
+        reset: Option<u64>,
+        /// The power-downs and power-ups the engine reported.
+        power: Vec<(usize, bool)>,
     }
 
     impl Devices for Board {
@@ -444,6 +539,12 @@ mod tests {
         }
         fn take_start(&mut self) -> Option<Start> {
             self.starts.pop()
+        }
+        fn reset_vector(&self, _: usize) -> Option<u64> {
+            self.reset
+        }
+        fn processor_power(&mut self, cpu: usize, on: bool) {
+            self.power.push((cpu, on));
         }
     }
 
@@ -643,6 +744,7 @@ mod tests {
         machine.waiting = Some(Wait {
             kind: WaitKind::Interrupt,
             timeout: None,
+            down: false,
         });
         machine.schedule().unwrap();
         assert!(machine.waiting.is_none());
@@ -844,5 +946,62 @@ mod tests {
             (1, 0x1_0000 + IRQ_CURRENT_SPX)
         );
         assert_eq!(machine.cpu.read(Register::ELR_EL1), BASE);
+    }
+
+    #[test]
+    fn a_powered_down_pe_loses_its_state_and_leaves_reset_on_a_wake_line_or_a_start() {
+        const MSR_CYC_OVRD_X0: u32 = 0xd51d_f500;
+        const POWER_DOWN: u64 = 3 << 24;
+        const LINES_DISABLED: u64 = 2 << 22 | 2 << 20;
+        const RESET: u64 = BASE + 0xc00;
+        let mut machine = pair();
+        machine.devices.reset = Some(RESET);
+        assert_eq!(machine.devices.power, [(1, true)]);
+        // PE 0 powers down with its lines enabled; PE 1 runs, and its SEV
+        // does not reach PE 0.
+        machine.cpu.state.x[0] = POWER_DOWN;
+        machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
+        machine.cpu.state.x[5] = 0x1234;
+        machine.system_instruction(WFI).unwrap();
+        assert_eq!(machine.devices.power, [(1, true), (0, false)]);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        assert!(matches!(machine.peer_states()[0], PeerState::Down));
+        machine.system_instruction(SEV).unwrap();
+        // Its device line wakes it at its reset vector, its state lost.
+        machine.devices.irq = [true, false];
+        turn(&mut machine, 0);
+        let cpu = &machine.cpu;
+        assert_eq!(
+            (cpu.pc, cpu.pstate.el, cpu.state.x[5], cpu.event),
+            (RESET, 2, 0, false)
+        );
+        assert_eq!(cpu.read(Register::MPIDR_EL1), 0x8000_0000);
+        assert_eq!(machine.devices.power.last(), Some(&(0, true)));
+        // With both its lines disabled the asserted line does not wake it,
+        // and with PE 1 waiting too the machine is idle until a device
+        // starts PE 0 again.
+        machine.cpu.state.x[0] = POWER_DOWN | LINES_DISABLED;
+        machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
+        machine.system_instruction(WFI).unwrap();
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 1);
+        machine.system_instruction(WFI).unwrap();
+        assert_eq!(machine.schedule(), Err(Stop::Idle));
+        machine.devices.starts.push(Start {
+            cpu: 0,
+            address: START,
+        });
+        machine.schedule().unwrap();
+        assert_eq!((machine.processor(), machine.cpu.pc), (0, START));
+        // A board that holds no reset vector cannot wake it.
+        machine.devices.reset = None;
+        machine.devices.irq = [false, false];
+        machine.cpu.state.x[0] = POWER_DOWN;
+        machine.system_instruction(MSR_CYC_OVRD_X0).unwrap();
+        machine.system_instruction(WFI).unwrap();
+        assert_eq!(machine.schedule(), Err(Stop::Idle));
+        machine.devices.irq = [true, false];
+        assert!(matches!(machine.schedule(), Err(Stop::Unsupported(_))));
     }
 }

@@ -255,10 +255,23 @@ impl Cpu {
     /// with the vGIC maintenance interrupt on IRQ (`machine::vgic`), which
     /// CYC_OVRD's FIQ and IRQ disable modes keep the core from seeing.
     pub fn core_lines(&self, lines: Lines) -> Lines {
+        self.enabled_lines(Lines {
+            irq: lines.irq || self.vgic.maintenance_asserted(),
+            fiq: lines.fiq,
+        })
+    }
+
+    /// Whether device `lines` wake this core from CYC_OVRD's power-down
+    /// mode: a line its FIQ or IRQ mode does not disable asserts.
+    pub fn wakes_for(&self, lines: Lines) -> bool {
+        let lines = self.enabled_lines(lines);
+        lines.irq || lines.fiq
+    }
+
+    fn enabled_lines(&self, lines: Lines) -> Lines {
         let enabled = |shift| cyc_ovrd_field(self.apple.cyc_ovrd, shift) != CYC_OVRD_DISABLE;
-        let irq = lines.irq || self.vgic.maintenance_asserted();
         Lines {
-            irq: irq && enabled(CYC_OVRD_IRQ_SHIFT),
+            irq: lines.irq && enabled(CYC_OVRD_IRQ_SHIFT),
             fiq: lines.fiq && enabled(CYC_OVRD_FIQ_SHIFT),
         }
     }
