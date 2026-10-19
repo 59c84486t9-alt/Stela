@@ -938,6 +938,14 @@ pub struct DcpController {
     pub interrupts: [u32; 4],
     pub quiesced: bool,
     pub regions: Vec<(&'static str, (u64, u64))>,
+    /// The [`Board::darts`] index and stream of its `iommu-parent`
+    /// (`mapper-dcpext`, dart-dcpext stream 5 on J473AP).
+    pub iommu: usize,
+    pub stream: u32,
+    /// That DART's `vm-base` when the node is `truncate-dvas`: the AP then
+    /// hands the coprocessor only a DVA's low 32 bits
+    /// (`AppleA7IOP::_restrictDVA`, kernel file 0x1bb1424).
+    pub window: Option<u64>,
 }
 
 /// T8112 device controller compatible; admission stays closed until the
@@ -1726,6 +1734,8 @@ pub struct Iommu {
     pub retention: bool,
     pub sids: Vec<u32>,
     pub remap: Vec<(u8, u8)>,
+    /// The base of the I/O window its mappers allocate in (`vm-base`).
+    pub vm_base: u64,
 }
 
 /// The AES engine: its block and key-disable register ranges, its
@@ -2517,10 +2527,19 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
         }
         remap.push((source, target));
     }
+    let vm_base = match node.property("vm-base") {
+        None => 0,
+        Some(bytes) => u64::from_le_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| format!("{path} vm-base is not one 64-bit address"))?,
+        ),
+    };
     Ok(Iommu {
         instances,
         sids,
         remap,
+        vm_base,
         streams,
         irq,
         mappers,
@@ -3604,6 +3623,7 @@ fn sep_device(
 fn dcp_device(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
+    darts: &[Iommu],
 ) -> Result<Option<DcpController>, String> {
     let Some(node) = io
         .child("dcpext")
@@ -3666,11 +3686,33 @@ fn dcp_device(
             regions.push((model_name, place(offset, bytes)?));
         }
     }
+    let parent = node
+        .first_u32("iommu-parent")
+        .ok_or_else(|| format!("{PATH} has no iommu-parent"))?;
+    let (iommu, stream) = darts
+        .iter()
+        .enumerate()
+        .find_map(|(index, dart)| {
+            dart.mappers
+                .iter()
+                .find(|(phandle, _)| *phandle == parent)
+                .map(|&(_, stream)| (index, stream))
+        })
+        .ok_or_else(|| format!("{PATH} iommu-parent is no modeled DART's mapper"))?;
+    if stream >= u32::from(darts[iommu].streams) {
+        return Err(format!(
+            "{PATH} iommu-parent stream exceeds its DART's sid-count"
+        ));
+    }
+    let window = node.property("truncate-dvas").map(|_| darts[iommu].vm_base);
     Ok(Some(DcpController {
         wrapper: place(wrapper_off, wrapper_bytes)?,
         interrupts: irqs,
         quiesced,
         regions,
+        iommu,
+        stream,
+        window,
     }))
 }
 
@@ -3837,7 +3879,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
     let spi_nor = spi_nor(&root, &io, &translate, phandle, gpio.as_ref())?;
     let spmis = spmi_controllers(&io, &translate, phandle)?;
-    let dcp = dcp_device(&io, &translate)?;
+    let dcp = dcp_device(&io, &translate, &darts)?;
     Ok(Board {
         spmis,
         dcp,
@@ -5081,6 +5123,7 @@ mod tests {
                 }],
                 sids: vec![],
                 remap: vec![],
+                vm_base: 0,
                 streams: 16,
                 irq: 0x301,
                 mappers: vec![(0x89, 0), (0x8a, 1)],
@@ -6225,17 +6268,40 @@ mod tests {
                 vec![("name", b"iop-dcpext-nub\0")]
             };
             let nub = encode(&nub_props, &[]);
+            let mapper = encode(
+                &[
+                    ("name", &z("mapper-dcpext")),
+                    ("compatible", &z(IOMMU_MAPPER)),
+                    ("reg", &words(&[5])),
+                    ("AAPL,phandle", &words(&[0xc8])),
+                ],
+                &[],
+            );
+            let dart = encode(
+                &[
+                    ("name", &z("dart-dcpext")),
+                    ("compatible", &z(DART)),
+                    ("reg", &pairs(&[0x7130_c000, 0x4000])),
+                    ("sid-count", &words(&[16])),
+                    ("instance", b"TRAD\0\0\0\0DARTASC\0"),
+                    ("interrupts", &words(&[0x251])),
+                    ("vm-base", &words(&[0, 8])),
+                ],
+                &[mapper],
+            );
             let dcpext = encode(
                 &[
                     ("name", &z("dcpext")),
                     ("compatible", &z(ASC)),
                     ("role", role),
                     ("interrupts", &words(&irqs)),
+                    ("iommu-parent", &words(&[0xc8])),
+                    ("truncate-dvas", &[]),
                     ("reg", &pairs(&[0x71c0_0000, 0x6c000, 0x7185_0000, 0x4000])),
                 ],
                 &[nub],
             );
-            let mut children = alloc::vec![dcpext];
+            let mut children = alloc::vec![dart, dcpext];
             if with_regions {
                 children.push(encode(
                     &[
@@ -6270,6 +6336,9 @@ mod tests {
         assert_eq!(dcp.wrapper, (0x2_71c0_0000, 0x6c000));
         assert_eq!(dcp.interrupts, irqs);
         assert!(dcp.quiesced);
+        assert_eq!((dcp.iommu, dcp.stream), (0, 5));
+        assert_eq!(found.darts[0].vm_base, 0x8_0000_0000);
+        assert_eq!(dcp.window, Some(0x8_0000_0000));
         assert_eq!(
             dcp.regions,
             alloc::vec![

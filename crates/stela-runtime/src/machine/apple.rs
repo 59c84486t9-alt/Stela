@@ -111,6 +111,7 @@ pub struct AppleDevices {
     /// memory through.
     gfx_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
+    dcp_masters: Vec<DcpMaster>,
     usb_masters: Vec<UsbMaster>,
     cpu_start: Option<CpuStarter>,
     reset_vectors: Vec<Option<DeviceId>>,
@@ -212,6 +213,13 @@ struct Master {
 /// A SEP and the DT-selected DART stream carrying its firmware DMA.
 struct SepMaster {
     sep: DeviceId,
+    dart: DeviceId,
+    stream: usize,
+}
+
+/// The DCPEXT coprocessor's ASC and the DART stream it masters through.
+struct DcpMaster {
+    asc: DeviceId,
     dart: DeviceId,
     stream: usize,
 }
@@ -318,6 +326,7 @@ impl AppleDevices {
             coprocessors: Vec::new(),
             nor: None,
             sep_masters: Vec::new(),
+            dcp_masters: Vec::new(),
             usb_masters: Vec::new(),
             cpu_start: None,
             reset_vectors: Vec::new(),
@@ -805,36 +814,43 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// Place the `dcpext` display coprocessor: its booted, user-power-managed
-    /// RTKit (reusing the common ASC wrapper) carrying the IOMFB link endpoint
-    /// and the AFK/EPIC endpoints, presenting one fixed connected monitor to
-    /// `scanout`. The DCPEXT nub is `quiesced`, so (like the SMC) the
-    /// coprocessor acknowledges the AP's wake once RTKit enumeration
-    /// completes behind the boot-chain handoff. This does
-    /// not admit DCPEXT in `soc::models`; the IOMFB RPC shared-region exchange
-    /// is not yet modeled (see `platform::apple::dcp`).
+    /// Place the `dcpext` display coprocessor: its booted RTKit (reusing the
+    /// common ASC wrapper) carrying the IOMFB link endpoint and the AFK/EPIC
+    /// endpoints, presenting one fixed connected monitor to `scanout`, and
+    /// mastering the AP's link region through `dart` stream `stream`
+    /// (`window` as `dcp::Coprocessor::new` takes it). The DCPEXT nub is
+    /// `quiesced`, so (like the SMC) the coprocessor acknowledges the AP's
+    /// wake once RTKit enumeration completes behind the boot-chain handoff.
+    /// This does not admit DCPEXT in `soc::models` (see
+    /// `platform::apple::dcp`).
     pub fn add_dcpext(
         &mut self,
         wrapper: Range,
         interrupts: [u32; 4],
         quiesced: bool,
         scanout: Box<dyn Scanout>,
+        (dart, stream): (DartId, usize),
+        window: Option<u64>,
     ) -> Result<(), String> {
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
         }
-        let mut rtkit =
-            RtKit::new(dcp::endpoints(scanout), Management::Ordinary).map_err(String::from)?;
+        let mut coprocessor = dcp::Coprocessor::new(scanout, window).map_err(String::from)?;
         if quiesced {
-            rtkit = rtkit.quiesced();
+            coprocessor = coprocessor.quiesced();
         }
         let wrap = Asc::booted(
-            Box::new(rtkit),
+            Box::new(coprocessor),
             AscLines::from_interrupts(interrupts.map(|n| AicInput::new(0, n as u16))),
         )
         .map_err(String::from)?;
         let asc = self.bus.add(Box::new(wrap));
         self.coprocessors.push(("DCPEXT", asc));
+        self.dcp_masters.push(DcpMaster {
+            asc,
+            dart: dart.0,
+            stream,
+        });
         self.bus
             .map(asc, wrapper.physical, wrapper.bytes, 0)
             .map_err(|e| format!("DCPEXT ASC placement: {e:?}"))
@@ -1832,6 +1848,25 @@ impl Devices for AppleDevices {
             };
             sep.transfer(&mut port).map_err(describe)?;
         }
+        for master in &self.dcp_masters {
+            let (asc, dart) = self
+                .bus
+                .pair_mut::<Asc, Dart>(master.asc, master.dart)
+                .expect("a DCP master names its ASC and DART");
+            if !asc.dma_pending() {
+                continue;
+            }
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            let mut port = Port {
+                iommu: dart,
+                stream: master.stream,
+                memory,
+                access: &mut access,
+            };
+            asc.service_dma(&mut port).map_err(|reason| {
+                DeviceError::TransferRefused(format!("DCPEXT link DMA: {reason}"))
+            })?;
+        }
         for master in &mut self.usb_masters {
             let (controller, dart) = self
                 .bus
@@ -2425,6 +2460,17 @@ mod tests {
         devices
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
+        let dart = devices
+            .add_dart(
+                Range {
+                    physical: 0x2_7130_c000,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+                None,
+            )
+            .unwrap();
         devices
             .add_dcpext(
                 Range {
@@ -2434,6 +2480,8 @@ mod tests {
                 [0x242, 0x242, 0x245, 0x244],
                 true,
                 Box::new(Screen),
+                (dart, 5),
+                Some(0x8_0000_0000),
             )
             .unwrap();
         devices

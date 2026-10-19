@@ -7,10 +7,42 @@
 //! The tags are `IOMobileFramebufferAP` / `UnifiedPipeline2` / `UPPipe2` RPC
 //! methods; their input and output byte sizes are the exact ones the kernel
 //! passes to `rpc(tag, in, inlen, out, outlen)` (recovered per call site).
-use super::super::scanout::Mode;
-use super::link::Request;
+use super::super::scanout::{Mode, Scanout};
+use super::rpc::{Service, Step};
+use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+
+/// The IOMFB methods of the one connected display, presenting to a host
+/// scanout.
+pub struct Methods {
+    scanout: Box<dyn Scanout>,
+}
+
+impl Methods {
+    pub fn new(scanout: Box<dyn Scanout>) -> Self {
+        Self { scanout }
+    }
+
+    /// The fixed mode the one connected display runs.
+    pub fn mode(&self) -> Mode {
+        self.scanout.mode()
+    }
+}
+
+impl Service for Methods {
+    fn call(
+        &mut self,
+        tag: [u8; 4],
+        input: &[u8],
+        output: u32,
+    ) -> Result<Step<Self>, &'static str> {
+        if is_swap(&tag) {
+            return Err("DCP swap host calls need the dart-dispext0 surface path, not yet modeled");
+        }
+        answer(&tag, input, output, self.mode()).map(Step::Return)
+    }
+}
 
 /// The reply to one host call: the output bytes to write back, or why the
 /// call is refused.
@@ -24,9 +56,8 @@ fn ok_bool() -> Vec<u8> {
 /// Answer a non-DMA host call for the fixed `mode`, or refuse it by name.
 /// Swap tags (A403/A406/A407…) are handled by the swap path, which needs the
 /// surface DART, so they are not answered here.
-pub fn answer(request: &Request, _input: &[u8], mode: Mode) -> Reply {
-    let code = request.code();
-    let out = request.output_len as usize;
+pub fn answer(code: &[u8; 4], _input: &[u8], output: u32, mode: Mode) -> Reply {
+    let out = output as usize;
     // A truthful reply must fill exactly the output the driver allocated.
     let sized = |bytes: Vec<u8>| -> Reply {
         if bytes.len() == out {
@@ -35,7 +66,7 @@ pub fn answer(request: &Request, _input: &[u8], mode: Mode) -> Reply {
             Err("DCP method output size differs from the driver's")
         }
     };
-    match &code {
+    match code {
         // IOMobileFramebufferAP::start_signal / free_signal / stop_signal.
         b"A401" => sized(ok_bool()),
         // set_display_device(index): one external display, accepted.
@@ -159,35 +190,26 @@ mod tests {
         format: PixelFormat::Bgra8888,
     };
 
-    fn request(code: &[u8; 4], input_len: u32, output_len: u32) -> Request {
-        let [a, b, c, d] = *code;
-        Request {
-            tag: u32::from_le_bytes([d, c, b, a]),
-            input_len,
-            output_len,
-        }
-    }
-
     #[test]
     fn display_size_tags_report_the_fixed_mode() {
         assert_eq!(
-            answer(&request(b"A451", 0, 4), &[], MODE).unwrap(),
+            answer(b"A451", &[], 4, MODE).unwrap(),
             1920u32.to_le_bytes()
         );
         assert_eq!(
-            answer(&request(b"A452", 0, 4), &[], MODE).unwrap(),
+            answer(b"A452", &[], 4, MODE).unwrap(),
             1080u32.to_le_bytes()
         );
-        let size = answer(&request(b"A453", 4, 8), &[0; 4], MODE).unwrap();
+        let size = answer(b"A453", &[0; 4], 8, MODE).unwrap();
         assert_eq!(&size[0..4], &1920u32.to_le_bytes());
         assert_eq!(&size[4..8], &1080u32.to_le_bytes());
     }
 
     #[test]
     fn an_unmodeled_tag_refuses_and_a_wrong_output_size_refuses() {
-        assert!(answer(&request(b"A999", 0, 4), &[], MODE).is_err());
+        assert!(answer(b"A999", &[], 4, MODE).is_err());
         // start_signal with the wrong output size is refused, not faked.
-        assert!(answer(&request(b"A401", 0, 8), &[], MODE).is_err());
+        assert!(answer(b"A401", &[], 8, MODE).is_err());
         assert!(is_swap(b"A407"));
         assert!(!is_swap(b"A401"));
     }

@@ -13,21 +13,25 @@
 //! boot-chain handoff.
 //!
 //! What is modeled and tested here: the RTKit endpoint set, the IOMFB link
-//! message framing ([`link`]), the fixed-mode method/EDID answers ([`iomfb`])
-//! and the swap-to-scanout presentation ([`scanout`]). The shared-region ring
-//! exchange that carries the host-call payloads (an RTBuddy endpoint shared
-//! buffer whose DVA the AP establishes during endpoint bring-up) is the
-//! recovered-but-unvalidated boundary: until it is confirmed against a boot,
-//! a type-2 RPC message refuses explicitly and names itself, rather than
-//! fabricating a reply. This is a recorded gap, not a silent placeholder.
+//! ([`link`] wire format, [`rpc`] coprocessor-side engine: hello, the
+//! region announcement, ready, the AP's calls, nested callbacks and
+//! answers) reaching the AP's shared region through `dart-dcpext`, the
+//! fixed-mode method/EDID answers ([`iomfb`]) and the swap-to-scanout
+//! presentation ([`scanout`]). The swap host calls need the
+//! `dart-dispext0` surface path and refuse by name until it is modeled.
 pub mod iomfb;
 pub mod link;
+pub mod rpc;
 
-use super::rtkit::Endpoint;
+use super::asc::{Firmware, Message, TransitionRequest};
+use super::rtkit::{Endpoint, Management, RtKit};
 use super::scanout::{Mode, Scanout};
+use crate::platform::dma::Port;
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 /// The RTKit endpoint numbers the J473AP DCPEXT advertises to the AP. 0x37 is
 /// the IOMFB link service (DCPEXTEndpoint24); the AFK/EPIC services are the
@@ -37,54 +41,116 @@ pub const DPAV_ENDPOINT: u8 = 0x24;
 pub const DPTX_ENDPOINT: u8 = 0x2a;
 pub use link::IOMFB_ENDPOINT;
 
-/// The IOMFB link-service endpoint: it drives one fixed connected monitor and
-/// presents completed swaps to a host scanout.
-pub struct Iomfb {
-    scanout: Box<dyn Scanout>,
-    /// Whether the AP has announced its shared heap (`link_state_init`).
-    heap: Option<u64>,
-}
+type Shared = Rc<RefCell<rpc::Link<iomfb::Methods>>>;
 
-impl Iomfb {
-    pub fn new(scanout: Box<dyn Scanout>) -> Self {
-        Self {
-            scanout,
-            heap: None,
-        }
-    }
-
-    /// The fixed mode the one connected display runs.
-    pub fn mode(&self) -> Mode {
-        self.scanout.mode()
-    }
-}
+/// The IOMFB link-service endpoint: words in either direction pass through
+/// the shared link, whose DMA step the coprocessor runs.
+struct Iomfb(Shared);
 
 impl Endpoint for Iomfb {
-    fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
-        // The AP drives link bring-up (DCPLink::start → bring_up_link_service
-        // → link_state_init); the coprocessor waits for its first message.
+    fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+        outbox.push(self.0.borrow_mut().start());
         Ok(())
     }
 
     fn receive(&mut self, payload: u64, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
-        let word = link::Word::decode(payload).ok_or("DCP link message type is not modeled")?;
-        match word.kind {
-            // The AP announces its shared heap increment; recorded.
-            link::Kind::Heap => {
-                self.heap = Some(word.length);
-                Ok(())
-            }
-            // A state transition (ready) before any RPC; recorded.
-            link::Kind::State => Ok(()),
-            // An RPC message addresses the shared-region ring. The ring's DVA
-            // is established by the RTBuddy endpoint shared-buffer exchange,
-            // which is not yet modeled; refuse explicitly rather than fake a
-            // reply. iomfb::answer / iomfb::edid / the scanout present path
-            // are the recovered semantics waiting on that exchange.
-            link::Kind::Message => {
-                Err("DCP IOMFB RPC needs the RTBuddy shared-region exchange, not yet modeled")
-            }
-        }
+        self.0.borrow_mut().receive(payload);
+        Ok(())
+    }
+}
+
+/// A `dma::Port` as the link's bus.
+struct PortBus<'p, 'a, 'b>(&'p mut Port<'a, 'b>);
+
+impl rpc::Bus for PortBus<'_, '_, '_> {
+    fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+        self.0
+            .read(address, buffer)
+            .map_err(|_| "DCP shared-region read faulted through dart-dcpext")
+    }
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), &'static str> {
+        self.0
+            .write(address, data)
+            .map_err(|_| "DCP shared-region write faulted through dart-dcpext")
+    }
+}
+
+/// The DCPEXT coprocessor: RTKit with the DCP endpoints, and the link's DMA
+/// through `dart-dcpext`.
+pub struct Coprocessor {
+    rtkit: RtKit,
+    link: Shared,
+}
+
+impl Coprocessor {
+    /// A coprocessor presenting to `scanout`. `window` is `dart-dcpext`'s
+    /// `vm-base` when the node is `truncate-dvas`: `AppleA7IOP::_restrictDVA`
+    /// (kernel file 0x1bb1424) then hands the coprocessor only a DVA's low
+    /// 32 bits, which lie in that window.
+    pub fn new(scanout: Box<dyn Scanout>, window: Option<u64>) -> Result<Self, &'static str> {
+        let link = Rc::new(RefCell::new(rpc::Link::new(
+            iomfb::Methods::new(scanout),
+            window,
+        )));
+        let endpoints = alloc::vec![
+            (
+                SYSTEM_ENDPOINT,
+                Box::new(Afk::new("DCP system AFK endpoint is not modeled")) as Box<dyn Endpoint>,
+            ),
+            (
+                DPAV_ENDPOINT,
+                Box::new(Afk::new("DCP DPAV EPIC endpoint is not modeled")),
+            ),
+            (
+                DPTX_ENDPOINT,
+                Box::new(Afk::new("DCP DPTX-port EPIC endpoint is not modeled")),
+            ),
+            (IOMFB_ENDPOINT, Box::new(Iomfb(link.clone()))),
+        ];
+        let rtkit = RtKit::new(endpoints, Management::Ordinary)?;
+        Ok(Self { rtkit, link })
+    }
+
+    /// The coprocessor was used and quiesced by the boot chain.
+    pub fn quiesced(mut self) -> Self {
+        self.rtkit = self.rtkit.quiesced();
+        self
+    }
+
+    /// The fixed mode the one connected display runs.
+    pub fn mode(&self) -> Mode {
+        self.link.borrow().service().mode()
+    }
+}
+
+impl Firmware for Coprocessor {
+    fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        self.rtkit.start(outbox)
+    }
+    fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        self.rtkit.receive(message, outbox)
+    }
+    fn dma_pending(&self) -> bool {
+        self.link.borrow().pending()
+    }
+    fn dma(
+        &mut self,
+        port: &mut Port<'_, '_>,
+        outbox: &mut Vec<Message>,
+    ) -> Result<(), &'static str> {
+        let mut sent = Vec::new();
+        self.link.borrow_mut().dma(&mut PortBus(port), &mut sent)?;
+        outbox.extend(sent.into_iter().map(|payload| Message {
+            endpoint: IOMFB_ENDPOINT,
+            payload,
+        }));
+        Ok(())
+    }
+    fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        self.rtkit.poll(outbox)
+    }
+    fn take_transition(&mut self) -> Option<TransitionRequest> {
+        self.rtkit.take_transition()
     }
 }
 
@@ -111,30 +177,13 @@ impl Endpoint for Afk {
     }
 }
 
-/// The DCP's application endpoints, in RTKit endpoint order, for a coprocessor
-/// presenting to `scanout`.
-pub fn endpoints(scanout: Box<dyn Scanout>) -> Vec<(u8, Box<dyn Endpoint>)> {
-    alloc::vec![
-        (
-            SYSTEM_ENDPOINT,
-            Box::new(Afk::new("DCP system AFK endpoint is not modeled")) as Box<dyn Endpoint>,
-        ),
-        (
-            DPAV_ENDPOINT,
-            Box::new(Afk::new("DCP DPAV EPIC endpoint is not modeled")),
-        ),
-        (
-            DPTX_ENDPOINT,
-            Box::new(Afk::new("DCP DPTX-port EPIC endpoint is not modeled")),
-        ),
-        (IOMFB_ENDPOINT, Box::new(Iomfb::new(scanout))),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::scanout::PixelFormat;
     use super::*;
+    use crate::platform::dma::{DmaError, tests::Ram};
+
+    const RAM: u64 = 0x8_0000_0000;
 
     struct TestScreen(Mode);
     impl Scanout for TestScreen {
@@ -146,54 +195,86 @@ mod tests {
         }
     }
 
-    fn iomfb() -> Iomfb {
-        Iomfb::new(Box::new(TestScreen(Mode {
+    struct Identity;
+    impl crate::platform::dma::Iommu for Identity {
+        fn page(&self) -> u64 {
+            0x4000
+        }
+        fn translate(
+            &mut self,
+            _: &mut dyn crate::platform::dma::Memory,
+            _: usize,
+            iova: u64,
+            _: u64,
+            _: bool,
+            _: &mut super::super::bus::Access<'_>,
+        ) -> Result<u64, DmaError> {
+            Ok(iova)
+        }
+    }
+
+    fn dma(coprocessor: &mut Coprocessor, ram: &mut Ram) -> Result<Vec<Message>, &'static str> {
+        let mut latch = super::super::interrupt::InterruptLatch::new();
+        let mut access = super::super::bus::Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Identity,
+            stream: 5,
+            memory: ram,
+            access: &mut access,
+        };
+        let mut outbox = Vec::new();
+        coprocessor.dma(&mut port, &mut outbox)?;
+        Ok(outbox)
+    }
+
+    #[test]
+    fn the_link_comes_up_and_answers_through_the_coprocessors_dart() {
+        let screen = TestScreen(Mode {
             width: 1920,
             height: 1080,
             format: PixelFormat::Bgra8888,
-        })))
-    }
-
-    #[test]
-    fn the_endpoint_records_the_heap_handshake_and_refuses_rpc_until_modeled() {
-        let mut endpoint = iomfb();
-        let mut outbox = Vec::new();
-        // link_state_init heap announcement: (heap << 16) | 0x40.
+        });
+        let mut coprocessor = Coprocessor::new(Box::new(screen), Some(RAM)).unwrap();
+        let mut endpoint = Iomfb(coprocessor.link.clone());
+        let mut sent = Vec::new();
+        endpoint.start(&mut sent).unwrap();
+        assert_eq!(sent, [0x100 | 211 << 16]);
+        // The AP's region at DVA 0x4000 (truncated), header at its start.
+        let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
+        ram.bytes[0x4000 + 12] = 4;
         endpoint
-            .receive(0x40 | (0x8000 << 16), &mut outbox)
+            .receive(link::Word::Region { dva: 0x4000 }.encode(), &mut sent)
             .unwrap();
-        assert_eq!(endpoint.heap, Some(0x8000));
-        // A type-2 RPC message refuses explicitly, not silently.
-        let message = link::Word {
-            kind: link::Kind::Message,
-            ack: false,
-            stream: Some(2),
-            length: 0x40,
+        assert!(coprocessor.dma_pending());
+        let ready = dma(&mut coprocessor, &mut ram).unwrap();
+        assert_eq!(ready[0].endpoint, IOMFB_ENDPOINT);
+        assert_eq!(ready[0].payload & 3, 1);
+        // display_width on AP stream 1.
+        let header = link::Header {
+            tag: *b"A451",
+            input: 0,
+            output: 4,
         };
-        assert!(endpoint.receive(message.encode(), &mut outbox).is_err());
-        assert!(outbox.is_empty());
-    }
-
-    #[test]
-    fn the_endpoint_set_is_the_four_dcp_services() {
-        let mode = Mode {
-            width: 800,
-            height: 600,
-            format: PixelFormat::Rgba8888,
+        let at = 0x4000 + 0x8000;
+        ram.bytes[at..at + 12].copy_from_slice(&header.bytes());
+        let call = link::Rpc {
+            answer: false,
+            stream: link::Stream {
+                owner: link::Owner::Ap,
+                index: 1,
+            },
+            opens: true,
+            offset: 0,
+            length: 16,
+            token: 0,
         };
-        let numbers: Vec<u8> = endpoints(Box::new(TestScreen(mode)))
-            .iter()
-            .map(|(number, _)| *number)
-            .collect();
-        assert_eq!(
-            numbers,
-            [
-                SYSTEM_ENDPOINT,
-                DPAV_ENDPOINT,
-                DPTX_ENDPOINT,
-                IOMFB_ENDPOINT
-            ]
-        );
+        endpoint
+            .receive(link::Word::Rpc(call).encode(), &mut sent)
+            .unwrap();
+        let answer = dma(&mut coprocessor, &mut ram).unwrap();
+        assert_eq!(answer[0].payload, link::Word::Rpc(call.answer()).encode());
+        assert_eq!(&ram.bytes[at + 12..at + 16], &1920u32.to_le_bytes());
+        assert!(!coprocessor.dma_pending());
     }
 
     #[test]

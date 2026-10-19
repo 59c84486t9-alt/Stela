@@ -593,28 +593,6 @@ fn devices<'f>(
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
         devices.add_spmi(spmi, clock.wall)?;
     }
-    // The dcpext display coprocessor and its register apertures, presenting
-    // to the GOP framebuffer. Admission is closed (soc::models hides the
-    // nodes), so this places an inert coprocessor like a hidden SEP; it needs
-    // a scanout, so it is placed only when the firmware gave Stela a mode.
-    if let Some(dcp) = board.and_then(|board| board.dcp.as_ref())
-        && let Some(screen) = cables.screen
-    {
-        let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-        let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
-        devices.add_dcpext(
-            range(dcp.wrapper),
-            dcp.interrupts,
-            dcp.quiesced,
-            alloc::boxed::Box::new(display::GopScanout::new(screen)),
-        )?;
-        let regions: Vec<(&'static str, Range)> = dcp
-            .regions
-            .iter()
-            .map(|&(name, reg)| (name, range(reg)))
-            .collect();
-        devices.add_display(&regions)?;
-    }
     for &physical in board.map_or(&[][..], |board| &board.coresight) {
         devices
             .add_coresight_lock(physical)
@@ -660,6 +638,30 @@ fn devices<'f>(
             .add_dart_group(&ranges, usize::from(dart.streams), Some(irq), dart.apf)
             .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
         darts.push(placed);
+    }
+    // The dcpext display coprocessor and its register apertures, presenting
+    // to the GOP framebuffer. Admission is closed (soc::models hides the
+    // nodes), so this places a hidden coprocessor like SEP, mastering through
+    // its DART; it needs a scanout, so it is placed only when the firmware gave Stela a mode.
+    if let Some(dcp) = board.and_then(|board| board.dcp.as_ref())
+        && let Some(screen) = cables.screen
+    {
+        let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+        let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
+        devices.add_dcpext(
+            range(dcp.wrapper),
+            dcp.interrupts,
+            dcp.quiesced,
+            alloc::boxed::Box::new(display::GopScanout::new(screen)),
+            (darts[dcp.iommu][0], dcp.stream as usize),
+            dcp.window,
+        )?;
+        let regions: Vec<(&'static str, Range)> = dcp
+            .regions
+            .iter()
+            .map(|&(name, reg)| (name, range(reg)))
+            .collect();
+        devices.add_display(&regions)?;
     }
     if let Some(sep) = board.and_then(|board| board.sep) {
         use stela_runtime::machine::apple::AscLines;
