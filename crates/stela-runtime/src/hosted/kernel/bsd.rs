@@ -17,8 +17,10 @@ use anyhow::{Result, bail};
 mod codesign;
 mod forwarded;
 mod memory;
+mod paths;
 mod process;
 pub(super) mod signal;
+pub(super) mod signatures;
 pub(super) mod sysctl;
 pub(super) mod thread;
 mod time;
@@ -144,6 +146,12 @@ fn complete(trap: &mut Trap, return_type: BsdReturnType, outcome: Outcome) -> Re
 
 fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let name = call.entry.name;
+    if let Some(outcome) = paths::call(kernel, call)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = signatures::call(kernel, call)? {
+        return Ok(outcome);
+    }
     if forwarded::forwarded(name) {
         return forward(kernel, call);
     }

@@ -12,7 +12,10 @@
 //! are serviced here by routine, and a routine not serviced stops the
 //! process naming it.
 use super::{Kernel, Pe, Trap};
-use crate::hosted::{forward, host, memory::PAGE_MASK};
+use crate::hosted::{
+    forward, host,
+    memory::{PAGE_MASK, Protection},
+};
 use crate::mach::catalog::{self, Reserved};
 use anyhow::{Result, bail};
 
@@ -190,10 +193,38 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
             else {
                 return Ok(KERN_INVALID_ARGUMENT);
             };
-            let mut rounded = arguments.to_vec();
-            rounded[1] = start;
-            rounded[2] = end - start;
-            forward_trap(kernel, index, &rounded)?
+            let deallocate = name == "_kernelrpc_mach_vm_deallocate_trap";
+            // `mach_vm_protect_trap(target, address, size, set_maximum,
+            // new_protection)`.
+            let (maximum, new) = match arguments {
+                [_, _, _, maximum, new, ..] => (*maximum != 0, *new as i32 & Protection::ALL.0),
+                _ => (false, 0),
+            };
+            let runs = kernel.unslid_change(start, end - start, |current| {
+                if deallocate {
+                    None
+                } else if maximum {
+                    Some(Protection(current.0 & new))
+                } else {
+                    Some(Protection(new))
+                }
+            });
+            let runs = if deallocate {
+                vec![(start, end - start)]
+            } else {
+                runs
+            };
+            let mut status = KERN_SUCCESS;
+            for (run, size) in runs {
+                let mut rounded = arguments.to_vec();
+                rounded[1] = run;
+                rounded[2] = size;
+                status = forward_trap(kernel, index, &rounded)?;
+                if status != KERN_SUCCESS {
+                    break;
+                }
+            }
+            status
         }
         "mach_timebase_info_trap" => {
             let mut info = TIMEBASE_NUMERATOR.to_le_bytes().to_vec();

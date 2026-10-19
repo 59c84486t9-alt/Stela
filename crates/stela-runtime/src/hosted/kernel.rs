@@ -67,6 +67,10 @@ pub(super) struct Kernel {
     /// The main thread's stack top (`p_usrstack`).
     pub(super) user_stack: u64,
     pub(super) map_with_linking_ended: bool,
+    /// Guest system roots read-only absolute lookups resolve under first.
+    pub(super) roots: Vec<std::path::PathBuf>,
+    /// Code signatures attached to files.
+    pub(super) signatures: bsd::signatures::Signatures,
     /// This task's, its thread's and the host's kernel-object port names.
     pub(super) kernel_objects: Vec<u32>,
 }
@@ -105,6 +109,7 @@ pub(super) struct Config {
     pub(super) features: Vec<(&'static str, bool)>,
     pub(super) executable: Executable,
     pub(super) user_stack: u64,
+    pub(super) roots: Vec<std::path::PathBuf>,
     pub(super) trace: bool,
 }
 
@@ -142,6 +147,8 @@ impl Kernel {
             threads: bsd::thread::Threads::default(),
             signals: bsd::signal::Signals::inherit(),
             user_stack: config.user_stack,
+            roots: config.roots,
+            signatures: Default::default(),
             map_with_linking_ended: false,
             kernel_objects,
         }
@@ -197,6 +204,21 @@ impl Kernel {
         match &mut self.shared_region {
             Some(region) => region.resolve(address, &self.signer),
             None => Ok(false),
+        }
+    }
+
+    /// The runs of a range whose host pages a protection change applies
+    /// to: shared-region pages not yet slid keep the change (or, `None`,
+    /// an unmapping forgets them) until they are slid.
+    pub(super) fn unslid_change(
+        &mut self,
+        address: u64,
+        size: u64,
+        change: impl FnMut(super::memory::Protection) -> Option<super::memory::Protection>,
+    ) -> Vec<(u64, u64)> {
+        match &mut self.shared_region {
+            Some(region) => region.update(address, size, change),
+            None => vec![(address, size)],
         }
     }
 

@@ -5,9 +5,10 @@
 //! The guest thread is a [`Machine`] PE at EL0 over an identity stage 1, so
 //! guest addresses are this process's addresses and translated code reaches
 //! guest memory directly. Exec is performed here as `execve` performs it:
-//! the commpage, the shared region (mapped as an earlier process left it,
-//! slid lazily), the executable and its unchanged dynamic linker at their
-//! slides, and the main stack with the kernel's argument block. The PE
+//! the commpage, the empty shared region of the first process to use the
+//! cache (dyld maps and the kernel slides it), the executable and its
+//! unchanged dynamic linker at their slides, and the main stack with the
+//! kernel's argument block. The PE
 //! enters dyld at its entry point; every exception it takes to EL1 stops at
 //! the vector, where [`kernel`] services it as XNU's exception handlers do
 //! and returns through ERET. The run ends at the guest's `exit`.
@@ -37,19 +38,6 @@ pub enum Termination {
     Exited(i32),
 }
 
-/// The shared cache the process finds already mapped.
-#[derive(Debug, Clone)]
-pub struct SharedCacheLaunch {
-    pub mappings: Vec<shared_region::MappingRequest>,
-    /// The unslid region `[start, start + size)` and the cache's largest
-    /// slide.
-    pub start: u64,
-    pub size: u64,
-    pub max_slide: u64,
-    /// A fixed slide, or `None` for a random one as the kernel chooses.
-    pub slide: Option<u64>,
-}
-
 /// The dynamic linker `LC_LOAD_DYLINKER` names.
 #[derive(Debug, Clone)]
 pub struct Dylinker {
@@ -69,7 +57,9 @@ pub struct Launch {
     pub executable_path: Vec<u8>,
     pub signature: Signature,
     pub dylinker: Dylinker,
-    pub shared_cache: Option<SharedCacheLaunch>,
+    /// Guest system roots, in order, that absolute paths the guest looks up
+    /// read-only resolve under before the host's own file system.
+    pub roots: Vec<std::path::PathBuf>,
     pub argv: Vec<Vec<u8>>,
     pub environment: Vec<Vec<u8>>,
     pub trace: bool,
@@ -149,25 +139,12 @@ pub fn run(launch: Launch) -> Result<Report> {
         &identification,
         commpage_time()?,
     ))?;
-    let shared_region = match &launch.shared_cache {
-        Some(cache) => {
-            let slide = match cache.slide {
-                Some(slide) => slide,
-                None if cache.max_slide == 0 => 0,
-                None => {
-                    let pages = cache.max_slide / memory::PAGE_BYTES;
-                    (random_words::<1>()?[0] % (pages + 1)) * memory::PAGE_BYTES
-                }
-            };
-            Some(shared_region::SharedRegion::map(
-                &cache.mappings,
-                cache.start,
-                cache.size,
-                slide,
-            )?)
-        }
-        None => None,
-    };
+    // The first process of its shared region: reserved and empty until
+    // dyld maps the cache.
+    let shared_region = Some(shared_region::SharedRegion::reserve(
+        shared_region::REGION_START,
+        shared_region::REGION_SIZE,
+    )?);
     let executable = exec::map_executable(&launch.executable)?;
     let dylinker = exec::map_dylinker(&launch.dylinker.image)?;
     let header = launch
@@ -204,14 +181,9 @@ pub fn run(launch: Launch) -> Result<Report> {
     let entry = launch.dylinker.entry + dylinker.slide;
     if launch.trace {
         eprintln!(
-            "stela: executable slide {:#x}, dyld slide {:#x} (entry {entry:#x}), shared region \
-             {:#x?}, stack top {:#x}",
-            executable.slide,
-            dylinker.slide,
-            shared_region
-                .as_ref()
-                .map(shared_region::SharedRegion::base),
-            stack.top
+            "stela: executable slide {:#x}, dyld slide {:#x} (entry {entry:#x}), stack top \
+             {:#x}",
+            executable.slide, dylinker.slide, stack.top
         );
     }
     let mut cpu = pe::user_thread(launch.chip, entry, &tables, &keys);
@@ -234,6 +206,7 @@ pub fn run(launch: Launch) -> Result<Report> {
             header,
         },
         user_stack: stack.top,
+        roots: launch.roots.clone(),
         trace: launch.trace,
     });
     loop {

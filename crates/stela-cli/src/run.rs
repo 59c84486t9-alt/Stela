@@ -2,16 +2,18 @@
 //! arm64 kernel would, in this process, and exit with its status.
 //!
 //! Exec's inputs are read here: the executable's arm64e slice (arm64 when
-//! it has none), its load commands and code signature, the dynamic linker
-//! its `LC_LOAD_DYLINKER` names under the guest root, and the shared cache
-//! the process finds mapped. Everything after is the hosted runtime's.
+//! it has none), its load commands and code signature, and the dynamic
+//! linker its `LC_LOAD_DYLINKER` names. Both paths, like every read-only
+//! lookup the process makes, resolve under the guest roots first (see
+//! `stela_runtime::hosted`); dyld finds and maps the shared cache there
+//! itself. Everything after is the hosted runtime's.
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use stela_loader::{code_signature, load_plan, shared_cache, split_slices};
-use stela_runtime::hosted::{self, Dylinker, Launch, SharedCacheLaunch, Signature, Termination};
+use stela_loader::{code_signature, load_plan, split_slices};
+use stela_runtime::hosted::{self, Dylinker, Launch, Signature, Termination};
 use stela_runtime::machine::Chip;
 
 /// `CPU_TYPE_ARM64` and the arm64e subtype, without capability bits.
@@ -26,15 +28,10 @@ pub(crate) struct Run {
     /// Its arguments after argv[0].
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     arguments: Vec<OsString>,
-    /// The guest root the dynamic linker path resolves under.
-    #[arg(long, default_value = "/")]
-    root: PathBuf,
-    /// The shared cache's main file.
+    /// A guest system root (repeatable, searched in order): read-only
+    /// lookups of absolute paths that exist under it resolve there.
     #[arg(long)]
-    shared_cache: Option<PathBuf>,
-    /// A fixed shared-region slide instead of a random one.
-    #[arg(long, value_parser = crate::args::parse_address)]
-    shared_cache_slide: Option<u64>,
+    root: Vec<PathBuf>,
     /// Print every serviced call to standard error.
     #[arg(long)]
     trace: bool,
@@ -105,14 +102,23 @@ fn signature(slice: &[u8]) -> Result<Signature> {
     })
 }
 
-fn guest_path(root: &Path, path: &str) -> PathBuf {
-    root.join(path.trim_start_matches('/'))
+/// `path` under the first root holding it, else the host's own.
+fn guest_path(roots: &[PathBuf], path: &Path) -> PathBuf {
+    match path.strip_prefix("/") {
+        Ok(relative) => roots
+            .iter()
+            .map(|root| root.join(relative))
+            .find(|candidate| candidate.exists())
+            .unwrap_or_else(|| path.to_owned()),
+        Err(_) => path.to_owned(),
+    }
 }
 
 impl Run {
     pub(crate) fn run(self) -> Result<()> {
-        let data = std::fs::read(&self.program)
-            .with_context(|| format!("cannot read {}", self.program.display()))?;
+        let program_file = guest_path(&self.root, &self.program);
+        let data = std::fs::read(&program_file)
+            .with_context(|| format!("cannot read {}", program_file.display()))?;
         let (slice_offset, slice) = select_slice(&data)?;
         let plan = load_plan::plan(slice)?;
         let signature = signature(slice)?;
@@ -120,40 +126,11 @@ impl Run {
             .dylinker
             .as_deref()
             .context("the executable names no LC_LOAD_DYLINKER")?;
-        let dylinker_file = guest_path(&self.root, dylinker_path);
+        let dylinker_file = guest_path(&self.root, Path::new(dylinker_path));
         let dylinker_data = std::fs::read(&dylinker_file)
             .with_context(|| format!("cannot read {}", dylinker_file.display()))?;
         let (dylinker_offset, dylinker_slice) = select_slice(&dylinker_data)?;
         let dylinker_plan = load_plan::plan_dynamic_linker(dylinker_slice)?;
-        let shared_cache = match &self.shared_cache {
-            Some(main) => {
-                let cache = shared_cache::plan(main)?;
-                Some(SharedCacheLaunch {
-                    mappings: cache
-                        .mappings
-                        .iter()
-                        .map(|mapping| hosted::shared_region::MappingRequest {
-                            path: cache.files[mapping.file].path.clone(),
-                            file_offset: mapping.file_offset,
-                            address: mapping.address,
-                            size: mapping.size,
-                            maximum: hosted::memory::Protection::from_mach_o(
-                                mapping.max_protection,
-                            ),
-                            initial: hosted::memory::Protection::from_mach_o(
-                                mapping.initial_protection,
-                            ),
-                            slide_info: mapping.slide_info,
-                        })
-                        .collect(),
-                    start: cache.shared_region_start,
-                    size: cache.shared_region_size,
-                    max_slide: cache.max_slide,
-                    slide: self.shared_cache_slide,
-                })
-            }
-            None => None,
-        };
         let program = self.program.as_os_str().as_bytes().to_vec();
         let mut argv = vec![program.clone()];
         argv.extend(
@@ -171,7 +148,7 @@ impl Run {
             .collect();
         let launch = Launch {
             chip: Chip::AppleM2,
-            executable: image(&self.program, slice_offset, &plan),
+            executable: image(&program_file, slice_offset, &plan),
             slice_offset,
             executable_path: program,
             signature,
@@ -179,7 +156,7 @@ impl Run {
                 image: image(&dylinker_file, dylinker_offset, &dylinker_plan.image),
                 entry: dylinker_plan.thread.pc,
             },
-            shared_cache,
+            roots: self.root.clone(),
             argv,
             environment,
             trace: self.trace,
