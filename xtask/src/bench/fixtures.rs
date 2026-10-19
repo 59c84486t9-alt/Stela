@@ -48,6 +48,8 @@ pub(super) const MICRO_ITERATIONS: usize = 1000;
 pub(super) enum Input {
     /// memchr over `n` bytes without the byte.
     MemchrMiss(usize),
+    /// memcpy of `n` bytes between separate pages.
+    Memcpy(usize),
     /// strncmp of two equal `n`-byte strings, limit `n`.
     StrncmpEqual(usize),
     Atol(&'static str),
@@ -73,7 +75,7 @@ pub(super) struct Workload {
     pub(super) input: Input,
 }
 
-pub(super) const WORKLOADS: [Workload; 12] = [
+pub(super) const WORKLOADS: [Workload; 13] = [
     Workload {
         name: "m1n1 memchr, 257-byte miss",
         source: Source::M1n1String,
@@ -85,6 +87,12 @@ pub(super) const WORKLOADS: [Workload; 12] = [
         source: Source::M1n1String,
         symbol: "_memchr",
         input: Input::MemchrMiss(4096),
+    },
+    Workload {
+        name: "m1n1 memcpy, 4096 bytes",
+        source: Source::M1n1String,
+        symbol: "_memcpy",
+        input: Input::Memcpy(4096),
     },
     Workload {
         name: "m1n1 strncmp, 257 equal bytes",
@@ -290,6 +298,15 @@ pub(super) fn prepare(input: Input, code: &[u8]) -> Result<(Arena, GuestState, u
     state.sp = arena.address(STACK_TOP);
     let data = arena.address(DATA);
     let expected = match input {
+        Input::Memcpy(bytes) => {
+            // It returns the destination; the copy itself is the
+            // differential's to check.
+            let text: Vec<u8> = (0..bytes).map(|index| (index * 37 + 11) as u8).collect();
+            arena.write(DATA, &text);
+            let destination = arena.address(DATA + 8 * PAGE);
+            state.x[..3].copy_from_slice(&[destination, data, bytes as u64]);
+            destination
+        }
         Input::MemchrMiss(bytes) => {
             arena.write(DATA, &vec![b'a'; bytes]);
             state.x[..3].copy_from_slice(&[data, u64::from(b'z'), bytes as u64]);
