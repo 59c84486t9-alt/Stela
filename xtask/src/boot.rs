@@ -205,6 +205,15 @@ pub struct Run {
     /// `--input`.
     #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
     input: bool,
+    /// Give the mount a host network adapter: QEMU user networking behind
+    /// a `virtio-net-pci`, which the mount drives after ExitBootServices
+    /// for its own requests (`--tss`, `--network-check`).
+    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    network: bool,
+    /// Have the mount POST once to this `http://` URL over the host network
+    /// at start and report the reply: adds `--network-check URL`.
+    #[arg(long, requires = "network")]
+    network_check: Option<String>,
     /// Run install mode on a synthetic restore payload.
     #[arg(long, value_enum, conflicts_with_all = ["opencore", "module", "append"])]
     payload: Option<PayloadMode>,
@@ -362,6 +371,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     options.extend(disks.iter().map(disks::Disk::option));
     if arguments.input {
         options.push_str(" --input");
+    }
+    if let Some(url) = &arguments.network_check {
+        ensure!(
+            url.starts_with("http://") && !url.contains(char::is_whitespace),
+            "the network check is one http:// URL"
+        );
+        options.push_str(&format!(" --network-check {url}"));
     }
     let target = output.join("target.img");
     let options = match arguments.payload {
@@ -560,6 +576,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             "virtio-keyboard-pci",
             "-device",
             "virtio-tablet-pci",
+        ]);
+    }
+    if arguments.network {
+        command.args([
+            "-netdev",
+            "user,id=host-net",
+            "-device",
+            "virtio-net-pci,netdev=host-net",
         ]);
     }
     match arguments.display {
@@ -1002,6 +1026,7 @@ mod tests {
             vec!["--storage-disk", "/tmp/disk", "--storage-check"],
             vec!["--storage-serial", "ANS"],
             vec!["--directory-volume"],
+            vec!["--network-check", "http://example.test/"],
             vec![
                 "--storage-disk",
                 "/tmp/disk",

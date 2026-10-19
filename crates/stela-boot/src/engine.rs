@@ -10,6 +10,7 @@ mod display;
 mod host;
 mod input;
 mod interrupts;
+mod network;
 mod nor;
 mod power;
 mod restore;
@@ -103,6 +104,12 @@ struct Options {
     /// Cable the native USB keyboard and pointer to the last USB-C
     /// controller and feed it the host's virtio-input devices (`--input`).
     input: bool,
+    /// Open the host network for the restore client's signing-server
+    /// request (`--tss`; `network::HostNetwork`).
+    tss: bool,
+    /// POST once to this `http://` URL at start and report the reply
+    /// (`--network-check URL`).
+    network_check: Option<String>,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
     breakpoints: Vec<u64>,
@@ -188,6 +195,8 @@ impl Options {
             survey: false,
             idle_skip: false,
             input: false,
+            tss: false,
+            network_check: None,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             watches: Vec::new(),
@@ -246,6 +255,18 @@ impl Options {
             }
             if name == "--input" {
                 options.input = true;
+                continue;
+            }
+            if name == "--tss" {
+                options.tss = true;
+                continue;
+            }
+            if name == "--network-check" {
+                let url = words.next().ok_or("missing network check URL")?;
+                network::split_url(url)?;
+                if options.network_check.replace(String::from(url)).is_some() {
+                    return Err("duplicate network check");
+                }
                 continue;
             }
             if name == "--storage" {
@@ -1103,24 +1124,46 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .chain(options.restore_source.iter())
         .chain(options.nor.iter())
         .collect();
-    let (services, host_input) = if targets.is_empty() && !options.input {
-        (Vec::new(), None)
-    } else {
-        let storage_handoff = handoff
-            .storage
-            .handoff()
-            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-        // SAFETY: before host::install, with sole ownership of DMA/controllers.
-        let (services, inputs) = unsafe { storage::open(&storage_handoff, &targets) }
-            .unwrap_or_else(|error| {
+    let wants_network = options.tss || options.network_check.is_some();
+    let (services, host_input, host_network) =
+        if targets.is_empty() && !options.input && !wants_network {
+            (Vec::new(), None, None)
+        } else {
+            let storage_handoff = handoff
+                .storage
+                .handoff()
+                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+            // SAFETY: before host::install, with sole ownership of DMA/controllers.
+            let storage::Opened {
+                services,
+                inputs,
+                links,
+            } = unsafe { storage::open(&storage_handoff, &targets) }.unwrap_or_else(|error| {
                 output::arguments(format_args!("host storage refusal: {error}\n"));
                 output::fatal("host storage could not be opened")
             });
-        (
-            services,
-            options.input.then(|| input::HostInput::new(inputs)),
-        )
-    };
+            let network = wants_network.then(|| {
+                network::HostNetwork::open(links, storage_handoff.clock).unwrap_or_else(|error| {
+                    output::arguments(format_args!("host network refusal: {error}\n"));
+                    output::fatal("the host network could not be opened")
+                })
+            });
+            (
+                services,
+                options.input.then(|| input::HostInput::new(inputs)),
+                network,
+            )
+        };
+    let mut host_network = host_network;
+    if let (Some(url), Some(network)) = (&options.network_check, host_network.as_mut()) {
+        let (host, path) = network::split_url(url).unwrap_or_else(|error| output::fatal(error));
+        if network.post(host, path, "text/plain", b"").is_err() {
+            output::fatal("the network check failed");
+        }
+    }
+    // The restore client's signing-server transport (`restore::tss`)
+    // borrows this; it lives for the whole run.
+    let _host_network = host_network;
     let mut services = services.into_iter();
     let backing = options.storage.as_ref().map(|_| services.next().unwrap());
     let source = options

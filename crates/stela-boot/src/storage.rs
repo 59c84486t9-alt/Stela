@@ -106,6 +106,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
             for mut function in unsafe { Function::enumerate(window) } {
                 let storage = pc::virtio::matches(&function)
                     || pc::input::matches(&function)
+                    || pc::virtio_net::matches(&function)
                     || function.class == pc::nvme::CLASS
                     || function.class == pc::ahci::CLASS;
                 if storage {

@@ -76,17 +76,14 @@ impl BlockDevice for Service {
 
 /// Open the explicitly selected partitions while the loader's identity root
 /// is still active, before host::install, and bring up every host input
-/// device. No guessed disk/partition, no writes at open. Ownership lasts
+/// device and network adapter. No guessed disk/partition, no writes at open. Ownership lasts
 /// with the returned services. Probe once for all consumers;
 /// do not reset a controller or reuse its DMA pages for a second probe.
 ///
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, and the loader root/window remain live for the boot.
-pub unsafe fn open(
-    handoff: &pc::Handoff,
-    targets: &[&Target],
-) -> Result<(alloc::vec::Vec<Box<dyn BlockDevice>>, Inputs), String> {
+pub unsafe fn open(handoff: &pc::Handoff, targets: &[&Target]) -> Result<Opened, String> {
     if targets
         .iter()
         .enumerate()
@@ -110,6 +107,10 @@ pub unsafe fn open(
         devices: core::mem::take(&mut disks.inputs),
         root,
     };
+    let links = super::network::Links {
+        devices: core::mem::take(&mut disks.links),
+        root,
+    };
     let services = targets
         .iter()
         .map(|target| {
@@ -128,7 +129,19 @@ pub unsafe fn open(
             }) as Box<dyn BlockDevice>)
         })
         .collect::<Result<_, String>>()?;
-    Ok((services, inputs))
+    Ok(Opened {
+        services,
+        inputs,
+        links,
+    })
+}
+
+/// What [`open`] brought up: a service per target, in order, and the
+/// host's input devices and network adapters.
+pub struct Opened {
+    pub services: alloc::vec::Vec<Box<dyn BlockDevice>>,
+    pub inputs: Inputs,
+    pub links: super::network::Links,
 }
 
 /// The host's input devices and the loader root their registers and DMA
