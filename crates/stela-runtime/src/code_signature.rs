@@ -29,10 +29,16 @@ pub const CDHASH_BYTES: usize = 20;
 const CD_VERSION: usize = 8;
 const CD_FLAGS: usize = 12;
 const CD_IDENT_OFFSET: usize = 20;
+const CD_CODE_LIMIT: usize = 32;
 const CD_HASH_TYPE: usize = 37;
 const CD_PLATFORM: usize = 38;
+const CD_PAGE_SIZE: usize = 39;
+const CD_SCATTER_OFFSET: usize = 44;
 const CD_TEAM_OFFSET: usize = 48;
+const CS_SUPPORTSSCATTER: u32 = 0x20100;
 const CS_SUPPORTSTEAMID: u32 = 0x20200;
+/// `SC_Scatter.base`, in hash pages.
+const SCATTER_BASE: usize = 4;
 
 fn be32(bytes: &[u8], at: usize) -> Result<u32> {
     Ok(u32::from_be_bytes(
@@ -70,6 +76,12 @@ pub struct CodeSignature {
     pub cdhash: [u8; CDHASH_BYTES],
     pub entitlements: Option<Vec<u8>>,
     pub der_entitlements: Option<Vec<u8>>,
+    /// The range of the file, from the slice's start, that the code
+    /// directory's page hashes cover, as `cs_blob_init_validated` records
+    /// it: from the scatter base (zero without one) to `codeLimit` rounded
+    /// up to the hash page.
+    pub start_offset: u64,
+    pub end_offset: u64,
 }
 
 mod hex_bytes {
@@ -125,6 +137,11 @@ pub fn read(slice: &[u8]) -> Result<Option<CodeSignature>> {
     let blob = slice
         .get(start..start + size)
         .context("code signature outside the slice")?;
+    parse(blob).map(Some)
+}
+
+/// An embedded signature superblob, as `F_ADDFILESIGS` reads it from a file.
+pub fn parse(blob: &[u8]) -> Result<CodeSignature> {
     ensure!(
         be32(blob, 0)? == CSMAGIC_EMBEDDED_SIGNATURE,
         "code signature is not an embedded signature superblob"
@@ -167,7 +184,23 @@ pub fn read(slice: &[u8]) -> Result<Option<CodeSignature>> {
     } else {
         None
     };
-    Ok(Some(CodeSignature {
+    let page_shift = *directory
+        .get(CD_PAGE_SIZE)
+        .context("truncated code directory")?;
+    ensure!(page_shift < 32, "code directory page size out of range");
+    let page_mask = (1u64 << page_shift) - 1;
+    let end_offset = (u64::from(be32(directory, CD_CODE_LIMIT)?) + page_mask) & !page_mask;
+    let scatter = if version >= CS_SUPPORTSSCATTER {
+        be32(directory, CD_SCATTER_OFFSET)? as usize
+    } else {
+        0
+    };
+    let start_offset = if scatter == 0 {
+        0
+    } else {
+        u64::from(be32(directory, scatter + SCATTER_BASE)?) << page_shift
+    };
+    Ok(CodeSignature {
         flags: be32(directory, CD_FLAGS)?,
         platform: *directory
             .get(CD_PLATFORM)
@@ -178,7 +211,9 @@ pub fn read(slice: &[u8]) -> Result<Option<CodeSignature>> {
         cdhash: cdhash(hash_type, directory).context("unsupported code directory hash")?,
         entitlements,
         der_entitlements,
-    }))
+        start_offset,
+        end_offset,
+    })
 }
 
 #[cfg(test)]
@@ -193,6 +228,8 @@ mod tests {
         cd[CD_IDENT_OFFSET..CD_IDENT_OFFSET + 4].copy_from_slice(&56u32.to_be_bytes());
         cd[CD_HASH_TYPE] = hash_type;
         cd[CD_PLATFORM] = platform;
+        cd[CD_PAGE_SIZE] = 12;
+        cd[CD_CODE_LIMIT..CD_CODE_LIMIT + 4].copy_from_slice(&0x1801u32.to_be_bytes());
         cd[56..63].copy_from_slice(b"com.ex\0");
         let length = cd.len() as u32;
         cd[4..8].copy_from_slice(&length.to_be_bytes());
@@ -230,5 +267,7 @@ mod tests {
         assert_eq!(signature.flags, 0x2_0000);
         assert_eq!(signature.identifier.as_deref(), Some("com.ex"));
         assert_eq!(signature.cdhash[..], Sha256::digest(&sha256)[..20]);
+        assert_eq!((signature.start_offset, signature.end_offset), (0, 0x2000));
+        assert_eq!(parse(&superblob).unwrap().cdhash, signature.cdhash);
     }
 }

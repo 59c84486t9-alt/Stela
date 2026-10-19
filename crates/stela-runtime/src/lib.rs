@@ -14,6 +14,8 @@ pub mod apfs;
 pub mod blocks;
 pub mod boot_bundle;
 pub mod clock;
+#[cfg(feature = "std")]
+pub mod code_signature;
 pub mod commpage;
 pub mod darwin;
 #[cfg(feature = "std")]

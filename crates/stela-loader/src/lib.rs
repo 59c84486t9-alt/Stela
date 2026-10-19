@@ -17,7 +17,7 @@ pub mod carveouts;
 #[cfg(feature = "std")]
 pub mod chained_fixups;
 #[cfg(feature = "std")]
-pub mod code_signature;
+pub use stela_runtime::code_signature;
 pub mod darts;
 #[cfg(feature = "std")]
 pub mod dependency_graph;
