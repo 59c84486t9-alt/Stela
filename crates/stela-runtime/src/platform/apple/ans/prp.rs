@@ -105,26 +105,18 @@ impl Prps {
 mod tests {
     use super::*;
     use crate::platform::{
-        apple::{
-            bus::{Access, MmioDevice, Width},
-            interrupt::InterruptLatch,
-            sart::Sart,
-        },
-        dma::tests::Ram,
+        apple::{bus::Access, interrupt::InterruptLatch},
+        dma::{Physical, tests::Ram},
     };
 
     #[test]
-    fn prps_scatter_across_pages_and_sart_applies_to_lists_and_data() {
+    fn prps_scatter_across_pages_at_physical_addresses() {
         let mut ram = Ram::new(0x8000_0000, 0x10000);
         let base = ram.base;
-        let mut sart = Sart::default();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        for (offset, value) in [(0x40, base / 4096), (0x80, 16), (0, 0xff)] {
-            sart.write(offset, Width::Word, value, &mut access).unwrap();
-        }
         let mut port = Port {
-            iommu: &mut sart,
+            iommu: &mut Physical,
             stream: 0,
             memory: &mut ram,
             access: &mut access,

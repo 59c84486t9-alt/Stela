@@ -1776,6 +1776,9 @@ pub struct AnsController {
     pub vdma: Option<(u64, u64)>,
     pub sart: (u64, u64),
     pub sart_idle: u64,
+    /// The SART node's `exclusive-bounds`: entry SIZEs count pages rather
+    /// than naming the last one ([`sart::Bounds`]).
+    pub sart_exclusive_bounds: bool,
     pub interrupts: [u16; 4],
     pub completion_irq: u16,
     pub namespaces: Vec<ans::Description>,
@@ -2269,6 +2272,7 @@ fn ans_controller(
         vdma,
         sart,
         sart_idle,
+        sart_exclusive_bounds: sart_node.property("exclusive-bounds").is_some(),
         interrupts,
         completion_irq,
         namespaces,
@@ -4369,6 +4373,7 @@ mod tests {
         assert_eq!(placed.nvme, (0x2_7bcc_0000, 0x60000));
         assert_eq!(placed.sart, (0x2_7bc5_0000, 0xc000));
         assert_eq!(placed.sart_idle, 0x2_7bcc_13e8);
+        assert!(!placed.sart_exclusive_bounds);
         assert_eq!(placed.completion_irq, 724);
         assert_eq!(placed.interrupts, [718, 717, 720, 719]);
         assert_eq!(

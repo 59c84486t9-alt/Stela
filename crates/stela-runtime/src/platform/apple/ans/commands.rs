@@ -9,7 +9,7 @@ use super::{
     namespace::BLOCK_BYTES,
     prp::{MAX_TRANSFER, Prps, dma_error},
 };
-use crate::platform::{dma::Port, pc::block::BlockError};
+use crate::platform::{apple::sart::Sart, dma::Port, pc::block::BlockError};
 use alloc::vec;
 
 const IDENTIFY_BYTES: usize = 4096;
@@ -140,6 +140,7 @@ impl Ans {
         queue: usize,
         cmd: &Command,
         port: &mut Port<'_, '_>,
+        sart: &mut Sart,
     ) -> Result<Outcome, &'static str> {
         if queue != 0 {
             return self.io(cmd, port);
@@ -163,7 +164,7 @@ impl Ans {
                 Ok(Outcome::status(SUCCESS))
             }
             APPLE_NAMESPACES => self.verify_namespaces(cmd, port),
-            APPLE_TUNNEL => self.tunnel(cmd, port),
+            APPLE_TUNNEL => self.tunnel(cmd, port, sart),
             _ => Err("ANS admin command is not modeled"),
         }
     }
@@ -454,10 +455,23 @@ impl Ans {
     /// bytes 44..52, response address at 52..60 and response length at 60.
     /// `SendOSBuildStrToDevice` (0x3de51e8) builds request type 0x120 at +12,
     /// a 16-byte OS build at +24 and checks the status at +0x4c afterwards.
-    fn tunnel(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome, &'static str> {
+    /// The request, output and status buffers are tunnel buffers, reached
+    /// through the SART's allow-list.
+    fn tunnel(
+        &mut self,
+        cmd: &Command,
+        port: &mut Port<'_, '_>,
+        sart: &mut Sart,
+    ) -> Result<Outcome, &'static str> {
         if cmd.nsid() != 0 || cmd.word(40) != 1 {
             return Err("ANS tunnel selector/output contract is not modeled");
         }
+        let port = &mut Port {
+            iommu: sart,
+            stream: 0,
+            memory: &mut *port.memory,
+            access: &mut *port.access,
+        };
         let address = cmd.long(44);
         if address == 0 {
             return Err("ANS tunnel request address is null");
@@ -551,8 +565,12 @@ mod tests {
     use super::super::Description;
     use super::*;
     use crate::platform::{
-        apple::{bus::Access, interrupt::InterruptLatch, sart::Sart},
-        dma::tests::Ram,
+        apple::{
+            bus::Access,
+            interrupt::InterruptLatch,
+            sart::{Bounds, Sart},
+        },
+        dma::{Physical, tests::Ram},
         pc::block::tests::RamDisk,
     };
     use alloc::boxed::Box;
@@ -571,14 +589,14 @@ mod tests {
         )
         .unwrap();
         let mut memory = Ram::new(0x1000, 8192);
-        let mut sart = Sart::default();
+        let mut sart = Sart::new(Bounds::Exclusive);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         for (offset, value) in [(0x40, 1), (0x80, 2), (0, 0xff)] {
             sart.write(offset, Width::Word, value, &mut access).unwrap();
         }
         let mut port = Port {
-            iommu: &mut sart,
+            iommu: &mut Physical,
             stream: 0,
             memory: &mut memory,
             access: &mut access,
@@ -592,7 +610,12 @@ mod tests {
         command.0[0] = APPLE_TUNNEL;
         command.0[40] = 1;
         command.0[44..52].copy_from_slice(&0x1000u64.to_le_bytes());
-        assert_eq!(ans.execute(0, &command, &mut port).unwrap().status, SUCCESS);
+        assert_eq!(
+            ans.execute(0, &command, &mut port, &mut sart)
+                .unwrap()
+                .status,
+            SUCCESS
+        );
         assert_eq!(&ans.os_build[..6], b"26A434");
         let mut status = [1; 4];
         port.read(0x104c, &mut status).unwrap();
@@ -600,7 +623,7 @@ mod tests {
         request[16] = 1;
         request[24..30].fill(b'X');
         port.write(0x1000, &request).unwrap();
-        assert!(ans.execute(0, &command, &mut port).is_err());
+        assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
         assert_eq!(&ans.os_build[..6], b"26A434");
         port.read(0x104c, &mut status).unwrap();
         assert_eq!(status, [0xff; 4]);
@@ -610,7 +633,7 @@ mod tests {
         port.write(0x2000, &[0xa5; 4096]).unwrap();
         command.0[52..60].copy_from_slice(&0x2000u64.to_le_bytes());
         command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
-        ans.execute(0, &command, &mut port).unwrap();
+        ans.execute(0, &command, &mut port, &mut sart).unwrap();
         let mut output = [0; 16];
         port.read(0x2000, &mut output).unwrap();
         assert_eq!(&output[..8], &die::NAND_ID.to_le_bytes());
@@ -622,7 +645,7 @@ mod tests {
         request[12..16].copy_from_slice(&0xbau32.to_le_bytes());
         port.write(0x1000, &request).unwrap();
         port.write(0x2000, &[0xa5; 4096]).unwrap();
-        ans.execute(0, &command, &mut port).unwrap();
+        ans.execute(0, &command, &mut port, &mut sart).unwrap();
         let mut geometry = [0; 0x80];
         port.read(0x2000, &mut geometry).unwrap();
         let field = |offset| u32::from_le_bytes(geometry[offset..offset + 4].try_into().unwrap());
@@ -636,6 +659,9 @@ mod tests {
         assert_eq!(&geometry[0x44..0x60], &[0xa5; 28]);
         assert_eq!(&geometry[0x60..0x62], &[1, 0xa5]);
         assert_eq!(&geometry[0x70..0x72], &[0, 0xa5]);
+        // Tunnel buffers outside the SART's allow-list refuse.
+        sart.write(0, Width::Word, 0, port.access).unwrap();
+        assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
     }
 
     #[test]
@@ -651,21 +677,21 @@ mod tests {
         )
         .unwrap();
         let mut memory = Ram::new(0x1000, 4096);
-        let mut sart = Sart::default();
+        let mut sart = Sart::new(Bounds::Exclusive);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut port = Port {
-            iommu: &mut sart,
+            iommu: &mut Physical,
             stream: 0,
             memory: &mut memory,
             access: &mut access,
         };
         let mut command = Command([0; 64]);
         command.0[0] = APPLE_TUNNEL;
-        assert!(ans.execute(0, &command, &mut port).is_err());
+        assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
         assert_eq!(ans.os_build, [0; 16]);
         command.0[0] = 0xc2;
-        assert!(ans.execute(0, &command, &mut port).is_err());
+        assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
     }
 
     #[test]

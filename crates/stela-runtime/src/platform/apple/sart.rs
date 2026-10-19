@@ -1,8 +1,14 @@
 //! SART v3 (`sart,coastguard`): sixteen identity-mapped DMA allow-list
 //! entries. Linux `drivers/soc/apple/sart.c`, `sart3_{get,set}_entry`, gives
 //! CONFIG at 4*i, PADDR at 0x40+4*i and SIZE at 0x80+4*i; addresses and
-//! lengths are in 4 KiB units. Only flags 0 (disabled) and 0xff (allow) have
-//! known semantics. Other flags refuse rather than widening permissions.
+//! lengths are in 4 KiB units. SPTM writes SIZE as the page count less one
+//! unless the SART's DT node has `exclusive-bounds` ([`Bounds`]). Only flags
+//! 0 (disabled) and 0xff (allow) have known semantics. Other flags refuse
+//! rather than widening permissions.
+//!
+//! On ANS2 the allow-list covers only what the coprocessor reaches at raw
+//! addresses carried in commands, the tunnel buffers: the NVMe engine reads
+//! queues, TCBs, PRPs and data at physical addresses (`ans`).
 //!
 //! The J473AP kernel's `IOCoastGuardSARTMapper::start` (file 0x2ccada8)
 //! passes `reg[0]` and `sart-version` to SPTM, which programs these entries.
@@ -40,20 +46,38 @@ struct Entry {
     pages: u32,
 }
 
-#[derive(Default)]
+/// How an entry's SIZE counts its pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bounds {
+    /// SIZE is the last page's index: SIZE + 1 pages.
+    Inclusive,
+    /// SIZE is the page count (`exclusive-bounds`).
+    Exclusive,
+}
+
 pub struct Sart {
     entries: [Entry; ENTRIES],
+    bounds: Bounds,
     idle: bool,
 }
 
 impl Sart {
+    pub fn new(bounds: Bounds) -> Self {
+        Self {
+            entries: [Entry::default(); ENTRIES],
+            bounds,
+            idle: false,
+        }
+    }
+
     /// Both directions use the same allow-list. Every byte must be inside
     /// one enabled entry; arithmetic must not wrap the physical address.
     pub fn allows(&self, first: u64, last: u64) -> bool {
         first <= last
             && self.entries.iter().any(|entry| {
+                let pages = u64::from(entry.pages) + u64::from(self.bounds == Bounds::Inclusive);
                 let base = u64::from(entry.base) * PAGE;
-                let end = base + u64::from(entry.pages) * PAGE;
+                let end = base + pages * PAGE;
                 entry.flags == ALLOW && first >= base && last < end
             })
     }
@@ -175,7 +199,7 @@ mod tests {
 
     #[test]
     fn synchronous_channel_configuration_is_nonzero_and_never_grants_dma() {
-        let mut sart = Sart::default();
+        let mut sart = Sart::new(Bounds::Exclusive);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         for offset in THROTTLES {
@@ -190,7 +214,7 @@ mod tests {
 
     #[test]
     fn entries_filter_both_directions_and_removal_revokes_access() {
-        let mut sart = Sart::default();
+        let mut sart = Sart::new(Bounds::Exclusive);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut ram = Ram::new(0x8_0000_0000, 8192);
@@ -217,8 +241,34 @@ mod tests {
     }
 
     #[test]
+    fn inclusive_sizes_count_the_last_page() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let address = 0x8_0000_0000;
+        for (bounds, size, pages) in [
+            (Bounds::Inclusive, 0, 1),
+            (Bounds::Inclusive, 1, 2),
+            (Bounds::Exclusive, 0, 0),
+            (Bounds::Exclusive, 1, 1),
+        ] {
+            let mut sart = Sart::new(bounds);
+            for (offset, value) in [(BASE, address / PAGE), (SIZE, size), (0, 0xff)] {
+                sart.write(offset, Width::Word, value, &mut access).unwrap();
+            }
+            let end = address + pages * PAGE;
+            assert_eq!(
+                sart.allows(address, address),
+                pages > 0,
+                "{bounds:?} {size}"
+            );
+            assert!(pages == 0 || sart.allows(address, end - 1));
+            assert!(!sart.allows(end, end));
+        }
+    }
+
+    #[test]
     fn unknown_permissions_widths_and_holes_refuse_without_effects() {
-        let mut sart = Sart::default();
+        let mut sart = Sart::new(Bounds::Exclusive);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         for (offset, width, value) in [

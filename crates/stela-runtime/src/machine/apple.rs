@@ -57,7 +57,7 @@ use crate::platform::apple::{
     wake::{self, WakeMasks},
     wdt::{self, AppleWdt},
 };
-use crate::platform::dma::Port;
+use crate::platform::dma::{Physical, Port};
 use crate::platform::usb::{
     Function,
     hid::{Input, Peripheral},
@@ -695,7 +695,12 @@ impl AppleDevices {
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("ANS ASC placement: {e:?}"))?;
-        let sart = self.bus.add(Box::new(Sart::default()));
+        let bounds = if placement.sart_exclusive_bounds {
+            sart::Bounds::Exclusive
+        } else {
+            sart::Bounds::Inclusive
+        };
+        let sart = self.bus.add(Box::new(Sart::new(bounds)));
         self.bus
             .map(sart, placement.sart.0, placement.sart.1, 0)
             .map_err(|e| format!("SART placement: {e:?}"))?;
@@ -1812,12 +1817,12 @@ impl Devices for AppleDevices {
             }
             let mut access = Access::new(cpu, now, &mut self.latch);
             let mut port = Port {
-                iommu: sart,
+                iommu: &mut Physical,
                 stream: 0,
                 memory,
                 access: &mut access,
             };
-            ans.run(&mut port)
+            ans.run(&mut port, sart)
                 .map_err(|error| match describe_transfer(error) {
                     DeviceError::TransferRefused(reason) => DeviceError::TransferRefused(format!(
                         "{reason}; ANS last submission {:02x?}",
@@ -2150,6 +2155,7 @@ mod tests {
             vdma: Some((VDMA, 0x44000)),
             sart: (SART, 0xc000),
             sart_idle: NVME + 0x13e8,
+            sart_exclusive_bounds: false,
             interrupts: [718, 717, 720, 719],
             completion_irq: 724,
             namespaces: alloc::vec![ans::Description {

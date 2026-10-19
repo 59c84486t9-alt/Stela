@@ -39,6 +39,27 @@ pub trait Iommu {
     ) -> Result<u64, DmaError>;
 }
 
+/// A bus master without an IOMMU: I/O addresses are physical addresses.
+pub struct Physical;
+
+impl Iommu for Physical {
+    fn page(&self) -> u64 {
+        0x1000
+    }
+
+    fn translate(
+        &mut self,
+        _memory: &mut dyn Memory,
+        _stream: usize,
+        iova: u64,
+        _last: u64,
+        _write: bool,
+        _access: &mut Access<'_>,
+    ) -> Result<u64, DmaError> {
+        Ok(iova)
+    }
+}
+
 /// One stream's I/O address space: transfers split at IOMMU pages, and stop
 /// at the first page that faults or is not RAM.
 pub struct Port<'a, 'b> {

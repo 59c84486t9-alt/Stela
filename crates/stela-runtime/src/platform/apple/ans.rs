@@ -31,7 +31,7 @@ use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
 };
-use crate::platform::{dma::Port, pc::block::BlockDevice};
+use crate::platform::{apple::sart::Sart, dma::Port, pc::block::BlockDevice};
 use alloc::{boxed::Box, collections::VecDeque};
 pub use namespace::Description;
 use namespace::Medium;
@@ -393,10 +393,16 @@ impl Ans {
         Ok(())
     }
 
-    /// Complete submitted commands through the board's SART port before the
-    /// next guest access. NVMMU TCB PRPs are authoritative; their encryption
-    /// and hash fields must be zero until those engines are modeled.
-    pub fn run(&mut self, port: &mut Port<'_, '_>) -> Result<(), MmioError> {
+    /// Complete submitted commands before the next guest access. The NVMe
+    /// engine reaches queues, TCBs, PRPs and data at physical addresses
+    /// through `port`: the driver gives them no SART entries
+    /// (`AllocateNVMeQueue` 0x3dbe804 and the request pool create their
+    /// buffers without a mapper; `GetIOMappers` 0x3dbceb4). Only tunnel
+    /// buffers, which the coprocessor reaches at raw addresses carried in the
+    /// command (`AllocateTunnelBuffer` 0x3dbe83c), are checked against `sart`.
+    /// NVMMU TCB PRPs are authoritative; their encryption and hash fields
+    /// must be zero until those engines are modeled.
+    pub fn run(&mut self, port: &mut Port<'_, '_>, sart: &mut Sart) -> Result<(), MmioError> {
         while let Some(&(queue, tag)) = self.pending.front() {
             self.last_submission = None;
             let error = |reason| {
@@ -459,7 +465,7 @@ impl Ans {
                 return Err(error("ANS NVMMU length differs from the command"));
             }
             command.0[24..40].copy_from_slice(&tcb[24..40]);
-            let outcome = self.execute(queue, &command, port).map_err(error)?;
+            let outcome = self.execute(queue, &command, port, sart).map_err(error)?;
             let mut completion = [0; 16];
             completion[..4].copy_from_slice(&outcome.result.to_le_bytes());
             // Linear SQs have no advancing head; the consumed slot is tag.
@@ -698,8 +704,11 @@ impl MmioDevice for Ans {
 mod tests {
     use super::*;
     use crate::platform::{
-        apple::{interrupt::InterruptLatch, sart::Sart},
-        dma::{Memory, tests::Ram},
+        apple::{
+            interrupt::InterruptLatch,
+            sart::{Bounds, Sart},
+        },
+        dma::{Memory, Physical, tests::Ram},
         pc::block::tests::RamDisk,
     };
     use alloc::vec;
@@ -738,7 +747,7 @@ mod tests {
                     Some(IRQ),
                 )
                 .unwrap(),
-                sart: Sart::default(),
+                sart: Sart::new(Bounds::Exclusive),
                 ram: Ram::new(RAM, 0x20000),
                 latch: InterruptLatch::new(),
             };
@@ -776,12 +785,15 @@ mod tests {
         }
         fn run(&mut self) -> Result<(), MmioError> {
             let mut access = Access::new(0, 0, &mut self.latch);
-            self.ans.run(&mut Port {
-                iommu: &mut self.sart,
-                stream: 0,
-                memory: &mut self.ram,
-                access: &mut access,
-            })
+            self.ans.run(
+                &mut Port {
+                    iommu: &mut Physical,
+                    stream: 0,
+                    memory: &mut self.ram,
+                    access: &mut access,
+                },
+                &mut self.sart,
+            )
         }
         fn submit(
             &mut self,
@@ -984,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn sart_faults_encryption_and_unknown_commands_never_complete() {
+    fn encryption_and_unknown_commands_never_complete_and_queues_bypass_the_sart() {
         let mut rig = Rig::new();
         assert!(rig.submit(0, 0, 0xff, 0, 0, [0; 6]).is_err());
         assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
@@ -1006,13 +1018,15 @@ mod tests {
         assert_eq!(rejected.command[0], 6);
         assert_eq!(rejected.tcb[64], 1);
         assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
+        // Queues, TCBs and PRP data are physical: an Identify completes
+        // with every SART entry disabled.
         let mut rig = Rig::new();
         rig.sart
             .write(0, Width::Word, 0, &mut Access::new(0, 0, &mut rig.latch))
             .unwrap();
-        assert!(rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).is_err());
-        assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
-        assert!(!rig.latch.is_asserted(Wire::Aic(IRQ)));
+        rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
+        assert_ne!(rig.bytes(CQ, 16), vec![0; 16]);
+        assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
     }
 
     #[test]
