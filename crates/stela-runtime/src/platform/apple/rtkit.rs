@@ -32,6 +32,19 @@
 //! enumeration; any other waits for the coprocessor to announce power-on
 //! with an unsolicited type 7 0x20 (`_iopValidate` 0x465dfd8).
 //!
+//! A nub marked `quiesced` was used and quiesced by the boot chain:
+//! `RTBuddy::_initConfigEDT` (0xfffffe000b665158) starts it in power state
+//! 3, and `_performPowerStateChangeGated` (0xfffffe000b66187c) wakes it
+//! with `wakeQuiesced` (0xfffffe000b674db8): IOP power 0x220, or AP power
+//! 0x20 when `automatic-rail-gating-enabled` is set. A quiesced coprocessor
+//! sends no HELLO until that wake. It then says HELLO and rolls call, and it
+//! acknowledges 0x220 once enumeration completes. That ack's low byte 0x20
+//! moves the AP to running (`_handlePowerAck` 0xfffffe000b674930), as Linux
+//! `apple_rtkit_wake` also expects. An ack sent during enumeration would
+//! change the AP's status before the last roll-call group, which
+//! `_handleEPRollCall` (0xfffffe000b6746e8) requires at VersionOk. The
+//! rail-gated AP-power wake is not modeled and refuses.
+//!
 //! The roll call lists exactly the endpoints the model provides. RTKit's
 //! system endpoints (crashlog 1, syslog 2, kdebug 3, IOReporting 4, OSLog 8,
 //! ...) are services of Apple's firmware this coprocessor does not have, so
@@ -72,7 +85,9 @@ const DISABLE: u64 = 1;
 pub const VERSION: u64 = 12;
 /// The IOP power state of a running coprocessor.
 pub const POWER_ON: u64 = 0x20;
-const IOP_STATES: [u64; 4] = [0x201, 0x220, 0x202, 0];
+const IOP_STATES: [u64; 4] = [0x201, WAKE, 0x202, 0];
+/// The IOP power state that wakes a quiesced coprocessor.
+const WAKE: u64 = 0x220;
 const AP_STATES: [u64; 3] = [0x201, POWER_ON, 0];
 
 /// The first application endpoint.
@@ -89,6 +104,8 @@ pub trait Endpoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
+    /// Quiesced by the boot chain, waiting for the AP's wake.
+    Quiesced,
     /// HELLO sent, waiting for the AP's choice.
     Hello,
     /// Roll call of `group` sent, waiting for the AP's answer.
@@ -111,6 +128,9 @@ pub struct RtKit {
     endpoints: BTreeMap<u8, (Box<dyn Endpoint>, bool)>,
     management: Management,
     stage: Stage,
+    quiesced: bool,
+    /// The wake state acknowledged when enumeration completes.
+    wake: Option<u64>,
     iop_power: u64,
     ap_power: u64,
     power_nap: bool,
@@ -143,10 +163,23 @@ impl RtKit {
             endpoints: map,
             management,
             stage: Stage::Hello,
+            quiesced: false,
+            wake: None,
             iop_power: POWER_ON,
             ap_power: 0,
             power_nap: false,
         })
+    }
+
+    /// The boot chain hands the coprocessor off quiesced (DT `quiesced`).
+    pub fn quiesced(mut self) -> Self {
+        self.quiesced = true;
+        self
+    }
+
+    fn hello(&mut self, outbox: &mut Vec<Message>) {
+        self.stage = Stage::Hello;
+        outbox.push(management(HELLO, VERSION | VERSION << 16));
     }
 
     /// Group `group`'s bitmap: the management endpoint and the endpoints the
@@ -229,13 +262,22 @@ impl RtKit {
                     Some(next) => self.roll_call(next, outbox),
                     None => {
                         self.stage = Stage::Ready;
-                        if self.management == Management::Ordinary {
+                        if let Some(state) = self.wake.take() {
+                            outbox.push(management(IOP_POWER_ACK, state));
+                        } else if self.management == Management::Ordinary {
                             outbox.push(management(IOP_POWER_ACK, POWER_ON));
                         }
                     }
                 }
                 Ok(())
             }
+            (IOP_POWER, Stage::Quiesced) if fields == WAKE => {
+                self.iop_power = fields;
+                self.wake = Some(fields);
+                self.hello(outbox);
+                Ok(())
+            }
+            (_, Stage::Quiesced) => Err("RTKit quiesced coprocessor takes only the IOP power wake"),
             (ENDPOINT_CONTROL, Stage::Ready) => self.control(fields, outbox),
             (IOP_POWER, _) if IOP_STATES.contains(&fields) => {
                 self.iop_power = fields;
@@ -262,8 +304,11 @@ impl RtKit {
 
 impl Firmware for RtKit {
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
-        self.stage = Stage::Hello;
-        outbox.push(management(HELLO, VERSION | VERSION << 16));
+        if self.quiesced {
+            self.stage = Stage::Quiesced;
+        } else {
+            self.hello(outbox);
+        }
         Ok(())
     }
 
@@ -408,6 +453,35 @@ mod tests {
         assert!(mgmt(&mut rtkit, AP_POWER, 0x202).is_err());
         assert!(mgmt(&mut rtkit, POWER_NAP, 2).is_err());
         assert!(mgmt(&mut rtkit, 0xf, 0).is_err());
+    }
+
+    #[test]
+    fn a_quiesced_coprocessor_waits_for_its_wake_and_acks_it_after_enumeration() {
+        let mut rtkit = RtKit::new(
+            vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
+            Management::User,
+        )
+        .unwrap()
+        .quiesced();
+        let mut outbox = Vec::new();
+        rtkit.start(&mut outbox).unwrap();
+        assert!(outbox.is_empty());
+        assert!(mgmt(&mut rtkit, AP_POWER, POWER_ON).is_err());
+        assert!(mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).is_err());
+        assert_eq!(
+            mgmt(&mut rtkit, IOP_POWER, WAKE).unwrap(),
+            vec![management(HELLO, 12 | 12 << 16)]
+        );
+        mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
+        // No ack before the last group is answered.
+        assert_eq!(
+            mgmt(&mut rtkit, ROLL_CALL, 1).unwrap(),
+            vec![management(ROLL_CALL, ROLL_CALL_LAST | 1 << 32 | 1)]
+        );
+        assert_eq!(
+            mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 1 << 32).unwrap(),
+            vec![management(IOP_POWER_ACK, WAKE)]
+        );
     }
 
     #[test]

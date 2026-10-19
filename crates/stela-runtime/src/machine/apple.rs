@@ -636,8 +636,11 @@ impl AppleDevices {
             .map(|&name| (name, smc::Key::gpio()))
             .collect();
         let endpoint = Smc::new(sram.clone(), placement.region.0, keys).map_err(String::from)?;
-        let rtkit = RtKit::new(vec![(smc::ENDPOINT, Box::new(endpoint))], Management::User)
+        let mut rtkit = RtKit::new(vec![(smc::ENDPOINT, Box::new(endpoint))], Management::User)
             .map_err(String::from)?;
+        if placement.quiesced {
+            rtkit = rtkit.quiesced();
+        }
         let wrapper = Asc::booted(
             Box::new(rtkit),
             AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
@@ -1907,6 +1910,7 @@ mod tests {
             watchdog: Some((WATCHDOG, 0x14)),
             region: (REGION, 0x10_0000),
             gpio_keys: alloc::vec![smc::code(b"gP16")],
+            quiesced: true,
         };
         let mut devices = AppleDevices::new();
         devices

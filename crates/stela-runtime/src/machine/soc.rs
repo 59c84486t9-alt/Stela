@@ -1566,6 +1566,7 @@ pub struct AnsController {
 /// the window AppleSMCKeysEndpoint accepts the shared page in
 /// (`_keyEndpointHandler`, 0xfffffe0009da5a20). `gpio_keys` are the keys
 /// the tree's `pKW4` platform functions write through the nub's `smc-pmu`.
+/// `quiesced` is the nub's hand-off state (`rtkit::RtKit::quiesced`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmcController {
     pub wrapper: (u64, u64),
@@ -1573,6 +1574,7 @@ pub struct SmcController {
     pub watchdog: Option<(u64, u64)>,
     pub region: (u64, u64),
     pub gpio_keys: Vec<u32>,
+    pub quiesced: bool,
 }
 
 /// A platform function property is the provider's phandle, the function's
@@ -1654,6 +1656,7 @@ fn smc_controller(
         watchdog,
         region: (base, size),
         gpio_keys,
+        quiesced: nub.property("quiesced").is_some(),
     }))
 }
 
@@ -3723,6 +3726,7 @@ mod tests {
                     ("compatible", &z(RTBUDDY)),
                     ("region-base", &0x2_3fe0_0000u64.to_le_bytes()),
                     ("region-size", &region_size.to_le_bytes()),
+                    ("quiesced", &[]),
                 ],
                 &[pmu],
             );
@@ -3781,6 +3785,7 @@ mod tests {
         assert_eq!(placed.watchdog, Some((0x2_3e81_0000, 0x14)));
         assert_eq!(placed.interrupts, [0x1f4, 0x1f3, 0x1f6, 0x1f5]);
         assert_eq!(placed.region, (0x2_3fe0_0000, 0x10_0000));
+        assert!(placed.quiesced);
         // Sorted; `keyW` is not a GPIO write.
         assert_eq!(
             placed.gpio_keys,
