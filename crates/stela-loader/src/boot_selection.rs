@@ -277,6 +277,19 @@ impl Selection {
     pub fn consumes(&self) -> bool {
         !self.consumed.is_empty()
     }
+
+    /// The boot disk holds no installed system: boot System Recovery, as
+    /// the 26A434 kernel's `IOSetRecoveryBoot` asks with
+    /// `boot-picker-bringup-reason=missing-boot-media` and
+    /// `boot-command=recover-system` (Inferred: LLB does the same when it
+    /// finds no boot volume, its `recover-fallback`).
+    pub fn missing_boot_media(&mut self) {
+        if matches!(self.target, Target::MacOs { .. }) {
+            self.target = Target::SystemRecovery;
+            self.reasons
+                .push("missing-boot-media: the boot disk holds no installed system".into());
+        }
+    }
 }
 
 /// `name`'s value, from `system` and then `common`.
@@ -690,6 +703,12 @@ mod tests {
                 .1
                 .contains("paired recoveryOS")
         );
+        // A disk without an installed system boots System Recovery too.
+        let mut empty = select(&variables(&[])).unwrap();
+        empty.missing_boot_media();
+        let (options, log) = route(CONFIG, Some(&empty)).unwrap();
+        assert!(options.ends_with("--bundle \\EFI\\stela\\recovery"));
+        assert!(log.contains("missing-boot-media"));
         let without = "--system --preboot S:G";
         assert!(route(without, Some(&selection)).is_err());
         assert!(route("--system --safe-boot", None).is_err());
