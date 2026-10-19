@@ -512,6 +512,9 @@ fn devices<'f>(
             .collect();
         devices.add_gpio(gpio, &selects, &interrupts)?;
     }
+    for aux in board.map_or(&[][..], |board| &board.aux_gpios) {
+        devices.add_aux_gpio(aux)?;
+    }
     if let Some(spi) = board.and_then(|board| board.spi_nor.as_ref()) {
         devices.add_spi_nor(spi)?;
     }

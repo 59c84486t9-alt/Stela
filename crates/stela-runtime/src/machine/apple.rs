@@ -28,7 +28,7 @@ use crate::platform::apple::{
     dwc3::{self, Dwc3, PortState},
     energy::{self, Energy},
     fuse::{self, AonFuses},
-    gpio::{Gpio, Net},
+    gpio::{Gpio, Net, OpenDrain},
     hpm::{Firmware, Hpm, Summary},
     i2c::{self, I2c},
     interrupt::{CpuIndex, InterruptLatch},
@@ -106,6 +106,9 @@ pub struct AppleDevices {
     selects: Vec<SelectWire>,
     /// The AP GPIO bank's base and the board nets on its input pins.
     gpio: Option<(u64, Vec<(u32, Net)>)>,
+    /// The other GPIO banks' phandles and the board nets on their client
+    /// pins.
+    aux_gpios: Vec<(u32, Vec<(u32, Net)>)>,
     typec_ports: Vec<(u32, typec::Port)>,
     pmgr: Option<DeviceId>,
     dart_power: Vec<DartPower>,
@@ -308,6 +311,7 @@ impl AppleDevices {
             starts: Vec::new(),
             selects: Vec::new(),
             gpio: None,
+            aux_gpios: Vec::new(),
             typec_ports: Vec::new(),
             pmgr: None,
             dart_power: Vec::new(),
@@ -381,6 +385,55 @@ impl AppleDevices {
             .map_err(|e| format!("GPIO placement: {e:?}"))?;
         self.gpio = Some((bank.physical, nets));
         Ok(())
+    }
+
+    /// Places another GPIO bank (`aop-gpio`, `smc-gpio`) with a pulled-up
+    /// board net on each pin its clients name. A pin no device drives reads
+    /// its pull-up; the board model that drives one, such as the HDMI
+    /// converter's hot-plug output, attaches through [`Self::gpio_line`]
+    /// before the guest runs.
+    pub fn add_aux_gpio(&mut self, aux: &super::soc::AuxGpioBank) -> Result<(), String> {
+        if self
+            .aux_gpios
+            .iter()
+            .any(|(phandle, _)| *phandle == aux.bank.phandle)
+        {
+            return Err(format!("GPIO bank {} placed twice", aux.name));
+        }
+        let nets: Vec<(u32, Net)> = aux
+            .client_pins
+            .iter()
+            .map(|&pin| (pin, Net::new()))
+            .collect();
+        let lines = aux
+            .bank
+            .lines
+            .iter()
+            .map(|&irq| AicInput::new(0, irq))
+            .collect();
+        let gpio = Gpio::new(aux.bank.pins, lines, &[], nets.clone())
+            .map_err(|error| format!("{}: {error}", aux.name))?;
+        let id = self.bus.add(Box::new(gpio));
+        self.bus
+            .map(id, aux.bank.physical, aux.bank.bytes, 0)
+            .map_err(|e| format!("{} placement: {e:?}", aux.name))?;
+        self.aux_gpios.push((aux.bank.phandle, nets));
+        Ok(())
+    }
+
+    /// A driver on `pin` of the GPIO bank with phandle `bank`: released, the
+    /// pin reads high; pulled low, it reads low.
+    pub fn gpio_line(&mut self, bank: u32, pin: u32) -> Result<OpenDrain, String> {
+        let (_, nets) = self
+            .aux_gpios
+            .iter()
+            .find(|(phandle, _)| *phandle == bank)
+            .ok_or_else(|| format!("no auxiliary GPIO bank with phandle {bank:#x}"))?;
+        let (_, net) = nets
+            .iter()
+            .find(|(p, _)| *p == pin)
+            .ok_or_else(|| format!("GPIO pin {pin} has no client in bank {bank:#x}"))?;
+        net.open_drain().map_err(String::from)
     }
 
     fn gpio_net(&self, pin: u32) -> Result<&Net, String> {
@@ -1956,6 +2009,40 @@ mod tests {
         let mut model = [0; 10];
         assert!(Memory::read(&mut ram, RAM + 0x4000 + 24, &mut model));
         assert_eq!(&model, b"Stela ANS2");
+    }
+
+    #[test]
+    fn an_aux_gpio_bank_reads_the_lines_its_board_drives() {
+        use crate::machine::soc::{AuxGpioBank, GpioBank};
+        const BANK: u64 = 0x2_4a82_0000;
+        const HPD: u32 = 0x31;
+        let aux = AuxGpioBank {
+            name: "aop-gpio".into(),
+            bank: GpioBank {
+                physical: BANK,
+                bytes: 0x4000,
+                pins: 0x36,
+                phandle: 0x6b,
+                lines: alloc::vec![0x12d, 0x12e, 0x12f, 0x130, 0x131, 0x132, 0x133],
+                i2c_lines: Vec::new(),
+            },
+            client_pins: alloc::vec![0x28, HPD],
+        };
+        let mut devices = AppleDevices::new();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        devices.add_aux_gpio(&aux).unwrap();
+        assert!(devices.add_aux_gpio(&aux).is_err());
+        let hpd = devices.gpio_line(0x6b, HPD).unwrap();
+        assert!(devices.gpio_line(0x6b, 0x30).is_err());
+        assert!(devices.gpio_line(0x6c, HPD).is_err());
+        // An interrupt-disabled input with its receiver on reads the net.
+        let pin = BANK + 4 * u64::from(HPD);
+        devices.write(0, pin, 4, 0xe | 1 << 9, 0).unwrap();
+        assert_eq!(devices.read(0, pin, 4, 0).unwrap() & 1, 1);
+        hpd.pull_low(true);
+        assert_eq!(devices.read(0, pin, 4, 0).unwrap() & 1, 0);
     }
 
     #[test]

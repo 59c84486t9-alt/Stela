@@ -897,6 +897,8 @@ pub struct UsbController {
 pub struct Board {
     /// The AP GPIO bank, when visible.
     pub gpio: Option<GpioBank>,
+    /// The other visible GPIO banks, in DeviceTree order.
+    pub aux_gpios: Vec<AuxGpioBank>,
     /// SPI1, its NOR image and the GPIO chip-select wire, when visible.
     pub spi_nor: Option<SpiNor>,
     /// Explicitly visible I2C controllers and their addressed targets.
@@ -1295,7 +1297,81 @@ fn gpio_bank(
     let Some(node) = io.child("gpio").filter(|n| n.compatible(GPIO)) else {
         return Ok(None);
     };
-    let (physical, bytes) = single_range(&node, translate)?;
+    let mut bank = gpio_geometry(&node, translate, aic)?;
+    bank.i2c_lines = i2c_lines(io, bank.pins)?;
+    Ok(Some(bank))
+}
+
+/// Another visible GPIO bank (`gpio,t8101` under `/arm-io` other than the
+/// AP's `gpio`: J473AP's `aop-gpio` and `smc-gpio`), and the pins its
+/// clients name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxGpioBank {
+    pub name: String,
+    pub bank: GpioBank,
+    /// Pins the tree's other nodes use: each `interrupts` pin of a node
+    /// whose `interrupt-parent` is the bank (`[pin, flags]` pairs) and each
+    /// `function-*` GPIO pin on it (`[bank, 'GPIO', pin, flags]`), such as
+    /// `dp2hdmi-gpio`'s HDMI hot-plug input, `aop-gpio` pin 0x31.
+    pub client_pins: Vec<u32>,
+}
+
+fn aux_gpio_banks(
+    root: &Node<'_>,
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    aic: u32,
+) -> Result<Vec<AuxGpioBank>, String> {
+    let mut banks = Vec::new();
+    for node in io.children().ok_or("/arm-io children are malformed")? {
+        let name = node
+            .property("name")
+            .and_then(|name| core::str::from_utf8(name).ok())
+            .map(|name| name.trim_end_matches('\0'))
+            .unwrap_or_default();
+        if name == "gpio" || !node.compatible(GPIO) {
+            continue;
+        }
+        let bank =
+            gpio_geometry(&node, translate, aic).map_err(|error| format!("{name}: {error}"))?;
+        let mut client_pins = Vec::new();
+        root.visit(&mut |client| {
+            if client.first_u32("interrupt-parent") == Some(bank.phandle)
+                && let Some(cells) = client.cells32("interrupts")
+            {
+                client_pins.extend(cells.as_chunks::<2>().0.iter().map(|[pin, _]| *pin));
+            }
+            for (property, value) in client.properties().unwrap_or_default() {
+                if property.starts_with(b"function-")
+                    && let Some([provider, GPIO_FUNCTION, pin, _]) = cells_of(value)
+                    && provider == bank.phandle
+                {
+                    client_pins.push(pin);
+                }
+            }
+        })
+        .ok_or("DeviceTree walk failed")?;
+        client_pins.sort_unstable();
+        client_pins.dedup();
+        if let Some(&pin) = client_pins.iter().find(|&&pin| pin >= bank.pins) {
+            return Err(format!("{name}: a client names pin {pin} past the bank"));
+        }
+        banks.push(AuxGpioBank {
+            name: name.into(),
+            bank,
+            client_pins,
+        });
+    }
+    Ok(banks)
+}
+
+/// A `gpio,t8101` node's registers, pins, groups and AIC lines.
+fn gpio_geometry(
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+    aic: u32,
+) -> Result<GpioBank, String> {
+    let (physical, bytes) = single_range(node, translate)?;
     let pins = node
         .first_u32("#gpio-pins")
         .ok_or("GPIO pin count missing")?;
@@ -1317,7 +1393,7 @@ fn gpio_bank(
     {
         return Err("unsupported GPIO geometry or interrupt parent".into());
     }
-    Ok(Some(GpioBank {
+    Ok(GpioBank {
         physical,
         bytes,
         pins,
@@ -1325,8 +1401,8 @@ fn gpio_bank(
             .first_u32("AAPL,phandle")
             .ok_or("GPIO phandle missing")?,
         lines,
-        i2c_lines: i2c_lines(io, pins)?,
-    }))
+        i2c_lines: Vec::new(),
+    })
 }
 
 /// The ADT cell naming the AP GPIO bank in a `gpio-iic_*` pin property
@@ -3462,6 +3538,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let memory_controller =
         memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
     let gpio = gpio_bank(&io, &translate, phandle)?;
+    let aux_gpios = aux_gpio_banks(&root, &io, &translate, phandle)?;
     let (i2cs, typec_phys) = typec_devices(&io, &translate, phandle, gpio.as_ref())?;
     let darts = iommus(&io, &translate)?;
     let aes = aes_engine(&io, &translate, &darts)?;
@@ -3488,6 +3565,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     Ok(Board {
         spmis,
         gpio,
+        aux_gpios,
         i2cs,
         typec_phys,
         cluster_events,
@@ -3678,6 +3756,70 @@ mod tests {
             watchdog_side(&Node::root(&tree).unwrap(), &Some).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn other_gpio_banks_carry_the_pins_their_clients_name() {
+        use crate::machine::adt::encode;
+        let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        let pairs = |v: &[u64]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+        // J473AP's aop-gpio, its dp2hdmi-gpio client and a hidden smc-gpio.
+        let aop = encode(
+            &[
+                ("name", b"aop-gpio\0"),
+                ("compatible", b"gpio,t8101\0"),
+                ("reg", &pairs(&[0x4a820000, 0x4000])),
+                ("#gpio-pins", &words(&[0x36])),
+                ("#gpio-int-groups", &words(&[7])),
+                ("AAPL,phandle", &words(&[0x6b])),
+                ("interrupt-parent", &words(&[99])),
+                (
+                    "interrupts",
+                    &words(&[0x12d, 0x12e, 0x12f, 0x130, 0x131, 0x132, 0x133]),
+                ),
+            ],
+            &[],
+        );
+        let hidden = encode(
+            &[
+                ("name", b"smc-gpio\0"),
+                ("reg", &pairs(&[0x3e820000, 0x4000])),
+                ("AAPL,phandle", &words(&[0x6d])),
+            ],
+            &[],
+        );
+        let client = encode(
+            &[
+                ("name", b"dp2hdmi-gpio\0"),
+                ("interrupt-parent", &words(&[0x6b])),
+                ("interrupts", &words(&[0x31, 0x500_0004])),
+                (
+                    "function-hdmi_hpd",
+                    &words(&[0x6b, GPIO_FUNCTION, 0x31, 0x100]),
+                ),
+                (
+                    "function-force-dpfu",
+                    &words(&[0x6b, GPIO_FUNCTION, 0x28, 0x1]),
+                ),
+                (
+                    "function-hdmi_pwr_en",
+                    &words(&[0x91, u32::from_be_bytes(*b"pKW4"), 0x6750_3136, 0x80_0000]),
+                ),
+            ],
+            &[],
+        );
+        let io = encode(&[("name", b"arm-io\0")], &[aop, hidden, client]);
+        let data = encode(&[("name", b"device-tree\0")], &[io]);
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let translate = |v: u64| v.checked_add(0x2_0000_0000);
+        let banks = aux_gpio_banks(&root, &io, &translate, 99).unwrap();
+        assert_eq!(banks.len(), 1);
+        assert_eq!(banks[0].name, "aop-gpio");
+        assert_eq!(banks[0].bank.physical, 0x2_4a82_0000);
+        assert_eq!(banks[0].bank.pins, 0x36);
+        assert_eq!(banks[0].client_pins, [0x28, 0x31]);
+        assert!(aux_gpio_banks(&root, &io, &translate, 100).is_err());
     }
 
     #[test]
