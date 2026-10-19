@@ -364,21 +364,27 @@ task_b:
     mov x8, #1
 1:  mov x9, #0
     adr x12, touch
+    adr x13, bounce
+    adr x14, 3f
 2:  bl increment                        // a call out of the 4 KiB page
     blr x12                             // and an indirect one
-    str x9, [sp, #-16]!
+    br x13                              // and jumps there and back
+3:  str x9, [sp, #-16]!
     ldr x10, [sp], #16
     tst x9, #0xff
     b.ne 2b
     svc #1
     b 2b
-// The next 4 KiB page of the user text (USER_VA + 0x1000): the calls to it
-// and the returns from it go through the engine's lookup thunks.
+// The next 4 KiB page of the user text (USER_VA + 0x1000): the calls to it,
+// the jumps to and from it and the returns from it go through the engine's
+// lookup thunks.
 .org user_start + 0x1000
 increment:
     add x9, x9, #1
     ret
 touch:
     ret
+bounce:
+    br x14
 .balign 16
 user_end:

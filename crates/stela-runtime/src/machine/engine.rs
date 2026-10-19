@@ -650,7 +650,8 @@ struct Block {
 
 /// The exit kind of a branch to a register's value (RET, BR, BLR and their
 /// PAC forms RETA*, BRA*, BLRA*), and the BTYPE it sets whatever page it is
-/// in: none for a BR form through other than X16 or X17 (Arm BTypeNext).
+/// in: none for a BR form through other than X16 or X17, which sets 0b11 in
+/// a guarded page and 0b01 elsewhere (Arm BTypeNext).
 fn dynamic_branch(word: u32) -> Option<(ExitKind, Option<u8>)> {
     // Bits 22:21 select BR, BLR or RET; bit 11 a PAC form, whose bit 24
     // selects the register modifier.
@@ -732,6 +733,10 @@ struct Variant {
     /// (`system::native_zero_block`), and the DC clean operations while
     /// they only check the translation of Xt (`system::native_cache_clean`).
     system: NativeSystem,
+    /// FEAT_BTI: the block's page is guarded (Arm `InGuardedPage`), which
+    /// fixes the BTYPE its BR forms through other than X16 and X17 set.
+    /// Contexts leave it out, as it belongs to a page, not to the PE.
+    guarded_page: bool,
 }
 
 /// Xt of `word` at `pc` if it is MRS Xt, TPIDR_EL1.
@@ -1860,10 +1865,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Redirect block `index`'s exit to the target in RAX, which just left
     /// BTYPE `btype`, through a lookup thunk, whose target any fetch may
-    /// have run. The thunk sets the BTYPE its form always sets: 0 for
-    /// RET, 0b10 for BLR forms and 0b01 for BR forms through X16 or X17; a
-    /// BR form through another register sets one that depends on its page
-    /// and keeps exiting to the engine.
+    /// have run. The thunk sets the BTYPE the form sets from the block's
+    /// page: 0 for RET, 0b10 for BLR forms, 0b01 for BR forms through X16
+    /// or X17, and for BR forms through another register 0b11 in a guarded
+    /// page and 0b01 elsewhere. Blocks are compiled per guarded page, so
+    /// the page's BTYPE is the block's.
     fn link_dynamic(&mut self, index: usize, btype: u8) {
         let block = &self.blocks[index];
         let Some(site) = block.dynamic_site.filter(|_| !block.variant.single) else {
@@ -1872,7 +1878,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some((kind, fixed)) = dynamic_branch(block.terminal.1) else {
             return;
         };
-        if fixed != Some(btype) {
+        let page = if block.variant.guarded_page {
+            0b11
+        } else {
+            0b01
+        };
+        if fixed.unwrap_or(page) != btype {
             return;
         }
         let retired = block.source_map.len() as u32;
@@ -2144,9 +2155,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .is_some()
                 .then(|| self.cpu.svcr() & 1 != 0),
             system: self.native_system(),
+            guarded_page: self.fetch_guarded(pc),
         };
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
-        self.chain.context = self.context(el, variant);
+        self.chain.context = self.context(
+            el,
+            Variant {
+                guarded_page: false,
+                ..variant
+            },
+        );
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
@@ -2210,6 +2228,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             single,
             scalable,
             system,
+            guarded_page: _,
         } = variant;
         let available = if single {
             INSTRUCTION
@@ -5272,6 +5291,8 @@ mod tests {
 
     #[test]
     fn dynamic_branches_name_their_exit_and_any_page_independent_btype() {
+        // BR through other than X16 or X17 sets a BTYPE that depends on
+        // its page.
         for (word, expected) in [
             (0xd61f_0000, Some((ExitKind::Indirect, None))), // br x0
             (0xd61f_0200, Some((ExitKind::Indirect, Some(0b01)))), // br x16
@@ -5288,10 +5309,11 @@ mod tests {
         }
     }
 
-    /// BLR and BR X16 exits are redirected through lookup thunks that set
-    /// their BTYPE; BR through another register, whose BTYPE depends on its
-    /// page, keeps exiting. A target in a guarded page accepts the BTYPEs
-    /// its first instruction is compatible with.
+    /// BLR and BR exits are redirected through lookup thunks that set their
+    /// BTYPE: a BR through other than X16 or X17 sets 0b11 from a guarded
+    /// page, whose blocks are compiled apart, and 0b01 elsewhere. A target
+    /// in a guarded page accepts the BTYPEs its first instruction is
+    /// compatible with.
     #[test]
     fn indirect_branches_go_through_lookups_that_check_the_target() {
         const BLR_X8: u32 = 0xd63f_0100;
@@ -5314,20 +5336,34 @@ mod tests {
             exit(ExitKind::Call),
             exit(ExitKind::Indirect),
             exit(ExitKind::Indirect),
+            exit(ExitKind::Indirect),
         ];
         for pc in [base, base + 4, base + 8] {
             machine.cpu.pc = pc;
             machine.cpu.pstate.btype = 0;
             machine.step().unwrap();
         }
+        // The same BR X0, now in a guarded page.
+        let page = (base / FETCH_PAGE) as usize % FETCH_CACHE;
+        machine.fetch[page].as_mut().unwrap().guarded = true;
+        machine.cpu.pc = base + 8;
+        machine.cpu.pstate.btype = 0;
+        machine.step().unwrap();
+        assert_eq!(machine.blocks.len(), 4);
+        assert!(!machine.blocks[2].variant.guarded_page && machine.blocks[3].variant.guarded_page);
         let control = &*machine.chain as *const ChainControl as u64;
-        for (index, kind, btype) in [(0, ExitKind::Call, 0b10), (1, ExitKind::Indirect, 0b01)] {
+        for (index, kind, btype) in [
+            (0, ExitKind::Call, 0b10),
+            (1, ExitKind::Indirect, 0b01),
+            (2, ExitKind::Indirect, 0b01),
+            (3, ExitKind::Indirect, 0b11),
+        ] {
             let thunk = chain::lookup_thunk(control, 1, None, kind, btype).unwrap();
-            assert!(machine.host.installed.contains(&thunk), "{kind:?}");
-            assert_eq!(machine.blocks[index].dynamic_site, None);
+            assert!(machine.host.installed.contains(&thunk), "{index}");
+            assert_eq!(machine.blocks[index].dynamic_site, None, "{index}");
         }
-        assert!(machine.blocks[2].dynamic_site.is_some());
-        assert_eq!(machine.statistics.lookups, 2);
+        assert_eq!(machine.statistics.lookups, 4);
+        machine.fetch[page].as_mut().unwrap().guarded = false;
         // The target outside a guarded page accepts every BTYPE; in one, the
         // BTYPEs BTI c is compatible with.
         machine.cpu.pc = far;
