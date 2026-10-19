@@ -24,19 +24,42 @@
 //! - The 26A434 kernel's `IOSetRecoveryBoot` and iBoot (0x4464) send a
 //!   machine to recovery by setting `recovery-boot-mode` with `boot-command`
 //!   `recover-system` or `recover`.
+//! - The `fsboot` class is `fsboot`, `fsboot-safe` and `post-upgrade` as a
+//!   one-time command (LLB 0xbeb70, iBoot 0xd242c): `post-upgrade` boots
+//!   macOS.
+//! - `boot-command=upgrade` (0xbe93c) boots the update macOS staged: when
+//!   `iboot1-precommitted=true` LLB first removes it, commits the staged
+//!   iBoot to the NOR and resets (0x43d0). The upgrade itself (0x448c)
+//!   removes `boot-command`, or, when `upgrade-retry` is set, removes that
+//!   and sets `boot-command=recover`, so a failed retry boots the paired
+//!   recoveryOS; it saves NVRAM, mounts the boot device's Update-role volume
+//!   (APFS role 0xc0, mount flag 1, 0x945a0) at `/boot` and runs its
+//!   `/boot/iBEC`. On a failure it sets `ota-result` to `failed to execute
+//!   upgrade command from iBoot` and `ota-failure-reason` to the step
+//!   (`scan SPs`, `mount upgrade partition`, `load upgrade iBEC`, `load
+//!   upgrade local policy`), saves and resets (0x4770).
+//! - `device-recovery` puts LLB in its recovery mode (0x2994, mode 5) and
+//!   `field-diags-paired` boots the paired diagnostics.
 //!
 //! Inferred: the second UUID is the partition's unique GUID in the same
 //! on-disk byte order as the type; `one-time-boot-command` takes precedence
-//! over `boot-command`; a set `recovery-boot-mode` without a recovery
+//! over `boot-command`, except that `upgrade` is checked first (0x2b14, before
+//! the boot-command dispatch); a set `recovery-boot-mode` without a recovery
 //! command boots the paired recoveryOS (the variable stays for recoveryOS
 //! to read and clear); `fsboot-safe` is a safe-mode (`-x`) macOS boot;
 //! `auto-boot-once=true` overrides `auto-boot=false` once and is consumed.
 //! Each variable is read from the `system` partition first, then `common`,
-//! since which one LLB reads is Unknown.
+//! since which one LLB reads is Unknown. Variables LLB sets are written to
+//! `system`.
 //!
-//! Unknown, and refused explicitly: `device-recovery`, `upgrade`,
-//! `post-upgrade` and `field-diags-paired` boots, and a machine with
-//! `auto-boot=false`, which LLB leaves in iBoot recovery mode.
+//! Stela does not run the NOR's LLB or iBoot, so a precommitted iBoot is
+//! consumed with a note rather than activated; Stela takes iBEC's place in
+//! an upgrade boot (`stela_loader::upgrade`).
+//!
+//! Refused explicitly: `device-recovery` (iBoot's recovery mode, which waits
+//! for a USB restore host) and `field-diags-paired` (a diagnostics image
+//! Stela does not read), and a machine with `auto-boot=false`, which LLB
+//! leaves in iBoot recovery mode.
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, bail, ensure};
 use stela_runtime::machine::apple::nor::nvram::{Partition, Variables};
@@ -48,6 +71,12 @@ pub const ONE_TIME_BOOT_COMMAND: &[u8] = b"one-time-boot-command";
 pub const RECOVERY_BOOT_MODE: &[u8] = b"recovery-boot-mode";
 pub const AUTO_BOOT: &[u8] = b"auto-boot";
 pub const AUTO_BOOT_ONCE: &[u8] = b"auto-boot-once";
+pub const UPGRADE_RETRY: &[u8] = b"upgrade-retry";
+pub const IBOOT_PRECOMMITTED: &[u8] = b"iboot1-precommitted";
+pub const OTA_RESULT: &[u8] = b"ota-result";
+pub const OTA_FAILURE_REASON: &[u8] = b"ota-failure-reason";
+/// LLB's `ota-result` when its upgrade boot fails.
+pub const UPGRADE_FAILURE: &[u8] = b"failed to execute upgrade command from iBoot";
 /// The variables LLB removes with `one-time-boot-command`.
 pub const FAILURE_REASONS: [&[u8]; 2] = [b"iboot-failure-reason", b"iboot-failure-reason-str"];
 const TRUE: &[u8] = b"true";
@@ -256,6 +285,8 @@ pub enum Target {
     /// System Recovery: the recoveryOS container's, or Stela's recovery
     /// bundle when the disk has none.
     SystemRecovery,
+    /// The update ramdisk macOS staged on its container's Update volume.
+    Upgrade,
 }
 
 /// The boot LLB would choose, what chose it, and the one-shot variables the
@@ -270,12 +301,20 @@ pub struct Selection {
     pub reasons: Vec<String>,
     /// Variables removed and saved before the boot.
     pub consumed: Vec<&'static [u8]>,
+    /// Variables set, in `system`, after those are removed.
+    pub assigned: Vec<(&'static [u8], &'static [u8])>,
+    /// Effects of the boot Stela does not reproduce, for the boot log.
+    pub notes: Vec<String>,
+    /// The boot disk holds the paired recoveryOS (`--paired-recovery`);
+    /// otherwise a paired recovery boot falls back to Stela's System
+    /// Recovery bundle.
+    pub paired_on_disk: bool,
 }
 
 impl Selection {
     /// Whether booting this selection changes NVRAM.
     pub fn consumes(&self) -> bool {
-        !self.consumed.is_empty()
+        !self.consumed.is_empty() || !self.assigned.is_empty()
     }
 
     /// The boot disk holds no installed system: boot System Recovery, as
@@ -330,6 +369,9 @@ pub fn select(variables: &Variables) -> Result<Selection> {
         volume: None,
         reasons: Vec::new(),
         consumed: Vec::new(),
+        assigned: Vec::new(),
+        notes: Vec::new(),
+        paired_on_disk: false,
     };
     if let Some(value) = lookup(variables, AUTO_BOOT)
         && !flag(AUTO_BOOT, value)?
@@ -356,6 +398,32 @@ pub fn select(variables: &Variables) -> Result<Selection> {
         selection.volume = Some(BootVolume::parse(value)?);
         selection.reasons.push(shown(name, value));
     }
+    let upgrade = lookup(variables, BOOT_COMMAND)
+        .is_some_and(|value| Command::parse(value).ok() == Some(Command::Upgrade));
+    if upgrade {
+        selection.reasons.push(shown(BOOT_COMMAND, b"upgrade"));
+        if let Some(value) = lookup(variables, IBOOT_PRECOMMITTED)
+            && flag(IBOOT_PRECOMMITTED, value)?
+        {
+            selection.consumed.push(IBOOT_PRECOMMITTED);
+            selection.notes.push(
+                "iboot1-precommitted: Stela does not run the NOR's iBoot, so the staged iBoot \
+                 is not committed"
+                    .into(),
+            );
+        }
+        selection.consumed.push(BOOT_COMMAND);
+        if lookup(variables, UPGRADE_RETRY).is_some() {
+            selection.reasons.push(shown(UPGRADE_RETRY, b"set"));
+            selection.consumed.push(UPGRADE_RETRY);
+            selection
+                .assigned
+                .push((BOOT_COMMAND, Command::Recover.name().as_bytes()));
+        }
+        selection.target = Target::Upgrade;
+        check_volume(&selection)?;
+        return Ok(selection);
+    }
     let command = match lookup(variables, ONE_TIME_BOOT_COMMAND) {
         Some(value) => {
             selection.consumed.push(ONE_TIME_BOOT_COMMAND);
@@ -375,43 +443,73 @@ pub fn select(variables: &Variables) -> Result<Selection> {
     selection.target = match command {
         Some(Command::Recover | Command::RecoverOnce) => Target::PairedRecovery,
         Some(Command::RecoverSystem | Command::RecoverFallback) => Target::SystemRecovery,
-        Some(
-            command @ (Command::DeviceRecovery
-            | Command::Upgrade
-            | Command::PostUpgrade
-            | Command::FieldDiagsPaired),
-        ) => bail!(
-            "boot-command {} is not modeled: what LLB boots for it is Unknown",
-            command.name()
+        Some(Command::DeviceRecovery) => bail!(
+            "boot-command device-recovery enters iBoot's recovery mode, which waits for a USB \
+             restore host; Stela restores through `stela setup` instead"
         ),
+        Some(Command::FieldDiagsPaired) => bail!(
+            "boot-command field-diags-paired boots the paired diagnostics, which Stela does \
+             not read"
+        ),
+        // A one-time `upgrade`; LLB checks only `boot-command` for it.
+        Some(Command::Upgrade) => {
+            bail!("one-time-boot-command upgrade: LLB enters an upgrade only from boot-command")
+        }
         _ if recovery_mode.is_some() => {
             let value = recovery_mode.expect("checked");
             selection.reasons.push(shown(RECOVERY_BOOT_MODE, value));
             Target::PairedRecovery
         }
         Some(Command::FsbootSafe) => Target::MacOs { safe: true },
-        Some(Command::Fsboot) | None => Target::MacOs { safe: false },
+        Some(Command::Fsboot | Command::PostUpgrade) | None => Target::MacOs { safe: false },
     };
+    check_volume(&selection)?;
+    Ok(selection)
+}
+
+fn check_volume(selection: &Selection) -> Result<()> {
     if let Some(volume) = &selection.volume {
         ensure!(
-            volume.kind == VolumeType::Apfs || !matches!(selection.target, Target::MacOs { .. }),
+            volume.kind == VolumeType::Apfs
+                || !matches!(selection.target, Target::MacOs { .. } | Target::Upgrade),
             "boot volume {} is not an APFS container, so it holds no macOS",
             uuid_text(&volume.partition)
         );
     }
-    Ok(selection)
+    Ok(())
+}
+
+/// Record a failed upgrade boot as LLB does before it resets: `ota-result`
+/// and `ota-failure-reason`, the step that failed.
+pub fn record_upgrade_failure(variables: &mut Variables, step: &str) -> Result<()> {
+    for (name, value) in [
+        (OTA_RESULT, UPGRADE_FAILURE),
+        (OTA_FAILURE_REASON, step.as_bytes()),
+    ] {
+        variables
+            .set(Partition::System, name, value)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(())
 }
 
 /// Remove the variables `selection` consumes from whichever partition holds
-/// them; returns whether any was removed, when the bank must be saved.
-pub fn consume(variables: &mut Variables, selection: &Selection) -> bool {
+/// them and set those it assigns; returns whether anything changed, when
+/// the bank must be saved.
+pub fn consume(variables: &mut Variables, selection: &Selection) -> Result<bool> {
     let mut changed = false;
     for name in &selection.consumed {
         for partition in [Partition::System, Partition::Common] {
             changed |= variables.remove(partition, name).is_some();
         }
     }
-    changed
+    for (name, value) in &selection.assigned {
+        variables
+            .set(Partition::System, name, value)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 /// Name `volume` as the next boot's volume: `alt-boot-volume` for one boot,
@@ -434,11 +532,26 @@ pub const BUNDLE_OPTION: &str = "--bundle";
 /// a safe-mode boot.
 pub const BOOT_VOLUME_OPTION: &str = "--boot-volume";
 pub const SAFE_BOOT_OPTION: &str = "--safe-boot";
+/// Build the bundle from the Preboot disk's Update volume
+/// (`stela_loader::upgrade`) instead of its installed system.
+pub const UPGRADE_OPTION: &str = "--upgrade";
+/// Build the bundle from the Preboot disk's Recovery volume
+/// (`stela_loader::installed`, its paired recoveryOS).
+pub const PAIRED_RECOVERY_OPTION: &str = "--paired-recovery";
+/// What the engine is told only by NVRAM.
+const NVRAM_OPTIONS: [&str; 4] = [
+    BOOT_VOLUME_OPTION,
+    SAFE_BOOT_OPTION,
+    UPGRADE_OPTION,
+    PAIRED_RECOVERY_OPTION,
+];
 
 /// The engine options for `selection` (none when NVRAM was not read): a
-/// macOS boot keeps `--preboot` and adds the boot volume and safe mode; a
-/// recoveryOS boot replaces `--preboot` with `--bundle` of the
-/// `--recovery-bundle` directory, and is refused without one.
+/// macOS boot keeps `--preboot` and adds the boot volume and safe mode; an
+/// update adds `--upgrade`, and a paired recoveryOS the disk holds
+/// `--paired-recovery`; any other recoveryOS boot replaces `--preboot` with
+/// `--bundle` of the `--recovery-bundle` directory, and is refused without
+/// one.
 /// `--recovery-bundle` never reaches the engine. Returns the options and
 /// what the boot log should say.
 pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, String)> {
@@ -456,7 +569,7 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
         );
         Ok(Some(value))
     };
-    for option in [BOOT_VOLUME_OPTION, SAFE_BOOT_OPTION] {
+    for option in NVRAM_OPTIONS {
         ensure!(
             !words.contains(&option),
             "{option} is chosen from NVRAM, not stela.cfg"
@@ -472,16 +585,20 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
         selection.reasons.join(", ")
     };
     let mut extra: Vec<String> = Vec::new();
+    let on_disk = |extra: &mut Vec<String>, what: &str| -> Result<()> {
+        ensure!(
+            words.contains(&PREBOOT_OPTION),
+            "NVRAM boots {what}, which needs {PREBOOT_OPTION}"
+        );
+        if let Some(volume) = &selection.volume {
+            extra.push(BOOT_VOLUME_OPTION.into());
+            extra.push(String::from_utf8(volume.encode()).expect("ASCII"));
+        }
+        Ok(())
+    };
     let log = match selection.target {
         Target::MacOs { safe } => {
-            ensure!(
-                words.contains(&PREBOOT_OPTION),
-                "NVRAM boots macOS, which needs {PREBOOT_OPTION}"
-            );
-            if let Some(volume) = &selection.volume {
-                extra.push(BOOT_VOLUME_OPTION.into());
-                extra.push(String::from_utf8(volume.encode()).expect("ASCII"));
-            }
+            on_disk(&mut extra, "macOS")?;
             if safe {
                 extra.push(SAFE_BOOT_OPTION.into());
             }
@@ -489,6 +606,16 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
                 "macOS{} ({reasons})",
                 if safe { " in safe mode" } else { "" }
             )
+        }
+        Target::Upgrade => {
+            on_disk(&mut extra, "a macOS update")?;
+            extra.push(UPGRADE_OPTION.into());
+            format!("macOS update from the Update volume ({reasons})")
+        }
+        Target::PairedRecovery if selection.paired_on_disk => {
+            on_disk(&mut extra, "the paired recoveryOS")?;
+            extra.push(PAIRED_RECOVERY_OPTION.into());
+            format!("paired recoveryOS from the Recovery volume ({reasons})")
         }
         target @ (Target::PairedRecovery | Target::SystemRecovery) => {
             let Some(directory) = recovery else {
@@ -506,8 +633,8 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
             extra.push(directory);
             match target {
                 Target::PairedRecovery => format!(
-                    "recoveryOS ({reasons}): the paired recoveryOS on the Recovery volume is not \
-                     read, so Stela's System Recovery bundle boots"
+                    "recoveryOS ({reasons}): the boot disk holds no paired recoveryOS, so \
+                     Stela's System Recovery bundle boots"
                 ),
                 _ => format!("System Recovery ({reasons})"),
             }
@@ -594,7 +721,7 @@ mod tests {
             uuid_text(&selection.volume.unwrap().volume_group),
             PARTITION
         );
-        assert!(consume(&mut vars, &selection));
+        assert!(consume(&mut vars, &selection).unwrap());
         assert_eq!(lookup(&vars, ALT_BOOT_VOLUME), None);
         assert_eq!(lookup(&vars, ONE_TIME_BOOT_COMMAND), None);
         assert_eq!(lookup(&vars, b"iboot-failure-reason"), None);
@@ -602,7 +729,7 @@ mod tests {
         let next = select(&vars).unwrap();
         assert_eq!(next.target, Target::MacOs { safe: false });
         assert_eq!(uuid_text(&next.volume.unwrap().volume_group), GROUP);
-        assert!(!consume(&mut vars, &next));
+        assert!(!consume(&mut vars, &next).unwrap());
         let saved = Variables::parse(&vars.encode().unwrap()).unwrap();
         assert_eq!(select(&saved).unwrap(), next);
     }
@@ -634,14 +761,17 @@ mod tests {
 
     #[test]
     fn unmodeled_boots_and_bad_values_are_refused() {
-        for command in [
-            &b"upgrade"[..],
-            b"post-upgrade",
-            b"device-recovery",
-            b"nope",
-        ] {
+        for command in [&b"device-recovery"[..], b"field-diags-paired", b"nope"] {
             assert!(select(&variables(&[(Partition::Common, BOOT_COMMAND, command)])).is_err());
         }
+        assert!(
+            select(&variables(&[(
+                Partition::Common,
+                ONE_TIME_BOOT_COMMAND,
+                b"upgrade"
+            )]))
+            .is_err()
+        );
         assert!(select(&variables(&[(Partition::Common, AUTO_BOOT, b"false")])).is_err());
         assert!(select(&variables(&[(Partition::Common, AUTO_BOOT, b"maybe")])).is_err());
         let once = variables(&[
@@ -661,6 +791,66 @@ mod tests {
         choose(&mut chosen, &target, true).unwrap();
         assert_eq!(select(&chosen).unwrap().volume, Some(target));
         assert_eq!(select(&chosen).unwrap().consumed, [ALT_BOOT_VOLUME]);
+    }
+
+    #[test]
+    fn an_upgrade_boots_once_and_a_retry_falls_back_to_the_paired_recoveryos() {
+        let mut vars = variables(&[
+            (Partition::System, BOOT_VOLUME, &volume(VolumeType::Apfs)),
+            (Partition::Common, BOOT_COMMAND, b"upgrade"),
+            (Partition::Common, ONE_TIME_BOOT_COMMAND, b"recover"),
+        ]);
+        let selection = select(&vars).unwrap();
+        assert_eq!(selection.target, Target::Upgrade);
+        assert_eq!(selection.consumed, [BOOT_COMMAND]);
+        assert!(consume(&mut vars, &selection).unwrap());
+        // A crash during the upgrade boots by the remaining variables.
+        assert_eq!(select(&vars).unwrap().target, Target::PairedRecovery);
+
+        let mut retry = variables(&[
+            (Partition::Common, BOOT_COMMAND, b"upgrade"),
+            (Partition::Common, UPGRADE_RETRY, b"true"),
+            (Partition::System, IBOOT_PRECOMMITTED, b"true"),
+        ]);
+        let selection = select(&retry).unwrap();
+        assert_eq!(selection.target, Target::Upgrade);
+        assert_eq!(selection.notes.len(), 1);
+        assert!(consume(&mut retry, &selection).unwrap());
+        assert_eq!(lookup(&retry, UPGRADE_RETRY), None);
+        assert_eq!(lookup(&retry, IBOOT_PRECOMMITTED), None);
+        assert_eq!(lookup(&retry, BOOT_COMMAND), Some(&b"recover"[..]));
+        assert_eq!(select(&retry).unwrap().target, Target::PairedRecovery);
+
+        let mut failed = variables(&[]);
+        record_upgrade_failure(&mut failed, "mount upgrade partition").unwrap();
+        assert_eq!(lookup(&failed, OTA_RESULT), Some(UPGRADE_FAILURE));
+        assert_eq!(
+            lookup(&failed, OTA_FAILURE_REASON),
+            Some(&b"mount upgrade partition"[..])
+        );
+        // post-upgrade is a macOS boot of the fsboot class.
+        let post = variables(&[(Partition::Common, ONE_TIME_BOOT_COMMAND, b"post-upgrade")]);
+        assert_eq!(select(&post).unwrap().target, Target::MacOs { safe: false });
+    }
+
+    #[test]
+    fn upgrades_and_paired_recoveryos_on_disk_keep_the_preboot_disk() {
+        let vars = variables(&[
+            (Partition::System, BOOT_VOLUME, &volume(VolumeType::Apfs)),
+            (Partition::System, BOOT_COMMAND, b"upgrade"),
+        ]);
+        let (options, log) = route(CONFIG, Some(&select(&vars).unwrap())).unwrap();
+        assert!(options.contains("--preboot S:G") && options.ends_with(UPGRADE_OPTION));
+        assert!(options.contains(BOOT_VOLUME_OPTION));
+        assert!(log.starts_with("macOS update"));
+        let mut paired =
+            select(&variables(&[(Partition::System, BOOT_COMMAND, b"recover")])).unwrap();
+        paired.paired_on_disk = true;
+        let (options, log) = route(CONFIG, Some(&paired)).unwrap();
+        assert!(options.ends_with(PAIRED_RECOVERY_OPTION) && !options.contains(BUNDLE_OPTION));
+        assert!(log.starts_with("paired recoveryOS"));
+        assert!(route("--system --upgrade", None).is_err());
+        assert!(route("--system --paired-recovery", None).is_err());
     }
 
     const CONFIG: &str = "--system --storage S:G --nor S:N --preboot S:G \

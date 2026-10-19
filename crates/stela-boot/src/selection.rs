@@ -195,7 +195,7 @@ fn select(target: &Target) -> Result<Selection, String> {
     let mut variables =
         Variables::parse(image.bank(current).map_err(String::from)?).map_err(String::from)?;
     let selection = select(&variables)?;
-    if boot_selection::consume(&mut variables, &selection) {
+    if boot_selection::consume(&mut variables, &selection).map_err(|e| format!("{e:#}"))? {
         let bank = variables.encode().map_err(String::from)?;
         let (written, sectors) = image.save_bank(&bank).map_err(String::from)?;
         for offset in sectors {
