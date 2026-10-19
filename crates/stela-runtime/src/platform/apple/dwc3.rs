@@ -14,9 +14,13 @@
 //! neither a captured iBoot image nor an assertion of Apple's reset values.
 //! Identification is the declared DWC3 3.00a programming profile (0x5533300a),
 //! 32 physical endpoints, four interrupt buffers, UTMI high-speed only, no
-//! streams/hibernation/OTG/SuperSpeed. The Apple vendor windows are gated:
-//! unknown offsets and widths refuse. Two traced RMW control reads have an
-//! explicit disabled handoff image; their unmodeled write effects refuse.
+//! streams/hibernation/OTG/SuperSpeed. Endpoints are control EP0, bulk and
+//! interrupt. The global configuration `AppleUSBXDCI::initDeviceController`
+//! (0x42f97f0), `goOnBus` (0x42f4ef8) and `updateLPMPolicy` (0x43037f4)
+//! program — GUCTL1, GUID, GTXFIFOPRIDEV, the DCFG speed maximum and LPM
+//! capability, the DCTL LPM and U1/U2 fields, the wakeup and suspend event
+//! enables — is retained where no modeled link observes it (the field
+//! constants say why); other fields, offsets and widths refuse.
 //!
 //! GCTL.PRTCAPDIR selects the dual-role core's host (1) or device (2)
 //! personality. `AppleT8112USBXHCI::start` read-modify-writes it to host at
@@ -45,7 +49,28 @@ use regs::*;
 const NAME: &str = "dwc3-device";
 pub const PLATFORM_WINDOW_BASE: u64 = 0x20000;
 pub const PLATFORM_WINDOW_STRIDE: u64 = 0x4000;
-const APPLE_INTERRUPT_CONTROL: u64 = 0xc11c;
+/// GUCTL1 fields the device driver sets (Linux `core.h` names):
+/// DEV_L1_EXIT_BY_HW (24, `updateLPMPolicy`), DEV_FORCE_20_CLK_FOR_30_CLK
+/// (26, `goOnBus`) and DEV_DECOUPLE_L1L2_EVT (31, `initDeviceController`,
+/// KC 0x42fa004). They shape LPM exit, the SuperSpeed clock source and
+/// suspend event reporting, none of which a high-speed link that never
+/// enters L1 or suspend observes; they are retained only.
+const GUCTL1_FIELDS: u32 = 1 << 24 | 1 << 26 | 1 << 31;
+/// DCTL: run, soft reset, the LPM NYET threshold (23:20) and the
+/// SuperSpeed U1/U2 accept/initiate enables (12:9), which no high-speed
+/// link uses. Link state change requests, test modes, save/restore and
+/// hibernation refuse.
+const DCTL_FIELDS: u32 = RUN | RESET | 0xf << 20 | 0xf << 9;
+/// DEVTEN: disconnect, reset, connect done, wakeup, suspend (EOPF) and
+/// command complete. The host peer never suspends or resumes the bus, so
+/// the wakeup and suspend events never occur.
+const DEVTEN_FIELDS: u32 = 1 | 1 << 1 | 1 << 2 | 1 << 4 | 1 << 6 | 1 << 10;
+/// DCFG: device speed (2:0), address, receive buffer count and LPM
+/// capability. A SuperSpeed (4) or SuperSpeedPlus (5) maximum connects at
+/// high speed, as on a core with no SuperSpeed link; full and low speed
+/// refuse. With LPM capable the core would answer LPM tokens, which the
+/// host peer never sends.
+const DCFG_FIELDS: u32 = 7 | 0x7f << 3 | 0x1f << 17 | 1 << 22;
 const MAX_PENDING_EVENTS: usize = 256;
 const MAX_LINKS_PER_PACKET: usize = 8;
 const FIFO_WORDS: u32 = 4096;
@@ -123,6 +148,11 @@ pub struct Dwc3 {
     usb2: u32,
     usb3: u32,
     tx_fifo: [u32; ENDPOINTS / 2],
+    /// GTXFIFOPRIDEV: one DMA priority bit per TX FIFO. The model serves
+    /// one transfer at a time, so priority orders nothing.
+    tx_priority: u32,
+    guid: u32,
+    guctl1: u32,
     rx_fifo: u32,
     dcfg: u32,
     dctl: u32,
@@ -152,6 +182,9 @@ impl Dwc3 {
             usb3: 0,
             tx_fifo: [0; ENDPOINTS / 2],
             rx_fifo: 0,
+            tx_priority: 0,
+            guid: 0,
+            guctl1: 0,
             dcfg: 0,
             dctl: 0,
             devten: 0,
@@ -306,17 +339,26 @@ impl Dwc3 {
                 let packet = ((p0 >> 3) & 0x7ff) as usize;
                 let ring = (p1 & 0x1f) as usize;
                 // No burst/stream/isochronous state can be discarded.
+                // An interrupt endpoint's bInterval-1 (16..23) sets its
+                // service interval, which only the host's polling observes.
+                let interval = if kind == INTERRUPT { 0xff << 16 } else { 0 };
                 if p2 != 0
                     || p0 & !((3 << 1) | (0x7ff << 3) | (0x1f << 17) | (3 << 30)) != 0
                     || p0 >> 30 == 1
                     || p0 >> 30 == 3
-                    || p1 & !((0x1f << 25) | CFG_COMPLETE | CFG_PROGRESS | CFG_NOT_READY | 0x1f)
+                    || p1
+                        & !((0x1f << 25)
+                            | CFG_COMPLETE
+                            | CFG_PROGRESS
+                            | CFG_NOT_READY
+                            | 0x1f
+                            | interval)
                         != 0
                 {
                     return Err("DWC3 endpoint streams, bursts or reserved configuration");
                 }
-                if !matches!(kind, 0 | 2) || (kind == 0) != (n < 2) {
-                    return Err("DWC3 models control EP0 and bulk endpoints only");
+                if !matches!(kind, 0 | 2 | INTERRUPT) || (kind == 0) != (n < 2) {
+                    return Err("DWC3 models control EP0, bulk and interrupt endpoints only");
                 }
                 if packet == 0
                     || packet
@@ -677,11 +719,9 @@ impl MmioDevice for Dwc3 {
             ));
         }
         let value = match offset {
-            // Emulated boot handoff, not a captured reset value: Stela
-            // programs no interrupt routing. Original 32-bit RMW: KC
-            // 0x42fa004. Its control effect still refuses on write; a read
-            // is not readiness. The pipehandler (reg[3]) is the ATC PHY's.
-            APPLE_INTERRUPT_CONTROL => 0,
+            GUCTL1 => self.guctl1,
+            GUID => self.guid,
+            GTXFIFOPRIDEV => self.tx_priority,
             GCTL => self.gctl,
             GSNPSID => 0x5533_300a,
             GHWPARAMS => (64 << 24) | (32 << 16) | (32 << 8),
@@ -807,16 +847,15 @@ impl MmioDevice for Dwc3 {
                 self.usb3 = value;
             }
             DCFG => {
-                const DCFG_CONFIG: u32 = (0x7f << 3) | (0x1f << 17);
-                if value & !DCFG_CONFIG != 0 {
-                    return Err(err("DWC3 supports high-speed without LPM or streams"));
+                if value & !DCFG_FIELDS != 0 || !matches!(value & 7, 0 | 4 | 5) {
+                    return Err(err("DWC3 connects at high speed only, without streams"));
                 }
                 self.dcfg = value;
             }
             DCTL => {
-                if value & !(RUN | RESET) != 0 {
+                if value & !DCTL_FIELDS != 0 {
                     return Err(err(
-                        "DWC3 link power, test or save/restore request is not modeled",
+                        "DWC3 link state change, test or save/restore request is not modeled",
                     ));
                 }
                 if value & RESET != 0 {
@@ -830,7 +869,7 @@ impl MmioDevice for Dwc3 {
                 }
             }
             DEVTEN => {
-                if value & !0x407 != 0 {
+                if value & !DEVTEN_FIELDS != 0 {
                     return Err(err("DWC3 unmodeled device event enable"));
                 }
                 self.devten = value;
@@ -921,8 +960,19 @@ impl MmioDevice for Dwc3 {
                     field => self.endpoints[index].parameters[(field / 4) as usize] = value,
                 }
             }
-            APPLE_INTERRUPT_CONTROL => {
-                return Err(err("Apple interrupt control effects are not modeled"));
+            GUCTL1 => {
+                if value & !GUCTL1_FIELDS != 0 {
+                    return Err(err("unmodeled DWC3 GUCTL1 fields"));
+                }
+                self.guctl1 = value;
+            }
+            // A software-defined identification word.
+            GUID => self.guid = value,
+            GTXFIFOPRIDEV => {
+                if value >> (ENDPOINTS / 2) != 0 {
+                    return Err(err("DWC3 TX FIFO priority names a FIFO the core lacks"));
+                }
+                self.tx_priority = value;
             }
             at if apple::Registers::claims(at) => self.apple.write(at, value).map_err(err)?,
             _ => return Err(err("read-only or unmodeled DWC3/Apple register")),
@@ -1089,11 +1139,27 @@ mod tests {
         assert!(dwc.read(GSNPSID, Width::Double, &mut access).is_err());
         assert_eq!(dwc.read(0xcd38, Width::Word, &mut access), Ok(0));
         assert!(dwc.read(0xcd44, Width::Word, &mut access).is_err());
-        let at = APPLE_INTERRUPT_CONTROL;
-        assert_eq!(dwc.read(at, Width::Word, &mut access), Ok(0));
-        assert!(dwc.write(at, Width::Word, 0x8000, &mut access).is_err());
-        assert_eq!(dwc.read(at, Width::Word, &mut access), Ok(0));
-        assert!(dwc.write(DCTL, Width::Word, 1 << 9, &mut access).is_err());
+        // initDeviceController's GUCTL1 and GUID accesses.
+        assert_eq!(dwc.read(GUCTL1, Width::Word, &mut access), Ok(0));
+        assert!(dwc.write(GUCTL1, Width::Word, 0x8000, &mut access).is_err());
+        write(&mut dwc, GUCTL1, 1 << 31, &mut access);
+        assert_eq!(dwc.read(GUCTL1, Width::Word, &mut access), Ok(1 << 31));
+        write(&mut dwc, GUID, 0x1234_5678, &mut access);
+        assert_eq!(dwc.read(GUID, Width::Word, &mut access), Ok(0x1234_5678));
+        assert!(
+            dwc.write(GTXFIFOPRIDEV, Width::Word, 1 << 16, &mut access)
+                .is_err()
+        );
+        // A SuperSpeed maximum connects at high speed; full speed refuses.
+        write(&mut dwc, DCFG, 4 | 1 << 22, &mut access);
+        assert!(dwc.write(DCFG, Width::Word, 1, &mut access).is_err());
+        // DCTL test control refuses; the LPM threshold is retained.
+        assert!(
+            dwc.write(DCTL, Width::Word, u64::from(RUN | 1 << 1), &mut access)
+                .is_err()
+        );
+        write(&mut dwc, DCTL, RUN | 6 << 20, &mut access);
+        write(&mut dwc, DCTL, RUN, &mut access);
         assert_eq!(dwc.dctl, RUN);
         write(&mut dwc, DEP + 12, CMDACT | 6, &mut access);
         assert_eq!(dwc.endpoints[0].command & CMD_FAILURE, CMD_FAILURE);
@@ -1117,6 +1183,25 @@ mod tests {
             .is_err()
         );
         assert_eq!(dwc.endpoints[2].command, command);
+        // An interrupt IN endpoint (EP 2 IN, number 5) with its interval;
+        // the interval field is reserved on bulk endpoints.
+        let base = DEP + 5 * STRIDE;
+        write(&mut dwc, base, 0, &mut access);
+        write(
+            &mut dwc,
+            base + 4,
+            5 << 25 | CFG_COMPLETE | 3 << 16,
+            &mut access,
+        );
+        write(&mut dwc, base + 8, 16 << 3 | INTERRUPT << 1, &mut access);
+        write(&mut dwc, base + 12, CMDACT | 1, &mut access);
+        assert_eq!(dwc.endpoints[5].command & CMD_FAILURE, 0);
+        assert!(dwc.endpoints[5].configured);
+        write(&mut dwc, base + 8, 16 << 3 | 2 << 1, &mut access);
+        assert!(
+            dwc.write(base + 12, Width::Word, u64::from(CMDACT | 1), &mut access)
+                .is_err()
+        );
     }
     #[test]
     fn bulk_dma_partial_short_and_events_precede_aic() {

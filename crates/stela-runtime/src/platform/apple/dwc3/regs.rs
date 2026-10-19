@@ -1,11 +1,14 @@
 //! DWC3 offsets and bit encodings from Linux a0ff06b3 `dwc3/core.h`.
 pub const GCTL: u64 = 0xc110;
+pub const GUCTL1: u64 = 0xc11c;
 pub const GSNPSID: u64 = 0xc120;
+pub const GUID: u64 = 0xc128;
 pub const GHWPARAMS: u64 = 0xc140;
 pub const GUSB2PHYCFG: u64 = 0xc200;
 pub const GUSB3PIPECTL: u64 = 0xc2c0;
 pub const GTXFIFOSIZ: u64 = 0xc300;
 pub const GRXFIFOSIZ: u64 = 0xc380;
+pub const GTXFIFOPRIDEV: u64 = 0xc610;
 pub const GEVNT: u64 = 0xc400;
 pub const DCFG: u64 = 0xc700;
 pub const DCTL: u64 = 0xc704;
@@ -39,6 +42,8 @@ pub const CFG_COMPLETE: u32 = 1 << 8;
 pub const CFG_PROGRESS: u32 = 1 << 9;
 pub const CFG_NOT_READY: u32 = 1 << 10;
 pub const ENDPOINTS: usize = 32;
+/// DEPCFG endpoint type of an interrupt endpoint.
+pub const INTERRUPT: u32 = 3;
 pub const RINGS: usize = 4;
 pub const EVENT_BYTES: u32 = 4;
 pub const TRB_BYTES: u64 = 16;
