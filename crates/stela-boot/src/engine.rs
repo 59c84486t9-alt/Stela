@@ -104,8 +104,9 @@ struct Options {
     /// Cable the native USB keyboard and pointer to the last USB-C
     /// controller and feed it the host's virtio-input devices (`--input`).
     input: bool,
-    /// Open the host network for the restore client's signing-server
-    /// request (`--tss`; `network::HostNetwork`).
+    /// The user opted in to Apple's signing server (`--tss`, `stela setup
+    /// --tss`): the restore host may send this machine's ECID and component
+    /// hashes to gs.apple.com for the recoveryOS LocalPolicy. Off by default.
     tss: bool,
     /// POST once to this `http://` URL at start and report the reply
     /// (`--network-check URL`).
@@ -1357,6 +1358,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         machine.begin_survey();
     }
     machine.set_idle_skip(options.idle_skip);
+    if options.tss {
+        output::arguments(format_args!(
+            "TSS OPT-IN: the restore host may send this machine's ECID and component hashes \
+             to gs.apple.com; this build's restore host does not request a LocalPolicy yet\n"
+        ));
+    }
     // Waits return to this loop often enough that a press of the host's
     // power button reaches a sleeping SoC, and other host inputs a waiting
     // guest, promptly.

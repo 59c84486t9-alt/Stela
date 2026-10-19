@@ -6,6 +6,8 @@
 //! installs its own page tables and runs the image on `SoftwareEl1Machine`.
 //! A `stela.cfg` that starts with `--system` instead runs the image on the
 //! system-mode engine (`docs/design/system.md#system-mode-execution`).
+//! With `\EFI\stela\choices.cfg` beside it, the startup choices (`choice`)
+//! pick the option line first.
 #![no_std]
 #![no_main]
 extern crate alloc;
@@ -27,6 +29,7 @@ use uefi::{
     Status,
     boot::{AllocateType, MemoryType},
 };
+mod choice;
 mod console;
 mod engine;
 mod firmware;
@@ -46,6 +49,11 @@ mod tables;
 pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new();
 /// Large enough for a J473AP boot bundle (about 135 MB) read whole.
 const HEAP_BYTES: usize = 384 * 1024 * 1024;
+/// What this build reads, for `stela setup` to check before installing it
+/// (`stela_loader::mount_interface`).
+#[used]
+static MOUNT_INTERFACE: [u8; stela_loader::mount_interface::MARKER_BYTES] =
+    stela_loader::mount_interface::marker(stela_loader::mount_interface::CURRENT);
 
 #[derive(Debug)]
 struct Options {
@@ -150,6 +158,8 @@ impl Options {
 fn main() -> Status {
     // Before any Rust state exists: the system engine runs from this copy.
     system::take_snapshot();
+    // Referenced, so the linker keeps the marker setup reads.
+    core::hint::black_box(&MOUNT_INTERFACE);
     serial::initialize();
     output::arguments(format_args!("STELA UEFI MOUNT\n"));
     let heap = uefi::boot::allocate_pages(
@@ -163,6 +173,7 @@ fn main() -> Status {
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
     let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
+    let options = choice::choose(&mut volume, options);
     if options.starts_with(b"--system") {
         system::boot(options, volume);
     }

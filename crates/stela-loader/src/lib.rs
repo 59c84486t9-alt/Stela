@@ -43,6 +43,7 @@ pub mod local_policy;
 pub mod lock_regs;
 #[cfg(feature = "std")]
 pub mod mapped_image;
+pub mod mount_interface;
 pub mod nvram;
 pub mod root_selection;
 #[cfg(feature = "std")]
