@@ -69,8 +69,10 @@ impl Command {
     pub fn direction(&self, queue: usize) -> Result<u8, &'static str> {
         if queue == 0 {
             match self.opcode() {
-                CREATE_SQ | CREATE_CQ => Ok(2),
-                DELETE_SQ | DELETE_CQ => Ok(0),
+                // The builders (0x3deb4f8, 0x3deb598) put the queue base
+                // straight into PRP1 and attach no memory descriptor, so the
+                // TCB grants no DMA: queue memory is reached physically.
+                CREATE_SQ | CREATE_CQ | DELETE_SQ | DELETE_CQ => Ok(0),
                 APPLE_TIME => Ok(0),
                 IDENTIFY => Ok(1),
                 SET_FEATURES | GET_FEATURES if self.long(24) == 0 => Ok(0),
@@ -662,6 +664,15 @@ mod tests {
         // Tunnel buffers outside the SART's allow-list refuse.
         sart.write(0, Width::Word, 0, port.access).unwrap();
         assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    }
+
+    #[test]
+    fn queue_commands_carry_no_nvmmu_dma_permission() {
+        for opcode in [CREATE_SQ, CREATE_CQ, DELETE_SQ, DELETE_CQ] {
+            let mut command = Command([0; 64]);
+            command.0[0] = opcode;
+            assert_eq!(command.direction(0), Ok(0));
+        }
     }
 
     #[test]
