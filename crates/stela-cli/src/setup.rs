@@ -112,7 +112,8 @@ pub(crate) struct Setup {
     #[arg(long, requires = "nor")]
     target: Option<String>,
     /// The PC's partition (at least 1 MiB and 64 KiB) that holds the Mac's
-    /// NOR flash, where NVRAM persists, and the SEP's state.
+    /// NOR flash, where NVRAM persists, and the SEP's state; with at least
+    /// 0x510000 bytes it also keeps stela.efi's boot log, which is optional.
     #[arg(long)]
     nor: Option<String>,
     /// The serial number of the disk holding `--target` and `--nor`, when
@@ -193,6 +194,10 @@ pub(crate) struct Setup {
     /// NOR partition named again with `--nor`).
     #[arg(long, value_name = "FILE")]
     restore_state: Option<PathBuf>,
+    /// Print the boot log stela.efi keeps on the install's machine-state
+    /// partition (`--install`, or the default install).
+    #[arg(long)]
+    boot_log: bool,
 }
 
 /// What setup writes, recorded on the ESP so `--uninstall` can remove it.
@@ -704,6 +709,7 @@ impl Setup {
             ("--reset-nvram", self.reset_nvram),
             ("--backup-state", self.backup_state.is_some()),
             ("--restore-state", self.restore_state.is_some()),
+            ("--boot-log", self.boot_log),
             ("--target", self.target.is_some()),
             ("--default-install, --remove-install", self.configures()),
         ];
@@ -722,9 +728,10 @@ impl Setup {
                 || self.target.is_some()
                 || self.reset_nvram
                 || self.backup_state.is_some()
-                || self.restore_state.is_some(),
-            "--nor names a NOR partition for --target, --reset-nvram, --backup-state or \
-             --restore-state"
+                || self.restore_state.is_some()
+                || self.boot_log,
+            "--nor names a NOR partition for --target, --reset-nvram, --backup-state, \
+             --restore-state or --boot-log"
         );
         Ok(())
     }
@@ -751,6 +758,10 @@ impl Setup {
         if let Some(path) = &self.restore_state {
             let record = read_record(environment, &self.usb)?;
             return state::restore(environment, &record, &self, path);
+        }
+        if self.boot_log {
+            let record = read_record(environment, &self.usb)?;
+            return state::boot_log(environment, &record, &self);
         }
         if self.update_stela {
             let record = read_record(environment, &self.usb)?;
@@ -1703,6 +1714,7 @@ mod tests {
             reset_nvram: false,
             backup_state: None,
             restore_state: None,
+            boot_log: false,
         }
     }
 
@@ -2743,5 +2755,49 @@ mod tests {
         );
         // --nor alone names nothing to do.
         assert!(rerun(&f, |c| c.nor = Some(NOR.into())).is_err());
+    }
+
+    #[test]
+    fn boot_log_prints_the_install_s_log_and_names_a_missing_one() {
+        use stela_runtime::pc::boot_log::{LOG_BYTES, OFFSET, PARTITION_BYTES};
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let plan = setup(&environment(&f.host), installed_command(&f)).unwrap();
+        assert!(plan.contains("also keeps stela.efi's boot log"), "{plan}");
+        let path = f.host.image(NOR).unwrap().to_path_buf();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.resize(PARTITION_BYTES as usize, 0);
+        fs::write(&path, &bytes).unwrap();
+        let error = format!("{:#}", rerun(&f, |c| c.boot_log = true).unwrap_err());
+        assert!(error.contains("the log region is blank"), "{error}");
+
+        let region = crate::boot_log::tests::region(&["NOR persistent fresh=true\n"]);
+        bytes[OFFSET as usize..(OFFSET + LOG_BYTES) as usize].copy_from_slice(&region);
+        fs::write(&path, &bytes).unwrap();
+        let state = partition_bytes(&f, NOR);
+        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        assert!(
+            text.contains("(disk1s3): Stela boot log: 1 boots, 47 bytes\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("=== STELA BOOT 1 ===\nNOR persistent fresh=true\n"),
+            "{text}"
+        );
+        assert_eq!(partition_bytes(&f, NOR), state);
+        // The log is optional: a smaller partition is noted, not refused.
+        f.host.partitions.get_mut(NOR).unwrap().0.bytes = PARTITION_BYTES - 1;
+        let error = format!("{:#}", rerun(&f, |c| c.boot_log = true).unwrap_err());
+        assert!(error.contains("without one"), "{error}");
+        let mut again = installed_command(&f);
+        again.target = Some(REGION2.into());
+        again.nor = Some(NOR2.into());
+        add_disk(&mut f, true, &[], &[]);
+        f.host.partitions.get_mut(NOR2).unwrap().0.bytes = PARTITION_BYTES - 1;
+        again.install = Some("Other".into());
+        again.model = None;
+        again.dry_run = true;
+        let plan = again.dispatch(&environment(&f.host)).unwrap();
+        assert!(plan.contains("boots without a boot log"), "{plan}");
     }
 }

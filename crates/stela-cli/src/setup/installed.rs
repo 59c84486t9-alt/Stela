@@ -21,6 +21,7 @@ use stela_runtime::{
     machine::apple::nor::{CAPACITY, Image, SECTOR_SIZE, nvram::Partition, nvram::Variables},
     machine::apple::sep_state,
     payload::gpt::DEFAULT_MIN_APPLE_BYTES,
+    pc::boot_log,
 };
 
 /// Memory the PC keeps for itself beyond the guest's DRAM: the engine's
@@ -298,9 +299,25 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let state_bytes = CAPACITY + sep_state::BYTES as usize;
     ensure!(
         nor.bytes >= state_bytes as u64,
-        "{} is smaller than the {state_bytes:#x} bytes of the 1 MiB NOR image and the SEP's state",
-        nor.identifier
+        "{} is smaller than the {state_bytes:#x} bytes of the 1 MiB NOR image and the SEP's \
+         state ({:#x} bytes also keep the optional boot log)",
+        nor.identifier,
+        boot_log::PARTITION_BYTES
     );
+    notes.push(if nor.bytes >= boot_log::PARTITION_BYTES {
+        format!(
+            "{} also keeps stela.efi's boot log (`stela setup --boot-log`)",
+            nor.identifier
+        )
+    } else {
+        format!(
+            "{} holds {:#x} bytes: it boots without a boot log, which is optional and needs a \
+             partition of at least {:#x} bytes",
+            nor.identifier,
+            nor.bytes,
+            boot_log::PARTITION_BYTES
+        )
+    });
     let bytes = host.read(&nor.identifier, 0, state_bytes)?;
     let (nor_bytes, sep_area) = bytes.split_at(CAPACITY);
     let blank = nor_bytes.iter().all(|&b| b == 0);

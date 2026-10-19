@@ -5,6 +5,7 @@ use std::process::ExitCode;
 mod apfs;
 mod args;
 mod boot;
+mod boot_log;
 pub mod compile;
 mod dyld_entry;
 pub mod efi;
@@ -82,6 +83,9 @@ pub(crate) enum Command {
     /// Prepare the kernel boot bundle that the UEFI mount loads.
     #[command(subcommand)]
     Boot(boot::BootCommand),
+    /// Print the boot log stela.efi keeps on a machine-state partition, from a
+    /// disk image or a raw partition.
+    BootLog(boot_log::BootLog),
     /// Prepare an OpenCore USB to install macOS 27 with Stela, or undo it.
     Setup(setup::Setup),
     /// Add the UEFI mount to an OpenCore EFI folder, or remove it.
@@ -116,6 +120,7 @@ impl Command {
             Self::ExtractGuestFiles(command) => command.run(),
             Self::Apfs(command) => command.run(),
             Self::Boot(command) => command.run(),
+            Self::BootLog(command) => command.run(),
             Self::Setup(command) => command.run(),
             Self::Efi(command) => command.run(),
         }

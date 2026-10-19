@@ -11,6 +11,9 @@
 //!   the SHA-256 of what it holds.
 //! - `--restore-state FILE` writes such a file back to the machine it came
 //!   from, and to no other.
+//! - `--boot-log` prints the boot log `stela.efi` keeps after the SEP's area
+//!   on a partition of at least `boot_log::PARTITION_BYTES`
+//!   (`stela_runtime::pc::boot_log`), and writes nothing.
 //!
 //! Both writes need the NOR partition named again with `--nor`, and that
 //! partition must still be the install's (`installed::confirm`).
@@ -25,9 +28,12 @@ use std::{
     path::Path,
 };
 use stela_loader::boot_selection;
-use stela_runtime::machine::apple::{
-    nor::{CAPACITY, Image, nvram::Variables},
-    sep_state,
+use stela_runtime::{
+    machine::apple::{
+        nor::{CAPACITY, Image, nvram::Variables},
+        sep_state,
+    },
+    pc::boot_log,
 };
 
 const MAGIC: &str = "STELA MACHINE STATE 1";
@@ -168,6 +174,39 @@ pub(super) fn reset_nvram(
         "{nor} did not read back as written"
     );
     text.push_str("Done.\n");
+    Ok(text)
+}
+
+/// `--boot-log`: the boot log `stela.efi` keeps after the SEP's area, when
+/// the partition holds one.
+pub(super) fn boot_log(
+    environment: &Environment<'_>,
+    record: &Record,
+    command: &Setup,
+) -> Result<String> {
+    let (install, nor) = target(environment, record, command, false)?;
+    let bytes = environment.host.partition(&nor)?.bytes;
+    ensure!(
+        bytes >= boot_log::PARTITION_BYTES,
+        "{nor} holds {bytes:#x} bytes; the boot log needs {:#x}, so stela.efi boots install \
+         \"{}\" without one",
+        boot_log::PARTITION_BYTES,
+        install.name
+    );
+    let region = environment
+        .host
+        .read(&nor, boot_log::OFFSET, boot_log::LOG_BYTES as usize)?;
+    let log = boot_log::read(&region)
+        .with_context(|| format!("{nor} has no boot log of install \"{}\"", install.name))?;
+    let mut text = format!(
+        "Boot log of install \"{}\" ({nor}): {}",
+        install.name,
+        crate::boot_log::summary(&log)
+    );
+    text.push_str(&String::from_utf8_lossy(&log.stream));
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
     Ok(text)
 }
 
