@@ -13,6 +13,7 @@ use stela_compiler::{
     GuestAddress, GuestState,
     block::{SynchronousTrap, TrapKind},
 };
+pub mod catalog;
 mod copyout;
 pub mod crossarch;
 pub mod csr;
