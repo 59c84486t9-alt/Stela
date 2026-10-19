@@ -1,6 +1,7 @@
 //! Generate the pinned Darwin service catalogs from an xnu source tree:
-//! the BSD system-call table (`bsd/kern/syscalls.master`) and the Mach-trap
-//! table (`osfmk/kern/syscall_sw.c`). The rows are derived the way the kernel
+//! the BSD system-call table (`bsd/kern/syscalls.master`), the Mach-trap
+//! table (`osfmk/kern/syscall_sw.c`) and the kernel-served MIG routines
+//! (`osfmk/mach/*.defs`, see [`mig`]). The rows are derived the way the kernel
 //! build derives them, so the runtime's `generated` tables are reproducible
 //! from a named source drop rather than edited by hand.
 use crate::tools::{exec, root};
@@ -11,6 +12,9 @@ const BSD_MASTER: &str = "bsd/kern/syscalls.master";
 const MACH_TABLE: &str = "osfmk/kern/syscall_sw.c";
 const BSD_OUTPUT: &str = "crates/stela-runtime/src/darwin/catalog/generated.rs";
 const MACH_OUTPUT: &str = "crates/stela-runtime/src/mach/catalog/generated.rs";
+const MIG_OUTPUT: &str = "crates/stela-runtime/src/mach/mig/generated.rs";
+
+mod mig;
 /// `MACH_TRAP_TABLE_COUNT` in `osfmk/kern/syscall_sw.h`.
 const MACH_TRAP_TABLE_COUNT: usize = 128;
 /// The placeholder routines `syscalls.master` uses for unassigned numbers.
@@ -34,8 +38,10 @@ impl DarwinCatalogs {
         let table = read(&self.xnu, MACH_TABLE)?;
         let bsd = render_bsd(&bsd_rows(&master)?);
         let mach = render_mach(&mach_rows(&table)?);
+        let (subsystems, routines) = mig::collect(&self.xnu)?;
+        let mig = mig::render(&subsystems, &routines);
         let mut stale = Vec::new();
-        for (output, text) in [(BSD_OUTPUT, bsd), (MACH_OUTPUT, mach)] {
+        for (output, text) in [(BSD_OUTPUT, bsd), (MACH_OUTPUT, mach), (MIG_OUTPUT, mig)] {
             let path = root().join(output);
             let formatted = rustfmt(&text)?;
             let current = std::fs::read_to_string(&path).unwrap_or_default();
