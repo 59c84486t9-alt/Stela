@@ -10,14 +10,24 @@
 //! (0x2d6b558) and advances the manager to its booted state.
 //!
 //! The control endpoint ([`super::control`]) then answers the AP's tagged
-//! requests and consumes its notifications. Application services (`sks`,
-//! `pnon`, `xars`/`xarm`, `scrd`, ...) are **not** advertised here; a guessed
-//! advertisement would mislead the kernel into creating a nub it then blocks
+//! requests and consumes its notifications.
+//!
+//! Right after OS active the SEP advertises its catalog of implemented
+//! application services on discovery (0xfd), each name record before its
+//! capacity record. `AppleSEPDiscovery::_msgReceived` 0x2d64a00 only asserts
+//! that it runs on the manager's work loop; it accepts records in any manager
+//! state and `_exposeNub` 0x2d64db4 publishes the nub at once. The state-8
+//! gate (`AppleSEPManager::_waitUntilCanSendMessage` 0x2d6bcc4..0x2d6bd30,
+//! passed once `_notifyOSActiveGated` advances the manager) holds back only
+//! the AP's own sends, such as a client's OOL registration; SEP-sent traffic
+//! is not gated. Only services with a native implementation are cataloged:
+//! a guessed advertisement would make the kernel create a nub it then blocks
 //! on. docs/research/sep.md owns the recovered contract.
 use super::super::asc::Message;
 use super::{
     Entropy, SecurityMode,
     control::{self, Request, Status},
+    endpoint::Catalog,
     message::{self, Frame},
     ool::Buffers,
     shared::Region,
@@ -41,7 +51,13 @@ pub struct SepOs {
     power: Power,
     ap_sleep_ready: bool,
     buffers: Vec<Buffers>,
+    catalog: Catalog,
 }
+
+/// The SEP page that scales discovery capacities: 16 KiB, since
+/// `AppleSEPManager::start` 0x2d67308 selects it from the SEP node's `aarch64`
+/// property, which `soc::sep_device` requires.
+pub const SEP_PAGE_BYTES: u32 = 0x4000;
 
 impl SepOs {
     pub fn new(security: Option<SecurityMode>) -> Self {
@@ -52,7 +68,15 @@ impl SepOs {
             power: Power::Awake,
             ap_sleep_ready: false,
             buffers: Vec::new(),
+            catalog: Catalog::empty(),
         }
+    }
+
+    /// Advertise `catalog` once OS active is reported. Its services' frames
+    /// still need native handlers; an empty catalog advertises nothing.
+    pub fn with_catalog(mut self, catalog: Catalog) -> Self {
+        self.catalog = catalog;
+        self
     }
 
     /// The shared-memory aggregate the AP mapped for the SEP, once received.
@@ -94,6 +118,12 @@ impl SepOs {
                 self.region = Some(region);
                 if !self.os_active_sent {
                     outbox.push(control::notification(control::OS_ACTIVE, 0).mailbox());
+                    outbox.extend(
+                        self.catalog
+                            .advertisements()
+                            .into_iter()
+                            .map(Frame::mailbox),
+                    );
                     self.os_active_sent = true;
                 }
                 Ok(())
@@ -123,6 +153,18 @@ impl SepOs {
         let data = match request {
             Request::Nop => Some(0),
             Request::Ool => {
+                let service = self.catalog.service(frame.parameter)?;
+                let input = matches!(
+                    frame.opcode,
+                    control::SET_OOL_IN_LENGTH | control::SET_OOL_IN_ADDRESS
+                );
+                let length = matches!(
+                    frame.opcode,
+                    control::SET_OOL_IN_LENGTH | control::SET_OOL_OUT_LENGTH
+                );
+                if length && !service.accepts(input, frame.data, SEP_PAGE_BYTES) {
+                    return Err("SEP OOL length is outside the service's advertised pages");
+                }
                 let index = match self
                     .buffers
                     .iter()
@@ -199,6 +241,7 @@ impl SepOs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::apple::sep::endpoint::Service;
 
     fn shm(address: u64, pages: u16) -> Frame {
         Frame {
@@ -231,8 +274,18 @@ mod tests {
         }
     }
 
+    /// Service 9, taking one or two pages each way.
+    fn catalog() -> Catalog {
+        Catalog::new(alloc::vec![Service {
+            id: 9,
+            name: u32::from_be_bytes(*b"test"),
+            capacities: [1, 2, 1, 2],
+        }])
+        .unwrap()
+    }
+
     fn active(security: Option<SecurityMode>) -> SepOs {
-        let mut os = SepOs::new(security);
+        let mut os = SepOs::new(security).with_catalog(catalog());
         let mut outbox = Vec::new();
         os.receive(shm(0x1234_5000, 0x20), &mut counter(), &mut outbox)
             .unwrap();
@@ -262,6 +315,12 @@ mod tests {
         );
         assert_eq!(first, [control::notification(control::OS_ACTIVE, 0)]);
         assert!(os.os_active_sent());
+        // A cataloged service is advertised after OS active, name first.
+        let mut os = SepOs::new(None).with_catalog(catalog());
+        let first = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        assert_eq!(first[0], control::notification(control::OS_ACTIVE, 0));
+        assert_eq!(first[1..], catalog().advertisements()[..]);
+        assert_eq!((first[1].opcode, first[2].opcode), (0, 1));
         // A second shared-memory frame (wake remap) does not re-announce.
         assert!(reply(&mut os, shm(0x2000_0000, 0x10)).unwrap().is_empty());
     }
@@ -294,6 +353,10 @@ mod tests {
         .unwrap();
         assert!(os.buffers(9).is_some());
         assert!(os.buffers(10).is_none());
+        // Unadvertised owners and lengths outside the pages refuse.
+        assert!(reply(&mut os, control(8, control::SET_OOL_IN_LENGTH, 10, 0x4000)).is_err());
+        assert!(reply(&mut os, control(8, control::SET_OOL_OUT_LENGTH, 9, 0xc000)).is_err());
+        assert!(reply(&mut os, control(8, control::SET_OOL_OUT_LENGTH, 9, 0x8000)).is_ok());
         // An unknown security mode refuses rather than guess one.
         let mut unknown = active(None);
         assert!(reply(&mut unknown, mode_request).is_err());
