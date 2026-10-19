@@ -137,6 +137,23 @@ const PROTECT_LOCK: u64 = 0x208;
 /// Protected-write control/status, restored by SPTM at file offset 0xcc014.
 const PROTECTED_WRITE: u64 = 0x210;
 const TLIMITS: [u64; 2] = [0x228, 0x22c];
+/// Interrupt words of the version 2.1-and-earlier layout. SPTM's table
+/// (file 0x159e0) gives ERROR_MASK 0x104 and these three; later versions
+/// move them to 0x4060 and 0x4200..0x4220. 0x700 enables and 0x704
+/// reports the performance counters' interrupts, bits 0x777 (SPTM's
+/// clear-performance-interrupts call writes that mask at file 0xc9840;
+/// power-up enables all and clears all, file 0xcc8f8..0xcc930; power-down
+/// disables, 0xcd624). The counters (+0x760..0x788) exist only for a node
+/// with `enable-perf-counters`, which no J473AP DART has: the counters are
+/// absent here (their words refuse), so no counter interrupt is ever
+/// pending. At 0x720 power-up writes one bit per stream from SPTM's set of
+/// streams in use (file 0xcc948); whether these gate the error interrupt
+/// per stream is unrecovered, so they are retained and the error
+/// interrupt follows ERROR_MASK alone.
+const PERF_INTERRUPT_ENABLE: u64 = 0x700;
+const PERF_INTERRUPT_STATUS: u64 = 0x704;
+const PERF_INTERRUPTS: u32 = 0x777;
+const STREAM_INTERRUPTS: u64 = 0x720;
 const ENABLE_STREAMS: u64 = 0xc00;
 const DISABLE_STREAMS: u64 = 0xc20;
 const TCR: u64 = 0x1000;
@@ -213,6 +230,8 @@ pub struct Dart {
     tcr: Vec<u32>,
     ttbr: Vec<u32>,
     enabled: [u32; STREAM_WORDS as usize],
+    perf_interrupts: u32,
+    stream_interrupts: [u32; STREAM_WORDS as usize],
     error: u32,
     error_mask: u32,
     error_address: u64,
@@ -262,6 +281,8 @@ impl Dart {
             tcr: vec![0; streams],
             ttbr: vec![0; streams],
             enabled: [0; STREAM_WORDS as usize],
+            perf_interrupts: 0,
+            stream_interrupts: [0; STREAM_WORDS as usize],
             error: 0,
             error_mask: 0,
             error_address: 0,
@@ -309,6 +330,8 @@ impl Dart {
             self.tcr.fill(0);
             self.ttbr.fill(0);
             self.enabled.fill(0);
+            self.perf_interrupts = 0;
+            self.stream_interrupts.fill(0);
             self.error = 0;
             self.error_mask = 0;
             self.error_address = 0;
@@ -520,6 +543,8 @@ impl MmioDevice for Dart {
             // The boot stage leaves protected-write reporting disabled and
             // there is no pending protected-write violation.
             PROTECTED_WRITE => 0,
+            PERF_INTERRUPT_ENABLE => self.perf_interrupts,
+            PERF_INTERRUPT_STATUS => 0,
             _ if TLIMITS.contains(&offset) => self.tlimits[((offset - TLIMITS[0]) / 4) as usize],
             TZ_CONFIG | TZ_SELECT => 0,
             _ if (TZ_FIRST..TZ_END).contains(&offset) && (offset - TZ_FIRST).is_multiple_of(8) => 0,
@@ -528,6 +553,8 @@ impl MmioDevice for Dart {
                     self.error_streams[word]
                 } else if let Some(word) = bitmap_word(offset, ENABLE_STREAMS) {
                     self.enabled[word]
+                } else if let Some(word) = bitmap_word(offset, STREAM_INTERRUPTS) {
+                    self.stream_interrupts[word]
                 } else if let Some(sid) = self.stream(offset, TCR).filter(|_| offset < TTBR) {
                     self.tcr[sid]
                 } else if let Some(sid) = self.stream(offset, TTBR) {
@@ -594,6 +621,9 @@ impl MmioDevice for Dart {
             _ if TLIMITS.contains(&offset) => {
                 self.tlimits[((offset - TLIMITS[0]) / 4) as usize] = value
             }
+            PERF_INTERRUPT_ENABLE => self.perf_interrupts = value & PERF_INTERRUPTS,
+            // Write-one-to-clear; nothing is pending.
+            PERF_INTERRUPT_STATUS => {}
             PROTECTED_WRITE if value == 0 => {}
             PROTECTED_WRITE => return Err(fail("nonzero protected-write policy is not described")),
             PROTECT => self.protect |= value,
@@ -606,6 +636,8 @@ impl MmioDevice for Dart {
                     self.enabled[word] |= value;
                 } else if let Some(word) = bitmap_word(offset, DISABLE_STREAMS) {
                     self.enabled[word] &= !value;
+                } else if let Some(word) = bitmap_word(offset, STREAM_INTERRUPTS) {
+                    self.stream_interrupts[word] = value;
                 } else if let Some(sid) = self.stream(offset, TCR).filter(|_| offset < TTBR) {
                     if value & !TCR_KNOWN != 0 {
                         return Err(fail("DART TCR reserved bits"));
@@ -686,6 +718,36 @@ mod tests {
             assert_eq!(d.read(offset, Width::Word, &mut a), Ok(0));
             assert!(d.read(offset, Width::Double, &mut a).is_err());
         }
+    }
+
+    #[test]
+    fn sptm_power_cycle_programs_the_interrupt_words_and_no_counter_interrupt_pends() {
+        let mut d = Dart::new(16, None);
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        // Power-down: clear all, disable the counter interrupts.
+        d.write(PERF_INTERRUPT_STATUS, Width::Word, 0xffff_ffff, &mut a)
+            .unwrap();
+        assert_eq!(d.read(PERF_INTERRUPT_STATUS, Width::Word, &mut a), Ok(0));
+        d.write(PERF_INTERRUPT_ENABLE, Width::Word, 0, &mut a)
+            .unwrap();
+        d.set_power(false, false, &mut a);
+        d.set_power(true, false, &mut a);
+        // Power-up: enable all, clear all, restore the in-use streams.
+        d.write(PERF_INTERRUPT_ENABLE, Width::Word, 0xffff_ffff, &mut a)
+            .unwrap();
+        assert_eq!(
+            d.read(PERF_INTERRUPT_ENABLE, Width::Word, &mut a),
+            Ok(u64::from(PERF_INTERRUPTS))
+        );
+        d.write(STREAM_INTERRUPTS + 4, Width::Word, 0x5, &mut a)
+            .unwrap();
+        assert_eq!(d.read(STREAM_INTERRUPTS + 4, Width::Word, &mut a), Ok(5));
+        // The counters themselves are absent.
+        assert!(d.read(0x760, Width::Word, &mut a).is_err());
+        d.set_power(false, false, &mut a);
+        d.set_power(true, false, &mut a);
+        assert_eq!(d.read(STREAM_INTERRUPTS + 4, Width::Word, &mut a), Ok(0));
     }
 
     #[test]
