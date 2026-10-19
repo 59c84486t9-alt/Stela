@@ -407,34 +407,57 @@ fn immediate(code: &mut Vec<u8>, value: u64) {
 }
 
 fn nzcv(code: &mut Vec<u8>, subtract: bool) {
-    const HOST_SIGN_BIT: u8 = 7;
-    const HOST_ZERO_BIT: u8 = 6;
-    const HOST_OVERFLOW_BIT: u8 = 11;
-    const ARM_NEGATIVE_BIT: u8 = 31;
-    const ARM_ZERO_BIT: u8 = 30;
-    const ARM_CARRY_BIT: u8 = 29;
-    const ARM_OVERFLOW_BIT: u8 = 28;
-    const NEGATIVE_ZERO_MASK: u32 = (1 << ARM_NEGATIVE_BIT) | (1 << ARM_ZERO_BIT);
     const STATE_NZCV_OFFSET: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
-    const SIGN_ZERO_SHIFT: u8 = ARM_NEGATIVE_BIT - HOST_SIGN_BIT;
-    const _: () = assert!(SIGN_ZERO_SHIFT == ARM_ZERO_BIT - HOST_ZERO_BIT);
-
-    code.extend([0x9c, 0x5a]); // pushfq; pop rdx: capture before modifying flags.
-    code.extend([0x89, 0xd0]); // mov eax,edx
-    code.extend([0xc1, 0xe0, SIGN_ZERO_SHIFT]); // shl eax,24: SF/ZF together.
-    code.push(0x25); // and eax,imm32: retain ARM N/Z only.
-    code.extend(NEGATIVE_ZERO_MASK.to_le_bytes());
-
-    code.extend([0x89, 0xd1, 0x83, 0xe1, 1]); // mov ecx,edx; and ecx,1: CF.
-    if subtract {
-        code.extend([0x83, 0xf1, 1]); // xor ecx,1: ARM subtraction has no-borrow C.
-    }
-    code.extend([0xc1, 0xe1, ARM_CARRY_BIT, 0x09, 0xc8]); // shl ecx,29; or eax,ecx
-
-    code.extend([0xc1, 0xea, HOST_OVERFLOW_BIT, 0x83, 0xe2, 1]); // shr edx,11; and edx,1
-    code.extend([0xc1, 0xe2, ARM_OVERFLOW_BIT, 0x09, 0xd0]); // shl edx,28; or eax,edx
+    capture_nzcv(code, subtract);
     code.extend([0x89, 0x87]); // mov dword [rdi+GuestState.nzcv],eax
     code.extend(STATE_NZCV_OFFSET.to_le_bytes());
+}
+
+/// SETcc into AL, AH, DL and DH: N | Z << 8 and C | V << 8.
+const CAPTURE_SIGN_AL: [u8; 3] = [0x0f, 0x98, 0xc0];
+const CAPTURE_ZERO_AH: [u8; 3] = [0x0f, 0x94, 0xc4];
+const CAPTURE_BELOW_DL: [u8; 3] = [0x0f, 0x92, 0xc2];
+const CAPTURE_ABOVE_EQUAL_DL: [u8; 3] = [0x0f, 0x93, 0xc2];
+const CAPTURE_OVERFLOW_DH: [u8; 3] = [0x0f, 0x90, 0xc6];
+const AND_EAX_IMM32: u8 = 0x25;
+const AND_EDX_IMM32: [u8; 2] = [0x81, 0xe2];
+const SHL_EDX_IMM8: [u8; 2] = [0xc1, 0xe2];
+const OR_EAX_EDX: [u8; 2] = [0x09, 0xd0];
+const IMUL_EAX_EAX_IMM32: [u8; 2] = [0x69, 0xc0];
+/// The SETcc bytes' low bits.
+const CAPTURED_BITS: u32 = 0x0101;
+/// C and V move above N and Z: N | C << 2 | Z << 8 | V << 10.
+const CAPTURE_CARRY_SHIFT: u8 = 2;
+/// One product moves N (bit 0) to 31, Z (8) to 30, C (2) to 29 and V (10)
+/// to 28. Every other partial product lands below bit 28 or above bit 31,
+/// on a bit no other lands on, so nothing carries into NZCV.
+const CAPTURE_MULTIPLIER: u32 = (1 << 31) | (1 << 22) | (1 << 27) | (1 << 18);
+const CAPTURE_NZCV_MASK: u32 = 0xf000_0000;
+
+/// The host flags as an Arm NZCV word in EAX, without a data-dependent
+/// branch or an instruction outside Intel's data operand independent timing
+/// list (SETcc, AND, SHL, OR, IMUL). `borrow` takes C as an Arm subtraction
+/// does, the complement of the host carry. Clobbers RDX; RCX is intact.
+pub(crate) fn capture_nzcv(code: &mut Vec<u8>, borrow: bool) {
+    code.extend(CAPTURE_SIGN_AL);
+    code.extend(CAPTURE_ZERO_AH);
+    code.extend(if borrow {
+        CAPTURE_ABOVE_EQUAL_DL
+    } else {
+        CAPTURE_BELOW_DL
+    });
+    code.extend(CAPTURE_OVERFLOW_DH);
+    code.push(AND_EAX_IMM32);
+    code.extend(CAPTURED_BITS.to_le_bytes());
+    code.extend(AND_EDX_IMM32);
+    code.extend(CAPTURED_BITS.to_le_bytes());
+    code.extend(SHL_EDX_IMM8);
+    code.push(CAPTURE_CARRY_SHIFT);
+    code.extend(OR_EAX_EDX);
+    code.extend(IMUL_EAX_EAX_IMM32);
+    code.extend(CAPTURE_MULTIPLIER.to_le_bytes());
+    code.push(AND_EAX_IMM32);
+    code.extend(CAPTURE_NZCV_MASK.to_le_bytes());
 }
 
 /// Shared semantic emission. Block compilation handles control transfers itself.
@@ -554,19 +577,25 @@ pub(crate) fn emit_instruction(
         } => {
             load(code, left);
             right_operand(code, right, width, Shift::Lsl, 0);
-            // Recover guest C after operand loads, including XOR-based
-            // ZR loads that clobber host flags. SBC consumes !C as borrow.
-            code.extend([0x0f, 0xba, 0xa7, 0, 1, 0, 0, 29]); // bt [rdi+256],29
+            // Arm's SBC is AddWithCarry(left, NOT(right), C): ADC of the
+            // complement, whose host CF and OF are Arm's C and V. (CMC is
+            // not on Intel's data operand independent timing list.)
             if subtract {
-                code.push(0xf5); // cmc: ARM no-borrow -> x86 borrow
+                if width == Width::X64 {
+                    code.push(0x48);
+                }
+                code.extend([0xf7, 0xd1]); // not (e/r)cx
             }
+            // Recover guest C after operand loads, including XOR-based
+            // ZR loads that clobber host flags.
+            code.extend([0x0f, 0xba, 0xa7, 0, 1, 0, 0, 29]); // bt [rdi+256],29
             if width == Width::X64 {
                 code.push(0x48);
             }
-            code.extend([if subtract { 0x19 } else { 0x11 }, 0xc8]); // sbb/adc (e/r)ax,(e/r)cx
+            code.extend([0x11, 0xc8]); // adc (e/r)ax,(e/r)cx
             store(code, destination);
             if flags {
-                nzcv(code, subtract);
+                nzcv(code, false);
             }
         }
         Operation::AddSubRegister {
@@ -854,5 +883,27 @@ mod tests {
             Err(UnsupportedReason::PrivilegedOperation { address }) if address == instructions[1].pc)
             );
         }
+    }
+
+    /// The capture's arithmetic on every flag combination: the SETcc bytes
+    /// at their register positions, shifted, combined, multiplied and masked.
+    #[test]
+    fn the_flag_capture_packs_every_combination_into_nzcv() {
+        for flags in 0u32..16 {
+            let [n, z, c, v] = [3, 2, 1, 0].map(|bit| (flags >> bit) & 1);
+            let accumulator = (n | z << 8) & CAPTURED_BITS;
+            let data = (c | v << 8) & CAPTURED_BITS;
+            let combined = accumulator | data << CAPTURE_CARRY_SHIFT;
+            let packed = combined.wrapping_mul(CAPTURE_MULTIPLIER) & CAPTURE_NZCV_MASK;
+            assert_eq!(packed, flags << 28, "NZCV {flags:#06b}");
+        }
+        let mut code = Vec::new();
+        capture_nzcv(&mut code, false);
+        let mut borrow = Vec::new();
+        capture_nzcv(&mut borrow, true);
+        // Only the carry's SETcc differs.
+        assert_eq!(code.len(), borrow.len());
+        assert_eq!(code[6..9], CAPTURE_BELOW_DL);
+        assert_eq!(borrow[6..9], CAPTURE_ABOVE_EQUAL_DL);
     }
 }

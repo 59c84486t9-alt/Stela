@@ -757,6 +757,43 @@ fn register_left(
         resolve_lane_branch(code, patch);
     }
 }
+/// SSHL and USHL of the extended lane in RAX by the signed count in ECX,
+/// without a branch: both directions are computed and CMOVs pick one, so
+/// the timing depends on neither the count nor the data (FEAT_DIT lists
+/// both). A left count of 64 or more gives zero; a right count is clamped to
+/// 63, which fills with the sign (SSHL) or, below -63, is replaced by zero
+/// (USHL of a 64-bit lane). Narrower lanes are truncated by the caller.
+fn register_plain(code: &mut Vec<u8>, signed: bool) {
+    const LEFT_LIMIT: u8 = 64;
+    const RIGHT_LIMIT: u8 = 63;
+    const RIGHT_ZERO: u8 = (-64i8) as u8;
+    code.extend([0x49, 0x89, 0xc2]); // mov r10,rax
+    code.extend([0x49, 0xd3, 0xe2]); // shl r10,cl
+    code.extend([0x31, 0xd2]); // xor edx,edx
+    code.extend([0x83, 0xf9, LEFT_LIMIT]); // cmp ecx,64
+    code.extend([0x4c, 0x0f, 0x4d, 0xd2]); // cmovge r10,rdx
+    code.extend([0x89, 0xca, 0xf7, 0xda]); // mov edx,ecx; neg edx
+    code.extend([0x41, 0xbb]); // mov r11d,63
+    code.extend(u32::from(RIGHT_LIMIT).to_le_bytes());
+    code.extend([0x44, 0x39, 0xda]); // cmp edx,r11d
+    code.extend([0x41, 0x0f, 0x4f, 0xd3]); // cmovg edx,r11d
+    code.extend([0x41, 0x89, 0xcb]); // mov r11d,ecx: the signed count
+    code.extend([0x89, 0xd1]); // mov ecx,edx
+    if signed {
+        LaneShift::ArithmeticRight
+    } else {
+        LaneShift::LogicalRight
+    }
+    .count(code, false);
+    if !signed {
+        code.extend([0x31, 0xd2]); // xor edx,edx
+        code.extend([0x41, 0x83, 0xfb, RIGHT_ZERO]); // cmp r11d,-64
+        code.extend([0x48, 0x0f, 0x4e, 0xc2]); // cmovle rax,rdx
+    }
+    code.extend([0x45, 0x85, 0xdb]); // test r11d,r11d
+    code.extend([0x49, 0x0f, 0x49, 0xc2]); // cmovns rax,r10
+}
+
 #[allow(clippy::too_many_arguments)]
 fn register_shift(
     code: &mut Vec<u8>,
@@ -776,14 +813,18 @@ fn register_shift(
         if let Some(counts) = counts {
             code.extend([0x0f, 0xbe, 0x8f]); // movsx ecx,byte [rdi+count lane]
             code.extend((vector_offset(counts) + u32::from(byte)).to_le_bytes());
-            code.extend([0x85, 0xc9]);
-            let left = lane_branch(code, LaneBranch::Nonnegative);
-            code.extend([0xf7, 0xd9]); // neg ecx (signed byte -128 becomes +128)
-            register_right(code, signed_source, round);
-            let merged = lane_branch(code, LaneBranch::Always);
-            resolve_lane_branch(code, left);
-            register_left(code, bits, signed_source, unsigned_result, saturating);
-            resolve_lane_branch(code, merged);
+            if !round && !saturating {
+                register_plain(code, signed_source);
+            } else {
+                code.extend([0x85, 0xc9]);
+                let left = lane_branch(code, LaneBranch::Nonnegative);
+                code.extend([0xf7, 0xd9]); // neg ecx (signed byte -128 becomes +128)
+                register_right(code, signed_source, round);
+                let merged = lane_branch(code, LaneBranch::Always);
+                resolve_lane_branch(code, left);
+                register_left(code, bits, signed_source, unsigned_result, saturating);
+                resolve_lane_branch(code, merged);
+            }
         } else {
             code.push(0xb9); // mov ecx,imm32
             code.extend(u32::from(operand.amount).to_le_bytes());

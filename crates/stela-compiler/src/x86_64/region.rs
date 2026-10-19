@@ -1826,13 +1826,12 @@ mod tests {
             assert_eq!(ordinary.x86_64_code, baseline.x86_64_code);
             assert_eq!(ordinary.source_map, baseline.source_map);
         }
+        let mut capture = Vec::new();
+        crate::x86_64::capture_nzcv(&mut capture, true);
+        assert_eq!(analysis::selected_output_instruction_count(&capture), None);
         assert_eq!(
-            analysis::selected_output_instruction_count(&[0x9c, 0x5a]),
-            None
-        );
-        assert_eq!(
-            analysis::allocated_output_instruction_count(&[0x9c, 0x5a]),
-            Some(2)
+            analysis::allocated_output_instruction_count(&capture),
+            Some(10)
         );
     }
 

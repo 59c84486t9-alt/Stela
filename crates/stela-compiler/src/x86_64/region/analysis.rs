@@ -256,7 +256,6 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     const IMUL_IMMEDIATE: u8 = 0x69;
     const PUSH_FIRST: u8 = 0x50;
     const POP_LAST: u8 = 0x5f;
-    const PUSH_FLAGS: u8 = 0x9c;
     const NEAR_JUMP: u8 = 0xe9;
     const SHORT_JUMP: u8 = 0xeb;
     const ACCUMULATOR_IMMEDIATES: [u8; 6] = [0x05, 0x2d, 0x25, 0x35, 0x3d, 0xa9];
@@ -303,7 +302,6 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
             && rex.is_none_or(|rex| rex == (REX_FIRST | REX_B))
         {
             // Borrowed native ABI registers; no memory addressing operand.
-        } else if extended && !word && rex.is_none() && opcode == PUSH_FLAGS {
         } else if extended && !word && rex.is_none() && matches!(opcode, NEAR_JUMP | SHORT_JUMP) {
             cursor += if opcode == NEAR_JUMP { 4 } else { 1 };
         } else if extended && !word && ACCUMULATOR_IMMEDIATES.contains(&opcode) {

@@ -75,8 +75,6 @@ const UNARY_GROUP: u8 = 0xf7;
 const NOP: u8 = 0x90;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
 const IMUL: u8 = 0xaf;
-const IMUL_IMMEDIATE: u8 = 0x69;
-const PUSH_FLAGS: u8 = 0x9c;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -84,7 +82,6 @@ pub enum ImmediateExtension {
     Add = 0,
     And = 4,
     Subtract = 5,
-    Xor = 6,
     Compare = 7,
 }
 
@@ -244,14 +241,12 @@ pub fn integer_immediate(
         const ADD_ACCUMULATOR: u8 = 0x05;
         const SUBTRACT_ACCUMULATOR: u8 = 0x2d;
         const AND_ACCUMULATOR: u8 = 0x25;
-        const XOR_ACCUMULATOR: u8 = 0x35;
         const COMPARE_ACCUMULATOR: u8 = 0x3d;
         rex(code, width, HostGpr::Rax, destination);
         code.push(match extension {
             ImmediateExtension::Add => ADD_ACCUMULATOR,
             ImmediateExtension::Subtract => SUBTRACT_ACCUMULATOR,
             ImmediateExtension::And => AND_ACCUMULATOR,
-            ImmediateExtension::Xor => XOR_ACCUMULATOR,
             ImmediateExtension::Compare => COMPARE_ACCUMULATOR,
         });
         code.extend(value.to_le_bytes());
@@ -273,20 +268,6 @@ fn group_immediate(
         REGISTER_MODE | ((extension as u8) << 3) | (destination as u8 & 7),
     ]);
     code.extend(value.to_le_bytes());
-}
-
-pub fn multiply_immediate32(code: &mut Vec<u8>, destination: HostGpr, source: HostGpr, value: i32) {
-    rex(code, Width::W32, destination, source);
-    code.extend([
-        IMUL_IMMEDIATE,
-        REGISTER_MODE | ((destination as u8 & 7) << 3) | (source as u8 & 7),
-    ]);
-    code.extend(value.to_le_bytes());
-}
-
-pub fn capture_host_flags(code: &mut Vec<u8>) {
-    code.push(PUSH_FLAGS);
-    pop(code, HostGpr::Rdx);
 }
 
 pub fn shift(code: &mut Vec<u8>, kind: Shift, amount: u8, width: Width) {

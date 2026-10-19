@@ -233,33 +233,14 @@ pub(super) fn analyze_value(operation: &Operation) -> Option<(Effects, ValueEffe
     ))
 }
 
-const HOST_CARRY_BIT: u8 = 0;
-const HOST_ZERO_BIT: u8 = 6;
-const HOST_SIGN_BIT: u8 = 7;
-const HOST_OVERFLOW_BIT: u8 = 11;
-const ARM_NEGATIVE_BIT: u8 = NZCV_N.trailing_zeros() as u8;
 const ARM_OVERFLOW_BIT: u8 = NZCV_V.trailing_zeros() as u8;
-const SIGN_ZERO_SHIFT: u8 = ARM_NEGATIVE_BIT - HOST_SIGN_BIT;
-const HOST_NZC_MASK: u32 = (1 << HOST_CARRY_BIT) | (1 << HOST_ZERO_BIT) | (1 << HOST_SIGN_BIT);
-const ARM_NZC_MASK: u32 = NZCV_N | NZCV_Z | NZCV_C;
-const PACK_MULTIPLIER: u32 = NZCV_C | (1 << SIGN_ZERO_SHIFT);
+const _: () = assert!(matches!(RESULT, encoding::HostGpr::Rax));
+const _: () = assert!(matches!(RIGHT, encoding::HostGpr::Rdx));
 
-/// Baseline two-scratch capture; no optional LAHF/SAHF capability assumption.
-/// PUSHFQ/POP is real host-stack traffic. RCX (a live value or budget) is intact.
+/// The two-scratch SETcc capture into RESULT (EAX), clobbering RIGHT (RDX).
+/// RCX (a live value or budget) is intact.
 fn pack_native(code: &mut Vec<u8>, carry: Carry) {
-    use encoding::ImmediateExtension::{And, Xor};
-    encoding::capture_host_flags(code);
-    encoding::copy(code, RESULT, RIGHT, Width::W32);
-    encoding::integer_immediate(code, RESULT, And, HOST_NZC_MASK, Width::W32);
-    encoding::multiply_immediate32(code, RESULT, RESULT, PACK_MULTIPLIER as i32);
-    encoding::integer_immediate(code, RESULT, And, ARM_NZC_MASK, Width::W32);
-    if matches!(carry, Carry::Inverted) {
-        encoding::integer_immediate(code, RESULT, Xor, NZCV_C, Width::W32);
-    }
-    encoding::shift_register(code, RIGHT, Shift::Lsr, HOST_OVERFLOW_BIT, Width::W32);
-    encoding::integer_immediate(code, RIGHT, And, 1, Width::W32);
-    encoding::shift_register(code, RIGHT, Shift::Lsl, ARM_OVERFLOW_BIT, Width::W32);
-    encoding::binary(code, RESULT, RIGHT, encoding::Binary::Or, Width::W32);
+    crate::x86_64::capture_nzcv(code, matches!(carry, Carry::Inverted));
 }
 
 impl Emitter<'_> {
