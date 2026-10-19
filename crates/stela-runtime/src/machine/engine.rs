@@ -3261,10 +3261,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             match written {
                 Ok(()) => {}
                 Err(error) if self.surveyed(physical, bytes, Some(value), &error) => {}
-                Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
-                Err(DeviceError::Refused(detail) | DeviceError::TransferRefused(detail)) => {
-                    return Err(refuse(self, detail));
+                Err(DeviceError::NoDevice) => {
+                    return Err(refuse(self, format!("no device model (value {value:#x})")));
                 }
+                Err(DeviceError::Refused(detail)) => {
+                    return Err(refuse(self, format!("{detail} (value {value:#x})")));
+                }
+                Err(DeviceError::TransferRefused(detail)) => return Err(refuse(self, detail)),
             }
             if let Some((base, updated)) = writeback {
                 self.write_register(base, updated);
