@@ -20,7 +20,10 @@
 //! The result is `isa/dit-timing-audit.json`, bound to the archives and the
 //! compiler sources it audited. It is evidence for FEAT_DIT, not a proof:
 //! a verdict of `constant` means the emitted instructions are all on Intel's
-//! list and nothing branches on or indexes by the data.
+//! list and nothing branches on or indexes by the data. Exclusive,
+//! unprivileged and pointer-authenticated loads and stores end their block,
+//! and the engine performs them ([`ENGINE_PERFORMED`]): their verdict
+//! `engine` rests on a review of that source, whose digest the ledger keeps.
 use crate::{
     amx::kernels::{listing, objdump},
     tools::root,
@@ -70,33 +73,51 @@ const LOADS_AND_STORES: &str = "Loads and Stores";
 /// Where each audited block is compiled.
 const BASE: u64 = 0x10_0000;
 
+/// The names of [`TargetCpu::DATA_INDEPENDENT_TIMING_TIERS`] in the ledger.
+const TIMING_TIER_NAMES: [&str; 3] = ["avx512-dit", "avx2-dit", "sse42-dit"];
+
 /// The host tiers audited: the SSE2 baseline every x86-64 host has, the
 /// AVX2 and AVX-512 tiers with every other optional feature the compiler
-/// uses, and those two compiled for PSTATE.DIT.
-fn tiers() -> [(&'static str, TargetCpu); 5] {
-    let full = TargetCpu::Sse42
-        .with_pclmulqdq()
-        .with_popcnt()
-        .with_bmi1()
-        .with_aes()
-        .with_sha()
-        .with_fma()
-        .with_f16c()
-        .with_cx8()
-        .with_cx16()
-        .with_atomic_load16()
-        .with_avx2();
-    [
+/// uses, and the tiers the system engine compiles PSTATE.DIT code for
+/// ([`TargetCpu::data_independent_timing_target`]).
+fn tiers() -> Vec<(&'static str, TargetCpu)> {
+    let mut tiers = vec![
         ("baseline", TargetCpu::Baseline),
-        ("avx2", full),
-        ("avx512", full.with_avx512f()),
-        ("avx2-dit", full.with_data_independent_timing()),
-        (
-            "avx512-dit",
-            full.with_avx512f().with_data_independent_timing(),
-        ),
-    ]
+        ("avx2", TargetCpu::Avx2Complete),
+        ("avx512", TargetCpu::Avx512Complete),
+    ];
+    tiers.extend(TIMING_TIER_NAMES.into_iter().zip(
+        TargetCpu::DATA_INDEPENDENT_TIMING_TIERS.map(TargetCpu::with_data_independent_timing),
+    ));
+    tiers
 }
+
+/// The listed classes whose instructions end a system-mode block for the
+/// engine to perform in Rust, which no disassembly of block code covers:
+/// each class and the engine source that performs it. That source branches
+/// and indexes only on the address, its translation, permissions, alignment,
+/// watchpoints and the Exclusives monitor; it copies the data without a
+/// branch or an index on it (reviewed, verdict `engine`).
+const ENGINE_PERFORMED: [(&str, &str); 4] = [
+    (
+        "Load/store exclusive register",
+        "crates/stela-runtime/src/machine/engine/exclusive.rs",
+    ),
+    (
+        "Load/store exclusive pair",
+        "crates/stela-runtime/src/machine/engine/exclusive.rs",
+    ),
+    (
+        "Load/store register (unprivileged)",
+        "crates/stela-runtime/src/machine/engine/unprivileged.rs",
+    ),
+    (
+        "Load/store register (pac)",
+        "crates/stela-runtime/src/machine/engine.rs",
+    ),
+];
+/// The refusal of a form that ends its block.
+const ENDS_BLOCK: &str = "the instruction ends its block";
 
 /// Intel's data operand independent timing instructions, lowercase. Every
 /// CMOVcc and SETcc condition is listed; [`listed`] folds them.
@@ -315,11 +336,12 @@ impl DitAudit {
                 "isa_archive_sha256": isa,
                 "doit_list": DOIT_SOURCE,
                 "compiler_sha256": compiler_digest()?,
+                "engine_sha256": engine_digests()?,
             },
             "profile": "system-mode-v1 on the M2: no SME or SVE classes",
             "absent_classes": absent,
             "unmatched": unmatched,
-            "tiers": tiers().map(|(name, _)| name),
+            "tiers": tiers().into_iter().map(|(name, _)| name).collect::<Vec<_>>(),
             "summary": summary,
             "forms": rows,
         });
@@ -490,6 +512,13 @@ fn audit(
     };
     row.insert("registry".into(), json!(status));
     let address_free = entry.top == LOADS_AND_STORES;
+    let engine = ENGINE_PERFORMED
+        .iter()
+        .find(|(class, _)| *class == entry.class)
+        .map(|(_, source)| *source);
+    if let Some(source) = engine {
+        row.insert("engine".into(), json!(source));
+    }
     for (tier, target) in tiers() {
         let mut verdicts = BTreeSet::new();
         let mut unlisted = BTreeSet::new();
@@ -498,6 +527,10 @@ fn audit(
         for &word in words {
             let code = match instruction_code(word, target) {
                 Ok(code) => code,
+                Err(error) if error == ENDS_BLOCK && engine.is_some() => {
+                    verdicts.insert("engine");
+                    continue;
+                }
                 Err(error) => {
                     refusals.insert(error);
                     continue;
@@ -684,6 +717,15 @@ fn indexed_operand(operands: &str) -> bool {
             .count();
         registers > 1
     })
+}
+
+/// Each engine source of [`ENGINE_PERFORMED`] with its SHA-256, so a change
+/// to one shows that its review needs repeating.
+fn engine_digests() -> Result<BTreeMap<&'static str, String>> {
+    ENGINE_PERFORMED
+        .iter()
+        .map(|(_, source)| Ok((*source, sha256(&fs::read(root().join(source))?))))
+        .collect()
 }
 
 /// SHA-256 over the compiler's sources, each as its path and digest.
