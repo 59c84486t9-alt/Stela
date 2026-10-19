@@ -1308,6 +1308,10 @@ fn run(
                 UsbLog::MuxControl(bytes) => {
                     output::arguments(format_args!("USB mux control bytes={:02x?}\n", bytes))
                 }
+                UsbLog::MuxRejected(bytes) => output::arguments(format_args!(
+                    "USB mux rejected bytes={:02x?}\n",
+                    bytes
+                )),
                 UsbLog::QueryTypeReply(bytes) => output::arguments(format_args!(
                     "USB QueryType reply bytes={:02x?} text={}\n",
                     bytes,

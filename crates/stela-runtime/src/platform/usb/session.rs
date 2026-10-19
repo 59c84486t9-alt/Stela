@@ -14,7 +14,13 @@ pub enum Log {
     Descriptor(Descriptor),
     MuxControl(Vec<u8>),
     QueryTypeReply(Vec<u8>),
+    /// The leading bytes of a bulk IN transfer the mux refused, so the
+    /// refusal that follows can be checked against the device's framing.
+    MuxRejected(Vec<u8>),
 }
+
+/// Bytes of a refused transfer kept for [`Log::MuxRejected`].
+const REJECTED_BYTES: usize = 96;
 struct Probe {
     stream: Option<StreamId>,
     request: Vec<u8>,
@@ -142,8 +148,11 @@ impl Session {
             }
             match completion.status {
                 TransferStatus::Complete => {
-                    if input {
-                        self.mux.receive(&completion.bytes)?;
+                    if input && let Err(error) = self.mux.receive(&completion.bytes) {
+                        let kept = completion.bytes.len().min(REJECTED_BYTES);
+                        self.logs
+                            .push_back(Log::MuxRejected(completion.bytes[..kept].to_vec()));
+                        return Err(error);
                     }
                 }
                 TransferStatus::Timeout if input && completion.transferred == 0 => {}
