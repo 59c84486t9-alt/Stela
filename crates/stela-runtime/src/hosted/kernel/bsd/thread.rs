@@ -176,16 +176,13 @@ fn register(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         return Ok(Outcome::Error(EINVAL));
     }
     // `machine_thread_function_pointers_convert_from_user`: both entries
-    // are function pointers signed with IA and no discriminator.
+    // are function pointers signed with IA and no discriminator, taken as
+    // they are when user JOP is disabled.
     let authenticate = |pointer: u64| -> Result<u64> {
-        if pointer == 0 {
-            return Ok(0);
+        match &kernel.process.signer {
+            Some(signer) if pointer != 0 => Ok(signer.authenticate(Key::Ia, pointer, 0)?.pointer),
+            _ => Ok(pointer),
         }
-        Ok(kernel
-            .process
-            .signer
-            .authenticate(Key::Ia, pointer, 0)?
-            .pointer)
     };
     let (thread_start, workqueue_thread) =
         (authenticate(thread_start)?, authenticate(workqueue_thread)?);

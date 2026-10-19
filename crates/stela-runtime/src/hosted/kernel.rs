@@ -66,7 +66,9 @@ const HOST_SELF_TRAP: u32 = 29;
 /// thread waits for the execution lock; [`Kernel::page_in`] takes the
 /// execution lock before the shared region's.
 pub(super) struct Process {
-    pub(super) signer: pauth::Context,
+    /// The signer of the user JOP key (IA and DA), `None` when exec
+    /// disabled user JOP: the kernel then signs nothing with it.
+    pub(super) signer: Option<pauth::Context>,
     pub(super) hardware: Hardware,
     pub(super) sysctl: bsd::sysctl::Model,
     /// The main thread's stack top (`p_usrstack`).
@@ -159,7 +161,7 @@ impl Trap<'_> {
 /// What the kernel personality is created from.
 pub(super) struct Config {
     pub(super) shared_region: Option<SharedRegion>,
-    pub(super) signer: pauth::Context,
+    pub(super) signer: Option<pauth::Context>,
     pub(super) hardware: Hardware,
     pub(super) features: Vec<(&'static str, bool)>,
     pub(super) executable: Executable,
@@ -328,7 +330,7 @@ impl Kernel {
     pub(super) fn page_in(&mut self, address: u64) -> Result<bool> {
         let process = &self.process;
         self.exclusive(|| match lock(&process.shared_region).as_mut() {
-            Some(region) => region.resolve(address, &process.signer),
+            Some(region) => region.resolve(address, process.signer.as_ref()),
             None => Ok(false),
         })
     }

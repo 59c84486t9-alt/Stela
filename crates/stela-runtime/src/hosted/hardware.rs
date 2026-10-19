@@ -11,6 +11,8 @@ use anyhow::{Result, bail};
 
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 pub const CPU_SUBTYPE_ARM64E: u32 = 2;
+/// `CPU_SUBTYPE_MASK`: the capability bits above the subtype.
+pub const CPU_SUBTYPE_MASK: u32 = 0xff00_0000;
 /// `CPU_SUBTYPE_PTRAUTH_ABI`: an arm64e process using the stable PAC ABI.
 pub const CPU_SUBTYPE_PTRAUTH_ABI: u32 = 0x8000_0000;
 pub const CPUFAMILY_ARM_BLIZZARD_AVALANCHE: u32 = 0xda33_d83d;

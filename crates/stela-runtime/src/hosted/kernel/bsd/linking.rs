@@ -135,7 +135,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outc
         }
         // No thread executes guest code while the region is writable and
         // its pages are not yet linked.
-        let signer = &kernel.process.signer;
+        let signer = kernel.process.signer.as_ref();
         let linked = kernel.exclusive(|| -> Result<bool> {
             // The private overmapping, writable while its pages are linked.
             // SAFETY: a fixed private mapping over the image's own region.
@@ -234,9 +234,10 @@ fn validate<'a>(blob: &'a [u8], regions: &[Region]) -> Option<LinkInfo<'a>> {
     })
 }
 
-/// `signPointer` with the process's A keys; NULL stays NULL.
+/// `signPointer` with the process's A keys; NULL stays NULL, and without
+/// a user JOP key (`dyld_a_key` zero) the target stays unsigned.
 fn sign(
-    signer: &pauth::Context,
+    signer: Option<&pauth::Context>,
     target: u64,
     location: u64,
     address_diversity: bool,
@@ -251,12 +252,21 @@ fn sign(
     } else {
         diversity
     };
-    signer.sign(key, target, modifier).ok()
+    match signer {
+        Some(signer) => signer.sign(key, target, modifier).ok(),
+        None => Some(target),
+    }
 }
 
 /// `fixup_page` on the page at `page`: walk its chain, rewriting each
 /// fixup in place, until the chain ends or leaves the page.
-fn fix_page(link: &LinkInfo, signer: &pauth::Context, page: u64, segment: usize, index: usize) {
+fn fix_page(
+    link: &LinkInfo,
+    signer: Option<&pauth::Context>,
+    page: u64,
+    segment: usize,
+    index: usize,
+) {
     let Some(start) = half(link.blob, segment + 22 + index * 2) else {
         return;
     };
@@ -409,7 +419,7 @@ mod tests {
             pauth::Keys::from_words([1, 2], [3, 4], [5, 6], [7, 8]),
             pauth::Version::FaultingCombined,
         );
-        fix_page(&link, &signer, page, chains + 8, 0);
+        fix_page(&link, Some(&signer), page, chains + 8, 0);
         assert_eq!(memory::read_u64(page), Some(page + 0x10 + (0x80 << 56)));
         assert_eq!(memory::read_u64(page + 8), Some(0x7004));
         let executable = Region {

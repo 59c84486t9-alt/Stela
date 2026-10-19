@@ -64,20 +64,21 @@ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// What builds one thread's engine: every PE of the process has the same
-/// chip, identification, translation tables and PAC keys.
+/// chip, identification, translation tables, PAC keys and user JOP state.
 pub(super) struct Engine {
     pub(super) chip: Chip,
     pub(super) profile: CpuProfile,
     pub(super) target: TargetCpu,
     pub(super) tables: Arc<Tables>,
     pub(super) keys: pe::Keys,
+    pub(super) jop: pe::UserJop,
 }
 
 impl Engine {
     /// A PE at EL0t entering at `pc`, with the hosted vectors as host
     /// breakpoints and waits returned to the thread's loop.
     fn machine(&self, pc: u64) -> Result<Box<Pe>> {
-        let cpu = pe::user_thread(self.chip, pc, &self.tables, &self.keys);
+        let cpu = pe::user_thread(self.chip, pc, &self.tables, &self.keys, self.jop);
         let host = ProcessHost::new(self.tables.clone())?;
         let mut machine = Box::new(Machine::new(
             cpu,
@@ -460,26 +461,31 @@ impl Entry {
 }
 
 /// Build what the threads of a new process share: the engine description
-/// and the PAC signer of its PEs.
+/// and the signer of its user JOP key, none when user JOP is disabled.
 pub(super) fn engine(
     chip: Chip,
     profile: CpuProfile,
     target: TargetCpu,
     keys: pe::Keys,
-) -> Result<(Engine, crate::pauth::Context)> {
+    jop: pe::UserJop,
+) -> Result<(Engine, Option<crate::pauth::Context>)> {
     let engine = Engine {
         chip,
         profile,
         target,
         tables: Arc::new(Tables::new()?),
         keys,
+        jop,
     };
+    if jop == pe::UserJop::Disabled {
+        return Ok((engine, None));
+    }
     let signer = engine
         .machine(0)?
         .pointer_signer()
         .map_err(|stop| anyhow!("the PE cannot sign pointers: {stop:?}"))
         .context("the process's pointer-authentication context")?;
-    Ok((engine, signer))
+    Ok((engine, Some(signer)))
 }
 
 #[cfg(test)]

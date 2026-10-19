@@ -56,6 +56,9 @@ pub struct Launch {
     pub executable: exec::Image,
     /// The image's slice offset in its file, where its Mach header lies.
     pub slice_offset: u64,
+    /// The slice's CPU subtype, capability bits included: whether exec
+    /// leaves user JOP enabled ([`pe::UserJop::of_subtype`]).
+    pub cpu_subtype: u32,
     /// The path exec was asked to run, as `executable_path=` reports it.
     pub executable_path: Vec<u8>,
     pub signature: Signature,
@@ -183,7 +186,8 @@ pub fn run(launch: Launch) -> Result<Report> {
             executable.slide, dylinker.slide, stack.top
         );
     }
-    let (engine, signer) = threads::engine(launch.chip, profile, target, keys)?;
+    let jop = pe::UserJop::of_subtype(launch.cpu_subtype);
+    let (engine, signer) = threads::engine(launch.chip, profile, target, keys, jop)?;
     let process = kernel::Process::new(kernel::Config {
         shared_region,
         signer,

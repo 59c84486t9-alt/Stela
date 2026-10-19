@@ -47,6 +47,12 @@ pub(crate) struct Run {
     statistics: bool,
 }
 
+/// The CPU subtype of a thin Mach-O slice, capability bits included.
+fn cpu_subtype(slice: &[u8]) -> Result<u32> {
+    let word = slice.get(8..12).context("the slice has no Mach header")?;
+    Ok(u32::from_le_bytes(word.try_into()?))
+}
+
 /// The slice exec would choose on an arm64e machine.
 fn select_slice(data: &[u8]) -> Result<(u64, &[u8])> {
     let slices = split_slices(data)?;
@@ -228,6 +234,7 @@ impl Run {
             chip: Chip::AppleM2,
             executable: image(&program_file, slice_offset, &plan),
             slice_offset,
+            cpu_subtype: cpu_subtype(slice)?,
             executable_path: program,
             signature,
             dylinker: Dylinker {

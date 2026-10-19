@@ -359,7 +359,7 @@ impl SharedRegion {
 
     /// Slide the page holding `address` in, if it is pending: false when
     /// there was nothing to do.
-    pub fn resolve(&mut self, address: u64, signer: &pauth::Context) -> Result<bool> {
+    pub fn resolve(&mut self, address: u64, signer: Option<&pauth::Context>) -> Result<bool> {
         let slide = self.slide;
         let Some(mapping) = self
             .slid
@@ -397,7 +397,7 @@ fn slide_page(
     start: u16,
     value_add: u64,
     slide: u64,
-    signer: &pauth::Context,
+    signer: Option<&pauth::Context>,
 ) -> Result<()> {
     let mut offset = u64::from(start);
     loop {
@@ -422,7 +422,13 @@ fn slide_page(
             } else {
                 pauth::Key::Ia
             };
-            signer.sign(key, target, modifier)?
+            // A region without pointer authentication (`si_ptrauth`
+            // false: a process whose user JOP is disabled) keeps the
+            // target unsigned.
+            match signer {
+                Some(signer) => signer.sign(key, target, modifier)?,
+                None => target,
+            }
         } else {
             target + ((raw << HIGH8_SHIFT) & HIGH8_MASK)
         };
@@ -549,8 +555,8 @@ mod tests {
         );
         assert!(memory::read_u64(base + 16).is_none());
         let signer = signer();
-        assert!(region.resolve(base + 16, &signer).unwrap());
-        assert!(!region.resolve(base, &signer).unwrap());
+        assert!(region.resolve(base + 16, Some(&signer)).unwrap());
+        assert!(!region.resolve(base, Some(&signer)).unwrap());
         assert_eq!(
             memory::read_u64(base + 16).unwrap(),
             0x1_8000_0100 + slide + (0x80 << 56)

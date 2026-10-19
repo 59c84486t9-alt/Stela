@@ -128,7 +128,7 @@ impl Hosted {
         let target = TargetCpu::detect();
         let tables = Arc::new(Tables::new()?);
         let keys = pe::Keys::random()?;
-        let cpu = pe::user_thread(chip, entry, &tables, &keys);
+        let cpu = pe::user_thread(chip, entry, &tables, &keys, pe::UserJop::Enabled);
         let mut machine = Box::new(Machine::new(
             cpu,
             ProcessHost::new(tables)?,

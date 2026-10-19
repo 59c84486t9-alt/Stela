@@ -8,6 +8,7 @@
 //! stream). The translation granule is the identity map's
 //! ([`super::tables`]). HCR_EL2 leaves PAC untrapped (API, APK) with TGE
 //! clear, so EL0 exceptions reach EL1.
+use super::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK};
 use super::tables::{T0SZ, Tables};
 use crate::machine::{
     Chip, Cpu, CpuProfile, exception::Pstate, registers::encodings::DCZID_EL0, system::Register,
@@ -65,6 +66,50 @@ pub const SCTLR_EL1: u64 = SCTLR_M
     | SCTLR_EN_DA
     | SCTLR_EN_IB
     | SCTLR_EN_IA;
+/// `SCTLR_JOP_KEYS_ENABLED`: the keys XNU disables on the return to EL0 of
+/// a thread whose user JOP is disabled (xnu-7195 `locore.s`
+/// `Ldisable_jop`), leaving IB for return addresses.
+pub const SCTLR_JOP_KEYS: u64 = SCTLR_EN_IA | SCTLR_EN_DA | SCTLR_EN_DB;
+
+/// Whether a process's user JOP keys (IA, DA and DB) are enabled. Exec
+/// disables them for an image whose CPU subtype does not use pointer
+/// authentication (`IMGPF_NOJOP`, `arm64_cpusubtype_uses_ptrauth`): its
+/// PAC and AUT instructions with those keys return their input, and the
+/// kernel signs nothing for it with them (the shared region's slide, the
+/// dyld pager and `bsdthread_register`'s entry points).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserJop {
+    Enabled,
+    Disabled,
+}
+
+impl UserJop {
+    /// `CPU_SUBTYPE_ARM64_PTR_AUTH_VERSION` and the macOS
+    /// `CPU_SUBTYPE_ARM64_PTR_AUTH_MAX_PREFERRED_VERSION` (1).
+    const PTR_AUTH_VERSION_SHIFT: u32 = 24;
+    const PTR_AUTH_VERSION_MASK: u32 = 0xf;
+    const PTR_AUTH_MAX_PREFERRED_VERSION: u32 = 1;
+
+    /// `arm64_cpusubtype_uses_ptrauth` of an arm64 image's CPU subtype.
+    pub fn of_subtype(subtype: u32) -> Self {
+        let version = (subtype >> Self::PTR_AUTH_VERSION_SHIFT) & Self::PTR_AUTH_VERSION_MASK;
+        if subtype & !CPU_SUBTYPE_MASK == CPU_SUBTYPE_ARM64E
+            && version <= Self::PTR_AUTH_MAX_PREFERRED_VERSION
+        {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
+    /// SCTLR_EL1 as the thread returns to EL0.
+    pub fn sctlr(self) -> u64 {
+        match self {
+            Self::Enabled => SCTLR_EL1,
+            Self::Disabled => SCTLR_EL1 & !SCTLR_JOP_KEYS,
+        }
+    }
+}
 
 const TCR_IRGN0_WRITEBACK: u64 = 1 << 8;
 const TCR_ORGN0_WRITEBACK: u64 = 1 << 10;
@@ -182,13 +227,13 @@ pub fn user_spsr() -> u64 {
     user_pstate().to_spsr(0)
 }
 
-/// A PE of `chip` at EL0t, entering at `pc` with the process's keys, its
-/// identity stage 1 and EL1's intercepted vectors.
-pub fn user_thread(chip: Chip, pc: u64, tables: &Tables, keys: &Keys) -> Cpu {
+/// A PE of `chip` at EL0t, entering at `pc` with the process's keys and
+/// user JOP state, its identity stage 1 and EL1's intercepted vectors.
+pub fn user_thread(chip: Chip, pc: u64, tables: &Tables, keys: &Keys, jop: UserJop) -> Cpu {
     let mut cpu = Cpu::of(chip, pc, user_pstate());
     let registers = &mut cpu.registers;
     for (register, value) in [
-        (Register::SCTLR_EL1, SCTLR_EL1),
+        (Register::SCTLR_EL1, jop.sctlr()),
         (Register::TCR_EL1, TCR_EL1),
         (Register::MAIR_EL1, MAIR_EL1),
         (Register::TTBR0_EL1, tables.root()),
@@ -240,10 +285,29 @@ mod tests {
         );
         let tables = Tables::new().unwrap();
         let keys = Keys::random().unwrap();
-        let cpu = user_thread(Chip::AppleM2, 0x1000, &tables, &keys);
+        let cpu = user_thread(Chip::AppleM2, 0x1000, &tables, &keys, UserJop::Enabled);
         assert_eq!(cpu.pstate.el, 0);
+        assert_eq!(cpu.read(Register::SCTLR_EL1), SCTLR_EL1);
         assert_eq!(cpu.read(Register::TTBR0_EL1), tables.root());
         assert_eq!(cpu.read(Register::APIBKeyHi_EL1), keys.ib[1]);
         assert_eq!(VECTOR_BASE & 0x7ff, 0);
+    }
+
+    #[test]
+    fn only_ptrauth_subtypes_keep_user_jop() {
+        // arm64e (ABI version 0 and the stable PTRAUTH_ABI bit), its
+        // macOS-preferred version 1, a later version, arm64 and arm64.v8.
+        assert_eq!(UserJop::of_subtype(2), UserJop::Enabled);
+        assert_eq!(UserJop::of_subtype(0x8000_0002), UserJop::Enabled);
+        assert_eq!(UserJop::of_subtype(0x8100_0002), UserJop::Enabled);
+        assert_eq!(UserJop::of_subtype(0x8200_0002), UserJop::Disabled);
+        assert_eq!(UserJop::of_subtype(0), UserJop::Disabled);
+        assert_eq!(UserJop::of_subtype(1), UserJop::Disabled);
+        let tables = Tables::new().unwrap();
+        let keys = Keys::random().unwrap();
+        let cpu = user_thread(Chip::AppleM2, 0x1000, &tables, &keys, UserJop::Disabled);
+        let sctlr = cpu.read(Register::SCTLR_EL1);
+        assert_eq!(sctlr & SCTLR_JOP_KEYS, 0);
+        assert_ne!(sctlr & SCTLR_EN_IB, 0, "return addresses stay signed");
     }
 }
