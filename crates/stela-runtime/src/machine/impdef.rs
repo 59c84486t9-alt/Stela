@@ -192,6 +192,7 @@ encodings! {
     UPMESR0_EL1 = 7, 1, 4;
     UPMC9 = 7, 1, 5;
     CLUSTER_COUNTER_C2 = 7, 2, 2;
+    SPTM_TUNING_SELECT = 7, 2, 0;
     AON_COUNTER_1 = 7, 2, 3;
     UPMC10 = 7, 2, 5;
     CORE_SRM_NRG_ACC_DAT = 7, 3, 1;
@@ -243,6 +244,7 @@ pub enum Class {
     Status,
     Record,
     Counter,
+    Energy,
     Guest,
     Unsupported,
 }
@@ -452,16 +454,25 @@ const MEM_STALL_COUNTER_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     S3_1_C15_C0_3 and C1_3 selectors, which accept only 0 here, so it holds what software \
     wrote, 0 from reset (inference)";
 
-const CLUSTER_COUNTER_EVIDENCE: &str = "refused: AppleT8112CLPC's ClusterPerfSampler::sample \
-    reads seven 48-bit counters of the PE's own cluster through S3_7_C15_C0_2 to C12_2 \
-    (0xfffffe0009f68a8c), the other clusters' through MMIO, and rewrites them on overflow; \
-    what they count and what enables them is not documented, so no count can be given";
+const CLUSTER_COUNTER_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
+    ClusterPerfSampler::enableCluster sets the cluster's counter enable and seven event \
+    selectors (0x800f, 0x810f, 0x9c0f, 0x9e0f, 0xbe0f, 0xbf0f, 0x8e0f) through the cluster's \
+    MMIO (0xfffffe0009f407a4), ClusterPerfSampler::sample reads the PE's own cluster's seven \
+    counters through S3_7_C15_C0_2 to C12_2 as 48-bit deltas and writes 0 to one whose bit 47 \
+    overflowed (0xfffffe0009f68a8c, 0xfffffe0009f68bdc), and CLPC::sampleSystemBIU divides \
+    the summed bus-interface delta by the elapsed time, clamped to elapsed time per cluster, as \
+    a utilization (0xfffffe0009f6871c..0xfffffe0009f687cc). The emulated die's bus interface \
+    carries no traffic (as the fabric bridges' counters, platform::apple::bridge), so they never \
+    count: they hold what software writes, 0 from reset (inference). One per cluster";
 
-const ENERGY_EVIDENCE: &str = "refused: m1n1 cpu_regs.h names this core energy accumulator; \
-    AppleT8112CLPC's context switch adds CORE_NRG_ACC_DAT and CORE_SRM_NRG_ACC_DAT and panics \
-    if the sum ever decreases (0xfffffe0009f38328, 0xfffffe0009f38374), and AppleT8112PMGR \
-    reports them (0xfffffe0009fa45d4, 0xfffffe0009fa8ad0); this machine models no core power, \
-    so it has no energy to accumulate";
+const ENERGY_EVIDENCE: &str = "m1n1 cpu_regs.h names this core energy accumulator; \
+    AppleT8112CLPC's context switch adds CORE_NRG_ACC_DAT and CORE_SRM_NRG_ACC_DAT, panics \
+    if the sum ever decreases (0xfffffe0009f38328, 0xfffffe0009f38374) and stores min(delta, \
+    2^32 - 1) * 0x199999a >> 30, the delta over 40, as the off-core thread's \
+    perfcontrol_thread_data.energy_estimate_nj (0xfffffe0009f38390..0xfffffe0009f383ac; XNU \
+    machine_switch_perfcontrol_context adds it to the thread's energy), so a count is 1/40 nJ; \
+    AppleT8112PMGR reports them (0xfffffe0009fa45d4, 0xfffffe0009fa8ad0). The emulated die \
+    accumulates a fixed modeled core power (Registers::energy), all of it on CORE_NRG_ACC_DAT";
 
 const TSO_THREAD_EVIDENCE: &str = "no public name; 26A434 XNU saves S3_6_C15_C8_3 (bits 1-2) \
     and S3_6_C15_C2_5 in the exception frame of a thread that runs with ACTLR_EL1's EnTSO and \
@@ -775,55 +786,62 @@ pub const TABLE: &[Entry] = &[
     entry(
         CLUSTER_COUNTER_C0,
         "S3_7_C15_C0_2 (unnamed)",
-        Class::Unsupported,
+        Class::Counter,
         CLUSTER_COUNTER_EVIDENCE,
-    ),
+    )
+    .cluster(),
     entry(
         CLUSTER_COUNTER_C2,
         "S3_7_C15_C2_2 (unnamed)",
-        Class::Unsupported,
+        Class::Counter,
         CLUSTER_COUNTER_EVIDENCE,
-    ),
+    )
+    .cluster(),
     entry(
         CLUSTER_COUNTER_C4,
         "S3_7_C15_C4_2 (unnamed)",
-        Class::Unsupported,
+        Class::Counter,
         CLUSTER_COUNTER_EVIDENCE,
-    ),
+    )
+    .cluster(),
     entry(
         CLUSTER_COUNTER_C6,
         "S3_7_C15_C6_2 (unnamed)",
-        Class::Unsupported,
+        Class::Counter,
         CLUSTER_COUNTER_EVIDENCE,
-    ),
+    )
+    .cluster(),
     entry(
         CLUSTER_COUNTER_C8,
         "S3_7_C15_C8_2 (unnamed)",
-        Class::Unsupported,
+        Class::Counter,
         CLUSTER_COUNTER_EVIDENCE,
-    ),
+    )
+    .cluster(),
     entry(
         CLUSTER_COUNTER_C10,
         "S3_7_C15_C10_2 (unnamed)",
-        Class::Unsupported,
+        Class::Counter,
         CLUSTER_COUNTER_EVIDENCE,
-    ),
+    )
+    .cluster(),
     entry(
         CLUSTER_COUNTER_C12,
         "S3_7_C15_C12_2 (unnamed)",
-        Class::Unsupported,
+        Class::Counter,
         CLUSTER_COUNTER_EVIDENCE,
-    ),
+    )
+    .cluster(),
     entry(
         CORE_NRG_ACC_DAT,
         "CORE_NRG_ACC_DAT",
-        Class::Unsupported,
+        Class::Energy,
         ENERGY_EVIDENCE,
     ),
     entry(
         CORE_SRM_NRG_ACC_DAT,
         "CORE_SRM_NRG_ACC_DAT",
-        Class::Unsupported,
+        Class::Energy,
         ENERGY_EVIDENCE,
     ),
     // Per-thread Rosetta (TSO) state, nested-virtualization and
@@ -951,10 +969,32 @@ pub fn lookup(encoding: Encoding, chip: Chip) -> Option<&'static Entry> {
         .filter(|_| consumed(encoding, chip))
 }
 
+/// XNU `MPIDR_PNE` ("pcore not ecore", xnu-7195.141.2 `apple_arm64_regs.h`):
+/// MPIDR_EL1 bit 16, set on a P core.
+const MPIDR_PNE: u64 = 1 << 16;
+/// The energy accumulators' unit: AppleT8112CLPC divides their delta by 40
+/// for `energy_estimate_nj` ([`ENERGY_EVIDENCE`]).
+pub const ENERGY_UNITS_PER_NANOJOULE: u128 = 40;
+const NANOJOULES_PER_MILLIWATT_SECOND: u128 = 1_000_000;
+/// The emulated die's modeled power of a running core, E then P, in
+/// milliwatts: Stela's fixed choice, not a measurement of any Apple core.
+pub const CORE_MILLIWATTS: [u128; 2] = [250, 1000];
+
+/// What an energy reading accumulates over: the system counter's value and
+/// frequency and the reading PE's MPIDR_EL1.
+#[derive(Debug, Clone, Copy)]
+pub struct Activity {
+    pub count: u64,
+    pub frequency: u64,
+    pub mpidr: u64,
+}
+
 /// Values and use counts of the table's registers.
 #[derive(Debug, Clone, Default)]
 pub struct Registers {
     values: BTreeMap<u16, u64>,
+    /// The system count of the PE's first energy reading.
+    energy_origin: Option<u64>,
     /// The `Scope::Cluster` values, shared with the cluster's other PEs.
     cluster: Rc<RefCell<BTreeMap<u16, u64>>>,
     pub reads: BTreeMap<u16, u64>,
@@ -976,10 +1016,34 @@ impl Registers {
         }
     }
 
+    /// An `Energy` entry's reading: the energy the PE's core type's modeled
+    /// power ([`CORE_MILLIWATTS`]) has drawn, in 1/40 nJ, over the system
+    /// counter's time since the PE first read either accumulator, all of it
+    /// on the core rail (CORE_NRG_ACC_DAT); the SRAM rail (CORE_SRM_NRG_ACC_DAT)
+    /// draws none on the emulated die. It never decreases.
+    pub fn energy(&mut self, entry: &Entry, activity: Activity) -> Result<u64, &'static str> {
+        if entry.class != Class::Energy || activity.frequency == 0 {
+            return Err("energy reading of a register that is no energy accumulator");
+        }
+        *self.reads.entry(entry.encoding.selector()).or_default() += 1;
+        let origin = *self.energy_origin.get_or_insert(activity.count);
+        if entry.encoding != CORE_NRG_ACC_DAT {
+            return Ok(0);
+        }
+        let ticks = u128::from(activity.count.saturating_sub(origin));
+        let milliwatts = CORE_MILLIWATTS[usize::from(activity.mpidr & MPIDR_PNE != 0)];
+        let units =
+            ticks * milliwatts * NANOJOULES_PER_MILLIWATT_SECOND * ENERGY_UNITS_PER_NANOJOULE
+                / u128::from(activity.frequency);
+        Ok(u64::try_from(units).unwrap_or(u64::MAX))
+    }
+
     /// A read, or why it cannot complete.
     pub fn read(&mut self, entry: &Entry) -> Result<u64, &'static str> {
-        if entry.class == Class::Unsupported {
-            return Err(entry.evidence);
+        match entry.class {
+            Class::Unsupported => return Err(entry.evidence),
+            Class::Energy => return Err("energy accumulator read without its activity"),
+            _ => {}
         }
         let key = entry.encoding.selector();
         *self.reads.entry(key).or_default() += 1;
@@ -999,6 +1063,9 @@ impl Registers {
             Class::Unsupported => return Err(entry.evidence),
             Class::Record => {
                 return Err("write of an implementation-defined record no consumer writes");
+            }
+            Class::Energy => {
+                return Err("write of a core energy accumulator, which no consumer writes");
             }
             Class::Control if value & !entry.permitted != 0 => {
                 return Err(
@@ -1152,10 +1219,10 @@ mod tests {
         assert_eq!(other.read(counter), Ok(0));
     }
 
-    /// CLPC's samplers can only be disabled; their counters hold what
-    /// software writes. Cluster counters and energy refuse.
+    /// CLPC's samplers can only be disabled; their counters, the cluster
+    /// counters among them, hold what software writes.
     #[test]
-    fn clpc_counters_stay_disabled_and_energy_refuses() {
+    fn clpc_counters_stay_disabled() {
         let mut registers = Registers::default();
         let enable = lookup(AON_ENABLE).unwrap();
         registers.write(enable, 0).unwrap();
@@ -1168,11 +1235,53 @@ mod tests {
         let counter = lookup(MEM_STALL_COUNTER_2).unwrap();
         assert_eq!(registers.read(counter), Ok(0));
         registers.write(counter, 0).unwrap();
-        for encoding in [CORE_NRG_ACC_DAT, CORE_SRM_NRG_ACC_DAT, CLUSTER_COUNTER_C6] {
-            let entry = lookup(encoding).unwrap();
-            assert_eq!(registers.read(entry), Err(entry.evidence));
+        // ClusterPerfSampler's overflow clear; the counter then holds it.
+        let cluster = lookup(CLUSTER_COUNTER_C6).unwrap();
+        assert_eq!(cluster.scope, Scope::Cluster);
+        assert_eq!(registers.read(cluster), Ok(0));
+        registers.write(cluster, 0).unwrap();
+        assert_eq!(registers.read(cluster), Ok(0));
+    }
+
+    /// The core rail accumulates the core type's modeled power in CLPC's
+    /// 1/40 nJ from the PE's first reading and never decreases; the SRAM
+    /// rail draws nothing, and neither takes a write.
+    #[test]
+    fn energy_accumulates_the_modeled_core_power_in_clpc_units() {
+        const FREQUENCY: u64 = 24_000_000;
+        const E_CORE: u64 = 0x8000_0000;
+        const P_CORE: u64 = 0x8001_0100;
+        let core = lookup(CORE_NRG_ACC_DAT).unwrap();
+        let sram = lookup(CORE_SRM_NRG_ACC_DAT).unwrap();
+        let at = |count, mpidr| Activity {
+            count,
+            frequency: FREQUENCY,
+            mpidr,
+        };
+        let mut registers = Registers::default();
+        assert_eq!(registers.energy(core, at(1_000, E_CORE)), Ok(0));
+        // One second at 250 mW: 0.25 J, 2.5e8 nJ, 1e10 counts.
+        let second = registers
+            .energy(core, at(1_000 + FREQUENCY, E_CORE))
+            .unwrap();
+        assert_eq!(second, 10_000_000_000);
+        assert!(
+            registers
+                .energy(core, at(1_000 + 2 * FREQUENCY, E_CORE))
+                .unwrap()
+                > second
+        );
+        assert_eq!(registers.energy(sram, at(1_000 + FREQUENCY, E_CORE)), Ok(0));
+        // A P core's second at 1 W.
+        let mut p = Registers::default();
+        p.energy(core, at(0, P_CORE)).unwrap();
+        assert_eq!(p.energy(core, at(FREQUENCY, P_CORE)), Ok(40_000_000_000));
+        for entry in [core, sram] {
             assert!(registers.write(entry, 0).is_err());
+            assert!(registers.read(entry).is_err());
         }
+        let hid = lookup(HID4).unwrap();
+        assert!(registers.energy(hid, at(0, E_CORE)).is_err());
     }
 
     #[test]

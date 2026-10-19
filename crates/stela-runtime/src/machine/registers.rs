@@ -568,6 +568,24 @@ impl Cpu {
                     "the guarded level's HPFAR while HCR_EL2.VM enables stage 2",
                 ));
             }
+            if entry.class == impdef::Class::Energy {
+                return if read {
+                    let activity = impdef::Activity {
+                        count: physical,
+                        frequency: self.read(Register::CNTFRQ_EL0),
+                        mpidr: self.read(Register::MPIDR_EL1),
+                    };
+                    match self.apple.impdef.energy(entry, activity) {
+                        Ok(value) => Outcome::Read(value),
+                        Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+                    }
+                } else {
+                    match self.apple.impdef.write(entry, value) {
+                        Ok(()) => Outcome::Written(Changes::default()),
+                        Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+                    }
+                };
+            }
             return if read {
                 match self.apple.impdef.read(entry) {
                     Ok(value) => Outcome::Read(value),
