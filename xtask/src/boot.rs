@@ -217,6 +217,16 @@ pub struct Run {
     /// at start and report the reply: adds `--network-check URL`.
     #[arg(long, requires = "network")]
     network_check: Option<String>,
+    /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
+    /// on a LAN peer of its own (logged to `guest-network.log`), which the
+    /// mount bridges to the guest's CDC-ECM adapter: adds `--guest-network`.
+    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    guest_network: bool,
+    /// Attach a raw disk over NVMe, preserving writes, that the guest sees
+    /// whole as a USB mass storage device behind its native hub; repeat for
+    /// more disks (at most six). Adds `--usb-storage STELAUSBn`.
+    #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
+    usb_storage_disk: Vec<PathBuf>,
     /// Run install mode on a synthetic restore payload.
     #[arg(long, value_enum, conflicts_with_all = ["opencore", "module", "append"])]
     payload: Option<PayloadMode>,
@@ -260,6 +270,12 @@ fn parse_storage_serial(value: &str) -> Result<String, String> {
     } else {
         Err("storage serial must be one to 20 ASCII letters, digits or hyphens".into())
     }
+}
+
+/// The NVMe serial of the --usb-storage-disk at `index`, which the mount's
+/// `--usb-storage` names.
+fn usb_serial(index: usize) -> String {
+    format!("STELAUSB{index}")
 }
 
 /// Pair each --storage-disk with its serial. Distinct serials keep the
@@ -374,6 +390,21 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     options.extend(disks.iter().map(disks::Disk::option));
     if arguments.input {
         options.push_str(" --input");
+    }
+    ensure!(
+        arguments.usb_storage_disk.len() <= 6,
+        "the guest's native hub carries at most six USB disks"
+    );
+    for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
+        ensure!(
+            path.is_file(),
+            "USB storage disk is not a file: {}",
+            path.display()
+        );
+        options.push_str(&format!(" --usb-storage {}", usb_serial(index)));
+    }
+    if arguments.guest_network {
+        options.push_str(" --guest-network");
     }
     if let Some(url) = &arguments.network_check {
         ensure!(
@@ -589,6 +620,31 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 "stream,id=host-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
             ))
             .args(["-device", "virtio-net-pci,netdev=host-net"]);
+    }
+    // After the mount's own adapter, so the mount gives the guest the
+    // second one when both are present.
+    if arguments.guest_network {
+        let port = lan::listen(output.join("guest-network.log"))
+            .context("start the guest network peer")?;
+        command
+            .arg("-netdev")
+            .arg(format!(
+                "stream,id=guest-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
+            ))
+            .args(["-device", "virtio-net-pci,netdev=guest-net"]);
+    }
+    for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=usb{index},format=raw,file={}",
+                option_path(path)
+            ))
+            .arg("-device")
+            .arg(format!(
+                "nvme,drive=usb{index},serial={}",
+                usb_serial(index)
+            ));
     }
     match arguments.display {
         Display::None => command
@@ -1031,6 +1087,8 @@ mod tests {
             vec!["--storage-serial", "ANS"],
             vec!["--directory-volume"],
             vec!["--network-check", "http://example.test/"],
+            vec!["--usb-storage-disk", "/tmp/disk", "--storage-check"],
+            vec!["--guest-network", "--opencore", "/tmp/oc"],
             vec![
                 "--storage-disk",
                 "/tmp/disk",
