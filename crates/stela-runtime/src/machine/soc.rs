@@ -17,6 +17,7 @@ use super::{
     registers::Identity,
 };
 use crate::platform::apple::{
+    agx,
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
     amcc, ans, asc, atc_phy, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse,
@@ -969,6 +970,8 @@ pub struct Board {
     pub smc: Option<SmcController>,
     /// The PMP coprocessor, under the same condition.
     pub pmp: Option<PmpController>,
+    /// The AGX GPU, when the DeviceTree shows both `gfx-asc` and `sgx`.
+    pub gfx: Option<GfxController>,
     /// SEP placement if the input tree explicitly keeps it. Production
     /// `models()` admission remains closed while sepOS boot services refuse.
     pub sep: Option<SepDevice>,
@@ -1788,6 +1791,71 @@ fn pmp_controller(
         wrapper: (physical, bytes),
         interrupts: [irq(0)?, irq(1)?, irq(2)?, irq(3)?],
         quiesced: nub.property("quiesced").is_some(),
+    }))
+}
+
+/// The `sgx` GPU's compatible and its firmware mapper's.
+pub const SGX: &str = "gpu,t8112";
+pub const GFX_MAPPER: &str = "iommu-mapper,gfx";
+
+/// The AGX GPU's DT placement: the `gfx-asc` wrapper (`reg[0]`) and its four
+/// mailbox interrupts, and the `sgx` register block (`reg[0]`; `reg[1]` lies
+/// inside it). The firmware reaches memory through the UAT the `sgx` MMU
+/// configuration roots, which `gfx-asc`'s `iommu-parent` (`mapper-gfx-asc`,
+/// `AGXArmFirmwareMapper`) names; no DART stream is involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GfxController {
+    pub wrapper: (u64, u64),
+    pub interrupts: [u16; 4],
+    pub sgx: (u64, u64),
+}
+
+fn gfx_controller(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<GfxController>, String> {
+    let asc = io
+        .child("gfx-asc")
+        .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"GFX\0".as_slice()));
+    let sgx = io.child("sgx").filter(|n| n.compatible(SGX));
+    let (asc, sgx) = match (asc, sgx) {
+        (None, None) => return Ok(None),
+        (Some(asc), Some(sgx)) => (asc, sgx),
+        _ => return Err("the GFX coprocessor and the sgx GPU must be visible together".into()),
+    };
+    if !asc
+        .child("iop-gfx-nub")
+        .is_some_and(|nub| nub.compatible(RTBUDDY))
+    {
+        return Err("gfx-asc has no RTBuddy v2 nub".into());
+    }
+    let place = |node: &Node<'_>, index: usize, minimum: u64, what: &str| {
+        let (offset, bytes) = node
+            .pairs("reg")
+            .and_then(|regs| regs.get(index).copied())
+            .filter(|&(_, bytes)| bytes >= minimum)
+            .ok_or_else(|| format!("{what} bank is absent or too short"))?;
+        let physical = translate(offset).ok_or_else(|| format!("{what} outside arm-io ranges"))?;
+        Ok::<_, String>((physical, bytes))
+    };
+    let wrapper = place(&asc, 0, asc::WRAPPER_BYTES, "gfx-asc wrapper")?;
+    let block = place(&sgx, 0, agx::sgx::BYTES, "sgx register")?;
+    let info = place(&sgx, 1, 1, "sgx info")?;
+    if info.0 < block.0 || info.0 + info.1 > block.0 + block.1 {
+        return Err("sgx reg[1] lies outside reg[0]".into());
+    }
+    let irqs = asc
+        .cells32("interrupts")
+        .ok_or("gfx-asc has no interrupts")?;
+    let irq = |index: usize| -> Result<u16, String> {
+        irqs.get(index)
+            .and_then(|&n| u16::try_from(n).ok())
+            .ok_or_else(|| "gfx-asc needs four valid mailbox interrupts".into())
+    };
+    Ok(Some(GfxController {
+        wrapper,
+        interrupts: [irq(0)?, irq(1)?, irq(2)?, irq(3)?],
+        sgx: (block.0, agx::sgx::BYTES),
     }))
 }
 
@@ -3721,6 +3789,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let ans = ans_controller(&io, &translate)?;
     let smc = smc_controller(&root, &io, &translate)?;
     let pmp = pmp_controller(&io, &translate)?;
+    let gfx = gfx_controller(&io, &translate)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
     let usbs = usb_controllers(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
@@ -3767,6 +3836,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         ans,
         smc,
         pmp,
+        gfx,
         sep,
         usbs,
         power_states,
@@ -4264,6 +4334,75 @@ mod tests {
         let root = Node::root(&data).unwrap();
         assert!(pmp_controller(&root.child("arm-io").unwrap(), &translate).is_err());
         assert!(models(ASC, |key| (key == "role").then_some(b"PMP\0".as_slice())));
+    }
+
+    /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
+    /// shared-page region and the `pKW4` functions other nodes route
+    /// through `smc-pmu`.
+    #[test]
+    fn gfx_placement_needs_the_coprocessor_and_the_gpu_together() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        let tree = |asc_visible: bool, sgx_visible: bool| {
+            let nub = encode(
+                &[("name", &z("iop-gfx-nub")), ("compatible", &z(RTBUDDY))],
+                &[],
+            );
+            let (name, role, asc_compatible) = (z("gfx-asc"), z("GFX"), z(ASC));
+            let asc_reg = pairs(&[(0x640_0000, 0x6c000), (0x605_0000, 8)]);
+            let irqs = cells(&[0x2c6, 0x2c5, 0x2c8, 0x2c7]);
+            let mut asc: Vec<(&str, &[u8])> = vec![
+                ("name", &name),
+                ("role", &role),
+                ("reg", &asc_reg),
+                ("interrupts", &irqs),
+            ];
+            if asc_visible {
+                asc.push(("compatible", &asc_compatible));
+            }
+            let (sgx_name, sgx_compatible) = (z("sgx"), z(SGX));
+            let sgx_reg = pairs(&[(0x400_0000, 0x400_0000), (0x4d0_0000, 0x2_0000)]);
+            let mut sgx: Vec<(&str, &[u8])> = vec![("name", &sgx_name), ("reg", &sgx_reg)];
+            if sgx_visible {
+                sgx.push(("compatible", &sgx_compatible));
+            }
+            let io = encode(
+                &[("name", &z("arm-io"))],
+                &[encode(&asc, &[nub]), encode(&sgx, &[])],
+            );
+            encode(&[("name", &z("device-tree"))], &[io])
+        };
+        let translate = |offset| Some(0x2_0000_0000 + offset);
+        let placed = |asc: bool, sgx: bool| {
+            let bytes = tree(asc, sgx);
+            let root = Node::root(&bytes).unwrap();
+            let io = root.child("arm-io").unwrap();
+            gfx_controller(&io, &translate)
+        };
+        assert_eq!(
+            placed(true, true).unwrap(),
+            Some(GfxController {
+                wrapper: (0x2_0640_0000, 0x6c000),
+                interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
+                sgx: (0x2_0400_0000, 0x400_0000),
+            })
+        );
+        assert_eq!(placed(false, false).unwrap(), None);
+        assert!(placed(true, false).is_err());
+        assert!(placed(false, true).is_err());
     }
 
     #[test]

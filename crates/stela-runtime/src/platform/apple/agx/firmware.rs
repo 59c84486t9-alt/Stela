@@ -21,13 +21,26 @@
 //!   `(msg >> 48) & 0x3f == 2`, the 0x42 event doorbell
 //!   (`AGXArmFirmware::receivedMessageFromAKF` 0x1b44480).
 //!
+//! - The initdata root the pointer names is one page whose first word is the
+//!   magic `0x0c8a_6342_8392_04c8` (`AGXArmFirmware::initFirmwareData`
+//!   0x1b5b36c, the page at `firmware+0x1630` that `notifyFirmwareStarted`
+//!   names).
+//!
+//! [`Coprocessor`] is the whole GFX coprocessor behind the ASC: RTKit with
+//! these endpoints, plus the firmware's bus-master reads through the UAT in
+//! the firmware context. On the initdata message it reads the root's magic
+//! through the UAT and refuses a root that lacks it.
+//!
 //! The model records the initdata pointer and each doorbell, and refuses every
 //! message type it does not model rather than acknowledging it silently. It
 //! never fabricates a completion: an event on 0x20 is sent only when a work
 //! item has actually been executed, which this layer does not yet do, so no
 //! event is produced here. The pipe of a work doorbell:
 
-use super::super::rtkit::Endpoint;
+use super::super::asc::{Firmware, Message as Mail};
+use super::super::rtkit::{Endpoint, RtKit};
+use super::uat;
+use crate::platform::dma::{DmaError, Port};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -55,6 +68,8 @@ const TYPE_MASK: u64 = 0x3f;
 const DOORBELL_WORK: u64 = 3;
 /// Firmware-control doorbell.
 const DOORBELL_FWCTL: u64 = 4;
+/// The initdata root's first word.
+pub const INITDATA_MAGIC: u64 = 0x0c8a_6342_8392_04c8;
 /// The event type the firmware would send on 0x20 (`0x42`).
 pub const EVENT_TYPE: u64 = 0x42;
 
@@ -80,8 +95,11 @@ impl Pipe {
 /// The GFX firmware protocol state shared by its two endpoints.
 #[derive(Debug, Default)]
 pub struct State {
-    /// The firmware VA of the initdata root, once the kext sends it.
+    /// The firmware VA of the initdata root, once the kext sends it, as the
+    /// 44-bit field of the message.
     pub initdata_va: Option<u64>,
+    /// The root's magic was read through the UAT and matched.
+    pub initdata_checked: bool,
     /// Work doorbells received, in order, as (pipe, write-pointer index).
     pub work: Vec<(Pipe, u64)>,
     /// Count of firmware-control doorbells received.
@@ -128,6 +146,32 @@ impl State {
     }
 }
 
+impl State {
+    /// The firmware has a bus-master read to make.
+    fn dma_pending(&self) -> bool {
+        self.initdata_va.is_some() && !self.initdata_checked
+    }
+
+    /// Read the initdata root's magic through the UAT.
+    fn dma(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+        let Some(va) = self.initdata_va.filter(|_| !self.initdata_checked) else {
+            return Ok(());
+        };
+        let mut word = [0; 8];
+        port.read(uat::canonical_firmware_va(va), &mut word)
+            .map_err(|error| match error {
+                DmaError::Fault(_) => "GFX initdata root faults in the UAT",
+                DmaError::Memory => "GFX initdata root is not RAM",
+                DmaError::Unsupported(reason) => reason,
+            })?;
+        if u64::from_le_bytes(word) != INITDATA_MAGIC {
+            return Err("GFX initdata root lacks its magic");
+        }
+        self.initdata_checked = true;
+        Ok(())
+    }
+}
+
 /// A handle to the shared protocol state, for the DMA boundary and tests.
 #[derive(Clone)]
 pub struct Protocol(Rc<RefCell<State>>);
@@ -145,6 +189,45 @@ impl Protocol {
 impl Default for Protocol {
     fn default() -> Self {
         Protocol::new()
+    }
+}
+
+/// The GFX coprocessor: RTKit with the GFX endpoints and the firmware's DMA.
+pub struct Coprocessor {
+    rtkit: RtKit,
+    protocol: Protocol,
+}
+
+impl Coprocessor {
+    /// A GFX coprocessor whose RTKit manages its power ordinarily
+    /// (`power-managed`).
+    pub fn new() -> Result<Self, &'static str> {
+        let (endpoints, protocol) = endpoints();
+        let rtkit = RtKit::new(endpoints, super::super::rtkit::Management::Ordinary)?;
+        Ok(Self { rtkit, protocol })
+    }
+
+    pub fn protocol(&self) -> &Protocol {
+        &self.protocol
+    }
+}
+
+impl Firmware for Coprocessor {
+    fn start(&mut self, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+        self.rtkit.start(outbox)
+    }
+    fn receive(&mut self, message: Mail, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+        self.rtkit.receive(message, outbox)
+    }
+    fn dma_pending(&self) -> bool {
+        self.protocol.with(State::dma_pending)
+    }
+    fn dma(
+        &mut self,
+        port: &mut Port<'_, '_>,
+        _outbox: &mut Vec<Mail>,
+    ) -> Result<(), &'static str> {
+        self.protocol.0.borrow_mut().dma(port)
     }
 }
 
@@ -245,5 +328,66 @@ mod tests {
                 .doorbell(doorbell_payload(DOORBELL_WORK, 0) | 0x2)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_initdata_root_is_checked_through_the_uat() {
+        use crate::platform::apple::bus::Access;
+        use crate::platform::apple::interrupt::InterruptLatch;
+        use crate::platform::dma::tests::Ram;
+        use uat::{Access as Ap, Agent, Flags, MemoryAttr, Uat};
+        // TTBAT, PCE, PDE, PTE and the initdata page.
+        let base = 0x8_0000_0000;
+        let mut ram = Ram::new(base, 0x4000 * 5);
+        let va = 0xffff_ffa0_0000_0000;
+        let (_, idx) = uat::indices(va);
+        let [ttbr0, ttbr1] = uat::encode_gptbat(0, 0, base + 0x4000);
+        ram.put_u64(base, ttbr0);
+        ram.put_u64(base + 8, ttbr1);
+        ram.put_u64(
+            base + 0x4000 + idx[0] as u64 * 8,
+            uat::encode_table(base + 0x8000),
+        );
+        ram.put_u64(
+            base + 0x8000 + idx[1] as u64 * 8,
+            uat::encode_table(base + 0xc000),
+        );
+        let flags = Flags {
+            access: Ap::Firmware,
+            memory: MemoryAttr::Uncached,
+            global: true,
+            pxn: false,
+            uxn: true,
+            gpu_access: true,
+        };
+        ram.put_u64(
+            base + 0xc000 + idx[2] as u64 * 8,
+            uat::encode_pte(base + 0x1_0000, &flags),
+        );
+        let mut table = Uat::default();
+        table.configure(base).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut state = State::default();
+        state
+            .init((MSG_INIT << TYPE_SHIFT) | (va & INIT_VA_BITS))
+            .unwrap();
+        assert!(state.dma_pending());
+        let mut run = |state: &mut State, ram: &mut Ram, table: &mut Uat| {
+            let mut access = Access::new(0, 0, &mut latch);
+            let mut view = table.agent(Agent::Firmware);
+            let mut port = Port {
+                iommu: &mut view,
+                stream: uat::FIRMWARE_CONTEXT,
+                memory: ram,
+                access: &mut access,
+            };
+            state.dma(&mut port)
+        };
+        // A root without the magic refuses and stays pending.
+        assert!(run(&mut state, &mut ram, &mut table).is_err());
+        assert!(state.dma_pending());
+        ram.put_u64(base + 0x1_0000, INITDATA_MAGIC);
+        run(&mut state, &mut ram, &mut table).unwrap();
+        assert!(state.initdata_checked && !state.dma_pending());
     }
 }

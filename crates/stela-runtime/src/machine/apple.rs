@@ -10,6 +10,11 @@ use super::{
 pub use crate::platform::apple::pmu::WallClock;
 use crate::platform::apple::{
     aes::{self, Aes},
+    agx::{
+        firmware::Coprocessor as GfxCoprocessor,
+        sgx::{self, Sgx},
+        uat::{self, Agent},
+    },
     aic::{Aic2, Aic2Config},
     aic1::Aic1,
     amcc::{self, Amcc},
@@ -102,6 +107,9 @@ pub struct AppleDevices {
     /// The SPI controller holding the NOR die.
     nor: Option<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
+    /// The GFX coprocessor's ASC and the `sgx` block whose UAT it masters
+    /// memory through.
+    gfx_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
     usb_masters: Vec<UsbMaster>,
     cpu_start: Option<CpuStarter>,
@@ -306,6 +314,7 @@ impl AppleDevices {
             ipi: None,
             masters: Vec::new(),
             storage_masters: Vec::new(),
+            gfx_masters: Vec::new(),
             coprocessors: Vec::new(),
             nor: None,
             sep_masters: Vec::new(),
@@ -758,6 +767,43 @@ impl AppleDevices {
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("PMP ASC placement: {e:?}"))
+    }
+
+    /// Place the AGX GPU: the started GFX coprocessor (RTKit with the native
+    /// GFX endpoints, `agx::firmware`) behind its ASC wrapper, and the `sgx`
+    /// register block whose MMU configuration roots the UAT the firmware
+    /// masters memory through.
+    pub fn add_gfx(&mut self, placement: &super::soc::GfxController) -> Result<(), String> {
+        let coprocessor = GfxCoprocessor::new().map_err(String::from)?;
+        let wrapper = Asc::booted(
+            Box::new(coprocessor),
+            AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
+        )
+        .map_err(String::from)?;
+        let asc = self.bus.add(Box::new(wrapper));
+        self.coprocessors.push(("GFX", asc));
+        self.bus
+            .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
+            .map_err(|e| format!("GFX ASC placement: {e:?}"))?;
+        // The 64 MiB `sgx` window spans the `gfx-asc` wrapper; each physical
+        // byte has one owner, so the block is mapped around it.
+        let block = self.bus.add(Box::new(Sgx::new(sgx::T8112)));
+        let (base, bytes) = placement.sgx;
+        let (asc_base, asc_bytes) = placement.wrapper;
+        let mut pieces = vec![(base, bytes)];
+        if asc_base >= base && asc_base + asc_bytes <= base + bytes {
+            pieces = vec![
+                (base, asc_base - base),
+                (asc_base + asc_bytes, base + bytes - asc_base - asc_bytes),
+            ];
+        }
+        for (start, len) in pieces.into_iter().filter(|&(_, len)| len != 0) {
+            self.bus
+                .map(block, start, len, start - base)
+                .map_err(|e| format!("sgx placement: {e:?}"))?;
+        }
+        self.gfx_masters.push((asc, block));
+        Ok(())
     }
 
     /// Place the `dcpext` display coprocessor: its booted, user-power-managed
@@ -1749,6 +1795,26 @@ impl Devices for AppleDevices {
                     other => other,
                 })?;
         }
+        for &(asc, block) in &self.gfx_masters {
+            let (asc, block) = self
+                .bus
+                .pair_mut::<Asc, Sgx>(asc, block)
+                .expect("a GFX master names its ASC and sgx block");
+            if !asc.dma_pending() {
+                continue;
+            }
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            let mut view = block.uat().agent(Agent::Firmware);
+            let mut port = Port {
+                iommu: &mut view,
+                stream: uat::FIRMWARE_CONTEXT,
+                memory,
+                access: &mut access,
+            };
+            asc.service_dma(&mut port).map_err(|reason| {
+                DeviceError::TransferRefused(format!("GFX firmware DMA: {reason}"))
+            })?;
+        }
         for master in &self.sep_masters {
             let (sep, dart) = self
                 .bus
@@ -2145,6 +2211,110 @@ mod tests {
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
         assert_eq!(devices.coprocessor_diagnostics().len(), 1);
         assert!(devices.coprocessor_diagnostics()[0].starts_with("PMP "));
+    }
+
+    #[test]
+    fn gfx_firmware_reads_its_initdata_through_the_uat_the_sgx_mmu_roots() {
+        use crate::machine::soc::GfxController;
+        use crate::platform::apple::agx::{firmware, uat as table};
+        use crate::platform::dma::tests::Ram;
+        const WRAPPER: u64 = 0x2_0640_0000;
+        const SGX: u64 = 0x2_0400_0000;
+        const RAM: u64 = 0x8_0000_0000;
+        let placement = GfxController {
+            wrapper: (WRAPPER, 0x6c000),
+            interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
+            sgx: (SGX, sgx::BYTES),
+        };
+        let mut devices = AppleDevices::new();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        devices.add_gfx(&placement).unwrap();
+        // The coprocessor is running and the sgx identity reads through the bus.
+        assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        assert_eq!(devices.read(0, SGX + 0xd0_4000, 4, 0).unwrap() >> 24, 5);
+        assert!(devices.read(0, SGX + 0x10, 4, 0).is_err());
+        // The wrapper inside the sgx window stays the ASC's.
+        assert!(devices.read(0, WRAPPER + 0x8110, 4, 0).is_ok());
+
+        // The TTBAT and one firmware page at the kernel half of context 0.
+        let mut ram = Ram::new(RAM, 0x4000 * 5);
+        let va = 0xffff_ffa0_0000_0000_u64;
+        let (_, idx) = table::indices(va);
+        let [ttbr0, ttbr1] = table::encode_gptbat(0, 0, RAM + 0x4000);
+        ram.put_u64(RAM, ttbr0 & !1);
+        ram.put_u64(RAM + 8, ttbr1);
+        ram.put_u64(
+            RAM + 0x4000 + idx[0] as u64 * 8,
+            table::encode_table(RAM + 0x8000),
+        );
+        ram.put_u64(
+            RAM + 0x8000 + idx[1] as u64 * 8,
+            table::encode_table(RAM + 0xc000),
+        );
+        let flags = table::Flags {
+            access: table::Access::Firmware,
+            memory: table::MemoryAttr::Uncached,
+            global: true,
+            pxn: false,
+            uxn: true,
+            gpu_access: true,
+        };
+        ram.put_u64(
+            RAM + 0xc000 + idx[2] as u64 * 8,
+            table::encode_pte(RAM + 0x1_0000, &flags),
+        );
+        ram.put_u64(RAM + 0x1_0000, firmware::INITDATA_MAGIC);
+        // setupMMUConfig's writes.
+        devices.write(0, SGX + 0xd0_802c, 4, RAM >> 14, 0).unwrap();
+        for (offset, value) in [
+            (0xd0_8014, 0x80d8),
+            (0xd0_8018, 0x80d8),
+            (0xd0_800c, 0),
+            (0xd0_8010, 0),
+            (0xd0_801c, 0),
+            (0xd0_8020, 0),
+            (0xd0_8024, 0),
+            (0xd0_8028, 0),
+            (0xd0_8008, 1),
+            (0xd0_8004, 0x3ff),
+            (0xd0_8000, 1),
+        ] {
+            devices.write(0, SGX + offset, 4, value, 0).unwrap();
+        }
+
+        // RTKit start-up over the mailbox.
+        let send = |devices: &mut AppleDevices, endpoint: u64, payload: u64| {
+            devices.write(0, WRAPPER + 0x8800, 8, payload, 0).unwrap();
+            devices.write(0, WRAPPER + 0x8808, 8, endpoint, 0).unwrap();
+        };
+        let receive = |devices: &mut AppleDevices| {
+            let payload = devices.read(0, WRAPPER + 0x8830, 8, 0).unwrap();
+            let endpoint = devices.read(0, WRAPPER + 0x8838, 8, 0).unwrap() & 0xff;
+            (endpoint, payload)
+        };
+        let mgmt = |kind: u64, fields: u64| kind << 52 | fields;
+        assert_eq!(receive(&mut devices), (0, mgmt(1, 12 | 12 << 16)));
+        send(&mut devices, 0, mgmt(2, 12 | 12 << 16));
+        assert_eq!(receive(&mut devices), (0, mgmt(8, 1)));
+        send(&mut devices, 0, mgmt(8, 1));
+        // 0x20 and 0x21 are bits 0 and 1 of the last group, 1.
+        assert_eq!(receive(&mut devices), (0, mgmt(8, 1 << 51 | 1 << 32 | 3)));
+        send(&mut devices, 0, mgmt(8, 1 << 51 | 1 << 32 | 3));
+        assert_eq!(receive(&mut devices), (0, mgmt(7, 0x20)));
+        for endpoint in [0x20, 0x21] {
+            send(&mut devices, 0, mgmt(5, endpoint << 32 | 2));
+        }
+        // notifyFirmwareStarted's initdata message, then the firmware's read.
+        send(&mut devices, 0x20, 0x81 << 48 | (va & ((1 << 44) - 1)));
+        devices.transfer(0, &mut ram, 0).unwrap();
+        let checked = devices
+            .bus
+            .device::<Asc>(devices.gfx_masters[0].0)
+            .and_then(|asc| asc.firmware::<firmware::Coprocessor>())
+            .map(|gfx| gfx.protocol().with(|state| state.initdata_checked));
+        assert_eq!(checked, Some(true));
     }
 
     #[test]

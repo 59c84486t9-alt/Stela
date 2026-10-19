@@ -564,6 +564,9 @@ fn devices<'f>(
     if let Some(pmp) = board.and_then(|b| b.pmp.as_ref()) {
         devices.add_pmp(pmp)?;
     }
+    if let Some(gfx) = board.and_then(|b| b.gfx.as_ref()) {
+        devices.add_gfx(gfx)?;
+    }
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
         devices.add_spmi(spmi, clock.wall)?;
     }
