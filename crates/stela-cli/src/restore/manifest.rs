@@ -23,6 +23,10 @@ pub struct Identity {
     pub ap_board_id: Option<String>,
     pub device_class: String,
     pub variant: String,
+    /// `Info.MacOSVariant`: the variant whose global manifests apply. An
+    /// erase identity's `Variant` names the restore, this the installed OS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macos_variant: Option<String>,
     pub components: BTreeMap<String, Component>,
     pub components_without_paths: Vec<String>,
 }
@@ -123,6 +127,10 @@ pub fn inspect(bytes: &[u8], model: Option<&str>) -> Result<RestoreManifest> {
             ap_board_id: text("ApBoardID"),
             device_class: required(info, "DeviceClass")?,
             variant: required(info, "Variant")?,
+            macos_variant: info
+                .get("MacOSVariant")
+                .and_then(Value::as_string)
+                .map(str::to_owned),
             components,
             components_without_paths,
         });

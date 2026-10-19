@@ -297,7 +297,10 @@ fn read_overlay(path: &std::path::Path) -> Result<Vec<OverlayProperty>> {
         .collect()
 }
 
-/// The identity's global manifests sit at `Firmware/Manifests/restore/[cryptex1/]VARIANT/apticket.CLASS.im4m`.
+/// The identity's global manifests sit at `Firmware/Manifests/restore/[cryptex1/]VARIANT/apticket.CLASS.im4m`,
+/// with `Info.MacOSVariant` as VARIANT when the identity has one, as the
+/// restore host's RootTicket answer chooses it: restored's `update_ticket`
+/// compares that ticket's SHA-384 with `/chosen/boot-manifest-hash`.
 fn manifest_member(cryptex1: bool, variant: &str, device_class: &str) -> String {
     let scope = if cryptex1 { "cryptex1/" } else { "" };
     format!("Firmware/Manifests/restore/{scope}{variant}/apticket.{device_class}.im4m")
@@ -506,7 +509,8 @@ impl Prepare {
             .then(|| component(roles.sep, None, COMPONENT_LIMIT))
             .transpose()?;
         let global_manifest = |cryptex1: bool| -> Result<Option<Decoded>> {
-            let member = manifest_member(cryptex1, &identity.variant, &identity.device_class);
+            let variant = identity.macos_variant.as_ref().unwrap_or(&identity.variant);
+            let member = manifest_member(cryptex1, variant, &identity.device_class);
             if !restore::archive::has_member(&ipsw, &member)? {
                 return Ok(None);
             }
