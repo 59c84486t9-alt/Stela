@@ -808,6 +808,82 @@ mod tests {
         );
     }
 
+    /// Every access of a system-mode block, in a clean-load region or not,
+    /// checks its address against the guest's ranges before it is made;
+    /// process blocks make no such check.
+    #[test]
+    fn system_mode_blocks_check_every_access_against_the_guest_ranges() {
+        use crate::x86_64::GUEST_RANGE_CHECK;
+        let count = |code: &[u8]| {
+            code.windows(GUEST_RANGE_CHECK.len())
+                .filter(|bytes| *bytes == GUEST_RANGE_CHECK)
+                .count()
+        };
+        let compile = |words: &[u32], profile, plan: fn(CompilationPlan) -> CompilationPlan| {
+            let source: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
+            CompilationPlan::new(
+                &source,
+                GuestAddress(0x1000),
+                profile,
+                crate::TargetCpu::detect(),
+            )
+            .map(plan)
+            .and_then(CompilationPlan::compile)
+            .unwrap()
+            .native
+            .x86_64_code
+        };
+        // ldr w0, [x1]; add w0, w0, #1; ldr x0, [x1, #8]; ldp w2, w3, [x1];
+        // ldr h0, [x1, x2]; ld1 {v0.4s}, [x1]; ldr x4, <literal>; ldadd x4,
+        // x5, [x1]; ldar w6, [x1]; stlr w6, [x1]; ldnp x8, x9, [x1];
+        // str x0, [x1]; ldr q0, [x1]; stp q0, q1, [x1]; prfm pldl1keep, [x1]
+        let words = [
+            0xb940_0020_u32,
+            0x1100_0400,
+            0xf940_0420,
+            0x2940_0c22,
+            0x7c62_6820,
+            0x4c40_7820,
+            0x5800_0084,
+            0xf824_0025,
+            0x88df_fc26,
+            0x889f_fc26,
+            0xa840_2428,
+            0xf900_0020,
+            0x3dc0_0020,
+            0xad00_0420,
+            0xf980_0020,
+        ];
+        // Alone, each access checks, but the prefetch, which never faults.
+        for (index, word) in words.into_iter().enumerate() {
+            let alone = compile(&[word], BlockProfile::SystemModeV1, |plan| plan);
+            assert_eq!(
+                count(&alone),
+                usize::from(![1, 14].contains(&index)),
+                "{word:#x}"
+            );
+        }
+        // Together, an immediate-offset access through X1 after another
+        // needs none (`x86_64::guest_range`): the SIMD register offset,
+        // which forgets every base, makes the LD1 check again, and the
+        // literal always checks.
+        let system = compile(&words, BlockProfile::SystemModeV1, |plan| plan);
+        assert_eq!(count(&system), 4);
+        assert_eq!(
+            count(&compile(&words, BlockProfile::Ordinary, |plan| plan)),
+            0
+        );
+        // DC ZVA and DC CVAC completed natively check Xt.
+        let zero = compile(&[0xd50b_7423], BlockProfile::SystemModeV1, |plan| {
+            plan.with_zero_block(Some(64)).unwrap()
+        });
+        let clean = compile(&[0xd50b_7a20], BlockProfile::SystemModeV1, |plan| {
+            plan.with_cache_clean(crate::x86_64::cache_clean::Operations::ALL)
+                .unwrap()
+        });
+        assert_eq!((count(&zero), count(&clean)), (1, 1));
+    }
+
     #[test]
     fn system_mode_blocks_check_sctlr_a_and_the_ordered_granule_when_asked() {
         // ldr x0, [x1, #8]; ldp w2, w3, [x1]; ldr h0, [x1, x2]; ld1 {v0.4s},
@@ -1130,7 +1206,8 @@ mod tests {
         }
         // Ordinary-only prefixes use the ordinary emitter and its regions,
         // which settle the frame before every access and exit, except under
-        // SCTLR_ELx.A, whose checks their loads lack.
+        // SCTLR_ELx.A, whose checks their loads lack, with each access's
+        // guest range check.
         let ordinary: Vec<u8> = [ADD, LDR, ADD, ADD, ADD, 0x1400_0000]
             .into_iter()
             .flat_map(u32::to_le_bytes)
@@ -1144,8 +1221,14 @@ mod tests {
         );
         let compiled =
             compile_for_target(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();
-        assert_eq!(compiled.native.x86_64_code, expected.x86_64_code);
-        assert_eq!(compiled.native.source_map, expected.source_map);
+        let check = crate::x86_64::GUEST_RANGE_CHECK;
+        let mut unchecked = compiled.native.x86_64_code.clone();
+        let at = unchecked
+            .windows(check.len())
+            .position(|bytes| bytes == check)
+            .expect("the load checks its address");
+        unchecked.drain(at..at + check.len());
+        assert_eq!(unchecked, expected.x86_64_code);
         let aligned = crate::x86_64::MemoryChecks {
             alignment: true,
             ..crate::x86_64::MemoryChecks::DEFAULT
@@ -1155,7 +1238,10 @@ mod tests {
             parsed.terminal.as_ref(),
             parsed.next_pc,
             crate::TargetCpu::Baseline,
-            aligned,
+            crate::x86_64::MemoryChecks {
+                guest_range: true,
+                ..aligned
+            },
         );
         let compiled = CompilationPlan::new(&ordinary, BASE, profile, crate::TargetCpu::Baseline)
             .unwrap()

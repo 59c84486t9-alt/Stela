@@ -2,7 +2,9 @@
 //! precise native faults, the local APIC timer and the TSC counter.
 //!
 //! Shadow roots are PML5 pages whose entry 0 and 511 hold the guest's two
-//! halves and whose entry 64 is the shared window. There is one root per
+//! halves and whose entry 64 is the shared window, which native code's
+//! guest range checks keep every guest access out of; no other entry is
+//! ever mapped, which those checks rely on. There is one root per
 //! permission view (EL0, EL1, EL1 with PAN, GL1), filled on demand by the #PF
 //! handler from the software walk of the guest's tables, a window of the
 //! guest leaf per fault. Each half takes its tables from its own part of the

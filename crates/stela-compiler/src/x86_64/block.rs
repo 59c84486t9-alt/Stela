@@ -120,14 +120,18 @@ pub(crate) fn emit_system_mode(
 ) -> NativeBlock {
     // Allocated and clean-load regions settle the frame before every
     // access and exit, so a fault inside one finds it exact. Their loads
-    // carry no SCTLR_ELx.A check.
+    // carry no SCTLR_ELx.A check. Accesses check the guest range
+    // (`x86_64::guest_range`).
     emit_selected(
         instructions,
         terminal,
         fallthrough,
         target,
         !checks.alignment,
-        checks,
+        super::MemoryChecks {
+            guest_range: true,
+            ..checks
+        },
         native,
     )
 }
@@ -147,6 +151,18 @@ fn emit_selected(
     };
     let code = &mut block.x86_64_code;
     let mut fixups = vec![];
+    // Which accesses check the guest range (`guest_range`), and each
+    // instruction's checks.
+    let ranges = if checks.guest_range {
+        super::guest_range::checks(instructions)
+    } else {
+        vec![]
+    };
+    let ranges = checks.guest_range.then_some(&ranges[..]);
+    let checks_at = |index: usize| super::MemoryChecks {
+        guest_range: ranges.is_some_and(|ranges| ranges[index]),
+        ..checks
+    };
     let mut cursor = 0;
     while cursor < instructions.len() {
         // Build the new candidate privately. Rejection leaves both cursor and
@@ -157,13 +173,13 @@ fn emit_selected(
             let count = region.consumed_instructions;
             let mut baseline = vec![];
             let mut candidate_fixups = vec![];
-            for instruction in &instructions[cursor..cursor + count] {
+            for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
                 super::emit_instruction(
                     &mut baseline,
                     instruction,
                     &mut candidate_fixups,
                     target,
-                    checks,
+                    checks_at(cursor + index),
                 );
             }
             if candidate_fixups.is_empty() && super::region::admits_allocated(&region, &baseline) {
@@ -177,21 +193,24 @@ fn emit_selected(
             }
         }
         if optimize_regions
-            && let Ok(region) = super::region::emit_clean_load_prefix(&instructions[cursor..])
+            && let Ok(region) = super::region::emit_clean_load_prefix(
+                &instructions[cursor..],
+                ranges.map(|ranges| &ranges[cursor..]),
+            )
             && region.consumed_instructions != 0
         {
             let count = region.consumed_instructions;
             let mut baseline_code = vec![];
             let mut baseline_map = vec![];
             let mut baseline_fixups = vec![];
-            for instruction in &instructions[cursor..cursor + count] {
+            for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
                 baseline_map.push((instruction.pc, baseline_code.len()));
                 super::emit_instruction(
                     &mut baseline_code,
                     instruction,
                     &mut baseline_fixups,
                     target,
-                    checks,
+                    checks_at(cursor + index),
                 );
             }
             debug_assert!(baseline_fixups.is_empty());
@@ -219,7 +238,7 @@ fn emit_selected(
         if let Operation::FloatingPoint(operand) = &instruction.operation {
             super::simd::emit_numerical(code, operand, instruction.pc, target);
         } else {
-            super::emit_instruction(code, instruction, &mut fixups, target, checks);
+            super::emit_instruction(code, instruction, &mut fixups, target, checks_at(cursor));
         }
         cursor += 1;
     }

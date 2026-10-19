@@ -72,9 +72,9 @@ const SYNTHETIC_SLICE_BYTES: u64 = 400_000;
 const KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kernel.bin"));
 const KERNEL_OPTIONS: &str =
     "--system --load 0x800004000 --entry 0x800004000 --ram-bytes 0x100000000";
-/// What the test kernel must leave in X0-X7 when it idles; X1 and X2, its
+/// What the test kernel must leave in X0-X10 when it idles; X1 and X2, its
 /// tasks' SVC counts, need only be nonzero.
-const KERNEL_RESULTS: [(usize, Option<u64>); 8] = [
+const KERNEL_RESULTS: [(usize, Option<u64>); 11] = [
     (0, Some(0x5354_454c_4120_4f4b)),
     (1, None),
     (2, None),
@@ -85,6 +85,11 @@ const KERNEL_RESULTS: [(usize, Option<u64>); 8] = [
     // EL1 SVC #0x10 and EL0 SVC #1.
     (6, Some(0x5600_0010)),
     (7, Some(0x5600_0001)),
+    // EL1 load and store at the Stela window's address, outside both
+    // ranges: level 0 translation faults, the store's with WnR.
+    (8, Some(0x9600_0004)),
+    (9, Some(0x9600_0044)),
+    (10, Some(0x0040_0000_0000_0000)),
 ];
 
 /// System options for a boot bundle: the J473AP DRAM base and 8 GiB.

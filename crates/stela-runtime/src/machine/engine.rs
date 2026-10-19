@@ -172,7 +172,8 @@ pub enum FaultCause {
     Translation(mmu::Unsupported),
     /// An x86 #GP: the address is not canonical for x86 (tags, wild pointers).
     NonCanonical,
-    /// An x86 #UD from a native check (16-byte SP alignment).
+    /// An x86 #UD from a native check: SP alignment, an Alignment fault, or
+    /// an address outside the guest's ranges.
     InvalidOpcode,
     /// The access reached a page [`Watch`] keeps unmapped.
     Watched,
@@ -1036,11 +1037,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         *self.memory_checks.get_or_insert_with(|| {
             let sctlr = self.cpu.regime_sctlr();
             let bit = if self.cpu.pstate.el == 0 { 4 } else { 3 };
-            MemoryChecks {
-                stack_alignment: sctlr & (1 << bit) != 0,
-                alignment: sctlr & mmu::alignment::SCTLR_A != 0,
-                ordered_granule: sctlr & mmu::alignment::SCTLR_NAA == 0,
-            }
+            MemoryChecks::system(
+                sctlr & (1 << bit) != 0,
+                sctlr & mmu::alignment::SCTLR_A != 0,
+                sctlr & mmu::alignment::SCTLR_NAA == 0,
+            )
         })
     }
 
@@ -3342,7 +3343,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // with the check (SCTLR_ELx.SA or SA0 set), which comes first,
             // and for an access that has an Alignment fault: unaligned under
             // SCTLR_ELx.A, or an atomic, or an ordered access with nAA
-            // clear, crossing its 16-byte granule.
+            // clear, crossing its 16-byte granule; and for an address outside
+            // the guest's two ranges.
             FaultCause::Watched => self.watched_access(index, pc),
             FaultCause::InvalidOpcode => {
                 let word = self.word(index, pc)?;
@@ -3353,7 +3355,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
                     Ok(())
                 } else {
-                    self.native_alignment_fault(pc, word)
+                    self.native_check_fault(pc, word)
                 }
             }
         }
@@ -4813,6 +4815,36 @@ mod tests {
         let (outcome, checks) = run(3, BASE + 0x10e, SCTLR_NAA);
         assert!(matches!(outcome, Err(Stop::Unsupported(_))));
         assert!(!checks.unwrap().ordered_granule);
+        // An address outside both ranges, such as Stela's window, takes the
+        // fault of its translation: with the MMU off, an Address size fault
+        // at level 0 (DFSC 0). An Alignment fault still comes first.
+        const WINDOW: u64 = 0x0040_0000_0000_0000;
+        for index in 0..5 {
+            let write = if index == 3 { 1 << 6 } else { 0 };
+            assert_eq!(
+                run(index, WINDOW, 0).0.unwrap(),
+                (0x9600_0000 | write, WINDOW),
+                "{index}"
+            );
+        }
+        assert_eq!(run(0, WINDOW + 4, SCTLR_A).0.unwrap(), (load, WINDOW + 4));
+    }
+
+    /// System-mode blocks check every access against the guest's ranges,
+    /// whatever SCTLR_ELx asks.
+    #[test]
+    fn system_mode_blocks_check_accesses_against_the_guest_ranges() {
+        const CHECK: [u8; 16] = [
+            0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, 48, 0xff, 0xc1, 0x83, 0xf9, 0x01, 0x76, 0x02, 0x0f,
+            0x0b,
+        ];
+        // ldr x0, [x1]; svc #0
+        let mut machine = machine(&[0xf940_0020, 0xd400_0001]);
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+            panic!("block")
+        };
+        let code = &machine.host.installed[machine.blocks[index].code.0 - 1];
+        assert!(code.windows(CHECK.len()).any(|bytes| bytes == CHECK));
     }
 
     impl Machine<FakeHost, NoDevices> {

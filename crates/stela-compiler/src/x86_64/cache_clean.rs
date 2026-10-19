@@ -4,9 +4,10 @@
 //! all the engine does for them is translate Xt as a read, taking the Data
 //! Abort of a failed translation (`engine::system` `check_maintenance`).
 //! Native code makes the same check by reading the byte at Xt through the
-//! same direct guest-VA access as LDRB, then falls through. A read that
-//! fails for any reason (a guest fault, Device memory, a watched page, a
-//! non-canonical x86 address) ends the block at the DC with nothing
+//! same direct guest-VA access as LDRB, after the guest range check, then
+//! falls through. A read that fails for any reason (a guest fault, Device
+//! memory, a watched page, an address outside the guest's ranges) ends the
+//! block at the DC with nothing
 //! written, and the engine then completes the instruction itself, with the
 //! syndrome of a cache maintenance fault. Code clobbers RAX and ECX.
 use crate::aarch64::{
@@ -74,6 +75,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, rt: u8) {
             Register::X(rt)
         },
     );
+    code.extend(super::GUEST_RANGE_CHECK);
     code.extend([0x0f, 0xb6, 0x08]); // movzx ecx,byte [rax]
 }
 

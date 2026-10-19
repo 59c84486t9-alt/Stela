@@ -76,6 +76,7 @@ mod crc;
 pub(crate) mod exclusive;
 mod flags;
 mod fp_register;
+mod guest_range;
 mod integer_math;
 mod integer_minmax;
 mod integer_unary;
@@ -215,6 +216,10 @@ pub struct MemoryChecks {
     /// SCTLR_ELx.nAA is clear: a load-acquire or store-release that crosses a
     /// 16-byte granule faults. Atomics always fault there (FEAT_LSE2).
     pub ordered_granule: bool,
+    /// Every access checks its address against the guest's two ranges
+    /// ([`GUEST_RANGE_CHECK`]). `SystemModeV1` sets it for every block,
+    /// whatever the engine asks, and no other profile does.
+    pub(crate) guest_range: bool,
 }
 
 impl MemoryChecks {
@@ -224,7 +229,46 @@ impl MemoryChecks {
         stack_alignment: true,
         alignment: false,
         ordered_granule: true,
+        guest_range: false,
     };
+    /// SCTLR_ELx's checks, as the system-mode engine selects them.
+    pub const fn system(stack_alignment: bool, alignment: bool, ordered_granule: bool) -> Self {
+        Self {
+            stack_alignment,
+            alignment,
+            ordered_granule,
+            guest_range: false,
+        }
+    }
+}
+
+/// The system-mode check of the access address in RAX against the guest's
+/// two ranges, the only parts of the host address space its shadow tables
+/// map: bits 63:48 all clear (TTBR0, PML5 entry 0) or all set (TTBR1, entry
+/// 511). Any other address raises #UD before the access, which the engine
+/// turns into the fault the guest's translation gives it. Every other PML5
+/// entry, Stela's window (entry 64) among them, is then out of a guest
+/// access's reach. RCX and host flags are scratch.
+pub(crate) const GUEST_RANGE_CHECK: [u8; 16] = [
+    0x48, 0x89, 0xc1, // mov rcx,rax
+    0x48, 0xc1, 0xf9, 48, // sar rcx,48: 0 or -1 in range
+    0xff, 0xc1, // inc ecx: 1 or 0 in range
+    0x83, 0xf9, 0x01, // cmp ecx,1
+    0x76, 0x02, // jbe +2
+    0x0f, 0x0b, // ud2
+];
+
+fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks) {
+    if checks.guest_range {
+        code.extend(GUEST_RANGE_CHECK);
+    }
+}
+
+/// The checks of an access's final address in RAX: the guest range, then
+/// SCTLR_ELx.A against `unit`, the bytes of each element it transfers.
+fn address_checks(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8) {
+    guest_range_check(code, checks);
+    alignment_check(code, checks, unit);
 }
 
 /// SCTLR_ELx.A's check of the effective address in RAX against `unit`, the
@@ -257,7 +301,7 @@ fn memory_address(
     if mode != AddressMode::PostIndex {
         code.extend([0x48, 0x89, 0xd0]); // mov rax,rdx: effective address
     }
-    alignment_check(code, checks, unit);
+    address_checks(code, checks, unit);
 }
 
 fn memory_writeback(code: &mut Vec<u8>, base: Register, mode: AddressMode) {
@@ -834,6 +878,89 @@ mod tests {
     use crate::aarch64::system::synchronization::{
         Operation as Synchronization, Requirement, Scope, WaitKind,
     };
+
+    /// The check runs on the host and passes exactly the addresses whose
+    /// bits 63:48 are all clear or all set.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn the_guest_range_check_passes_exactly_the_two_48_bit_ranges() {
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        let (check, trap) = GUEST_RANGE_CHECK.split_at(GUEST_RANGE_CHECK.len() - 2);
+        assert_eq!(trap, [0x0f, 0x0b]);
+        // mov rax,rdi; the check with `xor eax,eax` (a failure, also two
+        // bytes) where its UD2 is; ret.
+        let mut code = vec![0x48, 0x89, 0xf8];
+        code.extend(check);
+        code.extend([0x31, 0xc0, 0xc3]);
+        // SAFETY: private anonymous memory, RX after the copy and unmapped
+        // after the calls; the code touches no memory.
+        unsafe {
+            let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+            assert_ne!(page as usize, usize::MAX);
+            core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+            assert_eq!(mprotect(page, PAGE, 5), 0);
+            let passes = |address: u64| {
+                let entry: unsafe extern "sysv64" fn(u64) -> u64 = core::mem::transmute(page);
+                let result = entry(address);
+                assert!(result == address || result == 0);
+                result == address
+            };
+            for (address, expected) in [
+                (1, true),
+                (0x0000_ffff_ffff_ffff, true),
+                (0xffff_0000_0000_0000, true),
+                (u64::MAX, true),
+                (0x0001_0000_0000_0000, false),
+                // Stela's window, PML5 entry 64.
+                (0x0040_0000_0000_0000, false),
+                (0x00ff_ffff_ffff_ffff, false),
+                (0xff00_0000_0000_0000, false),
+                (0xfffe_ffff_ffff_ffff, false),
+                (0x7fff_ffff_ffff_ffff, false),
+                (0x8000_0000_0000_0000, false),
+                // A tagged pointer.
+                (0x0f00_0000_0000_1234, false),
+            ] {
+                assert_eq!(passes(address), expected, "{address:#x}");
+            }
+            let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+            for _ in 0..4096 {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                // Bias half the samples to the ranges' edges.
+                let top = match seed >> 62 {
+                    0 => 0,
+                    1 => 0xffff,
+                    _ => (seed >> 16) & 0xffff,
+                };
+                let address = top << 48 | (seed.rotate_left(17) & 0xffff_ffff_ffff) | 1;
+                assert_eq!(
+                    passes(address),
+                    matches!(address >> 48, 0 | 0xffff),
+                    "{address:#x}"
+                );
+            }
+            assert_eq!(munmap(page, PAGE), 0);
+        }
+    }
 
     #[test]
     fn constructed_context_operations_return_an_explicit_error() {

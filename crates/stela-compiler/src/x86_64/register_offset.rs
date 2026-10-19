@@ -37,7 +37,12 @@ pub(super) fn address(
     const LEA_RAX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x04, 0x08];
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
-    memory_address(code, checks, base, 0, AddressMode::Offset, 1);
+    // Only the final address is checked against the guest's ranges.
+    let base_checks = super::MemoryChecks {
+        guest_range: false,
+        ..checks
+    };
+    memory_address(code, base_checks, base, 0, AddressMode::Offset, 1);
     right_operand(code, index, Width::X64, Shift::Lsl, 0);
     match extend {
         IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
@@ -49,7 +54,7 @@ pub(super) fn address(
         code.push(shift);
     }
     code.extend(LEA_RAX_RAX_RCX); // modulo 2^64
-    super::alignment_check(code, checks, bytes);
+    super::address_checks(code, checks, bytes);
 }
 
 fn transfer(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {

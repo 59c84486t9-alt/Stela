@@ -418,6 +418,7 @@ pub(super) fn emitter<'a>(
         flag_location: flags::Location::Frame,
         coalesced: None,
         allocating_output: false,
+        range_checks: None,
     }
 }
 

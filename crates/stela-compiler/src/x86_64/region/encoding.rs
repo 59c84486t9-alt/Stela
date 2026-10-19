@@ -328,7 +328,13 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
     {
         return None;
     }
-    Some(vec![7, 14, ORDINARY_ADDRESS_BYTES])
+    let mut ends = vec![7, 14, ORDINARY_ADDRESS_BYTES];
+    // A system-mode access checks the address against the guest's ranges.
+    let checked = ORDINARY_ADDRESS_BYTES + super::super::GUEST_RANGE_CHECK.len();
+    if code.get(ORDINARY_ADDRESS_BYTES..checked) == Some(&super::super::GUEST_RANGE_CHECK[..]) {
+        ends.push(checked);
+    }
+    Some(ends)
 }
 
 fn check_frame_store(code: &[u8], start: usize, guest: usize, rex: u8, modrm: u8) -> Option<usize> {
@@ -360,8 +366,9 @@ pub fn ordinary_load_ends(
         _ => return None,
     };
     let mut ends = ordinary_address_ends(code, base, displacement)?;
-    let load_end = ORDINARY_ADDRESS_BYTES + memory_recipe.len();
-    if code.get(ORDINARY_ADDRESS_BYTES..load_end)? != memory_recipe {
+    let address_end = *ends.last()?;
+    let load_end = address_end + memory_recipe.len();
+    if code.get(address_end..load_end)? != memory_recipe {
         return None;
     }
     ends.push(load_end);
@@ -384,9 +391,10 @@ pub fn ordinary_pair_load_ends(
     displacement: i32,
 ) -> Option<Vec<usize>> {
     let mut ends = ordinary_address_ends(code, base, displacement)?;
-    let first_end = ORDINARY_ADDRESS_BYTES + 2;
+    let address_end = *ends.last()?;
+    let first_end = address_end + 2;
     let second_end = first_end + 4;
-    if code.get(ORDINARY_ADDRESS_BYTES..first_end)? != [MOV_LOAD, ECX_FROM_RAX_MEMORY]
+    if code.get(address_end..first_end)? != [MOV_LOAD, ECX_FROM_RAX_MEMORY]
         || code.get(first_end..second_end)?
             != [REX | REX_R, MOV_LOAD, R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES]
     {

@@ -88,6 +88,9 @@ struct Emitter<'a> {
     flag_location: flags::Location,
     coalesced: Option<usize>,
     allocating_output: bool,
+    /// For each instruction, whether its clean load checks the guest range
+    /// (`x86_64::guest_range`); none in process profiles.
+    range_checks: Option<&'a [bool]>,
 }
 
 impl Emitter<'_> {
@@ -288,7 +291,7 @@ impl Emitter<'_> {
         let mut raw = vec![];
         super::memory(
             &mut raw,
-            super::MemoryChecks::DEFAULT,
+            self.memory_checks(),
             transfer,
             bytes,
             data,
@@ -322,6 +325,17 @@ impl Emitter<'_> {
         self.output.stats.clean_loads += 1;
         self.output.stats.commits += 1;
         Ok(())
+    }
+
+    /// The checks of the shared memory emitter whose bytes the current
+    /// clean load reuses: the default ones, with its guest range check.
+    fn memory_checks(&self) -> super::MemoryChecks {
+        super::MemoryChecks {
+            guest_range: self
+                .range_checks
+                .is_some_and(|ranges| ranges.get(self.current).copied().unwrap_or(true)),
+            ..super::MemoryChecks::DEFAULT
+        }
     }
 
     fn settle_before_load(&mut self, clobbers: u16, destinations: &[Register]) {
@@ -380,7 +394,7 @@ impl Emitter<'_> {
         let mut raw = vec![];
         super::memory_pair(
             &mut raw,
-            super::MemoryChecks::DEFAULT,
+            self.memory_checks(),
             transfer,
             bytes,
             data,
@@ -801,7 +815,7 @@ impl Emitter<'_> {
 /// `consumed_instructions`, with the full frame written back and `exit_pc` set.
 #[cfg(test)]
 pub fn emit_prefix(instructions: &[Instruction]) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, false)
+    emit_prefix_selected(instructions, false, None)
 }
 
 /// Transactional nonfaulting GPR/NZCV span candidate.
@@ -812,15 +826,19 @@ pub fn emit_allocated_prefix(
 }
 
 /// Ordinary direct-RAM load retention; pure ALU allocation keeps six slots.
-pub fn emit_clean_load_prefix(
-    instructions: &[Instruction],
+/// With `range_checks`, the loads the system-mode analysis selects check
+/// their address ([`super::GUEST_RANGE_CHECK`]).
+pub fn emit_clean_load_prefix<'a>(
+    instructions: &'a [Instruction],
+    range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, true)
+    emit_prefix_selected(instructions, true, range_checks)
 }
 
-fn emit_prefix_selected(
-    instructions: &[Instruction],
+fn emit_prefix_selected<'a>(
+    instructions: &'a [Instruction],
     clean_loads: bool,
+    range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
     if instructions.len() > MAX_INSTRUCTIONS {
         return Err(RegionError::TooLong);
@@ -897,6 +915,7 @@ fn emit_prefix_selected(
         flag_location: flags::Location::Frame,
         coalesced: None,
         allocating_output: false,
+        range_checks,
     };
     for instruction in instructions.iter().take(consumed) {
         emitter.instruction(instruction)?;
@@ -1325,11 +1344,83 @@ mod tests {
             instruction(3, add(Register::X(9), Register::X(9))),
             instruction(4, add(Register::X(8), Register::X(8))),
         ];
-        let output = emit_clean_load_prefix(&instructions).unwrap();
+        let output = emit_clean_load_prefix(&instructions, None).unwrap();
         assert_eq!(output.consumed_instructions, 5);
         assert_eq!(output.stats.clean_loads, 1);
         assert_eq!(output.stats.load_boundary_stores, 2);
         assert_eq!(emit_prefix(&instructions).unwrap().consumed_instructions, 2);
+    }
+
+    /// With the system-mode guest range check, clean loads keep the same
+    /// shape and check each address once, after the frame is settled.
+    #[test]
+    fn clean_loads_check_the_guest_range_when_asked() {
+        use super::super::GUEST_RANGE_CHECK;
+        let load = |pc, data, base| {
+            instruction(
+                pc,
+                Operation::Memory {
+                    transfer: MemoryTransfer::Load {
+                        signed: false,
+                        width: Width::W32,
+                    },
+                    bytes: 4,
+                    data: Register::X(data),
+                    base: Register::X(base),
+                    displacement: 8,
+                    mode: AddressMode::Offset,
+                },
+            )
+        };
+        let pair = instruction(
+            3,
+            Operation::MemoryPair {
+                transfer: MemoryTransfer::Load {
+                    signed: false,
+                    width: Width::W32,
+                },
+                bytes: 4,
+                data: [Register::X(4), Register::X(5)],
+                base: Register::X(1),
+                displacement: 16,
+                mode: AddressMode::Offset,
+            },
+        );
+        let instructions = vec![
+            instruction(0, add(Register::X(9), Register::X(9))),
+            load(1, 2, 1),
+            load(2, 3, 1),
+            pair,
+            instruction(4, add(Register::X(9), Register::X(9))),
+        ];
+        let checks = |code: &[u8]| {
+            code.windows(GUEST_RANGE_CHECK.len())
+                .filter(|bytes| *bytes == GUEST_RANGE_CHECK)
+                .count()
+        };
+        let unchecked = emit_clean_load_prefix(&instructions, None).unwrap();
+        let checked = emit_clean_load_prefix(&instructions, Some(&[true; 5])).unwrap();
+        assert_eq!(checks(&unchecked.code), 0);
+        assert_eq!(checks(&checked.code), 3);
+        // Each load takes its own instruction's decision.
+        let second =
+            emit_clean_load_prefix(&instructions, Some(&[true, false, true, false, true])).unwrap();
+        assert_eq!(checks(&second.code), 1);
+        assert_eq!(
+            checked.consumed_instructions,
+            unchecked.consumed_instructions
+        );
+        assert_eq!(checked.stats.clean_loads, unchecked.stats.clean_loads);
+        assert_eq!(checked.stats.pair_loads, 1);
+        // The second load reuses the cached X1 and still checks.
+        assert_eq!(
+            checked.stats.address_cache_hits,
+            unchecked.stats.address_cache_hits
+        );
+        assert_eq!(
+            checked.code.len(),
+            unchecked.code.len() + 3 * GUEST_RANGE_CHECK.len()
+        );
     }
 
     #[test]
@@ -1387,12 +1478,15 @@ mod tests {
             displacement: 0,
             mode: AddressMode::Offset,
         };
-        let output = emit_clean_load_prefix(&[
-            instruction(0, load(10)),
-            instruction(1, add(Register::X(10), Register::X(10))),
-            instruction(2, load(11)),
-            instruction(3, add(Register::X(0), Register::X(10))),
-        ])
+        let output = emit_clean_load_prefix(
+            &[
+                instruction(0, load(10)),
+                instruction(1, add(Register::X(10), Register::X(10))),
+                instruction(2, load(11)),
+                instruction(3, add(Register::X(0), Register::X(10))),
+            ],
+            None,
+        )
         .unwrap();
         assert_eq!(output.stats.load_boundary_stores, 1);
     }
@@ -1466,7 +1560,7 @@ mod tests {
                 instruction(1, load(data, Register::X(15))),
                 instruction(2, add(Register::X(9), Register::X(9))),
             ];
-            let region = emit_clean_load_prefix(&instructions).unwrap();
+            let region = emit_clean_load_prefix(&instructions, None).unwrap();
             assert_eq!(region.consumed_instructions, instructions.len());
             assert_eq!(region.stats.clean_loads, 1);
             assert_eq!(region.stats.load_boundary_stores, 1);
@@ -1554,7 +1648,7 @@ mod tests {
             instruction(2, add(Register::X(9), Register::X(16))),
             instruction(3, add(Register::X(10), Register::X(17))),
         ];
-        let region = emit_clean_load_prefix(&source).unwrap();
+        let region = emit_clean_load_prefix(&source, None).unwrap();
         assert_eq!(region.consumed_instructions, source.len());
         assert_eq!(region.stats.pair_loads, 1);
         let mut raw = vec![];
@@ -1792,7 +1886,7 @@ mod tests {
             instruction(2, add(Register::X(2), Register::X(2))),
         ];
         assert!(emit_allocated_prefix(&instructions).unwrap().is_none());
-        let legacy = emit_clean_load_prefix(&instructions).unwrap();
+        let legacy = emit_clean_load_prefix(&instructions, None).unwrap();
         let target = crate::TargetCpu::Baseline;
         let fallthrough = GuestAddress(0x100c);
         let baseline = super::super::block::emit_for_target(

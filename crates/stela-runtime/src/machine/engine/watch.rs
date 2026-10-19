@@ -11,7 +11,10 @@ use super::{
 use crate::machine::{
     cpu::Exception,
     exception::Class,
-    mmu::alignment::{self, Kind, Shape},
+    mmu::{
+        self,
+        alignment::{self, Kind, Shape},
+    },
 };
 use alloc::{vec, vec::Vec};
 use stela_compiler::{
@@ -23,6 +26,12 @@ use stela_compiler::{
 };
 
 const PAGE: u64 = super::FETCH_PAGE;
+
+/// Whether native code accesses `address` directly: bits 63:48 all clear
+/// or all set, as `x86_64::GUEST_RANGE_CHECK` tests.
+fn in_guest_range(address: u64) -> bool {
+    matches!(address >> 48, 0 | 0xffff)
+}
 
 impl<H: Host, D: Devices> Machine<H, D> {
     fn index_value(&self, index: Register, extend: IndexExtend, shift: u8) -> u64 {
@@ -228,25 +237,51 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
-    /// A native alignment check in the block at `index` failed at `pc`:
-    /// take the Alignment fault of the first access that has one (Arm
-    /// `AArch64_UnalignedAccessFaults`), which comes before translation.
-    pub(super) fn native_alignment_fault(&mut self, pc: u64, word: u32) -> Step {
+    /// A native address check failed at `pc`. Take, in Arm's order of the
+    /// instruction's accesses, the first one's Alignment fault (Arm
+    /// `AArch64_UnalignedAccessFaults`, which comes before translation), or
+    /// the fault its translation gives an address outside the guest's two
+    /// ranges (`x86_64::GUEST_RANGE_CHECK`), which the shadow never maps.
+    pub(super) fn native_check_fault(&mut self, pc: u64, word: u32) -> Step {
         let accesses = self
             .data_accesses(pc, word)
             .map_err(|detail| self.refuse_word(word, detail))?;
         let sctlr = self.cpu.regime_sctlr();
-        match accesses
-            .iter()
-            .find(|(access, shape)| alignment::before_translation(sctlr, access.address, *shape))
-        {
+        for (access, shape) in accesses {
             // An atomic access reads and writes: its fault is not a write
             // (Arm `NoFault`).
-            Some((access, _)) => self.alignment_fault(access.address, access.write && !access.read),
-            None => Err(self.unsupported(RequirementKind::Native(
-                "a native alignment check failed where no access faults",
-            ))),
+            let write = access.write && !access.read;
+            if alignment::before_translation(sctlr, access.address, shape) {
+                return self.alignment_fault(access.address, write);
+            }
+            if !in_guest_range(access.address) {
+                let kind = if write {
+                    mmu::Access::Write
+                } else {
+                    mmu::Access::Read
+                };
+                return match self.translate_data(access.address, kind) {
+                    mmu::Outcome::Fault(fault) => {
+                        self.data_abort(access.address, fault, write, false)
+                    }
+                    mmu::Outcome::Unsupported(unsupported) => {
+                        Err(self.unsupported(RequirementKind::Translation(unsupported)))
+                    }
+                    // TBI, or a 52-bit range: the shadow maps 48-bit
+                    // untagged addresses only.
+                    mmu::Outcome::Mapped(_) => {
+                        let mut requirement = self.requirement(RequirementKind::Native(
+                            "a tagged or 52-bit data address in native code",
+                        ));
+                        requirement.address = Some(access.address);
+                        Err(super::Stop::Unsupported(requirement))
+                    }
+                };
+            }
         }
+        Err(self.unsupported(RequirementKind::Native(
+            "a native address check failed where no access faults",
+        )))
     }
 
     /// A native access reached a watched page: take the watchpoint exception

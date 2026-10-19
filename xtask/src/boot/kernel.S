@@ -14,6 +14,7 @@
 //   x3 = timer switches
 //   x4, x5 = ESR and FAR of the EL1 data abort
 //   x6 = ESR of the EL1 SVC, x7 = ESR of the last EL0 SVC
+//   x8, x9 = ESRs of the EL1 load and store at WINDOW_VA, x10 = its FAR
 
 .set BLOCK, 0x2000000
 .set KERNEL_VA, 0xffffff8000000000
@@ -24,6 +25,9 @@
 .set KDATA, 0x320000
 .set KSTACK_TOP, 0x310000
 .set USER_VA, 0x100000000
+// Outside both translation ranges, and the host address of the Stela window
+// (PML5 entry 64), which must fault like any other.
+.set WINDOW_VA, 0x0040000000000000
 .set SWITCHES, 6
 .set PERIOD, 240000                 // 10 ms of the 24 MHz counter
 .set MAIR, 0xff                     // Attr0 Normal WB, Attr1 Device-nGnRnE
@@ -50,6 +54,9 @@
 .set D_SWITCHES, 40
 .set D_CURRENT, 48
 .set D_USER_ESR, 56
+.set D_WINDOW_LOAD, 64
+.set D_WINDOW_STORE, 72
+.set D_WINDOW_FAR, 80
 .set D_CONTEXT, 0x100              // two 0x200-byte contexts
 // Context: x0-x30, then SP_EL0, ELR, SPSR.
 .set C_X8, 64
@@ -142,6 +149,17 @@ high:
     str w3, [x2, #0x20]                 // UTXH
     b 3b
 5:
+    // EL1 data aborts at an address no range holds: a load, then a store.
+    ldr x6, =WINDOW_VA
+    ldr x7, [x6]
+    ldr x8, [x22, #D_ABORT_ESR]
+    str x8, [x22, #D_WINDOW_LOAD]
+    str xzr, [x22, #D_ABORT_ESR]
+    str x7, [x6]
+    ldr x8, [x22, #D_ABORT_ESR]
+    str x8, [x22, #D_WINDOW_STORE]
+    ldr x8, [x22, #D_ABORT_FAR]
+    str x8, [x22, #D_WINDOW_FAR]
     // EL1 data abort: level 2 of TTBR1 maps only the first block.
     ldr x6, =(KERNEL_VA + 0x4000000)
     ldr x7, [x6]
@@ -296,6 +314,9 @@ done:
     ldr x5, [x0, #D_ABORT_FAR]
     ldr x6, [x0, #D_SVC_ESR]
     ldr x7, [x0, #D_USER_ESR]
+    ldr x8, [x0, #D_WINDOW_LOAD]
+    ldr x9, [x0, #D_WINDOW_STORE]
+    ldr x10, [x0, #D_WINDOW_FAR]
     ldr x0, =0x5354454c41204f4b
     b finish
 

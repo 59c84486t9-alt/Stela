@@ -105,7 +105,7 @@ pub(super) fn address_offset(
         code.extend(ADD_RAX_IMM32);
         code.extend(displacement.to_le_bytes());
     }
-    super::alignment_check(code, checks, bytes);
+    super::address_checks(code, checks, bytes);
     if granule && bytes != BYTE_BYTES {
         if !aligned_sp {
             code.extend(MOV_ECX_EAX);

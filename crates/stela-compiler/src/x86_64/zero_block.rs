@@ -1,9 +1,10 @@
 //! DC ZVA in system-mode blocks the engine compiles where it neither traps
 //! nor is UNDEFINED (`CompilationPlan::with_zero_block`): Arm
 //! `AArch64_MemZero` writes zeroes to the DCZID_EL0.BS block holding Xt,
-//! aligned down, through the same direct guest-VA stores as STR. The block
-//! is at most 2 KiB and naturally aligned, so it lies in one host page and
-//! either every store completes or the first faults with nothing written;
+//! aligned down, through the same direct guest-VA stores as STR, after the
+//! guest range check. The block is at most 2 KiB and naturally aligned, so
+//! it lies in one host page and either every store completes or the check
+//! or the first store faults with nothing written;
 //! the engine then completes the instruction itself, which reports Xt as
 //! the fault address and checks watchpoints over the whole block. Code
 //! clobbers RAX, RCX and RDX.
@@ -48,6 +49,9 @@ pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, bytes: u16) {
             Register::X(rt)
         },
     );
+    // Aligning down keeps bits 63:48, so Xt is in range exactly when the
+    // block is.
+    code.extend(super::GUEST_RANGE_CHECK);
     let mask = -i32::from(bytes);
     if let Ok(mask) = i8::try_from(mask) {
         code.extend([0x48, 0x83, 0xe0, mask as u8]); // and rax,-bytes
