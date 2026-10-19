@@ -18,14 +18,14 @@ pub(super) struct Request<'a> {
 }
 
 impl Request<'_> {
-    fn word(&self, at: usize) -> Option<u32> {
+    pub(super) fn word(&self, at: usize) -> Option<u32> {
         Some(u32::from_le_bytes(
             self.body.get(at..at + 4)?.try_into().ok()?,
         ))
     }
 
     /// MIG packs 64-bit arguments at 4-byte alignment.
-    fn double(&self, at: usize) -> Option<u64> {
+    pub(super) fn double(&self, at: usize) -> Option<u64> {
         Some(u64::from_le_bytes(
             self.body.get(at..at + 8)?.try_into().ok()?,
         ))
@@ -42,11 +42,11 @@ pub(super) enum Reply {
     Forward,
 }
 
-const KERN_INVALID_ARGUMENT: u32 = 4;
-const KERN_FAILURE: u32 = 5;
-const KERN_NOT_SUPPORTED: u32 = 46;
+pub(super) const KERN_INVALID_ARGUMENT: u32 = 4;
+pub(super) const KERN_FAILURE: u32 = 5;
+pub(super) const KERN_NOT_SUPPORTED: u32 = 46;
 /// `MIG_BAD_ARGUMENTS`: the request is malformed.
-const MIG_BAD_ARGUMENTS: u32 = (-304i32) as u32;
+pub(super) const MIG_BAD_ARGUMENTS: u32 = (-304i32) as u32;
 
 /// `NDR_record` on both LP64 ABIs: little-endian, ASCII, IEEE floats.
 pub(super) const NDR_RECORD: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
@@ -249,6 +249,7 @@ pub(super) fn serve(
             };
             pair(reclaim::resize(&mut lock(&kernel.process.reclaim), len))
         }
+        (Object::Task, _, _) => return super::vm::serve(kernel, routine, complex, request),
         _ => return Ok(None),
     }))
 }

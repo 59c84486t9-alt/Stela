@@ -23,6 +23,7 @@ use anyhow::{Result, bail};
 mod message;
 pub(super) mod reclaim;
 mod server;
+mod vm;
 
 /// The fast traps `handle_svc` answers before the table.
 const MACH_ABSOLUTE_TIME_FAST: u32 = 3;
@@ -184,11 +185,17 @@ pub(crate) fn mig_service(
     {
         return (Service::Forwarded { overlay: None }, None);
     }
+    let own_vm = (subsystem == "mach_vm")
+        .then(|| vm::SERVED.iter().find(|&&(name, _)| name == routine))
+        .flatten()
+        .map(|&(_, limit)| limit);
     match server::SERVED
         .iter()
         .find(|&&(served, name, _)| served == object && name == routine)
+        .map(|&(_, _, limit)| limit)
+        .or(own_vm)
     {
-        Some(&(_, _, limit)) => (
+        Some(limit) => (
             Service::Modeled {
                 family: "kernel objects",
             },
