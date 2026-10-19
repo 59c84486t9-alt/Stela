@@ -7,8 +7,9 @@
 //! compute channels drive. What it models:
 //!
 //! - A compute-style dispatch: each (x, y) invocation runs the program with
-//!   its coordinates and the dispatch's uniforms seeded into registers, as the
-//!   hardware's iterator and uniform setup do before a shader runs.
+//!   its coordinates seeded into registers and the dispatch's uniforms in the
+//!   uniform file, as the hardware's iterator and uniform setup do before a
+//!   shader runs.
 //! - A fixed-function store of the invocation's output register to a linear
 //!   `R8G8B8A8` surface, modeling the pixel back-end's store (the PBE store is
 //!   fixed-function, not shader ISA).
@@ -56,7 +57,7 @@ pub struct Binding {
     pub x: isa::Reg,
     /// 32-bit register seeded with the invocation's y coordinate as f32.
     pub y: isa::Reg,
-    /// The base register for `uniforms`, seeded in order as f32.
+    /// The base uniform lane for `uniforms`, loaded in order as f32 pairs.
     pub uniform_base: isa::Reg,
     /// The 32-bit register holding the four 0..=1 color channels, written as
     /// `out`, `out+2`, `out+4`, `out+6` (R, G, B, A).
@@ -84,11 +85,12 @@ pub fn dispatch(surface: &mut Surface, dispatch: &Dispatch<'_>) -> Result<u64, R
     let mut completed = 0u64;
     for y in 0..surface.height {
         for x in 0..surface.width {
-            let mut regs = Registers::new(dispatch.lanes);
+            let uniform_lanes = usize::from(b.uniform_base) + 2 * dispatch.uniforms.len();
+            let mut regs = Registers::new(dispatch.lanes, uniform_lanes);
             regs.write_f32(b.x, x as f32);
             regs.write_f32(b.y, y as f32);
             for (i, &u) in dispatch.uniforms.iter().enumerate() {
-                regs.write_f32(b.uniform_base + 2 * i as isa::Reg, u);
+                regs.write_uniform_f32(b.uniform_base + 2 * i as isa::Reg, u);
             }
             isa::run(dispatch.code, &mut regs)?;
             let rgba = channel(regs.read_f32(b.out))
@@ -122,51 +124,39 @@ impl Fence {
 
 #[cfg(test)]
 mod tests {
-    use super::super::isa::{BinOp, Dest, FloatSrc};
+    use super::super::isa::{Dest, FloatAlu, FloatOp, Operand, Src};
     use super::*;
 
-    fn src(reg: isa::Reg) -> FloatSrc {
-        FloatSrc {
-            reg,
+    fn op(op: FloatOp, dest: isa::Reg, a: Src, b: Src, saturate: bool) -> Vec<u8> {
+        isa::encode(&FloatAlu {
+            op,
+            dest: Dest::reg32(dest),
+            srcs: [a, b, Src::reg32(0)],
+            saturate,
+        })
+        .unwrap()
+    }
+
+    /// A shader computing a horizontal red gradient: R = x * u0 (u0 =
+    /// 1/(W-1)), G = B = 0, A = u2 (1.0) + 0. Registers: r0 = x, r2 = y.
+    fn gradient_shader() -> (Vec<u8>, Binding) {
+        let zero = Src {
+            operand: Operand::Immediate(0),
             size32: true,
             abs: false,
             neg: false,
-        }
-    }
-
-    fn dest(reg: isa::Reg) -> Dest {
-        Dest { reg, size32: true }
-    }
-
-    /// A shader computing a horizontal red gradient: R = x * (1/(W-1)),
-    /// G = 0, B = 0, A = 1. Registers: r0=x, r2=y, uniforms at r4 (1/(W-1))
-    /// and r6 (1.0 constant for A and used as G/B zero via r8 left zero).
-    fn gradient_shader() -> (Vec<u8>, Binding) {
+        };
         let mut code = Vec::new();
-        // r10 = r0 (x) * r4 (1/(W-1)), saturated.
-        code.extend_from_slice(&isa::encode_binary(
-            BinOp::Mul,
-            dest(10),
-            src(0),
-            src(4),
-            true,
-        ));
-        // A channel register r16 = r6 (1.0) + r8 (0.0).
-        code.extend_from_slice(&isa::encode_binary(
-            BinOp::Add,
-            dest(16),
-            src(6),
-            src(8),
-            true,
-        ));
+        code.extend(op(FloatOp::Mul, 10, Src::reg32(0), Src::uniform32(0), true));
+        code.extend(op(FloatOp::Add, 16, Src::uniform32(2), zero, true));
         code.extend_from_slice(&isa::encode_stop());
-        // out base r10: R=r10, G=r12 (zero), B=r14 (zero), A=r16.
+        // out base r10: R = r10, G = r12 (zero), B = r14 (zero), A = r16.
         (
             code,
             Binding {
                 x: 0,
                 y: 2,
-                uniform_base: 4,
+                uniform_base: 0,
                 out: 10,
             },
         )
@@ -176,7 +166,7 @@ mod tests {
     fn a_dispatch_runs_the_shader_and_writes_checked_gradient_pixels() {
         let mut surface = Surface::new(4, 2);
         let (code, binding) = gradient_shader();
-        // uniform 0 = 1/(W-1) at r4, uniform 1 = 1.0 at r6; r8 stays zero.
+        // u0 = 1/(W-1), u2 = 1.0.
         let invocations = dispatch(
             &mut surface,
             &Dispatch {
