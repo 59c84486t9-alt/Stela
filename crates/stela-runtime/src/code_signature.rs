@@ -93,10 +93,39 @@ pub struct CodeSignature {
     pub start_offset: u64,
     pub end_offset: u64,
     /// Whether the CMS signature's certificates include the Apple Code
-    /// Signing Certification Authority: code Apple itself signed, which
-    /// library validation admits into any process ("signed by Apple or with
-    /// the same Team ID"). The CMS signature is not verified.
+    /// Signing Certification Authority: code Apple itself signed ("anchor
+    /// apple"). The CMS signature is not verified.
     pub apple_signed: bool,
+}
+
+/// `<key>name</key>` followed by `<true/>` in an XML entitlements plist.
+pub fn xml_entitlement_true(plist: &[u8], name: &str) -> bool {
+    let key = format!("<key>{name}</key>");
+    let Some(text) = core::str::from_utf8(plist).ok() else {
+        return false;
+    };
+    text.match_indices(&key)
+        .any(|(at, _)| text[at + key.len()..].trim_start().starts_with("<true/>"))
+}
+
+impl CodeSignature {
+    /// Whether the kernel treats this code as platform code: a code
+    /// directory platform identifier (the trust caches' code), or code
+    /// Apple signed. macOS's AMFI grants Apple-anchored code platform status
+    /// when the blob is added (`ubc_cs_blob_add` takes `CS_PLATFORM_BINARY`
+    /// from `mac_vnode_check_signature`): Xcode's `python3`, signed by
+    /// Software Signing with Team ID 59GAB85EFG and no platform identifier,
+    /// runs on the 25G241 host with `CS_PLATFORM_BINARY`.
+    pub fn platform_code(&self) -> bool {
+        self.platform != 0 || self.apple_signed
+    }
+
+    /// Whether the XML entitlements grant the boolean `name`.
+    pub fn entitled(&self, name: &str) -> bool {
+        self.entitlements
+            .as_deref()
+            .is_some_and(|plist| xml_entitlement_true(plist, name))
+    }
 }
 
 mod hex_bytes {

@@ -10,10 +10,13 @@
 //! records its signed range; an unparsable blob fails with EBADEXEC. As
 //! for exec, the platform identity is the code directory's platform field
 //! and page hashes are not validated: the signature's trust is the host
-//! file system's. Library validation is AMFI's policy for platform
-//! processes and `CS_REQUIRE_LV`: platform code only, or, for a process
-//! that is not a platform binary, code Apple signed or code of its own
-//! team.
+//! file system's. Library validation is macOS's policy
+//! (`docs/research/userspace.md`, code signing and library validation):
+//! platform code (trust-cache or Apple-signed) loads into any process; a
+//! platform process loads nothing else; another process subject to it
+//! (`CS_REQUIRE_LV`, or the hardened runtime without
+//! `com.apple.security.cs.disable-library-validation`) also loads code of
+//! its own Team ID.
 use super::codesign::{CS_PLATFORM_BINARY, CS_REQUIRE_LV, CS_RUNTIME};
 use super::{Call, EFAULT, EINVAL, ENOENT, EPERM, Kernel, Outcome};
 use crate::code_signature::{self, CodeSignature};
@@ -143,7 +146,7 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
                 None => Outcome::Error(ENOENT),
                 Some(_) if request != GETSIGSINFO_PLATFORM_BINARY => Outcome::Error(EINVAL),
                 Some(blob) => {
-                    let platform = u32::from(blob.signature.platform != 0);
+                    let platform = u32::from(blob.signature.platform_code());
                     if memory::write_u32(argument + 12, platform) {
                         Outcome::value(0)
                     } else {
@@ -233,9 +236,14 @@ fn add_file_signatures(
     Ok(Outcome::value(0))
 }
 
+/// `com.apple.security.cs.disable-library-validation`: a hardened-runtime
+/// process loads code of any signer.
+const DISABLE_LIBRARY_VALIDATION: &str = "com.apple.security.cs.disable-library-validation";
+
 /// Why library validation refuses `library` in a process, or `None` when
-/// it admits it: a platform process loads platform code only; another
-/// loads platform code, code Apple signed, or code of its own team.
+/// it admits it ("signed by Apple or with the same team ID"): platform code
+/// (trust-cache or Apple-signed) loads anywhere; a platform process loads
+/// nothing else; another process also loads code of its own Team ID.
 fn library_refusal(
     platform_process: bool,
     own_team: Option<&str>,
@@ -243,14 +251,23 @@ fn library_refusal(
 ) -> Option<&'static str> {
     match library {
         None => Some("code signature not found"),
-        Some(library) if library.platform != 0 => None,
-        Some(_) if platform_process => Some("platform binaries may only load platform code"),
-        Some(library) if library.apple_signed => None,
+        Some(library) if library.platform_code() => None,
+        Some(_) if platform_process => {
+            Some("mapping process is a platform binary, but mapped file is not")
+        }
         Some(library) if own_team.is_some() && library.team_identifier.as_deref() == own_team => {
             None
         }
-        Some(_) => Some("mapping process and mapped file have different Team IDs"),
+        Some(_) => Some("mapping process and mapped file (non-platform) have different Team IDs"),
     }
+}
+
+/// Whether library validation applies: to platform processes, to
+/// `CS_REQUIRE_LV`, and to the hardened runtime unless it is entitled to
+/// disable it.
+fn requires_library_validation(flags: u32, disable_entitled: bool) -> bool {
+    flags & (CS_PLATFORM_BINARY | CS_REQUIRE_LV) != 0
+        || (flags & CS_RUNTIME != 0 && !disable_entitled)
 }
 
 /// `F_CHECK_LV`: whether the slice at `lv_file_start` may be mapped
@@ -264,21 +281,19 @@ fn check_library(kernel: &mut Kernel, file: (u64, u64), argument: u64) -> Result
     let field =
         |index: usize| u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap());
     let (start, message_size, message) = (field(0) as i64, field(1), field(2));
-    let flags = lock(&kernel.process.executable).code_signing_flags;
-    let platform_process = flags & CS_PLATFORM_BINARY != 0;
-    if !platform_process && flags & CS_REQUIRE_LV == 0 {
-        if flags & CS_RUNTIME != 0 {
-            bail!(
-                "fcntl F_CHECK_LV for a hardened-runtime process: its library-validation \
-                 entitlements are not evaluated"
-            );
-        }
+    let (flags, own_team, disable_entitled) = {
+        let executable = lock(&kernel.process.executable);
+        let signature = executable.signature.as_ref();
+        (
+            executable.code_signing_flags,
+            signature.and_then(|signature| signature.team_identifier.clone()),
+            signature.is_some_and(|signature| signature.entitled(DISABLE_LIBRARY_VALIDATION)),
+        )
+    };
+    if !requires_library_validation(flags, disable_entitled) {
         return Ok(Outcome::value(0));
     }
-    let own_team = lock(&kernel.process.executable)
-        .signature
-        .as_ref()
-        .and_then(|signature| signature.team_identifier.clone());
+    let platform_process = flags & CS_PLATFORM_BINARY != 0;
     let refusal = library_refusal(
         platform_process,
         own_team.as_deref(),
@@ -331,9 +346,39 @@ mod tests {
         assert_eq!(library_refusal(false, Some("TEAM"), Some(&own)), None);
         assert!(library_refusal(false, Some("TEAM"), Some(&other)).is_some());
         assert!(library_refusal(false, None, Some(&signature(0, None, false))).is_some());
-        assert!(library_refusal(true, None, Some(&apple)).is_some());
+        // A platform process (an xcrun shim) loads Apple-signed code (Xcode's
+        // libxcrun), but not a third party's, even its own team's.
+        assert_eq!(library_refusal(true, None, Some(&apple)), None);
         assert_eq!(library_refusal(true, None, Some(&platform)), None);
+        assert!(library_refusal(true, Some("TEAM"), Some(&own)).is_some());
+        assert!(library_refusal(true, None, Some(&signature(0, None, false))).is_some());
         assert!(library_refusal(false, Some("TEAM"), None).is_some());
+    }
+
+    #[test]
+    fn library_validation_applies_to_platform_required_and_hardened_processes() {
+        assert!(requires_library_validation(CS_PLATFORM_BINARY, false));
+        assert!(requires_library_validation(CS_REQUIRE_LV, true));
+        assert!(requires_library_validation(CS_RUNTIME, false));
+        assert!(!requires_library_validation(CS_RUNTIME, true));
+        assert!(!requires_library_validation(0, false));
+    }
+
+    #[test]
+    fn the_disable_entitlement_is_a_true_boolean() {
+        let plist = |value: &str| {
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\n\t<key>{}</key>\n\t{value}\
+                 </dict></plist>",
+                DISABLE_LIBRARY_VALIDATION
+            )
+        };
+        let entitled = |text: String| {
+            code_signature::xml_entitlement_true(text.as_bytes(), DISABLE_LIBRARY_VALIDATION)
+        };
+        assert!(entitled(plist("<true/>")));
+        assert!(!entitled(plist("<false/>")));
+        assert!(!entitled(plist("<string>true</string>")));
     }
 
     #[test]

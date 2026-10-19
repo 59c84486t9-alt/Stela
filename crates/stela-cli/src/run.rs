@@ -124,6 +124,7 @@ fn signature(slice: &[u8]) -> Result<Signature> {
         team_identifier: signature.team_identifier,
         entitlements: blob(0xfade_7171, signature.entitlements),
         der_entitlements: blob(0xfade_7172, signature.der_entitlements),
+        apple_signed: signature.apple_signed,
     })
 }
 

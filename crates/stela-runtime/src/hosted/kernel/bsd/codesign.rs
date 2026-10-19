@@ -12,6 +12,7 @@
 //! (`cs_process_enforcement`). Page hashes are not validated; the
 //! signature's trust is the host file system's.
 use super::{Call, EFAULT, EINVAL, ENOENT, Kernel, Outcome, forward};
+use crate::code_signature;
 use crate::hosted::{memory, threads::lock};
 use anyhow::{Result, bail};
 
@@ -82,16 +83,31 @@ pub struct Signature {
     /// The entitlements blobs, each with its 8-byte blob header.
     pub entitlements: Option<Vec<u8>>,
     pub der_entitlements: Option<Vec<u8>>,
+    /// Whether Apple signed it (`CodeSignature::apple_signed`).
+    pub apple_signed: bool,
 }
 
 impl Signature {
-    /// The process's code-signing flags after exec.
+    /// The process's code-signing flags after exec. Trust-cache code is a
+    /// restricted platform binary; Apple-signed code outside the trust
+    /// caches is a platform binary too (Xcode's `python3` runs with
+    /// `0x26004001` on the 25G241 host).
     pub fn exec_flags(&self) -> u32 {
         let mut flags = (self.directory_flags & CS_ALLOWED_MACHO) | CS_VALID | CS_SIGNED;
         if self.platform != 0 {
             flags |= CS_PLATFORM_BINARY | CS_NO_UNTRUSTED_HELPERS | CS_RESTRICT;
+        } else if self.apple_signed {
+            flags |= CS_PLATFORM_BINARY | CS_NO_UNTRUSTED_HELPERS;
         }
         flags
+    }
+
+    /// Whether the XML entitlements grant the boolean `name`.
+    pub fn entitled(&self, name: &str) -> bool {
+        self.entitlements.as_deref().is_some_and(|blob| {
+            blob.get(BLOB_HEADER_BYTES as usize..)
+                .is_some_and(|plist| code_signature::xml_entitlement_true(plist, name))
+        })
     }
 }
 
@@ -285,6 +301,11 @@ mod tests {
             ..Signature::default()
         };
         assert_eq!(signature.exec_flags(), 0x2601_0801);
+        let apple = Signature {
+            apple_signed: true,
+            ..Signature::default()
+        };
+        assert_eq!(apple.exec_flags(), 0x2600_0001);
         let adhoc = Signature {
             directory_flags: CS_ADHOC | CS_LINKER_SIGNED,
             ..Signature::default()
