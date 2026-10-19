@@ -431,7 +431,11 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
             status
         }
         "mach_msg_trap" | "mach_msg_overwrite_trap" | "mach_msg2_trap" => {
-            message::send(kernel, name, index, arguments)?
+            let status = message::send(kernel, name, index, arguments)?;
+            if status == KERN_SUCCESS {
+                message::received(name, arguments)?;
+            }
+            status
         }
         other => {
             let reason = REFUSED

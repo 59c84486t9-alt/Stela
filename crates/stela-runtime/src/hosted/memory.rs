@@ -70,6 +70,19 @@ unsafe extern "C" {
         inheritance: u32,
     ) -> i32;
     fn mach_vm_deallocate(task: u32, address: u64, size: u64) -> i32;
+    fn mach_vm_remap(
+        target: u32,
+        address: *mut u64,
+        size: u64,
+        mask: u64,
+        flags: i32,
+        source_task: u32,
+        source: u64,
+        copy: i32,
+        current: *mut i32,
+        maximum: *mut i32,
+        inheritance: u32,
+    ) -> i32;
     fn mach_vm_protect(
         task: u32,
         address: u64,
@@ -273,6 +286,55 @@ pub fn allocate(address: u64, bytes: u64, anywhere: bool, protection: Protection
     Ok(at)
 }
 
+/// Move memory the host kernel placed for this process in its own 4 KiB
+/// pages (a received out-of-line region) to guest pages of its own: the
+/// arm64 kernel places such memory in whole 16 KiB pages, and the guest
+/// releases it rounded to them, which would release a neighbor sharing
+/// the host placement's guest pages. Returns the region's new address,
+/// at the same offset in its first host page, or `None` when the region
+/// already fills whole guest pages.
+pub fn own_guest_pages(address: u64, bytes: u64) -> Result<Option<u64>> {
+    const VM_FLAGS_OVERWRITE: i32 = 0x4000;
+    if bytes == 0 {
+        return Ok(None);
+    }
+    let start = address & !HOST_PAGE_MASK;
+    let end = address
+        .checked_add(bytes)
+        .and_then(round_host_page)
+        .context("received region overflows")?;
+    if (start | end) & PAGE_MASK == 0 {
+        return Ok(None);
+    }
+    let size = end - start;
+    let reserved = allocate(0, size, true, Protection::READ_WRITE)?;
+    let mut at = reserved;
+    let (mut current, mut maximum) = (0, 0);
+    // SAFETY: the host pages move over the start of the reservation just
+    // made; the region was the caller's own.
+    let status = unsafe {
+        mach_vm_remap(
+            task(),
+            &mut at,
+            size,
+            0,
+            VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+            task(),
+            start,
+            0,
+            &mut current,
+            &mut maximum,
+            VM_INHERIT_COPY,
+        )
+    };
+    if status != KERN_SUCCESS {
+        deallocate(reserved, size)?;
+        bail!("cannot move {size:#x} received bytes at {start:#x}: kern_return {status}");
+    }
+    deallocate(start, size)?;
+    Ok(Some(reserved + (address - start)))
+}
+
 pub fn deallocate(address: u64, bytes: u64) -> Result<()> {
     // SAFETY: the caller names guest pages it owns.
     let status = unsafe { mach_vm_deallocate(task(), address, bytes) };
@@ -369,5 +431,29 @@ mod tests {
         assert_eq!(round_page(1), Some(PAGE_BYTES));
         assert_eq!(trunc_page(PAGE_BYTES + 5), PAGE_BYTES);
         assert_eq!(round_page(u64::MAX), None);
+    }
+
+    #[test]
+    fn received_host_pages_move_to_guest_pages_of_their_own() {
+        let block = allocate(0, 2 * PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        // A region in the second host page of the first guest page, as the
+        // host kernel may place one.
+        let region = block + 0x1000 + 0x10;
+        assert!(write(region, b"payload"));
+        let moved = own_guest_pages(region, 0x2000).unwrap().unwrap();
+        assert_eq!(moved & PAGE_MASK, 0x10);
+        assert_eq!(read(moved, 7).unwrap(), b"payload");
+        // The old host pages are gone, the guest page's other host pages
+        // stay, and the new region fills its guest page alone.
+        assert!(read_u64(block + 0x1000).is_none());
+        assert!(read_u64(block).is_some());
+        assert!(read_u64(moved - 0x10 + PAGE_BYTES - 8).is_some());
+        assert_eq!(
+            own_guest_pages(block + PAGE_BYTES, PAGE_BYTES).unwrap(),
+            None
+        );
+        deallocate(moved & !PAGE_MASK, PAGE_BYTES).unwrap();
+        deallocate(block, 0x1000).unwrap();
+        deallocate(block + 0x4000, 2 * PAGE_BYTES - 0x4000).unwrap();
     }
 }

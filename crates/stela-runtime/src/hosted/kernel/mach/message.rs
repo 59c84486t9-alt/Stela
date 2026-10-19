@@ -15,6 +15,9 @@
 //! combined receive then proceeds on the host as for any reply. Known
 //! limit: the host builds the received trailer, so its sender and audit
 //! tokens are this process's rather than the kernel's.
+//!
+//! A received message's out-of-line memory moves to guest pages of its own
+//! ([`received`]), as the arm64 kernel places it.
 use super::server::{self, NDR_RECORD, Object, Reply, Request};
 use super::{Kernel, forward_trap, index_of};
 use crate::hosted::{forward, memory};
@@ -108,6 +111,87 @@ pub(super) fn send(
         }
     }
     forward_trap(kernel, index, arguments)
+}
+
+/// `mach_msg_descriptor_type_t`: the out-of-line forms, whose received
+/// memory the host kernel places in its own 4 KiB pages.
+const OOL_DESCRIPTOR: u8 = 1;
+const OOL_PORTS_DESCRIPTOR: u8 = 2;
+const OOL_VOLATILE_DESCRIPTOR: u8 = 3;
+const PORT_DESCRIPTOR: u8 = 0;
+/// Received descriptor sizes on LP64: a port descriptor, and the others.
+const PORT_DESCRIPTOR_BYTES: u64 = 12;
+const DESCRIPTOR_BYTES: u64 = 16;
+/// `mach_msg_body_t`'s `msgh_descriptor_count` follows the header.
+const DESCRIPTOR_COUNT: u64 = HEADER_BYTES;
+/// `mach_msg_vector_t`: `msgv_data`, `msgv_rcv_addr`, then the sizes.
+const VECTOR_RECEIVE_ADDRESS: u64 = 8;
+
+/// The buffer a successful receive of the call wrote its message to.
+fn receive_buffer(name: &str, arguments: &[u64]) -> Option<u64> {
+    match name {
+        // `rcv_msg`, else the send buffer.
+        "mach_msg_overwrite_trap" if arguments[7] != 0 => Some(arguments[7]),
+        "mach_msg2_trap" if arguments[1] & MESSAGE_VECTOR != 0 => {
+            // The first vector is the message's.
+            let vector = arguments[0];
+            match memory::read_u64(vector + VECTOR_RECEIVE_ADDRESS)? {
+                0 => memory::read_u64(vector),
+                address => Some(address),
+            }
+        }
+        _ => Some(arguments[0]),
+    }
+}
+
+/// After a successful receive, move each out-of-line region of the
+/// received message into guest pages of its own and rewrite its
+/// descriptor's address ([`memory::own_guest_pages`]): the guest releases
+/// the region rounded to 16 KiB pages, as the arm64 kernel placed it.
+pub(super) fn received(name: &str, arguments: &[u64]) -> Result<()> {
+    if arguments[1] & RECEIVE == 0 {
+        return Ok(());
+    }
+    let Some(message) = receive_buffer(name, arguments) else {
+        return Ok(());
+    };
+    let Some(bits) = memory::read_u32(message) else {
+        return Ok(());
+    };
+    if bits & MACH_MSGH_BITS_COMPLEX == 0 {
+        return Ok(());
+    }
+    let Some(count) = memory::read_u32(message + DESCRIPTOR_COUNT) else {
+        return Ok(());
+    };
+    let mut at = message + DESCRIPTOR_COUNT + 4;
+    for _ in 0..count {
+        let Some(kind) = memory::read_u32(at + 8).map(|word| (word >> 24) as u8) else {
+            bail!("{name}: a received descriptor at {at:#x} is unreadable");
+        };
+        if kind == PORT_DESCRIPTOR {
+            at += PORT_DESCRIPTOR_BYTES;
+            continue;
+        }
+        let (Some(address), Some(length)) = (memory::read_u64(at), memory::read_u32(at + 12))
+        else {
+            bail!("{name}: a received descriptor at {at:#x} is unreadable");
+        };
+        let bytes = match kind {
+            OOL_DESCRIPTOR | OOL_VOLATILE_DESCRIPTOR => u64::from(length),
+            // Port names, one `mach_port_name_t` each.
+            OOL_PORTS_DESCRIPTOR => u64::from(length) * 4,
+            _ => 0,
+        };
+        if address != 0
+            && let Some(moved) = memory::own_guest_pages(address, bytes)?
+            && !memory::write_u64(at, moved)
+        {
+            bail!("{name}: a received descriptor at {at:#x} is not writable");
+        }
+        at += DESCRIPTOR_BYTES;
+    }
+    Ok(())
 }
 
 /// The kernel object `port` names in this task: the task, the host, or
@@ -331,5 +415,44 @@ fn host_message(
             0,
             0,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hosted::memory::{PAGE_BYTES, PAGE_MASK, Protection};
+
+    #[test]
+    fn received_out_of_line_memory_moves_to_guest_pages() {
+        let block = memory::allocate(0, 2 * PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        let region = block + 0x2000;
+        assert!(memory::write(region, b"data"));
+        // A complex message: a port descriptor, then an OOL descriptor.
+        let mut message = Vec::new();
+        for word in [MACH_MSGH_BITS_COMPLEX, 0, 0, 0, 0, 0, 2] {
+            message.extend(u32::to_le_bytes(word));
+        }
+        message.extend([0u8; 11]);
+        message.push(PORT_DESCRIPTOR);
+        message.extend(region.to_le_bytes());
+        message.extend([0, 0, 0, OOL_DESCRIPTOR]);
+        message.extend(0x100u32.to_le_bytes());
+        let buffer = message.as_mut_ptr() as u64;
+        let mut arguments = [0u64; 8];
+        arguments[0] = buffer;
+        // A send alone leaves the buffer as it is.
+        arguments[1] = SEND;
+        received("mach_msg_trap", &arguments).unwrap();
+        assert_eq!(memory::read_u64(buffer + 40), Some(region));
+        arguments[1] = SEND | RECEIVE;
+        received("mach_msg_trap", &arguments).unwrap();
+        let moved = memory::read_u64(buffer + 40).unwrap();
+        assert_ne!(moved, region);
+        assert_eq!(moved & PAGE_MASK, 0);
+        assert_eq!(memory::read(moved, 4).unwrap(), b"data");
+        memory::deallocate(moved, PAGE_BYTES).unwrap();
+        memory::deallocate(block, 0x2000).unwrap();
+        memory::deallocate(block + 0x3000, 2 * PAGE_BYTES - 0x3000).unwrap();
     }
 }
