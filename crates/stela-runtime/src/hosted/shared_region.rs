@@ -310,19 +310,25 @@ mod tests {
         info.extend(16u16.to_le_bytes());
         data[page..page + info.len()].copy_from_slice(&info);
         std::fs::write(&path, &data).unwrap();
-        let start = memory::allocate(0, 0x8000, true, Protection::NONE).unwrap();
-        memory::deallocate(start, 0x8000).unwrap();
-        let request = MappingRequest {
-            path,
-            file_offset: 0,
-            address: start,
-            size: page as u64,
-            maximum: Protection::READ_WRITE,
-            initial: Protection::READ_WRITE,
-            slide_info: Some((page as u64, info.len() as u64)),
-        };
         let slide = 0x4000;
-        let mut region = SharedRegion::map(&[request], start, 0x8000, slide).unwrap();
+        // A free range found here can be taken by a test on another thread
+        // before the map reserves it, so a few fresh ranges are tried.
+        let mut region = (0..16)
+            .find_map(|_| {
+                let start = memory::allocate(0, 0x8000, true, Protection::NONE).unwrap();
+                memory::deallocate(start, 0x8000).unwrap();
+                let request = MappingRequest {
+                    path: path.clone(),
+                    file_offset: 0,
+                    address: start,
+                    size: page as u64,
+                    maximum: Protection::READ_WRITE,
+                    initial: Protection::READ_WRITE,
+                    slide_info: Some((page as u64, info.len() as u64)),
+                };
+                SharedRegion::map(&[request], start, 0x8000, slide).ok()
+            })
+            .expect("a free guest range for the shared region");
         let base = region.base();
         assert!(region.pending(base + 16));
         assert!(memory::read_u64(base + 16).is_none());
