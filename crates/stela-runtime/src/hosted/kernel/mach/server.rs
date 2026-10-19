@@ -152,11 +152,28 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Host, "host_get_special_port", Some("the host port")),
     (
         Object::Host,
+        "processor_set_default",
+        Some("the x86 host's processor sets"),
+    ),
+    (
+        Object::Host,
+        "host_processor_sets",
+        Some("the x86 host's processor sets"),
+    ),
+    (
+        Object::Host,
+        "host_processor_set_priv",
+        Some("the x86 host's processor sets"),
+    ),
+    (
+        Object::Host,
         "host_get_io_main",
         Some("the IOKit main port is the host's: its registry describes the x86 host"),
     ),
     (Object::Task, "task_create_identity_token", None),
     (Object::Task, "task_threads_from_user", None),
+    (Object::Task, "_kernelrpc_mach_ports_register3", None),
+    (Object::Task, "_kernelrpc_mach_ports_lookup3", None),
     (
         Object::Task,
         "task_info_from_user",
@@ -239,6 +256,14 @@ pub(super) fn serve(
         // registry, whose serialized properties have one layout in both
         // ABIs but describe the x86 machine.
         (Object::Host, "host_get_io_main", false) => Reply::Forward,
+        // The processor sets are the host's: their names, and the host
+        // kernel's refusal of the privileged routines to an unprivileged
+        // host port.
+        (
+            Object::Host,
+            "processor_set_default" | "host_processor_sets" | "host_processor_set_priv",
+            _,
+        ) => Reply::Forward,
         // `flavor`, `host_info_outCnt`.
         (
             Object::Host,
@@ -279,6 +304,11 @@ pub(super) fn serve(
                 body: count.to_le_bytes().to_vec(),
             }
         }
+        // This task's three registered ports (`itk_registered`): IPC state
+        // of its own, which the host task keeps and children inherit as
+        // the arm64 kernel's do.
+        (Object::Task, "_kernelrpc_mach_ports_register3", true)
+        | (Object::Task, "_kernelrpc_mach_ports_lookup3", false) => Reply::Forward,
         // A send right naming this task's identity (pid, version and audit
         // token), the same in either ABI.
         (Object::Task, "task_create_identity_token", false) => Reply::Forward,
