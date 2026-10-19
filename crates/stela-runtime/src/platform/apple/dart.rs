@@ -16,7 +16,7 @@
 //!   (and 42-bit PAs, its entries' address field) reports version 1.0.
 //! - TLB_CMD (0x80): BUSY 31, OP [10:8] (0 flush all, 1 flush one stream;
 //!   SPTM also issues 2 and 4, see `TLB_OPS`),
-//!   STREAM [7:0].
+//!   STREAM [7:0]; SPTM's completion barrier at 0x600/0x604 (`TLB_SYNC`).
 //! - ERROR (0x100): FLAG 31, STREAM [27:20], CODE [14:0] (READ_FAULT 5,
 //!   WRITE_FAULT 4, NO_PTE 3, NO_PMD 2, NO_PGD 1, NO_TTBR 0) and region
 //!   protect 29 (below); software
@@ -129,13 +129,22 @@ const TLB_OP_FLUSH_STREAM: u32 = 1 << 8;
 const TLB_STREAM: u32 = 0xff;
 /// SPTM's invalidation requests (file 0xc8618..0xc8718): OP 0 and 4 on
 /// every instance, OP 1 for one stream, optionally (bit 14) bounded by the
-/// range words at +0x98/+0xa0, and OP 2 with its parameter at +0x84; bit
-/// 15 qualifies the request further. With no translation cached, each
-/// completes at once whatever subset it names; the words are retained.
+/// range words at +0x98/+0xa0, and OP 2 with its parameter at +0x84. Bits
+/// 13 and 15 qualify a request further: SPTM's whole-DART flush is OP 0
+/// with bit 13, and bit 15 too from version 2.2 on (file 0xcd7cc..0xcd7dc).
+/// With no translation cached, each completes at once whatever subset it
+/// names; the words are retained.
 const TLB_OPS: [u32; 4] = [TLB_OP_FLUSH_ALL, TLB_OP_FLUSH_STREAM, 2 << 8, 4 << 8];
-const TLB_QUALIFIERS: u32 = 1 << 14 | 1 << 15;
+const TLB_QUALIFIERS: u32 = 1 << 13 | 1 << 14 | 1 << 15;
 const TLB_PARAMETER: u64 = 0x84;
 const TLB_RANGE: [u64; 2] = [0x98, 0xa0];
+/// After a bit-15 request of OP 0 or 1, SPTM writes zero to +0x600 on each
+/// instance whose descriptor asks for it (flag +0xc06, file 0xc8718..0xc8758)
+/// and waits for bit 0 of +0x604 to clear (file 0xc8884..0xc8894): a
+/// completion barrier for the invalidation. It completes with the request,
+/// so the trigger reads zero and the status is never busy.
+const TLB_SYNC: u64 = 0x600;
+const TLB_SYNC_STATUS: u64 = 0x604;
 const ERROR: u64 = 0x100;
 const ERROR_MASK: u64 = 0x104;
 const ERROR_ADDRESS_LOW: u64 = 0x170;
@@ -546,7 +555,7 @@ impl MmioDevice for Dart {
             PARAMS2 => BYPASS_SUPPORT,
             PARAMS3 => PARAMS3_VALUE,
             PARAMS4 => self.streams as u32,
-            TLB_CMD => 0,
+            TLB_CMD | TLB_SYNC | TLB_SYNC_STATUS => 0,
             TLB_PARAMETER => self.tlb_words[0],
             _ if TLB_RANGE.contains(&offset) => {
                 self.tlb_words[1 + usize::from(offset == TLB_RANGE[1])]
@@ -630,6 +639,8 @@ impl MmioDevice for Dart {
                     return Err(fail("unknown DART TLB command"));
                 }
             }
+            TLB_SYNC if value == 0 => {}
+            TLB_SYNC => return Err(fail("DART TLB barrier trigger takes zero")),
             TLB_PARAMETER => self.tlb_words[0] = value,
             _ if TLB_RANGE.contains(&offset) => {
                 self.tlb_words[1 + usize::from(offset == TLB_RANGE[1])] = value
@@ -781,12 +792,17 @@ mod tests {
             (TLB_PARAMETER, 7),
             (TLB_CMD, 2 << 8),
             (TLB_CMD, 1 << 15 | 4 << 8),
+            (TLB_CMD, 1 << 15 | 1 << 13),
+            (TLB_SYNC, 0),
         ] {
             d.write(offset, Width::Word, value, &mut a).unwrap();
         }
         assert_eq!(d.read(TLB_RANGE[1], Width::Word, &mut a), Ok(0x80));
         assert_eq!(d.read(TLB_CMD, Width::Word, &mut a), Ok(0));
+        assert_eq!(d.read(TLB_SYNC, Width::Word, &mut a), Ok(0));
+        assert_eq!(d.read(TLB_SYNC_STATUS, Width::Word, &mut a), Ok(0));
         assert!(d.write(TLB_CMD, Width::Word, 3 << 8, &mut a).is_err());
+        assert!(d.write(TLB_SYNC, Width::Word, 1, &mut a).is_err());
         // The counters themselves are absent.
         assert!(d.read(0x760, Width::Word, &mut a).is_err());
         // Power-down disables each stream and reads the word back.
