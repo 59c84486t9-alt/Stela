@@ -2256,7 +2256,12 @@ mod tests {
             RAM + 0xc000 + idx[2] as u64 * 8,
             table::encode_pte(RAM + 0x1_0000, &flags),
         );
+        // The kext's root: magic, the +0x28 words and its object pointers.
         ram.put_u64(RAM + 0x1_0000, firmware::INITDATA_MAGIC);
+        ram.put_u64(RAM + 0x1_0028, 1 << 32);
+        for field in [0x08, 0x18, 0x20, 0xa8, 0xb0, 0xb8, 0xc0] {
+            ram.put_u64(RAM + 0x1_0000 + field, va + 0x1000);
+        }
         // setupMMUConfig's writes.
         devices.write(0, SGX + 0xd0_802c, 4, RAM >> 14, 0).unwrap();
         for (offset, value) in [
