@@ -107,7 +107,8 @@ struct Options {
     input: bool,
     /// The user opted in to Apple's signing server (`--tss`, `stela setup
     /// --tss`): the restore host may send this machine's ECID and component
-    /// hashes to gs.apple.com for the recoveryOS LocalPolicy. Off by default.
+    /// hashes to gs.apple.com for the recoveryOS LocalPolicy, over the host
+    /// network (`network::HostNetwork`). Off by default.
     tss: bool,
     /// The machine's ECID for a bundle built from the Preboot volume
     /// (`--ecid HEX`, nonzero; `boot_bundle::Options::ecid`).
@@ -115,6 +116,12 @@ struct Options {
     /// POST once to this `http://` URL at start and report the reply
     /// (`--network-check URL`).
     network_check: Option<String>,
+    /// Whole host disks, by serial, that the guest sees as USB mass
+    /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
+    usb_storage: Vec<String>,
+    /// Give the guest a USB Ethernet adapter bridged to a host network
+    /// adapter of its own (`--guest-network`; `network::GuestNetwork`).
+    guest_network: bool,
     /// Advertise and log the SEP `sks`/`pnon`/`scrd` services whose contracts
     /// are not recovered (`--sep-observe`): each request is recorded and
     /// refused by name, never answered. A diagnostic mode.
@@ -207,6 +214,8 @@ impl Options {
             tss: false,
             ecid: None,
             network_check: None,
+            usb_storage: Vec::new(),
+            guest_network: false,
             sep_observe: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
@@ -270,6 +279,18 @@ impl Options {
             }
             if name == "--tss" {
                 options.tss = true;
+                continue;
+            }
+            if name == "--usb-storage" {
+                let serial = words.next().ok_or("missing USB storage disk serial")?;
+                if options.usb_storage.iter().any(|other| other == serial) {
+                    return Err("duplicate USB storage disk");
+                }
+                options.usb_storage.push(String::from(serial));
+                continue;
+            }
+            if name == "--guest-network" {
+                options.guest_network = true;
                 continue;
             }
             if name == "--network-check" {
@@ -599,10 +620,12 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 /// `aic-timebase` has no public register description and no model, so its
 /// accesses stop explicitly.
 /// What is plugged into the board's USB-C connectors: a restore host on the
-/// first, the native keyboard and pointer on the last.
+/// first, and on the last the native hub with the keyboard and pointer and
+/// the `usb` disks and Ethernet adapter.
 struct Cables {
     restore: bool,
     input: bool,
+    usb: stela_runtime::machine::apple::UsbCables,
     /// The firmware's GOP mode, for the DCP display coprocessor's scanout.
     screen: Option<console::Framebuffer>,
 }
@@ -631,7 +654,7 @@ fn devices<'f>(
     reset: Option<u64>,
     clock: Clock,
     disks: Disks,
-    cables: Cables,
+    mut cables: Cables,
     firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
 ) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
@@ -838,9 +861,15 @@ fn devices<'f>(
         let id = devices.add_usb(usb, darts[usb.iommu][0])?;
         // The native keyboard and pointer plug into the last connector
         // (J473AP usb-drd1), the Mac being the downstream-facing port.
-        if cables.input && index + 1 == usbs && index != 0 {
-            devices.attach_input(usb.port, Vec::new())?;
-            output::arguments(format_args!("INPUT attached to USB-C port {}\n", usb.port));
+        let hub = cables.input || !cables.usb.disks.is_empty() || cables.usb.network.is_some();
+        if hub && index + 1 == usbs && index != 0 {
+            let disks = cables.usb.disks.len();
+            let network = cables.usb.network;
+            devices.attach_input(usb.port, core::mem::take(&mut cables.usb))?;
+            output::arguments(format_args!(
+                "INPUT attached to USB-C port {} with {disks} USB disks, network={network:?}\n",
+                usb.port
+            ));
         }
         // The first controller (J473AP usb-drd0, the back-left connector) is
         // the one a restore host or the native client uses; the others are
@@ -1171,35 +1200,51 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .chain(options.nor.iter())
         .collect();
     let wants_network = options.tss || options.network_check.is_some();
-    let (services, host_input, host_network) =
-        if targets.is_empty() && !options.input && !wants_network {
-            (Vec::new(), None, None)
-        } else {
-            let storage_handoff = handoff
-                .storage
-                .handoff()
-                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-            // SAFETY: before host::install, with sole ownership of DMA/controllers.
-            let storage::Opened {
-                services,
-                inputs,
-                links,
-            } = unsafe { storage::open(&storage_handoff, &targets) }.unwrap_or_else(|error| {
+    let (services, host_input, host_network, usb_disks, guest_network) = if targets.is_empty()
+        && !options.input
+        && !wants_network
+        && options.usb_storage.is_empty()
+        && !options.guest_network
+    {
+        (Vec::new(), None, None, Vec::new(), None)
+    } else {
+        let storage_handoff = handoff
+            .storage
+            .handoff()
+            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+        // SAFETY: before host::install, with sole ownership of DMA/controllers.
+        let storage::Opened {
+            services,
+            inputs,
+            mut links,
+            usb_disks,
+        } = unsafe { storage::open(&storage_handoff, &targets, &options.usb_storage) }
+            .unwrap_or_else(|error| {
                 output::arguments(format_args!("host storage refusal: {error}\n"));
                 output::fatal("host storage could not be opened")
             });
-            let network = wants_network.then(|| {
-                network::HostNetwork::open(links, storage_handoff.clock).unwrap_or_else(|error| {
-                    output::arguments(format_args!("host network refusal: {error}\n"));
-                    output::fatal("the host network could not be opened")
-                })
-            });
-            (
-                services,
-                options.input.then(|| input::HostInput::new(inputs)),
-                network,
-            )
-        };
+        // The guest's adapter is its own: the mount's client keeps the
+        // first one.
+        let guest_network = options.guest_network.then(|| {
+            network::GuestNetwork::open(&mut links, wants_network).unwrap_or_else(|error| {
+                output::arguments(format_args!("guest network refusal: {error}\n"));
+                output::fatal("the guest network could not be opened")
+            })
+        });
+        let network = wants_network.then(|| {
+            network::HostNetwork::open(links, storage_handoff.clock).unwrap_or_else(|error| {
+                output::arguments(format_args!("host network refusal: {error}\n"));
+                output::fatal("the host network could not be opened")
+            })
+        });
+        (
+            services,
+            options.input.then(|| input::HostInput::new(inputs)),
+            network,
+            usb_disks,
+            guest_network,
+        )
+    };
     let mut host_network = host_network;
     if let (Some(url), Some(network)) = (&options.network_check, host_network.as_mut()) {
         let (host, path) = network::split_url(url).unwrap_or_else(|error| output::fatal(error));
@@ -1393,6 +1438,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Cables {
             restore: options.restore,
             input: options.input,
+            usb: stela_runtime::machine::apple::UsbCables {
+                disks: usb_disks,
+                network: guest_network.as_ref().map(network::GuestNetwork::mac),
+            },
             screen: handoff.screen,
         },
         &firmware,
@@ -1467,6 +1516,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         })
     });
     let mut host_input = host_input;
+    let mut guest_network = guest_network;
     let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz);
     let started = host::rdtsc();
     let stop = run(
@@ -1476,6 +1526,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         handoff.tsc_hz,
         restore.as_mut(),
         host_input.as_mut(),
+        guest_network.as_mut(),
         host_nor.as_mut(),
         &mut host_power,
     );
@@ -1509,6 +1560,7 @@ fn run(
     tsc_hz: u64,
     mut restore: Option<&mut restore::Experiment>,
     mut host_input: Option<&mut input::HostInput>,
+    mut guest_network: Option<&mut network::GuestNetwork>,
     mut host_nor: Option<&mut nor::HostNor>,
     host_power: &mut power::HostPowerControl,
 ) -> Stop {
@@ -1615,6 +1667,9 @@ fn run(
         }
         if let Some(input) = host_input.as_deref_mut() {
             machine.exclude_host_time(|devices| input.poll(devices));
+        }
+        if let Some(network) = guest_network.as_deref_mut() {
+            machine.exclude_host_time(|devices| network.poll(devices));
         }
         if let Some(nor) = host_nor.as_deref_mut() {
             machine.exclude_host_time(|devices| nor.poll(devices));

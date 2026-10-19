@@ -12,6 +12,7 @@ use super::storage::RestoreRoot;
 use crate::output;
 use alloc::{format, string::String, vec::Vec};
 use stela_runtime::{
+    machine::apple::AppleDevices,
     net::{Link, Mac, NetError, Stack},
     pc::{self, virtio_net::VirtioNet},
 };
@@ -117,6 +118,93 @@ impl stela_runtime::restore::tss::Transport for HostNetwork {
     ) -> stela_runtime::restore::Result<Vec<u8>> {
         HostNetwork::post(self, host, path, content_type, body)
             .map_err(|error| stela_runtime::restore::Error::Transport(format!("{error}")))
+    }
+}
+
+/// Frames moved each way per poll, so a busy link cannot hold the engine.
+const FRAMES_PER_POLL: usize = 32;
+
+/// The guest's USB Ethernet adapter bridged to a host adapter of its own
+/// (`--guest-network`). The adapter keeps the host adapter's station
+/// address, so the guest is that adapter on the host's network and the
+/// adapter needs no promiscuous mode. Frames move between engine slices.
+pub struct GuestNetwork {
+    link: RootLink,
+    up: Option<bool>,
+    /// The first link refusal, reported once.
+    refused: bool,
+}
+
+impl GuestNetwork {
+    /// The second adapter when the mount's own client (`wants_client`)
+    /// keeps the first, otherwise the first.
+    pub fn open(links: &mut Links, wants_client: bool) -> Result<Self, String> {
+        let index = usize::from(wants_client);
+        if links.devices.len() <= index {
+            return Err(format!(
+                "the guest network needs host network adapter {} of its own; {} found",
+                index + 1,
+                links.devices.len()
+            ));
+        }
+        let device = links.devices.remove(index);
+        output::arguments(format_args!(
+            "GUEST NETWORK adapter {} mac={}\n",
+            device.location,
+            device.mac()
+        ));
+        Ok(Self {
+            link: RootLink {
+                device,
+                root: links.root,
+            },
+            up: None,
+            refused: false,
+        })
+    }
+
+    pub fn mac(&self) -> Mac {
+        self.link.mac()
+    }
+
+    pub fn poll(&mut self, devices: &mut AppleDevices) {
+        let status = devices.network_status();
+        let up = status.is_some_and(|(up, _)| up);
+        if self.up != Some(up) {
+            self.up = Some(up);
+            let counters = status.map(|(_, counters)| counters).unwrap_or_default();
+            output::arguments(format_args!(
+                "GUEST NETWORK link {} {counters:?}\n",
+                if up { "up" } else { "down" }
+            ));
+        }
+        for _ in 0..FRAMES_PER_POLL {
+            let Some(frame) = devices.network_take() else {
+                break;
+            };
+            if let Err(error) = self.link.transmit(&frame) {
+                self.refuse(error);
+            }
+        }
+        for _ in 0..FRAMES_PER_POLL {
+            match self.link.receive() {
+                Ok(Some(frame)) => {
+                    // Without an attached adapter the frame has nowhere to go.
+                    let _ = devices.network_deliver(&frame);
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    self.refuse(error);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn refuse(&mut self, error: NetError) {
+        if !core::mem::replace(&mut self.refused, true) {
+            output::arguments(format_args!("GUEST NETWORK refused: {error}\n"));
+        }
     }
 }
 

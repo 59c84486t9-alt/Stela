@@ -1,0 +1,595 @@
+//! A native high-speed USB Ethernet adapter: the CDC Ethernet Control
+//! Model, whose frames the machine owner exchanges with a host link.
+//!
+//! Evidence: USB CDC 1.2 (class and functional descriptors, 5.2.3; the
+//! Union descriptor, 5.2.3.2) and CDC ECM 1.2 (the Ethernet Networking
+//! functional descriptor, 5.4; SET_ETHERNET_PACKET_FILTER, 6.2.4; the
+//! NetworkConnection and ConnectionSpeedChange notifications, 6.3; data
+//! interface alternate settings and frame delimiting by short packets,
+//! 3.3-3.4). J473 macOS binds `AppleUSBECMControl` (KC `0x3230a9c`) to
+//! interface class 2 subclass 6 and `AppleUSBECMData` (`0x322f628`) to the
+//! data interface, class 10.
+//!
+//! The adapter reports a fixed 1 Gb/s link that is up while the data
+//! interface's second alternate setting is selected. It keeps no
+//! statistics, multicast filters or power filters (its descriptor says so),
+//! so GET_ETHERNET_STATISTIC, SET_ETHERNET_MULTICAST_FILTERS and the power
+//! management filter requests STALL, as ECM 6.2 allows. Its packet filter
+//! takes effect on received frames; MULTICAST without a filter list passes
+//! every multicast frame. Frames longer than the 1514-byte maximum segment
+//! are discarded and counted, never truncated. Each direction's queue holds
+//! at most [`QUEUE_FRAMES`]; a frame arriving at a full queue is dropped
+//! and counted, as a NIC's full ring drops.
+use super::{
+    BusPeer, Function, Reply, Token,
+    control::{
+        self, CLASS, CLEAR_FEATURE, Control, DEVICE, DEVICE_QUALIFIER, Descriptors, ENDPOINT,
+        ENDPOINT_HALT, GET_INTERFACE, GET_STATUS, INTERFACE, Outcome, RECIPIENT_ENDPOINT,
+        RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup,
+    },
+};
+use crate::platform::net::Mac;
+use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
+
+const NOTIFY: u8 = 0x83;
+const BULK_IN: u8 = 0x81;
+const BULK_OUT: u8 = 0x02;
+const HIGH_SPEED_PACKET: u16 = 512;
+const FULL_SPEED_PACKET: u16 = 64;
+const NOTIFY_PACKET: u16 = 16;
+const CONTROL_INTERFACE: u16 = 0;
+const DATA_INTERFACE: u16 = 1;
+/// The Ethernet maximum segment: header and payload, no FCS.
+pub const MAX_SEGMENT: usize = 1514;
+/// Frames each direction holds.
+pub const QUEUE_FRAMES: usize = 64;
+const LINK_BITS_PER_SECOND: u32 = 1_000_000_000;
+
+const SET_ETHERNET_MULTICAST_FILTERS: u8 = 0x40;
+const SET_ETHERNET_PACKET_FILTER: u8 = 0x43;
+const NETWORK_CONNECTION: u8 = 0x00;
+const CONNECTION_SPEED_CHANGE: u8 = 0x2a;
+
+const PROMISCUOUS: u16 = 0x01;
+const ALL_MULTICAST: u16 = 0x02;
+const DIRECTED: u16 = 0x04;
+const BROADCAST: u16 = 0x08;
+const MULTICAST: u16 = 0x10;
+
+/// Counters for the owner's diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counters {
+    pub to_host: u64,
+    pub to_guest: u64,
+    pub oversized: u64,
+    pub filtered: u64,
+    pub overflowed: u64,
+}
+
+struct State {
+    mac: Mac,
+    /// The data interface's alternate setting: 1 moves frames.
+    alternate: u8,
+    filter: u16,
+    halted: [bool; 3],
+    /// Notifications not yet sent, each one interrupt transfer.
+    notifications: VecDeque<Vec<u8>>,
+    /// The frame the host is sending, packet by packet.
+    assembling: Vec<u8>,
+    discarding: bool,
+    /// Frames for the host, from the guest's point of view outbound.
+    outbound: VecDeque<Vec<u8>>,
+    /// Frames for the guest and how much of the first is sent.
+    inbound: VecDeque<Vec<u8>>,
+    sent: usize,
+    /// The first inbound frame's last packet was full: a ZLP ends it.
+    zero_length_due: bool,
+    counters: Counters,
+}
+
+pub struct Ecm {
+    control: Control,
+    state: State,
+}
+
+fn descriptors(mac: Mac) -> Descriptors {
+    let device = [
+        18,
+        DEVICE,
+        0x00,
+        0x02,
+        2, // communications device class
+        0,
+        0,
+        control::EP0_PACKET as u8,
+        0x09,
+        0x12,
+        0x02,
+        0x00,
+        0x00,
+        0x01,
+        1,
+        2,
+        3,
+        1,
+    ];
+    let [segment_low, segment_high] = (MAX_SEGMENT as u16).to_le_bytes();
+    let configuration = |bulk: u16, interval: u8| {
+        let [low, high] = bulk.to_le_bytes();
+        control::configuration(
+            1,
+            0,
+            &[
+                &[9, INTERFACE, 0, 0, 1, 2, 6, 0, 0],
+                // Header (CDC 1.20), Union (control 0, data 1), Ethernet
+                // Networking: MAC string 4, no statistics, 1514-byte
+                // segments, no multicast or power filters.
+                &[5, 0x24, 0x00, 0x20, 0x01],
+                &[5, 0x24, 0x06, 0, 1],
+                &[
+                    13,
+                    0x24,
+                    0x0f,
+                    4,
+                    0,
+                    0,
+                    0,
+                    0,
+                    segment_low,
+                    segment_high,
+                    0,
+                    0,
+                    0,
+                ],
+                &[7, ENDPOINT, NOTIFY, 3, NOTIFY_PACKET as u8, 0, interval],
+                &[9, INTERFACE, 1, 0, 0, 10, 0, 0, 0],
+                &[9, INTERFACE, 1, 1, 2, 10, 0, 0, 0],
+                &[7, ENDPOINT, BULK_IN, 2, low, high, 0],
+                &[7, ENDPOINT, BULK_OUT, 2, low, high, 0],
+            ],
+        )
+    };
+    let qualifier = [
+        10,
+        DEVICE_QUALIFIER,
+        0x00,
+        0x02,
+        2,
+        0,
+        0,
+        control::EP0_PACKET as u8,
+        1,
+        0,
+    ];
+    let [a, b, c, d, e, f] = mac.0;
+    Descriptors {
+        device,
+        // High speed: 2^(9-1) microframes, 32 ms; full speed: 32 frames.
+        configuration: configuration(HIGH_SPEED_PACKET, 9),
+        other_speed: Some((qualifier, configuration(FULL_SPEED_PACKET, 32))),
+        strings: vec![
+            String::from("Stela"),
+            String::from("Stela USB Ethernet"),
+            format!("{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}"),
+            format!("{a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X}"),
+        ],
+    }
+}
+
+fn notification(code: u8, value: u16, data: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0xa1, code];
+    bytes.extend_from_slice(&value.to_le_bytes());
+    bytes.extend_from_slice(&CONTROL_INTERFACE.to_le_bytes());
+    bytes.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(data);
+    bytes
+}
+
+impl Ecm {
+    /// The adapter whose station address is `mac`, a unicast address.
+    pub fn new(mac: Mac) -> Result<Self, &'static str> {
+        if mac.is_multicast() || mac.0 == [0; 6] {
+            return Err("the USB Ethernet address must be a unicast address");
+        }
+        Ok(Self {
+            control: Control::new(descriptors(mac)),
+            state: State {
+                mac,
+                alternate: 0,
+                filter: DIRECTED | BROADCAST | ALL_MULTICAST,
+                halted: [false; 3],
+                notifications: VecDeque::new(),
+                assembling: Vec::new(),
+                discarding: false,
+                outbound: VecDeque::new(),
+                inbound: VecDeque::new(),
+                sent: 0,
+                zero_length_due: false,
+                counters: Counters::default(),
+            },
+        })
+    }
+
+    /// Whether the guest has the link up (the data interface's active
+    /// setting selected).
+    pub fn up(&self) -> bool {
+        self.control.configuration() != 0 && self.state.alternate == 1
+    }
+
+    pub fn counters(&self) -> Counters {
+        self.state.counters
+    }
+
+    /// A frame from the host network for the guest. Dropped (and counted)
+    /// while the link is down, when the packet filter excludes it, or when
+    /// the queue is full.
+    pub fn deliver(&mut self, frame: &[u8]) {
+        let state = &mut self.state;
+        if frame.len() < 14 || frame.len() > MAX_SEGMENT {
+            state.counters.oversized += 1;
+            return;
+        }
+        let destination = Mac(frame[..6].try_into().unwrap());
+        let filter = state.filter;
+        let passes = filter & PROMISCUOUS != 0
+            || if destination == Mac::BROADCAST {
+                filter & BROADCAST != 0
+            } else if destination.is_multicast() {
+                filter & (ALL_MULTICAST | MULTICAST) != 0
+            } else {
+                filter & DIRECTED != 0 && destination == state.mac
+            };
+        if !self.up() || !passes {
+            self.state.counters.filtered += 1;
+            return;
+        }
+        if self.state.inbound.len() >= QUEUE_FRAMES {
+            self.state.counters.overflowed += 1;
+            return;
+        }
+        self.state.inbound.push_back(frame.to_vec());
+    }
+
+    /// The next frame the guest sent, for the host network.
+    pub fn take(&mut self) -> Option<Vec<u8>> {
+        self.state.outbound.pop_front()
+    }
+}
+
+impl State {
+    fn select(&mut self, alternate: u8) {
+        self.alternate = alternate;
+        self.assembling.clear();
+        self.discarding = false;
+        self.inbound.clear();
+        self.sent = 0;
+        self.zero_length_due = false;
+        self.halted[1] = false;
+        self.halted[2] = false;
+        self.notifications.clear();
+        let connected = u16::from(alternate == 1);
+        if connected == 1 {
+            let speed = LINK_BITS_PER_SECOND.to_le_bytes();
+            let mut speeds = speed.to_vec();
+            speeds.extend_from_slice(&speed);
+            self.notifications
+                .push_back(notification(CONNECTION_SPEED_CHANGE, 0, &speeds));
+        }
+        self.notifications
+            .push_back(notification(NETWORK_CONNECTION, connected, &[]));
+    }
+
+    fn halt(&mut self, endpoint: u8) -> Option<&mut bool> {
+        match endpoint {
+            NOTIFY => Some(&mut self.halted[0]),
+            BULK_IN => Some(&mut self.halted[1]),
+            BULK_OUT => Some(&mut self.halted[2]),
+            _ => None,
+        }
+    }
+
+    fn bulk_in(&mut self, packet: &mut [u8]) -> Reply {
+        let Some(frame) = self.inbound.front() else {
+            return Reply::Nak;
+        };
+        if self.zero_length_due {
+            self.zero_length_due = false;
+            self.inbound.pop_front();
+            self.sent = 0;
+            return Reply::Ack(0);
+        }
+        let n = (frame.len() - self.sent).min(packet.len());
+        packet[..n].copy_from_slice(&frame[self.sent..self.sent + n]);
+        self.sent += n;
+        if self.sent == frame.len() {
+            // A frame ending on a full packet needs a ZLP to end it (3.3.1).
+            if n == packet.len() {
+                self.zero_length_due = true;
+            } else {
+                self.inbound.pop_front();
+                self.sent = 0;
+            }
+            self.counters.to_guest += 1;
+        }
+        Reply::Ack(n)
+    }
+
+    fn bulk_out(&mut self, packet: &[u8], max: usize) -> Reply {
+        if self.outbound.len() >= QUEUE_FRAMES {
+            // The host retries until the owner drains the queue.
+            return Reply::Nak;
+        }
+        if !self.discarding {
+            if self.assembling.len() + packet.len() > MAX_SEGMENT {
+                self.discarding = true;
+                self.assembling.clear();
+            } else {
+                self.assembling.extend_from_slice(packet);
+            }
+        }
+        // A short packet, or a ZLP, ends the frame.
+        if packet.len() < max {
+            if self.discarding {
+                self.counters.oversized += 1;
+            } else if !self.assembling.is_empty() {
+                self.outbound
+                    .push_back(core::mem::take(&mut self.assembling));
+                self.counters.to_host += 1;
+            }
+            self.discarding = false;
+            self.assembling.clear();
+        }
+        Reply::Ack(packet.len())
+    }
+}
+
+impl Requests for State {
+    fn configure(&mut self, _value: u8) -> Result<(), ()> {
+        self.alternate = 0;
+        self.filter = DIRECTED | BROADCAST | ALL_MULTICAST;
+        self.halted = [false; 3];
+        self.notifications.clear();
+        self.assembling.clear();
+        self.inbound.clear();
+        self.sent = 0;
+        self.zero_length_due = false;
+        Ok(())
+    }
+
+    fn request(&mut self, setup: Setup, data: &[u8]) -> Result<Outcome, ()> {
+        let read = setup.device_to_host();
+        match (setup.kind(), setup.recipient(), setup.request, read) {
+            (CLASS, RECIPIENT_INTERFACE, SET_ETHERNET_PACKET_FILTER, false)
+                if setup.index == CONTROL_INTERFACE && setup.length == 0 =>
+            {
+                if setup.value & !0x1f != 0 {
+                    return Err(());
+                }
+                self.filter = setup.value;
+                Ok(Outcome::Done)
+            }
+            (CLASS, RECIPIENT_INTERFACE, SET_ETHERNET_MULTICAST_FILTERS, false) => {
+                // No filter list (wNumberMCFilters 0); an empty one is fine.
+                if setup.value == 0 && data.is_empty() {
+                    Ok(Outcome::Done)
+                } else {
+                    Err(())
+                }
+            }
+            (STANDARD, RECIPIENT_INTERFACE, GET_STATUS, true) if setup.index <= DATA_INTERFACE => {
+                Ok(Outcome::Data(vec![0, 0]))
+            }
+            (STANDARD, RECIPIENT_INTERFACE, GET_INTERFACE, true) => match setup.index {
+                CONTROL_INTERFACE => Ok(Outcome::Data(vec![0])),
+                DATA_INTERFACE => Ok(Outcome::Data(vec![self.alternate])),
+                _ => Err(()),
+            },
+            (STANDARD, RECIPIENT_INTERFACE, SET_INTERFACE, false) => {
+                match (setup.index, setup.value) {
+                    (CONTROL_INTERFACE, 0) => Ok(Outcome::Done),
+                    (DATA_INTERFACE, alternate @ 0..=1) => {
+                        self.select(alternate as u8);
+                        Ok(Outcome::Done)
+                    }
+                    _ => Err(()),
+                }
+            }
+            (STANDARD, RECIPIENT_ENDPOINT, GET_STATUS, true) => {
+                let halted = *self.halt(setup.index as u8).ok_or(())?;
+                Ok(Outcome::Data(vec![u8::from(halted), 0]))
+            }
+            (STANDARD, RECIPIENT_ENDPOINT, CLEAR_FEATURE | SET_FEATURE, false)
+                if setup.value == ENDPOINT_HALT =>
+            {
+                *self.halt(setup.index as u8).ok_or(())? = setup.request == SET_FEATURE;
+                Ok(Outcome::Done)
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+impl BusPeer for Ecm {
+    fn reset(&mut self) -> Result<(), &'static str> {
+        self.control.reset(&mut self.state)?;
+        self.state.configure(0).map_err(|()| "USB Ethernet reset")
+    }
+
+    fn packet(
+        &mut self,
+        endpoint: u8,
+        token: Token,
+        data: &mut [u8],
+    ) -> Result<Reply, &'static str> {
+        if endpoint == 0 {
+            return self.control.packet(token, data, &mut self.state);
+        }
+        if token == Token::Setup {
+            return Err("SETUP to a non-control endpoint");
+        }
+        let configured = self.control.configuration() != 0;
+        let active = configured && self.state.alternate == 1;
+        let state = &mut self.state;
+        if state.halt(endpoint).is_some_and(|halted| *halted) {
+            return Ok(Reply::Stall);
+        }
+        Ok(match (endpoint, token) {
+            (NOTIFY, Token::In) if configured => match state.notifications.pop_front() {
+                Some(bytes) => {
+                    let n = bytes.len().min(data.len());
+                    data[..n].copy_from_slice(&bytes[..n]);
+                    Reply::Ack(n)
+                }
+                None => Reply::Nak,
+            },
+            (BULK_IN, Token::In) if active => state.bulk_in(data),
+            // The adapter sits on a high-speed port: 512-byte packets
+            // delimit frames.
+            (BULK_OUT, Token::Out) if active => {
+                state.bulk_out(data, usize::from(HIGH_SPEED_PACKET))
+            }
+            _ => Reply::Stall,
+        })
+    }
+}
+
+impl Function for Ecm {
+    fn set_time(&mut self, _now: u64) {}
+
+    fn ready_at(&self, endpoint: u8) -> Option<u64> {
+        let configured = self.control.configuration() != 0;
+        let ready = match endpoint {
+            NOTIFY => configured && !self.state.notifications.is_empty(),
+            BULK_IN => self.up() && !self.state.inbound.is_empty(),
+            _ => false,
+        };
+        ready.then_some(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::usb::control::{
+        GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION,
+        tests::{setup, transfer},
+    };
+
+    const MAC: Mac = Mac([0x02, 0x53, 0x54, 0x00, 0x00, 0x01]);
+
+    fn adapter(up: bool) -> Ecm {
+        let mut e = Ecm::new(MAC).unwrap();
+        transfer(&mut e, setup(0, SET_ADDRESS, 3, 0, 0), &[]).unwrap();
+        transfer(&mut e, setup(0, SET_CONFIGURATION, 1, 0, 0), &[]).unwrap();
+        if up {
+            transfer(&mut e, setup(0x01, SET_INTERFACE, 1, 1, 0), &[]).unwrap();
+        }
+        e
+    }
+
+    fn read(e: &mut Ecm, endpoint: u8) -> Option<Vec<u8>> {
+        let mut packet = [0u8; 512];
+        match e.packet(endpoint, Token::In, &mut packet).unwrap() {
+            Reply::Ack(n) => Some(packet[..n].to_vec()),
+            Reply::Nak => None,
+            Reply::Stall => panic!("STALL on {endpoint:#x}"),
+        }
+    }
+
+    fn frame(destination: Mac, length: usize) -> Vec<u8> {
+        let mut bytes: Vec<u8> = (0..length).map(|n| n as u8).collect();
+        bytes[..6].copy_from_slice(&destination.0);
+        bytes
+    }
+
+    #[test]
+    fn descriptors_present_a_cdc_ethernet_control_model_adapter() {
+        let mut e = adapter(false);
+        let config = transfer(&mut e, setup(0x80, GET_DESCRIPTOR, 0x200, 0, 255), &[]).unwrap();
+        assert_eq!(config[4], 2, "two interfaces");
+        assert_eq!(&config[9..18], &[9, INTERFACE, 0, 0, 1, 2, 6, 0, 0]);
+        // The Ethernet Networking descriptor names string 4, the MAC.
+        assert_eq!(&config[28..31], &[13, 0x24, 0x0f]);
+        assert_eq!(config[31], 4);
+        let mac = transfer(&mut e, setup(0x80, GET_DESCRIPTOR, 0x304, 0x409, 255), &[]).unwrap();
+        assert_eq!(mac, control::string("025354000001"));
+        assert!(Ecm::new(Mac::BROADCAST).is_err());
+    }
+
+    #[test]
+    fn selecting_the_data_setting_raises_the_link_and_notifies_it() {
+        let mut e = adapter(false);
+        assert!(!e.up());
+        assert_eq!(read(&mut e, NOTIFY), None);
+        e.deliver(&frame(MAC, 60));
+        assert_eq!(e.counters().filtered, 1);
+        transfer(&mut e, setup(0x01, SET_INTERFACE, 1, 1, 0), &[]).unwrap();
+        assert!(e.up());
+        assert_eq!(e.ready_at(NOTIFY), Some(0));
+        let speed = read(&mut e, NOTIFY).unwrap();
+        assert_eq!(&speed[..2], &[0xa1, CONNECTION_SPEED_CHANGE]);
+        assert_eq!(&speed[8..12], &LINK_BITS_PER_SECOND.to_le_bytes());
+        let link = read(&mut e, NOTIFY).unwrap();
+        assert_eq!(link, [0xa1, NETWORK_CONNECTION, 1, 0, 0, 0, 0, 0]);
+        let alternate = transfer(&mut e, setup(0x81, GET_INTERFACE, 0, 1, 1), &[]).unwrap();
+        assert_eq!(alternate, [1]);
+        transfer(&mut e, setup(0x01, SET_INTERFACE, 0, 1, 0), &[]).unwrap();
+        assert_eq!(read(&mut e, NOTIFY).unwrap()[2], 0);
+        assert!(transfer(&mut e, setup(0x01, SET_INTERFACE, 2, 1, 0), &[]).is_err());
+    }
+
+    #[test]
+    fn frames_move_both_ways_delimited_by_short_packets() {
+        let mut e = adapter(true);
+        // Guest to host: 600 bytes as 512 + 88; 512 bytes as 512 + ZLP.
+        let first = frame(Mac::BROADCAST, 600);
+        for chunk in [&first[..512], &first[512..]] {
+            let reply = e.packet(BULK_OUT, Token::Out, &mut chunk.to_vec());
+            assert_eq!(reply, Ok(Reply::Ack(chunk.len())));
+        }
+        let second = frame(Mac::BROADCAST, 512);
+        e.packet(BULK_OUT, Token::Out, &mut second.clone()).unwrap();
+        assert_eq!(e.take(), Some(first));
+        assert_eq!(e.take(), None);
+        e.packet(BULK_OUT, Token::Out, &mut []).unwrap();
+        assert_eq!(e.take(), Some(second));
+        // An oversized frame is discarded whole.
+        for _ in 0..3 {
+            e.packet(BULK_OUT, Token::Out, &mut [0u8; 512]).unwrap();
+        }
+        e.packet(BULK_OUT, Token::Out, &mut [0u8; 10]).unwrap();
+        assert_eq!((e.take(), e.counters().oversized), (None, 1));
+        // Host to guest: a 1024-byte frame is 512, 512 and a ZLP.
+        e.deliver(&frame(MAC, 1024));
+        assert_eq!(e.ready_at(BULK_IN), Some(0));
+        let sizes: Vec<usize> = (0..3)
+            .map(|_| read(&mut e, BULK_IN).unwrap().len())
+            .collect();
+        assert_eq!(sizes, [512, 512, 0]);
+        assert_eq!(read(&mut e, BULK_IN), None);
+        assert_eq!(e.counters().to_guest, 1);
+    }
+
+    #[test]
+    fn the_packet_filter_selects_received_frames() {
+        let mut e = adapter(true);
+        let other = Mac([0x02, 0, 0, 0, 0, 9]);
+        e.deliver(&frame(other, 60));
+        e.deliver(&frame(Mac([0x01, 0, 0x5e, 0, 0, 1]), 60));
+        assert_eq!((e.counters().filtered, e.state.inbound.len()), (1, 1));
+        // Directed only: multicast and broadcast stop.
+        let directed = setup(0x21, SET_ETHERNET_PACKET_FILTER, DIRECTED, 0, 0);
+        transfer(&mut e, directed, &[]).unwrap();
+        e.deliver(&frame(Mac::BROADCAST, 60));
+        assert_eq!(e.counters().filtered, 2);
+        // Promiscuous: everything.
+        let promiscuous = setup(0x21, SET_ETHERNET_PACKET_FILTER, PROMISCUOUS, 0, 0);
+        transfer(&mut e, promiscuous, &[]).unwrap();
+        e.deliver(&frame(other, 60));
+        assert_eq!(e.state.inbound.len(), 2);
+        // Statistics and unknown filter bits are refused.
+        assert!(transfer(&mut e, setup(0xa1, 0x44, 1, 0, 4), &[]).is_err());
+        let unknown = setup(0x21, SET_ETHERNET_PACKET_FILTER, 0x20, 0, 0);
+        assert!(transfer(&mut e, unknown, &[]).is_err());
+    }
+}

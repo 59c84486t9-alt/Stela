@@ -150,28 +150,41 @@ impl From<BlockError> for StorageError {
     }
 }
 
+/// The index of the one disk in `devices` whose serial is `serial`.
+fn find(devices: &[Box<dyn BlockDevice>], serial: &str) -> Result<usize, StorageError> {
+    let matching: Vec<usize> = devices
+        .iter()
+        .enumerate()
+        .filter(|(_, device)| device.identity().serial == serial)
+        .map(|(index, _)| index)
+        .collect();
+    match matching[..] {
+        [index] => Ok(index),
+        [] => Err(StorageError::NoDisk(String::from(serial))),
+        _ => Err(StorageError::AmbiguousDisk(
+            String::from(serial),
+            matching.len(),
+        )),
+    }
+}
+
+/// Take the whole disk with `serial` out of `devices`, as the guest's USB
+/// mass storage sees it: every block, its partition table included.
+pub fn take(
+    devices: &mut Vec<Box<dyn BlockDevice>>,
+    serial: &str,
+) -> Result<Box<dyn BlockDevice>, StorageError> {
+    let index = find(devices, serial)?;
+    Ok(devices.swap_remove(index))
+}
+
 /// Take the disk with `target`'s serial out of `devices` and confine it to
 /// `target`'s partition.
 pub fn open(
     devices: &mut Vec<Box<dyn BlockDevice>>,
     target: &Target,
 ) -> Result<PartitionDevice<Box<dyn BlockDevice>>, StorageError> {
-    let matching: Vec<usize> = devices
-        .iter()
-        .enumerate()
-        .filter(|(_, device)| device.identity().serial == target.serial)
-        .map(|(index, _)| index)
-        .collect();
-    let index = match matching[..] {
-        [index] => index,
-        [] => return Err(StorageError::NoDisk(target.serial.clone())),
-        _ => {
-            return Err(StorageError::AmbiguousDisk(
-                target.serial.clone(),
-                matching.len(),
-            ));
-        }
-    };
+    let index = find(devices, &target.serial)?;
     let table = gpt::read(&mut *devices[index]).map_err(StorageError::Table)?;
     let mut partitions = table
         .partitions
@@ -299,6 +312,22 @@ mod tests {
             Some(StorageError::AmbiguousDisk(String::from("disk-a"), 2))
         );
         assert_eq!(devices.len(), 4);
+    }
+
+    #[test]
+    fn whole_disks_are_taken_by_one_serial() {
+        let mut devices = disks();
+        let disk = take(&mut devices, "blank").unwrap();
+        assert_eq!((disk.identity().blocks, devices.len()), (256, 2));
+        assert!(matches!(
+            take(&mut devices, "blank"),
+            Err(StorageError::NoDisk(_))
+        ));
+        devices.push(Box::new(RamDisk::new("disk-a", 8, 512)));
+        assert!(matches!(
+            take(&mut devices, "disk-a"),
+            Err(StorageError::AmbiguousDisk(_, 2))
+        ));
     }
 
     #[test]

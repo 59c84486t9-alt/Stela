@@ -58,15 +58,18 @@ use crate::platform::apple::{
     wdt::{self, AppleWdt},
 };
 use crate::platform::dma::{Physical, Port};
+use crate::platform::net::Mac;
 use crate::platform::pc::block::BlockDevice;
 use crate::platform::usb::{
     Function, Speed,
+    ecm::Ecm,
     hid::{Input, Peripheral},
     hub::{self, Hub},
     session::Session as UsbSession,
     storage::MassStorage,
 };
 pub use crate::platform::usb::{
+    ecm::Counters as UsbNetworkCounters,
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
     mux::{State as MuxState, StreamId as MuxStream, StreamState as MuxStreamState},
     session::Log as UsbLog,
@@ -177,30 +180,52 @@ impl UsbPort {
 }
 /// The USB2 function a downstream-facing attach with VBUS cables to the
 /// host personality, by its speed.
+/// What the native hub carries besides the keyboard and pointer.
+#[derive(Default)]
+pub struct UsbCables {
+    /// Host disks, each a USB mass storage device (at most five with a
+    /// network adapter, six without).
+    pub disks: Vec<Box<dyn BlockDevice>>,
+    /// A USB Ethernet adapter with this station address.
+    pub network: Option<Mac>,
+}
+
 /// The functions on the native hub's ports: the keyboard and pointer on
-/// port 1, then one mass storage device per host disk.
+/// port 1, the Ethernet adapter on port 2 when there is one, then one mass
+/// storage device per host disk.
 struct Attachments {
     input: Peripheral,
+    network: Option<Ecm>,
     disks: Vec<MassStorage>,
+}
+
+impl Attachments {
+    fn port(&mut self, port: usize) -> &mut dyn Function {
+        let first_disk = 1 + usize::from(self.network.is_some());
+        match (port, &mut self.network) {
+            (0, _) => &mut self.input,
+            (1, Some(network)) => network,
+            (n, _) => &mut self.disks[n - first_disk],
+        }
+    }
 }
 
 impl hub::Ports for Attachments {
     fn count(&self) -> usize {
-        1 + self.disks.len()
+        1 + usize::from(self.network.is_some()) + self.disks.len()
     }
     fn speed(&self, port: usize) -> Speed {
         if port == 0 { Speed::Full } else { Speed::High }
     }
     fn function(&mut self, port: usize) -> &mut dyn Function {
-        match port {
-            0 => &mut self.input,
-            n => &mut self.disks[n - 1],
-        }
+        self.port(port)
     }
     fn function_ref(&self, port: usize) -> &dyn Function {
-        match port {
-            0 => &self.input,
-            n => &self.disks[n - 1],
+        let first_disk = 1 + usize::from(self.network.is_some());
+        match (port, &self.network) {
+            (0, _) => &self.input,
+            (1, Some(network)) => network,
+            (n, _) => &self.disks[n - first_disk],
         }
     }
 }
@@ -1282,16 +1307,14 @@ impl AppleDevices {
     /// this machine being the downstream-facing port that sources VBUS: the
     /// HPM reports the attach and the controller's host personality finds
     /// the hub on its USB2 port. The keyboard and pointer sit on the hub's
-    /// first port and each of `disks` is a mass storage device on the next
-    /// ones (at most six).
-    pub fn attach_input(
-        &mut self,
-        connector: u32,
-        disks: Vec<Box<dyn BlockDevice>>,
-    ) -> Result<(), &'static str> {
-        if disks.len() > hub::MAX_PORTS - 1 {
-            return Err("the native hub carries at most six disks");
+    /// first port, and `cables` names the USB Ethernet adapter and mass
+    /// storage devices on the next ones.
+    pub fn attach_input(&mut self, connector: u32, cables: UsbCables) -> Result<(), &'static str> {
+        let UsbCables { disks, network } = cables;
+        if 1 + usize::from(network.is_some()) + disks.len() > hub::MAX_PORTS {
+            return Err("the native hub has seven ports");
         }
+        let network = network.map(Ecm::new).transpose()?;
         let disks = disks
             .into_iter()
             .map(MassStorage::of)
@@ -1303,6 +1326,7 @@ impl AppleDevices {
             .ok_or("no USB controller on that connector")?;
         let attachments = Attachments {
             input: Peripheral::new(),
+            network,
             disks,
         };
         master.peripheral = Some(Hub::new(attachments, "0001")?);
@@ -1314,6 +1338,32 @@ impl AppleDevices {
             speed: typec::Usb2Speed::High,
         }))?;
         Ok(())
+    }
+
+    fn usb_network(&mut self) -> Result<&mut Ecm, &'static str> {
+        self.usb_masters
+            .iter_mut()
+            .find_map(|master| master.peripheral.as_mut()?.ports.network.as_mut())
+            .ok_or("no USB Ethernet adapter is attached")
+    }
+
+    /// A frame from the host network for the guest's USB Ethernet adapter;
+    /// dropped as the adapter's filter and queue decide.
+    pub fn network_deliver(&mut self, frame: &[u8]) -> Result<(), &'static str> {
+        self.usb_network()?.deliver(frame);
+        Ok(())
+    }
+
+    /// Whether the guest has its USB Ethernet link up, and the adapter's
+    /// counters; `None` without an adapter.
+    pub fn network_status(&mut self) -> Option<(bool, UsbNetworkCounters)> {
+        let network = self.usb_network().ok()?;
+        Some((network.up(), network.counters()))
+    }
+
+    /// The next frame the guest sent through its USB Ethernet adapter.
+    pub fn network_take(&mut self) -> Option<Vec<u8>> {
+        self.usb_network().ok()?.take()
     }
 
     /// One host input change for the attached peripheral.

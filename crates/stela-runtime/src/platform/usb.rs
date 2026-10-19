@@ -1,5 +1,6 @@
 //! Native USB bus peers. No guest code execution or translator callbacks.
 pub mod control;
+pub mod ecm;
 pub mod hid;
 pub mod host;
 pub mod hub;

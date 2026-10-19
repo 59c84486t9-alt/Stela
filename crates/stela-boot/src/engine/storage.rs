@@ -83,13 +83,25 @@ impl BlockDevice for Service {
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, and the loader root/window remain live for the boot.
-pub unsafe fn open(handoff: &pc::Handoff, targets: &[&Target]) -> Result<Opened, String> {
+pub unsafe fn open(
+    handoff: &pc::Handoff,
+    targets: &[&Target],
+    usb_disks: &[String],
+) -> Result<Opened, String> {
     if targets
         .iter()
         .enumerate()
         .any(|(i, t)| targets[..i].iter().any(|other| other.serial == t.serial))
     {
         return Err("ANS, restore source and NOR partitions must be on distinct host disks".into());
+    }
+    if let Some(serial) = usb_disks
+        .iter()
+        .find(|serial| targets.iter().any(|target| &target.serial == *serial))
+    {
+        return Err(format!(
+            "host disk {serial} is both a USB storage disk and a partition target"
+        ));
     }
     let root: u64;
     // SAFETY: engine CPL0, before switching away from the loader root.
@@ -129,10 +141,26 @@ pub unsafe fn open(handoff: &pc::Handoff, targets: &[&Target]) -> Result<Opened,
             }) as Box<dyn BlockDevice>)
         })
         .collect::<Result<_, String>>()?;
+    let usb_disks = usb_disks
+        .iter()
+        .map(|serial| {
+            let disk = storage::take(&mut disks.devices, serial)
+                .map_err(|error| format!("USB storage {serial}: {error}"))?;
+            output::arguments(format_args!(
+                "HOST USB DISK serial={serial} model={:?} blocks={} block_size={} read_only={}\n",
+                disk.identity().model,
+                disk.identity().blocks,
+                disk.identity().block_size,
+                disk.identity().read_only
+            ));
+            Ok(Box::new(Service { inner: disk, root }) as Box<dyn BlockDevice>)
+        })
+        .collect::<Result<_, String>>()?;
     Ok(Opened {
         services,
         inputs,
         links,
+        usb_disks,
     })
 }
 
@@ -142,6 +170,8 @@ pub struct Opened {
     pub services: alloc::vec::Vec<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
+    /// Whole disks for the guest's USB mass storage, in option order.
+    pub usb_disks: alloc::vec::Vec<Box<dyn BlockDevice>>,
 }
 
 /// The host's input devices and the loader root their registers and DMA
