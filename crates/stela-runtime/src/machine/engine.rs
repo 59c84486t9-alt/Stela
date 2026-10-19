@@ -5782,6 +5782,36 @@ mod tests {
         assert!(!machine.branch_target_compatible(PACIASP));
     }
 
+    /// SCTLR_EL2 bit 36 is BT with HCR_EL2.TGE clear and BT1 with it set
+    /// (E2H is RES1); either way it decides PACIASP at EL2.
+    #[test]
+    fn sctlr_el2_bt_decides_paciasp_at_el2_with_or_without_tge() {
+        const PACIASP: u32 = 0xd503_233f;
+        const SCTLR_BT: u64 = 1 << 36;
+        const HCR_TGE: u64 = 1 << 27;
+        let mut machine = machine(&[]);
+        machine.cpu.pstate.el = 2;
+        machine.cpu.pstate.btype = 0b11;
+        for hcr in [0, HCR_TGE] {
+            machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
+            // SCTLR_EL1.BT1 has no say at EL2.
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::SCTLR_EL1, 0, SCTLR_BT);
+            machine.cpu.registers.set(SystemRegister::SCTLR_EL2, 0, 0);
+            machine.derived_changed();
+            assert!(machine.branch_target_compatible(PACIASP), "{hcr:#x}");
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::SCTLR_EL2, 0, SCTLR_BT);
+            machine.derived_changed();
+            assert!(!machine.branch_target_compatible(PACIASP), "{hcr:#x}");
+            assert!(machine.branch_target_accepts(PACIASP, 0b01));
+        }
+    }
+
     #[test]
     fn indirect_branches_set_btype_from_their_page_and_register() {
         let mut guarded = guarded_machine(true);
