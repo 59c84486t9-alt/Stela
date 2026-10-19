@@ -187,6 +187,7 @@ impl Control {
         }
     }
 
+    #[cfg(test)]
     pub fn address(&self) -> u8 {
         self.address
     }

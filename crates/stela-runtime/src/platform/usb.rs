@@ -6,6 +6,7 @@ pub mod hub;
 pub mod mux;
 pub mod plist;
 pub mod session;
+pub mod storage;
 
 /// The initial transport profile has USB2 high-speed packets only.
 pub const MAX_PACKET: usize = 512;
@@ -69,7 +70,7 @@ pub trait Function: BusPeer {
 
 /// The function an xHCI route string names below `root` (xHCI 1.2 8.9:
 /// four bits per hub tier, tier 1 in bits 3:0, ended by a zero port).
-pub fn route<'a>(root: &'a mut dyn Function, route: u32) -> Option<&'a mut dyn Function> {
+pub fn route(root: &mut dyn Function, route: u32) -> Option<&mut dyn Function> {
     let mut function = root;
     let mut rest = route & 0xf_ffff;
     while rest & 0xf != 0 {
@@ -80,7 +81,7 @@ pub fn route<'a>(root: &'a mut dyn Function, route: u32) -> Option<&'a mut dyn F
 }
 
 /// [`route`] for a shared reference.
-pub fn route_ref<'a>(root: &'a dyn Function, route: u32) -> Option<&'a dyn Function> {
+pub fn route_ref(root: &dyn Function, route: u32) -> Option<&dyn Function> {
     let mut function = root;
     let mut rest = route & 0xf_ffff;
     while rest & 0xf != 0 {

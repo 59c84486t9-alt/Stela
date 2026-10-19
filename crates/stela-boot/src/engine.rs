@@ -839,7 +839,7 @@ fn devices<'f>(
         // The native keyboard and pointer plug into the last connector
         // (J473AP usb-drd1), the Mac being the downstream-facing port.
         if cables.input && index + 1 == usbs && index != 0 {
-            devices.attach_input(usb.port)?;
+            devices.attach_input(usb.port, Vec::new())?;
             output::arguments(format_args!("INPUT attached to USB-C port {}\n", usb.port));
         }
         // The first controller (J473AP usb-drd0, the back-left connector) is

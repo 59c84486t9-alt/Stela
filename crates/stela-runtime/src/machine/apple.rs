@@ -58,10 +58,13 @@ use crate::platform::apple::{
     wdt::{self, AppleWdt},
 };
 use crate::platform::dma::{Physical, Port};
+use crate::platform::pc::block::BlockDevice;
 use crate::platform::usb::{
-    Function,
+    Function, Speed,
     hid::{Input, Peripheral},
+    hub::{self, Hub},
     session::Session as UsbSession,
+    storage::MassStorage,
 };
 pub use crate::platform::usb::{
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
@@ -147,9 +150,10 @@ struct UsbMaster {
     /// The Type-C connector's `port-number` and shared cable state.
     number: u32,
     connector: typec::Port,
-    /// The input peripheral cabled to the connector when this port is the
-    /// downstream-facing (host) side.
-    peripheral: Option<Peripheral>,
+    /// The hub cabled to the connector, with the input peripheral and the
+    /// host's disks behind it, when this port is the downstream-facing
+    /// (host) side.
+    peripheral: Option<Hub<Attachments>>,
     next_poll: u64,
     attached: bool,
     epoch: u64,
@@ -173,6 +177,34 @@ impl UsbPort {
 }
 /// The USB2 function a downstream-facing attach with VBUS cables to the
 /// host personality, by its speed.
+/// The functions on the native hub's ports: the keyboard and pointer on
+/// port 1, then one mass storage device per host disk.
+struct Attachments {
+    input: Peripheral,
+    disks: Vec<MassStorage>,
+}
+
+impl hub::Ports for Attachments {
+    fn count(&self) -> usize {
+        1 + self.disks.len()
+    }
+    fn speed(&self, port: usize) -> Speed {
+        if port == 0 { Speed::Full } else { Speed::High }
+    }
+    fn function(&mut self, port: usize) -> &mut dyn Function {
+        match port {
+            0 => &mut self.input,
+            n => &mut self.disks[n - 1],
+        }
+    }
+    fn function_ref(&self, port: usize) -> &dyn Function {
+        match port {
+            0 => &self.input,
+            n => &self.disks[n - 1],
+        }
+    }
+}
+
 fn host_function(connector: &typec::Port) -> Option<typec::Usb2Speed> {
     connector
         .snapshot()
@@ -1246,23 +1278,40 @@ impl AppleDevices {
         self.typec_port(connector).set_connection(connection)?;
         Ok(())
     }
-    /// Cables the native keyboard and pointer to Type-C connector
-    /// `connector`, this machine being the downstream-facing port that
-    /// sources VBUS: the HPM reports the attach and the controller's host
-    /// personality finds a full-speed device on its USB2 port.
-    pub fn attach_input(&mut self, connector: u32) -> Result<(), &'static str> {
+    /// Cables a native high-speed hub to Type-C connector `connector`,
+    /// this machine being the downstream-facing port that sources VBUS: the
+    /// HPM reports the attach and the controller's host personality finds
+    /// the hub on its USB2 port. The keyboard and pointer sit on the hub's
+    /// first port and each of `disks` is a mass storage device on the next
+    /// ones (at most six).
+    pub fn attach_input(
+        &mut self,
+        connector: u32,
+        disks: Vec<Box<dyn BlockDevice>>,
+    ) -> Result<(), &'static str> {
+        if disks.len() > hub::MAX_PORTS - 1 {
+            return Err("the native hub carries at most six disks");
+        }
+        let disks = disks
+            .into_iter()
+            .map(MassStorage::of)
+            .collect::<Result<Vec<_>, _>>()?;
         let master = self
             .usb_masters
             .iter_mut()
             .find(|master| master.number == connector)
             .ok_or("no USB controller on that connector")?;
-        master.peripheral = Some(Peripheral::new());
+        let attachments = Attachments {
+            input: Peripheral::new(),
+            disks,
+        };
+        master.peripheral = Some(Hub::new(attachments, "0001")?);
         master.connector.set_connection(Some(typec::Attached {
             orientation: typec::Orientation::Normal,
             role: typec::DataRole::Dfp,
             source: true,
             vbus: true,
-            speed: typec::Usb2Speed::Full,
+            speed: typec::Usb2Speed::High,
         }))?;
         Ok(())
     }
@@ -1273,6 +1322,8 @@ impl AppleDevices {
             .iter_mut()
             .find_map(|master| master.peripheral.as_mut())
             .ok_or("no input peripheral is attached")?
+            .ports
+            .input
             .input(input)
     }
 
