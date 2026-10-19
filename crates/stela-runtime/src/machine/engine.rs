@@ -279,6 +279,11 @@ pub trait Devices {
     fn take_start(&mut self) -> Option<Start> {
         None
     }
+    /// The reset address PE `cpu` leaves reset at, where the board holds it
+    /// in a device register (RVBAR_EL2 reads it).
+    fn reset_vector(&self, _cpu: usize) -> Option<u64> {
+        None
+    }
     /// The physical region a memory controller has locked against writes,
     /// first and last byte.
     fn memory_lock(&self) -> Option<(u64, u64)> {

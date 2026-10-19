@@ -462,6 +462,13 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             self.refuse(AMU_REFUSAL);
             return 0;
         }
+        // The reset address, where the board holds it (Apple's
+        // `cpu-impl-reg` RVBAR); with none it has no profile value.
+        if register == Register::RVBAR_EL2
+            && let Some(address) = machine.devices.reset_vector(machine.current)
+        {
+            return address;
+        }
         if machine.profile_missing.contains(&register) {
             self.refuse("identification register without a profile value");
             return 0;
@@ -1948,6 +1955,63 @@ mod tests {
             Err(super::Stop::Unsupported(_))
         ));
         assert_eq!(machine.cpu.registers.get(Register::RMR_EL2, 0), 1);
+    }
+
+    #[test]
+    fn rvbar_el2_reads_the_reset_address_the_board_holds() {
+        const RVBAR_EL2: Encoding = Encoding::new(3, 4, 12, 0, 1);
+        const RESET: u64 = 0x8_0300_c000;
+        /// A board holding PE 0's reset address, as Apple's `cpu-impl-reg`
+        /// RVBAR does.
+        struct ResetBoard;
+        impl crate::machine::Devices for ResetBoard {
+            fn read(
+                &mut self,
+                _: usize,
+                _: u64,
+                _: u8,
+                _: u64,
+            ) -> Result<u64, crate::machine::DeviceError> {
+                Err(crate::machine::DeviceError::NoDevice)
+            }
+            fn write(
+                &mut self,
+                _: usize,
+                _: u64,
+                _: u8,
+                _: u64,
+                _: u64,
+            ) -> Result<(), crate::machine::DeviceError> {
+                Err(crate::machine::DeviceError::NoDevice)
+            }
+            fn lines(&mut self, _: usize, _: u64) -> crate::machine::Lines {
+                crate::machine::Lines::default()
+            }
+            fn reset_vector(&self, cpu: usize) -> Option<u64> {
+                (cpu == 0).then_some(RESET)
+            }
+        }
+        let mut machine = super::super::tests::board(&[], ResetBoard, Vec::new());
+        machine.cpu.pstate = Pstate::reset(2);
+        machine
+            .system_instruction(access(true, RVBAR_EL2, 1))
+            .unwrap();
+        assert_eq!(machine.cpu.state.x[1], RESET);
+        // RVBAR_EL2 is read-only and UNDEFINED below EL2.
+        machine.cpu.pstate = Pstate::reset(1);
+        machine.cpu.pc = BASE;
+        machine
+            .system_instruction(access(true, RVBAR_EL2, 1))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::ESR_EL1) >> 26, 0);
+        // A board without one leaves the reset address unknown: the read
+        // refuses rather than reading zero.
+        let mut bare = machine_on(crate::machine::Chip::AppleM2, &[]);
+        bare.cpu.pstate = Pstate::reset(2);
+        assert!(matches!(
+            bare.system_instruction(access(true, RVBAR_EL2, 1)),
+            Err(super::super::Stop::Unsupported(_))
+        ));
     }
 
     #[test]

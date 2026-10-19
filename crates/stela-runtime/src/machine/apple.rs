@@ -559,6 +559,12 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// The reset address in PE `cpu`'s `cpu-impl-reg` RVBAR.
+    fn locked_reset_vector(&self, cpu: usize) -> Option<u64> {
+        let block = self.reset_vectors.get(cpu).copied().flatten()?;
+        self.bus.device::<Lockdown>(block)?.reset_address()
+    }
+
     /// Turn the cores the CPU start registers released into PE starts.
     fn release_cores(&mut self) -> Result<(), DeviceError> {
         let Some(starter) = &self.cpu_start else {
@@ -581,15 +587,9 @@ impl AppleDevices {
                         core.cluster, core.core
                     ))
                 })?;
-            let address = self
-                .reset_vectors
-                .get(cpu)
-                .copied()
-                .flatten()
-                .and_then(|block| self.bus.device::<Lockdown>(block)?.reset_address())
-                .ok_or_else(|| {
-                    DeviceError::Refused(format!("CPU start of PE {cpu}, which has no RVBAR"))
-                })?;
+            let address = self.locked_reset_vector(cpu).ok_or_else(|| {
+                DeviceError::Refused(format!("CPU start of PE {cpu}, which has no RVBAR"))
+            })?;
             self.starts.push(Start { cpu, address });
         }
         Ok(())
@@ -1675,6 +1675,10 @@ impl Devices for AppleDevices {
         (!self.starts.is_empty()).then(|| self.starts.remove(0))
     }
 
+    fn reset_vector(&self, cpu: usize) -> Option<u64> {
+        self.locked_reset_vector(cpu)
+    }
+
     fn memory_lock(&self) -> Option<(u64, u64)> {
         let device = self.memory_controller?;
         self.bus.device::<Amcc>(device)?.locked_region()
@@ -2356,6 +2360,8 @@ mod tests {
             })
         );
         assert_eq!(devices.take_start(), None);
+        // RVBAR_EL2 reads the same reset address.
+        assert_eq!(devices.reset_vector(3), Some(0x8_0300_c000));
         // A core the board does not have refuses.
         assert!(devices.write(0, START + 0xc, 4, 1 << 2, 0).is_err());
     }
