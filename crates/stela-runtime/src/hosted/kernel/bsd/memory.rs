@@ -16,6 +16,7 @@ use anyhow::{Result, bail};
 use core::sync::atomic::Ordering;
 
 const MAP_FIXED: u64 = 0x0010;
+const EBUSY: u64 = 16;
 /// `DYLD_VM_END_MWL`: dyld ends `map_with_linking_np` for the process.
 const DYLD_VM_END_MWL: u64 = u64::MAX;
 const HOST_PAGE_BYTES: u64 = 4096;
@@ -125,7 +126,33 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     placed.arguments[3] = flags | MAP_FIXED;
     placed.arguments[4] = descriptor;
     placed.arguments[5] = position - offset;
-    let outcome = forward(kernel, &placed)?;
+    let mut outcome = forward(kernel, &placed)?;
+    // An object shorter than the guest page, such as a host process's
+    // POSIX shared memory sized in 4 KiB pages, refuses a mapping past its
+    // end: map it in host pages and fill the rest of the guest page with
+    // zeros, as the arm64 kernel's whole-page mapping reads past the end.
+    // The filled tail is the process's own, not the object's.
+    let host_size = memory::round_host_page(bytes + offset).unwrap_or(size);
+    if matches!(outcome, Outcome::Error(EINVAL | EBUSY)) && host_size < size {
+        placed.arguments[1] = host_size;
+        outcome = forward(kernel, &placed)?;
+        if kernel.trace {
+            eprintln!(
+                "stela: mmap of {size:#x} bytes refused; mapped {host_size:#x} in host pages: \
+                 {outcome:x?}"
+            );
+        }
+        if matches!(outcome, Outcome::Return(mapped, _) if mapped == start) {
+            let protection = Protection(call.argument(2) as i32 & Protection::ALL.0);
+            let status = memory::fill_host_pages(start + host_size, size - host_size, protection);
+            if status != 0 {
+                bail!(
+                    "the rest of the guest page past a {host_size:#x}-byte mapping at {start:#x} \
+                     could not be mapped: kern_return {status}"
+                );
+            }
+        }
+    }
     match outcome {
         Outcome::Return(mapped, _) if mapped == start => {
             kernel.invalidate_code(pe, start, size);

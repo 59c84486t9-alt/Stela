@@ -211,6 +211,30 @@ pub fn map_anonymous(
     (status, at)
 }
 
+/// Replace the host pages of `[address, address + bytes)` with zeroed
+/// anonymous memory: the rest of a guest page a shorter host mapping
+/// leaves.
+pub fn fill_host_pages(address: u64, bytes: u64, protection: Protection) -> i32 {
+    const VM_FLAGS_OVERWRITE: i32 = 0x4000;
+    let mut at = address;
+    // SAFETY: the caller's own range, which it replaces.
+    unsafe {
+        mach_vm_map(
+            task(),
+            &mut at,
+            bytes,
+            0,
+            VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+            0,
+            0,
+            0,
+            protection.0,
+            Protection::ALL.0,
+            VM_INHERIT_COPY,
+        )
+    }
+}
+
 /// `mach_vm_map` of a memory object (a host memory entry) as the guest
 /// requests it. The object is mapped in the host's pages, as the entry's
 /// size may be (an x86 process made it); a placement the guest leaves to
@@ -478,6 +502,23 @@ mod tests {
         assert_eq!(round_page(1), Some(PAGE_BYTES));
         assert_eq!(trunc_page(PAGE_BYTES + 5), PAGE_BYTES);
         assert_eq!(round_page(u64::MAX), None);
+    }
+
+    #[test]
+    fn the_rest_of_a_guest_page_fills_with_zeros() {
+        let at = allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        assert!(write_u64(at, 7) && write_u64(at + 0x2000, 9));
+        assert_eq!(
+            fill_host_pages(at + 0x1000, PAGE_BYTES - 0x1000, Protection::READ),
+            KERN_SUCCESS
+        );
+        assert_eq!(read_u64(at), Some(7));
+        assert_eq!(read_u64(at + 0x2000), Some(0));
+        assert_eq!(
+            protections(at + 0x2000),
+            Some((Protection::READ, Protection::ALL))
+        );
+        deallocate(at, PAGE_BYTES).unwrap();
     }
 
     #[test]
