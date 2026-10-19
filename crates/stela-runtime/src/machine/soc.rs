@@ -6160,8 +6160,8 @@ mod tests {
         // second one names itself.
         let second = encode(
             &[
-                ("name", b"usb-drd1 "),
-                ("compatible", b"usb-drd,t8112 "),
+                ("name", b"usb-drd1\0"),
+                ("compatible", b"usb-drd,t8112\0"),
                 ("reg", &pairs(&ranges)),
                 ("iommu-parent", &words(&[0xa4])),
                 ("interrupts", &words(&irqs)),
@@ -6187,8 +6187,8 @@ mod tests {
         assert_eq!(ports, [1, 2]);
         let unnumbered = encode(
             &[
-                ("name", b"usb-drd1 "),
-                ("compatible", b"usb-drd,t8112 "),
+                ("name", b"usb-drd1\0"),
+                ("compatible", b"usb-drd,t8112\0"),
                 ("reg", &pairs(&ranges)),
                 ("iommu-parent", &words(&[0xa4])),
                 ("interrupts", &words(&irqs)),
