@@ -1073,14 +1073,14 @@ impl AppleDevices {
         axi: Option<[u8; 4]>,
     ) -> Result<(), String> {
         let model = Bridge::new(fields, header, configs, axi).map_err(String::from)?;
-        let offsets = model.offsets();
+        let spans = model.spans();
         let device = self.bus.add(Box::new(model));
-        for o in offsets {
+        for (o, n) in spans {
             self.bus
                 .map(
                     device,
                     physical.checked_add(o).ok_or("bridge address overflows")?,
-                    4,
+                    n,
                     o,
                 )
                 .map_err(|e| format!("bridge placement: {e:?}"))?;

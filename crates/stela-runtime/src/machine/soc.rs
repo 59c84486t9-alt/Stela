@@ -2465,9 +2465,9 @@ fn place_bridges(
             .to_vec();
         let axi = axi.map(|a| a[id * 4..id * 4 + 4].try_into().expect("4 bytes"));
         let model = bridge::Bridge::new(tunables, header, &selected, axi).map_err(String::from)?;
-        for o in model.offsets() {
-            if o.checked_add(4).is_none_or(|end| end > bytes)
-                || physical.checked_add(o + 4).is_none()
+        for (o, n) in model.spans() {
+            if o.checked_add(n).is_none_or(|end| end > bytes)
+                || physical.checked_add(o + n).is_none()
             {
                 return Err("bridge configuration lies outside its DT range".into());
             }
