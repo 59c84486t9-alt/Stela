@@ -82,6 +82,14 @@ impl Rom {
         self.image
     }
 
+    /// The transfer boundary measured and accepted the delivered container
+    /// under Stela's own trust policy; clear the pending request so SEPROM
+    /// stops offering it. Acceptance and the reply are the firmware engine's
+    /// decision, not a ROM command effect.
+    pub fn accept_image(&mut self) {
+        self.image = None;
+    }
+
     fn command(&mut self, frame: Frame) -> Result<Option<Frame>, &'static str> {
         if !self.started {
             return Err("SEPROM has not started");

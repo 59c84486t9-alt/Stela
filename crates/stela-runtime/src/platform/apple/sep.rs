@@ -5,15 +5,19 @@
 //! service ID in its payload; ASC endpoint zero carries it unchanged.
 //! docs/research/sep.md owns the recovered contract and remaining gates.
 //!
-//! Only the ROM command prefix is executable today. Image4 signature evidence
-//! is checked without conferring trust. Boot authentication,
-//! shared-memory/TXM, sepOS services and persistence are explicit refusals.
-//! No production compatible is admitted in `machine::soc::models` yet.
+//! The emulated SEP boots: SEPROM accepts the delivered container under
+//! Stela's own explicit, TSS-free trust policy (recording measured evidence),
+//! then the native sepOS phase maps shared memory and notifies the control
+//! endpoint that the OS is active. Application services (sks, pnon, xART,
+//! scrd, ...) are not advertised: their ABIs are not recovered, and they
+//! refuse rather than fake replies. See `firmware`/`os` and docs/research/sep.md.
 pub mod endpoint;
+pub mod firmware;
 pub mod image;
 pub mod keys;
 pub mod message;
 pub mod ool;
+pub mod os;
 pub mod rom;
 pub mod shared;
 pub mod store;
@@ -54,71 +58,39 @@ impl Sep {
     /// HELLO or a claim that sepOS already booted.
     pub fn new(entropy: Box<dyn Entropy>, lines: Lines) -> Result<Self, &'static str> {
         Ok(Self {
-            mailbox: Asc::new(Box::new(rom::Rom::new(entropy)), true, lines)?,
+            mailbox: Asc::new(Box::new(firmware::SepFirmware::new(entropy)), true, lines)?,
         })
     }
 
     pub fn pending(&self) -> bool {
-        self.mailbox
-            .firmware::<rom::Rom>()
-            .expect("SEP owns SEPROM")
-            .image_request()
-            .is_some()
+        self.mailbox.dma_pending()
     }
 
-    /// Snapshot the delivered container through dart-sep, check the manifest's
-    /// signature and payload binding when supplied, then refuse at the trust/
-    /// native-service boundary. Signature evidence alone never boots SEP.
+    /// Firmware Stela measured and accepted under its own trust policy, if any.
+    pub fn evidence(&self) -> Option<&firmware::Evidence> {
+        self.mailbox
+            .firmware::<firmware::SepFirmware>()
+            .expect("SEP owns its firmware engine")
+            .evidence()
+    }
+
+    /// Whether sepOS has reported OS active (the kernel then publishes
+    /// `sepBootedOnce`).
+    pub fn booted(&self) -> bool {
+        self.mailbox
+            .firmware::<firmware::SepFirmware>()
+            .expect("SEP owns its firmware engine")
+            .booted()
+    }
+
+    /// Run the SEP coprocessor's queued bus-master work through dart-sep: the
+    /// opcode-6 container snapshot, measured and accepted under Stela's own
+    /// trust policy before SEPROM replies 106. A DMA fault or a container the
+    /// policy rejects refuses here, with no boot acknowledgement.
     pub fn transfer(&mut self, port: &mut Port<'_, '_>) -> Result<(), MmioError> {
-        let Some(request) = self
-            .mailbox
-            .firmware::<rom::Rom>()
-            .expect("SEP owns SEPROM")
-            .image_request()
-        else {
-            return Ok(());
-        };
-        let snapshot =
-            image::snapshot(port, request.address, image::MAX_IMAGE_BYTES).map_err(|error| {
-                let reason = match error {
-                    crate::platform::dma::DmaError::Unsupported(reason) => reason,
-                    crate::platform::dma::DmaError::Fault(_) => {
-                        "SEP firmware DMA fault in dart-sep"
-                    }
-                    crate::platform::dma::DmaError::Memory => {
-                        "SEP firmware DMA is outside guest RAM"
-                    }
-                };
-                refuse(NAME, SEND_COMMIT, Width::Double, Direction::Write, reason)
-            })?;
-        let inspect = || -> Result<(), &'static str> {
-            let parts = crate::img4::parse(snapshot.bytes())
-                .map_err(|_| "SEP firmware Image4 structure is malformed")?;
-            let kind = crate::img4::payload_type(parts.payload)
-                .map_err(|_| "SEP firmware payload type is malformed")?;
-            let expected = if request.parameter == 0 {
-                *b"sepi"
-            } else {
-                *b"rsep"
-            };
-            if kind != expected {
-                return Err("SEP firmware payload type differs from the ROM request");
-            }
-            let manifest = parts
-                .manifest
-                .ok_or("SEP bare IM4P has no manifest to authenticate")?;
-            image::signature::inspect(parts.payload, manifest)?;
-            Err(
-                "SEP signature evidence verified; trust constraints and native sepOS services are not modeled",
-            )
-        };
-        Err(refuse(
-            NAME,
-            SEND_COMMIT,
-            Width::Double,
-            Direction::Write,
-            inspect().expect_err("signature evidence cannot admit native sepOS"),
-        ))
+        self.mailbox
+            .service_dma(port)
+            .map_err(|reason| refuse(NAME, SEND_COMMIT, Width::Double, Direction::Write, reason))
     }
 }
 

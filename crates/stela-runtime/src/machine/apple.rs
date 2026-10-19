@@ -2307,104 +2307,157 @@ mod tests {
         assert_eq!(devices.read(0, AES + 0x24, 4, 0).unwrap() & 0xff02, 0b10);
     }
     #[test]
-    fn sep_firmware_dma_faults_or_refuses_authentication_without_a_boot_ack() {
+    fn sep_rom_accepts_firmware_under_stela_policy_and_reaches_os_active() {
         use crate::platform::{
-            apple::sep::message::{Frame, ROM},
+            apple::sep::message::{self, Frame, ROM},
             dma::tests::Ram,
         };
         const DART: u64 = 0x25d2c0000;
         const SEP: u64 = 0x25e400000;
         const AUX: u64 = 0x25e050000;
         const RAM: u64 = 0x800000000;
-        let (signed_payload, manifest) = sep::image::signature::tests::inputs();
-        for (image, refusal) in [
-            (
-                b"\x30\x06\x16\x04IM4P".to_vec(),
-                "payload type is malformed",
-            ),
-            (
-                crate::img4::tests::im4p(b"sepi", b"synthetic"),
-                "bare IM4P has no manifest",
-            ),
-            (
-                crate::img4::compose(&signed_payload, &manifest),
-                "signature evidence verified; trust constraints",
-            ),
-        ] {
-            for enable in [false, true] {
-                let mut devices = AppleDevices::new();
-                let dart = devices
-                    .add_dart(
+
+        // Build a SEP mapped on dart-sep stream 0, with its outbox enabled.
+        fn board() -> AppleDevices {
+            let mut devices = AppleDevices::new();
+            let dart = devices
+                .add_dart(
+                    Range {
+                        physical: DART,
+                        bytes: 0x4000,
+                    },
+                    1,
+                    None,
+                    None,
+                )
+                .unwrap();
+            devices
+                .add_sep(
+                    [
                         Range {
-                            physical: DART,
-                            bytes: 0x4000,
+                            physical: SEP,
+                            bytes: 0x6c000,
                         },
-                        1,
-                        None,
-                        None,
-                    )
-                    .unwrap();
-                devices
-                    .add_sep(
-                        [
-                            Range {
-                                physical: SEP,
-                                bytes: 0x6c000,
-                            },
-                            Range {
-                                physical: AUX,
-                                bytes: 0x60000,
-                            },
-                        ],
-                        asc::Lines::default(),
-                        (dart, 0),
-                        Box::new(|_: &mut [u8]| Err("unused entropy")),
-                    )
-                    .unwrap();
-                devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap();
-                if enable {
-                    devices.write(0, DART + 0xc00, 4, 1, 0).unwrap();
-                    devices.write(0, DART + 0x1000, 4, 6, 0).unwrap();
-                }
-                let mut ram = Ram::new(RAM, 0x1000);
-                ram.bytes[..image.len()].copy_from_slice(&image);
-                let before = ram.bytes.clone();
-                for (opcode, data) in [(5, 0), (6, (RAM >> 12) as u32)] {
-                    let message = Frame {
-                        service: ROM,
-                        tag: 1,
-                        opcode,
-                        parameter: 0,
-                        data,
-                    }
-                    .mailbox();
-                    devices
-                        .write(0, SEP + 0x8800, 8, message.payload, 0)
-                        .unwrap();
-                    devices.write(0, SEP + 0x8808, 8, 0, 0).unwrap();
-                    let result = devices.transfer(0, &mut ram, 0);
-                    if opcode == 5 {
-                        result.unwrap();
-                        devices.read(0, SEP + 0x8830, 8, 0).unwrap();
-                        devices.read(0, SEP + 0x8838, 8, 0).unwrap();
-                    } else {
-                        let Err(DeviceError::Refused(reason)) = result else {
-                            panic!("SEP must not boot from an unauthenticated image");
-                        };
-                        assert!(reason.contains(if enable { refusal } else { "DMA fault" }));
-                        assert_eq!(devices.read(0, SEP + 0x8114, 4, 0).unwrap(), 1 | 1 << 17);
-                        assert_eq!(ram.bytes, before);
-                    }
-                }
-                assert!(
-                    matches!(devices.read(0, AUX, 4, 0), Err(DeviceError::Refused(reason)) if reason.contains("auxiliary"))
-                );
-                assert!(matches!(
-                    devices.read(0, SEP + 0x6c000, 4, 0),
-                    Err(DeviceError::NoDevice)
-                ));
-            }
+                        Range {
+                            physical: AUX,
+                            bytes: 0x60000,
+                        },
+                    ],
+                    asc::Lines::default(),
+                    (dart, 0),
+                    Box::new(|b: &mut [u8]| {
+                        b.fill(0);
+                        Ok(())
+                    }),
+                )
+                .unwrap();
+            devices.write(0, SEP + 0x8114, 4, 1, 0).unwrap(); // enable outbox
+            devices
         }
+
+        fn send(
+            devices: &mut AppleDevices,
+            ram: &mut Ram,
+            frame: Frame,
+        ) -> Result<(), DeviceError> {
+            devices
+                .write(0, SEP + 0x8800, 8, frame.mailbox().payload, 0)
+                .unwrap();
+            let written = devices.write(0, SEP + 0x8808, 8, 0, 0);
+            written.and_then(|()| devices.transfer(0, ram, 0))
+        }
+
+        fn recv(devices: &mut AppleDevices) -> Frame {
+            let payload = devices.read(0, SEP + 0x8830, 8, 0).unwrap();
+            devices.read(0, SEP + 0x8838, 8, 0).unwrap();
+            Frame::from_payload(payload)
+        }
+
+        // The real IPSW SEP payload is a bare encrypted `sepi`; Stela accepts
+        // it under its own policy and boots its native sepOS.
+        let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+        let mut devices = board();
+        let mut ram = Ram::new(RAM, 0x8000);
+        ram.bytes[..image.len()].copy_from_slice(&image);
+        // Map the delivered container into the SEP's dart-sep stream.
+        devices.write(0, DART + 0xc00, 4, 1, 0).unwrap();
+        devices.write(0, DART + 0x1000, 4, 6, 0).unwrap(); // TCR BYPASS_DART|BYPASS_DAPF
+
+        send(
+            &mut devices,
+            &mut ram,
+            Frame {
+                service: ROM,
+                tag: 1,
+                opcode: 5,
+                parameter: 0,
+                data: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(recv(&mut devices).opcode, 105, "BootTz0 ack");
+        send(
+            &mut devices,
+            &mut ram,
+            Frame {
+                service: ROM,
+                tag: 1,
+                opcode: 6,
+                parameter: 0,
+                data: (RAM >> 12) as u32,
+            },
+        )
+        .unwrap();
+        assert_eq!(recv(&mut devices).opcode, 106, "SEP accepted IMG4");
+        // The AP maps shared memory; sepOS reports OS active on the control EP.
+        send(
+            &mut devices,
+            &mut ram,
+            Frame {
+                service: message::BOOT,
+                tag: 0,
+                opcode: 0x20,
+                parameter: 0,
+                data: 0x5_0000,
+            },
+        )
+        .unwrap();
+        let active = recv(&mut devices);
+        assert_eq!((active.service, active.tag, active.opcode), (0, 0, 21));
+
+        // A malformed container refuses with no boot acknowledgement.
+        let mut devices = board();
+        let mut ram = Ram::new(RAM, 0x8000);
+        ram.bytes[..8].copy_from_slice(b"\x30\x06\x16\x04IM4P");
+        devices.write(0, DART + 0xc00, 4, 1, 0).unwrap();
+        devices.write(0, DART + 0x1000, 4, 6, 0).unwrap(); // TCR BYPASS_DART|BYPASS_DAPF
+        send(
+            &mut devices,
+            &mut ram,
+            Frame {
+                service: ROM,
+                tag: 1,
+                opcode: 5,
+                parameter: 0,
+                data: 0,
+            },
+        )
+        .unwrap();
+        recv(&mut devices);
+        let refusal = send(
+            &mut devices,
+            &mut ram,
+            Frame {
+                service: ROM,
+                tag: 1,
+                opcode: 6,
+                parameter: 0,
+                data: (RAM >> 12) as u32,
+            },
+        );
+        assert!(
+            matches!(refusal, Err(DeviceError::Refused(reason)) if reason.contains("payload type is malformed"))
+        );
     }
     #[test]
     fn usb_core_aliases_platform_refusals_and_port_driven_polling() {

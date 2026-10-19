@@ -43,6 +43,7 @@
 //!   a restart loses.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
+use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
@@ -88,6 +89,21 @@ pub trait Firmware: Any {
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
     /// The AP sent `message`.
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
+    /// The coprocessor has bus-master work queued (DMA it began when it
+    /// received a message), to run before the AP's next mailbox access. The
+    /// default coprocessor masters no memory.
+    fn dma_pending(&self) -> bool {
+        false
+    }
+    /// Perform that queued DMA through `port`, pushing any resulting mailbox
+    /// messages to `outbox`. Reached from the owning device's transfer step.
+    fn dma(
+        &mut self,
+        _port: &mut Port<'_, '_>,
+        _outbox: &mut Vec<Message>,
+    ) -> Result<(), &'static str> {
+        Ok(())
+    }
 }
 
 /// The wrapper's interrupt lines, in ADT `interrupts` order.
@@ -178,6 +194,25 @@ impl Asc {
     /// still owns all mailbox and interrupt effects; firmware cannot replace it.
     pub fn firmware<F: Firmware>(&self) -> Option<&F> {
         (&*self.firmware as &dyn Any).downcast_ref()
+    }
+
+    /// Whether the coprocessor has bus-master work to run this step.
+    pub fn dma_pending(&self) -> bool {
+        self.running && self.firmware.dma_pending()
+    }
+
+    /// Run the coprocessor's queued DMA through `port`; any messages it
+    /// produces enter the outbox and raise the mailbox interrupt, exactly as
+    /// a received message's replies do.
+    pub fn service_dma(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+        if !self.running {
+            return Err("mailbox DMA on a stopped coprocessor");
+        }
+        let mut produced = Vec::new();
+        let result = self.firmware.dma(port, &mut produced).map(|()| produced);
+        self.deliver(result)?;
+        self.update_lines(port.access);
+        Ok(())
     }
 
     fn visible(&self) -> bool {
