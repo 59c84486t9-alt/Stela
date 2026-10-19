@@ -38,6 +38,7 @@ pub mod lockdown;
 pub mod nor;
 pub mod perf;
 pub mod pmgr;
+pub mod pmp;
 pub mod pmu;
 pub mod power;
 pub mod ptd;

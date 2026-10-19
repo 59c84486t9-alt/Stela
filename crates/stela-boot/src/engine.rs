@@ -531,6 +531,9 @@ fn devices<'f>(
     if let Some(smc) = board.and_then(|b| b.smc.as_ref()) {
         devices.add_smc(smc)?;
     }
+    if let Some(pmp) = board.and_then(|b| b.pmp.as_ref()) {
+        devices.add_pmp(pmp)?;
+    }
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
         devices.add_spmi(spmi, clock.wall)?;
     }

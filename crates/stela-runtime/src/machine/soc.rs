@@ -811,6 +811,11 @@ const ROLE_MODELS: &[ModelClaim] = &[
         property: ("role", b"SEP\0"),
         children: &[SEP_NUB_MODEL],
     },
+    ModelClaim {
+        compatible: ASC,
+        property: ("role", b"PMP\0"),
+        children: &[NATIVE_RTKIT],
+    },
 ];
 
 /// Child compatibles claimed by a matching parent model. The loader uses
@@ -931,6 +936,8 @@ pub struct Board {
     pub ans: Option<AnsController>,
     /// The SMC coprocessor, when the DeviceTree shows its `iop,ascwrap-v4`.
     pub smc: Option<SmcController>,
+    /// The PMP coprocessor, under the same condition.
+    pub pmp: Option<PmpController>,
     /// SEP placement if the input tree explicitly keeps it. Production
     /// `models()` admission remains closed while sepOS boot services refuse.
     pub sep: Option<SepDevice>,
@@ -1703,6 +1710,53 @@ pub struct SmcController {
     pub quiesced: bool,
 }
 
+/// The PMP's DT placement: `reg[0]` is the ASC wrapper and its four
+/// interrupts the mailbox lines. Its nub is `user-power-managed`; the
+/// PTD bank that `ptd-update-reg-index` names is [`MemoryCache`]'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PmpController {
+    pub wrapper: (u64, u64),
+    pub interrupts: [u16; 4],
+    pub quiesced: bool,
+}
+
+fn pmp_controller(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Option<PmpController>, String> {
+    let Some(node) = io
+        .child("pmp")
+        .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"PMP\0".as_slice()))
+    else {
+        return Ok(None);
+    };
+    let nub = node
+        .child("iop-pmp-nub")
+        .filter(|nub| nub.compatible(RTBUDDY))
+        .ok_or("PMP has no RTBuddy v2 nub")?;
+    if nub.first_u32("user-power-managed") != Some(1) {
+        return Err("PMP nub is not user-power-managed".into());
+    }
+    let &(offset, bytes) = node
+        .pairs("reg")
+        .ok_or("PMP has no reg pairs")?
+        .first()
+        .filter(|(_, bytes)| *bytes >= asc::WRAPPER_BYTES)
+        .ok_or("PMP wrapper bank is absent or too short")?;
+    let physical = translate(offset).ok_or("PMP wrapper outside arm-io ranges")?;
+    let irqs = node.cells32("interrupts").ok_or("PMP has no interrupts")?;
+    let irq = |index: usize| -> Result<u16, String> {
+        irqs.get(index)
+            .and_then(|&n| u16::try_from(n).ok())
+            .ok_or_else(|| "PMP needs four valid mailbox interrupts".into())
+    };
+    Ok(Some(PmpController {
+        wrapper: (physical, bytes),
+        interrupts: [irq(0)?, irq(1)?, irq(2)?, irq(3)?],
+        quiesced: nub.property("quiesced").is_some(),
+    }))
+}
+
 /// A platform function property is the provider's phandle, the function's
 /// four-character code and its arguments, all little-endian u32 cells
 /// (`function-reg_on` = smc-pmu, `pKW4`, `gP0d`, 0x8000).
@@ -1928,7 +1982,7 @@ fn cells_of(value: &[u8]) -> Option<[u32; 4]> {
 }
 
 /// Only explicitly visible ANS2 hardware is placed. Do not preserve all
-/// ASC compatibles in the loader: SIO, AOP, PMP and others need their own
+/// ASC compatibles in the loader: SIO, AOP and others need their own
 /// native application protocols before they can be exposed.
 fn ans_controller(
     io: &Node<'_>,
@@ -3544,6 +3598,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let aes = aes_engine(&io, &translate, &darts)?;
     let ans = ans_controller(&io, &translate)?;
     let smc = smc_controller(&root, &io, &translate)?;
+    let pmp = pmp_controller(&io, &translate)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
     let usbs = usb_controllers(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate)?;
@@ -3587,6 +3642,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         aes,
         ans,
         smc,
+        pmp,
         sep,
         usbs,
         power_states,
@@ -4021,6 +4077,71 @@ mod tests {
     /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's
     /// shared-page region and the `pKW4` functions other nodes route
     /// through `smc-pmu`.
+    #[test]
+    fn pmp_placement_reads_its_wrapper_and_needs_a_user_managed_nub() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        let tree = |managed: u32| {
+            let nub = encode(
+                &[
+                    ("name", &z("iop-pmp-nub")),
+                    ("compatible", &z(RTBUDDY)),
+                    ("user-power-managed", &cells(&[managed])),
+                ],
+                &[],
+            );
+            let pmp = encode(
+                &[
+                    ("name", &z("pmp")),
+                    ("compatible", &z(ASC)),
+                    ("role", &z("PMP")),
+                    (
+                        "reg",
+                        &pairs(&[
+                            (0x3bc0_0000, 0x6c000),
+                            (0x3b85_0000, 0x4000),
+                            (0x3b50_0000, 0x80000),
+                            (0x3b3d_0000, 0x4000),
+                        ]),
+                    ),
+                    ("interrupts", &cells(&[0x275, 0x274, 0x277, 0x276])),
+                ],
+                &[nub],
+            );
+            let io = encode(&[("name", &z("arm-io"))], &[pmp]);
+            encode(&[("name", &z("device-tree"))], &[io])
+        };
+        let translate = |v: u64| v.checked_add(0x2_0000_0000);
+        let data = tree(1);
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        assert_eq!(
+            pmp_controller(&io, &translate).unwrap(),
+            Some(PmpController {
+                wrapper: (0x2_3bc0_0000, 0x6c000),
+                interrupts: [0x275, 0x274, 0x277, 0x276],
+                quiesced: false,
+            })
+        );
+        let data = tree(0);
+        let root = Node::root(&data).unwrap();
+        assert!(pmp_controller(&root.child("arm-io").unwrap(), &translate).is_err());
+        assert!(models(ASC, |key| (key == "role").then_some(b"PMP\0".as_slice())));
+    }
+
     #[test]
     fn smc_placement_reads_its_banks_region_and_function_keys() {
         use crate::machine::adt::encode;

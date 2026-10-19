@@ -36,6 +36,7 @@ use crate::platform::apple::{
     lockdown::{self, Lockdown},
     perf::PerfCounters,
     pmgr::{ACTIVE, POWER_GATED, Pmgr, PowerState},
+    pmp,
     pmu::{self, Pmu},
     power::{self, Power},
     ptd::{self, Ptd},
@@ -730,6 +731,30 @@ impl AppleDevices {
                 .map_err(|e| format!("SMC watchdog placement: {e:?}"))?;
         }
         Ok(())
+    }
+
+    /// Place an explicitly described PMP: its started, user-power-managed
+    /// RTKit with the native `PMPEndpoint1` (`pmp::Pmp`). Its PTD bank is
+    /// the memory cache's ([`Self::add_memory_channels`]).
+    pub fn add_pmp(&mut self, placement: &super::soc::PmpController) -> Result<(), String> {
+        let mut rtkit = RtKit::new(
+            vec![(pmp::ENDPOINT, Box::new(pmp::Pmp::default()))],
+            Management::User,
+        )
+        .map_err(String::from)?;
+        if placement.quiesced {
+            rtkit = rtkit.quiesced();
+        }
+        let wrapper = Asc::booted(
+            Box::new(rtkit),
+            AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
+        )
+        .map_err(String::from)?;
+        let asc = self.bus.add(Box::new(wrapper));
+        self.coprocessors.push(("PMP", asc));
+        self.bus
+            .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
+            .map_err(|e| format!("PMP ASC placement: {e:?}"))
     }
 
     /// Place a visible SPMI controller and its PMUs. Bank B is the device's
@@ -2043,6 +2068,27 @@ mod tests {
         assert_eq!(devices.read(0, pin, 4, 0).unwrap() & 1, 1);
         hpd.pull_low(true);
         assert_eq!(devices.read(0, pin, 4, 0).unwrap() & 1, 0);
+    }
+
+    #[test]
+    fn pmp_places_a_running_user_managed_wrapper() {
+        use crate::machine::soc::PmpController;
+        const WRAPPER: u64 = 0x2_3bc0_0000;
+        let mut devices = AppleDevices::new();
+        devices
+            .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        devices
+            .add_pmp(&PmpController {
+                wrapper: (WRAPPER, 0x6c000),
+                interrupts: [0x275, 0x274, 0x277, 0x276],
+                quiesced: false,
+            })
+            .unwrap();
+        // Started and running; its HELLO waits in the outbox.
+        assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        assert_eq!(devices.coprocessor_diagnostics().len(), 1);
+        assert!(devices.coprocessor_diagnostics()[0].starts_with("PMP "));
     }
 
     #[test]
