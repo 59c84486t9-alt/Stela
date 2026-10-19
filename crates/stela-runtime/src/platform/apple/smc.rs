@@ -108,6 +108,24 @@
 //! (inferred: otherwise one press would both wake the machine and ask it
 //! to shut down).
 //!
+//! Port controller lock. `D1Vn` is the SMC's lock on the 4CC command
+//! interface of the RID-0 USB-C port controller. `AppleHPM::atomic4CC`
+//! (file 0x27cce78..0x27cd91c) takes it around every 4CC command except the
+//! `aUFC`/`sUFC`/`mUFC`/`pUFC` firmware-update ones: it reads the byte
+//! (`AppleHPMARM::get4ccLockStatus` file 0x27c2378, 1 = held), writes 1
+//! (`set4ccLock` file 0x27c2434), reads it again until it holds (two 5 ms
+//! retries, then it goes ahead regardless), issues the command and writes
+//! 0. The emulated SMC never issues 4CC commands of its own, so the lock
+//! is always free for the AP: the byte reads back what the AP last wrote.
+//! Values other than 0 and 1 refuse. Ports with another RID never take it
+//! (`get4ccLockStatus` returns at once for a nonzero RID).
+//!
+//! ADC sensors. `aDC#` is the number of PMU ADC channels the SMC exports
+//! as `AppleARMPMUSensor`s: `AppleSMC::start` (file 0x2da7c80..0x2da7d58)
+//! reads it (4 bytes) and creates one sensor per index from the `aDC?`
+//! keys. The emulated SMC measures no ADC channels, so it reads 0 and
+//! AppleSMC creates none.
+//!
 //! The table holds those keys, `#KEY`, the `NTAP` notification-enable
 //! flag, and the PMU GPIO keys the DeviceTree's `pKW4` platform functions
 //! on `smc-pmu` name (on J473AP `gP09` DP-to-HDMI reset, `gP0d` Wi-Fi/BT
@@ -117,8 +135,11 @@
 //! read the latch for the pin's level. Any other key answers KEY_NOT_FOUND,
 //! as an SMC without it does; a key is added only with its established
 //! size and meaning, never a guessed value. The type codes of `MBSE`,
-//! `NESN`, `MBSW` and `MESS` are inferred from their sizes; no client
-//! reads them.
+//! `NESN`, `MBSW`, `MESS`, `D1Vn` and `aDC#` are inferred from their sizes
+//! and uses; no client reads them. The 26A434 J473AP census of every key
+//! the kernel's SMC clients and the restore ramdisk use, with the reason
+//! each absent key stays absent, is in docs/research/desktop-requirements.md
+//! (SMC key census).
 use super::asc::TransitionRequest;
 use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::rtkit::Endpoint;
@@ -158,6 +179,12 @@ const NOTIFY_SMC: u32 = code(b"NESN");
 const BUTTON_HELD: u32 = code(b"bHLD");
 const WAKE_SOURCES: u32 = code(b"MBSW");
 const SHUTDOWN_CAUSE: u32 = code(b"MESS");
+const PORT_CONTROLLER_LOCK: u32 = code(b"D1Vn");
+const ADC_SENSOR_COUNT: u32 = code(b"aDC#");
+
+/// `D1Vn` values (see the module comment).
+const LOCK_RELEASED: u8 = 0;
+const LOCK_HELD: u8 = 1;
 
 /// `MBSE` commands (see the module comment).
 const WILL_POWER_OFF: u32 = code(b"offw");
@@ -262,7 +289,7 @@ impl Key {
 }
 
 /// The SMC's own keys, with their initial values (see the module comment).
-fn own_keys() -> [(u32, Key); 6] {
+fn own_keys() -> [(u32, Key); 8] {
     [
         // The notification enable: AppleSMC::_smcInitNotifications and
         // Linux macsmc write the one-byte flag 1.
@@ -272,6 +299,13 @@ fn own_keys() -> [(u32, Key); 6] {
         (BUTTON_HELD, Key::new(b"flag", READABLE, 1)),
         (WAKE_SOURCES, Key::new(b"ui64", READABLE, 8)),
         (SHUTDOWN_CAUSE, Key::new(b"ui8 ", READABLE, 1)),
+        // Released until the AP takes it.
+        (
+            PORT_CONTROLLER_LOCK,
+            Key::new(b"flag", READABLE | WRITABLE, 1),
+        ),
+        // No ADC channels.
+        (ADC_SENSOR_COUNT, Key::new(b"ui32", READABLE, 4)),
     ]
 }
 
@@ -482,6 +516,11 @@ impl Smc {
                 value[..].try_into().expect("MBSE is four bytes"),
             ))?,
             NOTIFY_SMC => answers.push(Self::notification(Self::notified(&value)?)),
+            PORT_CONTROLLER_LOCK if !matches!(value[..], [LOCK_RELEASED | LOCK_HELD]) => {
+                return Err(
+                    "SMC D1Vn takes 0 (release) or 1 (take) for the port controller's 4CC lock",
+                );
+            }
             _ => {}
         }
         self.keys.get_mut(&name).expect("key looked up").value = value;
@@ -736,7 +775,7 @@ mod tests {
         assert_eq!(reply & 0xff, u64::from(SUCCESS));
         assert_eq!(reply >> 12 & 0xf, 3);
         assert_eq!(reply >> 16 & 0xff, 4);
-        assert_eq!((reply >> 32) as u32, u32::from_be(15));
+        assert_eq!((reply >> 32) as u32, u32::from_be(17));
         // Unknown keys, short reads and bad sizes answer SMC errors.
         assert_eq!(
             send(&mut smc, request(READ, 0, 4, 0, code(b"RGEN"))) & 0xff,
@@ -758,12 +797,17 @@ mod tests {
         let (mut smc, sram) = smc();
         let first = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 0));
         assert_eq!((first >> 32) as u32, code(b"#KEY"));
+        // Byte order: `D1Vn` before `MBSE`, `aDC#` before `bHLD` and `gP09`.
         let second = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 1));
-        assert_eq!((second >> 32) as u32, code(b"MBSE"));
-        let third = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 7));
-        assert_eq!((third >> 32) as u32, code(b"gP09"));
+        assert_eq!((second >> 32) as u32, code(b"D1Vn"));
+        let third = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 2));
+        assert_eq!((third >> 32) as u32, code(b"MBSE"));
+        let eighth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 7));
+        assert_eq!((eighth >> 32) as u32, code(b"aDC#"));
+        let tenth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 9));
+        assert_eq!((tenth >> 32) as u32, code(b"gP09"));
         assert_eq!(
-            send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 15)) & 0xff,
+            send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 17)) & 0xff,
             u64::from(INDEX_RANGE)
         );
         send(&mut smc, request(KEY_INFO, 0, 0, 0, code(b"gP16")));
@@ -959,6 +1003,50 @@ mod tests {
         assert_eq!(
             send(&mut smc, request(WRITE, 0, 1, 0, code(b"MESS"))) & 0xff,
             u64::from(NOT_WRITABLE)
+        );
+    }
+
+    /// `AppleHPM::atomic4CC`'s sequence: read free, take, read held, issue
+    /// the 4CC command, release.
+    #[test]
+    fn the_port_controller_lock_is_granted_to_the_ap_at_once() {
+        let (mut smc, sram) = smc();
+        let lock = code(b"D1Vn");
+        let status = |smc: &mut Smc| send(smc, request(READ, 0, 1, 0, lock)) >> 32;
+        assert_eq!(status(&mut smc), u64::from(LOCK_RELEASED));
+        let taken = write_key(&mut smc, &sram, b"D1Vn", &[LOCK_HELD]);
+        assert_eq!(taken[0] & 0xff, u64::from(SUCCESS));
+        assert_eq!(status(&mut smc), u64::from(LOCK_HELD));
+        write_key(&mut smc, &sram, b"D1Vn", &[LOCK_RELEASED]);
+        assert_eq!(status(&mut smc), u64::from(LOCK_RELEASED));
+        // Only release and take have a meaning.
+        sram.put(&[2]);
+        assert!(
+            smc.receive(request(WRITE, 0, 1, 0, lock), &mut Vec::new())
+                .is_err()
+        );
+        assert_eq!(smc.value(lock), Some(&[LOCK_RELEASED][..]));
+        send(&mut smc, request(KEY_INFO, 0, 0, 0, lock));
+        assert_eq!(
+            sram.get(6),
+            [1, b'g', b'a', b'l', b'f', READABLE | WRITABLE]
+        );
+    }
+
+    #[test]
+    fn the_smc_exports_no_adc_sensors() {
+        let (mut smc, _) = smc();
+        let count = send(&mut smc, request(READ, 0, 4, 0, code(b"aDC#")));
+        assert_eq!((count & 0xff, count >> 16 & 0xff), (u64::from(SUCCESS), 4));
+        assert_eq!(count >> 32, 0);
+        assert_eq!(
+            send(&mut smc, request(WRITE, 0, 4, 0, code(b"aDC#"))) & 0xff,
+            u64::from(NOT_WRITABLE)
+        );
+        // Without a channel there is no per-index sensor key.
+        assert_eq!(
+            send(&mut smc, request(KEY_INFO, 0, 0, 0, code(b"aDC0"))) & 0xff,
+            u64::from(KEY_NOT_FOUND)
         );
     }
 
