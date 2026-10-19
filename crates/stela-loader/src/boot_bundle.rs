@@ -621,7 +621,33 @@ fn source_of(input: &Input) -> Source {
     input.source.clone()
 }
 
+/// A ramdisk the bundle takes ownership of, so its file is the caller's
+/// buffer rather than a copy: an update ramdisk of hundreds of megabytes
+/// then needs no second copy in `stela.efi`'s heap.
+pub struct OwnedRamdisk {
+    pub bytes: Vec<u8>,
+    pub source: Source,
+}
+
 pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
+    assemble(inputs, options, None)
+}
+
+/// [`prepare`], with `ramdisk` moved into the bundle; `inputs` must name no
+/// ramdisk of its own.
+pub fn prepare_owned(inputs: &Inputs, ramdisk: OwnedRamdisk, options: &Options) -> Result<Bundle> {
+    ensure!(
+        inputs.ramdisk.is_none(),
+        "a bundle has one ramdisk, given both borrowed and owned"
+    );
+    assemble(inputs, options, Some(ramdisk))
+}
+
+fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> Result<Bundle> {
+    let ramdisk_bytes = owned
+        .as_ref()
+        .map(|ramdisk| ramdisk.bytes.len())
+        .or_else(|| inputs.ramdisk.as_ref().map(|ramdisk| ramdisk.bytes.len()));
     // iBoot's carveouts sit below the managed range, which starts past them.
     let carveouts = inputs
         .target
@@ -791,13 +817,13 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
                 memory_bytes: 0,
                 virtual_address: None,
             },
-            "RAMDisk" => match &inputs.ramdisk {
-                Some(ramdisk) => Content {
+            "RAMDisk" => match ramdisk_bytes {
+                Some(bytes) => Content {
                     name: (*name).into(),
                     file: RAMDISK_FILE.into(),
                     file_offset: 0,
-                    bytes: ramdisk.bytes.len() as u64,
-                    memory_bytes: page_round(ramdisk.bytes.len() as u64),
+                    bytes: bytes as u64,
+                    memory_bytes: page_round(bytes as u64),
                     virtual_address: None,
                 },
                 None => continue,
@@ -1028,9 +1054,16 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     if let Some(sep) = &inputs.sep_firmware {
         files.push((SEP_FILE.to_owned(), sep.bytes.to_vec()));
     }
-    if let Some(ramdisk) = &inputs.ramdisk {
-        files.push((RAMDISK_FILE.to_owned(), ramdisk.bytes.to_vec()));
-    }
+    let ramdisk_source = match owned {
+        Some(ramdisk) => {
+            files.push((RAMDISK_FILE.to_owned(), ramdisk.bytes));
+            Some(ramdisk.source)
+        }
+        None => inputs.ramdisk.as_ref().map(|ramdisk| {
+            files.push((RAMDISK_FILE.to_owned(), ramdisk.bytes.to_vec()));
+            source_of(ramdisk)
+        }),
+    };
     for (name, image) in &inputs.board_firmware {
         // The manifest admits only simple names; these checks keep the name
         // within the engine handoff and distinct from the bundle's own files.
@@ -1068,8 +1101,14 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
             .chain(&inputs.boot_manifest)
             .chain(&inputs.cryptex1_manifest)
             .chain(&inputs.extra_trust_caches)
-            .chain(&inputs.ramdisk)
-            .chain(inputs.root_hash.iter().filter_map(|r| r.im4p.as_ref()))
+            .map(source_of),
+    );
+    sources.extend(ramdisk_source);
+    sources.extend(
+        inputs
+            .root_hash
+            .iter()
+            .filter_map(|r| r.im4p.as_ref())
             .chain(inputs.board_firmware.iter().map(|(_, image)| image))
             .map(source_of),
     );
@@ -1663,6 +1702,23 @@ mod tests {
             options.dram_base
         );
         let bundle = prepare(&inputs, &options)?;
+        // An owned ramdisk moves into the same bundle.
+        let borrowed = inputs.ramdisk.take().expect("a ramdisk");
+        let owned = OwnedRamdisk {
+            bytes: borrowed.bytes.to_vec(),
+            source: borrowed.source.clone(),
+        };
+        let moved = prepare_owned(&inputs, owned, &options)?;
+        assert_eq!(
+            serde_json::to_string(&moved.manifest)?,
+            serde_json::to_string(&bundle.manifest)?
+        );
+        inputs.ramdisk = Some(borrowed);
+        let twice = OwnedRamdisk {
+            bytes: vec![1],
+            source: source("RestoreRamDisk"),
+        };
+        assert!(prepare_owned(&inputs, twice, &options).is_err());
         // Board firmware travels unchanged under its guest file name, which
         // must not replace a bundle file.
         let firmware = bundle.files.iter().find(|(n, _)| n == "USB-C_HPM,47.bin");
