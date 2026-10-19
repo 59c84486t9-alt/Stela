@@ -46,7 +46,11 @@ use crate::platform::apple::{
     wdt::{self, AppleWdt},
 };
 use crate::platform::dma::Port;
-use crate::platform::usb::session::Session as UsbSession;
+use crate::platform::usb::{
+    Function,
+    hid::{Input, Peripheral},
+    session::Session as UsbSession,
+};
 pub use crate::platform::usb::{
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
     mux::{State as MuxState, StreamId as MuxStream, StreamState as MuxStreamState},
@@ -111,7 +115,12 @@ struct UsbMaster {
     stream: usize,
     session: UsbSession,
     port: UsbPort,
+    /// The Type-C connector's `port-number` and shared cable state.
+    number: u32,
     connector: typec::Port,
+    /// The input peripheral cabled to the connector when this port is the
+    /// downstream-facing (host) side.
+    peripheral: Option<Peripheral>,
     next_poll: u64,
     attached: bool,
     epoch: u64,
@@ -133,6 +142,16 @@ impl UsbPort {
         }
     }
 }
+/// The USB2 function a downstream-facing attach with VBUS cables to the
+/// host personality, by its speed.
+fn host_function(connector: &typec::Port) -> Option<typec::Usb2Speed> {
+    connector
+        .snapshot()
+        .connection
+        .filter(|c| c.role == typec::DataRole::Dfp && c.vbus)
+        .map(|c| c.speed)
+}
+
 impl PortState for UsbPort {
     fn generation(&self) -> u64 {
         self.generation
@@ -815,7 +834,9 @@ impl AppleDevices {
             stream: placement.stream as usize,
             session: UsbSession::new(),
             port: UsbPort::of(&connector),
+            number: placement.port,
             connector,
+            peripheral: None,
             next_poll: 0,
             attached: false,
             epoch: 0,
@@ -832,6 +853,36 @@ impl AppleDevices {
         self.typec_port(connector).set_connection(connection)?;
         Ok(())
     }
+    /// Cables the native keyboard and pointer to Type-C connector
+    /// `connector`, this machine being the downstream-facing port that
+    /// sources VBUS: the HPM reports the attach and the controller's host
+    /// personality finds a full-speed device on its USB2 port.
+    pub fn attach_input(&mut self, connector: u32) -> Result<(), &'static str> {
+        let master = self
+            .usb_masters
+            .iter_mut()
+            .find(|master| master.number == connector)
+            .ok_or("no USB controller on that connector")?;
+        master.peripheral = Some(Peripheral::new());
+        master.connector.set_connection(Some(typec::Attached {
+            orientation: typec::Orientation::Normal,
+            role: typec::DataRole::Dfp,
+            source: true,
+            vbus: true,
+            speed: typec::Usb2Speed::Full,
+        }))?;
+        Ok(())
+    }
+
+    /// One host input change for the attached peripheral.
+    pub fn input(&mut self, input: Input) -> Result<(), &'static str> {
+        self.usb_masters
+            .iter_mut()
+            .find_map(|master| master.peripheral.as_mut())
+            .ok_or("no input peripheral is attached")?
+            .input(input)
+    }
+
     pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>, &'static str> {
         let master = self
             .usb_masters
@@ -1411,7 +1462,8 @@ impl Devices for AppleDevices {
                     return Some(0);
                 }
                 let poll = (port.ready || master.attached).then_some(master.next_poll);
-                let host = controller.and_then(Dwc3::host_deadline);
+                let function = master.peripheral.as_ref().map(|p| p as &dyn Function);
+                let host = controller.and_then(|c| c.host_deadline(function));
                 poll.into_iter().chain(host).min()
             })
             .min()
@@ -1503,6 +1555,11 @@ impl Devices for AppleDevices {
                 master.next_poll = 0;
             }
             controller.sync_port(&master.port).map_err(fail)?;
+            controller
+                .attach_host_function(host_function(&master.connector))
+                .map_err(fail)?;
+            let function = master.peripheral.as_mut().map(|p| p as &mut dyn Function);
+            controller.service_host(&mut port, function).map_err(fail)?;
             controller.flush(&mut port).map_err(fail)?;
             let ready = controller.available();
             if !ready && master.attached {

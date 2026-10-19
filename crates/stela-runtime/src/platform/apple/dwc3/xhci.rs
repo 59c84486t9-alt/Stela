@@ -1,6 +1,6 @@
 //! The DWC3 core's xHCI host personality: eXtensible Host Controller
-//! Interface 1.1 (Intel, revision 1.2 of the specification), as a root hub
-//! with nothing attached.
+//! Interface 1.1 (Intel, revision 1.2 of the specification): a two-port
+//! root hub, device slots and their transfer rings (`slot`).
 //!
 //! The capability registers describe Stela's emulated core, matching the
 //! device personality's profile: version 1.10, 64 device slots, four
@@ -8,9 +8,9 @@
 //! buffer of the same number), 64-bit addressing, 32-byte contexts, port
 //! power control and no scratchpad buffers. Port 1 is the USB 2.0 port and
 //! port 2 the USB 3.0 port, each named by a Supported Protocol capability
-//! (spec 7.2), as on a DWC3 dual-role core. No device ever connects: the
-//! USB2 line is cabled to a host when one is, and there is no SuperSpeed
-//! PHY, so every port stays Disconnected (spec 4.19.1).
+//! (spec 7.2), as on a DWC3 dual-role core. A USB2 function the machine
+//! attaches (a downstream-facing Type-C attach) connects to port 1; there
+//! is no SuperSpeed PHY, so port 2 stays Disconnected (spec 4.19.1).
 //!
 //! Spec-defined behavior: USBCMD run/stop and reset complete at once (HCH
 //! and CNR settle before the next read); save and restore state (CSS/CRS)
@@ -20,30 +20,40 @@
 //! the primary interrupter (spec 4.14.2, 6.4.2.8). The
 //! command ring runs from a doorbell 0 write until software stops or aborts
 //! it, completing each command with a Command Completion Event (spec
-//! 6.4.2.2): No Op, Enable/Disable Slot and Get Port Bandwidth complete as
-//! specified; Address Device fails with a USB Transaction Error because its
-//! port has no device; the other slot commands find their slot Enabled,
-//! not Addressed, and fail with a Context State Error; commands whose
-//! capability is not advertised fail with a TRB Error. Event rings of up to
+//! 6.4.2.2): No Op, Get Port Bandwidth and the slot and endpoint commands
+//! complete as specified (`slot`); commands whose capability is not
+//! advertised fail with a TRB Error. Event rings of up to
 //! 16 segments take events at the enqueue pointer with the producer cycle
 //! state; IMAN.IP, ERDP.EHB and USBSTS.EINT latch, and an interrupter's
-//! wire follows IP with IE and USBCMD.INTE. Interrupt moderation only
-//! delays interrupts, and this model raises them at once.
+//! wire follows IP with IE and USBCMD.INTE; an event whose TRB set BEI
+//! leaves IP alone. Interrupt moderation only delays interrupts, and this
+//! model raises them at once.
 //!
-//! A warm reset (PORTSC.WPR) of the disconnected USB3 port completes at
-//! once: the link returns to RxDetect with PRC and WRC set (spec 4.19.5.1,
-//! 5.4.8). A change bit set while running, then and only then, posts a Port
-//! Status Change Event and sets USBSTS.PCD (spec 4.19.2). PR of a
-//! disconnected port and WPR of the USB2 port (RsvdZ) have no effect.
+//! The USB2 port follows the USB2 root hub port state machine (spec
+//! 4.19.1.2): a connection while powered sets CCS and CSC with the link in
+//! Polling, the speed Low or Full until reset; PR completes at once,
+//! enabling the port in U0 at the function's speed with PRC set and
+//! resetting the function; PED written as one disables it; disconnection
+//! clears CCS and PED and sets CSC. A link state write suspends an enabled
+//! port to U3, and Resume then U0 bring it back with PLC set (spec
+//! 4.15.2.3). A warm reset (PORTSC.WPR) of the disconnected USB3 port
+//! completes at once: the link returns to RxDetect with PRC and WRC set
+//! (spec 4.19.5.1, 5.4.8). A change bit set while running, then and only
+//! then, posts a Port Status Change Event and sets USBSTS.PCD (spec
+//! 4.19.2). PR of a disconnected port and WPR of the USB2 port (RsvdZ)
+//! have no effect.
 //!
 //! Refused rather than modeled: features not advertised (light reset,
-//! CEM, extended TBC, virtualization), Address Device
-//! with BSR (it initializes contexts without a device transaction), device
-//! slot doorbells (no slot ever reaches Addressed), port test modes and
-//! port indicators. A full event ring holds further events until software
-//! advances ERDP, rather than posting an Event Ring Full Error.
-use crate::platform::dma::Port;
-use alloc::collections::VecDeque;
+//! CEM, extended TBC, virtualization, streams, USB2 hardware LPM), port
+//! test modes and port indicators. A full event ring holds further events
+//! until software advances ERDP, rather than posting an Event Ring Full
+//! Error.
+mod slot;
+
+use super::super::typec::Usb2Speed;
+use crate::platform::{dma::Port, usb::Function};
+use alloc::{boxed::Box, collections::VecDeque};
+use slot::Slot;
 
 /// Bytes of the core's address space the host registers occupy.
 pub const BYTES: u64 = 0x1000;
@@ -103,7 +113,15 @@ const CS: u64 = 1 << 1;
 const CA: u64 = 1 << 2;
 const CRR: u64 = 1 << 3;
 
+const CCS: u32 = 1;
 const PED: u32 = 1 << 1;
+const CSC: u32 = 1 << 17;
+const PLC: u32 = 1 << 22;
+const SPEED_SHIFT: u32 = 10;
+const SPEED: u32 = 0xf << SPEED_SHIFT;
+const FULL_SPEED: u32 = 1;
+const LOW_SPEED: u32 = 2;
+const HIGH_SPEED: u32 = 3;
 const WRC: u32 = 1 << 19;
 const PRC: u32 = 1 << 21;
 const PR: u32 = 1 << 4;
@@ -115,8 +133,12 @@ const LWS: u32 = 1 << 16;
 const PORT_CHANGES: u32 = 0x7f << 17;
 const WAKE: u32 = 7 << 25;
 const WPR: u32 = 1 << 31;
+const U0: u32 = 0;
+const U3: u32 = 3;
 const DISABLED: u32 = 4;
 const RX_DETECT: u32 = 5;
+const POLLING: u32 = 7;
+const RESUME: u32 = 15;
 
 const IP: u32 = 1;
 const IE: u32 = 1 << 1;
@@ -129,6 +151,12 @@ const LINK: u32 = 6;
 const ENABLE_SLOT: u32 = 9;
 const DISABLE_SLOT: u32 = 10;
 const ADDRESS_DEVICE: u32 = 11;
+const CONFIGURE_ENDPOINT: u32 = 12;
+const EVALUATE_CONTEXT: u32 = 13;
+const RESET_ENDPOINT: u32 = 14;
+const STOP_ENDPOINT: u32 = 15;
+const SET_TR_DEQUEUE: u32 = 16;
+const RESET_DEVICE: u32 = 17;
 const GET_PORT_BANDWIDTH: u32 = 21;
 const NO_OP: u32 = 23;
 const COMMAND_COMPLETION: u32 = 33;
@@ -139,6 +167,7 @@ const TRANSACTION_ERROR: u32 = 4;
 const TRB_ERROR: u32 = 5;
 const NO_SLOTS: u32 = 9;
 const SLOT_NOT_ENABLED: u32 = 11;
+const PARAMETER_ERROR: u32 = 17;
 const CONTEXT_STATE_ERROR: u32 = 19;
 const COMMAND_RING_STOPPED: u32 = 24;
 /// Commands one doorbell may run before yielding: a ring software filled
@@ -176,6 +205,8 @@ struct EventRing {
 struct Event {
     interrupter: usize,
     trb: [u32; 4],
+    /// Whether posting sets IMAN.IP (clear for a TRB with BEI set).
+    interrupt: bool,
 }
 
 #[derive(Clone)]
@@ -190,7 +221,7 @@ pub struct Xhci {
     command_running: bool,
     command_doorbell: bool,
     ports: [PortRegisters; PORTS],
-    slots: [bool; MAX_SLOTS],
+    slots: [Option<Box<Slot>>; MAX_SLOTS],
     interrupters: [Interrupter; INTERRUPTERS],
     pending: VecDeque<Event>,
     /// Microframes counted when last halted, and the system count the run
@@ -206,6 +237,31 @@ struct PortRegisters {
     portsc: u32,
     pmsc: u32,
     hlpmc: u32,
+    /// The function cabled to the port, by its speed.
+    attached: Option<Usb2Speed>,
+    /// A port reset completed: the function resets before its next
+    /// transaction.
+    reset_function: bool,
+}
+
+impl PortRegisters {
+    /// A device is connected and the port Enabled.
+    fn enabled(&self) -> bool {
+        self.portsc & (CCS | PED) == CCS | PED
+    }
+
+    /// The link is in U0: transfers may run.
+    fn active(&self) -> bool {
+        self.enabled() && (self.portsc & PLS) >> PLS_SHIFT == U0
+    }
+}
+
+fn speed_id(speed: Usb2Speed) -> u32 {
+    match speed {
+        Usb2Speed::Low => LOW_SPEED,
+        Usb2Speed::Full => FULL_SPEED,
+        Usb2Speed::High => HIGH_SPEED,
+    }
 }
 
 impl Default for Xhci {
@@ -232,7 +288,7 @@ impl Xhci {
                 portsc: DISABLED << PLS_SHIFT,
                 ..PortRegisters::default()
             }; PORTS],
-            slots: [false; MAX_SLOTS],
+            slots: [const { None }; MAX_SLOTS],
             interrupters: [Interrupter::default(); INTERRUPTERS],
             pending: VecDeque::new(),
             mfindex: 0,
@@ -246,13 +302,69 @@ impl Xhci {
         self.command_doorbell
             || !self.pending.is_empty()
             || self.interrupters.iter().any(|i| i.reload)
+            || self.usbsts & HCH == 0 && self.transfers_pending()
     }
 
-    /// The system count at which the next MFINDEX Wrap Event falls due.
-    pub fn deadline(&self) -> Option<u64> {
+    /// The system count at which the next MFINDEX Wrap Event falls due, or
+    /// an endpoint that NAKed is due to be polled again.
+    pub fn deadline(&self, function: Option<&(dyn Function + '_)>) -> Option<u64> {
+        let transfers = self.started.and_then(|_| self.transfer_deadline(function));
+        self.wrap_deadline().into_iter().chain(transfers).min()
+    }
+
+    fn wrap_deadline(&self) -> Option<u64> {
         let start = self.started.filter(|_| self.usbcmd & EWE != 0)?;
         let ahead = self.next_wrap.saturating_sub(self.mfindex);
         Some(start.saturating_add(ahead.saturating_mul(MICROFRAME)))
+    }
+
+    /// Cables `attached` to the USB2 port, or nothing.
+    pub fn attach(&mut self, attached: Option<Usb2Speed>) -> Result<(), &'static str> {
+        if self.ports[0].attached == attached {
+            return Ok(());
+        }
+        let before = self.ports[0].portsc;
+        self.ports[0].attached = attached;
+        self.detect(0);
+        self.changed(0, before)
+    }
+
+    /// Brings port `n`'s connection status in line with its cable.
+    fn detect(&mut self, n: usize) {
+        let port = &mut self.ports[n];
+        let connected = port.portsc & CCS != 0;
+        let powered = port.portsc & PP != 0;
+        match port.attached {
+            Some(speed) if powered && !connected => {
+                let at_connect = if speed == Usb2Speed::Low {
+                    LOW_SPEED
+                } else {
+                    FULL_SPEED
+                };
+                port.portsc = port.portsc & !(PLS | SPEED)
+                    | CCS
+                    | CSC
+                    | POLLING << PLS_SHIFT
+                    | at_connect << SPEED_SHIFT;
+            }
+            None if connected => {
+                port.portsc =
+                    port.portsc & !(CCS | PED | PR | PLS | SPEED) | CSC | RX_DETECT << PLS_SHIFT;
+            }
+            _ => {}
+        }
+    }
+
+    /// A change bit that `portsc` did not have before posts a Port Status
+    /// Change Event while running.
+    fn changed(&mut self, n: usize, before: u32) -> Result<(), &'static str> {
+        if self.ports[n].portsc & !before & PORT_CHANGES != 0 {
+            self.usbsts |= PCD;
+            if self.usbsts & HCH == 0 {
+                self.post(0, Self::port_status_change(n))?;
+            }
+        }
+        Ok(())
     }
 
     /// Interrupter `n`'s wire level.
@@ -539,7 +651,7 @@ impl Xhci {
                 Ok(())
             }
             at if (DOORBELLS..DOORBELLS + 4 * (MAX_SLOTS as u64 + 1)).contains(&at) => {
-                Err("xHCI device slot doorbell: no slot is Addressed")
+                self.ring(((at - DOORBELLS) / 4) as usize, value)
             }
             at if at < BYTES => Err("read-only or reserved xHCI register"),
             _ => Err("offset outside the xHCI register space"),
@@ -586,48 +698,62 @@ impl Xhci {
         Ok(())
     }
 
-    /// PORTSC of a port no device connects to (spec 4.19.1, 5.4.8).
+    /// PORTSC (spec 4.19, 5.4.8).
     fn write_portsc(&mut self, n: usize, value: u32) -> Result<(), &'static str> {
         if value & PIC != 0 {
             return Err("xHCI port indicators are not advertised");
         }
-        let port = &mut self.ports[n];
         let usb3 = n == 1;
-        let before = port.portsc;
-        let mut portsc = port.portsc & !(value & PORT_CHANGES);
-        // PED is RW1CS: writing one disables an enabled port; none is. PR
-        // starts a reset only from the Enabled or Disabled states, which
-        // need a connection.
-        let _ = value & (PED | PR);
+        let before = self.ports[n].portsc;
+        let port = &mut self.ports[n];
+        let mut portsc = before & !(value & PORT_CHANGES);
         portsc = portsc & !WAKE | value & WAKE;
         if value & PP == 0 {
-            portsc &= !PP;
-            portsc = portsc & !PLS | DISABLED << PLS_SHIFT;
+            // Powered off: disconnected and disabled, with no change
+            // reported.
+            portsc &= !(PP | CCS | PED | PR | SPEED | PLS);
+            portsc |= DISABLED << PLS_SHIFT;
         } else if portsc & PP == 0 {
             portsc |= PP;
             portsc = portsc & !PLS | RX_DETECT << PLS_SHIFT;
         }
+        let pls = (portsc & PLS) >> PLS_SHIFT;
+        // PED is RW1CS: writing one disables an enabled port.
+        if value & PED != 0 && portsc & PED != 0 {
+            portsc = portsc & !(PED | PLS) | POLLING << PLS_SHIFT;
+        }
+        // A reset of a connected port completes at once, enabling it.
+        if value & PR != 0 && portsc & (PP | CCS) == PP | CCS {
+            let speed = port.attached.map_or(0, speed_id);
+            portsc = portsc & !(PLS | SPEED) | PED | PRC | U0 << PLS_SHIFT | speed << SPEED_SHIFT;
+            port.reset_function = true;
+        }
         if value & LWS != 0 && portsc & PP != 0 {
-            match (value & PLS) >> PLS_SHIFT {
-                DISABLED if usb3 => portsc = portsc & !PLS | DISABLED << PLS_SHIFT,
-                RX_DETECT if usb3 => portsc = portsc & !PLS | RX_DETECT << PLS_SHIFT,
-                // U0..U3 and resume apply to an Enabled port only.
-                0..=3 | 15 => {}
+            let enabled = portsc & PED != 0;
+            let link = |state: u32| portsc & !PLS | state << PLS_SHIFT;
+            portsc = match (value & PLS) >> PLS_SHIFT {
+                DISABLED if usb3 => link(DISABLED),
+                RX_DETECT if usb3 => link(RX_DETECT),
+                U3 if !usb3 && enabled && pls == U0 => link(U3),
+                RESUME if !usb3 && enabled && pls == U3 => link(RESUME),
+                U0 if !usb3 && enabled && matches!(pls, U3 | RESUME) => link(U0) | PLC,
+                2 if !usb3 && enabled => {
+                    return Err("xHCI USB2 L1 needs hardware LPM, which is not advertised");
+                }
+                // Other U0..U3 and resume writes apply to an Enabled port
+                // in a state they lead from; elsewhere they do nothing.
+                0..=3 | 15 => portsc,
                 _ => return Err("xHCI port link state write is not defined for this port"),
-            }
+            };
         }
         // A warm reset with no device ends in RxDetect at once.
         if usb3 && value & WPR != 0 && portsc & PP != 0 {
             portsc = portsc & !PLS | RX_DETECT << PLS_SHIFT | PRC | WRC;
         }
-        port.portsc = portsc;
-        if portsc & !before & PORT_CHANGES != 0 {
-            self.usbsts |= PCD;
-            if self.usbsts & HCH == 0 {
-                self.post(0, Self::port_status_change(n))?;
-            }
-        }
-        Ok(())
+        self.ports[n].portsc = portsc;
+        // A function cabled to a port that just gained power connects.
+        self.detect(n);
+        self.changed(n, before)
     }
 
     fn port_status_change(n: usize) -> [u32; 4] {
@@ -652,16 +778,35 @@ impl Xhci {
         if self.pending.len() == MAX_PENDING_EVENTS {
             return Err("xHCI pending event capacity exhausted");
         }
-        self.pending.push_back(Event { interrupter, trb });
+        self.pending.push_back(Event {
+            interrupter,
+            trb,
+            interrupt: true,
+        });
         Ok(())
     }
 
     /// Runs doorbelled commands and posts events through the core's DMA
     /// stream. A DMA fault is a host system error the guest cannot recover
     /// from in this model, so it stops the run.
-    pub fn service(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+    /// `function` is what is cabled to the USB2 port, if anything.
+    pub fn service(
+        &mut self,
+        port: &mut Port<'_, '_>,
+        mut function: Option<&mut (dyn Function + '_)>,
+    ) -> Result<(), &'static str> {
+        // Only a cabled function hears the bus.
+        if self.ports[0].attached.is_none() {
+            function = None;
+        }
+        if self.ports[0].reset_function {
+            if let Some(f) = function.as_deref_mut() {
+                f.reset()?;
+            }
+            self.ports[0].reset_function = false;
+        }
         while self
-            .deadline()
+            .wrap_deadline()
             .is_some_and(|deadline| port.access.now >= deadline)
         {
             self.next_wrap += MFINDEX_PERIOD;
@@ -677,7 +822,10 @@ impl Xhci {
         }
         if self.command_doorbell && self.usbsts & HCH == 0 {
             self.command_doorbell = false;
-            self.run_commands(port)?;
+            self.run_commands(port, function.as_deref_mut())?;
+        }
+        if self.usbsts & HCH == 0 {
+            self.run_transfers(port, function)?;
         }
         while let Some(event) = self.pending.front().copied() {
             if !self.deliver(port, event)? {
@@ -771,14 +919,20 @@ impl Xhci {
         } else if let Some(ring) = &mut self.interrupters[n].ring {
             ring.index += 1;
         }
-        let i = &mut self.interrupters[n];
-        i.erdp |= EHB;
-        i.iman |= IP;
-        self.usbsts |= EINT;
+        if event.interrupt {
+            let i = &mut self.interrupters[n];
+            i.erdp |= EHB;
+            i.iman |= IP;
+            self.usbsts |= EINT;
+        }
         Ok(true)
     }
 
-    fn run_commands(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
+    fn run_commands(
+        &mut self,
+        port: &mut Port<'_, '_>,
+        mut function: Option<&mut (dyn Function + '_)>,
+    ) -> Result<(), &'static str> {
         for _ in 0..COMMANDS_PER_SERVICE {
             if !self.command_running {
                 return Ok(());
@@ -803,6 +957,7 @@ impl Xhci {
             let trb = self.command;
             self.command += TRB_BYTES;
             let slot = (control >> 24) as usize;
+            let endpoint = (control >> 16 & 0x1f) as usize;
             let (code, slot) = match kind {
                 NO_OP => (SUCCESS, 0),
                 ENABLE_SLOT => {
@@ -810,9 +965,9 @@ impl Xhci {
                         (TRB_ERROR, 0)
                     } else {
                         let enabled = self.config as usize;
-                        match (0..enabled).find(|&s| !self.slots[s]) {
+                        match (0..enabled).find(|&s| self.slots[s].is_none()) {
                             Some(s) => {
-                                self.slots[s] = true;
+                                self.slots[s] = Some(Slot::new());
                                 (SUCCESS, s + 1)
                             }
                             None => (NO_SLOTS, 0),
@@ -821,28 +976,34 @@ impl Xhci {
                 }
                 DISABLE_SLOT => match self.slot(slot) {
                     Some(s) => {
-                        self.slots[s] = false;
+                        self.slots[s] = None;
                         (SUCCESS, slot)
                     }
                     None => (SLOT_NOT_ENABLED, slot),
                 },
                 ADDRESS_DEVICE => {
-                    if control & (1 << 9) != 0 {
-                        return Err("xHCI Address Device with BSR is not modeled");
-                    }
-                    match self.slot(slot) {
-                        // No root hub port has a device to address.
-                        Some(_) => (TRANSACTION_ERROR, slot),
-                        None => (SLOT_NOT_ENABLED, slot),
-                    }
+                    let bsr = control & (1 << 9) != 0;
+                    let input = parameter & !0xf;
+                    let code =
+                        self.address_device(port, function.as_deref_mut(), slot, input, bsr)?;
+                    (code, slot)
                 }
-                // Configure Endpoint, Evaluate Context, Reset Endpoint, Stop
-                // Endpoint, Set TR Dequeue Pointer, Reset Device: their slot
-                // is at most Enabled, never Addressed.
-                12..=17 => match self.slot(slot) {
-                    Some(_) => (CONTEXT_STATE_ERROR, slot),
-                    None => (SLOT_NOT_ENABLED, slot),
-                },
+                CONFIGURE_ENDPOINT => {
+                    let deconfigure = control & (1 << 9) != 0;
+                    (
+                        self.configure_endpoint(port, slot, parameter & !0xf, deconfigure)?,
+                        slot,
+                    )
+                }
+                EVALUATE_CONTEXT => (self.evaluate_context(port, slot, parameter & !0xf)?, slot),
+                RESET_ENDPOINT => (self.reset_endpoint(port, slot, endpoint)?, slot),
+                STOP_ENDPOINT => (self.stop_endpoint(port, slot, endpoint)?, slot),
+                SET_TR_DEQUEUE => {
+                    let stream = word(2) >> 16;
+                    let code = self.set_dequeue(port, slot, endpoint, parameter, stream)?;
+                    (code, slot)
+                }
+                RESET_DEVICE => (self.reset_device(port, slot)?, slot),
                 GET_PORT_BANDWIDTH => {
                     if control >> 16 & 0xf == 0 || slot != 0 {
                         (TRB_ERROR, 0)
@@ -871,7 +1032,7 @@ impl Xhci {
         (1..=MAX_SLOTS)
             .contains(&id)
             .then(|| id - 1)
-            .filter(|&s| self.slots[s])
+            .filter(|&s| self.slots[s].is_some())
     }
 }
 
@@ -884,6 +1045,8 @@ mod tests {
         interrupt::InterruptLatch,
     };
     use crate::platform::dma::{Memory, tests::Ram};
+
+    const STOPPED_CODE: u32 = 26;
 
     const RAM: u64 = 0x1_0000_0000;
     const ERST: u64 = RAM;
@@ -900,6 +1063,14 @@ mod tests {
         service_at(x, ram, 0);
     }
     fn service_at(x: &mut Xhci, ram: &mut Ram, now: u64) {
+        service_with(x, ram, now, None);
+    }
+    fn service_with(
+        x: &mut Xhci,
+        ram: &mut Ram,
+        now: u64,
+        function: Option<&mut (dyn Function + '_)>,
+    ) {
         let mut dart = Dart::new(16, None);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, now, &mut latch);
@@ -912,7 +1083,7 @@ mod tests {
             memory: ram,
             access: &mut access,
         };
-        x.service(&mut port).unwrap();
+        x.service(&mut port, function).unwrap();
     }
     fn trb(ram: &mut Ram, at: u64, words: [u32; 4]) {
         ram.put_u64(at, u64::from(words[0]) | u64::from(words[1]) << 32);
@@ -1005,7 +1176,7 @@ mod tests {
         let period = MFINDEX_PERIOD * MICROFRAME;
         x.write(OPERATIONAL, 4, u64::from(RUN | INTE | EWE), 100)
             .unwrap();
-        assert_eq!(x.deadline(), Some(100 + period));
+        assert_eq!(x.deadline(None), Some(100 + period));
         wr(&mut x, PORT_BASE + PORT_STRIDE, PP | WPR);
         service_at(&mut x, &mut ram, period);
         assert_eq!(event(&mut ram, 0)[0] >> 24, 2);
@@ -1015,12 +1186,12 @@ mod tests {
         assert_eq!(event(&mut ram, 1)[2] >> 24, SUCCESS);
         assert_eq!(event(&mut ram, 1)[3] >> 10 & 0x3f, MFINDEX_WRAP);
         assert_eq!(x.read(RUNTIME, 4, 100 + period), Ok(0));
-        assert_eq!(x.deadline(), Some(100 + 2 * period));
+        assert_eq!(x.deadline(None), Some(100 + 2 * period));
         assert!(x.interrupt(0));
         // Halting stops the count and the wraps.
         x.write(OPERATIONAL, 4, u64::from(EWE), 100 + period + 3000)
             .unwrap();
-        assert_eq!(x.deadline(), None);
+        assert_eq!(x.deadline(None), None);
         assert_eq!(x.read(RUNTIME, 4, u64::MAX), Ok(1));
     }
 
@@ -1041,7 +1212,22 @@ mod tests {
         let cmd = |kind: u32, slot: u32| [0, 0, 0, kind << 10 | slot << 24 | CYCLE];
         trb(&mut ram, COMMANDS, cmd(NO_OP, 0));
         trb(&mut ram, COMMANDS + 16, cmd(ENABLE_SLOT, 0));
-        trb(&mut ram, COMMANDS + 32, cmd(ADDRESS_DEVICE, 1));
+        // An input context adding the slot and EP0 on port 1, which has no
+        // device.
+        let input = RAM + 0x3000;
+        ram.put_u64(input, 3 << 32);
+        ram.put_u64(input + 0x20 + 4, 1 << 16);
+        ram.put_u64(input + 0x40 + 4, u64::from(4u32 << 3 | 64 << 16));
+        trb(
+            &mut ram,
+            COMMANDS + 32,
+            [
+                input as u32,
+                (input >> 32) as u32,
+                0,
+                ADDRESS_DEVICE << 10 | 1 << 24 | CYCLE,
+            ],
+        );
         trb(&mut ram, COMMANDS + 48, cmd(12, 1));
         trb(&mut ram, COMMANDS + 64, cmd(DISABLE_SLOT, 1));
         trb(&mut ram, COMMANDS + 80, cmd(DISABLE_SLOT, 1));
@@ -1090,7 +1276,7 @@ mod tests {
         service(&mut x, &mut ram);
         assert_eq!(event(&mut ram, 6)[2] >> 24, COMMAND_RING_STOPPED);
         assert_eq!(rd(&mut x, OPERATIONAL + 0x18), 0);
-        assert!(x.write(DOORBELLS + 4, 4, 1, 0).is_err());
+        assert!(x.write(DOORBELLS + 4, 4, 0, 0).is_err());
     }
 
     #[test]
@@ -1118,5 +1304,405 @@ mod tests {
         // Wrapping to the segment start flips the producer cycle.
         assert_eq!(event(&mut ram, 15)[3] & CYCLE, 1);
         assert_eq!(event(&mut ram, 0)[3] & CYCLE, 0);
+    }
+
+    /// A controller running with one 16-TRB event segment, eight slots,
+    /// a DCBAA and a command ring, its USB2 port powered.
+    struct Bench {
+        x: Xhci,
+        ram: Ram,
+        hid: crate::platform::usb::hid::Peripheral,
+        now: u64,
+        commands: u64,
+        events: u64,
+    }
+
+    const DCBAA: u64 = RAM + 0x4000;
+    const OUTPUT: u64 = RAM + 0x5000;
+    const INPUT: u64 = RAM + 0x6000;
+    const EP0_RING: u64 = RAM + 0x7000;
+    const EP1_RING: u64 = RAM + 0x8000;
+    const BUFFER: u64 = RAM + 0x9000;
+    const PORTSC1: u64 = PORT_BASE;
+
+    impl Bench {
+        fn new() -> Self {
+            let mut ram = Ram::new(RAM, 0x10000);
+            let mut x = Xhci::new();
+            ram.put_u64(ERST, EVENTS);
+            ram.put_u64(ERST + 8, 64);
+            ram.put_u64(DCBAA + 8, OUTPUT);
+            let i0 = INTERRUPTER_BASE;
+            wr(&mut x, i0 + 8, 1);
+            x.write(i0 + 0x18, 8, EVENTS, 0).unwrap();
+            x.write(i0 + 0x10, 8, ERST, 0).unwrap();
+            wr(&mut x, i0, IE);
+            wr(&mut x, OPERATIONAL + 0x38, 8);
+            x.write(OPERATIONAL + 0x30, 8, DCBAA, 0).unwrap();
+            x.write(OPERATIONAL + 0x18, 8, COMMANDS | RCS, 0).unwrap();
+            wr(&mut x, OPERATIONAL, RUN | INTE);
+            wr(&mut x, PORTSC1, PP);
+            Self {
+                x,
+                ram,
+                hid: crate::platform::usb::hid::Peripheral::new(),
+                now: 0,
+                commands: COMMANDS,
+                events: 0,
+            }
+        }
+
+        fn service(&mut self) {
+            service_with(&mut self.x, &mut self.ram, self.now, Some(&mut self.hid));
+        }
+
+        /// The next event, which must exist.
+        fn event(&mut self) -> [u32; 4] {
+            let e = event(&mut self.ram, self.events);
+            assert_eq!(e[3] & CYCLE, 1, "no event {}", self.events);
+            self.events += 1;
+            e
+        }
+
+        fn command(&mut self, words: [u32; 4]) -> [u32; 4] {
+            trb(&mut self.ram, self.commands, words);
+            self.commands += 16;
+            wr(&mut self.x, DOORBELLS, 0);
+            self.service();
+            let e = self.event();
+            assert_eq!(e[3] >> 10 & 0x3f, COMMAND_COMPLETION);
+            e
+        }
+
+        fn context(&mut self, at: u64) -> [u32; 8] {
+            let mut bytes = [0u8; 32];
+            assert!(self.ram.read(at, &mut bytes));
+            core::array::from_fn(|n| {
+                u32::from_le_bytes(bytes[n * 4..n * 4 + 4].try_into().unwrap())
+            })
+        }
+
+        fn put_context(&mut self, at: u64, words: [u32; 8]) {
+            for (n, pair) in words.chunks(2).enumerate() {
+                self.ram.put_u64(
+                    at + 8 * n as u64,
+                    u64::from(pair[0]) | u64::from(pair[1]) << 32,
+                );
+            }
+        }
+    }
+
+    const NORMAL_TRB: u32 = 1 << 10;
+    const SETUP_TRB: u32 = 2 << 10;
+    const DATA_TRB: u32 = 3 << 10;
+    const STATUS_TRB: u32 = 4 << 10;
+    const TRB_IOC: u32 = 1 << 5;
+    const TRB_IDT: u32 = 1 << 6;
+    const TRB_ISP: u32 = 1 << 2;
+    const TRB_IN: u32 = 1 << 16;
+    const TRANSFER_EVENT: u32 = 32;
+
+    fn setup_trb(packet: [u8; 8], transfer_type: u32) -> [u32; 4] {
+        let p = u64::from_le_bytes(packet);
+        [
+            p as u32,
+            (p >> 32) as u32,
+            8,
+            SETUP_TRB | TRB_IDT | transfer_type << 16 | CYCLE,
+        ]
+    }
+
+    /// Attaches, resets and addresses the keyboard as slot 1, then runs
+    /// SET_CONFIGURATION and configures its keyboard endpoint (DCI 3).
+    fn enumerated() -> Bench {
+        let mut b = Bench::new();
+        b.x.attach(Some(Usb2Speed::Full)).unwrap();
+        let portsc = rd(&mut b.x, PORTSC1);
+        assert_eq!(portsc & (CCS | CSC | PED), CCS | CSC);
+        assert_eq!(portsc & PLS, POLLING << PLS_SHIFT);
+        b.service();
+        assert_eq!(b.event()[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
+        wr(&mut b.x, PORTSC1, PP | CSC | PR);
+        let portsc = rd(&mut b.x, PORTSC1);
+        assert_eq!(portsc & (CCS | PED | PRC | PR), CCS | PED | PRC);
+        assert_eq!(portsc & SPEED, FULL_SPEED << SPEED_SHIFT);
+        assert_eq!(portsc & PLS, U0 << PLS_SHIFT);
+        b.service();
+        assert_eq!(b.event()[0] >> 24, 1);
+        wr(&mut b.x, PORTSC1, PP | PRC);
+        let e = b.command([0, 0, 0, ENABLE_SLOT << 10 | CYCLE]);
+        assert_eq!((e[2] >> 24, e[3] >> 24), (SUCCESS, 1));
+        // Input context: add the slot and EP0; root port 1, one entry.
+        b.put_context(INPUT, [0, 3, 0, 0, 0, 0, 0, 0]);
+        b.put_context(INPUT + 0x20, [1 << 27 | 1 << 20, 1 << 16, 0, 0, 0, 0, 0, 0]);
+        b.put_context(
+            INPUT + 0x40,
+            [
+                0,
+                3 << 1 | 4 << 3 | 64 << 16,
+                EP0_RING as u32 | 1,
+                (EP0_RING >> 32) as u32,
+                8,
+                0,
+                0,
+                0,
+            ],
+        );
+        let input = INPUT as u32;
+        let e = b.command([
+            input,
+            (INPUT >> 32) as u32,
+            0,
+            ADDRESS_DEVICE << 10 | 1 << 24 | CYCLE,
+        ]);
+        assert_eq!(e[2] >> 24, SUCCESS);
+        let slot = b.context(OUTPUT);
+        assert_eq!((slot[3] >> 27, slot[3] & 0xff), (2, 1));
+        assert_eq!(b.context(OUTPUT + 0x20)[0] & 7, 1);
+        // SET_CONFIGURATION 1: no data stage, status IN.
+        trb(&mut b.ram, EP0_RING, setup_trb([0, 9, 1, 0, 0, 0, 0, 0], 0));
+        trb(
+            &mut b.ram,
+            EP0_RING + 16,
+            [0, 0, 0, STATUS_TRB | TRB_IN | TRB_IOC | CYCLE],
+        );
+        wr(&mut b.x, DOORBELLS + 4, 1);
+        assert!(b.x.pending());
+        b.service();
+        let e = b.event();
+        assert_eq!(e[3] >> 10 & 0x3f, TRANSFER_EVENT);
+        assert_eq!(
+            (e[0], e[2] >> 24, e[3] >> 16 & 0x1f),
+            ((EP0_RING + 16) as u32, SUCCESS, 1)
+        );
+        // Configure the interrupt IN endpoint 0x81 (DCI 3), 1 ms interval.
+        b.put_context(INPUT, [0, 1 | 1 << 3, 0, 0, 0, 0, 0, 0]);
+        b.put_context(INPUT + 0x20, [3 << 27, 1 << 16, 0, 0, 0, 0, 0, 0]);
+        b.put_context(
+            INPUT + 0x20 * 4,
+            [
+                3 << 16,
+                3 << 1 | 7 << 3 | 8 << 16,
+                EP1_RING as u32 | 1,
+                (EP1_RING >> 32) as u32,
+                8,
+                0,
+                0,
+                0,
+            ],
+        );
+        let e = b.command([
+            input,
+            (INPUT >> 32) as u32,
+            0,
+            CONFIGURE_ENDPOINT << 10 | 1 << 24 | CYCLE,
+        ]);
+        assert_eq!(e[2] >> 24, SUCCESS);
+        assert_eq!(b.context(OUTPUT)[3] >> 27, 3);
+        assert_eq!(b.context(OUTPUT + 0x20 * 3)[0] & 7, 1);
+        b
+    }
+
+    #[test]
+    fn an_attached_keyboard_enumerates_and_reports_keys_through_its_rings() {
+        let mut b = enumerated();
+        // GET_DESCRIPTOR(device) with a 64-byte IN data stage: short.
+        trb(
+            &mut b.ram,
+            EP0_RING + 32,
+            setup_trb([0x80, 6, 0, 1, 0, 0, 64, 0], 3),
+        );
+        trb(
+            &mut b.ram,
+            EP0_RING + 48,
+            [
+                BUFFER as u32,
+                (BUFFER >> 32) as u32,
+                64,
+                DATA_TRB | TRB_IN | TRB_ISP | CYCLE,
+            ],
+        );
+        trb(
+            &mut b.ram,
+            EP0_RING + 64,
+            [0, 0, 0, STATUS_TRB | TRB_IOC | CYCLE],
+        );
+        wr(&mut b.x, DOORBELLS + 4, 1);
+        b.service();
+        let short = b.event();
+        assert_eq!((short[0], short[2] >> 24), ((EP0_RING + 48) as u32, 13));
+        assert_eq!(short[2] & 0xff_ffff, 64 - 18);
+        assert_eq!(b.event()[2] >> 24, SUCCESS);
+        let mut device = [0u8; 18];
+        assert!(b.ram.read(BUFFER, &mut device));
+        assert_eq!(device[..2], [18, 1]);
+        assert_eq!(device[8..10], [0x09, 0x12]);
+        // The keyboard endpoint NAKs until a key goes down, and is polled
+        // again only then, at its next interval.
+        trb(
+            &mut b.ram,
+            EP1_RING,
+            [
+                BUFFER as u32,
+                (BUFFER >> 32) as u32,
+                8,
+                NORMAL_TRB | TRB_IOC | TRB_ISP | CYCLE,
+            ],
+        );
+        wr(&mut b.x, DOORBELLS + 4, 3);
+        b.now = 1000;
+        b.service();
+        assert_eq!(event(&mut b.ram, b.events)[3] & CYCLE, 0);
+        assert!(!b.x.pending());
+        // The keyboard's default 500 ms idle rate repeats its report.
+        assert_eq!(b.x.deadline(Some(&b.hid)), Some(125 * 96_000));
+        b.hid
+            .input(crate::platform::usb::hid::Input::Key {
+                usage: 0x04,
+                pressed: true,
+            })
+            .unwrap();
+        assert_eq!(b.x.deadline(Some(&b.hid)), Some(1000 + 8 * MICROFRAME));
+        b.now = 1000 + 8 * MICROFRAME;
+        b.service();
+        let e = b.event();
+        assert_eq!(
+            (e[0], e[2], e[3] >> 16 & 0x1f),
+            (EP1_RING as u32, SUCCESS << 24, 3)
+        );
+        let mut report = [0u8; 8];
+        assert!(b.ram.read(BUFFER, &mut report));
+        assert_eq!(report, [0, 0, 4, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_stall_halts_ep0_until_reset_and_a_new_dequeue_pointer() {
+        let mut b = enumerated();
+        // GET_DESCRIPTOR(device qualifier): a full-speed device STALLs.
+        trb(
+            &mut b.ram,
+            EP0_RING + 32,
+            setup_trb([0x80, 6, 0, 6, 0, 0, 10, 0], 3),
+        );
+        trb(
+            &mut b.ram,
+            EP0_RING + 48,
+            [
+                BUFFER as u32,
+                (BUFFER >> 32) as u32,
+                10,
+                DATA_TRB | TRB_IN | CYCLE,
+            ],
+        );
+        trb(
+            &mut b.ram,
+            EP0_RING + 64,
+            [0, 0, 0, STATUS_TRB | TRB_IOC | CYCLE],
+        );
+        wr(&mut b.x, DOORBELLS + 4, 1);
+        b.service();
+        let e = b.event();
+        assert_eq!(
+            (e[0], e[2] >> 24, e[2] & 0xff_ffff),
+            ((EP0_RING + 48) as u32, 6, 10)
+        );
+        let ep0 = b.context(OUTPUT + 0x20);
+        assert_eq!((ep0[0] & 7, ep0[2]), (2, (EP0_RING + 48) as u32 | 1));
+        // A halted endpoint's doorbell does nothing; Set TR Dequeue needs
+        // Stopped.
+        wr(&mut b.x, DOORBELLS + 4, 1);
+        assert!(!b.x.pending());
+        let next = (EP0_RING + 80) as u32 | 1;
+        let e = b.command([
+            next,
+            (EP0_RING >> 32) as u32,
+            0,
+            SET_TR_DEQUEUE << 10 | 1 << 16 | 1 << 24 | CYCLE,
+        ]);
+        assert_eq!(e[2] >> 24, CONTEXT_STATE_ERROR);
+        let e = b.command([0, 0, 0, RESET_ENDPOINT << 10 | 1 << 16 | 1 << 24 | CYCLE]);
+        assert_eq!(e[2] >> 24, SUCCESS);
+        let e = b.command([
+            next,
+            (EP0_RING >> 32) as u32,
+            0,
+            SET_TR_DEQUEUE << 10 | 1 << 16 | 1 << 24 | CYCLE,
+        ]);
+        assert_eq!(e[2] >> 24, SUCCESS);
+        assert_eq!(b.context(OUTPUT + 0x20)[0] & 7, 3);
+        // The next request runs from the new dequeue pointer.
+        trb(
+            &mut b.ram,
+            EP0_RING + 80,
+            setup_trb([0x80, 8, 0, 0, 0, 0, 1, 0], 3),
+        );
+        trb(
+            &mut b.ram,
+            EP0_RING + 96,
+            [
+                BUFFER as u32,
+                (BUFFER >> 32) as u32,
+                1,
+                DATA_TRB | TRB_IN | CYCLE,
+            ],
+        );
+        trb(
+            &mut b.ram,
+            EP0_RING + 112,
+            [0, 0, 0, STATUS_TRB | TRB_IOC | CYCLE],
+        );
+        wr(&mut b.x, DOORBELLS + 4, 1);
+        b.service();
+        assert_eq!(b.event()[2] >> 24, SUCCESS);
+        let mut configuration = [0u8; 1];
+        assert!(b.ram.read(BUFFER, &mut configuration));
+        assert_eq!(configuration, [1]);
+    }
+
+    #[test]
+    fn stopping_a_polled_endpoint_reports_its_started_td_first() {
+        let mut b = enumerated();
+        trb(
+            &mut b.ram,
+            EP1_RING,
+            [
+                BUFFER as u32,
+                (BUFFER >> 32) as u32,
+                8,
+                NORMAL_TRB | TRB_IOC | CYCLE,
+            ],
+        );
+        wr(&mut b.x, DOORBELLS + 4, 3);
+        b.service();
+        trb(
+            &mut b.ram,
+            b.commands,
+            [0, 0, 0, STOP_ENDPOINT << 10 | 3 << 16 | 1 << 24 | CYCLE],
+        );
+        b.commands += 16;
+        wr(&mut b.x, DOORBELLS, 0);
+        b.service();
+        // The Stopped event precedes the command's completion.
+        let e = b.event();
+        assert_eq!(
+            (e[0], e[2] >> 24, e[2] & 0xff_ffff),
+            (EP1_RING as u32, STOPPED_CODE, 8)
+        );
+        let stopped = b.event();
+        assert_eq!(
+            (stopped[2] >> 24, stopped[3] >> 10 & 0x3f),
+            (SUCCESS, COMMAND_COMPLETION)
+        );
+        let ep = b.context(OUTPUT + 0x20 * 3);
+        assert_eq!((ep[0] & 7, ep[2]), (3, EP1_RING as u32 | 1));
+        let again = b.command([0, 0, 0, STOP_ENDPOINT << 10 | 3 << 16 | 1 << 24 | CYCLE]);
+        assert_eq!(again[2] >> 24, CONTEXT_STATE_ERROR);
+        // Disconnection clears the port; Disable Slot frees the slot.
+        b.x.attach(None).unwrap();
+        assert_eq!(rd(&mut b.x, PORTSC1) & (CCS | PED | CSC), CSC);
+        b.service();
+        assert_eq!(b.event()[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
+        let e = b.command([0, 0, 0, DISABLE_SLOT << 10 | 1 << 24 | CYCLE]);
+        assert_eq!(e[2] >> 24, SUCCESS);
     }
 }

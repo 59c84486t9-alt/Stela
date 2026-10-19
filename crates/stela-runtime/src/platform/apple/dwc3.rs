@@ -38,10 +38,11 @@ pub mod xhci;
 use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
+    typec::Usb2Speed,
 };
 use crate::platform::{
     dma::Port,
-    usb::{BusPeer, MAX_PACKET, Reply, Token},
+    usb::{BusPeer, Function, MAX_PACKET, Reply, Token},
 };
 use alloc::collections::VecDeque;
 use regs::*;
@@ -253,7 +254,6 @@ impl Dwc3 {
         if self.poisoned {
             return Err("DWC3 requires reset after a DMA failure");
         }
-        self.host.service(port)?;
         for _ in 0..self.pending.len() {
             let Some(event) = self.pending.front().copied() else {
                 break;
@@ -285,10 +285,31 @@ impl Dwc3 {
         self.host.pending()
     }
 
-    /// The system count at which the host personality next has an event
-    /// to post on its own.
-    pub fn host_deadline(&self) -> Option<u64> {
-        self.host.deadline()
+    /// The system count at which the host personality next has work of
+    /// its own: an event to post, or `function`'s endpoint to poll.
+    pub fn host_deadline(&self, function: Option<&(dyn Function + '_)>) -> Option<u64> {
+        self.host.deadline(function)
+    }
+
+    /// Cables a USB2 function of `speed` to the host personality's root
+    /// port, or nothing.
+    pub fn attach_host_function(&mut self, speed: Option<Usb2Speed>) -> Result<(), &'static str> {
+        self.host.attach(speed)
+    }
+
+    /// Runs the host personality's commands and transfers, `function`
+    /// being what is cabled to its port, and posts its events.
+    pub fn service_host(
+        &mut self,
+        port: &mut Port<'_, '_>,
+        function: Option<&mut (dyn Function + '_)>,
+    ) -> Result<(), &'static str> {
+        if self.poisoned {
+            return Err("DWC3 requires reset after a DMA failure");
+        }
+        self.host.service(port, function)?;
+        self.interrupts(port.access);
+        Ok(())
     }
 
     fn interrupts(&mut self, access: &mut Access<'_>) {
@@ -1104,7 +1125,7 @@ mod tests {
             memory: &mut ram,
             access: &mut access,
         };
-        dwc.flush(&mut port).unwrap();
+        dwc.service_host(&mut port, None).unwrap();
         assert!(!dwc.host_pending());
         assert!(latch.is_asserted(Wire::Aic(irqs()[0])));
     }
