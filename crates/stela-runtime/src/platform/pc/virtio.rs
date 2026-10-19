@@ -1,5 +1,5 @@
-//! Modern (virtio 1.x) PCI block devices with one polled split virtqueue,
-//! as QEMU's `virtio-blk-pci` presents them.
+//! Modern (virtio 1.x) PCI transport and block devices with one polled
+//! split virtqueue, as QEMU's `virtio-blk-pci` presents them.
 use super::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity, Transport, ascii},
@@ -53,40 +53,25 @@ const REQUEST_FLUSH: u32 = 4;
 const REQUEST_GET_ID: u32 = 8;
 
 const DESCRIPTOR_NEXT: u16 = 1;
-const DESCRIPTOR_WRITE: u16 = 2;
+pub(crate) const DESCRIPTOR_WRITE: u16 = 2;
 
 const QUEUE_ENTRIES: u16 = 8;
-const AVAIL: usize = 0x100;
-const USED: usize = 0x200;
+pub(crate) const AVAIL: usize = 0x100;
+pub(crate) const USED: usize = 0x200;
 const BOUNCE_BYTES: usize = 64 * 1024;
 const SECTOR: u64 = 512;
 const TIMEOUT_US: u64 = 10_000_000;
 
-pub fn matches(function: &Function) -> bool {
-    function.vendor == VENDOR
-        && (function.device == MODERN_BLOCK || function.device == TRANSITIONAL_BLOCK)
+/// A modern virtio PCI function's register regions, reset and acknowledged
+/// (virtio 1.2 section 4.1.4 and 3.1.1).
+pub(crate) struct Modern {
+    common: Mmio,
+    pub(crate) device: Mmio,
+    notify: (Option<super::pci::Bar>, u64, u64, u32),
 }
 
-pub struct VirtioBlk {
-    device: Mmio,
-    notify: Mmio,
-    queue: DmaBuffer,
-    request: DmaBuffer,
-    bounce: DmaBuffer,
-    entries: u16,
-    next: u16,
-    flush: bool,
-    sectors_per_block: u64,
-    identity: Identity,
-    clock: Clock,
-}
-
-impl VirtioBlk {
-    pub fn new(
-        function: &mut Function,
-        handoff: &Handoff,
-        dma: &mut dyn DmaAllocator,
-    ) -> Result<Self, BlockError> {
+impl Modern {
+    pub(crate) fn new(function: &mut Function, handoff: &Handoff) -> Result<Self, BlockError> {
         let bars = function.bars();
         let mut common = None;
         let mut device = None;
@@ -114,18 +99,12 @@ impl VirtioBlk {
                 _ => {}
             }
         }
-        let (
-            Some(common),
-            Some(device),
-            Some((notify_bar, notify_start, notify_length, multiplier)),
-        ) = (common, device, notify)
-        else {
+        let (Some(common), Some(device), Some(notify)) = (common, device, notify) else {
             return Err(BlockError::Unsupported(
                 "virtio device without modern registers",
             ));
         };
         function.enable();
-
         common.write8(DEVICE_STATUS, 0);
         if !handoff
             .clock
@@ -134,6 +113,16 @@ impl VirtioBlk {
             return Err(BlockError::Timeout);
         }
         common.write8(DEVICE_STATUS, ACKNOWLEDGE | DRIVER);
+        Ok(Self {
+            common,
+            device,
+            notify,
+        })
+    }
+
+    /// Accepts the offered features among `wanted`; VERSION_1 is required.
+    pub(crate) fn negotiate(&self, wanted: u64) -> Result<u64, BlockError> {
+        let common = &self.common;
         let features = |select: u32| {
             common.write32(DEVICE_FEATURE_SELECT, select);
             u64::from(common.read32(DEVICE_FEATURE)) << (32 * select)
@@ -143,8 +132,7 @@ impl VirtioBlk {
             common.write8(DEVICE_STATUS, FAILED);
             return Err(BlockError::Unsupported("virtio device without VERSION_1"));
         }
-        let accepted =
-            offered & (FEATURE_VERSION_1 | FEATURE_READ_ONLY | FEATURE_BLOCK_SIZE | FEATURE_FLUSH);
+        let accepted = offered & (FEATURE_VERSION_1 | wanted);
         for select in 0..2u32 {
             common.write32(DRIVER_FEATURE_SELECT, select);
             common.write32(DRIVER_FEATURE, (accepted >> (32 * select)) as u32);
@@ -157,31 +145,83 @@ impl VirtioBlk {
             ));
         }
         common.write16(CONFIG_VECTOR, NO_VECTOR);
+        Ok(accepted)
+    }
 
-        common.write16(QUEUE_SELECT, 0);
+    /// Enables queue `index` of at most `entries` entries in `memory`
+    /// (descriptors at 0, the driver ring at [`AVAIL`], the device ring
+    /// at [`USED`]), returning its size and notify register.
+    pub(crate) fn queue(
+        &self,
+        handoff: &Handoff,
+        index: u16,
+        entries: u16,
+        memory: &DmaBuffer,
+    ) -> Result<(u16, Mmio), BlockError> {
+        let common = &self.common;
+        common.write16(QUEUE_SELECT, index);
         let maximum = common.read16(QUEUE_SIZE);
         if maximum == 0 {
-            return Err(BlockError::Unsupported("virtio block device has no queue"));
+            return Err(BlockError::Unsupported("virtio queue is absent"));
         }
-        let entries = QUEUE_ENTRIES.min(1 << (15 - maximum.leading_zeros()));
-        let queue = dma.allocate(4096, 4096)?;
+        let entries = entries.min(1 << (15 - maximum.leading_zeros()));
         common.write16(QUEUE_SIZE, entries);
         common.write16(QUEUE_VECTOR, NO_VECTOR);
-        common.write64(QUEUE_DESCRIPTORS, queue.physical());
-        common.write64(QUEUE_DRIVER, queue.physical() + AVAIL as u64);
-        common.write64(QUEUE_DEVICE, queue.physical() + USED as u64);
-        let notify_offset = u64::from(common.read16(QUEUE_NOTIFY_OFF)) * u64::from(multiplier);
-        if notify_offset + 2 > notify_length {
+        common.write64(QUEUE_DESCRIPTORS, memory.physical());
+        common.write64(QUEUE_DRIVER, memory.physical() + AVAIL as u64);
+        common.write64(QUEUE_DEVICE, memory.physical() + USED as u64);
+        let (bar, start, length, multiplier) = self.notify;
+        let offset = u64::from(common.read16(QUEUE_NOTIFY_OFF)) * u64::from(multiplier);
+        if offset + 2 > length {
             return Err(BlockError::Unsupported(
                 "virtio notify register outside its region",
             ));
         }
-        let notify = registers(handoff, notify_bar, notify_start + notify_offset, 2)?;
+        let notify = registers(handoff, bar, start + offset, 2)?;
         common.write16(QUEUE_ENABLE, 1);
-        common.write8(
+        Ok((entries, notify))
+    }
+
+    pub(crate) fn ready(&self) {
+        self.common.write8(
             DEVICE_STATUS,
             ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK,
         );
+    }
+}
+
+pub fn matches(function: &Function) -> bool {
+    function.vendor == VENDOR
+        && (function.device == MODERN_BLOCK || function.device == TRANSITIONAL_BLOCK)
+}
+
+pub struct VirtioBlk {
+    device: Mmio,
+    notify: Mmio,
+    queue: DmaBuffer,
+    request: DmaBuffer,
+    bounce: DmaBuffer,
+    entries: u16,
+    next: u16,
+    flush: bool,
+    sectors_per_block: u64,
+    identity: Identity,
+    clock: Clock,
+}
+
+impl VirtioBlk {
+    pub fn new(
+        function: &mut Function,
+        handoff: &Handoff,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<Self, BlockError> {
+        let transport = Modern::new(function, handoff)?;
+        let accepted =
+            transport.negotiate(FEATURE_READ_ONLY | FEATURE_BLOCK_SIZE | FEATURE_FLUSH)?;
+        let queue = dma.allocate(4096, 4096)?;
+        let (entries, notify) = transport.queue(handoff, 0, QUEUE_ENTRIES, &queue)?;
+        transport.ready();
+        let device = transport.device;
 
         let block_size = match accepted & FEATURE_BLOCK_SIZE {
             0 => SECTOR as u32,

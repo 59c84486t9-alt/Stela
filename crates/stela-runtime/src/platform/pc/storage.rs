@@ -9,7 +9,7 @@ use super::{
     block::{BlockDevice, BlockError, Identity},
     dma::DmaAllocator,
     gpt::{self, GptError, Guid, PartitionDevice},
-    nvme,
+    input, nvme,
     pci::{Address, Function},
     virtio,
 };
@@ -40,17 +40,19 @@ impl core::str::FromStr for Target {
     }
 }
 
-/// Every block device the drivers brought up, and every controller they
-/// could not.
+/// Every block and input device the drivers brought up, and every
+/// controller they could not.
 #[derive(Default)]
 pub struct Disks {
     pub devices: Vec<Box<dyn BlockDevice>>,
+    pub inputs: Vec<input::VirtioInput>,
     pub failures: Vec<(Address, BlockError)>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<super::pci::EcamWindow>,
 }
 
-/// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller.
+/// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller
+/// and every virtio-input device.
 ///
 /// # Safety
 ///
@@ -77,6 +79,12 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
                         .map(|device| Box::new(device) as Box<dyn BlockDevice>)
                         .collect()
                 })
+            } else if input::matches(&function) {
+                match input::VirtioInput::new(&mut function, handoff, dma) {
+                    Ok(device) => disks.inputs.push(device),
+                    Err(error) => disks.failures.push((address, error)),
+                }
+                continue;
             } else if function.class == ahci::CLASS {
                 ahci::attach(&mut function, handoff, dma).map(|ports| {
                     ports

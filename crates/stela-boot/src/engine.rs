@@ -8,6 +8,7 @@
 pub(crate) mod bundle;
 mod display;
 mod host;
+mod input;
 mod interrupts;
 mod restore;
 mod storage;
@@ -75,6 +76,9 @@ struct Options {
     /// Leap the counter over waits of every PE (`--idle-skip`;
     /// `Machine::set_idle_skip`): boot and install runs, not interactive use.
     idle_skip: bool,
+    /// Cable the native USB keyboard and pointer to the last USB-C
+    /// controller and feed it the host's virtio-input devices (`--input`).
+    input: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
     breakpoints: Vec<u64>,
@@ -151,6 +155,7 @@ impl Options {
             restore_identity: None,
             survey: false,
             idle_skip: false,
+            input: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             dumps: Vec::new(),
@@ -204,6 +209,10 @@ impl Options {
             }
             if name == "--idle-skip" {
                 options.idle_skip = true;
+                continue;
+            }
+            if name == "--input" {
+                options.input = true;
                 continue;
             }
             if name == "--storage" {
@@ -404,6 +413,13 @@ const J473_AIC_TIMESTAMPS: u8 = 16;
 /// placed as the board's DeviceTree places them (`machine::soc::board`).
 /// `aic-timebase` has no public register description and no model, so its
 /// accesses stop explicitly.
+/// What is plugged into the board's USB-C connectors: a restore host on the
+/// first, the native keyboard and pointer on the last.
+struct Cables {
+    restore: bool,
+    input: bool,
+}
+
 /// The board's devices. `reset` is the entry point a boot bundle hands off
 /// to, on which boot firmware locks every PE's RVBAR.
 fn devices<'f>(
@@ -412,7 +428,7 @@ fn devices<'f>(
     reset: Option<u64>,
     now: u64,
     backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
-    restore: bool,
+    cables: Cables,
     firmware: &dyn Fn(&str) -> Option<&'f [u8]>,
 ) -> Result<(AppleDevices, Option<stela_runtime::machine::apple::UsbId>), String> {
     let fixed = |(offset, bytes, irq): (u64, u64, u32)| soc::Device {
@@ -540,18 +556,25 @@ fn devices<'f>(
         )?;
     }
     let mut restore_usb = None;
+    let usbs = board.map_or(0, |board| board.usbs.len());
     for (index, usb) in board.iter().flat_map(|board| &board.usbs).enumerate() {
         // The controller's stream translates through the group's first TRAD
         // instance, as SEP and AES masters do; per-instance selection is the
         // bus master's contract (`soc::Iommu`).
         let id = devices.add_usb(usb, darts[usb.iommu][0])?;
+        // The native keyboard and pointer plug into the last connector
+        // (J473AP usb-drd1), the Mac being the downstream-facing port.
+        if cables.input && index + 1 == usbs && index != 0 {
+            devices.attach_input(usb.port)?;
+            output::arguments(format_args!("INPUT attached to USB-C port {}\n", usb.port));
+        }
         // The first controller (J473AP usb-drd0, the back-left connector) is
         // the one a restore host or the native client uses; the others are
         // left uncabled.
         if index != 0 {
             continue;
         }
-        if restore {
+        if cables.restore {
             // A restore host is cabled to this connector from power-on: it
             // is the USB host and sources VBUS, so the Mac is a USB2 device.
             // The connector's HPM die and controller observe the same cable.
@@ -708,7 +731,7 @@ fn devices<'f>(
         darts.len(),
         board.and_then(|board| board.aes).is_some()
     ));
-    if restore && restore_usb.is_none() {
+    if cables.restore && restore_usb.is_none() {
         return Err("restore study requires a DT-placed USB device".into());
     }
     Ok((devices, restore_usb))
@@ -844,20 +867,25 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .iter()
         .chain(options.restore_source.iter())
         .collect();
-    let mut services = if targets.is_empty() {
-        Vec::new()
+    let (services, host_input) = if targets.is_empty() && !options.input {
+        (Vec::new(), None)
     } else {
         let storage_handoff = handoff
             .storage
             .handoff()
             .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
         // SAFETY: before host::install, with sole ownership of DMA/controllers.
-        unsafe { storage::open(&storage_handoff, &targets) }.unwrap_or_else(|error| {
-            output::arguments(format_args!("host storage refusal: {error}\n"));
-            output::fatal("host storage could not be opened")
-        })
-    }
-    .into_iter();
+        let (services, inputs) = unsafe { storage::open(&storage_handoff, &targets) }
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("host storage refusal: {error}\n"));
+                output::fatal("host storage could not be opened")
+            });
+        (
+            services,
+            options.input.then(|| input::HostInput::new(inputs)),
+        )
+    };
+    let mut services = services.into_iter();
     let backing = options.storage.as_ref().map(|_| services.next().unwrap());
     let source = options
         .restore_source
@@ -1004,7 +1032,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         reset,
         now,
         backing,
-        options.restore,
+        Cables {
+            restore: options.restore,
+            input: options.input,
+        },
         &firmware,
     ) {
         Ok(devices) => devices,
@@ -1040,6 +1071,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("restore preparation failed")
         })
     });
+    let mut host_input = host_input;
     let started = host::rdtsc();
     let stop = run(
         &mut machine,
@@ -1047,6 +1079,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         display.as_mut(),
         handoff.tsc_hz,
         restore.as_mut(),
+        host_input.as_mut(),
     );
     let seconds = (host::rdtsc() - started) as f64 / handoff.tsc_hz as f64;
     finish(&mut machine, stop, seconds, &options.dumps)
@@ -1071,6 +1104,7 @@ fn run(
     mut display: Option<&mut display::Display>,
     tsc_hz: u64,
     mut restore: Option<&mut restore::Experiment>,
+    mut host_input: Option<&mut input::HostInput>,
 ) -> Stop {
     let mut shown = host::rdtsc();
     let mut beat = (
@@ -1134,6 +1168,9 @@ fn run(
             && let Some(experiment) = restore.as_deref_mut()
         {
             machine.exclude_host_time(|devices| experiment.poll(devices));
+        }
+        if let Some(input) = host_input.as_deref_mut() {
+            machine.exclude_host_time(|devices| input.poll(devices));
         }
 
         let sliced = matches!(stop, Stop::Budget) && limit != budget;

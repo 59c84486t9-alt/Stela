@@ -1,12 +1,14 @@
-//! Host PC storage that the mount drives itself after ExitBootServices.
+//! Host PC storage and input that the mount drives itself after
+//! ExitBootServices.
 //!
 //! `stela.efi` records the ACPI MCFG windows, a block of DMA pages below
 //! 4 GiB, the MMIO ranges it mapped uncached and a TSC rate in a [`Handoff`]
 //! before it leaves boot services. [`storage::probe`] then enumerates PCI
 //! through ECAM and brings up every virtio-blk, NVMe and AHCI controller
-//! with polled completion; [`storage::open`] selects the one disk and GPT
-//! partition that `stela.cfg` names and returns a [`gpt::PartitionDevice`]
-//! that cannot reach any other block.
+//! with polled completion, and every virtio-input keyboard and pointer
+//! ([`input`]); [`storage::open`] selects the one disk and GPT partition
+//! that `stela.cfg` names and returns a [`gpt::PartitionDevice`] that cannot
+//! reach any other block.
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -15,6 +17,7 @@ pub mod ahci;
 pub mod block;
 pub mod dma;
 pub mod gpt;
+pub mod input;
 mod mmio;
 pub mod nvme;
 pub mod pci;
@@ -28,7 +31,7 @@ pub struct Handoff {
     /// ECAM windows from the ACPI MCFG table.
     pub ecam: Vec<pci::EcamWindow>,
     /// MMIO ranges mapped uncached in Stela's tables: the ECAM windows and
-    /// every memory BAR of a storage controller.
+    /// every memory BAR of a storage controller or input device.
     pub mapped: Vec<Range<u64>>,
     /// Identity-mapped, physically contiguous pages for DMA, below 4 GiB.
     pub dma: Range<u64>,

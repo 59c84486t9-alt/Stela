@@ -195,6 +195,11 @@ pub struct Run {
         "opencore", "payload", "module", "bundle", "append", "storage_check", "preboot_disk"
     ])]
     usb_image: Option<PathBuf>,
+    /// Give a bundle's guest the native USB keyboard and pointer, fed by
+    /// QEMU's virtio keyboard and tablet: adds both devices and the mount's
+    /// `--input`.
+    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    input: bool,
     /// Run install mode on a synthetic restore payload.
     #[arg(long, value_enum, conflicts_with_all = ["opencore", "module", "append"])]
     payload: Option<PayloadMode>,
@@ -350,6 +355,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         false => Vec::new(),
     };
     options.extend(disks.iter().map(disks::Disk::option));
+    if arguments.input {
+        options.push_str(" --input");
+    }
     let target = output.join("target.img");
     let options = match arguments.payload {
         None => options,
@@ -540,6 +548,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     // on a display.
     if picker || bundle {
         command.args(["-device", "VGA"]);
+    }
+    if arguments.input {
+        command.args([
+            "-device",
+            "virtio-keyboard-pci",
+            "-device",
+            "virtio-tablet-pci",
+        ]);
     }
     match arguments.display {
         Display::None => command

@@ -206,10 +206,11 @@ fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
 /// whose ranges are found here.
 fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
-    let storage = if ["--storage", "--preboot", "--restore-source"]
+    let host_devices = ["--storage", "--preboot", "--restore-source"]
         .iter()
         .any(|key| option(text, key).is_some())
-    {
+        || text.split_ascii_whitespace().any(|word| word == "--input");
+    let storage = if host_devices {
         Some(storage::discover()?)
     } else {
         None

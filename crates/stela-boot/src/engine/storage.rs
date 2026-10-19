@@ -15,7 +15,7 @@ use stela_runtime::pc::{
     storage::{self, Target},
 };
 
-struct RestoreRoot {
+pub(super) struct RestoreRoot {
     root: u64,
     flags: u64,
 }
@@ -23,7 +23,7 @@ impl RestoreRoot {
     /// # Safety
     /// `root` is the live loader root, retaining the engine window, and the
     /// engine is serialized: no other PE/interrupt may drive this controller.
-    unsafe fn enter(root: u64) -> Self {
+    pub(super) unsafe fn enter(root: u64) -> Self {
         let (previous, flags): (u64, u64);
         // SAFETY: CPL0, live roots with the same engine code/stack/window.
         // Interrupts remain off until the original root has been restored.
@@ -74,10 +74,10 @@ impl BlockDevice for Service {
     }
 }
 
-/// Open the explicitly selected partition while the loader's identity root
-/// is still active, before host::install. No guessed disk/partition, no
-/// writes at open. Ownership lasts with the returned services. Probe once
-/// for all consumers;
+/// Open the explicitly selected partitions while the loader's identity root
+/// is still active, before host::install, and bring up every host input
+/// device. No guessed disk/partition, no writes at open. Ownership lasts
+/// with the returned services. Probe once for all consumers;
 /// do not reset a controller or reuse its DMA pages for a second probe.
 ///
 /// # Safety
@@ -86,7 +86,7 @@ impl BlockDevice for Service {
 pub unsafe fn open(
     handoff: &pc::Handoff,
     targets: &[&Target],
-) -> Result<alloc::vec::Vec<Box<dyn BlockDevice>>, String> {
+) -> Result<(alloc::vec::Vec<Box<dyn BlockDevice>>, Inputs), String> {
     if targets
         .iter()
         .enumerate()
@@ -106,7 +106,11 @@ pub unsafe fn open(
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
-    targets
+    let inputs = Inputs {
+        devices: core::mem::take(&mut disks.inputs),
+        root,
+    };
+    let services = targets
         .iter()
         .map(|target| {
             let partition = storage::open(&mut disks.devices, target)
@@ -123,5 +127,13 @@ pub unsafe fn open(
                 root,
             }) as Box<dyn BlockDevice>)
         })
-        .collect()
+        .collect::<Result<_, String>>()?;
+    Ok((services, inputs))
+}
+
+/// The host's input devices and the loader root their registers and DMA
+/// pages are reached through.
+pub struct Inputs {
+    pub devices: alloc::vec::Vec<pc::input::VirtioInput>,
+    pub root: u64,
 }
