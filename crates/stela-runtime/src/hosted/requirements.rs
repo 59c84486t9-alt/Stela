@@ -466,10 +466,10 @@ mod tests {
             find(Area::Mig, "mach_host.host_info (host)").service,
             "kernel objects"
         );
-        assert!(matches!(
+        assert_eq!(
             find(Area::Mig, "task.task_info_from_user (task)").status,
-            Status::Partial(_)
-        ));
+            Status::Implemented
+        );
         assert!(matches!(
             find(Area::Mig, "thread_act.thread_set_state_from_user (thread)").status,
             Status::Partial(_)

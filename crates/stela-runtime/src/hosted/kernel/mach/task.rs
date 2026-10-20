@@ -6,13 +6,15 @@
 //! whose layout differs between the kernels (`TASK_BASIC_INFO_64` is the
 //! 32-bit layout on arm64, `TASK_BASIC_INFO_64_2` arm64's own), the times
 //! in absolute time (the profile's 24 MHz timebase), the VM page size, the
-//! executable's UUID and dyld's image list, which are the guest's.
+//! executable's UUID, dyld's image list and the security configuration
+//! and IPC space policy exec derived from the image's signature, which are
+//! the guest's.
 use super::super::Kernel;
 use super::server::{MIG_BAD_ARGUMENTS, Reply, Request};
 use crate::hosted::darwin::{KERN_FAILURE, KERN_INVALID_ARGUMENT, KERN_SUCCESS};
 use crate::hosted::threads::lock;
 use crate::hosted::{host, memory};
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 /// `task_info_t`'s MIG bound (`array[*:93+1] of integer_t`).
 const TASK_INFO_MAX: u32 = 94;
@@ -109,10 +111,15 @@ pub(super) fn info(kernel: &Kernel, port: u32, request: &Request) -> Result<Repl
             Err(code) => Reply::Failure(code),
         },
         TASK_DYLD_INFO => lock(&kernel.process.dyld_info).task_info(count),
-        TASK_SECURITY_CONFIG_INFO | TASK_IPC_SPACE_POLICY_INFO => bail!(
-            "task_info flavor {flavor}: the task's security configuration and IPC space \
-             policy, which exec derives from the image's signature, are not modeled"
-        ),
+        // Exec derived both from the image's signature, as the arm64
+        // kernel does; the host task's are the x86 runtime's.
+        TASK_SECURITY_CONFIG_INFO | TASK_IPC_SPACE_POLICY_INFO if count < 1 => {
+            Reply::Failure(KERN_INVALID_ARGUMENT)
+        }
+        TASK_SECURITY_CONFIG_INFO => words(vec![lock(&kernel.process.executable).security_config]),
+        TASK_IPC_SPACE_POLICY_INFO => {
+            words(vec![lock(&kernel.process.executable).ipc_space_policy])
+        }
         // The host task's own answer, which is this task's.
         _ => Reply::Forward,
     })

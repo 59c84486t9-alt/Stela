@@ -278,14 +278,7 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Task, "task_policy_get", None),
     (Object::Task, "_kernelrpc_mach_ports_register3", None),
     (Object::Task, "_kernelrpc_mach_ports_lookup3", None),
-    (
-        Object::Task,
-        "task_info_from_user",
-        Some(
-            "TASK_SECURITY_CONFIG_INFO and TASK_IPC_SPACE_POLICY_INFO, which exec's signature \
-             model does not yet derive, stop the run",
-        ),
-    ),
+    (Object::Task, "task_info_from_user", None),
     (Object::Task, "task_restartable_ranges_register", None),
     (Object::Task, "task_restartable_ranges_synchronize", None),
     (
