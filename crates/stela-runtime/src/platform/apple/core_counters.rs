@@ -33,7 +33,11 @@
 //! The counters count only under the samplers' enables and event selectors,
 //! whose events are not documented; the core holds those and reports the
 //! missing counting once (`machine::impdef`), and the counters hold what
-//! software writes, 0 from reset (inference).
+//! software writes, 0 from reset (inference). Their hardware widths are not
+//! established: software truncates the core counters to 32 bits and masks
+//! the memory-stall deltas to 48 bits itself, testing bit 47 for overflow,
+//! which a counter that never counts never sets. So each is held as 64 bits
+//! (inference).
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use stela_compiler::aarch64::system::registers::Encoding;
 
