@@ -1,13 +1,14 @@
 //! An image's embedded code signature (`LC_CODE_SIGNATURE`), as the kernel
 //! reads it at exec (`bsd/kern/ubc_subr.c`, `osfmk/kern/cs_blobs.h`): the
 //! best code directory's flags, platform and identifiers, its cdhash, and
-//! the entitlements blobs, and whether Apple issued its signing identity.
-//! Reading a signature is not validating it; page hashes and the CMS
-//! signature's trust are not checked here.
+//! the entitlements blobs, and whether a verified CMS signature shows
+//! Apple signed it ([`cms`]). Page hashes are not checked here.
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use sha1::{Digest as _, Sha1};
 use sha2::Sha256;
+
+mod cms;
 
 const LC_CODE_SIGNATURE: u32 = 0x1d;
 const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -25,6 +26,15 @@ const APPLE_CODE_SIGNING_CA: [u8; 32] = [
     0x5b, 0xda, 0xb1, 0x28, 0x8f, 0xc1, 0x68, 0x92, 0xfe, 0xf5, 0x0c, 0x65, 0x8d, 0xb5, 0x4f, 0x1e,
     0x2e, 0x19, 0xcf, 0x8f, 0x71, 0xcc, 0x55, 0xf7, 0x7d, 0xe2, 0xb9, 0x5e, 0x05, 0x1e, 0x25, 0x62,
 ];
+/// The SHA-256 fingerprint of the Apple Root CA certificate.
+const APPLE_ROOT_CA: [u8; 32] = [
+    0xb0, 0xb1, 0x73, 0x0e, 0xcb, 0xc7, 0xff, 0x45, 0x05, 0x14, 0x2c, 0x49, 0xf1, 0x29, 0x5e, 0x6e,
+    0xda, 0x6b, 0xca, 0xed, 0x7e, 0x2c, 0x68, 0xc5, 0xbe, 0x91, 0xb5, 0xa1, 0x10, 0x01, 0xf0, 0x24,
+];
+const APPLE_ANCHORS: cms::Anchors = cms::Anchors {
+    authority: APPLE_CODE_SIGNING_CA,
+    root: APPLE_ROOT_CA,
+};
 const CSSLOT_CODEDIRECTORY: u32 = 0;
 /// `CSSLOT_ALTERNATE_CODEDIRECTORIES` through its last slot.
 const CSSLOT_ALTERNATE_FIRST: u32 = 0x1000;
@@ -92,9 +102,10 @@ pub struct CodeSignature {
     /// up to the hash page.
     pub start_offset: u64,
     pub end_offset: u64,
-    /// Whether the CMS signature's certificates include the Apple Code
-    /// Signing Certification Authority: code Apple itself signed ("anchor
-    /// apple"). The CMS signature is not verified.
+    /// Whether a verified CMS signature binds the code directory to a
+    /// signing certificate the Apple Code Signing Certification Authority
+    /// issued under the Apple Root CA: code Apple itself signed ("anchor
+    /// apple"). A signature that fails verification is not Apple's.
     pub apple_signed: bool,
 }
 
@@ -208,30 +219,6 @@ fn ber_children(mut contents: &[u8]) -> impl Iterator<Item = (u8, &[u8], &[u8])>
     })
 }
 
-/// Whether a CMS `ContentInfo` holding `SignedData` (RFC 5652) carries a
-/// certificate whose SHA-256 fingerprint is `fingerprint`.
-fn carries_certificate(cms: &[u8], fingerprint: &[u8; 32]) -> bool {
-    const SEQUENCE: u8 = 0x30;
-    const CONTEXT_0: u8 = 0xa0;
-    let signed_data = ber_element(cms)
-        .filter(|(tag, ..)| *tag == SEQUENCE)
-        .and_then(|(_, info, _)| ber_children(info).find(|(tag, ..)| *tag == CONTEXT_0))
-        .and_then(|(_, explicit, _)| ber_element(explicit))
-        .filter(|(tag, ..)| *tag == SEQUENCE);
-    let Some((_, signed_data, _)) = signed_data else {
-        return false;
-    };
-    // `certificates [0] IMPLICIT CertificateSet`, after the version, the
-    // digest algorithms and the encapsulated content.
-    ber_children(signed_data)
-        .skip(3)
-        .find(|(tag, ..)| *tag == CONTEXT_0)
-        .is_some_and(|(_, certificates, _)| {
-            ber_children(certificates)
-                .any(|(_, _, certificate)| Sha256::digest(certificate)[..] == fingerprint[..])
-        })
-}
-
 /// The signature of a thin 64-bit Mach-O slice, or `None` without one.
 pub fn read(slice: &[u8]) -> Result<Option<CodeSignature>> {
     ensure!(le32(slice, 0)? == MH_MAGIC_64, "not a 64-bit Mach-O slice");
@@ -269,7 +256,8 @@ pub fn parse(blob: &[u8]) -> Result<CodeSignature> {
     let mut best: Option<(u8, &[u8])> = None;
     let mut entitlements = None;
     let mut der_entitlements = None;
-    let mut apple_signed = false;
+    let mut signed = None;
+    let mut cms = None;
     for index in 0..slots {
         let slot = be32(blob, 12 + index * 8)?;
         let at = be32(blob, 16 + index * 8)? as usize;
@@ -284,19 +272,22 @@ pub fn parse(blob: &[u8]) -> Result<CodeSignature> {
                     || (CSSLOT_ALTERNATE_FIRST..=CSSLOT_ALTERNATE_LAST).contains(&slot) =>
             {
                 let hash_type = *body.get(CD_HASH_TYPE).context("truncated code directory")?;
+                if slot == CSSLOT_CODEDIRECTORY {
+                    signed = Some(body);
+                }
                 if best.is_none_or(|(kind, _)| rank(hash_type) > rank(kind)) {
                     best = Some((hash_type, body));
                 }
             }
             CSMAGIC_EMBEDDED_ENTITLEMENTS => entitlements = Some(body[8..].to_vec()),
             CSMAGIC_EMBEDDED_DER_ENTITLEMENTS => der_entitlements = Some(body[8..].to_vec()),
-            CSMAGIC_BLOBWRAPPER if slot == CSSLOT_SIGNATURESLOT => {
-                apple_signed = carries_certificate(&body[8..], &APPLE_CODE_SIGNING_CA);
-            }
+            CSMAGIC_BLOBWRAPPER if slot == CSSLOT_SIGNATURESLOT => cms = body.get(8..),
             _ => {}
         }
     }
     let (hash_type, directory) = best.context("code signature has no code directory")?;
+    let apple_signed = matches!((cms, signed), (Some(cms), Some(signed))
+        if cms::verify(cms, signed, directory, hash_type, &APPLE_ANCHORS).is_ok());
     let version = be32(directory, CD_VERSION)?;
     let identifier = c_string(directory, be32(directory, CD_IDENT_OFFSET)? as usize);
     let team_identifier = if version >= CS_SUPPORTSTEAMID {
@@ -412,8 +403,10 @@ mod tests {
 
     #[test]
     fn certificates_are_found_in_cms_signed_data() {
+        const SIGNED_DATA: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
         let leaf = element(0x30, &[0x02, 0x01, 0x07]);
         let authority = element(0x30, &[0u8; 200]);
+        let signer = element(0x31, &element(0x30, &element(0x02, &[1])));
         let cms = |certificates: &[u8]| {
             let signed_data = element(
                 0x30,
@@ -422,25 +415,18 @@ mod tests {
                     element(0x31, &[]),
                     element(0x30, &element(0x06, &[0x2a])),
                     element(0xa0, certificates),
-                    element(0x31, &[]),
+                    signer.clone(),
                 ]
                 .concat(),
             );
             element(
                 0x30,
-                &[
-                    element(0x06, &[0x2a, 0x86, 0x48]),
-                    element(0xa0, &signed_data),
-                ]
-                .concat(),
+                &[element(0x06, &SIGNED_DATA), element(0xa0, &signed_data)].concat(),
             )
         };
-        let fingerprint = |certificate: &[u8]| -> [u8; 32] { Sha256::digest(certificate).into() };
         let both = cms(&[leaf.clone(), authority.clone()].concat());
-        assert!(carries_certificate(&both, &fingerprint(&authority)));
-        assert!(carries_certificate(&both, &fingerprint(&leaf)));
-        assert!(!carries_certificate(&cms(&leaf), &fingerprint(&authority)));
-        assert!(!carries_certificate(&both, &APPLE_CODE_SIGNING_CA));
+        assert_eq!(cms::certificates(&both), [&leaf[..], &authority[..]]);
+        assert_eq!(cms::certificates(&cms(&leaf)), [&leaf[..]]);
         // codesign's indefinite lengths around the certificates.
         let indefinite = |tag: u8, contents: &[u8]| [&[tag, 0x80], contents, &[0, 0]].concat();
         let signed_data = indefinite(
@@ -450,26 +436,16 @@ mod tests {
                 element(0x31, &[]),
                 indefinite(0x30, &element(0x06, &[0x2a])),
                 indefinite(0xa0, &[leaf.clone(), authority.clone()].concat()),
-                element(0x31, &[]),
+                signer.clone(),
             ]
             .concat(),
         );
         let ber = indefinite(
             0x30,
-            &[
-                element(0x06, &[0x2a, 0x86, 0x48]),
-                indefinite(0xa0, &signed_data),
-            ]
-            .concat(),
+            &[element(0x06, &SIGNED_DATA), indefinite(0xa0, &signed_data)].concat(),
         );
-        assert!(carries_certificate(&ber, &fingerprint(&authority)));
-        assert!(!carries_certificate(
-            &ber[..ber.len() - 2],
-            &fingerprint(&authority)
-        ));
-        assert!(!carries_certificate(
-            &[0x30, 0x80, 0, 0],
-            &fingerprint(&leaf)
-        ));
+        assert_eq!(cms::certificates(&ber), [&leaf[..], &authority[..]]);
+        assert!(cms::certificates(&ber[..ber.len() - 2]).is_empty());
+        assert!(cms::certificates(&[0x30, 0x80, 0, 0]).is_empty());
     }
 }

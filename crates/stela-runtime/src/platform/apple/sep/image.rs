@@ -5,7 +5,7 @@
 //! the caller supplies its permitted maximum. This is source-integrity
 //! evidence only: measurement never authenticates Image4 or boots sepOS.
 mod der;
-mod rsa;
+pub(crate) mod rsa;
 pub mod signature;
 
 use crate::platform::dma::{DmaError, Port};
