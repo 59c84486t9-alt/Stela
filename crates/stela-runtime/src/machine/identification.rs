@@ -756,6 +756,21 @@ pub const TABLE: &[Row] = &[
              them, EnPACM and EnPACM0 on the M6, under HCRX_EL2.SCTLR2En",
         ),
     ),
+    // Spec_FPACC, FEAT_FPACCOMBINE's field, reads 0: Arm's "does not
+    // disclose" value. How the speculative use of a pointer that failed its
+    // combined authentication changes cached state is the host's
+    // speculation past the engine's check, which Stela does not
+    // characterise.
+    feature(
+        ID_AA64MMFR3_EL1,
+        60,
+        0,
+        "FEAT_FPACCOMBINE",
+        engine(
+            true,
+            "the speculative effect of a failed authentication is not disclosed",
+        ),
+    ),
     // ID_AA64MMFR0_EL1
     fixed(ID_AA64MMFR0_EL1, 0, 0b0101, "48-bit physical addresses"),
     fixed(ID_AA64MMFR0_EL1, 4, 0b0010, "16-bit ASIDs"),
@@ -1502,6 +1517,9 @@ mod tests {
             let m6 = chip == Chip::AppleM6;
             assert_eq!(field(chip, ID_AA64ISAR3_EL1, 12), 2 * u64::from(m6));
             assert_eq!(field(chip, ID_AA64MMFR3_EL1, 4), u64::from(m6));
+            // Spec_FPACC, present with the M6's FEAT_FPACCOMBINE, reads 0:
+            // not disclosed.
+            assert_eq!(field(chip, ID_AA64MMFR3_EL1, 60), 0);
         }
         // Apple clang drops SSBS from the M4 on (PFR1.SSBS).
         assert_ne!(field(Chip::AppleM3, ID_AA64PFR1_EL1, 4), 0);
