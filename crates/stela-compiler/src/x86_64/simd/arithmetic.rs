@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 mod half;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, Condition, EXPONENT_VECTOR, INPUT_MINIMUM_EXPONENT, LEFT_VECTOR,
+    ArithmeticOpcode, ColdSplit, Condition, EXPONENT_VECTOR, INPUT_MINIMUM_EXPONENT, LEFT_VECTOR,
     MOVLHPS_XMM1_XMM2, MOVQ_XMM0_XMM0, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
     SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_scalar, commit_inexact, emit_opcode,
     environment, exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
@@ -236,9 +236,10 @@ fn product_left(operand: &Operand) -> u8 {
 /// scalar upper bits as NEP is zero there. Products that the classification
 /// rejects first take an out-of-line check for exact zeros
 /// ([`zero_product`]). Returns the branches to the full path, to the helper
-/// and past the full path.
-fn sticky_path(code: &mut Vec<u8>, operand: &Operand) -> ([usize; 2], Vec<usize>, usize) {
-    let full = sticky_inexact(code);
+/// and past the full path, and those between the sticky path and the
+/// rest ([`ColdSplit`]).
+fn sticky_path(code: &mut Vec<u8>, operand: &Operand, checked: bool) -> StickyPath {
+    let full = sticky_inexact(code, checked);
     // Zeroing loads leave a scalar result's upper bits clear.
     let zeroed = match operand.inputs {
         Inputs::Elementwise { left, right } if operand.shape == Shape::Scalar => {
@@ -276,8 +277,14 @@ fn sticky_path(code: &mut Vec<u8>, operand: &Operand) -> ([usize; 2], Vec<usize>
     }
     commit(code, operand.destination, LEFT_VECTOR);
     let done = jump(code);
+    let mut crossing = vec![rejected];
     if !zero_product(operand.operation) {
-        return (full, vec![rejected], done);
+        return StickyPath {
+            full,
+            helper: vec![rejected],
+            done,
+            crossing,
+        };
     }
     let check = code.len();
     resolve(code, rejected, check);
@@ -291,17 +298,43 @@ fn sticky_path(code: &mut Vec<u8>, operand: &Operand) -> ([usize; 2], Vec<usize>
             addend: None,
         },
         resume,
+        &mut crossing,
     );
-    (full, helper, done)
+    StickyPath {
+        full,
+        helper,
+        done,
+        crossing,
+    }
 }
 
-fn emit_scalar(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
-    let (full, sticky_helper, sticky_done) = sticky_path(code, operand);
-    let full_start = code.len();
-    for patch in full {
-        resolve(code, patch, full_start);
+/// A sticky path's open branches ([`sticky_path`]).
+struct StickyPath {
+    full: Vec<usize>,
+    helper: Vec<usize>,
+    done: usize,
+    crossing: Vec<usize>,
+}
+
+/// Resolve the sticky path's branches to the full path, which begins here.
+fn enter_full(code: &mut [u8], sticky: &mut StickyPath) -> usize {
+    let full = code.len();
+    for &patch in &sticky.full {
+        resolve(code, patch, full);
     }
-    let mut helper = sticky_helper;
+    sticky.crossing.append(&mut sticky.full);
+    full
+}
+
+fn emit_scalar(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    pc: GuestAddress,
+    checked: bool,
+) -> ColdSplit {
+    let mut sticky = sticky_path(code, operand, checked);
+    let full = enter_full(code, &mut sticky);
+    let mut helper = core::mem::take(&mut sticky.helper);
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
@@ -342,17 +375,29 @@ fn emit_scalar(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
         resolve(code, merge, merge_target);
     }
     commit(code, operand.destination, LEFT_VECTOR);
-    let done = code.len();
-    resolve(code, sticky_done, done);
+    finish(code, sticky, full)
 }
 
-fn emit_vector(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
-    let (full, sticky_helper, sticky_done) = sticky_path(code, operand);
-    let full_start = code.len();
-    for patch in full {
-        resolve(code, patch, full_start);
+/// Resolve the jump past the full path, which ends here.
+fn finish(code: &mut [u8], sticky: StickyPath, full: usize) -> ColdSplit {
+    let done = code.len();
+    resolve(code, sticky.done, done);
+    ColdSplit {
+        cold: sticky.done + size_of::<i32>(),
+        full,
+        crossing: sticky.crossing,
     }
-    let mut helper = sticky_helper;
+}
+
+fn emit_vector(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    pc: GuestAddress,
+    checked: bool,
+) -> ColdSplit {
+    let mut sticky = sticky_path(code, operand, checked);
+    let full = enter_full(code, &mut sticky);
+    let mut helper = core::mem::take(&mut sticky.helper);
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
@@ -399,8 +444,7 @@ fn emit_vector(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
         code.extend(MOVQ_XMM0_XMM0);
     }
     commit(code, operand.destination, LEFT_VECTOR);
-    let done = code.len();
-    resolve(code, sticky_done, done);
+    finish(code, sticky, full)
 }
 
 pub(super) fn always_exits(operand: &Operand) -> bool {
@@ -415,20 +459,25 @@ pub(super) fn always_exits(operand: &Operand) -> bool {
         )
 }
 
+/// The S/D forms return their [`ColdSplit`]; `checked` as for
+/// `numerical::sticky_inexact`.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
-) {
+    checked: bool,
+) -> Option<ColdSplit> {
     if always_exits(operand) {
         super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
+        None
     } else if operand.format == Format::Half {
         half::emit(code, operand, pc, target);
+        None
     } else if operand.shape == Shape::Scalar {
-        emit_scalar(code, operand, pc);
+        Some(emit_scalar(code, operand, pc, checked))
     } else {
-        emit_vector(code, operand, pc);
+        Some(emit_vector(code, operand, pc, checked))
     }
 }
 

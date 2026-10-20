@@ -184,6 +184,7 @@ fn emit_selected(
     let mut cursor = 0;
     // What the last instruction emitted left in RAX.
     let mut rax = super::Rax::Unknown;
+    let mut out_of_line = OutOfLine::default();
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut rax, super::Rax::Unknown);
         // Build the new candidate privately. Rejection leaves both cursor and
@@ -231,6 +232,7 @@ fn emit_selected(
                 baseline_map.push((instruction.pc, baseline_code.len()));
                 baseline_rax = emit_single(
                     &mut baseline_code,
+                    None,
                     instruction,
                     &mut baseline_fixups,
                     target,
@@ -270,6 +272,7 @@ fn emit_selected(
         block.source_map.push((instruction.pc, code.len()));
         rax = emit_single(
             code,
+            Some(&mut out_of_line),
             instruction,
             &mut fixups,
             target,
@@ -282,6 +285,7 @@ fn emit_selected(
         fixups.is_empty(),
         "ordinary instruction prefix cannot branch"
     );
+    out_of_line.place(code);
     emit_terminal(
         code,
         &mut block.source_map,
@@ -297,8 +301,11 @@ fn emit_selected(
 /// One instruction outside the regions, after an emission that left `held`
 /// in RAX; returns what it leaves there. An instruction that first loads
 /// the register the previous one just stored from RAX finds it there.
+/// With `out_of_line`, numerical instructions move their slow paths there.
+#[allow(clippy::too_many_arguments)]
 fn emit_single(
     code: &mut Vec<u8>,
+    out_of_line: Option<&mut OutOfLine>,
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
     target: crate::TargetCpu,
@@ -306,7 +313,15 @@ fn emit_single(
     held: super::Rax,
 ) -> super::Rax {
     if let Operation::FloatingPoint(operand) = &instruction.operation {
-        super::simd::emit_numerical(code, operand, instruction.pc, target);
+        let Some(out_of_line) = out_of_line else {
+            super::simd::emit_numerical(code, operand, instruction.pc, target);
+            return super::Rax::Unknown;
+        };
+        let start = code.len();
+        let checked = !out_of_line.continues_at(start);
+        let split =
+            super::simd::emit_numerical_split(code, operand, instruction.pc, target, checked);
+        out_of_line.take(code, start, split);
         return super::Rax::Unknown;
     }
     let start = code.len();
@@ -327,6 +342,129 @@ fn emit_single(
             super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
     });
     rax
+}
+
+/// Where a branch field or its target lies once the block is laid out.
+#[derive(Clone, Copy)]
+enum Place {
+    Inline(usize),
+    OutOfLine(usize),
+}
+
+const JMP_REL32: u8 = 0xe9;
+const REL32_BYTES: usize = size_of::<i32>();
+const JMP_REL32_BYTES: usize = 1 + REL32_BYTES;
+
+/// The slow paths of numerical instructions ([`ColdSplit`]), moved after
+/// the block's last ordinary instruction behind one jump, before the
+/// terminal, whose direct exits must end the code. Inline, each such
+/// instruction is its sticky-inexact path alone, falling through to the
+/// next instruction; its moved part ends with a jump back to there.
+///
+/// Consecutive such instructions form a run in which only the first
+/// checks FPCR and FPSR: a sticky path changes neither, so the next one
+/// holds whenever it is reached inline, and the moved part of one
+/// continues in the next one's full path, which is correct in every
+/// state. Moved code accesses no guest memory, so the source map entry
+/// of the last ordinary instruction that also covers it names no fault.
+///
+/// [`ColdSplit`]: super::simd::numerical::ColdSplit
+#[derive(Default)]
+struct OutOfLine {
+    code: Vec<u8>,
+    /// rel32 fields with the places they target.
+    fixups: Vec<(Place, Place)>,
+    /// The jump ending the last moved part and where its instruction ended
+    /// inline: the next instruction's full path continues the run if it
+    /// starts there.
+    open: Option<(usize, usize)>,
+}
+
+impl OutOfLine {
+    /// Whether an instruction starting at `start` continues a run. Every
+    /// instruction emits code (the source map's offsets strictly increase),
+    /// so nothing came between.
+    fn continues_at(&self, start: usize) -> bool {
+        self.open.is_some_and(|(_, end)| end == start)
+    }
+
+    /// Move the slow paths of the numerical instruction emitted from
+    /// `start` to the end of `code`, which ends its emission.
+    fn take(
+        &mut self,
+        code: &mut Vec<u8>,
+        start: usize,
+        split: Option<super::simd::numerical::ColdSplit>,
+    ) {
+        let base = self.code.len();
+        let continued = split.as_ref().filter(|_| self.continues_at(start));
+        if let Some((site, end)) = self.open.take() {
+            let target = continued.map_or(Place::Inline(end), |split| {
+                Place::OutOfLine(base + split.full - split.cold)
+            });
+            self.fixups.push((Place::OutOfLine(site), target));
+        }
+        let Some(split) = split else {
+            return;
+        };
+        let end = code.len();
+        let inline_end = split.cold - JMP_REL32_BYTES;
+        debug_assert_eq!(code[inline_end], JMP_REL32);
+        debug_assert_eq!(target_of(code, inline_end + 1), end);
+        // A branch from the sticky path past the full path now falls
+        // through; one from the moved part to its end takes the jump back.
+        let place = |offset: usize, inline: bool| {
+            debug_assert!(!(inline_end..split.cold).contains(&offset));
+            if offset < inline_end || (offset == end && inline) {
+                Place::Inline(offset.min(inline_end))
+            } else {
+                Place::OutOfLine(base + offset - split.cold)
+            }
+        };
+        for &site in &split.crossing {
+            let inline = site < inline_end;
+            let target = target_of(code, site);
+            self.fixups
+                .push((place(site, inline), place(target, inline)));
+        }
+        self.code.extend(&code[split.cold..]);
+        self.code.push(JMP_REL32);
+        self.open = Some((self.code.len(), inline_end));
+        self.code.extend([0; REL32_BYTES]);
+        code.truncate(inline_end);
+    }
+
+    /// Lay out the moved code at the end of `code` behind a jump over it.
+    fn place(mut self, code: &mut Vec<u8>) {
+        if let Some((site, end)) = self.open.take() {
+            self.fixups
+                .push((Place::OutOfLine(site), Place::Inline(end)));
+        }
+        if self.code.is_empty() {
+            return;
+        }
+        code.push(JMP_REL32);
+        code.extend(
+            i32::try_from(self.code.len())
+                .expect("bounded block")
+                .to_le_bytes(),
+        );
+        let base = code.len();
+        code.extend(&self.code);
+        let at = |place| match place {
+            Place::Inline(offset) => offset,
+            Place::OutOfLine(offset) => base + offset,
+        };
+        for (site, target) in self.fixups {
+            super::simd::numerical::resolve(code, at(site), at(target));
+        }
+    }
+}
+
+/// The target of the rel32 field at `site`.
+fn target_of(code: &[u8], site: usize) -> usize {
+    let field = i32::from_le_bytes(code[site..site + REL32_BYTES].try_into().unwrap());
+    (site + REL32_BYTES).wrapping_add_signed(field as isize)
 }
 
 /// `mov [rdi+GuestState.nzcv],eax`, which ends each emission after which
@@ -545,6 +683,203 @@ mod tests {
         };
         assert_eq!(count(&LOAD_X10), 1);
         assert_eq!(count(&LOAD_NZCV), 0);
+    }
+
+    /// A block whose numerical slow paths are out of line, with runs that
+    /// check FPCR and FPSR once, runs on the host exactly as its
+    /// instructions do one at a time with the inline layout: in every
+    /// sticky-path state and outside it, through zero-product resumes and
+    /// helper exits in mid-run.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn out_of_line_slow_paths_run_as_the_inline_layout() {
+        use crate::{GuestState, Lifter, aarch64::Decoder};
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        #[repr(C)]
+        #[derive(Debug, PartialEq, Eq)]
+        struct Exit {
+            pc: u64,
+            kind: u64,
+        }
+        fn run(code: &[u8], state: &mut GuestState) -> Exit {
+            let bytes = code.len().next_multiple_of(PAGE);
+            // SAFETY: private anonymous memory, RX after the copy, unmapped
+            // after the call; the block touches only `state` and its own
+            // stack slots.
+            unsafe {
+                let page = mmap(core::ptr::null_mut(), bytes, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                assert_ne!(page as usize, usize::MAX);
+                core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                assert_eq!(mprotect(page, bytes, 5), 0);
+                let entry: unsafe extern "sysv64" fn(*mut GuestState) -> Exit =
+                    core::mem::transmute(page);
+                let exit = entry(state);
+                assert_eq!(munmap(page, bytes), 0);
+                exit
+            }
+        }
+        // fmul s2,s0,s1; fadd s3,s2,s0; fmul s4,s7,s0; fsub s5,s3,s4;
+        // fmadd d6,d16,d17,d18; fsqrt d19,d6; fadd v20.4s,v21.4s,v22.4s;
+        // fmul v23.2d,v24.2d,v25.2d; add x0,x0,#1; fmul s8,s5,s1;
+        // fdiv s9,s8,s0; fnmul d10,d16,d17; fmla v26.4s,v21.4s,v22.4s
+        const WORDS: [u32; 13] = [
+            0x1e21_0802,
+            0x1e20_2843,
+            0x1e20_08e4,
+            0x1e24_3865,
+            0x1f51_4a06,
+            0x1e61_c0d3,
+            0x4e36_d6b4,
+            0x6e79_df17,
+            0x9100_0400,
+            0x1e21_08a8,
+            0x1e20_1909,
+            0x1e71_8a0a,
+            0x4e36_ceba,
+        ];
+        const IXC: u32 = 1 << 4;
+        const NEP: u32 = 1 << 2;
+        const ROUND_UP: u32 = 1 << 22;
+        const ROUND_TO_ZERO: u32 = 3 << 22;
+        const FZ: u32 = 1 << 24;
+        const DN: u32 = 1 << 25;
+        const UPPER_GARBAGE: u64 = 0xa5a5_5a5a_c3c3_3c3c;
+        let pc = GuestAddress(0x1000);
+        let instructions: Vec<_> = WORDS
+            .iter()
+            .enumerate()
+            .map(|(index, &word)| {
+                Decoder
+                    .lift(GuestAddress(pc.0 + 4 * index as u64), word)
+                    .unwrap()
+            })
+            .collect();
+        let fallthrough = GuestAddress(pc.0 + 4 * WORDS.len() as u64);
+        let single = |s: f32| u64::from(s.to_bits()) | UPPER_GARBAGE << 32;
+        let initial = |s7: f32, s1: f32, d18: f64| {
+            let mut state = GuestState::default();
+            for (index, vector) in state.v.iter_mut().enumerate() {
+                *vector = [UPPER_GARBAGE.rotate_left(index as u32), UPPER_GARBAGE];
+            }
+            state.v[0][0] = single(1.1);
+            state.v[1][0] = single(s1);
+            state.v[7][0] = single(s7);
+            for (index, value) in [(16, 1.3f64), (17, 2.7), (18, d18)] {
+                state.v[index][0] = value.to_bits();
+            }
+            let lanes = |values: [f32; 4]| {
+                let bits = values.map(|value| u64::from(value.to_bits()));
+                [bits[0] | bits[1] << 32, bits[2] | bits[3] << 32]
+            };
+            state.v[21] = lanes([1.5, -2.25, 3.1, 1e-3]);
+            state.v[22] = lanes([0.7, 5.5, -1.9, 7e3]);
+            state.v[24] = [1.7f64.to_bits(), (-0.3f64).to_bits()];
+            state.v[25] = [2.9f64.to_bits(), 1e10f64.to_bits()];
+            state
+        };
+        for target in [crate::TargetCpu::Baseline, crate::TargetCpu::detect()] {
+            let block = emit_for_target(
+                &instructions,
+                None,
+                fallthrough,
+                target,
+                super::super::MemoryChecks::DEFAULT,
+            );
+            // An exact zero product resumes; a subnormal one takes the
+            // helper mid-run, as does the root of a negative; an infinite
+            // input takes it at once.
+            for (s7, s1, d18) in [
+                (0.0, 3.3, 0.9),
+                (-0.0, 3.3, 0.9),
+                (1e-40, 3.3, 0.9),
+                (0.0, 3.3, -100.0),
+                (0.0, 3.3, f64::INFINITY),
+                (0.0, f32::INFINITY, 0.9),
+            ] {
+                for (fpcr, fpsr) in [
+                    (0, IXC),
+                    (0, 0),
+                    (ROUND_TO_ZERO, IXC),
+                    (ROUND_UP, 0),
+                    (NEP, IXC),
+                    (DN, IXC),
+                    (FZ, IXC),
+                ] {
+                    let mut state = initial(s7, s1, d18);
+                    state.fpcr = fpcr;
+                    state.fpsr = fpsr;
+                    let mut expected = state.clone();
+                    let mut expected_exit = None;
+                    // The state before each instruction.
+                    let mut before = vec![];
+                    for instruction in &instructions {
+                        before.push((instruction.pc.0, expected.clone()));
+                        let next = GuestAddress(instruction.pc.0 + 4);
+                        let mut code = vec![];
+                        match &instruction.operation {
+                            Operation::FloatingPoint(operand) => {
+                                super::super::simd::emit_numerical(
+                                    &mut code,
+                                    operand,
+                                    instruction.pc,
+                                    target,
+                                )
+                            }
+                            _ => super::super::emit_instruction(
+                                &mut code,
+                                instruction,
+                                &mut vec![],
+                                target,
+                                super::super::MemoryChecks::DEFAULT,
+                            ),
+                        }
+                        direct_exit(&mut code, next, ExitKind::Fallthrough);
+                        let exit = run(&code, &mut expected);
+                        if exit.pc != next.0 || exit.kind != ExitKind::Fallthrough as u64 {
+                            expected_exit = Some(exit);
+                            break;
+                        }
+                    }
+                    let expected_exit = expected_exit.unwrap_or(Exit {
+                        pc: fallthrough.0,
+                        kind: ExitKind::Fallthrough as u64,
+                    });
+                    let exit = run(&block.x86_64_code, &mut state);
+                    let case = (target, s7, s1, d18, fpcr, fpsr);
+                    // With FPSR.IXC clear, the first full path of a run may
+                    // set it; the run's later instructions then take full
+                    // paths too, where one at a time they take sticky ones.
+                    // A full path sends a zero input to the helper, where
+                    // a sticky product resumes.
+                    if exit != expected_exit && fpcr == 0 && fpsr & IXC == 0 {
+                        assert_eq!(exit.kind, ExitKind::FloatingPoint as u64, "{case:?}");
+                        assert!(exit.pc < expected_exit.pc, "{case:?}");
+                        let (_, at_exit) = before.iter().find(|(pc, _)| *pc == exit.pc).unwrap();
+                        assert_eq!(&state, at_exit, "{case:?}");
+                        continue;
+                    }
+                    assert_eq!(exit, expected_exit, "{case:?}");
+                    assert_eq!(state, expected, "{case:?}");
+                }
+            }
+        }
     }
 
     #[test]

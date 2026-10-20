@@ -1,13 +1,13 @@
 //! Fused multiply-add: FMA3 when available, otherwise an exact-product SSE2 path.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, RESULT_MINIMUM_EXPONENT,
-    ZeroProduct, branch, clear_scalar, commit_inexact, emit_fma, emit_opcode, environment,
-    exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
-    read_numerical_right, read_numerical_scalar, read_numerical_vector, reject_other_status,
-    reject_product_status, resolve, restore_environment, restore_environment_with_product,
-    save_product_status, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
-    zero_product_check,
+    ArithmeticOpcode, ColdSplit, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT,
+    RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_scalar, commit_inexact, emit_fma,
+    emit_opcode, environment, exponent_range, jump, prepare_vector_input_range,
+    prepare_vector_result_range, read_numerical_right, read_numerical_scalar,
+    read_numerical_vector, reject_other_status, reject_product_status, resolve,
+    restore_environment, restore_environment_with_product, save_product_status, sticky_inexact,
+    sticky_result_check, test_control, vector_exponent_range, zero_product_check,
 };
 use super::{Host, commit, packed};
 use crate::{
@@ -18,6 +18,7 @@ use crate::{
     },
     block::ExitKind,
 };
+use alloc::vec;
 use alloc::vec::Vec;
 
 const LEFT: u8 = 0;
@@ -77,24 +78,28 @@ fn prepare_negation(code: &mut Vec<u8>, operand: &Operand) -> u8 {
     merge
 }
 
+/// With FMA3, S/D forms return their [`ColdSplit`]; `checked` as for
+/// `numerical::sticky_inexact`.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
-) {
+    checked: bool,
+) -> Option<ColdSplit> {
     if operand.format == Format::Half {
         super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
-        return;
+        return None;
     }
     let native_fma = target.supports(TargetCpu::Fma);
-    let (mut helper, sticky_done) = if native_fma {
-        let (full, helper, done) = sticky_path(code, operand, target);
+    let (mut helper, sticky) = if native_fma {
+        let (full, helper, done, mut crossing) = sticky_path(code, operand, target, checked);
         let full_start = code.len();
-        for patch in full {
+        for &patch in &full {
             resolve(code, patch, full_start);
         }
-        (helper, Some(done))
+        crossing.extend(full);
+        (helper, Some((done, full_start, crossing)))
     } else {
         (Vec::new(), None)
     };
@@ -187,10 +192,14 @@ pub(in crate::x86_64) fn emit(
         }
         commit(code, operand.destination, LEFT);
     }
-    if let Some(done) = sticky_done {
-        let end = code.len();
-        resolve(code, done, end);
-    }
+    let (done, full, crossing) = sticky?;
+    let end = code.len();
+    resolve(code, done, end);
+    Some(ColdSplit {
+        cold: done + size_of::<i32>(),
+        full,
+        crossing,
+    })
 }
 
 /// The sticky-inexact path (`numerical::sticky_inexact`) for a host with
@@ -198,13 +207,15 @@ pub(in crate::x86_64) fn emit(
 /// MXCSR, its result classification and the commit, which clears scalar
 /// upper bits as NEP is zero there. A rejected zero takes the out-of-line
 /// zero-product check. Returns the branches to the full path, to the helper
-/// and past the full path.
+/// and past the full path, and those between the sticky path and the rest
+/// ([`ColdSplit`]).
 fn sticky_path(
     code: &mut Vec<u8>,
     operand: &Operand,
     target: TargetCpu,
-) -> ([usize; 2], Vec<usize>, usize) {
-    let full = sticky_inexact(code);
+    checked: bool,
+) -> (Vec<usize>, Vec<usize>, usize, Vec<usize>) {
+    let full = sticky_inexact(code, checked);
     // A zeroing load of the destination LEFT leaves a scalar result's
     // upper bits clear.
     if operand.shape == Shape::Scalar {
@@ -224,6 +235,7 @@ fn sticky_path(
     let done = jump(code);
     let check = code.len();
     resolve(code, rejected, check);
+    let mut crossing = vec![rejected];
     let helper = zero_product_check(
         code,
         &ZeroProduct {
@@ -234,6 +246,7 @@ fn sticky_path(
             addend: Some(ADDEND),
         },
         resume,
+        &mut crossing,
     );
-    (full, helper, done)
+    (full, helper, done, crossing)
 }

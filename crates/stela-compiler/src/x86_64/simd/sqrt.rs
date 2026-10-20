@@ -1,10 +1,11 @@
 //! FSQRT: SSE2 for positive normals, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar, commit_inexact,
-    environment_round, positive_exponent_range, prepare_vector_input_range, read_numerical_scalar,
-    read_numerical_vector, reject_other_status, resolve, restore_environment, sticky_inexact,
-    sticky_result_check, test_control, vector_positive_exponent_range,
+    ColdSplit, Condition, INPUT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar,
+    commit_inexact, environment_round, positive_exponent_range, prepare_vector_input_range,
+    read_numerical_scalar, read_numerical_vector, reject_other_status, resolve,
+    restore_environment, sticky_inexact, sticky_result_check, test_control,
+    vector_positive_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
 use crate::{
@@ -254,12 +255,15 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
     commit(code, operand.destination, RESULT);
 }
 
+/// S/D forms return their [`ColdSplit`]; `checked` as for
+/// `numerical::sticky_inexact`.
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
-) {
+    checked: bool,
+) -> Option<ColdSplit> {
     let checked_half = operand.format == Format::Half && target.supports(TargetCpu::F16c);
     if checked_half {
         // F16C requires usable AVX. Pay this prefix per body before legacy
@@ -270,9 +274,9 @@ pub(in crate::x86_64) fn emit(
     // The sticky-inexact path (`numerical::sticky_inexact`) for S and D: the
     // root of a negative input is NaN and of +infinity infinite, which take
     // the helper; every other root is exact IEEE on both sides.
-    let mut sticky_done = None;
+    let mut sticky = None;
     if operand.format != Format::Half {
-        let full = sticky_inexact(code);
+        let mut crossing = sticky_inexact(code, checked);
         // NEP is zero on this path: scalar upper bits clear, as the root
         // of a zeroing load into RESULT leaves them.
         let source = if operand.shape == Shape::Scalar {
@@ -283,22 +287,19 @@ pub(in crate::x86_64) fn emit(
             SOURCE
         };
         square_root(code, operand.format, operand.shape, source);
-        helper.push(sticky_result_check(
-            code,
-            operand.format,
-            operand.shape,
-            RESULT,
-            true,
-        ));
+        let rejected = sticky_result_check(code, operand.format, operand.shape, RESULT, true);
+        helper.push(rejected);
         if operand.shape == Shape::Vector64 {
             clear_scalar(code, Format::Double, RESULT);
         }
         commit(code, operand.destination, RESULT);
-        sticky_done = Some(jump(code));
+        let done = jump(code);
         let full_start = code.len();
-        for patch in full {
+        for &patch in &crossing {
             resolve(code, patch, full_start);
         }
+        crossing.push(rejected);
+        sticky = Some((done, full_start, crossing));
     }
     source_guard(code, operand, &mut helper);
     if operand.shape == Shape::Scalar && operand.format != Format::Half {
@@ -322,8 +323,12 @@ pub(in crate::x86_64) fn emit(
     helper_section(code, &helper, pc);
     commit_inexact(code);
     commit_result(code, operand);
-    if let Some(done) = sticky_done {
-        let end = code.len();
-        resolve(code, done, end);
-    }
+    let (done, full, crossing) = sticky?;
+    let end = code.len();
+    resolve(code, done, end);
+    Some(ColdSplit {
+        cold: done + size_of::<i32>(),
+        full,
+        crossing,
+    })
 }

@@ -203,6 +203,19 @@ pub(super) fn emit_numerical(
     pc: crate::GuestAddress,
     target: crate::TargetCpu,
 ) {
+    emit_numerical_split(code, operation, pc, target, true);
+}
+
+/// [`emit_numerical`], returning the [`numerical::ColdSplit`] of an
+/// emission with a sticky-inexact path; `checked` as for
+/// `numerical::sticky_inexact`.
+pub(super) fn emit_numerical_split(
+    code: &mut Vec<u8>,
+    operation: &crate::aarch64::FloatingPointOperation,
+    pc: crate::GuestAddress,
+    target: crate::TargetCpu,
+    checked: bool,
+) -> Option<numerical::ColdSplit> {
     match operation {
         crate::aarch64::FloatingPointOperation::Estimate(operand) => {
             estimate::emit(code, operand, pc, target);
@@ -211,10 +224,10 @@ pub(super) fn emit_numerical(
             refinement::emit(code, operand, pc, target);
         }
         crate::aarch64::FloatingPointOperation::Binary(operand) => {
-            arithmetic::emit(code, operand, pc, target)
+            return arithmetic::emit(code, operand, pc, target, checked);
         }
         crate::aarch64::FloatingPointOperation::Fused(operand) => {
-            fused::emit(code, operand, pc, target)
+            return fused::emit(code, operand, pc, target, checked);
         }
         crate::aarch64::FloatingPointOperation::Widening(operand) => {
             widening::emit(code, operand, pc, target)
@@ -236,7 +249,7 @@ pub(super) fn emit_numerical(
             rounding::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::SquareRoot(operand) => {
-            sqrt::emit(code, operand, pc, target)
+            return sqrt::emit(code, operand, pc, target, checked);
         }
         crate::aarch64::FloatingPointOperation::Conversion(operand) => {
             use crate::aarch64::simd::conversion::Operand;
@@ -255,6 +268,7 @@ pub(super) fn emit_numerical(
             }
         }
     }
+    None
 }
 
 #[cfg(test)]

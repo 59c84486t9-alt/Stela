@@ -250,14 +250,37 @@ const JMP_REL32: u8 = 0xe9;
 /// result, or, for an operation whose tiny results may be inexact, a result
 /// below twice the minimum normal, which the caller's classification sends
 /// to the exact helper.
-pub(super) fn sticky_inexact(code: &mut Vec<u8>) -> [usize; 2] {
+///
+/// Unless `checked`, the caller knows the conditions hold: the previous
+/// instruction's sticky path falls through here, and the previous
+/// instruction's full path continues in this one's ([`ColdSplit`]). There
+/// are then no branches.
+pub(super) fn sticky_inexact(code: &mut Vec<u8>, checked: bool) -> Vec<usize> {
+    if !checked {
+        return vec![];
+    }
     test_control(code, FPCR_STICKY_MASK);
     let control = branch(code, Condition::NotZero);
     code.extend(TEST_STATE_BYTE_IMM8);
     code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
     code.push(FPSR_INEXACT);
     let status = branch(code, Condition::Zero);
-    [control, status]
+    vec![control, status]
+}
+
+/// An S/D emission with a sticky-inexact path ([`sticky_inexact`]), laid
+/// out inline: the sticky path, a `jmp rel32` past the rest, then the rest
+/// (zero-product check, full path, helper exit), which ends where the
+/// emission ends. A block may move the rest out of line, re-resolving
+/// `crossing` and ending the moved part with a jump to where the emission
+/// ended. Neither part accesses guest memory.
+pub(in crate::x86_64) struct ColdSplit {
+    /// Start of the rest, just after the `jmp` past it.
+    pub(in crate::x86_64) cold: usize,
+    /// The full path's entry, correct in every FPCR and FPSR state.
+    pub(in crate::x86_64) full: usize,
+    /// Every rel32 branch field in one part that targets the other.
+    pub(in crate::x86_64) crossing: Vec<usize>,
 }
 
 /// An unconditional `jmp rel32` to resolve later.
@@ -387,12 +410,14 @@ const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
 /// to `resume` when every active lane the classification rejected is a
 /// zero whose product has a zero input, with a zero addend for a fused
 /// product, which makes it exact and without status, and otherwise take
-/// one of the returned branches to the helper. Other zeros and tiny
+/// one of the returned branches to the helper; `resumes` receives the
+/// branches to `resume`. Other zeros and tiny
 /// results may have underflowed, and need the helper.
 pub(super) fn zero_product_check(
     code: &mut Vec<u8>,
     product: &ZeroProduct,
     resume: usize,
+    resumes: &mut Vec<usize>,
 ) -> Vec<usize> {
     let ZeroProduct {
         format,
@@ -410,6 +435,7 @@ pub(super) fn zero_product_check(
         zero_scalar(code, format, right);
         let right_zero = branch(code, Condition::Zero);
         resolve(code, right_zero, resume);
+        resumes.push(right_zero);
         code.extend(if format == Format::Double {
             MOV_RAX_STATE
         } else {
@@ -423,6 +449,7 @@ pub(super) fn zero_product_check(
         });
         let left_zero = branch(code, Condition::Zero);
         resolve(code, left_zero, resume);
+        resumes.push(left_zero);
         helper.push(jump(code));
         return helper;
     }
@@ -451,6 +478,7 @@ pub(super) fn zero_product_check(
     code.push(mask);
     let passed = branch(code, Condition::Zero);
     resolve(code, passed, resume);
+    resumes.push(passed);
     vec![jump(code)]
 }
 
