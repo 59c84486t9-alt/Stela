@@ -4,7 +4,7 @@
 //! the out arguments), as the routine's MIG server stub lays it out, or a
 //! failing `RetCode` for the short `mig_reply_error_t`.
 use super::super::{Kernel, control};
-use super::reclaim;
+use super::{accounting, reclaim};
 use crate::hosted::threads::lock;
 use crate::hosted::{
     hardware,
@@ -222,35 +222,24 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         "_mach_make_memory_entry",
         Some("ranges in whole guest pages"),
     ),
-    (
-        Object::Host,
-        "host_statistics_from_user",
-        Some("the x86 host's load and VM statistics, its page counts in guest pages"),
-    ),
-    (
-        Object::Host,
-        "host_statistics64_from_user",
-        Some(
-            "the x86 host's load and VM statistics, its page counts in guest pages; on a profile \
-             with memory tagging the tag storage statistics stop the run",
-        ),
-    ),
+    (Object::Host, "host_statistics_from_user", None),
+    (Object::Host, "host_statistics64_from_user", None),
     (Object::Host, "host_get_special_port", None),
     (
         Object::Host,
         "host_processor_info",
-        Some("PROCESSOR_BASIC_INFO; the load and exception counters stop the run"),
+        Some(
+            "the arm64 kernel's exception counters (PROCESSOR_CPU_STAT, PROCESSOR_CPU_STAT64) \
+             stop the run: the x86 host kernel keeps none, and only the system-mode arm64 \
+             kernel takes those exceptions",
+        ),
     ),
     (Object::Host, "processor_set_default", None),
     (Object::Host, "host_processor_sets", None),
     (Object::Host, "host_processor_set_priv", None),
     (Object::Host, "host_processors", None),
     (Object::ProcessorSet, "processor_set_info", None),
-    (
-        Object::ProcessorSet,
-        "processor_set_statistics",
-        Some("the load average and Mach factor are the x86 host scheduler's"),
-    ),
+    (Object::ProcessorSet, "processor_set_statistics", None),
     (Object::ProcessorSet, "processor_set_tasks", None),
     (
         Object::ProcessorSet,
@@ -590,7 +579,7 @@ pub(super) fn serve(
         (Object::Host, "host_kernel_version", false) => kernel_version(kernel),
         // `flavor`.
         (Object::Host, "host_processor_info", false) => match request.word(8) {
-            Some(flavor) => processor_info(&kernel.process.hardware, flavor)?,
+            Some(flavor) => processor_info(&kernel.process.hardware, port, flavor)?,
             None => Reply::Failure(MIG_BAD_ARGUMENTS),
         },
         // `vm_size_t`: the arm64 kernel's 16 KiB page.
@@ -636,15 +625,24 @@ pub(super) fn serve(
                 count.min(PROCESSOR_SET_INFO_MAX),
             )
         }
-        // The boot set's load (the Mach factor and load average are the
-        // host scheduler's), and its tasks, which take the set's control
-        // port: only the privileged host port gives it, so the host
-        // kernel refuses the name port as the arm64 kernel does.
-        (
-            Object::ProcessorSet,
-            "processor_set_statistics" | "processor_set_tasks" | "processor_set_tasks_with_flavor",
-            _,
-        ) => Reply::Forward,
+        // `flavor`, `info_outCnt`: the boot set's load.
+        (Object::ProcessorSet, "processor_set_statistics", false) => {
+            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            processor_set_statistics(
+                &kernel.process.hardware,
+                port,
+                flavor,
+                count.min(PROCESSOR_SET_INFO_MAX),
+            )
+        }
+        // The boot set's tasks, which take the set's control port: only
+        // the privileged host port gives it, so the host kernel refuses
+        // the name port as the arm64 kernel does.
+        (Object::ProcessorSet, "processor_set_tasks" | "processor_set_tasks_with_flavor", _) => {
+            Reply::Forward
+        }
         // `flavor`, `host_info_outCnt`.
         (
             Object::Host,
@@ -1148,6 +1146,48 @@ fn processor_set_info(hardware: &hardware::Hardware, host: u32, flavor: u32, cou
     }
 }
 
+/// `PROCESSOR_SET_LOAD_INFO`: `task_count`, `thread_count`,
+/// `load_average`, `mach_factor`.
+const PROCESSOR_SET_LOAD_INFO: u32 = 4;
+const PROCESSOR_SET_LOAD_AVERAGE: usize = 2;
+const PROCESSOR_SET_MACH_FACTOR: usize = 3;
+
+/// `processor_set_statistics` on the default processor set `set`: the host
+/// machine's task and thread counts and load average, and the Mach factor
+/// of that load over the profile's processors (machine accounting). The
+/// kernels refuse every other flavor alike.
+fn processor_set_statistics(
+    hardware: &hardware::Hardware,
+    set: u32,
+    flavor: u32,
+    count: u32,
+) -> Reply {
+    unsafe extern "C" {
+        fn processor_set_statistics(set: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    }
+    let mut words = [0i32; PROCESSOR_SET_INFO_MAX as usize];
+    let mut filled = count;
+    // SAFETY: `words` holds `count` integers, at most its length.
+    let code =
+        unsafe { processor_set_statistics(set, flavor as i32, words.as_mut_ptr(), &mut filled) };
+    if code != 0 {
+        return Reply::Failure(code as u32);
+    }
+    let mut words: Vec<u32> = words[..filled.min(count) as usize]
+        .iter()
+        .map(|&word| word as u32)
+        .collect();
+    if flavor == PROCESSOR_SET_LOAD_INFO && words.len() > PROCESSOR_SET_MACH_FACTOR {
+        words[PROCESSOR_SET_MACH_FACTOR] =
+            accounting::mach_factor(words[PROCESSOR_SET_LOAD_AVERAGE], hardware.cpus().into());
+    }
+    let mut body = (words.len() as u32).to_le_bytes().to_vec();
+    for word in words {
+        body.extend(word.to_le_bytes());
+    }
+    Reply::Success(body)
+}
+
 /// `processor_flavor_t`s (`mach/processor_info.h`): the arm64 kernel's
 /// own two, its CPU counter statistics (`cpu_info_count`).
 const PROCESSOR_BASIC_INFO: u32 = 1;
@@ -1161,60 +1201,130 @@ const PROCESSOR_BASIC_INFO_COUNT: u32 = 5;
 /// `host_processor_info`: one record per processor of the profile's
 /// machine, out of line. Every processor is running ARM64E
 /// (`CPU_ARCH_ARMv8E`) in its logical slot, the boot processor (slot 0)
-/// the master. The load ticks and exception counters would be the x86
-/// host's processors', so they stop the run; other flavors fail in
-/// `processor_info_count`.
-fn processor_info(hardware: &hardware::Hardware, flavor: u32) -> Result<Reply> {
-    match flavor {
-        PROCESSOR_BASIC_INFO => {}
-        PROCESSOR_CPU_LOAD_INFO | PROCESSOR_CPU_STAT | PROCESSOR_CPU_STAT64 => bail!(
-            "host_processor_info flavor {flavor:#x}: the load ticks and exception counters of \
-             the profile's {} processors are not modeled",
-            hardware.cpus()
+/// the master. The load ticks are the host processors' folded onto the
+/// profile's (machine accounting). The arm64 exception counters
+/// (`PROCESSOR_CPU_STAT`, `_STAT64`) count exceptions the arm64 kernel
+/// takes, which the x86 host kernel does not: they stop the run. Other
+/// flavors fail in `processor_info_count`.
+fn processor_info(hardware: &hardware::Hardware, host: u32, flavor: u32) -> Result<Reply> {
+    let cpus = u32::from(hardware.cpus());
+    let (words, per_cpu) = match flavor {
+        PROCESSOR_BASIC_INFO => (
+            (0..cpus)
+                .flat_map(|slot| {
+                    [
+                        hardware::CPU_TYPE_ARM64,
+                        hardware::CPU_SUBTYPE_ARM64E,
+                        1,
+                        slot,
+                        u32::from(slot == 0),
+                    ]
+                })
+                .collect::<Vec<u32>>(),
+            PROCESSOR_BASIC_INFO_COUNT,
+        ),
+        PROCESSOR_CPU_LOAD_INFO => {
+            let ticks = match host_load_ticks(host) {
+                Ok(ticks) => ticks,
+                Err(code) => return Ok(Reply::Failure(code)),
+            };
+            (
+                accounting::fold(&ticks, cpus as usize)
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                accounting::CPU_STATES as u32,
+            )
+        }
+        PROCESSOR_CPU_STAT | PROCESSOR_CPU_STAT64 => bail!(
+            "host_processor_info flavor {flavor:#x}: the arm64 kernel's exception counters of \
+             the profile's {cpus} processors have no host counterpart"
         ),
         _ => return Ok(Reply::Failure(KERN_FAILURE)),
+    };
+    let Some(memory) = out_of_line(&words) else {
+        return Ok(Reply::Failure(KERN_RESOURCE_SHORTAGE));
+    };
+    let mut body = cpus.to_le_bytes().to_vec();
+    body.extend((cpus * per_cpu).to_le_bytes());
+    Ok(Reply::Complex {
+        descriptors: vec![memory],
+        body,
+    })
+}
+
+/// The host processors' load ticks (`PROCESSOR_CPU_LOAD_INFO`) through
+/// the host port `host`, or the host kernel's failure.
+fn host_load_ticks(host: u32) -> Result<Vec<[u32; accounting::CPU_STATES]>, u32> {
+    unsafe extern "C" {
+        fn host_processor_info(
+            host: u32,
+            flavor: i32,
+            count: *mut u32,
+            info: *mut *mut i32,
+            info_count: *mut u32,
+        ) -> i32;
+        fn mach_vm_deallocate(task: u32, address: u64, size: u64) -> i32;
     }
-    let cpus = u32::from(hardware.cpus());
-    let records: Vec<u8> = (0..cpus)
-        .flat_map(|slot| {
-            [
-                hardware::CPU_TYPE_ARM64,
-                hardware::CPU_SUBTYPE_ARM64E,
-                1,
-                slot,
-                u32::from(slot == 0),
-            ]
-        })
-        .flat_map(u32::to_le_bytes)
-        .collect();
+    let (mut processors, mut info, mut words) = (0u32, std::ptr::null_mut::<i32>(), 0u32);
+    // SAFETY: out arguments of this frame; the host's array is new memory
+    // of this task, released below.
+    let code = unsafe {
+        host_processor_info(
+            host,
+            PROCESSOR_CPU_LOAD_INFO as i32,
+            &raw mut processors,
+            &raw mut info,
+            &raw mut words,
+        )
+    };
+    if code != 0 {
+        return Err(code as u32);
+    }
+    let length = (processors as usize * accounting::CPU_STATES).min(words as usize);
+    // SAFETY: the host's array of `words` integers.
+    let ticks = unsafe { std::slice::from_raw_parts(info.cast::<u32>(), length) }
+        .as_chunks::<{ accounting::CPU_STATES }>()
+        .0
+        .to_vec();
+    // SAFETY: the array the host kernel moved into this task.
+    unsafe {
+        mach_vm_deallocate(
+            crate::hosted::host::task(),
+            info as u64,
+            u64::from(words) * 4,
+        )
+    };
+    Ok(ticks)
+}
+
+/// `words` in new memory of this task, as an out-of-line descriptor the
+/// reply's send releases; `None` when no memory could be had.
+fn out_of_line(words: &[u32]) -> Option<Descriptor> {
     unsafe extern "C" {
         fn mach_vm_allocate(task: u32, address: *mut u64, size: u64, flags: i32) -> i32;
     }
     const VM_FLAGS_ANYWHERE: i32 = 1;
+    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     let mut address = 0u64;
-    // SAFETY: new memory of this task, which the reply's send releases.
+    // SAFETY: new memory of this task.
     let code = unsafe {
         mach_vm_allocate(
             crate::hosted::host::task(),
             &mut address,
-            records.len() as u64,
+            bytes.len() as u64,
             VM_FLAGS_ANYWHERE,
         )
     };
     if code != 0 {
-        return Ok(Reply::Failure(KERN_RESOURCE_SHORTAGE));
+        return None;
     }
-    // SAFETY: the allocation holds the records.
-    unsafe { std::ptr::copy_nonoverlapping(records.as_ptr(), address as *mut u8, records.len()) };
-    let mut body = cpus.to_le_bytes().to_vec();
-    body.extend((cpus * PROCESSOR_BASIC_INFO_COUNT).to_le_bytes());
-    Ok(Reply::Complex {
-        descriptors: vec![Descriptor::Memory {
-            address,
-            size: records.len() as u32,
-            deallocate: true,
-        }],
-        body,
+    // SAFETY: the allocation holds the bytes.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len()) };
+    Some(Descriptor::Memory {
+        address,
+        size: bytes.len() as u32,
+        deallocate: true,
     })
 }
 
@@ -1385,6 +1495,7 @@ fn vm_map(request: &Request) -> Result<Reply> {
 }
 
 /// `osfmk/mach/host_info.h` statistics flavors.
+const HOST_LOAD_INFO: u32 = 1;
 const HOST_VM_INFO: u32 = 2;
 const HOST_VM_INFO64: u32 = 4;
 /// The words of `vm_statistics` and `vm_statistics64` that count resident
@@ -1396,15 +1507,31 @@ const HOST_VM_INFO64: u32 = 4;
 const VM_INFO_PAGE_WORDS: [usize; 6] = [0, 1, 2, 3, 12, 14];
 const VM_INFO64_PAGE_WORDS: [usize; 10] = [0, 1, 2, 3, 22, 23, 32, 33, 34, 35];
 const VM_INFO64_PAGE_PAIRS: [usize; 2] = [36, 38];
-/// Rev3's tag storage and tagged-page statistics, from this word on: zero
-/// on a profile without memory tagging, which has no tag storage.
+/// Rev3's tag storage and tagged-page statistics, from this word on: zero,
+/// the host memory's.
 const VM_INFO64_TAGGING: usize = 40;
 /// Host pages per guest page.
 const HOST_PAGES_PER_PAGE: u32 = (memory::PAGE_BYTES / (memory::HOST_PAGE_MASK + 1)) as u32;
 
-/// `host_statistics` and `host_statistics64` on the host port: the x86
-/// host's own answer, the same layout in both ABIs, with its page counts
-/// restated in the guest's 16 KiB pages, as an arm64 kernel counts them.
+/// `host_load_info`: `avenrun[3]`, then `mach_factor[3]`.
+const LOAD_AVERAGES: usize = 3;
+
+/// The Mach factors of a `host_load_info` reply restated from its load
+/// averages over the profile's `cpus` processors.
+fn restate_load(words: &mut [u32], cpus: u32) {
+    for index in 0..LOAD_AVERAGES {
+        if let (Some(&load), true) = (words.get(index), words.len() > LOAD_AVERAGES + index) {
+            words[LOAD_AVERAGES + index] = accounting::mach_factor(load, cpus);
+        }
+    }
+}
+
+/// `host_statistics` and `host_statistics64` on the host port: the host
+/// machine's answer (machine accounting), the same layout in both ABIs,
+/// with its page counts restated in the guest's 16 KiB pages, as an arm64
+/// kernel counts them, and its Mach factors over the profile's
+/// processors. The host's memory has no tag storage, so rev3's tag
+/// statistics are zero on every profile.
 fn host_statistics(
     hardware: &hardware::Hardware,
     sixty_four: bool,
@@ -1439,14 +1566,10 @@ fn host_statistics(
         .iter()
         .map(|&word| word as u32)
         .collect();
-    if flavor == HOST_VM_INFO64 && words.len() > VM_INFO64_TAGGING && hardware.memory_tagging {
-        bail!(
-            "host_statistics64(HOST_VM_INFO64) of {} words: the tag storage statistics of a \
-             profile with memory tagging are not modeled",
-            words.len()
-        );
-    }
     restate_pages(&mut words, flavor);
+    if flavor == HOST_LOAD_INFO {
+        restate_load(&mut words, hardware.cpus().into());
+    }
     let mut body = (words.len() as u32).to_le_bytes().to_vec();
     for word in words {
         body.extend(word.to_le_bytes());
@@ -1454,8 +1577,7 @@ fn host_statistics(
     Ok(Reply::Success(body))
 }
 
-/// Restate the page counts of a `flavor` statistics reply in guest pages,
-/// for a profile without memory tagging.
+/// Restate the page counts of a `flavor` statistics reply in guest pages.
 fn restate_pages(words: &mut [u32], flavor: u32) {
     let pages: &[usize] = match flavor {
         HOST_VM_INFO => &VM_INFO_PAGE_WORDS,
@@ -1643,24 +1765,92 @@ mod tests {
         let mut load = vec![400u32; 6];
         restate_pages(&mut load, 1);
         assert_eq!(load, [400; 6]);
-        // The host answers the load and VM flavors.
+        // The host answers the load and VM flavors, rev3's tag storage
+        // zero on every profile.
         let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
-        let Ok(Reply::Success(body)) = host_statistics(&hardware, true, HOST_VM_INFO64, 38) else {
-            panic!("host_statistics64 failed");
-        };
-        assert_eq!(u32::from_le_bytes(body[..4].try_into().unwrap()), 38);
-        // A profile with memory tagging has tag storage the host lacks.
         let tagging = hardware::Hardware {
             memory_tagging: true,
             ..hardware.clone()
         };
-        assert!(host_statistics(&tagging, true, HOST_VM_INFO64, 38).is_ok());
-        let full = host_statistics(&tagging, true, HOST_VM_INFO64, HOST_INFO_MAX);
-        let host_rev3 = matches!(
-            host_statistics(&hardware, true, HOST_VM_INFO64, HOST_INFO_MAX),
-            Ok(Reply::Success(body)) if u32::from_le_bytes(body[..4].try_into().unwrap()) > 40
+        for profile in [&hardware, &tagging] {
+            let Ok(Reply::Success(body)) =
+                host_statistics(profile, true, HOST_VM_INFO64, HOST_INFO_MAX)
+            else {
+                panic!("host_statistics64 failed");
+            };
+            let words: Vec<u32> = body
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word))
+                .collect();
+            assert!(words[0] >= 38);
+            assert!(words[1 + VM_INFO64_TAGGING..].iter().all(|&word| word == 0));
+        }
+    }
+
+    #[test]
+    fn mach_factors_count_the_profile_processors() {
+        // Three load averages of 2.5, 9 and 0 runnable threads.
+        let mut load = vec![2_500, 9_000, 0, 1, 1, 1];
+        restate_load(&mut load, 8);
+        assert_eq!(load, [2_500, 9_000, 0, 5_500, 800, 8_000]);
+        let mut short = vec![2_500, 9_000];
+        restate_load(&mut short, 8);
+        assert_eq!(short, [2_500, 9_000]);
+        let hardware = hardware::Hardware::of_soc(0x6001, 0x4_0000_0000).unwrap();
+        let cpus = u32::from(hardware.cpus());
+        let Ok(Reply::Success(body)) =
+            host_statistics(&hardware, false, HOST_LOAD_INFO, HOST_INFO_MAX)
+        else {
+            panic!("host_statistics(HOST_LOAD_INFO) failed");
+        };
+        let words: Vec<u32> = body
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        assert_eq!(words[0], 6);
+        for index in 0..LOAD_AVERAGES {
+            assert_eq!(
+                words[1 + LOAD_AVERAGES + index],
+                accounting::mach_factor(words[1 + index], cpus)
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_set_load_counts_the_profile_processors() {
+        unsafe extern "C" {
+            fn mach_host_self() -> u32;
+            fn processor_set_default(host: u32, set: *mut u32) -> i32;
+        }
+        let mut set = 0u32;
+        // SAFETY: this task's host port and a local out argument.
+        assert_eq!(
+            unsafe { processor_set_default(mach_host_self(), &raw mut set) },
+            0
         );
-        assert_eq!(full.is_err(), host_rev3);
+        let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
+        let Reply::Success(body) =
+            processor_set_statistics(&hardware, set, PROCESSOR_SET_LOAD_INFO, 4)
+        else {
+            panic!("processor_set_statistics failed");
+        };
+        let words: Vec<u32> = body
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        assert_eq!(words[0], 4);
+        assert!(words[1] > 0 && words[2] > 0);
+        assert_eq!(words[4], accounting::mach_factor(words[3], 8));
+        assert!(matches!(
+            processor_set_statistics(&hardware, set, PROCESSOR_SET_LOAD_INFO, 3),
+            Reply::Failure(KERN_FAILURE)
+        ));
     }
 
     #[test]
@@ -1690,33 +1880,64 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn processor_records_describe_the_m2_processors() {
-        let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
-        let Reply::Complex { descriptors, body } =
-            processor_info(&hardware, PROCESSOR_BASIC_INFO).unwrap()
-        else {
-            panic!("host_processor_info failed");
-        };
-        assert_eq!(body, [8, 0, 0, 0, 40, 0, 0, 0]);
+    /// The words of an out-of-line reply's memory, released.
+    fn records(descriptors: &[Descriptor]) -> Vec<u32> {
         let [Descriptor::Memory { address, size, .. }] = descriptors[..] else {
             panic!("no out-of-line records");
         };
-        assert_eq!(size, 160);
         // SAFETY: the records the reply would carry.
-        let records = unsafe { std::slice::from_raw_parts(address as *const u32, 40) };
-        assert_eq!(&records[..5], &[hardware::CPU_TYPE_ARM64, 2, 1, 0, 1]);
-        assert_eq!(&records[35..], &[hardware::CPU_TYPE_ARM64, 2, 1, 7, 0]);
+        let words = unsafe { std::slice::from_raw_parts(address as *const u32, size as usize / 4) }
+            .to_vec();
         unsafe extern "C" {
             fn mach_vm_deallocate(task: u32, address: u64, size: u64) -> i32;
         }
         // SAFETY: the allocation the reply's send would release.
         unsafe { mach_vm_deallocate(crate::hosted::host::task(), address, u64::from(size)) };
+        words
+    }
+
+    #[test]
+    fn processor_records_describe_the_profile_processors() {
+        unsafe extern "C" {
+            fn mach_host_self() -> u32;
+        }
+        // SAFETY: this task's host port.
+        let host = unsafe { mach_host_self() };
+        for chip_id in [0x8103, 0x8112, 0x6001, 0x6021] {
+            let hardware = hardware::Hardware::of_soc(chip_id, 0x4_0000_0000).unwrap();
+            let cpus = u32::from(hardware.cpus());
+            let Reply::Complex { descriptors, body } =
+                processor_info(&hardware, host, PROCESSOR_BASIC_INFO).unwrap()
+            else {
+                panic!("host_processor_info failed");
+            };
+            assert_eq!(u32::from_le_bytes(body[..4].try_into().unwrap()), cpus);
+            assert_eq!(u32::from_le_bytes(body[4..].try_into().unwrap()), cpus * 5);
+            let words = records(&descriptors);
+            assert_eq!(words.len() as u32, cpus * 5);
+            assert_eq!(&words[..5], &[hardware::CPU_TYPE_ARM64, 2, 1, 0, 1]);
+            let last = (cpus - 1) as usize * 5;
+            assert_eq!(
+                &words[last..],
+                &[hardware::CPU_TYPE_ARM64, 2, 1, cpus - 1, 0]
+            );
+            // The load ticks: one record of four states per processor.
+            let Reply::Complex { descriptors, body } =
+                processor_info(&hardware, host, PROCESSOR_CPU_LOAD_INFO).unwrap()
+            else {
+                panic!("host_processor_info(PROCESSOR_CPU_LOAD_INFO) failed");
+            };
+            assert_eq!(u32::from_le_bytes(body[..4].try_into().unwrap()), cpus);
+            let ticks = records(&descriptors);
+            assert_eq!(ticks.len() as u32, cpus * 4);
+            assert!(ticks.iter().any(|&tick| tick != 0));
+        }
+        let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
         assert!(matches!(
-            processor_info(&hardware, 99).unwrap(),
+            processor_info(&hardware, host, 99).unwrap(),
             Reply::Failure(KERN_FAILURE)
         ));
-        assert!(processor_info(&hardware, PROCESSOR_CPU_LOAD_INFO).is_err());
+        assert!(processor_info(&hardware, host, PROCESSOR_CPU_STAT).is_err());
     }
 
     #[test]
