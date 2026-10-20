@@ -10,7 +10,8 @@
 //! environment. The host kernel's exec keeps what exec keeps: the process
 //! ID, descriptors not marked close-on-exec, the signal mask and ignored
 //! signals, the working directory and the credentials. `posix_spawn`
-//! ([`super::spawn`]) creates a process with the same activation command.
+//! ([`super::spawn`]) creates a process with the same activation command;
+//! `fork` and `vfork` ([`super::fork`]) fork the host process.
 use super::{Call, EFAULT, Kernel, Outcome, Pe, paths};
 use crate::hosted::activation::{self, Activator};
 use crate::hosted::kernel::End;
@@ -29,7 +30,7 @@ const ENAMETOOLONG: u64 = 63;
 const E2BIG: u64 = 7;
 const EACCES: u64 = 13;
 
-pub(super) const CALLS: &[&str] = &["exit", "execve", "posix_spawn"];
+pub(super) const CALLS: &[&str] = &["exit", "execve", "posix_spawn", "fork", "vfork"];
 
 pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(match call.entry.name {
@@ -39,6 +40,7 @@ pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Opt
         }
         "execve" => Some(execve(kernel, call)?),
         "posix_spawn" => Some(super::spawn::posix_spawn(kernel, call)?),
+        "fork" | "vfork" => super::fork::call(kernel, call)?,
         _ => None,
     })
 }

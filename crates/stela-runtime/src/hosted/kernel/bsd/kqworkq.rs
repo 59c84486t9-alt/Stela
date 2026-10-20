@@ -587,6 +587,22 @@ impl Slot {
     pub(crate) fn existing(&self) -> Option<Arc<Kqworkq>> {
         lock(&self.0).clone()
     }
+
+    pub(crate) fn hold_for_fork(&self) -> Option<SlotHeld<'_>> {
+        crate::hosted::threads::try_lock(&self.0).map(SlotHeld)
+    }
+}
+
+/// The workqueue kqueue's slot, held across a host `fork`.
+pub(crate) struct SlotHeld<'a>(std::sync::MutexGuard<'a, Option<Arc<Kqworkq>>>);
+
+impl SlotHeld<'_> {
+    /// In the fork child: no workqueue kqueue, as `fdt_fork` copies none.
+    /// The parent's is forgotten, never dropped, so that its host
+    /// descriptor's number, free in the child, is never closed.
+    pub(crate) fn child(mut self) {
+        core::mem::forget(self.0.take());
+    }
 }
 
 impl Kqworkq {

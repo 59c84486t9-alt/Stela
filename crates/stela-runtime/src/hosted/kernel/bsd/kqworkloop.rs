@@ -185,6 +185,21 @@ impl Workloops {
     fn table(&self) -> MutexGuard<'_, Table> {
         lock(&self.table)
     }
+
+    pub(crate) fn hold_for_fork(&self) -> Option<WorkloopsHeld<'_>> {
+        crate::hosted::threads::try_lock(&self.table).map(WorkloopsHeld)
+    }
+}
+
+/// The workloop table, held across a host `fork`.
+pub(crate) struct WorkloopsHeld<'a>(MutexGuard<'a, Table>);
+
+impl WorkloopsHeld<'_> {
+    /// In the fork child: no workloops, as `fdt_fork` copies no
+    /// `fd_kqhash`. The parent's are forgotten, never dropped.
+    pub(crate) fn child(mut self) {
+        core::mem::forget(core::mem::take(&mut *self.0));
+    }
 }
 
 /// The lock word at `address`, read with no guest code running so that

@@ -23,7 +23,10 @@ use crate::{
 use anyhow::{Result, bail};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
 };
 
 mod bsd;
@@ -82,8 +85,8 @@ pub(super) struct Process {
     pub(super) reexec: Vec<std::ffi::OsString>,
     pub(super) trace: bool,
     /// This task's and the host's kernel-object port names.
-    pub(super) task_port: u32,
-    pub(super) host_port: u32,
+    pub(super) task_port: AtomicU32,
+    pub(super) host_port: AtomicU32,
     pub(super) engine: Engine,
     pub(super) runtime: Runtime,
     pub(super) shared_region: Mutex<Option<SharedRegion>>,
@@ -186,8 +189,8 @@ impl Process {
             roots: config.roots,
             reexec: config.reexec,
             trace: config.trace,
-            task_port: port(TASK_SELF_TRAP),
-            host_port: port(HOST_SELF_TRAP),
+            task_port: AtomicU32::new(port(TASK_SELF_TRAP)),
+            host_port: AtomicU32::new(port(HOST_SELF_TRAP)),
             engine: config.engine,
             runtime: Runtime::default(),
             shared_region: Mutex::new(config.shared_region),
@@ -203,6 +206,16 @@ impl Process {
             restartable_ranges: Mutex::new(None),
             reclaim: Mutex::new(None),
         })
+    }
+
+    /// This task's port name (a fork child's task has its own).
+    pub(super) fn task_port(&self) -> u32 {
+        self.task_port.load(Ordering::SeqCst)
+    }
+
+    /// The host port's name in this task.
+    pub(super) fn host_port(&self) -> u32 {
+        self.host_port.load(Ordering::SeqCst)
     }
 
     /// Pages of the shared region slid so far.
@@ -251,9 +264,9 @@ impl Kernel {
     /// This task's, this thread's and the host's kernel-object ports.
     pub(super) fn kernel_objects(&self) -> [u32; 3] {
         [
-            self.process.task_port,
+            self.process.task_port(),
             self.thread_port,
-            self.process.host_port,
+            self.process.host_port(),
         ]
     }
 

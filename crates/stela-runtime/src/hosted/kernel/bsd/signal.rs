@@ -46,6 +46,11 @@ extern "C" fn record(signal: libc::c_int) {
     PENDING.fetch_or(1 << signal, Ordering::SeqCst);
 }
 
+/// In a fork child: no signal is pending (`forkproc` clears `p_siglist`).
+pub(super) fn fork_child() {
+    PENDING.store(0, Ordering::SeqCst);
+}
+
 const fn bit(signal: u64) -> u32 {
     1 << (signal - 1)
 }

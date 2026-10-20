@@ -363,7 +363,7 @@ fn carry_reply_right(
             let status = forward::mach(
                 index_of("_kernelrpc_mach_port_allocate_trap"),
                 &[
-                    u64::from(kernel.process.task_port),
+                    u64::from(kernel.process.task_port()),
                     MACH_PORT_RIGHT_RECEIVE,
                     &raw mut relay as u64,
                 ],

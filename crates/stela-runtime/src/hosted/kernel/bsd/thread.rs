@@ -104,6 +104,12 @@ pub(crate) struct Threads {
 }
 
 impl Threads {
+    /// The registration's lock, held across a host `fork`: the child keeps
+    /// the registration, as `forkproc` copies it.
+    pub(crate) fn hold_for_fork(&self) -> Option<std::sync::MutexGuard<'_, Option<Registration>>> {
+        crate::hosted::threads::try_lock(&self.registration)
+    }
+
     /// The registration, once `bsdthread_register` succeeded
     /// (`P_LREGISTER`).
     pub(crate) fn registration(&self) -> Option<Registration> {
@@ -478,7 +484,7 @@ fn terminate(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     if port != 0 {
         crate::hosted::forward::mach(
             super::super::mach::index_of(PORT_DEALLOCATE_TRAP),
-            &[u64::from(kernel.process.task_port), u64::from(port)],
+            &[u64::from(kernel.process.task_port()), u64::from(port)],
         );
     }
     kernel.end = Some(End::Thread);

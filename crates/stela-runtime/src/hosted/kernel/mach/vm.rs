@@ -203,7 +203,7 @@ const EVERY_THREAD: u64 = u64::MAX;
 
 impl Task for Kernel {
     fn port(&self) -> u32 {
-        self.process.task_port
+        self.process.task_port()
     }
 
     fn page_in(&mut self, start: u64, end: u64) -> Result<()> {

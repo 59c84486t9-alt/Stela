@@ -370,7 +370,7 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
         "mach_vm_reclaim_update_kernel_accounting_trap" => {
             // `(target_task, bytes_reclaimed_out, next_deadline_out)`.
             let (bytes_out, deadline_out) = (arguments[1], arguments[2]);
-            if arguments[0] != u64::from(kernel.process.task_port) {
+            if arguments[0] != u64::from(kernel.process.task_port()) {
                 return Ok(MACH_SEND_INVALID_DEST);
             }
             if bytes_out == 0 || deadline_out == 0 {

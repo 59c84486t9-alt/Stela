@@ -159,8 +159,9 @@ impl ExecutionLock {
 
 /// One live guest thread as the other threads see it.
 pub(super) struct Member {
-    /// Its port name, the host thread's.
-    pub(super) port: u32,
+    /// Its port name, the host thread's (a fork child's thread has its
+    /// own).
+    port: AtomicU32,
     /// Guest ranges whose compiled blocks it must drop before it next
     /// executes guest code.
     stale: Mutex<Vec<(u64, u64)>>,
@@ -181,7 +182,7 @@ impl Registry {
     fn insert(&self, port: u32) -> (u64, Arc<Member>) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let member = Arc::new(Member {
-            port,
+            port: AtomicU32::new(port),
             stale: Mutex::new(Vec::new()),
             has_stale: AtomicBool::new(false),
         });
@@ -197,7 +198,7 @@ impl Registry {
     pub(super) fn ports(&self) -> Vec<u32> {
         lock(&self.members)
             .values()
-            .map(|member| member.port)
+            .map(|member| member.port.load(Ordering::SeqCst))
             .collect()
     }
 
@@ -205,7 +206,7 @@ impl Registry {
     pub(super) fn contains_port(&self, port: u32) -> bool {
         lock(&self.members)
             .values()
-            .any(|member| member.port == port)
+            .any(|member| member.port.load(Ordering::SeqCst) == port)
     }
 
     /// Record a range the hosted kernel changed for every thread but
@@ -258,6 +259,61 @@ pub(super) struct Runtime {
     pub(super) execution: ExecutionLock,
     pub(super) registry: Registry,
     pub(super) lifetime: Lifetime,
+    /// Set in a fork child, where no host thread waits in
+    /// [`Lifetime::wait`]: its end exits the host process itself.
+    forked: AtomicBool,
+}
+
+/// Take `mutex` if no other thread holds it.
+pub(super) fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+/// The runtime's locks, held across a host `fork` so that the child's one
+/// thread finds none of them held by a thread it does not have.
+pub(super) struct ForkHeld<'a> {
+    execution: MutexGuard<'a, LockState>,
+    members: MutexGuard<'a, BTreeMap<u64, Arc<Member>>>,
+    end: MutexGuard<'a, Option<Result<Termination>>>,
+}
+
+impl Runtime {
+    /// The runtime's locks, or `None` while another thread holds one.
+    pub(super) fn hold_for_fork(&self) -> Option<ForkHeld<'_>> {
+        Some(ForkHeld {
+            execution: try_lock(&self.execution.state)?,
+            members: try_lock(&self.registry.members)?,
+            end: try_lock(&self.lifetime.end)?,
+        })
+    }
+
+    /// In a fork child: `thread` is the process's one thread, now with the
+    /// host thread port `port`, no thread holds or waits for the execution
+    /// lock, and the process's end exits the host process.
+    pub(super) fn fork_child(&self, held: ForkHeld<'_>, thread: u64, port: u32) {
+        let ForkHeld {
+            mut execution,
+            mut members,
+            mut end,
+        } = held;
+        let ticket = execution.next_ticket;
+        *execution = LockState {
+            next_ticket: ticket,
+            serving: ticket,
+            ..LockState::default()
+        };
+        self.execution.waiting.store(0, Ordering::SeqCst);
+        members.retain(|&id, _| id == thread);
+        if let Some(member) = members.get(&thread) {
+            member.port.store(port, Ordering::SeqCst);
+        }
+        *end = None;
+        self.forked.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Runtime {
@@ -273,6 +329,16 @@ impl Runtime {
     /// End the process with `outcome`: no guest code runs after it.
     fn end(&self, thread: u64, outcome: Result<Termination>) {
         self.execution.close(thread);
+        if self.forked.load(Ordering::SeqCst) {
+            // The fork child's host process ends as the command's would.
+            match outcome {
+                Ok(Termination::Exited(status)) => std::process::exit(status & 0xff),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    std::process::exit(1)
+                }
+            }
+        }
         self.lifetime.end(outcome);
     }
 
@@ -323,7 +389,7 @@ where
                     process.runtime.registry.remove(id);
                     super::forward::mach(
                         MACH_PORT_DEALLOCATE_TRAP,
-                        &[u64::from(process.task_port), u64::from(port)],
+                        &[u64::from(process.task_port()), u64::from(port)],
                     );
                     let _ = sender.send(Ok(Err(errno)));
                     return;
@@ -499,6 +565,28 @@ pub(super) fn engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fork_child_keeps_only_the_forking_thread() {
+        let runtime = Runtime::default();
+        let (main, _) = runtime.registry.insert(0x103);
+        let (forking, member) = runtime.registry.insert(0x203);
+        // The main thread holds the lock and a third waits for it: tickets
+        // the child's threads will never take.
+        assert!(runtime.execution.acquire(main));
+        lock(&runtime.execution.state).next_ticket += 1;
+        runtime.execution.waiting.store(1, Ordering::SeqCst);
+        let held = runtime.hold_for_fork().unwrap();
+        assert!(runtime.hold_for_fork().is_none(), "the locks are held");
+        runtime.fork_child(held, forking, 0x303);
+        assert_eq!(runtime.registry.ports(), [0x303]);
+        assert_eq!(member.port.load(Ordering::SeqCst), 0x303);
+        assert!(!runtime.execution.contended());
+        // The child's thread takes the lock at once.
+        runtime.execution.acquire(forking);
+        runtime.execution.release(forking);
+        assert!(runtime.forked.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn the_execution_lock_is_fifo_and_reports_other_holders() {

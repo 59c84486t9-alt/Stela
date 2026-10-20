@@ -431,6 +431,31 @@ pub(crate) struct Workqueue {
     changed: Condvar,
 }
 
+/// The workqueue's state, held across a host `fork`.
+pub(crate) struct ForkHeld<'a>(MutexGuard<'a, State>);
+
+impl Workqueue {
+    pub(crate) fn hold_for_fork(&self) -> Option<ForkHeld<'_>> {
+        threads::try_lock(&self.state).map(ForkHeld)
+    }
+}
+
+impl ForkHeld<'_> {
+    /// In the fork child: no workqueue, as a new process has none
+    /// (`p_wqptr`), with the process's dispatch offsets and allowed signals
+    /// (`forkproc` copies them). The parent's threads' state is forgotten,
+    /// never dropped: nothing of it belongs to the child.
+    pub(crate) fn child(mut self) {
+        let kept = State {
+            serial_offset: self.0.serial_offset,
+            label_offset: self.0.label_offset,
+            allowed_signals: self.0.allowed_signals,
+            ..State::default()
+        };
+        core::mem::forget(core::mem::replace(&mut *self.0, kept));
+    }
+}
+
 /// A workqueue thread's handle in its own kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Worker {

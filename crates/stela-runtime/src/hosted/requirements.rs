@@ -440,7 +440,11 @@ mod tests {
         assert_eq!(find(Area::Bsd, "read").service, "forwarded");
         assert_eq!(find(Area::Bsd, "mmap").service, "memory");
         assert_eq!(find(Area::Bsd, "sys_sysctlbyname").service, "sysctl");
-        assert!(matches!(find(Area::Bsd, "fork").status, Status::Refused(_)));
+        assert_eq!(find(Area::Bsd, "fork").service, "process");
+        assert!(matches!(
+            find(Area::Bsd, "ptrace").status,
+            Status::Refused(_)
+        ));
         // Each 26A434 addition is serviced by its family or refused by name.
         for name in ["pipe2", "dup3", "getumask", "register_uexc_handler"] {
             let row = find(Area::Bsd, name);

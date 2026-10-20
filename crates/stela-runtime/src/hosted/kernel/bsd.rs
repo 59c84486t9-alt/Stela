@@ -16,6 +16,7 @@ use anyhow::{Result, anyhow, bail};
 
 pub(super) mod additions;
 mod codesign;
+mod fork;
 mod forwarded;
 pub(super) mod kqworkloop;
 pub(super) mod kqworkq;
@@ -278,6 +279,10 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
         "posix_spawn",
         "binary preferences naming an x86-64 slice (Rosetta) are refused",
     ),
+    (
+        "vfork",
+        "the child has its own copy of memory, not the parent's",
+    ),
     ("bsdthread_create", "PTHREAD_START_SUSPENDED is refused"),
     (
         "bsdthread_ctl",
@@ -287,14 +292,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
 
 /// Calls the hosted kernel refuses, stopping the run with the reason.
 pub(crate) const REFUSED: &[(&str, &str)] = &[
-    (
-        "fork",
-        "the child needs its own copy of the hosted runtime's threads and engines",
-    ),
-    (
-        "vfork",
-        "the child needs its own copy of the hosted runtime's threads and engines",
-    ),
     ("ptrace", "debugging another process is not modeled"),
     ("__mac_execve", "exec under a MAC label is not modeled"),
     (
