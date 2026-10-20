@@ -131,7 +131,10 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     ("_kernelrpc_mach_vm_purgable_control_external", None),
     ("mach_vm_machine_attribute", None),
     ("mach_vm_range_create", None),
-    ("_kernelrpc_mach_vm_update_pointers_with_remote_tags", None),
+    (
+        "_kernelrpc_mach_vm_update_pointers_with_remote_tags",
+        Some("on a profile with memory tagging the request stops the run"),
+    ),
 ];
 
 /// Routines whose request carries descriptors (`MACH_MSGH_BITS_COMPLEX`).
@@ -188,12 +191,18 @@ fn route(
         "_kernelrpc_mach_vm_purgable_control_external" => purgable_control(request),
         "mach_vm_machine_attribute" => machine_attribute(task, request),
         // Release macOS kernels are built without user VM ranges
-        // (`CONFIG_MAP_RANGES`, KERN_NOT_SUPPORTED) and the M2 without
-        // MTE (`HAS_MTE`): the host's answers, after the same argument
-        // checks, are the arm64 kernel's.
-        "mach_vm_range_create" | "_kernelrpc_mach_vm_update_pointers_with_remote_tags" => {
+        // (`CONFIG_MAP_RANGES`, KERN_NOT_SUPPORTED): the host's answer,
+        // after the same argument checks, is the arm64 kernel's.
+        "mach_vm_range_create" => Reply::Forward,
+        // Without memory tagging (`HAS_MTE`) the arm64 kernel fails it
+        // after the argument checks as the host does.
+        "_kernelrpc_mach_vm_update_pointers_with_remote_tags" if !task.memory_tagging() => {
             Reply::Forward
         }
+        "_kernelrpc_mach_vm_update_pointers_with_remote_tags" => bail!(
+            "mach_vm_update_pointers_with_remote_tags: remote tags of a profile with memory \
+             tagging are not modeled"
+        ),
         _ => unreachable!("every served routine is routed"),
     }))
 }
@@ -214,6 +223,8 @@ trait Task {
     ) -> Vec<(u64, u64)>;
     /// Drop the compiled blocks of a changed range in every thread.
     fn invalidate(&self, address: u64, bytes: u64);
+    /// Whether the profile's chip implements memory tagging.
+    fn memory_tagging(&self) -> bool;
 }
 
 /// A registry identifier no thread has (the service threads' own), so
@@ -263,6 +274,10 @@ impl Task for Kernel {
                 .registry
                 .invalidate(EVERY_THREAD, address, bytes);
         }
+    }
+
+    fn memory_tagging(&self) -> bool {
+        self.process.hardware.memory_tagging
     }
 }
 
@@ -1853,10 +1868,17 @@ mod tests {
         }
     }
 
-    /// This process as a hosted task without a shared region.
-    struct Bare;
+    /// This process as a hosted task without a shared region, on a profile
+    /// with or without memory tagging.
+    struct Bare {
+        memory_tagging: bool,
+    }
 
     impl Task for Bare {
+        fn memory_tagging(&self) -> bool {
+            self.memory_tagging
+        }
+
         fn port(&self) -> u32 {
             host()
         }
@@ -1878,7 +1900,30 @@ mod tests {
     }
 
     fn bare() -> Bare {
-        Bare
+        Bare {
+            memory_tagging: false,
+        }
+    }
+
+    #[test]
+    fn remote_tags_follow_the_profile() {
+        // Two pointers in, two slots out.
+        let mut body = simple(&[&2u32.to_le_bytes()]);
+        body.extend(
+            [0x1000u64, 0x2000]
+                .iter()
+                .flat_map(|word| word.to_le_bytes()),
+        );
+        body.extend(2u32.to_le_bytes());
+        let routine = "_kernelrpc_mach_vm_update_pointers_with_remote_tags";
+        assert!(matches!(
+            call(&mut bare(), routine, false, &body).unwrap(),
+            Reply::Forward
+        ));
+        let mut tagging = Bare {
+            memory_tagging: true,
+        };
+        assert!(call(&mut tagging, routine, false, &body).is_err());
     }
 
     fn simple(fields: &[&[u8]]) -> Vec<u8> {

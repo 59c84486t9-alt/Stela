@@ -135,7 +135,7 @@ pub(super) fn serve(
         // ports are immovable sends of a platform-restricted task, which
         // no special port may hold (`KERN_INVALID_RIGHT`); the kernel port
         // is settable only with SIP's kernel-debugger allowance, which a
-        // stock M2 does not grant (`KERN_NO_ACCESS`); no other port is.
+        // stock Mac does not grant (`KERN_NO_ACCESS`); no other port is.
         ("thread_set_special_port", true) => {
             let immovable = request
                 .word(4)

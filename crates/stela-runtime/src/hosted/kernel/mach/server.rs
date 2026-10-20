@@ -250,7 +250,10 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (
         Object::Host,
         "host_statistics64_from_user",
-        Some("the x86 host's load and VM statistics, its page counts in guest pages"),
+        Some(
+            "the x86 host's load and VM statistics, its page counts in guest pages; on a profile \
+             with memory tagging the tag storage statistics stop the run",
+        ),
     ),
     (Object::Host, "host_get_special_port", None),
     (
@@ -579,7 +582,7 @@ pub(super) fn serve(
         // ports are immovable sends of a platform-restricted task, which
         // no special port may hold (`KERN_INVALID_RIGHT`); the kernel and
         // host ports are settable only with SIP's kernel-debugger
-        // allowance, which a stock M2 does not grant (`KERN_NO_ACCESS`).
+        // allowance, which a stock Mac does not grant (`KERN_NO_ACCESS`).
         // Replacing any other port changes only this task's own state, or
         // fails alike in both kernels.
         (Object::Task, "task_set_special_port_from_user", true) => {
@@ -691,10 +694,11 @@ pub(super) fn serve(
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
             host_statistics(
+                &kernel.process.hardware,
                 routine == "host_statistics64_from_user",
                 flavor,
                 count.min(HOST_INFO_MAX),
-            )
+            )?
         }
         // A host-privileged routine: the host kernel refuses the host
         // port for every special port, as the arm64 kernel refuses it
@@ -794,7 +798,7 @@ pub(super) fn serve(
             } else {
                 bail!(
                     "task_inspect(TASK_INSPECT_BASIC_COUNTS): the host would count the x86 \
-                     host's instructions and cycles, not the M2's"
+                     host's instructions and cycles, not the profile's processors'"
                 )
             }
         }
@@ -1205,17 +1209,19 @@ const PROCESSOR_CPU_STAT64: u32 = 0x1000_0004;
 /// `slot_num`, `is_master`.
 const PROCESSOR_BASIC_INFO_COUNT: u32 = 5;
 
-/// `host_processor_info`: one record per processor of the machine, out of
-/// line. Every M2 processor is running ARM64E (`CPU_ARCH_ARMv8E`) in its
-/// logical slot, the boot processor (slot 0) the master. The load ticks
-/// and exception counters would be the x86 host's processors', so they
-/// stop the run; other flavors fail in `processor_info_count`.
+/// `host_processor_info`: one record per processor of the profile's
+/// machine, out of line. Every processor is running ARM64E
+/// (`CPU_ARCH_ARMv8E`) in its logical slot, the boot processor (slot 0)
+/// the master. The load ticks and exception counters would be the x86
+/// host's processors', so they stop the run; other flavors fail in
+/// `processor_info_count`.
 fn processor_info(hardware: &hardware::Hardware, flavor: u32) -> Result<Reply> {
     match flavor {
         PROCESSOR_BASIC_INFO => {}
         PROCESSOR_CPU_LOAD_INFO | PROCESSOR_CPU_STAT | PROCESSOR_CPU_STAT64 => bail!(
-            "host_processor_info flavor {flavor:#x}: the M2 processors' load ticks and \
-             exception counters are not modeled"
+            "host_processor_info flavor {flavor:#x}: the load ticks and exception counters of \
+             the profile's {} processors are not modeled",
+            hardware.cpus()
         ),
         _ => return Ok(Reply::Failure(KERN_FAILURE)),
     }
@@ -1443,8 +1449,8 @@ const HOST_VM_INFO64: u32 = 4;
 const VM_INFO_PAGE_WORDS: [usize; 6] = [0, 1, 2, 3, 12, 14];
 const VM_INFO64_PAGE_WORDS: [usize; 10] = [0, 1, 2, 3, 22, 23, 32, 33, 34, 35];
 const VM_INFO64_PAGE_PAIRS: [usize; 2] = [36, 38];
-/// Rev3's tag storage and tagged-page statistics, from this word on: the
-/// M2 has no memory tagging, so they are zero.
+/// Rev3's tag storage and tagged-page statistics, from this word on: zero
+/// on a profile without memory tagging, which has no tag storage.
 const VM_INFO64_TAGGING: usize = 40;
 /// Host pages per guest page.
 const HOST_PAGES_PER_PAGE: u32 = (memory::PAGE_BYTES / (memory::HOST_PAGE_MASK + 1)) as u32;
@@ -1452,7 +1458,12 @@ const HOST_PAGES_PER_PAGE: u32 = (memory::PAGE_BYTES / (memory::HOST_PAGE_MASK +
 /// `host_statistics` and `host_statistics64` on the host port: the x86
 /// host's own answer, the same layout in both ABIs, with its page counts
 /// restated in the guest's 16 KiB pages, as an arm64 kernel counts them.
-fn host_statistics(sixty_four: bool, flavor: u32, count: u32) -> Reply {
+fn host_statistics(
+    hardware: &hardware::Hardware,
+    sixty_four: bool,
+    flavor: u32,
+    count: u32,
+) -> Result<Reply> {
     let mut words = [0i32; HOST_INFO_MAX as usize];
     let mut filled = count;
     // SAFETY: `words` holds `count` integers, at most HOST_INFO_MAX; the
@@ -1475,21 +1486,29 @@ fn host_statistics(sixty_four: bool, flavor: u32, count: u32) -> Reply {
         status
     };
     if status != 0 {
-        return Reply::Failure(status as u32);
+        return Ok(Reply::Failure(status as u32));
     }
     let mut words: Vec<u32> = words[..filled.min(HOST_INFO_MAX) as usize]
         .iter()
         .map(|&word| word as u32)
         .collect();
+    if flavor == HOST_VM_INFO64 && words.len() > VM_INFO64_TAGGING && hardware.memory_tagging {
+        bail!(
+            "host_statistics64(HOST_VM_INFO64) of {} words: the tag storage statistics of a \
+             profile with memory tagging are not modeled",
+            words.len()
+        );
+    }
     restate_pages(&mut words, flavor);
     let mut body = (words.len() as u32).to_le_bytes().to_vec();
     for word in words {
         body.extend(word.to_le_bytes());
     }
-    Reply::Success(body)
+    Ok(Reply::Success(body))
 }
 
-/// Restate the page counts of a `flavor` statistics reply in guest pages.
+/// Restate the page counts of a `flavor` statistics reply in guest pages,
+/// for a profile without memory tagging.
 fn restate_pages(words: &mut [u32], flavor: u32) {
     let pages: &[usize] = match flavor {
         HOST_VM_INFO => &VM_INFO_PAGE_WORDS,
@@ -1678,10 +1697,23 @@ mod tests {
         restate_pages(&mut load, 1);
         assert_eq!(load, [400; 6]);
         // The host answers the load and VM flavors.
-        let Reply::Success(body) = host_statistics(true, HOST_VM_INFO64, HOST_INFO_MAX) else {
+        let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
+        let Ok(Reply::Success(body)) = host_statistics(&hardware, true, HOST_VM_INFO64, 38) else {
             panic!("host_statistics64 failed");
         };
-        assert!(u32::from_le_bytes(body[..4].try_into().unwrap()) >= 38);
+        assert_eq!(u32::from_le_bytes(body[..4].try_into().unwrap()), 38);
+        // A profile with memory tagging has tag storage the host lacks.
+        let tagging = hardware::Hardware {
+            memory_tagging: true,
+            ..hardware.clone()
+        };
+        assert!(host_statistics(&tagging, true, HOST_VM_INFO64, 38).is_ok());
+        let full = host_statistics(&tagging, true, HOST_VM_INFO64, HOST_INFO_MAX);
+        let host_rev3 = matches!(
+            host_statistics(&hardware, true, HOST_VM_INFO64, HOST_INFO_MAX),
+            Ok(Reply::Success(body)) if u32::from_le_bytes(body[..4].try_into().unwrap()) > 40
+        );
+        assert_eq!(full.is_err(), host_rev3);
     }
 
     #[test]
