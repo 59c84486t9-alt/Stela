@@ -3,14 +3,15 @@
 //! with no options, explains what it cannot run, and `stela apps` makes and
 //! removes a launcher.
 //!
-//! It needs the 26A434 guest roots `stela extract-guest-files` made
-//! (`.stela/26A434-guest-files` and `.stela/26A434-shared-cache` of the main
-//! checkout, or `STELA_TEST_GUEST_ROOTS`, colon-separated) and `xcrun
-//! clang`; without them it says so and checks nothing.
+//! It needs the 26A434 guest roots ([`support::guest`]) and `xcrun clang`;
+//! without them it says so and checks nothing.
+mod support {
+    pub mod guest;
+}
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-const ROOTS: [&str; 2] = [".stela/26A434-guest-files", ".stela/26A434-shared-cache"];
+use support::guest::guest_roots;
 const HELLO: &str = r#"#include <stdio.h>
 #include <stdlib.h>
 int main(int argc, char **argv) {
@@ -22,26 +23,6 @@ int main(int argc, char **argv) {
     return 3;
 }
 "#;
-
-/// The guest roots, when this checkout or its main checkout has them.
-fn guest_roots() -> Option<Vec<PathBuf>> {
-    if let Some(list) = std::env::var_os("STELA_TEST_GUEST_ROOTS") {
-        return Some(std::env::split_paths(&list).collect());
-    }
-    let common = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()?;
-    let checkout = PathBuf::from(String::from_utf8(common.stdout).ok()?.trim())
-        .parent()?
-        .to_owned();
-    let roots: Vec<PathBuf> = ROOTS.iter().map(|root| checkout.join(root)).collect();
-    roots
-        .iter()
-        .all(|root| root.join("receipt.json").is_file())
-        .then_some(roots)
-}
 
 /// A program that runs another by the path it is given, as `execv` does.
 const EXEC: &str = r#"#include <unistd.h>

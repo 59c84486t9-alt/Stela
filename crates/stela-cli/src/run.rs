@@ -14,6 +14,9 @@
 //! lookup the process makes, resolve under the guest roots first (see
 //! `stela_runtime::hosted`); dyld finds and maps the shared cache there
 //! itself. Everything after is the hosted runtime's.
+#[cfg(test)]
+#[path = "../tests/support/guest.rs"]
+mod guest;
 pub(crate) mod program;
 
 use crate::guest_system;
@@ -378,25 +381,6 @@ mod tests {
         assert!(message.contains("stela run --trace ./hello"), "{message}");
     }
 
-    /// The 26A434 guest system the process work extracted
-    /// (`.stela/process-work/guest-os` of the main checkout, or
-    /// `STELA_TEST_GUEST_OS`).
-    fn guest_os() -> Option<PathBuf> {
-        if let Some(root) = std::env::var_os("STELA_TEST_GUEST_OS") {
-            return Some(root.into());
-        }
-        let common = std::process::Command::new("git")
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .ok()?;
-        let checkout = PathBuf::from(String::from_utf8(common.stdout).ok()?.trim())
-            .parent()?
-            .to_owned();
-        let root = checkout.join(".stela/process-work/guest-os");
-        root.join("receipt.json").is_file().then_some(root)
-    }
-
     /// The exec security state of an image's arm64e slice: its security
     /// config and IPC space policy, or `None` when it is unsigned.
     fn security(data: &[u8]) -> Result<Option<(u32, u32)>> {
@@ -413,10 +397,11 @@ mod tests {
 
     #[test]
     fn exec_security_follows_the_signature_and_entitlements_of_26a434_images() -> Result<()> {
-        let Some(root) = guest_os() else {
-            eprintln!("skipped: no 26A434 guest system (see guest_os)");
+        let Some(roots) = guest::guest_roots() else {
+            eprintln!("skipped: no 26A434 guest roots (see tests/support/guest.rs)");
             return Ok(());
         };
+        let root = &roots[0];
         // Platform binaries take restrictions version 3 and the platform
         // IPC policy; hardened processes their version and guard objects,
         // legacy names included; plugin hosts (library validation off, or
