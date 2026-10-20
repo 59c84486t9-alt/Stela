@@ -517,10 +517,10 @@ impl Job {
                 }
                 return r;
             }
-            Plan::File(_) | Plan::Raw(_) => {
-                let raw = matches!(&self.plan, Plan::Raw(_));
+            Plan::File(_) | Plan::Raw(_) | Plan::Message(_) => {
+                let raw = !matches!(&self.plan, Plan::File(_));
                 let segments = match &self.plan {
-                    Plan::File(s) | Plan::Raw(s) => s,
+                    Plan::File(s) | Plan::Raw(s) | Plan::Message(s) => s,
                     _ => unreachable!(),
                 };
                 while self.index < segments.len() && self.offset == segments[self.index].len() {

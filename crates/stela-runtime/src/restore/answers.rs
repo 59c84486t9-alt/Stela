@@ -27,6 +27,9 @@ pub enum Plan {
     Reply(Value),
     File(Vec<Segment>),
     Raw(Vec<Segment>),
+    /// A whole framed reply (length and binary plist) too large to hold in
+    /// memory, whose data objects stream from IPSW members.
+    Message(Vec<Segment>),
     Asr(Sender),
 }
 #[derive(Clone)]
@@ -302,8 +305,14 @@ impl<R: ReadAt> Answers<R> {
         let tag = if self.store.digest384(&path)?.as_slice() == digest {
             stored
         } else {
+            let tags = global.tags_with(digest);
+            if tags.is_empty() {
+                return Err(Error::Invalid(
+                    "global manifest does not cover exact component digest",
+                ));
+            }
             let mut found = None;
-            for tag in global.tags_with(digest) {
+            for tag in tags {
                 if self.retyped_digest(&path, &head, at, tag)?.as_slice() == digest {
                     found = Some(tag);
                     break;
@@ -418,7 +427,20 @@ impl<R: ReadAt> Answers<R> {
                     "Ap,SystemVolumeCanonicalMetadata"
                 };
                 let data = if kind == "SystemImageCanonicalMetadata" {
-                    self.member_bytes(identity.path(component)?)?
+                    let path = identity.path(component)?;
+                    let bytes = self.store.member_len(path)?;
+                    if bytes > MAX_REPLY_BYTES as u64 {
+                        // The 26A434 mtree is 78 MB: stream it from the IPSW.
+                        let member = Segment::Member {
+                            path: path.into(),
+                            offset: 0,
+                            bytes,
+                        };
+                        return Ok(Plan::Message(framed_binary(&Streamed::Dict(
+                            [(format!("{kind}File"), Streamed::Data(vec![member]))].into(),
+                        ))?));
+                    }
+                    self.member_bytes(path)?
                 } else {
                     self.personalized(&identity, component, args)?
                 };
@@ -679,6 +701,16 @@ impl<R: ReadAt> Answers<R> {
                     "requested image does not match manifest ImageType",
                 ));
             }
+            if self.store.member_len(identity.path(name)?)? > MAX_REPLY_BYTES as u64 {
+                let data = self.personalized_stream(identity, name, &Value::dict([]))?;
+                return Ok(Plan::Message(framed_binary(&Streamed::Dict(
+                    [
+                        (data_key.into(), Streamed::Data(data)),
+                        ("ImageName".into(), Streamed::String(name.into())),
+                    ]
+                    .into(),
+                ))?));
+            }
             let data = self.personalized(identity, name, &Value::dict([]))?;
             return Ok(Plan::Reply(Value::dict([
                 (data_key, Value::Data(data)),
@@ -692,13 +724,21 @@ impl<R: ReadAt> Answers<R> {
         }
         let mut data = BTreeMap::new();
         let mut total = 0;
-        for name in matches {
-            let bytes = self.personalized(identity, &name, &Value::dict([]))?;
+        for name in &matches {
+            let bytes = self.personalized(identity, name, &Value::dict([]))?;
             total += bytes.len();
             if total > MAX_REPLY_BYTES {
-                return Err(Error::Limit("firmware reply bytes"));
+                // Too large to hold: stream every image from its member.
+                let mut streamed = BTreeMap::new();
+                for name in &matches {
+                    let data = self.personalized_stream(identity, name, &Value::dict([]))?;
+                    streamed.insert(name.clone(), Streamed::Data(data));
+                }
+                return Ok(Plan::Message(framed_binary(&Streamed::Dict(
+                    [(data_key.into(), Streamed::Dict(streamed))].into(),
+                ))?));
             }
-            data.insert(name, Value::Data(bytes));
+            data.insert(name.clone(), Value::Data(bytes));
         }
         Ok(Plan::Reply(Value::Dict(
             [(data_key.into(), Value::Dict(data))].into(),
@@ -751,6 +791,81 @@ impl<R: ReadAt> Answers<R> {
         segments.push(Segment::Bytes(cpio_header("TRAILER!!!", 0, 0)?));
         Ok(Plan::Raw(segments))
     }
+}
+/// A reply value whose data objects may stream from IPSW members.
+enum Streamed {
+    String(String),
+    Data(Vec<Segment>),
+    Dict(BTreeMap<String, Streamed>),
+}
+/// Frame `v` as the control stream frames a reply: a big-endian length and
+/// `plist::encode_binary`'s exact layout, with each data object's bytes left
+/// as its segments.
+fn framed_binary(v: &Streamed) -> Result<Vec<Segment>> {
+    fn marker(out: &mut Vec<u8>, tag: u8, n: u64) {
+        if n < 15 {
+            out.push(tag | n as u8);
+        } else {
+            out.extend_from_slice(&[tag | 15, 0x13]);
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+    }
+    fn emit(v: &Streamed, objects: &mut Vec<Vec<Segment>>) -> u64 {
+        let mut head = Vec::new();
+        let mut body = Vec::new();
+        match v {
+            Streamed::String(s) if s.is_ascii() => {
+                marker(&mut head, 0x50, s.len() as u64);
+                head.extend_from_slice(s.as_bytes());
+            }
+            Streamed::String(s) => {
+                marker(&mut head, 0x60, s.encode_utf16().count() as u64);
+                for c in s.encode_utf16() {
+                    head.extend_from_slice(&c.to_be_bytes());
+                }
+            }
+            Streamed::Data(segments) => {
+                marker(&mut head, 0x40, segments.iter().map(Segment::len).sum());
+                body = segments.clone();
+            }
+            Streamed::Dict(d) => {
+                marker(&mut head, 0xd0, d.len() as u64);
+                for k in d.keys() {
+                    let key = emit(&Streamed::String(k.clone()), objects);
+                    head.extend_from_slice(&key.to_be_bytes());
+                }
+                for v in d.values() {
+                    head.extend_from_slice(&emit(v, objects).to_be_bytes());
+                }
+            }
+        }
+        let mut object = vec![Segment::Bytes(head)];
+        object.extend(body);
+        objects.push(object);
+        objects.len() as u64 - 1
+    }
+    let mut objects = Vec::new();
+    let root = emit(v, &mut objects);
+    let mut segments = vec![Segment::Bytes(b"bplist00".to_vec())];
+    let mut at = 8u64;
+    let mut tail = Vec::new();
+    for object in objects.iter() {
+        tail.extend_from_slice(&at.to_be_bytes());
+        for segment in object {
+            at += segment.len();
+        }
+    }
+    let table = at;
+    segments.extend(objects.into_iter().flatten());
+    tail.extend_from_slice(&[0, 0, 0, 0, 0, 0, 8, 8]);
+    tail.extend_from_slice(&((tail.len() / 8 - 1) as u64).to_be_bytes());
+    tail.extend_from_slice(&root.to_be_bytes());
+    tail.extend_from_slice(&table.to_be_bytes());
+    let length = u32::try_from(table + tail.len() as u64)
+        .map_err(|_| Error::Limit("plist frame u32 length"))?;
+    segments.push(Segment::Bytes(tail));
+    segments.insert(0, Segment::Bytes(length.to_be_bytes().to_vec()));
+    Ok(segments)
 }
 /// The variant directory of a global manifest: the request's `Variant`, else
 /// the identity's macOS variant. An erase or upgrade identity names it as
@@ -948,6 +1063,59 @@ mod tests {
             assert!(got.contains(reason), "{kind}: {got}");
             assert_eq!(*kept, request);
         }
+    }
+    /// A streamed reply is byte for byte the frame of the same value held in
+    /// memory, however its data is split.
+    #[test]
+    fn a_streamed_reply_frames_as_the_reply_held_in_memory() {
+        let image = vec![7; 300];
+        let held = Value::dict([
+            (
+                "FUDImageData",
+                Value::dict([
+                    ("Ap,Big", Value::Data(image.clone())),
+                    ("S\u{e9}", Value::Data(b"tiny".to_vec())),
+                ]),
+            ),
+            ("ImageName", Value::from("Ap,Big")),
+        ]);
+        let streamed = Streamed::Dict(
+            [
+                (
+                    "FUDImageData".into(),
+                    Streamed::Dict(
+                        [
+                            (
+                                "Ap,Big".into(),
+                                Streamed::Data(vec![
+                                    Segment::Bytes(image[..10].to_vec()),
+                                    Segment::Bytes(Vec::new()),
+                                    Segment::Bytes(image[10..].to_vec()),
+                                ]),
+                            ),
+                            (
+                                "S\u{e9}".into(),
+                                Streamed::Data(vec![Segment::Bytes(b"tiny".to_vec())]),
+                            ),
+                        ]
+                        .into(),
+                    ),
+                ),
+                ("ImageName".into(), Streamed::String("Ap,Big".into())),
+            ]
+            .into(),
+        );
+        let body = plist::encode_binary(&held, Limits::default()).unwrap();
+        let mut framed = (body.len() as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(&body);
+        let mut got = Vec::new();
+        for segment in framed_binary(&streamed).unwrap() {
+            let Segment::Bytes(bytes) = segment else {
+                panic!("only byte segments were given")
+            };
+            got.extend(bytes);
+        }
+        assert_eq!(got, framed);
     }
     #[test]
     fn exact_http_arguments_digest_and_post_body_are_bound() {
