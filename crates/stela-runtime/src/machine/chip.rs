@@ -252,20 +252,21 @@ impl Chip {
         &[]
     }
 
-    /// The (mask, value) of every form with a variant on this chip whose
-    /// checks are exactly `checks`, for tests covering a class of forms.
+    /// The (mask, value) of every form with a variant on this chip, and that
+    /// variant's checks, for tests covering classes of forms.
     #[cfg(test)]
-    pub fn forms_checked(self, checks: &[Check]) -> Vec<(u32, u32)> {
+    pub fn check_forms(self) -> Vec<(u32, u32, &'static [Check])> {
         let bit = 1u8 << self as u8;
         checks::CHECKS
             .iter()
-            .flat_map(|group| group.forms.iter().map(move |form| (group.mask, form)))
-            .filter(|(_, form)| {
-                form.variants
-                    .iter()
-                    .any(|variant| variant.chips & bit != 0 && variant.checks == checks)
+            .flat_map(|group| {
+                group.forms.iter().flat_map(move |form| {
+                    form.variants
+                        .iter()
+                        .filter(move |variant| variant.chips & bit != 0)
+                        .map(move |variant| (group.mask, form.value, variant.checks))
+                })
             })
-            .map(|(mask, form)| (mask, form.value))
             .collect()
     }
 
@@ -320,11 +321,12 @@ pub fn test_chip() -> Chip {
 /// feature the M2 has; the M3's FEAT_HCX, FEAT_NV and FEAT_NV2; the M4's
 /// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS), the activity
 /// monitors FEAT_AMUv1 and FEAT_AMUv1p1 (`machine::amu`) and FEAT_SME with
-/// FEAT_SME2, whose System registers and PSTATE.ZA the engine holds (it
-/// refuses streaming mode, and the compiler refuses the SME and SVE
-/// instructions, explicitly); the M5's
+/// FEAT_SME2, FEAT_SME_F64F64 and FEAT_SME_I16I64, whose streaming mode, ZA,
+/// ZT0 and instructions the engine runs (`engine::scalable`); the M5's
+/// FEAT_SME2p1, FEAT_SME_B16B16, FEAT_SME_F16F16 and FEAT_SVE_B16B16 too,
 /// FEAT_SPECRES2 and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
-/// FEAT_FPACCOMBINE, FEAT_CPA (whose arithmetic the engine completes),
+/// FEAT_SME_LUTv2, FEAT_FPACCOMBINE, FEAT_CPA (whose arithmetic the engine
+/// completes),
 /// FEAT_PAuth_LR with FEAT_SCTLR2 (PACM and the two-modifier PAC forms),
 /// FEAT_RASv2 with FEAT_FGT2 (the error record group status and its trap) and
 /// the instruction-only FEAT_FAMINMAX and FEAT_LUT, whose forms the
@@ -362,20 +364,20 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_XS
         | Feature::FEAT_SME
         | Feature::FEAT_SME2
-        | Feature::FEAT_AMUv1 => true,
-        Feature::FEAT_FP8
-        | Feature::FEAT_FPMR
-        | Feature::FEAT_MTE
-        | Feature::FEAT_MTE2
+        | Feature::FEAT_AMUv1
         | Feature::FEAT_SME2p1
         | Feature::FEAT_SME_B16B16
         | Feature::FEAT_SME_F16F16
         | Feature::FEAT_SME_F64F64
-        | Feature::FEAT_SME_F8F16
-        | Feature::FEAT_SME_F8F32
         | Feature::FEAT_SME_I16I64
         | Feature::FEAT_SME_LUTv2
-        | Feature::FEAT_SVE_B16B16 => false,
+        | Feature::FEAT_SVE_B16B16 => true,
+        Feature::FEAT_FP8
+        | Feature::FEAT_FPMR
+        | Feature::FEAT_MTE
+        | Feature::FEAT_MTE2
+        | Feature::FEAT_SME_F8F16
+        | Feature::FEAT_SME_F8F32 => false,
     }
 }
 

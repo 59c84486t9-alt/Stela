@@ -300,7 +300,12 @@ mod tests {
     #[test]
     fn every_scalar_fp_form_of_the_sme_chips_names_its_vector_destinations() {
         for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
-            let forms = chip.forms_checked(&[Check::Fp]);
+            let forms: alloc::vec::Vec<_> = chip
+                .check_forms()
+                .into_iter()
+                .filter(|(_, _, checks)| *checks == [Check::Fp])
+                .map(|(mask, value, _)| (mask, value))
+                .collect();
             assert!(forms.len() > 400, "{chip:?}");
             let mut checked = 0;
             for (mask, value) in forms {

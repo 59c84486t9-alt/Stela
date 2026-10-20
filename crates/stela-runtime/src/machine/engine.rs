@@ -1819,6 +1819,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(()) => return self.scalable_instruction(pc, word),
         };
         self.cpu.step_advance = false;
+        // Arm decodes before it checks access: an SVE or SME word UNDEFINED
+        // on this chip takes that instead of the trap.
+        if checks.iter().any(|check| *check != Check::Fp) && self.scalable_undefined(pc, word) {
+            return self.undefined();
+        }
         self.take(exception);
         Ok(())
     }

@@ -7,7 +7,9 @@
 //! and discarded with the blocks. A leaf's memory accesses come back to the
 //! engine one element at a time through the context's memory service
 //! ([`serve`]), which translates and checks each as a plain data access and
-//! raises its exception after the leaf returns. What a leaf cannot run stops
+//! raises its exception after the leaf returns. A word that Arm's decode
+//! makes UNDEFINED on the chip takes that, before its access checks
+//! ([`Machine::scalable_undefined`]). What a leaf cannot run stops
 //! explicitly: tag-checked accesses with tag checks enabled, and PSTATE.DIT
 //! set, whose timing the leaves do not keep. Numerical floating point, which
 //! needs Arm's FP semantics, is completed in software
@@ -32,13 +34,14 @@ use stela_compiler::{
     aarch64::{
         floating::features::NumericalFeatures,
         scalable::{
-            VectorLength,
+            ScalableMode, VectorLength,
             features::{ScalableFeature, ScalableFeatures},
             profile::ScalableControls,
         },
+        sme::movement,
     },
     block::scalable::{
-        ScalableNumericalInstruction, admit_scalable_numerical_instruction,
+        AdmittedScalableNumericalInstruction, admit_scalable_numerical_instruction,
         decode_scalable_numerical_instruction,
     },
     context::{
@@ -85,12 +88,26 @@ const FEATURES: [(Feature, ScalableFeature); 17] = [
 /// instruction of a feature it has but the engine lacks fails to compile,
 /// and stops.
 pub(crate) fn features(chip: Chip) -> ScalableFeatures {
+    features_where(|feature| chip.implemented(feature) == Ok(true))
+}
+
+/// The scalable features `keep` selects of [`FEATURES`].
+fn features_where(keep: impl Fn(Feature) -> bool) -> ScalableFeatures {
     FEATURES
         .iter()
-        .filter(|(feature, _)| chip.implemented(*feature) == Ok(true))
+        .filter(|(feature, _)| keep(*feature))
         .fold(ScalableFeatures::empty(), |features, (_, scalable)| {
             features.with(*scalable)
         })
+}
+
+/// What the engine runs an SVE or SME word as.
+enum Prepared {
+    Movprfx(Movprfx),
+    Numerical(AdmittedScalableNumericalInstruction),
+    Leaf(Leaf),
+    /// UNDEFINED: the word needs a feature the chip lacks, or Debug state.
+    Undefined,
 }
 
 /// MOVPRFX (unpredicated, and predicated with merging or zeroing).
@@ -244,16 +261,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(profile) => profile,
             Err(detail) => return refuse(self, &detail),
         };
-        if let Some(prefix) = Movprfx::decode(word) {
-            return self.movprfx(pc, word, prefix);
-        }
-        match decode_scalable_numerical_instruction(GuestAddress(pc), word) {
-            Ok(Some(instruction)) => return self.scalable_numerical(instruction, profile),
-            Ok(None) => {}
-            Err(error) => return refuse(self, &error.0),
-        }
-        let leaf = match self.scalable_leaf(pc, word, profile) {
-            Ok(leaf) => leaf,
+        let leaf = match self.prepare_scalable(pc, word, profile) {
+            Ok(Prepared::Movprfx(prefix)) => return self.movprfx(pc, word, prefix),
+            Ok(Prepared::Numerical(admitted)) => return self.scalable_numerical(admitted),
+            Ok(Prepared::Undefined) => {
+                self.cpu.step_advance = false;
+                return self.undefined();
+            }
+            Ok(Prepared::Leaf(leaf)) => leaf,
             Err(detail) => return refuse(self, &detail),
         };
         if let Err(detail) = self.admit_memory(leaf.memory) {
@@ -366,20 +381,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// software (`floating::scalable`), with FPCR's controls and FPSR's
     /// cumulative flags; in streaming mode without FEAT_SME_FA64 Arm's
     /// `FPProcessException` takes no FP trap, so none is.
-    fn scalable_numerical(
-        &mut self,
-        instruction: ScalableNumericalInstruction,
-        profile: ScalableProfile,
-    ) -> Step {
-        let (pc, word) = (instruction.instruction_pc.0, instruction.word);
+    fn scalable_numerical(&mut self, admitted: AdmittedScalableNumericalInstruction) -> Step {
+        let (pc, word) = (admitted.instruction_pc().0, admitted.word());
         let refuse = |machine: &Self, detail: String| {
             Err(machine.unsupported(RequirementKind::Instruction { word, detail }))
         };
-        let admitted =
-            match admit_scalable_numerical_instruction(instruction, profile, NUMERICAL_FEATURES) {
-                Ok(admitted) => admitted,
-                Err(error) => return refuse(self, error.0),
-            };
         self.completing(pc, |machine| {
             let Some(scalable) = machine.cpu.scalable.as_mut() else {
                 return refuse(machine, "a PE without SME state".into());
@@ -677,6 +683,76 @@ impl<H: Host, D: Devices> Machine<H, D> {
         (self.cpu.regime_sctlr() >> shift) & 0b11 != 0
     }
 
+    /// What `word` at `pc` runs as under `profile`, compiling its leaf.
+    fn prepare_scalable(
+        &mut self,
+        pc: u64,
+        word: u32,
+        profile: ScalableProfile,
+    ) -> Result<Prepared, String> {
+        if let Some(prefix) = Movprfx::decode(word) {
+            return Ok(Prepared::Movprfx(prefix));
+        }
+        let result = match decode_scalable_numerical_instruction(GuestAddress(pc), word)
+            .map_err(|error| error.0)?
+        {
+            Some(instruction) => {
+                admit_scalable_numerical_instruction(instruction, profile, NUMERICAL_FEATURES)
+                    .map(Prepared::Numerical)
+                    .map_err(|error| error.0)
+            }
+            None => self.scalable_leaf(pc, word, profile).map(Prepared::Leaf),
+        };
+        match result {
+            Err(_) if self.scalable_undefined(pc, word) => Ok(Prepared::Undefined),
+            result => result,
+        }
+    }
+
+    /// Whether the SVE or SME word `word` at `pc` decodes as UNDEFINED on
+    /// this chip, which Arm's decode raises before any access check, in any
+    /// mode: MOVT between ZT0 and a general-purpose register, defined only
+    /// in Debug state, which this engine never enters (as the System
+    /// instructions of Debug state), and a word that compiles with every
+    /// scalable feature but not with those the chip has, engine-implemented
+    /// or not, so that `IsFeatureImplemented` fails, such as BFADD inside
+    /// the M4's FADD encoding.
+    pub(super) fn scalable_undefined(&self, pc: u64, word: u32) -> bool {
+        if movement::decode(word).is_some_and(|operand| operand.requirements.halted) {
+            return true;
+        }
+        let Some(length) = VectorLength::from_bytes(STREAMING_VECTOR_BYTES) else {
+            return false;
+        };
+        let chip = self.profile.chip;
+        let compiles = |features: ScalableFeatures| {
+            let controls = ScalableControls::new(length, features.contains(ScalableFeature::Sme2));
+            let Ok(profile) = ScalableProfile::new_with_features(
+                length,
+                ScalableMode::new(true, true),
+                features,
+                controls,
+            ) else {
+                return false;
+            };
+            match decode_scalable_numerical_instruction(GuestAddress(pc), word) {
+                Ok(Some(instruction)) => {
+                    admit_scalable_numerical_instruction(instruction, profile, NUMERICAL_FEATURES)
+                        .is_ok()
+                }
+                Ok(None) => {
+                    let source: Vec<u8> = [word, RET_X30]
+                        .iter()
+                        .flat_map(|word| word.to_le_bytes())
+                        .collect();
+                    extended::prepare_leaf(&source, GuestAddress(pc), profile, self.target).is_ok()
+                }
+                Err(_) => false,
+            }
+        };
+        compiles(features_where(|_| true)) && !compiles(features_where(|f| f.on(chip)))
+    }
+
     /// The profile of the PE's current scalable state.
     fn scalable_profile(&self) -> Result<ScalableProfile, String> {
         let scalable = self
@@ -755,6 +831,13 @@ mod tests {
     fn streaming(words: &[u32]) -> Option<TestMachine> {
         let mut machine = machine(words);
         machine.cpu.scalable.as_ref()?;
+        enable_streaming(&mut machine);
+        Some(machine)
+    }
+
+    /// Enable FP, SVE and SME at EL1 (vectors at 0x1_0000), and enter
+    /// streaming mode with ZA at BASE.
+    fn enable_streaming(machine: &mut TestMachine) {
         machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
         for register in [Register::CPACR_EL1, Register::CPTR_EL2] {
             machine
@@ -766,7 +849,6 @@ mod tests {
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.cpu.set_svcr(true, true).unwrap();
         machine.cpu.pc = BASE;
-        Some(machine)
     }
 
     fn z(machine: &TestMachine, register: u8) -> Vec<u8> {
@@ -975,6 +1057,122 @@ mod tests {
         assert_eq!(z(&machine, 5), merged);
         let added: Vec<u8> = (3..3 + STREAMING_VECTOR_BYTES as u8).collect();
         assert_eq!(z(&machine, 6), added);
+    }
+
+    /// Every SVE and SME form of the M4, M5 and M6 that runs through
+    /// [`Machine::prepare_scalable`], its operand fields filled in 24 ways,
+    /// in each mode its access checks allow: each form has a filling that
+    /// runs or decodes as UNDEFINED, and no filling stops for a feature,
+    /// apart from the FP8 forms the engine does not implement. Scalar FP,
+    /// Advanced SIMD and non-streaming SVE forms take other paths, and the
+    /// FPMR-checked ones are FP8's. The other fillings decline the reserved
+    /// encodings they hit.
+    #[test]
+    fn every_sve_and_sme_form_of_the_sme_chips_runs_or_is_undefined() {
+        use crate::machine::{Chip, chip::Check};
+        // FSCALE (multiple vectors) needs FEAT_FP8. BFSCALE, of
+        // FEAT_SVE_BFSCALE, which no Apple chip has, lies inside FSCALE's
+        // encodings, and the compiler declines it as unknown.
+        const FP8: [u32; 4] = [0xc120_a180, 0xc120_a980, 0xc120_b180, 0xc120_b980];
+        const BFSCALE: (u32, u32) = (0xffff_e000, 0x6509_8000);
+        let mut runs = 0;
+        let mut undefined = 0;
+        for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            let mut machine = super::super::tests::machine_on(chip, &[]);
+            machine.target = stela_compiler::TargetCpu::detect();
+            for (mask, value, checks) in chip.check_forms() {
+                if checks.iter().any(|check| {
+                    matches!(
+                        check,
+                        Check::Fp | Check::FpAdvSimd | Check::NonStreamingSve | Check::Fpmr
+                    )
+                }) {
+                    continue;
+                }
+                let known = FP8.contains(&value) || (mask, value) == BFSCALE;
+                let streaming_only = checks.iter().any(|check| {
+                    matches!(
+                        check,
+                        Check::Sve | Check::StreamingSve | Check::StreamingSveAndZa
+                    )
+                });
+                for streaming in [true, false] {
+                    if !streaming && streaming_only {
+                        continue;
+                    }
+                    machine.cpu.set_svcr(streaming, true).unwrap();
+                    let profile = machine.scalable_profile().unwrap();
+                    let (mut tried, mut handled) = (false, false);
+                    let mut seed = value ^ 0x9e37_79b9;
+                    for _ in 0..24 {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        let word = value | (seed & !mask);
+                        if chip.admit(word) != word || chip.checks(word) != checks {
+                            continue;
+                        }
+                        tried = true;
+                        match machine.prepare_scalable(BASE, word, profile) {
+                            Ok(Prepared::Undefined) => {
+                                handled = true;
+                                undefined += 1;
+                            }
+                            Ok(_) => {
+                                handled = true;
+                                runs += 1;
+                            }
+                            Err(error) => assert!(
+                                known || !error.contains("unavailable guest features"),
+                                "{chip:?} {word:#010x}: {error}"
+                            ),
+                        }
+                    }
+                    assert!(
+                        !tried || handled || known,
+                        "{chip:?} streaming {streaming}: {value:#010x} under {mask:#010x}"
+                    );
+                }
+            }
+        }
+        assert!(runs > 25_000 && undefined > 1_000, "{runs} {undefined}");
+    }
+
+    #[test]
+    fn features_the_chip_lacks_and_debug_state_movt_are_undefined_before_their_checks() {
+        use crate::machine::Chip;
+        const BFADD_Z0_Z1: u32 = 0x6500_8020; // bfadd z0.h, p0/m, z0.h, z1.h
+        const MOVT_X0_ZT0: u32 = 0xc04c_03e0; // movt x0, zt0[0]
+        const UNDEFINED: u64 = 1 << 25;
+        let on = |chip, word| {
+            let mut machine = super::super::tests::machine_on(chip, &[PTRUE_P0_B, word]);
+            enable_streaming(&mut machine);
+            machine.step().unwrap();
+            machine
+        };
+        // The M4 lacks FEAT_SVE_B16B16: BFADD is UNDEFINED, also with SME
+        // disabled, where it would otherwise trap; the M5 runs it.
+        let mut m4 = on(Chip::AppleM4, BFADD_Z0_Z1);
+        assert_eq!(m4.step(), Ok(()));
+        assert_eq!(m4.cpu.read(Register::ESR_EL1), UNDEFINED);
+        assert_eq!(m4.cpu.read(Register::ELR_EL1), BASE + 4);
+        let mut m5 = on(Chip::AppleM5, BFADD_Z0_Z1);
+        assert_eq!(m5.step(), Ok(()));
+        assert_eq!(m5.cpu.pc, BASE + 8);
+        for (chip, word) in [(Chip::AppleM4, BFADD_Z0_Z1), (Chip::AppleM5, MOVT_X0_ZT0)] {
+            let mut machine = on(chip, word);
+            for register in [Register::CPACR_EL1, Register::CPTR_EL2] {
+                machine.cpu.registers.set(register, 0, 0);
+            }
+            machine.derived_changed();
+            assert_eq!(machine.step(), Ok(()), "{chip:?}");
+            assert_eq!(machine.cpu.read(Register::ESR_EL1), UNDEFINED, "{chip:?}");
+        }
+        // MOVT between ZT0 and an X register exists only in Debug state.
+        let mut m6 = on(Chip::AppleM6, MOVT_X0_ZT0);
+        assert_eq!(m6.step(), Ok(()));
+        assert_eq!(m6.cpu.read(Register::ESR_EL1), UNDEFINED);
+        assert_eq!(m6.cpu.read(Register::ELR_EL1), BASE + 4);
     }
 
     #[test]

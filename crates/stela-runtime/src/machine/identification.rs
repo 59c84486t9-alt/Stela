@@ -104,8 +104,8 @@ const DATA_INDEPENDENT_TIMING: &str = "PSTATE.DIT blocks compile for the host's 
 const PAUTH_LR: &str = "PACM sets PSTATE.PACM for the next instruction, as IsPACMEnabled \
      allows, and the two-modifier forms and the PACM-modified PAC*SP, AUT*SP, RETA* and \
      *1716 forms compute ComputePAC2QARMA";
-const SME_PENDING: &str = "the engine holds SVCR.ZA and the SME System registers, but \
-     refuses streaming mode and the SME and SVE instructions";
+const SME_PENDING: &str = "the engine runs streaming mode and the SME and SVE instructions, \
+     but does not derive ID_AA64SMFR0_EL1 and ID_AA64ZFR0_EL1 yet";
 const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCTX run their \
      generated accessors, with SCTLR_ELx.EnRCTX and HFGITR_EL2 traps, and complete with no \
      effect: the engine keeps no prediction state a later context could use";
@@ -335,6 +335,56 @@ pub const TABLE: &[Row] = &[
         24,
         2,
         "FEAT_SME2",
+        engine(false, SME_PENDING),
+    ),
+    // ID_AA64SMFR0_EL1 and ID_AA64ZFR0_EL1
+    feature(
+        ID_AA64SMFR0_EL1,
+        42,
+        1,
+        "FEAT_SME_F16F16",
+        engine(false, SME_PENDING),
+    ),
+    feature(
+        ID_AA64SMFR0_EL1,
+        43,
+        1,
+        "FEAT_SME_B16B16",
+        engine(false, SME_PENDING),
+    ),
+    feature(
+        ID_AA64SMFR0_EL1,
+        48,
+        1,
+        "FEAT_SME_F64F64",
+        engine(false, SME_PENDING),
+    ),
+    feature(
+        ID_AA64SMFR0_EL1,
+        52,
+        0xf,
+        "FEAT_SME_I16I64",
+        engine(false, SME_PENDING),
+    ),
+    feature(
+        ID_AA64SMFR0_EL1,
+        56,
+        2,
+        "FEAT_SME2p1",
+        engine(false, SME_PENDING),
+    ),
+    feature(
+        ID_AA64SMFR0_EL1,
+        60,
+        1,
+        "FEAT_SME_LUTv2",
+        engine(false, SME_PENDING),
+    ),
+    feature(
+        ID_AA64ZFR0_EL1,
+        24,
+        1,
+        "FEAT_SVE_B16B16",
         engine(false, SME_PENDING),
     ),
     // ID_AA64ISAR0_EL1
