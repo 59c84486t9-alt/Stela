@@ -97,9 +97,9 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     (
         "mach_vm_region_recurse",
         Some(
-            "regions in whole guest pages outside the shared region; page counts are the \
-             host's restated in guest pages, rounded up; the x86 runtime's own mappings are \
-             regions of this task",
+            "regions in whole guest pages outside the shared region, host regions meeting \
+             inside a guest page merged into one entry; page counts are the host's restated in \
+             guest pages, rounded up; the x86 runtime's own mappings are regions of this task",
         ),
     ),
     (
@@ -1125,8 +1125,10 @@ fn region(request: &Request) -> Result<Reply> {
 }
 
 /// `mach_vm_region_recurse` (`address`, `nesting_depth`, `infoCnt`): the
-/// host's region at or after `address`, which must be whole guest pages,
-/// with its page counts restated in guest pages.
+/// region at or after `address` as the arm64 kernel's 16 KiB map shows
+/// it, in whole guest pages. Host regions whose bounds fall inside a guest
+/// page are one map entry there, so they are merged (see [`merge_submap`])
+/// and the page counts restated in guest pages.
 fn region_recurse(request: &Request) -> Result<Reply> {
     let Some((address, depth, count)) = fields(|| {
         Some((
@@ -1137,10 +1139,71 @@ fn region_recurse(request: &Request) -> Result<Reply> {
     }) else {
         return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
     };
+    let count = count.min(RECURSE_INFO_MAX);
+    let first = match host_recurse(address, depth, count) {
+        Ok(first) => first,
+        Err(code) => return Ok(Reply::Failure(code as u32)),
+    };
+    // Back to the first host region of the guest page it starts in.
+    let mut start = memory::trunc_page(first.start);
+    while start < first.start {
+        match host_recurse(start, depth, count) {
+            Ok(region) if region.start < start => start = memory::trunc_page(region.start),
+            _ => break,
+        }
+    }
+    // Forward over every region that begins before the merged end.
+    let mut pieces: Vec<HostRegion> = Vec::new();
+    let (mut cursor, mut end) = (start, start);
+    while let Ok(region) = host_recurse(cursor, depth, count) {
+        if !pieces.is_empty() && region.start >= end {
+            break;
+        }
+        let region_end = region.start + region.size;
+        end = end.max(memory::round_page(region_end).unwrap_or(!PAGE_MASK));
+        cursor = region_end;
+        pieces.push(region);
+        if region_end >= end {
+            break;
+        }
+    }
+    if pieces.is_empty() {
+        end = memory::round_page(first.start + first.size).unwrap_or(!PAGE_MASK);
+        pieces.push(first);
+    }
+    let head = &pieces[0];
+    let start = memory::trunc_page(head.start);
+    let size = end - start;
+    if in_shared_region(start, size) {
+        bail!(
+            "mach_vm_region_recurse at {address:#x}: the shared region's nested submap is not \
+             implemented"
+        );
+    }
+    let mut info = merge_submap(&pieces, start, count);
+    restate_submap_pages(&mut info, size);
+    let mut body = start.to_le_bytes().to_vec();
+    body.extend(size.to_le_bytes());
+    body.extend(words([head.depth, count]));
+    body.extend(words(info));
+    Ok(Reply::Success(body))
+}
+
+/// One host region `mach_vm_region_recurse` reported.
+struct HostRegion {
+    start: u64,
+    size: u64,
+    depth: u32,
+    info: Vec<u32>,
+}
+
+/// The host's region at or after `address` at `depth`, with `count` words
+/// of information, or its failure.
+fn host_recurse(address: u64, depth: u32, count: u32) -> Result<HostRegion, i32> {
     let (mut start, mut size, mut depth) = (address, 0u64, depth);
     let mut info = [0i32; RECURSE_INFO_MAX as usize];
-    let mut count = count.min(RECURSE_INFO_MAX);
-    // SAFETY: `info` holds the MIG bound's words, `count` at most.
+    let mut filled = count;
+    // SAFETY: `info` holds the MIG bound's words, `filled` at most.
     let code = unsafe {
         mach_vm_region_recurse(
             host(),
@@ -1148,38 +1211,119 @@ fn region_recurse(request: &Request) -> Result<Reply> {
             &mut size,
             &mut depth,
             info.as_mut_ptr(),
-            &mut count,
+            &mut filled,
         )
     };
     if code != KERN_SUCCESS {
-        return Ok(Reply::Failure(code as u32));
+        return Err(code);
     }
-    if in_shared_region(start, size) {
-        bail!(
-            "mach_vm_region_recurse at {address:#x}: the shared region's nested submap is not \
-             implemented"
-        );
+    let filled = filled.min(count) as usize;
+    Ok(HostRegion {
+        start,
+        size,
+        depth,
+        info: info[..filled].iter().map(|&word| word as u32).collect(),
+    })
+}
+
+/// `vm_region_submap_info_64` and `vm_region_submap_short_info_64`
+/// fields, by word: the long layout's (`VM_REGION_SUBMAP_INFO_V0_COUNT_64`
+/// and more) and the short one's.
+struct SubmapWords {
+    ref_count: usize,
+    /// `shadow_depth` (16 bits), `external_pager`, `share_mode`.
+    packed: usize,
+    is_submap: usize,
+    user_wired_count: usize,
+}
+const LONG: SubmapWords = SubmapWords {
+    ref_count: 10,
+    packed: 11,
+    is_submap: 12,
+    user_wired_count: 15,
+};
+const SHORT: SubmapWords = SubmapWords {
+    ref_count: 6,
+    packed: 7,
+    is_submap: 8,
+    user_wired_count: 11,
+};
+const SUBMAP_PROTECTION: usize = 0;
+const SUBMAP_MAX_PROTECTION: usize = 1;
+const SUBMAP_OFFSET: usize = 3;
+/// `share_mode` values (`vm_region.h`), least shared first: a guest page
+/// partly of one mode and partly of another is reported as the more
+/// shared.
+const SHARE_MODES_BY_SHARING: [u32; 8] = [3, 2, 8, 6, 1, 4, 7, 5];
+
+/// One map entry's information from host regions sharing guest pages:
+/// the first region's identity (inheritance, tag, behavior, object) with
+/// its offset moved back to `start`; the protections all of them allow;
+/// summed page counts; the largest reference count, shadow depth and
+/// wiring; an external pager or submap if any has one; the most shared
+/// share mode.
+fn merge_submap(pieces: &[HostRegion], start: u64, count: u32) -> Vec<u32> {
+    let mut info = pieces[0].info.clone();
+    if info.len() <= SUBMAP_MAX_PROTECTION {
+        return info;
     }
-    if (start | size) & PAGE_MASK != 0 {
-        bail!(
-            "mach_vm_region_recurse at {address:#x}: the host region {start:#x}+{size:#x} \
-             splits a guest page, which is not implemented"
-        );
+    let long = count >= SUBMAP_INFO_V0_COUNT;
+    let layout = if long { &LONG } else { &SHORT };
+    if info.len() > SUBMAP_OFFSET + 1 {
+        let offset = u64::from(info[SUBMAP_OFFSET]) | u64::from(info[SUBMAP_OFFSET + 1]) << 32;
+        let offset = offset.saturating_sub(pieces[0].start - start);
+        info[SUBMAP_OFFSET] = offset as u32;
+        info[SUBMAP_OFFSET + 1] = (offset >> 32) as u32;
     }
-    let count = count.min(RECURSE_INFO_MAX);
-    let mut info: Vec<u32> = info[..count as usize].iter().map(|&w| w as u32).collect();
-    restate_submap_pages(&mut info);
-    let mut body = start.to_le_bytes().to_vec();
-    body.extend(size.to_le_bytes());
-    body.extend(words([depth, count]));
-    body.extend(words(info));
-    Ok(Reply::Success(body))
+    let rank = |mode: u32| {
+        SHARE_MODES_BY_SHARING
+            .iter()
+            .position(|&m| m == mode)
+            .unwrap_or(0)
+    };
+    for piece in &pieces[1..] {
+        let other = &piece.info;
+        let both = info.len().min(other.len());
+        info[SUBMAP_PROTECTION] &= other[SUBMAP_PROTECTION];
+        info[SUBMAP_MAX_PROTECTION] &= other[SUBMAP_MAX_PROTECTION];
+        if long {
+            for index in SUBMAP_PAGE_WORDS
+                .into_iter()
+                .chain((both > SUBMAP_REUSABLE_WORD).then_some(SUBMAP_REUSABLE_WORD))
+            {
+                info[index] = info[index].saturating_add(other[index]);
+            }
+        }
+        let max = |info: &mut Vec<u32>, index: usize, mask: u32| {
+            if index < both {
+                let merged = (info[index] & mask).max(other[index] & mask);
+                info[index] = info[index] & !mask | merged;
+            }
+        };
+        max(&mut info, layout.ref_count, u32::MAX);
+        max(&mut info, layout.packed, 0xffff);
+        max(&mut info, layout.user_wired_count, 0xffff);
+        if layout.packed < both {
+            let pager = (info[layout.packed] | other[layout.packed]) & 0x00ff_0000;
+            let (mine, theirs) = (info[layout.packed] >> 24, other[layout.packed] >> 24);
+            let mode = if rank(theirs) > rank(mine) {
+                theirs
+            } else {
+                mine
+            };
+            info[layout.packed] = info[layout.packed] & 0xffff | pager | mode << 24;
+        }
+        if layout.is_submap < both {
+            info[layout.is_submap] |= other[layout.is_submap];
+        }
+    }
+    info
 }
 
 /// Restate a `vm_region_submap_info_64`'s host page counts in guest
 /// pages, a partly counted guest page counting whole; the short layout
 /// has none.
-fn restate_submap_pages(info: &mut [u32]) {
+fn restate_submap_pages(info: &mut [u32], size: u64) {
     let count = info.len() as u32;
     if count < SUBMAP_INFO_V0_COUNT {
         return;
@@ -1188,8 +1332,9 @@ fn restate_submap_pages(info: &mut [u32]) {
     if count >= SUBMAP_INFO_V1_COUNT {
         counted.push(SUBMAP_REUSABLE_WORD);
     }
+    let pages = u32::try_from(size / PAGE_BYTES).unwrap_or(u32::MAX);
     for index in counted {
-        info[index] = info[index].div_ceil(HOST_PAGES as u32);
+        info[index] = info[index].div_ceil(HOST_PAGES as u32).min(pages);
     }
 }
 
@@ -1766,7 +1911,13 @@ mod tests {
     #[test]
     fn queries_describe_guest_pages() {
         let mut task = bare();
-        let base = allocate_pages(&mut task, 2);
+        // Two guest pages between inaccessible guards, so no neighboring
+        // host allocation joins their region.
+        let outer = allocate_pages(&mut task, 4);
+        for guard in [outer, outer + 3 * PAGE_BYTES] {
+            memory::protect(guard, PAGE_BYTES, Protection::NONE).unwrap();
+        }
+        let base = outer + PAGE_BYTES;
         // Touch one host page of the first guest page only.
         assert!(memory::write(base + 3 * HOST_PAGE_BYTES, b"x"));
         let body = simple(&[&base.to_le_bytes()]);
@@ -1800,8 +1951,10 @@ mod tests {
             &RECURSE_INFO_MAX.to_le_bytes(),
         ]);
         let reply = success(call(&mut task, "mach_vm_region_recurse", false, &body).unwrap());
-        let (start, size) = (u64_at(&reply, 0), u64_at(&reply, 8));
-        assert!(start <= base && start + size >= base + 2 * PAGE_BYTES);
+        assert_eq!(
+            (u64_at(&reply, 0), u64_at(&reply, 8)),
+            (base, 2 * PAGE_BYTES)
+        );
         assert_eq!(u32_at(&reply, 20), RECURSE_INFO_MAX);
         assert_eq!(u32_at(&reply, 24), VM_PROT_DEFAULT as u32);
         let body = simple(&[
@@ -1835,7 +1988,7 @@ mod tests {
             &body,
         )
         .unwrap();
-        memory::deallocate(base, 2 * PAGE_BYTES).unwrap();
+        memory::deallocate(outer, 4 * PAGE_BYTES).unwrap();
     }
 
     #[test]
@@ -1895,14 +2048,90 @@ mod tests {
     }
 
     #[test]
+    fn host_regions_sharing_a_guest_page_merge_into_one_entry() {
+        let region = |start: u64, info: Vec<u32>| HostRegion {
+            start,
+            size: HOST_PAGE_BYTES,
+            depth: 0,
+            info,
+        };
+        let mut first = vec![0u32; 19];
+        first[SUBMAP_PROTECTION] = 3;
+        first[SUBMAP_MAX_PROTECTION] = 7;
+        first[SUBMAP_OFFSET] = 0x3000;
+        first[6] = 3;
+        first[LONG.ref_count] = 1;
+        first[LONG.packed] = 2 << 24 | 1;
+        let mut second = first.clone();
+        second[SUBMAP_PROTECTION] = 1;
+        second[6] = 1;
+        second[LONG.ref_count] = 4;
+        second[LONG.packed] = 4 << 24 | 1 << 16;
+        let merged = merge_submap(
+            &[region(0x1000, first), region(0x2000, second)],
+            0,
+            RECURSE_INFO_MAX,
+        );
+        assert_eq!(merged[SUBMAP_PROTECTION], 1);
+        assert_eq!(merged[SUBMAP_MAX_PROTECTION], 7);
+        assert_eq!(merged[SUBMAP_OFFSET], 0x2000);
+        assert_eq!(merged[6], 4);
+        assert_eq!(merged[LONG.ref_count], 4);
+        // Shadow depth 1, an external pager, shared over private.
+        assert_eq!(merged[LONG.packed], 4 << 24 | 1 << 16 | 1);
+    }
+
+    #[test]
+    fn a_region_split_inside_a_guest_page_is_reported_whole() {
+        let mut task = bare();
+        let base = allocate_pages(&mut task, 4);
+        // Guard pages either side, so no neighbor joins the region.
+        for guard in [base, base + 3 * PAGE_BYTES] {
+            memory::protect(guard, PAGE_BYTES, Protection::NONE).unwrap();
+        }
+        let query = |task: &mut Bare| {
+            let body = simple(&[
+                &(base + PAGE_BYTES).to_le_bytes(),
+                &0u32.to_le_bytes(),
+                &RECURSE_INFO_MAX.to_le_bytes(),
+            ]);
+            let reply = success(call(task, "mach_vm_region_recurse", false, &body).unwrap());
+            (u64_at(&reply, 0), u64_at(&reply, 8), u32_at(&reply, 24))
+        };
+        assert_eq!(
+            query(&mut task),
+            (base + PAGE_BYTES, 2 * PAGE_BYTES, VM_PROT_DEFAULT as u32)
+        );
+        // One host page made read-only splits the host's region inside the
+        // second guest page: the guest still sees one entry, read-only.
+        // SAFETY: a host page of this test's own allocation.
+        let status = unsafe {
+            mach_vm_protect(
+                host(),
+                base + 2 * PAGE_BYTES + HOST_PAGE_BYTES,
+                HOST_PAGE_BYTES,
+                0,
+                1,
+            )
+        };
+        assert_eq!(status, KERN_SUCCESS);
+        assert_eq!(query(&mut task), (base + PAGE_BYTES, 2 * PAGE_BYTES, 1));
+        memory::deallocate(base, 4 * PAGE_BYTES).unwrap();
+    }
+
+    #[test]
     fn page_counts_are_restated_in_guest_pages() {
         let mut info = [8u32; 19];
         info[6] = 5;
-        restate_submap_pages(&mut info);
+        restate_submap_pages(&mut info, 8 * PAGE_BYTES);
         assert_eq!(&info[5..11], &[8, 2, 2, 2, 2, 8]);
         assert_eq!(info[16], 2);
+        // No more pages than the region holds.
+        let mut full = [8u32; 19];
+        restate_submap_pages(&mut full, PAGE_BYTES);
+        assert_eq!(full[6], 1);
         let mut short = [8u32; 12];
-        restate_submap_pages(&mut short);
+        restate_submap_pages(&mut short, PAGE_BYTES);
         assert_eq!(short, [8; 12]);
         assert_eq!(union(&[(0, 1, 2), (0, 8, 5), (1, 0x10, 9)]), (9, 5));
         assert_eq!(pages(PAGE_BYTES + 1, 0), Some((PAGE_BYTES, 0)));
