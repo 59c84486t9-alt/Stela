@@ -234,6 +234,11 @@ fn bundle_status(record: &Record, report: &mut Report) {
             ));
         }
     }
+    for directory in record.build_directories() {
+        for (_, what) in bundle::leftovers(&directory) {
+            report.problem(format!("{what}: `stela setup --repair` puts it right"));
+        }
+    }
     for ecid in record.missing_bundles(&record.build) {
         report.problem(format!(
             "the active build {} has no recoveryOS bundle for {}: `stela setup --repair --ipsw`",
@@ -529,6 +534,19 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     for (name, ecid) in &assigned {
         writeln!(text, "  ECID           install \"{name}\" is now {ecid}")?;
     }
+    // What interrupted copies left, before any bundle is judged; a dry run
+    // judges a set-aside bundle where it would be put back.
+    for directory in record.build_directories() {
+        for (destination, what) in bundle::leftovers(&directory) {
+            if command.dry_run {
+                writeln!(text, "  bundle         would put right: {what}")?;
+                continue;
+            }
+            for done in bundle::recover(&destination)? {
+                writeln!(text, "  bundle         {done}")?;
+            }
+        }
+    }
     let stale = record.drop_stale_bundles();
     // The active build's bundles: all again with an image, else the damaged.
     let mut needed: Vec<Option<Ecid>> = Vec::new();
@@ -538,7 +556,9 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
         let digest = record
             .bundle(&record.build, ecid)
             .map(|b| b.manifest_sha256.clone());
-        let intact = digest.is_some_and(|digest| bundle::verify(&directory, &digest).is_empty());
+        let intact = digest.is_some_and(|digest| {
+            bundle::verify(&bundle::in_place(&directory), &digest).is_empty()
+        });
         if ipsw.is_some() || !intact {
             needed.push(ecid);
         }
@@ -591,7 +611,11 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     if record.active_medium().is_some() {
         for install in &record.installs {
             let intact = record.restore_bundle(install.ecid).is_some_and(|b| {
-                bundle::verify(&b.directory(&record.volume), &b.manifest_sha256).is_empty()
+                bundle::verify(
+                    &bundle::in_place(&b.directory(&record.volume)),
+                    &b.manifest_sha256,
+                )
+                .is_empty()
             });
             if (ipsw.is_some() || !intact) && !restore.contains(&install.ecid) {
                 restore.push(install.ecid);

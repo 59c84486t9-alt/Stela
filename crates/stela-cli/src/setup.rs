@@ -684,12 +684,17 @@ fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<Record> {
     Ok(record)
 }
 
+/// Replace the record through a synced sibling file, so a stop at any point
+/// leaves the previous record or this one whole: the record is the journal
+/// every interrupted setup, update and rollback is resumed or undone from.
 fn write_record(esp: &Path, record: &Record) -> Result<()> {
     let path = esp.join(RECORD);
     fs::create_dir_all(path.parent().unwrap())?;
     let mut record = record.clone();
     record.schema_version = RECORD_SCHEMA;
-    stela_runtime::write_json(&path, &record)
+    let mut bytes = serde_json::to_vec_pretty(&record)?;
+    bytes.push(b'\n');
+    efi::write_atomic(&path, &bytes, false)
 }
 
 /// Writes a boot bundle for an IPSW, model and machine into a directory.
@@ -3311,6 +3316,38 @@ mod tests {
         assert_eq!(repaired.ecid, Some(new));
         assert!(bundle_of(&f, Some(new)).join("bundle.json").is_file());
         status().unwrap();
+    }
+
+    #[test]
+    fn a_bundle_copy_stopped_between_its_renames_is_found_and_put_back() {
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        setup(&environment(&f.host), installed_command(&f)).unwrap();
+        let before = snapshot(&f.esp);
+        let directory = bundle_of(&f, record(&f).ecid);
+        // The stop came after the old bundle was set aside, before the new
+        // copy was renamed into place.
+        let (partial, previous) = bundle::siblings(&directory).unwrap();
+        fs::rename(&directory, &previous).unwrap();
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join("ramdisk.img"), b"half").unwrap();
+        let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
+        assert!(error.contains("set aside"), "{error}");
+        assert!(error.contains("stopped part way"), "{error}");
+        // A dry run says so and changes nothing, and needs no restore image.
+        let interrupted = snapshot(&f.esp);
+        let dry = rerun(&f, |c| {
+            c.repair = true;
+            c.dry_run = true;
+        })
+        .unwrap();
+        assert!(dry.contains("would put right"), "{dry}");
+        assert_eq!(snapshot(&f.esp), interrupted);
+        let report = rerun(&f, |c| c.repair = true).unwrap();
+        assert!(report.contains("put back"), "{report}");
+        assert!(!partial.exists() && !previous.exists());
+        assert_eq!(snapshot(&f.esp), before);
+        rerun(&f, |c| c.status = true).unwrap();
     }
 
     #[test]

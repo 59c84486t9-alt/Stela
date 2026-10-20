@@ -14,7 +14,11 @@
 //!   rollback finds them.
 //!
 //! A bundle is copied to a `.partial` sibling and renamed into place, so an
-//! interrupted copy is never taken for a bundle; the setup record keeps the
+//! interrupted copy is never taken for a bundle; the bundle it replaces is
+//! set aside as `.previous` until then, so a stop between the two renames
+//! leaves it whole, and the next install or `--repair` puts it back
+//! ([`recover`]), while `--status` reports what is left ([`leftovers`]).
+//! The setup record keeps the
 //! SHA-256 of its `bundle.json`, whose file list carries every file's
 //! SHA-256, so [`verify`] checks the whole bundle.
 use super::ecid::Ecid;
@@ -189,22 +193,108 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
-/// Copy the prepared bundle in `prepared` to `destination`, replacing what
-/// is there only once the copy is complete; returns its `bundle.json`'s
-/// SHA-256.
-pub(super) fn install(prepared: &Path, destination: &Path) -> Result<String> {
+/// The siblings [`install`] writes beside `destination`: the copy in
+/// progress, and the bundle it replaces until the copy is in place.
+pub(super) fn siblings(destination: &Path) -> Result<(PathBuf, PathBuf)> {
     let name = destination
         .file_name()
         .context("a bundle directory without a name")?
         .to_string_lossy()
         .into_owned();
-    let partial = destination.with_file_name(format!("{name}.partial"));
-    let previous = destination.with_file_name(format!("{name}.previous"));
+    Ok((
+        destination.with_file_name(format!("{name}.partial")),
+        destination.with_file_name(format!("{name}.previous")),
+    ))
+}
+
+/// Put back what an [`install`] that stopped part way left beside
+/// `destination`: a `.previous` bundle without a bundle in place is the
+/// last complete one (the stop came between its two renames), so it is
+/// renamed back; a `.previous` beside a bundle, and any `.partial`, are
+/// removed. Returns what was done, for the report.
+pub(super) fn recover(destination: &Path) -> Result<Vec<String>> {
+    let (partial, previous) = siblings(destination)?;
+    let mut done = Vec::new();
+    if previous.exists() && !destination.exists() {
+        fs::rename(&previous, destination)?;
+        sync_parent(destination);
+        done.push(format!(
+            "put back {}, which an interrupted copy had set aside",
+            destination.display()
+        ));
+    }
     for stale in [&partial, &previous] {
         if stale.exists() {
             fs::remove_dir_all(stale)?;
+            done.push(format!(
+                "removed {}, left by an interrupted copy",
+                stale.display()
+            ));
         }
     }
+    Ok(done)
+}
+
+/// Where `destination`'s bundle is: its `.previous` when an interrupted
+/// [`install`] set it aside and [`recover`] has not put it back.
+pub(super) fn in_place(destination: &Path) -> PathBuf {
+    match siblings(destination) {
+        Ok((_, previous)) if !destination.exists() && previous.is_dir() => previous,
+        _ => destination.to_path_buf(),
+    }
+}
+
+/// What interrupted [`install`]s left in a build directory: each bundle
+/// with a `.partial` or `.previous` sibling, and what is wrong.
+pub(super) fn leftovers(build_directory: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = fs::read_dir(build_directory) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(PathBuf, String)> = Vec::new();
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for name in names {
+        let (leaf, what) = if let Some(leaf) = name.strip_suffix(".partial") {
+            (leaf, "a copy that stopped part way")
+        } else if let Some(leaf) = name.strip_suffix(".previous") {
+            let destination = build_directory.join(leaf);
+            if destination.exists() {
+                (leaf, "the bundle an interrupted copy replaced")
+            } else {
+                (
+                    leaf,
+                    "the bundle itself, set aside by a copy that stopped between its renames",
+                )
+            }
+        } else {
+            continue;
+        };
+        found.push((
+            build_directory.join(leaf),
+            format!("{} is {what}", build_directory.join(&name).display()),
+        ));
+    }
+    found
+}
+
+/// Make the directory's renames durable; FAT may refuse to sync a
+/// directory, and its files are already synced.
+fn sync_parent(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+    }
+}
+
+/// Copy the prepared bundle in `prepared` to `destination`, replacing what
+/// is there only once the copy is complete; returns its `bundle.json`'s
+/// SHA-256. What an earlier, interrupted install left is recovered first
+/// ([`recover`]).
+pub(super) fn install(prepared: &Path, destination: &Path) -> Result<String> {
+    recover(destination)?;
+    let (partial, previous) = siblings(destination)?;
     fs::create_dir_all(&partial)?;
     for file in fs::read_dir(prepared)? {
         let file = file?;
@@ -212,10 +302,12 @@ pub(super) fn install(prepared: &Path, destination: &Path) -> Result<String> {
         fs::copy(file.path(), &target)?;
         fs::File::open(&target)?.sync_all()?;
     }
+    sync_parent(&partial.join(MANIFEST));
     if destination.exists() {
         fs::rename(destination, &previous)?;
     }
     fs::rename(&partial, destination)?;
+    sync_parent(destination);
     if previous.exists() {
         fs::remove_dir_all(&previous)?;
     }
@@ -346,5 +438,48 @@ pub(super) mod tests {
         );
         fs::remove_file(destination.join("ramdisk.img")).unwrap();
         assert!(verify(&destination, "")[0].contains("missing"));
+    }
+
+    #[test]
+    fn every_stop_inside_an_install_leaves_one_whole_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = dir.path().join("prepared");
+        let build = dir.path().join("boot/B");
+        let destination = build.join("recovery");
+        fs::create_dir_all(&build).unwrap();
+        write(&prepared, 1, &[0x5a; 4096]).unwrap();
+        let first = install(&prepared, &destination).unwrap();
+        let (partial, previous) = siblings(&destination).unwrap();
+        let half = |path: &Path| {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("ramdisk.img"), b"half").unwrap();
+        };
+        // Stopped while copying: the bundle in place is whole.
+        half(&partial);
+        assert!(leftovers(&build)[0].1.contains("stopped part way"));
+        assert_eq!(in_place(&destination), destination);
+        // Stopped between the renames: the set-aside bundle is the whole one.
+        fs::rename(&destination, &previous).unwrap();
+        assert_eq!(in_place(&destination), previous);
+        assert!(verify(&in_place(&destination), &first).is_empty());
+        let found = leftovers(&build);
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|(d, _)| *d == destination));
+        assert!(found[1].1.contains("set aside"), "{found:?}");
+        assert_eq!(recover(&destination).unwrap().len(), 2);
+        assert!(verify(&destination, &first).is_empty());
+        assert!(leftovers(&build).is_empty());
+        // Stopped before the set-aside copy was removed.
+        half(&previous);
+        assert!(leftovers(&build)[0].1.contains("replaced"));
+        recover(&destination).unwrap();
+        assert!(verify(&destination, &first).is_empty() && !previous.exists());
+        // An install after any of these replaces the bundle whole.
+        half(&partial);
+        fs::rename(&destination, &previous).unwrap();
+        write(&prepared, 2, &[0x33; 100]).unwrap();
+        let second = install(&prepared, &destination).unwrap();
+        assert!(verify(&destination, &second).is_empty());
+        assert!(leftovers(&build).is_empty());
     }
 }
