@@ -297,10 +297,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
         "NOTE_MACHTIME timer deadlines are taken in host nanoseconds",
     ),
     (
-        "sysctl",
-        "kern.version and kern.osrelease are the host kernel's",
-    ),
-    (
         "sigaction",
         "a caught signal reaches a thread waiting in a Mach trap or a hosted-kernel wait only \
          when the wait ends",

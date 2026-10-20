@@ -2,7 +2,9 @@
 //!
 //! The kernel the guest runs on is the host's, so the kernel's own
 //! variables (`kern.*`, `vm.*`, `vfs.*`, `net.*`, ...) are the host's and
-//! are forwarded. The machine is the modeled Apple-silicon one: the `hw.*`
+//! are forwarded, except the kernel's identity (`kern.version`,
+//! `kern.osrelease` and `kern.osversion`), which names the 26A434 arm64
+//! kernel. The machine is the modeled Apple-silicon one: the `hw.*`
 //! and `machdep.*` namespaces are owned here and answered as an arm64 XNU
 //! release kernel answers them (`bsd/kern/kern_mib.c`,
 //! `bsd/dev/arm64/sysctl.c`) for [`Hardware`] and the PE's identification
@@ -56,6 +58,14 @@ const LITTLE_ENDIAN: i32 = 1234;
 const WATCHPOINT_PAIRS: i32 = 4;
 const BREAKPOINT_PAIRS: i32 = 6;
 const CACHE_ENTRIES: usize = 10;
+
+/// The kernel the guest runs on: the M2's 26A434 release kernel, whose
+/// `version[]` names its Darwin release, build date and xnu tag.
+pub(crate) const KERNEL_VERSION: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:16 PDT \
+     2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8112";
+const KERNEL_RELEASE: &str = "27.0.0";
+/// The OS build the kernel belongs to (`kern.osversion`).
+const OS_BUILD: &str = "26A434";
 
 /// The namespaces whose variables describe the machine.
 const OWNED: &[&str] = &["hw.", "machdep."];
@@ -335,6 +345,9 @@ impl Model {
             Value::Int(crate::hosted::tables::ADDRESS_BITS as i32),
         );
         add("machdep.ptrauth_enabled", Value::Int(1));
+        add("kern.version", Value::String(KERNEL_VERSION.into()));
+        add("kern.osrelease", Value::String(KERNEL_RELEASE.into()));
+        add("kern.osversion", Value::String(OS_BUILD.into()));
         Self { entries }
     }
 
@@ -675,6 +688,10 @@ mod tests {
             Ok(Lookup::Absent)
         ));
         assert!(matches!(lookup(&model, "kern.ostype"), Ok(Lookup::Host)));
+        assert_eq!(value("kern.osrelease"), &Value::String("27.0.0".into()));
+        assert!(matches!(value("kern.version"), Value::String(version)
+            if version.starts_with("Darwin Kernel Version 27.0.0:")
+                && version.ends_with("RELEASE_ARM64_T8112")));
         assert!(matches!(lookup(&model, "hw.memsize"), Ok(Lookup::Host)));
         assert!(lookup(&model, "machdep.wake_abstime").is_err());
         let index = model.index("hw.optional.arm.FEAT_LSE").unwrap();
