@@ -85,6 +85,7 @@ pub(crate) fn emit(
         fallthrough,
         target,
         crate::x86_64::NativeSystem::NONE,
+        crate::x86_64::Rax::Unknown,
     );
     Ok(block)
 }
@@ -142,6 +143,7 @@ fn emit_scalar(
         GuestAddress(next),
         target,
         crate::x86_64::NativeSystem::NONE,
+        crate::x86_64::Rax::Unknown,
     );
     Ok(block)
 }
@@ -198,6 +200,7 @@ fn emit_pair(
         GuestAddress(next),
         target,
         crate::x86_64::NativeSystem::NONE,
+        crate::x86_64::Rax::Unknown,
     );
     Ok(block)
 }

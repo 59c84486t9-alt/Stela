@@ -508,10 +508,18 @@ fn jump(
 
 /// Evaluate ARM conditions from saved NZCV, independent of incidental host flags.
 fn condition(code: &mut Vec<u8>, condition: u8) -> Option<u8> {
+    condition_of(code, condition, false)
+}
+
+/// [`condition`], from the NZCV word already in EAX when `loaded`
+/// ([`Rax::Nzcv`]). Clobbers EAX and ECX.
+fn condition_of(code: &mut Vec<u8>, condition: u8, loaded: bool) -> Option<u8> {
     if condition >= 14 {
         return None;
     } // AL and NV both satisfy ConditionHolds.
-    code.extend([0x8b, 0x87, 0, 1, 0, 0]); // mov eax,[rdi+256]
+    if !loaded {
+        code.extend([0x8b, 0x87, 0, 1, 0, 0]); // mov eax,[rdi+256]
+    }
     let positive = match condition / 2 {
         0..=3 => {
             let bit = [30, 29, 31, 28][usize::from(condition / 2)];
@@ -526,21 +534,66 @@ fn condition(code: &mut Vec<u8>, condition: u8) -> Option<u8> {
             code.extend(0x20000000u32.to_le_bytes());
             0x84 // C && !Z
         }
-        5 => {
+        group => {
+            // EAX ^= EAX >> 3 leaves N ^ V in bit 28 and Z in bit 30, whatever
+            // the bits below NZCV hold.
             code.extend([0x89, 0xc1, 0xc1, 0xe9, 3, 0x31, 0xc8, 0xa9]);
-            code.extend(0x10000000u32.to_le_bytes());
-            0x84 // N == V
-        }
-        _ => {
-            code.extend([0x89, 0xc1, 0xc1, 0xe9, 3, 0x31, 0xc1, 0x81, 0xe1]);
-            code.extend(0x10000000u32.to_le_bytes());
-            code.push(0x25);
-            code.extend(0x40000000u32.to_le_bytes());
-            code.extend([0x09, 0xc8]);
-            0x84 // !Z && N == V
+            let mask: u32 = if group == 5 { 0x10000000 } else { 0x50000000 };
+            code.extend(mask.to_le_bytes());
+            0x84 // N == V, and for GT !Z
         }
     };
     Some(positive ^ (condition & 1))
+}
+
+/// What RAX holds after an instruction's emission, for the next one to
+/// use instead of reloading it from the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Rax {
+    Unknown,
+    /// The emission ended by storing the NZCV word in EAX ([`nzcv`]).
+    Nzcv,
+    /// The emission ended by storing RAX to this register's frame slot
+    /// ([`store`]).
+    Guest(Register),
+}
+
+/// What RAX holds after `operation`'s emission by [`emit_instruction`].
+pub(super) fn rax_after(operation: &Operation) -> Rax {
+    match *operation {
+        Operation::AddSub { flags: true, .. }
+        | Operation::AddSubRegister { flags: true, .. }
+        | Operation::AddSubExtended { flags: true, .. }
+        | Operation::AddSubCarry { flags: true, .. }
+        | Operation::LogicalImmediate { flags: true, .. }
+        | Operation::LogicalRegister { flags: true, .. } => Rax::Nzcv,
+        Operation::AddSub { destination, .. }
+        | Operation::AddSubRegister { destination, .. }
+        | Operation::AddSubExtended { destination, .. }
+        | Operation::AddSubCarry { destination, .. }
+        | Operation::LogicalImmediate { destination, .. }
+        | Operation::LogicalRegister { destination, .. }
+        | Operation::MoveWide { destination, .. }
+            if destination != Register::Zero =>
+        {
+            Rax::Guest(destination)
+        }
+        _ => Rax::Unknown,
+    }
+}
+
+/// [`load`]'s bytes for a frame register.
+pub(super) fn frame_load(register: Register) -> Option<[u8; 7]> {
+    let mut code = Vec::new();
+    load(&mut code, register);
+    code.try_into().ok()
+}
+
+/// [`store`]'s bytes for a frame register.
+pub(super) fn frame_store(register: Register) -> Option<[u8; 7]> {
+    let mut code = Vec::new();
+    store(&mut code, register);
+    code.try_into().ok()
 }
 
 fn immediate(code: &mut Vec<u8>, value: u64) {
@@ -1059,6 +1112,84 @@ mod tests {
                     }
                 }
                 assert_eq!(munmap(page, PAGE), 0);
+            }
+        }
+    }
+
+    /// Every condition runs on the host against every NZCV value, with and
+    /// without bits below it set, from the frame and from EAX.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn conditions_hold_exactly_as_arm_defines_them() {
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        const LOAD_EAX_NZCV: [u8; 6] = [0x8b, 0x87, 0, 1, 0, 0];
+        const SET_FROM_JUMP: u8 = 0x10;
+        const MOVZX_EAX_AL_RET: [u8; 4] = [0x0f, 0xb6, 0xc0, 0xc3];
+        const LOW_BITS: u32 = 0x0fff_ffff;
+        let holds = |condition: u8, nzcv: u32| {
+            let (n, z, c, v) = (nzcv & 8 != 0, nzcv & 4 != 0, nzcv & 2 != 0, nzcv & 1 != 0);
+            let result = match condition >> 1 {
+                0 => z,
+                1 => c,
+                2 => n,
+                3 => v,
+                4 => c && !z,
+                5 => n == v,
+                _ => n == v && !z,
+            };
+            result != (condition & 1 == 1)
+        };
+        for loaded in [false, true] {
+            for condition in 0..14 {
+                let mut code = if loaded {
+                    LOAD_EAX_NZCV.to_vec()
+                } else {
+                    vec![]
+                };
+                let jcc = condition_of(&mut code, condition, loaded).unwrap();
+                code.extend([0x0f, jcc + SET_FROM_JUMP, 0xc0]);
+                code.extend(MOVZX_EAX_AL_RET);
+                // SAFETY: private anonymous memory, RX after the copy and
+                // unmapped after the calls; the code reads only `state`.
+                unsafe {
+                    let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                    assert_ne!(page as usize, usize::MAX);
+                    core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                    assert_eq!(mprotect(page, PAGE, 5), 0);
+                    let entry: unsafe extern "sysv64" fn(*const crate::GuestState) -> u32 =
+                        core::mem::transmute(page);
+                    for nzcv in 0..16 {
+                        for low in [0, LOW_BITS] {
+                            let state = crate::GuestState {
+                                nzcv: nzcv << 28 | low,
+                                ..Default::default()
+                            };
+                            assert_eq!(
+                                entry(&state) == 1,
+                                holds(condition, nzcv),
+                                "condition {condition} NZCV {nzcv:#x} low {low:#x}"
+                            );
+                        }
+                    }
+                    assert_eq!(munmap(page, PAGE), 0);
+                }
             }
         }
     }

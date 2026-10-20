@@ -182,7 +182,10 @@ fn emit_selected(
         ..checks
     };
     let mut cursor = 0;
+    // What the last instruction emitted left in RAX.
+    let mut rax = super::Rax::Unknown;
     while cursor < instructions.len() {
+        let held = core::mem::replace(&mut rax, super::Rax::Unknown);
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.
         if optimize_regions
@@ -223,14 +226,16 @@ fn emit_selected(
             let mut baseline_code = vec![];
             let mut baseline_map = vec![];
             let mut baseline_fixups = vec![];
+            let mut baseline_rax = held;
             for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
                 baseline_map.push((instruction.pc, baseline_code.len()));
-                super::emit_instruction(
+                baseline_rax = emit_single(
                     &mut baseline_code,
                     instruction,
                     &mut baseline_fixups,
                     target,
                     checks_at(cursor + index),
+                    baseline_rax,
                 );
             }
             debug_assert!(baseline_fixups.is_empty());
@@ -254,6 +259,7 @@ fn emit_selected(
                     .source_map
                     .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
                 code.extend(baseline_code);
+                rax = baseline_rax;
             }
             // Each region wrote back the full register frame, so what follows
             // sees the ordinary direct-RAM ABI.
@@ -262,11 +268,14 @@ fn emit_selected(
         }
         let instruction = &instructions[cursor];
         block.source_map.push((instruction.pc, code.len()));
-        if let Operation::FloatingPoint(operand) = &instruction.operation {
-            super::simd::emit_numerical(code, operand, instruction.pc, target);
-        } else {
-            super::emit_instruction(code, instruction, &mut fixups, target, checks_at(cursor));
-        }
+        rax = emit_single(
+            code,
+            instruction,
+            &mut fixups,
+            target,
+            checks_at(cursor),
+            held,
+        );
         cursor += 1;
     }
     debug_assert!(
@@ -280,9 +289,52 @@ fn emit_selected(
         fallthrough,
         target,
         native,
+        rax,
     );
     (block, fault_recovery)
 }
+
+/// One instruction outside the regions, after an emission that left `held`
+/// in RAX; returns what it leaves there. An instruction that first loads
+/// the register the previous one just stored from RAX finds it there.
+fn emit_single(
+    code: &mut Vec<u8>,
+    instruction: &Instruction,
+    fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
+    target: crate::TargetCpu,
+    checks: super::MemoryChecks,
+    held: super::Rax,
+) -> super::Rax {
+    if let Operation::FloatingPoint(operand) = &instruction.operation {
+        super::simd::emit_numerical(code, operand, instruction.pc, target);
+        return super::Rax::Unknown;
+    }
+    let start = code.len();
+    super::emit_instruction(code, instruction, fixups, target, checks);
+    // The instruction keeps a non-empty native range for its source map.
+    if let super::Rax::Guest(register) = held
+        && let Some(load) = super::frame_load(register)
+        && code[start..].starts_with(&load)
+        && code.len() > start + load.len()
+    {
+        code.drain(start..start + load.len());
+    }
+    let rax = super::rax_after(&instruction.operation);
+    debug_assert!(match rax {
+        super::Rax::Unknown => true,
+        super::Rax::Nzcv => code.ends_with(&STORE_EAX_NZCV),
+        super::Rax::Guest(register) =>
+            super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
+    });
+    rax
+}
+
+/// `mov [rdi+GuestState.nzcv],eax`, which ends each emission after which
+/// RAX holds [`super::Rax::Nzcv`].
+const STORE_EAX_NZCV: [u8; 6] = {
+    let offset = (core::mem::offset_of!(crate::GuestState, nzcv) as u32).to_le_bytes();
+    [0x89, 0x87, offset[0], offset[1], offset[2], offset[3]]
+};
 /// The direct exits to static successors that [`emit_terminal`] ended
 /// `code` with: the target's last, after a conditional branch's fallthrough.
 pub(crate) fn successor_exits(
@@ -336,7 +388,14 @@ fn emit_terminal(
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
     native: super::NativeSystem,
+    rax: super::Rax,
 ) {
+    // The terminal's own load of a register RAX already holds.
+    let load = |code: &mut Vec<u8>, register| {
+        if rax != super::Rax::Guest(register) {
+            super::load(code, register);
+        }
+    };
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
         match terminal {
@@ -388,7 +447,7 @@ fn emit_terminal(
                 direct_exit(code, *target, ExitKind::Call);
             }
             Terminator::Register { source, kind } => {
-                super::load(code, *source);
+                load(code, *source);
                 if *kind == ExitKind::Call {
                     // Capture BLR X30's target before LR is overwritten.
                     code.extend([0x48, 0x89, 0xc1]); // mov rcx,rax
@@ -401,7 +460,7 @@ fn emit_terminal(
             Terminator::Branch(operation) => match *operation {
                 Operation::Branch { target } => direct_exit(code, target, ExitKind::Direct),
                 Operation::BranchCondition { target, condition } => {
-                    let opcode = super::condition(code, condition);
+                    let opcode = super::condition_of(code, condition, rax == super::Rax::Nzcv);
                     conditional_exit(code, opcode, target, fallthrough);
                 }
                 Operation::BranchZero {
@@ -410,7 +469,7 @@ fn emit_terminal(
                     width,
                     nonzero,
                 } => {
-                    super::load(code, source);
+                    load(code, source);
                     if width == Width::X64 {
                         code.push(0x48);
                     }
@@ -428,7 +487,7 @@ fn emit_terminal(
                     bit,
                     nonzero,
                 } => {
-                    super::load(code, source);
+                    load(code, source);
                     code.extend([0x48, 0x0f, 0xba, 0xe0, bit]); // bt rax,bit
                     conditional_exit(
                         code,
@@ -451,6 +510,42 @@ mod tests {
     use crate::block::{SynchronousTrap, TrapKind};
     use alloc::vec;
     use alloc::vec::Vec;
+
+    /// add x10, x10, #4; cmp x10, #0x600; b.ne: the CMP takes X10 from
+    /// RAX where the ADD stored it, and the branch tests the NZCV word the
+    /// CMP left in EAX, so neither reloads from the frame.
+    #[test]
+    fn values_left_in_rax_are_not_reloaded() {
+        use crate::{Lifter, aarch64::Decoder};
+        const LOAD_X10: [u8; 7] = [0x48, 0x8b, 0x87, 0x50, 0, 0, 0];
+        const LOAD_NZCV: [u8; 6] = [0x8b, 0x87, 0, 1, 0, 0];
+        let pc = GuestAddress(0x1000);
+        let instructions: Vec<_> = [0x9100_114a_u32, 0xf118_015f]
+            .into_iter()
+            .enumerate()
+            .map(|(index, word)| {
+                Decoder
+                    .lift(GuestAddress(pc.0 + 4 * index as u64), word)
+                    .unwrap()
+            })
+            .collect();
+        let branch = GuestAddress(pc.0 + 8);
+        let terminal = (
+            branch,
+            Terminator::Branch(Operation::BranchCondition {
+                target: pc,
+                condition: 1,
+            }),
+        );
+        let code = emit(&instructions, Some(&terminal), GuestAddress(branch.0 + 4)).x86_64_code;
+        let count = |pattern: &[u8]| {
+            code.windows(pattern.len())
+                .filter(|w| *w == pattern)
+                .count()
+        };
+        assert_eq!(count(&LOAD_X10), 1);
+        assert_eq!(count(&LOAD_NZCV), 0);
+    }
 
     #[test]
     fn clock_exit_requests_runtime_service_without_counter_or_guest_writes() {
