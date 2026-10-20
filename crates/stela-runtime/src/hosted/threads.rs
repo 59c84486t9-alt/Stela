@@ -577,6 +577,7 @@ fn enter<F>(
     };
     drop(sender);
     let mut pe = pe;
+    let ends = EndsControl(&member.control);
     let outcome = run(&mut kernel, &mut pe, &member);
     *lock(&process.runtime.statistics) += pe.statistics;
     process.exception_ports.thread_ended(port);
@@ -602,6 +603,7 @@ fn enter<F>(
         process.aio.exit();
         process.runtime.end(id, Ok(Termination::Exited(0)));
     }
+    drop(ends);
 }
 
 /// Take the execution lock for the thread and bring its engine up to date:
@@ -642,7 +644,12 @@ fn restart_ranges(process: &Process, pe: &mut Pe) {
     }
 }
 
-/// Marks the thread's control ended however [`run`] returns.
+/// Marks the thread's control ended however its host thread leaves the
+/// guest thread: after the process's end, when the thread ended it, so
+/// that the thread stays active to the others until no guest code runs
+/// (`exit` terminates the task's other threads before the exiting one,
+/// `task_terminate_internal`; a `thread_suspend` of it until then
+/// succeeds).
 struct EndsControl<'a>(&'a Control);
 
 impl Drop for EndsControl<'_> {
@@ -660,7 +667,6 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
     let thread = kernel.thread;
     let execution = &process.runtime.execution;
     let control = member.control.clone();
-    let _ends = EndsControl(&control);
     if let Some(end) = kernel.begin(pe)? {
         return Ok(ended(end));
     }
