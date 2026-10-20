@@ -2856,7 +2856,7 @@ mod tests {
         assert_eq!(analysis::selected_output_instruction_count(&capture), None);
         assert_eq!(
             analysis::allocated_output_instruction_count(&capture),
-            Some(10)
+            Some(7)
         );
     }
 

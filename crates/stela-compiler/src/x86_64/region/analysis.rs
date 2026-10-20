@@ -433,6 +433,12 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
             } else if extended && modrm == LEA_RDX_RDX_DISP8 {
                 // Flag-neutral selector adjustment.
                 cursor += 2;
+            } else if extended
+                && rex.is_none()
+                && code.get(cursor - 1..cursor + 2)? == super::super::CAPTURE_COMBINE
+            {
+                // The NZCV capture's combining step.
+                cursor += 2;
             } else {
                 return None;
             }

@@ -562,23 +562,28 @@ const CAPTURE_BELOW_DL: [u8; 3] = [0x0f, 0x92, 0xc2];
 const CAPTURE_ABOVE_EQUAL_DL: [u8; 3] = [0x0f, 0x93, 0xc2];
 const CAPTURE_OVERFLOW_DH: [u8; 3] = [0x0f, 0x90, 0xc6];
 const AND_EAX_IMM32: u8 = 0x25;
-const AND_EDX_IMM32: [u8; 2] = [0x81, 0xe2];
-const SHL_EDX_IMM8: [u8; 2] = [0xc1, 0xe2];
-const OR_EAX_EDX: [u8; 2] = [0x09, 0xd0];
+/// `lea eax,[rax+rdx*4]`: C and V move above N and Z, giving
+/// N | C << 2 | Z << 8 | V << 10 in the low 16 bits.
+pub(crate) const CAPTURE_COMBINE: [u8; 3] = [0x8d, 0x04, 0x90];
 const IMUL_EAX_EAX_IMM32: [u8; 2] = [0x69, 0xc0];
 /// The SETcc bytes' low bits.
+#[cfg(test)]
 const CAPTURED_BITS: u32 = 0x0101;
-/// C and V move above N and Z: N | C << 2 | Z << 8 | V << 10.
+/// The scale of [`CAPTURE_COMBINE`].
+#[cfg(test)]
 const CAPTURE_CARRY_SHIFT: u8 = 2;
 /// One product moves N (bit 0) to 31, Z (8) to 30, C (2) to 29 and V (10)
-/// to 28. Every other partial product lands below bit 28 or above bit 31,
-/// on a bit no other lands on, so nothing carries into NZCV.
+/// to 28. Every other partial product of the low 16 bits lands below bit 28
+/// or above bit 31, on a bit no other lands on, so nothing carries into
+/// NZCV; those of bits 16 and up, which the SETcc leave as they were, land
+/// at bit 34 or above and drop out of the 32-bit product.
 const CAPTURE_MULTIPLIER: u32 = (1 << 31) | (1 << 22) | (1 << 27) | (1 << 18);
 const CAPTURE_NZCV_MASK: u32 = 0xf000_0000;
+const _: () = assert!(CAPTURE_MULTIPLIER.trailing_zeros() + u16::BITS >= u32::BITS);
 
 /// The host flags as an Arm NZCV word in EAX, without a data-dependent
 /// branch or an instruction outside Intel's data operand independent timing
-/// list (SETcc, AND, SHL, OR, IMUL). `borrow` takes C as an Arm subtraction
+/// list (SETcc, LEA, IMUL, AND). `borrow` takes C as an Arm subtraction
 /// does, the complement of the host carry. Clobbers RDX; RCX is intact.
 pub(crate) fn capture_nzcv(code: &mut Vec<u8>, borrow: bool) {
     code.extend(CAPTURE_SIGN_AL);
@@ -589,13 +594,7 @@ pub(crate) fn capture_nzcv(code: &mut Vec<u8>, borrow: bool) {
         CAPTURE_BELOW_DL
     });
     code.extend(CAPTURE_OVERFLOW_DH);
-    code.push(AND_EAX_IMM32);
-    code.extend(CAPTURED_BITS.to_le_bytes());
-    code.extend(AND_EDX_IMM32);
-    code.extend(CAPTURED_BITS.to_le_bytes());
-    code.extend(SHL_EDX_IMM8);
-    code.push(CAPTURE_CARRY_SHIFT);
-    code.extend(OR_EAX_EDX);
+    code.extend(CAPTURE_COMBINE);
     code.extend(IMUL_EAX_EAX_IMM32);
     code.extend(CAPTURE_MULTIPLIER.to_le_bytes());
     code.push(AND_EAX_IMM32);
@@ -976,6 +975,93 @@ mod tests {
     use crate::aarch64::system::synchronization::{
         Operation as Synchronization, Requirement, Scope, WaitKind,
     };
+
+    /// The capture runs on the host after 64-bit additions and subtractions
+    /// of edge values, with RDX holding other bits, and packs Arm's NZCV.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn the_flag_capture_packs_arm_flags_of_host_arithmetic() {
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        const MOV_RAX_RDI: [u8; 3] = [0x48, 0x89, 0xf8];
+        const MOVABS_RDX: [u8; 2] = [0x48, 0xba];
+        const OTHER_BITS: u64 = 0xa5a5_5a5a_c3c3_3c3c;
+        const SUB_RAX_RSI: [u8; 3] = [0x48, 0x29, 0xf0];
+        const ADD_RAX_RSI: [u8; 3] = [0x48, 0x01, 0xf0];
+        const RET: u8 = 0xc3;
+        const VALUES: [u64; 8] = [
+            0,
+            1,
+            0x7fff,
+            0x8000_0000,
+            0x7fff_ffff_ffff_ffff,
+            0x8000_0000_0000_0000,
+            0xffff_ffff_ffff_fffe,
+            u64::MAX,
+        ];
+        let arm = |left: u64, right: u64, borrow: bool| {
+            let (result, carry, overflow) = if borrow {
+                let (result, borrowed) = left.overflowing_sub(right);
+                (
+                    result,
+                    !borrowed,
+                    (left as i64).overflowing_sub(right as i64).1,
+                )
+            } else {
+                let (result, carried) = left.overflowing_add(right);
+                (
+                    result,
+                    carried,
+                    (left as i64).overflowing_add(right as i64).1,
+                )
+            };
+            let [n, z, c, v] = [result >> 63 == 1, result == 0, carry, overflow].map(u32::from);
+            n << 31 | z << 30 | c << 29 | v << 28
+        };
+        for borrow in [false, true] {
+            let mut code = MOV_RAX_RDI.to_vec();
+            code.extend(MOVABS_RDX);
+            code.extend(OTHER_BITS.to_le_bytes());
+            code.extend(if borrow { SUB_RAX_RSI } else { ADD_RAX_RSI });
+            capture_nzcv(&mut code, borrow);
+            code.push(RET);
+            // SAFETY: private anonymous memory, RX after the copy and
+            // unmapped after the calls; the code touches no memory.
+            unsafe {
+                let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                assert_ne!(page as usize, usize::MAX);
+                core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                assert_eq!(mprotect(page, PAGE, 5), 0);
+                let entry: unsafe extern "sysv64" fn(u64, u64) -> u32 = core::mem::transmute(page);
+                for left in VALUES {
+                    for right in VALUES {
+                        assert_eq!(
+                            entry(left, right),
+                            arm(left, right, borrow),
+                            "{left:#x} {right:#x} borrow {borrow}"
+                        );
+                    }
+                }
+                assert_eq!(munmap(page, PAGE), 0);
+            }
+        }
+    }
 
     /// The shared address additions run on the host against a guest frame:
     /// every immediate form leaves the access address in RAX and, with
