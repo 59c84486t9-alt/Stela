@@ -559,8 +559,11 @@ fn memory_thread(
 pub static DATA_INDEPENDENT_TIMING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// The host tier to compile for (`--target`); the detected host's when unset.
+pub static TARGET: std::sync::OnceLock<TargetCpu> = std::sync::OnceLock::new();
+
 fn target() -> TargetCpu {
-    let target = TargetCpu::detect();
+    let target = TARGET.get().copied().unwrap_or_else(TargetCpu::detect);
     if DATA_INDEPENDENT_TIMING.load(std::sync::atomic::Ordering::Relaxed) {
         target.with_data_independent_timing()
     } else {

@@ -107,6 +107,11 @@ pub struct Differential {
     /// selects.
     #[arg(long)]
     data_independent_timing: bool,
+    /// Compile for this host tier instead of the detected host's, such as
+    /// the x86-64-v2 floor `x86_64-baseline+ssse3+sse4.1+sse4.2+popcnt+cx8+cx16`;
+    /// the host must support it.
+    #[arg(long)]
+    target: Option<stela_compiler::TargetCpu>,
     /// Random straight-line region sequences ([`regions`]).
     #[arg(long, default_value_t = 2048)]
     regions: usize,
@@ -669,6 +674,18 @@ struct Report {
 
 impl Differential {
     pub fn run(self) -> Result<()> {
+        if let Some(target) = self.target {
+            ensure!(
+                target.supported(),
+                "this host does not support {}",
+                target.id()
+            );
+            ensure!(
+                crate::oracle::native::TARGET.set(target).is_ok(),
+                "the target is set once"
+            );
+            println!("compiling for {}", target.id());
+        }
         crate::oracle::native::DATA_INDEPENDENT_TIMING.store(
             self.data_independent_timing,
             std::sync::atomic::Ordering::Relaxed,

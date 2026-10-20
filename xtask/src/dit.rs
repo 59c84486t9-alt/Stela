@@ -377,7 +377,7 @@ fn extract(archive: &Path, directory: &Path, member: &str) -> Result<()> {
 }
 
 /// `llvm-objdump` from the Rust toolchain's `llvm-tools`.
-fn toolchain_objdump() -> Option<PathBuf> {
+pub(crate) fn toolchain_objdump() -> Option<PathBuf> {
     let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
         .args(["--print", "sysroot"])
         .output()
@@ -471,7 +471,7 @@ fn attribute(text: &str, name: &str) -> Option<String> {
 }
 
 /// Each registry form by ID: its status and sample words.
-fn registry_forms() -> Result<BTreeMap<String, (String, Vec<u32>)>> {
+pub(crate) fn registry_forms() -> Result<BTreeMap<String, (String, Vec<u32>)>> {
     let mut forms = BTreeMap::new();
     for registry in REGISTRIES {
         let text = fs::read_to_string(root().join(registry))?;
@@ -597,7 +597,11 @@ fn audit(
 /// tables, shuffle masks), which a linear disassembly would decode as code.
 /// A branch into those bytes from before the jump or from after them makes
 /// them code.
-fn reachable(objdump: &Path, directory: &tempfile::TempDir, code: &[u8]) -> Result<Vec<String>> {
+pub(crate) fn reachable(
+    objdump: &Path,
+    directory: &tempfile::TempDir,
+    code: &[u8],
+) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     let mut start = 0usize;
     'segment: while start < code.len() {
@@ -675,7 +679,7 @@ fn instruction_code(word: u32, target: TargetCpu) -> Result<Vec<u8>, String> {
 }
 
 /// A listing line's mnemonic (prefixes dropped) and operands.
-fn split(line: &str) -> (&str, &str) {
+pub(crate) fn split(line: &str) -> (&str, &str) {
     let mut rest = line.trim();
     loop {
         let (word, tail) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));

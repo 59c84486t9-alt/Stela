@@ -11,6 +11,7 @@ mod check;
 mod darwin_catalogs;
 mod differential;
 mod dit;
+mod floor_audit;
 mod hosted_matrix;
 mod oracle;
 mod progress;
@@ -63,6 +64,9 @@ enum Task {
     /// Audit the native code of Arm's data-independent-time instructions
     /// against Intel's data operand independent timing list.
     DitAudit(dit::DitAudit),
+    /// Check that code compiled for the x86-64-v2 host floor uses only v2
+    /// instructions and compiles wherever a larger tier does.
+    FloorAudit(floor_audit::FloorAudit),
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
@@ -89,6 +93,7 @@ fn main() -> ExitCode {
         Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AgxObserve(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::FloorAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
