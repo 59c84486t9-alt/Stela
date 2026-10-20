@@ -1,10 +1,11 @@
 //! System mode, engine phase: runs in the Stela window after the loader has
 //! loaded the engine's tables, switching to LA57 when the host has it. Host
 //! physical memory is reached through the physmap.
-//! The one use of identity addresses is `--preboot`: before the host is
-//! installed, Stela's storage drivers, which address registers and DMA pages
-//! by identity, read the installed system from the disk through the
-//! loader's identity map and its uncached device mappings.
+//! Stela's host drivers address registers and DMA pages by identity, so
+//! every access runs on the loader's identity map and its uncached device
+//! mappings (`storage`). The hardware is probed once, before the host is
+//! installed; `--preboot` builds the boot bundle from the installed
+//! system's partition that probe opened.
 
 pub(crate) mod bundle;
 mod display;
@@ -1264,6 +1265,41 @@ pub(crate) fn report(event: &Event) {
 }
 
 /// Engine-phase entry, called by the loader on the window stack.
+/// The boot bundle `--preboot` names, built from the installed system on
+/// `partition`: its macOS, its staged update or its recoveryOS.
+fn from_disk(
+    partition: alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>,
+    options: &Options,
+) -> Vec<(String, Vec<u8>)> {
+    crate::status::begin("Reading macOS's boot files from its disk");
+    let defaults = boot_bundle::Options {
+        ecid: options.ecid,
+        ..boot_bundle::Options::default()
+    };
+    let result = if options.upgrade {
+        bundle::upgrade_from_disk(partition, options.boot_volume, &defaults)
+    } else if let Some(kind) = options.recovery {
+        bundle::recovery_from_disk(partition, kind, options.boot_volume, &defaults)
+    } else {
+        let request = installed::Request {
+            volume: options.boot_volume,
+            ..installed::Request::default()
+        };
+        let mut defaults = defaults;
+        if options.safe_boot {
+            defaults.boot_args.push_str(" -x");
+        }
+        bundle::from_disk(partition, &request, &defaults)
+    };
+    let files = result.unwrap_or_else(|error| {
+        output::arguments(format_args!("preboot refusal: {error}\n"));
+        output::fatal("no boot bundle could be built from the Preboot volume")
+    });
+    let bytes: usize = files.iter().map(|(_, contents)| contents.len()).sum();
+    crate::status::done(&format!("{} MB", bytes.div_ceil(1 << 20)));
+    files
+}
+
 pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // SAFETY: the first engine code; interrupts are off and nothing else runs.
     unsafe { interrupts::install(interrupts::interrupt) };
@@ -1303,58 +1339,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Ok(options) => options,
         Err(error) => output::fatal(error),
     };
-    // Before the host is installed, while the loader's identity map is live.
-    let built = options.preboot.as_ref().map(|target| {
-        let storage = handoff
-            .storage
-            .handoff()
-            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-        let defaults = boot_bundle::Options {
-            ecid: options.ecid,
-            ..boot_bundle::Options::default()
-        };
-        let result = if options.upgrade {
-            bundle::upgrade_from_disk(&storage, target, options.boot_volume, &defaults)
-        } else if let Some(kind) = options.recovery {
-            bundle::recovery_from_disk(&storage, target, kind, options.boot_volume, &defaults)
-        } else {
-            let request = installed::Request {
-                volume: options.boot_volume,
-                ..installed::Request::default()
-            };
-            let mut defaults = defaults;
-            if options.safe_boot {
-                defaults.boot_args.push_str(" -x");
-            }
-            bundle::from_disk(&storage, target, &request, &defaults)
-        };
-        result.unwrap_or_else(|error| {
-            output::arguments(format_args!("preboot refusal: {error}\n"));
-            output::fatal("no boot bundle could be built from the Preboot volume")
-        })
-    });
-    // A bundle runs at the DRAM base it was prepared for, its SoC's.
-    if options.bundle && !options.dram_explicit {
-        let files = &handoff.files[..handoff.file_count];
-        options.dram_base = match bundle::dram_base(files, built.as_deref()) {
-            Ok(base) if base.is_multiple_of(LARGE) => base,
-            Ok(_) => output::fatal("the bundle's DRAM base is not 2 MiB aligned"),
-            Err(error) => {
-                output::arguments(format_args!("bundle refusal: {error}\n"));
-                output::fatal("the boot bundle's DRAM base could not be read")
-            }
-        };
-    }
-    let ram = match guest_ram(handoff, &options) {
-        Ok(ram) => ram,
-        Err(error) => output::fatal(error),
-    };
-    for range in &ram {
-        output::arguments(format_args!(
-            "GUEST DRAM pa={:#x} bytes={:#x} host={:#x}\n",
-            range.guest, range.bytes, range.host
-        ));
-    }
     // The translation store the loader read, and its partition when the
     // pack can be rewritten.
     let translation_store = handoff.files[..handoff.file_count]
@@ -1372,9 +1356,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
     let wants_network = options.tss || options.network_check.is_some();
-    let (services, medium, host_input, host_network, usb_disks, guest_network) = if targets
+    let (services, medium, preboot, host_input, host_network, usb_disks, guest_network) = if targets
         .is_empty()
         && options.install_source.is_none()
+        && options.preboot.is_none()
         && !options.input
         && !wants_network
         && options.usb_storage.is_empty()
@@ -1382,7 +1367,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         && !options.guest_network
         && translation_store.is_none()
     {
-        (Vec::new(), None, None, None, Vec::new(), None)
+        (Vec::new(), None, None, None, None, Vec::new(), None)
     } else {
         let storage_handoff = handoff
             .storage
@@ -1393,6 +1378,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         let storage::Opened {
             services,
             medium,
+            preboot,
             store,
             log,
             inputs,
@@ -1401,10 +1387,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         } = unsafe {
             storage::open(
                 &storage_handoff,
-                &targets,
-                options.install_source,
-                translation_store,
-                handoff.log_partition.map(Guid),
+                &storage::Partitions {
+                    targets: &targets,
+                    medium: options.install_source,
+                    preboot: options.preboot.as_ref(),
+                    store: translation_store,
+                    log: handoff.log_partition.map(Guid),
+                },
                 &options.usb_storage,
                 options.external_disks.then(|| {
                     stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
@@ -1449,12 +1438,36 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         (
             services,
             medium,
+            preboot,
             options.input.then(|| input::HostInput::new(inputs)),
             network,
             usb_disks,
             guest_network,
         )
     };
+    let built = preboot.map(|partition| from_disk(partition, &options));
+    // A bundle runs at the DRAM base it was prepared for, its SoC's.
+    if options.bundle && !options.dram_explicit {
+        let files = &handoff.files[..handoff.file_count];
+        options.dram_base = match bundle::dram_base(files, built.as_deref()) {
+            Ok(base) if base.is_multiple_of(LARGE) => base,
+            Ok(_) => output::fatal("the bundle's DRAM base is not 2 MiB aligned"),
+            Err(error) => {
+                output::arguments(format_args!("bundle refusal: {error}\n"));
+                output::fatal("the boot bundle's DRAM base could not be read")
+            }
+        };
+    }
+    let ram = match guest_ram(handoff, &options) {
+        Ok(ram) => ram,
+        Err(error) => output::fatal(error),
+    };
+    for range in &ram {
+        output::arguments(format_args!(
+            "GUEST DRAM pa={:#x} bytes={:#x} host={:#x}\n",
+            range.guest, range.bytes, range.host
+        ));
+    }
     let mut host_network = host_network;
     if let Some(url) = &options.network_check {
         let Some(Ok(network)) = host_network.as_mut() else {

@@ -20,17 +20,12 @@ use crate::{
     layout, output,
     paging::PAGE,
 };
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::arch::{
     asm,
     x86_64::{__cpuid, __cpuid_count},
 };
-use stela_drivers::{
-    Handoff,
-    block::{BlockDevice, BlockError},
-    bus::dma::RegionAllocator,
-    probe::probe,
-};
+use stela_drivers::block::{BlockDevice, BlockError};
 use stela_loader::{
     boot_bundle::Options, boot_selection::BootVolume, installed, recovery, upgrade,
 };
@@ -38,10 +33,6 @@ use stela_runtime::{
     boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
     machine::Host,
     payload::{self, PayloadManifest, ReadAt},
-    pc::{
-        self,
-        storage::{self, Target},
-    },
 };
 use uefi::{
     CString16, boot,
@@ -327,37 +318,16 @@ impl<D: BlockDevice> ReadAt for Bytes<D> {
     }
 }
 
-/// Build the boot bundle of the installed system on `target`'s partition,
-/// an APFS container or a disk image with a GUID partition table, as
-/// `request` names it, with `options` (`stela boot prepare`'s defaults and
-/// the boot's own boot-args); returns `bundle.json` first and then every
-/// file it lists. Runs after boot services end, on the controllers
-/// `storage` describes.
-/// `target`'s partition, through Stela's own drivers for the controllers
-/// `storage` describes. Runs after boot services end.
-fn open_partition(
-    storage: &Handoff,
-    target: &Target,
-) -> Result<pc::gpt::PartitionDevice<alloc::boxed::Box<dyn BlockDevice>>, String> {
-    // SAFETY: the DMA pages were reserved for the storage drivers alone.
-    let mut dma = unsafe { RegionAllocator::new(storage.dma.clone()) };
-    // SAFETY: `storage` describes this machine after ExitBootServices, with
-    // its ranges mapped uncached, and nothing else drives the controllers.
-    let mut disks = unsafe { probe(storage, &mut dma) };
-    for (address, error) in &disks.failures {
-        output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
-    }
-    storage::open(&mut disks.devices, target)
-        .map_err(|e| format!("{}:{}: {e}", target.serial, target.partition))
-}
-
+/// Build the boot bundle of the installed system on `partition`, an APFS
+/// container or a disk image with a GUID partition table, as `request`
+/// names it, with `options` (`stela boot prepare`'s defaults and the boot's
+/// own boot-args); returns `bundle.json` first and then every file it
+/// lists. Runs after boot services end, through Stela's own drivers.
 pub fn from_disk(
-    storage: &Handoff,
-    target: &Target,
+    partition: Box<dyn BlockDevice>,
     request: &installed::Request,
     options: &Options,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let partition = open_partition(storage, target)?;
     let (offset, installed) = installed::prepare_disk(&mut Bytes::new(partition), request, options)
         .map_err(|e| format!("{e:#}"))?;
     output::arguments(format_args!(
@@ -378,17 +348,15 @@ pub fn from_disk(
     Ok(files)
 }
 
-/// Build the boot bundle of the macOS update staged on `target`'s Update
+/// Build the boot bundle of the macOS update staged on `partition`'s Update
 /// volume (`stela_loader::upgrade`), with `options` plus the update's own
 /// boot-args and OS environment; returns `bundle.json` first. Runs after
 /// boot services end.
 pub fn upgrade_from_disk(
-    storage: &Handoff,
-    target: &Target,
+    partition: Box<dyn BlockDevice>,
     volume: Option<BootVolume>,
     options: &Options,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let partition = open_partition(storage, target)?;
     let mut options = options.clone();
     options.boot_args = upgrade_boot_args(&options.boot_args);
     options.osenvironment = Some(upgrade::ENVIRONMENT);
@@ -407,19 +375,17 @@ pub fn upgrade_from_disk(
     Ok(files)
 }
 
-/// Build the boot bundle of the recoveryOS of `kind` on `target`'s disk
+/// Build the boot bundle of the recoveryOS of `kind` on `partition`
 /// (`stela_loader::recovery`): the paired recoveryOS of the boot container's
 /// Recovery volume, or System Recovery of the RecoveryOSContainer, as
 /// NVRAM's boot `volume` names them; returns `bundle.json` first. Runs
 /// after boot services end.
 pub fn recovery_from_disk(
-    storage: &Handoff,
-    target: &Target,
+    partition: Box<dyn BlockDevice>,
     kind: recovery::Kind,
     volume: Option<BootVolume>,
     options: &Options,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let partition = open_partition(storage, target)?;
     let (offset, recovered) = recovery::prepare_disk(
         &mut Bytes::new(partition),
         kind,

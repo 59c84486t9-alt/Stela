@@ -80,6 +80,21 @@ impl BlockDevice for Service {
     }
 }
 
+/// The partitions [`open`] opens, each named explicitly.
+#[derive(Clone, Copy)]
+pub struct Partitions<'a> {
+    /// The guest's disks, in order: one service each.
+    pub targets: &'a [&'a Target],
+    /// The install medium, by its GUID.
+    pub medium: Option<Guid>,
+    /// The installed system `--preboot` names.
+    pub preboot: Option<&'a Target>,
+    /// The translation store, by its GUID; left out when it cannot open.
+    pub store: Option<Guid>,
+    /// The USB's boot log, by its GUID; left out when it cannot open.
+    pub log: Option<Guid>,
+}
+
 /// Open the explicitly selected partitions while the loader's identity root
 /// is still active, before host::install, and bring up every host input
 /// device and network adapter. No guessed disk/partition, no writes at open. Ownership lasts
@@ -91,13 +106,17 @@ impl BlockDevice for Service {
 /// reserved DMA pages, and the loader root/window remain live for the boot.
 pub unsafe fn open(
     handoff: &Handoff,
-    targets: &[&Target],
-    medium: Option<Guid>,
-    store: Option<Guid>,
-    log: Option<Guid>,
+    partitions: &Partitions<'_>,
     usb_disks: &[String],
     external: Option<usize>,
 ) -> Result<Opened, String> {
+    let Partitions {
+        targets,
+        medium,
+        preboot,
+        store,
+        log,
+    } = *partitions;
     if let Some(serial) = usb_disks
         .iter()
         .find(|serial| targets.iter().any(|target| &target.serial == *serial))
@@ -134,13 +153,15 @@ pub unsafe fn open(
         root,
     };
     // One disk may hold several of them: the stick holds the Mac's internal
-    // SSD, the install medium, the translation store and the boot log. The
-    // last two are optional: one that cannot be opened is reported and
-    // left out.
+    // SSD, the install medium, the translation store and the boot log, and
+    // the internal SSD the installed system the Preboot volume names. The
+    // store and the log are optional: one that cannot be opened is reported
+    // and left out.
     let mut named: Vec<Named> = targets
         .iter()
         .map(|target| Named::Disk((*target).clone()))
         .chain(medium.map(Named::Unique))
+        .chain(preboot.map(|target| Named::Disk(target.clone())))
         .collect();
     let required = named.len();
     let mut optional: Vec<(Named, Optional)> = store
@@ -190,6 +211,12 @@ pub unsafe fn open(
             Optional::Log => log_partition = partition,
         }
     }
+    let preboot = preboot.map(|_| {
+        service(
+            opened.pop().expect("the installed system"),
+            " (installed system)",
+        )
+    });
     let medium = medium.map(|_| service(opened.pop().expect("the medium"), " (install medium)"));
     let services = opened
         .into_iter()
@@ -234,6 +261,7 @@ pub unsafe fn open(
     Ok(Opened {
         services,
         medium,
+        preboot,
         store: store_partition,
         log: log_partition,
         inputs,
@@ -264,6 +292,8 @@ pub struct Opened {
     pub services: alloc::vec::Vec<Box<dyn BlockDevice>>,
     /// The install medium's partition, found by its GUID.
     pub medium: Option<Box<dyn BlockDevice>>,
+    /// The partition `--preboot` names, which the boot bundle is built from.
+    pub preboot: Option<Box<dyn BlockDevice>>,
     /// The translation store's partition, found by its GUID.
     pub store: Option<Box<dyn BlockDevice>>,
     /// The partition holding the USB's boot log, found by its GUID.
