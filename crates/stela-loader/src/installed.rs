@@ -93,8 +93,9 @@ pub struct Request<'a> {
     pub authority: Option<&'a dyn PolicyAuthority>,
 }
 
-/// The hash type and hash of an `isys` root-hash record.
-fn root_hash_record(payload: &[u8]) -> Result<(Hash, &[u8])> {
+/// The hash type and hash of a root-hash record: an `isys` object's payload,
+/// or a `csys` one's (BaseSystem's), which has the same layout.
+pub fn root_hash_record(payload: &[u8]) -> Result<(Hash, &[u8])> {
     let word = |at: usize| -> Result<u32> {
         Ok(u32::from_le_bytes(
             payload

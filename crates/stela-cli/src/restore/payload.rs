@@ -215,7 +215,8 @@ fn fetch_keys(metadata: &[(String, aea::Metadata)]) -> Result<Vec<AeaKey>> {
         .collect()
 }
 
-fn file_sha256(path: &Path) -> Result<(u64, String)> {
+/// A file's length and SHA-256, read in pieces.
+pub(crate) fn file_sha256(path: &Path) -> Result<(u64, String)> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0u8; BUFFER];

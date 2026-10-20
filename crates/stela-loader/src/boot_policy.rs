@@ -361,13 +361,46 @@ pub fn apply(
 }
 
 /// iBoot forwards the root hash of the sealed volume the kernel roots from
-/// as `/chosen/secure-boot-hashes` data: the APFS kext's
-/// `import_iboot_forwarded_roothash` reads `base-system-volume-auth-blob`
-/// when it boots BaseSystem and `system-volume-auth-blob` otherwise (26A434
-/// `com.apple.filesystems.apfs`). The blob is taken to be the root-hash
-/// Image4 with the manifest that signs it, as the kext extracts "root hash and
-/// manifest" from it and evaluates Image4 trust; its decoding is not traced.
+/// as `/chosen/secure-boot-hashes` data. The 26A434 APFS kext's
+/// `import_iboot_forwarded_roothash` (0xfffffe000b8302d8) copies the
+/// property's bytes unchanged as its forwarded payload. Two paths import it:
+/// `AppleAPFSContainer::start` imports `system-volume-auth-blob` once, and
+/// `handle_basesystem_rootmount` (0xfffffe000b8a6164) imports
+/// `base-system-volume-auth-blob` before `validate_root_hash`. The second runs
+/// only for a root mount after an earlier APFS root mount, when the
+/// container's device reports a `Virtual Interface` (a disk image attached
+/// by DiskImages) and the volume's role is System
+/// (`apfs_vfsop_mount`, 0xfffffe000b8a48d4..0xfffffe000b8a4904). The blob is
+/// iBoot's `base_system_root_hash.img4` (its `base-system-roothash-path`):
+/// the root-hash `IM4P` with the manifest that signs it.
 const SECURE_BOOT_HASHES: &str = "/chosen/secure-boot-hashes";
+
+/// The boot-args XNU's `imageboot_desired` takes as the disk image to root
+/// from (xnu `bsd/kern/imageboot.c`). iBoot passes BaseSystem as
+/// `rp0=file://...` (J473 iBoot string table, with
+/// `/usr/standalone/firmware/arm64eBaseSystem.dmg`).
+pub const IMAGE_BOOT_ARGS: [&str; 5] = ["rp0", "arp0", "rp", "root-dmg", "auth-root-dmg"];
+
+/// A sealed BaseSystem volume roots only as a disk image. A memory device
+/// (`md0`) does not answer `DKIOCISVIRTUAL`, so APFS requires a root snapshot
+/// there (`apfs_find_named_root_snapshot_xid`, from `/chosen
+/// root-snapshot-name` or the forwarded hash). BaseSystem has no snapshot,
+/// and a sealed live root is refused ("Rooting from the live fs of a sealed
+/// volume is not allowed", `apfs_vfsops.c:2952`). Without an image-boot
+/// argument, refuse rather than boot into that panic.
+pub fn require_image_boot(boot_args: &str) -> Result<()> {
+    let named = boot_args
+        .split_whitespace()
+        .filter_map(|argument| argument.split_once('='))
+        .any(|(name, value)| IMAGE_BOOT_ARGS.contains(&name) && value.starts_with("file://"));
+    ensure!(
+        named,
+        "a BaseSystem root needs an image-boot argument ({}=file://...): APFS cannot root a \
+         sealed volume without a snapshot from a memory device",
+        IMAGE_BOOT_ARGS[0]
+    );
+    Ok(())
+}
 
 /// The sealed volume a boot roots from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -469,8 +502,9 @@ const OSENVIRONMENT: &str = "osenvironment";
 pub enum OsEnvironment {
     /// The Mac's recoveryOS, paired or System Recovery.
     Recoveryos,
-    /// `recovery-environment`: ephemeral storage and no SEP firmware load,
-    /// used by Stela's recovery bundle (BaseSystem as a ramdisk).
+    /// `recovery-environment`: ephemeral storage, no SEP firmware load and
+    /// an ephemeral data volume in `/filesystems`. No J473 iBoot caller
+    /// enters it.
     Recovery,
     /// A restore ramdisk.
     DarwinosRamdisk,
@@ -763,6 +797,17 @@ mod tests {
             boolean(false)
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_base_system_root_needs_a_file_image_boot_argument() {
+        let image = "rp0=file:///usr/standalone/firmware/arm64eBaseSystem.dmg";
+        assert!(require_image_boot(&format!("-v rd=md0 {image}")).is_ok());
+        assert!(require_image_boot("root-dmg=file:///a.dmg").is_ok());
+        // A ramdisk root alone, another scheme or another argument is refused.
+        assert!(require_image_boot("-v rd=md0").is_err());
+        assert!(require_image_boot("rp0=http://host/a.dmg").is_err());
+        assert!(require_image_boot("xrp0=file:///a.dmg").is_err());
     }
 
     #[test]

@@ -9,13 +9,18 @@ use stela_loader::boot_bundle::{
 use stela_loader::boot_policy::{OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy};
 use stela_loader::im4m;
 use stela_loader::root_selection::Root;
+use stela_runtime::apfs::btree::Seal;
 
 mod disk;
+mod recovery_volume;
 
 const MANIFEST_FILE: &str = "bundle.json";
 const KERNEL_LIMIT: u64 = 512 * 1024 * 1024;
 const COMPONENT_LIMIT: u64 = 64 * 1024 * 1024;
 const RAMDISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+/// The recoveryOS volume holds the whole BaseSystem UDIF image (2.3 GB for
+/// 26A434) and its APFS metadata.
+const RECOVERY_VOLUME_LIMIT: u64 = 3 * 1024 * 1024 * 1024;
 const INSTALLED_VARIANT: &str = "macOS Customer";
 const RESTORE_VARIANT: &str = "Customer Erase Install (IPSW)";
 /// The OS environment of a restore ramdisk: its `/osenvironments` child
@@ -35,14 +40,18 @@ const RESTORE_MODE_ARGS: &[&str] = &[
     "-progress",
     "-restore",
 ];
-/// recoveryOS roots from its BaseSystem ramdisk.
-const RECOVERY_MODE_ARGS: &[&str] = &["rd=md0"];
-/// recoveryOS from the installed-system identity, BaseSystem as the
-/// ramdisk: `recovery`, whose child also turns off the SEP firmware load,
-/// rather than the `recoveryos` a Mac's iBoot enters for recoveryOS on disk.
-const RECOVERY_ENVIRONMENT: OsEnvironment = OsEnvironment::Recovery;
+/// recoveryOS first roots from the ramdisk, the volume that holds BaseSystem
+/// (`recovery_volume`), then from BaseSystem as a disk image.
+const RECOVERY_MODE_ARGS: &[&str] = &["rd=md0", recovery_volume::IMAGE_BOOT_ARG];
+/// The environment J473 iBoot enters for recoveryOS (its table 0x170838).
+/// The kernel's APFS reads it (`apfs_is_booted_for_recovery`, which accepts
+/// only `recoveryos` and `diagnostics`). The DeviceTree's `recovery` child is
+/// one no J473 iBoot caller passes, and its data-volume entry needs a
+/// `/filesystems` node this DeviceTree lacks.
+const RECOVERY_ENVIRONMENT: OsEnvironment = OsEnvironment::Recoveryos;
 const BASE_SYSTEM: &str = "BaseSystem";
-/// The BaseSystem image's APFS partition, which becomes the ramdisk.
+/// The BaseSystem image's APFS partition, whose seal the forwarded root hash
+/// must name.
 const BASE_SYSTEM_PARTITION: &str = "Apple_APFS";
 
 /// The BuildManifest components, and their IM4P types, a boot mode loads.
@@ -66,7 +75,8 @@ struct Roles {
 enum Ramdisk {
     /// An IM4P component and its type.
     Image4(&'static str, &'static str),
-    /// The AEA-encrypted BaseSystem UDIF image's APFS partition.
+    /// The AEA-encrypted BaseSystem UDIF image, decrypted, on the volume
+    /// recoveryOS first roots from.
     BaseSystem,
 }
 
@@ -95,7 +105,8 @@ const RESTORE: Roles = Roles {
 };
 
 /// recoveryOS: the installed system's kernel, monitors and DeviceTree, the
-/// BaseSystem trust cache, and BaseSystem as the ramdisk root.
+/// BaseSystem trust cache, and the volume holding the BaseSystem image as the
+/// ramdisk root.
 const RECOVERY: Roles = Roles {
     kernel: "KernelCache",
     device_tree: "DeviceTree",
@@ -191,8 +202,10 @@ pub(crate) struct Prepare {
     /// of the installed system.
     #[arg(long, conflicts_with = "recovery")]
     restore: bool,
-    /// Boot recoveryOS: BaseSystem as a ramdisk with the installed system's
-    /// kernel. Needs `/usr/bin/aea` to decrypt BaseSystem.
+    /// Boot recoveryOS with the installed system's kernel: the ramdisk is a
+    /// volume holding the BaseSystem image, which the kernel then roots
+    /// from. Needs `/usr/bin/aea` to decrypt BaseSystem and
+    /// `/usr/bin/hdiutil` to make the volume.
     #[arg(long)]
     recovery: bool,
     /// The public AEA key (PKCS8 PEM) for BaseSystem; fetched from Apple's
@@ -205,7 +218,7 @@ pub(crate) struct Prepare {
     variant: Option<String>,
     /// The OS environment iBoot enters (`/chosen osenvironment` and its
     /// `/osenvironments` child): `darwinos-ramdisk` with `--restore`,
-    /// `recovery` with `--recovery`, none (macOS) otherwise.
+    /// `recoveryos` with `--recovery`, none (macOS) otherwise.
     #[arg(long, value_parser = |name: &str| OsEnvironment::parse(name).map_err(|e| e.to_string()))]
     osenvironment: Option<OsEnvironment>,
     /// Guest DRAM base; the target SoC's by default (0x800000000 on the M1
@@ -420,14 +433,16 @@ fn check_digests(
     Ok(outside)
 }
 
-/// BaseSystem's APFS partition: the AEA member is copied out, decrypted
-/// with the public key, and its UDIF image's `Apple_APFS` partition read.
+/// The volume recoveryOS first roots from, and the seal of BaseSystem's file
+/// system. The AEA member is copied out and decrypted with the public key.
+/// Its UDIF image's `Apple_APFS` partition gives the seal, and the image itself
+/// goes unchanged onto the volume (`recovery_volume`).
 fn base_system(
     ipsw: &std::path::Path,
     member: &str,
     key: Option<&std::path::Path>,
     declared_digest: Option<String>,
-) -> Result<Decoded> {
+) -> Result<(Decoded, Seal)> {
     let work = tempfile::tempdir()?;
     let encrypted = work.path().join("BaseSystem.dmg.aea");
     let receipt = restore::archive::extract(ipsw, member, &encrypted, RAMDISK_LIMIT)?;
@@ -446,20 +461,32 @@ fn base_system(
     };
     let image = work.path().join("BaseSystem.dmg");
     restore::aea::decrypt(&encrypted, &key, &image)?;
-    let bytes = restore::udif::partition(&image, BASE_SYSTEM_PARTITION, RAMDISK_LIMIT)?;
-    Ok(Decoded {
-        source: Source {
-            component: BASE_SYSTEM.into(),
-            member: member.into(),
-            container_sha256,
-            payload_type: "apfs".into(),
-            description: format!("{BASE_SYSTEM_PARTITION} partition of the decrypted UDIF image"),
-            decoded_bytes: bytes.len(),
-            decoded_sha256: stela_runtime::sha256(&bytes),
-        },
+    std::fs::remove_file(&encrypted)?;
+    let seal = recovery_volume::base_system_seal(restore::udif::partition(
+        &image,
+        BASE_SYSTEM_PARTITION,
+        RAMDISK_LIMIT,
+    )?)?;
+    let (_, image_sha256) = restore::payload::file_sha256(&image)?;
+    let bytes = recovery_volume::build(&image, work.path(), RECOVERY_VOLUME_LIMIT)?;
+    let source = Source {
+        component: BASE_SYSTEM.into(),
+        member: member.into(),
+        container_sha256,
+        payload_type: "apfs".into(),
+        description: format!(
+            "unsealed APFS volume holding the decrypted UDIF image (SHA-256 {image_sha256}) at /{}",
+            recovery_volume::IMAGE_PATH
+        ),
+        decoded_bytes: bytes.len(),
+        decoded_sha256: stela_runtime::sha256(&bytes),
+    };
+    let volume = Decoded {
+        source,
         bytes,
         declared_digest,
-    })
+    };
+    Ok((volume, seal))
 }
 
 fn parse_id(value: Option<&str>) -> Result<Option<u32>> {
@@ -561,22 +588,24 @@ impl Prepare {
         let device_tree = component(roles.device_tree, Some("dtre"), COMPONENT_LIMIT)?;
         let (trust_cache_name, trust_cache_type) = roles.trust_cache;
         let trust_cache = component(trust_cache_name, Some(trust_cache_type), COMPONENT_LIMIT)?;
-        let ramdisk = match roles.ramdisk {
-            None => None,
-            Some(Ramdisk::Image4(name, payload_type)) => {
-                Some(component(name, Some(payload_type), RAMDISK_LIMIT)?)
-            }
+        let (ramdisk, base_system_seal) = match roles.ramdisk {
+            None => (None, None),
+            Some(Ramdisk::Image4(name, payload_type)) => (
+                Some(component(name, Some(payload_type), RAMDISK_LIMIT)?),
+                None,
+            ),
             Some(Ramdisk::BaseSystem) => {
                 let entry = identity
                     .components
                     .get(BASE_SYSTEM)
                     .with_context(|| format!("{} lists no {BASE_SYSTEM}", identity.variant))?;
-                Some(base_system(
+                let (volume, seal) = base_system(
                     &ipsw,
                     &entry.path,
                     self.aea_key.as_deref(),
                     entry.declared_digest_hex.clone(),
-                )?)
+                )?;
+                (Some(volume), Some(seal))
             }
         };
         // The root hash stays an IM4P: iBoot forwards it with its manifest.
@@ -592,6 +621,9 @@ impl Prepare {
                     .transpose()?,
             )),
         };
+        if let (Some(seal), Some((_, Some(root_hash)))) = (&base_system_seal, &root_hash) {
+            recovery_volume::check_root_hash(seal, &root_hash.bytes)?;
+        }
         let sep = report
             .identities
             .iter()
@@ -900,7 +932,7 @@ mod tests {
         );
         assert_eq!(
             boot_args("-v debug=0x8", RECOVERY_MODE_ARGS),
-            "-v debug=0x8 rd=md0"
+            format!("-v debug=0x8 rd=md0 {}", recovery_volume::IMAGE_BOOT_ARG)
         );
     }
 
@@ -910,6 +942,9 @@ mod tests {
             boot_args("serial=3 rd=md1 -restore", RESTORE_MODE_ARGS),
             "serial=3 rd=md1 -restore nand-enable-reformat=0x1 -progress"
         );
-        assert_eq!(boot_args("", RECOVERY_MODE_ARGS), "rd=md0");
+        assert_eq!(
+            boot_args("", RECOVERY_MODE_ARGS),
+            format!("rd=md0 {}", recovery_volume::IMAGE_BOOT_ARG)
+        );
     }
 }

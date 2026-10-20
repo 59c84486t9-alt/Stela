@@ -1552,6 +1552,7 @@ dependencies = [
  "hex",
  "hpke",
  "libc",
+ "miniz_oxide",
  "p256",
  "plist",
  "reqwest",

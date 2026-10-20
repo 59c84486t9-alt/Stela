@@ -732,6 +732,9 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     unresolved.extend(policy_unresolved);
     let mut security = security;
     if let Some(root_hash) = &inputs.root_hash {
+        if root_hash.volume == boot_policy::SealedVolume::BaseSystem {
+            boot_policy::require_image_boot(&options.boot_args)?;
+        }
         let manifest = inputs
             .boot_manifest
             .as_ref()
