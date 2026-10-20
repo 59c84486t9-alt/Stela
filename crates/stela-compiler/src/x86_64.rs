@@ -96,6 +96,7 @@ pub mod register_read;
 mod scalable;
 mod scalable_matrix;
 mod simd;
+mod stack_alignment;
 pub(crate) use simd::memory_checked::CheckedOperand as CheckedFixedMemoryOperand;
 pub mod cache_clean;
 pub(crate) mod sme;
@@ -246,6 +247,10 @@ pub struct MemoryChecks {
     /// included. A mispredicted check then never runs an access whose
     /// address its own check did not mask ([`GUEST_RANGE_CHECK`]).
     pub every_access_masked: bool,
+    /// An earlier access of the block checked SP's alignment, which holds
+    /// since ([`stack_alignment::checks`]): an access through SP relies on
+    /// [`Self::stack_alignment`] without its own check.
+    pub(crate) stack_checked: bool,
 }
 
 impl MemoryChecks {
@@ -258,6 +263,7 @@ impl MemoryChecks {
         guest_range: false,
         single_agent: false,
         every_access_masked: false,
+        stack_checked: false,
     };
     /// SCTLR_ELx's checks, as the system-mode engine selects them, and
     /// whether every access masks its address
@@ -275,6 +281,7 @@ impl MemoryChecks {
             guest_range: false,
             single_agent: false,
             every_access_masked,
+            stack_checked: false,
         }
     }
 }
@@ -372,7 +379,7 @@ fn memory_address(
     unit: u8,
 ) {
     load(code, base);
-    if base == Register::Sp && checks.stack_alignment {
+    if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
         // Arm checks SP alignment before address addition. A native UD2 is a
         // mapped fault boundary, not guest exception delivery.
         code.extend(STACK_ALIGNMENT_CHECK);

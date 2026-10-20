@@ -177,9 +177,18 @@ fn emit_selected(
         vec![]
     };
     let ranges = checks.guest_range.then_some(&ranges[..]);
+    // Which accesses through SP check its alignment (`stack_alignment`).
+    let stack = super::stack_alignment::checks(instructions);
     let checks_at = |index: usize| super::MemoryChecks {
         guest_range: ranges.is_some_and(|ranges| ranges[index]),
+        stack_checked: !stack[index],
         ..checks
+    };
+    // The regions check SP at each access through it, and their cost gates
+    // weigh them against instructions that do too.
+    let gate_at = |index: usize| super::MemoryChecks {
+        stack_checked: false,
+        ..checks_at(index)
     };
     let mut cursor = 0;
     // What the last instruction emitted left in registers.
@@ -201,7 +210,7 @@ fn emit_selected(
                     instruction,
                     &mut candidate_fixups,
                     target,
-                    checks_at(cursor + index),
+                    gate_at(cursor + index),
                 );
             }
             if candidate_fixups.is_empty() && super::region::admits_allocated(&region, &baseline) {
@@ -224,25 +233,29 @@ fn emit_selected(
             && region.consumed_instructions != 0
         {
             let count = region.consumed_instructions;
-            let mut baseline_code = vec![];
-            let mut baseline_map = vec![];
-            let mut baseline_fixups = vec![];
-            let mut baseline_held = held;
-            for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
-                baseline_map.push((instruction.pc, baseline_code.len()));
-                baseline_held = emit_single(
-                    &mut baseline_code,
-                    None,
-                    instruction,
-                    &mut baseline_fixups,
-                    target,
-                    checks_at(cursor + index),
-                    baseline_held,
-                );
-            }
-            debug_assert!(baseline_fixups.is_empty());
+            let chunk = &instructions[cursor..cursor + count];
+            let baseline = |checks_at: &dyn Fn(usize) -> super::MemoryChecks| {
+                let mut code = vec![];
+                let mut map = vec![];
+                let mut fixups = vec![];
+                let mut after = held;
+                for (index, instruction) in chunk.iter().enumerate() {
+                    map.push((instruction.pc, code.len()));
+                    after = emit_single(
+                        &mut code,
+                        None,
+                        instruction,
+                        &mut fixups,
+                        target,
+                        checks_at(cursor + index),
+                        after,
+                    );
+                }
+                debug_assert!(fixups.is_empty());
+                (code, map, after)
+            };
             let offset = code.len();
-            if super::region::admits_ordinary(&region, &baseline_code) {
+            if super::region::admits_ordinary(&region, &baseline(&gate_at).0) {
                 block
                     .source_map
                     .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
@@ -257,11 +270,12 @@ fn emit_selected(
             } else {
                 // Reject the complete eligible chunk. Rescanning its suffix
                 // could bypass the measured cost gate with a different shape.
+                let (baseline_code, baseline_map, baseline_after) = baseline(&checks_at);
                 block
                     .source_map
                     .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
                 code.extend(baseline_code);
-                after = baseline_held;
+                after = baseline_after;
             }
             // Each region wrote back the full register frame, so what follows
             // sees the ordinary direct-RAM ABI.
@@ -714,6 +728,28 @@ mod tests {
         };
         assert_eq!(count(&LOAD_X10), 1);
         assert_eq!(count(&LOAD_NZCV), 0);
+    }
+
+    /// ldr x0, [sp, #8]; ldr x1, [sp, #16]; sub sp, sp, #8; ldr x2, [sp]:
+    /// the second access relies on the first one's SP alignment check, and
+    /// the third checks SP again after its move by 8.
+    #[test]
+    fn sp_alignment_is_checked_once_while_it_holds() {
+        use crate::{Lifter, aarch64::Decoder};
+        let pc = GuestAddress(0x1000);
+        let instructions: Vec<_> = [0xf940_07e0_u32, 0xf940_0be1, 0xd100_23ff, 0xf940_03e2]
+            .into_iter()
+            .enumerate()
+            .map(|(index, word)| {
+                Decoder
+                    .lift(GuestAddress(pc.0 + 4 * index as u64), word)
+                    .unwrap()
+            })
+            .collect();
+        let code = emit(&instructions, None, GuestAddress(pc.0 + 16)).x86_64_code;
+        let check = super::super::STACK_ALIGNMENT_CHECK;
+        let checks = code.windows(check.len()).filter(|w| *w == check).count();
+        assert_eq!(checks, 2);
     }
 
     /// A block whose numerical slow paths are out of line, with runs that
