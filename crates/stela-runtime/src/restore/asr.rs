@@ -174,6 +174,17 @@ impl Sender {
                 )?;
                 self.phase = Phase::Validation;
             }
+            // The ramdisk's asr also names an `OOB Ranges` request form,
+            // answered per range with `OOB Chunk`/`OOB Error`. The pinned
+            // public host serves only one Offset/Length range, and the
+            // multi-range reply layout is not recovered: refuse it whole so
+            // a run records the request rather than misframing a reply.
+            "OOBData" if msg.get("OOB Ranges").is_some() => {
+                return Poll::Ready(Err(super::refuse(
+                    "ASR multi-range OOB request (OOB Ranges) reply format is not recovered",
+                    &msg,
+                )));
+            }
             "OOBData" if self.phase == Phase::Validation => {
                 let offset = msg.required("OOB Offset")?.uint()?;
                 let len = msg.required("OOB Length")?.uint()?;
@@ -301,6 +312,45 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn multi_range_oob_refuses_with_the_whole_request() {
+        let mut source = fixture(b"hello world", false);
+        let mut input = xml(Value::dict([("Command", Value::from("Initiate"))]));
+        input.extend(xml(Value::dict([
+            ("Command", Value::from("OOBData")),
+            (
+                "OOB Ranges",
+                Value::Array(alloc::vec![Value::dict([
+                    ("OOB Offset", Value::Integer(0)),
+                    ("OOB Length", Value::Integer(5)),
+                ])]),
+            ),
+        ])));
+        let mut stream = Memory::new(input, 13);
+        let mut sender = Sender::new("os.dmg".into(), &source).unwrap();
+        let mut result = None;
+        for _ in 0..100_000 {
+            if let Poll::Ready(r) = sender.poll(&mut stream, &mut source) {
+                result = Some(r);
+                break;
+            }
+        }
+        let Error::Refused { reason, request } = result.unwrap().unwrap_err() else {
+            panic!("missing OOB Ranges context")
+        };
+        assert!(reason.contains("OOB Ranges"));
+        assert!(request.get("OOB Ranges").is_some());
+        assert_eq!(sender.phase(), Phase::Failed);
+        // Nothing but the Initiate reply was sent.
+        let end = stream
+            .output
+            .windows(8)
+            .position(|w| w == b"</plist>")
+            .unwrap()
+            + 9;
+        assert!(stream.output[end..].iter().all(u8::is_ascii_whitespace));
+    }
+
     #[test]
     fn malformed_ranges_and_commands_are_terminal() {
         for v in [
