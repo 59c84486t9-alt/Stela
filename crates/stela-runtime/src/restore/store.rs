@@ -94,6 +94,10 @@ pub struct Store<R> {
     verified: BTreeMap<String, Verified>,
     block_count: usize,
     verify: Verify,
+    /// The most recently read member and its resumable inflate position, so
+    /// reading a deflate member block by block inflates it once rather than
+    /// replaying it from the start each block.
+    cursor: Option<(String, crate::payload::zip::Progress)>,
 }
 fn payload(e: impl core::fmt::Display) -> Error {
     Error::Payload(e.to_string())
@@ -186,6 +190,7 @@ impl<R: ReadAt> Store<R> {
             verified: BTreeMap::new(),
             block_count: 0,
             verify: Verify::Full,
+            cursor: None,
         })
     }
     pub fn manifest(&self) -> &PayloadManifest {
@@ -301,12 +306,19 @@ impl<R: ReadAt> Store<R> {
         let size = self.member_len(path)?;
         let verified = &self.verified[path];
         let start = block * BLOCK_BYTES as u64;
+        let entry = verified.entry.clone();
+        let expected = verified.blocks[block as usize];
         let mut bytes = vec![0; (size - start).min(BLOCK_BYTES as u64) as usize];
+        let mut progress = match self.cursor.take() {
+            Some((p, progress)) if p == path => Some(progress),
+            _ => None,
+        };
         self.archive
-            .read_member_at(&mut self.reader, &verified.entry, start, &mut bytes)
+            .read_member_resuming(&mut self.reader, &entry, &mut progress, start, &mut bytes)
             .map_err(payload)?;
+        self.cursor = progress.map(|progress| (path.to_string(), progress));
         let actual: [u8; 32] = Sha256::digest(&bytes).into();
-        if actual != verified.blocks[block as usize] {
+        if actual != expected {
             return Err(Error::Payload(format!(
                 "{path}: source changed at block {block}"
             )));

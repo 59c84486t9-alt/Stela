@@ -216,9 +216,9 @@ impl Archive {
         }
         let mut stream = self.open_member(reader, entry)?;
         if entry.method == Method::Stored {
-            stream.next += offset;
-            stream.remaining_input -= offset;
-            stream.remaining_output -= offset;
+            stream.progress.next += offset;
+            stream.progress.remaining_input -= offset;
+            stream.progress.remaining_output -= offset;
         } else {
             let mut discard = [0; 4096];
             let mut remaining = offset;
@@ -248,6 +248,20 @@ impl Archive {
         reader: &'r mut R,
         entry: &Entry,
     ) -> Result<MemberStream<'r, R>, PayloadError> {
+        let progress = self.start_member(reader, entry)?;
+        Ok(MemberStream { reader, progress })
+    }
+
+    /// A resumable position at the start of a member's uncompressed bytes.
+    /// Unlike [`MemberStream`] it borrows no reader, so a caller may keep it
+    /// between reads and advance it with [`Self::pump`]: a deflate member
+    /// read block by block then resumes its inflater instead of replaying it
+    /// from the start each time.
+    pub fn start_member<R: ReadAt>(
+        &self,
+        reader: &mut R,
+        entry: &Entry,
+    ) -> Result<Progress, PayloadError> {
         let local = read(reader, entry.local_header, LOCAL_BYTES)?;
         if u32_at(&local, 0) != LOCAL {
             return Err(corrupt("bad local header"));
@@ -270,13 +284,84 @@ impl Archive {
             ready: 0..0,
             finished: false,
         });
-        Ok(MemberStream {
-            reader,
+        Ok(Progress {
             next: data,
             remaining_input: entry.compressed_bytes,
             remaining_output: entry.bytes,
             inflater,
+            produced: 0,
         })
+    }
+
+    /// Advance a [`Progress`] by up to `buffer.len()` uncompressed bytes.
+    pub fn pump<R: ReadAt>(
+        &self,
+        reader: &mut R,
+        progress: &mut Progress,
+        buffer: &mut [u8],
+    ) -> Result<usize, PayloadError> {
+        let n = progress.read(reader, buffer)?;
+        progress.produced += n as u64;
+        Ok(n)
+    }
+
+    /// Fill `output` with the member's bytes at `offset`, resuming `cursor`
+    /// when it is positioned at or before `offset` and re-opening it
+    /// otherwise. Sequential reads of a deflate member then inflate it once,
+    /// not once per block. Integrity is the caller's, as for `open_member`.
+    pub fn read_member_resuming<R: ReadAt>(
+        &self,
+        reader: &mut R,
+        entry: &Entry,
+        cursor: &mut Option<Progress>,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<(), PayloadError> {
+        if offset
+            .checked_add(output.len() as u64)
+            .is_none_or(|end| end > entry.bytes)
+        {
+            return Err(corrupt("member read range"));
+        }
+        // Reuse the cursor only when it has not yet passed this offset.
+        let mut progress = match cursor.take() {
+            Some(progress) if progress.produced <= offset => progress,
+            _ => self.start_member(reader, entry)?,
+        };
+        let mut discard = [0; 4096];
+        while progress.produced < offset {
+            let want = (offset - progress.produced).min(discard.len() as u64) as usize;
+            if self.pump(reader, &mut progress, &mut discard[..want])? == 0 {
+                return Err(corrupt("short random member read"));
+            }
+        }
+        let mut done = 0;
+        while done < output.len() {
+            let n = self.pump(reader, &mut progress, &mut output[done..])?;
+            if n == 0 {
+                return Err(corrupt("short random member read"));
+            }
+            done += n;
+        }
+        *cursor = Some(progress);
+        Ok(())
+    }
+}
+
+/// How many uncompressed bytes of a member have been produced, and the
+/// inflater state to produce the next ones.
+pub struct Progress {
+    next: u64,
+    remaining_input: u64,
+    remaining_output: u64,
+    inflater: Option<Inflater>,
+    produced: u64,
+}
+
+impl Progress {
+    /// Uncompressed bytes produced so far.
+    pub fn produced(&self) -> u64 {
+        self.produced
     }
 }
 
@@ -293,28 +378,31 @@ struct Inflater {
 
 pub struct MemberStream<'r, R: ReadAt> {
     reader: &'r mut R,
-    next: u64,
-    remaining_input: u64,
-    remaining_output: u64,
-    inflater: Option<Inflater>,
+    progress: Progress,
 }
 
-impl<R: ReadAt> MemberStream<'_, R> {
-    fn fill(&mut self, buffer: &mut [u8]) -> Result<usize, PayloadError> {
+impl Progress {
+    fn fill<R: ReadAt>(
+        &mut self,
+        reader: &mut R,
+        buffer: &mut [u8],
+    ) -> Result<usize, PayloadError> {
         let count = (buffer.len() as u64).min(self.remaining_input) as usize;
-        self.reader
+        reader
             .read_at(self.next, &mut buffer[..count])
             .map_err(PayloadError::io)?;
         self.next += count as u64;
         self.remaining_input -= count as u64;
         Ok(count)
     }
-}
 
-impl<R: ReadAt> MemberRead for MemberStream<'_, R> {
-    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, PayloadError> {
+    fn read<R: ReadAt>(
+        &mut self,
+        reader: &mut R,
+        buffer: &mut [u8],
+    ) -> Result<usize, PayloadError> {
         if self.inflater.is_none() {
-            let count = self.fill(buffer)?;
+            let count = self.fill(reader, buffer)?;
             self.remaining_output -= count as u64;
             return Ok(count);
         }
@@ -339,7 +427,7 @@ impl<R: ReadAt> MemberRead for MemberStream<'_, R> {
             }
             if inflater.start == inflater.filled && self.remaining_input > 0 {
                 let mut input = core::mem::take(&mut self.inflater.as_mut().unwrap().input);
-                let count = self.fill(&mut input);
+                let count = self.fill(reader, &mut input);
                 let inflater = self.inflater.as_mut().unwrap();
                 inflater.input = input;
                 inflater.start = 0;
@@ -365,6 +453,12 @@ impl<R: ReadAt> MemberRead for MemberStream<'_, R> {
                 _ => return Err(corrupt("deflate stream is damaged or truncated")),
             }
         }
+    }
+}
+
+impl<R: ReadAt> MemberRead for MemberStream<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, PayloadError> {
+        self.progress.read(self.reader, buffer)
     }
 }
 
@@ -507,6 +601,86 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    /// A reader that counts the bytes it serves, to show the cost of reading
+    /// a deflate member block by block.
+    struct Counting {
+        inner: Memory,
+        served: core::cell::Cell<u64>,
+    }
+    impl ReadAt for Counting {
+        type Error = <Memory as ReadAt>::Error;
+        fn len(&self) -> u64 {
+            self.inner.len()
+        }
+        fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), Self::Error> {
+            self.served.set(self.served.get() + bytes.len() as u64);
+            self.inner.read_at(offset, bytes)
+        }
+    }
+
+    #[test]
+    fn a_resumed_cursor_reads_a_deflate_member_once_not_once_per_block() {
+        let big = sample(400_000);
+        let bytes = archive(&[("m", &big, true)], false);
+        let mut memory = Counting {
+            inner: Memory(bytes),
+            served: core::cell::Cell::new(0),
+        };
+        let archive = Archive::open(&mut memory).unwrap();
+        let entry = archive.find("m").unwrap().clone();
+        let compressed = entry.compressed_bytes;
+
+        // Read every 64 KiB block in order, resuming the cursor.
+        let block = 64 * 1024u64;
+        let mut cursor = None;
+        let mut joined = Vec::new();
+        memory.served.set(0);
+        let mut offset = 0;
+        while offset < entry.bytes {
+            let n = (entry.bytes - offset).min(block) as usize;
+            let mut out = vec![0; n];
+            archive
+                .read_member_resuming(&mut memory, &entry, &mut cursor, offset, &mut out)
+                .unwrap();
+            joined.extend_from_slice(&out);
+            offset += n as u64;
+        }
+        assert_eq!(joined, big);
+        let resumed = memory.served.get();
+        // The whole compressed stream is read about once, not once per block.
+        assert!(
+            resumed < compressed * 2,
+            "resumed read served {resumed} of {compressed} compressed bytes"
+        );
+
+        // Re-opening per block instead reads far more: each block replays the
+        // inflater from the member start.
+        memory.served.set(0);
+        offset = 0;
+        while offset < entry.bytes {
+            let n = (entry.bytes - offset).min(block) as usize;
+            let mut out = vec![0; n];
+            let mut fresh = None;
+            archive
+                .read_member_resuming(&mut memory, &entry, &mut fresh, offset, &mut out)
+                .unwrap();
+            offset += n as u64;
+        }
+        assert!(
+            memory.served.get() > resumed * 3,
+            "re-opening served {} vs resumed {resumed}",
+            memory.served.get()
+        );
+
+        // A cursor already past the offset re-opens and still reads correctly.
+        let mut back = cursor.take();
+        let mut out = vec![0; 100];
+        archive
+            .read_member_resuming(&mut memory, &entry, &mut back, 0, &mut out)
+            .unwrap();
+        assert_eq!(out, &big[..100]);
     }
 
     #[test]
