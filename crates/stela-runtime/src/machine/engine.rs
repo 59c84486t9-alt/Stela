@@ -19,6 +19,7 @@ use super::{
     },
     debug,
     exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
+    hacr,
     mmu::{self, Access, Controls, Outcome as Translated},
     pmu,
     registers::{self, CpuProfile, HCR_TIDCP, Lines, Outcome as RegisterOutcome, Refusal},
@@ -3846,6 +3847,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(Some(instruction)) => instruction,
             _ => return Err(self.refuse_system(word, "System exit at a word that is not System")),
         };
+        // Apple's GENTER, GEXIT and SDSB (`0x00201460` plus the domain).
+        let apple = match instruction.operation {
+            SystemOperation::Guarded(operation) => Some(hacr::Operation::Guarded {
+                enter: operation == GuardedOperation::Enter,
+            }),
+            SystemOperation::Synchronization(_) if word & !3 == 0x0020_1460 => {
+                Some(hacr::Operation::SynchronizationBarrier)
+            }
+            _ => None,
+        };
+        if let Some(operation) = apple
+            && let Some(step) = self.hacr_guest(word, operation)
+        {
+            return step;
+        }
         match instruction.operation {
             SystemOperation::Exception(operation) => self.exception_instruction(operation),
             SystemOperation::Register(access) => self.register_instruction(word, access),
@@ -4161,6 +4177,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(outcome) = self.cpu.vgic.access(encoding, write, &context) {
             return self.register_outcome(word, Some(access), outcome);
         }
+        if self.hacr_reaches(access)
+            && let Some(step) = self.hacr_guest(word, hacr::Operation::Register(encoding))
+        {
+            return step;
+        }
         // Whether the access is a plain TPIDR_EL1 read, judged before it
         // runs: one that is UNDEFINED or traps changes the EL.
         let thread_pointer = encoding == registers::encodings::TPIDR_EL1
@@ -4182,6 +4203,56 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let outcome = self.cpu.apple_access(access, physical);
         self.derived_changed();
         self.register_outcome(word, Some(access), outcome)
+    }
+
+    /// Whether HACR_EL2 decides an MRS or MSR of a guest: AIDR_EL1 from EL1,
+    /// an op0 3, CRn 11 or 15 encoding from EL1 that HCR_EL2.TIDCP does not
+    /// already trap to EL2, and from EL0 the two such encodings EL0 reaches
+    /// (SPRR_PERM_EL0, and reads of the counter alias); the others are
+    /// UNDEFINED there.
+    fn hacr_reaches(&self, access: RegisterAccess) -> bool {
+        let encoding = access.encoding();
+        if self.cpu.pstate.el == 2 || self.cpu.in_host() {
+            return false;
+        }
+        let apple = encoding.op0() == 3 && matches!(encoding.crn(), 11 | 15);
+        match self.cpu.pstate.el {
+            1 => encoding == registers::encodings::AIDR_EL1 || (apple && !self.cpu.hcr(HCR_TIDCP)),
+            _ => {
+                encoding == registers::encodings::SPRR_PERM_EL0
+                    || (encoding == registers::encodings::CNTVCT_ALIAS_EL0
+                        && access.direction() == Direction::Read)
+            }
+        }
+    }
+
+    /// HACR_EL2 on an Apple-specific operation of an EL1&0 guest
+    /// (`machine::hacr`): the step when a set bit traps it to EL2 (EC 0x18,
+    /// the instruction's ISS) or refuses it, `None` when it runs.
+    fn hacr_guest(&mut self, word: u32, operation: hacr::Operation) -> Option<Step> {
+        if self.cpu.pstate.el == 2 || self.cpu.in_host() {
+            return None;
+        }
+        let value = self.cpu.read(SystemRegister::HACR_EL2);
+        if value == 0 {
+            return None;
+        }
+        let context = hacr::Context {
+            el: self.cpu.pstate.el,
+            guarded: self.cpu.pstate.guarded,
+        };
+        match hacr::guest(value, operation, context) {
+            hacr::Outcome::Runs => None,
+            hacr::Outcome::Trap => {
+                let iss = registers::word_trap_iss(word);
+                let exception = Exception::synchronous(Class::SystemRegister, iss, self.cpu.pc);
+                self.take(exception.to(2));
+                Some(Ok(()))
+            }
+            hacr::Outcome::Refused(detail) => Some(Err(
+                self.unsupported(RequirementKind::Instruction { word, detail })
+            )),
+        }
     }
 
     /// An Apple IMPLEMENTATION DEFINED register of the board (`Devices::
@@ -7531,6 +7602,81 @@ mod tests {
         assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x8000));
         enter(&mut machine, ERET, EL1H).unwrap();
         assert_eq!(machine.cpu.pstate.el, 1);
+    }
+
+    /// HACR_EL2's SPTM VM entry value traps a guest EL1's HID read to EL2 as
+    /// an MRS trap, refuses an encoding no bit names and SDSB by the unnamed
+    /// bit, and leaves the host and a guest without set bits alone.
+    #[test]
+    fn hacr_traps_or_refuses_a_guests_apple_operations() {
+        const MRS_HID4: u32 = 0xd538_f402;
+        const MRS_C15_C2_5: u32 = 0xd53e_f2a2;
+        const MRS_AIDR: u32 = 0xd539_00e2;
+        const MRS_SPRR_PERM_EL1: u32 = 0xd53e_f1c2;
+        const SDSB_ISH: u32 = 0x0020_1462;
+        const HCR_E2H: u64 = 1 << 34;
+        const CUSTOMER: u64 = 0x061f_0000_6100_2000;
+        let mut machine = machine(&[]);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL2, 0, 0x4_0000);
+        let run = |machine: &mut Machine<_, _>, el, hacr, word| {
+            machine.cpu.set_pstate(Pstate::reset(el));
+            machine.cpu.pc = BASE;
+            machine.cpu.registers.set(SystemRegister::HACR_EL2, 0, hacr);
+            machine.system_instruction(word)
+        };
+        run(&mut machine, 1, CUSTOMER, MRS_HID4).unwrap();
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
+        assert_eq!(
+            machine.cpu.read(SystemRegister::ESR_EL2),
+            0x18 << 26 | 1 << 25 | u64::from(registers::word_trap_iss(MRS_HID4))
+        );
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL2), BASE);
+        for (word, reason) in [
+            (
+                MRS_C15_C2_5,
+                "HACR_EL2 bit 24 on S3_6_C15_C2_5: trapped operation not recovered",
+            ),
+            (
+                SDSB_ISH,
+                "HACR_EL2 bit 24 on SDSB: trapped operation not recovered",
+            ),
+        ] {
+            match run(&mut machine, 1, CUSTOMER, word) {
+                Err(Stop::Unsupported(requirement)) => assert_eq!(
+                    requirement.kind,
+                    RequirementKind::Instruction {
+                        word,
+                        detail: reason.into()
+                    }
+                ),
+                other => panic!("{other:?}"),
+            }
+        }
+        // TRAP_AIDR and TRAP_SPRR trap the guest's AIDR_EL1 and
+        // SPRR_PERM_EL1 reads; without set bits the guest's SPRR access and
+        // barrier run, and the host's own accesses never consult HACR_EL2.
+        for (hacr, word) in [(1 << 4, MRS_AIDR), (1 << 11, MRS_SPRR_PERM_EL1)] {
+            run(&mut machine, 1, hacr, word).unwrap();
+            assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x4_0400));
+        }
+        for (el, hacr, word) in [
+            (1, 0, MRS_SPRR_PERM_EL1),
+            (1, 0, SDSB_ISH),
+            (2, CUSTOMER | 1 << 11, MRS_SPRR_PERM_EL1),
+        ] {
+            // The access completes or takes its own exception at the same
+            // EL (SPRR is not enabled here), never HACR_EL2's trap.
+            run(&mut machine, el, hacr, word).unwrap();
+            assert_eq!(machine.cpu.pstate.el, el);
+            assert_ne!(machine.cpu.pc, 0x4_0400);
+        }
     }
 
     #[test]

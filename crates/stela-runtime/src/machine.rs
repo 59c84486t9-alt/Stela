@@ -14,6 +14,7 @@ pub mod ctrr;
 pub mod debug;
 pub mod engine;
 pub mod exception;
+pub mod hacr;
 pub mod identification;
 pub mod impdef;
 pub mod mmu;

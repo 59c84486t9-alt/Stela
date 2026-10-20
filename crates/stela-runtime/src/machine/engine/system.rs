@@ -92,10 +92,9 @@ const HCR_AMVOFFEN: u32 = 51;
 
 /// ACTLR_ELx bit 1, which XNU `xnu-12377.121.6` `proc_reg.h` names EnTSO.
 const ACTLR_EN_TSO: u64 = 1 << 1;
-
-/// The bits a write may set in a register whose whole contents Arm leaves
-/// IMPLEMENTATION DEFINED, or `None` for every other register. A write that
-/// sets any other bit stops. The 26A434 census (docs/design/system.md)
+/// Why a write that sets these bits of a register whose whole contents Arm
+/// leaves IMPLEMENTATION DEFINED stops, or `None` when it completes (also
+/// for every other register). The 26A434 census (docs/design/system.md)
 /// gives each bit its treatment:
 ///
 /// - AFSRn_ELx report additional fault status. This machine records none,
@@ -112,17 +111,18 @@ const ACTLR_EN_TSO: u64 = 1 << 1;
 ///   flag into bit 9 while the `icdsb` boot argument (1 by default) is
 ///   nonzero. Those bits change execution in ways no source defines, and no
 ///   component sets any other bit, so they stop.
-/// - AMAIR_ELx and HACR_EL2 take no set bit: no component writes AMAIR_EL1
-///   or AMAIR_EL2 (the hypervisor round-trips a guest's AMAIR_EL12), and
-///   the SPTM's VM entry sets HACR_EL2 bits whose traps of Apple guest
-///   operation no source defines.
-fn implementation_defined_bits(register: Register) -> Option<u64> {
+/// - AMAIR_ELx take no set bit: no component writes AMAIR_EL1 or AMAIR_EL2
+///   (the hypervisor round-trips a guest's AMAIR_EL12).
+/// - HACR_EL2 holds every bit but the guest timer mask
+///   (`machine::hacr`), which decides what each bit traps.
+fn implementation_defined_refusal(register: Register, value: u64) -> Option<&'static str> {
+    const UNMODELED: &str = "an IMPLEMENTATION DEFINED register bit without a modelled effect";
     match register {
-        Register::AFSR0_EL1 | Register::AFSR0_EL2 | Register::AFSR1_EL1 | Register::AFSR1_EL2 => {
-            Some(u64::MAX)
+        Register::ACTLR_EL1 | Register::ACTLR_EL2 => {
+            (value & !ACTLR_EN_TSO != 0).then_some(UNMODELED)
         }
-        Register::ACTLR_EL1 | Register::ACTLR_EL2 => Some(ACTLR_EN_TSO),
-        Register::AMAIR_EL1 | Register::AMAIR_EL2 | Register::HACR_EL2 => Some(0),
+        Register::AMAIR_EL1 | Register::AMAIR_EL2 => (value != 0).then_some(UNMODELED),
+        Register::HACR_EL2 => crate::machine::hacr::unsupported_bits(value),
         _ => None,
     }
 }
@@ -663,10 +663,8 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             self.reset = true;
         }
         let cpu = &mut self.machine.cpu;
-        if implementation_defined_bits(register).is_some_and(|bits| value & !bits != 0) {
-            return Err(Effect::Refused(
-                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
-            ));
+        if let Some(reason) = implementation_defined_refusal(register, value) {
+            return Err(Effect::Refused(reason));
         }
         let value = if register == Register::MPAM1_EL1 {
             value & !MPAMEN
@@ -3273,23 +3271,44 @@ mod tests {
         write(&mut machine, ACTLR_EL12, EN_TSO).unwrap();
         assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
         assert_eq!(read(&mut machine, ACTLR_EL12), EN_TSO);
-        // EnAPFLG and the bit the icdsb context switch sets stop, as does
-        // any AMAIR or HACR_EL2 bit.
-        for (encoding, value) in [
-            (ACTLR_EL1, EN_TSO | EN_APFLG),
-            (ACTLR_EL12, ICDSB),
-            (AMAIR_EL12, 1),
-            (HACR_EL2, 0x041f_0000_0000_0000),
+        // EnAPFLG and the bit the icdsb context switch sets stop, as do any
+        // AMAIR bit and HACR_EL2's guest timer mask.
+        for (encoding, value, reason) in [
+            (
+                ACTLR_EL1,
+                EN_TSO | EN_APFLG,
+                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
+            ),
+            (
+                ACTLR_EL12,
+                ICDSB,
+                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
+            ),
+            (
+                AMAIR_EL12,
+                1,
+                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
+            ),
+            (
+                HACR_EL2,
+                1 << 20,
+                "HACR_EL2 bit 20 masks the guest's virtual timer, whose pending FIQ register is not modeled",
+            ),
         ] {
-            assert!(
-                matches!(
-                    write(&mut machine, encoding, value),
-                    Err(Stop::Unsupported(_))
-                ),
-                "{encoding:?}"
-            );
+            match write(&mut machine, encoding, value) {
+                Err(Stop::Unsupported(requirement)) => {
+                    assert!(format!("{requirement}").contains(reason), "{requirement}")
+                }
+                other => panic!("{encoding:?}: {other:?}"),
+            }
         }
         assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
+        // HACR_EL2 holds the SPTM's VM entry values.
+        for value in [0x061f_0000_6100_2000, 0x041f_0000_0000_0000] {
+            write(&mut machine, HACR_EL2, value).unwrap();
+            assert_eq!(read(&mut machine, HACR_EL2), value);
+        }
+        write(&mut machine, HACR_EL2, 0).unwrap();
         // The fault status registers hold what software writes, as the
         // hypervisor's save and restore needs, and no exception records in
         // them.

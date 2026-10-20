@@ -153,6 +153,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Err(error) => return self.refuse_amx(word, &error.0),
         };
+        if let Some(step) = self.hacr_guest(word, crate::machine::hacr::Operation::Amx) {
+            return step;
+        }
         let operation = instruction.operation;
         if !self.cpu.amx.enabled(amx::governing(
             if self.cpu.regime() == crate::machine::cpu::TranslationRegime::El20 {
