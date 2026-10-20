@@ -34,6 +34,12 @@ pub const MAX_SLICE_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 1;
 pub const PIECE_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 1024 * 1024;
 /// Pieces an install medium may have: `ipsw.000` to `ipsw.999`.
 pub const MAX_PIECES: usize = 1000;
+/// The block a member's precomputed hashes cover ([`BlockHashes`]).
+pub const HASH_BLOCK_BYTES: u64 = 64 * 1024;
+/// The block hashes' file name beside `payload.json`.
+pub const BLOCK_HASHES_FILE: &str = "blocks.bin";
+/// The most block hashes a manifest may name: 64 GiB of members.
+pub const MAX_HASH_BLOCKS: u64 = 1 << 20;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +212,24 @@ pub struct Member {
     pub name: String,
     pub bytes: u64,
     pub sha256: String,
+    /// Its SHA-384, the digest a BuildManifest component names, when the
+    /// manifest carries precomputed hashes ([`BlockHashes`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha384: Option<String>,
+}
+
+/// The SHA-256 of every [`HASH_BLOCK_BYTES`] block of every member,
+/// computed by the host that wrote the manifest, so the restore host checks
+/// each block as it reads it instead of scanning the whole payload first.
+/// The hashes are a separate file beside the manifest: each member's in
+/// manifest order, its last block the remainder, 32 raw bytes each.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockHashes {
+    /// Its file name, in the manifest's directory.
+    pub file: String,
+    pub block_bytes: u64,
+    /// The SHA-256 of the whole file.
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +278,8 @@ pub struct PayloadManifest {
     /// The global `apticket` manifests, which no identity names.
     pub global_manifests: Vec<String>,
     pub aea_keys: Vec<AeaKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_hashes: Option<BlockHashes>,
 }
 
 /// A relative path made of ordinary components only.
@@ -371,10 +397,34 @@ impl PayloadManifest {
         }
         let mut names: Vec<&str> = Vec::with_capacity(self.members.len());
         for member in &self.members {
-            if !safe_path(&member.name) || !sha256_hex(&member.sha256) {
+            if !safe_path(&member.name)
+                || !sha256_hex(&member.sha256)
+                || member
+                    .sha384
+                    .as_ref()
+                    .is_some_and(|digest| !lower_hex(digest, 96))
+            {
                 return fail("unsafe member name or invalid digest");
             }
             names.push(&member.name);
+        }
+        if let Some(blocks) = &self.block_hashes {
+            if blocks.file.is_empty()
+                || blocks.file.contains('/')
+                || !safe_path(&blocks.file)
+                || !sha256_hex(&blocks.sha256)
+            {
+                return fail("unsafe block hash file or invalid digest");
+            }
+            if blocks.block_bytes != HASH_BLOCK_BYTES {
+                return fail("block hashes of another block size");
+            }
+            if self.members.iter().any(|member| member.sha384.is_none()) {
+                return fail("block hashes without every member's SHA-384");
+            }
+            if self.hash_blocks() > MAX_HASH_BLOCKS {
+                return fail("more block hashes than 64 GiB of members");
+            }
         }
         names.sort_unstable();
         if names.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -454,6 +504,15 @@ impl PayloadManifest {
         })
     }
 
+    /// Blocks of [`HASH_BLOCK_BYTES`] the members take, in the order
+    /// [`BlockHashes`] lists them.
+    pub fn hash_blocks(&self) -> u64 {
+        self.members
+            .iter()
+            .map(|member| member.bytes.div_ceil(HASH_BLOCK_BYTES))
+            .sum()
+    }
+
     pub fn total_bytes(&self) -> u64 {
         self.members.iter().map(|member| member.bytes).sum()
     }
@@ -523,6 +582,7 @@ pub(crate) mod tests {
                     name: name.clone(),
                     bytes: data.len() as u64,
                     sha256: crate::sha256(data),
+                    sha384: None,
                 })
                 .collect(),
             identities: vec![
@@ -547,6 +607,7 @@ pub(crate) mod tests {
                 key_pem: pem.into(),
                 key_sha256: crate::sha256(pem.as_bytes()),
             }],
+            block_hashes: None,
         };
         (manifest, contents)
     }
@@ -556,7 +617,7 @@ pub(crate) mod tests {
         let (manifest, _) = manifest();
         let json = manifest.to_json();
         assert_eq!(PayloadManifest::parse(json.as_bytes()).unwrap(), manifest);
-        let broken: [fn(&mut PayloadManifest); 13] = [
+        let broken: [fn(&mut PayloadManifest); 16] = [
             |m| m.members[0].name = "../escape".into(),
             |m| m.members[0].sha256 = "A".repeat(64),
             |m| m.members[1].name = m.members[0].name.clone(),
@@ -574,6 +635,14 @@ pub(crate) mod tests {
             |m| m.aea_keys[0].key_pem.push('x'),
             |m| m.product_build = "26A434/..".into(),
             |m| m.source.catalog_sha1 = Some("A".repeat(40)),
+            |m| m.members[0].sha384 = Some("0".repeat(64)),
+            |m| m.block_hashes = Some(blocks("blocks.bin")),
+            |m| {
+                for member in &mut m.members {
+                    member.sha384 = Some("5".repeat(96));
+                }
+                m.block_hashes = Some(blocks("../blocks.bin"));
+            },
             |m| m.layout = pieces(&[1], 0),
             |m| m.layout = pieces(&[], 2),
             |m| m.layout = pieces(&[1, 1], 2),
@@ -589,6 +658,30 @@ pub(crate) mod tests {
             change(&mut bad);
             assert!(bad.validate().is_err(), "{bad:?}");
         }
+    }
+
+    fn blocks(file: &str) -> BlockHashes {
+        BlockHashes {
+            file: file.into(),
+            block_bytes: HASH_BLOCK_BYTES,
+            sha256: "6".repeat(64),
+        }
+    }
+
+    #[test]
+    fn block_hashes_need_every_members_sha384() {
+        let (mut manifest, _) = manifest();
+        for member in &mut manifest.members {
+            member.sha384 = Some("5".repeat(96));
+        }
+        manifest.block_hashes = Some(blocks(BLOCK_HASHES_FILE));
+        manifest.validate().unwrap();
+        let json = manifest.to_json();
+        assert_eq!(PayloadManifest::parse(json.as_bytes()).unwrap(), manifest);
+        // 3000 bytes, 2,500,000 bytes (39 blocks), 10 bytes and an empty one.
+        assert_eq!(manifest.hash_blocks(), 1 + 39 + 1);
+        manifest.block_hashes.as_mut().unwrap().block_bytes = 4096;
+        assert!(manifest.validate().is_err());
     }
 
     /// A pieces layout of these sizes.
