@@ -31,7 +31,7 @@ pub(super) mod reclaim;
 mod server;
 pub(super) mod suspension;
 pub(super) mod task;
-mod thread;
+pub(super) mod thread;
 mod vm;
 
 /// The fast traps `handle_svc` answers before the table.

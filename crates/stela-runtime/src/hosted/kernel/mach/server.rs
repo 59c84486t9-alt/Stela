@@ -407,11 +407,7 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Thread, "thread_get_exception_ports_info", None),
     (Object::Thread, "thread_adopt_exception_handler", None),
     (Object::Thread, "_kernelrpc_thread_policy", None),
-    (
-        Object::Thread,
-        "_kernelrpc_thread_policy_set",
-        Some("a time constraint of over 4.29 seconds, past the host's nanoseconds"),
-    ),
+    (Object::Thread, "_kernelrpc_thread_policy_set", None),
     (Object::Thread, "thread_policy_get", None),
     (Object::Thread, "_kernelrpc_thread_set_policy", None),
     (Object::Thread, "thread_get_mach_voucher", None),

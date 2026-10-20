@@ -13,7 +13,8 @@ use crate::hosted::darwin::{KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED, KERN_SUCC
 use crate::hosted::host;
 use crate::hosted::threads::lock;
 use anyhow::{Result, bail};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 unsafe extern "C" {
     fn thread_info(thread: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
@@ -326,11 +327,46 @@ fn info(kernel: &Kernel, port: u32, request: &Request) -> Result<Reply> {
 }
 
 /// Host absolute time (x86 nanoseconds) for guest ticks, rounded up so
-/// that [`ticks`] of it is the same count of ticks again: `None` past the
-/// host's 32-bit field.
-fn host_time(ticks: u32) -> Option<u32> {
+/// that [`ticks`] of it is the same count of ticks again, and whether it
+/// saturated at the host's 32-bit field: only a saturated time is
+/// `u32::MAX`.
+fn host_time(ticks: u32) -> (u32, bool) {
     let nanoseconds = (u64::from(ticks) * 1_000_000_000).div_ceil(host::COUNTER_HZ);
-    u32::try_from(nanoseconds).ok()
+    u32::try_from(nanoseconds).map_or((u32::MAX, true), |time| (time, false))
+}
+
+/// The time constraints of this task's threads that the host thread holds
+/// saturated, by thread port: the guest's period, computation and
+/// constraint as set, which `thread_policy_get` answers. Past 2^32 host
+/// nanoseconds only the period and constraint can be accepted (the
+/// computation is at most 50 ms), and the kernel's checks and its
+/// computation of half the constraint, capped at the 50 ms quantum, give
+/// a saturated constraint's result.
+#[derive(Debug, Default)]
+pub(crate) struct Realtime(Mutex<BTreeMap<u32, [u32; TIME_FIELDS]>>);
+
+impl Realtime {
+    /// A time constraint the host accepted for the thread `port`: `fields`
+    /// when the host holds them saturated.
+    fn set(&self, port: u32, fields: Option<[u32; TIME_FIELDS]>) {
+        let mut threads = lock(&self.0);
+        match fields {
+            Some(fields) => threads.insert(port, fields),
+            None => threads.remove(&port),
+        };
+    }
+
+    /// The guest's time-constraint fields from the host's `words` for the
+    /// thread `port`.
+    fn get(&self, port: u32, words: &mut [u32]) {
+        let recorded = lock(&self.0).get(&port).copied();
+        for (index, word) in words.iter_mut().enumerate().take(TIME_FIELDS) {
+            *word = match recorded {
+                Some(fields) if *word == u32::MAX => fields[index],
+                _ => ticks(*word),
+            };
+        }
+    }
 }
 
 /// Guest ticks for host absolute time.
@@ -342,7 +378,8 @@ fn ticks(nanoseconds: u32) -> u32 {
 /// constraint is in absolute time, which the host thread takes in its
 /// nanoseconds: the bounds the kernel checks (50 us to 50 ms of
 /// computation) and its rounding of the computation to half the
-/// constraint then fall on the same values. Affinity sets do not exist
+/// constraint then fall on the same values. A time past the host's 32 bits
+/// is held saturated and answered as set ([`Realtime`]). Affinity sets do not exist
 /// on arm64 (`ml_get_max_affinity_sets`): the host kernel's checks that
 /// precede the flavor's are asked with an empty affinity policy, whose
 /// count it refuses where the arm64 kernel refuses the flavor.
@@ -356,17 +393,26 @@ fn policy_set(kernel: &Kernel, port: u32, request: &Request) -> Result<Reply> {
     let mut words: Vec<u32> = (0..count as usize)
         .map(|index| request.word(16 + index * 4).expect("the count was checked"))
         .collect();
-    match flavor {
+    Ok(match flavor {
         THREAD_TIME_CONSTRAINT_POLICY | THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY => {
-            for (index, word) in words.iter_mut().enumerate().take(TIME_FIELDS) {
-                let Some(converted) = host_time(*word) else {
-                    bail!(
-                        "thread_policy_set time constraint field {index} of {word} ticks: the \
-                         host's 32-bit nanoseconds cannot hold it, which is not implemented"
-                    );
-                };
-                *word = converted;
+            let mut guest = [0; TIME_FIELDS];
+            let mut saturated = false;
+            for (field, word) in guest.iter_mut().zip(words.iter_mut()) {
+                *field = *word;
+                let (time, past) = host_time(*word);
+                *word = time;
+                saturated |= past;
             }
+            // SAFETY: a thread port of this task and `count` words.
+            let code =
+                unsafe { thread_policy_set(port, flavor, words.as_ptr().cast(), count) } as u32;
+            if code == KERN_SUCCESS {
+                kernel
+                    .process
+                    .realtime
+                    .set(port, saturated.then_some(guest));
+            }
+            status(code)
         }
         THREAD_AFFINITY_POLICY => {
             if target(kernel, port).is_some_and(|control| !control.active()) {
@@ -374,16 +420,13 @@ fn policy_set(kernel: &Kernel, port: u32, request: &Request) -> Result<Reply> {
             }
             // SAFETY: a thread port of this task and an empty policy.
             let code = unsafe { thread_policy_set(port, flavor, words.as_ptr().cast(), 0) } as u32;
-            return Ok(Reply::Failure(match code {
+            Reply::Failure(match code {
                 KERN_INVALID_ARGUMENT => KERN_NOT_SUPPORTED,
                 other => other,
-            }));
+            })
         }
-        _ => return Ok(Reply::Forward),
-    }
-    // SAFETY: a thread port of this task and `count` words.
-    let code = unsafe { thread_policy_set(port, flavor, words.as_ptr().cast(), count) } as u32;
-    Ok(status(code))
+        _ => Reply::Forward,
+    })
 }
 
 /// `thread_policy_get(flavor, policy_infoCnt, get_default)`: a time
@@ -428,9 +471,7 @@ fn policy_get(kernel: &Kernel, port: u32, request: &Request) -> Result<Reply> {
     if code != KERN_SUCCESS {
         return Ok(Reply::Failure(code));
     }
-    for word in words.iter_mut().take(TIME_FIELDS) {
-        *word = ticks(*word);
-    }
+    kernel.process.realtime.get(port, &mut words);
     let mut body = count.to_le_bytes().to_vec();
     for word in &words[..count as usize] {
         body.extend(word.to_le_bytes());
@@ -479,15 +520,34 @@ mod tests {
     #[test]
     fn time_constraints_round_trip_through_host_nanoseconds() {
         // The kernel's bounds fall on whole microseconds.
-        assert_eq!(host_time(1_200), Some(50_000));
-        assert_eq!(host_time(1_200_000), Some(50_000_000));
+        assert_eq!(host_time(1_200), (50_000, false));
+        assert_eq!(host_time(1_200_000), (50_000_000, false));
         for value in [1, 2, 3, 1_201, 999_999, 240_000, 103_079_215] {
-            assert_eq!(ticks(host_time(value).unwrap()), value);
+            let (time, saturated) = host_time(value);
+            assert!(!saturated && time < u32::MAX);
+            assert_eq!(ticks(time), value);
         }
         // The release defaults, half the 10 ms quantum and the quantum.
         assert_eq!(ticks(5_000_000), 120_000);
         assert_eq!(ticks(10_000_000), 240_000);
-        assert_eq!(host_time(u32::MAX), None);
+        assert_eq!(host_time(103_079_216), (u32::MAX, true));
+        assert_eq!(host_time(u32::MAX), (u32::MAX, true));
+    }
+
+    #[test]
+    fn saturated_time_constraints_read_back_as_the_guest_set_them() {
+        let realtime = Realtime::default();
+        realtime.set(7, Some([240_000_000, 1_200, 480_000_000]));
+        // The host's period and constraint saturated, its computation the
+        // quantum it capped half the constraint at.
+        let mut words = [u32::MAX, 50_000_000, u32::MAX, 1];
+        realtime.get(7, &mut words);
+        assert_eq!(words, [240_000_000, 1_200_000, 480_000_000, 1]);
+        // A later constraint within the host's range is the host's.
+        realtime.set(7, None);
+        let mut words = [5_000_000, 50_000, 10_000_000, 0];
+        realtime.get(7, &mut words);
+        assert_eq!(words, [120_000, 1_200, 240_000, 0]);
     }
 
     #[test]

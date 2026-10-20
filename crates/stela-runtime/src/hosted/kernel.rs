@@ -130,6 +130,8 @@ pub(super) struct Process {
     pub(super) reclaim: Mutex<Option<mach::reclaim::Ring>>,
     /// The task's exception actions.
     pub(super) exception_ports: mach::exception::ExceptionPorts,
+    /// Its threads' time constraints past the host's nanoseconds.
+    pub(super) realtime: mach::thread::Realtime,
     /// The debug state new threads take (`task_debug`), once set.
     pub(super) task_debug: Mutex<Option<Vec<u32>>>,
     /// Its asynchronous I/O queues and workers.
@@ -265,6 +267,7 @@ impl Process {
             restartable_ranges: Mutex::new(None),
             reclaim: Mutex::new(None),
             exception_ports: Default::default(),
+            realtime: Default::default(),
             task_debug: Mutex::new(None),
         })
     }
