@@ -42,6 +42,12 @@ use stela_compiler::x86_64::cache_clean;
 /// does not trap FP exceptions (inferred: macOS on Apple silicon cannot
 /// enable FP traps); FEAT_EBF16 and AArch32's Len and Stride are on no chip.
 const FPCR_FIELDS: u32 = 0x07c8_0000;
+/// FPCR's floating-point exception trap enables: IOE, DZE, OFE, UFE, IXE
+/// and IDE.
+const FPCR_TRAP_ENABLES: u32 = 0x9f00;
+/// Whether software can set every FPCR trap enable, the test XNU makes for
+/// `hw.optional.arm.FP_SyncExceptions` (`commpage_init_arm_optional_features_fpcr`).
+pub const FP_TRAPS_WRITABLE: bool = FPCR_FIELDS & FPCR_TRAP_ENABLES == FPCR_TRAP_ENABLES;
 /// FIZ, AH and NEP (FEAT_AFP, M4 and later). The compiled FP operations take
 /// their effects from the stored FPCR.
 const FPCR_ALTERNATE: u32 = 0b111;

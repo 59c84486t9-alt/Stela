@@ -275,8 +275,8 @@ pub fn run(launch: Launch) -> Result<Report> {
     let [guard0, guard1, guard2, guard3, entropy0, entropy1, munge] = random_words::<7>()?;
     let jop = pe::UserJop::of_subtype(launch.cpu_subtype);
     let memory_tagging = pe::memory_tagging(hardware.memory_tagging);
-    if hardware.memory_tagging && !memory_tagging {
-        eprintln!("stela: {}", pe::MEMORY_TAGGING_LIMIT);
+    for limit in pe::limits(chip) {
+        eprintln!("stela: {limit}");
     }
     let security_config = launch.signature.security_config(memory_tagging)?;
     let ipc_space_policy = launch.signature.ipc_space_policy(jop)?;

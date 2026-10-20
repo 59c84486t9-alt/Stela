@@ -147,6 +147,8 @@ const DFR0_WRPS: u8 = 20;
 const PFR1_MTE: u8 = 8;
 /// ID_AA64PFR1_EL1.MTE_frac, the asynchronous Tag Check fault support.
 const PFR1_MTE_FRAC: u8 = 40;
+/// ID_AA64PFR1_EL1.SME, the Scalable Matrix Extension level.
+const PFR1_SME: u8 = 24;
 /// MTE_frac 0b1111: asynchronous Tag Check faults are not supported (no
 /// FEAT_MTE_ASYNC).
 const MTE_FRAC_SYNCHRONOUS_ONLY: u64 = 0b1111;
@@ -1390,6 +1392,12 @@ fn presents(index: usize, row: &Row, fixed: &[(Encoding, u64)]) -> bool {
 /// is nonzero.
 pub fn memory_tagging(chip: Chip) -> bool {
     engine_field(chip, ID_AA64PFR1_EL1, PFR1_MTE) != 0
+}
+
+/// Whether `chip`'s profile implements the Scalable Matrix Extension:
+/// ID_AA64PFR1_EL1.SME is nonzero.
+pub fn streaming(chip: Chip) -> bool {
+    engine_field(chip, ID_AA64PFR1_EL1, PFR1_SME) != 0
 }
 
 /// The breakpoint and watchpoint counts `chip`'s profile presents:

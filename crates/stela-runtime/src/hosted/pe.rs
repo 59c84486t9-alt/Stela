@@ -13,7 +13,7 @@ use super::tables::{T0SZ, Tables};
 use crate::machine::{
     Chip, Cpu, CpuProfile,
     exception::Pstate,
-    registers::encodings::{DCZID_EL0, ID_AA64PFR1_EL1},
+    registers::encodings::{DCZID_EL0, ID_AA64PFR1_EL1, ID_AA64SMFR0_EL1},
     soc,
     system::Register,
 };
@@ -233,10 +233,49 @@ pub const MEMORY_TAGGING_LIMIT: &str = "the chip's memory tagging (FEAT_MTE2) is
      to hosted processes: hosted memory keeps no Allocation Tags, so the process runs as on a \
      chip without it";
 
+/// Hosted streaming execution is not implemented: the hosted kernel has no
+/// SME access trap (XNU enables SME for a thread at its first use,
+/// `arm_sme_trap`), no SME or ZA thread states, signal contexts or
+/// `hw.optional.arm.sme_max_svl_b`, and no cluster shared resource for
+/// `bsdthread_get_max_parallelism`.
+const HOSTED_STREAMING: bool = false;
+
+/// ID_AA64PFR1_EL1.SME.
+const PFR1_SME_FIELD: u64 = 0xf << 24;
+
+/// Whether the hosted machine presents the Scalable Matrix Extension, given
+/// whether the chip has it (`identification::streaming`): not until hosted
+/// streaming execution exists, so an SME chip's hosted process sees a
+/// machine without it (no FEAT_SME in its identification, sysctls and
+/// commpage, and SMSTART UNDEFINED) rather than one whose first SME
+/// instruction faults.
+pub const fn streaming(chip: bool) -> bool {
+    chip && HOSTED_STREAMING
+}
+
+/// The hosted limit exec reports once for a chip with SME.
+pub const STREAMING_LIMIT: &str = "the chip's Scalable Matrix Extension (FEAT_SME) is not \
+     presented to hosted processes: the hosted kernel keeps no streaming or ZA state, so the \
+     process runs as on a chip without it";
+
+/// The hosted limits exec reports once for `chip`: each feature the chip
+/// has that the hosted machine does not present.
+pub fn limits(chip: Chip) -> Vec<&'static str> {
+    let tagging = crate::machine::identification::memory_tagging(chip);
+    let sme = crate::machine::identification::streaming(chip);
+    [
+        (tagging && !memory_tagging(tagging), MEMORY_TAGGING_LIMIT),
+        (sme && !streaming(sme), STREAMING_LIMIT),
+    ]
+    .into_iter()
+    .filter_map(|(withheld, limit)| withheld.then_some(limit))
+    .collect()
+}
+
 /// The chip profile of the hosted PE: identification the engine implements
 /// on this host, capped at the SoC's chip, with the M2's 24 MHz counter
-/// and without memory tagging unless the hosted machine presents it
-/// ([`memory_tagging`]). Its one PE is the core the
+/// and without memory tagging or SME unless the hosted machine presents
+/// them ([`memory_tagging`], [`streaming`]). Its one PE is the core the
 /// thread reports running on (CPU 0, [`TPIDR_EL0_CPU`]), identified from
 /// the SoC's row as the system engine identifies it (`soc::cpus`): the
 /// MIDR_EL1 part of its cluster type, which gives the commpage's and
@@ -253,9 +292,19 @@ pub fn profile(hardware: &Hardware, target: TargetCpu) -> anyhow::Result<CpuProf
         crate::machine::identification::Speculation::HOSTED,
     );
     let tagging = memory_tagging(hardware.memory_tagging);
+    let sme = streaming(crate::machine::identification::streaming(chip));
     for (register, value) in &mut fixed {
-        if *register == ID_AA64PFR1_EL1 && !tagging {
-            *value &= !PFR1_MTE_FIELDS;
+        match *register {
+            ID_AA64PFR1_EL1 => {
+                if !tagging {
+                    *value &= !PFR1_MTE_FIELDS;
+                }
+                if !sme {
+                    *value &= !PFR1_SME_FIELD;
+                }
+            }
+            ID_AA64SMFR0_EL1 if !sme => *value = 0,
+            _ => {}
         }
     }
     fixed.push((DCZID_EL0, DCZID_BLOCK_64));
@@ -384,6 +433,20 @@ mod tests {
         assert_eq!(fixed(&m5, ID_AA64PFR1_EL1) & PFR1_MTE_FIELDS, 0);
         // The register's other features stay.
         assert_ne!(fixed(&m5, ID_AA64PFR1_EL1), 0);
+        assert!(limits(Chip::AppleM5).contains(&MEMORY_TAGGING_LIMIT));
+        assert!(!limits(Chip::AppleM2).contains(&MEMORY_TAGGING_LIMIT));
+    }
+
+    /// An SME chip's hosted PE presents no SME, and exec reports the limit.
+    #[test]
+    fn an_sme_chip_presents_no_streaming_to_hosted_processes() {
+        assert!(crate::machine::identification::streaming(Chip::AppleM4));
+        assert!(!streaming(true));
+        let m4 = hosted_profile(0x8132);
+        assert_eq!(fixed(&m4, ID_AA64PFR1_EL1) & PFR1_SME_FIELD, 0);
+        assert_eq!(fixed(&m4, ID_AA64SMFR0_EL1), 0);
+        assert_eq!(limits(Chip::AppleM4), [STREAMING_LIMIT]);
+        assert!(limits(Chip::AppleM2).is_empty());
     }
 
     /// Each SoC's hosted PE is its CPU 0 as the SoC row identifies it: a Pro,

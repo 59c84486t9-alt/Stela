@@ -1,8 +1,9 @@
 //! The EL0-visible CPU features XNU publishes, derived from the hosted
 //! PE's identification registers the way XNU derives them
 //! (`osfmk/arm/commpage/commpage.c` `commpage_init_arm_optional_features_*`):
-//! the commpage capability bits and the `hw.optional.arm.FEAT_*` sysctls
-//! answer from the same rows, so they cannot disagree.
+//! the commpage capability bits and every `hw.optional.arm.*` flag
+//! (`arm/arm_features.inc`) answer from the same identification, so they
+//! cannot disagree with each other or with what the PE executes.
 //!
 //! One adaptation: XNU tests only the IMPLEMENTATION DEFINED PAC fields (API,
 //! GPI), which Apple cores set. The engine implements the architected QARMA5
@@ -10,7 +11,8 @@
 //! fields are each the larger of the two.
 use crate::machine::registers::encodings::{
     Encoding, ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1, ID_AA64ISAR2_EL1, ID_AA64MMFR0_EL1,
-    ID_AA64MMFR1_EL1, ID_AA64MMFR2_EL1, ID_AA64PFR0_EL1, ID_AA64PFR1_EL1,
+    ID_AA64MMFR1_EL1, ID_AA64MMFR2_EL1, ID_AA64PFR0_EL1, ID_AA64PFR1_EL1, ID_AA64PFR2_EL1,
+    ID_AA64SMFR0_EL1, ID_AA64ZFR0_EL1,
 };
 
 /// `osfmk/arm/cpu_capabilities.h` capability bits.
@@ -53,6 +55,10 @@ pub mod capability {
     pub const FEAT_CSV2: u64 = 0x0080_0000_0000_0000;
     pub const FEAT_CSV3: u64 = 0x0100_0000_0000_0000;
     pub const FEAT_DIT: u64 = 0x0200_0000_0000_0000;
+    pub const FP_SYNC_EXCEPTIONS: u64 = 0x0400_0000_0000_0000;
+    pub const FEAT_SME: u64 = 0x0800_0000_0000_0000;
+    pub const FEAT_SME2: u64 = 0x1000_0000_0000_0000;
+    pub const FEAT_SME2P1: u64 = 0x2000_0000_0000_0000;
 }
 
 /// `osfmk/arm/cpu_capabilities_public.h` `CAP_BIT_*`: each
@@ -176,6 +182,48 @@ const ISAR1_GPI: u32 = 28;
 const PFR0_ADV_SIMD: u32 = 20;
 const ADV_SIMD_ABSENT: u64 = 0xf;
 const ADV_SIMD_FP16: u64 = 1;
+/// ID_AA64ISAR1_EL1.SPECRES, which XNU publishes only while SCTLR_EL1.EnRCTX
+/// gives EL0 the restriction instructions; `SCTLR_EL1_DEFAULT` leaves it
+/// clear.
+const ISAR1_SPECRES: u32 = 40;
+const SCTLR_EN_RCTX: u64 = 1 << 10;
+const PFR1_MTE: u32 = 8;
+const PFR1_SME: u32 = 24;
+const PFR1_MTE_FRAC: u32 = 40;
+const PFR1_MTEX: u32 = 52;
+const PFR2_MTE_STORE_ONLY: u32 = 4;
+const SMFR0_SME_VERSION: u32 = 56;
+const ZFR0_B16B16: u32 = 24;
+
+/// The ID_AA64SMFR0_EL1 features XNU publishes, as `(sysctl, shift, bits)`:
+/// under the register's alternative ID scheme a feature is present when
+/// every one of its `bits` is set (`commpage_init_arm_optional_features_smfr0`).
+const SMFR0_FEATURES: &[(&str, u32, u64)] = &[
+    ("SME_F32F32", 32, 1),
+    ("SME_BI32I32", 33, 1),
+    ("SME_B16F32", 34, 1),
+    ("SME_F16F32", 35, 1),
+    ("FEAT_SME_F64F64", 48, 1),
+    ("FEAT_SME_F16F16", 42, 1),
+    ("FEAT_SME_B16B16", 43, 1),
+    ("SME_I8I32", 36, 0xf),
+    ("SME_I16I32", 44, 0x5),
+    ("FEAT_SME_I16I64", 52, 0xf),
+];
+
+/// The commpage bits of the features no [`ROWS`] row gives.
+const DERIVED_BITS: &[(&str, u64)] = &[
+    ("FEAT_PAuth", c::FEAT_PAUTH),
+    ("FEAT_PACIMP", c::ARMV8_GPI),
+    ("AdvSIMD", c::ADV_SIMD),
+    ("AdvSIMD_HPFPCvt", c::ADV_SIMD_HPFP_CVT),
+    ("FEAT_FP16", c::FEAT_FP16),
+    ("FEAT_SPECRES", c::FEAT_SPECRES),
+    ("FEAT_SME", c::FEAT_SME),
+    ("FEAT_SME2", c::FEAT_SME2),
+    ("FEAT_SME2p1", c::FEAT_SME2P1),
+    ("FP_SyncExceptions", c::FP_SYNC_EXCEPTIONS),
+];
 
 use capability as c;
 const ROWS: &[Row] = &[
@@ -243,10 +291,28 @@ impl Identification<'_> {
             .max(self.field(ID_AA64ISAR1_EL1, ISAR1_GPA))
     }
 
-    /// Every `hw.optional.arm.FEAT_*` sysctl XNU publishes and its value.
+    /// The SME version `arm_sme_probe_version` finds: 0 without SME, then
+    /// FEAT_SME, FEAT_SME2 and FEAT_SME2p1 from ID_AA64SMFR0_EL1.SMEver.
+    fn sme_version(&self) -> u64 {
+        if self.field(ID_AA64PFR1_EL1, PFR1_SME) == 0 {
+            return 0;
+        }
+        (self.field(ID_AA64SMFR0_EL1, SMFR0_SME_VERSION) + 1).min(3)
+    }
+
+    /// Every `hw.optional.arm.*` flag XNU publishes (`arm/arm_features.inc`)
+    /// and its value.
     pub fn optional_features(&self) -> Vec<(&'static str, bool)> {
         let pac = self.address_authentication();
         let simd = self.field(ID_AA64PFR0_EL1, PFR0_ADV_SIMD);
+        let specres = if super::pe::SCTLR_EL1 & SCTLR_EN_RCTX != 0 {
+            self.field(ID_AA64ISAR1_EL1, ISAR1_SPECRES)
+        } else {
+            0
+        };
+        let sme = self.sme_version();
+        let mte = self.field(ID_AA64PFR1_EL1, PFR1_MTE);
+        let mte4 = mte >= 2 && self.field(ID_AA64PFR1_EL1, PFR1_MTEX) >= 1;
         let mut features: Vec<(&'static str, bool)> = ROWS
             .iter()
             .map(|row| {
@@ -257,6 +323,8 @@ impl Identification<'_> {
             })
             .collect();
         features.extend([
+            ("FEAT_SPECRES", specres >= 1),
+            ("FEAT_SPECRES2", specres >= 2),
             ("FEAT_PAuth", pac >= 1),
             ("FEAT_PAuth2", pac >= 3),
             ("FEAT_FPAC", pac >= 4),
@@ -268,36 +336,60 @@ impl Identification<'_> {
             ),
             ("AdvSIMD", simd != ADV_SIMD_ABSENT),
             ("AdvSIMD_HPFPCvt", simd != ADV_SIMD_ABSENT),
+            ("FEAT_SME", sme >= 1),
+            ("FEAT_SME2", sme >= 2),
+            ("FEAT_SME2p1", sme >= 3),
+            ("FEAT_MTE", mte >= 1),
+            ("FEAT_MTE2", mte >= 2),
+            ("FEAT_MTE3", mte >= 3),
+            ("FEAT_MTE4", mte4),
+            (
+                "FEAT_MTE_ASYNC",
+                mte >= 2 && self.field(ID_AA64PFR1_EL1, PFR1_MTE_FRAC) == 0,
+            ),
+            (
+                "FEAT_MTE_STORE_ONLY",
+                self.field(ID_AA64PFR2_EL1, PFR2_MTE_STORE_ONLY) >= 1,
+            ),
+            ("FEAT_MTE_CANONICAL_TAGS", mte4),
+            ("FEAT_MTE_NO_ADDRESS_TAGS", mte4),
+            (
+                "FEAT_SVE_B16B16",
+                self.field(ID_AA64ZFR0_EL1, ZFR0_B16B16) >= 1,
+            ),
+            (
+                "FP_SyncExceptions",
+                crate::machine::engine::FP_TRAPS_WRITABLE,
+            ),
         ]);
+        // XNU reads ID_AA64SMFR0_EL1 only with SME.
+        let smfr0 = if sme == 0 {
+            0
+        } else {
+            self.register(ID_AA64SMFR0_EL1)
+        };
+        features.extend(
+            SMFR0_FEATURES
+                .iter()
+                .map(|&(name, shift, bits)| (name, smfr0 >> shift & bits == bits)),
+        );
         features
     }
 
-    /// The commpage's optional-feature bits.
+    /// The commpage's optional-feature bits, from the same features.
     pub fn capability_bits(&self) -> u64 {
-        let mut bits = ROWS
-            .iter()
-            .filter(|row| row.bit != 0 && self.field(row.register, row.shift) >= row.minimum)
-            .fold(0, |bits, row| bits | row.bit);
-        if self.address_authentication() >= 1 {
-            bits |= c::FEAT_PAUTH;
-        }
-        if self.generic_authentication() >= 1 {
-            bits |= c::ARMV8_GPI;
-        }
-        let simd = self.field(ID_AA64PFR0_EL1, PFR0_ADV_SIMD);
-        if simd != ADV_SIMD_ABSENT {
-            bits |= c::ADV_SIMD | c::ADV_SIMD_HPFP_CVT;
-            if simd >= ADV_SIMD_FP16 {
-                bits |= c::FEAT_FP16;
-            }
-        }
-        bits
+        let features = self.optional_features();
+        let present = |name: &str| features.iter().any(|&(feature, on)| on && feature == name);
+        ROWS.iter()
+            .map(|row| (row.sysctl, row.bit))
+            .chain(DERIVED_BITS.iter().copied())
+            .filter(|&(name, bit)| bit != 0 && present(name))
+            .fold(0, |bits, (_, bit)| bits | bit)
     }
 }
 
 /// `commpage_init_cpu_capabilities`: cache line, CPU count, the fixed
-/// arm64 bits and the optional features. FP trap enables are RAZ/WI on
-/// Apple cores, so `kHasFP_SyncExceptions` stays clear.
+/// arm64 bits and the optional features.
 pub fn cpu_capabilities(identification: &Identification, cache_line: u32, cpus: u8) -> u64 {
     let cache = match cache_line {
         128 => c::CACHE128,
@@ -362,5 +454,57 @@ mod tests {
         assert_eq!((capabilities >> c::NUM_CPUS_SHIFT) & 0xff, 8);
         assert_ne!(capabilities & c::CACHE128, 0);
         assert_eq!(capabilities & c::UP, 0);
+    }
+
+    /// Every flag of xnu-12377.121.6 `arm/arm_features.inc` is published
+    /// once, present or not.
+    #[test]
+    fn every_xnu_feature_flag_is_published() {
+        let features = Identification(&[]).optional_features();
+        assert_eq!(features.len(), 69);
+        let names: std::collections::BTreeSet<_> = features.iter().map(|(name, _)| name).collect();
+        assert_eq!(names.len(), features.len());
+        // All-zero registers present only AdvSIMD, whose 0 is implemented.
+        let present: Vec<_> = features
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(present, ["AdvSIMD", "AdvSIMD_HPFPCvt"]);
+    }
+
+    /// SME and its ID_AA64SMFR0_EL1 features follow `arm_sme_probe_version`
+    /// and the alternative ID scheme, and need ID_AA64PFR1_EL1.SME.
+    #[test]
+    fn sme_flags_follow_the_alternative_id_scheme() {
+        // SME2 (SMEver 1) with F32F32, I8I32 (0xf) and I16I32 0b0100, which
+        // lacks I16I32's 0b0101.
+        let smfr0 = (ID_AA64SMFR0_EL1, 1 << 56 | 1 << 32 | 0xf << 36 | 0x4 << 44);
+        let with = [(ID_AA64PFR1_EL1, 2 << PFR1_SME), smfr0];
+        let identification = Identification(&with);
+        let features = identification.optional_features();
+        for (name, present) in [
+            ("FEAT_SME", true),
+            ("FEAT_SME2", true),
+            ("FEAT_SME2p1", false),
+            ("SME_F32F32", true),
+            ("SME_I8I32", true),
+            ("SME_I16I32", false),
+            ("FEAT_SME_I16I64", false),
+        ] {
+            assert!(features.contains(&(name, present)), "{name}");
+        }
+        let bits = identification.capability_bits();
+        assert_eq!(
+            bits & (c::FEAT_SME | c::FEAT_SME2 | c::FEAT_SME2P1),
+            c::FEAT_SME | c::FEAT_SME2
+        );
+        // A masked PFR1.SME withholds SME and every SMFR0 feature.
+        let without = Identification(&[smfr0]).optional_features();
+        assert!(
+            without
+                .iter()
+                .all(|(name, present)| !present || name.starts_with("AdvSIMD"))
+        );
     }
 }

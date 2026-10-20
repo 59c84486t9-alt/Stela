@@ -75,6 +75,7 @@ use stela_compiler::{
     },
 };
 pub use stored::{Offer, Translations};
+pub use system::FP_TRAPS_WRITABLE;
 
 const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
 const INSTRUCTION: u64 = 4;
