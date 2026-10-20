@@ -924,14 +924,12 @@ struct ModelClaim {
 }
 
 /// Whether the GPU (`sgx`, its `gfx-asc` coprocessor and firmware mapper) is
-/// visible. Its firmware reads the initdata the kext names through
-/// kernel-half page tables nobody has populated when the kext sends it
-/// (restore boot ru-s36: the firmware context's TTBR1 root table is empty;
-/// docs/research/agx.md section 3), so who owns the GPU's page tables (the
-/// kext, SPTM, or the shared region the firmware and the AP hand off) must be
-/// specified before the GPU is admitted. Until then the loader hides it as it
-/// hides any unmodeled device.
-pub const GPU_ADMITTED: bool = false;
+/// visible. Its kernel window resolves through SPTM's shared L2
+/// (docs/research/agx.md section 3) and the firmware consumes the kext's
+/// device-control ring (section 2), so `AGXAcceleratorG14G::start` completes
+/// on the 26A434 J473AP kext (restore boot agx-obs-9). GPU work commands still
+/// refuse by name until their fields are confirmed (section 5.1a).
+pub const GPU_ADMITTED: bool = true;
 /// A child owned by a native coprocessor model and its boot-chain facts.
 /// Properties describe model state, never a guest image or a driver patch.
 /// `children` are the child's own children the same model owns.
