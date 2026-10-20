@@ -184,6 +184,11 @@ pub(super) fn is_ours(path: &Path, target: &Path) -> bool {
 /// Build the launcher for `bundle` at `path`, replacing an earlier
 /// launcher of Stela's there.
 pub(super) fn create(environment: &Environment, bundle: &AppBundle, path: &Path) -> Result<()> {
+    ensure!(
+        !path.exists() || marker(path).is_some(),
+        "{} is not Stela's launcher",
+        path.display()
+    );
     let folder = path.parent().context("launcher has no folder")?;
     fs::create_dir_all(folder)?;
     let name = path.file_name().context("launcher has no name")?;
@@ -191,17 +196,11 @@ pub(super) fn create(environment: &Environment, bundle: &AppBundle, path: &Path)
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
-    let built = build(environment, bundle, &staging);
-    if let Err(error) = built {
+    if let Err(error) = build(environment, bundle, &staging) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
     if path.exists() {
-        ensure!(
-            marker(path).is_some(),
-            "{} is not Stela's launcher",
-            path.display()
-        );
         fs::remove_dir_all(path)?;
     }
     fs::rename(&staging, path)?;
@@ -325,6 +324,11 @@ mod tests {
         assert!(!path.exists());
         fs::create_dir_all(path.join("Contents"))?;
         assert!(remove(&environment, &path).is_err());
+        // Nor is a launcher built over a bundle that is not Stela's, and
+        // nothing is left beside it.
+        assert!(create(&environment, &bundle, &path).is_err());
+        let left: Vec<_> = fs::read_dir(&environment.launchers)?.collect();
+        assert_eq!(left.len(), 1, "{left:?}");
         Ok(())
     }
 

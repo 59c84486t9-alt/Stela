@@ -64,9 +64,23 @@ fn domain() -> String {
     format!("gui/{}", unsafe { libc::getuid() })
 }
 
-/// Write the agent and load it.
+/// Whether the property list at `plist` is Stela's agent.
+fn ours(plist: &Path) -> bool {
+    Value::from_file(plist)
+        .ok()
+        .and_then(Value::into_dictionary)
+        .is_some_and(|agent| agent.get("Label").and_then(Value::as_string) == Some(LABEL))
+}
+
+/// Write the agent and load it; a file of someone else's at its path is
+/// refused.
 pub(super) fn install(environment: &Environment) -> Result<()> {
     let plist = path(environment);
+    ensure!(
+        !plist.exists() || ours(&plist),
+        "{} exists and is not Stela's agent; remove it to use --watch",
+        plist.display()
+    );
     std::fs::create_dir_all(&environment.agents)?;
     std::fs::create_dir_all(&environment.logs)?;
     Value::Dictionary(definition(environment)).to_file_xml(&plist)?;
@@ -96,11 +110,7 @@ pub(super) fn remove(environment: &Environment, plist: &Path) -> Result<()> {
             .args(["bootout", &format!("{}/{LABEL}", domain())])
             .output();
     }
-    let ours = Value::from_file(plist)
-        .ok()
-        .and_then(Value::into_dictionary)
-        .is_some_and(|agent| agent.get("Label").and_then(Value::as_string) == Some(LABEL));
-    if ours {
+    if ours(plist) {
         std::fs::remove_file(plist)?;
     }
     Ok(())
@@ -133,10 +143,12 @@ mod tests {
         );
         remove(&environment, &plist)?;
         assert!(!plist.exists());
-        // Someone else's property list at the path is kept.
+        // Someone else's property list at the path is kept, and never
+        // replaced.
         std::fs::write(&plist, b"not an agent")?;
         remove(&environment, &plist)?;
-        assert!(plist.exists());
+        assert!(install(&environment).is_err());
+        assert_eq!(std::fs::read(&plist)?, b"not an agent");
         Ok(())
     }
 }
