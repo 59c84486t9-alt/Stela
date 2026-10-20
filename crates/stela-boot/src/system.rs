@@ -495,9 +495,17 @@ fn load(
             )?;
         }
     }
+    // The xAPIC page must be strong uncacheable (Intel SDM Vol. 3A 11.4.1);
+    // the entry says so rather than relying on the firmware's MTRRs.
     let apic = apic_base & crate::apic::BASE_ADDRESS;
     if !ram.iter().any(|r| r.0 as u64 <= apic && apic < r.1 as u64) {
-        tables::map_page(&mut frames, root, layout::physical(apic), apic, data)?;
+        tables::map_page(
+            &mut frames,
+            root,
+            layout::physical(apic),
+            apic,
+            data | UNCACHED,
+        )?;
     }
     let window = {
         // SAFETY: the root was just filled; entry 64 holds the window PML4.
