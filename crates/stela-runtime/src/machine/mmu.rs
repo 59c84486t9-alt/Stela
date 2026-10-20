@@ -46,6 +46,9 @@ pub struct Controls {
     /// The chip implements FEAT_XS: MAIR's XS encodings are allocated and
     /// the attributes report XS (`attributes`).
     pub xs: bool,
+    /// The chip implements FEAT_MTE2: MAIR's `0xf0` and, with HCR_EL2.DCT,
+    /// the HCR_EL2.DC default are Tagged memory (`attributes::TAGGED`).
+    pub tagged: bool,
     pub sprr: Sprr,
     /// Apple's CTRR, applied to the output address of an access.
     pub ctrr: Ctrr,
@@ -197,6 +200,7 @@ pub(crate) fn test_translation_chip() -> super::Chip {
 
 const HCR_VM: u64 = 1 << 0;
 const HCR_DC: u64 = 1 << 12;
+const HCR_DCT: u64 = 1 << 57;
 const HCR_TGE: u64 = 1 << 27;
 
 impl Stage2 {
@@ -211,6 +215,11 @@ impl Stage2 {
     /// AArch64.S1DisabledOutput).
     fn default_cacheable(&self, regime: Regime) -> bool {
         self.applies(regime) && self.hcr & HCR_DC != 0
+    }
+
+    /// HCR_EL2.DCT: the HCR_EL2.DC default is Tagged memory (FEAT_MTE2).
+    fn default_tagged(&self) -> bool {
+        self.hcr & HCR_DCT != 0
     }
 
     /// VTTBR_EL2.VMID: 8 bits, because FEAT_VMID16 is not in the profile.
@@ -861,6 +870,54 @@ mod tests {
         };
         assert_eq!(default.physical, 0x8000_1234);
         assert_eq!((default.attributes, default.shareability), (0xff, 0b11));
+        // HCR_EL2.DCT makes that default Tagged where the chip has
+        // FEAT_MTE2 (AArch64.S1DisabledOutput), through stage 2's
+        // Write-Back memory.
+        controls.second_stage = Some(Stage2 {
+            hcr: HCR_DC | HCR_DCT,
+            ..controls.second_stage.unwrap()
+        });
+        for tagged in [false, true] {
+            controls.tagged = tagged;
+            let Outcome::Mapped(default) =
+                translate(&controls, 0x4000_1234, Access::Read, KERNEL, &mut tables)
+            else {
+                panic!("HCR_EL2.DCT")
+            };
+            assert_eq!(
+                default.attributes,
+                if tagged { attributes::TAGGED } else { 0xff }
+            );
+        }
+        // A descriptor selecting MAIR's 0xf0 is Tagged through stage 2's
+        // Write-Back block; stage-2 Non-cacheable memory is Untagged.
+        controls.mair = u64::from(attributes::TAGGED);
+        for (block, expected) in [
+            (STAGE2_BLOCK, attributes::TAGGED),
+            (
+                STAGE2_BLOCK & !(0b1111 << 2) | 0b0101 << 2,
+                attributes::non_cacheable(attributes::TAGGED, test_xs()),
+            ),
+        ] {
+            tables.0.insert(0x10_0008, block);
+            controls.second_stage = Some(Stage2 {
+                hcr: HCR_VM,
+                ..controls.second_stage.unwrap()
+            });
+            let Outcome::Mapped(tagged) =
+                translate(&controls, 0x1234, Access::Read, KERNEL, &mut tables)
+            else {
+                panic!("Tagged stage 1")
+            };
+            assert_eq!(tagged.attributes, expected);
+        }
+        tables.0.insert(0x10_0008, STAGE2_BLOCK);
+        controls.mair = 0xff;
+        controls.tagged = false;
+        controls.second_stage = Some(Stage2 {
+            hcr: HCR_DC,
+            ..controls.second_stage.unwrap()
+        });
         // TGE set: the EL1&0 regime has no stage 2, so TTBR0 is a PA.
         tables.0.insert(0x4000_0000, tables.0[&0x8000_0000]);
         controls.second_stage = Some(Stage2 {

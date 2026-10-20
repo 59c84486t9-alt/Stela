@@ -630,6 +630,7 @@ impl Cpu {
             ttbr1: self.read(ttbr1),
             mair: self.read(mair),
             xs: Feature::FEAT_XS.on(self.registers.chip()),
+            tagged: Feature::FEAT_MTE2.on(self.registers.chip()),
             sprr: Sprr {
                 config: self.apple.sprr_config,
                 el1: self.apple.sprr_perm[kernel],

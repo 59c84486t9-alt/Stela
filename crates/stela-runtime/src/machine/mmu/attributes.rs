@@ -4,7 +4,8 @@
 //! with FEAT_XS also carries the XS attribute (pseudocode EncodePARAttrs):
 //! bit 0 of a Device byte, and `0x40` and `0xa0` for Non-cacheable and
 //! Write-Through memory with XS 0. Every combination decodes the byte to its
-//! form without XS first.
+//! form without XS first. On a chip with FEAT_MTE2, `0xf0` is Tagged Normal
+//! memory ([`TAGGED`]), which also travels as its PAR_EL1.ATTR byte.
 
 use super::MemoryType;
 
@@ -22,6 +23,10 @@ pub const INNER_SHAREABLE: u8 = 0b11;
 /// Normal Inner/Outer Write-Back, Read/Write-Allocate, non-transient: the
 /// EL1&0 default with stage 1 disabled and HCR_EL2.DC set.
 pub const NORMAL_WRITE_BACK: u8 = 0xff;
+/// Tagged Normal Inner/Outer Write-Back, Read/Write-Allocate, non-transient
+/// (FEAT_MTE2): Allocation Tagged memory, MAIR's and PAR_EL1.ATTR's `0xf0`
+/// (pseudocode S1DecodeMemAttrs and EncodePARAttrs).
+pub const TAGGED: u8 = 0xf0;
 
 const SCTLR_C: u64 = 1 << 2;
 const SCTLR_I: u64 = 1 << 12;
@@ -38,13 +43,20 @@ const DEVICE_NOT_XS: u8 = 0b01;
 /// the chip implements FEAT_XS. Without it the XS encodings of MAIR are
 /// reserved, and this implementation gives each the meaning of the encoding
 /// without XS (Unpredictable_RESMAIR maps a reserved value to an allocated
-/// one).
-pub fn of_descriptor(mair: u64, descriptor: u64, xs: bool) -> (u8, MemoryType, u8) {
+/// one). `tagged`: the chip implements FEAT_MTE2, whose `0xf0` is
+/// [`TAGGED`]; without it that encoding is reserved too, and means Normal
+/// Write-Back, its form without the Tagged attribute.
+pub fn of_descriptor(mair: u64, descriptor: u64, xs: bool, tagged: bool) -> (u8, MemoryType, u8) {
     let index = (descriptor >> ATTRIBUTE_INDEX_SHIFT) & 7;
-    let (attribute, attribute_xs) = decoded((mair >> (index * 8)) as u8);
+    let shareability = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
+    let byte = (mair >> (index * 8)) as u8;
+    if byte == TAGGED {
+        let attribute = if tagged { TAGGED } else { NORMAL_WRITE_BACK };
+        return (attribute, MemoryType::Normal, shareability);
+    }
+    let (attribute, attribute_xs) = decoded(byte);
     let attribute = encoded(attribute, attribute_xs, xs);
     let memory = memory_type(attribute);
-    let shareability = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
     (
         attribute,
         memory,
@@ -54,9 +66,11 @@ pub fn of_descriptor(mair: u64, descriptor: u64, xs: bool) -> (u8, MemoryType, u
 
 /// An attribute byte without its XS encoding, and its XS attribute
 /// (pseudocode S1DecodeMemAttrs): 0 for Device memory with bit 0 set, for
-/// `0x40` and `0xa0`, and for Normal memory Write-Back at both levels.
+/// `0x40` and `0xa0`, and for Normal memory Write-Back at both levels, which
+/// [`TAGGED`] decodes to.
 pub fn decoded(attribute: u8) -> (u8, bool) {
     match attribute {
+        TAGGED => (NORMAL_WRITE_BACK, false),
         NON_CACHEABLE_NOT_XS => (NORMAL_NON_CACHEABLE, false),
         WRITE_THROUGH_NOT_XS => (NORMAL_WRITE_THROUGH, false),
         attribute if device(attribute).is_some() => {
@@ -175,10 +189,11 @@ pub fn of_stage2(field: u8) -> Option<u8> {
 /// for Write-Back output and otherwise set only when both stages set it.
 /// `implemented`: the chip has FEAT_XS.
 pub fn combine(first: u8, second: u8, second_xs: bool, implemented: bool) -> u8 {
+    let tags = first;
     let (first, first_xs) = decoded(first);
     let attribute = combined(first, second);
     let xs = !write_back(attribute) && first_xs && second_xs;
-    encoded(attribute, xs, implemented)
+    keep_tags(tags, encoded(attribute, xs, implemented))
 }
 
 fn combined(first: u8, second: u8) -> u8 {
@@ -192,6 +207,18 @@ fn combined(first: u8, second: u8) -> u8 {
     }
 }
 
+/// `attribute`, the combination of stage 1's `first` with stage 2, as
+/// [`TAGGED`] when stage 1 is and the combination keeps Write-Back,
+/// Read/Write-Allocate, non-transient memory at both levels (pseudocode
+/// S2MemTagType and IsTaggableMemAttr).
+fn keep_tags(first: u8, attribute: u8) -> u8 {
+    if first == TAGGED && attribute == NORMAL_WRITE_BACK {
+        TAGGED
+    } else {
+        attribute
+    }
+}
+
 /// The attribute byte with HCR_EL2.FWB set, where the stage-2 MemAttr field
 /// overrides stage 1 (pseudocode AArch64.S2ApplyFWBMemAttrs): `0b0xx`
 /// Device, `0b111` stage 1's attributes, `0b110` Write-Back keeping stage
@@ -199,9 +226,13 @@ fn combined(first: u8, second: u8) -> u8 {
 /// stage 1's, except 0 for forced Write-Back and with the descriptor's FnXS
 /// (`no_xs`). `implemented`: the chip has FEAT_XS.
 pub fn forced(first: u8, field: u8, no_xs: bool, implemented: bool) -> u8 {
+    let tags = first;
     let (first, first_xs) = decoded(first);
     let xs = first_xs && field & 0b111 != 0b110 && !no_xs;
-    encoded(forced_attribute(first, field), xs, implemented)
+    keep_tags(
+        tags,
+        encoded(forced_attribute(first, field), xs, implemented),
+    )
 }
 
 fn forced_attribute(first: u8, field: u8) -> u8 {
@@ -279,15 +310,15 @@ mod tests {
         let mair = 0x44_ff_04;
         let inner_shareable = 0b11 << 8;
         assert_eq!(
-            of_descriptor(mair, 1 << 2 | inner_shareable, xs),
+            of_descriptor(mair, 1 << 2 | inner_shareable, xs, false),
             (0xff, MemoryType::Normal, 0b11)
         );
         assert_eq!(
-            of_descriptor(mair, inner_shareable, xs),
+            of_descriptor(mair, inner_shareable, xs, false),
             (0x04, MemoryType::Device, OUTER_SHAREABLE)
         );
         assert_eq!(
-            of_descriptor(mair, 2 << 2, xs),
+            of_descriptor(mair, 2 << 2, xs, false),
             (0x44, MemoryType::Normal, OUTER_SHAREABLE)
         );
         assert_eq!(disabled(0, false), (DEVICE_NGNRNE, MemoryType::Device));
@@ -370,28 +401,28 @@ mod tests {
         let inner_shareable = 0b11 << 8;
         // With FEAT_XS each byte is its own PAR_EL1.ATTR encoding.
         assert_eq!(
-            of_descriptor(mair, inner_shareable, true),
+            of_descriptor(mair, inner_shareable, true, false),
             (0x05, MemoryType::Device, OUTER_SHAREABLE)
         );
         assert_eq!(
-            of_descriptor(mair, 1 << 2 | inner_shareable, true),
+            of_descriptor(mair, 1 << 2 | inner_shareable, true, false),
             (0x40, MemoryType::Normal, OUTER_SHAREABLE)
         );
         assert_eq!(
-            of_descriptor(mair, 2 << 2 | inner_shareable, true),
+            of_descriptor(mair, 2 << 2 | inner_shareable, true, false),
             (0xa0, MemoryType::Normal, 0b11)
         );
         // Without it they are reserved and mean the encodings without XS.
         assert_eq!(
-            of_descriptor(mair, inner_shareable, false),
+            of_descriptor(mair, inner_shareable, false, false),
             (0x04, MemoryType::Device, OUTER_SHAREABLE)
         );
         assert_eq!(
-            of_descriptor(mair, 1 << 2 | inner_shareable, false),
+            of_descriptor(mair, 1 << 2 | inner_shareable, false, false),
             (0x44, MemoryType::Normal, OUTER_SHAREABLE)
         );
         assert_eq!(
-            of_descriptor(mair, 2 << 2 | inner_shareable, false),
+            of_descriptor(mair, 2 << 2 | inner_shareable, false, false),
             (0xaa, MemoryType::Normal, 0b11)
         );
         // Caches off keep XS: Write-Back memory has XS 0.
@@ -414,5 +445,51 @@ mod tests {
         assert_eq!(forced(0x40, 0b0101, false, true), 0x40);
         assert_eq!(forced(0x44, 0b0101, false, true), 0x44);
         assert_eq!(forced(0x05, 0b0010, false, true), 0x05);
+    }
+
+    #[test]
+    fn tagged_memory_needs_feat_mte2_and_write_back_through_stage_two() {
+        // MAIR index 1 is 0xf0: Tagged on a chip with FEAT_MTE2, keeping
+        // the descriptor's SH; without it the reserved encoding is Normal
+        // Write-Back.
+        let mair = 0xf0_00;
+        let inner_shareable = 0b11 << 8;
+        for xs in [false, true] {
+            assert_eq!(
+                of_descriptor(mair, 1 << 2 | inner_shareable, xs, true),
+                (TAGGED, MemoryType::Normal, INNER_SHAREABLE)
+            );
+            assert_eq!(
+                of_descriptor(mair, 1 << 2 | inner_shareable, xs, false),
+                (NORMAL_WRITE_BACK, MemoryType::Normal, INNER_SHAREABLE)
+            );
+            // Tagged memory is Write-Back (XS 0); with caches off it is
+            // Normal Non-cacheable and Untagged (Unpredictable_S1CTAGGED).
+            assert_eq!(decoded(TAGGED), (NORMAL_WRITE_BACK, false));
+            assert_eq!(
+                non_cacheable(TAGGED, xs),
+                if xs {
+                    NON_CACHEABLE_NOT_XS
+                } else {
+                    NORMAL_NON_CACHEABLE
+                }
+            );
+            // Stage 2 keeps the tags only where the combination stays
+            // Write-Back, Read/Write-Allocate and non-transient at both
+            // levels (IsTaggableMemAttr): stage-2 Write-Back does, stage-2
+            // Write-Through, Non-cacheable and Device do not.
+            assert_eq!(combine(TAGGED, 0xcc, true, xs), TAGGED);
+            assert_eq!(combine(TAGGED, 0x8c, true, xs), 0xbf);
+            assert_eq!(combine(TAGGED, 0x44, true, xs), non_cacheable(TAGGED, xs));
+            assert_eq!(
+                combine(TAGGED, 0x04, true, xs),
+                if xs { 0x05 } else { 0x04 }
+            );
+            assert_eq!(combine(0xff, 0xcc, true, xs), NORMAL_WRITE_BACK);
+            // FWB: stage 1's attributes and forced Write-Back keep the tags.
+            assert_eq!(forced(TAGGED, 0b0111, false, xs), TAGGED);
+            assert_eq!(forced(TAGGED, 0b0110, false, xs), TAGGED);
+            assert_eq!(forced(TAGGED, 0b0101, false, xs), non_cacheable(TAGGED, xs));
+        }
     }
 }

@@ -191,10 +191,19 @@ fn disabled(
     if checked >> PHYSICAL_ADDRESS_BITS != 0 {
         return (fault(FaultKind::AddressSize, 0), 0);
     }
-    // HCR_EL2.DC makes EL1&0 output Normal Write-Back, Non-shareable.
+    // HCR_EL2.DC makes EL1&0 output Normal Write-Back, Non-shareable, and
+    // Tagged with HCR_EL2.DCT.
     let (attributes, memory, shareability) = if default_cacheable(controls) {
+        let tagged = controls.tagged
+            && controls
+                .second_stage
+                .is_some_and(|stage2| stage2.default_tagged());
         (
-            attributes::NORMAL_WRITE_BACK,
+            if tagged {
+                attributes::TAGGED
+            } else {
+                attributes::NORMAL_WRITE_BACK
+            },
             MemoryType::Normal,
             attributes::NON_SHAREABLE,
         )
@@ -360,7 +369,7 @@ fn walk_enabled(
             return fault(FaultKind::AccessFlag, level);
         }
         let (mut attributes, mut memory, mut shareability) =
-            attributes::of_descriptor(controls.mair, descriptor, controls.xs);
+            attributes::of_descriptor(controls.mair, descriptor, controls.xs, controls.tagged);
         let field = (descriptor >> SHAREABILITY_SHIFT) as u8 & 3;
         let alignment = stage_alignment(attributes);
         if shape.is_some_and(|shape| alignment::after_translation(alignment, address, shape)) {
