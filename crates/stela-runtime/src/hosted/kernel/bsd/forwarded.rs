@@ -3,9 +3,11 @@
 //! scalars, descriptors, paths or pointers to structures with one layout
 //! on x86-64 and arm64 (`struct stat64`, `statfs64`, `rusage`, `sockaddr`,
 //! `kevent64_s`, ...), and its effect stays within this process's own
-//! descriptors, identity and synchronization objects. Calls that touch the
-//! CPU, page size, clock base, signals, threads or code signing are not
-//! here; their families service them.
+//! descriptors, identity and synchronization objects, or is the machine's
+//! own (file systems, the network, system administration), which this
+//! process shares with the host. Calls that touch the CPU, page size,
+//! clock base, signals, threads or code signing are not here; their
+//! families service them.
 //!
 //! Known limit: `kevent`/`kevent64` timers with `NOTE_MACHTIME` take the
 //! host's nanosecond timebase rather than the guest's 24 MHz ticks.
@@ -185,7 +187,8 @@ const FILES: &[&str] = &[
     "lio_listio",
 ];
 
-/// Sockets and networking.
+/// Sockets and networking, with Skywalk nexus controllers and channels,
+/// whose arenas the host kernel maps into this process.
 const NETWORK: &[&str] = &[
     "recvmsg",
     "sendmsg",
@@ -221,6 +224,18 @@ const NETWORK: &[&str] = &[
     "necp_session_action",
     "netagent_trigger",
     "net_qos_guideline",
+    "__nexus_open",
+    "__nexus_register",
+    "__nexus_deregister",
+    "__nexus_create",
+    "__nexus_destroy",
+    "__nexus_get_opt",
+    "__nexus_set_opt",
+    "__channel_open",
+    "__channel_get_info",
+    "__channel_sync",
+    "__channel_get_opt",
+    "__channel_set_opt",
 ];
 
 /// Credentials, process groups, resource limits and accounting.
@@ -395,6 +410,23 @@ const MEMORY: &[&str] = &[
     "minherit",
 ];
 
+/// System administration: the host kernel is the same xnu, whose
+/// credential checks refuse an unprivileged caller as the arm64 kernel's
+/// do and let a privileged one act on this machine, which is the host.
+const SYSTEM: &[&str] = &[
+    "acct",
+    "reboot",
+    "setprivexec",
+    "nfssvc",
+    "pid_hibernate",
+    "usrctl",
+    "system_override",
+    "vfs_purge",
+    "sfi_ctl",
+    "sfi_pidctl",
+    "proc_trace_log",
+];
+
 const FAMILIES: &[&[&str]] = &[
     FILES,
     NETWORK,
@@ -402,6 +434,7 @@ const FAMILIES: &[&[&str]] = &[
     INFORMATION,
     SYNCHRONIZATION,
     MEMORY,
+    SYSTEM,
 ];
 
 pub(super) fn forwarded(name: &str) -> bool {

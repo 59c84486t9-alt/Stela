@@ -30,6 +30,7 @@ pub(super) mod signal;
 pub(super) mod signatures;
 mod spawn;
 pub(super) mod sysctl;
+mod system;
 pub(super) mod thread;
 mod time;
 pub(super) mod workqueue;
@@ -220,6 +221,7 @@ pub(crate) enum Family {
     Threads,
     Workqueue,
     Signals,
+    System,
     Additions,
 }
 
@@ -235,6 +237,7 @@ impl Family {
             Self::Threads => "threads",
             Self::Workqueue => "workqueue",
             Self::Signals => "signals",
+            Self::System => "system",
             Self::Additions => "26A434 additions",
         }
     }
@@ -250,6 +253,7 @@ const MODELED: &[(Family, &[&str])] = &[
     (Family::Threads, thread::CALLS),
     (Family::Workqueue, workqueue::CALLS),
     (Family::Signals, signal::CALLS),
+    (Family::System, system::CALLS),
 ];
 
 /// The family servicing the call `name`, or `None` for a call the hosted
@@ -280,6 +284,10 @@ pub(crate) fn overlay(name: &str) -> Option<&'static str> {
 /// Calls serviced with a named limit: what of the arm64 kernel's contract
 /// the hosted kernel does not provide.
 pub(crate) const LIMITS: &[(&str, &str)] = &[
+    (
+        "ptrace",
+        "PT_STEP stops the run: the host would single-step the target's x86 host thread",
+    ),
     (
         "kevent",
         "NOTE_MACHTIME timer deadlines are taken in host nanoseconds",
@@ -318,119 +326,12 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
 
 /// Calls the hosted kernel refuses, stopping the run with the reason.
 pub(crate) const REFUSED: &[(&str, &str)] = &[
-    ("ptrace", "debugging another process is not modeled"),
     ("__mac_execve", "exec under a MAC label is not modeled"),
     (
         "kqueue_workloop_ctl",
         "workloop scheduling parameters are not implemented",
     ),
-    ("acct", "process accounting is a system administration call"),
-    ("reboot", "a system administration call"),
-    ("swapon", "a system administration call"),
-    ("setprivexec", "a system administration call"),
-    (
-        "nfssvc",
-        "the NFS server is a system administration service",
-    ),
-    ("funmount", "a system administration call"),
-    ("sys_panic_with_data", "panicking the kernel is not modeled"),
-    ("pid_suspend", "suspending another process is not modeled"),
-    ("pid_resume", "resuming another process is not modeled"),
-    ("pid_hibernate", "a system administration call"),
-    ("pid_shutdown_sockets", "a system administration call"),
-    ("kas_info", "the kernel address space is not described"),
-    ("usrctl", "a system administration call"),
-    ("system_override", "a system administration call"),
-    ("vfs_purge", "a system administration call"),
-    ("sfi_ctl", "selective forced idle is not modeled"),
-    ("sfi_pidctl", "selective forced idle is not modeled"),
-    ("proc_trace_log", "process trace logging is not modeled"),
     ("mremap_encrypted", "encrypted image pages are not modeled"),
-    (
-        "stack_snapshot_with_config",
-        "kernel stackshots are not modeled",
-    ),
-    ("microstackshot", "kernel stackshots are not modeled"),
-    ("grab_pgo_data", "kernel profile data is not modeled"),
-    ("__nexus_open", "Skywalk nexus and channels are not modeled"),
-    (
-        "__nexus_register",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__nexus_deregister",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__nexus_create",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__nexus_destroy",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__nexus_get_opt",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__nexus_set_opt",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__channel_open",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__channel_get_info",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__channel_sync",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__channel_get_opt",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__channel_set_opt",
-        "Skywalk nexus and channels are not modeled",
-    ),
-    (
-        "__mach_bridge_remote_time",
-        "no bridge (T2) clock exists on this machine",
-    ),
-    (
-        "objc_bp_assist_cfg_np",
-        "the Objective-C branch-prediction assist is not modeled",
-    ),
-    ("pivot_root", "a system administration call"),
-    ("tracker_action", "tracker domain policy is not modeled"),
-    (
-        "debug_syscall_reject",
-        "system-call rejection policy is not modeled",
-    ),
-    (
-        "sys_debug_syscall_reject_config",
-        "system-call rejection policy is not modeled",
-    ),
-    ("graftdmg", "grafting disk images is not modeled"),
-    ("ungraftdmg", "grafting disk images is not modeled"),
-    (
-        "sys_record_system_event",
-        "system event recording is not modeled",
-    ),
-    (
-        "sys_coalition_policy_set",
-        "coalition policies are not modeled",
-    ),
-    (
-        "sys_coalition_policy_get",
-        "coalition policies are not modeled",
-    ),
-    ("oslog_coproc_reg", "coprocessor logging is not modeled"),
-    ("oslog_coproc", "coprocessor logging is not modeled"),
 ];
 
 fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
@@ -451,6 +352,7 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         Some(Family::Threads) => thread::call(kernel, pe, call)?,
         Some(Family::Workqueue) => workqueue::call(kernel, pe, call)?,
         Some(Family::Signals) => signal::call(kernel, pe, call)?,
+        Some(Family::System) => system::call(kernel, call)?,
         // The additions have no catalog row: [`call`] dispatches them by
         // number.
         Some(Family::Additions) | None => None,

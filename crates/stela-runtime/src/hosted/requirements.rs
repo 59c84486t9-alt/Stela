@@ -441,8 +441,9 @@ mod tests {
         assert_eq!(find(Area::Bsd, "mmap").service, "memory");
         assert_eq!(find(Area::Bsd, "sys_sysctlbyname").service, "sysctl");
         assert_eq!(find(Area::Bsd, "fork").service, "process");
+        assert_eq!(find(Area::Bsd, "ptrace").service, "system");
         assert!(matches!(
-            find(Area::Bsd, "ptrace").status,
+            find(Area::Bsd, "__mac_execve").status,
             Status::Refused(_)
         ));
         // Each 26A434 addition is serviced by its family or refused by name.
