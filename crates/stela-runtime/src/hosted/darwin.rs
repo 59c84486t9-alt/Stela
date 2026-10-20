@@ -76,6 +76,39 @@ pub(crate) const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 /// `VM_PROT_READ | VM_PROT_WRITE`.
 pub(crate) const VM_PROT_DEFAULT: u32 = 3;
 
+// Thread states (`osfmk/mach/arm/thread_status.h`, `_structs.h`).
+pub(crate) const ARM_DEBUG_STATE64: u32 = 15;
+/// `ARM_DEBUG_STATE64_COUNT`, in `natural_t` words.
+pub(crate) const DEBUG_STATE64_COUNT: u32 = 130;
+/// `__DARWIN_ARM_THREAD_STATE64_FLAGS_*` and the user diversifier field.
+pub(crate) const FLAGS_NO_PTRAUTH: u32 = 0x1;
+pub(crate) const FLAGS_IB_SIGNED_LR: u32 = 0x2;
+pub(crate) const FLAGS_KERNEL_SIGNED_PC: u32 = 0x4;
+pub(crate) const FLAGS_KERNEL_SIGNED_LR: u32 = 0x8;
+pub(crate) const USER_DIVERSIFIER_MASK: u32 = 0xff00_0000;
+/// `ptrauth_string_discriminator` of "pc", "lr", "sp" and "fp", as the
+/// arm64e compiler folds them.
+pub(crate) const DISCRIMINATOR_PC: u64 = 0x7481;
+pub(crate) const DISCRIMINATOR_LR: u64 = 0x77d3;
+pub(crate) const DISCRIMINATOR_SP: u64 = 0xcbed;
+pub(crate) const DISCRIMINATOR_FP: u64 = 0x4517;
+/// `PSR64_NZCV_MASK` (`PSR64_USER_MASK`) and `PSR64_MODE_MASK`.
+pub(crate) const PSR64_NZCV_MASK: u32 = 0xf000_0000;
+pub(crate) const PSR64_MODE_MASK: u32 = 0x1f;
+
+/// `ptrauth_blend_discriminator(pointer, integer)`, which the compiler
+/// lowers to a MOVK of the integer into bits 63:48.
+pub(crate) fn blend_discriminator(pointer: u64, integer: u64) -> u64 {
+    (integer << 48) | (pointer & 0x0000_ffff_ffff_ffff)
+}
+
+/// The CPSR a user thread state `requested` leaves on a thread whose saved
+/// CPSR is `current`: NZCV copied, the mode cleared (EL0t), the rest kept
+/// (`thread_state64_to_saved_state`).
+pub(crate) fn user_cpsr(current: u32, requested: u32) -> u32 {
+    (current & !(PSR64_NZCV_MASK | PSR64_MODE_MASK)) | (requested & PSR64_NZCV_MASK)
+}
+
 // The self-port traps (`-x16`).
 pub(crate) const THREAD_SELF_TRAP: u32 = 27;
 pub(crate) const TASK_SELF_TRAP: u32 = 28;
@@ -112,4 +145,23 @@ unsafe extern "C" {
     pub(crate) fn semaphore_destroy(task: u32, semaphore: u32) -> i32;
     pub(crate) fn semaphore_signal(semaphore: u32) -> i32;
     pub(crate) fn host_request_notification(host: u32, kind: i32, port: u32) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cpsr_keeps_only_nzcv_from_the_user() {
+        assert_eq!(user_cpsr(0x0000_1000, 0xf000_03c5), 0xf000_1000);
+        assert_eq!(user_cpsr(0x6000_0000, 0), 0);
+    }
+
+    #[test]
+    fn a_blend_puts_the_integer_in_the_top_sixteen_bits() {
+        assert_eq!(
+            blend_discriminator(0xffff_1234_5678_9abc, DISCRIMINATOR_PC),
+            0x7481_1234_5678_9abc
+        );
+    }
 }

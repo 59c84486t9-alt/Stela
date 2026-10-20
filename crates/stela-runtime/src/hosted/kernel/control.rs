@@ -21,6 +21,11 @@
 //! state: each register the call changed keeps the call's value.
 use super::Pe;
 use super::status;
+use crate::hosted::darwin::{
+    ARM_DEBUG_STATE64, DEBUG_STATE64_COUNT, DISCRIMINATOR_FP, DISCRIMINATOR_LR, DISCRIMINATOR_PC,
+    DISCRIMINATOR_SP, FLAGS_IB_SIGNED_LR, FLAGS_KERNEL_SIGNED_LR, FLAGS_KERNEL_SIGNED_PC,
+    FLAGS_NO_PTRAUTH, PSR64_NZCV_MASK, USER_DIVERSIFIER_MASK, blend_discriminator, user_cpsr,
+};
 use crate::machine::system::Register;
 use crate::pauth::{Context, Key};
 use anyhow::{Result, bail};
@@ -50,10 +55,6 @@ pub(crate) struct UserState {
     pub(crate) far: u64,
     pub(crate) esr: u64,
 }
-
-/// `PSR64_USER_MASK` (NZCV) and `PSR64_MODE_MASK`.
-const PSR64_NZCV_MASK: u32 = 0xf000_0000;
-const PSR64_MODE_MASK: u32 = 0x1f;
 
 impl UserState {
     /// The thread's user state: the trap frame at a kernel entry (ELR_EL1,
@@ -107,8 +108,7 @@ impl UserState {
         } else {
             cpu.registers.set_raw(Register::ELR_EL1, 0, self.pc);
             let current = cpu.read(Register::SPSR_EL1);
-            let kept = current as u32 & !(PSR64_NZCV_MASK | PSR64_MODE_MASK);
-            let cpsr = kept | (self.cpsr & PSR64_NZCV_MASK);
+            let cpsr = user_cpsr(current as u32, self.cpsr);
             cpu.registers.set_raw(
                 Register::SPSR_EL1,
                 0,
@@ -667,17 +667,6 @@ impl ForkHeld<'_> {
     }
 }
 
-/// `arm_thread_state64_t` flags (`__DARWIN_ARM_THREAD_STATE64_FLAGS_*`).
-const FLAGS_NO_PTRAUTH: u32 = 0x1;
-const FLAGS_IB_SIGNED_LR: u32 = 0x2;
-const FLAGS_KERNEL_SIGNED_PC: u32 = 0x4;
-const FLAGS_KERNEL_SIGNED_LR: u32 = 0x8;
-/// `ptrauth_string_discriminator` of "pc", "lr", "sp" and "fp".
-const DISCRIMINATOR_PC: u64 = 0x7481;
-const DISCRIMINATOR_LR: u64 = 0x77d3;
-const DISCRIMINATOR_SP: u64 = 0xcbed;
-const DISCRIMINATOR_FP: u64 = 0x4517;
-
 /// `arm_thread_state64_t`: X0..X28, FP, LR, SP, PC, CPSR and flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct ThreadState64 {
@@ -785,10 +774,9 @@ impl ThreadState64 {
         }
         let diversifier = old & USER_DIVERSIFIER_MASK;
         self.flags |= diversifier | old & (FLAGS_KERNEL_SIGNED_PC | FLAGS_KERNEL_SIGNED_LR);
-        // `ptrauth_blend_discriminator`.
         let discriminator = |kernel_signed: u32, discriminator: u64| {
             if old & kernel_signed == 0 && diversifier != 0 {
-                u64::from(diversifier) & 0xffff_ffff_ffff | discriminator << 48
+                blend_discriminator(u64::from(diversifier), discriminator)
             } else {
                 discriminator
             }
@@ -849,7 +837,6 @@ const ARM_DEBUG_STATE: u32 = 4;
 const ARM_THREAD_STATE64: u32 = 6;
 const ARM_EXCEPTION_STATE64: u32 = 7;
 const ARM_EXCEPTION_STATE64_V2: u32 = 10;
-const ARM_DEBUG_STATE64: u32 = 15;
 const ARM_NEON_STATE64: u32 = 17;
 const ARM_PAGEIN_STATE: u32 = 27;
 /// Counts in `natural_t` words.
@@ -859,7 +846,6 @@ const EXCEPTION_STATE64_COUNT: u32 = 4;
 const EXCEPTION_STATE64_V2_COUNT: u32 = 4;
 const VFP_STATE_COUNT: u32 = 65;
 const VFPV2_STATE_COUNT: u32 = 33;
-const DEBUG_STATE64_COUNT: u32 = 130;
 const NEON_STATE64_COUNT: u32 = 132;
 const PAGEIN_STATE_COUNT: u32 = 1;
 /// `THREAD_STATE_MAX`: the largest state a message carries.
@@ -965,9 +951,6 @@ pub(crate) fn get_state(
     };
     Ok(Ok(words))
 }
-
-/// `__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK`.
-const USER_DIVERSIFIER_MASK: u32 = 0xff00_0000;
 
 /// `thread_convert_thread_state`'s conversion of `words`, a state of
 /// `flavor`, between two threads of this process, which share its user

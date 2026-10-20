@@ -20,8 +20,8 @@
 //! signal nobody catches ends the process by that signal.
 use super::{Call, Kernel, Outcome, forward};
 use crate::hosted::darwin::{
-    EFAULT, EINTR, EINVAL, ENOMEM, ENOTSUP, EPERM, SA_NOCLDSTOP, SA_NOCLDWAIT, SA_RESTART, SIG_DFL,
-    SIG_IGN, SIGKILL, SIGSTOP,
+    self, EFAULT, EINTR, EINVAL, ENOMEM, ENOTSUP, EPERM, SA_NOCLDSTOP, SA_NOCLDWAIT, SA_RESTART,
+    SIG_DFL, SIG_IGN, SIGKILL, SIGSTOP,
 };
 use crate::hosted::kernel::{End, Pe, status};
 use crate::hosted::{Termination, forward as host_call, memory, threads::lock};
@@ -744,10 +744,10 @@ fn user_cpsr(pe: &Pe) -> u32 {
 /// rest kept, at EL0t.
 fn set_user_cpsr(pe: &mut Pe, requested: u32) {
     if pe.cpu.pstate.el == 0 {
-        pe.cpu.state.nzcv = requested & frame::PSR64_NZCV_MASK;
+        pe.cpu.state.nzcv = requested & darwin::PSR64_NZCV_MASK;
     } else {
         let current = pe.cpu.read(Register::SPSR_EL1);
-        let cpsr = frame::user_cpsr(current as u32, requested);
+        let cpsr = darwin::user_cpsr(current as u32, requested);
         pe.cpu.registers.set_raw(
             Register::SPSR_EL1,
             0,

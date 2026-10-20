@@ -11,6 +11,11 @@
 //! every pointer is raw and the flags are `NO_PTRAUTH`. Layouts are the
 //! SDK's `struct __darwin_mcontext64`, `struct __darwin_ucontext` and
 //! `siginfo_t` for LP64.
+use crate::hosted::darwin::{
+    DISCRIMINATOR_FP, DISCRIMINATOR_LR, DISCRIMINATOR_PC, DISCRIMINATOR_SP, FLAGS_IB_SIGNED_LR,
+    FLAGS_KERNEL_SIGNED_LR, FLAGS_KERNEL_SIGNED_PC, FLAGS_NO_PTRAUTH, USER_DIVERSIFIER_MASK,
+    blend_discriminator,
+};
 use crate::hosted::kernel::status;
 use crate::pauth::{Context, Key};
 use anyhow::Result;
@@ -43,42 +48,14 @@ const NS: usize = 288;
 const NS_FPSR: usize = NS + 512;
 const NS_FPCR: usize = NS + 516;
 
-/// `__DARWIN_ARM_THREAD_STATE64_FLAGS_*` and the flag fields
+/// The sigreturn token fields of the thread-state flags
 /// (`osfmk/mach/arm/_structs.h`).
-pub(super) const FLAGS_NO_PTRAUTH: u32 = 0x1;
-pub(super) const FLAGS_IB_SIGNED_LR: u32 = 0x2;
-pub(super) const FLAGS_KERNEL_SIGNED_PC: u32 = 0x4;
-pub(super) const FLAGS_KERNEL_SIGNED_LR: u32 = 0x8;
-pub(super) const USER_DIVERSIFIER_MASK: u32 = 0xff00_0000;
 pub(super) const SIGRETURN_PC_MASK: u32 = 0x000f_0000;
 pub(super) const SIGRETURN_LR_MASK: u32 = 0x00f0_0000;
 
-/// `ptrauth_string_discriminator` of "pc", "lr", "sp", "fp", "uctx" and
-/// "nonce", as the arm64e compiler folds them.
-const DISCRIMINATOR_PC: u64 = 0x7481;
-const DISCRIMINATOR_LR: u64 = 0x77d3;
-const DISCRIMINATOR_SP: u64 = 0xcbed;
-const DISCRIMINATOR_FP: u64 = 0x4517;
+/// `ptrauth_string_discriminator` of "uctx" and "nonce".
 const DISCRIMINATOR_UCTX: u64 = 0xd4a6;
 const DISCRIMINATOR_NONCE: u64 = 0xb743;
-
-/// `ptrauth_blend_discriminator(pointer, integer)`, which the compiler
-/// lowers to a MOVK of the integer into bits 63:48.
-fn blend(pointer: u64, integer: u64) -> u64 {
-    (integer << 48) | (pointer & 0x0000_ffff_ffff_ffff)
-}
-
-/// `PSR64_NZCV_MASK` (`PSR64_USER_MASK`) and `PSR64_MODE_MASK`: setting a
-/// user thread state copies NZCV, clears the mode (EL0t) and keeps the
-/// rest (`thread_state64_to_saved_state`).
-pub(super) const PSR64_NZCV_MASK: u32 = 0xf000_0000;
-pub(super) const PSR64_MODE_MASK: u32 = 0x1f;
-
-/// The CPSR a user thread state `requested` leaves on a thread whose
-/// saved CPSR is `current`.
-pub(super) fn user_cpsr(current: u32, requested: u32) -> u32 {
-    (current & !(PSR64_NZCV_MASK | PSR64_MODE_MASK)) | (requested & PSR64_NZCV_MASK)
-}
 
 /// `arm_thread_state64_t`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -391,7 +368,7 @@ pub(super) fn from_user(
     };
     let discriminator = |kernel_signed: bool, string: u64| {
         if !kernel_signed && diversifier != 0 {
-            blend(diversifier, string)
+            blend_discriminator(diversifier, string)
         } else {
             string
         }
@@ -550,7 +527,11 @@ mod tests {
         to_user(&mut user, Some(&signer), &sigreturn).unwrap();
         let target = 0x1_0000_8000;
         user.pc = signer
-            .sign(Key::Ia, target, blend(0x5a00_0000, DISCRIMINATOR_PC))
+            .sign(
+                Key::Ia,
+                target,
+                blend_discriminator(0x5a00_0000, DISCRIMINATOR_PC),
+            )
             .unwrap();
         user.flags &= !FLAGS_KERNEL_SIGNED_PC;
         assert!(from_user(&mut user, Some(&signer), &sigreturn, Validation::Tokens).unwrap());
@@ -606,11 +587,5 @@ mod tests {
         assert!(from_user(&mut user, None, &armed(), Validation::Tokens).unwrap());
         assert_eq!(user.pc, original.pc);
         assert_eq!(ucontext_pointer(None, 0x7000).unwrap(), 0x7000);
-    }
-
-    #[test]
-    fn the_cpsr_keeps_only_nzcv_from_the_user() {
-        assert_eq!(user_cpsr(0x0000_1000, 0xf000_03c5), 0xf000_1000);
-        assert_eq!(user_cpsr(0x6000_0000, 0), 0);
     }
 }
