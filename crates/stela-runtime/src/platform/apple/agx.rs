@@ -21,6 +21,9 @@
 //!   stream, completion stamp) and the command-stream records.
 //! - [`signal`]: the commands that need no GPU work (shared-event and
 //!   dashboard signals), run to completion.
+//! - [`observe`]: `--agx-observe`, which records each work command and
+//!   derives its fields from the engine's own decoding, then still refuses
+//!   the command by name.
 //! - [`event`]: the firmware event ring's producer and the entries the kext
 //!   reads (Flag, shared-event signal, CLPC notice).
 //! - [`isa`]: the AGX2 shader ISA, decoded from tables generated out of
@@ -41,6 +44,7 @@ pub mod firmware;
 pub mod format;
 pub mod initdata;
 pub mod isa;
+pub mod observe;
 pub mod raster;
 pub mod ring;
 pub mod sgx;

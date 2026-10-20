@@ -441,6 +441,23 @@ impl AppleDevices {
         lines
     }
 
+    /// Drain the GFX work commands the firmware observed this run under
+    /// `--agx-observe`, as log lines. Empty when observation is off.
+    pub fn agx_observations(&mut self) -> Vec<String> {
+        let ids: Vec<DeviceId> = self.gfx_masters.iter().map(|&(asc, _)| asc).collect();
+        let mut lines = Vec::new();
+        for id in ids {
+            if let Some(gfx) = self
+                .bus
+                .device_mut::<Asc>(id)
+                .and_then(Asc::firmware_mut::<GfxCoprocessor>)
+            {
+                lines.extend(gfx.observations());
+            }
+        }
+        lines
+    }
+
     /// 4 KiB blocks that ANS2 namespace re-creations erased and the host
     /// backing still holds stale. The guest already reads them as zeros.
     pub fn ans_erase_pending(&self) -> u64 {
@@ -936,8 +953,12 @@ impl AppleDevices {
     /// GFX endpoints, `agx::firmware`) behind its ASC wrapper, and the `sgx`
     /// register block whose MMU configuration roots the UAT the firmware
     /// masters memory through.
-    pub fn add_gfx(&mut self, placement: &super::soc::GfxController) -> Result<(), String> {
-        let coprocessor = GfxCoprocessor::new().map_err(String::from)?;
+    pub fn add_gfx(
+        &mut self,
+        placement: &super::soc::GfxController,
+        observe: bool,
+    ) -> Result<(), String> {
+        let coprocessor = GfxCoprocessor::with_observe(observe).map_err(String::from)?;
         let wrapper = Asc::booted(
             Box::new(coprocessor),
             AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
@@ -2654,7 +2675,7 @@ mod tests {
         devices
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
-        devices.add_gfx(&placement).unwrap();
+        devices.add_gfx(&placement, false).unwrap();
         // The coprocessor is running and the sgx identity reads through the bus.
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
         assert_eq!(devices.read(0, SGX + 0xd0_4000, 4, 0).unwrap() >> 24, 5);

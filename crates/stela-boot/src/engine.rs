@@ -127,6 +127,10 @@ struct Options {
     /// are not recovered (`--sep-observe`): each request is recorded and
     /// refused by name, never answered. A diagnostic mode.
     sep_observe: bool,
+    /// Record each GFX firmware work command and derive its fields
+    /// (`--agx-observe`): the command is logged and still refused by name,
+    /// never completed. A diagnostic mode.
+    agx_observe: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
     breakpoints: Vec<u64>,
@@ -218,6 +222,7 @@ impl Options {
             usb_storage: Vec::new(),
             guest_network: false,
             sep_observe: false,
+            agx_observe: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             watches: Vec::new(),
@@ -311,6 +316,10 @@ impl Options {
             }
             if name == "--sep-observe" {
                 options.sep_observe = true;
+                continue;
+            }
+            if name == "--agx-observe" {
+                options.agx_observe = true;
                 continue;
             }
             if name == "--storage" {
@@ -645,6 +654,9 @@ struct Disks {
     sep_state: Option<stela_runtime::machine::apple::sep_state::Location>,
     /// Advertise and log the SEP `sks`/`pnon`/`scrd` services (`--sep-observe`).
     sep_observe: bool,
+    /// Record the GFX firmware work commands and derive their fields
+    /// (`--agx-observe`); each is still refused by name.
+    agx_observe: bool,
 }
 
 /// The board's devices. `reset` is the entry point a boot bundle hands off
@@ -720,6 +732,7 @@ fn devices<'f>(
         backing,
         sep_state,
         sep_observe,
+        agx_observe,
     } = disks;
     match (board.and_then(|b| b.ans.as_ref()), backing) {
         (Some(ans), Some(backing)) => devices.add_ans(ans, backing)?,
@@ -1038,7 +1051,7 @@ fn devices<'f>(
     // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
     // bridge) and owns only the bytes they leave.
     if let Some(gfx) = board.and_then(|b| b.gfx.as_ref()) {
-        devices.add_gfx(gfx)?;
+        devices.add_gfx(gfx, agx_observe)?;
     }
     if cables.restore && restore_usb.is_none() {
         return Err("restore study requires a DT-placed USB device".into());
@@ -1445,6 +1458,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             backing,
             sep_state,
             sep_observe: options.sep_observe,
+            agx_observe: options.agx_observe,
         },
         Cables {
             restore: options.restore,
@@ -2156,6 +2170,9 @@ fn finish(
     general_registers(cpu);
     for line in machine.devices.sep_observations() {
         output::arguments(format_args!("SEP OBSERVE {line}\n"));
+    }
+    for line in machine.devices.agx_observations() {
+        output::arguments(format_args!("{line}\n"));
     }
     match stop {
         Stop::Idle => {

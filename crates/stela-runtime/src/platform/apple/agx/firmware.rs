@@ -48,6 +48,7 @@ use super::super::rtkit::{Endpoint, RtKit};
 use super::channel;
 use super::event;
 use super::initdata::{self, Root};
+use super::observe::{self, Journal};
 use super::ring::{self, Kind, Shared};
 use super::signal;
 use super::uat;
@@ -55,6 +56,7 @@ use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -170,9 +172,29 @@ pub struct State {
     /// Firmware events posted.
     pub events: u64,
     jobs: VecDeque<Job>,
+    /// When observing (`--agx-observe`), the record of each work command a
+    /// doorbell ran. Each is still refused by name.
+    observe: Option<Journal>,
 }
 
 impl State {
+    /// A fresh protocol state, observing work commands when `observe`.
+    fn new(observe: bool) -> Self {
+        State {
+            observe: observe.then(Journal::default),
+            ..Self::default()
+        }
+    }
+
+    /// The observed work commands recorded this run, as log lines; empty
+    /// unless `--agx-observe` and a work doorbell ran.
+    pub fn observations(&mut self) -> Vec<String> {
+        self.observe
+            .as_mut()
+            .map(Journal::drain)
+            .unwrap_or_default()
+    }
+
     fn init(&mut self, payload: u64) -> Result<(), &'static str> {
         if payload >> TYPE_SHIFT != MSG_INIT {
             return Err("AGX message endpoint models only the 0x81 initdata message");
@@ -290,6 +312,14 @@ impl State {
             let queue = channel::Queue::read(memory, state)?;
             while let Some(va) = queue.next(memory)? {
                 let command = channel::Command::read(memory, va)?;
+                // Observe (`--agx-observe`): record the command and the
+                // fields observation confirms, then run it as usual — a work
+                // command still refuses by name below, with its record logged.
+                if let Some(journal) = self.observe.as_mut() {
+                    let observation =
+                        observe::Observation::record(memory, pipe as u8, index, state, va)?;
+                    journal.record(&observation);
+                }
                 for event in signal::execute(memory, &command)? {
                     event::post(memory, root, event)?;
                     outbox.push(Mail {
@@ -346,11 +376,21 @@ pub struct Protocol(Rc<RefCell<State>>);
 
 impl Protocol {
     pub fn new() -> Self {
-        Protocol(Rc::new(RefCell::new(State::default())))
+        Protocol::with_observe(false)
+    }
+
+    /// A protocol whose firmware records work commands (`--agx-observe`).
+    pub fn with_observe(observe: bool) -> Self {
+        Protocol(Rc::new(RefCell::new(State::new(observe))))
     }
 
     pub fn with<R>(&self, f: impl FnOnce(&State) -> R) -> R {
         f(&self.0.borrow())
+    }
+
+    /// Drain the observed work commands recorded this run, as log lines.
+    pub fn observations(&self) -> Vec<String> {
+        self.0.borrow_mut().observations()
     }
 }
 
@@ -370,13 +410,24 @@ impl Coprocessor {
     /// A GFX coprocessor whose RTKit manages its power ordinarily
     /// (`power-managed`).
     pub fn new() -> Result<Self, &'static str> {
-        let (endpoints, protocol) = endpoints();
+        Self::with_observe(false)
+    }
+
+    /// A GFX coprocessor that records each work command (`--agx-observe`)
+    /// when `observe`, still refusing it by name.
+    pub fn with_observe(observe: bool) -> Result<Self, &'static str> {
+        let (endpoints, protocol) = endpoints(observe);
         let rtkit = RtKit::new(endpoints, super::super::rtkit::Management::Ordinary)?;
         Ok(Self { rtkit, protocol })
     }
 
     pub fn protocol(&self) -> &Protocol {
         &self.protocol
+    }
+
+    /// Drain the observed work commands recorded this run, as log lines.
+    pub fn observations(&mut self) -> Vec<String> {
+        self.protocol.observations()
     }
 }
 
@@ -420,8 +471,8 @@ impl Endpoint for Doorbell {
 
 /// The GFX coprocessor's application endpoints and a handle to their shared
 /// state. Pass the endpoints to [`super::super::rtkit::RtKit::new`].
-pub fn endpoints() -> (Vec<NumberedEndpoint>, Protocol) {
-    let protocol = Protocol::new();
+pub fn endpoints(observe: bool) -> (Vec<NumberedEndpoint>, Protocol) {
+    let protocol = Protocol::with_observe(observe);
     let endpoints: Vec<NumberedEndpoint> = alloc::vec![
         (
             MESSAGE_ENDPOINT,
@@ -493,7 +544,7 @@ mod tests {
 
     #[test]
     fn doorbells_take_the_kexts_forms_and_queue_firmware_work() {
-        let (endpoints, protocol) = endpoints();
+        let (endpoints, protocol) = endpoints(false);
         let mut by_number = endpoints
             .into_iter()
             .collect::<alloc::collections::BTreeMap<_, _>>();
@@ -685,6 +736,51 @@ mod tests {
         assert_eq!(memory.read_u32(channel_state + 0x1000), Ok(1));
         assert_eq!(memory.read_u32(ring_state + READ), Ok(1));
         assert_eq!((state.commands, state.events), (1, 2));
+    }
+
+    #[test]
+    fn observe_records_the_refused_work_command_and_its_fields() {
+        let mut memory = Flat::new(BASE, 0x20000);
+        kext_root(&mut memory);
+        memory.put_descriptor(RINGS + 0x1a0, CONTROL_STATE, CONTROL_ENTRIES);
+        let mut state = State::new(true);
+        state
+            .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
+            .unwrap();
+        state.dma(&mut memory, &mut Vec::new()).unwrap();
+        // A 3D command naming a VDM stream at +0x14 (channel.rs 3D +0x14).
+        let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
+        one_3d_entry(&mut memory, channel_state, command);
+        memory.put_u32(command, 1);
+        let stream = command + 0x400;
+        memory.put_u64(command + 0x14, stream);
+        for (i, word) in [
+            3u32 << 29 | 6 << 8 | 1 << 22 | 1 << 23 | 1 << 24,
+            3,
+            1,
+            0,
+            6 << 29,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            memory.put_u32(stream + 4 * i as u64, word);
+        }
+        state.doorbell(work(1, 0)).unwrap();
+        // The command still refuses by name: no fake completion.
+        assert_eq!(
+            state.dma(&mut memory, &mut Vec::new()),
+            Err("GFX 3D command (type 1) is not executed")
+        );
+        let lines = state.observations();
+        assert!(lines[0].starts_with("AGX OBSERVE pipe=1 index=0"));
+        assert!(lines.iter().any(|l| l.contains("ThreeD")));
+        assert!(lines.iter().any(|l| l.contains("VDM control stream")));
+        // Draining twice yields nothing the second time.
+        assert!(state.observations().is_empty());
+        // Off by default: no records without observe.
+        let mut quiet = State::default();
+        assert!(quiet.observations().is_empty());
     }
 
     #[test]
