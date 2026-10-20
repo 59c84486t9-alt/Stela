@@ -76,6 +76,19 @@ pub fn mach(name: &str) -> (Service, Option<&'static str>) {
     (service, find(mach::LIMITS, name))
 }
 
+/// The 26A434 trap at the reserved Mach index `index`: its name and
+/// service.
+pub fn mach_addition(index: u32) -> Option<(&'static str, Service)> {
+    mach::addition(index).map(|name| {
+        (
+            name,
+            Service::Modeled {
+                family: "Mach traps",
+            },
+        )
+    })
+}
+
 /// The kernel object a MIG subsystem's requests address in this task.
 pub fn mig_object(subsystem: &str) -> Option<&'static str> {
     mach::object_of(subsystem).map(mach::object_name)

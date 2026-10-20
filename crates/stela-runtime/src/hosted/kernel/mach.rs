@@ -33,6 +33,16 @@ const KERN_INVALID_ARGUMENT: u64 = 4;
 /// `MACH_SEND_INVALID_DEST`-class failure for a bad user address.
 const KERN_INVALID_ADDRESS: u64 = 1;
 const MACH_SEND_INVALID_DEST: u64 = 0x1000_0003;
+const KERN_FAILURE: u64 = 5;
+const KERN_NOT_SUPPORTED: u64 = 46;
+/// `ENOTSUP`, which the swap traps return as their result.
+const ENOTSUP: u64 = 45;
+/// The entitlements exec records as the task's x86-64 compatibility
+/// permission in 26A434.
+const CROSS_ARCHITECTURE_ENTITLEMENTS: [&str; 2] = [
+    "com.apple.developer.cross-architecture-support",
+    "com.apple.developer.cross-architecture-support-unmanaged",
+];
 const VM_FLAGS_ANYWHERE: u64 = 1;
 /// `VM_PROT_DEFAULT`.
 const VM_PROT_DEFAULT: u64 = 3;
@@ -83,6 +93,8 @@ const FORWARDED: &[&str] = &[
     "mk_timer_create_trap",
     "mk_timer_destroy_trap",
     "debug_control_port_for_pid",
+    "macx_triggers",
+    "iokit_user_client_trap",
 ];
 
 /// Traps the hosted kernel models: virtual memory in guest pages, the
@@ -101,7 +113,24 @@ const MODELED: &[&str] = &[
     "mach_msg_trap",
     "mach_msg_overwrite_trap",
     "mach_msg2_trap",
+    "macx_swapon",
+    "macx_swapoff",
+    "macx_backing_store_suspend",
+    "macx_backing_store_recovery",
+    "_exclaves_ctl_trap",
 ];
+
+/// Traps the 26A434 kernel adds at indices the pinned catalog reserves
+/// (`kern_invalid`), with their `libsystem_kernel` stub names.
+pub(crate) const ADDITIONS: &[(u32, &str)] = &[(108, "thread_set_x86_64_compat")];
+
+/// The 26A434 trap at reserved index `index`, if any.
+pub(crate) fn addition(index: u32) -> Option<&'static str> {
+    ADDITIONS
+        .iter()
+        .find(|&&(entry, _)| entry == index)
+        .map(|&(_, name)| name)
+}
 
 /// Traps serviced with a named limit.
 pub(crate) const LIMITS: &[(&str, &str)] = &[
@@ -123,21 +152,7 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
 ];
 
 /// Traps the hosted kernel refuses, with the reason.
-pub(crate) const REFUSED: &[(&str, &str)] = &[
-    (
-        "iokit_user_client_trap",
-        "IOKit user clients are not modeled",
-    ),
-    ("_exclaves_ctl_trap", "exclaves are not modeled"),
-    ("macx_swapon", "a system administration call"),
-    ("macx_swapoff", "a system administration call"),
-    ("macx_triggers", "a system administration call"),
-    ("macx_backing_store_suspend", "a system administration call"),
-    (
-        "macx_backing_store_recovery",
-        "a system administration call",
-    ),
-];
+pub(crate) const REFUSED: &[(&str, &str)] = &[];
 
 /// The kernel object a subsystem's requests address in this task: the
 /// task port carries task, VM, restartable-range and port-space requests,
@@ -246,6 +261,19 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
             host::counter_at(host::continuous_nanoseconds())
         }
         _ => {
+            if let Some(name) = catalog::entry(index)
+                .filter(|entry| entry.reserved == Reserved::Yes)
+                .and(addition(index))
+            {
+                kernel.count(name);
+                let compat = pe.cpu.state.x[0] as u32;
+                let result = thread_set_x86_64_compat(kernel, compat);
+                if kernel.trace {
+                    eprintln!("stela: mach {name}({compat:#x}) = {result:#x}");
+                }
+                Trap { cpu: &mut pe.cpu }.set_x(0, result);
+                return Ok(());
+            }
             let Some(entry) = catalog::entry(index).filter(|entry| entry.reserved == Reserved::No)
             else {
                 bail!(
@@ -430,6 +458,14 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
             }
             status
         }
+        // 26A434 keeps these stubs: no swap file is added or removed and
+        // no backing store is suspended (`bsd/vm/dp_backing_file.c`).
+        "macx_swapon"
+        | "macx_swapoff"
+        | "macx_backing_store_suspend"
+        | "macx_backing_store_recovery" => ENOTSUP,
+        // The M2's 26A434 kernel is built without exclaves.
+        "_exclaves_ctl_trap" => KERN_NOT_SUPPORTED,
         "mach_msg_trap" | "mach_msg_overwrite_trap" | "mach_msg2_trap" => {
             let status = message::send(kernel, name, index, arguments)?;
             if status == KERN_SUCCESS {
@@ -448,4 +484,46 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
             )
         }
     })
+}
+
+/// `thread_set_x86_64_compat(compat)` (26A434): a task exec found holding
+/// a cross-architecture entitlement may turn the calling thread's x86-64
+/// compatibility mode off (0) or on (1), which runs its user code with
+/// ACTLR_EL1's TSO ordering and saves the Apple FP-mode registers across
+/// exceptions; any other value is KERN_INVALID_ARGUMENT, and every other
+/// task gets KERN_FAILURE. Guest code here already runs under one total
+/// order of memory effects, which TSO ordering permits, in either mode,
+/// and the Apple FP-mode registers are each thread's own PE state, so
+/// either mode leaves nothing more to change.
+fn thread_set_x86_64_compat(kernel: &Kernel, compat: u32) -> u64 {
+    let entitled = lock(&kernel.process.executable)
+        .signature
+        .as_ref()
+        .is_some_and(|signature| {
+            CROSS_ARCHITECTURE_ENTITLEMENTS
+                .iter()
+                .any(|name| signature.entitled(name))
+        });
+    if !entitled {
+        return KERN_FAILURE;
+    }
+    match compat {
+        0 | 1 => KERN_SUCCESS,
+        _ => KERN_INVALID_ARGUMENT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn additions_lie_at_reserved_indices() {
+        for &(index, name) in ADDITIONS {
+            let entry = catalog::entry(index).expect("the index is in the trap table");
+            assert_eq!(entry.reserved, Reserved::Yes, "{name}");
+            assert_eq!(addition(index), Some(name));
+        }
+        assert!(REFUSED.is_empty());
+    }
 }

@@ -158,6 +158,9 @@ fn mach_rows() -> impl Iterator<Item = Row> {
                 let (service, limit) = services::mach(entry.name);
                 (entry.name.to_owned(), status(service, limit))
             }
+            _ if let Some((name, service)) = services::mach_addition(site.number) => {
+                (name.to_owned(), status(service, None))
+            }
             _ => (
                 stub_name(site.stub),
                 ("refused".into(), Status::Refused(ADDITION), None),
