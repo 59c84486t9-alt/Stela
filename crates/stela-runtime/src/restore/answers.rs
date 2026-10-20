@@ -452,6 +452,10 @@ impl<R: ReadAt> Answers<R> {
             )),
             "NORData" => self.nor(&identity, args),
             "BootabilityBundle" | "BootabilityBundleV2" => self.bootability(kind),
+            // Advertised for restored's compatibility check (`DATA_TYPES`).
+            _ if DATA_TYPES.iter().any(|(name, _)| *name == kind) => {
+                Err(Error::Invalid("advertised data type without a host answer"))
+            }
             _ => Err(Error::Invalid("unknown required restore DataType")),
         }
     }
@@ -923,6 +927,27 @@ mod tests {
         let named = Value::dict([("Variant", Value::from("Other"))]);
         assert_eq!(manifest_variant(&erase, &named).unwrap(), "Other");
         assert!(manifest_variant(&none, &none).is_err());
+    }
+    /// An advertised type with no answer and a type outside the vocabulary
+    /// refuse with distinct reasons, each with the whole request.
+    #[test]
+    fn unanswered_and_unknown_data_types_refuse_by_name() {
+        let mut answers = Answers::new(super::super::store::tests::fixture(b"x", false));
+        for (kind, reason) in [
+            ("KernelCache", "advertised data type without a host answer"),
+            ("NoSuchType", "unknown required restore DataType"),
+        ] {
+            let request = Value::dict([("DataType", Value::from(kind))]);
+            let Err(Error::Refused {
+                reason: got,
+                request: kept,
+            }) = answers.plan(&request)
+            else {
+                panic!("{kind} must refuse")
+            };
+            assert!(got.contains(reason), "{kind}: {got}");
+            assert_eq!(*kept, request);
+        }
     }
     #[test]
     fn exact_http_arguments_digest_and_post_body_are_bound() {
