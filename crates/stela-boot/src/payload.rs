@@ -9,6 +9,12 @@
 //! (`--install-target-path`, `--install-target-bytes`). The disk that holds
 //! the payload is never a target. Without `--install-mode` the
 //! options pass through to the mount unchanged.
+//!
+//! A stage that stops part way through is run again: its GPT writes resume
+//! from what `gpt::read` finds (the primary header commits the table), and
+//! the staging header is cleared before the first member byte and written
+//! after the last, so a partial copy never reads as staged and the members
+//! are copied again.
 use crate::output;
 use alloc::{
     format,
@@ -496,26 +502,16 @@ impl Target {
             .map_err(|_| "cannot write the target disk")
     }
 
-    fn table(&mut self) -> Result<Option<gpt::Table>, &'static str> {
-        let header = self.read(1, 1)?;
-        let Some(info) = gpt::parse_header(self.disk, 1, &header).map_err(report)? else {
-            return Ok(None);
-        };
-        let blocks = info.entry_array_bytes().div_ceil(self.disk.block_bytes);
-        let entries = self.read(info.entries_lba, blocks)?;
-        gpt::parse_entries(&info, &entries)
-            .map(Some)
-            .map_err(report)
-    }
-
-    /// A disk without a GPT is staged only when its first and last 34
-    /// blocks are zero, so another system's MBR or filesystem is never
+    /// The disk's GPT, from the backup when an interrupted write left the
+    /// primary damaged (`gpt::read`). A disk without one is staged only when
+    /// it is blank, so another system's MBR or filesystem is never
     /// overwritten.
-    fn blank(&mut self) -> Result<bool, &'static str> {
-        let span = 34.min(self.disk.blocks);
-        let head = self.read(0, span)?;
-        let tail = self.read(self.disk.blocks - span, span)?;
-        Ok(head.iter().chain(&tail).all(|&byte| byte == 0))
+    fn table(&mut self) -> Result<gpt::Found, &'static str> {
+        let disk = self.disk;
+        gpt::read(disk, |lba, blocks| {
+            self.read(lba, blocks).map_err(PayloadError::Disk)
+        })
+        .map_err(report)
     }
 }
 
@@ -564,7 +560,7 @@ fn find_target(install: &Install, payload_path: &str) -> Result<Target, &'static
                     disk,
                     path: path.clone(),
                 };
-                matches!(probe.table(), Ok(Some(table)) if table.disk_guid == guid)
+                matches!(probe.table(), Ok(gpt::Found::Table { table, .. }) if table.disk_guid == guid)
             }
             (None, Some(serial), None, None) => {
                 disk_serial(handle, &path).is_some_and(|found| found == *serial)
@@ -778,9 +774,19 @@ fn stage(
         "TARGET path={} block={} blocks={}\n",
         target.path, target.disk.block_bytes, target.disk.blocks
     ));
-    let existing = target.table()?;
-    if existing.is_none() && !target.blank()? {
-        return Err("the target disk has no GPT and is not blank");
+    // An earlier stage that stopped part way through its GPT writes is
+    // resumed: before the primary header they read as the earlier table (or
+    // blank), after it as the new one with its remaining writes to repeat.
+    let (existing, repair) = match target.table()? {
+        gpt::Found::Blank => (None, None),
+        gpt::Found::Interrupted => (
+            None,
+            Some("an earlier stage stopped before its first GPT header"),
+        ),
+        gpt::Found::Table { table, repair } => (Some(table), repair),
+    };
+    if let Some(repair) = repair {
+        output::arguments(format_args!("GPT REPAIR {repair}\n"));
     }
     let request = Request {
         staging_bytes: header.total_bytes(),
@@ -797,7 +803,7 @@ fn stage(
         entropy(&target, &source_json),
     )
     .map_err(report)?;
-    if plan.write {
+    if plan.write || repair.is_some() {
         for write in gpt::encode(target.disk, &plan.table).map_err(report)? {
             target.write(write.lba, &write.bytes)?;
         }

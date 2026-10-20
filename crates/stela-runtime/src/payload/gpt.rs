@@ -567,6 +567,149 @@ pub fn encode(disk: Disk, table: &Table) -> Result<Vec<Write>, PayloadError> {
     ])
 }
 
+/// Blocks at each end of a disk that a GPT occupies at 512-byte blocks (the
+/// MBR or backup header, and a header and the 16 KiB entry array). A disk
+/// without a GPT is blank only when they are zero, so another system's MBR
+/// or filesystem is never overwritten.
+const BLANK_SPAN: u64 = 34;
+
+/// What [`read`] found on a disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    /// No GPT, and the blocks a GPT occupies at either end are zero.
+    Blank,
+    /// No GPT header, and the only bytes at either end are a backup entry
+    /// array holding nothing but ESP and Stela entries: [`encode`]'s first
+    /// write to a blank disk, interrupted before the backup header. Nothing
+    /// was committed, so the disk is staged as blank.
+    Interrupted,
+    /// A table: the primary GPT's, or the backup's when the primary is
+    /// damaged or unwritten. `repair` names why [`encode`]'s writes must be
+    /// made again even when the plan keeps the table.
+    Table {
+        table: Table,
+        repair: Option<&'static str>,
+    },
+}
+
+/// One copy of the GPT.
+enum Side {
+    Absent,
+    Damaged(PayloadError),
+    Valid(Table),
+}
+
+fn copy_at(
+    disk: Disk,
+    lba: u64,
+    read: &mut impl FnMut(u64, u64) -> Result<Vec<u8>, PayloadError>,
+) -> Result<Side, PayloadError> {
+    let header = read(lba, 1)?;
+    let info = match parse_header(disk, lba, &header) {
+        Ok(Some(info)) => info,
+        Ok(None) => return Ok(Side::Absent),
+        Err(error) => return Ok(Side::Damaged(error)),
+    };
+    let blocks = info.entry_array_bytes().div_ceil(disk.block_bytes);
+    if info.entries_lba + blocks > disk.blocks {
+        return Ok(Side::Damaged(PayloadError::Disk(
+            "GPT entry array outside the disk",
+        )));
+    }
+    let entries = read(info.entries_lba, blocks)?;
+    Ok(match parse_entries(&info, &entries) {
+        Ok(table) => Side::Valid(table),
+        Err(error) => Side::Damaged(error),
+    })
+}
+
+/// A protective (or hybrid) MBR: the boot signature and a type 0xEE entry.
+fn protective(block: &[u8]) -> bool {
+    block.len() >= 512
+        && block[510..512] == [0x55, 0xaa]
+        && (0..4).any(|n| block[446 + 16 * n + 4] == 0xee)
+}
+
+/// Every 128-byte entry is zero or names an ESP or Stela role, and one is
+/// not zero.
+fn stela_entries(bytes: &[u8]) -> bool {
+    let mut any = false;
+    for entry in bytes.chunks(ENTRY_BYTES as usize) {
+        if entry.iter().all(|&byte| byte == 0) {
+            continue;
+        }
+        if entry.len() < 16 || Role::of(guid_at(entry, 0)).is_none() {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Read a disk's GPT as UEFI does after an interrupted write: the primary
+/// when it and its entries are valid, else the backup, which must then be
+/// written back. [`encode`] writes the backup first and the primary header
+/// last but for the MBR, so the primary header is the commit point:
+///
+/// - before it, a valid primary is the earlier table (the plan is made
+///   again), and a damaged or missing primary means the backup holds the
+///   new table in full;
+/// - after it, only the protective MBR can be missing.
+///
+/// A disk without either header must be blank, or hold only [`encode`]'s
+/// first write ([`Found::Interrupted`]); anything else is refused. `read`
+/// returns `blocks` whole blocks from `lba`; its errors pass through.
+pub fn read(
+    disk: Disk,
+    mut read: impl FnMut(u64, u64) -> Result<Vec<u8>, PayloadError>,
+) -> Result<Found, PayloadError> {
+    disk.validate()?;
+    let last = disk.blocks - 1;
+    let primary = copy_at(disk, 1, &mut read)?;
+    let backup = copy_at(disk, last, &mut read)?;
+    match (primary, backup) {
+        (Side::Valid(table), backup) => {
+            let repair = match backup {
+                Side::Valid(copy) if copy == table => None,
+                Side::Valid(_) => Some("the backup GPT differs from the primary"),
+                Side::Absent => Some("the backup GPT is missing"),
+                Side::Damaged(_) => Some("the backup GPT is damaged"),
+            };
+            let repair = match repair {
+                None if !protective(&read(0, 1)?) => Some("the protective MBR is missing"),
+                repair => repair,
+            };
+            Ok(Found::Table { table, repair })
+        }
+        (primary, Side::Valid(table)) => Ok(Found::Table {
+            table,
+            repair: Some(match primary {
+                Side::Absent => "the primary GPT is missing",
+                _ => "the primary GPT is damaged",
+            }),
+        }),
+        (Side::Damaged(error), _) | (Side::Absent, Side::Damaged(error)) => Err(error),
+        (Side::Absent, Side::Absent) => {
+            let span = BLANK_SPAN.min(disk.blocks);
+            let head = read(0, span)?;
+            let tail_lba = disk.blocks - span;
+            let tail = read(tail_lba, span)?;
+            if head.iter().chain(&tail).all(|&byte| byte == 0) {
+                return Ok(Found::Blank);
+            }
+            // The backup entry array sits just below the backup header.
+            let block = disk.block_bytes as usize;
+            let entries = ((last - disk.entry_blocks() - tail_lba) as usize * block)
+                ..((last - tail_lba) as usize * block);
+            let outside = tail[..entries.start].iter().chain(&tail[entries.end..]);
+            if head.iter().chain(outside).all(|&byte| byte == 0) && stela_entries(&tail[entries]) {
+                return Ok(Found::Interrupted);
+            }
+            Err(PayloadError::Disk("the disk has no GPT and is not blank"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +844,212 @@ mod tests {
         let mut partial = planned.table.clone();
         partial.partitions.pop();
         assert!(plan(DISK, Some(&partial), request(), counter()).is_err());
+    }
+
+    /// A sparse disk: absent blocks read as zero.
+    #[derive(Clone, Default)]
+    struct Sparse {
+        disk: Option<Disk>,
+        blocks: alloc::collections::BTreeMap<u64, Vec<u8>>,
+    }
+
+    impl Sparse {
+        fn new(disk: Disk) -> Self {
+            Self {
+                disk: Some(disk),
+                ..Self::default()
+            }
+        }
+
+        fn block_bytes(&self) -> usize {
+            self.disk.unwrap().block_bytes as usize
+        }
+
+        /// Write the first `blocks` blocks of `write` (all with `None`).
+        fn apply(&mut self, write: &Write, blocks: Option<usize>) {
+            let size = self.block_bytes();
+            for (n, block) in write
+                .bytes
+                .chunks(size)
+                .enumerate()
+                .take(blocks.unwrap_or(usize::MAX))
+            {
+                self.blocks.insert(write.lba + n as u64, block.to_vec());
+            }
+        }
+
+        fn read(&self) -> Result<Found, PayloadError> {
+            let disk = self.disk.unwrap();
+            read(disk, |lba, count| {
+                let mut out = Vec::new();
+                for at in lba..lba + count {
+                    match self.blocks.get(&at) {
+                        Some(block) => out.extend_from_slice(block),
+                        None => out.resize(out.len() + disk.block_bytes as usize, 0),
+                    }
+                }
+                Ok(out)
+            })
+        }
+
+        /// What setup does next: plan on what it read, and write the table
+        /// again when the plan changes it or the read asks for a repair.
+        fn rerun(&mut self) -> Table {
+            let disk = self.disk.unwrap();
+            let (existing, repair) = match self.read().unwrap() {
+                Found::Blank | Found::Interrupted => (None, None),
+                Found::Table { table, repair } => (Some(table), repair),
+            };
+            let plan = plan(disk, existing.as_ref(), request(), counter()).unwrap();
+            if plan.write || repair.is_some() {
+                for write in encode(disk, &plan.table).unwrap() {
+                    self.apply(&write, None);
+                }
+            }
+            match self.read().unwrap() {
+                Found::Table {
+                    table,
+                    repair: None,
+                } => table,
+                other => panic!("not repaired: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_interrupted_write_to_a_blank_disk_is_resumed() {
+        for block_bytes in [512, 4096] {
+            let disk = Disk {
+                block_bytes,
+                blocks: DISK.blocks * 512 / block_bytes,
+            };
+            let planned = plan(disk, None, request(), counter()).unwrap().table;
+            let writes = encode(disk, &planned).unwrap();
+            assert_eq!(Sparse::new(disk).read().unwrap(), Found::Blank);
+            for done in 0..=writes.len() {
+                // Each write cut off after its first block, then each whole.
+                for torn in [true, false] {
+                    if torn
+                        && writes
+                            .get(done)
+                            .is_none_or(|w| w.bytes.len() <= block_bytes as usize)
+                    {
+                        continue;
+                    }
+                    let mut image = Sparse::new(disk);
+                    for write in &writes[..done] {
+                        image.apply(write, None);
+                    }
+                    if torn {
+                        image.apply(&writes[done], Some(1));
+                    }
+                    let found = image.read().unwrap();
+                    let expected = match (done, torn) {
+                        (0, false) => Found::Blank,
+                        (0 | 1, _) => Found::Interrupted,
+                        (2 | 3, _) => Found::Table {
+                            table: planned.clone(),
+                            repair: Some("the primary GPT is missing"),
+                        },
+                        (4, _) => Found::Table {
+                            table: planned.clone(),
+                            repair: Some("the protective MBR is missing"),
+                        },
+                        _ => Found::Table {
+                            table: planned.clone(),
+                            repair: None,
+                        },
+                    };
+                    // Primary entries without their header read as missing too.
+                    assert_eq!(found, expected, "{block_bytes} {done} {torn}");
+                    let table = image.rerun();
+                    if done >= 2 {
+                        // Committed to the backup: the same table, whole.
+                        assert_eq!(table, planned);
+                    }
+                    assert_eq!(table.partitions.len(), 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_interrupted_rewrite_keeps_the_existing_esp_and_its_bytes() {
+        let esp = Partition {
+            type_guid: Role::Esp.type_guid(),
+            unique_guid: Guid([9; 16]),
+            first_lba: 2048,
+            last_lba: 2048 + 1024 * 1024 * 2 - 1,
+            attributes: 0,
+            name: "EFI".into(),
+        };
+        let old = Table {
+            disk_guid: Guid([7; 16]),
+            partitions: vec![esp.clone()],
+        };
+        let mut base = Sparse::new(DISK);
+        for write in encode(DISK, &old).unwrap() {
+            base.apply(&write, None);
+        }
+        // The ESP's own blocks, which no GPT write may touch.
+        let marker = vec![0x5a; 512];
+        base.blocks.insert(esp.first_lba, marker.clone());
+        base.blocks.insert(esp.last_lba, marker.clone());
+        let new = plan(DISK, Some(&old), request(), counter()).unwrap().table;
+        let writes = encode(DISK, &new).unwrap();
+        for write in &writes {
+            let end = write.lba + write.bytes.len() as u64 / 512;
+            assert!(
+                new.partitions
+                    .iter()
+                    .all(|p| end <= p.first_lba || write.lba > p.last_lba)
+            );
+        }
+        for done in 0..=writes.len() {
+            let mut image = base.clone();
+            for write in &writes[..done] {
+                image.apply(write, None);
+            }
+            let Found::Table { table, repair } = image.read().unwrap() else {
+                panic!("no table after {done} writes");
+            };
+            let (want, why) = match done {
+                0 => (&old, None),
+                1 => (&old, Some("the backup GPT is damaged")),
+                2 => (&old, Some("the backup GPT differs from the primary")),
+                3 => (&new, Some("the primary GPT is damaged")),
+                _ => (&new, None),
+            };
+            assert_eq!((&table, repair), (want, why), "{done}");
+            let table = image.rerun();
+            assert_eq!(table.partitions[0], esp);
+            assert_eq!(table.disk_guid, old.disk_guid);
+            assert_eq!(image.blocks[&esp.first_lba], marker);
+            assert_eq!(image.blocks[&esp.last_lba], marker);
+        }
+    }
+
+    #[test]
+    fn a_disk_without_a_gpt_that_is_not_blank_is_refused() {
+        let mut mbr = Sparse::new(DISK);
+        mbr.blocks.insert(0, vec![0x33; 512]);
+        assert!(mbr.read().is_err());
+        // Foreign bytes where a backup entry array would be.
+        let mut tail = Sparse::new(DISK);
+        tail.blocks.insert(DISK.blocks - 33, vec![0x44; 512]);
+        assert!(tail.read().is_err());
+        // A Stela entry array, but another block written too.
+        let planned = plan(DISK, None, request(), counter()).unwrap().table;
+        let mut mixed = Sparse::new(DISK);
+        mixed.apply(&encode(DISK, &planned).unwrap()[0], None);
+        mixed.blocks.insert(DISK.blocks - 34, vec![1; 512]);
+        assert!(mixed.read().is_err());
+        // A damaged primary with no backup is refused, never blank.
+        let mut damaged = Sparse::new(DISK);
+        let mut header = encode(DISK, &planned).unwrap()[3].clone();
+        header.bytes[60] ^= 1;
+        damaged.apply(&header, None);
+        assert!(damaged.read().is_err());
     }
 
     #[test]
