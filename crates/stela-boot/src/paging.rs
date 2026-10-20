@@ -26,6 +26,13 @@ const CR4_LA57: u64 = 1 << 12;
 const CR4_PCID: u64 = 1 << 17;
 const EFER_MSR: u32 = 0xc000_0080;
 const EFER_NX_ENABLE: u64 = 1 << 11;
+const IA32_PAT: u32 = 0x277;
+/// The memory type of PAT entry 1, which a page with PWT alone selects
+/// (Intel SDM vol. 3A, "Selecting a Memory Type from the PAT"). Reset makes
+/// it write-through; Stela makes it write-combining for the framebuffer
+/// (`tables::WRITE_COMBINING`).
+const PAT_ENTRY_1: u64 = 0xff << 8;
+const PAT_WRITE_COMBINING: u64 = 0x01 << 8;
 
 type Table = [u64; ENTRIES];
 
@@ -276,6 +283,26 @@ pub unsafe fn take_over() -> Result<(), &'static str> {
             options(nostack, preserves_flags));
         asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
         asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags));
+    }
+    // Make the framebuffer write-combining whatever type the firmware's
+    // MTRRs give its range: a write-combining PAT type over an uncached MTRR
+    // range is write-combining (SDM vol. 3A, "Memory Type Setting for the
+    // PAT and MTRRs"). Otherwise a video BAR that the firmware leaves
+    // uncached takes one bus write per pixel. Every x86-64 processor has the
+    // PAT. No Stela table uses PWT alone except for the framebuffer, and the
+    // firmware's tables, which might, are replaced next. The caches are
+    // written back on both sides of the change, as SDM vol. 3A "Programming
+    // the PAT" orders.
+    // SAFETY: ring 0 with interrupts disabled; IA32_PAT is architectural.
+    unsafe {
+        let (low, high): (u32, u32);
+        asm!("rdmsr", in("ecx") IA32_PAT, out("eax") low, out("edx") high,
+            options(nomem, nostack, preserves_flags));
+        let pat = (u64::from(low) | u64::from(high) << 32) & !PAT_ENTRY_1 | PAT_WRITE_COMBINING;
+        asm!("wbinvd", options(nostack, preserves_flags));
+        asm!("wrmsr", in("ecx") IA32_PAT, in("eax") pat as u32, in("edx") (pat >> 32) as u32,
+            options(nostack, preserves_flags));
+        asm!("wbinvd", options(nostack, preserves_flags));
     }
     Ok(())
 }

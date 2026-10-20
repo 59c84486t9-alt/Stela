@@ -12,7 +12,7 @@ use crate::{
     la57, layout, output, paging,
     selection::Refusal,
     storage,
-    tables::{self, Frames, LARGE, NX, PAGE, PRESENT, UNCACHED, WRITABLE},
+    tables::{self, Frames, LARGE, NX, PAGE, PRESENT, UNCACHED, WRITABLE, WRITE_COMBINING},
 };
 use alloc::{string::String, vec::Vec};
 use core::{arch::asm, cell::UnsafeCell, ops::Range};
@@ -421,6 +421,8 @@ fn load(
         Some(storage) => Storage::new(storage)?,
         None => Storage::absent(),
     };
+    // The framebuffer is written, never read back, so its writes combine.
+    let video = PRESENT | WRITABLE | NX | WRITE_COMBINING;
     if let Some(screen) = &screen {
         let start = screen.base as u64 & !(PAGE - 1);
         let end = (screen.base + screen.bytes) as u64;
@@ -430,7 +432,7 @@ fn load(
             start,
             start,
             end.next_multiple_of(PAGE) - start,
-            PRESENT | WRITABLE | NX,
+            video,
         )?;
     }
     // The window: the engine image with section rights, heap, stack, code.
@@ -491,7 +493,7 @@ fn load(
                 layout::physical(start),
                 start,
                 end - start,
-                data,
+                video,
             )?;
         }
     }
