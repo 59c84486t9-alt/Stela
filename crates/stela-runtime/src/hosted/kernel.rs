@@ -67,6 +67,22 @@ const ISS_FSC_MASK: u64 = 0x3f;
 const FSC_ALIGNMENT: u64 = 0x21;
 /// Data addresses ignore their top byte (`VM_USER_STRIP_TBI`).
 const TBI_MASK: u64 = (1 << 56) - 1;
+/// The exceptions guest faults raise, and their codes (`mach/arm/exception.h`
+/// and the abort's `kern_return_t`).
+const EXC_BAD_ACCESS: usize = mach::exception::EXC_BAD_ACCESS;
+const EXC_BREAKPOINT: usize = mach::exception::EXC_BREAKPOINT;
+const KERN_INVALID_ADDRESS: u64 = 1;
+const KERN_PROTECTION_FAILURE: u64 = 2;
+const EXC_ARM_DA_ALIGN: u64 = 0x101;
+const EXC_ARM_PAC_FAIL: u64 = 0x105;
+const EXC_ARM_BREAKPOINT: u64 = 1;
+const EXC_ARM_UNDEFINED: u64 = 1;
+/// The BRK labels `sleh.c`'s `user_brk_descriptors` reserve, which may end
+/// the process before delivery: pointer-authentication traps
+/// (`PTRAUTH_TRAP_START` to `_END`) and system libraries' disallowed
+/// conditions.
+const UNRECOVERABLE_BRK_LABELS: [std::ops::RangeInclusive<u64>; 2] =
+    [0xc470..=0xc47f, 0xb000..=0xbfff];
 /// SPSR's C flag, which a BSD call's error sets (`PSR64_CF`).
 const SPSR_CARRY: u64 = 1 << 29;
 /// `PLATFORM_SYSCALL_TRAP_NO`.
@@ -431,17 +447,27 @@ impl Kernel {
                 if super::memory::permits(address, access) {
                     return Ok(());
                 }
-                // EXC_BAD_ACCESS, as `handle_user_abort` and `ux_exception`
-                // turn it into a signal.
-                self.process
-                    .exception_ports
-                    .deliverable(self.thread_port, mach::exception::EXC_BAD_ACCESS)?;
+                // EXC_BAD_ACCESS, as `handle_user_abort` raises it with the
+                // fault's result and address and `ux_exception` turns it
+                // into a signal.
                 let data = class == EC_DATA_ABORT_LOWER;
                 let looked_up = if data { address & TBI_MASK } else { address };
+                let mapped = super::memory::mapped(looked_up);
+                let alignment = data && iss & ISS_FSC_MASK == FSC_ALIGNMENT;
+                let result = if alignment {
+                    EXC_ARM_DA_ALIGN
+                } else if mapped {
+                    KERN_PROTECTION_FAILURE
+                } else {
+                    KERN_INVALID_ADDRESS
+                };
+                if self.deliver_exception(pe, EXC_BAD_ACCESS, &[result, address], false)? {
+                    return Ok(());
+                }
                 let fault = bsd::signal::FaultSignal::of(
                     looked_up,
-                    super::memory::mapped(looked_up),
-                    data && iss & ISS_FSC_MASK == FSC_ALIGNMENT,
+                    mapped,
+                    alignment,
                     self.process.user_stack,
                 );
                 let shared_cache_slide = self.shared_cache_slide();
@@ -462,9 +488,18 @@ impl Kernel {
             // EXC_BREAKPOINT (`handle_user_breakpoint`): SIGTRAP, at the
             // BRK itself.
             EC_BRK64 => {
-                self.process
-                    .exception_ports
-                    .deliverable(self.thread_port, mach::exception::EXC_BREAKPOINT)?;
+                let comment = iss & 0xffff;
+                let unrecoverable = UNRECOVERABLE_BRK_LABELS
+                    .iter()
+                    .any(|labels| labels.contains(&comment));
+                if self.deliver_exception(
+                    pe,
+                    EXC_BREAKPOINT,
+                    &[EXC_ARM_BREAKPOINT, elr],
+                    unrecoverable,
+                )? {
+                    return Ok(());
+                }
                 let shared_cache_slide = self.shared_cache_slide();
                 self.exception_signal(bsd::signal::SIGTRAP, 0, false, || {
                     format!(
@@ -481,9 +516,19 @@ impl Kernel {
             // instruction. `pac_exception_triage` ends a PAC-hardened task
             // with SIGKILL; any other takes SIGBUS (`ux_exception`).
             EC_PAC_FAIL => {
-                self.process
-                    .exception_ports
-                    .deliverable(self.thread_port, mach::exception::EXC_BAD_ACCESS)?;
+                let instruction = super::memory::read(elr, 4).map_or(0, |bytes| {
+                    u32::from_le_bytes(bytes[..4].try_into().unwrap())
+                });
+                if !self.process.pac_exception_fatal
+                    && self.deliver_exception(
+                        pe,
+                        EXC_BAD_ACCESS,
+                        &[EXC_ARM_PAC_FAIL, u64::from(instruction)],
+                        false,
+                    )?
+                {
+                    return Ok(());
+                }
                 let shared_cache_slide = self.shared_cache_slide();
                 let describe = || {
                     format!(
@@ -527,22 +572,31 @@ impl Kernel {
         }
     }
 
-    /// EXC_BAD_INSTRUCTION for the instruction the thread stopped at
-    /// (`handle_uncategorized`, `handle_msr_trap`, ...), which becomes SIGILL
-    /// there (`ux_exception`).
+    /// EXC_BAD_INSTRUCTION with EXC_ARM_UNDEFINED and the instruction the
+    /// thread stopped at (`handle_uncategorized`, `handle_msr_trap`, ...),
+    /// which becomes SIGILL there (`ux_exception`) unless a handler takes
+    /// it.
     pub(super) fn bad_instruction(
         &mut self,
         pe: &mut Pe,
         describe: impl FnOnce() -> String,
     ) -> Result<()> {
-        self.process
-            .exception_ports
-            .deliverable(self.thread_port, super::darwin::EXC_BAD_INSTRUCTION)?;
         let pc = if pe.cpu.pstate.el == 0 {
             pe.cpu.pc
         } else {
             pe.cpu.read(Register::ELR_EL1)
         };
+        let instruction = super::memory::read(pc, 4).map_or(0, |bytes| {
+            u32::from_le_bytes(bytes[..4].try_into().unwrap())
+        });
+        if self.deliver_exception(
+            pe,
+            super::darwin::EXC_BAD_INSTRUCTION,
+            &[EXC_ARM_UNDEFINED, u64::from(instruction)],
+            false,
+        )? {
+            return Ok(());
+        }
         let shared_cache_slide = self.shared_cache_slide();
         self.exception_signal(bsd::signal::SIGILL, 0, false, || {
             format!(
@@ -554,6 +608,32 @@ impl Kernel {
             )
         });
         Ok(())
+    }
+
+    /// Deliver a guest exception of `kind` with `codes` to the exception
+    /// ports set for it (`exception_triage`): whether a handler handled
+    /// it, when the thread returns to user space at its state with no
+    /// signal. An `unrecoverable` one (a reserved BRK label) is delivered
+    /// only to a debugged address space.
+    fn deliver_exception(
+        &self,
+        pe: &mut Pe,
+        kind: usize,
+        codes: &[u64],
+        unrecoverable: bool,
+    ) -> Result<bool> {
+        let mut words = [0; 2];
+        words[..codes.len()].copy_from_slice(codes);
+        mach::raise::deliver(
+            self,
+            pe,
+            mach::raise::Exception {
+                kind,
+                codes: words,
+                count: codes.len(),
+                unrecoverable,
+            },
+        )
     }
 
     /// The shared cache's slide, for diagnostics.

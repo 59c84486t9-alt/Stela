@@ -280,8 +280,15 @@ impl Task for Kernel {
     }
 
     fn address_space_debugged(&self) -> bool {
-        lock(&self.process.executable).code_signing_flags & CS_DEBUGGED != 0 && developer_mode()
+        address_space_debugged(self)
     }
+}
+
+/// Whether this process's address space is debugged
+/// (`is_address_space_debugged`): its code signature is `CS_DEBUGGED` and
+/// developer mode is on.
+pub(super) fn address_space_debugged(kernel: &Kernel) -> bool {
+    lock(&kernel.process.executable).code_signing_flags & CS_DEBUGGED != 0 && developer_mode()
 }
 
 /// `CS_DEBUGGED` (`osfmk/kern/cs_blobs.h`).
@@ -289,7 +296,7 @@ const CS_DEBUGGED: u32 = 0x1000_0000;
 
 /// Whether developer mode is on: the host kernel's state, which is the
 /// kernel beneath this process (`security.mac.amfi.developer_mode_status`).
-fn developer_mode() -> bool {
+pub(super) fn developer_mode() -> bool {
     let mut status = 0i32;
     let mut size = size_of::<i32>();
     // SAFETY: a NUL-terminated name and an out argument of `size` bytes.

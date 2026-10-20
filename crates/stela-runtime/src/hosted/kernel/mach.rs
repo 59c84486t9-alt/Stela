@@ -32,6 +32,7 @@ use anyhow::Result;
 mod accounting;
 pub(super) mod exception;
 mod message;
+pub(super) mod raise;
 pub(super) mod reclaim;
 mod server;
 pub(super) mod suspension;
@@ -306,12 +307,17 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
 }
 
 /// `mach_syscall`'s unassigned number: EXC_SYSCALL with the number, which
-/// becomes SIGSYS at the trap (`ux_exception`); X0 is left as it was.
+/// becomes SIGSYS at the trap (`ux_exception`) unless a handler takes it;
+/// X0 is left as it was.
 fn syscall_exception(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
-    kernel
-        .process
-        .exception_ports
-        .deliverable(kernel.thread_port, crate::hosted::darwin::EXC_SYSCALL)?;
+    if kernel.deliver_exception(
+        pe,
+        crate::hosted::darwin::EXC_SYSCALL,
+        &[u64::from(index)],
+        false,
+    )? {
+        return Ok(());
+    }
     let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
     kernel.exception_signal(super::bsd::signal::SIGSYS, 0, false, || {
         format!("unassigned Mach trap -{index} at pc {pc:#x}")

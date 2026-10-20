@@ -417,15 +417,19 @@ const THREAD_PORT_LIMIT: &str =
     "the new thread's port name also carries its host thread library's reference";
 
 /// What setting the task's exception ports does not reach.
-const EXCEPTION_PORT_LIMITS: &str = "a guest exception for which a port is set stops the run; \
-     the host kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports go to the ports the process \
+const EXCEPTION_PORT_LIMITS: &str = "a guest exception delivered with EXCEPTION_DEFAULT or \
+     EXCEPTION_STATE_IDENTITY without developer mode (whose read ports are not served) or with \
+     MACH_EXCEPTION_BACKTRACE_PREFERRED stops the run, and delivery carries no voucher; the host \
+     kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports go to the ports the process \
      inherited; a fork, exec or spawn after a change stops the run; a platform-restricted task's \
      policy violation stops the run";
 
 /// What setting a thread's exception ports does not reach.
-const THREAD_EXCEPTION_PORT_LIMITS: &str = "a guest exception for which a port is set stops the \
-     run; the host kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports pass the thread's ports \
-     for the task's; a platform-restricted task's policy violation stops the run";
+const THREAD_EXCEPTION_PORT_LIMITS: &str = "a guest exception delivered with EXCEPTION_DEFAULT \
+     or EXCEPTION_STATE_IDENTITY without developer mode (whose read ports are not served) or with \
+     MACH_EXCEPTION_BACKTRACE_PREFERRED stops the run, and delivery carries no voucher; the host \
+     kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports pass the thread's ports for the \
+     task's; a platform-restricted task's policy violation stops the run";
 
 /// Task routines whose answer is the arm64 kernel's: the request is
 /// forwarded to the task port, which is the host task's. They suspend,

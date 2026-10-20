@@ -18,13 +18,14 @@
 //! started alike inherits the same actions with its parent's arm64
 //! flavors.
 //!
-//! Known limits: a guest exception for which this task holds a port stops
-//! the run, as delivering Mach exceptions is not implemented; the
-//! EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports the host kernel raises go
-//! to the ports the host task inherited; a fork, exec or spawn after this
-//! process changed its actions stops the run, as the child would not
-//! inherit them.
+//! A guest exception is delivered to these actions by [`super::raise`].
+//!
+//! Known limits: the EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports the host
+//! kernel raises go to the ports the host task inherited; a fork, exec or
+//! spawn after this process changed its actions stops the run, as the
+//! child would not inherit them.
 use super::super::Kernel;
+use super::raise;
 use super::server::{
     Descriptor, MACH_PORT_DEAD, MIG_BAD_ARGUMENTS, MOVE_SEND, Reply, Request, release_send,
 };
@@ -147,6 +148,16 @@ struct Holder {
 /// The process's exception actions.
 #[derive(Debug, Default)]
 pub(crate) struct ExceptionPorts(Mutex<State>);
+
+/// The task level's holder before this process sets its own actions: the
+/// host task, whose inherited actions [`ExceptionPorts::actions`] reads.
+const INHERITED: Holder = Holder {
+    thread: 0,
+    actions: [Action {
+        behavior: 0,
+        flavor: 0,
+    }; EXC_TYPES_COUNT],
+};
 
 #[derive(Debug, Default)]
 struct State {
@@ -400,29 +411,59 @@ impl ExceptionPorts {
         Ok(())
     }
 
-    /// Stop the run if the thread `thread` or its task holds a port for
-    /// `exception`, which XNU would deliver to it before any signal.
-    pub(crate) fn deliverable(&self, thread: u32, exception: usize) -> Result<()> {
+    /// The actions `exception_triage_thread` tries for `exception` of the
+    /// thread `thread`: its own, then its task's (as the host task
+    /// inherited them until this process sets its own), each with a send
+    /// right of this space to its port, snapshotted as `exception_deliver`
+    /// takes them.
+    pub(super) fn actions(&self, thread: u32, exception: usize) -> Result<Vec<raise::Action>> {
         let state = self.lock();
-        let mut groups = match state.threads.get(&thread) {
-            Some(holder) => host_groups(false, holder.thread, 1 << exception)?,
-            None => Vec::new(),
-        };
-        groups.extend(match &state.task {
-            Some(holder) => host_groups(false, holder.thread, 1 << exception)?,
-            None => host_groups(true, host::task(), 1 << exception)?,
-        });
-        let held = groups.iter().any(|group| valid(group.name));
-        for group in &groups {
-            release_send(group.name);
+        let mut actions = Vec::new();
+        let levels = [
+            state.threads.get(&thread).map(|holder| (false, holder)),
+            Some(match &state.task {
+                Some(holder) => (false, holder),
+                None => (true, &INHERITED),
+            }),
+        ];
+        for (inherited, holder) in levels.into_iter().flatten() {
+            let groups = if inherited {
+                host_groups(true, host::task(), 1 << exception)?
+            } else {
+                host_groups(false, holder.thread, 1 << exception)?
+            };
+            for group in groups {
+                if !valid(group.name) {
+                    release_send(group.name);
+                    continue;
+                }
+                let action = if inherited {
+                    match arm64_flavor(group.flavor) {
+                        Some(flavor) => Action {
+                            behavior: group.behavior,
+                            flavor,
+                        },
+                        None => {
+                            release_send(group.name);
+                            bail!(
+                                "{} for an inherited exception port with x86 flavor {}, which \
+                                 has no arm64 counterpart",
+                                NAMES[exception],
+                                group.flavor
+                            );
+                        }
+                    }
+                } else {
+                    holder.actions[exception]
+                };
+                actions.push(raise::Action {
+                    name: group.name,
+                    behavior: action.behavior,
+                    flavor: action.flavor,
+                });
+            }
         }
-        if held {
-            bail!(
-                "{} with an exception port set for it: Mach exception delivery is not implemented",
-                NAMES[exception]
-            );
-        }
-        Ok(())
+        Ok(actions)
     }
 
     /// The guest thread of port `thread` ended: its actions' rights are
