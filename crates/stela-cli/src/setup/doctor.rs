@@ -253,10 +253,7 @@ fn bundle_status(record: &Record, report: &mut Report) {
             record.build,
             kind.label(),
             ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}")),
-            match kind {
-                bundle::Kind::Update => "Update macOS (Stela)",
-                _ => "Install macOS (Stela)",
-            }
+            super::restore_choice_name(kind)
         ));
     }
     if record.installs_media() && record.active_medium().is_none() {

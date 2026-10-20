@@ -96,6 +96,15 @@ const UPDATE_RESTORE: &str = "--update-restore";
 /// rollback.
 pub(super) const MEDIA_KEPT: usize = 2;
 
+/// The startup choice that restores with a bundle of `kind` on a setup
+/// with one install.
+fn restore_choice_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Update => UPDATE_CHOICE,
+        _ => INSTALL_CHOICE,
+    }
+}
+
 #[derive(Args)]
 pub(crate) struct Setup {
     /// The USB's EFI partition, or another mounted volume of the same USB.
@@ -564,15 +573,14 @@ impl Record {
     /// The name of `install`'s Install macOS (Stela) or Update macOS
     /// (Stela) choice.
     fn restore_choice(&self, kind: Kind, install: &machines::Install) -> String {
-        let (one, several) = match kind {
-            Kind::Update => (UPDATE_CHOICE, "Update macOS"),
-            _ => (INSTALL_CHOICE, "Install macOS"),
-        };
         if self.installs.len() == 1 {
-            one.into()
-        } else {
-            format!("{} - {several}", install.name)
+            return restore_choice_name(kind).into();
         }
+        let several = match kind {
+            Kind::Update => "Update macOS",
+            _ => "Install macOS",
+        };
+        format!("{} - {several}", install.name)
     }
 
     /// The restore bundles the installs' machines need of the active build

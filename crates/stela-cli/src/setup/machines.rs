@@ -27,8 +27,6 @@ use stela_loader::{boot_bundle::Options as BundleOptions, mount_interface::MAX_C
 
 /// The first install's name unless `--install` gives one.
 pub(super) const FIRST_NAME: &str = "macOS";
-/// Each install takes three startup choices: itself, its System Recovery
-/// and its Install macOS (Stela).
 /// Each install has four startup choices: itself, its System Recovery,
 /// Install macOS and Update macOS.
 const MAX_INSTALLS: usize = MAX_CHOICES / 4;
