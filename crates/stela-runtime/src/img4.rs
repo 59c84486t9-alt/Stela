@@ -157,6 +157,22 @@ pub fn payload_type(im4p: &[u8]) -> Result<[u8; 4], Img4Error> {
     Ok(text.try_into().unwrap())
 }
 
+/// Set a bare `IM4P`'s four-character type, as a restore host retypes one
+/// image for another component (the `SEP` image `sepi` sent as `RestoreSEP`
+/// `rsep`, whose manifest digest covers the retyped encoding).
+pub fn set_payload_type(im4p: &mut [u8], kind: [u8; 4]) -> Result<(), Img4Error> {
+    parse(im4p)?;
+    let rest = labeled(im4p, b"IM4P")?;
+    let (tag, text, _) = element(rest)?;
+    if tag != IA5_STRING || text.len() != 4 {
+        return Err(Img4Error::Malformed("IM4P type is not four characters"));
+    }
+    // A four-byte IA5 string has a two-byte header.
+    let at = im4p.len() - rest.len() + 2;
+    im4p[at..at + 4].copy_from_slice(&kind);
+    Ok(())
+}
+
 /// The header of a DER element: tag, the offset of its contents and its
 /// declared content length; the contents need not be present.
 fn header(bytes: &[u8]) -> Result<(u8, usize, usize), Img4Error> {
@@ -379,5 +395,18 @@ pub(crate) mod tests {
         }
         assert!(parse(b"\x30\x81\x06\x16\x04IM4P").is_err());
         assert!(parse(b"\x30\x82\0\x80").is_err());
+    }
+
+    #[test]
+    fn a_bare_im4p_is_retyped_in_place() {
+        let mut im4p = [
+            0x30, 0x11, 0x16, 0x04, b'I', b'M', b'4', b'P', 0x16, 0x04, b's', b'e', b'p', b'i',
+            0x16, 0x00, 0x04, 0x01, 0x07,
+        ];
+        set_payload_type(&mut im4p, *b"rsep").unwrap();
+        assert_eq!(payload_type(&im4p), Ok(*b"rsep"));
+        assert_eq!(&im4p[14..], &[0x16, 0x00, 0x04, 0x01, 0x07]);
+        let mut truncated = im4p[..10].to_vec();
+        assert!(set_payload_type(&mut truncated, *b"sepi").is_err());
     }
 }

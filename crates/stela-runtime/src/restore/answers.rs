@@ -522,19 +522,33 @@ impl<R: ReadAt> Answers<R> {
         let mut total = 0usize;
         // `load_sep_os` reads only these (R 0x2d514); the installed `SEP`
         // image is not sent.
-        for (component, key) in [
-            ("RestoreSEP", "RestoreSEPImageData"),
-            ("SepStage1", "SEPPatchImageData"),
+        //
+        // `RestoreSEP` names the `SEP` image file, and its manifest digest
+        // covers that IM4P retyped `rsep` (the 26A434 J473 identity's
+        // `RestoreSEP` digest is SHA-384 of `sep-firmware.j473.RELEASE.im4p`
+        // with `sepi` replaced by `rsep`), so the image is sent retyped. No
+        // `SepStage1` type is recorded: one is sent unchanged, and a digest
+        // that does not cover it refuses.
+        for (component, key, kind) in [
+            ("RestoreSEP", "RestoreSEPImageData", Some(*b"rsep")),
+            ("SepStage1", "SEPPatchImageData", None),
         ] {
             if identity.component(component).is_err() {
                 continue;
             }
             let path = identity.path(component)?.to_string();
-            let bytes = self.member_bytes(&path)?;
+            let mut bytes = self.member_bytes(&path)?;
             let digest = identity.component(component)?.required("Digest")?.data()?;
             let parts = crate::img4::parse(&bytes)
                 .map_err(|_| Error::Invalid("SEP firmware is not an IM4P"))?;
-            if parts.manifest.is_some() || Sha384::digest(parts.payload).as_slice() != digest {
+            if parts.manifest.is_some() {
+                return Err(Error::Invalid("SEP firmware is not a bare IM4P"));
+            }
+            if let Some(kind) = kind {
+                crate::img4::set_payload_type(&mut bytes, kind)
+                    .map_err(|_| Error::Invalid("SEP firmware type cannot be set"))?;
+            }
+            if Sha384::digest(&bytes).as_slice() != digest {
                 return Err(Error::Invalid(
                     "SEP firmware differs from its BuildManifest digest",
                 ));
@@ -778,6 +792,46 @@ mod tests {
         );
         let mut bare = Answers::new(super::super::store::tests::fixture(b"x", false));
         assert!(bare.sep_firmware(&request).is_err());
+    }
+    /// As in the 26A434 J473 identity: `RestoreSEP` and `SEP` name one
+    /// `sepi` file, and `RestoreSEP`'s digest covers it retyped `rsep`.
+    #[test]
+    fn nor_data_sends_the_sep_image_retyped_rsep_that_its_digest_covers() {
+        use sha2::{Digest, Sha384};
+        let sepi = [
+            0x30, 0x11, 0x16, 0x04, b'I', b'M', b'4', b'P', 0x16, 0x04, b's', b'e', b'p', b'i',
+            0x16, 0x00, 0x04, 0x01, 0x07,
+        ];
+        let mut rsep = sepi;
+        rsep[10..14].copy_from_slice(b"rsep");
+        let components: [(&str, &str, &[u8]); 2] = [
+            ("SEP", "sep.im4p", &sepi),
+            ("RestoreSEP", "sep.im4p", &sepi),
+        ];
+        let request = Value::dict([("DataType", Value::from("NORData"))]);
+        let store = super::super::store::tests::with_digests(
+            b"x",
+            false,
+            &components,
+            &[("RestoreSEP", Sha384::digest(rsep).into())],
+        );
+        let Plan::Reply(reply) = Answers::new(store).sep_firmware(&request).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            reply
+                .required("RestoreSEPImageData")
+                .unwrap()
+                .data()
+                .unwrap(),
+            rsep
+        );
+        // A digest of the file as stored does not cover the retyped image.
+        let store = super::super::store::tests::with_components(b"x", false, &components);
+        let Err(error) = Answers::new(store).sep_firmware(&request) else {
+            panic!("a digest of the stored file must not cover the retyped image")
+        };
+        assert!(format!("{error}").contains("differs from its BuildManifest digest"));
     }
     #[test]
     fn exact_http_arguments_digest_and_post_body_are_bound() {

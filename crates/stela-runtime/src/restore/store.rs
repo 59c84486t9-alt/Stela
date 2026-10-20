@@ -336,6 +336,17 @@ pub(crate) mod tests {
         deflate: bool,
         extra: &[(&str, &str, &[u8])],
     ) -> Store<Memory> {
+        with_digests(data, deflate, extra, &[])
+    }
+    /// `with_components` with the named components' Digest replaced, for a
+    /// manifest whose digest covers something other than the member's
+    /// bytes. Components naming one path share one member.
+    pub(crate) fn with_digests(
+        data: &[u8],
+        deflate: bool,
+        extra: &[(&str, &str, &[u8])],
+        digests: &[(&str, [u8; 48])],
+    ) -> Store<Memory> {
         use sha2::{Digest, Sha384};
         let mut components: BTreeMap<String, Value> = [(
             "OS".into(),
@@ -350,7 +361,18 @@ pub(crate) mod tests {
                 (*name).into(),
                 Value::dict([
                     ("Info", Value::dict([("Path", Value::from(*path))])),
-                    ("Digest", Value::Data(Sha384::digest(bytes).to_vec())),
+                    (
+                        "Digest",
+                        Value::Data(
+                            digests
+                                .iter()
+                                .find(|(component, _)| component == name)
+                                .map_or_else(
+                                    || Sha384::digest(bytes).to_vec(),
+                                    |(_, d)| d.to_vec(),
+                                ),
+                        ),
+                    ),
                 ]),
             );
         }
@@ -379,9 +401,12 @@ pub(crate) mod tests {
         m.source.build_manifest_sha256 = crate::sha256(&build);
         m.global_manifests.clear();
         m.aea_keys.clear();
-        let files: Vec<(&str, &[u8])> = core::iter::once(("os.dmg", data))
-            .chain(extra.iter().map(|(_, path, bytes)| (*path, *bytes)))
-            .collect();
+        let mut files: Vec<(&str, &[u8])> = vec![("os.dmg", data)];
+        for (_, path, bytes) in extra {
+            if !files.iter().any(|(name, _)| name == path) {
+                files.push((*path, *bytes));
+            }
+        }
         m.members = files
             .iter()
             .map(|(name, bytes)| Member {
