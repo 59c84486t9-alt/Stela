@@ -1181,7 +1181,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         DISPEXT,
     ]
     .contains(&name)
-        || GPU_ADMITTED && [SGX, GFX_MAPPER].contains(&name)
+        || GPU_ADMITTED && (name == GFX_MAPPER || admitted_gpu(name))
         || AICS.contains(&name)
         || ATC_PHY_LAYOUTS.iter().any(|&(layout, _)| layout == name)
         || SOCS
@@ -2239,20 +2239,33 @@ fn pmp_controller(
     }))
 }
 
-/// The `sgx` GPU's compatible and its firmware mapper's.
-pub const SGX: &str = "gpu,t8112";
+/// The GPU's firmware mapper's compatible.
 pub const GFX_MAPPER: &str = "iommu-mapper,gfx";
 
+/// Whether `compatible` names an `sgx` GPU whose whole interface is modeled
+/// (`agx::generation`, every SoC 26A434 supports; only admitted ones stay
+/// visible).
+pub fn admitted_gpu(compatible: &str) -> bool {
+    agx::generation::by_compatible(compatible).is_some_and(|gpu| gpu.admitted().is_ok())
+}
+
 /// The AGX GPU's DT placement: the `gfx-asc` wrapper (`reg[0]`) and its four
-/// mailbox interrupts, and the `sgx` register block (`reg[0]`; `reg[1]` lies
-/// inside it). The firmware reaches memory through the UAT the `sgx` MMU
-/// configuration roots, which `gfx-asc`'s `iommu-parent` (`mapper-gfx-asc`,
-/// `AGXArmFirmwareMapper`) names; no DART stream is involved.
+/// mailbox interrupts, and the `sgx` register banks. The firmware reaches
+/// memory through the UAT the `sgx` MMU configuration roots, which
+/// `gfx-asc`'s `iommu-parent` (`mapper-gfx-asc`, `AGXArmFirmwareMapper`)
+/// names; no DART stream is involved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GfxController {
+    /// The census entry the `sgx` node's `compatible` names.
+    pub gpu: &'static agx::generation::Gpu,
     pub wrapper: (u64, u64),
     pub interrupts: [u16; 4],
-    pub sgx: (u64, u64),
+    /// The `sgx` banks as `(physical base, bytes, register offset)`. Register
+    /// offsets are relative to `reg[0]`'s base, as `readGFXReg32` takes them:
+    /// `reg[0]` is the first bank, and `reg[1]` another unless it lies inside
+    /// `reg[0]` (T8112). On the Pro/Max SoCs `reg[0]` is 1 MiB and the
+    /// registers lie in `reg[1]` (docs/research/agx.md §6).
+    pub sgx: Vec<(u64, u64, u64)>,
     /// The GPU's TTBAT as the boot stage publishes it (`gptbat-ready`,
     /// `ttbat-phys-addr-base` in 16 KiB pages; the loader sets it to
     /// `gpu-region-base`): the MMU is handed off rooted there
@@ -2263,6 +2276,22 @@ pub struct GfxController {
     pub shared_l2: u64,
 }
 
+/// The `sgx` banks of [`GfxController::sgx`] from `reg[0]` and `reg[1]`
+/// (physical base, bytes).
+fn sgx_banks(block: (u64, u64), info: (u64, u64)) -> Result<Vec<(u64, u64, u64)>, &'static str> {
+    if info.0 < block.0 {
+        return Err("sgx reg[1] lies below reg[0]");
+    }
+    let mut banks = vec![(block.0, block.1, 0)];
+    if info.0 + info.1 > block.0 + block.1 {
+        if info.0 < block.0 + block.1 {
+            return Err("sgx reg[1] straddles the end of reg[0]");
+        }
+        banks.push((info.0, info.1, info.0 - block.0));
+    }
+    Ok(banks)
+}
+
 fn gfx_controller(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
@@ -2270,12 +2299,19 @@ fn gfx_controller(
     let asc = io
         .child("gfx-asc")
         .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"GFX\0".as_slice()));
-    let sgx = io.child("sgx").filter(|n| n.compatible(SGX));
-    let (asc, sgx) = match (asc, sgx) {
+    let sgx = io.child("sgx").and_then(|n| {
+        agx::generation::GPUS
+            .iter()
+            .find(|gpu| n.compatible(gpu.compatible))
+            .map(|gpu| (n, gpu))
+    });
+    let (asc, (sgx, gpu)) = match (asc, sgx) {
         (None, None) => return Ok(None),
         (Some(asc), Some(sgx)) => (asc, sgx),
         _ => return Err("the GFX coprocessor and the sgx GPU must be visible together".into()),
     };
+    gpu.admitted()
+        .map_err(|reason| format!("{} is not modeled: {reason}", gpu.compatible))?;
     let nub = asc
         .child("iop-gfx-nub")
         .filter(|nub| nub.compatible(RTBUDDY))
@@ -2291,11 +2327,10 @@ fn gfx_controller(
         Ok::<_, String>((physical, bytes))
     };
     let wrapper = place(&asc, 0, asc::WRAPPER_BYTES, "gfx-asc wrapper")?;
-    let block = place(&sgx, 0, agx::sgx::BYTES, "sgx register")?;
+    let block = place(&sgx, 0, 1, "sgx register")?;
     let info = place(&sgx, 1, 1, "sgx info")?;
-    if info.0 < block.0 || info.0 + info.1 > block.0 + block.1 {
-        return Err("sgx reg[1] lies outside reg[0]".into());
-    }
+    let banks = sgx_banks(block, info)?;
+    agx::sgx::covers(gpu.family, &banks)?;
     let irqs = asc
         .cells32("interrupts")
         .ok_or("gfx-asc has no interrupts")?;
@@ -2326,9 +2361,10 @@ fn gfx_controller(
         _ => return Err("sgx gfx-shared-l2-region is not one nonzero 16 KiB page".into()),
     };
     Ok(Some(GfxController {
+        gpu,
         wrapper,
         interrupts: [irq(0)?, irq(1)?, irq(2)?, irq(3)?],
-        sgx: (block.0, agx::sgx::BYTES),
+        sgx: banks,
         ttbat,
         shared_l2,
     }))
@@ -5056,7 +5092,11 @@ mod tests {
             model_children(ASC, gfx_role).len(),
             usize::from(GPU_ADMITTED)
         );
-        assert_eq!(models(SGX, |_| None), GPU_ADMITTED);
+        assert_eq!(models("gpu,t8112", |_| None), GPU_ADMITTED);
+        // A GPU whose family the firmware model does not implement stays
+        // hidden.
+        assert!(!models("gpu,t8103", |_| None));
+        assert!(!models("gpu,t6041", |_| None));
         assert_eq!(models(GFX_MAPPER, |_| None), GPU_ADMITTED);
         assert!(!models(ASC, |key| (key == "role").then_some(b"GFX2\0".as_slice())));
         assert!(models(SEP, |key| (key == "role").then_some(b"SEP\0".as_slice())));
@@ -5097,7 +5137,7 @@ mod tests {
             if asc_visible {
                 asc.push(("compatible", &asc_compatible));
             }
-            let (sgx_name, sgx_compatible) = (z("sgx"), z(SGX));
+            let (sgx_name, sgx_compatible) = (z("sgx"), z("gpu,t8112"));
             let sgx_reg = pairs(&[(0x400_0000, 0x400_0000), (0x4d0_0000, 0x2_0000)]);
             let ttbat_page = cells(&[0x20_0011]);
             let l2_base = 0x8_0008_8000u64.to_le_bytes();
@@ -5129,9 +5169,10 @@ mod tests {
         assert_eq!(
             placed(true, true).unwrap(),
             Some(GfxController {
+                gpu: agx::generation::by_compatible("gpu,t8112").unwrap(),
                 wrapper: (0x2_0640_0000, 0x6c000),
                 interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
-                sgx: (0x2_0400_0000, 0x400_0000),
+                sgx: vec![(0x2_0400_0000, 0x400_0000, 0)],
                 ttbat: 0x8_0004_4000,
                 shared_l2: 0x8_0008_8000,
             })
@@ -5139,6 +5180,32 @@ mod tests {
         assert_eq!(placed(false, false).unwrap(), None);
         assert!(placed(true, false).is_err());
         assert!(placed(false, true).is_err());
+    }
+
+    /// The census `sgx` layouts: T8112's `reg[1]` inside `reg[0]`, the
+    /// T6000's 1 MiB `reg[0]` with the registers in `reg[1]`, and the
+    /// T6020's longer `reg[1]` that holds the G14X core masks.
+    #[test]
+    fn sgx_banks_place_the_registers_at_their_offsets_from_reg0() {
+        use agx::generation::{G13X, G14G, G14X};
+        let t8112 = sgx_banks((0x2_0400_0000, 0x400_0000), (0x2_04d0_0000, 0x2_0000)).unwrap();
+        assert_eq!(t8112, [(0x2_0400_0000, 0x400_0000, 0)]);
+        assert_eq!(agx::sgx::covers(&G14G, &t8112), Ok(()));
+        let t6000 = sgx_banks((0x2_0400_0000, 0x10_0000), (0x2_04d0_0000, 0x2_0000)).unwrap();
+        assert_eq!(
+            t6000,
+            [
+                (0x2_0400_0000, 0x10_0000, 0),
+                (0x2_04d0_0000, 0x2_0000, 0xd0_0000)
+            ]
+        );
+        assert_eq!(agx::sgx::covers(&G13X, &t6000), Ok(()));
+        // The G14X core masks at 0xe01500 need T6020's 0x16c000-byte bank.
+        assert!(agx::sgx::covers(&G14X, &t6000).is_err());
+        let t6020 = sgx_banks((0x2_0400_0000, 0x10_0000), (0x2_04d0_0000, 0x16_c000)).unwrap();
+        assert_eq!(agx::sgx::covers(&G14X, &t6020), Ok(()));
+        assert!(sgx_banks((0x2_0400_0000, 0x10_0000), (0x2_0000_0000, 0x10)).is_err());
+        assert!(sgx_banks((0x2_0400_0000, 0x10_0000), (0x2_040f_0000, 0x2_0000)).is_err());
     }
 
     /// The J473AP SMC subtree: its wrapper and watchdog banks, the nub's

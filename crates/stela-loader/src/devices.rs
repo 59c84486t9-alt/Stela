@@ -299,7 +299,12 @@ fn hide_unprovided_buttons(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
 /// which the running firmware never walks.
 fn publish_gpu_ttbat(tree: &mut DeviceTree, notes: &mut Vec<String>) {
     let mut gpus = Vec::new();
-    visible_paths(&tree.root, "", &|node| named(node, soc::SGX), &mut gpus);
+    visible_paths(
+        &tree.root,
+        "",
+        &|node| compatibles(node).any(soc::admitted_gpu),
+        &mut gpus,
+    );
     for path in gpus {
         let node = tree.node_mut(&path).expect("visited path");
         if node.property(GPTBAT_READY).is_some() {
@@ -618,7 +623,7 @@ mod tests {
     #[test]
     fn a_visible_gpu_gets_the_handed_off_ttbat_published() {
         let gpu = |base: u64| {
-            let mut sgx = node("sgx", Some(soc::SGX.as_bytes()), vec![]);
+            let mut sgx = node("sgx", Some(b"gpu,t8112".as_slice()), vec![]);
             sgx.set_property(GPU_REGION_BASE, base.to_le_bytes().to_vec())
                 .unwrap();
             DeviceTree {

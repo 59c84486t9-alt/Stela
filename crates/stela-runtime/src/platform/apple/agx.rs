@@ -1,10 +1,13 @@
-//! The Apple AGX G14G GPU (`sgx`, `gfx-asc`) of the T8112, modeled as a native
-//! coprocessor at its AP-facing firmware protocol plus a GPU execution engine.
-//! Apple's `armfw_g14g` is not executed. The chosen route, the full 26A434
-//! interface inventory and the Known/Inferred/Unknown status are in
-//! docs/research/agx.md.
+//! The Apple AGX GPUs (`sgx`, `gfx-asc`), modeled as a native coprocessor at
+//! their AP-facing firmware protocol plus a GPU execution engine. Apple's GFX
+//! firmware is not executed. The chosen route, the full 26A434 interface
+//! inventory and the Known/Inferred/Unknown status are in
+//! docs/research/agx.md; [`generation`] names every SoC's GPU and which
+//! families the model implements (G14G today).
 //!
 //! Layers, each its own submodule:
+//! - [`generation`]: the census of every 26A434 GPU (compatible, kext,
+//!   firmware, identity, MMU layout, initdata magic) and admission.
 //! - [`firmware`]: the GFX RTKit application endpoints (0x20 message, 0x21
 //!   doorbell) and the firmware-protocol state (initdata pointer, work and
 //!   firmware-control doorbells).
@@ -45,6 +48,7 @@ pub mod event;
 pub mod exec;
 pub mod firmware;
 pub mod format;
+pub mod generation;
 pub mod initdata;
 pub mod isa;
 pub mod observe;

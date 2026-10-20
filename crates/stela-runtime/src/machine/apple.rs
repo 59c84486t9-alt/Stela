@@ -12,7 +12,7 @@ use crate::platform::apple::{
     aes::{self, Aes},
     agx::{
         firmware::Coprocessor as GfxCoprocessor,
-        sgx::{self, Sgx},
+        sgx::Sgx,
         uat::{self, Agent},
     },
     aic::{Aic2, Aic2Config},
@@ -1011,17 +1011,18 @@ impl AppleDevices {
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
             .map_err(|e| format!("GFX ASC placement: {e:?}"))?;
-        // The 64 MiB `sgx` window spans the `gfx-asc` wrapper and a PMGR
-        // fabric bridge; each physical byte has one owner, so the block owns
+        // T8112's 64 MiB `sgx` window spans the `gfx-asc` wrapper and a PMGR
+        // fabric bridge; each physical byte has one owner, so each bank owns
         // only what the smaller banks placed before it leave.
         let block = self.bus.add(Box::new(
-            Sgx::handed_off(sgx::T8112, placement.ttbat, placement.shared_l2)
+            Sgx::handed_off(placement.gpu, placement.ttbat, placement.shared_l2)
                 .map_err(String::from)?,
         ));
-        let (base, bytes) = placement.sgx;
-        self.bus
-            .map_gaps(block, base, bytes, 0)
-            .map_err(|e| format!("sgx placement: {e:?}"))?;
+        for &(base, bytes, offset) in &placement.sgx {
+            self.bus
+                .map_gaps(block, base, bytes, offset)
+                .map_err(|e| format!("sgx placement: {e:?}"))?;
+        }
         self.gfx_masters.push((asc, block));
         Ok(())
     }
@@ -2703,15 +2704,16 @@ mod tests {
     #[test]
     fn gfx_firmware_reads_its_initdata_through_the_uat_the_sgx_mmu_roots() {
         use crate::machine::soc::GfxController;
-        use crate::platform::apple::agx::{firmware, uat as table};
+        use crate::platform::apple::agx::{firmware, generation, uat as table};
         use crate::platform::dma::tests::Ram;
         const WRAPPER: u64 = 0x2_0640_0000;
         const SGX: u64 = 0x2_0400_0000;
         const RAM: u64 = 0x8_0000_0000;
         let placement = GfxController {
+            gpu: generation::by_compatible("gpu,t8112").unwrap(),
             wrapper: (WRAPPER, 0x6c000),
             interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
-            sgx: (SGX, sgx::BYTES),
+            sgx: vec![(SGX, 0x400_0000, 0)],
             ttbat: RAM,
             shared_l2: RAM + 0x8000,
         };

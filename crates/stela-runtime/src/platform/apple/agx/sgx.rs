@@ -1,11 +1,15 @@
-//! The `sgx` register block (`gpu,t8112`, ADT `reg[0]` `0x2_0400_0000` +
-//! 64 MiB; `reg[1]` `0x2_04d0_0000` + 128 KiB lies inside it): the registers
-//! the AP touches directly. Everything else the GPU has is driven by the GFX
-//! firmware, which Stela models natively, so every other offset refuses.
+//! The `sgx` register block: the registers the AP touches directly. Offsets
+//! are relative to the node's `reg[0]` base, as `readGFXReg32` takes them;
+//! on T8112 `reg[0]` (`0x2_0400_0000` + 64 MiB) spans them all, while on the
+//! Pro/Max SoCs `reg[0]` is 1 MiB and they lie in `reg[1]`
+//! (`0x2_04d0_0000`.., docs/research/agx.md §6). Everything else the GPU
+//! has is driven by the GFX firmware, which Stela models natively, so every
+//! other offset refuses.
 //!
 //! Known (26A434 `AGXG14G`; every AP access goes through
 //! `AGXAccelerator::readGFXReg32` 0x1b7f868 / `writeGFXReg32` 0x1b80ce0,
-//! whose callers are listed in docs/research/agx.md §4):
+//! whose callers are listed in docs/research/agx.md §4; the other families'
+//! readings are in §6 and [`generation`]):
 //! - `AGXAcceleratorG14::readChipInfo` (0x1b62f88) reads the identification
 //!   words 0xd04000, 0xd04010, 0xd04014, 0xd04018 and 0xd0401c and the core
 //!   mask at 0xd01500. It requires generation 5 (bits 31:24 of 0xd04000),
@@ -19,7 +23,7 @@
 //!   0xd0800c, 0xd08010, 0xd0801c..0xd08028, 1 to 0xd08008, 0x3ff to 0xd08004
 //!   and finally 1 to 0xd08000, reading each back.
 //!   `invalidateGPUTTBACache(a, b)` (0x1b67788) writes `a << 8 | b` to 0xd08030
-//!   and reads it back.
+//!   and reads it back. The family's [`Mmu`] gives these per kext.
 //! - `G14::AGXFenderCommon` reads the GPC performance state from 0xd01000
 //!   bits 3:0 (`getGPCPerformanceState` 0x1b64b0c), sets host-interrupt
 //!   enables 0xd01010 bits 0..2 by type (`enableGPCHostInterrupts`
@@ -28,11 +32,9 @@
 //!   `AGXArmFenderChinook::disable/enableDynamicFenderGating` (0x1b643cc,
 //!   0x1b644c0) set 0xd06030 bit 2, or clear bits 2:1.
 //!
-//! Public (Asahi `regs.rs`, `hw/t8112.rs` and m1n1 `agx/initdata.py`, pinned
-//! in docs/research/agx.md): T8112 is G14 generation 5, variant G (2),
-//! revision B0 (0x10), one cluster of 10 cores, 10 fragment units, 4 GPs.
-//!
 //! Model decisions:
+//! - The GPU must be admitted ([`generation::Gpu::admitted`]): its identity
+//!   comes from the census, its MMU and core-mask registers from its family.
 //! - Identification subfields no source names (0xd04010 bits 31:16, 0xd04014
 //!   bits 15:0 and 31:24, 0xd04018, 0xd0401c outside bits 19:12) read as zero.
 //!   The kext multiplies some of them into its core configuration
@@ -50,23 +52,21 @@
 //!   from `gpu-region-base`. 0xd08000 then reads nonzero and `setupMMUConfig`
 //!   returns at once.
 //! - The model has one performance state (0), no GPC power transitions and
-//!   so no GPC host interrupts; none of the five `sgx` interrupt lines is
-//!   raised. Enables and dynamic gating are held as written.
+//!   so no GPC host interrupts; none of the `sgx` interrupt lines is raised.
+//!   Enables and dynamic gating are held as written.
 use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::generation::{Family, Gpu, MMU_ENABLE, Mmu};
 use super::uat::{self, Uat};
+use alloc::vec;
+use alloc::vec::Vec;
 
 const NAME: &str = "agx-sgx";
-
-/// The block's span (ADT `reg[0]`).
-pub const BYTES: u64 = 0x400_0000;
 
 const GPC_PERFORMANCE_STATE: u64 = 0xd0_1000;
 const GPC_HOST_INTERRUPT_ENABLE: u64 = 0xd0_1010;
 const GPC_HOST_INTERRUPT_STATUS: u64 = 0xd0_1014;
 /// Host-interrupt types 0..2 (`GPCHostInterruptType`).
 const GPC_HOST_INTERRUPTS: u32 = 0b111;
-const CORE_MASK_0: u64 = 0xd0_1500;
-const CORE_MASK_1: u64 = 0xd0_1514;
 
 const ID_VERSION: u64 = 0xd0_4000;
 const ID_COUNTS_1: u64 = 0xd0_4010;
@@ -78,27 +78,41 @@ const GATING_CONTROL: u64 = 0xd0_6030;
 /// The dynamic-gating bits the Fender writes (bit 2 disables).
 const GATING_BITS: u32 = 0b110;
 
-const MMU_ENABLE: u64 = 0xd0_8000;
-const MMU_TTBAT: u64 = 0xd0_802c;
-const MMU_TTBA_INVALIDATE: u64 = 0xd0_8030;
-/// The TTBAT page number field (`ubfx x2, x0, #14, #26`).
-const TTBAT_PAGE_BITS: u32 = 26;
+/// Check that `banks` (`(physical base, bytes, register offset)`) cover
+/// every register the model serves for `family`.
+pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static str> {
+    let fixed = [
+        GPC_PERFORMANCE_STATE,
+        GPC_HOST_INTERRUPT_ENABLE,
+        GPC_HOST_INTERRUPT_STATUS,
+        ID_VERSION,
+        ID_COUNTS_1,
+        ID_COUNTS_2,
+        ID_UNK18,
+        ID_CLUSTERS,
+        GATING_CONTROL,
+        MMU_ENABLE,
+        family.mmu.ttbat,
+        family.mmu.invalidate,
+    ];
+    let mut registers = fixed
+        .into_iter()
+        .chain(family.core_masks.iter().copied())
+        .chain(family.mmu.configuration.iter().map(|&(offset, _)| offset));
+    let covered = |offset: u64| {
+        banks
+            .iter()
+            .any(|&(_, bytes, at)| (at..at + bytes).contains(&offset))
+    };
+    if registers.all(covered) {
+        Ok(())
+    } else {
+        Err("the sgx banks leave a modeled register unmapped")
+    }
+}
 
-/// The fixed MMU configuration words and the only value each accepts.
-const MMU_CONFIGURATION: [(u64, u32); 10] = [
-    (0xd0_8004, 0x3ff),
-    (0xd0_8008, 1),
-    (0xd0_800c, 0),
-    (0xd0_8010, 0),
-    (0xd0_8014, 0x80d8),
-    (0xd0_8018, 0x80d8),
-    (0xd0_801c, 0),
-    (0xd0_8020, 0),
-    (0xd0_8024, 0),
-    (0xd0_8028, 0),
-];
-
-/// The T8112 GPU's identity (see the module documentation).
+/// A GPU's identification registers ([`super::generation`] states each
+/// SoC's values and their sources).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
     pub generation: u8,
@@ -108,21 +122,10 @@ pub struct Identity {
     pub cores: u8,
     pub frags: u8,
     pub gps: u8,
-    /// Enabled cores, cluster 0 first, packed `cores` bits per cluster.
-    pub core_mask: [u32; 2],
+    /// Enabled cores, cluster 0 first, packed `cores` bits per cluster, one
+    /// word per core-mask register of the family.
+    pub core_mask: [u32; 3],
 }
-
-/// T8112: G14G B0, one cluster of 10 cores.
-pub const T8112: Identity = Identity {
-    generation: 5,
-    variant: 2,
-    revision: 0x10,
-    clusters: 1,
-    cores: 10,
-    frags: 10,
-    gps: 4,
-    core_mask: [0x3ff, 0],
-};
 
 impl Identity {
     fn version(&self) -> u32 {
@@ -144,47 +147,52 @@ impl Identity {
 /// The `sgx` registers and the UAT they configure.
 pub struct Sgx {
     identity: Identity,
+    family: &'static Family,
     interrupt_enable: u32,
     gating: u32,
     mmu_enabled: bool,
     ttbat_page: u32,
-    configuration: [u32; MMU_CONFIGURATION.len()],
+    configuration: Vec<u32>,
     last_invalidate: u32,
     uat: Uat,
 }
 
 impl Sgx {
-    pub fn new(identity: Identity) -> Self {
-        Self {
+    /// The registers of `gpu`, which must be admitted.
+    pub fn new(gpu: &'static Gpu) -> Result<Self, &'static str> {
+        let identity = gpu.admitted()?;
+        Ok(Self {
             identity,
+            family: gpu.family,
             interrupt_enable: 0,
             gating: 0,
             mmu_enabled: false,
             ttbat_page: 0,
-            configuration: [0; MMU_CONFIGURATION.len()],
+            configuration: vec![0; gpu.family.mmu.configuration.len()],
             last_invalidate: 0,
             uat: Uat::default(),
-        }
+        })
     }
 
     /// The GPU as the boot stage hands it off: the MMU configured as
     /// `setupMMUConfig` would and enabled at the 16 KiB-aligned `ttbat`,
     /// with the shared TTBR1 window resolving from the page-directory page
     /// `shared_l2` (`gfx-shared-l2-region`, [`uat::SHARED_INDEX`]).
-    pub fn handed_off(
-        identity: Identity,
-        ttbat: u64,
-        shared_l2: u64,
-    ) -> Result<Self, &'static str> {
+    pub fn handed_off(gpu: &'static Gpu, ttbat: u64, shared_l2: u64) -> Result<Self, &'static str> {
+        let mut sgx = Self::new(gpu)?;
         let page = ttbat >> uat::PAGE_SHIFT;
-        if ttbat == 0 || page >> TTBAT_PAGE_BITS != 0 {
-            return Err("GPU TTBAT outside the MMU's 26-bit page field");
+        if ttbat == 0 || page >> sgx.mmu().ttbat_page_bits != 0 {
+            return Err("GPU TTBAT outside the MMU's page field");
         }
-        let mut sgx = Self::new(identity);
         sgx.uat.configure(ttbat)?;
         sgx.uat.share_kernel_window(shared_l2)?;
         sgx.ttbat_page = page as u32;
-        sgx.configuration = MMU_CONFIGURATION.map(|(_, value)| value);
+        sgx.configuration = sgx
+            .mmu()
+            .configuration
+            .iter()
+            .map(|&(_, value)| value)
+            .collect();
         sgx.mmu_enabled = true;
         Ok(sgx)
     }
@@ -194,22 +202,39 @@ impl Sgx {
         &mut self.uat
     }
 
-    fn configuration_slot(offset: u64) -> Option<(usize, u32)> {
-        MMU_CONFIGURATION
+    fn mmu(&self) -> &'static Mmu {
+        &self.family.mmu
+    }
+
+    fn configuration_slot(&self, offset: u64) -> Option<(usize, u32)> {
+        self.mmu()
+            .configuration
             .iter()
             .enumerate()
             .find(|(_, (register, _))| *register == offset)
             .map(|(slot, &(_, value))| (slot, value))
     }
 
+    fn core_mask_slot(&self, offset: u64) -> Option<usize> {
+        self.family
+            .core_masks
+            .iter()
+            .position(|&register| register == offset)
+    }
+
     fn read32(&self, offset: u64) -> Result<u32, &'static str> {
         let id = &self.identity;
+        let mmu = self.mmu();
+        if let Some(slot) = self.core_mask_slot(offset) {
+            return Ok(id.core_mask[slot]);
+        }
+        if let Some((slot, _)) = self.configuration_slot(offset) {
+            return Ok(self.configuration[slot]);
+        }
         Ok(match offset {
             GPC_PERFORMANCE_STATE => 0,
             GPC_HOST_INTERRUPT_ENABLE => self.interrupt_enable,
             GPC_HOST_INTERRUPT_STATUS => 0,
-            CORE_MASK_0 => id.core_mask[0],
-            CORE_MASK_1 => id.core_mask[1],
             ID_VERSION => id.version(),
             ID_COUNTS_1 => id.counts_1(),
             ID_COUNTS_2 => id.counts_2(),
@@ -217,16 +242,17 @@ impl Sgx {
             ID_CLUSTERS => id.clusters(),
             GATING_CONTROL => self.gating,
             MMU_ENABLE => u32::from(self.mmu_enabled),
-            MMU_TTBAT => self.ttbat_page,
-            MMU_TTBA_INVALIDATE => self.last_invalidate,
-            _ => match Self::configuration_slot(offset) {
-                Some((slot, _)) => self.configuration[slot],
-                None => return Err("sgx register is not modeled"),
-            },
+            _ if offset == mmu.ttbat => self.ttbat_page,
+            _ if offset == mmu.invalidate => self.last_invalidate,
+            _ => return Err("sgx register is not modeled"),
         })
     }
 
     fn write32(&mut self, offset: u64, value: u32) -> Result<(), &'static str> {
+        let mmu = self.mmu();
+        let mmu_register = offset == MMU_ENABLE
+            || offset == mmu.ttbat
+            || self.configuration_slot(offset).is_some();
         match offset {
             GPC_HOST_INTERRUPT_ENABLE => {
                 if value & !GPC_HOST_INTERRUPTS != 0 {
@@ -246,13 +272,13 @@ impl Sgx {
                 }
                 self.gating = value;
             }
-            MMU_TTBA_INVALIDATE => self.last_invalidate = value,
-            _ if self.mmu_enabled && (MMU_ENABLE..MMU_TTBA_INVALIDATE).contains(&offset) => {
+            _ if offset == mmu.invalidate => self.last_invalidate = value,
+            _ if self.mmu_enabled && mmu_register => {
                 return Err("reconfiguring an enabled GPU MMU is not modeled");
             }
-            MMU_TTBAT => {
-                if value >> TTBAT_PAGE_BITS != 0 {
-                    return Err("TTBAT page number above 26 bits");
+            _ if offset == mmu.ttbat => {
+                if value >> mmu.ttbat_page_bits != 0 {
+                    return Err("TTBAT page number wider than the MMU's field");
                 }
                 self.ttbat_page = value;
             }
@@ -260,10 +286,11 @@ impl Sgx {
                 0 => {}
                 1 => {
                     let ttbat = u64::from(self.ttbat_page) << uat::PAGE_SHIFT;
-                    let configured = MMU_CONFIGURATION
+                    let configured = mmu
+                        .configuration
                         .iter()
-                        .zip(self.configuration)
-                        .all(|(&(_, wanted), held)| wanted == held);
+                        .zip(&self.configuration)
+                        .all(|(&(_, wanted), &held)| wanted == held);
                     if !configured || ttbat == 0 {
                         return Err("GPU MMU enabled before its configuration is written");
                     }
@@ -272,7 +299,7 @@ impl Sgx {
                 }
                 _ => return Err("GPU MMU enable value is not modeled"),
             },
-            _ => match Self::configuration_slot(offset) {
+            _ => match self.configuration_slot(offset) {
                 Some((slot, wanted)) if value == wanted => self.configuration[slot] = value,
                 Some(_) => return Err("GPU MMU configuration value is not modeled"),
                 None => return Err("sgx register is not modeled"),
@@ -324,8 +351,18 @@ impl MmioDevice for Sgx {
 
 #[cfg(test)]
 mod tests {
+    use super::super::generation::{self, GPUS};
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+
+    const MMU_TTBAT: u64 = 0xd0_802c;
+    const MMU_TTBA_INVALIDATE: u64 = 0xd0_8030;
+    const CORE_MASK_0: u64 = 0xd0_1500;
+    const CORE_MASK_1: u64 = 0xd0_1514;
+
+    fn t8112() -> &'static Gpu {
+        generation::by_compatible("gpu,t8112").unwrap()
+    }
 
     fn read(sgx: &mut Sgx, offset: u64) -> Result<u64, MmioError> {
         let mut latch = InterruptLatch::new();
@@ -341,7 +378,7 @@ mod tests {
 
     #[test]
     fn identification_decodes_as_readchipinfo_reads_it() {
-        let mut sgx = Sgx::new(T8112);
+        let mut sgx = Sgx::new(t8112()).unwrap();
         let version = read(&mut sgx, ID_VERSION).unwrap();
         assert_eq!(version >> 24, 5);
         assert_eq!((version >> 16) & 0xff, 2);
@@ -353,12 +390,21 @@ mod tests {
         assert_eq!((read(&mut sgx, ID_CLUSTERS).unwrap() >> 12) & 0xff, 1);
         assert_eq!(read(&mut sgx, CORE_MASK_0).unwrap(), 0x3ff);
         assert_eq!(read(&mut sgx, CORE_MASK_1).unwrap(), 0);
-        // A word no AP code reads refuses, as do other widths.
+        // A word no AP code reads refuses, as do other widths and the
+        // core-mask words of another family.
         assert!(read(&mut sgx, 0xd0_4008).is_err());
+        assert!(read(&mut sgx, 0xe0_1500).is_err());
         assert!(read(&mut sgx, 0).is_err());
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         assert!(sgx.read(ID_VERSION, Width::Double, &mut access).is_err());
+    }
+
+    #[test]
+    fn a_gpu_whose_family_is_not_modeled_has_no_registers() {
+        for gpu in GPUS.iter().filter(|gpu| gpu.admitted().is_err()) {
+            assert!(Sgx::new(gpu).is_err(), "{}", gpu.compatible);
+        }
     }
 
     /// The register writes of `setupMMUConfig`, in its order.
@@ -385,7 +431,7 @@ mod tests {
 
     #[test]
     fn the_mmu_configuration_roots_the_uat_at_the_programmed_ttbat() {
-        let mut sgx = Sgx::new(T8112);
+        let mut sgx = Sgx::new(t8112()).unwrap();
         assert_eq!(sgx.uat().ttbat(), None);
         setup_mmu(&mut sgx, 0x8_1234_4000).unwrap();
         assert_eq!(read(&mut sgx, MMU_ENABLE).unwrap(), 1);
@@ -399,27 +445,27 @@ mod tests {
 
     #[test]
     fn the_boot_stage_hands_off_the_mmu_setup_would_have_configured() {
-        let mut configured = Sgx::new(T8112);
+        let mut configured = Sgx::new(t8112()).unwrap();
         setup_mmu(&mut configured, 0x8_0004_4000).unwrap();
-        let mut handed = Sgx::handed_off(T8112, 0x8_0004_4000, 0x8_0008_8000).unwrap();
+        let mut handed = Sgx::handed_off(t8112(), 0x8_0004_4000, 0x8_0008_8000).unwrap();
         for offset in [MMU_ENABLE, MMU_TTBAT]
             .into_iter()
-            .chain(MMU_CONFIGURATION.map(|(offset, _)| offset))
+            .chain(t8112().family.mmu.configuration.iter().map(|&(o, _)| o))
         {
             assert_eq!(read(&mut handed, offset), read(&mut configured, offset));
         }
         assert_eq!(handed.uat().ttbat(), Some(0x8_0004_4000));
         // setupMMUConfig then returns at once; a rewrite refuses.
         assert!(write(&mut handed, MMU_TTBAT, 0x1).is_err());
-        assert!(Sgx::handed_off(T8112, 0, 0x8_0008_8000).is_err());
-        assert!(Sgx::handed_off(T8112, 0x8_0004_4001, 0x8_0008_8000).is_err());
-        assert!(Sgx::handed_off(T8112, 1 << 40, 0x8_0008_8000).is_err());
-        assert!(Sgx::handed_off(T8112, 0x8_0004_4000, 0x8_0008_8001).is_err());
+        assert!(Sgx::handed_off(t8112(), 0, 0x8_0008_8000).is_err());
+        assert!(Sgx::handed_off(t8112(), 0x8_0004_4001, 0x8_0008_8000).is_err());
+        assert!(Sgx::handed_off(t8112(), 1 << 40, 0x8_0008_8000).is_err());
+        assert!(Sgx::handed_off(t8112(), 0x8_0004_4000, 0x8_0008_8001).is_err());
     }
 
     #[test]
     fn an_unknown_mmu_configuration_refuses() {
-        let mut sgx = Sgx::new(T8112);
+        let mut sgx = Sgx::new(t8112()).unwrap();
         assert!(write(&mut sgx, 0xd0_8014, 0x80d9).is_err());
         // Enabling before the configuration is written refuses.
         write(&mut sgx, MMU_TTBAT, 0x2_0000).unwrap();
@@ -429,7 +475,7 @@ mod tests {
 
     #[test]
     fn fender_controls_hold_their_bits_and_raise_nothing() {
-        let mut sgx = Sgx::new(T8112);
+        let mut sgx = Sgx::new(t8112()).unwrap();
         assert_eq!(read(&mut sgx, GPC_PERFORMANCE_STATE).unwrap(), 0);
         write(&mut sgx, GPC_HOST_INTERRUPT_ENABLE, 0b101).unwrap();
         assert_eq!(read(&mut sgx, GPC_HOST_INTERRUPT_ENABLE).unwrap(), 0b101);
