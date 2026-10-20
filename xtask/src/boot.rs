@@ -3,9 +3,7 @@
 //! The run puts the application on a FAT volume as the removable-media boot
 //! file, beside `\EFI\stela\stela.cfg` (the mount options) and
 //! `\EFI\stela\source.bin` (the unchanged ARM bytes), and boots it with QEMU's
-//! edk2 firmware. A boot manager such as OpenCore uses the same layout:
-//! `--opencore` boots a copy of an existing OpenCore EFI with the mount added
-//! by `stela efi install`, and picks its entry in the boot picker.
+//! edk2 firmware, as a PC's firmware boots the USB `stela setup` prepares.
 //!
 //! `--payload` runs install mode on a synthetic IPSW (no Apple bytes) split
 //! onto the boot volume: `verify` checks every Erase member,
@@ -27,10 +25,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
     process::{Command as Process, ExitCode, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 use stela_cli::efi;
@@ -52,8 +48,6 @@ const VVFAT_BYTES: u64 = 480 * 1024 * 1024;
 const MAX_LONG_TIMEOUT_SECONDS: f64 = 4.0 * 3600.0;
 const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
 const FIRMWARE_VARIABLES: &str = "edk2-i386-vars.fd";
-/// How often an OpenCore run presses Enter in the boot picker.
-const PICKER_KEY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The default ARM image: `movz x0, #0x1234; movz x1, #0x5678;
 /// add x2, x0, x1; b .`, run at EL1 with the MMU off up to the branch.
@@ -136,13 +130,13 @@ pub struct Run {
     memory: Option<String>,
     /// A kernel boot bundle directory (`stela boot prepare` output) to start
     /// on the system-mode engine; it is copied to `\EFI\stela\bundle`.
-    #[arg(long, conflicts_with_all = ["module", "opencore"])]
+    #[arg(long, conflicts_with = "module")]
     bundle: Option<PathBuf>,
     /// A GPT disk image whose APFS container holds an installed system's
     /// Preboot volume, attached over NVMe through a snapshot: the mount
     /// builds the boot bundle from it with its own storage drivers and
     /// starts it on the system-mode engine.
-    #[arg(long, conflicts_with_all = ["module", "opencore", "bundle", "append", "payload"])]
+    #[arg(long, conflicts_with_all = ["module", "bundle", "append", "payload"])]
     preboot_disk: Option<PathBuf>,
     /// A restore payload inventory (`stela image-manifest
     /// --payload-manifest`), placed at `\EFI\stela\payload.json` for the
@@ -162,7 +156,7 @@ pub struct Run {
     /// system-mode run is a boot study: it adds the mount's `--strict`, so
     /// the first unsupported operation stops the run
     /// (docs/design/runtime.md "Unsupported operations").
-    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
     graceful: bool,
     /// Use QEMU's directory-backed FAT16 for a bundle that fits its
     /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
@@ -190,7 +184,7 @@ pub struct Run {
     #[arg(long)]
     gdb: Option<u16>,
     /// Serve the QEMU monitor over telnet on this loopback port.
-    #[arg(long, conflicts_with = "opencore")]
+    #[arg(long)]
     monitor: Option<u16>,
     /// Advance QEMU's clocks by 2^SHIFT ns per executed x86 instruction
     /// (`-icount shift=SHIFT,sleep=off`) instead of host time, so that guest
@@ -198,35 +192,29 @@ pub struct Run {
     /// guest skips ahead to its next timer.
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=10))]
     icount: Option<u8>,
-    /// Boot through a copy of this OpenCore ESP (the directory holding
-    /// `EFI/OC`), without `EFI/Microsoft`, with the mount installed as a tool.
-    #[arg(long)]
-    opencore: Option<PathBuf>,
-    /// Disable this `UEFI.Drivers` path in the OpenCore copy; repeatable.
-    #[arg(long, requires = "opencore")]
-    disable_driver: Vec<String>,
     /// Attach a GPT disk image through virtio-blk, NVMe and AHCI, have the
     /// mount overwrite and read back one partition of each, and verify the
     /// mount's hashes and every byte of the images.
     #[arg(long)]
     storage_check: bool,
     /// Boot an existing USB disk image, such as one `stela setup` prepared,
-    /// through its own OpenCore; writes go to a temporary overlay.
+    /// from its removable-media boot loader; writes go to a temporary
+    /// overlay.
     #[arg(long, conflicts_with_all = [
-        "opencore", "payload", "module", "bundle", "append", "storage_check", "preboot_disk"
+        "payload", "module", "bundle", "append", "storage_check", "preboot_disk"
     ])]
     usb_image: Option<PathBuf>,
     /// Give a bundle's guest the native USB keyboard and pointer, fed by
     /// QEMU's virtio keyboard and tablet: adds both devices and the mount's
     /// `--input`.
-    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
     input: bool,
     /// Give the mount a host network adapter: a `virtio-net-pci`, which the
     /// mount drives after ExitBootServices for its own requests (`--tss`,
     /// `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
     /// peer (`boot/lan.rs`): DHCP, DNS and TCP relayed to the host, logged
     /// to `network.log`. QEMU needs no slirp.
-    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "usb_image", "payload"])]
     network: bool,
     /// Have the mount POST once to this `http://` URL over the host network
     /// at start and report the reply: adds `--network-check URL`.
@@ -235,7 +223,7 @@ pub struct Run {
     /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
     /// on a LAN peer of its own (logged to `guest-network.log`), which the
     /// mount bridges to the guest's CDC-ECM adapter: adds `--guest-network`.
-    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
     guest_network: bool,
     /// Attach a raw disk over NVMe, preserving writes, that the guest sees
     /// whole as a USB mass storage device behind its native hub; repeat for
@@ -245,12 +233,12 @@ pub struct Run {
     /// Feed the guest's keyboard and pointer from USB HID devices the mount
     /// drives itself: a `qemu-xhci` with `usb-kbd`, `usb-tablet` and
     /// `usb-mouse`, and the mount's `--input`.
-    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
     usb_input: bool,
     /// Give the mount its host network adapter as a USB CDC-ECM device on
     /// the `qemu-xhci` (`usb-net`), on a LAN peer of its own
     /// (`usb-network.log`), for `--tss` and `--network-check`.
-    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "usb_image", "payload"])]
     usb_network: bool,
     /// Attach a raw disk as a QEMU `usb-storage` device on the `qemu-xhci`,
     /// with serial `STELAUSBDISKn`, preserving writes; the mount drives it
@@ -258,7 +246,7 @@ pub struct Run {
     #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
     usb_disk: Vec<PathBuf>,
     /// Run install mode on a synthetic restore payload.
-    #[arg(long, value_enum, conflicts_with_all = ["opencore", "module", "append"])]
+    #[arg(long, value_enum, conflicts_with_all = ["module", "append"])]
     payload: Option<PayloadMode>,
 }
 
@@ -498,60 +486,36 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         }
     };
     let system = options.starts_with("--system");
-    match &arguments.opencore {
-        None if arguments.usb_image.is_some() => fs::create_dir_all(&output)?,
-        None => {
-            fs::create_dir_all(volume.join("EFI/BOOT"))?;
-            fs::create_dir_all(volume.join("EFI/stela"))?;
-            fs::copy(&image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
-            fs::write(&source, bytes)?;
-            fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
-            if let Some(bundle) = &arguments.bundle {
-                copy_bundle(bundle, &volume.join("EFI/stela/bundle"))?;
-            }
-            if let Some(manifest) = &arguments.restore_manifest {
-                fs::copy(manifest, volume.join("EFI/stela/payload.json"))
-                    .with_context(|| format!("restore manifest {}", manifest.display()))?;
-                // The block hashes the manifest names go beside it, so the
-                // restore host needs no scan of the payload.
-                let parsed = stela_runtime::payload::PayloadManifest::parse(&fs::read(manifest)?)
-                    .map_err(|error| anyhow::anyhow!("{}: {error}", manifest.display()))?;
-                if let Some(blocks) = &parsed.block_hashes {
-                    let from = manifest.with_file_name(&blocks.file);
-                    fs::copy(&from, volume.join("EFI/stela").join(&blocks.file))
-                        .with_context(|| format!("block hashes {}", from.display()))?;
-                }
-            }
+    if arguments.usb_image.is_some() {
+        fs::create_dir_all(&output)?;
+    } else {
+        fs::create_dir_all(volume.join("EFI/BOOT"))?;
+        fs::create_dir_all(volume.join("EFI/stela"))?;
+        fs::copy(&image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
+        fs::write(&source, bytes)?;
+        fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
+        if let Some(bundle) = &arguments.bundle {
+            copy_bundle(bundle, &volume.join("EFI/stela/bundle"))?;
         }
-        Some(esp) => {
-            ensure!(
-                esp.join("EFI/OC/config.plist").is_file(),
-                "{} has no EFI/OC/config.plist",
-                esp.display()
-            );
-            copy_efi(&esp.join("EFI"), &volume.join("EFI"), true)?;
-            disable_drivers(&volume, &arguments.disable_driver)?;
-            let module = output.join("source.bin");
-            fs::write(&module, bytes)?;
-            efi::install(&efi::Install {
-                esp: volume.clone(),
-                image: image.clone(),
-                source: Some(module),
-                options: Some(options.clone()),
-                ipsw: None,
-                model: "Mac14,3".into(),
-                payload_root: None,
-                payload_layout: efi::PayloadLayout::Split,
-                slice_bytes: stela_runtime::payload::MAX_SLICE_BYTES,
-                no_aea_keys: false,
-            })?;
+        if let Some(manifest) = &arguments.restore_manifest {
+            fs::copy(manifest, volume.join("EFI/stela/payload.json"))
+                .with_context(|| format!("restore manifest {}", manifest.display()))?;
+            // The block hashes the manifest names go beside it, so the
+            // restore host needs no scan of the payload.
+            let parsed = stela_runtime::payload::PayloadManifest::parse(&fs::read(manifest)?)
+                .map_err(|error| anyhow::anyhow!("{}: {error}", manifest.display()))?;
+            if let Some(blocks) = &parsed.block_hashes {
+                let from = manifest.with_file_name(&blocks.file);
+                fs::copy(&from, volume.join("EFI/stela").join(&blocks.file))
+                    .with_context(|| format!("block hashes {}", from.display()))?;
+            }
         }
     }
 
     // QEMU's directory volume is FAT16 and holds 516 MB; larger volumes,
     // such as a recovery bundle with its ramdisk, go into a FAT32 image.
-    let fat = match (&arguments.usb_image, &arguments.opencore) {
-        (None, None) if !arguments.directory_volume && directory_bytes(&volume)? > VVFAT_BYTES => {
+    let fat = match &arguments.usb_image {
+        None if !arguments.directory_volume && directory_bytes(&volume)? > VVFAT_BYTES => {
             Some(fat_image(&volume, &output)?)
         }
         _ => None,
@@ -561,13 +525,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let variables = output.join("variables.fd");
     fs::copy(firmware.join(FIRMWARE_VARIABLES), &variables)?;
     let serial = output.join("serial.txt");
-    let picker = arguments.opencore.is_some() || arguments.usb_image.is_some();
+    let usb = arguments.usb_image.is_some();
     let mut command = Process::new(&qemu);
-    // OpenCore's picker needs a keyboard and a display adapter, its HFS+
-    // driver uses instructions beyond the qemu64 model, and it halts when a
-    // configured log file cannot be written.
-    // System mode needs LA57, which `max` provides.
-    let (keyboard, cpu, access) = if picker {
+    // A USB's startup choices take a keyboard, and its setup writes the boot
+    // log. System mode needs LA57, which `max` provides.
+    let (keyboard, cpu, access) = if usb {
         ("on", "max", "readonly=off,file=fat:rw:")
     } else if system {
         ("off", "max", "readonly=on,file=fat:")
@@ -648,9 +610,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 _ => format!("nvme,drive=target,serial={TARGET_SERIAL},addr={TARGET_SLOT:#x}"),
             });
     }
-    // The boot picker, and a bundle's kernel through the mount's GOP, draw
-    // on a display.
-    if picker || bundle {
+    // A bundle's kernel draws on a display through the mount's GOP.
+    if bundle {
         command.args(["-device", "VGA"]);
     }
     if arguments.input {
@@ -745,7 +706,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Some(port) => command
             .arg("-monitor")
             .arg(format!("telnet:127.0.0.1:{port},server=on,wait=off")),
-        None if picker => command.args(["-monitor", "stdio"]),
         None => command.args(["-monitor", "none"]),
     };
     for (index, (path, serial)) in attached.iter().enumerate() {
@@ -774,26 +734,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let mut child = command
         .stdout(fs::File::create(output.join("stdout.txt"))?)
         .stderr(fs::File::create(output.join("stderr.txt"))?)
-        .stdin(if picker {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .spawn()?;
-    // OpenCore never boots a tool on its own. The picker gives the host no
-    // signal that it is up, so Enter goes in until QEMU exits; it continues
-    // edk2's boot and then starts the first entry, Stela's.
-    if let Some(mut monitor) = child.stdin.take() {
-        thread::spawn(move || {
-            while monitor
-                .write_all(b"sendkey ret\n")
-                .and_then(|()| monitor.flush())
-                .is_ok()
-            {
-                thread::sleep(PICKER_KEY_INTERVAL);
-            }
-        });
-    }
     // A paused debugging session has no deadline.
     let limit = match arguments.gdb {
         Some(_) => Duration::MAX,
@@ -858,7 +800,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "source": source.exists().then(|| binding(&source)).transpose()?,
         "usb_image": arguments.usb_image,
         "options": options,
-        "opencore": arguments.opencore,
         "scenario": verification,
         "bundle": arguments.bundle,
         "preboot_disk": arguments.preboot_disk,
@@ -1080,61 +1021,6 @@ fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
     Ok(output.join("volume.cdr"))
 }
 
-/// Copy an EFI directory tree; at its top, leave out Windows' boot files.
-fn copy_efi(from: &Path, to: &Path, top: bool) -> Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if top && name.eq_ignore_ascii_case("Microsoft") {
-            continue;
-        }
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_efi(&entry.path(), &to.join(&name), false)?;
-        } else if kind.is_file() {
-            fs::copy(entry.path(), to.join(&name))?;
-        } else {
-            bail!(
-                "{} is neither a file nor a directory",
-                entry.path().display()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Turn off the named `UEFI.Drivers` entries in the run's OpenCore copy.
-fn disable_drivers(volume: &Path, paths: &[String]) -> Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    let config = volume.join("EFI/OC/config.plist");
-    let mut root = plist::Value::from_file(&config)?;
-    let drivers = root
-        .as_dictionary_mut()
-        .and_then(|root| root.get_mut("UEFI"))
-        .and_then(plist::Value::as_dictionary_mut)
-        .and_then(|uefi| uefi.get_mut("Drivers"))
-        .and_then(plist::Value::as_array_mut)
-        .context("config.plist has no UEFI.Drivers array")?;
-    for path in paths {
-        let driver = drivers
-            .iter_mut()
-            .filter_map(plist::Value::as_dictionary_mut)
-            .find(|driver| {
-                driver
-                    .get("Path")
-                    .and_then(plist::Value::as_string)
-                    .is_some_and(|name| name.eq_ignore_ascii_case(path))
-            })
-            .with_context(|| format!("config.plist has no driver {path}"))?;
-        driver.insert("Enabled".into(), false.into());
-    }
-    root.to_file_xml(&config)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,8 +1060,6 @@ mod tests {
             vec!["--directory-volume"],
             vec!["--network-check", "http://example.test/"],
             vec!["--usb-storage-disk", "/tmp/disk", "--storage-check"],
-            vec!["--guest-network", "--opencore", "/tmp/oc"],
-            vec!["--graceful", "--opencore", "/tmp/oc"],
             vec!["--network", "--usb-network"],
             vec!["--usb-disk", "/tmp/disk", "--storage-check"],
             vec![
