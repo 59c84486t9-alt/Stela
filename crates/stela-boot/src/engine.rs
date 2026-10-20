@@ -61,6 +61,9 @@ const INSTALL_SOURCE_OPTION: &str = "--install-source";
 /// restore reads each block, instead of reading every member whole before
 /// StartRestore (`restore::store::Verify::OnRead`).
 pub const VERIFY_ON_READ_OPTION: &str = "--verify-on-read";
+/// Stop at the first unsupported device access instead of answering it as
+/// the SoC does (docs/design/runtime.md "Unsupported operations").
+pub const STRICT_OPTION: &str = "--strict";
 /// The install restores with the inventory's Update identity, over the
 /// installed system and keeping its data, instead of erasing the target.
 pub const UPDATE_RESTORE_OPTION: &str = "--update-restore";
@@ -159,6 +162,11 @@ struct Options {
     /// (`--agx-observe`): the command is logged and still refused by name,
     /// never completed. A diagnostic mode.
     agx_observe: bool,
+    /// Stop at the first unsupported device access (`--strict`) instead of
+    /// answering it as the SoC does and reporting it
+    /// (docs/design/runtime.md "Unsupported operations"). Boot studies
+    /// (`--restore-study`) are strict whatever this says.
+    strict: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
     breakpoints: Vec<u64>,
@@ -255,6 +263,7 @@ impl Options {
             guest_network: false,
             sep_observe: false,
             agx_observe: false,
+            strict: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             watches: Vec::new(),
@@ -377,6 +386,10 @@ impl Options {
             }
             if name == "--agx-observe" {
                 options.agx_observe = true;
+                continue;
+            }
+            if name == STRICT_OPTION {
+                options.strict = true;
                 continue;
             }
             if name == "--storage" {
@@ -1639,6 +1652,16 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         machine.begin_survey();
     }
     machine.set_idle_skip(options.idle_skip);
+    let strict = options.strict || options.restore;
+    machine.set_graceful(!strict);
+    output::arguments(format_args!(
+        "UNSUPPORTED OPERATIONS {}\n",
+        if strict {
+            "strict: the first one stops the machine"
+        } else {
+            "graceful: each takes the SoC's error response and is reported once"
+        }
+    ));
     if options.tss {
         output::arguments(format_args!(
             "TSS OPT-IN: the restore host may send this machine's ECID and component hashes \
@@ -1930,6 +1953,7 @@ fn run(
                 output::arguments(format_args!("ASC {state}\n"));
             }
             survey_report(machine);
+            unsupported_report(machine);
             user = 0;
             beats += 1;
             if beats.is_multiple_of(SUSPENSION_BEATS) {
@@ -2165,6 +2189,14 @@ fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
     }
 }
 
+/// Each unsupported device access graceful mode answered for the first time
+/// since the last report.
+fn unsupported_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    for requirement in machine.take_unsupported() {
+        output::arguments(format_args!("UNSUPPORTED {requirement}\n"));
+    }
+}
+
 /// Each device register a survey answered for the first time since the last
 /// report: guest PA, width, direction, the PC and link register that first
 /// reached it, its count so far, the last value written and the refusal it replaced.
@@ -2289,6 +2321,7 @@ fn finish(
     host_power: &power::HostPowerControl,
 ) -> ! {
     survey_report(machine);
+    unsupported_report(machine);
     stack_report(machine);
     dump_report(machine, dumps);
     let host = host::statistics();

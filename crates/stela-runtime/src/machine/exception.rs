@@ -217,6 +217,10 @@ pub fn syndrome(class: Class, iss: u32) -> u64 {
     u64::from(((class as u32) << 26) | IL | (iss & 0x01ff_ffff))
 }
 
+/// The data abort fault status (DFSC) of a synchronous external abort, not
+/// on a translation table walk.
+pub const SYNCHRONOUS_EXTERNAL_ABORT: u32 = 0b01_0000;
+
 /// ISS for a data abort without instruction syndrome (ISV=0). WnR marks a
 /// write; FnV stays clear because FAR is always valid here.
 pub fn data_abort_iss(status: u32, write: bool) -> u32 {

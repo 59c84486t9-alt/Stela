@@ -19,7 +19,10 @@ use super::{
         HCR_TSC, HCR_VF, HCR_VI, HCR_VSE,
     },
     debug,
-    exception::{Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, Vector, data_abort_iss},
+    exception::{
+        Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, SYNCHRONOUS_EXTERNAL_ABORT, Vector,
+        data_abort_iss,
+    },
     hacr,
     mmu::{self, Access, Controls, Outcome as Translated},
     pmu,
@@ -31,7 +34,13 @@ use super::{
 pub use crate::platform::apple::bus::Transition;
 pub use crate::platform::dma::Memory;
 use crate::{pauth, scalable::ScalableState};
-use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::String,
+    vec,
+    vec::Vec,
+};
 use core::fmt;
 use pointer::{PointerInputs, PointerOperation, PointerResult};
 pub use processors::PeerState;
@@ -698,6 +707,14 @@ pub struct Surveyed {
     pub detail: String,
 }
 
+/// The registers and directions graceful mode has reported, and the
+/// reports not yet taken.
+#[derive(Default)]
+struct Graceful {
+    reported: BTreeSet<(u64, bool)>,
+    fresh: Vec<Requirement>,
+}
+
 /// A survey's records by register and direction, and those not yet taken.
 #[derive(Default)]
 struct Survey {
@@ -1028,6 +1045,9 @@ pub struct Machine<H: Host, D: Devices> {
     suspended: BTreeMap<u64, Suspension>,
     /// Device accesses answered without a model ([`Self::begin_survey`]).
     survey: Option<Survey>,
+    /// Unsupported device accesses answered gracefully
+    /// ([`Self::set_graceful`]); strict when `None`.
+    graceful: Option<Graceful>,
     /// The context leaves SVE and SME instructions run as, by PC, word and
     /// scalable profile ([`scalable`]); discarded with the blocks.
     scalable_leaves:
@@ -1123,6 +1143,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block_limit: u64::MAX,
             suspended: BTreeMap::new(),
             survey: None,
+            graceful: None,
             scalable_leaves: BTreeMap::new(),
             tags: crate::machine::tags::Store::default(),
             tag_checks: [false; 2],
@@ -1727,6 +1748,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// lists every register a driver needs in one run.
     pub fn begin_survey(&mut self) {
         self.survey = Some(Survey::default());
+    }
+
+    /// Answer unsupported device accesses as the SoC does instead of
+    /// stopping (docs/design/runtime.md "Unsupported operations"): an
+    /// access the devices refuse, or that reaches no device, takes a
+    /// synchronous external abort and is reported once per register and
+    /// direction ([`Self::take_unsupported`]). The default is strict: the
+    /// machine stops at the first one.
+    pub fn set_graceful(&mut self, graceful: bool) {
+        self.graceful = graceful.then(Graceful::default);
+    }
+
+    /// The unsupported device accesses graceful mode answered for the first
+    /// time since the last call.
+    pub fn take_unsupported(&mut self) -> Vec<Requirement> {
+        self.graceful
+            .as_mut()
+            .map(|graceful| core::mem::take(&mut graceful.fresh))
+            .unwrap_or_default()
     }
 
     /// The registers the survey answered first since the last call, with
@@ -3853,10 +3893,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let raw = match self.device_read(physical, bytes, now) {
                 Ok(value) => value,
                 Err(error) if self.surveyed(physical, bytes, None, &error) => 0,
-                Err(DeviceError::NoDevice) => return Err(refuse(self, "no device model".into())),
-                Err(DeviceError::Refused(detail) | DeviceError::TransferRefused(detail)) => {
-                    return Err(refuse(self, detail));
-                }
+                Err(error) => return self.device_failure(error, address, physical, None),
             };
             let bits = u32::from(bytes) * 8;
             let mut value = if bits == 64 {
@@ -3898,13 +3935,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             match written {
                 Ok(()) => {}
                 Err(error) if self.surveyed(physical, bytes, Some(value), &error) => {}
-                Err(DeviceError::NoDevice) => {
-                    return Err(refuse(self, format!("no device model (value {value:#x})")));
-                }
-                Err(DeviceError::Refused(detail)) => {
-                    return Err(refuse(self, format!("{detail} (value {value:#x})")));
-                }
-                Err(DeviceError::TransferRefused(detail)) => return Err(refuse(self, detail)),
+                Err(error) => return self.device_failure(error, address, physical, Some(value)),
             }
             if let Some((base, updated)) = writeback {
                 self.write_register(base, updated);
@@ -3954,12 +3985,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         let raw = match self.device_read(element, bytes, now) {
                             Ok(raw) => raw,
                             Err(error) if self.surveyed(element, bytes, None, &error) => 0,
-                            Err(DeviceError::NoDevice) => {
-                                return Err(refuse(self, "no device model".into()));
+                            Err(error) => {
+                                let at = address + (element - physical);
+                                return self.device_failure(error, at, element, None);
                             }
-                            Err(
-                                DeviceError::Refused(detail) | DeviceError::TransferRefused(detail),
-                            ) => return Err(refuse(self, detail)),
                         };
                         *value = match (bytes, signed) {
                             (8, _) => raw,
@@ -3986,12 +4015,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         match written {
                             Ok(()) => {}
                             Err(error) if self.surveyed(element, bytes, Some(value), &error) => {}
-                            Err(DeviceError::NoDevice) => {
-                                return Err(refuse(self, "no device model".into()));
+                            Err(error) => {
+                                let at = address + (element - physical);
+                                return self.device_failure(error, at, element, Some(value));
                             }
-                            Err(
-                                DeviceError::Refused(detail) | DeviceError::TransferRefused(detail),
-                            ) => return Err(refuse(self, detail)),
                         }
                     }
                     self.follow_memory_lock();
@@ -4038,6 +4065,65 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let mut exception =
             Exception::synchronous(class, data_abort_iss(0b10_0001, write), self.cpu.pc);
+        exception.fault_address = Some(address);
+        self.take(exception);
+        Ok(())
+    }
+
+    /// A device access the devices refused or no device answers
+    /// (docs/design/runtime.md "Unsupported operations"). Strict, it stops
+    /// the machine with the requirement. Graceful, it is reported once per
+    /// register and direction and the access takes the synchronous external
+    /// abort the fabric raises for an unimplemented register.
+    fn device_failure(
+        &mut self,
+        error: DeviceError,
+        address: u64,
+        physical: u64,
+        written: Option<u64>,
+    ) -> Step {
+        let write = written.is_some();
+        let detail = match (error, written) {
+            (DeviceError::NoDevice, None) => "no device model".into(),
+            (DeviceError::NoDevice, Some(value)) => format!("no device model (value {value:#x})"),
+            (DeviceError::Refused(detail), Some(value)) => format!("{detail} (value {value:#x})"),
+            (DeviceError::Refused(detail) | DeviceError::TransferRefused(detail), _) => detail,
+        };
+        let mut requirement = self.requirement(RequirementKind::Device {
+            physical,
+            write,
+            detail,
+        });
+        requirement.address = Some(address);
+        let Some(graceful) = self.graceful.as_mut() else {
+            return Err(Stop::Unsupported(requirement));
+        };
+        if graceful.reported.insert((physical, write)) {
+            graceful.fresh.push(requirement);
+        }
+        self.external_abort(address, write)
+    }
+
+    /// The synchronous external abort (DFSC 0b010000) a data access takes;
+    /// from EL0 or EL1 it goes to EL2 under HCR_EL2.TEA (Arm
+    /// SyncExternalAbortTarget).
+    fn external_abort(&mut self, address: u64, write: bool) -> Step {
+        let target = if self.cpu.pstate.el < 2 && self.cpu.hcr(crate::machine::cpu::HCR_TEA) {
+            2
+        } else {
+            self.cpu.route()
+        };
+        let class = if target > self.cpu.pstate.el {
+            Class::DataAbortLower
+        } else {
+            Class::DataAbortSame
+        };
+        let mut exception = Exception::synchronous(
+            class,
+            data_abort_iss(SYNCHRONOUS_EXTERNAL_ABORT, write),
+            self.cpu.pc,
+        )
+        .to(target);
         exception.fault_address = Some(address);
         self.take(exception);
         Ok(())
@@ -5050,6 +5136,39 @@ mod tests {
             &DeviceError::Refused("unknown register".into())
         ));
         assert_eq!(machine.take_survey().len(), 1);
+    }
+
+    #[test]
+    fn unsupported_device_accesses_stop_strictly_or_take_an_external_abort_once_reported() {
+        const DEVICE: u64 = 0x2_3d2b_0010;
+        // ldr w0, [x1]; str w0, [x1]
+        let (load, store) = (0xb940_0020, 0xb900_0020);
+        let mut machine = machine(&[0]);
+        machine.write_register(Register::X(1), DEVICE);
+        assert!(matches!(
+            machine.device_access(load, DEVICE, DEVICE, false),
+            Err(Stop::Unsupported(_))
+        ));
+        machine.set_graceful(true);
+        for (word, write) in [(load, false), (store, true), (load, false)] {
+            machine.cpu.pc = BASE;
+            machine.device_access(word, DEVICE, DEVICE, write).unwrap();
+            // A data abort at EL1 from EL1: EC 0x25, IL, DFSC 0b010000, WnR.
+            let wnr = if write { 1 << 6 } else { 0 };
+            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x9600_0010 | wnr);
+            assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), DEVICE);
+            assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+        }
+        // One report per register and direction.
+        let reports = machine.take_unsupported();
+        assert_eq!(reports.len(), 2);
+        assert!(matches!(
+            reports[1].kind,
+            RequirementKind::Device { write: true, .. }
+        ));
+        assert!(machine.take_unsupported().is_empty());
+        machine.set_graceful(false);
+        assert!(machine.take_unsupported().is_empty());
     }
 
     #[test]
