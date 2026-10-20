@@ -369,14 +369,14 @@ impl Shared {
     /// The valid record of page `key` on disk.
     fn load(&self, disk: &Disk, key: &Digest) -> Option<Record> {
         let path = Self::path(disk, key);
-        let Some(bytes) = read_bounded(&path) else {
+        let Some((bytes, modified)) = read_dated(&path) else {
             COUNTERS.records_absent.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         match Record::decode(&bytes, &self.translator, key) {
             Ok(record) => {
                 COUNTERS.records_loaded.fetch_add(1, Ordering::Relaxed);
-                refresh(&path);
+                refresh(&path, modified);
                 Some(record)
             }
             Err(_) => {
@@ -644,29 +644,28 @@ pub fn summary(engine: &crate::machine::Statistics) -> Vec<String> {
 }
 
 fn read_bounded(path: &Path) -> Option<Vec<u8>> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let length = file.metadata().ok()?.len();
-    if length > MAX_RECORD_BYTES {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(length as usize);
-    file.read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    read_dated(path).map(|(bytes, _)| bytes)
 }
 
-/// Keep a record in use from eviction: its modification time ages a day
-/// at most.
-fn refresh(path: &Path) {
-    let Ok(file) = std::fs::File::options().write(true).open(path) else {
-        return;
-    };
-    let stale = file
-        .metadata()
-        .and_then(|metadata| metadata.modified())
-        .ok()
+/// [`read_bounded`], with the file's modification time.
+fn read_dated(path: &Path) -> Option<(Vec<u8>, Option<SystemTime>)> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if metadata.len() > MAX_RECORD_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    Some((bytes, metadata.modified().ok()))
+}
+
+/// Keep a record in use from eviction: its modification time, read with
+/// it, ages a day at most.
+fn refresh(path: &Path, modified: Option<SystemTime>) {
+    let stale = modified
         .and_then(|modified| SystemTime::now().duration_since(modified).ok())
         .is_some_and(|age| age > REFRESH_AGE);
-    if stale {
+    if stale && let Ok(file) = std::fs::File::options().write(true).open(path) {
         let _ = file.set_modified(SystemTime::now());
     }
 }
@@ -759,6 +758,27 @@ mod tests {
         assert_eq!(read_directory(&shard).len(), 3, "no sibling is left");
         assert_eq!(evict(&root, 150), 100);
         assert!(!paths[0].exists() && !paths[1].exists() && paths[2].exists());
+    }
+
+    #[test]
+    fn a_record_read_ages_a_day_at_most() {
+        let home = tempfile::tempdir().unwrap();
+        let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+        let [recent, old] = ["recent", "old"].map(|name| home.path().join(name));
+        let hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+        let two_days_ago = SystemTime::now() - 2 * REFRESH_AGE;
+        for (path, time) in [(&recent, hour_ago), (&old, two_days_ago)] {
+            std::fs::write(path, [1, 2, 3]).unwrap();
+            let file = std::fs::File::options().write(true).open(path).unwrap();
+            file.set_modified(time).unwrap();
+        }
+        for path in [&recent, &old] {
+            let (bytes, time) = read_dated(path).unwrap();
+            assert_eq!(bytes, [1, 2, 3]);
+            refresh(path, time);
+        }
+        assert_eq!(modified(&recent), hour_ago);
+        assert!(modified(&old) > hour_ago);
     }
 
     #[test]
