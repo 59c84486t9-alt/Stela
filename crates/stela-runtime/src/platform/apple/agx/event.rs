@@ -24,10 +24,16 @@
 //! - CLPC I/O performance notice (type 0xe): a u64 at +0x04 the kext passes
 //!   to `IOGPUFenceMachine::notifyCLPCIOPerfControl` (`armfw_g14g` +0x1817c).
 //!
-//! The kext's switch also reads types 0, 4 (fault and restart, with
-//! `signalHardwareError`), 7 (channel error: kind below 5, pipe below 3,
-//! stamp index, value), 8 (scheduler notice), 0xb and 0xc; the model posts
-//! none of them.
+//! The kext's switch also reads types 0 (`handleFirmwareControllerEvent`),
+//! 4 (hardware recovery: +0x04 the recovery generation, +0x0c the stamp
+//! index, with the root +0xb0 recovery block and stop-state handshake;
+//! `armfw_g14g` +0x6034), 7 (channel error: +0x04 kind below 5, +0x08 pipe
+//! below 3, +0x0c stamp index, +0x10 value; `armfw_g14g` +0x88c4), 8
+//! (scheduler notice), 0xb and 0xc. The model posts none of them: it starts
+//! no recovery (what a UAT fault leaves in the firmware's recovery request
+//! and what the firmware does between the stop states are unrecovered), and
+//! channel errors come only from recovery aborts and from 3D-command words
+//! read at 3D start (docs/research/agx.md FW-14, FW-15).
 
 use super::initdata::Root;
 use super::ring::{self, Kind, Shared};
