@@ -33,6 +33,7 @@ mod bsd;
 mod mach;
 mod platform;
 pub mod services;
+mod status;
 
 pub use bsd::Signature;
 pub(super) use bsd::{EAGAIN, ENOMEM};

@@ -16,11 +16,10 @@ use super::{
     signal::WORKQ_THREADMASK,
 };
 use crate::hosted::{
-    kernel::End,
+    kernel::{End, status},
     memory::{self, Protection, round_page, trunc_page},
     threads::{self, Entry, lock},
 };
-use crate::pauth::Key;
 use anyhow::{Result, bail};
 use std::sync::Mutex;
 
@@ -188,17 +187,13 @@ fn register(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     if registered.is_some() {
         return Ok(Outcome::Error(EINVAL));
     }
-    // `machine_thread_function_pointers_convert_from_user`: both entries
-    // are function pointers signed with IA and no discriminator, taken as
-    // they are when user JOP is disabled.
-    let authenticate = |pointer: u64| -> Result<u64> {
-        match &kernel.process.signer {
-            Some(signer) if pointer != 0 => Ok(signer.authenticate(Key::Ia, pointer, 0)?.pointer),
-            _ => Ok(pointer),
-        }
-    };
-    let (thread_start, workqueue_thread) =
-        (authenticate(thread_start)?, authenticate(workqueue_thread)?);
+    // Both entries are function pointers: authenticated, or poisoned so
+    // that a thread entering one faults.
+    let signer = kernel.process.signer.as_ref();
+    let (thread_start, workqueue_thread) = (
+        status::function_pointer_from_user(signer, thread_start)?,
+        status::function_pointer_from_user(signer, workqueue_thread)?,
+    );
     let mut tsd_offset = field32(&registration, TSD_OFFSET);
     let maximum = if pthread_size >= TSD_SLOT_BYTES
         && u64::from(tsd_offset) <= pthread_size - TSD_SLOT_BYTES
