@@ -26,9 +26,9 @@
 //! inherit them.
 use super::super::Kernel;
 use super::server::{
-    Descriptor, KERN_INVALID_ARGUMENT, MACH_PORT_DEAD, MIG_BAD_ARGUMENTS, MOVE_SEND, Reply,
-    Request, release_send,
+    Descriptor, MACH_PORT_DEAD, MIG_BAD_ARGUMENTS, MOVE_SEND, Reply, Request, release_send,
 };
+use crate::hosted::darwin::KERN_INVALID_ARGUMENT;
 use crate::hosted::host;
 use crate::hosted::threads::{lock, try_lock};
 use anyhow::{Result, bail};
@@ -793,16 +793,22 @@ mod tests {
     use super::*;
 
     fn receive_right() -> u32 {
-        unsafe extern "C" {
-            fn mach_port_allocate(task: u32, right: u32, name: *mut u32) -> i32;
-            fn mach_port_insert_right(task: u32, name: u32, port: u32, disposition: u32) -> i32;
-        }
+        use crate::hosted::darwin::{
+            MACH_MSG_TYPE_MAKE_SEND, MACH_PORT_RIGHT_RECEIVE, mach_port_allocate,
+            mach_port_insert_right,
+        };
         let mut name = 0u32;
         // SAFETY: an out-parameter in this frame; a send right made from
         // the new receive right.
         unsafe {
-            assert_eq!(mach_port_allocate(host::task(), 1, &raw mut name), 0);
-            assert_eq!(mach_port_insert_right(host::task(), name, name, 20), 0);
+            assert_eq!(
+                mach_port_allocate(host::task(), MACH_PORT_RIGHT_RECEIVE, &raw mut name),
+                0
+            );
+            assert_eq!(
+                mach_port_insert_right(host::task(), name, name, MACH_MSG_TYPE_MAKE_SEND),
+                0
+            );
         }
         name
     }

@@ -8,9 +8,8 @@
 use super::super::control::{self, Control, Kind};
 use super::super::{End, Kernel};
 use super::exception::{self, Target};
-use super::server::{
-    KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED, MIG_BAD_ARGUMENTS, Reply, Request, release_send,
-};
+use super::server::{MIG_BAD_ARGUMENTS, Reply, Request, release_send};
+use crate::hosted::darwin::{KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED, KERN_SUCCESS};
 use crate::hosted::host;
 use crate::hosted::threads::lock;
 use anyhow::{Result, bail};
@@ -29,13 +28,10 @@ unsafe extern "C" {
     fn mach_port_get_refs(task: u32, name: u32, right: u32, refs: *mut u32) -> i32;
 }
 
-const KERN_SUCCESS: u32 = 0;
 /// `KERN_NO_ACCESS`.
 const KERN_NO_ACCESS: u32 = 8;
 const KERN_INSUFFICIENT_BUFFER_SIZE: u32 = 52;
 const KERN_DENIED: u32 = 53;
-/// `MACH_SEND_INVALID_DEST`.
-pub(super) const MACH_SEND_INVALID_DEST: u32 = 0x1000_0003;
 
 /// Thread routines whose answer is the arm64 kernel's, forwarded to the
 /// thread's port: they act on the host thread's priority depression,

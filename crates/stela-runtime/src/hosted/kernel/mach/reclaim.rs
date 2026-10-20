@@ -11,6 +11,7 @@
 //! pressure level (`kern.memorystatus_vm_pressure_level`); the scavenger
 //! thread's asynchronous reclamation under pressure and the swap-active
 //! critical period are not modeled.
+use crate::hosted::darwin::{KERN_FAILURE, KERN_INVALID_ARGUMENT, KERN_SUCCESS};
 use crate::hosted::{host, memory};
 
 /// `struct mach_vm_reclaim_ring_s` field offsets.
@@ -43,9 +44,6 @@ const WMA_DENOMINATOR: u64 = 4;
 const WMA_UNIT: u64 = 1 << 8;
 const ABANDONMENT_THRESHOLD: u64 = 512;
 
-const KERN_SUCCESS: u32 = 0;
-const KERN_INVALID_ARGUMENT: u32 = 4;
-const KERN_FAILURE: u32 = 5;
 const KERN_NO_SPACE: u32 = 3;
 const KERN_INVALID_TASK: u32 = 16;
 const KERN_ABORTED: u32 = 14;

@@ -15,16 +15,18 @@
 use super::super::control::{self, Token};
 use super::super::{Kernel, Process};
 use super::server::{Descriptor, MIG_BAD_ARGUMENTS, MOVE_SEND, Reply};
+use crate::hosted::darwin::{
+    MACH_MSG_TYPE_MAKE_SEND, MACH_PORT_RIGHT_RECEIVE, MACH_RCV_MSG, MACH_SEND_MSG,
+    MACH_SEND_TIMEOUT, mach_msg, mach_port_allocate, mach_port_insert_right,
+};
 use crate::hosted::host;
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// `mach_port_right_t`s, dispositions and notifications.
-const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
 const MACH_PORT_RIGHT_PORT_SET: u32 = 3;
 const MACH_PORT_TYPE_RECEIVE: u32 = 1 << 17;
-const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 const MACH_MSG_TYPE_MAKE_SEND_ONCE: u32 = 21;
 const MACH_NOTIFY_NO_SENDERS: i32 = 0o106;
 /// `MACH_PORT_RECEIVE_STATUS` and the offset of `mps_mscount` in
@@ -32,10 +34,7 @@ const MACH_NOTIFY_NO_SENDERS: i32 = 0o106;
 const MACH_PORT_RECEIVE_STATUS: i32 = 2;
 const STATUS_WORDS: usize = 10;
 const STATUS_MSCOUNT: usize = 2;
-/// `mach_msg` options and results.
-const MACH_SEND_MSG: i32 = 1;
-const MACH_RCV_MSG: i32 = 2;
-const MACH_SEND_TIMEOUT: i32 = 0x10;
+/// `mach_msg` results.
 const MACH_RCV_INTERRUPTED: i32 = 0x1000_4005;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 /// `thread_resume2`'s message ID, and its reply's.
@@ -48,9 +47,7 @@ const KERN_RESOURCE_SHORTAGE: u32 = 6;
 const RECEIVE_BYTES: usize = 1024;
 
 unsafe extern "C" {
-    fn mach_port_allocate(task: u32, right: u32, name: *mut u32) -> i32;
     fn mach_port_mod_refs(task: u32, name: u32, right: u32, delta: i32) -> i32;
-    fn mach_port_insert_right(task: u32, name: u32, right: u32, disposition: u32) -> i32;
     fn mach_port_insert_member(task: u32, name: u32, set: u32) -> i32;
     fn mach_port_set_context(task: u32, name: u32, context: u64) -> i32;
     fn mach_port_get_context(task: u32, name: u32, context: *mut u64) -> i32;
@@ -70,15 +67,6 @@ unsafe extern "C" {
         notify: u32,
         disposition: u32,
         previous: *mut u32,
-    ) -> i32;
-    fn mach_msg(
-        message: *mut u8,
-        option: i32,
-        send_size: u32,
-        receive_size: u32,
-        receive_name: u32,
-        timeout: u32,
-        notify: u32,
     ) -> i32;
 }
 

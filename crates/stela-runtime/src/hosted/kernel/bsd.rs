@@ -13,7 +13,6 @@ use crate::hosted::darwin::{EINTR, ENOSYS};
 // Kept for the MIG routines that still name it through this module.
 use super::{Kernel, Pe, Trap};
 use crate::darwin::{BsdReturnType, catalog};
-pub(super) use crate::hosted::darwin::EINVAL;
 use crate::hosted::forward;
 use crate::machine::system::Register;
 use anyhow::{Result, anyhow, bail};

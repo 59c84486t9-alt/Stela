@@ -20,15 +20,18 @@
 //! ([`received`]), as the arm64 kernel places it.
 use super::server::{self, NDR_RECORD, Object, Reply, Request};
 use super::{Kernel, forward_trap, index_of};
+use crate::hosted::darwin::{
+    self, MACH_MSG_TYPE_MAKE_SEND, MACH_PORT_RIGHT_RECEIVE, MACH_SEND_INVALID_DEST, mach_msg,
+};
 use crate::hosted::threads::lock;
 use crate::hosted::{forward, memory};
 use crate::mach::mig;
 use anyhow::{Context as _, Result, bail};
 
 /// `MACH_SEND_MSG` (and `MACH64_SEND_MSG`).
-const SEND: u64 = 0x1;
+const SEND: u64 = darwin::MACH_SEND_MSG as u64;
 /// `MACH_RCV_MSG`.
-const RECEIVE: u64 = 0x2;
+const RECEIVE: u64 = darwin::MACH_RCV_MSG as u64;
 /// `mach_msg_header_t` field offsets.
 const HEADER_REMOTE_PORT: u64 = 8;
 const HEADER_ID: u64 = 20;
@@ -67,7 +70,7 @@ pub(super) fn send(
         // A guest thread's name with no reference of the guest's left is
         // the host thread library's alone: the guest holds no right.
         if object == Object::Thread && super::thread::guest_references(port) == 0 {
-            return Ok(u64::from(super::thread::MACH_SEND_INVALID_DEST));
+            return Ok(u64::from(MACH_SEND_INVALID_DEST));
         }
         match (mig::subsystem(id), mig::routine(id)) {
             (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {}
@@ -253,7 +256,7 @@ fn moved_destination(
              implemented"
         );
     }
-    Ok(Some(super::thread::MACH_SEND_INVALID_DEST))
+    Ok(Some(MACH_SEND_INVALID_DEST))
 }
 
 /// The kernel object `port` names in this task: the task, the host, or
@@ -441,8 +444,6 @@ fn answer(
     forward_trap(kernel, index, &receive)
 }
 
-const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
-const MACH_PORT_RIGHT_RECEIVE: u64 = 1;
 /// A received relay message: its header and the largest trailer.
 const RELAY_BUFFER_BYTES: usize = 24 + 76;
 
@@ -491,7 +492,7 @@ fn relay(kernel: &mut Kernel, name: &str) -> Result<u32> {
         index_of("_kernelrpc_mach_port_allocate_trap"),
         &[
             u64::from(kernel.process.task_port()),
-            MACH_PORT_RIGHT_RECEIVE,
+            u64::from(MACH_PORT_RIGHT_RECEIVE),
             &raw mut relay as u64,
         ],
     )
@@ -546,18 +547,6 @@ pub(super) fn carry_port(
     let at = HEADER_BYTES as usize + 4;
     let carried = u32::from_le_bytes(received[at..at + 4].try_into().unwrap());
     Ok(Ok((carried, received[at + 10])))
-}
-
-unsafe extern "C" {
-    fn mach_msg(
-        message: *mut u8,
-        option: i32,
-        send_size: u32,
-        receive_size: u32,
-        receive_name: u32,
-        timeout: u32,
-        notify: u32,
-    ) -> i32;
 }
 
 /// The hosted kernel's own message operation, through the host library,

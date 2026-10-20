@@ -5,6 +5,10 @@
 //! failing `RetCode` for the short `mig_reply_error_t`.
 use super::super::{Kernel, control};
 use super::{accounting, reclaim};
+use crate::hosted::darwin::{
+    self, ARM_DEBUG_STATE64, DEBUG_STATE64_COUNT, EINVAL, KERN_FAILURE, KERN_INVALID_ARGUMENT,
+    KERN_NOT_SUPPORTED, mach_host_self,
+};
 use crate::hosted::threads::lock;
 use crate::hosted::{
     hardware,
@@ -77,8 +81,8 @@ pub(super) enum Descriptor {
 /// `MACH_MSG_TYPE_MOVE_SEND`, which is also a received send right's
 /// disposition (`MACH_MSG_TYPE_PORT_SEND`).
 pub(super) const MOVE_SEND: u8 = 17;
-/// `MACH_MSG_TYPE_COPY_SEND`.
-pub(super) const COPY_SEND: u8 = 19;
+/// `MACH_MSG_TYPE_COPY_SEND`, as a descriptor's disposition byte.
+pub(super) const COPY_SEND: u8 = darwin::MACH_MSG_TYPE_COPY_SEND as u8;
 /// `MACH_PORT_DEAD`.
 pub(super) const MACH_PORT_DEAD: u32 = !0;
 
@@ -139,9 +143,6 @@ pub(super) fn release_send(name: u32) {
     }
 }
 
-pub(super) const KERN_INVALID_ARGUMENT: u32 = 4;
-pub(super) const KERN_FAILURE: u32 = 5;
-pub(super) const KERN_NOT_SUPPORTED: u32 = 46;
 /// `MIG_BAD_ARGUMENTS`: the request is malformed.
 pub(super) const MIG_BAD_ARGUMENTS: u32 = (-304i32) as u32;
 
@@ -886,8 +887,6 @@ fn state_words(request: &Request, count: u32) -> Option<Vec<u32>> {
 
 /// `thread_state_flavor_t` values the task routines take.
 const THREAD_STATE_NONE: u32 = 5;
-const ARM_DEBUG_STATE64: u32 = 15;
-const DEBUG_STATE64_COUNT: u32 = 130;
 /// `MACH_VM_MAX_ADDRESS` of a 64-bit macOS task.
 const MACH_VM_MAX_ADDRESS: u64 = 0x0000_7fff_fe00_0000;
 
@@ -997,7 +996,7 @@ fn thread_create(kernel: &mut Kernel, state: Option<(u32, Vec<u32>)>) -> Result<
                         Ok(set) => set.apply(pe),
                         Err(code) => {
                             refusal.store(code, std::sync::atomic::Ordering::SeqCst);
-                            return Ok(Err(super::super::bsd::EINVAL));
+                            return Ok(Err(EINVAL));
                         }
                     }
                 }
@@ -1552,11 +1551,8 @@ fn host_statistics(
     // SAFETY: `words` holds `count` integers, at most HOST_INFO_MAX; the
     // host port right is released after the call.
     unsafe extern "C" {
-        static mach_task_self_: u32;
-        fn mach_host_self() -> u32;
         fn host_statistics(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
         fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
-        fn mach_port_deallocate(task: u32, name: u32) -> i32;
     }
     let status = unsafe {
         let host = mach_host_self();
@@ -1565,7 +1561,7 @@ fn host_statistics(
         } else {
             host_statistics(host, flavor as i32, words.as_mut_ptr(), &mut filled)
         };
-        mach_port_deallocate(mach_task_self_, host);
+        release_send(host);
         status
     };
     if status != 0 {
@@ -1867,7 +1863,6 @@ mod tests {
     #[test]
     fn the_default_set_load_counts_the_profile_processors() {
         unsafe extern "C" {
-            fn mach_host_self() -> u32;
             fn processor_set_default(host: u32, set: *mut u32) -> i32;
         }
         let mut set = 0u32;
@@ -1942,9 +1937,6 @@ mod tests {
 
     #[test]
     fn processor_records_describe_the_profile_processors() {
-        unsafe extern "C" {
-            fn mach_host_self() -> u32;
-        }
         // SAFETY: this task's host port.
         let host = unsafe { mach_host_self() };
         for chip_id in [0x8103, 0x8112, 0x6001, 0x6021] {

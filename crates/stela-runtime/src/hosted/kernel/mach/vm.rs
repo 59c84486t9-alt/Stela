@@ -27,7 +27,8 @@
 //! arm64 kernel's, and answered with a null one, merged, where host
 //! regions meet inside a guest page.
 use super::super::Kernel;
-use super::server::{Descriptor, KERN_INVALID_ARGUMENT, MIG_BAD_ARGUMENTS, Reply, Request};
+use super::server::{Descriptor, MIG_BAD_ARGUMENTS, Reply, Request};
+use crate::hosted::darwin::{self, KERN_FAILURE, KERN_INVALID_ADDRESS, KERN_INVALID_ARGUMENT};
 use crate::hosted::memory::{self, HOST_PAGE_MASK, PAGE_BYTES, PAGE_MASK, Protection};
 use crate::hosted::shared_region::{REGION_SIZE, REGION_START};
 use crate::hosted::threads::lock;
@@ -348,8 +349,8 @@ fn remote_tags(task: &dyn Task, request: &Request) -> Reply {
     Reply::Success(body)
 }
 
-const KERN_SUCCESS: i32 = 0;
-const KERN_INVALID_ADDRESS: u32 = 1;
+/// `KERN_SUCCESS` as the host library's calls return it.
+const KERN_SUCCESS: i32 = darwin::KERN_SUCCESS as i32;
 /// `MIG_TYPE_ERROR`: a field's type or size disagrees with the routine.
 const MIG_TYPE_ERROR: u32 = (-300i32) as u32;
 
@@ -368,7 +369,7 @@ const VM_REALLOCATE_ZERO_FILL_SOURCE: i32 = 0x1;
 /// RETURN_DATA_ADDR, RESILIENT_CODESIGN and RESILIENT_MEDIA.
 const VM_FLAGS_USER_REMAP: i32 = 0x1 | 0x8 | 0x4000 | 0x10_0000 | 0x20 | 0x40;
 /// `VM_PROT_DEFAULT`, `VM_INHERIT_DEFAULT` (`VM_INHERIT_COPY`).
-const VM_PROT_DEFAULT: i32 = 3;
+const VM_PROT_DEFAULT: i32 = darwin::VM_PROT_DEFAULT as i32;
 const VM_INHERIT_DEFAULT: u32 = 1;
 /// `osfmk/mach/vm_sync.h`.
 const VM_SYNC_KILLPAGES: u32 = 0x08;
@@ -404,7 +405,7 @@ const PAGE_INFO_BASIC_COUNT: u32 = 8;
 const MACH_MSG_PORT_DESCRIPTOR: u8 = 0;
 const MACH_MSG_OOL_DESCRIPTOR: u8 = 1;
 const MACH_MSG_TYPE_MOVE_SEND: u8 = 17;
-const MACH_MSG_TYPE_COPY_SEND: u8 = 19;
+const MACH_MSG_TYPE_COPY_SEND: u8 = darwin::MACH_MSG_TYPE_COPY_SEND as u8;
 const MACH_PORT_DEAD: u32 = u32::MAX;
 
 /// A simple request's arguments start after its NDR record; a request
@@ -967,7 +968,6 @@ fn protect(task: &mut dyn Task, request: &Request) -> Reply {
 const MACH_VM_MAX_ADDRESS: u64 = 0x0000_7fff_fe00_0000;
 /// `MATTR_CACHE`, the one machine attribute.
 const MATTR_CACHE: u32 = 1;
-const KERN_FAILURE: u32 = 5;
 
 /// This task's map's start (`vm_map_min`): its `__PAGEZERO`'s end, which
 /// the host task's shares (`TASK_VM_INFO`'s `min_address`).
