@@ -221,6 +221,8 @@ pub struct Answers<R> {
     pub staged: Staged,
     /// Apple's signing service, only when the user enables it (`tss`).
     pub signer: Option<tss::Signer>,
+    /// The root tickets Apple personalized for this restore, each asked once.
+    roots: BTreeMap<tss::Root, Ticket>,
     /// The host's wall clock, in seconds since the Unix epoch.
     pub clock: Option<Box<dyn FnMut() -> u64>>,
 }
@@ -230,6 +232,7 @@ impl<R: ReadAt> Answers<R> {
             store,
             staged: Staged::default(),
             signer: None,
+            roots: BTreeMap::new(),
             clock: None,
         }
     }
@@ -274,12 +277,7 @@ impl<R: ReadAt> Answers<R> {
     }
     fn identity(&self, args: &Value) -> Result<Identity> {
         let current = self.store.identity();
-        if !args
-            .get("IsRecoveryOS")
-            .map(Value::boolean)
-            .transpose()?
-            .unwrap_or(false)
-        {
+        if !recovery_os(args)? {
             return Ok(current.clone());
         }
         let matches: Vec<_> = self
@@ -323,6 +321,35 @@ impl<R: ReadAt> Answers<R> {
         let path = self.global_path(identity, args, cryptex)?;
         Ticket::global(self.store.read_small(&path)?, identity)
     }
+    /// The AP root ticket for `identity`: with the signing service, the one
+    /// Apple personalizes for this machine and restore over the restore
+    /// identity (idevicerestore's `tss` and `tss_recoveryos_root_ticket`),
+    /// else the IPSW's global one.
+    fn root(&mut self, identity: &Identity, args: &Value) -> Result<Ticket> {
+        let Some(signer) = self.signer.as_mut() else {
+            return self.global(identity, args, false);
+        };
+        let root = match recovery_os(args)? {
+            true => tss::Root::RecoveryOs,
+            false => tss::Root::Ap,
+        };
+        if let Some(ticket) = self.roots.get(&root) {
+            return Ok(ticket.clone());
+        }
+        let restore = self.store.identity();
+        let bytes = tss::request_root_ticket(signer, restore, root)?;
+        let ticket = Ticket::personalized(bytes, restore, signer.ecid, Some(&signer.nonces))?;
+        self.roots.insert(root, ticket.clone());
+        Ok(ticket)
+    }
+    /// The ticket that covers component `name`: Cryptex1 components keep the
+    /// IPSW's global cryptex ticket, every other one the AP root ticket.
+    fn ticket_for(&mut self, identity: &Identity, args: &Value, name: &str) -> Result<Ticket> {
+        match name.starts_with("Cryptex1,") {
+            true => self.global(identity, args, true),
+            false => self.root(identity, args),
+        }
+    }
     fn member_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
         let size = self.store.member_len(path)?;
         if size > MAX_REPLY_BYTES as u64 {
@@ -348,7 +375,7 @@ impl<R: ReadAt> Answers<R> {
         let head = self.store.read_at(&path, 0, size.min(64) as usize)?;
         let (stored, at) = bare_type(&head, size)?;
         let digest = identity.component(name)?.required("Digest")?.data()?;
-        let global = self.global(identity, args, name.starts_with("Cryptex1,"))?;
+        let global = self.ticket_for(identity, args, name)?;
         // Image4 finds the object by its IM4P type: send the type under which
         // the ticket covers the manifest digest (`Ticket::retype_covered`).
         let tag = if self.store.digest384(&path)?.as_slice() == digest {
@@ -357,7 +384,7 @@ impl<R: ReadAt> Answers<R> {
             let tags = global.tags_with(digest);
             if tags.is_empty() {
                 return Err(Error::Invalid(
-                    "global manifest does not cover exact component digest",
+                    "the ticket does not cover the exact component digest",
                 ));
             }
             let mut found = None;
@@ -411,7 +438,7 @@ impl<R: ReadAt> Answers<R> {
         let path = identity.path(name)?;
         let mut bytes = self.member_bytes(path)?;
         let digest = identity.component(name)?.required("Digest")?.data()?;
-        let global = self.global(identity, args, name.starts_with("Cryptex1,"))?;
+        let global = self.ticket_for(identity, args, name)?;
         global.retype_covered(&mut bytes, digest)?;
         global.wrap(&bytes, digest)
     }
@@ -433,7 +460,7 @@ impl<R: ReadAt> Answers<R> {
                 ),
             ]))),
             "RootTicket" | "RecoveryOSRootTicketData" => {
-                let g = self.global(&identity, args, false)?;
+                let g = self.root(&identity, args)?;
                 Ok(Plan::Reply(Value::dict([(
                     "RootTicketData",
                     Value::Data(g.bytes().to_vec()),
@@ -538,7 +565,7 @@ impl<R: ReadAt> Answers<R> {
             "recoveryOS LocalPolicy needs Apple's signing service (opt-in --tss); a Stela-signed policy fails libbootpolicy's Apple root",
         ))?;
         let bytes = tss::request_local_policy(signer, identity, args)?;
-        let ticket = Ticket::personalized(bytes, identity, signer.ecid)?;
+        let ticket = Ticket::personalized(bytes, identity, signer.ecid, None)?;
         let policy = ticket.wrap(&tss::LOCAL_POLICY, &Sha384::digest(tss::LOCAL_POLICY))?;
         Ok(Plan::Reply(Value::dict([(
             "Ap,LocalPolicy",
@@ -930,6 +957,14 @@ fn framed_binary(v: &Streamed) -> Result<Vec<Segment>> {
     segments.push(Segment::Bytes(tail));
     segments.insert(0, Segment::Bytes(length.to_be_bytes().to_vec()));
     Ok(segments)
+}
+/// Whether a request is for the recoveryOS (`IsRecoveryOS`).
+fn recovery_os(args: &Value) -> Result<bool> {
+    Ok(args
+        .get("IsRecoveryOS")
+        .map(Value::boolean)
+        .transpose()?
+        .unwrap_or(false))
 }
 /// The variant directory of a global manifest: the request's `Variant`, else
 /// the identity's macOS variant. An erase or upgrade identity names it as

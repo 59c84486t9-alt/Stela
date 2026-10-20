@@ -1,14 +1,19 @@
-//! The opt-in request to Apple's signing service (TSS) for the recoveryOS
-//! LocalPolicy, the one object restored verifies against Apple's fixed roots
+//! The opt-in requests to Apple's signing service (TSS): the personalized AP
+//! root tickets a restore installs, and the recoveryOS LocalPolicy, the one
+//! object restored verifies against Apple's fixed roots
 //! (`docs/research/restore-trust.md`), so no Stela key can sign it.
 //!
-//! Wire: libtatsu `tss.c` (`tss_request_new`,
-//! `tss_request_add_local_policy_tags`, `tss_request_send`) and idevicerestore
-//! 4b3e847e `idevicerestore.c` (`get_recovery_os_local_policy_tss_response`,
-//! `lpol_file`). The request carries the device's ECID, its chip, board and
-//! security domain, and the hashes restored supplies; nothing is sent without
-//! a [`Transport`], which the user enables explicitly. The answer is Apple's
-//! ticket, unchanged: the guest's libbootpolicy authenticates it.
+//! Wire: libtatsu `tss.c` (`tss_request_new`, `tss_parameters_add_from_manifest`,
+//! `tss_request_add_common_tags`, `tss_request_add_ap_tags`,
+//! `tss_request_add_ap_recovery_tags`, `tss_request_add_ap_img4_tags`,
+//! `tss_entry_apply_restore_request_rules`, `tss_request_add_local_policy_tags`,
+//! `tss_request_send`) and idevicerestore 4b3e847e `idevicerestore.c`
+//! (`get_tss_response`, `get_recoveryos_root_ticket_tss_response`,
+//! `get_recovery_os_local_policy_tss_response`, `lpol_file`). A request carries
+//! the device's ECID, its chip, board and security domain, the build's
+//! component digests and the boot's nonces; nothing is sent without a
+//! [`Transport`], which the user enables explicitly. The answer is Apple's
+//! ticket, unchanged: the guest authenticates it.
 use super::{Error, Result, plist, plist::Value, store::Identity};
 use alloc::{format, string::String, vec::Vec};
 use sha2::{Digest, Sha256, Sha384};
@@ -36,7 +41,242 @@ pub trait Transport {
 /// The device the request personalizes for, and the way out to Apple.
 pub struct Signer {
     pub ecid: u64,
+    pub nonces: Nonces,
     pub transport: alloc::boxed::Box<dyn Transport>,
+}
+
+/// The nonces a root ticket binds (`BNCH`, `snon`). On a Mac the boot ROM
+/// and iBEC hold the AP nonce and the SEP ROM its own when the host asks for
+/// the restore's tickets; under Stela, which plays both roles, they are drawn
+/// once for the restore, and a ticket naming any other refuses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nonces {
+    /// The AP nonce: 32 bytes under `boot-nonce-hash-method` sha2-384.
+    pub ap: [u8; 32],
+    /// The SEP nonce, a 20-byte ROM nonce (`generateROMNonce`).
+    pub sep: [u8; 20],
+}
+
+/// Which root ticket a restore asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Root {
+    /// The AP ticket (`RootTicket`): every trusted component of the restore
+    /// identity, restore-only firmware and the FDR trust objects included.
+    Ap,
+    /// The recoveryOS root ticket (`RecoveryOSRootTicketData`): the same
+    /// identity without the components libtatsu leaves out of it.
+    RecoveryOs,
+}
+
+/// Build-identity keys libtatsu copies from the identity into every AP
+/// request (`tss_parameters_add_from_manifest`, then
+/// `tss_request_add_ap_img4_tags`), when present.
+const IDENTITY_STRINGS: [&str; 8] = [
+    "Ap,OSLongVersion",
+    "Ap,OSReleaseType",
+    "Ap,ProductMarketingVersion",
+    "Ap,ProductType",
+    "Ap,SDKPlatform",
+    "Ap,Target",
+    "Ap,TargetType",
+    "Ap,Timestamp",
+];
+/// Components no AP request carries (`tss_request_add_ap_tags`).
+const AP_SKIPPED: [&str; 5] = [
+    "BasebandFirmware",
+    "SE,UpdatePayload",
+    "BaseSystem",
+    "Diags",
+    "Ap,ExclaveOS",
+];
+/// Components the recoveryOS root ticket also leaves out
+/// (`tss_request_add_ap_recovery_tags`); it keeps `Ap,ExclaveOS`.
+const RECOVERY_SKIPPED: [&str; 30] = [
+    "BasebandFirmware",
+    "SE,UpdatePayload",
+    "BaseSystem",
+    "ANS",
+    "Ap,AudioBootChime",
+    "Ap,CIO",
+    "Ap,RestoreCIO",
+    "Ap,RestoreTMU",
+    "Ap,TMU",
+    "Ap,rOSLogo1",
+    "Ap,rOSLogo2",
+    "AppleLogo",
+    "DCP",
+    "LLB",
+    "RecoveryMode",
+    "RestoreANS",
+    "RestoreDCP",
+    "RestoreDeviceTree",
+    "RestoreKernelCache",
+    "RestoreLogo",
+    "RestoreRamDisk",
+    "RestoreSEP",
+    "SEP",
+    "ftap",
+    "ftsp",
+    "iBEC",
+    "iBSS",
+    "rfta",
+    "rfts",
+    "Diags",
+];
+
+/// The TSS request for `root` over the restore identity, as
+/// idevicerestore's `get_tss_response` (AP) and
+/// `get_recoveryos_root_ticket_tss_response` build it for an Image4 device
+/// in production and security mode.
+pub fn root_ticket_request(
+    identity: &Identity,
+    ecid: u64,
+    nonces: &Nonces,
+    root: Root,
+) -> Result<Value> {
+    if ecid == 0 {
+        return Err(Error::Invalid("TSS needs the machine's nonzero ECID"));
+    }
+    let mut request = Value::dict([
+        ("@HostPlatformInfo", Value::from("mac")),
+        ("@VersionInfo", Value::from(VERSION)),
+        ("@ApImg4Ticket", Value::Boolean(true)),
+        ("ApECID", Value::Integer(ecid)),
+        (
+            "UniqueBuildID",
+            Value::Data(identity.value.required("UniqueBuildID")?.data()?.to_vec()),
+        ),
+        ("ApChipID", Value::Integer(identity.number("ApChipID")?)),
+        ("ApBoardID", Value::Integer(identity.number("ApBoardID")?)),
+        (
+            "ApSecurityDomain",
+            Value::Integer(identity.number("ApSecurityDomain")?),
+        ),
+        ("ApNonce", Value::Data(nonces.ap.to_vec())),
+        ("SepNonce", Value::Data(nonces.sep.to_vec())),
+        ("ApSecurityMode", Value::Boolean(true)),
+        ("ApProductionMode", Value::Boolean(true)),
+    ]);
+    let Value::Dict(fields) = &mut request else {
+        unreachable!()
+    };
+    for key in IDENTITY_STRINGS {
+        if let Some(value) = identity.value.get(key) {
+            fields.insert(key.into(), Value::from(value.string()?));
+        }
+    }
+    let Value::Dict(manifest) = identity.value.required("Manifest")? else {
+        return Err(Error::Invalid("identity Manifest dictionary"));
+    };
+    let skipped: &[&str] = match root {
+        Root::Ap => &AP_SKIPPED,
+        Root::RecoveryOs => &RECOVERY_SKIPPED,
+    };
+    for (name, entry) in manifest {
+        if skipped.contains(&name.as_str()) {
+            continue;
+        }
+        if let Some(component) = component_entry(entry, root)? {
+            fields.insert(name.clone(), component);
+        }
+    }
+    // libtatsu sends a random GUID that only names the request; this one
+    // names it by its contents, so a retry of the same request keeps it.
+    let id = guid(&plist::encode_xml(&request, plist::Limits::default())?);
+    if let Value::Dict(fields) = &mut request {
+        fields.insert("@UUID".into(), Value::String(id));
+    }
+    Ok(request)
+}
+
+/// One manifest entry as an AP request carries it, or `None` for one it
+/// leaves out: the entry without its `Info`, its `RestoreRequestRules`
+/// applied, and an empty `Digest` for a trusted entry that has none.
+fn component_entry(entry: &Value, root: Root) -> Result<Option<Value>> {
+    let Value::Dict(fields) = entry else {
+        return Err(Error::Invalid("BuildManifest entry dictionary"));
+    };
+    let Some(info) = entry.get("Info") else {
+        return Ok(None);
+    };
+    let trusted = entry
+        .get("Trusted")
+        .map(Value::boolean)
+        .transpose()?
+        .unwrap_or(false);
+    let rules = info.get("RestoreRequestRules");
+    if root == Root::Ap {
+        let ftab = info
+            .get("IsFTAB")
+            .map(Value::boolean)
+            .transpose()?
+            .unwrap_or(false);
+        if (rules.is_none() && !trusted) || ftab {
+            return Ok(None);
+        }
+    }
+    let mut out = fields.clone();
+    out.remove("Info");
+    match rules {
+        Some(rules) => apply_rules(&mut out, rules)?,
+        None if root == Root::Ap => {
+            out.insert("EPRO".into(), Value::Boolean(true));
+            out.insert("ESEC".into(), Value::Boolean(true));
+        }
+        None => {}
+    }
+    if trusted && !fields.contains_key("Digest") {
+        out.insert("Digest".into(), Value::Data(Vec::new()));
+    }
+    // The AP request drops an empty entry; the recovery request keeps it.
+    Ok((root == Root::RecoveryOs || !out.is_empty()).then_some(Value::Dict(out)))
+}
+
+/// `tss_entry_apply_restore_request_rules` for a production, security-mode
+/// Image4 request: a rule applies when each of its conditions names one of
+/// those parameters with an equal value; the Boolean actions of each rule
+/// that applies are set, in order. A condition on a parameter this request
+/// does not have (`ApDemotionPolicyOverride`, `ApInRomDFU`) never holds.
+fn apply_rules(
+    entry: &mut alloc::collections::BTreeMap<String, Value>,
+    rules: &Value,
+) -> Result<()> {
+    for rule in rules.array()? {
+        let Value::Dict(conditions) = rule.required("Conditions")? else {
+            return Err(Error::Invalid("RestoreRequestRules conditions"));
+        };
+        let holds = conditions.iter().all(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "ApRawProductionMode"
+                    | "ApCurrentProductionMode"
+                    | "ApRawSecurityMode"
+                    | "ApRequiresImage4"
+            ) && *value == Value::Boolean(true)
+        });
+        if !holds {
+            continue;
+        }
+        let Value::Dict(actions) = rule.required("Actions")? else {
+            return Err(Error::Invalid("RestoreRequestRules actions"));
+        };
+        for (key, value) in actions {
+            if let Value::Boolean(_) = value {
+                entry.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Ask Apple for `root`'s ticket.
+pub fn request_root_ticket(
+    signer: &mut Signer,
+    identity: &Identity,
+    root: Root,
+) -> Result<Vec<u8>> {
+    let request = root_ticket_request(identity, signer.ecid, &signer.nonces, root)?;
+    send(signer, &request)
 }
 
 /// The TSS request for a recoveryOS LocalPolicy, from restored's
@@ -129,7 +369,11 @@ pub fn request_local_policy(
     args: &Value,
 ) -> Result<Vec<u8>> {
     let request = local_policy_request(identity, signer.ecid, args)?;
-    let body = plist::encode_xml(&request, plist::Limits::default())?;
+    send(signer, &request)
+}
+
+fn send(signer: &mut Signer, request: &Value) -> Result<Vec<u8>> {
+    let body = plist::encode_xml(request, plist::Limits::default())?;
     let response = signer.transport.post(HOST, PATH, CONTENT_TYPE, &body)?;
     ticket(&response)
 }
@@ -227,6 +471,185 @@ mod tests {
         assert!(local_policy_request(store.identity(), 0, &args()).is_err());
     }
 
+    fn nonces() -> Nonces {
+        Nonces {
+            ap: [0xa5; 32],
+            sep: [0x5a; 20],
+        }
+    }
+
+    /// An identity with one component of each kind libtatsu treats apart.
+    fn root_identity() -> Identity {
+        let rule = |conditions: Value, actions: Value| {
+            Value::dict([("Conditions", conditions), ("Actions", actions)])
+        };
+        let trusted = |info: Value, digest: Option<u8>| {
+            let mut entry = Value::dict([("Info", info), ("Trusted", Value::Boolean(true))]);
+            if let (Value::Dict(fields), Some(byte)) = (&mut entry, digest) {
+                fields.insert("Digest".into(), Value::Data(vec![byte; 48]));
+            }
+            entry
+        };
+        let rules = Value::dict([(
+            "RestoreRequestRules",
+            Value::Array(vec![
+                rule(
+                    Value::dict([
+                        ("ApRawProductionMode", Value::Boolean(true)),
+                        ("ApRequiresImage4", Value::Boolean(true)),
+                    ]),
+                    Value::dict([("EPRO", Value::Boolean(true))]),
+                ),
+                rule(
+                    Value::dict([("ApInRomDFU", Value::Boolean(true))]),
+                    Value::dict([("ESEC", Value::Boolean(false))]),
+                ),
+            ]),
+        )]);
+        let manifest = Value::dict([
+            ("KernelCache", trusted(rules, Some(1))),
+            ("ftap", trusted(Value::dict([]), Some(2))),
+            ("SEP", trusted(Value::dict([]), None)),
+            ("BaseSystem", trusted(Value::dict([]), Some(3))),
+            ("Logo", Value::dict([("Info", Value::dict([]))])),
+            ("NoInfo", Value::dict([("Trusted", Value::Boolean(true))])),
+        ]);
+        Identity {
+            index: 20,
+            value: Value::dict([
+                ("ApChipID", Value::from("0x8112")),
+                ("ApBoardID", Value::from("0x24")),
+                ("ApSecurityDomain", Value::from("0x01")),
+                ("UniqueBuildID", Value::Data(vec![0x12; 8])),
+                ("Ap,ProductType", Value::from("Mac14,3")),
+                ("Manifest", manifest),
+            ]),
+        }
+    }
+
+    #[test]
+    fn the_ap_request_carries_libtatsus_tags_and_applies_the_rules() {
+        let request = root_ticket_request(&root_identity(), 0x77, &nonces(), Root::Ap).unwrap();
+        let Value::Dict(fields) = &request else {
+            panic!()
+        };
+        let keys: Vec<_> = fields.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "@ApImg4Ticket",
+                "@HostPlatformInfo",
+                "@UUID",
+                "@VersionInfo",
+                "Ap,ProductType",
+                "ApBoardID",
+                "ApChipID",
+                "ApECID",
+                "ApNonce",
+                "ApProductionMode",
+                "ApSecurityDomain",
+                "ApSecurityMode",
+                "KernelCache",
+                "SEP",
+                "SepNonce",
+                "UniqueBuildID",
+                "ftap",
+            ]
+        );
+        let kernel = request.required("KernelCache").unwrap();
+        assert_eq!(kernel.get("EPRO"), Some(&Value::Boolean(true)));
+        assert_eq!(kernel.get("ESEC"), None);
+        assert!(kernel.get("Info").is_none());
+        let ftap = request.required("ftap").unwrap();
+        assert_eq!(ftap.get("ESEC"), Some(&Value::Boolean(true)));
+        assert_eq!(ftap.required("Digest").unwrap().data().unwrap(), [2; 48]);
+        let sep = request.required("SEP").unwrap();
+        assert_eq!(sep.required("Digest").unwrap().data().unwrap(), b"");
+        assert_eq!(
+            request.required("ApNonce").unwrap().data().unwrap(),
+            nonces().ap
+        );
+        assert_eq!(
+            request.required("ApChipID").unwrap().uint().unwrap(),
+            0x8112
+        );
+        assert!(root_ticket_request(&root_identity(), 0, &nonces(), Root::Ap).is_err());
+    }
+
+    #[test]
+    fn the_recovery_request_leaves_out_restore_only_components() {
+        let request =
+            root_ticket_request(&root_identity(), 0x77, &nonces(), Root::RecoveryOs).unwrap();
+        for absent in ["ftap", "SEP", "BaseSystem", "NoInfo"] {
+            assert!(request.get(absent).is_none(), "{absent}");
+        }
+        // Without the AP request's defaults, an untrusted entry is sent empty.
+        assert_eq!(request.get("Logo"), Some(&Value::dict([])));
+        let kernel = request.required("KernelCache").unwrap();
+        assert_eq!(kernel.get("EPRO"), Some(&Value::Boolean(true)));
+    }
+
+    struct Signing {
+        posts: alloc::rc::Rc<core::cell::Cell<usize>>,
+        nonces: Nonces,
+    }
+    impl Transport for Signing {
+        fn post(&mut self, _: &str, _: &str, _: &str, body: &[u8]) -> Result<Vec<u8>> {
+            self.posts.set(self.posts.get() + 1);
+            let request = plist::decode(body, plist::Limits::default())?;
+            assert_eq!(request.required("ApNonce")?.data()?, nonces().ap);
+            let ticket = super::super::ticket::tests::bound_ticket(
+                b"krnl",
+                b"k",
+                Some(request.required("ApECID")?.uint()?),
+                Some(&self.nonces),
+            );
+            let answer = Value::dict([("ApImg4Ticket", Value::Data(ticket))]);
+            let mut response = b"STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=".to_vec();
+            response.extend(plist::encode_xml(&answer, plist::Limits::default())?);
+            Ok(response)
+        }
+    }
+
+    #[test]
+    fn the_root_ticket_is_apples_personalized_one_asked_once() {
+        use super::super::answers::{Answers, Plan};
+        let store = super::super::store::tests::fixture(b"x", false);
+        let mut answers = Answers::new(store);
+        let posts = alloc::rc::Rc::new(core::cell::Cell::new(0));
+        answers.signer = Some(Signer {
+            ecid: 0x77,
+            nonces: nonces(),
+            transport: alloc::boxed::Box::new(Signing {
+                posts: posts.clone(),
+                nonces: nonces(),
+            }),
+        });
+        let request = Value::dict([("DataType", Value::from("RootTicket"))]);
+        for _ in 0..2 {
+            let Plan::Reply(reply) = answers.plan(&request).unwrap() else {
+                panic!()
+            };
+            let ticket = reply.required("RootTicketData").unwrap().data().unwrap();
+            assert!(ticket.windows(4).any(|w| w == b"BNCH"));
+        }
+        assert_eq!(posts.get(), 1);
+        // A ticket bound to nonces this restore never sent refuses.
+        let mut answers = Answers::new(super::super::store::tests::fixture(b"x", false));
+        answers.signer = Some(Signer {
+            ecid: 0x77,
+            nonces: nonces(),
+            transport: alloc::boxed::Box::new(Signing {
+                posts,
+                nonces: Nonces {
+                    sep: [0; 20],
+                    ..nonces()
+                },
+            }),
+        });
+        assert!(answers.plan(&request).is_err());
+    }
+
     #[test]
     fn a_volume_uuid_must_be_canonical() {
         assert!(volume_uuid("15C1EDB0A41443F89AF64E28F13D8956").is_err());
@@ -272,6 +695,7 @@ mod tests {
         assert!(answers.plan(&request).is_err());
         answers.signer = Some(Signer {
             ecid: 0x77,
+            nonces: nonces(),
             transport: alloc::boxed::Box::new(Apple {
                 sent: vec![],
                 ecid: 0x77,
@@ -286,6 +710,7 @@ mod tests {
         assert!(parts.manifest.is_some());
         answers.signer = Some(Signer {
             ecid: 0x77,
+            nonces: nonces(),
             transport: alloc::boxed::Box::new(Apple {
                 sent: vec![],
                 ecid: 0x78,

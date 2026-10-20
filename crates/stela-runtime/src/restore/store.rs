@@ -577,6 +577,7 @@ pub(crate) mod tests {
             ("ApChipID", Value::from("0x8112")),
             ("ApBoardID", Value::from("0x24")),
             ("ApSecurityDomain", Value::from("0x1")),
+            ("UniqueBuildID", Value::Data(vec![0x12; 8])),
             ("Manifest", Value::Dict(components)),
         ]);
         let build = plist::encode_xml(

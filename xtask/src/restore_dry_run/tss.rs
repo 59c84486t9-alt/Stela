@@ -1,11 +1,25 @@
 //! A synthetic signing service for `--tss`: it records the request the
 //! host would send to Apple and answers with an unsigned ticket naming the
-//! dry run's ECID and covering the bare `lpol` policy. Nothing leaves the
-//! machine; the ticket only exercises the host's request and stitching.
-use super::{context::Ctx, image4};
+//! dry run's ECID: for the recoveryOS LocalPolicy one covering the bare
+//! `lpol` policy, for a root ticket the IPSW's global AP ticket personalized
+//! with the dry run's nonces. Nothing leaves the machine; the tickets only
+//! exercise the host's requests and stitching.
+use super::{
+    context::Ctx,
+    image4::{self, Im4m, Property},
+};
 use anyhow::{Result, anyhow, ensure};
 use std::{cell::RefCell, io::Cursor, rc::Rc};
-use stela_runtime::restore::{Result as HostResult, tss::Transport};
+use stela_runtime::restore::{
+    Result as HostResult,
+    tss::{Nonces, Transport},
+};
+
+/// The nonces the dry run's restore binds its root tickets to.
+pub const NONCES: Nonces = Nonces {
+    ap: [0xa5; 32],
+    sep: [0x5a; 20],
+};
 
 /// idevicerestore's `lpol_file`: an IM4P typed `lpol`, version `1.0`, with
 /// a one-byte zero payload, written out independently of `restore::tss`.
@@ -101,8 +115,51 @@ pub fn ticket(chip: u64, board: u64, domain: u64, ecid: u64) -> Vec<u8> {
 }
 
 /// The recorded requests and the response the synthetic service gives.
+/// `global` as Apple personalizes it: its `MANP` with the device's `ECID`
+/// and the restore's `BNCH` and `snon` added, every object unchanged.
+pub fn personalize(global: &Im4m, ecid: u64, nonces: &Nonces) -> Vec<u8> {
+    let property = |key: &str, value: &Property| {
+        let tag = <[u8; 4]>::try_from(key.as_bytes()).unwrap();
+        let value = match value {
+            Property::Integer(n) => integer(*n),
+            Property::Data(d) => tlv(0x04, d),
+            Property::Boolean(b) => tlv(0x01, &[if *b { 0xff } else { 0 }]),
+        };
+        private(&tag, &value)
+    };
+    let mut objects = Vec::new();
+    for (tag, properties) in &global.entries {
+        let mut body: Vec<u8> = properties
+            .iter()
+            .map(|(key, value)| property(key, value))
+            .collect::<Vec<_>>()
+            .concat();
+        if tag == "MANP" {
+            body.extend(private(b"ECID", &integer(ecid)));
+            body.extend(private(b"BNCH", &tlv(0x04, &nonces.ap)));
+            body.extend(private(b"snon", &tlv(0x04, &nonces.sep)));
+        }
+        let tag = <[u8; 4]>::try_from(tag.as_bytes()).unwrap();
+        objects.extend(private(&tag, &tlv(0x31, &body)));
+    }
+    tlv(
+        0x30,
+        &[
+            tlv(0x16, b"IM4M"),
+            integer(0),
+            tlv(0x31, &private(b"MANB", &tlv(0x31, &objects))),
+            tlv(0x04, b"unsigned dry-run ticket"),
+            tlv(0x30, b""),
+        ]
+        .concat(),
+    )
+}
+
 pub struct Synthetic {
+    /// The answer to a LocalPolicy request.
     pub ticket: Vec<u8>,
+    /// The answer to a root ticket request.
+    pub root: Vec<u8>,
     pub requests: Rc<RefCell<Vec<Vec<u8>>>>,
 }
 impl Transport for Synthetic {
@@ -110,11 +167,13 @@ impl Transport for Synthetic {
         assert_eq!((host, path), ("gs.apple.com", "/TSS/controller?action=2"));
         assert!(kind.starts_with("text/xml"));
         self.requests.borrow_mut().push(body.to_vec());
+        let request = plist::Value::from_reader(Cursor::new(body)).unwrap();
+        let policy = request
+            .as_dictionary()
+            .is_some_and(|d| d.contains_key("Ap,LocalPolicy"));
+        let ticket = if policy { &self.ticket } else { &self.root };
         let mut answer = plist::Dictionary::new();
-        answer.insert(
-            "ApImg4Ticket".into(),
-            plist::Value::Data(self.ticket.clone()),
-        );
+        answer.insert("ApImg4Ticket".into(), plist::Value::Data(ticket.clone()));
         let mut xml = Vec::new();
         plist::Value::Dictionary(answer)
             .to_writer_xml(&mut xml)
@@ -132,9 +191,20 @@ thread_local! {
 /// The host's `Ap,LocalPolicy` and the request it sent the service.
 pub fn check_policy(ctx: &mut Ctx, reply: &plist::Dictionary) -> Result<String> {
     let request = REQUESTS
-        .with(|r| r.borrow().last().cloned())
-        .ok_or_else(|| anyhow!("the host sent no TSS request"))?;
-    let request = plist::Value::from_reader(Cursor::new(request))?;
+        .with(|r| {
+            r.borrow()
+                .iter()
+                .rev()
+                .map(|body| plist::Value::from_reader(Cursor::new(body)))
+                .find(|request| {
+                    request
+                        .as_ref()
+                        .ok()
+                        .and_then(plist::Value::as_dictionary)
+                        .is_some_and(|d| d.contains_key("Ap,LocalPolicy"))
+                })
+        })
+        .ok_or_else(|| anyhow!("the host sent no LocalPolicy TSS request"))??;
     let r = request
         .as_dictionary()
         .ok_or_else(|| anyhow!("TSS request is not a dictionary"))?;

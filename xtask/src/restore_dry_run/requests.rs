@@ -408,7 +408,7 @@ pub fn answers(route: Route, ctx: &Ctx) -> Vec<Step> {
                         let global = ctx.global.as_ref().ok_or_else(|| anyhow!("no apticket"))?;
                         ensure!(t == global.bytes, "RootTicketData is not {}", global.path);
                         let m = image4::im4m(t)?;
-                        ctx.check_ticket(&m, None)?;
+                        ctx.check_root(&m)?;
                         let names = ctx.components(false);
                         let covered = names
                             .iter()

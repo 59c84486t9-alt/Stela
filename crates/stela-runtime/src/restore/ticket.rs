@@ -4,7 +4,7 @@
 //! chip/board/domain (and, personalized, the device's ECID) plus the SHA-384 of
 //! the original IM4P before constructing an IMG4. No new signature, nonce
 //! substitution, type rewrite or certificate is manufactured.
-use super::{Error, Result, plist::Value, store::Identity};
+use super::{Error, Result, plist::Value, store::Identity, tss::Nonces};
 use alloc::{collections::BTreeMap, vec::Vec};
 use sha2::{Digest, Sha384};
 const MAX_TICKET_BYTES: usize = 1024 * 1024;
@@ -97,6 +97,7 @@ fn integer(b: &[u8]) -> Result<u64> {
     }
     Ok(b.iter().fold(0, |n, &v| (n << 8) | v as u64))
 }
+#[derive(Clone)]
 pub struct Ticket {
     bytes: Vec<u8>,
     entries: BTreeMap<[u8; 4], BTreeMap<[u8; 4], Value>>,
@@ -109,9 +110,14 @@ impl Ticket {
     }
     /// A ticket personalized for the device whose ECID is `ecid`: its `MANP`
     /// must name exactly that ECID. A nonce-bound property (`BNCH`, `snon`)
-    /// still refuses, since no request here sends a nonce.
-    pub fn personalized(bytes: Vec<u8>, identity: &Identity, ecid: u64) -> Result<Self> {
-        let ticket = Self::parse(bytes, identity, Some(ecid))?;
+    /// must equal the nonce the request sent, and refuses without one.
+    pub fn personalized(
+        bytes: Vec<u8>,
+        identity: &Identity,
+        ecid: u64,
+        nonces: Option<&Nonces>,
+    ) -> Result<Self> {
+        let ticket = Self::parse(bytes, identity, Some((ecid, nonces)))?;
         let named = ticket
             .entries
             .get(b"MANP")
@@ -123,7 +129,12 @@ impl Ticket {
         }
         Ok(ticket)
     }
-    fn parse(bytes: Vec<u8>, identity: &Identity, ecid: Option<u64>) -> Result<Self> {
+    fn parse(
+        bytes: Vec<u8>,
+        identity: &Identity,
+        binding: Option<(u64, Option<&Nonces>)>,
+    ) -> Result<Self> {
+        let nonces = binding.and_then(|(_, nonces)| nonces);
         if bytes.len() > MAX_TICKET_BYTES {
             return Err(Error::Limit("IM4M bytes"));
         }
@@ -162,10 +173,16 @@ impl Ticket {
                 let (key, mut property) = named(first, tag, b)?;
                 let (first, _, b) = property.next()?;
                 property.end()?;
-                if matches!(&key, b"BNCH" | b"snon")
-                    || (key == *b"ECID" && (ecid.is_none() || name != *b"MANP"))
-                {
-                    return Err(Error::Invalid("manifest is personalized/nonce-bound"));
+                let sent = match &key {
+                    b"BNCH" => nonces.map(|n| &n.ap[..]),
+                    b"snon" => nonces.map(|n| &n.sep[..]),
+                    _ => Some(b),
+                };
+                if sent != Some(b) {
+                    return Err(Error::Invalid("ticket is bound to another nonce"));
+                }
+                if key == *b"ECID" && (binding.is_none() || name != *b"MANP") {
+                    return Err(Error::Invalid("manifest is personalized"));
                 }
                 let value = match first {
                     2 => Value::Integer(integer(b)?),
@@ -273,7 +290,7 @@ impl Ticket {
         crate::img4::set_payload_type(im4p, original)
             .map_err(|_| Error::Invalid("IM4P payload type"))?;
         Err(Error::Invalid(
-            "global manifest does not cover exact component digest",
+            "the ticket does not cover the exact component digest",
         ))
     }
     pub fn wrap(&self, source: &[u8], manifest_digest: &[u8]) -> Result<Vec<u8>> {
@@ -289,7 +306,7 @@ impl Ticket {
         let digest = Sha384::digest(parts.payload);
         if digest.as_slice() != manifest_digest || !self.covers(tag, manifest_digest) {
             return Err(Error::Invalid(
-                "global manifest does not cover exact component digest",
+                "the ticket does not cover the exact component digest",
             ));
         }
         Ok(tlv(
@@ -343,6 +360,15 @@ pub(crate) mod tests {
     /// A synthetic ticket covering `payload` as `tag`, personalized for
     /// `ecid` when given.
     pub(crate) fn ticket_for(tag: &[u8; 4], payload: &[u8], ecid: Option<u64>) -> Vec<u8> {
+        bound_ticket(tag, payload, ecid, None)
+    }
+    /// `ticket_for`, bound to `nonces` (`BNCH`, `snon`) when given.
+    pub(crate) fn bound_ticket(
+        tag: &[u8; 4],
+        payload: &[u8],
+        ecid: Option<u64>,
+        nonces: Option<&Nonces>,
+    ) -> Vec<u8> {
         let mut p = [
             entry(b"CHIP", &tlv(2, &[0, 0x81, 0x12])),
             entry(b"BORD", &tlv(2, &[0x24])),
@@ -358,6 +384,10 @@ pub(crate) mod tests {
                 digits.insert(0, 0);
             }
             p.extend(entry(b"ECID", &tlv(2, &digits)));
+        }
+        if let Some(nonces) = nonces {
+            p.extend(entry(b"BNCH", &tlv(4, &nonces.ap)));
+            p.extend(entry(b"snon", &tlv(4, &nonces.sep)));
         }
         let entries = [
             entry(b"MANP", &tlv(0x31, &p)),
@@ -380,16 +410,34 @@ pub(crate) mod tests {
         )
     }
     #[test]
+    fn a_nonce_bound_ticket_must_name_the_sent_nonces() {
+        let store = super::super::store::tests::fixture(b"x", false);
+        let identity = store.identity();
+        let sent = Nonces {
+            ap: [1; 32],
+            sep: [2; 20],
+        };
+        let bound = bound_ticket(b"krnl", b"k", Some(7), Some(&sent));
+        assert!(Ticket::personalized(bound.clone(), identity, 7, Some(&sent)).is_ok());
+        assert!(Ticket::personalized(bound.clone(), identity, 7, None).is_err());
+        let other = Nonces {
+            ap: [3; 32],
+            ..sent
+        };
+        assert!(Ticket::personalized(bound.clone(), identity, 7, Some(&other)).is_err());
+        assert!(Ticket::global(bound, identity).is_err());
+    }
+    #[test]
     fn a_personalized_ticket_must_name_this_devices_ecid() {
         let store = super::super::store::tests::fixture(b"x", false);
         let identity = store.identity();
         let bytes = ticket_for(b"lpol", b"policy", Some(0xabcd_1234));
         assert!(Ticket::global(bytes.clone(), identity).is_err());
-        assert!(Ticket::personalized(bytes.clone(), identity, 0xabcd_1235).is_err());
-        let ticket = Ticket::personalized(bytes, identity, 0xabcd_1234).unwrap();
+        assert!(Ticket::personalized(bytes.clone(), identity, 0xabcd_1235, None).is_err());
+        let ticket = Ticket::personalized(bytes, identity, 0xabcd_1234, None).unwrap();
         assert!(ticket.covers(*b"lpol", &Sha384::digest(b"policy")));
         let global = ticket_for(b"lpol", b"policy", None);
-        assert!(Ticket::personalized(global, identity, 0xabcd_1234).is_err());
+        assert!(Ticket::personalized(global, identity, 0xabcd_1234, None).is_err());
     }
     #[test]
     fn only_exact_payload_digest_can_be_wrapped() {

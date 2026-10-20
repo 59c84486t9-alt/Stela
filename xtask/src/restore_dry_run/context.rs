@@ -2,7 +2,10 @@
 //! selected identity and its board's other identities, decoded with the
 //! `plist` crate; IPSW members, read with the `zip` crate; and the global
 //! tickets. Checks compare the host's answers against these.
-use super::image4::{self, Im4m, Property};
+use super::{
+    image4::{self, Im4m, Property},
+    tss,
+};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -13,7 +16,7 @@ use std::{
     rc::Rc,
 };
 use stela_cli::restore::archive;
-use stela_runtime::payload::PayloadManifest;
+use stela_runtime::{payload::PayloadManifest, restore::tss::Nonces};
 
 /// Members read whole for comparison; larger ones are only streamed.
 pub const SMALL: u64 = 96 << 20;
@@ -41,9 +44,13 @@ pub struct Ctx {
     pub recovery: Option<(usize, plist::Dictionary)>,
     pub inventory: PayloadManifest,
     pub zip: BTreeMap<String, (u64, bool)>,
+    /// The IPSW's global AP ticket, or under `--tss` the synthetic signing
+    /// service's personalization of it ([`Ctx::personalize`]).
     pub global: Option<Ticket>,
     pub cryptex: Option<Ticket>,
     pub ecid: u64,
+    /// The nonces the AP ticket binds, once personalized.
+    pub nonces: Option<Nonces>,
     pub full: bool,
     cache: HashMap<String, Rc<Vec<u8>>>,
 }
@@ -112,6 +119,7 @@ impl Ctx {
             global: None,
             cryptex: None,
             ecid,
+            nonces: None,
             full,
             cache: HashMap::new(),
         };
@@ -282,6 +290,33 @@ impl Ctx {
         }
         bail!("{name}: the manifest digest covers no candidate type of {path}")
     }
+    /// Replace the global AP ticket with the synthetic signing service's
+    /// personalization of it for this ECID and `nonces`: the root ticket a
+    /// `--tss` host serves and stitches.
+    pub fn personalize(&mut self, nonces: Nonces) -> Result<Vec<u8>> {
+        let global = self.global.as_mut().ok_or_else(|| anyhow!("no apticket"))?;
+        let bytes = tss::personalize(&global.manifest, self.ecid, &nonces);
+        global.manifest = image4::im4m(&bytes)?;
+        global.path = format!("the synthetic personalization of {}", global.path);
+        global.bytes = bytes.clone();
+        self.nonces = Some(nonces);
+        Ok(bytes)
+    }
+    /// An AP root ticket: personalized for this ECID and nonces once
+    /// [`Ctx::personalize`]d, else global.
+    pub fn check_root(&self, m: &Im4m) -> Result<()> {
+        let Some(nonces) = &self.nonces else {
+            return self.check_ticket(m, None);
+        };
+        self.check_ticket(m, Some(self.ecid))?;
+        for (tag, sent) in [("BNCH", &nonces.ap[..]), ("snon", &nonces.sep[..])] {
+            ensure!(
+                m.manp(tag) == Some(&Property::Data(sent.to_vec())),
+                "the root ticket's {tag} is not the restore's nonce"
+            );
+        }
+        Ok(())
+    }
     /// A ticket for this board: chip, board and security domain match the
     /// identity; a global one names no ECID or nonce.
     pub fn check_ticket(&self, m: &Im4m, ecid: Option<u64>) -> Result<()> {
@@ -326,7 +361,10 @@ impl Ctx {
             want.kind
         );
         let m = image4::im4m(ticket)?;
-        self.check_ticket(&m, None)?;
+        match name.starts_with("Cryptex1,") {
+            true => self.check_ticket(&m, None)?,
+            false => self.check_root(&m)?,
+        }
         let digest = image4::sha384(payload);
         ensure!(
             m.covers(&kind, &digest),
@@ -335,7 +373,7 @@ impl Ctx {
         let expected = self.ticket_for(name).map(|t| t.bytes.as_slice());
         ensure!(
             Some(ticket) == expected,
-            "the stitched ticket is not the IPSW's global ticket"
+            "the stitched ticket is not the AP or cryptex1 root ticket"
         );
         Ok(format!(
             "IMG4 {kind}{} covered by the {}",

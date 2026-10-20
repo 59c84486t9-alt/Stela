@@ -88,7 +88,8 @@ pub struct RestoreDryRun {
     #[arg(long, value_enum, default_value = "install")]
     mode: Mode,
     /// In the study, also answer signing-service requests from the
-    /// synthetic ticket, as `--tss` does (the install always does).
+    /// synthetic signing service, as `--tss` does (the install always does):
+    /// personalized root tickets and the recoveryOS LocalPolicy.
     #[arg(long)]
     tss: bool,
     /// Check recorded hashes only on the blocks each request reads, as
@@ -619,10 +620,13 @@ impl RestoreDryRun {
                 ctx.number("ApSecurityDomain").context("ApSecurityDomain")?,
                 ECID,
             );
+            let root = ctx.personalize(tss::NONCES)?;
             answers.signer = Some(Signer {
                 ecid: ECID,
+                nonces: tss::NONCES,
                 transport: Box::new(tss::Synthetic {
                     ticket,
+                    root,
                     requests: tss::REQUESTS.with(|r| r.clone()),
                 }),
             });
