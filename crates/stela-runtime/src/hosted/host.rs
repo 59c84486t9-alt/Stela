@@ -6,9 +6,10 @@
 //!
 //! The guest's stage 1 is the identity map of [`super::tables`], so a guest
 //! physical address is the host virtual address. Native code reaches guest
-//! memory directly; the engine's own accesses copy through the kernel
-//! (`mach_vm_read_overwrite`, `mach_vm_write`), which refuses an unmapped or
-//! protected page instead of faulting the host.
+//! memory directly. The engine's own reads copy in a routine whose faults
+//! the signal handler turns into a refusal ([`copy_in`]), and its writes
+//! copy through the kernel (`mach_vm_write`): an unmapped or protected page
+//! is refused instead of faulting the host.
 use super::tables::Tables;
 use crate::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
@@ -189,11 +190,28 @@ global_asm!(
     "xor eax, eax",
     "mov edx, 0xffff",
     "ret",
+    // Copy RDX bytes from RSI to RDI: 1, or 0 from the fault handler when
+    // the copy faults (`stela_hosted_copy_failed`).
+    ".global _stela_hosted_copy",
+    "_stela_hosted_copy:",
+    "mov rcx, rdx",
+    "rep movsb",
+    ".global _stela_hosted_copy_end",
+    "_stela_hosted_copy_end:",
+    "mov eax, 1",
+    "ret",
+    ".global _stela_hosted_copy_failed",
+    "_stela_hosted_copy_failed:",
+    "xor eax, eax",
+    "ret",
 );
 
 unsafe extern "sysv64" {
     fn stela_hosted_enter(state: *mut GuestState, code: usize, stack: *mut u64) -> BlockExit;
     fn stela_hosted_recover();
+    fn stela_hosted_copy(destination: *mut u8, source: *const u8, bytes: usize) -> u32;
+    fn stela_hosted_copy_end();
+    fn stela_hosted_copy_failed();
 }
 
 /// SIGSEGV, SIGBUS and SIGILL: inside native code, end the block at the
@@ -206,6 +224,14 @@ extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *
         let context = &mut *(context as *mut UserContext);
         let machine = &mut *context.machine_context;
         let rip = machine.thread.rip;
+        // A probing copy (`copy_in`) faulted: it returns 0 from its frame,
+        // which it has not changed.
+        if (stela_hosted_copy as *const () as u64..stela_hosted_copy_end as *const () as u64)
+            .contains(&rip)
+        {
+            machine.thread.rip = stela_hosted_copy_failed as *const () as u64;
+            return;
+        }
         if let Some(recovery) = recovery.as_mut()
             && recovery.covers(rip)
             && recovery.recorded.is_none()
@@ -312,16 +338,9 @@ fn install_handlers() {
     }
 }
 
-/// `mach_vm_read_overwrite`/`mach_vm_write`/`mach_vm_region` on this task.
+/// `mach_vm_write` on this task.
 mod kernel {
     unsafe extern "C" {
-        pub fn mach_vm_read_overwrite(
-            task: u32,
-            address: u64,
-            size: u64,
-            data: u64,
-            out: *mut u64,
-        ) -> i32;
         pub fn mach_vm_write(task: u32, address: u64, data: usize, count: u32) -> i32;
     }
 }
@@ -362,22 +381,19 @@ pub fn continuous_nanoseconds() -> u64 {
 
 /// Copy `buffer.len()` bytes of this process's memory at `address`, or
 /// false when any page is unmapped or unreadable.
+///
+/// The copy runs in this thread, and a fault on an unmapped or unreadable
+/// page ends it through the fault handler, which costs nothing when no
+/// page faults: a `mach_vm_read_overwrite` per read was a Mach call for
+/// every block the engine compiled and every guest string a call read.
 pub fn copy_in(address: u64, buffer: &mut [u8]) -> bool {
     if buffer.is_empty() {
         return true;
     }
-    let mut copied = 0u64;
-    // SAFETY: the kernel copies into the distinct buffer and checks the source.
-    let status = unsafe {
-        kernel::mach_vm_read_overwrite(
-            task(),
-            address,
-            buffer.len() as u64,
-            buffer.as_mut_ptr() as u64,
-            &mut copied,
-        )
-    };
-    status == KERN_SUCCESS && copied == buffer.len() as u64
+    install_handlers();
+    // SAFETY: the destination is the caller's buffer; a source byte that
+    // cannot be read faults inside the copy, whose handler returns 0.
+    unsafe { stela_hosted_copy(buffer.as_mut_ptr(), address as *const u8, buffer.len()) == 1 }
 }
 
 /// Write `data` to this process's memory at `address`, or false when any
@@ -610,5 +626,33 @@ mod tests {
         assert_eq!(&word[..4], &source);
         assert!(copy_out(address, &[9, 8]));
         assert_eq!(source[..2], [9, 8]);
+    }
+
+    #[test]
+    fn a_copy_into_an_unreadable_page_is_refused_and_the_thread_goes_on() {
+        const PAGE: usize = 0x4000;
+        // SAFETY: a fresh private mapping of two pages, the second made
+        // unreadable, unmapped at the end.
+        unsafe {
+            let base = libc::mmap(
+                core::ptr::null_mut(),
+                2 * PAGE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            );
+            assert_ne!(base, libc::MAP_FAILED);
+            let bytes = base.cast::<u8>();
+            bytes.add(PAGE - 2).write_bytes(7, 2);
+            assert_eq!(libc::mprotect(base.add(PAGE), PAGE, libc::PROT_NONE), 0);
+            let address = bytes as u64;
+            let mut buffer = [0u8; 4];
+            assert!(!copy_in(address + PAGE as u64 - 2, &mut buffer));
+            assert!(!copy_in(address + PAGE as u64, &mut buffer[..1]));
+            assert!(copy_in(address + PAGE as u64 - 2, &mut buffer[..2]));
+            assert_eq!(buffer[..2], [7, 7]);
+            assert_eq!(libc::munmap(base, 2 * PAGE), 0);
+        }
     }
 }
