@@ -4,10 +4,12 @@
 //! the #PF handler does: it looks the access up in the software TLB
 //! (`mmu::translated`), fills a missing page from the same software walk of
 //! the guest's tables as a shadow fill ([`super::resolve`]), and returns
-//! where the host reaches the access, through the physmap or, across
-//! discontiguous pages, through its two-page bounce slot. A guest fault, a
-//! device, a watched or tag-checked page ends the block precisely, as an
-//! unresolved #PF does.
+//! where the host reaches the access, at the guest address's offset in its
+//! page, through the physmap or, across discontiguous pages, through its
+//! two-page bounce slot. A guest fault, a device, a watched or tag-checked
+//! page ends the block precisely, as an unresolved #PF does; a guest fault
+//! leaves the instruction to the engine, which takes an Alignment fault
+//! first.
 //!
 //! The call (`stela_compiler::x86_64`'s translated access stub) passes the
 //! guest address in RCX and the access's size and flags in the two bytes
@@ -176,6 +178,13 @@ extern "sysv64" fn translate(saved: &mut Saved) -> u64 {
                 match resolve(state, missing, write, flags & UNPRIVILEGED != 0) {
                     Ok((translation, host)) => {
                         state.tlb.fill(missing, host, translation.writable, view)
+                    }
+                    // The stub runs before the block's alignment check, and
+                    // Arm takes an Alignment fault before a translation
+                    // fault: the engine checks the instruction's accesses
+                    // in that order.
+                    Err(FaultCause::Guest(_)) => {
+                        abandon(state, saved, missing, write, FaultCause::NonCanonical)
                     }
                     Err(cause) => abandon(state, saved, missing, write, cause),
                 }
