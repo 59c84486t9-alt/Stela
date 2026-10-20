@@ -1416,15 +1416,16 @@ mod tests {
         unsafe extern "C" {
             fn mach_vm_allocate(task: u32, address: *mut u64, size: u64, flags: i32) -> i32;
         }
-        /// `VM_FLAGS_FIXED` with a test-private tag, which no other
-        /// mapping joins.
-        const HOST_FLAGS: i32 = 254 << 24;
+        /// `VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE` with a test-private tag,
+        /// which no other mapping joins: the range is replaced in one
+        /// step, leaving no gap another test thread's mapping could take.
+        const HOST_FLAGS: i32 = 254 << 24 | 0x4000;
         let port = Port::new();
         let page = memory::allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
-        // The host's own allocation in the second half of the guest page.
+        // The host's own allocation in the second half of the guest page,
+        // carved out of the test's own page.
         let mut host = page + 0x2000;
-        memory::deallocate(host, 0x2000).unwrap();
-        // SAFETY: the host pages this test just released.
+        // SAFETY: replaces host pages of this test's own allocation.
         let status =
             unsafe { mach_vm_allocate(crate::hosted::host::task(), &mut host, 0x2000, HOST_FLAGS) };
         assert_eq!(status, 0);
