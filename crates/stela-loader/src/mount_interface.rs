@@ -27,8 +27,10 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// `--nor` may name the `--storage` partition, whose tail then holds the
 /// machine state. Revision 4: `--update-restore` restores the install
 /// medium's Update identity, and the startup choices hold up to
-/// [`MAX_CHOICES`] entries, chosen with `1`-`9` and then `a`-`z`.
-pub const OPTIONS_REVISION: u32 = 4;
+/// [`MAX_CHOICES`] entries, chosen with `1`-`9` and then `a`-`z`. Revision
+/// 5: `--external-disks` makes every host disk the engine leaves the guest's
+/// external drive, and `--storage` may share the USB with the install medium.
+pub const OPTIONS_REVISION: u32 = 5;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";

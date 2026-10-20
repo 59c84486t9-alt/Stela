@@ -288,17 +288,28 @@ pub fn open_unique(
     Ok(PartitionDevice::new(devices.swap_remove(index), partition))
 }
 
-/// [`open_unique`] for each of `guids`, each disk taken once and shared by
-/// the partitions found on it: the install medium and the translation store
-/// `stela.efi` rewrites are partitions of one USB, or one partition. When
-/// any GUID is refused, no disk is taken.
-pub fn open_unique_shared(
+/// A partition to open: by its disk's serial and its GUID, as `stela.cfg`
+/// names a target, or by its unique GUID alone, as the install medium and
+/// the translation store are named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Named {
+    Disk(Target),
+    Unique(Guid),
+}
+
+/// Open every partition of `named`, each disk taken once and shared by the
+/// partitions found on it: the Mac's internal SSD, the install medium and
+/// the translation store `stela.efi` rewrites are partitions of one USB, and
+/// one partition may be named twice. When any is refused, no disk is taken
+/// and the refused one's index comes back with the reason.
+pub fn open_shared(
     devices: &mut Vec<Box<dyn BlockDevice>>,
-    guids: &[Guid],
-) -> Result<Vec<PartitionDevice<Window>>, StorageError> {
-    let found = guids
+    named: &[Named],
+) -> Result<Vec<PartitionDevice<Window>>, (usize, StorageError)> {
+    let found = named
         .iter()
-        .map(|&guid| find_unique(devices, guid))
+        .enumerate()
+        .map(|(at, named)| locate(devices, named).map_err(|error| (at, error)))
         .collect::<Result<Vec<_>, _>>()?;
     let mut indices: Vec<usize> = found.iter().map(|(index, _)| *index).collect();
     indices.sort_unstable();
@@ -319,6 +330,36 @@ pub fn open_unique_shared(
             PartitionDevice::new(disk.whole(), partition)
         })
         .collect())
+}
+
+/// The index of the disk holding `named` and its partition, refusing an
+/// EFI system partition.
+fn locate(
+    devices: &mut [Box<dyn BlockDevice>],
+    named: &Named,
+) -> Result<(usize, gpt::Partition), StorageError> {
+    let (index, partition) = match named {
+        Named::Unique(guid) => find_unique(devices, *guid)?,
+        Named::Disk(target) => {
+            let index = find(devices, &target.serial)?;
+            let table = gpt::read(&mut *devices[index]).map_err(StorageError::Table)?;
+            let mut matching = table
+                .partitions
+                .into_iter()
+                .filter(|partition| partition.unique == target.partition);
+            let partition = matching
+                .next()
+                .ok_or(StorageError::NoPartition(target.partition))?;
+            if matching.next().is_some() {
+                return Err(StorageError::AmbiguousPartition(target.partition));
+            }
+            (index, partition)
+        }
+    };
+    if partition.kind == Guid::ESP {
+        return Err(StorageError::SystemPartition(partition.unique));
+    }
+    Ok((index, partition))
 }
 
 /// The index of the one disk in `devices` whose GPT holds partition `guid`,
@@ -504,16 +545,20 @@ mod tests {
                 table::partition(data, store, 140, 179),
             ],
         )));
-        let guids: Vec<Guid> = [medium, store, store]
+        let guids: Vec<Named> = [medium, store, store]
             .iter()
-            .map(|guid| guid.parse().unwrap())
+            .map(|guid| Named::Unique(guid.parse().unwrap()))
             .collect();
         assert_eq!(
-            open_unique_shared(&mut devices, &[guids[0], TARGET.parse().unwrap()]).err(),
-            Some(StorageError::AmbiguousPartition(TARGET.parse().unwrap()))
+            open_shared(
+                &mut devices,
+                &[guids[0].clone(), Named::Unique(TARGET.parse().unwrap())]
+            )
+            .err(),
+            Some((1, StorageError::AmbiguousPartition(TARGET.parse().unwrap())))
         );
         assert_eq!(devices.len(), 4, "a refusal takes no disk");
-        let mut opened = open_unique_shared(&mut devices, &guids).unwrap();
+        let mut opened = open_shared(&mut devices, &guids).unwrap();
         assert_eq!(devices.len(), 3, "the USB is taken once");
         let blocks: Vec<u64> = opened
             .iter()
@@ -526,6 +571,49 @@ mod tests {
         assert_eq!(read, [7; 512], "one partition opened twice is one");
         opened[0].read(99, &mut read).unwrap();
         assert_ne!(read, [7; 512], "the medium ends before the store");
+    }
+
+    #[test]
+    fn a_target_shares_its_disk_with_partitions_named_by_guid() {
+        let data: Guid = table::DATA.parse().unwrap();
+        let (medium, ssd) = (
+            "CCCCCCCC-0000-0000-0000-000000000003",
+            "CCCCCCCC-0000-0000-0000-000000000005",
+        );
+        let mut devices = disks();
+        devices.push(Box::new(table::formatted(
+            "usb",
+            &[
+                table::partition(data, medium, 40, 139),
+                table::partition(data, ssd, 140, 199),
+            ],
+        )));
+        let ssd = Named::Disk(Target {
+            serial: "usb".into(),
+            partition: ssd.parse().unwrap(),
+        });
+        let opened =
+            open_shared(&mut devices, &[ssd, Named::Unique(medium.parse().unwrap())]).unwrap();
+        assert_eq!(devices.len(), 3, "the USB is taken once");
+        let blocks: Vec<u64> = opened
+            .iter()
+            .map(|device| device.identity().blocks)
+            .collect();
+        assert_eq!(blocks, [60, 100]);
+        // A serial no disk reports refuses before any disk is taken.
+        let missing = Named::Disk(Target {
+            serial: "none".into(),
+            partition: TARGET.parse().unwrap(),
+        });
+        assert_eq!(
+            open_shared(
+                &mut devices,
+                &[Named::Unique(TARGET.parse().unwrap()), missing]
+            )
+            .err(),
+            Some((0, StorageError::AmbiguousPartition(TARGET.parse().unwrap())))
+        );
+        assert_eq!(devices.len(), 3);
     }
 
     #[test]

@@ -197,6 +197,14 @@ pub struct UsbCables {
     pub network: Option<Mac>,
 }
 
+impl UsbCables {
+    /// The disks the hub has ports for beside the keyboard and pointer and,
+    /// with `network`, the Ethernet adapter.
+    pub const fn disk_ports(network: bool) -> usize {
+        hub::MAX_PORTS - 1 - network as usize
+    }
+}
+
 /// The functions on the native hub's ports: the keyboard and pointer on
 /// port 1, the Ethernet adapter on port 2 when there is one, then one mass
 /// storage device per host disk.

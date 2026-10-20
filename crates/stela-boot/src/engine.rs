@@ -69,6 +69,8 @@ pub const STRICT_OPTION: &str = "--strict";
 /// The install restores with the inventory's Update identity, over the
 /// installed system and keeping its data, instead of erasing the target.
 pub const UPDATE_RESTORE_OPTION: &str = "--update-restore";
+/// Every host disk the engine leaves is the guest's external drive.
+pub const EXTERNAL_DISKS_OPTION: &str = "--external-disks";
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
@@ -159,6 +161,11 @@ struct Options {
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
     usb_storage: Vec<String>,
+    /// Every other host disk the engine does not open itself is USB mass
+    /// storage too, up to the hub's free ports (`--external-disks`): the
+    /// PC's disks are a Mac's external drives, which recoveryOS partitions,
+    /// formats and installs macOS onto.
+    external_disks: bool,
     /// Give the guest a USB Ethernet adapter bridged to a host network
     /// adapter of its own (`--guest-network`; `network::GuestNetwork`).
     guest_network: bool,
@@ -270,6 +277,7 @@ impl Options {
             ecid: None,
             network_check: None,
             usb_storage: Vec::new(),
+            external_disks: false,
             guest_network: false,
             sep_observe: false,
             agx_observe: false,
@@ -373,6 +381,10 @@ impl Options {
             }
             if name == "--guest-network" {
                 options.guest_network = true;
+                continue;
+            }
+            if name == EXTERNAL_DISKS_OPTION {
+                options.external_disks = true;
                 continue;
             }
             if name == "--network-check" {
@@ -1362,6 +1374,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         && !options.input
         && !wants_network
         && options.usb_storage.is_empty()
+        && !options.external_disks
         && !options.guest_network
         && translation_store.is_none()
     {
@@ -1386,6 +1399,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 options.install_source,
                 translation_store,
                 &options.usb_storage,
+                options.external_disks.then(|| {
+                    stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
+                        .saturating_sub(options.usb_storage.len())
+                }),
             )
         }
         .unwrap_or_else(|error| {

@@ -6,14 +6,14 @@
 //! This boundary never maps host identity addresses into a guest root. All
 //! buffers passed here belong to the engine window, not guest virtual RAM.
 use crate::output;
-use alloc::{boxed::Box, format, string::String};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::arch::asm;
 use stela_runtime::pc::{
     self,
-    block::{BlockDevice, BlockError, Identity},
+    block::{BlockDevice, BlockError, Identity, Window},
     dma::RegionAllocator,
-    gpt::Guid,
-    storage::{self, Target},
+    gpt::{Guid, PartitionDevice},
+    storage::{self, Named, Target},
 };
 
 pub(super) struct RestoreRoot {
@@ -90,14 +90,8 @@ pub unsafe fn open(
     medium: Option<Guid>,
     store: Option<Guid>,
     usb_disks: &[String],
+    external: Option<usize>,
 ) -> Result<Opened, String> {
-    if targets
-        .iter()
-        .enumerate()
-        .any(|(i, t)| targets[..i].iter().any(|other| other.serial == t.serial))
-    {
-        return Err("ANS, restore source and NOR partitions must be on distinct host disks".into());
-    }
     if let Some(serial) = usb_disks
         .iter()
         .find(|serial| targets.iter().any(|target| &target.serial == *serial))
@@ -133,96 +127,87 @@ pub unsafe fn open(
         devices: core::mem::take(&mut disks.links),
         root,
     };
-    let services = targets
+    // One disk may hold several of them: the stick holds the Mac's internal
+    // SSD, the install medium and the translation store. A store that
+    // cannot be opened is reported and left out.
+    let mut named: Vec<Named> = targets
         .iter()
-        .map(|target| {
-            let partition = storage::open(&mut disks.devices, target)
-                .map_err(|error| format!("{}:{}: {error}", target.serial, target.partition))?;
-            output::arguments(format_args!(
-                "HOST PARTITION serial={} partition={} blocks={} block_size={}\n",
-                target.serial,
-                target.partition,
-                partition.identity().blocks,
-                partition.identity().block_size
-            ));
-            Ok(Box::new(Service {
-                inner: Box::new(partition),
-                root,
-            }) as Box<dyn BlockDevice>)
-        })
-        .collect::<Result<_, String>>()?;
-    // After the targets, so a medium GUID on a target's disk finds no disk.
-    // The translation store's partition may share the medium's disk, or be
-    // the medium's partition; one it cannot open is reported and left out.
-    let service = |partition: Box<dyn BlockDevice>| -> Box<dyn BlockDevice> {
-        Box::new(Service {
-            inner: partition,
-            root,
-        })
+        .map(|target| Named::Disk((*target).clone()))
+        .chain(medium.map(Named::Unique))
+        .collect();
+    let store = store.inspect(|&guid| named.push(Named::Unique(guid)));
+    let describe = |named: &Named, error: storage::StorageError| match named {
+        Named::Disk(target) => format!("{}:{}: {error}", target.serial, target.partition),
+        Named::Unique(guid) => format!("partition {guid}: {error}"),
     };
-    let mut store_partition = None;
-    let mut shared_medium = None;
-    if let Some(guid) = store {
-        let guids: alloc::vec::Vec<Guid> = medium.into_iter().chain([guid]).collect();
-        match storage::open_unique_shared(&mut disks.devices, &guids) {
-            Ok(mut partitions) => {
-                let partition = partitions.pop().expect("the store's partition");
-                output::arguments(format_args!(
-                    "HOST PARTITION serial={} partition={guid} blocks={} block_size={} (translation store)\n",
-                    partition.disk().serial,
-                    partition.identity().blocks,
-                    partition.identity().block_size
-                ));
-                store_partition = Some(service(Box::new(partition)));
-                shared_medium = partitions.pop();
-            }
-            Err(error) => output::arguments(format_args!(
-                "TRANSLATIONS store partition {guid}: {error}\n"
-            )),
+    let (mut opened, with_store) = match storage::open_shared(&mut disks.devices, &named) {
+        Err((at, error)) if store.is_some() && at == named.len() - 1 => {
+            output::arguments(format_args!(
+                "TRANSLATIONS store partition {}: {error}\n",
+                store.expect("checked")
+            ));
+            named.pop();
+            storage::open_shared(&mut disks.devices, &named).map(|opened| (opened, false))
         }
+        opened => opened.map(|opened| (opened, store.is_some())),
     }
-    if let (Some(guid), Some(partition)) = (medium, &shared_medium) {
+    .map_err(|(at, error)| describe(&named[at], error))?;
+    let service = |partition: PartitionDevice<Window>, role: &str| -> Box<dyn BlockDevice> {
         output::arguments(format_args!(
-            "HOST PARTITION serial={} partition={guid} blocks={} block_size={} (install medium)\n",
+            "HOST PARTITION serial={} partition={} blocks={} block_size={}{role}\n",
             partition.disk().serial,
+            partition.partition().unique,
             partition.identity().blocks,
             partition.identity().block_size
         ));
-    }
-    let shared_medium = shared_medium.map(|partition| service(Box::new(partition)));
-    let medium = medium
-        .filter(|_| shared_medium.is_none())
-        .map(|guid| {
-            let partition = storage::open_unique(&mut disks.devices, guid)
-                .map_err(|error| format!("install medium {guid}: {error}"))?;
-            output::arguments(format_args!(
-                "HOST PARTITION serial={} partition={guid} blocks={} block_size={} (install medium)\n",
-                partition.disk().serial,
-                partition.identity().blocks,
-                partition.identity().block_size
-            ));
-            Ok::<_, String>(Box::new(Service {
-                inner: Box::new(partition),
-                root,
-            }) as Box<dyn BlockDevice>)
+        Box::new(Service {
+            inner: Box::new(partition),
+            root,
         })
-        .transpose()?
-        .or(shared_medium);
-    let usb_disks = usb_disks
+    };
+    let store_partition =
+        with_store.then(|| service(opened.pop().expect("the store"), " (translation store)"));
+    let medium = medium.map(|_| service(opened.pop().expect("the medium"), " (install medium)"));
+    let services = opened
+        .into_iter()
+        .map(|partition| service(partition, ""))
+        .collect();
+    let mut taken = usb_disks
         .iter()
         .map(|serial| {
-            let disk = storage::take(&mut disks.devices, serial)
-                .map_err(|error| format!("USB storage {serial}: {error}"))?;
+            storage::take(&mut disks.devices, serial)
+                .map_err(|error| format!("USB storage {serial}: {error}"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    // With `--external-disks`, every disk left, in probe order, up to the
+    // hub's free ports; the rest are reported.
+    if let Some(ports) = external {
+        let rest = core::mem::take(&mut disks.devices);
+        for (index, disk) in rest.into_iter().enumerate() {
+            if index < ports {
+                taken.push(disk);
+            } else {
+                output::arguments(format_args!(
+                    "HOST DISK serial={} left out: the guest's hub has no free port\n",
+                    disk.identity().serial
+                ));
+            }
+        }
+    }
+    let usb_disks = taken
+        .into_iter()
+        .map(|disk| {
             output::arguments(format_args!(
-                "HOST USB DISK serial={serial} model={:?} blocks={} block_size={} read_only={}\n",
+                "HOST USB DISK serial={} model={:?} blocks={} block_size={} read_only={}\n",
+                disk.identity().serial,
                 disk.identity().model,
                 disk.identity().blocks,
                 disk.identity().block_size,
                 disk.identity().read_only
             ));
-            Ok(Box::new(Service { inner: disk, root }) as Box<dyn BlockDevice>)
+            Box::new(Service { inner: disk, root }) as Box<dyn BlockDevice>
         })
-        .collect::<Result<_, String>>()?;
+        .collect();
     Ok(Opened {
         services,
         medium,
