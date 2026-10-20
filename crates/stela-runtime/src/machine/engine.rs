@@ -1677,7 +1677,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     fn lines(&mut self) -> Lines {
-        let now = self.now();
+        // The count is read only when an answer can change with it alone: a
+        // device answer with a deadline, a timer's or a PMI's. Every exit
+        // asks, and a hosted process's PE has none of them.
+        let timed = !matches!(self.device_lines, Some((_, u64::MAX)))
+            || self.timer_deadline().is_some()
+            || self
+                .cpu
+                .pmu
+                .as_ref()
+                .is_some_and(|monitor| monitor.deadline().is_some());
+        let now = if timed { self.now() } else { 0 };
         let device = match self.device_lines {
             Some((lines, until)) if now < until => lines,
             _ => {
@@ -5093,6 +5103,7 @@ mod tests {
         /// Pages whose fetch the host refuses, and its answers.
         refused: Vec<u64>,
         fetch_checks: usize,
+        counter_reads: usize,
     }
 
     impl Host for FakeHost {
@@ -5175,6 +5186,7 @@ mod tests {
             }
         }
         fn counter(&mut self) -> u64 {
+            self.counter_reads += 1;
             self.now
         }
         fn arm_timer(&mut self, _: Option<u64>) {}
@@ -5276,6 +5288,7 @@ mod tests {
             store: None,
             refused: Vec::new(),
             fetch_checks: 0,
+            counter_reads: 0,
         };
         let profile = CpuProfile {
             name: "test",
@@ -5713,6 +5726,29 @@ mod tests {
         fn system_instruction_for_test(&mut self, word: u32) {
             self.pointer_authentication(word).unwrap();
         }
+    }
+
+    #[test]
+    fn interrupt_lines_read_the_count_only_when_a_deadline_needs_it() {
+        let mut machine = machine(&[]);
+        assert_eq!(machine.lines(), Lines::default());
+        let reads = machine.host.counter_reads;
+        // No device deadline, timer or PMI: the cached answer stands.
+        assert_eq!(machine.lines(), Lines::default());
+        assert_eq!(machine.host.counter_reads, reads);
+        // An enabled, unmasked virtual timer due at count 10.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTV_CVAL_EL0, 0, 10);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTV_CTL_EL0, 0, 1);
+        machine.timers = None;
+        machine.host.now = 0;
+        machine.lines();
+        assert_eq!(machine.host.counter_reads, reads + 1);
     }
 
     #[test]
