@@ -253,6 +253,11 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         Some("the x86 host's load and VM statistics, its page counts in guest pages"),
     ),
     (Object::Host, "host_get_special_port", None),
+    (
+        Object::Host,
+        "host_processor_info",
+        Some("PROCESSOR_BASIC_INFO; the load and exception counters stop the run"),
+    ),
     (Object::Host, "processor_set_default", None),
     (Object::Host, "host_processor_sets", None),
     (Object::Host, "host_processor_set_priv", None),
@@ -613,6 +618,11 @@ pub(super) fn serve(
         // ABIs but describe the x86 machine.
         (Object::Host, "host_get_io_main", false) => Reply::Forward,
         (Object::Host, "host_kernel_version", false) => kernel_version(),
+        // `flavor`.
+        (Object::Host, "host_processor_info", false) => match request.word(8) {
+            Some(flavor) => processor_info(&kernel.process.hardware, flavor)?,
+            None => Reply::Failure(MIG_BAD_ARGUMENTS),
+        },
         // `vm_size_t`: the arm64 kernel's 16 KiB page.
         (Object::Host, "_host_page_size", false) => {
             Reply::Success(memory::PAGE_BYTES.to_le_bytes().to_vec())
@@ -1059,12 +1069,6 @@ const KERN_RESOURCE_SHORTAGE: u32 = 6;
 /// with the reason.
 pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
     (
-        Object::Host,
-        "host_processor_info",
-        "its per-processor counters would describe the x86 host's processors, not the M2's \
-         eight",
-    ),
-    (
         Object::Task,
         "task_generate_corpse",
         "the host kernel's corpse would hold the x86 host's thread states and the hosted \
@@ -1194,6 +1198,74 @@ fn processor_set_info(hardware: &hardware::Hardware, host: u32, flavor: u32, cou
         }],
         body,
     }
+}
+
+/// `processor_flavor_t`s (`mach/processor_info.h`): the arm64 kernel's
+/// own two, its CPU counter statistics (`cpu_info_count`).
+const PROCESSOR_BASIC_INFO: u32 = 1;
+const PROCESSOR_CPU_LOAD_INFO: u32 = 2;
+const PROCESSOR_CPU_STAT: u32 = 0x1000_0003;
+const PROCESSOR_CPU_STAT64: u32 = 0x1000_0004;
+/// `processor_basic_info`: `cpu_type`, `cpu_subtype`, `running`,
+/// `slot_num`, `is_master`.
+const PROCESSOR_BASIC_INFO_COUNT: u32 = 5;
+
+/// `host_processor_info`: one record per processor of the machine, out of
+/// line. Every M2 processor is running ARM64E (`CPU_ARCH_ARMv8E`) in its
+/// logical slot, the boot processor (slot 0) the master. The load ticks
+/// and exception counters would be the x86 host's processors', so they
+/// stop the run; other flavors fail in `processor_info_count`.
+fn processor_info(hardware: &hardware::Hardware, flavor: u32) -> Result<Reply> {
+    match flavor {
+        PROCESSOR_BASIC_INFO => {}
+        PROCESSOR_CPU_LOAD_INFO | PROCESSOR_CPU_STAT | PROCESSOR_CPU_STAT64 => bail!(
+            "host_processor_info flavor {flavor:#x}: the M2 processors' load ticks and \
+             exception counters are not modeled"
+        ),
+        _ => return Ok(Reply::Failure(KERN_FAILURE)),
+    }
+    let cpus = u32::from(hardware.cpus());
+    let records: Vec<u8> = (0..cpus)
+        .flat_map(|slot| {
+            [
+                hardware::CPU_TYPE_ARM64,
+                hardware::CPU_SUBTYPE_ARM64E,
+                1,
+                slot,
+                u32::from(slot == 0),
+            ]
+        })
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    unsafe extern "C" {
+        fn mach_vm_allocate(task: u32, address: *mut u64, size: u64, flags: i32) -> i32;
+    }
+    const VM_FLAGS_ANYWHERE: i32 = 1;
+    let mut address = 0u64;
+    // SAFETY: new memory of this task, which the reply's send releases.
+    let code = unsafe {
+        mach_vm_allocate(
+            crate::hosted::host::task(),
+            &mut address,
+            records.len() as u64,
+            VM_FLAGS_ANYWHERE,
+        )
+    };
+    if code != 0 {
+        return Ok(Reply::Failure(KERN_RESOURCE_SHORTAGE));
+    }
+    // SAFETY: the allocation holds the records.
+    unsafe { std::ptr::copy_nonoverlapping(records.as_ptr(), address as *mut u8, records.len()) };
+    let mut body = cpus.to_le_bytes().to_vec();
+    body.extend((cpus * PROCESSOR_BASIC_INFO_COUNT).to_le_bytes());
+    Ok(Reply::Complex {
+        descriptors: vec![Descriptor::Memory {
+            address,
+            size: records.len() as u32,
+            deallocate: true,
+        }],
+        body,
+    })
 }
 
 /// `kernel_version_t`'s bound.
@@ -1642,6 +1714,35 @@ mod tests {
             processor_set_info(&hardware, 0x103, 10, 8),
             Reply::Forward
         ));
+    }
+
+    #[test]
+    fn processor_records_describe_the_m2_processors() {
+        let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
+        let Reply::Complex { descriptors, body } =
+            processor_info(&hardware, PROCESSOR_BASIC_INFO).unwrap()
+        else {
+            panic!("host_processor_info failed");
+        };
+        assert_eq!(body, [8, 0, 0, 0, 40, 0, 0, 0]);
+        let [Descriptor::Memory { address, size, .. }] = descriptors[..] else {
+            panic!("no out-of-line records");
+        };
+        assert_eq!(size, 160);
+        // SAFETY: the records the reply would carry.
+        let records = unsafe { std::slice::from_raw_parts(address as *const u32, 40) };
+        assert_eq!(&records[..5], &[hardware::CPU_TYPE_ARM64, 2, 1, 0, 1]);
+        assert_eq!(&records[35..], &[hardware::CPU_TYPE_ARM64, 2, 1, 7, 0]);
+        unsafe extern "C" {
+            fn mach_vm_deallocate(task: u32, address: u64, size: u64) -> i32;
+        }
+        // SAFETY: the allocation the reply's send would release.
+        unsafe { mach_vm_deallocate(crate::hosted::host::task(), address, u64::from(size)) };
+        assert!(matches!(
+            processor_info(&hardware, 99).unwrap(),
+            Reply::Failure(KERN_FAILURE)
+        ));
+        assert!(processor_info(&hardware, PROCESSOR_CPU_LOAD_INFO).is_err());
     }
 
     #[test]
