@@ -376,10 +376,6 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let mut notes = Vec::new();
     let cpu = host.cpu()?;
     ensure!(
-        cpu.la57,
-        "this PC's CPU lacks five-level paging (LA57), which stela.efi's system mode needs"
-    );
-    ensure!(
         cpu.entropy,
         "this PC's CPU has neither RDSEED nor RDRAND, which the kernel's seeds need"
     );

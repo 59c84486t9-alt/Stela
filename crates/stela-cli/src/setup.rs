@@ -2140,10 +2140,7 @@ mod tests {
                 partitions: BTreeMap::new(),
                 serials: BTreeMap::new(),
                 memory: 32 * GIB,
-                cpu: Cpu {
-                    la57: true,
-                    entropy: true,
-                },
+                cpu: Cpu { entropy: true },
             }
         }
 
@@ -3039,9 +3036,9 @@ mod tests {
         f.host.memory = 8 * GIB;
         assert!(refusal(&f, &|_| {}).contains("GiB of memory"));
         f.host.memory = 32 * GIB;
-        f.host.cpu.la57 = false;
-        assert!(refusal(&f, &|_| {}).contains("LA57"));
-        f.host.cpu.la57 = true;
+        f.host.cpu.entropy = false;
+        assert!(refusal(&f, &|_| {}).contains("RDSEED"));
+        f.host.cpu.entropy = true;
         assert!(refusal(&f, &|c| c.disk_serial = Some("OTHER".into())).contains("reports serial"));
         f.host.serials.clear();
         assert!(refusal(&f, &|_| {}).contains("--disk-serial"));

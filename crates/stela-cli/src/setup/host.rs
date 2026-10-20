@@ -78,8 +78,6 @@ pub(crate) struct PartitionInfo {
 /// What the PC's CPU offers the engine.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Cpu {
-    /// Five-level paging: system mode's address space needs it.
-    pub(crate) la57: bool,
     /// RDSEED or RDRAND: the kernel's seeds.
     pub(crate) entropy: bool,
 }
@@ -212,12 +210,10 @@ impl Host for System {
         #[cfg(target_arch = "x86_64")]
         {
             use core::arch::x86_64::{__cpuid, __cpuid_count};
-            const LA57: u32 = 1 << 16;
             const RDSEED: u32 = 1 << 18;
             const RDRAND: u32 = 1 << 30;
             let (basic, extended) = (__cpuid(1), __cpuid_count(7, 0));
             Ok(Cpu {
-                la57: extended.ecx & LA57 != 0,
                 entropy: extended.ebx & RDSEED != 0 || basic.ecx & RDRAND != 0,
             })
         }
