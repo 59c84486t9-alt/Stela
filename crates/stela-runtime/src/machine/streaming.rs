@@ -146,7 +146,7 @@ pub(crate) fn fpmr_enabled(cpu: &Cpu) -> bool {
 }
 
 fn fpmr_access(cpu: &Cpu) -> Result<(), Denial> {
-    match cpu.registers.chip().implemented(Feature::FEAT_FPMR) {
+    match cpu.registers.implemented(Feature::FEAT_FPMR) {
         Ok(true) => {}
         Ok(false) => return Err(Denial::Undefined),
         Err(reason) => return Err(Denial::Unimplemented(reason)),

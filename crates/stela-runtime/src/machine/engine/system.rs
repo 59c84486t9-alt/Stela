@@ -28,7 +28,7 @@ use crate::machine::{
     registers::{Lines, Refusal, trap_iss},
     system::{
         ACCESSORS, AtAccess, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord,
-        Feature, Limit, Operation, Pstate, Register, Stage, Tlbi, helpers::sign_extend,
+        Feature, File, Limit, Operation, Pstate, Register, Stage, Tlbi, helpers::sign_extend,
     },
     timer::Channel,
 };
@@ -46,9 +46,9 @@ const FPCR_FIELDS: u32 = 0x07c8_0000;
 /// their effects from the stored FPCR.
 const FPCR_ALTERNATE: u32 = 0b111;
 
-/// The FPCR fields `chip` holds.
-fn fpcr_fields(chip: Chip) -> u32 {
-    if Feature::FEAT_AFP.on(chip) {
+/// The FPCR fields the PE whose register file is `registers` holds.
+fn fpcr_fields(registers: &File) -> u32 {
+    if registers.has(Feature::FEAT_AFP) {
         FPCR_FIELDS | FPCR_ALTERNATE
     } else {
         FPCR_FIELDS
@@ -274,7 +274,7 @@ const HFGRTR_TPIDR_EL1: u32 = 33;
 /// Native code completes the read only then (`x86_64::register_read`).
 pub(super) fn thread_pointer_readable(cpu: &Cpu) -> bool {
     match cpu.pstate.el {
-        1 => match cpu.registers.chip().implemented(Feature::FEAT_FGT) {
+        1 => match cpu.registers.implemented(Feature::FEAT_FGT) {
             Ok(true) => cpu.field(Register::HFGRTR_EL2, HFGRTR_TPIDR_EL1, 1) == 0,
             Ok(false) => true,
             Err(_) => false,
@@ -295,7 +295,7 @@ pub(super) fn thread_pointer_readable(cpu: &Cpu) -> bool {
 /// takes an Alignment fault.
 pub(super) fn native_zero_block(cpu: &Cpu, missing: &[Register]) -> Option<u16> {
     let fine_grained = || {
-        let implemented = cpu.registers.chip().implemented(Feature::FEAT_FGT).ok()?;
+        let implemented = cpu.registers.implemented(Feature::FEAT_FGT).ok()?;
         Some(implemented && cpu.field(Register::HFGITR_EL2, HFGITR_DCZVA, 1) != 0)
     };
     let enabled = |register| cpu.field(register, SCTLR_DZE, 1) != 0;
@@ -337,7 +337,7 @@ const HFGITR_DCCVAU: u32 = 7;
 /// nor treat as a NOP (`treat_dc_as_nop` never does). Native code completes
 /// these by reading the byte at Xt (`x86_64::cache_clean`).
 pub(super) fn native_cache_clean(cpu: &Cpu) -> cache_clean::Operations {
-    let Ok(fine_grained) = cpu.registers.chip().implemented(Feature::FEAT_FGT) else {
+    let Ok(fine_grained) = cpu.registers.implemented(Feature::FEAT_FGT) else {
         return cache_clean::Operations::NONE;
     };
     let hcr = |bit| cpu.hcr(bit);
@@ -520,6 +520,14 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
 impl<H: Host, D: Devices> Context for Access<'_, H, D> {
     fn chip(&self) -> Chip {
         self.machine.cpu.registers.chip()
+    }
+
+    fn implemented(&self, feature: Feature) -> Result<bool, Effect> {
+        self.machine
+            .cpu
+            .registers
+            .implemented(feature)
+            .map_err(Effect::Refused)
     }
 
     fn el(&self) -> u64 {
@@ -772,7 +780,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 return Ok(());
             }
             Register::FPCR => {
-                cpu.state.fpcr = value as u32 & fpcr_fields(cpu.registers.chip());
+                cpu.state.fpcr = value as u32 & fpcr_fields(&cpu.registers);
                 return Ok(());
             }
             // Without AArch32, FPSR keeps only QC and the cumulative flags.
@@ -988,7 +996,7 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
             return monitors.enabled();
         }
         let count = monitors.count(index as usize, self.now, cpu.retired);
-        let virtual_view = Feature::FEAT_AMUv1p1.on(cpu.registers.chip())
+        let virtual_view = cpu.registers.has(Feature::FEAT_AMUv1p1)
             && cpu.pstate.el < 2
             && !cpu.in_host()
             && cpu.hcr(HCR_AMVOFFEN);
@@ -1353,6 +1361,10 @@ pub(super) fn identify(
     cpu: &mut Cpu,
     missing: &mut Vec<Register>,
 ) {
+    cpu.present(crate::machine::identification::withheld(
+        profile.chip,
+        &profile.fixed,
+    ));
     cpu.registers
         .set_raw(Register::CNTFRQ_EL0, 0, profile.counter_frequency);
     let own = profile.processors.get(pe);
@@ -1362,7 +1374,7 @@ pub(super) fn identify(
         .map(|clock| Pmu::new(clock, profile.counter_frequency));
     // The activity monitors count the board's core clock, or the counter's
     // frequency where the board gives none (`machine::amu`).
-    cpu.amu = (profile.chip.implemented(Feature::FEAT_AMUv1) == Ok(true)).then(|| {
+    cpu.amu = (cpu.registers.implemented(Feature::FEAT_AMUv1) == Ok(true)).then(|| {
         let clock = own.and_then(|identity| identity.clock);
         Amu::new(
             clock.unwrap_or(profile.counter_frequency),
@@ -1403,7 +1415,7 @@ pub(super) fn identify(
             None => missing.push(register),
         }
     }
-    if Feature::FEAT_SME.on(profile.chip) && !missing.contains(&Register::MPIDR_EL1) {
+    if cpu.registers.has(Feature::FEAT_SME) && !missing.contains(&Register::MPIDR_EL1) {
         let smidr = crate::machine::streaming::smidr(cpu.read(Register::MPIDR_EL1));
         cpu.registers.set_raw(Register::SMIDR_EL1, 0, smidr);
         missing.retain(|&register| register != Register::SMIDR_EL1);

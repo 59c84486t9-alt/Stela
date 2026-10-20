@@ -368,6 +368,27 @@ impl Cpu {
         }
     }
 
+    /// Present an identification that withholds the chip's features in
+    /// `withheld` (`identification::withheld`): the PE treats them as
+    /// absent, and without FEAT_SME (or FEAT_SME2) keeps no SME state (or
+    /// ZT0) for them.
+    pub fn present(&mut self, withheld: u64) {
+        self.registers.withhold(withheld);
+        let sme = self.registers.has(Feature::FEAT_SME);
+        let sme2 = self.registers.has(Feature::FEAT_SME2);
+        match &self.scalable {
+            Some(scalable) if sme && scalable.has_zt0_storage() == sme2 => {}
+            None if !sme => {}
+            _ => {
+                self.scalable = sme.then(|| {
+                    let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)
+                        .expect("a 512-bit vector length");
+                    ScalableState::new(length, sme2)
+                });
+            }
+        }
+    }
+
     /// SVCR: PSTATE.SM at bit 0 and PSTATE.ZA at bit 1.
     pub fn svcr(&self) -> u64 {
         self.scalable.as_ref().map_or(0, |scalable| {
@@ -444,11 +465,10 @@ impl Cpu {
     /// Arm `EffectiveHCR_EL2_NVx` (`helpers::effective_nvx`): '000' on a chip
     /// without FEAT_NV.
     pub fn nested(&self) -> u64 {
-        let chip = self.registers.chip();
         effective_nvx(
             self.read(Register::HCR_EL2),
-            Feature::FEAT_NV.on(chip),
-            Feature::FEAT_NV2.on(chip),
+            self.registers.has(Feature::FEAT_NV),
+            self.registers.has(Feature::FEAT_NV2),
         )
     }
 
@@ -540,7 +560,7 @@ impl Cpu {
             el: self.pstate.el,
             hcr: self.read(Register::HCR_EL2),
             nested: self.nested() & 1 != 0,
-            fine_grained_trap: self.registers.chip().implemented(Feature::FEAT_FGT) == Ok(true)
+            fine_grained_trap: self.registers.implemented(Feature::FEAT_FGT) == Ok(true)
                 && self.field(fine_grained, HFGXTR_ICC_IGRPENN, 1) == 1,
         }
     }
@@ -569,7 +589,7 @@ impl Cpu {
         const HCRX_PACMEN: u32 = 24;
         const SCTLR2_ENPACM: u32 = 7;
         const SCTLR2_ENPACM0: u32 = 8;
-        if !Feature::FEAT_PAuth_LR.on(self.registers.chip()) {
+        if !self.registers.has(Feature::FEAT_PAuth_LR) {
             return false;
         }
         let hcrx = |bit| bits(self.read(Register::HCRX_EL2), u64::from(bit), 1) == 1;
@@ -613,10 +633,10 @@ impl Cpu {
         })
     }
 
-    /// The chip has FEAT_MTE: exception entry sets PSTATE.TCO, and return
+    /// The PE has FEAT_MTE: exception entry sets PSTATE.TCO, and return
     /// restores it.
     pub fn mte(&self) -> bool {
-        Feature::FEAT_MTE.on(self.registers.chip())
+        self.registers.has(Feature::FEAT_MTE)
     }
 
     /// SCTLR_ELx of `el`'s translation regime: SCTLR_EL2 at EL2 and at EL0
@@ -633,7 +653,7 @@ impl Cpu {
     /// is set for EL0 and EL1 outside the host, and SCTLR_ELx.ATA (ATA0 for
     /// EL0) of `el`'s regime enables Allocation Tag access.
     pub fn allocation_tags(&self, el: u8) -> bool {
-        if self.registers.chip().implemented(Feature::FEAT_MTE2) != Ok(true) {
+        if self.registers.implemented(Feature::FEAT_MTE2) != Ok(true) {
             return false;
         }
         if el < 2 && !self.in_host() && !self.hcr(HCR_ATA) {
@@ -707,8 +727,8 @@ impl Cpu {
             ttbr0: self.read(ttbr0),
             ttbr1: self.read(ttbr1),
             mair: self.read(mair),
-            xs: Feature::FEAT_XS.on(self.registers.chip()),
-            tagged: Feature::FEAT_MTE2.on(self.registers.chip()),
+            xs: self.registers.has(Feature::FEAT_XS),
+            tagged: self.registers.has(Feature::FEAT_MTE2),
             sprr: Sprr {
                 config: self.apple.sprr_config,
                 el1: self.apple.sprr_perm[kernel],
@@ -728,7 +748,7 @@ impl Cpu {
                 hcr: self.read(Register::HCR_EL2),
                 vtcr: self.read(Register::VTCR_EL2),
                 vttbr: self.read(Register::VTTBR_EL2),
-                xs: Feature::FEAT_XS.on(self.registers.chip()),
+                xs: self.registers.has(Feature::FEAT_XS),
             }),
             regime: match regime {
                 TranslationRegime::El10 => mmu::Regime::El10,

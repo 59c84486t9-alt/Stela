@@ -19,13 +19,13 @@ use super::{
     RequirementKind, Step, Stop, Translated, Variant, tags::TagCheck,
 };
 use crate::machine::{
-    Chip,
     cpu::{Exception, STREAMING_VECTOR_BYTES},
     debug,
     exception::Class,
     mmu::{self, Access, MemoryType, alignment},
     streaming::{self, VectorDestinations},
     system::Feature,
+    system::File,
 };
 use crate::scalable::ScalableState;
 use alloc::{format, string::String, vec::Vec};
@@ -81,11 +81,11 @@ const FEATURES: [(Feature, ScalableFeature); 17] = [
     (Feature::FEAT_FPMR, ScalableFeature::Fpmr),
 ];
 
-/// The scalable features of `chip` that the engine implements: an
-/// instruction of a feature it has but the engine lacks fails to compile,
-/// and stops.
-pub(crate) fn features(chip: Chip) -> ScalableFeatures {
-    features_where(|feature| chip.implemented(feature) == Ok(true))
+/// The scalable features of the PE whose register file is `registers`
+/// that the engine implements: an instruction of a feature it has but the
+/// engine lacks fails to compile, and stops.
+pub(crate) fn features(registers: &File) -> ScalableFeatures {
+    features_where(|feature| registers.implemented(feature) == Ok(true))
 }
 
 /// The scalable features `keep` selects of [`FEATURES`].
@@ -745,7 +745,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .scalable
             .as_ref()
             .ok_or_else(|| String::from("a PE without SME state"))?;
-        let features = features(self.profile.chip);
+        let features = features(&self.cpu.registers);
         let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)
             .ok_or_else(|| String::from("the streaming vector length"))?;
         // The FP8 forms read FPMR, which the PE reaches once their

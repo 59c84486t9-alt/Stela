@@ -1341,6 +1341,51 @@ fn engine_field(chip: Chip, register: Encoding, shift: u8) -> u64 {
         })
 }
 
+/// The chip-varying features `chip` has that the identification `fixed`
+/// withholds, one bit per [`Feature`] (`1 << feature as u64`): a feature
+/// is withheld when one of the ID fields its rows describe reads below the
+/// feature's lowest level there, as a profile that masks the field (the
+/// hosted machine's memory tagging) or whose row's basis fails on this host
+/// presents it. A PE then treats the feature as absent, exactly as a chip
+/// without it. A register `fixed` has no value for withholds nothing.
+pub fn withheld(chip: Chip, fixed: &[(Encoding, u64)]) -> u64 {
+    let mut withheld = 0;
+    for feature in Feature::ALL.into_iter().filter(|feature| feature.on(chip)) {
+        let name = feature.name();
+        let presented = TABLE
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.feature == Some(name))
+            .all(|(index, row)| presents(index, row, fixed));
+        if !presented {
+            withheld |= 1 << feature as u64;
+        }
+    }
+    withheld
+}
+
+/// Whether `fixed` presents `row` (at `index` in [`TABLE`]): its field
+/// reads the level of this row or of a later row of the same field, or of
+/// an earlier row of the same feature there (its lowest level).
+fn presents(index: usize, row: &Row, fixed: &[(Encoding, u64)]) -> bool {
+    let Some(value) = fixed
+        .iter()
+        .find(|(register, _)| *register == row.register)
+        .map(|(_, value)| value >> row.shift & 0xf)
+    else {
+        return true;
+    };
+    let field = |other: &&Row| other.register == row.register && other.shift == row.shift;
+    let first = TABLE
+        .iter()
+        .position(|other| field(&other) && other.feature == row.feature)
+        .unwrap_or(index);
+    TABLE[first..]
+        .iter()
+        .filter(field)
+        .any(|other| other.level == value)
+}
+
 /// Whether `chip`'s profile implements memory tagging: ID_AA64PFR1_EL1.MTE
 /// is nonzero.
 pub fn memory_tagging(chip: Chip) -> bool {
@@ -1399,6 +1444,38 @@ mod tests {
             .join("../../isa")
             .join(name);
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// A field masked to 0 withholds the features its rows describe, and a
+    /// field reading a later row's level presents the earlier rows'.
+    #[test]
+    fn a_masked_field_withholds_its_features() {
+        let full = derive(Chip::AppleM5, TargetCpu::Baseline, true, Speculation::NONE);
+        let bit = |feature: Feature| 1u64 << feature as u64;
+        let mte = bit(Feature::FEAT_MTE) | bit(Feature::FEAT_MTE2);
+        assert_eq!(withheld(Chip::AppleM5, &full) & mte, 0);
+        let mut masked = full.clone();
+        for (register, value) in &mut masked {
+            if *register == ID_AA64PFR1_EL1 {
+                *value &= !(0xf << PFR1_MTE | 0xf << PFR1_MTE_FRAC);
+            }
+        }
+        assert_eq!(
+            withheld(Chip::AppleM5, &masked) & !withheld(Chip::AppleM5, &full),
+            mte
+        );
+        // FEAT_MTE alone at level 1 presents FEAT_MTE, not FEAT_MTE2.
+        for (register, value) in &mut masked {
+            if *register == ID_AA64PFR1_EL1 {
+                *value |= 1 << PFR1_MTE;
+            }
+        }
+        assert_eq!(
+            withheld(Chip::AppleM5, &masked) & mte,
+            bit(Feature::FEAT_MTE2)
+        );
+        // A profile without the register withholds nothing.
+        assert_eq!(withheld(Chip::AppleM5, &[]), 0);
     }
 
     #[test]

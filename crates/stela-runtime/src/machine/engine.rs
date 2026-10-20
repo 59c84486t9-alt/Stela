@@ -2976,13 +2976,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         ]
     }
 
-    /// The PAC algorithm version of the profile's chip: FEAT_FPACCOMBINE,
-    /// FEAT_FPAC, FEAT_PAuth2 or the classic FEAT_PAuth insertion and error
-    /// code (the M1). A chip feature the engine does not implement yet stops.
+    /// The PAC algorithm version of the PE: FEAT_FPACCOMBINE, FEAT_FPAC,
+    /// FEAT_PAuth2 or the classic FEAT_PAuth insertion and error code (the
+    /// M1). A feature the PE has and the engine does not implement yet stops.
     fn pointer_version(&self) -> Result<pauth::Version, Stop> {
-        let chip = self.profile.chip;
         let has = |feature| {
-            chip.implemented(feature)
+            self.cpu
+                .registers
+                .implemented(feature)
                 .map_err(|reason| self.unsupported(RequirementKind::Native(reason)))
         };
         Ok(if has(Feature::FEAT_FPACCOMBINE)? {
@@ -3043,8 +3044,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             _ => return refuse(self, "PAC exit at a word that is not PAC".into()),
         };
         let link_register = self
-            .profile
-            .chip
+            .cpu
+            .registers
             .implemented(Feature::FEAT_PAuth_LR)
             .map_err(|reason| self.unsupported(RequirementKind::Native(reason)))?;
         // Without FEAT_PAuth_LR its hint-space form (PACM) is a NOP and the
@@ -3729,7 +3730,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         operand: stela_compiler::aarch64::checked_pointer::Operand,
     ) -> Step {
         use stela_compiler::aarch64::checked_pointer::Kind;
-        match self.profile.chip.implemented(Feature::FEAT_CPA) {
+        match self.cpu.registers.implemented(Feature::FEAT_CPA) {
             Ok(true) => {}
             Ok(false) => return self.undefined(),
             Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),
@@ -4092,7 +4093,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // DSB nXS waits for a subset of what DSB waits for (accesses
                 // to memory with XS 0), and is UNDEFINED without FEAT_XS.
                 Synchronization::DataCompletion { nxs: true, .. } => {
-                    match self.profile.chip.implemented(Feature::FEAT_XS) {
+                    match self.cpu.registers.implemented(Feature::FEAT_XS) {
                         Ok(true) => self.next(),
                         Ok(false) => self.undefined(),
                         Err(reason) => Err(self.unsupported(RequirementKind::Native(reason))),
@@ -4593,7 +4594,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         const HCR_TWI: u32 = 13;
         const HCR_TWE: u32 = 14;
         if register.is_some() {
-            match self.profile.chip.implemented(Feature::FEAT_WFxT) {
+            match self.cpu.registers.implemented(Feature::FEAT_WFxT) {
                 Ok(true) => {}
                 Ok(false) => return self.undefined(),
                 Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),

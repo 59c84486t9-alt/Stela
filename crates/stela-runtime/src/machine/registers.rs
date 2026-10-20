@@ -678,7 +678,7 @@ impl Cpu {
         let minimum = match (encoding.op1(), encoding.op2()) {
             (0, 3..=5) => 1,
             (3, 1 | 2 | 6 | 7) => 0,
-            (3, 4) => match self.registers.chip().implemented(Feature::FEAT_MTE) {
+            (3, 4) => match self.registers.implemented(Feature::FEAT_MTE) {
                 Ok(true) => 0,
                 Ok(false) => return Outcome::Undefined,
                 Err(reason) => return Outcome::Refused(Refusal::UnsupportedSetting(reason)),

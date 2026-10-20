@@ -304,11 +304,10 @@ pub enum ErrorRecord {
 pub trait Context {
     /// The PE's chip.
     fn chip(&self) -> Chip;
-    /// Arm `IsFeatureImplemented` for a feature only some chips have; a
-    /// feature the chip has and the engine does not implement stops.
-    fn implemented(&self, feature: Feature) -> Result<bool, Effect> {
-        self.chip().implemented(feature).map_err(Effect::Refused)
-    }
+    /// Arm `IsFeatureImplemented` for a feature only some chips have, as
+    /// the PE's identification presents it (`File::implemented`); a feature
+    /// the PE has and the engine does not implement stops.
+    fn implemented(&self, feature: Feature) -> Result<bool, Effect>;
     /// PSTATE.EL.
     fn el(&self) -> u64;
     fn pstate(&self, field: Pstate) -> u64;

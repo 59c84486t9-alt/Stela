@@ -2,12 +2,15 @@
 //! instance, starting at the reset value. Writes keep the bits that are RES0
 //! at 0 and RES1 at 1 in every layout the chip's profile allows
 //! (`Register::res0`, `Register::res1`).
-use super::{Chip, Register};
+use super::{Chip, Feature, Register};
 use alloc::{boxed::Box, vec};
 
 #[derive(Debug, Clone)]
 pub struct File {
     chip: Chip,
+    /// The chip's features the PE's identification withholds
+    /// (`identification::withheld`).
+    withheld: u64,
     values: Box<[u64]>,
 }
 
@@ -28,11 +31,39 @@ impl File {
                 values[register.offset() + index as usize] = register.reset(chip);
             }
         }
-        Self { chip, values }
+        Self {
+            chip,
+            withheld: 0,
+            values,
+        }
     }
 
     pub fn chip(&self) -> Chip {
         self.chip
+    }
+
+    /// Treat the chip's features in `withheld` (one bit per [`Feature`],
+    /// `identification::withheld`) as absent: the PE presents an
+    /// identification without them.
+    pub fn withhold(&mut self, withheld: u64) {
+        self.withheld = withheld;
+    }
+
+    /// Whether the PE has `feature`: the chip has it and the PE's
+    /// identification presents it.
+    pub fn has(&self, feature: Feature) -> bool {
+        feature.on(self.chip) && self.withheld & 1 << feature as u64 == 0
+    }
+
+    /// Arm `IsFeatureImplemented` for the PE: [`Chip::implemented`] for a
+    /// feature its identification presents, `Ok(false)` for one it
+    /// withholds.
+    pub fn implemented(&self, feature: Feature) -> Result<bool, &'static str> {
+        if self.withheld & 1 << feature as u64 != 0 {
+            Ok(false)
+        } else {
+            self.chip.implemented(feature)
+        }
     }
 
     /// The bits of `register` that are RES0 under the chip's profile.

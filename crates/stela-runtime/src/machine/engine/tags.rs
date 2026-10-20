@@ -107,7 +107,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             Feature::FEAT_MTE
         };
-        match self.cpu.registers.chip().implemented(feature) {
+        match self.cpu.registers.implemented(feature) {
             Ok(true) => {}
             Ok(false) => return self.undefined(),
             Err(reason) => {
@@ -168,7 +168,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// from the source's over the tags GCR_EL1.Exclude leaves, or 0 without
     /// Allocation Tag access (Arm `AArch64_ChooseNonExcludedTagOrZero`).
     pub(super) fn tag_offset(&mut self, word: u32, operand: tag_arithmetic::Operand) -> Step {
-        match self.cpu.registers.chip().implemented(Feature::FEAT_MTE) {
+        match self.cpu.registers.implemented(Feature::FEAT_MTE) {
             Ok(true) => {}
             Ok(false) => return self.undefined(),
             Err(reason) => {
@@ -929,6 +929,41 @@ mod tests {
             run(&mut machine, 1, word);
             assert_eq!(fault(&machine).map(|fault| fault.0), Some(UNDEFINED));
         }
+    }
+
+    /// An M5 PE whose identification masks ID_AA64PFR1_EL1.MTE and MTE_frac
+    /// (the hosted machine's) lacks memory tagging exactly as the M4 does:
+    /// IRG, ADDG and STG are UNDEFINED, exception entry leaves TCO alone and
+    /// no access is Tagged.
+    #[test]
+    fn a_masked_m5_pe_has_no_memory_tagging() {
+        const STG: u32 = 0xd920_0822; // stg x2, [x1]
+        const MTE_FIELDS: u64 = 0xf << 8 | 0xf << 40;
+        let mut fixed = identification::derive(
+            Chip::AppleM5,
+            TargetCpu::Baseline,
+            true,
+            identification::Speculation::NONE,
+        );
+        for (register, value) in &mut fixed {
+            if *register == encodings::ID_AA64PFR1_EL1 {
+                *value &= !MTE_FIELDS;
+            }
+        }
+        let withheld = identification::withheld(Chip::AppleM5, &fixed);
+        let mut machine = tagged(Chip::AppleM5, &[], false);
+        machine.cpu.present(withheld);
+        machine.translations_changed();
+        assert!(!machine.cpu.mte());
+        assert!(!machine.cpu.allocation_tags(1));
+        set_x(&mut machine, &[(1, DATA), (2, tagged_pointer(3, DATA))]);
+        for word in [0x9ac2_1020, 0x9182_0c20, STG] {
+            run(&mut machine, 1, word);
+            assert_eq!(fault(&machine).map(|fault| fault.0), Some(UNDEFINED));
+        }
+        // The same PE presenting its full identification has it.
+        machine.cpu.present(0);
+        assert!(machine.cpu.mte());
     }
 
     #[test]
