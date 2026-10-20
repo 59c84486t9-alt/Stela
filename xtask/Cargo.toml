@@ -17,6 +17,9 @@ stela-loader.workspace = true
 stela-runtime.workspace = true
 object = { version = "0.37", features = ["read"] }
 plist = "1"
+sha1 = "0.10"
+sha2.workspace = true
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 object = { version = "0.37", features = ["read"] }

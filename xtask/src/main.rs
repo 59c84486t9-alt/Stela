@@ -14,6 +14,7 @@ mod dit;
 mod hosted_matrix;
 mod oracle;
 mod progress;
+mod restore_dry_run;
 mod soc_facts;
 mod system_matrix;
 mod tools;
@@ -62,6 +63,9 @@ enum Task {
     /// Audit the native code of Arm's data-independent-time instructions
     /// against Intel's data operand independent timing list.
     DitAudit(dit::DitAudit),
+    /// Drive the whole restore host against the real IPSW, natively, with
+    /// every request restored can make, and check each answer.
+    RestoreDryRun(restore_dry_run::RestoreDryRun),
     /// Merge the instruction and system registries into their matrices and
     /// the README.
     Progress {
@@ -85,6 +89,7 @@ fn main() -> ExitCode {
         Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AgxObserve(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::RestoreDryRun(task) => task.run(),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
             .and_then(|()| hosted_matrix::run(check))

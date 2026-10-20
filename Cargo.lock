@@ -2128,11 +2128,14 @@ dependencies = [
  "object",
  "plist",
  "serde_json",
+ "sha1",
+ "sha2",
  "stela-cli",
  "stela-compiler",
  "stela-loader",
  "stela-runtime",
  "tempfile",
+ "zip",
 ]
 
 [[package]]
