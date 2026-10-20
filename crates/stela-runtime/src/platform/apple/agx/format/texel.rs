@@ -7,11 +7,11 @@
 //! (alpha) before the descriptor's swizzle. Unorm/snorm convert to [0, 1] and
 //! [-1, 1], floats widen exactly, integers keep their value. sRGB decodes R,
 //! G and B of 8-bit unorm layouts (G of a two-channel layout only with
-//! `sRGB 2-channel`). Extended-range (`XR`) types, the 4:2:2 layouts (whose
-//! component order no public source records) and PVRTC refuse by name;
-//! block-compressed layouts decode through [`super::block`].
+//! `sRGB 2-channel`). Extended-range (`XR`) types and PVRTC refuse by name;
+//! block-compressed layouts decode through [`super::block`], [`super::bptc`]
+//! and [`super::astc`], and the 4:2:2 layouts as two-pixel elements.
 
-use super::{block, pixel};
+use super::{astc, block, bptc, pixel};
 use crate::platform::apple::agx::isa::float::half_to_f32;
 
 /// `Channels` values.
@@ -89,6 +89,24 @@ pub struct Format {
     pub srgb_2_channel: bool,
 }
 
+/// The ASTC block footprints of codes 0x60..0x6d, in order.
+const ASTC_BLOCKS: [(u32, u32); 14] = [
+    (4, 4),
+    (5, 4),
+    (5, 5),
+    (6, 5),
+    (6, 6),
+    (8, 5),
+    (8, 6),
+    (8, 8),
+    (10, 5),
+    (10, 6),
+    (10, 8),
+    (10, 10),
+    (12, 10),
+    (12, 12),
+];
+
 /// Bit widths of a packed or per-component layout.
 fn widths(channels: u32) -> Option<&'static [u32]> {
     use channels::*;
@@ -121,9 +139,12 @@ impl Format {
             ETC2_RGB8 | ETC2_RGB8A1 | EAC_R11 | BC1 | BC4 => (4, 4, 8),
             ETC2_RGBA8 | EAC_RG11 | BC2 | BC3 | BC5 | BC6H | BC6H_UFLOAT | BC7 => (4, 4, 16),
             R32G32B32_EMULATED => return Err("the emulated R32G32B32 layout is software-only"),
-            GBGR_422 | BGRG_422 => return Err("4:2:2 layouts (component order unrecorded)"),
+            GBGR_422 | BGRG_422 => (2, 1, 4),
             PVRTC_2BPP | PVRTC_4BPP => return Err("PVRTC is not modeled"),
-            ASTC_FIRST..=ASTC_LAST => return Err("ASTC is not modeled"),
+            ASTC_FIRST..=ASTC_LAST => {
+                let (w, h) = ASTC_BLOCKS[(self.channels - ASTC_FIRST) as usize];
+                (w, h, 16)
+            }
             other => {
                 let widths = widths(other).ok_or("a channel layout the enumeration lacks")?;
                 (1, 1, widths.iter().sum::<u32>() / 8)
@@ -191,6 +212,32 @@ impl Format {
     /// Decode texel `at` of a compressed block.
     pub fn decode_block(&self, block: &[u8], at: block::Position) -> Result<Texel, &'static str> {
         use channels::*;
+        // BC6H carries its own signedness in the layout (Mesa `formats.c`
+        // pairs both with the float type).
+        if (ASTC_FIRST..=ASTC_LAST).contains(&self.channels) {
+            let profile = match self.ty {
+                ty::UNORM if self.srgb => astc::Profile::Srgb,
+                ty::UNORM => astc::Profile::Ldr,
+                ty::FLOAT => astc::Profile::Hdr,
+                _ => return Err("ASTC with a type other than unorm or float"),
+            };
+            let dims = ASTC_BLOCKS[(self.channels - ASTC_FIRST) as usize];
+            let mut value = astc::astc(block, dims, at, profile);
+            self.apply_srgb(&mut value);
+            return Ok(Texel {
+                kind: Kind::Float,
+                value,
+            });
+        }
+        if matches!(self.channels, BC6H | BC6H_UFLOAT) {
+            if self.ty != ty::FLOAT {
+                return Err("BC6H with a type other than float");
+            }
+            return Ok(Texel {
+                kind: Kind::Float,
+                value: bptc::bc6h(block, at, self.channels == BC6H),
+            });
+        }
         let signed = match self.ty {
             ty::UNORM => false,
             ty::SNORM => true,
@@ -212,12 +259,29 @@ impl Format {
                 0.0,
                 1.0,
             ],
-            (BC6H | BC6H_UFLOAT | BC7, _) => return Err("BC6H and BC7 decoding is not modeled"),
+            (BC7, false) => bptc::bc7(block, at),
+            // Two pixels share one 32-bit element: GBGR is G0 B G1 R, BGRG
+            // is B G0 R G1. Both sample as (G, B, R), the luma and the two
+            // shared chroma bytes (Public: Mesa `cmdbuf.xml` gives both the
+            // swizzle BRG1 that restores R, G, B; Inferred placement).
+            (GBGR_422 | BGRG_422, false) => {
+                let (g, b, r) = if self.channels == GBGR_422 {
+                    (block[2 * at.0 as usize], block[1], block[3])
+                } else {
+                    (block[1 + 2 * at.0 as usize], block[0], block[2])
+                };
+                [
+                    f64::from(g) / 255.0,
+                    f64::from(b) / 255.0,
+                    f64::from(r) / 255.0,
+                    1.0,
+                ]
+            }
             _ => return Err("a block-compressed layout and type pair the formats lack"),
         };
         if matches!(
             self.channels,
-            BC1 | BC2 | BC3 | ETC2_RGB8 | ETC2_RGB8A1 | ETC2_RGBA8
+            BC1 | BC2 | BC3 | BC7 | ETC2_RGB8 | ETC2_RGB8A1 | ETC2_RGBA8
         ) {
             self.apply_srgb(&mut value);
         }
@@ -466,10 +530,27 @@ mod tests {
     }
 
     #[test]
-    fn unmodeled_layouts_refuse() {
-        assert!(format(channels::GBGR_422, ty::UNORM).block().is_err());
-        assert!(format(channels::ASTC_FIRST, ty::UNORM).block().is_err());
+    fn subsampled_and_compressed_layouts_decode_and_xr_refuses() {
+        // 4:2:2: each pixel samples its own luma and the shared chroma.
+        let gbgr = format(channels::GBGR_422, ty::UNORM);
+        assert_eq!(gbgr.block(), Ok((2, 1, 4)));
+        let element = [10, 20, 30, 40];
+        let value = |f: Format, x| f.decode_block(&element, (x, 0)).unwrap().value;
+        let v = |bytes: [u8; 3]| bytes.map(|b| f64::from(b) / 255.0);
+        assert_eq!(value(gbgr, 0)[..3], v([10, 20, 40]));
+        assert_eq!(value(gbgr, 1)[..3], v([30, 20, 40]));
+        let bgrg = format(channels::BGRG_422, ty::UNORM);
+        assert_eq!(value(bgrg, 0)[..3], v([20, 10, 30]));
+        assert_eq!(value(bgrg, 1)[..3], v([40, 10, 30]));
         assert!(format(channels::R8, ty::XR).decode(&[0]).is_err());
         assert_eq!(format(channels::BC3, ty::UNORM).block(), Ok((4, 4, 16)));
+        assert_eq!(
+            format(channels::ASTC_FIRST, ty::UNORM).block(),
+            Ok((4, 4, 16))
+        );
+        assert_eq!(
+            format(channels::ASTC_LAST, ty::FLOAT).block(),
+            Ok((12, 12, 16))
+        );
     }
 }

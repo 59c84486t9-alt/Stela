@@ -5,10 +5,11 @@
 //! Each decoder returns one texel of a 4x4 block as `[f64; 4]` before any
 //! sRGB conversion. Interpolated BC endpoints are exact fractions of the
 //! expanded endpoints (Inferred: hardware rounding of the interpolation is
-//! unrecorded and conformance allows that freedom). BC6H, BC7, ASTC and
-//! PVRTC refuse by name in [`super::texel`].
+//! unrecorded and conformance allows that freedom). BC6H and BC7 decode in
+//! [`super::bptc`], ASTC in [`super::astc`]; PVRTC refuses by name in
+//! [`super::texel`].
 
-/// A 4x4 block's texel at (`x`, `y`), both below 4.
+/// A texel's position inside its block (`x`, `y`).
 pub type Position = (u32, u32);
 
 fn u64_le(bytes: &[u8]) -> u64 {
