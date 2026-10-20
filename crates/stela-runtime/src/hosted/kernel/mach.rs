@@ -30,6 +30,7 @@ mod message;
 pub(super) mod reclaim;
 mod server;
 pub(super) mod suspension;
+pub(super) mod task;
 mod thread;
 mod vm;
 

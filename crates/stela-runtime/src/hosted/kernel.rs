@@ -104,6 +104,8 @@ pub(super) struct Process {
     pub(super) runtime: Runtime,
     pub(super) shared_region: Mutex<Option<SharedRegion>>,
     pub(super) executable: Mutex<Executable>,
+    /// The location of dyld's image list (`all_image_info_addr`).
+    pub(super) dyld_info: Mutex<mach::task::DyldInfo>,
     pub(super) counts: Mutex<BTreeMap<&'static str, u64>>,
     pub(super) threads: bsd::thread::Threads,
     pub(super) workqueue: bsd::workqueue::Workqueue,
@@ -206,6 +208,8 @@ pub(super) struct Config {
     pub(super) hardware: Hardware,
     pub(super) features: Vec<(&'static str, bool)>,
     pub(super) executable: Executable,
+    /// The dynamic linker's Mach header, slid.
+    pub(super) dyld_header: u64,
     pub(super) user_stack: u64,
     pub(super) roots: Vec<std::path::PathBuf>,
     pub(super) reexec: Vec<std::ffi::OsString>,
@@ -246,6 +250,7 @@ impl Process {
             runtime: Runtime::default(),
             shared_region: Mutex::new(config.shared_region),
             executable: Mutex::new(config.executable),
+            dyld_info: Mutex::new(mach::task::DyldInfo::of_dylinker(config.dyld_header)),
             counts: Mutex::new(BTreeMap::new()),
             threads: Default::default(),
             workqueue: Default::default(),

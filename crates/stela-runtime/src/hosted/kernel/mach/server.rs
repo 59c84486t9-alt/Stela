@@ -281,7 +281,10 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (
         Object::Task,
         "task_info_from_user",
-        Some("the TASK_AUDIT_TOKEN flavor"),
+        Some(
+            "TASK_SECURITY_CONFIG_INFO and TASK_IPC_SPACE_POLICY_INFO, which exec's signature \
+             model does not yet derive, stop the run",
+        ),
     ),
     (Object::Task, "task_restartable_ranges_register", None),
     (Object::Task, "task_restartable_ranges_synchronize", None),
@@ -664,8 +667,6 @@ pub(super) fn serve(
         // port for every special port, as the arm64 kernel refuses it
         // to an unprivileged process.
         (Object::Host, "host_get_special_port", false) => Reply::Forward,
-        // `flavor`, `task_info_outCnt`. The audit token is this process's
-        // identity, the same in either ABI.
         // The process's guest threads, each as a new send right, in
         // creation order; the host task's other threads are the hosted
         // runtime's own.
@@ -693,15 +694,7 @@ pub(super) fn serve(
         // A send right naming this task's identity (pid, version and audit
         // token), the same in either ABI.
         (Object::Task, "task_create_identity_token", false) => Reply::Forward,
-        (Object::Task, "task_info_from_user", false) => {
-            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
-                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
-            };
-            match flavor {
-                TASK_AUDIT_TOKEN => Reply::Forward,
-                _ => bail!("task_info flavor {flavor} (count {count}) is not implemented"),
-            }
-        }
+        (Object::Task, "task_info_from_user", false) => super::task::info(kernel, port, request)?,
         (Object::Task, "task_restartable_ranges_register", false) => {
             restartable_ranges_register(kernel, request)
         }
@@ -1353,8 +1346,6 @@ const TASK_READ_PORT: u32 = 6;
 /// `KERN_NO_ACCESS` and `KERN_INVALID_RIGHT`.
 const KERN_NO_ACCESS: u32 = 8;
 const KERN_INVALID_RIGHT: u32 = 17;
-/// `osfmk/mach/task_info.h`.
-const TASK_AUDIT_TOKEN: u32 = 15;
 
 /// `task_restartable_range_t` and the kernel's bounds
 /// (`osfmk/kern/restartable.c`).

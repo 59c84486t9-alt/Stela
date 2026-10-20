@@ -214,6 +214,16 @@ pub fn run(launch: Launch) -> Result<Report> {
         .header_address(launch.slice_offset)
         .context("the executable has no segment holding its Mach header")?
         + executable.slide;
+    let dyld_header = launch
+        .dylinker
+        .image
+        .segments
+        .iter()
+        .filter(|segment| segment.file_bytes != 0)
+        .min_by_key(|segment| segment.file_offset)
+        .context("the dynamic linker has no segment holding its Mach header")?
+        .address
+        + dylinker.slide;
     let stack = exec::map_stack()?;
     let keys = pe::Keys::random()?;
     let [guard0, guard1, guard2, guard3, entropy0, entropy1, munge] = random_words::<7>()?;
@@ -262,6 +272,7 @@ pub fn run(launch: Launch) -> Result<Report> {
             security_config,
             ipc_space_policy,
         },
+        dyld_header,
         user_stack: stack.top,
         roots: launch.roots.clone(),
         reexec: launch.reexec.clone(),
