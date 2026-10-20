@@ -36,8 +36,17 @@ impl Architectures {
         Ok(Self(activation::slices(&head(path)?)))
     }
 
+    pub(crate) fn arm64(&self) -> bool {
+        self.0.iter().any(|&(cpu, _)| cpu == CPU_TYPE_ARM64)
+    }
+
     pub(crate) fn x86_64(&self) -> bool {
         self.0.iter().any(|&(cpu, _)| cpu == CPU_TYPE_X86_64)
+    }
+
+    /// Runs only under Stela on an Intel Mac: arm64 and no x86_64 slice.
+    pub(crate) fn arm64_only(&self) -> bool {
+        self.arm64() && !self.x86_64()
     }
 
     /// The architectures' names, as `lipo -archs` prints them.
@@ -258,13 +267,13 @@ mod tests {
     }
 
     #[test]
-    fn architectures_are_named() -> Result<()> {
+    fn architectures_are_named_and_arm64_only_is_found() -> Result<()> {
         let work = tempfile::tempdir()?;
         let arm64e = work.path().join("arm64e");
         executable(&arm64e, &thin(CPU_TYPE_ARM64, 0x8000_0002))?;
         let architectures = Architectures::of(&arm64e)?;
         assert_eq!(architectures.names(), "arm64e");
-        assert!(!architectures.x86_64());
+        assert!(architectures.arm64_only());
         let mut fat = 0xcafe_babeu32.to_be_bytes().to_vec();
         fat.extend(2u32.to_be_bytes());
         for cpu in [CPU_TYPE_X86_64, CPU_TYPE_ARM64] {
@@ -275,7 +284,7 @@ mod tests {
         executable(&universal, &fat)?;
         let architectures = Architectures::of(&universal)?;
         assert_eq!(architectures.names(), "x86_64, arm64");
-        assert!(architectures.x86_64());
+        assert!(architectures.arm64() && !architectures.arm64_only());
         let text = work.path().join("text");
         executable(&text, b"hello")?;
         assert_eq!(Architectures::of(&text)?, Architectures::default());

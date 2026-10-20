@@ -8,6 +8,11 @@ license.workspace = true
 name = "stela"
 path = "src/main.rs"
 
+# The native program inside each launcher bundle `stela apps` makes.
+[[bin]]
+name = "stela-launcher"
+path = "src/bin/stela-launcher/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

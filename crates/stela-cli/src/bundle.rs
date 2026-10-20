@@ -31,6 +31,11 @@ impl AppBundle {
         Ok(Self { path, info })
     }
 
+    /// The `Info.plist` path.
+    pub(crate) fn info_path(&self) -> PathBuf {
+        self.path.join(INFO)
+    }
+
     pub(crate) fn string(&self, key: &str) -> Option<&str> {
         self.info.get(key).and_then(Value::as_string)
     }

@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 mod apfs;
+mod apps;
 mod args;
 mod boot;
 mod boot_log;
@@ -27,6 +28,7 @@ const EXAMPLES: &str = "Examples:
   stela install-system          Install the macOS 27 system files programs run against (once)
   stela ./hello                 Run an arm64 program or #! script
   stela /Applications/Foo.app   Run an app's arm64 executable
+  stela apps                    Add launchers for arm64-only apps to ~/Applications/Stela
 
 The research and development commands are described in docs/development.md.";
 
@@ -53,6 +55,9 @@ pub(crate) enum Command {
     /// Install the macOS 27 system files arm64 programs run against, from
     /// its restore image (IPSW).
     InstallSystem(guest_system::InstallSystem),
+    /// Make native launchers in ~/Applications/Stela for arm64-only apps, so
+    /// they open from Finder, the Dock and Open With.
+    Apps(apps::Apps),
     /// Prepare an OpenCore USB to install macOS 27 with Stela, or undo it.
     Setup(setup::Setup),
     /// Print the boot log stela.efi keeps on a machine-state partition, from a
@@ -145,6 +150,7 @@ impl Command {
         match self {
             Self::Run(command) => command.run(),
             Self::InstallSystem(command) => command.run(),
+            Self::Apps(command) => command.run(),
             Self::Setup(command) => command.run(),
             Self::BootLog(command) => command.run(),
             Self::Program(words) => run::Run::shorthand(words)?.run(),
@@ -206,13 +212,14 @@ mod tests {
         };
         assert_eq!(words, ["./hello", "--help", "-v"]);
         assert!(matches!(parse(&["run", "./hello"]), Command::Run(_)));
+        assert!(matches!(parse(&["apps"]), Command::Apps(_)));
     }
 
     #[test]
     fn the_help_shows_the_simple_usage_and_hides_the_research_commands() {
         let help = Cli::command().render_help().to_string();
         assert!(help.contains("stela PROGRAM [ARGS]..."), "{help}");
-        assert!(help.contains("install-system"));
+        assert!(help.contains("install-system") && help.contains("apps"));
         assert!(!help.contains("compile-block") && !help.contains("decrypt-aea"));
         Cli::command().debug_assert();
     }
