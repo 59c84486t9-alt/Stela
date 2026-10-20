@@ -165,6 +165,10 @@ impl Experiment {
         }
         let mut answers = Answers::new(store);
         answers.signer = signer;
+        // Serve the system-image content-key GET from the inventory's keys.
+        answers
+            .stage_system_image_keys()
+            .map_err(|e| format!("{e}"))?;
         if let Some(seconds) = handoff.wall_seconds {
             // The firmware's time at the handoff, carried forward on the TSC.
             let (tsc, hz) = (handoff.wall_tsc, handoff.tsc_hz);

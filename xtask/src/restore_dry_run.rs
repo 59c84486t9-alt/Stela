@@ -625,6 +625,10 @@ impl RestoreDryRun {
                 }),
             });
         }
+        // Serve the system-image content-key GET offline, as the engine does.
+        answers
+            .stage_system_image_keys()
+            .map_err(|e| anyhow!("{e}"))?;
         println!("opened in {:.1}s", t.elapsed().as_secs_f64());
         let hardware = requests::dict([
             (
@@ -690,7 +694,7 @@ impl RestoreDryRun {
         steps.extend(requests::answers(route, &ctx));
         steps.extend(requests::boot_objects(route, &ctx));
         steps.extend(requests::images(route, &ctx));
-        steps.extend(requests::others(route, tss));
+        steps.extend(requests::others(route, tss, &ctx));
         let covered: BTreeSet<String> = steps
             .iter()
             .filter_map(|s| s.message.get("DataType").and_then(Value::as_string))

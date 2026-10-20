@@ -974,7 +974,7 @@ fn all_step(
 
 /// Firmware updaters, the system volume objects, the HTTP proxies, the
 /// recovery policy and the transfers on their own DataPorts.
-pub fn others(route: Route, tss: bool) -> Vec<Step> {
+pub fn others(route: Route, tss: bool, ctx: &Ctx) -> Vec<Step> {
     let mut out = vec![];
     let cryptex = dict([
         ("MessageArgUpdaterName", s("Cryptex1")),
@@ -1126,34 +1126,66 @@ pub fn others(route: Route, tss: bool) -> Vec<Step> {
             ),
         ),
     ));
-    for kind in ["URLAsset", "StreamedImageDecryptionKey"] {
-        let args = if kind == "URLAsset" {
-            dict([
-                ("RequestMethod", s("GET")),
-                ("RequestURL", s("https://example.invalid/asset")),
-            ])
-        } else {
-            dict([
-                ("RequestMethod", s("POST")),
-                ("RequestURL", s("http://127.0.0.1:9")),
-                (
-                    "RequestAdditionalHeaders",
-                    Value::Dictionary(Dictionary::new()),
-                ),
-                ("RequestBody", Value::Data(vec![0; 16])),
-            ])
-        };
+    // URLAsset: the system-image content-key GET. When the inventory carries
+    // the offline recipient keys, restored's exact `fcs-key-url` request is
+    // answered with the PEM; otherwise, and for an unknown URL, it refuses.
+    if let Some(key) = ctx.inventory.aea_keys.first() {
+        let url = key.url.clone();
+        let pem = key.key_pem.clone().into_bytes();
+        let member = key.member.clone();
         out.push(step(
-            kind,
-            Some(args),
+            "URLAsset",
+            Some(dict([("RequestMethod", s("GET")), ("RequestURL", s(&url))])),
             Transfer::Control,
             routed(
                 route,
-                kind,
-                refusal("no prefetched HTTP response is staged for these exact Arguments"),
+                "URLAsset",
+                Box::new(move |_, o| {
+                    let Outcome::Reply(Value::Dictionary(d)) = o else {
+                        return Verdict::Failed("no reply".into());
+                    };
+                    match d.get("ResponseBody").and_then(Value::as_data) {
+                        Some(body) if body == pem.as_slice() => Verdict::Ok(format!(
+                            "the recipient key for {member} ({} bytes), offline",
+                            body.len()
+                        )),
+                        _ => Verdict::Failed("ResponseBody is not the recorded key".into()),
+                    }
+                }),
             ),
         ));
     }
+    out.push(step(
+        "URLAsset",
+        Some(dict([
+            ("RequestMethod", s("GET")),
+            ("RequestURL", s("https://example.invalid/asset")),
+        ])),
+        Transfer::Control,
+        routed(
+            route,
+            "URLAsset",
+            refusal("no prefetched HTTP response is staged for these exact Arguments"),
+        ),
+    ));
+    out.push(step(
+        "StreamedImageDecryptionKey",
+        Some(dict([
+            ("RequestMethod", s("POST")),
+            ("RequestURL", s("http://127.0.0.1:9")),
+            (
+                "RequestAdditionalHeaders",
+                Value::Dictionary(Dictionary::new()),
+            ),
+            ("RequestBody", Value::Data(vec![0; 16])),
+        ])),
+        Transfer::Control,
+        routed(
+            route,
+            "StreamedImageDecryptionKey",
+            refusal("no prefetched HTTP response is staged for these exact Arguments"),
+        ),
+    ));
     let policy = dict([
         ("Ap,NextStageIM4MHash", Value::Data(vec![1; 48])),
         ("Ap,RecoveryOSPolicyNonceHash", Value::Data(vec![2; 48])),
