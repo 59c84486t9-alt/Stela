@@ -440,17 +440,10 @@ mod tests {
             "{motion:?}"
         );
         assert_eq!(motion.last(), Some(&Input::Buttons(1)));
-        bench
-            .model
-            .borrow_mut()
-            .function
-            .ports
-            .0
-            .input(Input::Key {
-                usage: 0x04,
-                pressed: false,
-            })
-            .unwrap();
+        feed(Input::Key {
+            usage: 0x04,
+            pressed: false,
+        });
         let mut released = Vec::new();
         for _ in 0..50 {
             released.extend(keyboard.poll());
@@ -464,16 +457,6 @@ mod tests {
         );
         // The native mouse runs the report protocol: its counts and wheel
         // arrive as they were sent.
-        let feed = |input: Input| {
-            bench
-                .model
-                .borrow_mut()
-                .function
-                .ports
-                .0
-                .input(input)
-                .unwrap();
-        };
         feed(Input::Motion { dx: -20, dy: 7 });
         feed(Input::MouseButtons(4));
         feed(Input::MouseWheel(-1));
