@@ -14,11 +14,20 @@ use std::{
 };
 
 /// The kernel's subsystem registry, its definitions tree, and the
-/// preprocessor definitions of the kernel's MIG build for its own objects.
+/// preprocessor definitions of the kernel's MIG build for its own objects,
+/// with the `IOKIT` configuration option (`config/MASTER`) that
+/// `device.defs` serves its routines under. (The kernel build's `KERNEL`
+/// would rename routines to their in-kernel symbols; the catalog keeps the
+/// names user space sends by.)
 const REGISTRY: &str = "osfmk/kern/ipc_kobject.c";
 const REGISTRY_TABLE: &str = "mig_e[] = {";
 const DEFS_DIRECTORY: &str = "osfmk";
-const DEFINES: &[&str] = &["-DKERNEL_SERVER=1", "-D__arm64__=1", "-D__LP64__=1"];
+const DEFINES: &[&str] = &[
+    "-DKERNEL_SERVER=1",
+    "-DIOKIT=1",
+    "-D__arm64__=1",
+    "-D__LP64__=1",
+];
 const KERNEL_SERVER: &str = "KernelServer";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
