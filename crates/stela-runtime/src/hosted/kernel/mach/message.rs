@@ -225,7 +225,26 @@ impl Deallocated {
     fn rest(&self) -> [(u64, u64); 2] {
         [(self.guest.0, self.host.0), (self.host.1, self.guest.1)]
     }
+
+    /// Whether the guest pages are the guest's own: wholly mapped by host
+    /// regions that begin and end on guest pages, as every mapping the
+    /// hosted kernel makes for the guest does. A region beginning or ending
+    /// inside them is one the host placed in its own 4 KiB pages, which
+    /// may be the runtime's.
+    fn guest_owned(&self) -> bool {
+        let (start, end) = self.guest;
+        let runs = memory::mapped_runs(start, end);
+        let mapped: u64 = runs.iter().map(|(start, end)| end - start).sum();
+        mapped == end - start
+            && runs.iter().all(|&(run, run_end)| {
+                (run == start || run & PAGE_MASK == 0)
+                    && (run_end == end || run_end & PAGE_MASK == 0)
+            })
+    }
 }
+
+/// The guest's page mask.
+const PAGE_MASK: u64 = memory::PAGE_MASK;
 
 /// `mach_msg_return_t` send failures, `MACH_SEND_*`.
 const SEND_FAILURE: u32 = 0x1000_0000;
@@ -276,13 +295,21 @@ impl Outgoing {
                 && address != 0
                 && let Some(region) = Deallocated::new(address, bytes)
                 && region.guest != region.host
-                && memory::mapped_runs(region.guest.0, region.guest.1)
-                    .iter()
-                    .map(|(start, end)| end - start)
-                    .sum::<u64>()
-                    == region.guest.1 - region.guest.0
             {
-                partial.push(region);
+                if region.guest_owned() {
+                    partial.push(region);
+                } else {
+                    unsupported::note(
+                        Kind::MachTrap,
+                        "shared guest page",
+                        &format!(
+                            "an out-of-line region a send deallocates at {address:#x} lies in \
+                             guest pages {:#x}..{:#x} the host maps in parts, which may be the \
+                             runtime's own: only the host pages it covers are released",
+                            region.guest.0, region.guest.1
+                        ),
+                    );
+                }
             }
             at += DESCRIPTOR_BYTES as usize;
         }
@@ -987,6 +1014,43 @@ mod tests {
         memory::deallocate(moved & !PAGE_MASK, PAGE_BYTES).unwrap();
         memory::deallocate(block, PAGE_BYTES).unwrap();
         memory::deallocate(block + 2 * PAGE_BYTES, PAGE_BYTES).unwrap();
+    }
+
+    #[test]
+    fn a_guest_page_the_host_shares_keeps_the_hosts_pages() {
+        unsafe extern "C" {
+            fn mach_vm_allocate(task: u32, address: *mut u64, size: u64, flags: i32) -> i32;
+        }
+        /// `VM_FLAGS_FIXED` with a test-private tag, which no other
+        /// mapping joins.
+        const HOST_FLAGS: i32 = 254 << 24;
+        let port = Port::new();
+        let page = memory::allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        // The host's own allocation in the second half of the guest page.
+        let mut host = page + 0x2000;
+        memory::deallocate(host, 0x2000).unwrap();
+        // SAFETY: the host pages this test just released.
+        let status =
+            unsafe { mach_vm_allocate(crate::hosted::host::task(), &mut host, 0x2000, HOST_FLAGS) };
+        assert_eq!(status, 0);
+        assert!(memory::write(host, b"host"));
+        let region = page + 0x10;
+        let mut message = ool_message(port.0, region, 0x20, true);
+        let arguments = [message.as_mut_ptr() as u64, SEND, 0, 0, 0, 0, 0, 0];
+        let outgoing = Outgoing::read("mach_msg_trap", &arguments).unwrap();
+        assert!(outgoing.partial.is_empty());
+        let status = host_send(&mut message, darwin::MACH_SEND_MSG);
+        assert_eq!(status, 0);
+        let mut released = Vec::new();
+        outgoing
+            .sent("mach_msg_trap", status, |start, size| {
+                released.push((start, size))
+            })
+            .unwrap();
+        assert!(released.is_empty());
+        assert_eq!(memory::read(host, 4).unwrap(), b"host");
+        memory::deallocate(page + 0x1000, 0x1000).unwrap();
+        memory::deallocate(host, 0x2000).unwrap();
     }
 
     #[test]
