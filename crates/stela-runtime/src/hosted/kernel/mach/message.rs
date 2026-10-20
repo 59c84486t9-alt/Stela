@@ -93,6 +93,13 @@ pub(super) fn send(
                     routine.name
                 )
             }
+            (Some(_), Some(routine)) if server::refused(object, routine.name).is_some() => bail!(
+                "{name}: {}.{} (message {id}) to this process's kernel object {port:#x} is not \
+                 serviced by the hosted kernel: {} (arguments {arguments:x?})",
+                routine.subsystem,
+                routine.name,
+                server::refusal(object, routine.name)
+            ),
             (Some(subsystem), Some(routine)) => bail!(
                 "{name}: {}.{} (message {id}) to this process's kernel object {port:#x} is \
                  not serviced by the hosted kernel (arguments {arguments:x?})",

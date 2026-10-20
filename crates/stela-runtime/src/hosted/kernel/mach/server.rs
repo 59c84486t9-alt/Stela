@@ -119,6 +119,69 @@ pub(crate) enum Object {
 /// naming them).
 pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Host, "host_info", None),
+    (Object::Host, "host_kernel_version", None),
+    (Object::Host, "_host_page_size", None),
+    (
+        Object::Host,
+        "mach_memory_object_memory_entry",
+        Some("an internal entry of a size in partial guest pages stops the run"),
+    ),
+    (
+        Object::Host,
+        "mach_memory_object_memory_entry_64",
+        Some("an internal entry of a size in partial guest pages stops the run"),
+    ),
+    (Object::Host, "host_request_notification", None),
+    (Object::Host, "_kernelrpc_host_create_mach_voucher", None),
+    (Object::Host, "kmod_get_info", None),
+    (Object::Host, "host_virtual_physical_table_info", None),
+    (
+        Object::Host,
+        "host_lockgroup_info",
+        Some("the lock groups are the x86 host kernel's"),
+    ),
+    (
+        Object::Host,
+        "mach_zone_info",
+        Some("a caller shown zones receives the x86 host kernel's"),
+    ),
+    (
+        Object::Host,
+        "mach_zone_info_for_zone",
+        Some("a caller shown zones receives the x86 host kernel's"),
+    ),
+    (
+        Object::Host,
+        "mach_memory_info",
+        Some("a caller shown zones receives the x86 host kernel's zones and memory"),
+    ),
+    (
+        Object::Host,
+        "mach_memory_info_redacted",
+        Some("a caller shown zones receives the x86 host kernel's zones and memory"),
+    ),
+    (
+        Object::Host,
+        "host_set_atm_diagnostic_flag",
+        Some(
+            "an entitled caller sets the host's flag, which this process's commpage does not show",
+        ),
+    ),
+    (Object::Host, "host_set_multiuser_config_flags", None),
+    (Object::Host, "host_get_boot_info", None),
+    (Object::Host, "host_reboot", None),
+    (Object::Host, "host_priv_statistics", None),
+    (Object::Host, "host_default_memory_manager", None),
+    (Object::Host, "vm_wire", None),
+    (Object::Host, "thread_wire", None),
+    (Object::Host, "host_set_special_port", None),
+    (Object::Host, "host_set_exception_ports", None),
+    (Object::Host, "host_get_exception_ports", None),
+    (Object::Host, "host_swap_exception_ports", None),
+    (Object::Host, "mach_vm_wire_external", None),
+    (Object::Host, "host_set_UNDServer", None),
+    (Object::Host, "host_get_UNDServer", None),
+    (Object::Host, "kext_request", None),
     (
         Object::Task,
         "_kernelrpc_mach_vm_map_external",
@@ -290,6 +353,34 @@ pub(super) fn serve(
         // registry, whose serialized properties have one layout in both
         // ABIs but describe the x86 machine.
         (Object::Host, "host_get_io_main", false) => Reply::Forward,
+        (Object::Host, "host_kernel_version", false) => kernel_version(),
+        // `vm_size_t`: the arm64 kernel's 16 KiB page.
+        (Object::Host, "_host_page_size", false) => {
+            Reply::Success(memory::PAGE_BYTES.to_le_bytes().to_vec())
+        }
+        // The pager port, then `internal`, `size` and `permission`. An
+        // internal entry's object is the size rounded to the kernel's page
+        // (`vm_sanitize_object_size`): the host's 4 KiB rounding names the
+        // same memory only for whole guest pages.
+        (
+            Object::Host,
+            "mach_memory_object_memory_entry" | "mach_memory_object_memory_entry_64",
+            true,
+        ) => {
+            let (Some(pager), Some(internal), Some(size)) =
+                (request.word(4), request.word(24), request.double(28))
+            else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            if pager == 0 && internal != 0 && size & memory::PAGE_MASK != 0 {
+                bail!(
+                    "{routine} of {size:#x} bytes: an internal entry in partial guest pages is \
+                     not implemented"
+                );
+            }
+            Reply::Forward
+        }
+        (Object::Host, routine, _) if HOST_FORWARDED.contains(&routine) => Reply::Forward,
         // The processor sets are the host's: their names, and the host
         // kernel's refusal of the privileged routines to an unprivileged
         // host port.
@@ -477,6 +568,88 @@ fn set_state(kernel: &Kernel, port: u32, routine: &str, request: &Request) -> Re
         }),
         Err(code) => Ok(Reply::Failure(code)),
     }
+}
+
+/// Routines of this process's kernel objects the hosted kernel refuses,
+/// with the reason.
+pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
+    (
+        Object::Host,
+        "host_processor_info",
+        "its per-processor counters would describe the x86 host's processors, not the M2's \
+         eight",
+    ),
+    (
+        Object::Host,
+        "host_processors",
+        "its processor ports would be the x86 host's processors, not the M2's eight",
+    ),
+];
+
+/// The reason routine `routine` of `object` is refused, if it is named.
+pub(crate) fn refused(object: Object, routine: &str) -> Option<&'static str> {
+    REFUSED
+        .iter()
+        .find(|&&(refused, name, _)| refused == object && name == routine)
+        .map(|&(_, _, reason)| reason)
+}
+
+/// Why routine `routine` of `object` stops the run.
+pub(crate) fn refusal(object: Object, routine: &str) -> &'static str {
+    refused(object, routine).unwrap_or("this process's kernel object does not serve it")
+}
+
+/// Host routines whose answer is the arm64 kernel's: the request is
+/// forwarded to the host port. The host-privileged routines refuse the
+/// host port as an unprivileged arm64 process's kernel refuses it (only
+/// root obtains the privileged port); the others act on this machine's
+/// calendar notifications, vouchers and flags, or answer as every
+/// release kernel does (`kmod_get_info`, `host_virtual_physical_table_info`).
+const HOST_FORWARDED: &[&str] = &[
+    "host_request_notification",
+    "_kernelrpc_host_create_mach_voucher",
+    "kmod_get_info",
+    "host_virtual_physical_table_info",
+    "host_lockgroup_info",
+    "mach_zone_info",
+    "mach_zone_info_for_zone",
+    "mach_memory_info",
+    "mach_memory_info_redacted",
+    "host_set_atm_diagnostic_flag",
+    "host_set_multiuser_config_flags",
+    "host_get_boot_info",
+    "host_reboot",
+    "host_priv_statistics",
+    "host_default_memory_manager",
+    "vm_wire",
+    "thread_wire",
+    "host_set_special_port",
+    "host_set_exception_ports",
+    "host_get_exception_ports",
+    "host_swap_exception_ports",
+    "mach_vm_wire_external",
+    "host_set_UNDServer",
+    "host_get_UNDServer",
+    "kext_request",
+];
+
+/// `kernel_version_t`'s bound.
+const KERNEL_VERSION_MAX: usize = 512;
+
+/// `host_kernel_version`: the 26A434 kernel's version string, as
+/// `kern.version` gives it, as a MIG string (offset, count with the NUL,
+/// the bytes padded to a word).
+fn kernel_version() -> Reply {
+    let mut string = super::super::bsd::sysctl::KERNEL_VERSION
+        .as_bytes()
+        .to_vec();
+    string.truncate(KERNEL_VERSION_MAX - 1);
+    string.push(0);
+    let mut body = 0u32.to_le_bytes().to_vec();
+    body.extend((string.len() as u32).to_le_bytes());
+    body.extend(&string);
+    body.resize(body.len().next_multiple_of(4), 0);
+    Reply::Success(body)
 }
 
 /// `osfmk/mach/host_special_ports.h`.

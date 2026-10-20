@@ -219,7 +219,7 @@ pub(crate) fn mig_service(
         ),
         None => (
             Service::Refused {
-                reason: "this process's kernel object does not serve it",
+                reason: server::refusal(object, routine),
             },
             None,
         ),
