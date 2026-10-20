@@ -1145,6 +1145,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.idle_skip = skip;
     }
 
+    /// Keep the system counter at the host's: no slow slice holds it back
+    /// (`clock::Clock::follow_host`). For a machine that is one thread of a
+    /// hosted process, whose threads each run their own machine and must
+    /// read one clock.
+    pub fn follow_host_counter(&mut self) {
+        self.clock.follow_host();
+    }
+
     /// Bound each wait of every PE on the host to `limit` system counter
     /// ticks, after which `run` returns [`Stop::Waiting`] so the host can
     /// take inputs that reach the board from outside it, such as its power

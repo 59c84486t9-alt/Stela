@@ -30,6 +30,11 @@
 //! The architecture requires a constant counter frequency, not a match
 //! with wall time; time of day drifts behind by the accumulated lag, as on
 //! a machine whose counter was paused, and ahead by any idle leaps.
+//!
+//! A machine that is one thread of a hosted process follows the host's
+//! counter instead ([`Clock::follow_host`]): there the guest is an ordinary
+//! process, which no kernel timeout constrains, and its threads, each on its
+//! own machine, must read one clock.
 
 /// The most counts one block may account for: one count at 24 MHz is
 /// 42 ns, a PE at least ~1/12 the speed of an M2 core. XNU drivers time
@@ -50,6 +55,8 @@ pub(super) struct Clock {
     /// The running slice, when a PE runs: its start count, start block
     /// count and the PEs sharing the round.
     slice: Option<Slice>,
+    /// Charge no slice lag: the count is the host's ([`Clock::follow_host`]).
+    follows_host: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +67,16 @@ struct Slice {
 }
 
 impl Clock {
+    /// Charge no slice lag, so the count is the host's counter (plus any
+    /// idle leap). A hosted process runs one machine per thread, and its
+    /// threads read one clock, as an OS process's do: a count held back by
+    /// the lag of one thread's slow slices would order another thread's
+    /// reads before it.
+    pub(super) fn follow_host(&mut self) {
+        self.follows_host = true;
+        self.lag = 0;
+    }
+
     /// The count at host counter value `host`.
     pub(super) fn read(&mut self, host: u64) -> u64 {
         self.last = host
@@ -111,7 +128,9 @@ impl Clock {
             .saturating_mul(TICKS_PER_BLOCK)
             / slice.share;
         let shown = count - slice.count;
-        self.lag += shown.saturating_sub(allowed);
+        if !self.follows_host {
+            self.lag += shown.saturating_sub(allowed);
+        }
     }
 }
 
@@ -142,6 +161,27 @@ mod tests {
         assert_eq!(clock.read(10_000), 9200);
         clock.end_slice(11_000, blocks(800));
         assert_eq!(clock.read(11_000), 10_200);
+    }
+
+    #[test]
+    fn a_clock_following_the_host_charges_no_lag() {
+        let mut clock = Clock::default();
+        clock.start_slice(1000, 0, 1);
+        clock.end_slice(2000, 0);
+        // The slow slice's lag holds the count.
+        assert_eq!(clock.read(2500), 2000);
+        clock.follow_host();
+        assert_eq!(clock.read(2600), 2600);
+        // A slice that shows more than its blocks' bound keeps the host's.
+        clock.start_slice(2600, 0, 2);
+        clock.end_slice(9000, 10);
+        assert_eq!(clock.read(9000), 9000);
+        // Two such clocks read alike whatever their slices did.
+        let mut other = Clock::default();
+        other.follow_host();
+        other.start_slice(0, 0, 1);
+        other.end_slice(5000, 1);
+        assert_eq!(other.read(9500), clock.read(9500));
     }
 
     #[test]
