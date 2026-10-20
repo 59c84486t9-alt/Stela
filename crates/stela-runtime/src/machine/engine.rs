@@ -92,8 +92,11 @@ const HOST_REFUSED_FETCH_LEVEL: i8 = 3;
 const CSV3_SHIFT: u32 = 60;
 const JUMP_CACHE: usize = 4096;
 /// The most blocks one native run chains into, which bounds how late the
-/// engine sees an interrupt, a timer or the end of a time slice.
-const CHAIN_LIMIT: u64 = 256;
+/// engine sees a timer or device deadline pass (tens of microseconds of
+/// guest code; every System register write and device access exits
+/// anyway). Each run that reaches it costs an exit to the engine, which
+/// at 256 was half of a hosted process's exits.
+const CHAIN_LIMIT: u64 = 4096;
 /// ISS CV=1 and COND=0b1110, as reported for trapped AArch64 instructions.
 const TRAPPED_AARCH64: u32 = (1 << 24) | (0b1110 << 20);
 
