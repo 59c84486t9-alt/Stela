@@ -1654,7 +1654,7 @@ mod tests {
     #[test]
     fn the_sme_chips_advertise_streaming_sve_and_sme_by_feature() {
         let value = |chip, register| {
-            derive(chip, TargetCpu::detect(), true)
+            derive(chip, TargetCpu::detect(), true, Speculation::NONE)
                 .into_iter()
                 .find(|(r, _)| *r == register)
                 .unwrap()
