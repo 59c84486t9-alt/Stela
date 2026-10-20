@@ -34,6 +34,22 @@ struct Selection {
     names: Vec<String>,
 }
 
+/// Members outside the BuildManifest that restored asks the host for in any
+/// restore: `SourceBootObjectV4` `__RestoreVersion__` and `__SystemVersion__`,
+/// and the `BootabilityBundle` tree (every file, link and trust cache under
+/// it; directories carry no bytes).
+fn restored_members<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    names
+        .filter(|name| {
+            matches!(*name, "RestoreVersion.plist" | "SystemVersion.plist")
+                || (name.starts_with("BootabilityBundle/") && !name.ends_with('/'))
+        })
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
     let mut bytes = Vec::new();
     archive
@@ -54,6 +70,7 @@ fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
         restore.product_build
     );
     let device_class = profile.device_class.clone();
+    let restored = restored_members(archive.file_names());
     let identities: Vec<IdentitySet> = restore
         .identities
         .iter()
@@ -71,6 +88,7 @@ fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
                     .components
                     .values()
                     .map(|component| component.path.clone())
+                    .chain(restored.iter().cloned())
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect(),
@@ -665,7 +683,7 @@ pub fn synthetic_ipsw_of(path: &Path, build: &str) -> Result<()> {
     let mut writer = zip::ZipWriter::new(File::create_new(path)?);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let members: [(&str, Vec<u8>, SimpleFileOptions); 7] = [
+    let members: [(&str, Vec<u8>, SimpleFileOptions); 10] = [
         (BUILD_MANIFEST, build_manifest.into_bytes(), deflated),
         (kernel.1, vec![0x5a; 70_000], stored.large_file(true)),
         (os.1, os_bytes, deflated),
@@ -677,6 +695,13 @@ pub fn synthetic_ipsw_of(path: &Path, build: &str) -> Result<()> {
             stored,
         ),
         ("Firmware/unrelated.bin", vec![1; 10], stored),
+        ("RestoreVersion.plist", b"restore version".to_vec(), stored),
+        ("BootabilityBundle/Restore/Bootability/", Vec::new(), stored),
+        (
+            "BootabilityBundle/Restore/Bootability/brain",
+            b"bootability".to_vec(),
+            deflated,
+        ),
     ];
     for (name, bytes, options) in members {
         writer.start_file(name, options)?;
@@ -709,7 +734,7 @@ mod tests {
         synthetic_ipsw(&image)?;
         let root = dir.path().join("usb");
         let report = write(&options(&image, &root, PayloadLayout::Split))?;
-        assert_eq!(report["members"], 5);
+        assert_eq!(report["members"], 7);
         let directory = root.join(images_directory(SYNTHETIC_BUILD));
         let manifest = PayloadManifest::parse(&fs::read(directory.join(MANIFEST_FILE))?).unwrap();
         assert_eq!(manifest.model, SYNTHETIC_MODEL);
@@ -746,6 +771,16 @@ mod tests {
         }
         assert!(directory.join("Firmware/stelatest-os.dmg.003").exists());
         assert!(!directory.join("Firmware/unrelated.bin.000").exists());
+        // Every identity carries what restored asks for outside the manifest.
+        for identity in &manifest.identities {
+            for name in [
+                "RestoreVersion.plist",
+                "BootabilityBundle/Restore/Bootability/brain",
+            ] {
+                assert!(identity.members.iter().any(|m| m == name), "{name}");
+            }
+            assert!(!identity.members.iter().any(|m| m.ends_with('/')));
+        }
         // A second write never replaces a payload.
         assert!(write(&options(&image, &root, PayloadLayout::Split)).is_err());
         Ok(())
