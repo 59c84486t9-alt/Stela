@@ -10,6 +10,7 @@ mod display;
 mod erase;
 mod host;
 mod input;
+pub(crate) mod install;
 mod interrupts;
 mod network;
 mod nor;
@@ -47,7 +48,12 @@ use stela_runtime::machine::{
     soc,
     system::Register,
 };
-use stela_runtime::pc::storage::Target;
+use stela_runtime::pc::{gpt::Guid, storage::Target};
+
+/// The user-facing restore: `--install MANIFEST` names the install medium's
+/// `payload.json`, `--install-source GUID` the FAT32 partition holding it.
+pub const INSTALL_OPTION: &str = "--install";
+const INSTALL_SOURCE_OPTION: &str = "--install-source";
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
@@ -97,6 +103,11 @@ struct Options {
     restore_source: Option<Target>,
     restore_manifest: bool,
     restore_identity: Option<usize>,
+    /// The install medium's `payload.json` (`--install`), whose directory
+    /// holds its pieces: a restore with Apple's stock options.
+    install: Option<String>,
+    /// The install medium's partition, by its unique GUID alone.
+    install_source: Option<Guid>,
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
@@ -213,6 +224,8 @@ impl Options {
             restore_source: None,
             restore_manifest: false,
             restore_identity: None,
+            install: None,
+            install_source: None,
             survey: false,
             idle_skip: false,
             input: false,
@@ -253,6 +266,23 @@ impl Options {
                     return Err("duplicate restore manifest");
                 }
                 options.restore_manifest = true;
+                continue;
+            }
+            if name == INSTALL_OPTION {
+                let path = words.next().ok_or("missing install medium manifest")?;
+                if options.install.replace(String::from(path)).is_some() {
+                    return Err("duplicate install medium");
+                }
+                continue;
+            }
+            if name == INSTALL_SOURCE_OPTION {
+                let guid = words
+                    .next()
+                    .ok_or("missing install medium partition")?
+                    .parse()?;
+                if options.install_source.replace(guid).is_some() {
+                    return Err("duplicate install medium partition");
+                }
                 continue;
             }
             if name == "--restore-identity" {
@@ -412,6 +442,26 @@ impl Options {
         }
         if !options.restore && restore_inputs {
             return Err("restore inputs require explicit --restore-study");
+        }
+        if options.install.is_some() != options.install_source.is_some() {
+            return Err("--install and --install-source name the install medium together");
+        }
+        if options.install.is_some()
+            && (!options.bundle
+                || options.preboot.is_some()
+                || options.storage.is_none()
+                || options.nor.is_none()
+                || options.restore
+                || options.survey)
+        {
+            return Err(
+                "--install requires --bundle, --storage and --nor; refuses --restore-study, --preboot and --survey",
+            );
+        }
+        if options.install.is_some() && !options.tss {
+            return Err(
+                "--install needs --tss: the restore personalizes the recoveryOS LocalPolicy with Apple's signing server",
+            );
         }
         if options.preboot.is_none()
             && (options.boot_volume.is_some()
@@ -1217,13 +1267,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
     let wants_network = options.tss || options.network_check.is_some();
-    let (services, host_input, host_network, usb_disks, guest_network) = if targets.is_empty()
+    let (services, medium, host_input, host_network, usb_disks, guest_network) = if targets
+        .is_empty()
+        && options.install_source.is_none()
         && !options.input
         && !wants_network
         && options.usb_storage.is_empty()
         && !options.guest_network
     {
-        (Vec::new(), None, None, Vec::new(), None)
+        (Vec::new(), None, None, None, Vec::new(), None)
     } else {
         let storage_handoff = handoff
             .storage
@@ -1232,10 +1284,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         // SAFETY: before host::install, with sole ownership of DMA/controllers.
         let storage::Opened {
             services,
+            medium,
             inputs,
             mut links,
             usb_disks,
-        } = unsafe { storage::open(&storage_handoff, &targets, &options.usb_storage) }
+        } = unsafe {
+            storage::open(
+                &storage_handoff,
+                &targets,
+                options.install_source,
+                &options.usb_storage,
+            )
+        }
             .unwrap_or_else(|error| {
                 output::arguments(format_args!("host storage refusal: {error}\n"));
                 output::fatal("host storage could not be opened")
@@ -1256,6 +1316,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         });
         (
             services,
+            medium,
             options.input.then(|| input::HostInput::new(inputs)),
             network,
             usb_disks,
@@ -1282,6 +1343,28 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .restore_source
         .as_ref()
         .map(|_| services.next().unwrap());
+    // The restore host's IPSW: the study's raw extent, or the install
+    // medium's pieces, found through FAT32 and joined.
+    let source = match (source, medium) {
+        (Some(partition), _) => Some(
+            restore::inventory(handoff)
+                .and_then(|manifest| restore::Source::extent(partition, manifest.source.bytes)),
+        ),
+        (None, Some(partition)) => Some(restore::inventory(handoff).and_then(|manifest| {
+            let path = options.install.as_deref().unwrap_or_default();
+            let directory = path.rsplit_once('\\').map_or("", |(directory, _)| directory);
+            let hashes = restore::inventory_file(handoff, crate::system::INSTALL_PIECES_FILE)
+                .ok_or("the install medium's piece hashes were not loaded")?;
+            install::open(partition, &manifest, directory, hashes).map(restore::Source::new)
+        })),
+        (None, None) => None,
+    }
+    .map(|source| {
+        source.unwrap_or_else(|error| {
+            output::arguments(format_args!("restore source refusal: {error}\n"));
+            output::fatal("the restore source could not be opened")
+        })
+    });
     let (backing, nor) = match backing {
         Some(partition) if state_in_storage => {
             let (namespace, state) = nor::split(partition);
@@ -1461,7 +1544,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             agx_observe: options.agx_observe,
         },
         Cables {
-            restore: options.restore,
+            restore: options.restore || options.install.is_some(),
             input: options.input,
             usb: stela_runtime::machine::apple::UsbCables {
                 disks: usb_disks,
@@ -1528,11 +1611,16 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 ),
             }
         });
+        let mode = match options.install {
+            Some(_) => restore::Mode::Install,
+            None => restore::Mode::Study,
+        };
         restore::Experiment::new(
             source,
             restore_usb.unwrap(),
             handoff,
-            options.restore_identity.unwrap(),
+            mode,
+            options.restore_identity,
             signer,
         )
         .unwrap_or_else(|error| {

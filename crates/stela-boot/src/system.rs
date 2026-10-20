@@ -191,6 +191,12 @@ fn identity(
 /// Bundle files by name, `bundle.json` first, each in its own pages.
 type BundleFiles = Vec<(String, Region)>;
 
+/// The names the restore inventory and its block hashes take among the
+/// bundle files the engine receives.
+pub const RESTORE_INVENTORY_FILE: &str = "restore-payload.json";
+pub const RESTORE_BLOCKS_FILE: &str = "restore-blocks.bin";
+pub const INSTALL_PIECES_FILE: &str = "install-pieces.bin";
+
 /// The value after `name` in the options, as text.
 fn option<'a>(options: &'a str, name: &str) -> Option<&'a str> {
     let mut words = options.split_ascii_whitespace();
@@ -211,6 +217,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         "--storage",
         "--preboot",
         "--restore-source",
+        "--install-source",
         "--nor",
         "--network-check",
         "--usb-storage",
@@ -236,14 +243,40 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         drop(volume);
         (source, Vec::new())
     };
-    if let Some(path) = option(text, "--restore-manifest") {
-        if files.iter().any(|(name, _)| name == "restore-payload.json") {
-            return Err("bundle reserves restore-payload.json");
+    let inventory = match (
+        option(text, "--restore-manifest"),
+        option(text, crate::engine::INSTALL_OPTION),
+    ) {
+        (Some(_), Some(_)) => return Err("--install and --restore-manifest name one inventory"),
+        (Some(path), None) => Some(crate::engine::bundle::restore_inventory(path)?),
+        // The install medium's pieces are checked through the firmware's
+        // FAT driver now, while it is there; the engine reads them through
+        // its own after boot services end.
+        (None, Some(path)) => Some(crate::engine::bundle::with_inventory(
+            path,
+            crate::engine::install::check_pieces,
+        )?),
+        (None, None) => None,
+    };
+    if let Some(inventory) = inventory {
+        let reserved = [
+            RESTORE_INVENTORY_FILE,
+            RESTORE_BLOCKS_FILE,
+            INSTALL_PIECES_FILE,
+        ];
+        if files
+            .iter()
+            .any(|(name, _)| reserved.contains(&name.as_str()))
+        {
+            return Err("a bundle file takes a name the restore inventory reserves");
         }
-        files.push((
-            String::from("restore-payload.json"),
-            crate::engine::bundle::restore_inventory(path)?,
-        ));
+        files.push((String::from(RESTORE_INVENTORY_FILE), inventory.manifest));
+        if let Some(blocks) = inventory.blocks {
+            files.push((String::from(RESTORE_BLOCKS_FILE), blocks));
+        }
+        if let Some(pieces) = inventory.pieces {
+            files.push((String::from(INSTALL_PIECES_FILE), pieces));
+        }
     }
     if files.len() > MAX_FILES {
         return Err("bundle lists too many files");

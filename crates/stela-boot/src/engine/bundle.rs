@@ -27,7 +27,7 @@ use stela_loader::{boot_bundle::Options, boot_selection::BootVolume, installed, 
 use stela_runtime::{
     boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
     machine::Host,
-    payload::ReadAt,
+    payload::{self, PayloadManifest, ReadAt},
     pc::{
         self,
         block::{BlockDevice, BlockError},
@@ -148,9 +148,33 @@ pub fn read(directory: &str) -> Result<Vec<(String, Region)>, &'static str> {
     Err("no volume has the bundle's bundle.json")
 }
 
-/// Bounded restore inventory, read before ExitBootServices. Reject ambiguous
-/// paths across firmware volumes rather than choosing a different inventory.
-pub fn restore_inventory(path: &str) -> Result<Region, &'static str> {
+/// The restore inventory as it was read, and what it names beside itself.
+pub struct Inventory {
+    pub manifest: Region,
+    /// Its members' precomputed block hashes (`payload::BlockHashes`), when
+    /// it names them.
+    pub blocks: Option<Region>,
+    /// An install medium's piece block hashes (`Layout::Pieces`).
+    pub pieces: Option<Region>,
+}
+
+/// The most bytes a hash file may hold: a million blocks' hashes.
+const MAX_HASH_FILE_BYTES: u64 = payload::MAX_HASH_BLOCKS * 32;
+
+/// Bounded restore inventory, read before ExitBootServices, with the hash
+/// files it names from the same directory of the same volume. Reject
+/// ambiguous paths across firmware volumes rather than choosing a different
+/// inventory.
+pub fn restore_inventory(path: &str) -> Result<Inventory, &'static str> {
+    with_inventory(path, |_, _, _| Ok(()))
+}
+
+/// [`restore_inventory`], also running `check` on the inventory's volume
+/// while it is open, with the inventory's directory.
+pub fn with_inventory(
+    path: &str,
+    mut check: impl FnMut(&mut Directory, &str, &PayloadManifest) -> Result<(), &'static str>,
+) -> Result<Inventory, &'static str> {
     const LIMIT: u64 = 16 * 1024 * 1024;
     let mut found = None;
     for handle in boot::find_handles::<SimpleFileSystem>().map_err(|_| "no file systems")? {
@@ -166,9 +190,50 @@ pub fn restore_inventory(path: &str) -> Result<Region, &'static str> {
         if found.is_some() {
             return Err("restore inventory path appears on multiple volumes");
         }
-        found = Some(read_bounded(&mut root, path, LIMIT)?);
+        let manifest = read_bounded(&mut root, path, LIMIT)?;
+        // SAFETY: just read into Stela's own pages.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(manifest.physical as *const u8, manifest.bytes as usize)
+        };
+        let parsed = PayloadManifest::parse(bytes).map_err(|error| {
+            output::arguments(format_args!("restore inventory refusal: {error}\n"));
+            "the restore inventory is not a payload manifest"
+        })?;
+        let directory = path
+            .rsplit_once('\\')
+            .map_or("", |(directory, _)| directory);
+        let mut hash_file = |entry: Option<&payload::BlockHashes>| {
+            entry
+                .map(|entry| {
+                    let path = format!("{directory}\\{}", entry.file);
+                    output::arguments(format_args!("READ {path}\n"));
+                    read_bounded(&mut root, &path, MAX_HASH_FILE_BYTES)
+                        .map_err(|_| "a hash file the restore inventory names cannot be read")
+                })
+                .transpose()
+        };
+        let blocks = hash_file(parsed.block_hashes.as_ref())?;
+        let pieces = hash_file(match &parsed.layout {
+            payload::Layout::Pieces { block_hashes, .. } => Some(block_hashes),
+            _ => None,
+        })?;
+        check(&mut root, directory, &parsed)?;
+        found = Some(Inventory {
+            manifest,
+            blocks,
+            pieces,
+        });
     }
     found.ok_or("restore inventory file was not found")
+}
+
+/// The size of the file at `path` of `root`, when it is one.
+pub fn file_size(root: &mut Directory, path: &str) -> Result<u64, &'static str> {
+    let mut file = open(root, path)?;
+    Ok(file
+        .get_boxed_info::<FileInfo>()
+        .map_err(|_| "cannot read a file's size")?
+        .file_size())
 }
 
 /// One 64-bit word from RDSEED or RDRAND, retried while the source is busy.

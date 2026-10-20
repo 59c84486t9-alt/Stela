@@ -12,6 +12,7 @@ use stela_runtime::pc::{
     self,
     block::{BlockDevice, BlockError, Identity},
     dma::RegionAllocator,
+    gpt::Guid,
     storage::{self, Target},
 };
 
@@ -86,6 +87,7 @@ impl BlockDevice for Service {
 pub unsafe fn open(
     handoff: &pc::Handoff,
     targets: &[&Target],
+    medium: Option<Guid>,
     usb_disks: &[String],
 ) -> Result<Opened, String> {
     if targets
@@ -148,6 +150,23 @@ pub unsafe fn open(
             }) as Box<dyn BlockDevice>)
         })
         .collect::<Result<_, String>>()?;
+    // After the targets, so a medium GUID on a target's disk finds no disk.
+    let medium = medium
+        .map(|guid| {
+            let partition = storage::open_unique(&mut disks.devices, guid)
+                .map_err(|error| format!("install medium {guid}: {error}"))?;
+            output::arguments(format_args!(
+                "HOST PARTITION serial={} partition={guid} blocks={} block_size={} (install medium)\n",
+                partition.disk().serial,
+                partition.identity().blocks,
+                partition.identity().block_size
+            ));
+            Ok::<_, String>(Box::new(Service {
+                inner: Box::new(partition),
+                root,
+            }) as Box<dyn BlockDevice>)
+        })
+        .transpose()?;
     let usb_disks = usb_disks
         .iter()
         .map(|serial| {
@@ -165,6 +184,7 @@ pub unsafe fn open(
         .collect::<Result<_, String>>()?;
     Ok(Opened {
         services,
+        medium,
         inputs,
         links,
         usb_disks,
@@ -175,6 +195,8 @@ pub unsafe fn open(
 /// host's input devices and network adapters.
 pub struct Opened {
     pub services: alloc::vec::Vec<Box<dyn BlockDevice>>,
+    /// The install medium's partition, found by its GUID.
+    pub medium: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
     /// Whole disks for the guest's USB mass storage, in option order.
