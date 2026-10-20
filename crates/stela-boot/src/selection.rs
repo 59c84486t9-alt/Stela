@@ -157,7 +157,11 @@ fn block_io(handle: Handle) -> Option<ScopedProtocol<BlockIO>> {
     .ok()
 }
 
-fn find(target: &Target) -> Result<Partition, &'static str> {
+/// A whole disk's serial, when it reports one, and its block I/O.
+type WholeDisk = (Option<String>, ScopedProtocol<BlockIO>);
+
+/// Every whole disk with media.
+fn whole_disks() -> Result<Vec<WholeDisk>, &'static str> {
     let handles = boot::find_handles::<BlockIO>().map_err(|_| "no block devices")?;
     let mut disks = Vec::new();
     for handle in handles {
@@ -169,11 +173,13 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
             continue;
         }
         let path = device_path(handle).unwrap_or_default();
-        if disk_serial(handle, &path).is_some_and(|serial| serial == target.serial) {
-            disks.push(io);
-        }
+        disks.push((disk_serial(handle, &path), io));
     }
-    let [io] = <[_; 1]>::try_from(disks).map_err(|_| "not exactly one disk has the serial")?;
+    Ok(disks)
+}
+
+/// The whole disk behind `io` and its GPT.
+fn table(io: ScopedProtocol<BlockIO>) -> Result<(Partition, gpt::Table), &'static str> {
     let media = io.media();
     let disk = Disk {
         block_bytes: media.block_size() as u64,
@@ -201,6 +207,16 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
     let gpt::Found::Table { table, .. } = found else {
         return Err("the disk has no valid GPT");
     };
+    Ok((whole, table))
+}
+
+fn find(target: &Target) -> Result<Partition, &'static str> {
+    let disks: Vec<_> = whole_disks()?
+        .into_iter()
+        .filter(|(serial, _)| serial.as_deref() == Some(target.serial.as_str()))
+        .collect();
+    let [(_, io)] = <[_; 1]>::try_from(disks).map_err(|_| "not exactly one disk has the serial")?;
+    let (mut whole, table) = table(io)?;
     let matching: Vec<_> = table
         .partitions
         .iter()
@@ -213,8 +229,39 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
         return Err("the partition is an EFI system partition");
     }
     whole.first_lba = partition.first_lba;
-    whole.bytes = partition.blocks() * disk.block_bytes;
+    whole.bytes = partition.blocks() * whole.block_bytes;
     Ok(whole)
+}
+
+/// The external disk's partition NVRAM's boot volume names, as the
+/// `--preboot` target that boots it: a whole disk's own GPT partition, as
+/// recoveryOS installs macOS on a Mac's external drive. `None` when no
+/// disk's table holds it, as for the internal SSD's containers, which lie in
+/// the Apple region's own table.
+fn external(volume: &BootVolume) -> Result<Option<Target>, String> {
+    let mut found = None;
+    for (serial, io) in whole_disks()? {
+        let Ok((_, table)) = table(io) else {
+            continue;
+        };
+        if !table
+            .partitions
+            .iter()
+            .any(|p| p.unique_guid.0 == volume.partition)
+        {
+            continue;
+        }
+        let serial = serial
+            .ok_or("the boot volume's disk reports no serial number to find it by after boot")?;
+        if found.is_some() {
+            return Err("several disks hold the boot volume's partition".into());
+        }
+        found = Some(Target {
+            serial,
+            partition: stela_runtime::pc::gpt::Guid(volume.partition),
+        });
+    }
+    Ok(found)
 }
 
 /// The boot NVRAM chooses, with its one-shot variables consumed and saved.
@@ -326,11 +373,35 @@ fn holds_recovery(
     }
 }
 
+/// Whether the internal SSD lacks the iBootSystemContainer every boot of a
+/// Mac reads (`apfs::require_system_container`), as a blank one does.
+fn blank(target: &Target, part: Part) -> Result<bool, String> {
+    let mut disk = find(target).map_err(|e| format!("internal SSD: {e}"))?;
+    disk.confine(part)
+        .map_err(|e| format!("internal SSD: {e}"))?;
+    match apfs::require_system_container(&mut disk) {
+        Ok(()) => Ok(false),
+        Err(ApfsError::NotFound(_)) => Ok(true),
+        Err(error) => Err(format!("internal SSD: {error}")),
+    }
+}
+
 /// The value after `name` in the options.
 fn option<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let mut words = text.split_ascii_whitespace();
     words.find(|w| *w == name)?;
     words.next()
+}
+
+/// `text` with the value after `name` replaced by `value`.
+fn replace(text: &str, name: &str, value: &str) -> String {
+    let mut words: Vec<&str> = text.split_ascii_whitespace().collect();
+    if let Some(at) = words.iter().position(|w| *w == name)
+        && at + 1 < words.len()
+    {
+        words[at + 1] = value;
+    }
+    words.join(" ")
 }
 
 /// Why no boot options came out of [`route`].
@@ -339,6 +410,9 @@ pub enum Refusal {
     /// (`boot_selection::Target::RecoveryMode`): it waits for a restore
     /// host, Stela's Install macOS (Stela) startup choice.
     RecoveryMode,
+    /// The internal SSD has no iBootSystemContainer yet: only Install macOS
+    /// (Stela) boots.
+    BlankDisk,
     Other(&'static str),
 }
 
@@ -351,6 +425,7 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
         Refusal::Other("NVRAM's boot choice could not be read or is not modeled")
     };
     let parse = |text: &str| text.parse::<Target>().map_err(Refusal::Other);
+    let mut retargeted = None;
     let selection = match option(text, boot_selection::PREBOOT_OPTION) {
         Some(preboot) => {
             let nor = option(text, "--nor");
@@ -375,12 +450,26 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
                 )
                 .map_err(|e| refuse(format!("{e:#}")))?,
             };
-            let disk = parse(preboot)?;
-            let part = if in_storage(preboot) {
-                Part::Namespace
-            } else {
-                Part::Whole
+            // A boot volume on an external disk boots from that disk.
+            let outside = match &selection.volume {
+                Some(volume) => external(volume).map_err(refuse)?,
+                None => None,
             };
+            let (disk, part) = match outside {
+                Some(target) => {
+                    let value = format!("{}:{}", target.serial, target.partition);
+                    output::arguments(format_args!("BOOT volume on external disk {value}\n"));
+                    retargeted = Some(replace(text, boot_selection::PREBOOT_OPTION, &value));
+                    (target, Part::Whole)
+                }
+                None if in_storage(preboot) => (parse(preboot)?, Part::Namespace),
+                None => (parse(preboot)?, Part::Whole),
+            };
+            // An internal SSD without its iBootSystemContainer boots nothing,
+            // recoveryOS included: it waits for the restore that creates it.
+            if retargeted.is_none() && blank(&disk, part).map_err(refuse)? {
+                return Err(Refusal::BlankDisk);
+            }
             let recovery = option(text, boot_selection::RECOVERY_BUNDLE_OPTION).is_some();
             if recovery
                 && matches!(selection.target, boot_selection::Target::MacOs { .. })
@@ -407,6 +496,7 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
         }
         None => None,
     };
+    let text = retargeted.as_deref().unwrap_or(text);
     if let Some(held) = selection
         .as_ref()
         .filter(|s| s.target == boot_selection::Target::RecoveryMode)

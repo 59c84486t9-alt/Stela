@@ -154,17 +154,16 @@ pub fn choose(volume: &mut FileSystem, options: Vec<u8>) -> Vec<u8> {
     chosen(&choices, index)
 }
 
-/// Wait at the startup choices, with no timeout and no default, as LLB
-/// waits in recovery mode for a restore host: NVRAM holds the machine there
-/// (`auto-boot=false`), as an interrupted restore leaves it. Returns the
-/// chosen entry's options; `None` when the volume has no choices or no
-/// console input to choose with.
-pub fn hold(volume: &mut FileSystem) -> Option<Vec<u8>> {
+/// Wait at the startup choices, with no timeout and no default, after
+/// `reason`, as LLB waits in recovery mode for a restore host: NVRAM holds
+/// the machine there (`auto-boot=false`), as an interrupted restore leaves
+/// it, or its internal SSD is blank. Returns the chosen entry's options;
+/// `None` when the volume has no choices or no console input to choose with.
+pub fn hold(volume: &mut FileSystem, reason: &str) -> Option<Vec<u8>> {
     let choices = read(volume)?;
     let mut text = list(
         &choices,
-        "\r\nThis Mac is in recovery mode: its last restore did not finish. Choose Install \
-         macOS (Stela) to restore it again.\r\nStela startup options:\r\n",
+        &alloc::format!("\r\n{reason}\r\nStela startup options:\r\n"),
     );
     text.push_str("Press an entry's key to choose.\r\n");
     show(&text);

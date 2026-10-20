@@ -335,11 +335,21 @@ pub fn boot(mut options: Vec<u8>, mut volume: FileSystem) -> ! {
         match crate::selection::route(options) {
             Ok(routed) => break routed,
             Err(Refusal::Other(error)) => output::fatal(error),
-            Err(Refusal::RecoveryMode) => {
-                options = crate::choice::hold(&mut volume).unwrap_or_else(|| {
+            Err(refusal @ (Refusal::RecoveryMode | Refusal::BlankDisk)) => {
+                let reason = match refusal {
+                    Refusal::BlankDisk => {
+                        "This Mac's internal SSD is blank. Choose Install macOS (Stela) to \
+                         restore it."
+                    }
+                    _ => {
+                        "This Mac is in recovery mode: its last restore did not finish. Choose \
+                         Install macOS (Stela) to restore it again."
+                    }
+                };
+                options = crate::choice::hold(&mut volume, reason).unwrap_or_else(|| {
                     output::fatal(
-                        "NVRAM holds the machine in recovery mode and this volume has no \
-                         startup choices to restore it from",
+                        "the machine can only be restored and this volume has no startup \
+                         choices to restore it from",
                     )
                 });
                 if !options.starts_with(b"--system") {
