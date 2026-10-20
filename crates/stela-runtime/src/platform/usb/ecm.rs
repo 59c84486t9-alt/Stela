@@ -11,15 +11,30 @@
 //! data interface, class 10.
 //!
 //! The adapter reports a fixed 1 Gb/s link that is up while the data
-//! interface's second alternate setting is selected. It keeps no
-//! statistics, multicast filters or power filters (its descriptor says so),
-//! so GET_ETHERNET_STATISTIC, SET_ETHERNET_MULTICAST_FILTERS and the power
-//! management filter requests STALL, as ECM 6.2 allows. Its packet filter
-//! takes effect on received frames; MULTICAST without a filter list passes
-//! every multicast frame. Frames longer than the 1514-byte maximum segment
-//! are discarded and counted, never truncated. Each direction's queue holds
-//! at most [`QUEUE_FRAMES`]; a frame arriving at a full queue is dropped
-//! and counted, as a NIC's full ring drops.
+//! interface's second alternate setting is selected. Its packet filter
+//! (6.2.4) takes effect on received frames. It has [`MULTICAST_FILTERS`]
+//! perfect multicast filters (wNumberMCFilters D15 clear):
+//! SET_ETHERNET_MULTICAST_FILTERS (6.2.1) replaces the whole list, and
+//! PACKET_TYPE_MULTICAST passes exactly the listed groups, while
+//! ALL_MULTICAST passes every group. GET_ETHERNET_STATISTIC (6.2.5)
+//! answers the counters [`STATISTICS`] advertises in bmEthernetStatistics,
+//! each a wrapping 32-bit count since the device was configured; every
+//! other selector, such as collisions or CRC errors on a medium the
+//! adapter does not have, STALLs.
+//!
+//! Power-management pattern filters (6.2.2-6.2.3) exist to wake a
+//! suspended host from a matching frame. The configuration has no remote
+//! wakeup (bmAttributes D5 clear), so bNumberPowerFilters is 0 and both
+//! requests STALL. J473 macOS sends neither those nor statistics requests:
+//! the CDC and ECM drivers (KC `0x320d040..0x3236000`) issue only
+//! SET_ETHERNET_MULTICAST_FILTERS (`setMulticastFilterGated` `0x3232ff4`,
+//! when the list fits wNumberMCFilters) and SET_ETHERNET_PACKET_FILTER
+//! (`0x323321c`).
+//!
+//! Frames longer than the 1514-byte maximum segment are discarded and
+//! counted, never truncated. Each direction's queue holds at most
+//! [`QUEUE_FRAMES`]; a frame arriving at a full queue is dropped and
+//! counted, as a NIC's full ring drops.
 use super::{
     BusPeer, Function, Reply, Token,
     control::{
@@ -47,6 +62,31 @@ const LINK_BITS_PER_SECOND: u32 = 1_000_000_000;
 
 const SET_ETHERNET_MULTICAST_FILTERS: u8 = 0x40;
 const SET_ETHERNET_PACKET_FILTER: u8 = 0x43;
+const GET_ETHERNET_STATISTIC: u8 = 0x44;
+/// Perfect multicast filters (wNumberMCFilters, ECM 5.4 table 3).
+pub const MULTICAST_FILTERS: u16 = 32;
+
+// Ethernet statistics feature selectors (ECM 6.2.5, table 9).
+const XMIT_OK: u16 = 1;
+const RCV_OK: u16 = 2;
+const XMIT_ERROR: u16 = 3;
+const RCV_ERROR: u16 = 4;
+const RCV_NO_BUFFER: u16 = 5;
+const DIRECTED_BYTES_XMIT: u16 = 6;
+const DIRECTED_FRAMES_XMIT: u16 = 7;
+const MULTICAST_BYTES_XMIT: u16 = 8;
+const MULTICAST_FRAMES_XMIT: u16 = 9;
+const BROADCAST_BYTES_XMIT: u16 = 10;
+const BROADCAST_FRAMES_XMIT: u16 = 11;
+const DIRECTED_BYTES_RCV: u16 = 12;
+const DIRECTED_FRAMES_RCV: u16 = 13;
+const MULTICAST_BYTES_RCV: u16 = 14;
+const MULTICAST_FRAMES_RCV: u16 = 15;
+const BROADCAST_BYTES_RCV: u16 = 16;
+const BROADCAST_FRAMES_RCV: u16 = 17;
+const TRANSMIT_QUEUE_LENGTH: u16 = 19;
+/// bmEthernetStatistics: selector n is bit n - 1. Selectors 1-17 and 19.
+pub const STATISTICS: u32 = 0x0005_ffff;
 const NETWORK_CONNECTION: u8 = 0x00;
 const CONNECTION_SPEED_CHANGE: u8 = 0x2a;
 
@@ -66,11 +106,56 @@ pub struct Counters {
     pub overflowed: u64,
 }
 
+/// Destination kinds, as [`Traffic`] indices.
+const UNICAST: usize = 0;
+const GROUP: usize = 1;
+const EVERYONE: usize = 2;
+
+/// One direction's frames and bytes by destination kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Traffic {
+    /// Directed, multicast and broadcast: (bytes, frames).
+    kinds: [(u64, u64); 3],
+}
+
+impl Traffic {
+    fn count(&mut self, frame: &[u8]) {
+        let destination = Mac(frame[..6].try_into().unwrap());
+        let kind = if destination == Mac::BROADCAST {
+            EVERYONE
+        } else if destination.is_multicast() {
+            GROUP
+        } else {
+            UNICAST
+        };
+        let (bytes, frames) = &mut self.kinds[kind];
+        *bytes += frame.len() as u64;
+        *frames += 1;
+    }
+}
+
+/// The counts GET_ETHERNET_STATISTIC reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Statistics {
+    /// Guest frames sent on to the host network: XMIT.
+    transmitted: Traffic,
+    /// Frames the guest read in full: RCV.
+    received: Traffic,
+    /// Guest frames over the maximum segment, never sent.
+    transmit_errors: u64,
+    /// Host frames outside the Ethernet frame sizes, never delivered.
+    receive_errors: u64,
+    /// Host frames that met a full receive queue.
+    no_buffer: u64,
+}
+
 struct State {
     mac: Mac,
     /// The data interface's alternate setting: 1 moves frames.
     alternate: u8,
     filter: u16,
+    /// The multicast groups PACKET_TYPE_MULTICAST passes.
+    multicast: Vec<Mac>,
     halted: [bool; 3],
     /// Notifications not yet sent, each one interrupt transfer.
     notifications: VecDeque<Vec<u8>>,
@@ -85,6 +170,7 @@ struct State {
     /// The first inbound frame's last packet was full: a ZLP ends it.
     zero_length_due: bool,
     counters: Counters,
+    statistics: Statistics,
 }
 
 pub struct Ecm {
@@ -114,6 +200,8 @@ fn descriptors(mac: Mac) -> Descriptors {
         1,
     ];
     let [segment_low, segment_high] = (MAX_SEGMENT as u16).to_le_bytes();
+    let [filters_low, filters_high] = MULTICAST_FILTERS.to_le_bytes();
+    let statistics = STATISTICS.to_le_bytes();
     let configuration = |bulk: u16, interval: u8| {
         let [low, high] = bulk.to_le_bytes();
         control::configuration(
@@ -122,8 +210,9 @@ fn descriptors(mac: Mac) -> Descriptors {
             &[
                 &[9, INTERFACE, 0, 0, 1, 2, 6, 0, 0],
                 // Header (CDC 1.20), Union (control 0, data 1), Ethernet
-                // Networking: MAC string 4, no statistics, 1514-byte
-                // segments, no multicast or power filters.
+                // Networking: MAC string 4, the statistics it counts,
+                // 1514-byte segments, perfect multicast filters, no power
+                // filters.
                 &[5, 0x24, 0x00, 0x20, 0x01],
                 &[5, 0x24, 0x06, 0, 1],
                 &[
@@ -131,14 +220,14 @@ fn descriptors(mac: Mac) -> Descriptors {
                     0x24,
                     0x0f,
                     4,
-                    0,
-                    0,
-                    0,
-                    0,
+                    statistics[0],
+                    statistics[1],
+                    statistics[2],
+                    statistics[3],
                     segment_low,
                     segment_high,
-                    0,
-                    0,
+                    filters_low,
+                    filters_high,
                     0,
                 ],
                 &[7, ENDPOINT, NOTIFY, 3, NOTIFY_PACKET as u8, 0, interval],
@@ -197,6 +286,7 @@ impl Ecm {
                 mac,
                 alternate: 0,
                 filter: DIRECTED | BROADCAST | ALL_MULTICAST,
+                multicast: Vec::new(),
                 halted: [false; 3],
                 notifications: VecDeque::new(),
                 assembling: Vec::new(),
@@ -206,6 +296,7 @@ impl Ecm {
                 sent: 0,
                 zero_length_due: false,
                 counters: Counters::default(),
+                statistics: Statistics::default(),
             },
         })
     }
@@ -227,6 +318,7 @@ impl Ecm {
         let state = &mut self.state;
         if frame.len() < 14 || frame.len() > MAX_SEGMENT {
             state.counters.oversized += 1;
+            state.statistics.receive_errors += 1;
             return;
         }
         let destination = Mac(frame[..6].try_into().unwrap());
@@ -235,7 +327,8 @@ impl Ecm {
             || if destination == Mac::BROADCAST {
                 filter & BROADCAST != 0
             } else if destination.is_multicast() {
-                filter & (ALL_MULTICAST | MULTICAST) != 0
+                filter & ALL_MULTICAST != 0
+                    || filter & MULTICAST != 0 && state.multicast.contains(&destination)
             } else {
                 filter & DIRECTED != 0 && destination == state.mac
             };
@@ -245,6 +338,7 @@ impl Ecm {
         }
         if self.state.inbound.len() >= QUEUE_FRAMES {
             self.state.counters.overflowed += 1;
+            self.state.statistics.no_buffer += 1;
             return;
         }
         self.state.inbound.push_back(frame.to_vec());
@@ -302,6 +396,7 @@ impl State {
         packet[..n].copy_from_slice(&frame[self.sent..self.sent + n]);
         self.sent += n;
         if self.sent == frame.len() {
+            self.statistics.received.count(frame);
             // A frame ending on a full packet needs a ZLP to end it (3.3.1).
             if n == packet.len() {
                 self.zero_length_due = true;
@@ -329,9 +424,12 @@ impl State {
         }
         // A short packet, or a ZLP, ends the frame.
         if packet.len() < max {
-            if self.discarding {
+            if self.discarding || (1..14).contains(&self.assembling.len()) {
+                // Longer than a segment, or shorter than an Ethernet header.
                 self.counters.oversized += 1;
+                self.statistics.transmit_errors += 1;
             } else if !self.assembling.is_empty() {
+                self.statistics.transmitted.count(&self.assembling);
                 self.outbound
                     .push_back(core::mem::take(&mut self.assembling));
                 self.counters.to_host += 1;
@@ -343,10 +441,45 @@ impl State {
     }
 }
 
+impl State {
+    /// The 32-bit count of statistic `selector`, if bmEthernetStatistics
+    /// advertises it.
+    fn statistic(&self, selector: u16) -> Option<u32> {
+        let s = &self.statistics;
+        let (sent, received) = (&s.transmitted.kinds, &s.received.kinds);
+        let total = |t: &Traffic| t.kinds.iter().map(|(_, frames)| frames).sum::<u64>();
+        let value = match selector {
+            XMIT_OK => total(&s.transmitted),
+            RCV_OK => total(&s.received),
+            XMIT_ERROR => s.transmit_errors,
+            RCV_ERROR => s.receive_errors,
+            RCV_NO_BUFFER => s.no_buffer,
+            DIRECTED_BYTES_XMIT => sent[UNICAST].0,
+            DIRECTED_FRAMES_XMIT => sent[UNICAST].1,
+            MULTICAST_BYTES_XMIT => sent[GROUP].0,
+            MULTICAST_FRAMES_XMIT => sent[GROUP].1,
+            BROADCAST_BYTES_XMIT => sent[EVERYONE].0,
+            BROADCAST_FRAMES_XMIT => sent[EVERYONE].1,
+            DIRECTED_BYTES_RCV => received[UNICAST].0,
+            DIRECTED_FRAMES_RCV => received[UNICAST].1,
+            MULTICAST_BYTES_RCV => received[GROUP].0,
+            MULTICAST_FRAMES_RCV => received[GROUP].1,
+            BROADCAST_BYTES_RCV => received[EVERYONE].0,
+            BROADCAST_FRAMES_RCV => received[EVERYONE].1,
+            TRANSMIT_QUEUE_LENGTH => self.outbound.len() as u64,
+            _ => return None,
+        };
+        debug_assert_ne!(STATISTICS >> (selector - 1) & 1, 0);
+        Some(value as u32)
+    }
+}
+
 impl Requests for State {
     fn configure(&mut self, _value: u8) -> Result<(), ()> {
         self.alternate = 0;
         self.filter = DIRECTED | BROADCAST | ALL_MULTICAST;
+        self.multicast.clear();
+        self.statistics = Statistics::default();
         self.halted = [false; 3];
         self.notifications.clear();
         self.assembling.clear();
@@ -368,13 +501,24 @@ impl Requests for State {
                 self.filter = setup.value;
                 Ok(Outcome::Done)
             }
-            (CLASS, RECIPIENT_INTERFACE, SET_ETHERNET_MULTICAST_FILTERS, false) => {
-                // No filter list (wNumberMCFilters 0); an empty one is fine.
-                if setup.value == 0 && data.is_empty() {
-                    Ok(Outcome::Done)
-                } else {
-                    Err(())
+            // The whole list at once: wValue groups, six bytes each.
+            (CLASS, RECIPIENT_INTERFACE, SET_ETHERNET_MULTICAST_FILTERS, false)
+                if setup.index == CONTROL_INTERFACE
+                    && setup.value <= MULTICAST_FILTERS
+                    && data.len() == 6 * usize::from(setup.value) =>
+            {
+                let groups: Vec<Mac> = data.as_chunks::<6>().0.iter().copied().map(Mac).collect();
+                if !groups.iter().all(|group| group.is_multicast()) {
+                    return Err(());
                 }
+                self.multicast = groups;
+                Ok(Outcome::Done)
+            }
+            (CLASS, RECIPIENT_INTERFACE, GET_ETHERNET_STATISTIC, true)
+                if setup.index == CONTROL_INTERFACE && setup.length == 4 =>
+            {
+                let count = self.statistic(setup.value).ok_or(())?;
+                Ok(Outcome::Data(count.to_le_bytes().to_vec()))
             }
             (STANDARD, RECIPIENT_INTERFACE, GET_STATUS, true) if setup.index <= DATA_INTERFACE => {
                 Ok(Outcome::Data(vec![0, 0]))
@@ -587,9 +731,80 @@ mod tests {
         transfer(&mut e, promiscuous, &[]).unwrap();
         e.deliver(&frame(other, 60));
         assert_eq!(e.state.inbound.len(), 2);
-        // Statistics and unknown filter bits are refused.
-        assert!(transfer(&mut e, setup(0xa1, 0x44, 1, 0, 4), &[]).is_err());
+        // Unknown filter bits are refused.
         let unknown = setup(0x21, SET_ETHERNET_PACKET_FILTER, 0x20, 0, 0);
         assert!(transfer(&mut e, unknown, &[]).is_err());
+    }
+
+    #[test]
+    fn multicast_filters_pass_exactly_the_listed_groups() {
+        let mut e = adapter(true);
+        let config = transfer(&mut e, setup(0x80, GET_DESCRIPTOR, 0x200, 0, 255), &[]).unwrap();
+        assert_eq!(&config[38..40], &MULTICAST_FILTERS.to_le_bytes());
+        assert_eq!(config[40], 0, "no power filters");
+        let listed = Mac([0x01, 0, 0x5e, 0, 0, 0xfb]);
+        let other = Mac([0x33, 0x33, 0, 0, 0, 1]);
+        let list = setup(0x21, SET_ETHERNET_MULTICAST_FILTERS, 1, 0, 6);
+        transfer(&mut e, list, &listed.0).unwrap();
+        let multicast = setup(0x21, SET_ETHERNET_PACKET_FILTER, DIRECTED | MULTICAST, 0, 0);
+        transfer(&mut e, multicast, &[]).unwrap();
+        e.deliver(&frame(listed, 60));
+        e.deliver(&frame(other, 60));
+        assert_eq!((e.state.inbound.len(), e.counters().filtered), (1, 1));
+        // ALL_MULTICAST passes every group.
+        let all = setup(0x21, SET_ETHERNET_PACKET_FILTER, ALL_MULTICAST, 0, 0);
+        transfer(&mut e, all, &[]).unwrap();
+        e.deliver(&frame(other, 60));
+        assert_eq!(e.state.inbound.len(), 2);
+        // Too many groups, a unicast group or a short list are refused.
+        let too_many = setup(0x21, SET_ETHERNET_MULTICAST_FILTERS, 33, 0, 198);
+        assert!(transfer(&mut e, too_many, &[0x01; 198]).is_err());
+        assert!(transfer(&mut e, list, &MAC.0).is_err());
+        let short = setup(0x21, SET_ETHERNET_MULTICAST_FILTERS, 2, 0, 6);
+        assert!(transfer(&mut e, short, &listed.0).is_err());
+        // An empty list clears it.
+        let clear = setup(0x21, SET_ETHERNET_MULTICAST_FILTERS, 0, 0, 0);
+        transfer(&mut e, clear, &[]).unwrap();
+        assert!(e.state.multicast.is_empty());
+    }
+
+    #[test]
+    fn statistics_count_frames_and_bytes_by_kind() {
+        let mut e = adapter(true);
+        let statistic = |e: &mut Ecm, selector: u16| {
+            let bytes = transfer(e, setup(0xa1, GET_ETHERNET_STATISTIC, selector, 0, 4), &[]);
+            u32::from_le_bytes(bytes.unwrap().try_into().unwrap())
+        };
+        // Guest to host: one broadcast frame, one too short to be one.
+        e.packet(BULK_OUT, Token::Out, &mut frame(Mac::BROADCAST, 100))
+            .unwrap();
+        e.packet(BULK_OUT, Token::Out, &mut [0u8; 10]).unwrap();
+        // Host to guest: one directed frame read in full, one oversized.
+        e.deliver(&frame(MAC, 60));
+        e.deliver(&[0u8; MAX_SEGMENT + 1]);
+        read(&mut e, BULK_IN).unwrap();
+        assert_eq!(statistic(&mut e, XMIT_OK), 1);
+        assert_eq!(statistic(&mut e, BROADCAST_BYTES_XMIT), 100);
+        assert_eq!(statistic(&mut e, BROADCAST_FRAMES_XMIT), 1);
+        assert_eq!(statistic(&mut e, DIRECTED_FRAMES_XMIT), 0);
+        assert_eq!(statistic(&mut e, XMIT_ERROR), 1);
+        assert_eq!(statistic(&mut e, TRANSMIT_QUEUE_LENGTH), 1);
+        assert_eq!(statistic(&mut e, RCV_OK), 1);
+        assert_eq!(statistic(&mut e, DIRECTED_BYTES_RCV), 60);
+        assert_eq!(statistic(&mut e, RCV_ERROR), 1);
+        assert_eq!(statistic(&mut e, RCV_NO_BUFFER), 0);
+        // Every advertised selector answers; the others STALL.
+        for selector in 1..=29u16 {
+            let request = setup(0xa1, GET_ETHERNET_STATISTIC, selector, 0, 4);
+            let advertised = STATISTICS >> (selector - 1) & 1 != 0;
+            assert_eq!(
+                transfer(&mut e, request, &[]).is_ok(),
+                advertised,
+                "{selector}"
+            );
+        }
+        // Power-management pattern filters are not offered.
+        assert!(transfer(&mut e, setup(0x21, 0x41, 0, 0, 0), &[]).is_err());
+        assert!(transfer(&mut e, setup(0xa1, 0x42, 0, 0, 2), &[]).is_err());
     }
 }
