@@ -92,6 +92,26 @@ const HCR_AMVOFFEN: u32 = 51;
 
 /// ACTLR_ELx bit 1, which XNU `xnu-12377.121.6` `proc_reg.h` names EnTSO.
 const ACTLR_EN_TSO: u64 = 1 << 1;
+/// ACTLR_ELx bit 9, which the 26A434 context switch sets to a Rosetta
+/// thread's flag while the `icdsb` boot argument is nonzero.
+const ACTLR_ICDSB: u64 = 1 << 9;
+
+/// The ACTLR_ELx bits that refuse by name, from XNU `proc_reg.h`, with what
+/// the public descriptions and the 26A434 Rosetta runtime establish of each
+/// (docs/design/system.md, "IMPLEMENTATION DEFINED architectural
+/// registers").
+const ACTLR_REFUSED: [(u64, &str); 3] = [
+    (
+        1 << 4,
+        "ACTLR EnAPFLG: Rosetta flag extension semantics not recovered",
+    ),
+    (
+        1 << 5,
+        "ACTLR EnAFP: Apple alternate floating-point mode semantics not recovered",
+    ),
+    (1 << 6, "ACTLR EnPRSV: semantics not recovered"),
+];
+
 /// Why a write that sets these bits of a register whose whole contents Arm
 /// leaves IMPLEMENTATION DEFINED stops, or `None` when it completes (also
 /// for every other register). The 26A434 census (docs/design/system.md)
@@ -105,11 +125,17 @@ const ACTLR_EN_TSO: u64 = 1 << 1;
 /// - ACTLR_ELx bit 1, EnTSO, asks for total store order. Every execution
 ///   here is already sequentially consistent (one PE runs at a time and its
 ///   accesses complete in program order), so the bit needs no further
-///   effect. XNU sets it with bit 4 (EnAPFLG), or with bits 5 and 6 (EnAFP,
+///   effect. Bit 9 is held: XNU's context switch copies a Rosetta thread's
+///   flag into it while the `icdsb` boot argument (1 by default) is
+///   nonzero, and the name ties it to instruction-cache maintenance and
+///   DSB. Whatever ordering it adds to them, this machine already completes
+///   every IC invalidation before the next instruction, and its only
+///   consumer, the 26A434 Rosetta runtime, invalidates the code it writes
+///   with the full DSB ISH, IC IVAU, DSB ISH, ISB sequence (`runtime`
+///   `__text+0x318`), so no consumer needs a further effect (inference).
+///   XNU sets EnTSO with bit 4 (EnAPFLG), or with bits 5 and 6 (EnAFP,
 ///   EnPRSV) as its patched alternatives choose, before returning to EL0 in
-///   a thread whose machine flag bit 0 is set, and its context switch copies that
-///   flag into bit 9 while the `icdsb` boot argument (1 by default) is
-///   nonzero. Those bits change execution in ways no source defines, and no
+///   a Rosetta thread; each refuses by name ([`ACTLR_REFUSED`]), and no
 ///   component sets any other bit, so they stop.
 /// - AMAIR_ELx take no set bit: no component writes AMAIR_EL1 or AMAIR_EL2
 ///   (the hypervisor round-trips a guest's AMAIR_EL12).
@@ -118,9 +144,11 @@ const ACTLR_EN_TSO: u64 = 1 << 1;
 fn implementation_defined_refusal(register: Register, value: u64) -> Option<&'static str> {
     const UNMODELED: &str = "an IMPLEMENTATION DEFINED register bit without a modelled effect";
     match register {
-        Register::ACTLR_EL1 | Register::ACTLR_EL2 => {
-            (value & !ACTLR_EN_TSO != 0).then_some(UNMODELED)
-        }
+        Register::ACTLR_EL1 | Register::ACTLR_EL2 => ACTLR_REFUSED
+            .iter()
+            .find(|(bit, _)| value & bit != 0)
+            .map(|&(_, reason)| reason)
+            .or((value & !(ACTLR_EN_TSO | ACTLR_ICDSB) != 0).then_some(UNMODELED)),
         Register::AMAIR_EL1 | Register::AMAIR_EL2 => (value != 0).then_some(UNMODELED),
         Register::HACR_EL2 => crate::machine::hacr::unsupported_bits(value),
         _ => None,
@@ -3246,6 +3274,8 @@ mod tests {
         const HACR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 7);
         const EN_TSO: u64 = 1 << 1;
         const EN_APFLG: u64 = 1 << 4;
+        const EN_AFP: u64 = 1 << 5;
+        const EN_PRSV: u64 = 1 << 6;
         const ICDSB: u64 = 1 << 9;
         let mut machine = machine(&[]);
         machine.cpu.set_pstate(Pstate::reset(2));
@@ -3266,24 +3296,27 @@ mod tests {
             write(&mut machine, encoding, 0).unwrap();
         }
         // EnTSO is held, through the host's ACTLR_EL2 and the guest's
-        // ACTLR_EL1, as the context switch and the EL0 return leave it.
+        // ACTLR_EL1, as the context switch and the EL0 return leave it, and
+        // so is the bit the icdsb context switch sets.
         write(&mut machine, ACTLR_EL1, EN_TSO).unwrap();
-        write(&mut machine, ACTLR_EL12, EN_TSO).unwrap();
+        write(&mut machine, ACTLR_EL12, EN_TSO | ICDSB).unwrap();
         assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
-        assert_eq!(read(&mut machine, ACTLR_EL12), EN_TSO);
-        // EnAPFLG and the bit the icdsb context switch sets stop, as do any
-        // AMAIR bit and HACR_EL2's guest timer mask.
+        assert_eq!(read(&mut machine, ACTLR_EL12), EN_TSO | ICDSB);
+        write(&mut machine, ACTLR_EL1, EN_TSO | ICDSB).unwrap();
+        // EnAPFLG, EnAFP and EnPRSV refuse by name, as does any AMAIR bit
+        // and HACR_EL2's guest timer mask.
         for (encoding, value, reason) in [
             (
                 ACTLR_EL1,
                 EN_TSO | EN_APFLG,
-                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
+                "ACTLR EnAPFLG: Rosetta flag extension semantics not recovered",
             ),
             (
                 ACTLR_EL12,
-                ICDSB,
-                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
+                EN_TSO | EN_AFP | EN_PRSV,
+                "ACTLR EnAFP: Apple alternate floating-point mode semantics not recovered",
             ),
+            (ACTLR_EL1, EN_PRSV, "ACTLR EnPRSV: semantics not recovered"),
             (
                 AMAIR_EL12,
                 1,
@@ -3302,7 +3335,7 @@ mod tests {
                 other => panic!("{encoding:?}: {other:?}"),
             }
         }
-        assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
+        assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO | ICDSB);
         // HACR_EL2 holds the SPTM's VM entry values.
         for value in [0x061f_0000_6100_2000, 0x041f_0000_0000_0000] {
             write(&mut machine, HACR_EL2, value).unwrap();
