@@ -72,6 +72,9 @@ pub const UPDATE_RESTORE_OPTION: &str = "--update-restore";
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
 const DEFAULT_RAM: u64 = 4 << 30;
+/// The most of the engine heap (`system::HEAP_BYTES`) `--storage-ram` may
+/// take for written blocks; a restore or recovery boot writes far less.
+const RAM_STORAGE_LIMIT: usize = 64 << 20;
 const LARGE: u64 = 2 * 1024 * 1024;
 /// Synchronous exceptions and returns logged before the log goes quiet;
 /// interrupts are logged up to `REPORTED_INTERRUPTS`. A guarded level's
@@ -112,6 +115,9 @@ struct Options {
     recovery: Option<recovery::Kind>,
     /// One host partition backing all ANS namespaces.
     storage: Option<Target>,
+    /// Instead, this many bytes of engine memory back them, and nothing
+    /// persists (`--storage-ram`, `pc::block::Volatile`).
+    storage_ram: Option<u64>,
     /// The host partition holding the NOR flash image (`--nor`); the
     /// `--storage` partition itself keeps it in its tail.
     nor: Option<Target>,
@@ -246,6 +252,7 @@ impl Options {
             upgrade: false,
             recovery: None,
             storage: None,
+            storage_ram: None,
             nor: None,
             restore: false,
             restore_source: None,
@@ -399,8 +406,15 @@ impl Options {
                     .next()
                     .ok_or("missing ANS storage partition")?
                     .parse()?;
-                if options.storage.replace(target).is_some() {
-                    return Err("system mode accepts exactly one ANS backing partition");
+                if options.storage_ram.is_some() || options.storage.replace(target).is_some() {
+                    return Err("system mode accepts exactly one ANS backing");
+                }
+                continue;
+            }
+            if name == "--storage-ram" {
+                let bytes = number(words.next().ok_or("missing RAM storage size")?)?;
+                if options.storage.is_some() || options.storage_ram.replace(bytes).is_some() {
+                    return Err("system mode accepts exactly one ANS backing");
                 }
                 continue;
             }
@@ -1417,6 +1431,22 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // takes `host_network` below; it lives for the whole run.
     let mut services = services.into_iter();
     let backing = options.storage.as_ref().map(|_| services.next().unwrap());
+    let backing = backing.or_else(|| {
+        let bytes = options.storage_ram?;
+        let disk = stela_runtime::pc::block::Volatile::new("STELARAM", bytes, RAM_STORAGE_LIMIT)
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("RAM storage refusal: {error}\n"));
+                output::fatal("the RAM-backed storage could not be made")
+            });
+        output::arguments(format_args!(
+            "STORAGE volatile: {bytes:#x} bytes of engine memory back the ANS namespaces, \
+             at most {RAM_STORAGE_LIMIT:#x} written; nothing persists\n"
+        ));
+        Some(alloc::boxed::Box::new(disk)
+            as alloc::boxed::Box<
+                dyn stela_runtime::pc::block::BlockDevice,
+            >)
+    });
     let source = options
         .restore_source
         .as_ref()

@@ -1,5 +1,5 @@
 //! Block devices addressed by logical block, with explicit errors.
-use alloc::{boxed::Box, rc::Rc, string::String};
+use alloc::{boxed::Box, collections::BTreeMap, rc::Rc, string::String, vec};
 use core::cell::RefCell;
 use core::fmt;
 
@@ -55,6 +55,8 @@ pub enum Transport {
     Ahci,
     /// USB mass storage (Bulk-Only) behind an xHCI controller.
     Usb,
+    /// The engine's own memory ([`Volatile`]).
+    Ram,
 }
 
 /// What a device reports about itself.
@@ -214,6 +216,107 @@ impl BlockDevice for Window {
     }
 }
 
+/// Engine memory as a disk that keeps nothing past power-off. Blocks read
+/// as zeros until written; a written chunk takes [`Volatile::CHUNK`] bytes
+/// of the heap, at most `limit` bytes in all, and a write that needs more
+/// refuses whole. Writing zeros where nothing was written takes nothing.
+pub struct Volatile {
+    identity: Identity,
+    chunks: BTreeMap<u64, Box<[u8]>>,
+    limit: usize,
+}
+
+impl Volatile {
+    pub const BLOCK: u32 = 4096;
+    pub const CHUNK: usize = 64 * 1024;
+
+    /// A `bytes`-long disk, a nonzero whole number of chunks, named
+    /// `serial`, that may keep at most `limit` written bytes.
+    pub fn new(serial: &str, bytes: u64, limit: usize) -> Result<Self, BlockError> {
+        if bytes == 0 || !bytes.is_multiple_of(Self::CHUNK as u64) {
+            return Err(BlockError::Unsupported(
+                "a RAM-backed disk is a nonzero whole number of 64 KiB chunks",
+            ));
+        }
+        Ok(Self {
+            identity: Identity {
+                transport: Transport::Ram,
+                location: String::from("engine memory"),
+                model: String::from("Stela volatile disk"),
+                serial: String::from(serial),
+                blocks: bytes / u64::from(Self::BLOCK),
+                block_size: Self::BLOCK,
+                read_only: false,
+            },
+            chunks: BTreeMap::new(),
+            limit,
+        })
+    }
+
+    /// The chunks a checked `len`-byte transfer at `lba` touches: each
+    /// chunk's index, the offset in it, and the range of the transfer.
+    fn pieces(lba: u64, len: usize) -> impl Iterator<Item = (u64, usize, core::ops::Range<usize>)> {
+        let start = lba * u64::from(Self::BLOCK);
+        let mut done = 0;
+        core::iter::from_fn(move || {
+            (done < len).then(|| {
+                let at = start + done as u64;
+                let within = (at % Self::CHUNK as u64) as usize;
+                let n = (Self::CHUNK - within).min(len - done);
+                let piece = (at / Self::CHUNK as u64, within, done..done + n);
+                done += n;
+                piece
+            })
+        })
+    }
+}
+
+impl BlockDevice for Volatile {
+    fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.identity.check(lba, buffer.len())?;
+        for (chunk, within, range) in Self::pieces(lba, buffer.len()) {
+            let n = range.len();
+            match self.chunks.get(&chunk) {
+                Some(bytes) => buffer[range].copy_from_slice(&bytes[within..within + n]),
+                None => buffer[range].fill(0),
+            }
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.identity.check_write(lba, data.len())?;
+        let written = |range: &core::ops::Range<usize>| data[range.clone()].iter().any(|&b| b != 0);
+        let new = Self::pieces(lba, data.len())
+            .filter(|(chunk, _, range)| !self.chunks.contains_key(chunk) && written(range))
+            .count();
+        if (self.chunks.len() + new) * Self::CHUNK > self.limit {
+            return Err(BlockError::Unsupported(
+                "the RAM-backed disk has used all the memory it may take",
+            ));
+        }
+        for (chunk, within, range) in Self::pieces(lba, data.len()) {
+            let n = range.len();
+            if let Some(bytes) = self.chunks.get_mut(&chunk) {
+                bytes[within..within + n].copy_from_slice(&data[range]);
+            } else if written(&range) {
+                let mut bytes = vec![0; Self::CHUNK].into_boxed_slice();
+                bytes[within..within + n].copy_from_slice(&data[range]);
+                self.chunks.insert(chunk, bytes);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -322,6 +425,39 @@ pub(crate) mod tests {
         whole.read(4, &mut block).unwrap();
         assert_eq!(block, [7; 512]);
         low.flush().unwrap();
+    }
+
+    #[test]
+    fn a_volatile_disk_reads_zeros_until_written_and_refuses_past_its_limit() {
+        assert!(Volatile::new("ram", 4096, 0).is_err());
+        let chunk = Volatile::CHUNK;
+        let mut disk = Volatile::new("ram", 1 << 30, 2 * chunk).unwrap();
+        assert_eq!(disk.identity().blocks, (1 << 30) / 4096);
+        assert_eq!(disk.identity().transport, Transport::Ram);
+        let mut block = vec![1; 4096];
+        disk.read(1000, &mut block).unwrap();
+        assert!(block.iter().all(|&b| b == 0));
+        // Zeros take no memory; a write spanning two chunks takes both.
+        disk.write(0, &vec![0; 4 * chunk]).unwrap();
+        assert!(disk.chunks.is_empty());
+        let span: Vec<u8> = (0..8192).map(|i| (i % 251) as u8 + 1).collect();
+        let lba = (chunk / 4096 - 1) as u64;
+        disk.write(lba, &span).unwrap();
+        assert_eq!(disk.chunks.len(), 2);
+        let mut back = vec![0; 8192];
+        disk.read(lba, &mut back).unwrap();
+        assert_eq!(back, span);
+        // A third chunk is past the limit: the write refuses and changes
+        // nothing, while chunks already taken still accept writes.
+        let far = (8 * chunk / 4096) as u64;
+        assert!(disk.write(far, &[9; 4096]).is_err());
+        disk.read(far, &mut block).unwrap();
+        assert!(block.iter().all(|&b| b == 0));
+        disk.write(0, &[7; 4096]).unwrap();
+        disk.read(0, &mut block).unwrap();
+        assert!(block.iter().all(|&b| b == 7));
+        assert!(disk.read(disk.identity().blocks, &mut block).is_err());
+        disk.flush().unwrap();
     }
 
     #[test]
