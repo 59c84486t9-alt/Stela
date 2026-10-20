@@ -6,6 +6,7 @@ mod exclusive;
 mod hosted;
 mod pointer;
 mod processors;
+mod scalable;
 mod system;
 mod unprivileged;
 mod watch;
@@ -49,6 +50,7 @@ use stela_compiler::{
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::{GuardedOperation, SystemOperation},
     },
+    context::ExecutionContext,
     x86_64::{
         MemoryChecks, NativeSystem, cache_clean,
         chain::{self, ChainControl},
@@ -225,6 +227,23 @@ pub trait Host {
     /// `code` was returned by [`Host::install`] since the last discard and
     /// was compiled for the system-mode block ABI.
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit;
+    /// Call installed context-leaf code (`stela_compiler::extended`'s
+    /// two-argument ABI) on `state` and `context`, as the SVE and SME
+    /// instructions run. False, before running anything, on a host that
+    /// cannot.
+    ///
+    /// # Safety
+    /// `code` was returned by [`Host::install`] since the last discard and
+    /// was compiled as a context leaf for the profile `context`'s views
+    /// were validated against; the views stay valid through the call.
+    unsafe fn call_context(
+        &mut self,
+        _code: NativeCode,
+        _state: &mut GuestState,
+        _context: &mut ExecutionContext,
+    ) -> bool {
+        false
+    }
     /// Make the shadow translation follow `regime`: drop what a change of
     /// its controls translates differently (a TTBR0 write arrives only
     /// here, not through [`Host::invalidate_translations`]).
@@ -921,6 +940,9 @@ pub struct Machine<H: Host, D: Devices> {
     suspended: BTreeMap<u64, Suspension>,
     /// Device accesses answered without a model ([`Self::begin_survey`]).
     survey: Option<Survey>,
+    /// The context leaves SVE and SME instructions run as, by PC, word and
+    /// scalable profile ([`scalable`]); discarded with the blocks.
+    scalable_leaves: BTreeMap<(u64, u32, stela_compiler::extended::ScalableProfile), NativeCode>,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -1001,6 +1023,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block_limit: u64::MAX,
             suspended: BTreeMap::new(),
             survey: None,
+            scalable_leaves: BTreeMap::new(),
         };
         machine.chain.table = machine.targets.as_ptr() as u64;
         machine.peers = processors::boot(&machine.profile);
@@ -1315,6 +1338,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.fault_recovery.clear();
         self.index.clear();
         self.code_pages.clear();
+        self.scalable_leaves.clear();
         self.code_generation += 1;
         self.statistics.code_discards += 1;
     }
@@ -1737,7 +1761,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.take(exception);
                 return Ok(());
             }
-            Fetched::Checked(word) => return self.checked_instruction(pc, word),
+            Fetched::Checked(word) => {
+                let step = self.checked_instruction(pc, word);
+                if !core::mem::take(&mut self.pacm_written) && pacm {
+                    self.cpu.pstate.pacm = false;
+                }
+                self.advance_step();
+                return step;
+            }
         };
         if self.cpu.pstate.btype != 0 && self.fetch_guarded(pc) {
             let word = self.word(index, pc)?;
@@ -1764,15 +1795,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// An instruction whose FP, SVE and SME access checks the engine
     /// applies before it runs: after a Branch Target exception, the first
-    /// check that fails traps. SVE and SME execution, and scalar FP in
-    /// streaming mode (whose writes zero the upper Z bits), stop explicitly.
+    /// check that fails traps. One that passes runs on its own
+    /// ([`scalable`]); scalar FP in streaming mode (whose writes zero the
+    /// upper Z bits) stops explicitly.
     #[cold]
     fn checked_instruction(&mut self, pc: u64, word: u32) -> Step {
-        self.cpu.step_advance = false;
         if self.cpu.pstate.btype != 0
             && self.fetch_guarded(pc)
             && let Some(exception) = self.branch_target_exception(pc, word)
         {
+            self.cpu.step_advance = false;
             self.take(exception);
             return Ok(());
         }
@@ -1790,18 +1822,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     detail: format!("its access check needs {feature}, which the engine lacks"),
                 }));
             }
-            Ok(()) => {
-                let detail = if checks.iter().all(|check| *check == Check::Fp) {
-                    "scalar FP in streaming mode, which zeroes the upper Z bits it writes, is not run by the system engine"
-                } else {
-                    "SVE and SME instructions are not run by the system engine"
-                };
+            Ok(()) if checks.iter().all(|check| *check == Check::Fp) => {
                 return Err(self.unsupported(RequirementKind::Instruction {
                     word,
-                    detail: detail.into(),
+                    detail: "scalar FP in streaming mode, which zeroes the upper Z bits it writes, is not run by the system engine".into(),
                 }));
             }
+            Ok(()) => return self.scalable_instruction(pc, word),
         };
+        self.cpu.step_advance = false;
         self.take(exception);
         Ok(())
     }
@@ -4522,6 +4551,20 @@ mod tests {
         }
         fn discard_code(&mut self) {
             self.installed.clear();
+        }
+        unsafe fn call_context(
+            &mut self,
+            code: NativeCode,
+            state: &mut GuestState,
+            context: &mut ExecutionContext,
+        ) -> bool {
+            // Context leaves run: they touch only the state and the context.
+            let mapping = crate::execution::platform::Mapping::new(&self.installed[code.0 - 1])
+                .expect("an executable mapping of the leaf");
+            // SAFETY: the engine passes an installed context leaf and views
+            // valid for the call.
+            unsafe { mapping.call_context(state, context) }.expect("a context leaf call");
+            true
         }
         unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
             assert!(!self.exits.is_empty(), "unit tests do not run native code");
@@ -7686,10 +7729,13 @@ mod tests {
         assert_eq!(taken(&mut machine, 1), trapped(1, 2));
         assert_eq!(taken(&mut machine, 2), trapped(2, 3));
         // In streaming mode AdvSIMD traps as streaming; SVE, the ZA load and
-        // scalar FP pass their checks and stop explicitly.
+        // scalar FP pass their checks: the SVE addition runs, the ZA load
+        // and scalar FP stop explicitly.
         machine.cpu.set_svcr(true, true).unwrap();
         assert_eq!(taken(&mut machine, 0), trapped(0, 1));
-        for index in 1..4 {
+        assert_eq!(run(&mut machine, 1).0, Ok(()));
+        assert_eq!(machine.cpu.pc, BASE + 8);
+        for index in 2..4 {
             assert!(
                 matches!(run(&mut machine, index).0, Err(Stop::Unsupported(_))),
                 "{index}"
