@@ -973,7 +973,8 @@ impl AppleDevices {
         // fabric bridge; each physical byte has one owner, so the block owns
         // only what the smaller banks placed before it leave.
         let block = self.bus.add(Box::new(
-            Sgx::handed_off(sgx::T8112, placement.ttbat).map_err(String::from)?,
+            Sgx::handed_off(sgx::T8112, placement.ttbat, placement.shared_l2)
+                .map_err(String::from)?,
         ));
         let (base, bytes) = placement.sgx;
         self.bus
@@ -2669,6 +2670,7 @@ mod tests {
             interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
             sgx: (SGX, sgx::BYTES),
             ttbat: RAM,
+            shared_l2: RAM + 0x8000,
         };
         let mut devices = AppleDevices::new();
         devices
@@ -2682,17 +2684,15 @@ mod tests {
         // The wrapper inside the sgx window stays the ASC's.
         assert!(devices.read(0, WRAPPER + 0x8110, 4, 0).is_ok());
 
-        // The TTBAT and one firmware page at the kernel half of context 0.
+        // The TTBAT, context 0's empty TTBR1 root, and one firmware page of
+        // the shared kernel window through the shared L2, as SPTM leaves
+        // them.
         let mut ram = Ram::new(RAM, 0x4000 * 5);
         let va = 0xffff_ffa0_0000_0000_u64;
         let (_, idx) = table::indices(va);
         let [ttbr0, ttbr1] = table::encode_gptbat(0, 0, RAM + 0x4000);
         ram.put_u64(RAM, ttbr0 & !1);
         ram.put_u64(RAM + 8, ttbr1);
-        ram.put_u64(
-            RAM + 0x4000 + idx[0] as u64 * 8,
-            table::encode_table(RAM + 0x8000),
-        );
         ram.put_u64(
             RAM + 0x8000 + idx[1] as u64 * 8,
             table::encode_table(RAM + 0xc000),

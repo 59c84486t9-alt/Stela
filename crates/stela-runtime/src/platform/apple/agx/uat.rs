@@ -37,6 +37,17 @@
 //! (kernel objects at `0xffff_ffa0_0000_0000`). The firmware addresses the
 //! kext sends are 44 bits wide ([`canonical_firmware_va`]).
 //!
+//! Inferred (26A434 SPTM and observed restore boots): the TTBR1 window at
+//! level-0 index [`SHARED_INDEX`] (`0xffff_ffa0_0000_0000`, 64 GiB) is shared
+//! by every context through one page-directory page, `gfx-shared-l2-region`.
+//! SPTM names that region "the TTBR1 shared L2" and requires it to be one
+//! page (`uat_bootstrap_parse_dt`); its UAT endpoints install every kernel
+//! mapping there through a global state object (`sptm_uat_map_table` level
+//! 2), while the per-context TTBR1 roots it creates (`sptm_uat_init_state`,
+//! placed in the TTBAT by `sptm_uat_set_ctx_id`) never link it, and no RAM
+//! word holds a table entry for it. The window therefore resolves from the
+//! shared L2 for every context ([`Uat::share_kernel_window`]).
+//!
 //! The model walks the tables on every access and caches nothing, so a TLB or
 //! TTBA-cache invalidation has nothing to discard.
 
@@ -206,6 +217,9 @@ const CONTEXT_SHIFT: u32 = 48;
 const CONTEXT_MASK: u64 = 0xff;
 /// The context the GFX firmware runs in.
 pub const FIRMWARE_CONTEXT: usize = 0;
+/// The level-0 index of the TTBR1 window every context shares through the
+/// shared L2 (`0xffff_ffa0_0000_0000`).
+pub const SHARED_INDEX: usize = 2;
 /// Width of the firmware VAs the kext hands the firmware (the 0x81 initdata
 /// message's 44-bit field).
 const FIRMWARE_VA_BITS: u32 = 44;
@@ -261,6 +275,13 @@ pub struct Mapping {
 /// RAM. `ttbr` is the 16 KiB-aligned base of the top-level (PCE) table.
 /// `input`'s bits above [`IAS`] must all equal its TTBR-select bit.
 pub fn translate(memory: &mut dyn Memory, ttbr: u64, input: u64) -> Result<Mapping, Fault> {
+    in_range(input)?;
+    let (_, idx) = indices(input);
+    walk_from(memory, ttbr & !PAGE_MASK, 0, &idx, input)
+}
+
+/// `input`'s bits above [`IAS`] must all equal its TTBR-select bit.
+fn in_range(input: u64) -> Result<(), Fault> {
     let upper = input >> (IAS + 1);
     let expected = if input & TTBR_SELECT_BIT != 0 {
         u64::MAX >> (IAS + 1)
@@ -270,9 +291,18 @@ pub fn translate(memory: &mut dyn Memory, ttbr: u64, input: u64) -> Result<Mappi
     if upper != expected {
         return Err(Fault::OutOfRange);
     }
-    let (_, idx) = indices(input);
-    let mut table = ttbr & !PAGE_MASK;
-    for level in 0..LEVELS - 1 {
+    Ok(())
+}
+
+/// Walk from `table` at `first` level for an input whose `idx` are known.
+fn walk_from(
+    memory: &mut dyn Memory,
+    mut table: u64,
+    first: u32,
+    idx: &[usize; LEVELS as usize],
+    input: u64,
+) -> Result<Mapping, Fault> {
+    for level in first..LEVELS - 1 {
         let entry = read_entry(memory, table, idx[level as usize], level)?;
         if entry & VALID == 0 {
             return Err(Fault::NotPresent { level });
@@ -377,6 +407,8 @@ const FAULT_PERMISSION: u32 = 2;
 #[derive(Debug, Default)]
 pub struct Uat {
     ttbat: Option<u64>,
+    /// The page-directory page of the shared TTBR1 window.
+    shared_l2: Option<u64>,
     last_fault: Option<FaultRecord>,
 }
 
@@ -393,6 +425,21 @@ impl Uat {
         }
         self.ttbat = Some(ttbat);
         Ok(())
+    }
+
+    /// Resolve the shared TTBR1 window ([`SHARED_INDEX`]) of every context
+    /// from the 16 KiB-aligned page-directory page `l2`.
+    pub fn share_kernel_window(&mut self, l2: u64) -> Result<(), &'static str> {
+        if l2 & PHYSICAL_INVALID != 0 || l2 == 0 {
+            return Err("UAT shared L2 outside bits 39:14");
+        }
+        self.shared_l2 = Some(l2);
+        Ok(())
+    }
+
+    /// The shared TTBR1 window's page-directory page, once configured.
+    pub fn shared_l2(&self) -> Option<u64> {
+        self.shared_l2
     }
 
     /// The last fault, if any.
@@ -449,7 +496,15 @@ impl Uat {
                 "UAT TTBAT entry tagged with another context",
             ));
         }
-        let mapping = match translate(memory, ttbr & ADDRESS_MASK, iova) {
+        let (half, idx) = indices(iova);
+        let shared = (half == Half::Ttbr1 && idx[0] == SHARED_INDEX)
+            .then_some(self.shared_l2)
+            .flatten();
+        let walked = in_range(iova).and_then(|()| match shared {
+            Some(l2) => walk_from(memory, l2, 1, &idx, iova),
+            None => walk_from(memory, ttbr & ADDRESS_MASK, 0, &idx, iova),
+        });
+        let mapping = match walked {
             Ok(mapping) => mapping,
             Err(Fault::Memory { .. }) => return Err(DmaError::Memory),
             Err(fault) => return Err(record(fault, FAULT_TRANSLATION)),
@@ -696,6 +751,79 @@ mod tests {
             port_read(&mut uat, Agent::Firmware, &mut ram, CONTEXTS, va),
             Err(DmaError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn every_context_shares_the_kernel_window_through_the_shared_l2() {
+        // Contexts 0 and 3 with empty TTBR1 roots; the shared L2 maps one
+        // page of the window for both, firmware and GPU alike.
+        let base = 0x8_0000_0000;
+        let mut ram = Ram::new(base, 0x4000 * 6);
+        let (ttbat, root0, root3, l2, pte, page) = (
+            base,
+            base + 0x4000,
+            base + 0x8000,
+            base + 0xc000,
+            base + 0x1_0000,
+            base + 0x1_4000,
+        );
+        for (context, root) in [(0u16, root0), (3, root3)] {
+            let [ttbr0, ttbr1] = encode_gptbat(context, root, root);
+            ram.put_u64(ttbat + u64::from(context) * 16, ttbr0);
+            ram.put_u64(ttbat + u64::from(context) * 16 + 8, ttbr1);
+        }
+        let va = 0xffff_ffa0_0000_4000;
+        let (_, idx) = indices(va);
+        assert_eq!(idx[0], SHARED_INDEX);
+        let flags = Flags {
+            access: Access::FirmwareGpu,
+            uxn: true,
+            pxn: true,
+            ..demo_flags()
+        };
+        ram.put_u64(l2 + idx[1] as u64 * 8, encode_table(pte));
+        ram.put_u64(pte + idx[2] as u64 * 8, encode_pte(page, &flags));
+        ram.put_u64(page, 0x5157_e1a0);
+        let mut uat = Uat::default();
+        uat.configure(ttbat).unwrap();
+        // Before the boot stage names the shared L2, the window faults.
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, 0, va),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        );
+        uat.share_kernel_window(l2).unwrap();
+        assert_eq!(uat.shared_l2(), Some(l2));
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, 0, va),
+            Ok(0x5157_e1a0)
+        );
+        assert_eq!(
+            port_read(&mut uat, Agent::Gpu, &mut ram, 3, va),
+            Ok(0x5157_e1a0)
+        );
+        // TTBR1 outside the window still walks the context's own root.
+        assert_eq!(
+            port_read(
+                &mut uat,
+                Agent::Firmware,
+                &mut ram,
+                0,
+                0xffff_ff80_0000_4000
+            ),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        );
+        assert_eq!(
+            uat.last_fault().map(|fault| fault.fault),
+            Some(Fault::NotPresent { level: 0 })
+        );
+        // An invalid TTBAT entry still refuses the context.
+        ram.put_u64(ttbat + 3 * 16 + 8, 0);
+        assert_eq!(
+            port_read(&mut uat, Agent::Gpu, &mut ram, 3, va),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        );
+        assert!(uat.share_kernel_window(0).is_err());
+        assert!(uat.share_kernel_window(1 << 40).is_err());
     }
 
     #[test]

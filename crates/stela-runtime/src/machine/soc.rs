@@ -2184,6 +2184,9 @@ pub struct GfxController {
     /// `gpu-region-base`): the MMU is handed off rooted there
     /// ([`agx::sgx::Sgx::handed_off`]).
     pub ttbat: u64,
+    /// The shared TTBR1 window's page-directory page (`gfx-shared-l2-region`,
+    /// one page, as SPTM's `uat_bootstrap_parse_dt` requires).
+    pub shared_l2: u64,
 }
 
 fn gfx_controller(
@@ -2236,11 +2239,24 @@ fn gfx_controller(
         .map(|page| u64::from(u32::from_le_bytes(page)) << agx::uat::PAGE_SHIFT)
         .filter(|&base| base != 0)
         .ok_or("sgx ttbat-phys-addr-base is not one nonzero 32-bit page number")?;
+    let u64_property = |name: &str| {
+        sgx.property(name)
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map(u64::from_le_bytes)
+    };
+    let shared_l2 = match (
+        u64_property("gfx-shared-l2-region-base"),
+        u64_property("gfx-shared-l2-region-size"),
+    ) {
+        (Some(base), Some(agx::uat::PAGE_BYTES)) if base != 0 => base,
+        _ => return Err("sgx gfx-shared-l2-region is not one nonzero 16 KiB page".into()),
+    };
     Ok(Some(GfxController {
         wrapper,
         interrupts: [irq(0)?, irq(1)?, irq(2)?, irq(3)?],
         sgx: (block.0, agx::sgx::BYTES),
         ttbat,
+        shared_l2,
     }))
 }
 
@@ -5010,11 +5026,15 @@ mod tests {
             let (sgx_name, sgx_compatible) = (z("sgx"), z(SGX));
             let sgx_reg = pairs(&[(0x400_0000, 0x400_0000), (0x4d0_0000, 0x2_0000)]);
             let ttbat_page = cells(&[0x20_0011]);
+            let l2_base = 0x8_0008_8000u64.to_le_bytes();
+            let l2_size = 0x4000u64.to_le_bytes();
             let mut sgx: Vec<(&str, &[u8])> = vec![
                 ("name", &sgx_name),
                 ("reg", &sgx_reg),
                 ("gptbat-ready", b""),
                 ("ttbat-phys-addr-base", &ttbat_page),
+                ("gfx-shared-l2-region-base", &l2_base),
+                ("gfx-shared-l2-region-size", &l2_size),
             ];
             if sgx_visible {
                 sgx.push(("compatible", &sgx_compatible));
@@ -5039,6 +5059,7 @@ mod tests {
                 interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
                 sgx: (0x2_0400_0000, 0x400_0000),
                 ttbat: 0x8_0004_4000,
+                shared_l2: 0x8_0008_8000,
             })
         );
         assert_eq!(placed(false, false).unwrap(), None);

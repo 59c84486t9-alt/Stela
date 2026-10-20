@@ -168,14 +168,21 @@ impl Sgx {
     }
 
     /// The GPU as the boot stage hands it off: the MMU configured as
-    /// `setupMMUConfig` would and enabled at the 16 KiB-aligned `ttbat`.
-    pub fn handed_off(identity: Identity, ttbat: u64) -> Result<Self, &'static str> {
+    /// `setupMMUConfig` would and enabled at the 16 KiB-aligned `ttbat`,
+    /// with the shared TTBR1 window resolving from the page-directory page
+    /// `shared_l2` (`gfx-shared-l2-region`, [`uat::SHARED_INDEX`]).
+    pub fn handed_off(
+        identity: Identity,
+        ttbat: u64,
+        shared_l2: u64,
+    ) -> Result<Self, &'static str> {
         let page = ttbat >> uat::PAGE_SHIFT;
         if ttbat == 0 || page >> TTBAT_PAGE_BITS != 0 {
             return Err("GPU TTBAT outside the MMU's 26-bit page field");
         }
         let mut sgx = Self::new(identity);
         sgx.uat.configure(ttbat)?;
+        sgx.uat.share_kernel_window(shared_l2)?;
         sgx.ttbat_page = page as u32;
         sgx.configuration = MMU_CONFIGURATION.map(|(_, value)| value);
         sgx.mmu_enabled = true;
@@ -394,7 +401,7 @@ mod tests {
     fn the_boot_stage_hands_off_the_mmu_setup_would_have_configured() {
         let mut configured = Sgx::new(T8112);
         setup_mmu(&mut configured, 0x8_0004_4000).unwrap();
-        let mut handed = Sgx::handed_off(T8112, 0x8_0004_4000).unwrap();
+        let mut handed = Sgx::handed_off(T8112, 0x8_0004_4000, 0x8_0008_8000).unwrap();
         for offset in [MMU_ENABLE, MMU_TTBAT]
             .into_iter()
             .chain(MMU_CONFIGURATION.map(|(offset, _)| offset))
@@ -404,9 +411,10 @@ mod tests {
         assert_eq!(handed.uat().ttbat(), Some(0x8_0004_4000));
         // setupMMUConfig then returns at once; a rewrite refuses.
         assert!(write(&mut handed, MMU_TTBAT, 0x1).is_err());
-        assert!(Sgx::handed_off(T8112, 0).is_err());
-        assert!(Sgx::handed_off(T8112, 0x8_0004_4001).is_err());
-        assert!(Sgx::handed_off(T8112, 1 << 40).is_err());
+        assert!(Sgx::handed_off(T8112, 0, 0x8_0008_8000).is_err());
+        assert!(Sgx::handed_off(T8112, 0x8_0004_4001, 0x8_0008_8000).is_err());
+        assert!(Sgx::handed_off(T8112, 1 << 40, 0x8_0008_8000).is_err());
+        assert!(Sgx::handed_off(T8112, 0x8_0004_4000, 0x8_0008_8001).is_err());
     }
 
     #[test]
