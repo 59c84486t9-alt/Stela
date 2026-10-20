@@ -1507,9 +1507,18 @@ const HOST_VM_INFO64: u32 = 4;
 const VM_INFO_PAGE_WORDS: [usize; 6] = [0, 1, 2, 3, 12, 14];
 const VM_INFO64_PAGE_WORDS: [usize; 10] = [0, 1, 2, 3, 22, 23, 32, 33, 34, 35];
 const VM_INFO64_PAGE_PAIRS: [usize; 2] = [36, 38];
-/// Rev3's tag storage and tagged-page statistics, from this word on: zero,
-/// the host memory's.
+/// Rev3's tag storage and tagged-page statistics, eleven 64-bit counts
+/// from this word on: the total tag storage pages, those holding pageable
+/// and wired non-tag data, the free ones and those storing tags, then the
+/// tagged pages (virtual, resident, compressed), tagged compressions and
+/// decompressions and the compressed tag bytes.
 const VM_INFO64_TAGGING: usize = 40;
+const VM_INFO64_TAG_STORAGE_FREE: usize = 46;
+/// `HOST_VM_INFO64_COUNT` of rev3.
+const VM_INFO64_REV3_COUNT: usize = 62;
+/// Memory per byte of tag storage: a 4-bit allocation tag per 16-byte
+/// granule (Arm ARM, FEAT_MTE2).
+const TAG_STORAGE_RATIO: u64 = 32;
 /// Host pages per guest page.
 const HOST_PAGES_PER_PAGE: u32 = (memory::PAGE_BYTES / (memory::HOST_PAGE_MASK + 1)) as u32;
 
@@ -1530,8 +1539,8 @@ fn restate_load(words: &mut [u32], cpus: u32) {
 /// machine's answer (machine accounting), the same layout in both ABIs,
 /// with its page counts restated in the guest's 16 KiB pages, as an arm64
 /// kernel counts them, and its Mach factors over the profile's
-/// processors. The host's memory has no tag storage, so rev3's tag
-/// statistics are zero on every profile.
+/// processors. Rev3's tag statistics are the profile's
+/// ([`tag_storage_pages`]).
 fn host_statistics(
     hardware: &hardware::Hardware,
     sixty_four: bool,
@@ -1566,7 +1575,12 @@ fn host_statistics(
         .iter()
         .map(|&word| word as u32)
         .collect();
-    restate_pages(&mut words, flavor);
+    if flavor == HOST_VM_INFO64 && count as usize >= VM_INFO64_REV3_COUNT {
+        // The arm64 kernel always keeps rev3's words, which the profile
+        // answers whether or not the host kernel has them.
+        words.resize(words.len().max(VM_INFO64_REV3_COUNT), 0);
+    }
+    restate_pages(&mut words, flavor, tag_storage_pages(hardware));
     if flavor == HOST_LOAD_INFO {
         restate_load(&mut words, hardware.cpus().into());
     }
@@ -1577,8 +1591,22 @@ fn host_statistics(
     Ok(Reply::Success(body))
 }
 
-/// Restate the page counts of a `flavor` statistics reply in guest pages.
-fn restate_pages(words: &mut [u32], flavor: u32) {
+/// The tag storage of the hosted machine's memory, in guest pages: on a
+/// profile with memory tagging, the memory's share holding its allocation
+/// tags, none of it storing tags or reused for other data, since no page
+/// of the hosted machine is tagged (`VM_FLAGS_MTE` memory is refused);
+/// without memory tagging, none.
+fn tag_storage_pages(hardware: &hardware::Hardware) -> u64 {
+    if hardware.memory_tagging {
+        hardware.memory_bytes / TAG_STORAGE_RATIO / memory::PAGE_BYTES
+    } else {
+        0
+    }
+}
+
+/// Restate the page counts of a `flavor` statistics reply in guest pages,
+/// with `tag_storage` free tag storage pages.
+fn restate_pages(words: &mut [u32], flavor: u32, tag_storage: u64) {
     let pages: &[usize] = match flavor {
         HOST_VM_INFO => &VM_INFO_PAGE_WORDS,
         HOST_VM_INFO64 => &VM_INFO64_PAGE_WORDS,
@@ -1602,6 +1630,12 @@ fn restate_pages(words: &mut [u32], flavor: u32) {
     }
     if let Some(tagging) = words.get_mut(VM_INFO64_TAGGING..) {
         tagging.fill(0);
+    }
+    for index in [VM_INFO64_TAGGING, VM_INFO64_TAG_STORAGE_FREE] {
+        if let Some(pair) = words.get_mut(index..index + 2) {
+            pair[0] = tag_storage as u32;
+            pair[1] = (tag_storage >> 32) as u32;
+        }
     }
 }
 
@@ -1752,18 +1786,18 @@ mod tests {
     #[test]
     fn vm_statistics_count_guest_pages() {
         let mut vm = vec![400u32; 15];
-        restate_pages(&mut vm, HOST_VM_INFO);
+        restate_pages(&mut vm, HOST_VM_INFO, 0);
         assert_eq!(&vm[..5], &[100, 100, 100, 100, 400]);
         assert_eq!((vm[12], vm[13], vm[14]), (100, 400, 100));
         let mut vm64 = vec![8u32; 62];
         vm64[36] = 0;
         vm64[37] = 4;
-        restate_pages(&mut vm64, HOST_VM_INFO64);
+        restate_pages(&mut vm64, HOST_VM_INFO64, 0);
         assert_eq!(&vm64[..5], &[2, 2, 2, 2, 8]);
         assert_eq!(&vm64[32..42], &[2, 2, 2, 2, 0, 1, 2, 2, 0, 0]);
         assert!(vm64[40..].iter().all(|&word| word == 0));
         let mut load = vec![400u32; 6];
-        restate_pages(&mut load, 1);
+        restate_pages(&mut load, 1, 0);
         assert_eq!(load, [400; 6]);
         // The host answers the load and VM flavors, rev3's tag storage
         // zero on every profile.
@@ -1784,9 +1818,19 @@ mod tests {
                 .iter()
                 .map(|word| u32::from_le_bytes(*word))
                 .collect();
-            assert!(words[0] >= 38);
-            assert!(words[1 + VM_INFO64_TAGGING..].iter().all(|&word| word == 0));
+            assert_eq!(words[0], VM_INFO64_REV3_COUNT as u32);
+            let storage = tag_storage_pages(profile);
+            let tags = &words[1 + VM_INFO64_TAGGING..];
+            for (index, pair) in tags.as_chunks::<2>().0.iter().enumerate() {
+                let value = u64::from(pair[0]) | u64::from(pair[1]) << 32;
+                // The total and the free tag storage.
+                let expected = if matches!(index, 0 | 3) { storage } else { 0 };
+                assert_eq!(value, expected, "tag statistic {index}");
+            }
         }
+        assert_eq!(tag_storage_pages(&hardware), 0);
+        // 16 GiB holds 512 MiB of tags: 32768 guest pages.
+        assert_eq!(tag_storage_pages(&tagging), 0x8000);
     }
 
     #[test]

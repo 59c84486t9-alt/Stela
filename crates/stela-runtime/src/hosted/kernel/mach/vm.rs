@@ -131,10 +131,7 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     ("_kernelrpc_mach_vm_purgable_control_external", None),
     ("mach_vm_machine_attribute", None),
     ("mach_vm_range_create", None),
-    (
-        "_kernelrpc_mach_vm_update_pointers_with_remote_tags",
-        Some("on a profile with memory tagging the request stops the run"),
-    ),
+    ("_kernelrpc_mach_vm_update_pointers_with_remote_tags", None),
 ];
 
 /// Routines whose request carries descriptors (`MACH_MSGH_BITS_COMPLEX`).
@@ -199,10 +196,7 @@ fn route(
         "_kernelrpc_mach_vm_update_pointers_with_remote_tags" if !task.memory_tagging() => {
             Reply::Forward
         }
-        "_kernelrpc_mach_vm_update_pointers_with_remote_tags" => bail!(
-            "mach_vm_update_pointers_with_remote_tags: remote tags of a profile with memory \
-             tagging are not modeled"
-        ),
+        "_kernelrpc_mach_vm_update_pointers_with_remote_tags" => remote_tags(task, request),
         _ => unreachable!("every served routine is routed"),
     }))
 }
@@ -225,6 +219,10 @@ trait Task {
     fn invalidate(&self, address: u64, bytes: u64);
     /// Whether the profile's chip implements memory tagging.
     fn memory_tagging(&self) -> bool;
+    /// Whether this task's address space is debugged
+    /// (`address_space_debugged_state`): developer mode is on and its code
+    /// signature is marked debugged (`CS_DEBUGGED`).
+    fn address_space_debugged(&self) -> bool;
 }
 
 /// A registry identifier no thread has (the service threads' own), so
@@ -279,6 +277,75 @@ impl Task for Kernel {
     fn memory_tagging(&self) -> bool {
         self.process.hardware.memory_tagging
     }
+
+    fn address_space_debugged(&self) -> bool {
+        lock(&self.process.executable).code_signing_flags & CS_DEBUGGED != 0 && developer_mode()
+    }
+}
+
+/// `CS_DEBUGGED` (`osfmk/kern/cs_blobs.h`).
+const CS_DEBUGGED: u32 = 0x1000_0000;
+
+/// Whether developer mode is on: the host kernel's state, which is the
+/// kernel beneath this process (`security.mac.amfi.developer_mode_status`).
+fn developer_mode() -> bool {
+    let mut status = 0i32;
+    let mut size = size_of::<i32>();
+    // SAFETY: a NUL-terminated name and an out argument of `size` bytes.
+    let code = unsafe {
+        libc::sysctlbyname(
+            c"security.mac.amfi.developer_mode_status".as_ptr(),
+            (&raw mut status).cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    code == 0 && status != 0
+}
+
+/// `VM_OFFSET_LIST_MAX`, MIG's bound on a pointer list.
+const VM_OFFSET_LIST_MAX: u32 = 1024;
+/// A pointer's allocation tag, bits 59:56 (`MTE_TAG_SHIFT`).
+const ALLOCATION_TAG: u64 = 0xf << 56;
+
+/// `mach_vm_update_pointers_with_remote_tags(in_pointer_listCnt,
+/// in_pointer_list, out_pointer_listCnt)` on a profile with memory
+/// tagging: for a debugged address space, each pointer with its memory's
+/// allocation tag, which is 0 for every page of the hosted machine (no
+/// memory is tagged: `VM_FLAGS_MTE` is refused), and a zero slot for an
+/// address that cannot be read; otherwise KERN_INVALID_ARGUMENT.
+fn remote_tags(task: &dyn Task, request: &Request) -> Reply {
+    let Some(count) = request
+        .word(SIMPLE)
+        .filter(|&count| count <= VM_OFFSET_LIST_MAX)
+    else {
+        return Reply::Failure(MIG_BAD_ARGUMENTS);
+    };
+    let pointers: Option<Vec<u64>> = (0..count as usize)
+        .map(|index| request.double(SIMPLE + 4 + index * 8))
+        .collect();
+    let out_at = SIMPLE + 4 + count as usize * 8;
+    let (Some(pointers), Some(out_count)) = (pointers, request.word(out_at)) else {
+        return Reply::Failure(MIG_BAD_ARGUMENTS);
+    };
+    if request.body.len() != out_at + 4 {
+        return Reply::Failure(MIG_BAD_ARGUMENTS);
+    }
+    // The stub bounds the out count; the kernel wants it to match.
+    if out_count.min(VM_OFFSET_LIST_MAX) != count || !task.address_space_debugged() {
+        return Reply::Failure(KERN_INVALID_ARGUMENT);
+    }
+    let mut body = count.to_le_bytes().to_vec();
+    for pointer in pointers {
+        let tagged = if memory::read(pointer & !ALLOCATION_TAG, 1).is_some() {
+            pointer & !ALLOCATION_TAG
+        } else {
+            0
+        };
+        body.extend(tagged.to_le_bytes());
+    }
+    Reply::Success(body)
 }
 
 const KERN_SUCCESS: i32 = 0;
@@ -1869,14 +1936,19 @@ mod tests {
     }
 
     /// This process as a hosted task without a shared region, on a profile
-    /// with or without memory tagging.
+    /// with or without memory tagging, debugged or not.
     struct Bare {
         memory_tagging: bool,
+        debugged: bool,
     }
 
     impl Task for Bare {
         fn memory_tagging(&self) -> bool {
             self.memory_tagging
+        }
+
+        fn address_space_debugged(&self) -> bool {
+            self.debugged
         }
 
         fn port(&self) -> u32 {
@@ -1902,28 +1974,61 @@ mod tests {
     fn bare() -> Bare {
         Bare {
             memory_tagging: false,
+            debugged: false,
         }
+    }
+
+    fn remote_tags_body(pointers: &[u64], out_count: u32) -> Vec<u8> {
+        let mut body = simple(&[&(pointers.len() as u32).to_le_bytes()]);
+        body.extend(pointers.iter().flat_map(|word| word.to_le_bytes()));
+        body.extend(out_count.to_le_bytes());
+        body
     }
 
     #[test]
     fn remote_tags_follow_the_profile() {
-        // Two pointers in, two slots out.
-        let mut body = simple(&[&2u32.to_le_bytes()]);
-        body.extend(
-            [0x1000u64, 0x2000]
-                .iter()
-                .flat_map(|word| word.to_le_bytes()),
-        );
-        body.extend(2u32.to_le_bytes());
         let routine = "_kernelrpc_mach_vm_update_pointers_with_remote_tags";
+        let mapped = allocate_pages(&mut bare(), 1);
+        // A tagged pointer to mapped memory, then an unmapped one.
+        let pointers = [mapped | 0x0700_0000_0000_0000 | 0x18, 0x10];
+        let body = remote_tags_body(&pointers, 2);
         assert!(matches!(
             call(&mut bare(), routine, false, &body).unwrap(),
             Reply::Forward
         ));
         let mut tagging = Bare {
             memory_tagging: true,
+            debugged: false,
         };
-        assert!(call(&mut tagging, routine, false, &body).is_err());
+        // Only a debugged address space is answered.
+        assert_eq!(
+            failure(call(&mut tagging, routine, false, &body).unwrap()),
+            KERN_INVALID_ARGUMENT
+        );
+        tagging.debugged = true;
+        let reply = success(call(&mut tagging, routine, false, &body).unwrap());
+        assert_eq!(u32::from_le_bytes(reply[..4].try_into().unwrap()), 2);
+        assert_eq!(u64_at(&reply, 4), mapped | 0x18);
+        assert_eq!(u64_at(&reply, 12), 0);
+        // The out count must match the in count.
+        assert_eq!(
+            failure(
+                call(
+                    &mut tagging,
+                    routine,
+                    false,
+                    &remote_tags_body(&pointers, 1)
+                )
+                .unwrap()
+            ),
+            KERN_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            failure(call(&mut tagging, routine, false, &body[..body.len() - 2]).unwrap()),
+            MIG_BAD_ARGUMENTS
+        );
+        // SAFETY: the page this test allocated.
+        unsafe { mach_vm_deallocate(host(), mapped, PAGE_BYTES) };
     }
 
     fn simple(fields: &[&[u8]]) -> Vec<u8> {
