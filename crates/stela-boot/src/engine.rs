@@ -162,10 +162,11 @@ struct Options {
     /// (`--agx-observe`): the command is logged and still refused by name,
     /// never completed. A diagnostic mode.
     agx_observe: bool,
-    /// Stop at the first unsupported device access (`--strict`) instead of
-    /// answering it as the SoC does and reporting it
-    /// (docs/design/runtime.md "Unsupported operations"). Boot studies
-    /// (`--restore-study`) are strict whatever this says.
+    /// Stop every PE at the first unsupported operation (`--strict`)
+    /// instead of answering it as the SoC or its firmware does and
+    /// reporting it (docs/design/runtime.md "Unsupported operations").
+    /// Restore studies (`--restore-study`) are strict whatever this says;
+    /// `cargo xtask boot run` passes it unless `--graceful`.
     strict: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
@@ -1653,14 +1654,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     }
     machine.set_idle_skip(options.idle_skip);
     let strict = options.strict || options.restore;
-    machine.set_graceful(!strict);
-    machine.devices.set_graceful(!strict);
+    machine.set_strict(strict);
+    machine.devices.set_strict(strict);
     output::arguments(format_args!(
         "UNSUPPORTED OPERATIONS {}\n",
         if strict {
             "strict: the first one stops the machine"
         } else {
-            "graceful: each takes the SoC's error response and is reported once"
+            "graceful: each takes the SoC's error response and is reported once as UNMODELED"
         }
     ));
     if options.tss {
@@ -1803,9 +1804,7 @@ fn run(
             budget.min(slice)
         };
         let stop = machine.run(limit);
-        for requirement in machine.take_unmodeled() {
-            output::arguments(format_args!("UNMODELED {requirement}\n"));
-        }
+        unmodeled_report(machine);
         for hit in machine.take_trace_hits() {
             output::arguments(format_args!(
                 "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
@@ -1954,7 +1953,6 @@ fn run(
                 output::arguments(format_args!("ASC {state}\n"));
             }
             survey_report(machine);
-            unsupported_report(machine);
             user = 0;
             beats += 1;
             if beats.is_multiple_of(SUSPENSION_BEATS) {
@@ -2190,14 +2188,15 @@ fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
     }
 }
 
-/// Each unsupported device access graceful mode answered for the first time
-/// since the last report.
-fn unsupported_report(machine: &mut Machine<BareHost, AppleDevices>) {
-    for requirement in machine.take_unsupported() {
-        output::arguments(format_args!("UNSUPPORTED {requirement}\n"));
+/// Each unsupported operation answered outside strict mode for the first
+/// time since the last report: machine effects and device accesses, then
+/// coprocessor requests answered with their firmware's error reply.
+fn unmodeled_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    for requirement in machine.take_unmodeled() {
+        output::arguments(format_args!("UNMODELED {requirement}\n"));
     }
-    for line in machine.devices.take_unsupported() {
-        output::arguments(format_args!("UNSUPPORTED {line}\n"));
+    for line in machine.devices.take_unmodeled() {
+        output::arguments(format_args!("UNMODELED {line}\n"));
     }
 }
 
@@ -2325,7 +2324,7 @@ fn finish(
     host_power: &power::HostPowerControl,
 ) -> ! {
     survey_report(machine);
-    unsupported_report(machine);
+    unmodeled_report(machine);
     stack_report(machine);
     dump_report(machine, dumps);
     let host = host::statistics();

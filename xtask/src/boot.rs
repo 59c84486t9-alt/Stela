@@ -157,6 +157,13 @@ pub struct Run {
     /// --verify-on-read`).
     #[arg(long, requires = "bundle")]
     verify_on_read: bool,
+    /// Answer unsupported operations as the SoC and its firmware do and
+    /// report each once as `UNMODELED`, as a user's boot does. Without it a
+    /// system-mode run is a boot study: it adds the mount's `--strict`, so
+    /// the first unsupported operation stops the run
+    /// (docs/design/runtime.md "Unsupported operations").
+    #[arg(long, conflicts_with_all = ["module", "opencore", "usb_image", "payload"])]
+    graceful: bool,
     /// Use QEMU's directory-backed FAT16 for a bundle that fits its
     /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
     #[arg(long, requires = "bundle")]
@@ -434,6 +441,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     if arguments.verify_on_read {
         options.push_str(" --verify-on-read");
+    }
+    let strict = (arguments.bundle.is_some() || preboot.is_some()) && !arguments.graceful;
+    if strict {
+        options.push_str(" --strict");
     }
     if let Some(url) = &arguments.network_check {
         ensure!(
@@ -854,6 +865,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "directory_volume": arguments.directory_volume,
         "restore_manifest": arguments.restore_manifest,
         "verify_on_read": arguments.verify_on_read,
+        "strict": strict,
         "storage_disks": attached
             .iter()
             .map(|(path, serial)| json!({ "path": path, "serial": serial }))
@@ -1143,6 +1155,7 @@ mod tests {
             "--storage-serial",
             "ANS-1",
             "--directory-volume",
+            "--graceful",
             "--append",
             "--system --storage ANS-1:GUID",
         ])
@@ -1153,6 +1166,7 @@ mod tests {
         assert_eq!(run.storage_serial, ["ANS-1"]);
         assert_eq!(run.storage_disk, [Path::new("/tmp/disk.raw")]);
         assert!(run.directory_volume);
+        assert!(run.graceful);
         assert_eq!(run.append.as_deref(), Some("--system --storage ANS-1:GUID"));
         for extra in [
             vec!["--storage-disk", "/tmp/disk", "--storage-check"],
@@ -1161,6 +1175,7 @@ mod tests {
             vec!["--network-check", "http://example.test/"],
             vec!["--usb-storage-disk", "/tmp/disk", "--storage-check"],
             vec!["--guest-network", "--opencore", "/tmp/oc"],
+            vec!["--graceful", "--opencore", "/tmp/oc"],
             vec!["--network", "--usb-network"],
             vec!["--usb-disk", "/tmp/disk", "--storage-check"],
             vec![

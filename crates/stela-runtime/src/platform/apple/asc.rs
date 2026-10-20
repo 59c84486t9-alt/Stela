@@ -124,7 +124,7 @@ pub trait Firmware: Any {
         None
     }
     /// The coprocessor's own error reply to `message`, a request it does
-    /// not implement (`reason`), for graceful mode (docs/design/runtime.md
+    /// not implement (`reason`), outside strict mode (docs/design/runtime.md
     /// "Unsupported operations"). `None`, the default, when its protocol
     /// has no error reply for that request: the request stays refused.
     fn error_reply(&mut self, _message: Message, _reason: &'static str) -> Option<Vec<Message>> {
@@ -166,13 +166,13 @@ pub struct Asc {
     lines: Lines,
     /// Levels last reported, in [`Lines`] order.
     levels: [Option<bool>; 4],
-    /// Answer unimplemented requests with the firmware's error reply
-    /// ([`Self::set_graceful`]).
-    graceful: bool,
-    /// The endpoints and refusals graceful mode has reported.
+    /// Refuse unimplemented requests instead of answering them with the
+    /// firmware's error reply ([`Self::set_strict`]).
+    strict: bool,
+    /// The endpoints and refusals answered with an error reply so far.
     reported: BTreeSet<(u8, &'static str)>,
-    /// Reports not yet taken ([`Self::take_unsupported`]).
-    unsupported: Vec<String>,
+    /// Reports not yet taken ([`Self::take_unmodeled`]).
+    unmodeled: Vec<String>,
 }
 
 impl Asc {
@@ -197,23 +197,24 @@ impl Asc {
             outbox: outbox.into(),
             lines,
             levels: [None; 4],
-            graceful: false,
+            strict: true,
             reported: BTreeSet::new(),
-            unsupported: Vec::new(),
+            unmodeled: Vec::new(),
         })
     }
 
-    /// Answer each request the firmware does not implement with its own
-    /// error reply, where its protocol has one, and report it once per
-    /// endpoint and refusal, instead of refusing the mailbox write.
-    pub fn set_graceful(&mut self, graceful: bool) {
-        self.graceful = graceful;
+    /// Refuse the mailbox write of each request the firmware does not
+    /// implement (strict, the default), or answer it with the firmware's
+    /// own error reply where its protocol has one and report it once per
+    /// endpoint and refusal.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
     }
 
-    /// The requests graceful mode answered for the first time since the
-    /// last call.
-    pub fn take_unsupported(&mut self) -> Vec<String> {
-        core::mem::take(&mut self.unsupported)
+    /// The requests answered with an error reply for the first time since
+    /// the last call.
+    pub fn take_unmodeled(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.unmodeled)
     }
 
     /// Emulated boot-chain handoff: native firmware is running and both
@@ -315,10 +316,10 @@ impl Asc {
         let mut replies = Vec::new();
         let result = match self.firmware.receive(message, &mut replies) {
             Ok(()) => Ok(replies),
-            Err(reason) if self.graceful => match self.firmware.error_reply(message, reason) {
+            Err(reason) if !self.strict => match self.firmware.error_reply(message, reason) {
                 Some(error) => {
                     if self.reported.insert((message.endpoint, reason)) {
-                        self.unsupported.push(alloc::format!(
+                        self.unmodeled.push(alloc::format!(
                             "endpoint {:#x} payload {:#018x}: {reason}; answered with the \
                              firmware's error reply",
                             message.endpoint,
@@ -483,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn graceful_mode_answers_with_the_firmware_error_reply_and_reports_once() {
+    fn non_strict_mode_answers_with_the_firmware_error_reply_and_reports_once() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut asc = Asc::booted(Box::new(Echo), Lines::from_interrupts(LINES)).unwrap();
@@ -495,17 +496,17 @@ mod tests {
             asc.write(A2I_SEND1, Width::Double, 0xff, access)
         };
         assert!(send(&mut asc, 5, &mut access).is_err());
-        asc.set_graceful(true);
+        asc.set_strict(false);
         for _ in 0..2 {
             send(&mut asc, 5, &mut access).unwrap();
             assert_eq!(receive(&mut asc, &mut access).0, !5);
         }
-        let reports = asc.take_unsupported();
+        let reports = asc.take_unmodeled();
         assert_eq!(reports.len(), 1);
         assert!(reports[0].contains("refused"), "{}", reports[0]);
         // Without an error reply in its protocol the request stays refused.
         assert!(send(&mut asc, 0, &mut access).is_err());
-        assert!(asc.take_unsupported().is_empty());
+        assert!(asc.take_unmodeled().is_empty());
     }
 
     const LINES: [AicInput; 4] = [

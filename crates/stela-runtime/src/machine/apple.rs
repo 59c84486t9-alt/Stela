@@ -488,33 +488,34 @@ impl AppleDevices {
         Ok(pending)
     }
 
-    /// Graceful mode for every native coprocessor (docs/design/runtime.md
-    /// "Unsupported operations"): each answers a request it does not
-    /// implement with its own error reply, where its protocol has one.
-    pub fn set_graceful(&mut self, graceful: bool) {
+    /// Strict mode for every native coprocessor (docs/design/runtime.md
+    /// "Unsupported operations"), the default; otherwise each answers a
+    /// request it does not implement with its own error reply, where its
+    /// protocol has one.
+    pub fn set_strict(&mut self, strict: bool) {
         let ids: Vec<DeviceId> = self.coprocessors.iter().map(|&(_, id)| id).collect();
         for id in ids {
             if let Some(asc) = self.bus.device_mut::<Asc>(id) {
-                asc.set_graceful(graceful);
+                asc.set_strict(strict);
             }
         }
         let ids: Vec<DeviceId> = self.sep_masters.iter().map(|master| master.sep).collect();
         for id in ids {
             if let Some(sep) = self.bus.device_mut::<Sep>(id) {
-                sep.set_graceful(graceful);
+                sep.set_strict(strict);
             }
         }
     }
 
-    /// The coprocessor requests graceful mode answered for the first time
-    /// since the last call, as log lines naming the coprocessor.
-    pub fn take_unsupported(&mut self) -> Vec<String> {
+    /// The coprocessor requests answered with an error reply for the first
+    /// time since the last call, as log lines naming the coprocessor.
+    pub fn take_unmodeled(&mut self) -> Vec<String> {
         let mut lines = Vec::new();
         let ids: Vec<(&'static str, DeviceId)> = self.coprocessors.clone();
         for (role, id) in ids {
             if let Some(asc) = self.bus.device_mut::<Asc>(id) {
                 lines.extend(
-                    asc.take_unsupported()
+                    asc.take_unmodeled()
                         .into_iter()
                         .map(|l| format!("{role} {l}")),
                 );
@@ -523,11 +524,7 @@ impl AppleDevices {
         let ids: Vec<DeviceId> = self.sep_masters.iter().map(|master| master.sep).collect();
         for id in ids {
             if let Some(sep) = self.bus.device_mut::<Sep>(id) {
-                lines.extend(
-                    sep.take_unsupported()
-                        .into_iter()
-                        .map(|l| format!("SEP {l}")),
-                );
+                lines.extend(sep.take_unmodeled().into_iter().map(|l| format!("SEP {l}")));
             }
         }
         lines

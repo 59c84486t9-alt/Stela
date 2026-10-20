@@ -707,14 +707,6 @@ pub struct Surveyed {
     pub detail: String,
 }
 
-/// The registers and directions graceful mode has reported, and the
-/// reports not yet taken.
-#[derive(Default)]
-struct Graceful {
-    reported: BTreeSet<(u64, bool)>,
-    fresh: Vec<Requirement>,
-}
-
 /// A survey's records by register and direction, and those not yet taken.
 #[derive(Default)]
 struct Survey {
@@ -1045,9 +1037,9 @@ pub struct Machine<H: Host, D: Devices> {
     suspended: BTreeMap<u64, Suspension>,
     /// Device accesses answered without a model ([`Self::begin_survey`]).
     survey: Option<Survey>,
-    /// Unsupported device accesses answered gracefully
-    /// ([`Self::set_graceful`]); strict when `None`.
-    graceful: Option<Graceful>,
+    /// The device registers and directions whose external abort has been
+    /// reported (`take_unmodeled`).
+    aborted: BTreeSet<(u64, bool)>,
     /// The context leaves SVE and SME instructions run as, by PC, word and
     /// scalable profile ([`scalable`]); discarded with the blocks.
     scalable_leaves:
@@ -1143,7 +1135,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block_limit: u64::MAX,
             suspended: BTreeMap::new(),
             survey: None,
-            graceful: None,
+            aborted: BTreeSet::new(),
             scalable_leaves: BTreeMap::new(),
             tags: crate::machine::tags::Store::default(),
             tag_checks: [false; 2],
@@ -1748,25 +1740,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// lists every register a driver needs in one run.
     pub fn begin_survey(&mut self) {
         self.survey = Some(Survey::default());
-    }
-
-    /// Answer unsupported device accesses as the SoC does instead of
-    /// stopping (docs/design/runtime.md "Unsupported operations"): an
-    /// access the devices refuse, or that reaches no device, takes a
-    /// synchronous external abort and is reported once per register and
-    /// direction ([`Self::take_unsupported`]). The default is strict: the
-    /// machine stops at the first one.
-    pub fn set_graceful(&mut self, graceful: bool) {
-        self.graceful = graceful.then(Graceful::default);
-    }
-
-    /// The unsupported device accesses graceful mode answered for the first
-    /// time since the last call.
-    pub fn take_unsupported(&mut self) -> Vec<Requirement> {
-        self.graceful
-            .as_mut()
-            .map(|graceful| core::mem::take(&mut graceful.fresh))
-            .unwrap_or_default()
     }
 
     /// The registers the survey answered first since the last call, with
@@ -4072,9 +4045,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// A device access the devices refused or no device answers
     /// (docs/design/runtime.md "Unsupported operations"). Strict, it stops
-    /// the machine with the requirement. Graceful, it is reported once per
-    /// register and direction and the access takes the synchronous external
-    /// abort the fabric raises for an unimplemented register.
+    /// the machine with the requirement. Otherwise it is reported once per
+    /// register and direction (`take_unmodeled`) and the access takes the
+    /// synchronous external abort the fabric raises for an unimplemented
+    /// register.
     fn device_failure(
         &mut self,
         error: DeviceError,
@@ -4095,11 +4069,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             detail,
         });
         requirement.address = Some(address);
-        let Some(graceful) = self.graceful.as_mut() else {
+        if self.strict {
             return Err(Stop::Unsupported(requirement));
-        };
-        if graceful.reported.insert((physical, write)) {
-            graceful.fresh.push(requirement);
+        }
+        if self.aborted.insert((physical, write)) {
+            self.unmodeled.push(requirement);
         }
         self.external_abort(address, write)
     }
@@ -5145,11 +5119,12 @@ mod tests {
         let (load, store) = (0xb940_0020, 0xb900_0020);
         let mut machine = machine(&[0]);
         machine.write_register(Register::X(1), DEVICE);
+        machine.set_strict(true);
         assert!(matches!(
             machine.device_access(load, DEVICE, DEVICE, false),
             Err(Stop::Unsupported(_))
         ));
-        machine.set_graceful(true);
+        machine.set_strict(false);
         for (word, write) in [(load, false), (store, true), (load, false)] {
             machine.cpu.pc = BASE;
             machine.device_access(word, DEVICE, DEVICE, write).unwrap();
@@ -5160,15 +5135,13 @@ mod tests {
             assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
         }
         // One report per register and direction.
-        let reports = machine.take_unsupported();
+        let reports = machine.take_unmodeled();
         assert_eq!(reports.len(), 2);
         assert!(matches!(
             reports[1].kind,
             RequirementKind::Device { write: true, .. }
         ));
-        assert!(machine.take_unsupported().is_empty());
-        machine.set_graceful(false);
-        assert!(machine.take_unsupported().is_empty());
+        assert!(machine.take_unmodeled().is_empty());
     }
 
     #[test]
