@@ -30,7 +30,12 @@ const IBIC_WORD: u8 = 31;
 const TMM: u8 = 36;
 const PATCH: u8 = 37;
 const PONG: u8 = 101;
-const STATUS_VALUE: u8 = 210;
+/// The status query's reply, data = ROM state. `_bootAction` 0x2d72d10
+/// releases the waiting `bootSEP` (clears its reply flag) only for 102, then
+/// stores the state (0x2d72e58); 210 (0x2d72d38) stores a state the ROM
+/// reports unsolicited and releases no waiter, so a status check answered
+/// with it times out (0xe00002d6).
+const STATUS_VALUE: u8 = 102;
 const NONCE_GENERATED: u8 = 103;
 const NONCE_VALUE: u8 = 104;
 const TZ0_READY: u8 = 105;
@@ -268,7 +273,7 @@ mod tests {
     fn native_rom_status_tz0_and_image_never_claim_sepos_is_booted() {
         let mut rom = booted();
         let status = send(&mut rom, STATUS, 0, 0).unwrap()[0];
-        assert_eq!((status.opcode, status.data), (210, 1));
+        assert_eq!((status.opcode, status.data), (STATUS_VALUE, 1));
         assert!(send(&mut rom, BOOT_IMAGE, 0, 1).is_err());
         assert!(rom.image_request().is_none());
         assert!(send(&mut rom, BOOT_TZ0, 2, 0).is_err());
