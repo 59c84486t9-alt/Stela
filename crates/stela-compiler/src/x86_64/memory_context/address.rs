@@ -1,8 +1,8 @@
 //! SP alignment checks and address arithmetic for checked accesses.
 use super::{fault, patch_branch};
-use crate::x86_64::{load, right_operand};
+use crate::x86_64::load;
 use crate::{
-    aarch64::{AddressMode, Register, Shift, Width, register_offset::IndexExtend},
+    aarch64::{AddressMode, Register, register_offset::IndexExtend},
     context::memory::{MemoryStatus, address::AddressAddChecks},
 };
 use alloc::vec::Vec;
@@ -16,16 +16,9 @@ const JE_REL8: u8 = 0x74;
 const RET: u8 = 0xc3;
 const LEA_RAX_RAX_DISP8: &[u8] = &[0x48, 0x8d, 0x40];
 const LEA_RAX_RAX_DISP32: &[u8] = &[0x48, 0x8d, 0x80];
-const LEA_RDX_RAX_DISP8: &[u8] = &[0x48, 0x8d, 0x50];
-const LEA_RDX_RAX_DISP32: &[u8] = &[0x48, 0x8d, 0x90];
 const MOV_RDX_RAX: &[u8] = &[0x48, 0x89, 0xc2];
-const MOV_RAX_RDX: &[u8] = &[0x48, 0x89, 0xd0];
 const MOV_R8_RAX: &[u8] = &[0x49, 0x89, 0xc0];
 const MOV_RAX_R8: &[u8] = &[0x4c, 0x89, 0xc0];
-const MOV_ECX_ECX: &[u8] = &[0x89, 0xc9];
-const MOVSXD_RCX_ECX: &[u8] = &[0x48, 0x63, 0xc9];
-const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
-const LEA_RAX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x04, 0x08];
 
 /// Check SP before the offset is applied. The caller patches the returned rel32
 /// to its cleanup. On failure RAX holds the faulting SP. Clobbers RAX/RCX/RDX
@@ -55,33 +48,11 @@ pub(crate) fn return_if_failed(code: &mut Vec<u8>) {
     code.extend([JE_REL8, 1, RET]);
 }
 
-/// Unchecked arithmetic AFTER check_sp. RAX=EA. Pre/Post also produce
-/// RDX=pending base writeback; Offset leaves RDX unspecified. Snapshot pending
-/// writeback before callbacks; commit only on full success. LEA is modulo64.
+/// Unchecked arithmetic AFTER check_sp ([`crate::x86_64::address_add`]).
+/// Snapshot pending writeback before callbacks; commit only on full success.
 pub(crate) fn immediate(code: &mut Vec<u8>, base: Register, displacement: i32, mode: AddressMode) {
     load(code, base);
-    if mode == AddressMode::Offset && displacement == 0 {
-        return;
-    }
-    if mode != AddressMode::Offset && displacement == 0 {
-        code.extend(MOV_RDX_RAX);
-    } else {
-        let compact = i8::try_from(displacement).ok();
-        code.extend(match (mode == AddressMode::Offset, compact.is_some()) {
-            (true, true) => LEA_RAX_RAX_DISP8,
-            (true, false) => LEA_RAX_RAX_DISP32,
-            (false, true) => LEA_RDX_RAX_DISP8,
-            (false, false) => LEA_RDX_RAX_DISP32,
-        });
-        if let Some(value) = compact {
-            code.push(value as u8);
-        } else {
-            code.extend(displacement.to_le_bytes());
-        }
-    }
-    if mode == AddressMode::PreIndex && displacement != 0 {
-        code.extend(MOV_RAX_RDX);
-    }
+    crate::x86_64::address_add(code, displacement, mode);
 }
 
 /// AddressAdd at the access level's resolved specialization, after the SP check
@@ -133,17 +104,7 @@ pub(crate) fn register_offset(
     shift: u8,
 ) {
     load(code, base);
-    right_operand(code, index, Width::X64, Shift::Lsl, 0);
-    match extend {
-        IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
-        IndexExtend::Sxtw => code.extend(MOVSXD_RCX_ECX),
-        IndexExtend::Lsl | IndexExtend::Sxtx => {}
-    }
-    if shift != 0 {
-        code.extend(SHL_RCX_IMM8);
-        code.push(shift);
-    }
-    code.extend(LEA_RAX_RAX_RCX);
+    crate::x86_64::register_offset::index_add(code, index, extend, shift);
 }
 
 /// AddressAdd for an extended or shifted register offset. RAX is the effective
@@ -165,16 +126,6 @@ pub(crate) fn register_offset_with_checks(
         return;
     }
     code.extend(MOV_RDX_RAX);
-    right_operand(code, index, Width::X64, Shift::Lsl, 0);
-    match extend {
-        IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
-        IndexExtend::Sxtw => code.extend(MOVSXD_RCX_ECX),
-        IndexExtend::Lsl | IndexExtend::Sxtx => {}
-    }
-    if shift != 0 {
-        code.extend(SHL_RCX_IMM8);
-        code.push(shift);
-    }
-    code.extend(LEA_RAX_RAX_RCX);
+    crate::x86_64::register_offset::index_add(code, index, extend, shift);
     crate::x86_64::pointer_checks::emit(code, false);
 }

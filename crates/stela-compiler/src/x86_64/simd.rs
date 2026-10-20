@@ -600,7 +600,7 @@ mod tests {
                     },
                 );
                 if load {
-                    assert!(code[17..].starts_with(&load_bytes));
+                    assert!(code[7..].starts_with(&load_bytes));
                     assert!(code.ends_with(&[0xf3, 0x0f, 0x7f, 0x87, 8, 1, 0, 0]));
                 } else {
                     assert!(code.ends_with(&store_bytes));
@@ -666,12 +666,12 @@ mod tests {
                 },
             );
             assert_eq!(
-                &code[17..26],
+                &code[14..23],
                 &[prefix, 0x0f, opcode, 0, prefix, 0x0f, opcode, 0x48, bytes]
             );
-            assert_eq!(&code[26..34], &[0xf3, 0x0f, 0x7f, 0x87, 8, 1, 0, 0]);
-            assert_eq!(&code[34..42], &[0xf3, 0x0f, 0x7f, 0x8f, 0xf8, 2, 0, 0]);
-            assert_eq!(&code[42..], &[0x48, 0x89, 0x97, 0, 0, 0, 0]);
+            assert_eq!(&code[23..31], &[0xf3, 0x0f, 0x7f, 0x87, 8, 1, 0, 0]);
+            assert_eq!(&code[31..39], &[0xf3, 0x0f, 0x7f, 0x8f, 0xf8, 2, 0, 0]);
+            assert_eq!(&code[39..], &[0x48, 0x89, 0x97, 0, 0, 0, 0]);
         }
     }
 
@@ -691,13 +691,13 @@ mod tests {
                 },
             );
             assert_eq!(&code[7..13], &[0xa8, 15, 0x74, 2, 0x0f, 0x0b]);
-            assert_eq!(&code[20..28], &[0xf3, 0x0f, 0x6f, 0x87, 0xf8, 2, 0, 0]);
-            assert_eq!(&code[28..36], &[0xf3, 0x0f, 0x6f, 0x8f, 0xf8, 2, 0, 0]);
+            assert_eq!(&code[17..25], &[0xf3, 0x0f, 0x6f, 0x87, 0xf8, 2, 0, 0]);
+            assert_eq!(&code[25..33], &[0xf3, 0x0f, 0x6f, 0x8f, 0xf8, 2, 0, 0]);
             assert_eq!(
-                &code[36..45],
+                &code[33..42],
                 &[prefix, 0x0f, opcode, 0, prefix, 0x0f, opcode, 0x48, bytes]
             );
-            assert_eq!(&code[45..], &[0x48, 0x89, 0x97, 248, 0, 0, 0]);
+            assert_eq!(&code[42..], &[0x48, 0x89, 0x97, 248, 0, 0, 0]);
         }
     }
 }

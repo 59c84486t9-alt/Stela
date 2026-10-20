@@ -31,10 +31,6 @@ pub(super) fn address(
     shift: u8,
     bytes: u8,
 ) {
-    const MOV_ECX_ECX: &[u8] = &[0x89, 0xc9];
-    const MOVSXD_RCX_ECX: &[u8] = &[0x48, 0x63, 0xc9];
-    const SHL_RCX_IMM8: &[u8] = &[0x48, 0xc1, 0xe1];
-    const LEA_RAX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x04, 0x08];
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
     // Only the final address is checked against the guest's ranges.
@@ -43,18 +39,49 @@ pub(super) fn address(
         ..checks
     };
     memory_address(code, base_checks, base, 0, AddressMode::Offset, 1);
-    right_operand(code, index, Width::X64, Shift::Lsl, 0);
+    index_add(code, index, extend, shift);
+    super::address_checks(code, checks, bytes);
+}
+
+const MOV_ECX_STATE: [u8; 2] = [0x8b, 0x8f];
+const MOVSXD_RCX_STATE: [u8; 3] = [0x48, 0x63, 0x8f];
+const MOV_RCX_STATE: [u8; 3] = [0x48, 0x8b, 0x8f];
+const ADD_RAX_STATE: [u8; 3] = [0x48, 0x03, 0x87];
+const SHL_RCX_IMM8: [u8; 3] = [0x48, 0xc1, 0xe1];
+/// LEA RAX,[RAX+RCX*scale]: the SIB byte's scale field, RCX index, RAX base.
+const LEA_RAX_RAX_RCX: [u8; 3] = [0x48, 0x8d, 0x04];
+const SIB_RCX_INDEX_RAX_BASE: u8 = 0x08;
+const SIB_SCALE_SHIFT: u8 = 6;
+/// The largest shift a SIB scale applies (times eight).
+const MAX_SCALE_SHIFT: u8 = 3;
+
+/// The index register, extended and shifted, added to the base in RAX
+/// modulo 2^64. A W index is read with its extension from its frame slot;
+/// a ZR index adds nothing. RCX and host flags are scratch.
+pub(crate) fn index_add(code: &mut Vec<u8>, index: Register, extend: IndexExtend, shift: u8) {
+    let Some(slot) = offset(index) else {
+        return;
+    };
     match extend {
-        IndexExtend::Uxtw => code.extend(MOV_ECX_ECX),
-        IndexExtend::Sxtw => code.extend(MOVSXD_RCX_ECX),
-        IndexExtend::Lsl | IndexExtend::Sxtx => {}
+        IndexExtend::Uxtw => code.extend(MOV_ECX_STATE),
+        IndexExtend::Sxtw => code.extend(MOVSXD_RCX_STATE),
+        IndexExtend::Lsl | IndexExtend::Sxtx if shift == 0 => {
+            code.extend(ADD_RAX_STATE);
+            code.extend(slot.to_le_bytes());
+            return;
+        }
+        IndexExtend::Lsl | IndexExtend::Sxtx => code.extend(MOV_RCX_STATE),
     }
-    if shift != 0 {
+    code.extend(slot.to_le_bytes());
+    let scale = if shift > MAX_SCALE_SHIFT {
         code.extend(SHL_RCX_IMM8);
         code.push(shift);
-    }
-    code.extend(LEA_RAX_RAX_RCX); // modulo 2^64
-    super::address_checks(code, checks, bytes);
+        0
+    } else {
+        shift
+    };
+    code.extend(LEA_RAX_RAX_RCX);
+    code.push(scale << SIB_SCALE_SHIFT | SIB_RCX_INDEX_RAX_BASE);
 }
 
 fn transfer(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryChecks) {

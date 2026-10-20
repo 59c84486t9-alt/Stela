@@ -27,7 +27,8 @@ const MODRM_DISP8: u8 = 0x40;
 const MOVZX_ECX_BYTE: &[u8] = &[0x0f, 0xb6];
 const MOVZX_ECX_HALFWORD: &[u8] = &[0x0f, 0xb7];
 const LEA_RDX_RAX_DISP32: &[u8] = &[0x48, 0x8d, 0x90];
-const ADD_RDX_RCX: &[u8] = &[0x48, 0x01, 0xca];
+/// LEA RDX,[RAX+RCX]: the address plus the post-index register.
+const LEA_RDX_RAX_RCX: &[u8] = &[0x48, 0x8d, 0x14, 0x08];
 const ADD_RAX_IMM8: &[u8] = &[0x48, 0x83, 0xc0];
 const LEA_R10D_RAX_DISP8: &[u8] = &[0x44, 0x8d, 0x50];
 const XOR_R10D_EAX: &[u8] = &[0x41, 0x31, 0xc2];
@@ -65,7 +66,7 @@ pub(super) fn emit(
                 QWORD_BYTES,
                 super::super::offset(Register::X(index)).expect("post-index is X0..X30"),
             );
-            code.extend(ADD_RDX_RCX);
+            code.extend(LEA_RDX_RAX_RCX);
         }
     }
     // A checked SP is 16-byte aligned; an unchecked one is an ordinary base.

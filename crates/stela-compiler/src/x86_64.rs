@@ -346,8 +346,9 @@ fn alignment_check(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8) {
     }
 }
 
-/// RAX is the access address and RDX the potential writeback. `unit` is the
-/// bytes of each element the access transfers, which SCTLR_ELx.A checks.
+/// RAX is the access address and, for pre- and post-index forms, RDX the
+/// pending writeback ([`address_add`]). `unit` is the bytes of each element
+/// the access transfers, which SCTLR_ELx.A checks.
 fn memory_address(
     code: &mut Vec<u8>,
     checks: MemoryChecks,
@@ -362,12 +363,43 @@ fn memory_address(
         // mapped fault boundary, not guest exception delivery.
         code.extend(STACK_ALIGNMENT_CHECK);
     }
-    code.extend([0x48, 0x8d, 0x90]); // lea rdx,[rax+disp32]: potential writeback
-    code.extend(displacement.to_le_bytes());
-    if mode != AddressMode::PostIndex {
-        code.extend([0x48, 0x89, 0xd0]); // mov rax,rdx: effective address
-    }
+    address_add(code, displacement, mode);
     address_checks(code, checks, unit);
+}
+
+const LEA_RAX_RAX_DISP8: [u8; 3] = [0x48, 0x8d, 0x40];
+const LEA_RAX_RAX_DISP32: [u8; 3] = [0x48, 0x8d, 0x80];
+const LEA_RDX_RAX_DISP8: [u8; 3] = [0x48, 0x8d, 0x50];
+const LEA_RDX_RAX_DISP32: [u8; 3] = [0x48, 0x8d, 0x90];
+const MOV_RDX_RAX: [u8; 3] = [0x48, 0x89, 0xc2];
+const MOV_RAX_RDX: [u8; 3] = [0x48, 0x89, 0xd0];
+
+/// An immediate offset added to the base in RAX, modulo 2^64 and without
+/// touching host flags: RAX becomes the access address, and pre- and
+/// post-index forms leave the pending writeback in RDX. An Offset access
+/// leaves RDX unspecified and emits nothing for a zero offset.
+pub(crate) fn address_add(code: &mut Vec<u8>, displacement: i32, mode: AddressMode) {
+    let offset = mode == AddressMode::Offset;
+    if displacement == 0 {
+        if !offset {
+            code.extend(MOV_RDX_RAX);
+        }
+        return;
+    }
+    let compact = i8::try_from(displacement).ok();
+    code.extend(match (offset, compact.is_some()) {
+        (true, true) => LEA_RAX_RAX_DISP8,
+        (true, false) => LEA_RAX_RAX_DISP32,
+        (false, true) => LEA_RDX_RAX_DISP8,
+        (false, false) => LEA_RDX_RAX_DISP32,
+    });
+    match compact {
+        Some(value) => code.push(value as u8),
+        None => code.extend(displacement.to_le_bytes()),
+    }
+    if mode == AddressMode::PreIndex {
+        code.extend(MOV_RAX_RDX);
+    }
 }
 
 fn memory_writeback(code: &mut Vec<u8>, base: Register, mode: AddressMode) {
@@ -944,6 +976,100 @@ mod tests {
     use crate::aarch64::system::synchronization::{
         Operation as Synchronization, Requirement, Scope, WaitKind,
     };
+
+    /// The shared address additions run on the host against a guest frame:
+    /// every immediate form leaves the access address in RAX and, with
+    /// writeback, the new base in RDX; every index extension and shift,
+    /// scaled or shifted first, and a ZR index add modulo 2^64.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn address_additions_compute_the_access_address_and_writeback() {
+        use crate::aarch64::register_offset::IndexExtend;
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        const MOV_RAX_RSI: [u8; 3] = [0x48, 0x89, 0xf0];
+        const RET: u8 = 0xc3;
+        const BASE: u64 = 0xffff_ffff_ffff_ff00;
+        // Bit 31 set, so UXTW and SXTW differ, and high bits SXTW drops.
+        const INDEX: u64 = 0x8000_0001_fedc_ba98;
+        const INDEX_REGISTER: u8 = 5;
+        #[repr(C)]
+        struct Result {
+            rax: u64,
+            rdx: u64,
+        }
+        let run = |body: &dyn Fn(&mut Vec<u8>)| -> Result {
+            let mut code = MOV_RAX_RSI.to_vec();
+            body(&mut code);
+            code.push(RET);
+            let mut state = crate::GuestState::default();
+            state.x[usize::from(INDEX_REGISTER)] = INDEX;
+            // SAFETY: private anonymous memory, RX after the copy and
+            // unmapped after the call; the code reads only `state`.
+            unsafe {
+                let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                assert_ne!(page as usize, usize::MAX);
+                core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                assert_eq!(mprotect(page, PAGE, 5), 0);
+                let entry: unsafe extern "sysv64" fn(*const crate::GuestState, u64) -> Result =
+                    core::mem::transmute(page);
+                let result = entry(&state, BASE);
+                assert_eq!(munmap(page, PAGE), 0);
+                result
+            }
+        };
+        for displacement in [0, 8, -256, 0x1000, i32::MIN] {
+            let added = BASE.wrapping_add_signed(i64::from(displacement));
+            for (mode, address, writeback) in [
+                (AddressMode::Offset, added, None),
+                (AddressMode::PreIndex, added, Some(added)),
+                (AddressMode::PostIndex, BASE, Some(added)),
+            ] {
+                let result = run(&|code| address_add(code, displacement, mode));
+                assert_eq!(result.rax, address, "{mode:?} {displacement}");
+                if let Some(writeback) = writeback {
+                    assert_eq!(result.rdx, writeback, "{mode:?} {displacement}");
+                }
+            }
+        }
+        for extend in [
+            IndexExtend::Uxtw,
+            IndexExtend::Sxtw,
+            IndexExtend::Lsl,
+            IndexExtend::Sxtx,
+        ] {
+            let extended = match extend {
+                IndexExtend::Uxtw => u64::from(INDEX as u32),
+                IndexExtend::Sxtw => i64::from(INDEX as i32) as u64,
+                IndexExtend::Lsl | IndexExtend::Sxtx => INDEX,
+            };
+            for shift in 0..=4 {
+                let index = Register::X(INDEX_REGISTER);
+                let result = run(&|code| register_offset::index_add(code, index, extend, shift));
+                let expected = BASE.wrapping_add(extended << shift);
+                assert_eq!(result.rax, expected, "{extend:?} {shift}");
+                let zero =
+                    run(&|code| register_offset::index_add(code, Register::Zero, extend, shift));
+                assert_eq!(zero.rax, BASE, "ZR {extend:?} {shift}");
+            }
+        }
+    }
 
     /// The check runs on the host and passes exactly the addresses whose
     /// bits 63:48 are all clear or all set.

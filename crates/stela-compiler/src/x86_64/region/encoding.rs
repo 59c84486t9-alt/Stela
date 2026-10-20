@@ -1,6 +1,6 @@
 //! Integer encodings, including flag-preserving variants.
 use super::{BYTE_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES};
-use crate::aarch64::{Logical, Shift, Width};
+use crate::aarch64::{AddressMode, Logical, Shift, Width};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -333,7 +333,6 @@ pub fn invert(code: &mut Vec<u8>, width: Width) {
     ]);
 }
 
-const ORDINARY_ADDRESS_BYTES: usize = 17;
 const FRAME_STORE_BYTES: usize = 7;
 const GPR_BYTES: usize = core::mem::size_of::<u64>();
 const ECX_FROM_RAX_MEMORY: u8 = 0x08;
@@ -346,10 +345,7 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
         GUEST_RANGE_CHECK, GUEST_RANGE_CHECK_ENDS, STACK_ALIGNMENT_CHECK,
         STACK_ALIGNMENT_CHECK_ENDS,
     };
-    const LEA: u8 = 0x8d;
     const RAX_FROM_FRAME_DISP32: u8 = 0x87;
-    const RDX_FROM_RAX_DISP32: u8 = 0x90;
-    const RAX_FROM_RDX: u8 = 0xd0;
     const BASE_LOAD_BYTES: usize = 7;
     const SP: usize = 31;
     if code.get(0..3)? != [REX | REX_W, MOV_LOAD, RAX_FROM_FRAME_DISP32]
@@ -367,14 +363,16 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
         ends.extend(STACK_ALIGNMENT_CHECK_ENDS.map(|end| cursor + end));
         cursor += STACK_ALIGNMENT_CHECK.len();
     }
-    if code.get(cursor..cursor + 3)? != [REX | REX_W, LEA, RDX_FROM_RAX_DISP32]
-        || code.get(cursor + 3..cursor + 7)? != displacement.to_le_bytes()
-        || code.get(cursor + 7..cursor + 10)? != [REX | REX_W, MOV_STORE, RAX_FROM_RDX]
-    {
-        return None;
+    // The Offset form's one LEA, or nothing for a zero offset.
+    let mut add = vec![];
+    super::super::address_add(&mut add, displacement, AddressMode::Offset);
+    if !add.is_empty() {
+        if code.get(cursor..cursor + add.len())? != add {
+            return None;
+        }
+        cursor += add.len();
+        ends.push(cursor);
     }
-    cursor += ORDINARY_ADDRESS_BYTES - BASE_LOAD_BYTES;
-    ends.extend([cursor - 3, cursor]);
     // A system-mode access checks the address against the guest's ranges.
     if code[cursor..].starts_with(&GUEST_RANGE_CHECK) {
         ends.extend(GUEST_RANGE_CHECK_ENDS.map(|end| cursor + end));

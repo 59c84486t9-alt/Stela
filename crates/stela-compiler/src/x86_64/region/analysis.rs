@@ -348,6 +348,9 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     const FRAME_RM: u8 = 7;
     const REX_X64_LOW_REGISTERS: u8 = 0x48;
     const LEA: u8 = 0x8d;
+    const LEA_RAX_RAX_DISP8: u8 = 0x40;
+    const LEA_RAX_RAX_DISP32: u8 = 0x80;
+    const LEA_RDX_RAX_DISP8: u8 = 0x50;
     const LEA_RDX_RAX_DISP32: u8 = 0x90;
     const LEA_RDX_RDX_DISP8: u8 = 0x52;
     const TWO_BYTE_OPCODE: u8 = 0x0f;
@@ -421,8 +424,12 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
             && (rex == Some(REX_X64_LOW_REGISTERS) || (extended && rex.is_none()))
         {
             let modrm = *code.get(cursor)?;
-            if modrm == LEA_RDX_RAX_DISP32 && rex == Some(REX_X64_LOW_REGISTERS) {
+            // The shared address additions ([`super::super::address_add`]).
+            let low = rex == Some(REX_X64_LOW_REGISTERS);
+            if low && matches!(modrm, LEA_RAX_RAX_DISP32 | LEA_RDX_RAX_DISP32) {
                 cursor += 5;
+            } else if low && matches!(modrm, LEA_RAX_RAX_DISP8 | LEA_RDX_RAX_DISP8) {
+                cursor += 2;
             } else if extended && modrm == LEA_RDX_RDX_DISP8 {
                 // Flag-neutral selector adjustment.
                 cursor += 2;

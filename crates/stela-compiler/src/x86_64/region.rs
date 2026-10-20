@@ -451,13 +451,12 @@ impl Emitter<'_> {
     }
 
     /// The address of an Offset access in RAX, in place of the shared
-    /// recipe's base load, SP alignment check, LEA and move, which end at
+    /// recipe's base load, SP alignment check and LEA, which end at
     /// `ends[index]` for the returned `index`. A base in a register (`cached`,
     /// or loaded into a free pool register when the region reads it again)
     /// has its own low byte tested and one LEA adds the offset; otherwise
-    /// the shared base load and check stay, followed by one LEA. Without
-    /// writeback the shared recipe's RDX copy of the address is dead, and
-    /// a fault still finds the frame exact: every dirty value has settled.
+    /// the shared recipe stays. A fault still finds the frame exact: every
+    /// dirty value has settled.
     fn access_address(
         &mut self,
         base: Register,
@@ -472,7 +471,7 @@ impl Emitter<'_> {
         const TEST: usize = 1;
         const TRAP: usize = 3;
         let checked = base == Register::Sp && self.stack_alignment;
-        let index = if checked { 5 } else { 2 };
+        let index = if checked { TRAP } else { BASE_LOAD } + usize::from(displacement != 0);
         debug_assert_eq!(
             checked,
             raw[ends[BASE_LOAD]..].starts_with(&super::STACK_ALIGNMENT_CHECK)
@@ -503,11 +502,7 @@ impl Emitter<'_> {
             self.emit(|code| encoding::lea(code, HostGpr::Rax, host, displacement));
             self.output.stats.address_cache_hits += 1;
         } else {
-            let last = if checked { TRAP } else { BASE_LOAD };
-            self.emit_segments(raw, &[&[0][..], &ends[..=last]].concat());
-            if displacement != 0 {
-                self.emit(|code| encoding::lea(code, HostGpr::Rax, HostGpr::Rax, displacement));
-            }
+            self.emit_segments(raw, &[&[0][..], &ends[..=index]].concat());
         }
         index
     }
@@ -1853,7 +1848,7 @@ mod tests {
         );
         assert_eq!(
             encoding::ordinary_load_ends(&raw, 1, 15, Some(16), -255),
-            Some(vec![7, 14, 17, 20, 27])
+            Some(vec![7, 14, 17, 24])
         );
         for index in 0..raw.len() {
             let mut mutated = raw.clone();
