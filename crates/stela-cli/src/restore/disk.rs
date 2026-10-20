@@ -11,7 +11,6 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
 };
-use stela_runtime::sha256;
 
 const HDIUTIL: &str = "/usr/bin/hdiutil";
 /// Directory of the dyld shared cache inside an OS volume.
@@ -78,10 +77,11 @@ impl Attachment {
 
 impl Drop for Attachment {
     fn drop(&mut self) {
+        // Its "ejected" line is not the caller's output.
         let detached = Command::new(HDIUTIL)
             .args(["detach", &self.device])
-            .status()
-            .is_ok_and(|status| status.success());
+            .output()
+            .is_ok_and(|output| output.status.success());
         if !detached {
             eprintln!("warning: could not detach {}", self.device);
         }
@@ -142,27 +142,61 @@ fn resolve(volume: &Path, guest: &str) -> Result<PathBuf> {
     Ok(host)
 }
 
-/// Copy the selection from `image` into the new directory `output`, keeping
-/// guest paths, and return a receipt of every copied file.
-pub fn extract(image: &Path, output: &Path, selection: &Selection) -> Result<serde_json::Value> {
-    ensure!(!output.exists(), "{} exists", output.display());
-    let mount_root = tempfile::tempdir()?;
-    let attachment = Attachment::new(image, mount_root.path())?;
-    let volume = match &selection.volume {
-        Some(name) => attachment
-            .mounts
+/// One guest file copied out of an image.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct Copied {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// What [`copy_into`] copied from one image.
+#[derive(Debug)]
+pub struct Copy {
+    /// The mounted volume's name.
+    pub volume: Option<String>,
+    pub files: Vec<Copied>,
+    pub missing_optional: Vec<String>,
+}
+
+/// The selection's volume among the image's mounts: the named one, the only
+/// one, or the only one that holds every required path.
+fn select_volume<'a>(mounts: &'a [PathBuf], selection: &Selection) -> Result<&'a Path> {
+    if let Some(name) = &selection.volume {
+        return mounts
             .iter()
             .find(|mount| mount.file_name().is_some_and(|file| file == name.as_str()))
-            .with_context(|| format!("no mounted volume named {name}"))?,
-        None => match attachment.mounts.as_slice() {
-            [volume] => volume,
-            mounts => bail!(
-                "image mounts {} volumes; select one with --volume",
-                mounts.len()
-            ),
-        },
+            .map(PathBuf::as_path)
+            .with_context(|| format!("no mounted volume named {name}"));
     }
-    .clone();
+    if let [volume] = mounts {
+        return Ok(volume);
+    }
+    let holds = |volume: &Path| {
+        selection
+            .required
+            .iter()
+            .all(|path| resolve(volume, path).is_ok())
+            && (!selection.shared_cache || volume.join(SHARED_CACHE_DIRECTORY).is_dir())
+    };
+    let mut holding = mounts.iter().filter(|volume| holds(volume));
+    match (holding.next(), holding.next()) {
+        (Some(volume), None) if !selection.required.is_empty() || selection.shared_cache => {
+            Ok(volume)
+        }
+        _ => bail!(
+            "image mounts {} volumes; select one with --volume",
+            mounts.len()
+        ),
+    }
+}
+
+/// Copy the selection from `image` into the directory `root`, keeping guest
+/// paths; no file there is replaced.
+pub fn copy_into(image: &Path, root: &Path, selection: &Selection) -> Result<Copy> {
+    let mount_root = tempfile::tempdir()?;
+    let attachment = Attachment::new(image, mount_root.path())?;
+    let volume = select_volume(&attachment.mounts, selection)?.to_path_buf();
     let volume = volume.as_path();
     let mut paths: Vec<(String, bool)> = selection
         .required
@@ -172,12 +206,20 @@ pub fn extract(image: &Path, output: &Path, selection: &Selection) -> Result<ser
         .collect();
     if selection.shared_cache {
         let directory = volume.join(SHARED_CACHE_DIRECTORY);
+        let mut names = vec![];
         for entry in fs::read_dir(&directory).context("image has no dyld shared cache directory")? {
             let name = entry?.file_name().to_string_lossy().into_owned();
             if name.starts_with(SHARED_CACHE_PREFIX) {
-                paths.push((format!("/{SHARED_CACHE_DIRECTORY}/{name}"), true));
+                names.push(name);
             }
         }
+        names.sort();
+        ensure!(!names.is_empty(), "image has no arm64e dyld shared cache");
+        paths.extend(
+            names
+                .into_iter()
+                .map(|name| (format!("/{SHARED_CACHE_DIRECTORY}/{name}"), true)),
+        );
     }
     let mut files = vec![];
     let mut missing = vec![];
@@ -190,20 +232,46 @@ pub fn extract(image: &Path, output: &Path, selection: &Selection) -> Result<ser
             }
             Err(error) => return Err(error),
         };
-        let destination = output.join(guest.trim_start_matches('/'));
+        let destination = root.join(guest.trim_start_matches('/'));
+        ensure!(
+            !destination.try_exists()?,
+            "{} exists",
+            destination.display()
+        );
         fs::create_dir_all(destination.parent().context("guest path has no parent")?)?;
-        fs::copy(&source, &destination)?;
-        let bytes = fs::read(&destination)?;
-        files.push(json!({ "path": guest, "bytes": bytes.len(), "sha256": sha256(&bytes) }));
+        fs::copy(&source, &destination)
+            .with_context(|| format!("cannot copy {guest} out of the image"))?;
+        let (bytes, sha256) = super::payload::file_sha256(&destination)?;
+        files.push(Copied {
+            path: guest,
+            bytes,
+            sha256,
+        });
     }
+    let volume = volume
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
     drop(attachment);
+    Ok(Copy {
+        volume,
+        files,
+        missing_optional: missing,
+    })
+}
+
+/// Copy the selection from `image` into the new directory `output`, keeping
+/// guest paths, and return a receipt of every copied file.
+pub fn extract(image: &Path, output: &Path, selection: &Selection) -> Result<serde_json::Value> {
+    ensure!(!output.exists(), "{} exists", output.display());
+    let copy = copy_into(image, output, selection)?;
     let receipt = json!({
         "kind": "guest_file_extraction",
         "image": image.canonicalize()?,
-        "volume": volume.file_name().map(|name| name.to_string_lossy().into_owned()),
-        "files": files,
-        "missing_optional": missing,
+        "volume": copy.volume,
+        "files": copy.files,
+        "missing_optional": copy.missing_optional,
     });
+    fs::create_dir_all(output)?;
     fs::write(output.join("receipt.json"), format!("{receipt:#}\n"))?;
     Ok(receipt)
 }
@@ -233,6 +301,32 @@ mod tests {
         assert!(resolve(root, "/usr/lib/escape").is_err());
         assert!(resolve(root, "usr/lib/libz.dylib").is_err());
         assert!(resolve(root, "/usr/lib").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_volume_holding_the_selection_is_chosen_among_several() -> Result<()> {
+        let image = tempfile::tempdir()?;
+        let data = image.path().join("Data");
+        let system = image.path().join("Macintosh HD");
+        fs::create_dir_all(data.join("Users"))?;
+        fs::create_dir_all(system.join("usr/lib"))?;
+        fs::write(system.join("usr/lib/dyld"), b"dyld")?;
+        let mounts = [data.clone(), system.clone()];
+        let selection = |required: &[&str], volume: Option<&str>| Selection {
+            required: required.iter().map(|path| path.to_string()).collect(),
+            optional: vec![],
+            shared_cache: false,
+            volume: volume.map(str::to_owned),
+        };
+        assert_eq!(
+            select_volume(&mounts, &selection(&["/usr/lib/dyld"], None))?,
+            system
+        );
+        assert_eq!(select_volume(&mounts, &selection(&[], Some("Data")))?, data);
+        assert!(select_volume(&mounts, &selection(&[], None)).is_err());
+        assert!(select_volume(&mounts, &selection(&["/missing"], None)).is_err());
+        assert_eq!(select_volume(&mounts[..1], &selection(&[], None))?, data);
         Ok(())
     }
 }

@@ -1,7 +1,12 @@
-//! `stela run PROGRAM [ARGS...]`: exec an unchanged arm64e Mach-O as the
-//! arm64 kernel would, in this process, and exit with its status. A `#!`
-//! script runs its interpreter as exec does. The guest's own `execve`
-//! comes back here, through `--argv0`, in the same host process.
+//! `stela run PROGRAM [ARGS...]` (and `stela PROGRAM [ARGS...]`): exec an
+//! unchanged arm64e Mach-O as the arm64 kernel would, in this process, and
+//! exit with its status. A `#!` script runs its interpreter as exec does,
+//! and an app bundle its executable as LaunchServices starts it
+//! (`run::program`). The guest's own `execve` comes back here, through
+//! `--argv0`, in the same host process.
+//!
+//! The guest roots are `--root`, else `STELA_GUEST_ROOT`, else the guest
+//! system `stela install-system` installed (`guest_system`).
 //!
 //! Exec's inputs are read here: the executable's arm64e slice (arm64 when
 //! it has none), its load commands and code signature, and the dynamic
@@ -9,8 +14,12 @@
 //! lookup the process makes, resolve under the guest roots first (see
 //! `stela_runtime::hosted`); dyld finds and maps the shared cache there
 //! itself. Everything after is the hosted runtime's.
-use anyhow::{Context, Result, bail};
+pub(crate) mod program;
+
+use crate::guest_system;
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use program::guest_path;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -23,31 +32,35 @@ use stela_runtime::machine::Chip;
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 const CPU_SUBTYPE_ARM64E: u32 = 2;
 const CPU_SUBTYPE_MASK: u32 = 0xff00_0000;
+/// The help heading of the developer options.
+const ADVANCED: &str = "Advanced options";
 
 #[derive(Args)]
 pub(crate) struct Run {
-    /// The arm64e executable.
+    /// The program: an arm64 Mach-O, a #! script or an app bundle (.app),
+    /// by path, or a name looked up in PATH.
     program: PathBuf,
-    /// Its arguments after argv[0].
+    /// Its arguments.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     arguments: Vec<OsString>,
-    /// A guest system root (repeatable, searched in order): read-only
-    /// lookups of absolute paths that exist under it resolve there.
-    #[arg(long)]
+    /// A guest system root (repeatable, searched in order) instead of the
+    /// installed system files: read-only lookups of absolute paths that
+    /// exist under it resolve there.
+    #[arg(long, help_heading = ADVANCED)]
     root: Vec<PathBuf>,
     /// The new image's argv[0], when it is not the program path (as
     /// `execve` passes it).
-    #[arg(long)]
+    #[arg(long, hide = true)]
     argv0: Option<OsString>,
     /// The arm64 slice exec chose by subtype (as `posix_spawn`'s binary
     /// preferences choose it), instead of the regular grading.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     cpu_subtype: Option<u32>,
     /// Print every serviced call to standard error.
-    #[arg(long)]
+    #[arg(long, help_heading = ADVANCED)]
     trace: bool,
     /// Print the serviced-call counts when the program exits.
-    #[arg(long)]
+    #[arg(long, help_heading = ADVANCED)]
     statistics: bool,
 }
 
@@ -103,9 +116,10 @@ fn image(path: &Path, slice_offset: u64, plan: &load_plan::LoadPlan) -> hosted::
     }
 }
 
-fn signature(slice: &[u8]) -> Result<Signature> {
+/// The slice's code signature; `None` when it is unsigned.
+fn signature(slice: &[u8]) -> Result<Option<Signature>> {
     let Some(signature) = code_signature::read(slice)? else {
-        bail!("the executable is unsigned: arm64 exec admits only signed images");
+        return Ok(None);
     };
     let blob = |magic: u32, body: Option<Vec<u8>>| {
         body.map(|body| {
@@ -115,7 +129,7 @@ fn signature(slice: &[u8]) -> Result<Signature> {
             blob
         })
     };
-    Ok(Signature {
+    Ok(Some(Signature {
         directory_flags: signature.flags,
         platform: signature.platform,
         hash_type: signature.hash_type,
@@ -125,19 +139,7 @@ fn signature(slice: &[u8]) -> Result<Signature> {
         entitlements: blob(0xfade_7171, signature.entitlements),
         der_entitlements: blob(0xfade_7172, signature.der_entitlements),
         apple_signed: signature.apple_signed,
-    })
-}
-
-/// `path` under the first root holding it, else the host's own.
-fn guest_path(roots: &[PathBuf], path: &Path) -> PathBuf {
-    match path.strip_prefix("/") {
-        Ok(relative) => roots
-            .iter()
-            .map(|root| root.join(relative))
-            .find(|candidate| candidate.exists())
-            .unwrap_or_else(|| path.to_owned()),
-        Err(_) => path.to_owned(),
-    }
+    }))
 }
 
 /// The image exec activates.
@@ -157,7 +159,12 @@ fn activate(roots: &[PathBuf], program: &Path, argv: Vec<Vec<u8>>) -> Result<Act
     let file = guest_path(roots, program);
     let data = std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?;
     let head = &data[..data.len().min(hosted::memory::PAGE_BYTES as usize)];
-    let tokens = match activation::activator(head) {
+    let activator = activation::activator(head);
+    // A file that is no program at all is explained as such first.
+    if activator.is_ok() {
+        program::check_executable(program, &file)?;
+    }
+    let tokens = match activator {
         Ok(Activator::MachO) => {
             return Ok(Activated {
                 file,
@@ -167,14 +174,20 @@ fn activate(roots: &[PathBuf], program: &Path, argv: Vec<Vec<u8>>) -> Result<Act
             });
         }
         Ok(Activator::Interpreter(tokens)) => tokens,
-        Err(errno) => bail!("{} cannot be executed: errno {errno}", program.display()),
+        Err(errno) => return Err(program::not_runnable(program, &file, errno)),
     };
     let interpreter = PathBuf::from(OsStr::from_bytes(&tokens[0]));
     let mut interpreted = tokens;
     interpreted.push(program.as_os_str().as_bytes().to_vec());
     interpreted.extend(argv.into_iter().skip(1));
     let file = guest_path(roots, &interpreter);
-    let data = std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?;
+    let data = std::fs::read(&file).with_context(|| {
+        format!(
+            "{}'s interpreter {} cannot be read",
+            program.display(),
+            interpreter.display()
+        )
+    })?;
     if data.starts_with(b"#!") {
         bail!(
             "{}: nested interpreters are not executed (ENOEXEC)",
@@ -189,11 +202,39 @@ fn activate(roots: &[PathBuf], program: &Path, argv: Vec<Vec<u8>>) -> Result<Act
     })
 }
 
+/// A run the hosted runtime could not continue, introduced for people: the
+/// runtime's own text says which call it refused and why.
+fn stopped(program: &Path, error: anyhow::Error) -> anyhow::Error {
+    anyhow!(
+        "{0} stopped: it asked for something Stela's hosted macOS does not support yet.\n\n    \
+         {error:#}\n\nStela refuses what it cannot do faithfully instead of guessing. `stela run \
+         --trace {0}` shows the calls before it; the indented line is what to report.",
+        program.display()
+    )
+}
+
 impl Run {
-    /// The host command that activates another guest image here.
-    fn reexec(&self) -> Result<Vec<OsString>> {
+    /// `stela PROGRAM [ARGS...]`: the program and its arguments, every
+    /// option at its default.
+    pub(crate) fn shorthand(words: Vec<OsString>) -> Result<Self> {
+        let mut words = words.into_iter();
+        let program = words.next().context("no program named")?;
+        Ok(Self {
+            program: program.into(),
+            arguments: words.collect(),
+            root: vec![],
+            argv0: None,
+            cpu_subtype: None,
+            trace: false,
+            statistics: false,
+        })
+    }
+
+    /// The host command that activates another guest image here, with the
+    /// roots this run chose.
+    fn reexec(&self, roots: &[PathBuf]) -> Result<Vec<OsString>> {
         let mut command = vec![std::env::current_exe()?.into_os_string(), "run".into()];
-        for root in &self.root {
+        for root in roots {
             command.push("--root".into());
             command.push(root.clone().into_os_string());
         }
@@ -206,11 +247,31 @@ impl Run {
         Ok(command)
     }
 
+    /// Whether exec could start `program` with the host's files alone:
+    /// without guest system files, a program Stela could not run anyway
+    /// is the better message.
+    fn check_runnable(&self) -> Result<()> {
+        let target = program::resolve(&[], &self.program, std::env::var_os("PATH").as_deref())?;
+        let activated = activate(&[], &target.program, vec![])?;
+        let (_, slice) = select_slice(&activated.data, self.cpu_subtype)?;
+        if signature(slice)?.is_none() {
+            return Err(program::unsigned(Path::new(OsStr::from_bytes(
+                &activated.path,
+            ))));
+        }
+        Ok(())
+    }
+
     pub(crate) fn run(self) -> Result<()> {
-        let argv0 = self
-            .argv0
-            .clone()
-            .unwrap_or_else(|| self.program.clone().into_os_string());
+        let roots = match guest_system::roots(&self.root) {
+            Ok(roots) => roots,
+            Err(missing) => {
+                self.check_runnable()?;
+                return Err(missing);
+            }
+        };
+        let target = program::resolve(&roots, &self.program, std::env::var_os("PATH").as_deref())?;
+        let argv0 = self.argv0.clone().unwrap_or(target.argv0);
         let mut argv = vec![argv0.as_bytes().to_vec()];
         argv.extend(
             self.arguments
@@ -222,20 +283,23 @@ impl Run {
             path: program,
             argv,
             data,
-        } = activate(&self.root, &self.program, argv)?;
+        } = activate(&roots, &target.program, argv)?;
+        let shown = Path::new(OsStr::from_bytes(&program));
         let (slice_offset, slice) = select_slice(&data, self.cpu_subtype)?;
         let plan = load_plan::plan(slice)?;
-        let signature = signature(slice)?;
+        let signature = signature(slice)?.ok_or_else(|| program::unsigned(shown))?;
         let dylinker_path = plan
             .dylinker
             .as_deref()
             .context("the executable names no LC_LOAD_DYLINKER")?;
-        let dylinker_file = guest_path(&self.root, Path::new(dylinker_path));
+        let dylinker_file = guest_path(&roots, Path::new(dylinker_path));
         let dylinker_data = std::fs::read(&dylinker_file)
             .with_context(|| format!("cannot read {}", dylinker_file.display()))?;
         let (dylinker_offset, dylinker_slice) = select_slice(&dylinker_data, None)?;
         let dylinker_plan = load_plan::plan_dynamic_linker(dylinker_slice)?;
-        let environment = std::env::vars_os()
+        let environment: Vec<Vec<u8>> = std::env::vars_os()
+            .filter(|(key, _)| !target.environment.iter().any(|(added, _)| added == key))
+            .chain(target.environment.iter().cloned())
             .map(|(key, value)| {
                 let mut entry = key.as_bytes().to_vec();
                 entry.push(b'=');
@@ -248,19 +312,19 @@ impl Run {
             executable: image(&program_file, slice_offset, &plan),
             slice_offset,
             cpu_subtype: cpu_subtype(slice)?,
-            executable_path: program,
+            executable_path: program.clone(),
             signature,
             dylinker: Dylinker {
                 image: image(&dylinker_file, dylinker_offset, &dylinker_plan.image),
                 entry: dylinker_plan.thread.pc,
             },
-            roots: self.root.clone(),
-            reexec: self.reexec()?,
+            roots: roots.clone(),
+            reexec: self.reexec(&roots)?,
             argv,
             environment,
             trace: self.trace,
         };
-        let report = hosted::run(launch)?;
+        let report = hosted::run(launch).map_err(|error| stopped(&target.program, error))?;
         if self.statistics {
             for (name, count) in &report.calls {
                 eprintln!("stela: {count:>8} {name}");
@@ -268,5 +332,45 @@ impl Run {
             eprintln!("stela: {:>8} shared-region pages slid", report.slid_pages);
         }
         report.termination.end_host_process()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_shorthand_runs_the_program_with_every_option_at_its_default() -> Result<()> {
+        let run = Run::shorthand(vec!["./hello".into(), "--help".into(), "x".into()])?;
+        assert_eq!(run.program, Path::new("./hello"));
+        assert_eq!(run.arguments, ["--help", "x"]);
+        assert!(run.root.is_empty() && !run.trace && !run.statistics);
+        assert!(Run::shorthand(vec![]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn child_images_get_the_chosen_roots_explicitly() -> Result<()> {
+        let run = Run::shorthand(vec!["hello".into()])?;
+        let command = run.reexec(&[PathBuf::from("/guest")])?;
+        assert_eq!(
+            command[1..],
+            ["run", "--root", "/guest"].map(OsString::from)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_stopped_run_shows_the_refusal_and_how_to_trace_it() {
+        let message = stopped(
+            Path::new("./hello"),
+            anyhow!("BSD system call frob (999) is not implemented by the hosted kernel"),
+        )
+        .to_string();
+        assert!(
+            message.contains("    BSD system call frob (999)"),
+            "{message}"
+        );
+        assert!(message.contains("stela run --trace ./hello"), "{message}");
     }
 }

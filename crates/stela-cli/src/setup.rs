@@ -74,8 +74,8 @@ use stela_loader::{
 };
 
 /// The pinned system target.
-const PINNED_BUILD: &str = "26A434";
-const PINNED_MODEL: &str = "Mac14,3";
+pub(crate) const PINNED_BUILD: &str = "26A434";
+pub(crate) const PINNED_MODEL: &str = "Mac14,3";
 const RECORD: &str = "EFI/stela/setup.json";
 /// A margin so no volume is filled to its last byte.
 pub(super) const MARGIN: u64 = 64 * 1024 * 1024;
@@ -1282,7 +1282,8 @@ fn default_efi_image() -> Option<PathBuf> {
     [beside, built].into_iter().find(|path| path.is_file())
 }
 
-fn download_dir() -> PathBuf {
+/// Where `--fetch` keeps downloaded restore images.
+pub(crate) fn download_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
     if cfg!(target_os = "macos") {
         home.join("Library/Caches/Stela/images")
@@ -1296,8 +1297,14 @@ fn download_dir() -> PathBuf {
 /// Download the pinned image, or reuse a complete earlier download.
 fn fetch(command: &Setup) -> Result<PathBuf> {
     let directory = command.download_dir.clone().unwrap_or_else(download_dir);
+    fetch_image(&directory, &command.build, command.model())
+}
+
+/// Download `build`'s restore image for `model` from Apple's catalog into
+/// `directory`, or reuse a complete earlier download from the same entry.
+pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<PathBuf> {
     let images = restore::catalog()?;
-    let image = restore::select(&images, Some(&command.build), Some(command.model()))?;
+    let image = restore::select(&images, Some(build), Some(model))?;
     ensure!(
         image.build.bytes().all(|c| c.is_ascii_alphanumeric())
             && image

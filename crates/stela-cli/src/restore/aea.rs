@@ -411,6 +411,45 @@ pub fn decrypt(input: &Path, key: &Path, output: &Path) -> Result<serde_json::Va
     }))
 }
 
+/// Decrypt the AEA1 profile-1 archive read from `input`, whose metadata is
+/// `metadata`, with its recipient key `pem` into the new file `output`: the
+/// archive streams through macOS `aea`, so an archive still inside its IPSW
+/// needs no copy of its own.
+pub fn decrypt_reader(
+    metadata: &Metadata,
+    pem: &str,
+    input: &mut impl Read,
+    output: &Path,
+) -> Result<u64> {
+    ensure!(!output.try_exists()?, "{} exists", output.display());
+    ensure!(pem.len() <= MAX_KEY, "key exceeds 64 KiB");
+    let archive_key = archive_key(metadata, pem)?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut key_file = tempfile::NamedTempFile::new_in(parent)?;
+    key_file.write_all(&archive_key)?;
+    let mut child = std::process::Command::new(AEA_TOOL)
+        .arg("decrypt")
+        .arg("-key")
+        .arg(key_file.path())
+        .arg("-o")
+        .arg(output)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("cannot run {AEA_TOOL}"))?;
+    let copied = {
+        let mut stdin = child.stdin.take().context("aea has no standard input")?;
+        std::io::copy(input, &mut stdin)
+    };
+    let status = child.wait()?;
+    drop(key_file);
+    ensure!(status.success(), "{AEA_TOOL} decrypt failed with {status}");
+    copied.context("cannot stream the archive into aea")?;
+    Ok(File::open(output)?.metadata()?.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
