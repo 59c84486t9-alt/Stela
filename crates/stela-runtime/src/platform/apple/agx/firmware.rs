@@ -694,9 +694,10 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
         0x1f => Err(
             "GFX device control 0x1f updates an app role in the firmware scheduler's context registry, which the model does not keep",
         ),
-        0x24 => Err(
-            "GFX device control 0x24 is an AFR perf-state override the 26A434 firmware lacks; it answers with a firmware log warning the model does not post",
-        ),
+        // An AFR perf-state override the 26A434 firmware lacks: its handler
+        // only logs a warning, and firmware log records are excluded
+        // (docs/research/agx.md §5.7), so the entry is consumed.
+        0x24 => form(&[(4, 8)], "GFX AFR perf state has fields beyond its word"),
         0x29 => Err(
             "GFX device control 0x29 hands an exiting context to a firmware teardown thread the model does not run",
         ),
@@ -1001,6 +1002,7 @@ mod tests {
             filled(0x17, 4..0xc, 0x5a),
             filled(0x18, 8..0x10, 0x5a),
             filled(0x19, 4..5, 1),
+            filled(0x24, 4..8, 0x5a),
             filled(0x25, 4..0xa, 2),
             filled(0x33, 4..0xc, 0x5a),
             filled(0x3b, 4..0x10, 0x5a),
@@ -1198,7 +1200,6 @@ mod tests {
             (0x5, "performance-counter"),
             (0x9, "scheduler thread"),
             (0x1f, "context registry"),
-            (0x24, "AFR"),
             (0x29, "teardown thread"),
             (0x2c, "fatal"),
             (0x26, "host-allocation"),
