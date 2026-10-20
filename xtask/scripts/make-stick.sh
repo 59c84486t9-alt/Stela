@@ -27,6 +27,8 @@ mode=$1 target=$2
 shift 2
 extra=${*:---key-seconds 120 --deadline 1800}
 [[ -f $EFI ]] || die "no stela.efi at $EFI"
+# macOS mounts a physical disk's EFI system partition only for root.
+esp_root=()
 info=$(mktemp -t make-stick)
 trap 'rm -f $info' EXIT
 
@@ -60,6 +62,7 @@ case $mode in
     print -n "This erases every byte of $dev. Type $dev to continue: "
     read -r answer
     [[ $answer == $dev ]] || die "not confirmed"
+    esp_root=(sudo)
     ;;
   *) die "unknown mode $mode" ;;
 esac
@@ -68,7 +71,7 @@ diskutil partitionDisk $dev GPT "MS-DOS FAT32" STELA R
 mount_point() { diskutil info -plist $1 > $info; field $info MountPoint; }
 diskutil info -plist ${dev}s1 > $info
 [[ $(field $info Content) == EFI ]] || die "${dev}s1 is not an EFI system partition"
-diskutil mount ${dev}s1
+$esp_root diskutil mount ${dev}s1
 esp=$(mount_point ${dev}s1)
 data=$(mount_point ${dev}s2)
 [[ -d $esp && -d $data ]] || die "partitions not mounted (esp=$esp data=$data)"
@@ -76,13 +79,14 @@ diskutil info -plist ${dev}s2 > $info
 guid=$(field $info DiskUUID)
 [[ $guid == ????????-????-????-????-???????????? ]] || die "no partition GUID for ${dev}s2"
 
-mkdir -p "$esp/EFI/BOOT" "$esp/EFI/stela" "$data/EFI/stela"
-cp "$EFI" "$esp/EFI/BOOT/BOOTX64.EFI"
-print -n -- "--host-check --nor-file $guid:/EFI/stela/STELALOG.BIN $extra" > "$esp/EFI/stela/stela.cfg"
+$esp_root mkdir -p "$esp/EFI/BOOT" "$esp/EFI/stela"
+mkdir -p "$data/EFI/stela"
+$esp_root cp "$EFI" "$esp/EFI/BOOT/BOOTX64.EFI"
+print -n -- "--host-check --nor-file $guid:/EFI/stela/STELALOG.BIN $extra" | $esp_root tee "$esp/EFI/stela/stela.cfg" > /dev/null
 # dd, not mkfile -n: every cluster is allocated, contiguous on a fresh volume.
 dd if=/dev/zero of="$data/EFI/stela/STELALOG.BIN" bs=1m count=$LOG_MIB
 sync
 print "stela.cfg: $(cat "$esp/EFI/stela/stela.cfg")"
 print "BOOTX64.EFI sha256: $(shasum -a 256 "$EFI" | cut -d' ' -f1)"
-diskutil unmountDisk $dev
+$esp_root diskutil unmountDisk $dev
 print "make-stick: done"
