@@ -27,9 +27,9 @@ use super::{
     system::{Feature, Register as SystemRegister},
     timer,
 };
-use crate::pauth;
 pub use crate::platform::apple::bus::Transition;
 pub use crate::platform::dma::Memory;
+use crate::{pauth, scalable::ScalableState};
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 use core::fmt;
 use pointer::{PointerInputs, PointerOperation, PointerResult};
@@ -39,6 +39,7 @@ use stela_compiler::{
     aarch64::{
         AddressMode, Decoder, FloatingPointOperation, MemoryTransfer, Operation, Register, Width,
         register_offset::IndexExtend,
+        simd::fp8_conversion,
         system::{
             exception::{AuthenticationKey, Operation as ExceptionOperation},
             registers::{Direction, Encoding, RegisterAccess},
@@ -1845,11 +1846,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .then(|| Exception::synchronous(Class::BranchTarget, u32::from(btype), pc))
     }
 
-    /// An instruction whose FP, SVE and SME access checks the engine
+    /// An instruction whose FP, SVE, SME and FPMR access checks the engine
     /// applies before it runs: after a Branch Target exception, the first
-    /// check that fails traps. One that passes runs on its own
-    /// ([`scalable`]), scalar FP in streaming mode as a block that then
-    /// zeroes the upper Z bits it wrote.
+    /// check that fails traps, or is UNDEFINED (`CheckFPMREnabled`). One
+    /// that passes runs on its own: the AdvSIMD FP8 conversions here
+    /// ([`Self::fp8_conversion`]), SVE and SME forms through [`scalable`],
+    /// and scalar FP in streaming mode as a block that then zeroes the upper
+    /// Z bits it wrote.
     #[cold]
     fn checked_instruction(&mut self, pc: u64, word: u32) -> Step {
         if self.cpu.pstate.btype != 0
@@ -1868,11 +1871,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(Denial::Sme { el, smtc }) => {
                 Exception::synchronous(Class::SmeAccess, smtc, pc).to(el)
             }
+            Err(Denial::Undefined) => return self.undefined(),
             Err(Denial::Unimplemented(feature)) => {
                 return Err(self.unsupported(RequirementKind::Instruction {
                     word,
                     detail: format!("its access check needs {feature}, which the engine lacks"),
                 }));
+            }
+            Ok(()) if let Some(operand) = fp8_conversion::decode(word) => {
+                return self.fp8_conversion(word, &operand);
             }
             Ok(()) if checks.iter().all(|check| *check == Check::Fp) => {
                 return self.streaming_scalar(pc, word);
@@ -1887,6 +1894,44 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.take(exception);
         Ok(())
+    }
+
+    /// F1CVTL, F2CVTL, BF1CVTL, BF2CVTL and FCVTN (FP8) and their upper
+    /// forms, after their checks passed: the shared FP8 conversion with
+    /// FPMR's formats and scales and FPCR, the cumulative exceptions ORed
+    /// into FPSR. In streaming mode the V write zeroes the upper Z bits.
+    fn fp8_conversion(&mut self, word: u32, operand: &fp8_conversion::Operand) -> Step {
+        let Some(fpmr) = self.cpu.scalable.as_ref().map(ScalableState::fpmr) else {
+            return Err(self.unsupported(RequirementKind::Instruction {
+                word,
+                detail: "an FP8 conversion on a PE without FPMR".into(),
+            }));
+        };
+        let fpcr = self.cpu.state.fpcr;
+        let register = |index: u8| self.cpu.state.v[usize::from(index)];
+        let converted = crate::floating::scalable::fixed_fp8_conversion(
+            operand,
+            register(operand.source),
+            register(operand.second_source),
+            register(operand.destination),
+            fpcr,
+            fpmr,
+        );
+        let Ok((value, exceptions)) = converted else {
+            return Err(self.unsupported(RequirementKind::Instruction {
+                word,
+                detail: format!("FPCR {fpcr:#x} enables a trapped FP exception"),
+            }));
+        };
+        let scalable = self.cpu.scalable.as_mut().expect("checked above");
+        if let Err(error) = scalable.write_v(&mut self.cpu.state, operand.destination, value) {
+            return Err(self.unsupported(RequirementKind::Instruction {
+                word,
+                detail: format!("its FP8 result cannot be written: {error}"),
+            }));
+        }
+        self.cpu.state.fpsr |= exceptions;
+        self.next()
     }
 
     /// Blocks the next native run may chain into: none past the time slice
@@ -2422,7 +2467,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .iter()
                 .position(|word| is_floating_point(u32::from_le_bytes(*word)));
             match first {
-                Some(0) => return Ok(Fetched::Exception(self.floating_point_exception(pc))),
+                // CheckFPMREnabled comes before the FP access check.
+                Some(0) => {
+                    let word = u32::from_le_bytes(source[..4].try_into().expect("a word"));
+                    if chip.checks(word).contains(&Check::Fpmr) {
+                        return Ok(Fetched::Checked(word));
+                    }
+                    return Ok(Fetched::Exception(self.floating_point_exception(pc)));
+                }
                 Some(index) => length = index * 4,
                 None => {}
             }
@@ -5994,6 +6046,129 @@ mod tests {
             .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
         machine.system_instruction(WFIT_X1).unwrap();
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+    }
+
+    #[test]
+    fn fp8_conversions_take_fpmr_formats_behind_enfpm_and_the_fp_check() {
+        const F1CVTL: u32 = 0x2e21_7820; // f1cvtl v0.8h, v1.8b
+        const F2CVTL2: u32 = 0x6e61_7820; // f2cvtl2 v0.8h, v1.16b
+        const BF1CVTL: u32 = 0x2ea1_7820; // bf1cvtl v0.8h, v1.8b
+        const FCVTN_H: u32 = 0x0e42_f420; // fcvtn v0.8b, v1.4h, v2.4h
+        const FCVTN2_S: u32 = 0x4e02_f420; // fcvtn2 v0.16b, v1.4s, v2.4s
+        const FSCALE: u32 = 0x6ea2_fc20; // fscale v0.4s, v1.4s, v2.4s
+        const E4M3: u64 = 1;
+        const HCRX_ENFPM: u64 = 1 << 23;
+        const SCTLR_ENFPM: u64 = 1 << 34;
+        let code = [F1CVTL, F2CVTL2, BF1CVTL, FCVTN_H, FCVTN2_S, FSCALE];
+        let mut machine = machine(&code);
+        let chip = machine.profile.chip;
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        registers.set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
+        registers.set(SystemRegister::CPACR_EL1, 0, 0b11 << 20);
+        registers.set(SystemRegister::CPTR_EL2, 0, 0b11 << 20);
+        let run = |machine: &mut Machine<FakeHost, NoDevices>, index: u64, el: u8| {
+            machine.cpu.set_pstate(Pstate {
+                sp: el != 0,
+                ..Pstate::reset(el.max(1))
+            });
+            machine.cpu.pstate.el = el;
+            machine.derived_changed();
+            machine.cpu.pc = BASE + 4 * index;
+            machine.step()
+        };
+        if !Feature::FEAT_FP8.on(chip) {
+            // The chip lacks the forms: they compile as the UDF they are.
+            for index in 0..code.len() as u64 {
+                assert!(!matches!(
+                    machine.fetch_block(BASE + 4 * index, true),
+                    Ok(Fetched::Checked(_))
+                ));
+            }
+            return;
+        }
+        // HCRX_EL2.EnFPM clear makes them UNDEFINED at EL1, even with FP
+        // access trapped (CheckFPMREnabled comes first).
+        machine.cpu.state.v[1] = [0x3c38, 0];
+        run(&mut machine, 0, 1).unwrap();
+        assert_eq!(
+            (
+                machine.cpu.pstate.el,
+                machine.cpu.read(SystemRegister::ESR_EL1)
+            ),
+            (1, 0x0200_0000)
+        );
+        machine.cpu.registers.set(SystemRegister::CPACR_EL1, 0, 0);
+        run(&mut machine, 0, 1).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+        // With EnFPM set, the FP access check traps (EC 0x07).
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCRX_EL2, 0, HCRX_ENFPM);
+        run(&mut machine, 0, 1).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x1fe0_0000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CPACR_EL1, 0, 0b11 << 20);
+        // EL0 also needs SCTLR_EL1.EnFPM.
+        run(&mut machine, 0, 0).unwrap();
+        assert_eq!(
+            (
+                machine.cpu.pstate.el,
+                machine.cpu.read(SystemRegister::ESR_EL1)
+            ),
+            (1, 0x0200_0000)
+        );
+        let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr | SCTLR_ENFPM);
+        // FPMR.F8S1 0 is E5M2, whose 0x3c is 1.0 and 0x38 0.5; E4M3 reads
+        // 0x38 as 1.0 and 0x3c as 1.5. The widened halves fill V0.
+        let fpmr = |machine: &mut Machine<FakeHost, NoDevices>, value: u64| {
+            machine.cpu.scalable.as_mut().unwrap().set_fpmr(value);
+        };
+        fpmr(&mut machine, 0);
+        run(&mut machine, 0, 0).unwrap();
+        assert_eq!(machine.cpu.state.v[0], [0x3c00_3800, 0]);
+        assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (0, BASE + 4));
+        fpmr(&mut machine, E4M3);
+        run(&mut machine, 0, 1).unwrap();
+        assert_eq!(machine.cpu.state.v[0], [0x3e00_3c00, 0]);
+        // F2CVTL2 takes FPMR.F8S2 and the upper half of V1.
+        machine.cpu.state.v[1] = [0, 0x38];
+        fpmr(&mut machine, E4M3 << 3);
+        run(&mut machine, 1, 1).unwrap();
+        assert_eq!(machine.cpu.state.v[0], [0x3c00, 0]);
+        // BF1CVTL widens to BFloat16: E4M3 1.0 is 0x3f80.
+        machine.cpu.state.v[1] = [0x38, 0];
+        fpmr(&mut machine, E4M3);
+        run(&mut machine, 2, 1).unwrap();
+        assert_eq!(machine.cpu.state.v[0], [0x3f80, 0]);
+        // FCVTN narrows the halves of V1 then V2 to FPMR.F8D's E4M3, and
+        // 1.0 + 2^-10 is inexact.
+        fpmr(&mut machine, E4M3 << 6);
+        machine.cpu.state.v[1] = [0x3c00, 0];
+        machine.cpu.state.v[2] = [0x3c01, 0];
+        machine.cpu.state.fpsr = 0;
+        run(&mut machine, 3, 1).unwrap();
+        assert_eq!(machine.cpu.state.v[0], [0x38 << 32 | 0x38, 0]);
+        assert_eq!(machine.cpu.state.fpsr, 1 << 4, "FPSR.IXC");
+        // FCVTN2 from singles keeps V0's lower half.
+        machine.cpu.state.v[0] = [0x1234, 0];
+        machine.cpu.state.v[1] = [0x3f80_0000, 0];
+        machine.cpu.state.v[2] = [0, 0];
+        run(&mut machine, 4, 1).unwrap();
+        assert_eq!(machine.cpu.state.v[0], [0x1234, 0x38]);
+        assert_eq!(machine.cpu.pc, BASE + 20);
+        // FSCALE, FEAT_FP8 without FPMR, compiles natively.
+        assert!(matches!(
+            machine.fetch_block(BASE + 20, true),
+            Ok(Fetched::Block(_))
+        ));
     }
 
     /// Execute WFI or WFE and schedule as `Machine::run` does next.

@@ -142,6 +142,10 @@ const SME_RUNS: &str = "the engine runs streaming mode, ZA and ZT0 at a 512-bit 
      (engine::scalable)";
 const FP8_PENDING: &str = "the FP8 outer products and dot products need FPMR, which the engine \
      does not implement";
+const FPMR: &str = "FPMR holds its fields with the scalable state, which clears it as \
+     PSTATE.SM changes, behind SCTLR_ELx.EnFPM and HCRX_EL2.EnFPM";
+const FP8: &str = "the engine completes F1CVTL, F2CVTL, BF1CVTL, BF2CVTL and FCVTN (FP8) \
+     with FPMR's formats and scales, and FSCALE compiles; the SVE and SME FP8 forms stop";
 const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCTX run their \
      generated accessors, with SCTLR_ELx.EnRCTX and HFGITR_EL2 traps, and complete with no \
      effect: the engine keeps no prediction state a later context could use";
@@ -786,7 +790,12 @@ pub const TABLE: &[Row] = &[
         "FEAT_PAuth_LR",
         engine(true, PAUTH_LR),
     ),
-    // ID_AA64MMFR3_EL1
+    // ID_AA64PFR2_EL1.FPMR and ID_AA64FPFR0_EL1: the FP8 conversions
+    // (F8CVT) in both formats (F8E5M2, F8E4M3); no FP8 arithmetic feature.
+    feature(ID_AA64PFR2_EL1, 32, 1, "FEAT_FPMR", engine(true, FPMR)),
+    feature(ID_AA64FPFR0_EL1, 0, 1, "FEAT_FP8", engine(true, FP8)),
+    feature(ID_AA64FPFR0_EL1, 1, 1, "FEAT_FP8", engine(true, FP8)),
+    feature(ID_AA64FPFR0_EL1, 31, 1, "FEAT_FP8", engine(true, FP8)),
     feature(
         ID_AA64MMFR3_EL1,
         4,
@@ -1607,6 +1616,15 @@ mod tests {
             let m6 = chip == Chip::AppleM6;
             assert_eq!(field(chip, ID_AA64ISAR3_EL1, 12), 2 * u64::from(m6));
             assert_eq!(field(chip, ID_AA64MMFR3_EL1, 4), u64::from(m6));
+            // The M6's FEAT_FPMR (PFR2.FPMR) and FEAT_FP8 conversions
+            // (FPFR0.F8CVT, F8E4M3 and F8E5M2).
+            assert_eq!(field(chip, ID_AA64PFR2_EL1, 32), u64::from(m6));
+            let fpfr0 = derive(chip, TargetCpu::detect(), true, Speculation::NONE)
+                .into_iter()
+                .find(|(register, _)| *register == ID_AA64FPFR0_EL1)
+                .unwrap()
+                .1;
+            assert_eq!(fpfr0, if m6 { 1 << 31 | 0b11 } else { 0 }, "{chip:?}");
             // Spec_FPACC, present with the M6's FEAT_FPACCOMBINE, reads 0:
             // not disclosed.
             assert_eq!(field(chip, ID_AA64MMFR3_EL1, 60), 0);

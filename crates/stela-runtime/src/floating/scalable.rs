@@ -14,6 +14,8 @@ mod sme_fp8_matrix;
 mod sme_matrix;
 mod sme_vector;
 
+pub(crate) use fp8_conversion_fixed::convert as fixed_fp8_conversion;
+
 use stela_compiler::{
     GuestState,
     aarch64::{

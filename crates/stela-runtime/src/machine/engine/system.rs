@@ -634,6 +634,13 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::FPCR => u64::from(cpu.state.fpcr),
             Register::FPSR => u64::from(cpu.state.fpsr),
             Register::SVCR => cpu.svcr(),
+            Register::FPMR => match cpu.scalable.as_ref() {
+                Some(scalable) => scalable.fpmr(),
+                None => {
+                    self.refuse("FPMR on a PE without its scalable state");
+                    0
+                }
+            },
             Register::ISR_EL1 => self.pending(),
             Register::CCSIDR_EL1 => match cpu.caches {
                 Some(caches) => caches.ccsidr(cpu.registers.get(Register::CSSELR_EL1, 0)),
@@ -765,6 +772,18 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::FPSR => {
                 cpu.state.fpsr = (value & !cpu.registers.res0(Register::FPSR)) as u32;
                 return Ok(());
+            }
+            // FPMR lives with the scalable state, which resets it whenever
+            // PSTATE.SM changes (ResetSVEState).
+            Register::FPMR => {
+                let value = value & !cpu.registers.res0(Register::FPMR);
+                return match cpu.scalable.as_mut() {
+                    Some(scalable) => {
+                        scalable.set_fpmr(value);
+                        Ok(())
+                    }
+                    None => Err(Effect::Refused("FPMR on a PE without its scalable state")),
+                };
             }
             _ => {}
         }
@@ -1886,6 +1905,77 @@ mod tests {
             | u64::from(rt) << 5
             | u64::from(encoding.crm()) << 1
             | u64::from(read)
+    }
+
+    #[test]
+    fn fpmr_holds_its_fields_behind_enfpm_and_clears_as_streaming_mode_changes() {
+        const FPMR: Encoding = Encoding::new(3, 3, 4, 4, 2);
+        const SMSTART: u32 = 0xd503_477f;
+        const SMSTOP: u32 = 0xd503_467f;
+        const ENABLED: u64 = 0b11 << 24 | 0b11 << 20;
+        const HCRX_ENFPM: u64 = 1 << 23;
+        const SCTLR_ENFPM: u64 = 1 << 34;
+        // EC 0x18 with ISS Op0 3, Op2 2, Op1 3, CRn 4, CRm 4 and a read of Xt.
+        let fpmr_trap = |rt: u64| 0x18 << 26 | 1 << 25 | 0x34_d009 | rt << 5;
+        let mut machine = machine(&[]);
+        let chip = machine.profile.chip;
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x2_0000);
+        machine.cpu.registers.set(Register::CPACR_EL1, 0, ENABLED);
+        machine.cpu.registers.set(Register::CPTR_EL2, 0, ENABLED);
+        machine.derived_changed();
+        let run = |machine: &mut TestMachine, el: u8, word: u32| {
+            machine.cpu.pstate = Pstate {
+                sp: el != 0,
+                ..Pstate::reset(el.max(1))
+            };
+            machine.cpu.pstate.el = el;
+            machine.cpu.pc = BASE;
+            machine.system_instruction(word)
+        };
+        if !Feature::FEAT_FPMR.on(chip) {
+            run(&mut machine, 1, access(true, FPMR, 0)).unwrap();
+            assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+            return;
+        }
+        // HCRX_EL2.EnFPM clear traps EL1's accesses to EL2 with EC 0x18.
+        run(&mut machine, 1, access(true, FPMR, 0)).unwrap();
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.read(Register::ESR_EL2)),
+            (2, fpmr_trap(0))
+        );
+        machine.cpu.registers.set(Register::HCRX_EL2, 0, HCRX_ENFPM);
+        // FPMR holds every field and reads its RES0 bits as 0.
+        machine.cpu.state.x[3] = u64::MAX;
+        run(&mut machine, 1, access(false, FPMR, 3)).unwrap();
+        run(&mut machine, 1, access(true, FPMR, 4)).unwrap();
+        assert_eq!(machine.cpu.state.x[4], 0x0000_003f_ff7f_c1ff);
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        // EL0 also needs SCTLR_EL1.EnFPM, whose trap goes to EL1.
+        run(&mut machine, 0, access(true, FPMR, 5)).unwrap();
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.read(Register::ESR_EL1)),
+            (1, fpmr_trap(5))
+        );
+        let sctlr = machine.cpu.read(Register::SCTLR_EL1);
+        machine
+            .cpu
+            .registers
+            .set(Register::SCTLR_EL1, 0, sctlr | SCTLR_ENFPM);
+        run(&mut machine, 0, access(true, FPMR, 5)).unwrap();
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.state.x[5]),
+            (0, 0x0000_003f_ff7f_c1ff)
+        );
+        // Entering and leaving streaming mode resets FPMR (ResetSVEState).
+        run(&mut machine, 1, SMSTART).unwrap();
+        assert_eq!(machine.cpu.svcr() & 1, 1);
+        run(&mut machine, 1, access(true, FPMR, 6)).unwrap();
+        assert_eq!(machine.cpu.state.x[6], 0);
+        run(&mut machine, 1, access(false, FPMR, 3)).unwrap();
+        run(&mut machine, 1, SMSTOP).unwrap();
+        run(&mut machine, 1, access(true, FPMR, 6)).unwrap();
+        assert_eq!((machine.cpu.svcr(), machine.cpu.state.x[6]), (0, 0));
     }
 
     #[test]

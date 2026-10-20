@@ -2,12 +2,16 @@
 //! with HCR_EL2.E2H RES1: `AArch64_CheckFPEnabled`,
 //! `AArch64_CheckFPAdvSIMDEnabled`, `CheckSVEEnabled`,
 //! `CheckNonStreamingSVEEnabled`, `CheckStreamingSVEEnabled`,
-//! `CheckStreamingSVEAndZAEnabled`, `CheckSMEEnabled`, `CheckSMEAndZAEnabled`
-//! and `CheckSMEZT0Enabled`, applied in the order an instruction's pseudocode
+//! `CheckStreamingSVEAndZAEnabled`, `CheckSMEEnabled`, `CheckSMEAndZAEnabled`,
+//! `CheckSMEZT0Enabled` and `CheckFPMREnabled`, applied in the order an instruction's pseudocode
 //! calls them ([`Chip::checks`](super::Chip::checks)). No Apple chip has
 //! FEAT_SVE or FEAT_SME_FA64, so streaming mode is what admits SVE, and
 //! there it makes the AdvSIMD and non-streaming SVE forms illegal.
-use super::{chip::Check, cpu::Cpu, system::Register};
+use super::{
+    chip::Check,
+    cpu::Cpu,
+    system::{Feature, Register},
+};
 
 /// `SMEExceptionType`, as ISS[2:0] (SMTC) of EC 0x1D.
 pub const SMTC_ACCESS: u32 = 0;
@@ -19,6 +23,8 @@ pub const SMTC_INACCESSIBLE_ZT0: u32 = 4;
 const CPACR_FPEN: u32 = 20;
 const SMEN: u32 = 24;
 const SMCR_EZT0: u32 = 30;
+const SCTLR_ENFPM: u32 = 34;
+const HCRX_ENFPM: u32 = 23;
 
 /// SMIDR_EL1.Implementer: Apple's code, as MIDR_EL1 has it.
 const SMIDR_IMPLEMENTER_APPLE: u64 = 0x61 << 24;
@@ -59,6 +65,8 @@ pub enum Denial {
     FloatingPoint(u8),
     /// `SMEAccessTrap` (EC 0x1D) with this SMTC, to this EL.
     Sme { el: u8, smtc: u32 },
+    /// `Undefined()`, as `CheckFPMREnabled` makes an FP8 instruction.
+    Undefined,
     /// A check of a feature the engine does not implement.
     Unimplemented(&'static str),
 }
@@ -119,8 +127,36 @@ fn one(cpu: &Cpu, check: Check) -> Result<(), Denial> {
             }
             Ok(())
         }
-        Check::Fpmr => Err(Denial::Unimplemented("FPMR (FEAT_FPMR)")),
+        Check::Fpmr => fpmr(cpu),
     }
+}
+
+/// `CheckFPMREnabled` without EL3: at EL0 the regime's SCTLR_ELx.EnFPM, then
+/// at EL0 and EL1 outside the host HCRX_EL2.EnFPM (HCRX_EL2 is enabled on
+/// every chip with FEAT_FPMR, which all have FEAT_HCX). Either clear makes
+/// the instruction UNDEFINED.
+fn fpmr(cpu: &Cpu) -> Result<(), Denial> {
+    match cpu.registers.chip().implemented(Feature::FEAT_FPMR) {
+        Ok(true) => {}
+        Ok(false) => return Err(Denial::Undefined),
+        Err(reason) => return Err(Denial::Unimplemented(reason)),
+    }
+    let el = cpu.pstate.el;
+    let host = el == 2 || (el == 0 && cpu.in_host());
+    if el == 0 {
+        let sctlr = if host {
+            Register::SCTLR_EL2
+        } else {
+            Register::SCTLR_EL1
+        };
+        if cpu.field(sctlr, SCTLR_ENFPM, 1) == 0 {
+            return Err(Denial::Undefined);
+        }
+    }
+    if !host && cpu.field(Register::HCRX_EL2, HCRX_ENFPM, 1) == 0 {
+        return Err(Denial::Undefined);
+    }
+    Ok(())
 }
 
 fn za(cpu: &Cpu) -> Result<(), Denial> {
