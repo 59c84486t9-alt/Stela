@@ -14,6 +14,7 @@ use stela_loader::im4m;
 use stela_loader::root_selection::Root;
 use stela_runtime::{apfs::btree::Seal, payload::Purpose};
 
+mod board_firmware;
 mod disk;
 mod recovery_volume;
 
@@ -278,8 +279,9 @@ pub(crate) struct Prepare {
     #[arg(long, value_parser = parse_ecid)]
     ecid: Option<u64>,
     /// A firmware image the board's own devices run, kept under its guest
-    /// file name (such as `USB-C_HPM,47.bin` from `extract-guest-files`);
-    /// repeat for each image.
+    /// file name (such as `USB-C_HPM,47.bin`); repeat for each image. These
+    /// replace the images the DeviceTree's board names, which are otherwise
+    /// taken from the IPSW's restore ramdisk.
     #[arg(long, conflicts_with = "disk")]
     board_firmware: Vec<PathBuf>,
 }
@@ -728,7 +730,10 @@ impl Prepare {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let inputs = Inputs {
+        // Set below when the images come from the restore ramdisk.
+        let sourced: Vec<(String, Decoded)>;
+        let ramdisk_component: Decoded;
+        let mut inputs = Inputs {
             target: Target {
                 product_type: model.clone(),
                 device_class: identity.device_class.clone(),
@@ -759,6 +764,42 @@ impl Prepare {
         };
         let options = self.options(inputs.dram_base()?)?;
         let mut bundle = boot_bundle::prepare(&inputs, &options)?;
+        let mut unresolved = vec![];
+        if self.board_firmware.is_empty() {
+            // The board the bundle's DeviceTree describes names its images;
+            // the same IPSW's restore ramdisk holds them.
+            match board_firmware::needed(&bundle) {
+                Ok(names) if names.is_empty() => {}
+                Ok(names) => {
+                    let ramdisk = match &ramdisk {
+                        Some(ramdisk)
+                            if ramdisk.source.component == components::RESTORE_RAMDISK =>
+                        {
+                            ramdisk
+                        }
+                        _ => {
+                            ramdisk_component = component(
+                                components::RESTORE_RAMDISK,
+                                Some("rdsk"),
+                                RAMDISK_LIMIT,
+                            )?;
+                            &ramdisk_component
+                        }
+                    };
+                    sourced =
+                        board_firmware::from_ramdisk(ramdisk, board_firmware::DIRECTORY, &names)?;
+                    inputs.board_firmware = sourced
+                        .iter()
+                        .map(|(name, decoded)| (name.clone(), input(decoded)))
+                        .collect();
+                    bundle = boot_bundle::prepare(&inputs, &options)?;
+                }
+                Err(error) => unresolved.push(format!(
+                    "board firmware: the DeviceTree is not a board the engine models ({error})"
+                )),
+            }
+        }
+        bundle.manifest.unresolved.extend(unresolved);
         bundle
             .manifest
             .unresolved

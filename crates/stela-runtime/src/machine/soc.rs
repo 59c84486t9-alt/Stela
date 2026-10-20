@@ -1332,6 +1332,32 @@ pub struct I2cController {
     pub targets: Vec<I2cAddress>,
 }
 
+/// The guest file name of the image an HPM die with `personality` runs: the
+/// name macOS keeps it under in `/usr/standalone/firmware`.
+pub fn hpm_firmware_file(personality: &str) -> String {
+    format!("USB-C_{personality}.bin")
+}
+
+impl Board {
+    /// The board firmware images its devices run, by guest file name, each
+    /// once: what a boot bundle must carry for the board's devices.
+    pub fn firmware_files(&self) -> Vec<String> {
+        let mut files: Vec<String> = Vec::new();
+        for target in self.i2cs.iter().flat_map(|i2c| &i2c.targets) {
+            if target.compatible != HPM {
+                continue;
+            }
+            if let Some(personality) = &target.firmware {
+                let file = hpm_firmware_file(personality);
+                if !files.contains(&file) {
+                    files.push(file);
+                }
+            }
+        }
+        files
+    }
+}
+
 /// Digital PHY placement preserves all ADT views for evidence, but maps the
 /// canonical USB2/core regions once. The pipehandler belongs to the same PHY
 /// via `usb-drd*/atc-phy-parent`, whose `reg[3]` supplies its aperture; its
@@ -5863,6 +5889,16 @@ mod tests {
                 hpm(0x3f, Some(1)),
             ]
         );
+        // A board with these buses carries the one image both dies run.
+        let mut with_buses = board(&tree(
+            0x8112,
+            "Apple M2",
+            ["uart-1,samsung", "wdt,s5l8960x", "aic,2"],
+        ))
+        .unwrap();
+        assert!(with_buses.firmware_files().is_empty());
+        with_buses.i2cs = buses.clone();
+        assert_eq!(with_buses.firmware_files(), ["USB-C_HPM,47.bin"]);
         // The manager's line must be a visible AP GPIO pin.
         assert!(place(&io, 0x63, None).is_err());
         assert_eq!(phys[0].usb2, (0x382a90000, 0x4000));

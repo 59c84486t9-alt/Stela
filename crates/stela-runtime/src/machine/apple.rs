@@ -1099,9 +1099,8 @@ impl AppleDevices {
             if target.compatible != super::soc::HPM {
                 continue;
             }
-            let name = format!(
-                "USB-C_{}.bin",
-                target.firmware.as_deref().ok_or("HPM names no firmware")?
+            let name = super::soc::hpm_firmware_file(
+                target.firmware.as_deref().ok_or("HPM names no firmware")?,
             );
             let image =
                 firmware(&name).ok_or_else(|| format!("board firmware {name} was not supplied"))?;
