@@ -11,6 +11,8 @@
 //! RecoveryOSContainer (`stela_loader::recovery::find`), which the engine
 //! builds from the disk; otherwise it reads the `--recovery-bundle`
 //! directory here, because the ESP is readable only through the firmware.
+//! NVRAM that holds the machine in iBoot's recovery mode, as an interrupted
+//! restore leaves it, boots nothing ([`Refusal::RecoveryMode`]).
 //!
 //! Each partition is found as the engine finds it: exactly one whole disk
 //! reports the serial, and exactly one of its GPT partitions has the GUID;
@@ -326,14 +328,24 @@ fn option<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     words.next()
 }
 
+/// Why no boot options came out of [`route`].
+pub enum Refusal {
+    /// NVRAM holds the machine in iBoot's recovery mode
+    /// (`boot_selection::Target::RecoveryMode`): it waits for a restore
+    /// host, Stela's Install macOS (Stela) startup choice.
+    RecoveryMode,
+    Other(&'static str),
+}
+
 /// The engine's options for this boot (`boot_selection::route`).
-pub fn route(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
-    let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+pub fn route(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+    let text =
+        core::str::from_utf8(&options).map_err(|_| Refusal::Other("stela.cfg is not UTF-8"))?;
     let refuse = |error: String| {
         output::arguments(format_args!("NVRAM boot refusal: {error}\n"));
-        "NVRAM's boot choice could not be read or is not modeled"
+        Refusal::Other("NVRAM's boot choice could not be read or is not modeled")
     };
-    let parse = |text: &str| text.parse::<Target>();
+    let parse = |text: &str| text.parse::<Target>().map_err(Refusal::Other);
     let selection = match option(text, boot_selection::PREBOOT_OPTION) {
         Some(preboot) => {
             let nor = option(text, "--nor");
@@ -390,9 +402,18 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
         }
         None => None,
     };
+    if let Some(held) = selection
+        .as_ref()
+        .filter(|s| s.target == boot_selection::Target::RecoveryMode)
+    {
+        if let Err(error) = boot_selection::route(text, Some(held)) {
+            output::arguments(format_args!("BOOT {error:#}\n"));
+        }
+        return Err(Refusal::RecoveryMode);
+    }
     let (routed, log) = boot_selection::route(text, selection.as_ref()).map_err(|error| {
         output::arguments(format_args!("NVRAM boot refusal: {error:#}\n"));
-        "stela.cfg cannot boot what NVRAM chose"
+        Refusal::Other("stela.cfg cannot boot what NVRAM chose")
     })?;
     // Only an installed-system boot has a choice to report.
     if selection.is_some() {

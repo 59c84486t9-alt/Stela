@@ -98,6 +98,10 @@ pub(super) fn next_boot(variables: &Variables) -> String {
                 boot_selection::Target::Upgrade => {
                     "the macOS update staged on the Update volume".to_string()
                 }
+                boot_selection::Target::RecoveryMode => "no system: recovery mode, as an \
+                     interrupted restore leaves it; stela.efi shows its startup choices for \
+                     Install macOS (Stela)"
+                    .into(),
             };
             if selection.reasons.is_empty() {
                 target

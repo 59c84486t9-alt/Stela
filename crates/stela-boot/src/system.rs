@@ -9,7 +9,9 @@ use crate::{
     console::Framebuffer,
     firmware,
     handoff::{File, Handoff, MAGIC, MAX_FILES, MAX_GUEST_RANGES, MAX_NAME, Region, Storage},
-    la57, layout, output, paging, storage,
+    la57, layout, output, paging,
+    selection::Refusal,
+    storage,
     tables::{self, Frames, LARGE, NX, PAGE, PRESENT, UNCACHED, WRITABLE},
 };
 use alloc::{string::String, vec::Vec};
@@ -314,9 +316,27 @@ fn map_devices(
 }
 
 /// Run the engine; never returns.
-pub fn boot(options: Vec<u8>, volume: FileSystem) -> ! {
-    // NVRAM chooses macOS or recoveryOS before any input is read.
-    let options = crate::selection::route(options).unwrap_or_else(|error| output::fatal(error));
+pub fn boot(mut options: Vec<u8>, mut volume: FileSystem) -> ! {
+    // NVRAM chooses macOS or recoveryOS before any input is read. A machine
+    // NVRAM holds in recovery mode waits at the startup choices, as LLB
+    // waits for a restore host, until one that boots is chosen.
+    let options = loop {
+        match crate::selection::route(options) {
+            Ok(routed) => break routed,
+            Err(Refusal::Other(error)) => output::fatal(error),
+            Err(Refusal::RecoveryMode) => {
+                options = crate::choice::hold(&mut volume).unwrap_or_else(|| {
+                    output::fatal(
+                        "NVRAM holds the machine in recovery mode and this volume has no \
+                         startup choices to restore it from",
+                    )
+                });
+                if !options.starts_with(b"--system") {
+                    output::fatal("the chosen startup option is not a system-mode boot");
+                }
+            }
+        }
+    };
     // `inputs` closes the volume: protocols must be closed before boot
     // services end.
     let inputs = inputs(&options, volume);

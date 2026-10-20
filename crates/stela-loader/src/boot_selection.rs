@@ -56,15 +56,24 @@
 //! consumed with a note rather than activated; Stela takes iBEC's place in
 //! an upgrade boot (`stela_loader::upgrade`).
 //!
+//! iBoot's recovery mode, which waits for a USB restore host, is entered by
+//! `device-recovery` and by `auto-boot=false` without `auto-boot-once`
+//! ([`Target::RecoveryMode`]). Known, from the 26A434 `restored_external`
+//! strings ("could not set auto-boot=false", "Setting auto-boot to true to
+//! return to prior OS"): a restore clears `auto-boot` while it writes the
+//! disk and sets it again once it completes, so an interrupted restore
+//! leaves the machine in recovery mode (the order is Inferred). Stela's
+//! restore host is its Install macOS (Stela) startup choice, so `stela.efi`
+//! holds such a machine at its startup choices instead of booting the
+//! half-restored disk.
+//!
 //! A recoveryOS boot prefers the copy on the boot disk, as LLB does: the
 //! paired recoveryOS from the boot container's Recovery volume, then System
 //! Recovery from the RecoveryOSContainer, then Stela's own System Recovery
 //! bundle ([`route`], `stela_loader::recovery`).
 //!
-//! Refused explicitly: `device-recovery` (iBoot's recovery mode, which waits
-//! for a USB restore host) and `field-diags-paired` (a diagnostics image
-//! Stela does not read), and a machine with `auto-boot=false`, which LLB
-//! leaves in iBoot recovery mode.
+//! Refused explicitly: `field-diags-paired` (a diagnostics image Stela does
+//! not read).
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, bail, ensure};
 use stela_runtime::machine::apple::nor::nvram::{Partition, Variables};
@@ -292,6 +301,9 @@ pub enum Target {
     SystemRecovery,
     /// The update ramdisk macOS staged on its container's Update volume.
     Upgrade,
+    /// iBoot's recovery mode, waiting for a restore host: `auto-boot=false`
+    /// or `device-recovery`. No operating system boots.
+    RecoveryMode,
 }
 
 /// The boot LLB would choose, what chose it, and the one-shot variables the
@@ -390,10 +402,14 @@ pub fn select(variables: &Variables) -> Result<Selection> {
                 selection.reasons.push(shown(AUTO_BOOT_ONCE, once));
                 selection.consumed.push(AUTO_BOOT_ONCE);
             }
-            _ => bail!(
-                "auto-boot=false: LLB stays in iBoot recovery mode, which Stela does not \
-                 provide; remove auto-boot from the NOR NVRAM"
-            ),
+            once => {
+                if let Some(once) = once {
+                    flag(AUTO_BOOT_ONCE, once)?;
+                }
+                selection.reasons.push(shown(AUTO_BOOT, value));
+                selection.target = Target::RecoveryMode;
+                return Ok(selection);
+            }
         }
     }
     let volume = match lookup(variables, ALT_BOOT_VOLUME) {
@@ -452,10 +468,7 @@ pub fn select(variables: &Variables) -> Result<Selection> {
     selection.target = match command {
         Some(Command::Recover | Command::RecoverOnce) => Target::PairedRecovery,
         Some(Command::RecoverSystem | Command::RecoverFallback) => Target::SystemRecovery,
-        Some(Command::DeviceRecovery) => bail!(
-            "boot-command device-recovery enters iBoot's recovery mode, which waits for a USB \
-             restore host; Stela restores through `stela setup` instead"
-        ),
+        Some(Command::DeviceRecovery) => Target::RecoveryMode,
         Some(Command::FieldDiagsPaired) => bail!(
             "boot-command field-diags-paired boots the paired diagnostics, which Stela does \
              not read"
@@ -550,6 +563,10 @@ pub const PAIRED_RECOVERY_OPTION: &str = "--paired-recovery";
 /// Build the bundle from the Preboot disk's RecoveryOSContainer, System
 /// Recovery (`stela_loader::recovery`).
 pub const SYSTEM_RECOVERY_OPTION: &str = "--system-recovery";
+/// How [`route`]'s refusal of [`Target::RecoveryMode`] starts, so the
+/// mount can tell it from other refusals and hold the machine at its
+/// startup choices.
+pub const RECOVERY_MODE_REFUSAL: &str = "NVRAM holds the machine in iBoot's recovery mode";
 /// What the engine is told only by NVRAM.
 const NVRAM_OPTIONS: [&str; 5] = [
     BOOT_VOLUME_OPTION,
@@ -565,7 +582,8 @@ const NVRAM_OPTIONS: [&str; 5] = [
 /// `--paired-recovery`, and System Recovery the disk holds (also in place
 /// of a paired recoveryOS it lacks) `--system-recovery`; any other
 /// recoveryOS boot replaces `--preboot` with `--bundle` of the
-/// `--recovery-bundle` directory, and is refused without one.
+/// `--recovery-bundle` directory, and is refused without one. Recovery mode
+/// boots nothing and is refused ([`Target::RecoveryMode`]).
 /// `--recovery-bundle` never reaches the engine. Returns the options and
 /// what the boot log should say.
 pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, String)> {
@@ -626,6 +644,10 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
             extra.push(UPGRADE_OPTION.into());
             format!("macOS update from the Update volume ({reasons})")
         }
+        Target::RecoveryMode => bail!(
+            "{RECOVERY_MODE_REFUSAL} ({reasons}): it waits for a restore host, as an \
+             interrupted restore leaves it; choose Install macOS (Stela) to restore again"
+        ),
         Target::PairedRecovery if selection.paired_on_disk => {
             on_disk(&mut extra, "the paired recoveryOS")?;
             extra.push(PAIRED_RECOVERY_OPTION.into());
@@ -786,7 +808,7 @@ mod tests {
 
     #[test]
     fn unmodeled_boots_and_bad_values_are_refused() {
-        for command in [&b"device-recovery"[..], b"field-diags-paired", b"nope"] {
+        for command in [&b"field-diags-paired"[..], b"nope"] {
             assert!(select(&variables(&[(Partition::Common, BOOT_COMMAND, command)])).is_err());
         }
         assert!(
@@ -797,8 +819,12 @@ mod tests {
             )]))
             .is_err()
         );
-        assert!(select(&variables(&[(Partition::Common, AUTO_BOOT, b"false")])).is_err());
         assert!(select(&variables(&[(Partition::Common, AUTO_BOOT, b"maybe")])).is_err());
+        let bad_once = variables(&[
+            (Partition::Common, AUTO_BOOT, b"false"),
+            (Partition::Common, AUTO_BOOT_ONCE, b"maybe"),
+        ]);
+        assert!(select(&bad_once).is_err());
         let once = variables(&[
             (Partition::Common, AUTO_BOOT, b"false"),
             (Partition::Common, AUTO_BOOT_ONCE, b"true"),
@@ -876,6 +902,34 @@ mod tests {
         assert!(log.starts_with("paired recoveryOS"));
         assert!(route("--system --upgrade", None).is_err());
         assert!(route("--system --paired-recovery", None).is_err());
+    }
+
+    #[test]
+    fn an_interrupted_restore_holds_the_machine_in_recovery_mode() {
+        // restored clears auto-boot while it writes the disk.
+        for vars in [
+            variables(&[(Partition::System, AUTO_BOOT, b"false")]),
+            variables(&[
+                (Partition::System, AUTO_BOOT, b"false"),
+                (Partition::System, AUTO_BOOT_ONCE, b"false"),
+                (Partition::System, BOOT_COMMAND, b"recover"),
+            ]),
+            variables(&[(Partition::Common, BOOT_COMMAND, b"device-recovery")]),
+        ] {
+            let selection = select(&vars).unwrap();
+            assert_eq!(selection.target, Target::RecoveryMode);
+            // Nothing is consumed: the restore's completion sets auto-boot.
+            assert!(!selection.consumes());
+            let error = route(CONFIG, Some(&selection)).unwrap_err().to_string();
+            assert!(error.starts_with(RECOVERY_MODE_REFUSAL), "{error}");
+            assert!(error.contains("Install macOS (Stela)"), "{error}");
+        }
+        // auto-boot-once lets one boot through, which consumes it.
+        let once = variables(&[
+            (Partition::System, AUTO_BOOT, b"false"),
+            (Partition::System, AUTO_BOOT_ONCE, b"true"),
+        ]);
+        assert_eq!(select(&once).unwrap().target, Target::MacOs { safe: false });
     }
 
     #[test]
