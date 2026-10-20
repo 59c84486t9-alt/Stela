@@ -741,6 +741,7 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                     requirement.pc,
                     &requirement.to_string(),
                     Failure::BadInstruction,
+                    None,
                 )?;
                 pe.cpu.pc = requirement.pc;
                 kernel.bad_instruction(pe, || format!("unsupported {requirement}"))?;

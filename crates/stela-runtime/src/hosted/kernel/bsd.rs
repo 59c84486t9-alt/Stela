@@ -151,7 +151,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
             Ok(serviced) => serviced,
             Err(error) => (
                 BsdReturnType::Int,
-                failed(unsupported::recover(error, Kind::BsdCall, pc)?),
+                failed(unsupported::recover(error, Kind::BsdCall, pc, None)?),
             ),
         };
         if kernel.trace {
@@ -181,7 +181,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
     kernel.count(entry.name);
     let outcome = match dispatch(kernel, pe, &call) {
         Ok(outcome) => outcome,
-        Err(error) => failed(unsupported::recover(error, Kind::BsdCall, pc)?),
+        Err(error) => failed(unsupported::recover(error, Kind::BsdCall, pc, None)?),
     };
     if kernel.trace {
         eprintln!(

@@ -114,13 +114,14 @@ pub(super) fn send(
             // MIG_BAD_ID.
             None => Reply::Failure(MIG_BAD_ID),
             Some(routine) => {
+                let subject = format!("{}.{}", routine.subsystem, routine.name);
                 let served = match server::serve(kernel, object, port, routine.name, complex, &body)
                 {
                     Ok(served) => served,
                     // An unsupported operation fails as the routine's error,
                     // its reply's RetCode.
                     Err(error) => Some(Reply::Failure(
-                        match unsupported::recover(error, Kind::MigRoutine, pc)? {
+                        match unsupported::recover(error, Kind::MigRoutine, pc, Some(&subject))? {
                             Failure::Kern(code) => code,
                             _ => darwin::KERN_FAILURE,
                         },
@@ -143,12 +144,11 @@ pub(super) fn send(
                             Kind::MigRoutine,
                             pc,
                             &format!(
-                                "{}.{} (message {id}) to this process's kernel object: {}",
-                                routine.subsystem,
-                                routine.name,
+                                "{subject} (message {id}) to this process's kernel object: {}",
                                 server::refusal(object, routine.name)
                             ),
                             Failure::Kern(MIG_BAD_ID),
+                            Some(&subject),
                         )?;
                         Reply::Failure(MIG_BAD_ID)
                     }

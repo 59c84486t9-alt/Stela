@@ -117,7 +117,8 @@ pub(crate) fn deliver(kernel: &Kernel, pe: &mut Pe, exception: Exception) -> Res
                 // on to the next.
                 Err(error) => {
                     let pc = UserState::capture(pe).pc;
-                    if let Err(error) = unsupported::recover(error, Kind::Exception, pc) {
+                    let subject = super::exception::NAMES.get(exception.kind).copied();
+                    if let Err(error) = unsupported::recover(error, Kind::Exception, pc, subject) {
                         outcome = Err(error);
                     }
                 }

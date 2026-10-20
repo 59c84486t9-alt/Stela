@@ -289,7 +289,7 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
             let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
             let result = match dispatch(kernel, entry.name, index, arguments, pc) {
                 Ok(result) => result,
-                Err(error) => match unsupported::recover(error, Kind::MachTrap, pc)? {
+                Err(error) => match unsupported::recover(error, Kind::MachTrap, pc, None)? {
                     Failure::Kern(code) => u64::from(code),
                     _ => u64::from(KERN_INVALID_ARGUMENT),
                 },

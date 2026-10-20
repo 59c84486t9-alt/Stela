@@ -1,7 +1,9 @@
 //! Unsupported operations (`docs/design/runtime.md`, "Unsupported
 //! operations"): an operation the hosted runtime does not implement fails
 //! as the guest's platform fails an operation it lacks, and is reported
-//! once per distinct (kind, image, offset): a `stela:` line on standard
+//! once per distinct (kind, image, offset, subject), the subject telling
+//! apart operations one place serves (each MIG routine at the message
+//! trap, each exception type at its delivery): a `stela:` line on standard
 //! error, an entry in `~/Library/Logs/Stela/unsupported.log` and the
 //! notifier a host application installs ([`set_notifier`]). Strict mode
 //! (`stela run --strict`, `STELA_STRICT=1`) stops the run at the first one
@@ -188,7 +190,15 @@ impl fmt::Display for Report {
 static STRICT: AtomicBool = AtomicBool::new(false);
 static NOTIFIER: OnceLock<fn(&Report)> = OnceLock::new();
 static PROGRAM: OnceLock<String> = OnceLock::new();
-static REPORTED: Mutex<Option<HashSet<(Kind, String, u64)>>> = Mutex::new(None);
+/// A report's identity: its kind, place and subject.
+type Key = (Kind, String, u64, Option<String>);
+static REPORTED: Mutex<Option<HashSet<Key>>> = Mutex::new(None);
+
+/// Whether `key` is reported for the first time.
+fn first(key: Key) -> bool {
+    let mut reported = REPORTED.lock().unwrap_or_else(|poison| poison.into_inner());
+    reported.get_or_insert_with(HashSet::new).insert(key)
+}
 
 /// Stop at the first unsupported operation (`--strict`).
 pub fn set_strict(strict: bool) {
@@ -216,8 +226,15 @@ pub fn set_notifier(notifier: fn(&Report)) -> bool {
 
 /// Report the unsupported `operation` the code at `pc` asked for, which
 /// the guest sees fail as `failure`: in strict mode the error that stops
-/// the run, otherwise `Ok` after reporting it, once per kind and place.
-pub fn report(kind: Kind, pc: u64, operation: &str, failure: Failure) -> Result<()> {
+/// the run, otherwise `Ok` after reporting it, once per kind, place and
+/// `subject`.
+pub fn report(
+    kind: Kind,
+    pc: u64,
+    operation: &str,
+    failure: Failure,
+    subject: Option<&str>,
+) -> Result<()> {
     if strict() {
         anyhow::bail!("{operation}");
     }
@@ -229,26 +246,34 @@ pub fn report(kind: Kind, pc: u64, operation: &str, failure: Failure) -> Result<
         offset,
         failure,
     };
-    publish(report);
+    publish(report, subject);
     Ok(())
 }
 
 /// A note about the run that names no code (`Kind::GuestSystem`): reported
 /// once per `key`, never a stop.
 pub fn note(kind: Kind, key: &str, text: &str) {
-    publish(Report {
-        kind,
-        operation: text.to_owned(),
-        image: key.to_owned(),
-        offset: 0,
-        failure: Failure::None,
-    });
+    publish(
+        Report {
+            kind,
+            operation: text.to_owned(),
+            image: key.to_owned(),
+            offset: 0,
+            failure: Failure::None,
+        },
+        None,
+    );
 }
 
 /// The guest-visible failure of an error a service returned: an
-/// unsupported operation's, after reporting it, outside strict mode; the
-/// error itself otherwise.
-pub fn recover(error: anyhow::Error, kind: Kind, pc: u64) -> Result<Failure> {
+/// unsupported operation's, after reporting it (as [`report`] with
+/// `subject`), outside strict mode; the error itself otherwise.
+pub fn recover(
+    error: anyhow::Error,
+    kind: Kind,
+    pc: u64,
+    subject: Option<&str>,
+) -> Result<Failure> {
     let Some(unsupported) = error.downcast_ref::<Unsupported>() else {
         return Err(error);
     };
@@ -256,17 +281,19 @@ pub fn recover(error: anyhow::Error, kind: Kind, pc: u64) -> Result<Failure> {
         return Err(error);
     }
     let failure = unsupported.failure;
-    report(kind, pc, &format!("{error:#}"), failure)?;
+    report(kind, pc, &format!("{error:#}"), failure, subject)?;
     Ok(failure)
 }
 
-fn publish(report: Report) {
-    let key = (report.kind, report.image.clone(), report.offset);
-    {
-        let mut reported = REPORTED.lock().unwrap_or_else(|poison| poison.into_inner());
-        if !reported.get_or_insert_with(HashSet::new).insert(key) {
-            return;
-        }
+fn publish(report: Report, subject: Option<&str>) {
+    let key = (
+        report.kind,
+        report.image.clone(),
+        report.offset,
+        subject.map(str::to_owned),
+    );
+    if !first(key) {
+        return;
     }
     eprintln!("stela: {report}");
     log(&report);
@@ -386,7 +413,24 @@ mod tests {
         assert_eq!(unsupported.failure, Failure::Errno(22));
         assert_eq!(unsupported.operation, "frob option 0x7");
         // Other errors stay errors.
-        assert!(recover(anyhow::anyhow!("internal"), Kind::BsdCall, 0).is_err());
+        assert!(recover(anyhow::anyhow!("internal"), Kind::BsdCall, 0, None).is_err());
+    }
+
+    #[test]
+    fn subjects_tell_apart_operations_at_one_place() {
+        let key = |subject: Option<&str>| {
+            (
+                Kind::MigRoutine,
+                "test image".to_owned(),
+                0x1234,
+                subject.map(str::to_owned),
+            )
+        };
+        assert!(first(key(Some("task.task_get_special_port"))));
+        assert!(first(key(Some("thread_act.thread_get_special_port"))));
+        assert!(!first(key(Some("task.task_get_special_port"))));
+        assert!(first(key(None)));
+        assert!(!first(key(None)));
     }
 
     #[test]
