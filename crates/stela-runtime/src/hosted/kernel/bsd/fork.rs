@@ -103,6 +103,9 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
                 held_control.child();
             }
             drop(others);
+            // The child keeps the commpage, shared with the parent, but
+            // not the parent's thread that follows the host calendar.
+            crate::hosted::commpage::watch_calendar();
             signal::fork_child(kernel);
             kernel.thread_port = thread_port;
             kernel.mig_relay = None;

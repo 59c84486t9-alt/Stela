@@ -333,7 +333,6 @@ const INFORMATION: &[&str] = &[
     "abort_with_payload",
     "task_inspect_for_pid",
     "task_read_for_pid",
-    "settimeofday",
     "adjtime",
     "ntp_adjtime",
     "ntp_gettime",

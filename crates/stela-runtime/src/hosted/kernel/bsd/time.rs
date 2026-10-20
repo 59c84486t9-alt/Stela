@@ -3,9 +3,10 @@
 //! time ([`host::counter_at`]); a value crossing the boundary is converted.
 //! Wall-clock and `timespec` arguments are the same on both kernels and stay
 //! with the forwarded families. `kevent` and `kevent64` timers in absolute
-//! units are [`super::timer`]'s.
+//! units are [`super::timer`]'s. `gettimeofday` and `settimeofday` also
+//! refresh the commpage's timestamp ([`commpage::refresh_time`]).
 use super::{Call, EFAULT, Kernel, Outcome, forward};
-use crate::hosted::{host, memory};
+use crate::hosted::{commpage, host, memory};
 use anyhow::{Result, bail};
 
 /// `KERN_CLOCK_MACH_ABSOLUTE_TIME`, the eventlink deadline clock.
@@ -13,6 +14,7 @@ const KERN_CLOCK_MACH_ABSOLUTE_TIME: u64 = 1;
 
 pub(super) const CALLS: &[&str] = &[
     "gettimeofday",
+    "settimeofday",
     "mach_eventlink_wait_until",
     "mach_eventlink_signal_wait_until",
     "kevent",
@@ -22,6 +24,7 @@ pub(super) const CALLS: &[&str] = &[
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "gettimeofday" => gettimeofday(kernel, call)?,
+        "settimeofday" => settimeofday(kernel, call)?,
         "mach_eventlink_wait_until" => eventlink_wait(kernel, call, 2, 3)?,
         "mach_eventlink_signal_wait_until" => eventlink_wait(kernel, call, 3, 4)?,
         "kevent" | "kevent64" => return super::timer::call(kernel, call),
@@ -42,12 +45,26 @@ fn gettimeofday(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         host_call.arguments[2] = &raw mut absolute as u64;
     }
     let outcome = forward(kernel, &host_call)?;
+    // Reading the time refreshes the commpage's timestamp
+    // (`clock_gettimeofday_and_absolute_time`), the host's and so the
+    // guest's.
+    if call.argument(0) != 0 || target != 0 {
+        commpage::refresh_time();
+    }
     if target != 0
         && matches!(outcome, Outcome::Return(..))
         && !memory::write_u64(target, host::counter_at(absolute))
     {
         return Ok(Outcome::Error(EFAULT));
     }
+    Ok(outcome)
+}
+
+/// `settimeofday(tv, tzp)`: the host's calendar is this machine's; a set
+/// refreshes the commpage's timestamp (`clock_set_calendar_microtime`).
+fn settimeofday(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
+    let outcome = forward(kernel, call)?;
+    commpage::refresh_time();
     Ok(outcome)
 }
 

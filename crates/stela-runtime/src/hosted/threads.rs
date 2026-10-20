@@ -587,9 +587,13 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
             // preemption-free zone until the zone's exit, marking X15 for
             // the zone's routine to come back through `pfz_exit`.
             Stop::Budget if crate::hosted::commpage::preemption_free(pe.cpu.pc) => {
+                crate::hosted::commpage::note_time();
                 pe.cpu.state.x[crate::hosted::commpage::DEFERRED_PREEMPTION_REGISTER] = 1;
             }
             Stop::Budget => {
+                // The quantum's end stores the approximate time
+                // (`thread_quantum_expire`).
+                crate::hosted::commpage::note_time();
                 if kernel.signals.deliverable().is_some() {
                     restart_ranges(&process, &mut pe);
                     execution.release(thread);

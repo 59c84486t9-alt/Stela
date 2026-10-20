@@ -83,6 +83,7 @@ unsafe extern "C" {
         maximum: *mut i32,
         inheritance: u32,
     ) -> i32;
+    fn mach_vm_inherit(task: u32, address: u64, size: u64, inheritance: u32) -> i32;
     fn mach_vm_protect(
         task: u32,
         address: u64,
@@ -412,6 +413,43 @@ pub fn deallocate(address: u64, bytes: u64) -> Result<()> {
         "cannot deallocate {bytes:#x} bytes at {address:#x}: kern_return {status}"
     );
     Ok(())
+}
+
+/// A second mapping of the pages at `address`, sharing their memory with
+/// the protection they have now, placed anywhere. Both mappings are
+/// shared with a fork child (`VM_INHERIT_SHARE`), so writes through the
+/// second still reach the first there.
+pub fn shared_alias(address: u64, bytes: u64) -> Result<u64> {
+    const VM_INHERIT_SHARE: u32 = 0;
+    let mut at = 0u64;
+    let (mut current, mut maximum) = (0, 0);
+    // SAFETY: a new placement of the caller's own pages, without copying.
+    let status = unsafe {
+        mach_vm_remap(
+            task(),
+            &mut at,
+            bytes,
+            0,
+            VM_FLAGS_ANYWHERE,
+            task(),
+            address,
+            0,
+            &mut current,
+            &mut maximum,
+            VM_INHERIT_SHARE,
+        )
+    };
+    ensure!(
+        status == KERN_SUCCESS,
+        "cannot alias {bytes:#x} bytes at {address:#x}: kern_return {status}"
+    );
+    // SAFETY: the caller's own pages.
+    let status = unsafe { mach_vm_inherit(task(), address, bytes, VM_INHERIT_SHARE) };
+    ensure!(
+        status == KERN_SUCCESS,
+        "cannot share {bytes:#x} bytes at {address:#x} with a fork child: kern_return {status}"
+    );
+    Ok(at)
 }
 
 pub fn protect(address: u64, bytes: u64, protection: Protection) -> Result<()> {

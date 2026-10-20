@@ -342,6 +342,7 @@ impl Kernel {
     /// the way back to the guest, deliver its deliverable signals (XNU's
     /// AST).
     pub(super) fn synchronous(&mut self, pe: &mut Pe) -> Result<()> {
+        super::commpage::note_time();
         self.serve(pe)?;
         if self.end.is_none() {
             self.deliver_pending(pe)?;

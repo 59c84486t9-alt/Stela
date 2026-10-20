@@ -5,6 +5,16 @@
 //! them. Layout `osfmk/arm/cpu_capabilities.h`, contents
 //! `osfmk/arm/commpage/commpage.c` `commpage_populate`.
 //!
+//! The data page's time fields follow the host's own commpage, restated
+//! in the guest's 24 MHz ticks: the `gettimeofday` timestamp
+//! (`commpage_set_timestamp`) whenever the guest's `gettimeofday` or
+//! `settimeofday` enters the kernel, as XNU's `clock_gettimeofday` and
+//! `clock_set_calendar_microtime` refresh it, and with the continuous-time
+//! base and boot time whenever the host announces a calendar change
+//! (a set or a wake, `host_notify_calendar_change`). The approximate time
+//! (`CONFIG_MACH_APPROXIMATE_TIME`) is the latest absolute time at a kernel
+//! entry or a time slice's end, where XNU's scheduler stores it.
+//!
 //! The text page holds the routines libplatform's `OSAtomicFifoEnqueue` and
 //! `OSAtomicFifoDequeue` and the atomic TPIDR_EL0 update call through its
 //! 32-entry jump table, with the contract of XNU's `commpage_asm.s`: a
@@ -21,6 +31,8 @@ use super::{
     memory::{self, PAGE_BYTES, Protection},
 };
 use anyhow::{Result, ensure};
+use core::sync::atomic::{AtomicU64, Ordering, fence};
+use std::sync::OnceLock;
 
 pub const DATA_ADDRESS: u64 = 0xf_ffff_c000;
 pub const READ_ONLY_ADDRESS: u64 = 0xf_ffff_4000;
@@ -52,8 +64,12 @@ const CONT_HWCLOCK: usize = 0x091;
 const CONT_TIMEBASE: usize = 0x098;
 const BOOTTIME_USEC: usize = 0x0a0;
 const CONT_HW_TIMEBASE: usize = 0x0a8;
+const APPROX_TIME: usize = 0x0c0;
 const APPROX_TIME_SUPPORTED: usize = 0x0c8;
 const KDEBUG_ENABLE: usize = 0x100;
+/// `new_commpage_timeofday_data_t`: `TimeStamp_tick`, `TimeStamp_sec`,
+/// `TimeStamp_frac`, `Ticks_scale`, `Ticks_per_sec`.
+const NEWTIMEOFDAY_DATA: usize = 0x120;
 const REMOTETIME_PARAMS: usize = 0x148;
 const DYLD_FLAGS: usize = 0x160;
 const CPU_TO_CLUSTER: usize = 0x200;
@@ -105,7 +121,7 @@ pub fn data_page(hardware: &Hardware, identification: &Identification, time: Tim
     put(CONT_TIMEBASE, &time.continuous_offset.to_le_bytes());
     put(BOOTTIME_USEC, &time.boot_microseconds.to_le_bytes());
     put(CONT_HW_TIMEBASE, &time.continuous_offset.to_le_bytes());
-    put(APPROX_TIME_SUPPORTED, &[0]);
+    put(APPROX_TIME_SUPPORTED, &[1]);
     put(KDEBUG_ENABLE, &0u32.to_le_bytes());
     put(REMOTETIME_PARAMS, &BT_RESET_SENTINEL_TS.to_le_bytes());
     put(DYLD_FLAGS, &0u64.to_le_bytes());
@@ -256,7 +272,8 @@ pub fn text_page() -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
 
-/// Map the three pages at their fixed addresses, read-only to the guest.
+/// Map the three pages at their fixed addresses, read-only to the guest,
+/// keeping a writable view of the data page for its time fields.
 pub fn map(data: &[u8]) -> Result<()> {
     for (address, bytes, protection) in [
         (DATA_ADDRESS, data.to_vec(), Protection::READ),
@@ -267,9 +284,212 @@ pub fn map(data: &[u8]) -> Result<()> {
         let at = memory::allocate(address, PAGE_BYTES, false, Protection::READ_WRITE)?;
         ensure!(at == address, "commpage placed at {at:#x}");
         ensure!(memory::write(address, &bytes), "commpage write");
+        if address == DATA_ADDRESS {
+            let writable = memory::shared_alias(address, PAGE_BYTES)?;
+            ensure!(
+                WRITABLE.set(writable).is_ok(),
+                "the commpage is mapped once"
+            );
+        }
         memory::protect(address, PAGE_BYTES, protection)?;
     }
+    refresh_time();
+    note_time();
+    watch_calendar();
     Ok(())
+}
+
+/// The data page's writable view.
+static WRITABLE: OnceLock<u64> = OnceLock::new();
+
+/// The data page's 64-bit field at `offset`, once mapped.
+fn field(offset: usize) -> Option<&'static AtomicU64> {
+    let base = *WRITABLE.get()?;
+    // SAFETY: an aligned word of the writable view, mapped for the
+    // process's life; guest code reads it concurrently, as it does XNU's.
+    Some(unsafe { &*((base + offset as u64) as *const AtomicU64) })
+}
+
+/// The x86 host's commpage (`osfmk/i386/cpu_capabilities.h`): its
+/// continuous-time base and boot time, and its `gettimeofday` data in
+/// nanosecond ticks.
+const HOST_COMMPAGE: u64 = 0x7fff_ffe0_0000;
+const HOST_CONT_TIMEBASE: u64 = 0x0c0;
+const HOST_BOOTTIME_USEC: u64 = 0x0c8;
+const HOST_NEWTIMEOFDAY_DATA: u64 = 0x0d0;
+
+fn host_word(offset: u64) -> u64 {
+    // SAFETY: the host commpage is mapped read-only in every x86 process.
+    unsafe { core::ptr::read_volatile((HOST_COMMPAGE + offset) as *const u64) }
+}
+
+/// `new_commpage_timeofday_data_t`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeOfDay {
+    pub tick: u64,
+    pub seconds: u64,
+    pub fraction: u64,
+    pub scale: u64,
+    pub ticks_per_second: u64,
+}
+
+/// The host's timestamp, read as `__commpage_gettimeofday` reads it: again
+/// while its tick changes under the read.
+fn host_time_of_day() -> TimeOfDay {
+    loop {
+        let tick = host_word(HOST_NEWTIMEOFDAY_DATA);
+        fence(Ordering::Acquire);
+        let read = TimeOfDay {
+            tick,
+            seconds: host_word(HOST_NEWTIMEOFDAY_DATA + 8),
+            fraction: host_word(HOST_NEWTIMEOFDAY_DATA + 16),
+            scale: host_word(HOST_NEWTIMEOFDAY_DATA + 24),
+            ticks_per_second: host_word(HOST_NEWTIMEOFDAY_DATA + 32),
+        };
+        fence(Ordering::Acquire);
+        if host_word(HOST_NEWTIMEOFDAY_DATA) == tick {
+            return read;
+        }
+    }
+}
+
+/// A host timestamp in nanosecond ticks restated at the guest tick
+/// before it: the calendar time moved back by the part of a guest tick
+/// between them, the scale per guest tick. A host timestamp marked
+/// invalid (tick 0) stays invalid, which sends libc to the system call.
+pub fn guest_time_of_day(host: TimeOfDay) -> TimeOfDay {
+    const NANOSECONDS: u64 = 1_000_000_000;
+    if host.tick == 0 || host.ticks_per_second != NANOSECONDS {
+        return TimeOfDay { tick: 0, ..host };
+    }
+    let tick = super::host::counter_at(host.tick);
+    // Thirds of a nanosecond: a guest tick is 125/3 ns.
+    let behind = u128::from(host.tick) * 3 - u128::from(tick) * 125;
+    let time = (u128::from(host.seconds) << 64 | u128::from(host.fraction))
+        - behind * u128::from(host.scale) / 3;
+    TimeOfDay {
+        tick,
+        seconds: (time >> 64) as u64,
+        fraction: time as u64,
+        scale: (u128::from(host.scale) * 125 / 3) as u64,
+        ticks_per_second: super::host::COUNTER_HZ,
+    }
+}
+
+/// Restate the host's timestamp, continuous-time base and boot time in
+/// the data page (`commpage_set_timestamp`, `commpage_update_boottime`,
+/// `commpage_update_mach_continuous_time`).
+pub fn refresh_time() {
+    let Some(tick) = field(NEWTIMEOFDAY_DATA) else {
+        return;
+    };
+    let time = guest_time_of_day(host_time_of_day());
+    tick.store(0, Ordering::SeqCst);
+    for (offset, value) in [
+        (8, time.seconds),
+        (16, time.fraction),
+        (24, time.scale),
+        (32, time.ticks_per_second),
+    ] {
+        if let Some(word) = field(NEWTIMEOFDAY_DATA + offset) {
+            word.store(value, Ordering::SeqCst);
+        }
+    }
+    tick.store(time.tick, Ordering::SeqCst);
+    let continuous = super::host::counter_at(host_word(HOST_CONT_TIMEBASE));
+    for offset in [CONT_TIMEBASE, CONT_HW_TIMEBASE] {
+        if let Some(word) = field(offset) {
+            word.store(continuous, Ordering::SeqCst);
+        }
+    }
+    if let Some(word) = field(BOOTTIME_USEC) {
+        word.store(host_word(HOST_BOOTTIME_USEC), Ordering::SeqCst);
+    }
+}
+
+/// Raise the approximate time to now (`commpage_update_mach_approximate_time`).
+pub fn note_time() {
+    if let Some(approximate) = field(APPROX_TIME) {
+        approximate.fetch_max(
+            super::host::counter_at(super::host::host_nanoseconds()),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+/// `HOST_NOTIFY_CALENDAR_CHANGE` (`mach/host_notify.h`).
+const HOST_NOTIFY_CALENDAR_CHANGE: i32 = 1;
+
+unsafe extern "C" {
+    fn host_request_notification(host: u32, kind: i32, port: u32) -> i32;
+    fn mach_host_self() -> u32;
+    fn mach_port_allocate(task: u32, right: u32, name: *mut u32) -> i32;
+    fn mach_msg(
+        message: *mut u8,
+        option: i32,
+        send_size: u32,
+        receive_size: u32,
+        port: u32,
+        timeout: u32,
+        notify: u32,
+    ) -> i32;
+}
+
+/// `MACH_PORT_RIGHT_RECEIVE`, `MACH_RCV_MSG` and `MACH_RCV_TOO_LARGE`
+/// (without `MACH_RCV_LARGE` a message too large is dropped).
+const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
+const MACH_RCV_MSG: i32 = 0x2;
+const MACH_RCV_TOO_LARGE: i32 = 0x1000_4004;
+
+/// A new receive right of this task.
+fn receive_port() -> Option<u32> {
+    let mut name = 0u32;
+    // SAFETY: the out-parameter is this frame's.
+    let status =
+        unsafe { mach_port_allocate(super::host::task(), MACH_PORT_RIGHT_RECEIVE, &raw mut name) };
+    (status == 0).then_some(name)
+}
+
+/// Wait for one message on `port` and drop it (a notification carries no
+/// rights): false when receiving fails.
+fn receive_any(port: u32) -> bool {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the buffer is this frame's and its size is passed.
+    let status = unsafe {
+        mach_msg(
+            buffer.as_mut_ptr(),
+            MACH_RCV_MSG,
+            0,
+            buffer.len() as u32,
+            port,
+            0,
+            0,
+        )
+    };
+    status == 0 || status == MACH_RCV_TOO_LARGE
+}
+
+/// Refresh the data page at each host calendar change, from a host thread
+/// of this process. The host sends one notification per request.
+pub fn watch_calendar() {
+    let Some(port) = receive_port() else {
+        return;
+    };
+    // SAFETY: no arguments.
+    let host = unsafe { mach_host_self() };
+    let spawned = std::thread::Builder::new()
+        .name("stela-calendar".into())
+        .spawn(move || {
+            // SAFETY: a receive right this thread owns.
+            while unsafe { host_request_notification(host, HOST_NOTIFY_CALENDAR_CHANGE, port) } == 0
+            {
+                if !receive_any(port) {
+                    return;
+                }
+                refresh_time();
+            }
+        });
+    drop(spawned);
 }
 
 #[cfg(test)]
@@ -297,6 +517,31 @@ mod tests {
         );
         assert_eq!(page[CPU_TO_CLUSTER + 7], 1);
         assert_eq!(page[BOOTTIME_USEC], 7);
+        assert_eq!(page[APPROX_TIME_SUPPORTED], 1);
+    }
+
+    #[test]
+    fn the_timestamp_is_restated_at_the_guest_tick_before_the_hosts() {
+        // 2^64 / 10^9 fractions of a second per nanosecond.
+        let scale = 18_446_744_073;
+        let host = TimeOfDay {
+            tick: 1_000_000_010,
+            seconds: 1_700_000_000,
+            fraction: 5,
+            scale,
+            ticks_per_second: 1_000_000_000,
+        };
+        let guest = guest_time_of_day(host);
+        // 1_000_000_010 ns is 24_000_000.24 ticks: tick 24_000_000, 10 ns
+        // before the host's, which the time moves back across a second.
+        assert_eq!(guest.tick, 24_000_000);
+        assert_eq!(guest.ticks_per_second, 24_000_000);
+        assert_eq!(guest.seconds, 1_699_999_999);
+        assert_eq!(guest.fraction, 5u64.wrapping_sub(10 * scale));
+        assert_eq!(guest.scale, scale * 125 / 3);
+        // An invalid host stamp stays invalid.
+        let invalid = guest_time_of_day(TimeOfDay { tick: 0, ..host });
+        assert_eq!(invalid.tick, 0);
     }
 
     #[test]
