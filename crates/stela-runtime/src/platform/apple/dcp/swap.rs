@@ -33,13 +33,38 @@
 //! `DCP_REMOVE_LAYERS` (bit 31: layers outside the mask are removed) is
 //! honored as Linux defines it.
 //!
-//! The `SurfaceContents` fields (`SurfaceContents::from`): tiled +0,
-//! premultiplied +0x2 (set when an IOSurface descriptor byte masked with
-//! 0xfd is zero; Linux's `is_premultiplied`), plane count +0x3, the CoreVideo pixel format +0xb (`'BGRA'`, stored
-//! little-endian as the bytes `"ARGB"`), bytes per row +0x15, base offset
-//! +0x1d, width +0x21, height +0x25, allocation size +0x29, has compression
-//! info +0x1ed. The DVAs are I/O addresses in the display pipe's DART
-//! (`dart-dispext0` stream 0 on J473AP), not the DCP's.
+//! `SurfaceContents::from` (0x3dae3a4) fills each record from the IOSurface's
+//! accessors (its calls resolve through the kext's stubs to the named
+//! `IOSurface` methods):
+//!
+//! | Offset | Field | Source |
+//! | --- | --- | --- |
+//! | 0x0 | tiled (u8) | `isTiled` |
+//! | 0x1 | tearing allowed (u8) | `isTearingAllowed` |
+//! | 0x2 | premultiplied (u8) | a `getBulkAttachments` byte masked with 0xfd is zero (Linux `is_premultiplied`) |
+//! | 0x3, 0x7 | plane count (u32, twice) | `getPlaneCount` |
+//! | 0xb | pixel format (CoreVideo 4CC; `'BGRA'` stored as the bytes `"ARGB"`) | `getPixelFormat` |
+//! | 0xf | YCbCr matrix (u32) | `getYCbCrMatrix` |
+//! | 0x13, 0x14 | transfer function, colour space (u8) | `getBulkAttachments` |
+//! | 0x15 | bytes per row | `getBytesPerRow` |
+//! | 0x19, 0x1b, 0x1c | bytes per element (u16), element width, height (u8) | `getBytesPerElement`, `getElementWidth`/`Height` |
+//! | 0x1d | base offset | `getBaseOffset` |
+//! | 0x21, 0x25 | width, height | `getWidth`, `getHeight` |
+//! | 0x29 | allocation size | `getAllocSize` |
+//! | 0x2d | protection options (u64) | `getProtectionOptions` |
+//! | 0x35 | surface ID | `getSurfaceID` |
+//! | 0x39 + 8i | plane i's component count (u8) and up to 7 component types | `getNumberOfComponentsOfPlane`, `getTypeOfComponentOfPlane` |
+//! | 0x59 + 0x50i | plane i: width, height, base, offset, bytes per row, size (u32 each), bytes per element (u16), element width, height (u8), address format (u8 at +0x29) | `getPlane*`, `getPlaneAddressFormat` |
+//! | 0x149 | has plane info (u64) | |
+//! | 0x151 + 0x34i | plane i's compression info, repacked from `getCompressedPlaneInfo` | |
+//! | 0x1ed | has compression info (u64) | |
+//!
+//! The model presents linear single-plane surfaces in the 32-bit formats
+//! [`PixelFormat`] names. Tiled and compressed surfaces refuse: the
+//! address-format and compression-info encodings are IOSurface-private and
+//! unrecorded. Multi-planar YCbCr surfaces refuse: the `getYCbCrMatrix`
+//! enumeration is unrecorded. The DVAs are I/O addresses in the display
+//! pipe's DART (`dart-dispext0` stream 0 on J473AP), not the DCP's.
 pub use super::super::scanout::Rect;
 use super::super::scanout::{PixelFormat, Surface};
 
@@ -144,7 +169,7 @@ impl Record {
             return Err("DCP swap surface is multi-planar; the model scans out one plane");
         }
         let format = PixelFormat::from_fourcc(self.format)
-            .ok_or("DCP swap surface format is not 32-bit BGRA or RGBA")?;
+            .ok_or("DCP swap surface format is not BGRA, RGBA or l10r")?;
         if self.width == 0 || self.height == 0 {
             return Err("DCP swap surface has no size");
         }

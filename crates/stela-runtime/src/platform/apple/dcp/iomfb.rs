@@ -41,9 +41,10 @@
 //! layers 0..3 stack bottom to top over opaque black, each a source
 //! rectangle of its surface scaled nearest-neighbour into its destination
 //! rectangle, clipped to the screen, and blended source-over with the
-//! premultiplied flag the AP sets per surface. Linux drives the same
-//! records the same way: its primary plane is layer 0 and its cursor a
-//! higher layer, every surface marked premultiplied.
+//! premultiplied flag the AP sets per surface. This agrees with Linux
+//! (`plane.c`), which marks premultiplied only its formats without alpha
+//! (XRGB, XBGR, XBGR2101010) and straight its ARGB ones: premultiplied over
+//! black, an X byte of any value shows the colour unchanged.
 use super::super::scanout::{self, Mode, Scanout};
 use super::Log;
 use super::abi::{self, Fields, IO_RETURN_SUCCESS, Packed};

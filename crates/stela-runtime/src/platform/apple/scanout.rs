@@ -15,9 +15,10 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-/// A 32-bit surface pixel format the model converts from. The DCP driver's
-/// default framebuffer is one of these at the GOP resolution; other formats
-/// are refused (`IOMFB::getPixelDef`, `swap_submit_dcp` `SurfaceContents`).
+/// A 32-bit pixel format: the scanout's (an 8-bit one) or a surface's the
+/// model converts from. The DCP driver's default framebuffer is 8-bit at the
+/// GOP resolution; other formats are refused (`IOMFB::getPixelDef`,
+/// `swap_submit_dcp` `SurfaceContents`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
     /// 8:8:8:8 with blue in the low byte of the little-endian pixel
@@ -25,6 +26,10 @@ pub enum PixelFormat {
     Bgra8888,
     /// 8:8:8:8 with red in the low byte (`'RGBA'`).
     Rgba8888,
+    /// 2:10:10:10 with blue in the low bits and alpha in the top two
+    /// (`'l10r'`, CoreVideo's `ARGB2101010LEPacked`; Linux maps DRM's
+    /// `ARGB2101010`, the same bits, to this DCP format).
+    Argb2101010,
 }
 
 impl PixelFormat {
@@ -36,15 +41,20 @@ impl PixelFormat {
             // 32-bit default framebuffer.
             PixelFormat::Bgra8888 => u32::from_be_bytes(*b"BGRA"),
             PixelFormat::Rgba8888 => u32::from_be_bytes(*b"RGBA"),
+            PixelFormat::Argb2101010 => u32::from_be_bytes(*b"l10r"),
         }
     }
 
     /// The format of a surface four-character code, or `None` when the model
     /// does not convert it.
     pub fn from_fourcc(code: u32) -> Option<Self> {
-        [PixelFormat::Bgra8888, PixelFormat::Rgba8888]
-            .into_iter()
-            .find(|format| format.fourcc() == code)
+        [
+            PixelFormat::Bgra8888,
+            PixelFormat::Rgba8888,
+            PixelFormat::Argb2101010,
+        ]
+        .into_iter()
+        .find(|format| format.fourcc() == code)
     }
 }
 
@@ -155,11 +165,26 @@ fn scale(value: u32, weight: u32) -> u32 {
 }
 
 impl PixelFormat {
-    /// The byte offsets of red and blue in a pixel.
-    const fn red_blue(self) -> (usize, usize) {
+    /// The byte offsets of red and blue in an 8-bit format's pixel.
+    const fn red_blue(self) -> Option<(usize, usize)> {
         match self {
-            PixelFormat::Bgra8888 => (2, 0),
-            PixelFormat::Rgba8888 => (0, 2),
+            PixelFormat::Bgra8888 => Some((2, 0)),
+            PixelFormat::Rgba8888 => Some((0, 2)),
+            PixelFormat::Argb2101010 => None,
+        }
+    }
+
+    /// A pixel's red, green, blue and alpha as 8-bit values; 10-bit
+    /// components and 2-bit alpha are rescaled, rounded.
+    fn rgba(self, pixel: [u8; 4]) -> [u8; 4] {
+        match self {
+            PixelFormat::Bgra8888 => [pixel[2], pixel[1], pixel[0], pixel[3]],
+            PixelFormat::Rgba8888 => pixel,
+            PixelFormat::Argb2101010 => {
+                let value = u32::from_le_bytes(pixel);
+                let ten = |shift: u32| (((value >> shift & 0x3ff) * 255 + 511) / 1023) as u8;
+                [ten(20), ten(10), ten(0), (value >> 30) as u8 * 85]
+            }
         }
     }
 }
@@ -213,7 +238,10 @@ pub fn compose(
 ) -> Result<Vec<u8>, &'static str> {
     let width = mode.width as usize;
     let mut frame = [0, 0, 0, 0xff].repeat(width * mode.height as usize);
-    let (red, blue) = mode.format.red_blue();
+    let (red, blue) = mode
+        .format
+        .red_blue()
+        .ok_or("scanout mode is not an 8-bit format")?;
     let mut row = Vec::new();
     let mut drawn: Vec<([usize; 2], [usize; 2])> = Vec::new();
     for layer in layers {
@@ -225,7 +253,7 @@ pub fn compose(
         let over_black = !drawn
             .iter()
             .any(|(x, y)| x[0] < xs[1] && xs[0] < x[1] && y[0] < ys[1] && ys[0] < y[1]);
-        let (from_red, from_blue) = surface.format.red_blue();
+        let copies = surface.format.red_blue().is_some();
         row.resize(source.width as usize * 4, 0);
         for y in ys[0]..ys[1] {
             let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
@@ -239,7 +267,7 @@ pub fn compose(
                 return Err("surface row is not reachable through its DART");
             }
             let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
-            if unscaled {
+            if unscaled && copies {
                 let start = (xs[0] - destination.x as usize) * 4;
                 let pixels = &row[start..start + out.len()];
                 if (layer.premultiplied && over_black)
@@ -253,10 +281,13 @@ pub fn compose(
                 let from_x = (2 * (x as u64 - u64::from(destination.x)) + 1)
                     * u64::from(source.width)
                     / (2 * u64::from(destination.width));
-                let pixel = &row[from_x as usize * 4..][..4];
+                let at = from_x as usize * 4;
+                let pixel = surface
+                    .format
+                    .rgba([row[at], row[at + 1], row[at + 2], row[at + 3]]);
                 let alpha = u32::from(pixel[3]);
-                for (to, from) in [(red, from_red), (1, 1), (blue, from_blue)] {
-                    let value = u32::from(pixel[from]);
+                for (to, value) in [(red, pixel[0]), (1, pixel[1]), (blue, pixel[2])] {
+                    let value = u32::from(value);
                     let value = if layer.premultiplied {
                         value
                     } else {
@@ -302,9 +333,16 @@ mod tests {
 
     #[test]
     fn fourcc_round_trips_the_two_known_formats() {
-        for format in [PixelFormat::Bgra8888, PixelFormat::Rgba8888] {
+        for format in [
+            PixelFormat::Bgra8888,
+            PixelFormat::Rgba8888,
+            PixelFormat::Argb2101010,
+        ] {
             assert_eq!(PixelFormat::from_fourcc(format.fourcc()), Some(format));
         }
+        // 10-bit components round to 8 bits; 2-bit alpha spans 0..255.
+        let l10r = (3u32 << 30 | 1023 << 20 | 512 << 10 | 3).to_le_bytes();
+        assert_eq!(PixelFormat::Argb2101010.rgba(l10r), [255, 128, 1, 255]);
         assert_eq!(PixelFormat::from_fourcc(u32::from_be_bytes(*b"420f")), None);
     }
 
@@ -393,12 +431,11 @@ mod tests {
                     let at = surface.iova
                         + (u64::from(source.y) + from_y) * u64::from(surface.stride)
                         + (u64::from(source.x) + from_x) * 4;
-                    let pixel = &memory[at as usize..][..4];
-                    let (red, blue) = surface.format.red_blue();
+                    let at = at as usize;
+                    let pixel = surface.format.rgba(memory[at..at + 4].try_into().unwrap());
                     let alpha = u32::from(pixel[3]);
                     let out = &mut canvas[y as usize * width + x as usize];
-                    for (channel, value) in out.iter_mut().zip([pixel[red], pixel[1], pixel[blue]])
-                    {
+                    for (channel, value) in out.iter_mut().zip([pixel[0], pixel[1], pixel[2]]) {
                         let value = u32::from(value);
                         let value = if layer.premultiplied {
                             value
@@ -410,7 +447,7 @@ mod tests {
                 }
             }
         }
-        let (red, blue) = mode.format.red_blue();
+        let (red, blue) = mode.format.red_blue().unwrap();
         canvas
             .into_iter()
             .flat_map(|rgb| {
@@ -440,7 +477,11 @@ mod tests {
             *byte = next(256) as u8;
         }
         // Surfaces at 0x1000 steps; the even ones opaque.
-        let formats = [PixelFormat::Bgra8888, PixelFormat::Rgba8888];
+        let formats = [
+            PixelFormat::Bgra8888,
+            PixelFormat::Rgba8888,
+            PixelFormat::Argb2101010,
+        ];
         let mut surfaces = Vec::new();
         for index in 0..6u32 {
             let (width, height) = (next(9) + 1, next(7) + 1);
@@ -456,7 +497,7 @@ mod tests {
                 width,
                 height,
                 stride,
-                format: formats[next(2) as usize],
+                format: formats[next(3) as usize],
                 iova,
             });
         }
