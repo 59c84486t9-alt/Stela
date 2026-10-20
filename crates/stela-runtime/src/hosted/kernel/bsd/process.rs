@@ -9,7 +9,17 @@
 //! activation command on the host with the new path, arguments and
 //! environment. The host kernel's exec keeps what exec keeps: the process
 //! ID, descriptors not marked close-on-exec, the signal mask and ignored
-//! signals, the working directory and the credentials. `posix_spawn`
+//! signals, the working directory and the credentials.
+//!
+//! `__mac_execve` is `execve` under a MAC label (`struct mac`), which
+//! `mac_execve_enter` reads before the image: a `m_buflen` of 0 or past
+//! `MAC_MAX_LABEL_BUF_LEN` fails with EINVAL and the string with
+//! `copyinstr`'s errors. The policies that internalize the label are the
+//! host kernel's: the label is first given to a host `__mac_execve` of the
+//! empty path, which fails with ENOENT only once the label is accepted, so
+//! a refused label fails before the image is looked up as on the arm64
+//! kernel, and the host exec of the activation command then carries it.
+//! `posix_spawn`
 //! ([`super::spawn`]) creates a process with the same activation command;
 //! `fork` and `vfork` ([`super::fork`]) fork the host process.
 use super::{Call, EFAULT, Kernel, Outcome, Pe, paths};
@@ -29,8 +39,87 @@ const ARG_MAX: usize = 1 << 20;
 const ENAMETOOLONG: u64 = 63;
 const E2BIG: u64 = 7;
 const EACCES: u64 = 13;
+const EINVAL: u64 = 22;
+/// `MAC_MAX_LABEL_BUF_LEN` (`security/mac.h`).
+const MAC_MAX_LABEL_BUF_LEN: u64 = 8192;
 
-pub(super) const CALLS: &[&str] = &["exit", "execve", "posix_spawn", "fork", "vfork"];
+unsafe extern "C" {
+    /// `__mac_execve(fname, argv, envp, mac_p)`, system call 380.
+    fn __mac_execve(
+        path: *const libc::c_char,
+        argv: *const *const libc::c_char,
+        envp: *const *const libc::c_char,
+        label: *const Mac,
+    ) -> libc::c_int;
+}
+
+/// `struct user64_mac`.
+#[repr(C)]
+struct Mac {
+    buffer_length: u64,
+    string: *const libc::c_char,
+}
+
+/// A label `__mac_execve` read, as the host kernel takes it.
+struct Label {
+    length: u64,
+    string: Vec<u8>,
+}
+
+impl Label {
+    /// The guest's `struct mac` at `address`, with `user_mac_copyin`'s and
+    /// `copyinstr`'s errnos.
+    fn read(address: u64) -> Result<Self, u64> {
+        let header = memory::read(address, 16).ok_or(EFAULT)?;
+        let length = u64::from_le_bytes(header[..8].try_into().unwrap());
+        let string = u64::from_le_bytes(header[8..].try_into().unwrap());
+        if length == 0 || length > MAC_MAX_LABEL_BUF_LEN {
+            return Err(EINVAL);
+        }
+        let mut bytes = memory::read_string(string, length as usize - 1).ok_or(
+            if memory::read(string, length as usize).is_some() {
+                ENAMETOOLONG
+            } else {
+                EFAULT
+            },
+        )?;
+        // The kernel's buffer is `m_buflen` bytes.
+        bytes.resize(length as usize, 0);
+        Ok(Self {
+            length,
+            string: bytes,
+        })
+    }
+
+    fn host(&self) -> Mac {
+        Mac {
+            buffer_length: self.length,
+            string: self.string.as_ptr().cast(),
+        }
+    }
+
+    /// The errno the host's policies refuse the label with, or `None`
+    /// when they accept it: a host exec of the empty path fails with
+    /// ENOENT at its lookup, past `mac_execve_enter`.
+    fn refused(&self) -> Option<u64> {
+        let label = self.host();
+        let empty = [std::ptr::null::<libc::c_char>()];
+        // SAFETY: an empty path, empty vectors and a label that lives
+        // across the call; no image is activated.
+        let result = unsafe { __mac_execve(c"".as_ptr(), empty.as_ptr(), empty.as_ptr(), &label) };
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        (result != 0 && errno != libc::ENOENT).then_some(errno as u64)
+    }
+}
+
+pub(super) const CALLS: &[&str] = &[
+    "exit",
+    "execve",
+    "__mac_execve",
+    "posix_spawn",
+    "fork",
+    "vfork",
+];
 
 pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(match call.entry.name {
@@ -38,7 +127,8 @@ pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Opt
             kernel.end = Some(End::Process(Termination::Exited(call.argument(0) as i32)));
             Some(Outcome::JustReturn)
         }
-        "execve" => Some(execve(kernel, call)?),
+        "execve" => Some(execve(kernel, call, 0)?),
+        "__mac_execve" => Some(execve(kernel, call, call.argument(3))?),
         "posix_spawn" => Some(super::spawn::posix_spawn(kernel, call)?),
         "fork" | "vfork" => super::fork::call(kernel, call)?,
         _ => None,
@@ -179,8 +269,17 @@ pub(super) fn activation_command(
     Ok(HostVector::new(command))
 }
 
-fn execve(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
+/// `execve(path, argv, envp)`, or `__mac_execve` with the guest's
+/// `struct mac` at `label` when it is not 0.
+fn execve(kernel: &mut Kernel, call: &Call, label: u64) -> Result<Outcome> {
     let [path, argv, envp, ..] = call.arguments;
+    let label = match (label != 0).then(|| Label::read(label)).transpose() {
+        Ok(label) => label,
+        Err(errno) => return Ok(Outcome::Error(errno)),
+    };
+    if let Some(errno) = label.as_ref().and_then(Label::refused) {
+        return Ok(Outcome::Error(errno));
+    }
     let path = match exec_path(path) {
         Ok(path) => path,
         Err(errno) => return Ok(Outcome::Error(errno)),
@@ -218,12 +317,49 @@ fn execve(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     // SAFETY: NULL-terminated vectors of NUL-terminated strings that live
     // across the call; on success the host replaces this process.
     unsafe {
-        libc::execve(
-            command.program().as_ptr(),
-            command.as_ptr(),
-            environment.as_ptr(),
-        )
+        match &label {
+            Some(label) => __mac_execve(
+                command.program().as_ptr(),
+                command.as_ptr(),
+                environment.as_ptr(),
+                &label.host(),
+            ),
+            None => libc::execve(
+                command.program().as_ptr(),
+                command.as_ptr(),
+                environment.as_ptr(),
+            ),
+        }
     };
     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     Ok(Outcome::Error(errno as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hosted::memory::{PAGE_BYTES, Protection};
+
+    #[test]
+    fn a_mac_label_fails_as_mac_execve_enter_reads_it() {
+        let page = memory::allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        let string = page + 64;
+        let label = |length: u64| {
+            let mut header = length.to_le_bytes().to_vec();
+            header.extend(string.to_le_bytes());
+            assert!(memory::write(page, &header));
+            Label::read(page).map(|label| label.string)
+        };
+        assert!(memory::write(string, b"x/y\0"));
+        assert_eq!(label(0).unwrap_err(), EINVAL);
+        assert_eq!(label(MAC_MAX_LABEL_BUF_LEN + 1).unwrap_err(), EINVAL);
+        // `copyinstr` needs the terminator within `m_buflen` bytes.
+        assert_eq!(label(3).unwrap_err(), ENAMETOOLONG);
+        assert_eq!(label(6).unwrap(), b"x/y\0\0\0");
+        assert_eq!(Label::read(8).err(), Some(EFAULT));
+        // An element without a policy name is EINVAL in `mac_internalize`.
+        assert!(memory::write(string, b"x\0"));
+        assert_eq!(label(2).map(|_| ()), Ok(()));
+        assert_eq!(Label::read(page).unwrap().refused(), Some(EINVAL));
+    }
 }

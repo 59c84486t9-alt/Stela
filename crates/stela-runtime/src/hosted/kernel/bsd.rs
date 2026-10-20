@@ -318,7 +318,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
 
 /// Calls the hosted kernel refuses, stopping the run with the reason.
 pub(crate) const REFUSED: &[(&str, &str)] = &[
-    ("__mac_execve", "exec under a MAC label is not modeled"),
     (
         "kqueue_workloop_ctl",
         "workloop scheduling parameters are not implemented",
