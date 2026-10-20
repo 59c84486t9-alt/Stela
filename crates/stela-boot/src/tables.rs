@@ -1,6 +1,8 @@
-//! Five-level x86 page tables built from any frame source. The loader uses
+//! x86 page tables, five-level under LA57 and four-level otherwise
+//! (`layout::top_level`), built from any frame source. The loader uses
 //! firmware pages reached by identity; the engine uses its own pool reached
 //! through the physmap.
+use crate::layout;
 
 pub const PAGE: u64 = 4096;
 pub const LARGE: u64 = 2 * 1024 * 1024;
@@ -28,7 +30,7 @@ pub fn index(address: u64, level: u32) -> usize {
     ((address >> (12 + 9 * level)) & (ENTRIES - 1)) as usize
 }
 
-/// The entry for `address` at `level` (0 = PT, 3 = PML4) under a PML5 root,
+/// The entry for `address` at `level` (0 = PT, 3 = PML4) under `root`,
 /// creating tables on the way when `create`.
 pub fn entry(
     frames: &mut dyn Frames,
@@ -38,7 +40,7 @@ pub fn entry(
     create: bool,
 ) -> Result<Option<*mut u64>, &'static str> {
     let mut table = root;
-    for current in (level + 1..=4).rev() {
+    for current in (level + 1..=layout::top_level()).rev() {
         let slot = frames.table(table).wrapping_add(index(address, current));
         // SAFETY: `table` is a live table page owned by this builder.
         let value = unsafe { slot.read_volatile() };
@@ -118,12 +120,12 @@ pub fn map_range(
     Ok(())
 }
 
-/// Unmap `first..=last`, an address range inside one entry of the PML5
-/// `root`: clear each entry that maps only addresses in the range, and
-/// descend into the tables of the entries that straddle its ends. Tables
-/// the cleared entries pointed to stay allocated; the TLB is the caller's.
+/// Unmap `first..=last`, a canonical address range in one half: clear each
+/// entry that maps only addresses in the range, and descend into the tables
+/// of the entries that straddle its ends. Tables the cleared entries pointed
+/// to stay allocated; the TLB is the caller's.
 pub fn unmap(frames: &dyn Frames, root: u64, first: u64, last: u64) {
-    clear(frames, root, 4, first, last);
+    clear(frames, root, layout::top_level(), first, last);
 }
 
 fn clear(frames: &dyn Frames, table: u64, level: u32, first: u64, last: u64) {

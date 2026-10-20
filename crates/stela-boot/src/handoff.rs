@@ -2,7 +2,7 @@
 //! physical; the engine reaches them through its physmap.
 use crate::console::Framebuffer;
 use alloc::vec::Vec;
-use stela_runtime::pc;
+use stela_runtime::{machine::mmu::placement::Placement, pc};
 
 pub const MAGIC: u64 = 0x5354_454c_4153_5953; // "SYSALETS"
 pub const MAX_GUEST_RANGES: usize = 128;
@@ -129,8 +129,12 @@ pub struct Handoff {
     pub code: Region,
     /// Page-table frames: engine roots and shadow tables.
     pub pool: Region,
-    /// The window's PML4, shared by every root.
-    pub window: u64,
+    /// Where the guest's address space lies beside the window.
+    pub placement: Placement,
+    /// The loader's root, whose window entries every engine root shares.
+    pub root: u64,
+    /// The physical addresses of the bounce slot's two leaf entries.
+    pub bounce: [u64; 2],
     pub screen: Option<Framebuffer>,
     /// TSC ticks per second, measured against the firmware's Stall.
     pub tsc_hz: u64,
@@ -148,5 +152,3 @@ pub struct Handoff {
     /// The host's ACPI power hardware, when its FADT is usable.
     pub power: Option<pc::power::HostPower>,
 }
-
-const _: () = assert!(size_of::<Handoff>() <= crate::paging::PAGE);

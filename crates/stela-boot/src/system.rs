@@ -1,10 +1,12 @@
 //! System mode, loader phase: everything that needs the firmware.
 //!
 //! It runs identity-mapped under the firmware. It keeps a pristine copy of
-//! this image (taken before any Rust state exists), places a relocated copy
-//! in the Stela window, allocates the engine's memory, builds five-level page
-//! tables, leaves boot services, switches to LA57 and calls the engine phase
-//! in the window. See `docs/design/system.md#host-placement`.
+//! this image (taken before any Rust state exists), chooses the host
+//! placement, places a relocated copy in the Stela window, allocates the
+//! engine's memory, builds its page tables (five-level under LA57, else
+//! four-level), leaves boot services, loads them, through the LA57
+//! trampoline when five-level, and calls the engine phase in the window. See
+//! `docs/design/system.md#host-placement`.
 use crate::{
     console::Framebuffer,
     firmware,
@@ -16,7 +18,7 @@ use crate::{
 };
 use alloc::{string::String, vec::Vec};
 use core::{arch::asm, cell::UnsafeCell, ops::Range};
-use stela_runtime::pc;
+use stela_runtime::{machine::mmu::placement::Placement, pc};
 use uefi::{
     boot::{self, AllocateType, MemoryType},
     fs::FileSystem,
@@ -32,7 +34,6 @@ const BELOW_4G: u64 = 0xffff_f000;
 const RELOCATION_DIRECTORY: usize = 5;
 const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
 const IMAGE_REL_BASED_DIR64: u16 = 10;
-const CPUID_LA57: u32 = 1 << 16;
 
 #[derive(Clone, Copy)]
 struct Snapshot {
@@ -89,7 +90,7 @@ impl Frames for FirmwareFrames {
 
 fn low_page(kind: MemoryType) -> Result<u64, &'static str> {
     let page = boot::allocate_pages(AllocateType::MaxAddress(BELOW_4G), kind, 1)
-        .map_err(|_| "no page below 4 GiB for the LA57 switch")?;
+        .map_err(|_| "no page below 4 GiB for the page-table root")?;
     // SAFETY: a fresh page owned by Stela.
     unsafe { page.as_ptr().write_bytes(0, PAGE as usize) };
     Ok(page.as_ptr() as u64)
@@ -363,10 +364,6 @@ fn load(
     bundle: BundleFiles,
     storage: Option<pc::Handoff>,
 ) -> Result<core::convert::Infallible, &'static str> {
-    let leaf7 = core::arch::x86_64::__cpuid_count(7, 0);
-    if leaf7.ecx & CPUID_LA57 == 0 {
-        return Err("system mode needs five-level paging (LA57), which this CPU lacks");
-    }
     // SAFETY: written once at entry, read here.
     let snapshot = unsafe { *PRISTINE.0.get() }.ok_or("no pristine image copy")?;
     let image = firmware::Image::loaded()?;
@@ -382,19 +379,33 @@ fn load(
             snapshot.bytes,
         );
     }
+    let ram = firmware::ram()?;
+    let screen = Framebuffer::from_firmware();
+    let apic_base = crate::apic::base_msr();
+    // The physmap reaches RAM, the framebuffer and the local APIC.
+    let apic = apic_base & crate::apic::BASE_ADDRESS;
+    let top = ram
+        .iter()
+        .map(|r| r.1 as u64)
+        .chain(screen.iter().map(|s| (s.base + s.bytes) as u64))
+        .chain(core::iter::once(apic + PAGE))
+        .max()
+        .unwrap_or(0);
+    let placement = layout::choose(crate::cpu::LA57.present(), top)
+        .ok_or("host physical addresses lie beyond what any placement's physmap reaches")?;
+    layout::set(placement);
     relocate(
         engine.physical as usize,
         snapshot.bytes,
-        layout::IMAGE.wrapping_sub(image.start as u64),
+        layout::image().wrapping_sub(image.start as u64),
     )?;
     let heap = allocate(HEAP_BYTES)?;
     let stack = allocate(STACK_BYTES)?;
     let code = allocate(CODE_BYTES)?;
     let pool = allocate(POOL_BYTES)?;
-    let handoff_page = allocate(PAGE)?;
+    let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
     let root = low_page(MemoryType::LOADER_DATA)?;
-    let screen = Framebuffer::from_firmware();
     let before = rdtsc();
     boot::stall(core::time::Duration::from_millis(50));
     let tsc_hz = (rdtsc() - before) * 20;
@@ -403,10 +414,8 @@ fn load(
         .ok()
         .and_then(|time| unix_seconds(&time));
     let power = host_power();
-    let apic_base = crate::apic::base_msr();
 
     let mut frames = FirmwareFrames;
-    let ram = firmware::ram()?;
     let image_rights: Vec<(u64, u64, u64)> = image
         .sections
         .iter()
@@ -441,7 +450,7 @@ fn load(
         tables::map_page(
             &mut frames,
             root,
-            layout::IMAGE + page,
+            layout::image() + page,
             engine.physical + page,
             rights,
         )?;
@@ -450,7 +459,7 @@ fn load(
     tables::map_range(
         &mut frames,
         root,
-        layout::HEAP,
+        layout::heap(),
         heap.physical,
         heap.bytes,
         data,
@@ -458,7 +467,7 @@ fn load(
     tables::map_range(
         &mut frames,
         root,
-        layout::STACK + PAGE,
+        layout::stack() + PAGE,
         stack.physical,
         stack.bytes,
         data,
@@ -466,7 +475,7 @@ fn load(
     tables::map_range(
         &mut frames,
         root,
-        layout::CODE,
+        layout::code(),
         code.physical,
         code.bytes,
         PRESENT,
@@ -499,7 +508,6 @@ fn load(
     }
     // The xAPIC page must be strong uncacheable (Intel SDM Vol. 3A 11.4.1);
     // the entry says so rather than relying on the firmware's MTRRs.
-    let apic = apic_base & crate::apic::BASE_ADDRESS;
     if !ram.iter().any(|r| r.0 as u64 <= apic && apic < r.1 as u64) {
         tables::map_page(
             &mut frames,
@@ -509,11 +517,16 @@ fn load(
             data | UNCACHED,
         )?;
     }
-    let window = {
-        // SAFETY: the root was just filled; entry 64 holds the window PML4.
-        let entry = unsafe { (root as *const u64).add(layout::WINDOW_INDEX).read() };
-        entry & tables::ADDRESS
-    };
+    // The bounce slot's leaf entries, which the translation helper points
+    // at guest frames; until then they map a scratch page.
+    let scratch = allocate(PAGE)?.physical;
+    let mut bounce = [0; 2];
+    for (index, slot) in bounce.iter_mut().enumerate() {
+        let address = layout::bounce() + index as u64 * PAGE;
+        tables::map_page(&mut frames, root, address, scratch, data)?;
+        let entry = tables::entry(&mut frames, root, address, 0, false)?;
+        *slot = entry.ok_or("bounce slot unmapped")? as u64;
+    }
 
     let options_region = Region {
         physical: options.as_ptr() as u64,
@@ -539,7 +552,7 @@ fn load(
     core::mem::forget(bundle);
     let handoff = handoff_page.physical as *mut Handoff;
     let engine_entry =
-        layout::IMAGE + (crate::engine::entry as *const () as u64 - image.start as u64);
+        layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
@@ -572,7 +585,7 @@ fn load(
         }
     }
     core::mem::forget(map);
-    // SAFETY: a fresh LOADER_DATA page sized for the handoff.
+    // SAFETY: fresh LOADER_DATA pages sized for the handoff.
     unsafe {
         handoff.write(Handoff {
             magic: MAGIC,
@@ -584,7 +597,9 @@ fn load(
             stack,
             code,
             pool,
-            window,
+            placement,
+            root,
+            bounce,
             screen,
             tsc_hz,
             apic_base,
@@ -601,12 +616,17 @@ fn load(
     unsafe {
         asm!("cli", options(nomem, nostack));
         paging::take_over()?;
-        la57::enable(root, trampoline);
+        match placement {
+            Placement::FiveLevel => la57::enable(root, trampoline),
+            Placement::FourLevel { .. } => {
+                asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags))
+            }
+        }
         asm!(
             "mov rsp, {stack}",
             "call {entry}",
             "ud2",
-            stack = in(reg) layout::STACK + PAGE + STACK_BYTES,
+            stack = in(reg) layout::stack() + PAGE + STACK_BYTES,
             entry = in(reg) engine_entry,
             in("rdi") layout::physical(handoff as u64),
             options(noreturn),

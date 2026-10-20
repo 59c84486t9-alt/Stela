@@ -1,10 +1,11 @@
 //! The bare-metal [`Host`]: guest RAM, the native code arena, shadow paging,
 //! precise native faults, the local APIC timer and the TSC counter.
 //!
-//! Shadow roots are PML5 pages whose entry 0 and 511 hold the guest's two
-//! halves and whose entry 64 is the shared window, which native code's
-//! guest range checks keep every guest access out of; no other entry is
-//! ever mapped, which those checks rely on. There is one root per
+//! Shadow roots are PML5 pages under LA57 and PML4 pages otherwise, whose
+//! entries hold the guest's native ranges and the shared window
+//! (`layout::window_entries`), which native code's guest range checks keep
+//! every guest access out of; no other entry is ever mapped, which those
+//! checks rely on. There is one root per
 //! permission view (EL0, EL1, EL1 with PAN, GL1), and a second set for the
 //! same views while tag checks keep Tagged memory out (`Regime::tag_checks`),
 //! filled on demand by the #PF handler from the software walk of the
@@ -222,7 +223,8 @@ pub struct Config {
     pub ram: Vec<RamRange>,
     pub pool_physical: u64,
     pub pool_bytes: u64,
-    pub window: u64,
+    /// The loader's root, whose window entries every root shares.
+    pub window_root: u64,
     pub code_physical: u64,
     pub code_bytes: u64,
     pub tsc_hz: u64,
@@ -249,15 +251,19 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
     for half in [LOWER, UPPER] {
         pool.reset_half(half);
     }
-    let window_entry = config.window | PRESENT | WRITABLE;
+    let (first, last) = layout::window_entries();
+    let window = layout::physical(config.window_root) as *const u64;
     let mut root = || -> Result<u64, &'static str> {
         let frame = pool.permanent().ok_or("page-table pool too small")?;
-        // SAFETY: a fresh permanent frame through the physmap.
-        unsafe {
-            (layout::physical(frame) as *mut u64)
-                .add(layout::WINDOW_INDEX)
-                .write(window_entry)
-        };
+        for entry in first..=last {
+            // SAFETY: a fresh permanent frame and the loader's root, both
+            // through the physmap.
+            unsafe {
+                (layout::physical(frame) as *mut u64)
+                    .add(entry)
+                    .write(window.add(entry).read())
+            };
+        }
         Ok(frame)
     };
     let host_root = root()?;
@@ -523,7 +529,7 @@ unsafe extern "sysv64" {
 }
 
 fn in_code(state: &State, rip: u64) -> bool {
-    state.native && (layout::CODE..layout::CODE + state.code_bytes).contains(&rip)
+    state.native && (layout::code()..layout::code() + state.code_bytes).contains(&rip)
 }
 
 /// End the native block at `frame` and report `cause` to the engine.
@@ -721,12 +727,12 @@ impl Host for BareHost {
         // Serialize before the executable alias runs the new bytes.
         core::arch::x86_64::__cpuid(0);
         state.code_used = end;
-        Ok(NativeCode((layout::CODE + offset) as usize))
+        Ok(NativeCode((layout::code() + offset) as usize))
     }
 
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
         let state = state();
-        let offset = code.0 as u64 - layout::CODE;
+        let offset = code.0 as u64 - layout::code();
         assert!(
             offset + bytes.len() as u64 <= state.code_used,
             "a patch outside the installed code"

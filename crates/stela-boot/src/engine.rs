@@ -1,5 +1,6 @@
 //! System mode, engine phase: runs in the Stela window after the loader has
-//! switched to LA57. Host physical memory is reached through the physmap.
+//! loaded the engine's tables, switching to LA57 when the host has it. Host
+//! physical memory is reached through the physmap.
 //! The one use of identity addresses is `--preboot`: before the host is
 //! installed, Stela's storage drivers, which address registers and DMA pages
 //! by identity, read the installed system from the disk through the
@@ -1259,14 +1260,16 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     if handoff.magic != MAGIC {
         output::fatal("engine handoff has the wrong magic");
     }
+    layout::set(handoff.placement);
     // SAFETY: the window heap is reserved for this allocator and still unused.
-    unsafe { crate::ALLOCATOR.initialize(layout::HEAP as *mut u8, handoff.heap.bytes as usize) };
+    unsafe { crate::ALLOCATOR.initialize(layout::heap() as *mut u8, handoff.heap.bytes as usize) };
     if let Some(screen) = handoff.screen {
         console::install(screen.relocated(layout::physical(screen.base as u64) as usize));
     }
     output::arguments(format_args!(
-        "STELA SYSTEM ENGINE window={:#x} tsc_hz={} guest_ranges={}\n",
-        layout::WINDOW,
+        "STELA SYSTEM ENGINE window={:#x} placement={:?} tsc_hz={} guest_ranges={}\n",
+        layout::window(),
+        handoff.placement,
         handoff.tsc_hz,
         handoff.guest_count
     ));
@@ -1519,13 +1522,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ram,
         pool_physical: handoff.pool.physical,
         pool_bytes: handoff.pool.bytes,
-        window: handoff.window,
+        window_root: handoff.root,
         code_physical: handoff.code.physical,
         code_bytes: handoff.code.bytes,
         tsc_hz: handoff.tsc_hz,
         apic_base: handoff.apic_base,
-        placement: stela_runtime::machine::mmu::placement::Placement::FiveLevel,
-        bounce: None,
+        placement: handoff.placement,
+        bounce: Some((layout::bounce(), handoff.bounce)),
     };
     // SAFETY: once, with interrupts off.
     if let Err(error) = unsafe { host::install(config) } {
