@@ -107,6 +107,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
                 let storage = pc::virtio::matches(&function)
                     || pc::input::matches(&function)
                     || pc::virtio_net::matches(&function)
+                    || pc::igc::matches(&function)
                     || function.class == pc::nvme::CLASS
                     || function.class == pc::ahci::CLASS
                     || function.class == pc::xhci::CLASS;

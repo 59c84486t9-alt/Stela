@@ -9,6 +9,7 @@ use super::{
     block::{BlockDevice, BlockError, Identity, Shared, Window},
     dma::DmaAllocator,
     gpt::{self, GptError, Guid, PartitionDevice},
+    igc::{self, Igc},
     input, nvme,
     pci::{Address, Function},
     virtio,
@@ -46,6 +47,7 @@ impl core::str::FromStr for Target {
 /// A host network adapter, as a raw Ethernet link.
 pub enum Adapter {
     Virtio(VirtioNet),
+    Igc(Igc),
     Usb(xhci::cdc::UsbNet),
 }
 
@@ -54,6 +56,7 @@ impl Adapter {
     pub fn location(&self) -> &str {
         match self {
             Self::Virtio(device) => &device.location,
+            Self::Igc(device) => &device.location,
             Self::Usb(device) => &device.location,
         }
     }
@@ -63,24 +66,28 @@ impl Link for Adapter {
     fn mac(&self) -> Mac {
         match self {
             Self::Virtio(device) => device.mac(),
+            Self::Igc(device) => device.mac(),
             Self::Usb(device) => device.mac(),
         }
     }
     fn carrier(&mut self) -> bool {
         match self {
             Self::Virtio(device) => device.carrier(),
+            Self::Igc(device) => device.carrier(),
             Self::Usb(device) => device.carrier(),
         }
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
         match self {
             Self::Virtio(device) => device.transmit(frame),
+            Self::Igc(device) => device.transmit(frame),
             Self::Usb(device) => device.transmit(frame),
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
         match self {
             Self::Virtio(device) => device.receive(),
+            Self::Igc(device) => device.receive(),
             Self::Usb(device) => device.receive(),
         }
     }
@@ -106,7 +113,8 @@ pub struct Disks {
 }
 
 /// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
-/// every virtio-input device, every virtio-net adapter, and every xHCI
+/// every virtio-input device, every virtio-net and Intel I225/I226 adapter,
+/// and every xHCI
 /// controller with the USB disks, keyboards, pointers and Ethernet
 /// adapters on it.
 ///
@@ -157,6 +165,12 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
             } else if virtio_net::matches(&function) {
                 match VirtioNet::new(&mut function, handoff, dma) {
                     Ok(device) => disks.links.push(Adapter::Virtio(device)),
+                    Err(error) => disks.failures.push((address, error)),
+                }
+                continue;
+            } else if igc::matches(&function) {
+                match Igc::new(&mut function, handoff, dma) {
+                    Ok(device) => disks.links.push(Adapter::Igc(device)),
                     Err(error) => disks.failures.push((address, error)),
                 }
                 continue;

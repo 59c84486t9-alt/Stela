@@ -5,8 +5,8 @@
 //! UEFI's Simple Network Protocol ends with boot services, and the request
 //! is made during the restore, long after ExitBootServices, so the client
 //! runs the runtime's IPv4 stack (`stela_runtime::net`) over the adapter's
-//! after-EBS driver (`pc::virtio_net`, or `pc::xhci::cdc` for a USB
-//! Ethernet adapter). Its registers and DMA pages are
+//! after-EBS driver (`pc::virtio_net`, `pc::igc` for an Intel I225/I226,
+//! or `pc::xhci::cdc` for a USB Ethernet adapter). Its registers and DMA pages are
 //! identity-mapped in the loader's root, so every frame moves inside that
 //! root (`storage::RestoreRoot`), as block and input I/O do.
 use super::storage::RestoreRoot;
@@ -61,7 +61,7 @@ impl HostNetwork {
     pub fn open(links: Links, clock: pc::Clock) -> Result<Self, String> {
         let Some(device) = links.devices.into_iter().next() else {
             return Err(String::from(
-                "no host network adapter: the mount drives virtio-net and USB CDC-ECM adapters after ExitBootServices",
+                "no host network adapter: the mount drives virtio-net, Intel I225/I226 and USB CDC Ethernet adapters after ExitBootServices",
             ));
         };
         output::arguments(format_args!(

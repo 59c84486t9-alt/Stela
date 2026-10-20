@@ -29,6 +29,9 @@ impl Config {
     }
 }
 
+/// Autonegotiation after an adapter reset: about 3 s for 2.5GBASE-T,
+/// doubled.
+const CARRIER_WAIT_US: u64 = 6_000_000;
 const DHCP_ATTEMPTS: u32 = 4;
 const DHCP_FIRST_WAIT_US: u64 = 4_000_000;
 const ARP_ATTEMPTS: u32 = 3;
@@ -350,8 +353,11 @@ impl<L: Link, C: Clock> Stack<L, C> {
 
     /// Configures the interface from a DHCP server (RFC 2131 3.1).
     pub fn dhcp(&mut self) -> Result<&Config, NetError> {
-        if !self.link.carrier() {
-            return Err(NetError::NoCarrier);
+        let deadline = self.clock.now_us().saturating_add(CARRIER_WAIT_US);
+        while !self.link.carrier() {
+            if self.clock.now_us() >= deadline {
+                return Err(NetError::NoCarrier);
+            }
         }
         self.config = None;
         let xid = self.random();
@@ -658,6 +664,8 @@ pub(crate) mod tests {
         pub drop_response_segments: usize,
         pub refuse: bool,
         pub dhcp_silent: bool,
+        /// Carrier polls that report no link before the link comes up.
+        pub carrier_after: usize,
         pub response: Vec<u8>,
         request: Vec<u8>,
         server_next: u32,
@@ -680,6 +688,7 @@ pub(crate) mod tests {
                 drop_response_segments: 0,
                 refuse: false,
                 dhcp_silent: false,
+                carrier_after: 0,
                 response: response.to_vec(),
                 request: Vec::new(),
                 server_next: 7000,
@@ -893,6 +902,10 @@ pub(crate) mod tests {
         fn mac(&self) -> Mac {
             CLIENT
         }
+        fn carrier(&mut self) -> bool {
+            self.carrier_after = self.carrier_after.saturating_sub(1);
+            self.carrier_after == 0
+        }
         fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
             assert!(frame.len() >= wire::MIN_FRAME && frame.len() <= wire::MAX_FRAME);
             self.sent.push(frame.to_vec());
@@ -926,6 +939,18 @@ pub(crate) mod tests {
         assert_eq!(config.dns, [RESOLVER]);
         assert_eq!(s.resolve("gs.apple.com").unwrap(), SERVER);
         assert_eq!(s.resolve("1.2.3.4").unwrap(), Ipv4([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn dhcp_waits_a_bounded_time_for_carrier() {
+        let mut lan = Lan::new(b"");
+        lan.carrier_after = 1000;
+        assert_eq!(stack(lan).dhcp().unwrap().address, LEASE);
+        let mut lan = Lan::new(b"");
+        lan.carrier_after = usize::MAX;
+        let mut s = stack(lan);
+        assert_eq!(s.dhcp().unwrap_err(), NetError::NoCarrier);
+        assert!(s.link.sent.is_empty());
     }
 
     #[test]
