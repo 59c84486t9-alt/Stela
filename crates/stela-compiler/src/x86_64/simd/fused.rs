@@ -2,11 +2,11 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, RESULT_MINIMUM_EXPONENT,
-    branch, clear_scalar, commit_inexact, emit_fma, emit_opcode, environment, exponent_range,
-    prepare_vector_input_range, prepare_vector_result_range, read_numerical_right,
-    read_numerical_vector, reject_other_status, reject_product_status, resolve,
-    restore_environment, restore_environment_with_product, save_product_status, test_control,
-    vector_exponent_range,
+    ZeroProduct, branch, clear_scalar, commit_inexact, emit_fma, emit_opcode, environment,
+    exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
+    read_numerical_right, read_numerical_vector, reject_other_status, reject_product_status,
+    resolve, restore_environment, restore_environment_with_product, save_product_status,
+    sticky_inexact, sticky_result_check, test_control, vector_exponent_range, zero_product_check,
 };
 use super::{Host, commit, packed};
 use crate::{
@@ -86,7 +86,17 @@ pub(in crate::x86_64) fn emit(
         super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
         return;
     }
-    let mut helper = Vec::new();
+    let native_fma = target.supports(TargetCpu::Fma);
+    let (mut helper, sticky_done) = if native_fma {
+        let (full, helper, done) = sticky_path(code, operand, target);
+        let full_start = code.len();
+        for patch in full {
+            resolve(code, patch, full_start);
+        }
+        (helper, Some(done))
+    } else {
+        (Vec::new(), None)
+    };
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     read_numerical_vector(code, operand.shape, operand.left, LEFT);
@@ -105,7 +115,6 @@ pub(in crate::x86_64) fn emit(
         };
         helper.push(branch(code, condition));
     }
-    let native_fma = target.supports(TargetCpu::Fma);
     let merge = if native_fma {
         ADDEND
     } else {
@@ -177,4 +186,49 @@ pub(in crate::x86_64) fn emit(
         }
         commit(code, operand.destination, LEFT);
     }
+    if let Some(done) = sticky_done {
+        let end = code.len();
+        resolve(code, done, end);
+    }
+}
+
+/// The sticky-inexact path (`numerical::sticky_inexact`) for a host with
+/// FMA3, whose single rounding is the guest's: the operation in the entry
+/// MXCSR, its result classification and the commit, which clears scalar
+/// upper bits as NEP is zero there. A rejected zero takes the out-of-line
+/// zero-product check. Returns the branches to the full path, to the helper
+/// and past the full path.
+fn sticky_path(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    target: TargetCpu,
+) -> ([usize; 2], Vec<usize>, usize) {
+    let full = sticky_inexact(code);
+    read_numerical_vector(code, operand.shape, operand.left, LEFT);
+    read_numerical_vector(code, operand.shape, operand.addend, ADDEND);
+    prepare_right(code, operand);
+    emit_checked_fma(code, operand, target);
+    let rejected = sticky_result_check(code, operand.format, operand.shape, LEFT, false);
+    let resume = code.len();
+    match operand.shape {
+        Shape::Scalar => clear_scalar(code, operand.format, LEFT),
+        Shape::Vector64 => packed(code, Host::MoveQword, LEFT, LEFT),
+        Shape::Vector128 => {}
+    }
+    commit(code, operand.destination, LEFT);
+    let done = jump(code);
+    let check = code.len();
+    resolve(code, rejected, check);
+    let helper = zero_product_check(
+        code,
+        &ZeroProduct {
+            format: operand.format,
+            shape: operand.shape,
+            right: RIGHT,
+            left: operand.left,
+            addend: Some(ADDEND),
+        },
+        resume,
+    );
+    (full, helper, done)
 }

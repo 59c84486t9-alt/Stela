@@ -1,14 +1,15 @@
 //! FP binary arithmetic: SSE2 for normal values, software fallback otherwise.
+use alloc::vec;
 use alloc::vec::Vec;
 mod half;
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, Condition, EXPONENT_VECTOR, INPUT_MINIMUM_EXPONENT, LEFT_VECTOR,
     MOVLHPS_XMM1_XMM2, MOVQ_XMM0_XMM0, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
-    SINGLE_EXPONENT_BIAS_BITS, branch, clear_scalar, commit_inexact, emit_opcode, environment,
-    exponent_range, prepare_vector_input_range, prepare_vector_result_range, read_numerical_right,
-    read_numerical_vector, reject_other_status, resolve, restore_environment, test_control,
-    vector_exponent_range,
+    SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_scalar, commit_inexact, emit_opcode,
+    environment, exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
+    read_numerical_right, read_numerical_vector, reject_other_status, resolve, restore_environment,
+    sticky_inexact, sticky_result_check, test_control, vector_exponent_range, zero_product_check,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
@@ -197,8 +198,96 @@ fn result_sign(code: &mut Vec<u8>, operand: &Operand) {
     }
 }
 
+/// Addition and subtraction results below the minimum normal are exact, so
+/// they raise no guest status.
+fn exact_tiny(operation: BinaryOperation) -> bool {
+    matches!(
+        operation,
+        BinaryOperation::Add | BinaryOperation::Subtract | BinaryOperation::AbsoluteDifference
+    )
+}
+
+/// A product whose rounded result is a zero is exact, without status,
+/// exactly when an input is a zero; otherwise it underflowed. FMULX's
+/// zero times infinity is two, not a zero.
+fn zero_product(operation: BinaryOperation) -> bool {
+    matches!(
+        operation,
+        BinaryOperation::Multiply
+            | BinaryOperation::NegatedMultiply
+            | BinaryOperation::MultiplyExtended
+    )
+}
+
+/// The left source, whose register the operation overwrote, for the
+/// out-of-line zero-product check: still unchanged in the frame.
+fn product_left(operand: &Operand) -> u8 {
+    match operand.inputs {
+        Inputs::Elementwise { left, .. } | Inputs::Indexed { left, .. } => left,
+        Inputs::Pairwise { .. } | Inputs::PairwiseScalar { .. } => {
+            unreachable!("pairwise forms add")
+        }
+    }
+}
+
+/// The sticky-inexact path (`numerical::sticky_inexact`): the operation in
+/// the entry MXCSR, its result classification and the commit, which clears
+/// scalar upper bits as NEP is zero there. Products that the classification
+/// rejects first take an out-of-line check for exact zeros
+/// ([`zero_product`]). Returns the branches to the full path, to the helper
+/// and past the full path.
+fn sticky_path(code: &mut Vec<u8>, operand: &Operand) -> ([usize; 2], Vec<usize>, usize) {
+    let full = sticky_inexact(code);
+    let right = prepare_inputs(code, operand);
+    emit_opcode(
+        code,
+        operand.format,
+        operand.shape,
+        arithmetic_opcode(operand.operation),
+        right,
+    );
+    let rejected = sticky_result_check(
+        code,
+        operand.format,
+        operand.shape,
+        LEFT_VECTOR,
+        exact_tiny(operand.operation),
+    );
+    let resume = code.len();
+    result_sign(code, operand);
+    match operand.shape {
+        Shape::Scalar => clear_scalar(code, operand.format, LEFT_VECTOR),
+        Shape::Vector64 => code.extend(MOVQ_XMM0_XMM0),
+        Shape::Vector128 => {}
+    }
+    commit(code, operand.destination, LEFT_VECTOR);
+    let done = jump(code);
+    if !zero_product(operand.operation) {
+        return (full, vec![rejected], done);
+    }
+    let check = code.len();
+    resolve(code, rejected, check);
+    let helper = zero_product_check(
+        code,
+        &ZeroProduct {
+            format: operand.format,
+            shape: operand.shape,
+            right,
+            left: product_left(operand),
+            addend: None,
+        },
+        resume,
+    );
+    (full, helper, done)
+}
+
 fn emit_scalar(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
-    let mut helper = Vec::new();
+    let (full, sticky_helper, sticky_done) = sticky_path(code, operand);
+    let full_start = code.len();
+    for patch in full {
+        resolve(code, patch, full_start);
+    }
+    let mut helper = sticky_helper;
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
@@ -239,10 +328,17 @@ fn emit_scalar(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
         resolve(code, merge, merge_target);
     }
     commit(code, operand.destination, LEFT_VECTOR);
+    let done = code.len();
+    resolve(code, sticky_done, done);
 }
 
 fn emit_vector(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
-    let mut helper = Vec::new();
+    let (full, sticky_helper, sticky_done) = sticky_path(code, operand);
+    let full_start = code.len();
+    for patch in full {
+        resolve(code, patch, full_start);
+    }
+    let mut helper = sticky_helper;
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
@@ -289,6 +385,8 @@ fn emit_vector(code: &mut Vec<u8>, operand: &Operand, pc: GuestAddress) {
         code.extend(MOVQ_XMM0_XMM0);
     }
     commit(code, operand.destination, LEFT_VECTOR);
+    let done = code.len();
+    resolve(code, sticky_done, done);
 }
 
 pub(super) fn always_exits(operand: &Operand) -> bool {

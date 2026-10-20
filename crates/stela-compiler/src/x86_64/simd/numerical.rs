@@ -1,4 +1,5 @@
 //! Shared FP emission: integer lane classification and a private MXCSR.
+use alloc::vec;
 use alloc::vec::Vec;
 mod control;
 
@@ -212,6 +213,257 @@ pub(super) fn commit_ah0_inexact(code: &mut Vec<u8>) {
     resolve(code, suppressed, end);
 }
 
+/// The FPCR fields outside whose defaults the sticky-inexact path
+/// ([`sticky_inexact`]) declines: FIZ, AH, the exception enables, RMode
+/// and FZ change some S/D result or its status that the path's result
+/// classification cannot see, and NEP, which the path does not merge,
+/// changes scalar upper bits. DN only selects a NaN result, which the
+/// classification sends to the helper; FZ16 and AHP concern Half only.
+pub(super) const FPCR_STICKY_MASK: u32 = {
+    use crate::aarch64::floating::{
+        FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, FPCR_ROUNDING_MASK,
+        FPCR_ROUNDING_SHIFT,
+    };
+    FPCR_FIZ
+        | FPCR_AH
+        | FPCR_NEP
+        | FPCR_EXCEPTION_ENABLE_MASK
+        | FPCR_ROUNDING_MASK << FPCR_ROUNDING_SHIFT
+        | FPCR_FZ
+};
+/// FPSR.IXC.
+const FPSR_INEXACT: u8 = 1 << 4;
+const TEST_STATE_BYTE_IMM8: &[u8] = &[0xf6, 0x87];
+const JMP_REL32: u8 = 0xe9;
+
+/// Enter the sticky-inexact path, or take one of the returned branches to
+/// the full path. With FPCR at its defaults ([`FPCR_STICKY_MASK`]) and
+/// FPSR.IXC already set, an S/D operation whose result its caller then
+/// classifies needs neither its own MXCSR control nor its status. It runs
+/// in the MXCSR native code is entered with: the block ABI's power-on
+/// control (all exceptions masked, nearest rounding, no DAZ or FTZ), which
+/// the SysV ABI preserves across calls and every environment sequence here
+/// restores; its status flags are never read. Without DAZ, FZ and FIZ both
+/// sides compute subnormal inputs exactly and without guest status, so no
+/// input needs classifying. A fresh inexact result would only set IXC
+/// again; every other status the guest would see needs a NaN or infinite
+/// result, or, for an operation whose tiny results may be inexact, a result
+/// below twice the minimum normal, which the caller's classification sends
+/// to the exact helper.
+pub(super) fn sticky_inexact(code: &mut Vec<u8>) -> [usize; 2] {
+    test_control(code, FPCR_STICKY_MASK);
+    let control = branch(code, Condition::NotZero);
+    code.extend(TEST_STATE_BYTE_IMM8);
+    code.extend((core::mem::offset_of!(GuestState, fpsr) as u32).to_le_bytes());
+    code.push(FPSR_INEXACT);
+    let status = branch(code, Condition::Zero);
+    [control, status]
+}
+
+/// An unconditional `jmp rel32` to resolve later.
+pub(super) fn jump(code: &mut Vec<u8>) -> usize {
+    code.push(JMP_REL32);
+    let patch = code.len();
+    code.extend(0i32.to_le_bytes());
+    patch
+}
+
+/// Classify the active result lanes in `source` for the sticky-inexact
+/// path and return the branch to the helper. Every NaN or infinite lane
+/// takes it; unless `exact_tiny` (addition and subtraction, whose results
+/// below the minimum normal are exact, and roots, which are never tiny),
+/// so does every lane below twice the minimum normal, which may be tiny
+/// before rounding, zero included.
+pub(super) fn sticky_result_check(
+    code: &mut Vec<u8>,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    exact_tiny: bool,
+) -> usize {
+    if shape == Shape::Scalar {
+        let minimum = if exact_tiny {
+            0
+        } else {
+            RESULT_MINIMUM_EXPONENT
+        };
+        exponent_range(code, format, source, minimum);
+        return branch(code, Condition::AboveOrEqual);
+    }
+    prepare_vector_input_range(code, format);
+    if exact_tiny {
+        vector_below_maximum(code, format, shape, source);
+    } else {
+        prepare_vector_result_range(code);
+        vector_exponent_range(code, format, shape, source);
+    }
+    branch(code, Condition::NotZero)
+}
+
+/// Leave ZF set when every active S/D lane of `source` has an exponent
+/// below all ones, with the maximum from [`prepare_vector_input_range`].
+/// The high dwords of Double lanes hold zero, which is below it too.
+fn vector_below_maximum(code: &mut Vec<u8>, format: Format, shape: Shape, source: u8) {
+    vector_exponent_fields(code, format, source, false);
+    packed(
+        code,
+        Host::MoveAligned,
+        VALIDITY_VECTOR,
+        MAXIMUM_EXPONENT_VECTOR,
+    );
+    packed(code, Host::GreaterDword, VALIDITY_VECTOR, EXPONENT_VECTOR);
+    Host::DwordSignMask.register(code, 0, VALIDITY_VECTOR, crate::TargetCpu::Baseline);
+    let mask = match (shape, format) {
+        (Shape::Vector64, Format::Single) => {
+            code.extend(AND_EAX_IMM8);
+            code.push(SINGLE_LOW_VECTOR_MASK);
+            SINGLE_LOW_VECTOR_MASK
+        }
+        (Shape::Vector128, Format::Single | Format::Double) => SINGLE_VECTOR_MASK,
+        _ => unreachable!("allocated S/D vector shape"),
+    };
+    code.extend(CMP_EAX_IMM8);
+    code.push(mask);
+}
+
+/// The operands of a product whose result the sticky classification
+/// rejected, for [`zero_product_check`]: the result is in LEFT_VECTOR, the
+/// right input in `right`, the left source (overwritten by the result)
+/// still in guest vector `left` of the frame, and a fused addend in
+/// `addend`.
+pub(super) struct ZeroProduct {
+    pub format: Format,
+    pub shape: Shape,
+    pub right: u8,
+    pub left: u8,
+    pub addend: Option<u8>,
+}
+
+/// Zero-product check registers; EXPONENT_VECTOR keeps the classifier's
+/// lane validity, and the right input's register is reused for the left
+/// once its own zeros are known.
+const ZERO_RESULT: u8 = 3;
+const ZERO_INPUT: u8 = 4;
+const ZERO_PAIR: u8 = 5;
+const ZERO_VECTOR: u8 = 7;
+/// PSHUFD selector exchanging the two dwords of each qword.
+const SWAP_DWORD_PAIRS: u8 = 0xb1;
+/// MOVMSKPS lanes that are active: the low dword of each D lane holds its
+/// classification.
+const DOUBLE_LOW_DWORDS: u8 = 0b0101;
+const MOV_RAX_STATE: &[u8] = &[0x48, 0x8b, 0x87];
+const MOV_EAX_STATE: &[u8] = &[0x8b, 0x87];
+const ADD_RAX_RAX: &[u8] = &[0x48, 0x01, 0xc0];
+const ADD_EAX_EAX: &[u8] = &[0x01, 0xc0];
+const MOVQ_RAX_XMM_PREFIX: &[u8] = &[0x66, 0x48, 0x0f, 0x7e];
+const MOVD_EAX_XMM_PREFIX: &[u8] = &[0x66, 0x0f, 0x7e];
+
+/// Out of line after a sticky-inexact product (`sticky_inexact`): return
+/// to `resume` when every active lane the classification rejected is a
+/// zero whose product has a zero input, with a zero addend for a fused
+/// product, which makes it exact and without status, and otherwise take
+/// one of the returned branches to the helper. Other zeros and tiny
+/// results may have underflowed, and need the helper.
+pub(super) fn zero_product_check(
+    code: &mut Vec<u8>,
+    product: &ZeroProduct,
+    resume: usize,
+) -> Vec<usize> {
+    let ZeroProduct {
+        format,
+        shape,
+        right,
+        left,
+        addend,
+    } = *product;
+    if shape == Shape::Scalar {
+        let mut helper = vec![];
+        for source in core::iter::once(LEFT_VECTOR).chain(addend) {
+            zero_scalar(code, format, source);
+            helper.push(branch(code, Condition::NotZero));
+        }
+        zero_scalar(code, format, right);
+        let right_zero = branch(code, Condition::Zero);
+        resolve(code, right_zero, resume);
+        code.extend(if format == Format::Double {
+            MOV_RAX_STATE
+        } else {
+            MOV_EAX_STATE
+        });
+        code.extend(vector_offset(left).to_le_bytes());
+        code.extend(if format == Format::Double {
+            ADD_RAX_RAX
+        } else {
+            ADD_EAX_EAX
+        });
+        let left_zero = branch(code, Condition::Zero);
+        resolve(code, left_zero, resume);
+        helper.push(jump(code));
+        return helper;
+    }
+    packed(code, Host::Xor, ZERO_VECTOR, ZERO_VECTOR);
+    zero_lanes(code, format, ZERO_INPUT, right);
+    read_vector(code, left, right);
+    zero_lanes(code, format, right, right);
+    packed(code, Host::Or, ZERO_INPUT, right);
+    zero_lanes(code, format, ZERO_RESULT, LEFT_VECTOR);
+    packed(code, Host::And, ZERO_INPUT, ZERO_RESULT);
+    if let Some(addend) = addend {
+        zero_lanes(code, format, addend, addend);
+        packed(code, Host::And, ZERO_INPUT, addend);
+    }
+    packed(code, Host::Or, EXPONENT_VECTOR, ZERO_INPUT);
+    Host::DwordSignMask.register(code, 0, EXPONENT_VECTOR, crate::TargetCpu::Baseline);
+    let mask = match (shape, format) {
+        (Shape::Vector64, Format::Single) => SINGLE_LOW_VECTOR_MASK,
+        (Shape::Vector128, Format::Single) => SINGLE_VECTOR_MASK,
+        (Shape::Vector128, Format::Double) => DOUBLE_LOW_DWORDS,
+        _ => unreachable!("allocated S/D vector shape"),
+    };
+    code.extend(AND_EAX_IMM8);
+    code.push(mask);
+    code.extend(CMP_EAX_IMM8);
+    code.push(mask);
+    let passed = branch(code, Condition::Zero);
+    resolve(code, passed, resume);
+    vec![jump(code)]
+}
+
+/// Leave ZF set when the low S/D lane of `xmm` is a zero of either sign.
+fn zero_scalar(code: &mut Vec<u8>, format: Format, xmm: u8) {
+    const REGISTER_DIRECT: u8 = 0xc0;
+    const MODRM_REGISTER_SHIFT: u8 = 3;
+    if format == Format::Double {
+        code.extend(MOVQ_RAX_XMM_PREFIX);
+        code.push(REGISTER_DIRECT | xmm << MODRM_REGISTER_SHIFT);
+        code.extend(ADD_RAX_RAX);
+    } else {
+        code.extend(MOVD_EAX_XMM_PREFIX);
+        code.push(REGISTER_DIRECT | xmm << MODRM_REGISTER_SHIFT);
+        code.extend(ADD_EAX_EAX);
+    }
+}
+
+/// Set every S lane, or both dwords of every D lane, of `destination` to
+/// all ones where `source` holds a zero of either sign, using ZERO_VECTOR
+/// and, for D, ZERO_PAIR.
+fn zero_lanes(code: &mut Vec<u8>, format: Format, destination: u8, source: u8) {
+    if destination != source {
+        packed(code, Host::MoveAligned, destination, source);
+    }
+    if format == Format::Double {
+        ShiftOpcode::LeftQword.emit(code, destination, SIGN_BITS);
+    } else {
+        ShiftOpcode::LeftDword.emit(code, destination, SIGN_BITS);
+    }
+    packed(code, Host::EqualDword, destination, ZERO_VECTOR);
+    if format == Format::Double {
+        packed(code, Host::ShuffleDword, ZERO_PAIR, destination);
+        code.push(SWAP_DWORD_PAIRS);
+        packed(code, Host::And, destination, ZERO_PAIR);
+    }
+}
+
 pub(super) fn test_control(code: &mut Vec<u8>, mask: u32) {
     code.extend(TEST_STATE_IMM32);
     code.extend((core::mem::offset_of!(GuestState, fpcr) as u32).to_le_bytes());
@@ -273,8 +525,10 @@ fn exponent_range_impl(
         exponent_mask
     };
     code.extend(field_mask.to_le_bytes());
-    code.extend(SUB_EAX_IMM8);
-    code.push(minimum);
+    if minimum != 0 {
+        code.extend(SUB_EAX_IMM8);
+        code.push(minimum);
+    }
     code.push(CMP_EAX_IMM32);
     code.extend((maximum - u32::from(minimum)).to_le_bytes());
 }
@@ -368,7 +622,9 @@ pub(super) fn vector_positive_exponent_range(
     vector_exponent_range_impl(code, format, shape, source, true);
 }
 
-fn vector_exponent_validity(code: &mut Vec<u8>, format: Format, source: u8, positive_only: bool) {
+/// Copy `source` to EXPONENT_VECTOR and reduce every lane to its exponent
+/// field, with the sign above it if `positive_only`.
+fn vector_exponent_fields(code: &mut Vec<u8>, format: Format, source: u8, positive_only: bool) {
     packed(code, Host::MoveAligned, EXPONENT_VECTOR, source);
     let (left, right) = match format {
         Format::Single => (ShiftOpcode::LeftDword, ShiftOpcode::RightDword),
@@ -385,6 +641,10 @@ fn vector_exponent_validity(code: &mut Vec<u8>, format: Format, source: u8, posi
             format.fraction_bits() as u8 + SIGN_BITS,
         );
     }
+}
+
+fn vector_exponent_validity(code: &mut Vec<u8>, format: Format, source: u8, positive_only: bool) {
+    vector_exponent_fields(code, format, source, positive_only);
     packed(
         code,
         Host::MoveAligned,

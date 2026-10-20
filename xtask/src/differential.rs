@@ -38,6 +38,19 @@ const FPCR_MASK: u32 = 0x07c8_0007;
 /// silicon does not implement.
 const FPSR_MASK: u32 = 0x0800_009f;
 const FPCR_AH: u32 = 1 << 1;
+/// FPCR fields that leave S/D arithmetic in its common native paths: DN,
+/// FZ16 and AHP. A quarter of the states keep only these, with FPSR.IXC
+/// set, as most programs run.
+const FPCR_COMMON: u32 = 1 << 25 | 1 << 19 | 1 << 26;
+const FPSR_IXC: u32 = 1 << 4;
+/// Moderate FP lanes: exponents within this distance of the bias, so that
+/// products and quotients of two stay finite and normal.
+const DOUBLE_SPREAD: u64 = 64;
+const SINGLE_SPREAD: u32 = 32;
+const DOUBLE_BIAS: u64 = 1023;
+const SINGLE_BIAS: u32 = 127;
+const DOUBLE_FRACTION_BITS: u32 = 52;
+const SINGLE_FRACTION_BITS: u32 = 23;
 const NZCV_SHIFT: u32 = 28;
 const ESR_CLASS_SHIFT: u64 = 26;
 /// Pointers land in the middle half of the window so offsets either way stay inside.
@@ -165,11 +178,45 @@ impl Random {
         state.sp = self.pointer() & !(POINTER_ALIGNMENT - 1);
         state.nzcv = ((self.next() & 0xf) as u32) << NZCV_SHIFT;
         for vector in &mut state.v {
-            *vector = [self.next(), self.next()];
+            *vector = self.vector();
         }
         state.fpcr = self.next() as u32 & FPCR_MASK;
         state.fpsr = self.next() as u32 & FPSR_MASK;
+        if self.next().is_multiple_of(4) {
+            state.fpcr &= FPCR_COMMON;
+            state.fpsr |= FPSR_IXC;
+        }
         state
+    }
+
+    /// Random bits, or moderate D or S lanes with some zeros of either sign.
+    fn vector(&mut self) -> [u64; 2] {
+        match self.next() % 8 {
+            0 | 1 => [self.moderate_double(), self.moderate_double()],
+            2 | 3 => [0; 2].map(|_| {
+                u64::from(self.moderate_single()) | u64::from(self.moderate_single()) << 32
+            }),
+            _ => [self.next(), self.next()],
+        }
+    }
+
+    fn moderate_double(&mut self) -> u64 {
+        let sign = self.next() & 1 << 63;
+        if self.next().is_multiple_of(8) {
+            return sign;
+        }
+        let exponent = DOUBLE_BIAS - DOUBLE_SPREAD / 2 + self.next() % DOUBLE_SPREAD;
+        sign | exponent << DOUBLE_FRACTION_BITS | self.next() >> (u64::BITS - DOUBLE_FRACTION_BITS)
+    }
+
+    fn moderate_single(&mut self) -> u32 {
+        let sign = self.next() as u32 & 1 << 31;
+        if self.next().is_multiple_of(8) {
+            return sign;
+        }
+        let exponent = SINGLE_BIAS - SINGLE_SPREAD / 2 + self.next() as u32 % SINGLE_SPREAD;
+        sign | exponent << SINGLE_FRACTION_BITS
+            | self.next() as u32 >> (u32::BITS - SINGLE_FRACTION_BITS)
     }
 
     /// The identity stage 2 half the time; otherwise random HCR_EL2

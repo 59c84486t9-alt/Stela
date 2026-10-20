@@ -3,8 +3,8 @@ use super::super::isa::ShiftOpcode;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar, commit_inexact,
     environment_round, positive_exponent_range, prepare_vector_input_range, read_numerical_vector,
-    reject_other_status, resolve, restore_environment, test_control,
-    vector_positive_exponent_range,
+    reject_other_status, resolve, restore_environment, sticky_inexact, sticky_result_check,
+    test_control, vector_positive_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
 use crate::{
@@ -267,6 +267,34 @@ pub(in crate::x86_64) fn emit(
         code.extend(VZEROUPPER);
     }
     let mut helper = Vec::new();
+    // The sticky-inexact path (`numerical::sticky_inexact`) for S and D: the
+    // root of a negative input is NaN and of +infinity infinite, which take
+    // the helper; every other root is exact IEEE on both sides.
+    let mut sticky_done = None;
+    if operand.format != Format::Half {
+        let full = sticky_inexact(code);
+        read_numerical_vector(code, operand.shape, operand.source, SOURCE);
+        square_root(code, operand.format, operand.shape, SOURCE);
+        helper.push(sticky_result_check(
+            code,
+            operand.format,
+            operand.shape,
+            RESULT,
+            true,
+        ));
+        // NEP is zero on this path: scalar upper bits clear.
+        match operand.shape {
+            Shape::Scalar => clear_scalar(code, operand.format, RESULT),
+            Shape::Vector64 => clear_scalar(code, Format::Double, RESULT),
+            Shape::Vector128 => {}
+        }
+        commit(code, operand.destination, RESULT);
+        sticky_done = Some(jump(code));
+        let full_start = code.len();
+        for patch in full {
+            resolve(code, patch, full_start);
+        }
+    }
     source_guard(code, operand, &mut helper);
     if operand.shape == Shape::Scalar && operand.format != Format::Half {
         // Legacy scalar SQRT preserves destination upper bits for NEP.
@@ -289,4 +317,8 @@ pub(in crate::x86_64) fn emit(
     helper_section(code, &helper, pc);
     commit_inexact(code);
     commit_result(code, operand);
+    if let Some(done) = sticky_done {
+        let end = code.len();
+        resolve(code, done, end);
+    }
 }
