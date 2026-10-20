@@ -1,6 +1,6 @@
-//! The channel commands that need no GPU work: shared-event signals (command
-//! type 9) and dashboard signals (0xc), as the GFX firmware runs their
-//! streams (docs/research/agx.md §2).
+//! The channel commands that need no GPU work: remote-node stamps (command
+//! type 7), shared-event signals (9) and dashboard signals (0xc), as the GFX
+//! firmware runs their streams (docs/research/agx.md §2, FW-13).
 //!
 //! Known (`armfw_g14g` a000 image, firmware VAs less 0xffffff8000000000; the
 //! record dispatcher at +0x13a60 switches on `header & 0x3f` through the
@@ -26,6 +26,19 @@
 //!   `0x70000` window request for that context, writes each value whose
 //!   index is at most 0x9f into a firmware table, posts a CLPC event for a
 //!   nonzero argument, and writes the firmware stamp.
+//! - A remote-node command (`AGXChannel::submitRemoteNodeCommand` 0x1b0f3c8,
+//!   queued after a barrier the same function sets up) carries its stream at
+//!   +0x1c like a shared-event signal, and every pipe's firmware handler
+//!   starts it the same way (`armfw_g14g` +0x1d1d0 for 3D, +0x1e3b0 for CL).
+//!   Its stream is one 0xd record and the end record. The kext writes the
+//!   record inline: the channel's +0x1dc word at +0x04 (the command's +0x14),
+//!   the command's +0x28 u64 at +0x08, the firmware stamp VA at +0x10 (the
+//!   command's +0x38) and the stamp value at +0x18 (the command's +0x40),
+//!   zero to +0x2c. The handler (+0x18210) only writes that value to the
+//!   firmware stamp (+0x1ab5c) and retires a deferred stamp of the same
+//!   context, as the signal handlers' tails do; nothing in it reaches another
+//!   die. On the one-die T8112 (`num_mgpus` 1) the command is therefore a
+//!   stamp-only command.
 //! - The end record completes the command (+0x18290 → +0x126dc). The
 //!   firmware's completion of TA, 3D and CL work writes the stamp value to
 //!   the command's driver stamp and posts a Flag event with the stamp
@@ -62,11 +75,17 @@ const DASHBOARD_SLOTS: u64 = 0x28;
 const DASHBOARD_CLPC: u64 = 0x40;
 /// The highest dashboard slot the handler writes.
 const DASHBOARD_LAST_SLOT: u16 = 0x9f;
+/// Remote-node record fields: the firmware stamp's VA and value, then the
+/// zero tail the kext writes.
+const REMOTE_STAMP_VA: u64 = 0x10;
+const REMOTE_STAMP_VALUE: u64 = 0x18;
+const REMOTE_ZERO: core::ops::Range<u64> = 0x1c..0x2c;
 
 /// Run a signal command's stream to completion, returning the events it
 /// posts in order.
 pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>, &'static str> {
     let expected = match command.kind {
+        Kind::RemoteNode => Record::RemoteNode,
         Kind::SharedEventSignal => Record::SharedEventSignal,
         Kind::DashboardSignal => Record::DashboardSignal,
         other => return Err(other.unexecuted()),
@@ -80,18 +99,40 @@ pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>,
         return Err("GFX signal command's stream continues past its signal record");
     }
     let mut events = Vec::new();
-    match expected {
-        Record::SharedEventSignal => shared_event(memory, command, stream, &mut events)?,
-        _ => dashboard(memory, stream, &mut events)?,
-    }
-    // The firmware stamp both records write.
-    let firmware = memory.read_u64(stream + STAMP_VA)?;
-    let value = memory.read_u32(stream + STAMP_VALUE)?;
+    let (stamp_va, stamp_value) = match expected {
+        Record::RemoteNode => {
+            remote_node(memory, stream)?;
+            (REMOTE_STAMP_VA, REMOTE_STAMP_VALUE)
+        }
+        Record::SharedEventSignal => {
+            shared_event(memory, command, stream, &mut events)?;
+            (STAMP_VA, STAMP_VALUE)
+        }
+        _ => {
+            dashboard(memory, stream, &mut events)?;
+            (STAMP_VA, STAMP_VALUE)
+        }
+    };
+    // The firmware stamp every record writes.
+    let firmware = memory.read_u64(stream + stamp_va)?;
+    let value = memory.read_u32(stream + stamp_value)?;
     memory.write(firmware, &value.to_le_bytes())?;
     // Completion: the driver stamp, then its Flag.
     memory.write(stamp.driver, &stamp.value.to_le_bytes())?;
     events.push(Event::Flag(1 << stamp.index));
     Ok(events)
+}
+
+/// Check a remote-node record against the form its writer gives it: the
+/// handler acts on nothing but the stamp, so a nonzero tail is a record the
+/// model has no reading of.
+fn remote_node(memory: &mut dyn Shared, record: u64) -> Result<(), &'static str> {
+    let mut tail = [0; (REMOTE_ZERO.end - REMOTE_ZERO.start) as usize];
+    memory.read(record + REMOTE_ZERO.start, &mut tail)?;
+    if tail.iter().any(|&byte| byte != 0) {
+        return Err("GFX remote-node record carries bytes past its stamp");
+    }
+    Ok(())
 }
 
 fn shared_event(
@@ -241,6 +282,42 @@ mod tests {
         memory.put_u32(STREAM + 0x28, 0x00a0_ffff);
         assert!(execute(&mut memory, &command).is_ok());
         memory.put_u32(STREAM + 0x2c, 0x0000_ffff);
+        assert!(execute(&mut memory, &command).is_err());
+    }
+
+    #[test]
+    fn a_remote_node_command_writes_its_stamps_on_one_die() {
+        let mut memory = Flat::new(BASE, 0x1000);
+        memory.put_u32(COMMAND, 7);
+        memory.put_u64(COMMAND + 0x1c, STREAM);
+        memory.put_u64(COMMAND + 0x30, DRIVER);
+        memory.put_u64(COMMAND + 0x38, FIRMWARE);
+        memory.put_u32(COMMAND + 0x40, 0x500);
+        memory.put_u32(COMMAND + 0x44, 9);
+        memory.put_u32(STREAM, 0xd);
+        memory.put_u32(STREAM + 0x04, 0x11);
+        memory.put_u64(STREAM + 0x08, 0x2222);
+        memory.put_u64(STREAM + 0x10, FIRMWARE);
+        memory.put_u32(STREAM + 0x18, 0x500);
+        memory.put_u32(STREAM + 0x2c, 0x4000_0002);
+        let command = Command::read(&mut memory, COMMAND).unwrap();
+        assert_eq!(
+            execute(&mut memory, &command),
+            Ok(alloc::vec![Event::Flag(1 << 9)])
+        );
+        assert_eq!(memory.read_u32(FIRMWARE), Ok(0x500));
+        assert_eq!(memory.read_u32(DRIVER), Ok(0x500));
+        // A record whose tail is not the writer's zeros refuses, stamps
+        // untouched.
+        memory.put_u32(FIRMWARE, 0);
+        memory.put_u32(DRIVER, 0);
+        memory.put_u32(STREAM + 0x20, 1);
+        assert!(execute(&mut memory, &command).is_err());
+        assert_eq!(memory.read_u32(FIRMWARE), Ok(0));
+        assert_eq!(memory.read_u32(DRIVER), Ok(0));
+        // So does a stream that is not the record and the end.
+        memory.put_u32(STREAM + 0x20, 0);
+        memory.put_u32(STREAM + 0x2c, 0x3);
         assert!(execute(&mut memory, &command).is_err());
     }
 

@@ -1,5 +1,5 @@
 //! Opt-in observation of the GFX firmware work commands whose field layouts
-//! are not recovered: the TA, 3D, CL, fast-blit, barrier, remote-node and
+//! are not recovered: the TA, 3D, CL, fast-blit, barrier and
 //! timestamp commands the matrix refuses by name (docs/research/agx.md §5.1,
 //! rows FW-6..FW-9, FW-11, FW-12).
 //!

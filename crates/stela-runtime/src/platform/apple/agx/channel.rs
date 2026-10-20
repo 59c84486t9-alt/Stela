@@ -38,7 +38,9 @@
 //!   0x1b90088 writes no record; `finishEncode` 0x1b902d0 appends the end
 //!   word `0x4000_0002` and returns the stream's firmware VA, which the
 //!   encoder stores in the command: 3D +0x14, fast blit +0x498, CL +0x1e8,
-//!   shared-event signal +0x1c, dashboard signal +0x10). A record starts with
+//!   remote node and shared-event signal +0x1c, dashboard signal +0x10; the
+//!   firmware's pipe handlers read the same words, `armfw_g14g` +0x1d1d0 and
+//!   +0x1e3b0). A record starts with
 //!   a 32-bit header whose low 16 bits are its type and whose high byte
 //!   carries flags; the firmware dispatches on the low six bits. The types
 //!   and sizes the 26A434 encoders write: TA start 0x6 (0x9c bytes,
@@ -51,12 +53,14 @@
 //!   and fast blit 1, CL 2, with bit 7 on the copy before the start), timestamp 0x3
 //!   (0x4c, flag 0x80 optional, `encodeTimeStamp` 0x1b9040c), shared-event
 //!   signal 0xe (0x4c, `AGXChannel::encodeSharedEventSignalCommandSKUStream`
-//!   0x1b0d02c), dashboard signal 0xf (0x54,
+//!   0x1b0d02c), remote-node stamp 0xd (0x2c, written inline by
+//!   `AGXChannel::submitRemoteNodeCommand` 0x1b0f3c8), dashboard signal 0xf (0x54,
 //!   `encodeDashboardSignalCommandSKUStream` 0x1b0cf30) and the end 0x2 (4,
 //!   flag 0x40).
 //!
-//! The firmware model reads the queue and the next command; the signal
-//! commands run in [`super::signal`], every other type refuses by name.
+//! The firmware model reads the queue and the next command; the commands that
+//! need no GPU work (remote node, shared-event and dashboard signals) run in
+//! [`super::signal`], every other type refuses by name.
 
 use super::ring::Shared;
 
@@ -176,9 +180,9 @@ impl Kind {
             Kind::ThreeD => Some(0x14),
             Kind::FastBlit => Some(0x498),
             Kind::Cl => Some(0x1e8),
-            Kind::SharedEventSignal => Some(0x1c),
+            Kind::RemoteNode | Kind::SharedEventSignal => Some(0x1c),
             Kind::DashboardSignal => Some(0x10),
-            Kind::Ta | Kind::Barrier | Kind::RemoteNode => None,
+            Kind::Ta | Kind::Barrier => None,
         }
     }
 
@@ -262,10 +266,11 @@ pub struct Stamp {
 pub enum Record {
     End,
     Timestamp,
-    /// The 0x4 record with its flag byte: the pipe in bits 4:3 (TA 0, 3D
-    /// and fast blit 1, CL 2), bit 7 set on the copy written before the
-    /// start (`encode*SKUStream`).
-    Record4(u8),
+    /// The 0x4 record, a performance-counter sample point, with its flag
+    /// byte: the pipe in bits 4:3 (TA 0, 3D and fast blit 1, CL 2), bit 7 set
+    /// on the copy written before the start (`encode*SKUStream`). See
+    /// [`Record::sample_point`].
+    SamplePoint(u8),
     /// The record each work stream opens with, ahead of its start: TA 0x5,
     /// 3D 0x7, fast blit 0x9, CL 0xb.
     SetupTa,
@@ -276,6 +281,8 @@ pub enum Record {
     Start3d,
     FastBlit,
     StartCl,
+    /// A remote-node command's stamp record.
+    RemoteNode,
     SharedEventSignal,
     DashboardSignal,
 }
@@ -290,7 +297,7 @@ impl Record {
         let record = match header & 0xffff {
             0x2 => Record::End,
             0x3 => Record::Timestamp,
-            0x4 => Record::Record4(flags as u8),
+            0x4 => Record::SamplePoint(flags as u8),
             0x5 => Record::SetupTa,
             0x7 => Record::Setup3d,
             0x9 => Record::SetupFastBlit,
@@ -299,6 +306,7 @@ impl Record {
             0x8 => Record::Start3d,
             0xa => Record::FastBlit,
             0xc => Record::StartCl,
+            0xd => Record::RemoteNode,
             0xe => Record::SharedEventSignal,
             0xf => Record::DashboardSignal,
             _ => return Err("GFX command record type is not one the 26A434 kext writes"),
@@ -306,7 +314,7 @@ impl Record {
         let allowed: &[u32] = match record {
             Record::End => &[0x40],
             Record::Timestamp => &[0, 0x80],
-            Record::Record4(_) => &[0x00, 0x80, 0x08, 0x88, 0x10, 0x90],
+            Record::SamplePoint(_) => &[0x00, 0x80, 0x08, 0x88, 0x10, 0x90],
             _ => &[0],
         };
         if !allowed.contains(&flags) {
@@ -320,7 +328,7 @@ impl Record {
         match self {
             Record::End => 0x4,
             Record::Timestamp => 0x4c,
-            Record::Record4(_) => 0x14,
+            Record::SamplePoint(_) => 0x14,
             Record::SetupTa => 0x19c,
             Record::Setup3d => 0x1b4,
             Record::SetupFastBlit => 0x174,
@@ -329,8 +337,39 @@ impl Record {
             Record::Start3d => 0xbc,
             Record::FastBlit => 0x7c,
             Record::StartCl => 0x84,
+            Record::RemoteNode => 0x2c,
             Record::SharedEventSignal => 0x4c,
             Record::DashboardSignal => 0x54,
+        }
+    }
+
+    /// What the firmware does with a sample point (record 0x4), given whether
+    /// the performance-counter sampler runs.
+    ///
+    /// Known (`armfw_g14g`, the record dispatcher's entry 4 at +0x149cc):
+    /// the handler first tests the sampler-active word (+0xf812c, written
+    /// with the root's +0xb0 object's +0x4040 by the device-control sampler
+    /// start, type 4, at +0x4814 and cleared by its stop, type 5, at
+    /// +0x4748). While it is clear both copies are skipped whole (+0x172ec
+    /// advances past the 0x14 bytes and nothing else runs). While it is set,
+    /// the copy before the start reads the command its +0x0c names and writes
+    /// GPU registers from that command, and the copy after it calls the
+    /// per-source routine (+0x352c4) for each enabled source of the +0xb0
+    /// object's sample table (+0x4060, 0x538 bytes per source) with the
+    /// record's +0x04, +0x08 and +0x0c words; **Inferred** that this takes a
+    /// counter sample tagged with them.
+    ///
+    /// The model refuses the sampler start (device control 4: counter
+    /// hardware), so the sampler never runs and the record is skipped, as
+    /// the firmware skips it. A caller that found the sampler running would
+    /// need the counter hardware, and refuses by name.
+    pub fn sample_point(self, sampler_active: bool) -> Result<(), &'static str> {
+        match self {
+            Record::SamplePoint(_) if !sampler_active => Ok(()),
+            Record::SamplePoint(_) => {
+                Err("GFX sample-point record samples counter hardware the model does not have")
+            }
+            _ => Err("GFX record is not a sample point"),
         }
     }
 
@@ -380,13 +419,18 @@ pub(crate) mod tests {
         assert_eq!(Record::decode(0x4000_0002), Ok(Record::End));
         assert_eq!(Record::decode(0x8000_0003), Ok(Record::Timestamp));
         assert_eq!(Record::decode(3), Ok(Record::Timestamp));
-        assert_eq!(Record::decode(0x8800_0004), Ok(Record::Record4(0x88)));
-        assert_eq!(Record::decode(0x0800_0004), Ok(Record::Record4(0x08)));
+        assert_eq!(Record::decode(0x8800_0004), Ok(Record::SamplePoint(0x88)));
+        assert_eq!(Record::decode(0x0800_0004), Ok(Record::SamplePoint(0x08)));
         // CL and TA streams carry the 0x4 record with their own pipe bits.
-        assert_eq!(Record::decode(0x9000_0004), Ok(Record::Record4(0x90)));
-        assert_eq!(Record::decode(0x1000_0004), Ok(Record::Record4(0x10)));
-        assert_eq!(Record::decode(0x8000_0004), Ok(Record::Record4(0x80)));
-        assert_eq!(Record::decode(0x4), Ok(Record::Record4(0)));
+        assert_eq!(Record::decode(0x9000_0004), Ok(Record::SamplePoint(0x90)));
+        assert_eq!(Record::decode(0x1000_0004), Ok(Record::SamplePoint(0x10)));
+        assert_eq!(Record::decode(0x8000_0004), Ok(Record::SamplePoint(0x80)));
+        assert_eq!(Record::decode(0x4), Ok(Record::SamplePoint(0)));
+        // With the sampler idle the firmware skips both copies; a running
+        // sampler needs counter hardware.
+        assert_eq!(Record::SamplePoint(0x88).sample_point(false), Ok(()));
+        assert!(Record::SamplePoint(0x08).sample_point(true).is_err());
+        assert!(Record::End.sample_point(false).is_err());
         assert!(Record::decode(0x1800_0004).is_err());
         // Each work stream's setup record.
         assert_eq!(Record::decode(0xb).map(Record::bytes), Ok(0x16c));
@@ -396,8 +440,10 @@ pub(crate) mod tests {
         assert!(Record::decode(0x8000_000b).is_err());
         assert_eq!(Record::decode(8).map(Record::bytes), Ok(0xbc));
         assert_eq!(Record::decode(0xe).map(Record::bytes), Ok(0x4c));
+        assert_eq!(Record::decode(0xd).map(Record::bytes), Ok(0x2c));
+        assert!(Record::decode(0x8000_000d).is_err());
         // Unwritten types, flags or middle bits refuse.
-        assert!(Record::decode(0xd).is_err());
+        assert!(Record::decode(0x10).is_err());
         assert!(Record::decode(0x2).is_err());
         assert!(Record::decode(0x8000_0008).is_err());
         assert!(Record::decode(0x0001_0008).is_err());
@@ -410,6 +456,7 @@ pub(crate) mod tests {
         assert_eq!(Kind::decode(3).map(Kind::stamp_value), Ok(Some(0x2a8)));
         assert_eq!(Kind::Barrier.stamp_value(), None);
         assert_eq!(Kind::Ta.stream(), None);
+        assert_eq!(Kind::RemoteNode.stream(), Some(0x1c));
         // The firmware accepts 0x10, which no 26A434 writer produces.
         assert!(Kind::decode(0x10).is_err());
         assert!(Kind::decode(5).is_err());
