@@ -1132,6 +1132,15 @@ const ROLE_MODELS: &[ModelClaim] = &[
         boot_properties: &[],
         admitted: true,
     },
+    // Its power expert ([`DCP_EXPERT`]), a register-less node that
+    // `AppleDCPExpert` binds to. IOMFB waits for it before it makes a call.
+    ModelClaim {
+        compatible: DCP_EXPERT,
+        property: ("role", DCPEXT_ROLE),
+        children: &[],
+        boot_properties: &[],
+        admitted: true,
+    },
 ];
 
 /// Child compatibles claimed by a matching parent model. The loader uses
@@ -1231,6 +1240,25 @@ pub const SEP_NUB: &str = "iop-nub,sep";
 /// Open row of section 8.6.
 pub const DCPEXT_ROLE: &[u8] = b"DCPEXT\0";
 pub const DISPEXT: &str = "dispext0,t8112";
+/// The coprocessor's power expert, `/arm-io/dcpext-expert` (`role` `DCPEXT`,
+/// `join-power-plane`, no `reg`). In the 26A434 J473AP kernelcache:
+/// - `UnifiedPipeline2::start` waits in `DCPPowerManager::wait_for_dcp_expert`,
+///   and `DCPEndpointV2::start` in `AppleDCPExpert::copyDCPExpert`, until an
+///   `AppleDCPExpert` with the coprocessor's role is published. Without it,
+///   `AppleCLCD2` never makes an IOMFB call and restore reports no display.
+/// - `AppleDCPExpert::start` (KC file 0x22f4278) reads its hardware features
+///   from that node: `require-pmgr-scratch`, `require-conditional-retention`,
+///   `require-force-wakeup`, `require-axi2af-reset`, `support-dynamic-sysfe-pg`
+///   and `support-psd-self-vote`. J473AP sets none of them, so it maps no
+///   register. It waits for the role's `RTBuddyService` and joins the power
+///   plane.
+/// - It changes the coprocessor's power only through that RTBuddy
+///   (`_changeDCPPowerStateInternal`, 0x22f8928), whose RTKit power messages
+///   the coprocessor model answers.
+///
+/// The internal display's `dcp0-expert` (`role` `DCP`) stays hidden with its
+/// unmodeled coprocessor.
+pub const DCP_EXPERT: &str = "dcp-expert-v1";
 pub const DPTX_PHY: &str = "dptx-phy,t8112";
 pub const DISPLAY_CROSSBAR: &str = "display-crossbar,t8112";
 
@@ -7283,6 +7311,11 @@ mod tests {
         assert_eq!(model_children(ASC, role)[0].compatible, RTBUDDY);
         assert!(models(DISPEXT, |_| None));
         assert!(!models(DPTX_PHY, |_| None) && !models(DISPLAY_CROSSBAR, |_| None));
+        // Its power expert binds; the internal display's expert does not.
+        assert!(models(DCP_EXPERT, role));
+        assert!(model_children(DCP_EXPERT, role).is_empty());
+        assert!(!models(DCP_EXPERT, |key| (key == "role")
+            .then_some(b"DCP\0".as_slice())));
         assert!(board(&build(b"DCP\0", true, false)).unwrap().dcp.is_none());
     }
 
