@@ -81,8 +81,9 @@ const HOST_SELF_TRAP: u32 = 29;
 
 /// The process's kernel state, shared by its threads: what exec fixed, and
 /// each mutable family behind its own lock. No lock here is held while a
-/// thread waits for the execution lock; [`Kernel::page_in`] takes the
-/// execution lock before the shared region's.
+/// thread waits for the execution lock, except the descriptor-flag gate
+/// ([`bsd::files`]), which no thread takes holding it; [`Kernel::page_in`]
+/// takes the execution lock before the shared region's.
 pub(super) struct Process {
     /// The signer of the user JOP key (IA and DA), `None` when exec
     /// disabled user JOP: the kernel then signs nothing with it.
@@ -111,6 +112,8 @@ pub(super) struct Process {
     /// The workloops (`fd_kqhash`).
     pub(super) workloops: bsd::kqworkloop::Workloops,
     pub(super) actions: Mutex<bsd::signal::Actions>,
+    /// The file-creation mask and the descriptor-flag gate.
+    pub(super) files: bsd::files::Files,
     /// Whether a pointer-authentication failure ends the process
     /// (`TFRO_PAC_EXC_FATAL`), fixed at exec.
     pub(super) pac_exception_fatal: bool,
@@ -152,6 +155,9 @@ pub(super) struct Kernel {
     pub(super) mig_relay: Option<u32>,
     /// Its workqueue thread state, when the workqueue created it.
     pub(super) worker: Option<bsd::workqueue::Worker>,
+    /// Whether its host thread has its own working directory
+    /// (`__pthread_chdir`), which [`bsd::files`] restores.
+    pub(super) thread_directory: bool,
     pub(super) end: Option<End>,
 }
 
@@ -228,6 +234,7 @@ impl Process {
             kqworkq: Default::default(),
             workloops: Default::default(),
             actions: Mutex::new(bsd::signal::Actions::inherit()),
+            files: bsd::files::Files::inherit(),
             signal_slots: Default::default(),
             map_with_linking_ended: AtomicBool::new(false),
             signatures: Default::default(),
@@ -283,6 +290,7 @@ impl Kernel {
             thread_port,
             mig_relay: None,
             worker: None,
+            thread_directory: false,
             end: None,
         }
     }

@@ -170,6 +170,9 @@ pub(super) fn posix_spawn(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     } else {
         descriptor.as_ptr() as u64
     };
+    // The child copies the descriptor table with no descriptor mid-flag
+    // change.
+    let _gate = kernel.process.files.gate();
     let returned = forward::bsd(
         POSIX_SPAWN,
         &[

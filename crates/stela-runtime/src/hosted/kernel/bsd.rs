@@ -17,6 +17,7 @@ use anyhow::{Result, anyhow, bail};
 
 pub(super) mod additions;
 mod codesign;
+pub(super) mod files;
 mod fork;
 mod forwarded;
 pub(super) mod kqworkloop;
@@ -222,6 +223,7 @@ pub(crate) enum Family {
     Workqueue,
     Signals,
     System,
+    Files,
     Additions,
 }
 
@@ -238,6 +240,7 @@ impl Family {
             Self::Workqueue => "workqueue",
             Self::Signals => "signals",
             Self::System => "system",
+            Self::Files => "descriptor table",
             Self::Additions => "26A434 additions",
         }
     }
@@ -254,6 +257,7 @@ const MODELED: &[(Family, &[&str])] = &[
     (Family::Workqueue, workqueue::CALLS),
     (Family::Signals, signal::CALLS),
     (Family::System, system::CALLS),
+    (Family::Files, files::CALLS),
 ];
 
 /// The family servicing the call `name`, or `None` for a call the hosted
@@ -332,6 +336,8 @@ pub(crate) const REFUSED: &[(&str, &str)] = &[
 
 fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let name = call.entry.name;
+    let gated = files::gated(call).then(|| kernel.process.clone());
+    let _gate = gated.as_ref().map(|process| process.files.gate());
     if let Some(outcome) = paths::call(kernel, call)? {
         return Ok(outcome);
     }
@@ -349,6 +355,7 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         Some(Family::Workqueue) => workqueue::call(kernel, pe, call)?,
         Some(Family::Signals) => signal::call(kernel, pe, call)?,
         Some(Family::System) => system::call(kernel, call)?,
+        Some(Family::Files) => files::call(kernel, call)?,
         // The additions have no catalog row: [`call`] dispatches them by
         // number.
         Some(Family::Additions) | None => None,

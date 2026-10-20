@@ -63,6 +63,7 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
                 Box::new(try_lock(&process.signatures)?),
                 Box::new(try_lock(&process.restartable_ranges)?),
                 Box::new(try_lock(&process.reclaim)?),
+                Box::new(process.files.hold_for_fork()?),
                 Box::new(process.threads.hold_for_fork()?),
             ];
             let workqueue = process.workqueue.hold_for_fork()?;
@@ -97,6 +98,8 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             kernel.thread_port = thread_port;
             kernel.mig_relay = None;
             kernel.worker = None;
+            // The child's working directory is the thread's (`fdt_fork`).
+            kernel.thread_directory = false;
         } else {
             drop((runtime, others, workqueue, kqworkq, workloops));
         }

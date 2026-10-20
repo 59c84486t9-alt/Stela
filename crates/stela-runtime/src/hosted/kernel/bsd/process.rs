@@ -212,6 +212,9 @@ fn execve(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
             host.display()
         );
     }
+    // The new image keeps the descriptor table with no descriptor
+    // mid-flag change.
+    let _gate = kernel.process.files.gate();
     // SAFETY: NULL-terminated vectors of NUL-terminated strings that live
     // across the call; on success the host replaces this process.
     unsafe {

@@ -18,7 +18,8 @@
 //! - `fchflagsat(fd, path, flags, atflags)` accepts `AT_SYMLINK_NOFOLLOW`,
 //!   `AT_SYMLINK_NOFOLLOW_ANY` and `AT_RESOLVE_BENEATH`, then looks `path`
 //!   up from `fd` and sets the flags as `chflags` does.
-//! - `getumask()` reads the file-creation mask without changing it.
+//! - `getumask()` reads the file-creation mask without changing it: the
+//!   mask [`super::files`] records.
 //! - `fsctlat(fd, path, cmd, data, options)` is the body 26A434's `fsctl`
 //!   now shares with `AT_FDCWD`; `options` selects no symbolic links
 //!   (`FSOPT_NOFOLLOW`, `FSOPT_NOFOLLOW_ANY`) and further lookup
@@ -32,11 +33,10 @@
 //!   unless the kernel booted with `-enable_uexc`; then the caller also needs
 //!   the `com.apple.private.uexc` entitlement.
 //! - `aio_readv(aiocb)` and `aio_writev(aiocb)` queue one vectored request.
-use super::{EFAULT, EINVAL, EPERM, Kernel, Outcome, Pe};
+use super::{EFAULT, EINVAL, EPERM, Kernel, Outcome, Pe, files};
 use crate::darwin::BsdReturnType;
 use crate::hosted::forward;
 use anyhow::{Result, bail};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Each addition's number and its libsystem_kernel stub's call name.
 pub(crate) const ADDITIONS: &[(u16, &str)] = &[
@@ -66,33 +66,19 @@ pub(crate) const CALLS: &[&str] = &[
 /// contract the hosted kernel does not provide.
 pub(crate) const LIMITS: &[(&str, &str)] = &[
     (
-        "pipe2",
-        "O_CLOFORK stops the run (the host has no close-on-fork flag), and O_CLOEXEC is set \
-         after the host pipe, so a spawn another thread has in the host kernel then inherits \
-         the ends",
-    ),
-    (
         "dup3",
-        "O_CLOFORK stops the run (the host has no close-on-fork flag), and O_CLOEXEC is set \
-         after the host dup2, so a spawn another thread has in the host kernel then inherits \
-         the copy",
+        "O_CLOFORK of a descriptor the host cannot guard (other than a file, pipe, socket, \
+         kqueue or network policy) stops the run",
     ),
     (
         "fchflagsat",
-        "a path relative to a directory descriptor, or with an AT_ flag, is set through \
-         setattrlistat, which succeeds rather than failing with ENOTSUP on a file system \
-         without file flags",
-    ),
-    (
-        "getumask",
-        "read by setting the mask with guest code stopped: a creating call another thread \
-         has in the host kernel then can see the mask getumask last read",
+        "with an AT_ flag the flags are set through setattrlistat, which succeeds rather than \
+         failing with ENOTSUP on a file system without file flags",
     ),
     (
         "fsctlat",
-        "a path relative to a directory descriptor, and the FSOPT_NOFOLLOW_ANY, \
-         FSOPT_RESOLVE_BENEATH and FSOPT_UNIQUE lookups, stop the run: the host's fsctl \
-         looks up from the working directory and honors FSOPT_NOFOLLOW alone",
+        "an FSOPT_RESOLVE_BENEATH lookup stops the run: the host's fsctl does not confine a \
+         path beneath its starting directory",
     ),
     (
         "register_uexc_handler",
@@ -135,19 +121,24 @@ pub(super) fn call(
     arguments: &[u64; forward::MAX_ARGUMENTS],
 ) -> Result<(BsdReturnType, Outcome)> {
     let serviced = match name {
-        "pipe2" => kernel.exclusive(|| pipe2(arguments[1] as u32)),
+        "pipe2" => {
+            let _gate = kernel.process.files.gate();
+            kernel.exclusive(|| pipe2(arguments[1] as u32))
+        }
         "dup3" => {
+            let _gate = kernel.process.files.gate();
             kernel.exclusive(|| dup3(fd(arguments[0]), fd(arguments[1]), arguments[2] as u32))
         }
-        "getumask" => Ok(kernel.exclusive(getumask)),
+        "getumask" => Ok(Outcome::value(kernel.process.files.mask())),
         "fchflagsat" => {
             kernel.page_in_arguments(&arguments[1..2])?;
-            Ok(fchflagsat(
+            fchflagsat(
                 fd(arguments[0]),
                 arguments[1],
                 arguments[2] as u32,
                 arguments[3] as u32,
-            ))
+                kernel.thread_directory,
+            )
         }
         "fsctlat" => {
             kernel.page_in_arguments(&arguments[1..4])?;
@@ -157,6 +148,7 @@ pub(super) fn call(
                 arguments[2],
                 arguments[3],
                 arguments[4] as u32,
+                kernel.thread_directory,
             )
         }
         "guarded_ftruncate_np" => {
@@ -188,6 +180,12 @@ const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const FD_CLOEXEC: u64 = 1;
+/// `FD_CLOFORK`, the host's close-on-fork descriptor flag, which only
+/// `change_fdguard_np` sets.
+const FD_CLOFORK: u32 = 2;
+/// The guard [`apply_flags`] adds and at once removes.
+const TRANSIENT_GUARD: u64 = 0x5354_454c_4143_4c46;
+const ENOTSUP: u64 = 45;
 const AT_FDCWD: i32 = -2;
 const AT_SYMLINK_NOFOLLOW: u32 = 0x20;
 const AT_SYMLINK_NOFOLLOW_ANY: u32 = 0x800;
@@ -195,7 +193,6 @@ const AT_RESOLVE_BENEATH: u32 = 0x2000;
 const FSOPT_NOFOLLOW: u32 = 0x1;
 const FSOPT_NOFOLLOW_ANY: u32 = 0x800;
 const FSOPT_RESOLVE_BENEATH: u32 = 0x1000;
-const FSOPT_UNIQUE: u32 = 0x2000;
 const ATTR_BIT_MAP_COUNT: u16 = 5;
 const ATTR_CMN_FLAGS: u32 = 0x0004_0000;
 const RLIMIT_FSIZE: u64 = 1;
@@ -234,10 +231,27 @@ fn outcome(result: std::result::Result<(u64, u64), u64>) -> Outcome {
     }
 }
 
-/// Mark the host descriptor `fd` with the descriptor and status flags of
-/// `flags` that the host has.
+/// Mark the host descriptor `fd`, new and unguarded, with the descriptor
+/// and status flags of `flags`. Close-on-fork is the host's `FP_CLOFORK`,
+/// which removing a guard sets from the flags it is given; until then the
+/// guarded descriptor is close-on-exec and refuses duplication, which the
+/// descriptor-flag gate ([`super::files`]) keeps every observer from
+/// seeing. ENOTSUP: the host guards no descriptor of its kind.
 fn apply_flags(fd: u64, flags: u32) -> std::result::Result<(), u64> {
-    if flags & O_CLOEXEC != 0 {
+    if flags & O_CLOFORK != 0 {
+        let guard = TRANSIENT_GUARD.to_le_bytes();
+        let guard = guard.as_ptr() as u64;
+        host("change_fdguard_np", &[fd, 0, 0, guard, GUARD_REQUIRED, 0])?;
+        let mut kept = FD_CLOFORK;
+        if flags & O_CLOEXEC != 0 {
+            kept |= FD_CLOEXEC as u32;
+        }
+        let kept = &raw mut kept as u64;
+        host(
+            "change_fdguard_np",
+            &[fd, guard, GUARD_REQUIRED, 0, 0, kept],
+        )?;
+    } else if flags & O_CLOEXEC != 0 {
         host("sys_fcntl", &[fd, F_SETFD, FD_CLOEXEC])?;
     }
     if flags & O_NONBLOCK != 0 {
@@ -248,15 +262,11 @@ fn apply_flags(fd: u64, flags: u32) -> std::result::Result<(), u64> {
 }
 
 /// `pipe2`: a host pipe whose ends then take the flags. Runs with guest
-/// code stopped, so no guest thread sees an end before its flags.
+/// code stopped and the descriptor-flag gate held, so nothing sees an end
+/// before its flags.
 fn pipe2(flags: u32) -> Serviced {
     if flags & !(O_NONBLOCK | O_CLOEXEC | O_CLOFORK) != 0 {
         return Ok(Outcome::Error(EINVAL));
-    }
-    if flags & O_CLOFORK != 0 {
-        return Err(Refusal(
-            "O_CLOFORK: the host kernel has no close-on-fork descriptor flag",
-        ));
     }
     let (read, write) = match host("pipe", &[]) {
         Ok(ends) => ends,
@@ -272,45 +282,26 @@ fn pipe2(flags: u32) -> Serviced {
 }
 
 /// `dup3`: `dup2`, whose copy then takes the descriptor flags. Runs with
-/// guest code stopped, so no guest thread sees the copy before its flags.
+/// guest code stopped and the descriptor-flag gate held, so nothing sees
+/// the copy before its flags.
 fn dup3(from: i32, to: i32, flags: u32) -> Serviced {
     if from == to || flags & !(O_CLOEXEC | O_CLOFORK) != 0 {
         return Ok(Outcome::Error(EINVAL));
-    }
-    if flags & O_CLOFORK != 0 {
-        return Err(Refusal(
-            "O_CLOFORK: the host kernel has no close-on-fork descriptor flag",
-        ));
     }
     let copy = match host("sys_dup2", &[host_fd(from), host_fd(to)]) {
         Ok((copy, _)) => copy,
         Err(errno) => return Ok(Outcome::Error(errno)),
     };
-    // `dup2` leaves the copy without FD_CLOEXEC.
-    Ok(match apply_flags(copy, flags & O_CLOEXEC) {
-        Ok(()) => Outcome::value(copy),
-        Err(errno) => Outcome::Error(errno),
-    })
-}
-
-/// The mask the last `getumask` read, the value it next sets: while the
-/// mask is unchanged, setting it changes nothing.
-static LAST_UMASK: AtomicU64 = AtomicU64::new(0o022);
-
-/// `getumask`: the host's `umask` returns the mask it replaces, so set it
-/// to the last mask read and restore it when that differs. Runs with guest
-/// code stopped.
-fn getumask() -> Outcome {
-    let guess = LAST_UMASK.load(Ordering::Relaxed);
-    let (mask, _) = match host("umask", &[guess]) {
-        Ok(mask) => mask,
-        Err(errno) => return Outcome::Error(errno),
-    };
-    if mask != guess {
-        let _ = host("umask", &[mask]);
-        LAST_UMASK.store(mask, Ordering::Relaxed);
+    // `dup2` leaves the copy without FD_CLOEXEC and FD_CLOFORK.
+    match apply_flags(copy, flags) {
+        Ok(()) => Ok(Outcome::value(copy)),
+        Err(ENOTSUP) => Err(Refusal(
+            "O_CLOFORK of a descriptor the host cannot guard: its close-on-fork flag is set \
+             only by removing a guard, which the host adds to files, pipes, sockets, kqueues \
+             and network policies alone",
+        )),
+        Err(errno) => Ok(Outcome::Error(errno)),
     }
-    Outcome::value(mask)
 }
 
 /// Whether the lookup of `path` from `fd` starts at the working directory:
@@ -320,16 +311,30 @@ fn from_working_directory(fd: i32, path: u64) -> bool {
     fd == AT_FDCWD || crate::hosted::memory::read(path, 1).is_none_or(|first| first[0] == b'/')
 }
 
-/// `fchflagsat`. A lookup from the working directory without AT_ flags is
-/// the host's `chflags`; any other is `setattrlistat` setting
-/// `ATTR_CMN_FLAGS`, whose `nameiat` lookup takes the same restrictions
-/// and whose authorization is `chflags`'s (`vnode_authattr`).
-fn fchflagsat(fd: i32, path: u64, flags: u32, at_flags: u32) -> Outcome {
-    if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY | AT_RESOLVE_BENEATH) != 0 {
-        return Outcome::Error(EINVAL);
+/// Run the lookup `call` makes from the directory descriptor `fd`
+/// ([`files::at_directory`]).
+fn from_directory(thread_directory: bool, fd: i32, call: impl FnOnce() -> Outcome) -> Serviced {
+    match files::at_directory(thread_directory, fd, call) {
+        Ok(outcome) => Ok(outcome),
+        Err(Some(errno)) => Ok(Outcome::Error(errno)),
+        Err(None) => Err(Refusal(files::UNRESTORABLE)),
     }
-    if at_flags == 0 && from_working_directory(fd, path) {
-        return outcome(host("chflags", &[path, u64::from(flags)]));
+}
+
+/// `fchflagsat`. Without AT_ flags it is the host's `chflags`, from the
+/// directory descriptor for a relative path; with them, `setattrlistat`
+/// setting `ATTR_CMN_FLAGS`, whose `nameiat` lookup takes the same
+/// restrictions and whose authorization is `chflags`'s (`vnode_authattr`).
+fn fchflagsat(fd: i32, path: u64, flags: u32, at_flags: u32, thread_directory: bool) -> Serviced {
+    if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY | AT_RESOLVE_BENEATH) != 0 {
+        return Ok(Outcome::Error(EINVAL));
+    }
+    if at_flags == 0 {
+        let chflags = || outcome(host("chflags", &[path, u64::from(flags)]));
+        if from_working_directory(fd, path) {
+            return Ok(chflags());
+        }
+        return from_directory(thread_directory, fd, chflags);
     }
     let mut options = 0;
     for (at, option) in [
@@ -347,7 +352,7 @@ fn fchflagsat(fd: i32, path: u64, flags: u32, at_flags: u32) -> Outcome {
     list[..2].copy_from_slice(&ATTR_BIT_MAP_COUNT.to_le_bytes());
     list[4..8].copy_from_slice(&ATTR_CMN_FLAGS.to_le_bytes());
     let value = flags.to_le_bytes();
-    outcome(host(
+    Ok(outcome(host(
         "setattrlistat",
         &[
             host_fd(fd),
@@ -357,28 +362,31 @@ fn fchflagsat(fd: i32, path: u64, flags: u32, at_flags: u32) -> Outcome {
             value.len() as u64,
             u64::from(options),
         ],
-    ))
+    )))
 }
 
-/// `fsctlat`: the host's `fsctl` for a lookup from the working directory
-/// that it resolves alike.
-fn fsctlat(fd: i32, path: u64, command: u64, data: u64, options: u32) -> Serviced {
-    if options & (FSOPT_NOFOLLOW_ANY | FSOPT_RESOLVE_BENEATH | FSOPT_UNIQUE) != 0 {
+/// `fsctlat`: the host's `fsctl`, whose lookup honors `FSOPT_NOFOLLOW`,
+/// `FSOPT_NOFOLLOW_ANY` and `FSOPT_UNIQUE`, from the directory descriptor
+/// for a relative path.
+fn fsctlat(
+    fd: i32,
+    path: u64,
+    command: u64,
+    data: u64,
+    options: u32,
+    thread_directory: bool,
+) -> Serviced {
+    if options & FSOPT_RESOLVE_BENEATH != 0 {
         return Err(Refusal(
-            "FSOPT_NOFOLLOW_ANY, FSOPT_RESOLVE_BENEATH and FSOPT_UNIQUE lookups: the host's \
-             fsctl honors FSOPT_NOFOLLOW alone",
+            "FSOPT_RESOLVE_BENEATH: the host's fsctl does not confine a path beneath its \
+             starting directory",
         ));
     }
-    if !from_working_directory(fd, path) {
-        return Err(Refusal(
-            "a path relative to a directory descriptor: the host has no fsctlat, and its \
-             fsctl looks up from the working directory",
-        ));
+    let fsctl = || outcome(host("fsctl", &[path, command, data, u64::from(options)]));
+    if from_working_directory(fd, path) {
+        return Ok(fsctl());
     }
-    Ok(outcome(host(
-        "fsctl",
-        &[path, command, data, u64::from(options)],
-    )))
+    from_directory(thread_directory, fd, fsctl)
 }
 
 /// Whether the host descriptor `fd` holds `guard`: `fp_lookup_guarded`'s
@@ -496,6 +504,20 @@ mod tests {
         host("sys_fcntl", &[fd, F_GETFD]).unwrap().0
     }
 
+    /// The host's FD_CLOEXEC and FD_CLOFORK: `change_fdguard_np` reports
+    /// them before refusing to leave an unguarded descriptor unguarded.
+    fn guard_flags(fd: u64) -> u32 {
+        let mut flags = 0u32;
+        assert_eq!(
+            host(
+                "change_fdguard_np",
+                &[fd, 0, 0, 0, 0, &raw mut flags as u64]
+            ),
+            Err(EINVAL)
+        );
+        flags
+    }
+
     fn status_flags(fd: u64) -> u64 {
         host("sys_fcntl", &[fd, F_GETFL]).unwrap().0
     }
@@ -556,7 +578,37 @@ mod tests {
         close(read);
         close(write);
         assert_eq!(pipe2(0x2), Ok(Outcome::Error(EINVAL)));
-        assert!(pipe2(O_CLOFORK).is_err());
+        let Ok(Outcome::Return(read, write)) = pipe2(O_CLOFORK) else {
+            panic!("pipe2 failed");
+        };
+        for end in [read, write] {
+            assert_eq!(guard_flags(end), FD_CLOFORK);
+        }
+        // A fork child does not have them.
+        // SAFETY: the child only checks the descriptor and exits.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            // SAFETY: async-signal-safe calls only.
+            unsafe {
+                let open = libc::fcntl(read as i32, libc::F_GETFD) >= 0;
+                libc::_exit(i32::from(open));
+            }
+        }
+        let mut status = 0;
+        // SAFETY: the child this test forked.
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+        close(read);
+        close(write);
+        let Ok(Outcome::Return(read, write)) = pipe2(O_CLOFORK | O_CLOEXEC) else {
+            panic!("pipe2 failed");
+        };
+        assert_eq!(guard_flags(read), FD_CLOFORK | FD_CLOEXEC as u32);
+        // The transient guard is gone: the ends close and duplicate.
+        let copy = host("sys_dup", &[write]).unwrap().0;
+        close(copy);
+        close(read);
+        close(write);
     }
 
     #[test]
@@ -573,27 +625,17 @@ mod tests {
         assert_eq!(descriptor_flags(spare) & FD_CLOEXEC, 0);
         assert_eq!(dup3(from, from, 0), Ok(Outcome::Error(EINVAL)));
         assert_eq!(dup3(from, to, O_NONBLOCK), Ok(Outcome::Error(EINVAL)));
-        assert!(dup3(from, to, O_CLOFORK).is_err());
+        assert_eq!(dup3(from, to, O_CLOFORK), Ok(Outcome::value(spare)));
+        assert_eq!(guard_flags(spare), FD_CLOFORK);
+        assert_eq!(dup3(from, to, 0), Ok(Outcome::value(spare)));
+        assert_eq!(guard_flags(spare), 0);
         assert_eq!(dup3(-1, to, 0), Ok(Outcome::Error(EBADF)));
         close(spare);
     }
 
     #[test]
-    fn getumask_reads_the_mask_children_inherit() {
-        let Outcome::Return(mask, 0) = getumask() else {
-            panic!("getumask failed");
-        };
-        assert_eq!(getumask(), Outcome::value(mask));
-        let shell = std::process::Command::new("/bin/sh")
-            .args(["-c", "umask"])
-            .output()
-            .unwrap();
-        let printed = String::from_utf8(shell.stdout).unwrap();
-        assert_eq!(u64::from_str_radix(printed.trim(), 8).unwrap(), mask);
-    }
-
-    #[test]
     fn fchflagsat_sets_flags_from_a_directory_descriptor() {
+        let chflagsat = |fd, path, flags, at| fchflagsat(fd, path, flags, at, false).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("file");
         std::fs::write(&file, b"x").unwrap();
@@ -603,83 +645,129 @@ mod tests {
         let flags = |path: &std::path::Path| std::fs::symlink_metadata(path).unwrap().st_flags();
         let name = c"file";
         assert_eq!(
-            fchflagsat(dirfd, name.as_ptr() as u64, UF_HIDDEN, 0),
+            chflagsat(dirfd, name.as_ptr() as u64, UF_HIDDEN, 0),
             Outcome::value(0)
         );
         assert_eq!(flags(&file), UF_HIDDEN);
         let link = c"link";
         assert_eq!(
-            fchflagsat(dirfd, link.as_ptr() as u64, UF_HIDDEN, AT_SYMLINK_NOFOLLOW),
+            chflagsat(dirfd, link.as_ptr() as u64, UF_HIDDEN, AT_SYMLINK_NOFOLLOW),
             Outcome::value(0)
         );
         assert_eq!(flags(&directory.path().join("link")), UF_HIDDEN);
         // Following the link reaches the file.
         assert_eq!(
-            fchflagsat(dirfd, link.as_ptr() as u64, 0, 0),
+            chflagsat(dirfd, link.as_ptr() as u64, 0, 0),
             Outcome::value(0)
         );
         assert_eq!(flags(&file), 0);
         // No link anywhere on the path: a final link is the object itself,
         // one before it fails the lookup.
         assert_eq!(
-            fchflagsat(dirfd, link.as_ptr() as u64, 0, AT_SYMLINK_NOFOLLOW_ANY),
+            chflagsat(dirfd, link.as_ptr() as u64, 0, AT_SYMLINK_NOFOLLOW_ANY),
             Outcome::value(0)
         );
         assert_eq!(flags(&directory.path().join("link")), 0);
         std::os::unix::fs::symlink(".", directory.path().join("here")).unwrap();
         let through = c"here/file";
         assert_eq!(
-            fchflagsat(dirfd, through.as_ptr() as u64, 0, 0),
+            chflagsat(dirfd, through.as_ptr() as u64, 0, 0),
             Outcome::value(0)
         );
         assert!(matches!(
-            fchflagsat(dirfd, through.as_ptr() as u64, 0, AT_SYMLINK_NOFOLLOW_ANY),
+            chflagsat(dirfd, through.as_ptr() as u64, 0, AT_SYMLINK_NOFOLLOW_ANY),
             Outcome::Error(_)
         ));
         let outside = c"../outside";
         assert!(matches!(
-            fchflagsat(dirfd, outside.as_ptr() as u64, 0, AT_RESOLVE_BENEATH),
+            chflagsat(dirfd, outside.as_ptr() as u64, 0, AT_RESOLVE_BENEATH),
             Outcome::Error(_)
         ));
         let absolute = c_path(&file);
         assert_eq!(
-            fchflagsat(-1, absolute.as_ptr() as u64, UF_HIDDEN, 0),
+            chflagsat(-1, absolute.as_ptr() as u64, UF_HIDDEN, 0),
             Outcome::value(0)
         );
         assert_eq!(flags(&file), UF_HIDDEN);
         assert_eq!(
-            fchflagsat(dirfd, name.as_ptr() as u64, 0, 0x10),
+            chflagsat(dirfd, name.as_ptr() as u64, 0, 0x10),
             Outcome::Error(EINVAL)
         );
         assert_eq!(
-            fchflagsat(-1, name.as_ptr() as u64, 0, AT_SYMLINK_NOFOLLOW),
+            chflagsat(-1, name.as_ptr() as u64, 0, AT_SYMLINK_NOFOLLOW),
             Outcome::Error(EBADF)
         );
     }
 
     #[test]
-    fn fsctlat_is_fsctl_from_the_working_directory() {
+    fn fsctlat_is_fsctl_from_the_working_directory_or_a_directory() {
         // FSIOC_SYNC_VOLUME (`_IOW('A', 1, uint32_t)`) without waiting.
         const SYNC_VOLUME: u64 = 0x8004_4101;
+        const ENOENT: u64 = 2;
+        const ENOTDIR: u64 = 20;
         let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("file"), b"x").unwrap();
         let path = c_path(directory.path());
-        let options = 0u32;
         let argument = 0u32;
         let data = &raw const argument as u64;
-        assert_eq!(
-            fsctlat(AT_FDCWD, path.as_ptr() as u64, SYNC_VOLUME, data, 0),
-            Ok(outcome(host(
+        let fsctl = |path: u64, options: u32| {
+            outcome(host(
                 "fsctl",
-                &[path.as_ptr() as u64, SYNC_VOLUME, data, 0]
-            )))
-        );
+                &[path, SYNC_VOLUME, data, u64::from(options)],
+            ))
+        };
+        let at = |fd, path: &std::ffi::CStr, options, own| {
+            fsctlat(fd, path.as_ptr() as u64, SYNC_VOLUME, data, options, own).unwrap()
+        };
         assert_eq!(
-            fsctlat(7, path.as_ptr() as u64, 0, 0, options),
-            Ok(outcome(host("fsctl", &[path.as_ptr() as u64, 0, 0, 0])))
+            at(AT_FDCWD, &path, 0, false),
+            fsctl(path.as_ptr() as u64, 0)
         );
-        let relative = c"file";
-        assert!(fsctlat(7, relative.as_ptr() as u64, 0, 0, 0).is_err());
-        assert!(fsctlat(AT_FDCWD, path.as_ptr() as u64, 0, 0, FSOPT_NOFOLLOW_ANY).is_err());
+        assert_eq!(at(7, &path, 0, false), fsctl(path.as_ptr() as u64, 0));
+        let handle = std::fs::File::open(directory.path()).unwrap();
+        let dirfd = handle.as_raw_fd();
+        let file = c_path(&directory.path().join("file"));
+        assert_eq!(at(dirfd, c"file", 0, false), fsctl(file.as_ptr() as u64, 0));
+        assert_eq!(at(dirfd, c"missing", 0, false), Outcome::Error(ENOENT));
+        let plain = std::fs::File::open(directory.path().join("file")).unwrap();
+        assert_eq!(
+            at(plain.as_raw_fd(), c"file", 0, false),
+            Outcome::Error(ENOTDIR)
+        );
+        assert_eq!(at(-1, c"file", 0, false), Outcome::Error(EBADF));
+        // FSOPT_NOFOLLOW_ANY refuses a link anywhere on the path.
+        std::os::unix::fs::symlink(".", directory.path().join("here")).unwrap();
+        assert_eq!(
+            at(dirfd, c"here/file", 0, false),
+            fsctl(file.as_ptr() as u64, 0)
+        );
+        assert!(matches!(
+            at(dirfd, c"here/file", FSOPT_NOFOLLOW_ANY, false),
+            Outcome::Error(_)
+        ));
+        // The thread's own directory comes back; without one, the process's.
+        let own = tempfile::tempdir().unwrap();
+        let own_path = c_path(own.path());
+        host("__pthread_chdir", &[own_path.as_ptr() as u64]).unwrap();
+        assert_eq!(at(dirfd, c"file", 0, true), fsctl(file.as_ptr() as u64, 0));
+        let here = std::fs::metadata(".").unwrap();
+        let expected = std::fs::metadata(own.path()).unwrap();
+        assert_eq!(here.st_ino(), expected.st_ino());
+        host("__pthread_fchdir", &[u64::MAX]).unwrap();
+        let process = std::fs::metadata(".").unwrap().st_ino();
+        assert_eq!(at(dirfd, c"file", 0, false), fsctl(file.as_ptr() as u64, 0));
+        assert_eq!(std::fs::metadata(".").unwrap().st_ino(), process);
+        assert!(
+            fsctlat(
+                dirfd,
+                c"file".as_ptr() as u64,
+                0,
+                0,
+                FSOPT_RESOLVE_BENEATH,
+                false
+            )
+            .is_err()
+        );
     }
 
     #[test]
