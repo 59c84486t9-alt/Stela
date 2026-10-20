@@ -1,7 +1,8 @@
 //! NVMe command effects. Kernel evidence: `AppleNVMeRequest::BuildCommand*`
 //! at 26A434 file 0x3deb4f8 (CQ), 0x3deb598 (SQ), 0x3deb56c/0x3deb62c
 //! (delete CQ/SQ, CDW10 the queue ID), 0x3deb654 (Identify),
-//! 0x3deb7ac..0x3deba30 (flush/read/write), 0x3debc88..0x3dec1dc
+//! 0x3deb7ac..0x3deba30 (flush/read/write), 0x3debb80 (Dataset Management
+//! Deallocate, `BuildCommandDeallocate`), 0x3debc88..0x3dec1dc
 //! (logs/features), 0x3dec394 (Apple time), 0x3dec794 (namespace records),
 //! 0x3dec980 (tunnel, with the tunable tables of [`super::tunables`]), and
 //! 0x3dec1e0/0x3dec2ac/0x3dec35c (boot-from-host activate, download and
@@ -145,6 +146,25 @@ const FLUSH: u8 = 0;
 const WRITE: u8 = 1;
 const READ: u8 = 2;
 const COMPARE: u8 = 5;
+/// Dataset Management (NVMe 1.4 6.7). `BuildCommandDeallocate` (0x3debb80)
+/// puts the namespace in CDW1, the 0's-based range count in CDW10 and
+/// [`DEALLOCATE`] in CDW11; its 4 KiB range list is PRP data the device reads.
+/// `AppleNVMeNamespaceDevice::unmapBlocks` (0x3dd4400) sends one range, from
+/// `AppleNVMeEAN::eanFormat` (0x3dce9e0) and `eraseImage` (0x3dcf860) on the
+/// EAN namespace; `IONVMeBlockStorageDevice::doUnmapNVMe` (0x3dee810) sends up
+/// to 256 for the block-storage namespaces once ONCS reports the command.
+const DATASET_MANAGEMENT: u8 = 9;
+/// CDW11 attribute AD (bit 2), the only attribute the builder sets.
+const DEALLOCATE: u32 = 1 << 2;
+/// One Dataset Management range: context attributes, length, starting LBA.
+const RANGE_BYTES: usize = 16;
+/// ONCS (Identify controller bytes 520..521): Compare (bit 0) and Dataset
+/// Management (bit 2). `IONVMeController::ProcessIdentifyData`
+/// (0x3ddc7bc..0x3ddc7c8) keeps bit 2 as `IsDatasetManagementSupported`.
+const ONCS: u16 = 1 | (1 << 2);
+/// DLFEAT (Identify namespace byte 33) 001b: a deallocated block reads as
+/// zeros, which is what [`super::namespace::Medium::deallocate`] provides.
+const DLFEAT_READ_ZEROS: u8 = 1;
 
 pub(super) struct Command(pub [u8; 64]);
 impl Command {
@@ -194,7 +214,8 @@ impl Command {
         } else {
             match self.opcode() {
                 READ => Ok(1),
-                WRITE | COMPARE => Ok(2),
+                // The range list is read by the device, like write data.
+                WRITE | COMPARE | DATASET_MANAGEMENT => Ok(2),
                 FLUSH => Ok(0),
                 _ => Err("ANS I/O opcode is not modeled"),
             }
@@ -357,7 +378,7 @@ impl Ans {
                 data[512] = 0x66;
                 data[513] = 0x44; // SQES/CQES max and min.
                 put32(&mut data, 516, self.medium.namespaces.len() as u32);
-                put16(&mut data, 520, 1); // ONCS: Compare; no deallocate/crypto.
+                put16(&mut data, 520, ONCS); // No write zeroes or crypto.
                 // VWC/OACS are zero: no downloadable firmware/cache.
             }
             0 if cmd.nsid() == 0 => {
@@ -371,6 +392,7 @@ impl Ans {
                 for offset in [0, 8, 16] {
                     put64(&mut data, offset, ns.blocks);
                 }
+                data[33] = DLFEAT_READ_ZEROS;
                 data[130] = 12; // LBAF0.LBADS; zero metadata, one format.
                 data[0x180] = ns.description.kind as u8;
             }
@@ -538,6 +560,9 @@ impl Ans {
             }
             return Ok(block_result(self.medium.device.flush()));
         }
+        if cmd.opcode() == DATASET_MANAGEMENT {
+            return self.dataset_management(cmd, port);
+        }
         let controls = cmd.word(48);
         if controls & !0x4000_ffff != 0 || !cmd.zero_words(52) {
             return Err("ANS protection, encryption, metadata or read/write hints are not modeled");
@@ -582,6 +607,49 @@ impl Ans {
             }
             _ => Err("ANS I/O command is not modeled"),
         }
+    }
+
+    /// Deallocate every listed range. Ranges are all checked before any
+    /// takes effect, so an out-of-range entry fails the whole command (LBA
+    /// Out of Range) with nothing deallocated. Integral-dataset hints (IDR,
+    /// IDW) and context attributes carry no modeled effect and refuse.
+    fn dataset_management(
+        &mut self,
+        cmd: &Command,
+        port: &mut Port<'_, '_>,
+    ) -> Result<Outcome, &'static str> {
+        let count = cmd.word(40);
+        if count & !0xff != 0 || cmd.word(44) != DEALLOCATE || !cmd.zero_words(48) {
+            return Err(
+                "ANS Dataset Management is modeled only as Deallocate without hints or reserved fields",
+            );
+        }
+        let ranges = count as usize + 1;
+        let mut list = vec![0; ranges * RANGE_BYTES];
+        cmd.prps(port, list.len(), self.page())?
+            .read(port, &mut list)?;
+        let mut extents = vec![];
+        for range in list.as_chunks::<RANGE_BYTES>().0 {
+            let word = |at: usize| u32::from_le_bytes(range[at..at + 4].try_into().unwrap());
+            if word(0) != 0 {
+                return Err("ANS Dataset Management context attributes are not modeled");
+            }
+            let blocks = u64::from(word(4));
+            let lba = u64::from_le_bytes(range[8..].try_into().unwrap());
+            let fits = lba
+                .checked_add(blocks)
+                .is_some_and(|end| end <= self.medium.namespace(cmd.nsid()).unwrap().blocks);
+            if !fits {
+                return Ok(Outcome::status(LBA_RANGE));
+            }
+            extents.push((lba, blocks));
+        }
+        for (lba, blocks) in extents {
+            self.medium
+                .deallocate(cmd.nsid(), lba, blocks)
+                .expect("a checked range");
+        }
+        Ok(Outcome::status(SUCCESS))
     }
 
     fn verify_namespaces(
@@ -1284,6 +1352,144 @@ mod tests {
             assert_eq!(io(&mut ans, &mut port, READ, nsid, lba), SUCCESS);
             port.read(0x2000, &mut block).unwrap();
             assert_eq!(block, [fill; 4096]);
+        }
+    }
+
+    #[test]
+    fn dataset_management_deallocates_checked_ranges_and_reads_zero() {
+        let records =
+            [(1, 1, 0), (2, 0xd, 8)].map(|(id, kind, blocks)| Description { id, kind, blocks });
+        let mut ans = Ans::new(Box::new(RamDisk::new("", 16, 4096)), &records, None).unwrap();
+        let mut memory = Ram::new(0x1000, 0x3000);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let rw = |ans: &mut Ans, port: &mut Port<'_, '_>, opcode, lba: u64| {
+            let mut command = Command([0; 64]);
+            command.0[0] = opcode;
+            command.0[4..8].copy_from_slice(&2u32.to_le_bytes());
+            command.0[24..32].copy_from_slice(&0x3000u64.to_le_bytes());
+            command.0[40..48].copy_from_slice(&lba.to_le_bytes());
+            let mut sart = Sart::new(Bounds::Exclusive);
+            ans.execute(1, &command, port, &mut sart).unwrap().status
+        };
+        for lba in 0..8 {
+            port.write(0x3000, &[0x5a; 4096]).unwrap();
+            assert_eq!(rw(&mut ans, &mut port, WRITE, lba), SUCCESS);
+        }
+        // The range list as `unmapBlocks` and `doUnmapNVMe` fill it.
+        let list = |ranges: &[(u32, u32, u64)]| {
+            let mut data = alloc::vec![0; 4096];
+            for (i, &(context, blocks, lba)) in ranges.iter().enumerate() {
+                let at = i * RANGE_BYTES;
+                data[at..at + 4].copy_from_slice(&context.to_le_bytes());
+                data[at + 4..at + 8].copy_from_slice(&blocks.to_le_bytes());
+                data[at + 8..at + 16].copy_from_slice(&lba.to_le_bytes());
+            }
+            data
+        };
+        let dsm = |count: u32, attributes: u32| {
+            let mut command = Command([0; 64]);
+            command.0[0] = DATASET_MANAGEMENT;
+            command.0[4..8].copy_from_slice(&2u32.to_le_bytes());
+            command.0[24..32].copy_from_slice(&0x2000u64.to_le_bytes());
+            command.0[40..44].copy_from_slice(&count.to_le_bytes());
+            command.0[44..48].copy_from_slice(&attributes.to_le_bytes());
+            command
+        };
+        assert_eq!(dsm(0, DEALLOCATE).direction(1), Ok(2));
+        // A range past the namespace fails the whole command unchanged.
+        port.write(0x2000, &list(&[(0, 2, 0), (0, 2, 7)])).unwrap();
+        let outcome = ans
+            .execute(1, &dsm(1, DEALLOCATE), &mut port, &mut sart)
+            .unwrap();
+        assert_eq!(outcome.status, LBA_RANGE);
+        assert_eq!(ans.erase_pending(), 0);
+        // Hints, reserved fields and context attributes refuse.
+        for (count, attributes) in [(0, 1 | DEALLOCATE), (0, 0), (0x100, DEALLOCATE)] {
+            assert!(
+                ans.execute(1, &dsm(count, attributes), &mut port, &mut sart)
+                    .is_err()
+            );
+        }
+        port.write(0x2000, &list(&[(1, 1, 0)])).unwrap();
+        assert!(
+            ans.execute(1, &dsm(0, DEALLOCATE), &mut port, &mut sart)
+                .is_err()
+        );
+        assert_eq!(ans.erase_pending(), 0);
+        // eanFormat's whole-namespace range, then two ranges of one command.
+        port.write(0x2000, &list(&[(0, 8, 0)])).unwrap();
+        let outcome = ans
+            .execute(1, &dsm(0, DEALLOCATE), &mut port, &mut sart)
+            .unwrap();
+        assert_eq!(outcome.status, SUCCESS);
+        assert_eq!(ans.erase_pending(), 8);
+        let mut block = [0; 4096];
+        for lba in [0, 7] {
+            port.write(0x3000, &[0xff; 4096]).unwrap();
+            assert_eq!(rw(&mut ans, &mut port, READ, lba), SUCCESS);
+            port.read(0x3000, &mut block).unwrap();
+            assert_eq!(block, [0; 4096]);
+        }
+        port.write(0x3000, &[0x77; 4096]).unwrap();
+        assert_eq!(rw(&mut ans, &mut port, WRITE, 3), SUCCESS);
+        assert_eq!(ans.erase_pending(), 7);
+        port.write(0x2000, &list(&[(0, 1, 3), (0, 0, 5)])).unwrap();
+        let outcome = ans
+            .execute(1, &dsm(1, DEALLOCATE), &mut port, &mut sart)
+            .unwrap();
+        assert_eq!(outcome.status, SUCCESS);
+        assert_eq!(ans.erase_pending(), 8);
+        assert_eq!(rw(&mut ans, &mut port, READ, 3), SUCCESS);
+        port.read(0x3000, &mut block).unwrap();
+        assert_eq!(block, [0; 4096]);
+        assert_eq!(ans.zero_erased(u64::MAX), Ok(0));
+    }
+
+    #[test]
+    fn identify_reports_dataset_management_and_zero_reads() {
+        let mut ans = Ans::new(
+            Box::new(RamDisk::new("", 4, 4096)),
+            &[Description {
+                id: 1,
+                kind: 1,
+                blocks: 0,
+            }],
+            None,
+        )
+        .unwrap();
+        let mut memory = Ram::new(0x1000, 4096);
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        let mut data = [0; 4096];
+        for (cns, nsid) in [(1u8, 0u32), (0, 1)] {
+            let mut command = Command([0; 64]);
+            command.0[0] = IDENTIFY;
+            command.0[4..8].copy_from_slice(&nsid.to_le_bytes());
+            command.0[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
+            command.0[40] = cns;
+            let outcome = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+            assert_eq!(outcome.status, SUCCESS);
+            port.read(0x1000, &mut data).unwrap();
+            if cns == 1 {
+                assert_eq!(u16::from_le_bytes([data[520], data[521]]), ONCS);
+            } else {
+                assert_eq!(data[33], DLFEAT_READ_ZEROS);
+            }
         }
     }
 

@@ -265,6 +265,22 @@ impl Medium {
         Some(())
     }
 
+    /// Deallocate `blocks` blocks of namespace `id` from `lba`, as Dataset
+    /// Management with the Deallocate attribute does: like a namespace
+    /// erase, but for one range. The blocks read as zeros at once (the
+    /// controller reports DLFEAT 001b) and [`Self::zero_erased`] makes that
+    /// durable. `None` when the range leaves the namespace; nothing changes.
+    pub fn deallocate(&mut self, id: u32, lba: u64, blocks: u64) -> Option<()> {
+        let namespace = self.namespace(id)?;
+        let end = lba.checked_add(blocks)?;
+        if end > namespace.blocks {
+            return None;
+        }
+        self.erased
+            .insert(namespace.first + lba, namespace.first + end);
+        Some(())
+    }
+
     /// Erased blocks whose host bytes are still stale.
     pub fn erase_pending(&self) -> u64 {
         self.erased.blocks
@@ -447,6 +463,42 @@ mod tests {
             }
             host.read((first - 1) * ratio, &mut stale).unwrap();
             assert_eq!(stale, [0x11; 4096]);
+        }
+    }
+
+    #[test]
+    fn deallocated_ranges_read_zero_stay_inside_their_namespace_and_reach_the_host() {
+        for block_size in [512, 4096] {
+            let (mut medium, mut host) = erasable(block_size);
+            let ratio = u64::from(BLOCK_BYTES / block_size);
+            for lba in 0..300 {
+                medium.write(1, lba, &[0x11; 4096]).unwrap();
+                medium.write(2, lba, &[0x22; 4096]).unwrap();
+            }
+            // A range past the namespace, or wrapping, changes nothing.
+            assert_eq!(medium.deallocate(2, 299, 2), None);
+            assert_eq!(medium.deallocate(2, u64::MAX, 2), None);
+            assert_eq!(medium.deallocate(4, 0, 1), None);
+            assert_eq!(medium.erase_pending(), 0);
+            medium.deallocate(2, 10, 5).unwrap();
+            medium.deallocate(2, 0, 0).unwrap();
+            assert_eq!(medium.erase_pending(), 5);
+            let mut data = alloc::vec![0xff; 7 * 4096];
+            medium.read(2, 9, &mut data).unwrap();
+            for (i, block) in data.chunks(4096).enumerate() {
+                let fill = if (1..6).contains(&i) { 0 } else { 0x22 };
+                assert!(block.iter().all(|&b| b == fill), "block {i}");
+            }
+            // The neighbouring namespace keeps its data.
+            medium.read(1, 299, &mut data[..4096]).unwrap();
+            assert_eq!(&data[..4096], &[0x11; 4096]);
+            assert_eq!(medium.zero_erased(u64::MAX).unwrap(), 0);
+            let first = medium.namespace(2).unwrap().first;
+            let mut stale = alloc::vec![0; 4096];
+            host.read((first + 12) * ratio, &mut stale).unwrap();
+            assert_eq!(stale, [0; 4096]);
+            host.read((first + 15) * ratio, &mut stale).unwrap();
+            assert_eq!(stale, [0x22; 4096]);
         }
     }
 
