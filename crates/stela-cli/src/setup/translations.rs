@@ -1,0 +1,429 @@
+//! The persistent translation store's home on the USB: where `stela.efi`
+//! keeps its `STLTPACK` packs (`docs/design/runtime.md`, "Persistent
+//! translation store"), how much room each may take, and which packs are
+//! kept. The pack format is the engine's; setup never reads a pack beyond
+//! its header.
+//!
+//! ```text
+//! EFI/stela/translations/store.cfg              `bytes N`: one pack's bound
+//! EFI/stela/translations/<translator id>.stltpack  one pack per translator id
+//! ```
+//!
+//! The home is one FAT32 volume of the boot USB, as the firmware writes it:
+//! the install medium's partition when the setup has one, else the bundle
+//! volume when it is FAT32, else the ESP. `stela.efi` writes only its own
+//! translator id's pack, never past the bound. Setup keeps the packs of the
+//! [`PACKS_KEPT`] most recently written translator ids, one for each Stela
+//! version it keeps, so a rollback boots warm, and removes the others when
+//! Stela is updated or repaired. A damaged pack is harmless (the engine
+//! discards it); `--status` names it and `--repair` removes it.
+use super::{MARGIN, host::FileSystem, host::Host};
+use crate::efi;
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
+
+/// The store's directory on its volume.
+pub(super) const DIRECTORY: &str = "EFI/stela/translations";
+/// The bound setup gives `stela.efi`.
+pub(super) const CONFIG: &str = "store.cfg";
+const BYTES_KEY: &str = "bytes";
+const PACK_EXTENSION: &str = "stltpack";
+/// A pack's leading bytes: magic, schema, record count, translator id.
+const PACK_MAGIC: &[u8; 8] = b"STLTPACK";
+const PACK_SCHEMA: u32 = 1;
+const ID_BYTES: usize = 32;
+const HEADER_BYTES: usize = PACK_MAGIC.len() + 4 + 4 + ID_BYTES;
+const MIB: u64 = 1024 * 1024;
+/// One pack's bound by default.
+pub(super) const DEFAULT_PACK_BYTES: u64 = 2 * 1024 * MIB;
+/// The smallest bound worth keeping a store for.
+pub(super) const MIN_PACK_BYTES: u64 = 64 * MIB;
+/// FAT32's largest file, on a 1 MiB boundary.
+pub(super) const MAX_PACK_BYTES: u64 = 4 * 1024 * MIB - MIB;
+/// Translator ids whose packs are kept: as many as Stela versions
+/// (`update::KEEP`).
+pub(super) const PACKS_KEPT: usize = super::update::KEEP;
+
+/// The store a setup keeps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct Store {
+    /// The FAT32 volume of the USB that holds it.
+    pub(super) volume: PathBuf,
+    /// One pack's bound.
+    pub(super) pack_bytes: u64,
+}
+
+impl Store {
+    pub(super) fn directory(&self) -> PathBuf {
+        self.volume.join(DIRECTORY)
+    }
+
+    fn config_text(&self) -> String {
+        format!("{BYTES_KEY} {}\n", self.pack_bytes)
+    }
+
+    /// Create the directory and write `store.cfg`.
+    pub(super) fn publish(&self) -> Result<()> {
+        let directory = self.directory();
+        fs::create_dir_all(&directory)
+            .with_context(|| format!("cannot create {}", directory.display()))?;
+        efi::write_atomic(
+            &directory.join(CONFIG),
+            self.config_text().as_bytes(),
+            false,
+        )
+    }
+
+    /// Whether `store.cfg` says what the record does.
+    pub(super) fn config_intact(&self) -> bool {
+        fs::read_to_string(self.directory().join(CONFIG)).is_ok_and(|t| t == self.config_text())
+    }
+
+    /// The packs on the volume, most recently written first.
+    pub(super) fn packs(&self) -> Vec<Pack> {
+        let Ok(entries) = fs::read_dir(self.directory()) else {
+            return Vec::new();
+        };
+        let mut packs: Vec<Pack> = entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e == PACK_EXTENSION))
+            .map(|path| Pack::read(&path, self.pack_bytes))
+            .collect();
+        packs.sort_by(|a, b| b.modified.cmp(&a.modified).then(a.path.cmp(&b.path)));
+        packs
+    }
+
+    /// The packs to remove: damaged ones, and those past the
+    /// [`PACKS_KEPT`] most recently written intact ones.
+    pub(super) fn stale(&self) -> Vec<Pack> {
+        let mut intact = 0;
+        self.packs()
+            .into_iter()
+            .filter(|pack| match pack.problem {
+                Some(_) => true,
+                None => {
+                    intact += 1;
+                    intact > PACKS_KEPT
+                }
+            })
+            .collect()
+    }
+
+    /// Remove the stale packs; returns them.
+    pub(super) fn prune(&self) -> Result<Vec<Pack>> {
+        let stale = self.stale();
+        for pack in &stale {
+            fs::remove_file(&pack.path)
+                .with_context(|| format!("cannot remove {}", pack.path.display()))?;
+        }
+        Ok(stale)
+    }
+
+    /// What the store's packs take now.
+    pub(super) fn used_bytes(&self) -> u64 {
+        self.packs().iter().map(|p| p.bytes).sum()
+    }
+
+    /// The store, for plans and `--status`.
+    pub(super) fn describe(&self) -> String {
+        format!(
+            "{}: packs of up to {:.1} GB, the {PACKS_KEPT} newest kept",
+            self.directory().display(),
+            self.pack_bytes as f64 / 1e9
+        )
+    }
+
+    /// What [`Self::repair`] would change: a missing or changed
+    /// `store.cfg`, and each pack to remove, damaged or past the kept
+    /// ones.
+    pub(super) fn repairs(&self) -> Vec<String> {
+        let mut repairs = Vec::new();
+        if !self.config_intact() {
+            repairs.push(format!(
+                "write {} (bytes {})",
+                self.directory().join(CONFIG).display(),
+                self.pack_bytes
+            ));
+        }
+        for pack in self.stale() {
+            repairs.push(format!(
+                "remove {}{}",
+                pack.path.display(),
+                pack.problem
+                    .map(|problem| format!(", which {problem}"))
+                    .unwrap_or_else(|| ", an older translator's".into())
+            ));
+        }
+        repairs
+    }
+
+    /// Write `store.cfg` again and remove the stale packs.
+    pub(super) fn repair(&self) -> Result<()> {
+        self.publish()?;
+        self.prune()?;
+        Ok(())
+    }
+}
+
+/// One pack file, checked as far as setup checks it.
+#[derive(Debug, Clone)]
+pub(super) struct Pack {
+    pub(super) path: PathBuf,
+    pub(super) bytes: u64,
+    modified: Option<SystemTime>,
+    /// Why the engine would discard it; `None` when its header is sound.
+    pub(super) problem: Option<String>,
+}
+
+impl Pack {
+    fn read(path: &Path, bound: u64) -> Self {
+        let metadata = fs::metadata(path).ok();
+        let bytes = metadata.as_ref().map_or(0, |m| m.len());
+        let modified = metadata.and_then(|m| m.modified().ok());
+        let problem = check(path, bytes, bound).err();
+        Self {
+            path: path.to_path_buf(),
+            bytes,
+            modified,
+            problem,
+        }
+    }
+}
+
+/// A pack's header names its file's translator id, and its size is within
+/// the bound.
+fn check(path: &Path, bytes: u64, bound: u64) -> Result<(), String> {
+    if bytes > bound {
+        return Err(format!("holds {bytes} bytes, more than the bound {bound}"));
+    }
+    let mut header = [0u8; HEADER_BYTES];
+    use std::io::Read;
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|_| "is shorter than a pack header".to_string())?;
+    if &header[..PACK_MAGIC.len()] != PACK_MAGIC {
+        return Err("is not a STLTPACK pack".into());
+    }
+    let schema = u32::from_le_bytes(header[8..12].try_into().unwrap());
+    if schema != PACK_SCHEMA {
+        return Err(format!("has pack schema {schema}, not {PACK_SCHEMA}"));
+    }
+    let id = hex::encode(&header[16..16 + ID_BYTES]);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if stem != id {
+        return Err(format!("names translator {id}, not its file name"));
+    }
+    Ok(())
+}
+
+/// The bytes a store of `pack_bytes` needs on its volume: the kept packs
+/// and one rewrite beside them, and a margin.
+pub(super) fn needed_bytes(pack_bytes: u64) -> u64 {
+    pack_bytes * (PACKS_KEPT as u64 + 1) + MARGIN
+}
+
+/// The largest bound, on a 1 MiB boundary, whose store fits in `room`.
+fn fitting(room: u64) -> u64 {
+    let bound = room.saturating_sub(MARGIN) / (PACKS_KEPT as u64 + 1);
+    bound / MIB * MIB
+}
+
+/// The store's home among `candidates` (the install medium's partition,
+/// the bundle volume, the ESP, in that order): the first FAT32 one.
+/// `planned` is what setup writes to a volume besides the store, and
+/// `requested` the user's bound (`--translation-store-bytes`, 0 for none).
+/// The default bound shrinks to what fits; below [`MIN_PACK_BYTES`] the
+/// setup keeps no store, which the returned note says. A requested bound
+/// that does not fit is refused with the sizes.
+pub(super) fn choose(
+    host: &dyn Host,
+    candidates: &[&Path],
+    planned: impl Fn(&Path) -> u64,
+    requested: Option<u64>,
+) -> Result<(Option<Store>, Option<String>)> {
+    if requested == Some(0) {
+        return Ok((
+            None,
+            Some(
+                "no translation store (--translation-store-bytes 0): every boot translates anew"
+                    .into(),
+            ),
+        ));
+    }
+    if let Some(bytes) = requested {
+        ensure!(
+            (MIN_PACK_BYTES..=MAX_PACK_BYTES).contains(&bytes),
+            "--translation-store-bytes {bytes} is outside {MIN_PACK_BYTES}..={MAX_PACK_BYTES} (64 \
+             MiB to FAT32's largest file), or 0 for no store"
+        );
+    }
+    let mut seen: Vec<&Path> = Vec::new();
+    for &volume in candidates {
+        if seen.contains(&volume) {
+            continue;
+        }
+        seen.push(volume);
+        let info = host.volume(volume)?;
+        if info.filesystem != FileSystem::Fat {
+            continue;
+        }
+        let existing = Store {
+            volume: volume.to_path_buf(),
+            pack_bytes: MAX_PACK_BYTES,
+        }
+        .used_bytes();
+        let room = (info.free_bytes + existing).saturating_sub(planned(volume));
+        let pack_bytes = match requested {
+            Some(bytes) => {
+                let need = needed_bytes(bytes);
+                if room < need {
+                    bail!(
+                        "{} has {:.1} GB for the translation store; {} packs of {:.1} GB and a \
+                         rewrite need {:.1} GB. Pass a smaller --translation-store-bytes, or 0 \
+                         for none.",
+                        volume.display(),
+                        room as f64 / 1e9,
+                        PACKS_KEPT,
+                        bytes as f64 / 1e9,
+                        need as f64 / 1e9
+                    );
+                }
+                bytes
+            }
+            None => fitting(room).min(DEFAULT_PACK_BYTES),
+        };
+        if pack_bytes < MIN_PACK_BYTES {
+            return Ok((
+                None,
+                Some(format!(
+                    "no translation store: {} ({:.1} GB free) has no room for {} packs of 64 \
+                     MiB; every boot translates anew",
+                    volume.display(),
+                    room as f64 / 1e9,
+                    PACKS_KEPT
+                )),
+            ));
+        }
+        return Ok((
+            Some(Store {
+                volume: volume.to_path_buf(),
+                pack_bytes,
+            }),
+            None,
+        ));
+    }
+    Ok((
+        None,
+        Some(
+            "no translation store: the USB has no FAT32 volume the firmware writes; every boot \
+             translates anew"
+                .into(),
+        ),
+    ))
+}
+
+/// The store's directory, refused unless it is where setup puts it, for
+/// `--uninstall`.
+pub(super) fn checked_directory(store: &Store) -> Result<PathBuf> {
+    let directory = store.directory();
+    ensure!(
+        directory.ends_with(DIRECTORY),
+        "the setup record names an unexpected translation store {}",
+        directory.display()
+    );
+    Ok(directory)
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+
+    /// A pack of translator `id` holding `bytes` bytes in all.
+    pub(in crate::setup) fn write_pack(directory: &Path, id: [u8; 32], bytes: usize) -> PathBuf {
+        let mut pack = PACK_MAGIC.to_vec();
+        pack.extend_from_slice(&PACK_SCHEMA.to_le_bytes());
+        pack.extend_from_slice(&0u32.to_le_bytes());
+        pack.extend_from_slice(&id);
+        pack.resize(bytes.max(HEADER_BYTES), 0);
+        fs::create_dir_all(directory).unwrap();
+        let path = directory.join(format!("{}.{PACK_EXTENSION}", hex::encode(id)));
+        fs::write(&path, pack).unwrap();
+        path
+    }
+
+    #[test]
+    fn packs_are_checked_by_header_and_the_newest_ids_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store {
+            volume: dir.path().to_path_buf(),
+            pack_bytes: 4096,
+        };
+        store.publish().unwrap();
+        assert!(store.config_intact());
+        assert_eq!(
+            fs::read_to_string(store.directory().join(CONFIG)).unwrap(),
+            "bytes 4096\n"
+        );
+        let mut paths = Vec::new();
+        for n in 0..5u8 {
+            paths.push(write_pack(&store.directory(), [n; 32], 100));
+            let time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000 + n as u64);
+            fs::File::options()
+                .write(true)
+                .open(&paths[n as usize])
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        }
+        // A pack under another id's name, a short one and one past the
+        // bound are damaged.
+        let wrong = store
+            .directory()
+            .join(format!("{}.stltpack", hex::encode([9u8; 32])));
+        fs::copy(&paths[0], &wrong).unwrap();
+        fs::write(
+            store
+                .directory()
+                .join(format!("{}.stltpack", "ab".repeat(32))),
+            b"STLT",
+        )
+        .unwrap();
+        write_pack(&store.directory(), [7; 32], 5000);
+        let problems: Vec<String> = store
+            .packs()
+            .into_iter()
+            .filter_map(|p| p.problem)
+            .collect();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("not its file name")));
+        assert!(problems.iter().any(|p| p.contains("shorter")));
+        assert!(problems.iter().any(|p| p.contains("more than the bound")));
+        // The three newest intact packs stay.
+        let removed = store.prune().unwrap();
+        assert_eq!(removed.len(), 5);
+        let kept: Vec<PathBuf> = store.packs().into_iter().map(|p| p.path).collect();
+        assert_eq!(kept, [paths[4].clone(), paths[3].clone(), paths[2].clone()]);
+        assert_eq!(store.used_bytes(), 300);
+        fs::remove_dir_all(checked_directory(&store).unwrap()).unwrap();
+        assert!(!store.directory().exists());
+    }
+
+    #[test]
+    fn the_bound_fits_the_volume() {
+        assert_eq!(
+            fitting(needed_bytes(DEFAULT_PACK_BYTES)),
+            DEFAULT_PACK_BYTES
+        );
+        assert_eq!(
+            fitting(needed_bytes(MIN_PACK_BYTES) - 1),
+            MIN_PACK_BYTES - MIB
+        );
+        assert_eq!(fitting(0), 0);
+    }
+}

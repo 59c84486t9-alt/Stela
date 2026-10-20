@@ -51,6 +51,7 @@ mod installed;
 mod machines;
 mod medium;
 mod state;
+mod translations;
 mod update;
 mod usb;
 
@@ -250,6 +251,11 @@ pub(crate) struct Setup {
     /// partition (`--install`, or the default install).
     #[arg(long)]
     boot_log: bool,
+    /// The bound of each translation pack `stela.efi` keeps on the USB, in
+    /// bytes (64 MiB to 4 GiB; 0 for none). By default 2 GiB, or what the
+    /// USB's FAT32 volumes have room for.
+    #[arg(long, value_name = "BYTES")]
+    translation_store_bytes: Option<u64>,
 }
 
 #[derive(Args)]
@@ -381,6 +387,10 @@ struct Record {
     /// (`--verify-on-read`).
     #[serde(default)]
     verify_on_read: bool,
+    /// The translation store `stela.efi` keeps its packs in, if the USB
+    /// has room for one (`setup::translations`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    translations: Option<translations::Store>,
 }
 
 fn first_schema() -> u32 {
@@ -1746,6 +1756,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         medium: None,
         media: Vec::new(),
         verify_on_read: command.verify_on_read,
+        translations: None,
     };
     let install = match &installed {
         Some(_) => Some(plan_install(
@@ -1759,6 +1770,28 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         )?),
         None => None,
     };
+    // The translation store takes what the USB's FAT32 volumes have left
+    // after everything above.
+    let medium = install.as_ref().and_then(|plan| plan.medium.as_ref());
+    let mut candidates: Vec<&Path> = medium.iter().map(|m| m.volume.as_path()).collect();
+    candidates.extend([record.volume.as_path(), esp.as_path()]);
+    let planned = |volume: &Path| {
+        let mut bytes = 0;
+        if medium.is_some_and(|m| m.volume == volume) {
+            bytes += medium.map_or(0, |m| m.need);
+        }
+        if record.volume == volume {
+            bytes += bundles;
+        }
+        if esp == volume {
+            bytes += efi_image.len() as u64;
+        }
+        bytes
+    };
+    let (store, note) =
+        translations::choose(host, &candidates, planned, command.translation_store_bytes)?;
+    notes.extend(note);
+    record.translations = store;
     record.options = record.options_text();
     record.choices_text()?;
     notes.push(format!(
@@ -1835,6 +1868,9 @@ fn describe(plan: &Plan) -> Result<String> {
             .display(),
             prepared.bytes as f64 / 1e9
         )?;
+    }
+    if let Some(store) = &record.translations {
+        writeln!(text, "  translations   {}", store.describe())?;
     }
     writeln!(
         text,
@@ -1955,6 +1991,9 @@ fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     write_record(&esp, &record)?;
     copy_bundles(&mut record, &plan.prepared)?;
     write_record(&esp, &record)?;
+    if let Some(store) = &record.translations {
+        store.publish()?;
+    }
     if let Some(install) = plan.install {
         apply_install(environment, &mut record, &plan.ipsw, install)?;
     }
@@ -2020,6 +2059,12 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
         let versions = esp.join(update::VERSIONS);
         if versions.is_dir() {
             removals.push(versions);
+        }
+        if let Some(store) = &record.translations {
+            let directory = translations::checked_directory(store)?;
+            if directory.is_dir() {
+                removals.push(directory);
+            }
         }
     } else {
         writeln!(
@@ -2319,6 +2364,7 @@ mod tests {
             backup_state: None,
             restore_state: None,
             boot_log: false,
+            translation_store_bytes: None,
         }
     }
 
@@ -3234,8 +3280,41 @@ mod tests {
         };
         assert!(update(true).unwrap().contains("Dry run"));
         assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela"));
+        // Packs of four translators and a damaged one: the update keeps the
+        // three newest intact ones.
+        let packs = f.esp.join(translations::DIRECTORY);
+        assert!(packs.join(translations::CONFIG).is_file());
+        let written: Vec<PathBuf> = (0..4u8)
+            .map(|n| {
+                let path = translations::tests::write_pack(&packs, [n; 32], 100);
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(
+                        std::time::SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_secs(1000 + u64::from(n)),
+                    )
+                    .unwrap();
+                path
+            })
+            .collect();
+        fs::write(packs.join(format!("{}.stltpack", "ab".repeat(32))), b"STLT").unwrap();
         let report = update(false).unwrap();
-        assert!(report.contains("no translation cache"), "{report}");
+        assert!(
+            report.contains("translates anew into its own pack"),
+            "{report}"
+        );
+        assert!(
+            report.contains(&written[0].display().to_string()),
+            "{report}"
+        );
+        assert!(!written[0].exists() && written[1..].iter().all(|path| path.exists()));
+        assert_eq!(
+            fs::read_dir(&packs).unwrap().count(),
+            4,
+            "store.cfg and three packs"
+        );
         assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela-2"));
         // Only the tool changed: the entry and stela.cfg stay.
         assert_eq!(fs::read(f.esp.join("EFI/OC/config.plist")).unwrap(), config);

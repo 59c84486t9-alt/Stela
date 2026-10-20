@@ -133,6 +133,33 @@ impl Report {
     }
 }
 
+/// The translation store's packs, and what `--repair` would fix.
+fn translations_status(record: &Record, report: &mut Report) {
+    let Some(store) = &record.translations else {
+        report.line(
+            "translations",
+            "no store: every boot translates anew (the USB had no room for one)",
+        );
+        return;
+    };
+    report.line("translations", store.describe());
+    for pack in store.packs() {
+        report.line(
+            "  pack",
+            format!(
+                "{} ({:.1} MB)",
+                pack.path.display(),
+                pack.bytes as f64 / 1e6
+            ),
+        );
+    }
+    for repair in store.repairs() {
+        report.problem(format!(
+            "translation store: {repair}: `stela setup --repair`"
+        ));
+    }
+}
+
 fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Report) {
     let tool = record.esp.join(TOOL_PATH);
     match fs::read(&tool) {
@@ -459,6 +486,7 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
     );
     efi_status(environment, &record, &mut report);
     bundle_status(&record, &mut report);
+    translations_status(&record, &mut report);
     for install in &record.installs {
         install_status(environment, &record, install, &mut report);
     }
@@ -677,9 +705,22 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     for note in &notes {
         writeln!(text, "  note           {note}")?;
     }
+    let store_repairs = record
+        .translations
+        .as_ref()
+        .map(super::translations::Store::repairs)
+        .unwrap_or_default();
+    for repair in &store_repairs {
+        writeln!(text, "  translations   {repair}")?;
+    }
     if command.dry_run {
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
+    }
+    if let Some(store) = &record.translations
+        && !store_repairs.is_empty()
+    {
+        store.repair()?;
     }
     copy_bundles(&mut record, &prepared)?;
     write_record(&esp, &record)?;

@@ -48,7 +48,7 @@ const VERSION_FILE: &str = "stela.efi";
 const VERSION_ID_DIGITS: usize = 16;
 /// Stela versions and recoveryOS builds kept for rollback, the active one
 /// included.
-const KEEP: usize = 3;
+pub(super) const KEEP: usize = 3;
 
 /// One update, as the record keeps it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,10 +271,19 @@ pub(super) fn update_stela(
             bundle.bytes as f64 / 1e9
         )?;
     }
-    writeln!(
-        text,
-        "  caches         none: Stela keeps no translation cache on disk"
-    )?;
+    match &record.translations {
+        Some(store) => {
+            writeln!(
+                text,
+                "  translations   {}; the new stela.efi translates anew into its own pack",
+                store.describe()
+            )?;
+            for pack in store.stale() {
+                writeln!(text, "  remove         {}", pack.path.display())?;
+            }
+        }
+        None => writeln!(text, "  translations   no store on this USB")?,
+    }
     writeln!(text, "  disks          the installed disks are not changed")?;
     if dry_run {
         text.push_str("Dry run: nothing was changed.\n");
@@ -311,6 +320,9 @@ pub(super) fn update_stela(
     });
     record.pending = None;
     prune(&mut record)?;
+    if let Some(store) = &record.translations {
+        store.prune()?;
+    }
     write_record(&esp, &record)?;
     text.push_str("Done. Undo with: stela setup --rollback\n");
     Ok(text)
