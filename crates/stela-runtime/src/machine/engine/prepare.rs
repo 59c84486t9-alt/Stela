@@ -8,17 +8,23 @@
 //! prepared anywhere is the block the engine would compile at that PC from
 //! those bytes in that variant, which is what lets the store key it by its
 //! page bytes and context alone.
-use super::{INSTRUCTION, PROFILE, is_floating_point};
+use super::{FETCH_PAGE, INSTRUCTION, MAX_BLOCK_BYTES, PROFILE, is_floating_point};
 use crate::{
     machine::chip::{AdmitTable, Check, Chip},
     translations::{self, Digest},
 };
-use alloc::{format, string::String, sync::Arc};
+use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use stela_compiler::{
     CompileError, GuestAddress, TargetCpu,
     block::{self, CompilationPlan, CompiledBlock},
     x86_64::{MemoryChecks, NativeSystem},
 };
+
+/// The bytes of the source window of a block at `pc`: to the end of its
+/// fetch page, which no block leaves, and at most a block's.
+pub fn window(pc: u64) -> usize {
+    (FETCH_PAGE - (pc & (FETCH_PAGE - 1))).min(MAX_BLOCK_BYTES) as usize
+}
 
 /// How blocks of one variant are compiled.
 #[derive(Debug, Clone)]
@@ -38,10 +44,12 @@ pub struct Preparation {
 /// What a source window prepares to.
 #[derive(Debug)]
 pub enum Prepared {
-    /// The block, and the bytes of the window the compiler was given.
+    /// The block, the bytes of the window the compiler was given, and the
+    /// entry PCs its static successors (call continuations included) have.
     Block {
         compiled: CompiledBlock,
         input: usize,
+        successors: Vec<u64>,
     },
     /// Its first instruction, an FP/SIMD or scalable one, has an access
     /// check the engine applies before it runs.
@@ -163,19 +171,34 @@ impl Preparation {
             }
         }
         let refused = |at: u64, detail: String| Refused { pc: at, detail };
-        let consumed =
+        let analysis =
             match block::analyze_with_profile(&source[..length], GuestAddress(pc), PROFILE) {
-                Ok(analysis) => analysis.source_bytes,
+                Ok(analysis) => analysis,
                 Err(error) if error.pc.0 > pc => {
                     length = (error.pc.0 - pc) as usize;
                     block::analyze_with_profile(&source[..length], GuestAddress(pc), PROFILE)
                         .map_err(|error| refused(error.pc.0, error.detail))?
-                        .source_bytes
                 }
                 Err(error) => return Err(refused(pc, error.detail)),
             };
+        let consumed = analysis.source_bytes;
         let (compiled, input) = self.compile_prefix(&source[..consumed], pc)?;
-        Ok(Prepared::Block { compiled, input })
+        // A block a host refusal cut short falls through to the refused
+        // word; a whole one has the analysis's static successors.
+        let successors = if input < consumed {
+            vec![pc + input as u64]
+        } else {
+            analysis
+                .static_successors
+                .iter()
+                .map(|successor| successor.target.0)
+                .collect()
+        };
+        Ok(Prepared::Block {
+            compiled,
+            input,
+            successors,
+        })
     }
 
     /// Compile the longest prefix of `source` the target can emit, and the

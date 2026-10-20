@@ -34,6 +34,6 @@ pub use cpu::{Cpu, Exception};
 pub use engine::{
     DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,
     NativeFault, NoDevices, Offer, PeerState, Preparation, Prepared, Refused, Regime, Requirement,
-    RequirementKind, Reset, StaleCode, Statistics, Stop, Transition, Translations,
+    RequirementKind, Reset, StaleCode, Statistics, Stop, Transition, Translations, window,
 };
 pub use registers::{CpuProfile, Identity, Lines};

@@ -37,6 +37,9 @@ pub struct Offer {
     /// The admitted words the compiler was given.
     pub input: Vec<u8>,
     pub preparation: Arc<Preparation>,
+    /// The entry PCs of its static successors, for translation ahead of
+    /// execution.
+    pub successors: Vec<u64>,
     pub block: CompiledBlock,
 }
 

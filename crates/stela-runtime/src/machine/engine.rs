@@ -46,7 +46,7 @@ use alloc::{
 };
 use core::fmt;
 use pointer::{PointerInputs, PointerOperation, PointerResult};
-pub use prepare::{Preparation, Prepared, Refused};
+pub use prepare::{Preparation, Prepared, Refused, window};
 pub use processors::PeerState;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
@@ -2629,13 +2629,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// applies.
     fn compile(&mut self, pc: u64, physical: u64, variant: Variant) -> Result<Fetched, Stop> {
         let available = if variant.single {
-            INSTRUCTION
+            INSTRUCTION as usize
         } else {
-            (FETCH_PAGE - (pc & (FETCH_PAGE - 1))).min(MAX_BLOCK_BYTES)
+            prepare::window(pc)
         };
         let page = pc & !(FETCH_PAGE - 1);
         let offset = (pc - page) as usize;
-        let mut source = vec![0u8; available as usize];
+        let mut source = vec![0u8; available];
         if !self.host.read_ram(physical, &mut source) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
@@ -2678,8 +2678,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .filter(|&&stop| stop > pc && stop < pc + source.len() as u64)
             .min()
             .map_or(source.len(), |&stop| (stop - pc) as usize);
-        let (compiled, input) = match preparation.prepare(&source, pc, limit) {
-            Ok(Prepared::Block { compiled, input }) => (compiled, input),
+        let (compiled, input, successors) = match preparation.prepare(&source, pc, limit) {
+            Ok(Prepared::Block {
+                compiled,
+                input,
+                successors,
+            }) => (compiled, input, successors),
             Ok(Prepared::Checked(word)) => return Ok(Fetched::Checked(word)),
             Ok(Prepared::FloatingPointTrap) => {
                 return Ok(Fetched::Exception(self.floating_point_exception(pc)));
@@ -2702,6 +2706,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 input: source[..input].to_vec(),
                 preparation,
                 block: compiled.clone(),
+                successors,
             });
             self.statistics.offered += 1;
         }

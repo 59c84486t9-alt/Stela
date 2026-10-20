@@ -13,6 +13,9 @@
 //!
 //! A fork child starts its own store state: the parent's workers and
 //! unwritten entries stay the parent's.
+pub mod ahead;
+mod image;
+
 use crate::machine::{Offer, Translations};
 use crate::translations::{self, Digest, Record};
 use std::{
@@ -132,20 +135,27 @@ struct State {
     closed: bool,
 }
 
-/// One process's store.
-struct Shared {
+/// The store's directory, when the process has one.
+struct Disk {
     config: Config,
-    translator: Digest,
     /// `HOME/v1/TRANSLATOR`.
     namespace: PathBuf,
+}
+
+/// One process's store: the blocks its threads and its ahead-of-time
+/// translation prepared, and its disk, if it has one.
+struct Shared {
+    disk: Option<Disk>,
+    translator: Digest,
     pid: u32,
     state: Mutex<State>,
     /// Signals work for the workers and their progress to the finish.
     changed: Condvar,
     written_bytes: AtomicU64,
+    ahead: ahead::Ahead,
 }
 
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
+fn lock<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -163,7 +173,7 @@ pub fn configure(config: Option<Config>) {
 /// The calling process's store, created on first use and again in a fork
 /// child, whose parent's state (its locks included) it never touches.
 fn shared() -> Option<&'static Shared> {
-    let config = CONFIG.get()?.as_ref()?;
+    let config = CONFIG.get()?;
     let pid = std::process::id();
     let current = CURRENT.load(Ordering::Acquire);
     // SAFETY: stores are leaked, never freed.
@@ -174,8 +184,10 @@ fn shared() -> Option<&'static Shared> {
     }
     let translator = translations::translator_id();
     let shared = Box::leak(Box::new(Shared {
-        namespace: config.home.join(LAYOUT).join(translator.hex()),
-        config: config.clone(),
+        disk: config.as_ref().map(|config| Disk {
+            namespace: config.home.join(LAYOUT).join(translator.hex()),
+            config: config.clone(),
+        }),
         translator,
         pid,
         state: Mutex::new(State {
@@ -190,6 +202,7 @@ fn shared() -> Option<&'static Shared> {
         }),
         changed: Condvar::new(),
         written_bytes: AtomicU64::new(0),
+        ahead: ahead::Ahead::default(),
     }));
     CURRENT.store(shared, Ordering::Release);
     Some(shared)
@@ -208,13 +221,7 @@ impl Store {
 
 impl Translations for Store {
     fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
-        let shared = shared()?;
-        if let Some(loaded) = lock(&shared.state).loaded.get(key) {
-            return loaded.clone();
-        }
-        let record = shared.load(key).map(Arc::new);
-        lock(&shared.state).loaded.insert(*key, record.clone());
-        record
+        shared()?.record(key)
     }
 
     fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<CompiledBlock> {
@@ -229,7 +236,34 @@ impl Translations for Store {
         let Some(shared) = shared() else {
             return;
         };
-        let mut state = lock(&shared.state);
+        shared.ahead.note(shared, &offer);
+        shared.prepare(offer);
+    }
+}
+
+impl Shared {
+    /// The record of page `key`, read once.
+    fn record(&self, key: &Digest) -> Option<Arc<Record>> {
+        let disk = self.disk.as_ref()?;
+        if let Some(loaded) = lock(&self.state).loaded.get(key) {
+            return loaded.clone();
+        }
+        let record = self.load(disk, key).map(Arc::new);
+        lock(&self.state).loaded.insert(*key, record.clone());
+        record
+    }
+
+    /// Whether the block at `pc` of page `key` is prepared in `context`.
+    fn has_prepared(&self, key: &Digest, pc: u64, context: &Digest) -> bool {
+        lock(&self.state)
+            .prepared
+            .contains_key(&(*key, pc, *context))
+    }
+
+    /// Keep `offer`'s block for the process's threads and queue it for its
+    /// workers to prove and write.
+    fn prepare(&'static self, offer: Offer) {
+        let mut state = lock(&self.state);
         let bytes = offer.block.native.x86_64_code.len();
         if state.prepared_bytes + bytes <= MAX_PREPARED_BYTES {
             state.prepared_bytes += bytes;
@@ -237,9 +271,10 @@ impl Translations for Store {
                 .prepared
                 .insert((offer.key, offer.pc, offer.context), offer.block.clone());
         }
-        if state.closed {
+        if state.closed || self.disk.is_none() {
             return;
         }
+        let shared = self;
         state.queue.push_back(offer);
         if state.workers < WORKERS {
             state.workers += 1;
@@ -255,19 +290,17 @@ impl Translations for Store {
         drop(state);
         shared.changed.notify_one();
     }
-}
 
-impl Shared {
-    fn path(&self, key: &Digest) -> PathBuf {
+    fn path(disk: &Disk, key: &Digest) -> PathBuf {
         let hex = key.hex();
-        self.namespace
+        disk.namespace
             .join(&hex[..2])
             .join(format!("{hex}.{RECORD_EXTENSION}"))
     }
 
     /// The valid record of page `key` on disk.
-    fn load(&self, key: &Digest) -> Option<Record> {
-        let path = self.path(key);
+    fn load(&self, disk: &Disk, key: &Digest) -> Option<Record> {
+        let path = Self::path(disk, key);
         let Some(bytes) = read_bounded(&path) else {
             COUNTERS.records_absent.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -335,8 +368,11 @@ impl Shared {
 
     /// Write each record merged with the one on disk.
     fn write(&self, records: BTreeMap<Digest, Record>) {
+        let Some(disk) = &self.disk else {
+            return;
+        };
         for (key, mut record) in records {
-            let path = self.path(&key);
+            let path = Self::path(disk, &key);
             let previous = read_bounded(&path);
             if let Some(stored) = previous
                 .as_deref()
@@ -360,6 +396,10 @@ impl Shared {
     /// Stop taking offers, wait for the workers until `deadline`, drop what
     /// they did not reach and write what they proved.
     fn finish(&self, deadline: Instant) {
+        self.ahead.close();
+        let Some(disk) = &self.disk else {
+            return;
+        };
         let mut state = lock(&self.state);
         state.closed = true;
         self.changed.notify_all();
@@ -383,8 +423,8 @@ impl Shared {
         if unwritten.is_empty() {
             return;
         }
-        let _ = std::fs::create_dir_all(&self.namespace);
-        let described = self.namespace.join(TRANSLATOR_FILE);
+        let _ = std::fs::create_dir_all(&disk.namespace);
+        let described = disk.namespace.join(TRANSLATOR_FILE);
         if !described.exists() {
             let text = format!(
                 "stela {}\ncompiler {}\nengine {}\nschema {}\n",
@@ -396,14 +436,14 @@ impl Shared {
             let _ = write_replacing(&described, text.as_bytes());
         }
         self.write(unwritten);
-        self.account();
+        self.account(disk);
     }
 
     /// Add this process's growth to the home's usage and evict past the
     /// bound.
-    fn account(&self) {
+    fn account(&self, disk: &Disk) {
         let grown = self.written_bytes.swap(0, Ordering::Relaxed);
-        let root = self.config.home.join(LAYOUT);
+        let root = disk.config.home.join(LAYOUT);
         let Ok(mut file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -421,8 +461,8 @@ impl Shared {
         let mut text = String::new();
         let _ = file.read_to_string(&mut text);
         let mut usage = text.trim().parse::<u64>().unwrap_or(0) + grown;
-        if usage > self.config.bound {
-            usage = evict(&root, self.config.bound * EVICT_TO_PERCENT / 100);
+        if usage > disk.config.bound {
+            usage = evict(&root, disk.config.bound * EVICT_TO_PERCENT / 100);
         }
         let _ = file.set_len(0);
         let _ = std::io::Seek::rewind(&mut file);
@@ -509,6 +549,15 @@ pub fn summary(engine: &crate::machine::Statistics) -> Vec<String> {
     } else {
         lines.push("store: off".into());
     }
+    lines.push(format!(
+        "ahead: {} images read naming {} entries; {} blocks prepared, {} already prepared, {} \
+         refused",
+        counter(&ahead::COUNTERS.images),
+        counter(&ahead::COUNTERS.entries),
+        counter(&ahead::COUNTERS.prepared),
+        counter(&ahead::COUNTERS.already),
+        counter(&ahead::COUNTERS.refused),
+    ));
     lines
 }
 
