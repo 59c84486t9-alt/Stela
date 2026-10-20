@@ -564,6 +564,7 @@ fn load(
     let engine_entry =
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
+    crate::output::leave_firmware_console();
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
     let map = unsafe { boot::exit_boot_services(None) };

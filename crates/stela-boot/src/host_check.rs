@@ -316,6 +316,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     }
     let registers = (machine.apic_base & apic::BASE_ADDRESS) as usize;
     tables.device(registers, registers + PAGE)?;
+    crate::output::leave_firmware_console();
     // SAFETY: no protocol or pool allocation outlives this call; the heap,
     // stack and tables are LOADER_DATA, which Stela keeps.
     let map = unsafe { boot::exit_boot_services(None) };

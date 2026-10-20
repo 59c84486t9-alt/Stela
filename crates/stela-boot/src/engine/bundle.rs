@@ -84,6 +84,9 @@ fn open(root: &mut Directory, path: &str) -> Result<RegularFile, &'static str> {
 }
 
 /// Read a whole file into fresh `LOADER_DATA` pages, which Stela keeps.
+/// The part of a large file read between progress updates.
+const PROGRESS_STEP: usize = 16 << 20;
+
 fn read_file(root: &mut Directory, path: &str) -> Result<Region, &'static str> {
     read_bounded(root, path, u64::MAX)
 }
@@ -101,15 +104,28 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, 
     let physical = firmware::pages(length.div_ceil(PAGE).max(1))?;
     // SAFETY: fresh pages Stela owns for the whole boot, never freed.
     let buffer = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, length) };
+    // Large files are read in parts, with their progress on the screen.
+    let name = path.rsplit('\\').next().unwrap_or(path);
     let mut done = 0;
     while done < length {
+        let end = length.min(done + PROGRESS_STEP);
         let count = file
-            .read(&mut buffer[done..])
+            .read(&mut buffer[done..end])
             .map_err(|_| "cannot read a bundle file")?;
         if count == 0 {
             return Err("a bundle file ended early");
         }
         done += count;
+        if length > PROGRESS_STEP {
+            output::firmware_console(&format!(
+                "\rReading {name}: {} of {} MB",
+                done >> 20,
+                length >> 20
+            ));
+        }
+    }
+    if length > PROGRESS_STEP {
+        output::firmware_console("\n");
     }
     Ok(Region {
         physical: physical as u64,

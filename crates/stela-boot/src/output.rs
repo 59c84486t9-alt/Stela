@@ -1,5 +1,6 @@
-//! The mount's output: every line goes to the UART and, once installed, the
-//! framebuffer console, and waits from the very first line in a bounded
+//! The mount's output: every line goes to the UART, to the firmware's
+//! console until boot services end, then to the framebuffer console once
+//! installed, and waits from the very first line in a bounded
 //! buffer for the persistent boot log (`pc::boot_log`). Once `--nor` opens
 //! the log ([`install_log`]), [`flush_log`] stores what waits: between
 //! engine slices and at every stop, which [`terminate`] reaches.
@@ -42,11 +43,35 @@ static SINK: Global<Option<Sink>> = Global(RefCell::new(None));
 /// A flush is running: a fatal or panic raised inside it halts without
 /// flushing again.
 static FLUSHING: AtomicBool = AtomicBool::new(false);
+/// Boot services still run, so the firmware's console is the screen.
+static FIRMWARE_CONSOLE: AtomicBool = AtomicBool::new(true);
+
+/// Stop writing to the firmware's console: called just before boot services
+/// end, which take the console with them.
+pub fn leave_firmware_console() {
+    FIRMWARE_CONSOLE.store(false, Ordering::Relaxed);
+}
+
+/// Write `text` to the firmware's console while boot services run and the
+/// firmware has one.
+pub fn firmware_console(text: &str) {
+    // SAFETY: the firmware's system table, valid while boot services run.
+    let console = || {
+        uefi::table::system_table_raw()
+            .is_some_and(|table| unsafe { !table.as_ref().stdout.is_null() })
+    };
+    if FIRMWARE_CONSOLE.load(Ordering::Relaxed) && console() {
+        uefi::system::with_stdout(|out| {
+            let _ = out.write_str(text);
+        });
+    }
+}
 
 struct Output(console::Color);
 impl Write for Output {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         let _ = Serial.write_str(value);
+        firmware_console(value);
         console::write(value, self.0);
         if let Ok(mut pending) = PENDING.0.try_borrow_mut() {
             pending.push(value.as_bytes());
