@@ -38,7 +38,7 @@ impl Request<'_> {
 }
 
 /// A routine's outcome.
-pub(super) enum Reply {
+pub(crate) enum Reply {
     /// The body after `RetCode` (`KERN_SUCCESS`).
     Success(Vec<u8>),
     /// A failing `RetCode`.
@@ -61,7 +61,7 @@ pub(super) enum Reply {
 /// One descriptor of a complex reply. Further forms join as routines
 /// need them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Descriptor {
+pub(crate) enum Descriptor {
     /// One right of this space carried with `disposition`
     /// (`mach_msg_port_descriptor_t`).
     Port { name: u32, disposition: u8 },

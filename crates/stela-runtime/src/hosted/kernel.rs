@@ -41,6 +41,16 @@ mod status;
 pub use bsd::Signature;
 pub(super) use bsd::signal::host as signals;
 pub(super) use bsd::sysctl::Release;
+#[expect(
+    unused_imports,
+    reason = "the device family that registers an IOKit service uses them"
+)]
+pub(super) use mach::iokit::{IokitRequest, IokitService};
+#[expect(
+    unused_imports,
+    reason = "the device family that registers an IOKit service uses them"
+)]
+pub(super) use mach::server::{Descriptor as MigDescriptor, Reply as MigReply};
 
 pub(super) type Pe = Machine<ProcessHost, NoDevices>;
 
@@ -169,6 +179,9 @@ pub(super) struct Process {
     /// Set in a fork child, which has none of the parent's IOKit
     /// connections (Mach port rights are not inherited).
     pub(super) user_clients_closed: AtomicBool,
+    /// The device family serving its own IOKit objects
+    /// ([`mach::iokit`]), if any.
+    pub(super) iokit: Option<Arc<dyn IokitService>>,
 }
 
 /// A hosted device's user clients: `iokit_user_client_trap`
@@ -271,6 +284,8 @@ pub(super) struct Config {
     pub(super) trace: bool,
     pub(super) engine: Engine,
     pub(super) user_client_traps: Option<Arc<dyn UserClientTraps>>,
+    /// The device family serving its own IOKit objects, if any.
+    pub(super) iokit: Option<Arc<dyn IokitService>>,
 }
 
 impl Process {
@@ -331,6 +346,7 @@ impl Process {
             exception_ports: Default::default(),
             realtime: Default::default(),
             task_debug: Mutex::new(None),
+            iokit: config.iokit,
         })
     }
 

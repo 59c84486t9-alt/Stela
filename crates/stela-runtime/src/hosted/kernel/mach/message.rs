@@ -32,6 +32,7 @@
 //! forwarded one against its own port, with the host task's IPC space
 //! policy and SDK for a send-only kernel-object call, and its guard ends
 //! the run (known limit).
+use super::iokit;
 use super::raise::Guard;
 use super::server::{self, NDR_RECORD, Object, Reply, Request};
 use super::{Kernel, forward_trap, index_of};
@@ -240,7 +241,143 @@ pub(super) fn send(
         }
         return answer(kernel, name, index, arguments, &request, id, reply);
     }
+    if let Some((port, id)) = destination(name, arguments)
+        && let Some(status) =
+            iokit_request(kernel, name, index, arguments, options, (port, id), pc)?
+    {
+        return Ok(status);
+    }
     forward_send(kernel, name, index, arguments)
+}
+
+/// A request to one of the IOKit objects of the process's device family
+/// ([`iokit`]): its port's, or an IOKit request to the main port the
+/// family claims, copied in, served and answered (the call's status), or
+/// `None` for the host's IOKit.
+fn iokit_request(
+    kernel: &mut Kernel,
+    name: &str,
+    index: u32,
+    arguments: &[u64],
+    options: Option<u64>,
+    (port, id): (u32, u32),
+    pc: u64,
+) -> Result<Option<u64>> {
+    let Some(service) = kernel.process.iokit.clone() else {
+        return Ok(None);
+    };
+    // A fork child holds none of the parent's rights to the family's
+    // ports, and a name it reuses is another right's.
+    let owned = !kernel
+        .process
+        .user_clients_closed
+        .load(std::sync::atomic::Ordering::SeqCst)
+        && service.owns(port);
+    if !owned && !(iokit::iokit_message(id) && iokit::main_port(kernel.process.host_port(), port)) {
+        return Ok(None);
+    }
+    // An unreadable request fails on the host as for any destination.
+    let Some(sent) = request(name, arguments)? else {
+        return Ok(None);
+    };
+    let routine = mig::routine(id).filter(|routine| routine.subsystem == "iokit");
+    let complex = sent.bits & MACH_MSGH_BITS_COMPLEX != 0;
+    let routed = |body| iokit::IokitRequest {
+        port,
+        main: !owned,
+        id,
+        routine,
+        complex,
+        body,
+        pc,
+    };
+    if !owned && !service.claims(&routed(&sent.body)) {
+        return Ok(None);
+    }
+    // An IOKit object is a kernel object.
+    if let Some(options) = options
+        && !kobject_call(options, sent.reply_port, || {
+            send_only_kobject_calls(lock(&kernel.process.executable).header)
+        })
+    {
+        return Ok(Some(invalid_options(kernel, options)));
+    }
+    let copied = if complex {
+        match iokit::copy_in(name, &sent.body, |carried, disposition| {
+            carry_port(kernel, name, carried, disposition)
+        })? {
+            Ok(copied) => copied,
+            Err(status) => return Ok(Some(u64::from(status))),
+        }
+    } else {
+        iokit::CopiedIn {
+            body: sent.body.clone(),
+            taken: Vec::new(),
+        }
+    };
+    let subject = routine.map_or_else(
+        || format!("iokit message {id}"),
+        |routine| format!("iokit.{}", routine.name),
+    );
+    let reply = match service.serve(&routed(&copied.body)) {
+        Ok(Reply::Forward) => {
+            bail!("{name}: the IOKit service forwarded {subject} to its own object {port:#x}")
+        }
+        Ok(reply) => reply,
+        Err(error) => Reply::Failure(
+            match unsupported::recover(error, Kind::MigRoutine, pc, Some(&subject))? {
+                Failure::Kern(code) => code,
+                _ => darwin::KERN_FAILURE,
+            },
+        ),
+    };
+    if let Reply::NotSent(status) = reply {
+        return Ok(Some(u64::from(status)));
+    }
+    // The kernel took the regions the request deallocates.
+    for &(address, bytes) in &copied.taken {
+        release_taken(kernel, address, bytes)?;
+    }
+    if sent.bits & 0x1f == MACH_MSG_TYPE_MOVE_SEND {
+        server::release_send(port);
+    }
+    if (sent.bits >> 16) & 0x1f == MACH_MSG_TYPE_MOVE_SEND {
+        server::release_send(sent.voucher);
+    }
+    if kernel.trace {
+        eprintln!("stela: {subject} to {port:#x} answered by the IOKit service");
+    }
+    answer(kernel, name, index, arguments, &sent, id, reply).map(Some)
+}
+
+/// Release an out-of-line region a request the hosted kernel received
+/// deallocates (`vm_map_copyin` with `src_destroy`): its guest pages, or
+/// only the host pages it covers when the host maps those guest pages in
+/// parts, which may be the runtime's own.
+fn release_taken(kernel: &mut Kernel, address: u64, bytes: u64) -> Result<()> {
+    let Some(region) = Deallocated::new(address, bytes) else {
+        return Ok(());
+    };
+    let (start, end) = if region.guest_owned() {
+        region.guest
+    } else {
+        unsupported::note(
+            Kind::MachTrap,
+            "shared guest page",
+            &format!(
+                "an out-of-line region a request deallocates at {address:#x} lies in guest \
+                 pages {:#x}..{:#x} the host maps in parts: only the host pages it covers are \
+                 released",
+                region.guest.0, region.guest.1
+            ),
+        );
+        region.host
+    };
+    for (run, run_end) in memory::mapped_runs(start, end) {
+        kernel.unslid_change(run, run_end - run, |_| None);
+        memory::deallocate(run, run_end - run)?;
+    }
+    Ok(())
 }
 
 /// Send a message on the host, as the arm64 kernel would for the guest's

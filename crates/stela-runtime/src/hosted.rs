@@ -331,6 +331,7 @@ pub fn run(launch: Launch) -> Result<Report> {
         trace: launch.trace,
         engine,
         user_client_traps: None,
+        iokit: None,
     });
     // The main thread runs on this host thread, the process's first, with
     // the signal mask exec left it; its port, which the apple strings
