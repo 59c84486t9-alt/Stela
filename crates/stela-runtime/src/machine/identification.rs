@@ -71,7 +71,7 @@ pub struct Speculation {
     /// bare metal: Intel's RDCL_NO, MDS_NO, TAA_NO or no TSX, GDS_NO and
     /// RFDS_NO; AMD's TSA_SQ_NO and TSA_L1_NO with an always-serializing
     /// LFENCE); every access then masks its address into an unmapped entry
-    /// on a mispredicted range check (`x86_64::GUEST_RANGE_CHECK`, checked
+    /// on a mispredicted range check (`x86_64::RangeCheck`, checked
     /// at every access), the engine fences each guest RAM read behind its
     /// translation, and closed native System register cells hold no value.
     /// A hosted process cannot read the host's capabilities and discloses

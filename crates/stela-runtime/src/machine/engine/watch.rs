@@ -37,7 +37,7 @@ use stela_compiler::{
 const PAGE: u64 = super::FETCH_PAGE;
 
 /// Whether native code accesses `address` directly: bits 63:48 all clear
-/// or all set, as `x86_64::GUEST_RANGE_CHECK` tests.
+/// or all set, as `x86_64::RangeCheck::FIVE_LEVEL` tests.
 fn in_guest_range(address: u64) -> bool {
     matches!(address >> 48, 0 | 0xffff)
 }
@@ -334,7 +334,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// instruction's accesses, the first one's Alignment fault (Arm
     /// `AArch64_UnalignedAccessFaults`, which comes before translation), or
     /// the fault its translation gives an address outside the guest's two
-    /// ranges (`x86_64::GUEST_RANGE_CHECK`), which the shadow never maps.
+    /// ranges (`x86_64::RangeCheck`), which the shadow never maps.
     pub(super) fn native_check_fault(&mut self, pc: u64, word: u32) -> Step {
         let accesses = self
             .data_accesses(pc, word)

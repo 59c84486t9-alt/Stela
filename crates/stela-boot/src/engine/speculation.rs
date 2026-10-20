@@ -14,7 +14,7 @@
 //! speculative instructions ([`forwards_no_faulting_data`]). Native guest
 //! accesses then fault through the shadow tables, an address a mispredicted
 //! range check lets through is masked into an unmapped entry
-//! (`x86_64::GUEST_RANGE_CHECK`), and [`fence`] keeps each of the engine's
+//! (`x86_64::RangeCheck`), and [`fence`] keeps each of the engine's
 //! own guest reads behind the translation that allows it.
 use core::{
     arch::{
