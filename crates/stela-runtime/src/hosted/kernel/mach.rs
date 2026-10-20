@@ -159,12 +159,14 @@ pub(crate) const REFUSED: &[(&str, &str)] = &[];
 
 /// The kernel object a subsystem's requests address in this task: the
 /// task port carries task, VM, restartable-range and port-space requests,
-/// a thread port thread requests, the host port host requests.
+/// a thread port thread requests, the host port host requests, the
+/// default processor set's name port processor-set requests.
 pub(crate) fn object_of(subsystem: &str) -> Option<server::Object> {
     Some(match subsystem {
         "task" | "mach_vm" | "task_restartable" | "mach_port" => server::Object::Task,
         "thread_act" => server::Object::Thread,
         "mach_host" | "host_priv" => server::Object::Host,
+        "processor_set" => server::Object::ProcessorSet,
         _ => return None,
     })
 }
@@ -174,29 +176,22 @@ pub(crate) fn object_name(object: server::Object) -> &'static str {
         server::Object::Task => "task",
         server::Object::Thread => "thread",
         server::Object::Host => "host",
+        server::Object::ProcessorSet => "processor set",
     }
 }
 
-/// Subsystems whose objects are not this process's and whose requests are
-/// forwarded, with what of the arm64 kernel's answer the host's differs in.
-const OTHER_OBJECT_LIMITS: &[(&str, &str)] = &[
-    ("processor", "describes the x86 host's processors"),
-    ("processor_set", "describes the x86 host's processors"),
-];
-
 /// How a MIG request is serviced: to this process's kernel objects as the
-/// message dispatcher routes it, to any other object forwarded.
+/// message dispatcher routes it, to any other object forwarded. Processor
+/// ports come only from the privileged host port (`host_processors`),
+/// which an unprivileged process does not hold, so a processor request
+/// reaches no processor, as on the arm64 kernel.
 pub(crate) fn mig_service(
     subsystem: &str,
     routine: &str,
 ) -> (super::services::Service, Option<&'static str>) {
     use super::services::Service;
     let Some(object) = object_of(subsystem) else {
-        let limit = OTHER_OBJECT_LIMITS
-            .iter()
-            .find(|(name, _)| *name == subsystem)
-            .map(|&(_, limit)| limit);
-        return (Service::Forwarded { overlay: None }, limit);
+        return (Service::Forwarded { overlay: None }, None);
     };
     if message::IPC_ONLY.contains(&subsystem)
         || message::FORWARDED_ROUTINES.contains(&(subsystem, routine))

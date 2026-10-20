@@ -154,6 +154,8 @@ pub(crate) enum Object {
     Task,
     Thread,
     Host,
+    /// The default processor set's name port (`processor_set_default`).
+    ProcessorSet,
 }
 
 /// The routines [`serve`] answers or forwards, by object, with the named
@@ -255,20 +257,21 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         Some("the x86 host's load and VM statistics, its page counts in guest pages"),
     ),
     (Object::Host, "host_get_special_port", Some("the host port")),
+    (Object::Host, "processor_set_default", None),
+    (Object::Host, "host_processor_sets", None),
+    (Object::Host, "host_processor_set_priv", None),
+    (Object::Host, "host_processors", None),
+    (Object::ProcessorSet, "processor_set_info", None),
     (
-        Object::Host,
-        "processor_set_default",
-        Some("the x86 host's processor sets"),
+        Object::ProcessorSet,
+        "processor_set_statistics",
+        Some("the load average and Mach factor are the x86 host scheduler's"),
     ),
+    (Object::ProcessorSet, "processor_set_tasks", None),
     (
-        Object::Host,
-        "host_processor_sets",
-        Some("the x86 host's processor sets"),
-    ),
-    (
-        Object::Host,
-        "host_processor_set_priv",
-        Some("the x86 host's processor sets"),
+        Object::ProcessorSet,
+        "processor_set_tasks_with_flavor",
+        None,
     ),
     (
         Object::Host,
@@ -617,12 +620,29 @@ pub(super) fn serve(
             Reply::Forward
         }
         (Object::Host, routine, _) if HOST_FORWARDED.contains(&routine) => Reply::Forward,
-        // The processor sets are the host's: their names, and the host
-        // kernel's refusal of the privileged routines to an unprivileged
-        // host port.
+        // The default processor set is the host's boot set, whose name
+        // the host kernel gives, and requests to it come back to
+        // [`processor_set_info`].
+        (Object::Host, "processor_set_default", _) => Reply::Forward,
+        // `flavor`, `info_outCnt`.
+        (Object::ProcessorSet, "processor_set_info", false) => {
+            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            processor_set_info(
+                &kernel.process.hardware,
+                kernel.process.host_port(),
+                flavor,
+                count.min(PROCESSOR_SET_INFO_MAX),
+            )
+        }
+        // The boot set's load (the Mach factor and load average are the
+        // host scheduler's), and its tasks, which take the set's control
+        // port: only the privileged host port gives it, so the host
+        // kernel refuses the name port as the arm64 kernel does.
         (
-            Object::Host,
-            "processor_set_default" | "host_processor_sets" | "host_processor_set_priv",
+            Object::ProcessorSet,
+            "processor_set_statistics" | "processor_set_tasks" | "processor_set_tasks_with_flavor",
             _,
         ) => Reply::Forward,
         // `flavor`, `host_info_outCnt`.
@@ -1030,11 +1050,6 @@ pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
          eight",
     ),
     (
-        Object::Host,
-        "host_processors",
-        "its processor ports would be the x86 host's processors, not the M2's eight",
-    ),
-    (
         Object::Task,
         "task_generate_corpse",
         "the host kernel's corpse would hold the x86 host's thread states and the hosted \
@@ -1109,6 +1124,9 @@ const HOST_FORWARDED: &[&str] = &[
     "host_set_multiuser_config_flags",
     "host_get_boot_info",
     "host_reboot",
+    "host_processor_sets",
+    "host_processor_set_priv",
+    "host_processors",
     "host_priv_statistics",
     "host_default_memory_manager",
     "vm_wire",
@@ -1122,6 +1140,46 @@ const HOST_FORWARDED: &[&str] = &[
     "host_get_UNDServer",
     "kext_request",
 ];
+
+/// `processor_set_info_t`'s bound.
+const PROCESSOR_SET_INFO_MAX: u32 = 1024;
+/// `PROCESSOR_SET_BASIC_INFO` and its count: `processor_count`,
+/// `default_policy`.
+const PROCESSOR_SET_BASIC_INFO: u32 = 5;
+const PROCESSOR_SET_BASIC_INFO_COUNT: u32 = 2;
+/// `POLICY_TIMESHARE`.
+const POLICY_TIMESHARE: u32 = 1;
+
+/// `processor_set_info` on the default processor set. Its basic
+/// information counts the set's processors as the arm64 kernel counts
+/// them, every available processor of the machine
+/// (`processor_avail_count`, where the x86 kernel gives
+/// `processor_avail_count_user`), with the timesharing policy, in a
+/// complex reply carrying the host port (`host`). The other flavors are
+/// the scheduler's priority constants, the same in both kernels:
+/// forwarded.
+fn processor_set_info(hardware: &hardware::Hardware, host: u32, flavor: u32, count: u32) -> Reply {
+    if flavor != PROCESSOR_SET_BASIC_INFO {
+        return Reply::Forward;
+    }
+    if count < PROCESSOR_SET_BASIC_INFO_COUNT {
+        return Reply::Failure(KERN_FAILURE);
+    }
+    let cpus = u32::from(hardware.cpus());
+    let mut body = PROCESSOR_SET_BASIC_INFO_COUNT.to_le_bytes().to_vec();
+    body.extend(
+        [cpus, POLICY_TIMESHARE]
+            .iter()
+            .flat_map(|word| word.to_le_bytes()),
+    );
+    Reply::Complex {
+        descriptors: vec![Descriptor::Port {
+            name: host,
+            disposition: COPY_SEND,
+        }],
+        body,
+    }
+}
 
 /// `kernel_version_t`'s bound.
 const KERNEL_VERSION_MAX: usize = 512;
@@ -1540,6 +1598,33 @@ mod tests {
             panic!("host_statistics64 failed");
         };
         assert!(u32::from_le_bytes(body[..4].try_into().unwrap()) >= 38);
+    }
+
+    #[test]
+    fn the_default_processor_set_holds_every_processor() {
+        let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
+        let Reply::Complex { descriptors, body } =
+            processor_set_info(&hardware, 0x103, PROCESSOR_SET_BASIC_INFO, 8)
+        else {
+            panic!("processor_set_info failed");
+        };
+        assert!(matches!(
+            descriptors[..],
+            [Descriptor::Port {
+                name: 0x103,
+                disposition: COPY_SEND
+            }]
+        ));
+        assert_eq!(body, [2, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0]);
+        assert!(matches!(
+            processor_set_info(&hardware, 0x103, PROCESSOR_SET_BASIC_INFO, 1),
+            Reply::Failure(KERN_FAILURE)
+        ));
+        // The policy constants are the host kernel's too.
+        assert!(matches!(
+            processor_set_info(&hardware, 0x103, 10, 8),
+            Reply::Forward
+        ));
     }
 
     #[test]

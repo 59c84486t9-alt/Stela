@@ -62,7 +62,7 @@ pub(super) fn send(
     arguments: &[u64],
 ) -> Result<u64> {
     if let Some((port, id)) = destination(name, arguments)
-        && let Some(object) = kernel_object(kernel, port)
+        && let Some(object) = kernel_object(kernel, port, id)
     {
         // A guest thread's name with no reference of the guest's left is
         // the host thread library's alone: the guest holds no right.
@@ -71,6 +71,10 @@ pub(super) fn send(
         }
         match (mig::subsystem(id), mig::routine(id)) {
             (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {}
+            // A routine of another object's subsystem: the kernel converts
+            // the destination to that object, which fails for this one in
+            // either kernel, and the routine answers the failure.
+            (Some(subsystem), Some(_)) if super::object_of(subsystem.name) != Some(object) => {}
             (Some(_), Some(routine))
                 if FORWARDED_ROUTINES.contains(&(routine.subsystem, routine.name)) => {}
             (Some(_), Some(routine))
@@ -254,7 +258,7 @@ fn moved_destination(
 
 /// The kernel object `port` names in this task: the task, the host, or
 /// any of the task's threads.
-fn kernel_object(kernel: &Kernel, port: u32) -> Option<Object> {
+fn kernel_object(kernel: &Kernel, port: u32, id: u32) -> Option<Object> {
     let [task, thread, host] = kernel.kernel_objects();
     if port == task {
         Some(Object::Task)
@@ -262,9 +266,29 @@ fn kernel_object(kernel: &Kernel, port: u32) -> Option<Object> {
         Some(Object::Host)
     } else if port == thread || kernel.process.runtime.registry.contains_port(port) {
         Some(Object::Thread)
+    } else if mig::subsystem(id).is_some_and(|subsystem| subsystem.name == "processor_set")
+        && default_processor_set(host) == Some(port)
+    {
+        Some(Object::ProcessorSet)
     } else {
         None
     }
+}
+
+/// This space's name for the default processor set's name port, which
+/// `processor_set_default` on the host port gives (the extra reference it
+/// makes is dropped again).
+fn default_processor_set(host: u32) -> Option<u32> {
+    unsafe extern "C" {
+        fn processor_set_default(host: u32, set: *mut u32) -> i32;
+    }
+    let mut set = 0u32;
+    // SAFETY: an out-parameter for one port name.
+    if unsafe { processor_set_default(host, &mut set) } != 0 {
+        return None;
+    }
+    server::release_send(set);
+    Some(set)
 }
 
 /// The destination port and message id of a send, if the call sends and
