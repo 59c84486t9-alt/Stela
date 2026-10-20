@@ -144,17 +144,35 @@ fn assess(forms: &mut BTreeMap<String, Value>) -> Result<()> {
             if status_index(status)? < status_index(text(form, "status")?)? {
                 form["status"] = status.into();
             }
+            let mut profile = serde_json::json!({
+                "profile": entry["profile"],
+                "status": status,
+                "scope": entry["scope"],
+            });
+            if let Some(excluded) = exclusion(entry)? {
+                profile["excluded"] = excluded.into();
+            }
             form["profiles"]
                 .as_array_mut()
                 .expect("profiles were reset to an array")
-                .push(serde_json::json!({
-                    "profile": entry["profile"],
-                    "status": status,
-                    "scope": entry["scope"],
-                }));
+                .push(profile);
         }
     }
     Ok(())
+}
+
+/// The part of a form or extension group the exclusion policy (no source
+/// gives a reasonably certain implementation, and no user workload reaches
+/// it) leaves out, with the reason: its `excluded` field, when present.
+fn exclusion(entry: &Value) -> Result<Option<&str>> {
+    match &entry["excluded"] {
+        Value::Null => Ok(None),
+        Value::String(reason) if !reason.trim().is_empty() => Ok(Some(reason)),
+        _ => bail!(
+            "{}: excluded must name the excluded part and its reason",
+            entry["id"]
+        ),
+    }
 }
 
 fn render_checklist(checklist: &str, forms: &BTreeMap<String, Value>) -> Result<String> {
@@ -196,8 +214,12 @@ fn render_checklist(checklist: &str, forms: &BTreeMap<String, Value>) -> Result<
                 .expect("assessed forms have profiles")
                 .iter()
                 .map(|profile| {
+                    let excluded = match &profile["excluded"] {
+                        Value::Null => String::new(),
+                        reason => format!(",\"excluded\":{}", json(reason)?),
+                    };
                     Ok(format!(
-                        "{{\"profile\":{},\"status\":{},\"scope\":{}}}",
+                        "{{\"profile\":{},\"status\":{},\"scope\":{}{excluded}}}",
                         json(&profile["profile"])?,
                         json(&profile["status"])?,
                         json(&profile["scope"])?
@@ -241,6 +263,17 @@ fn render_readme(readme: &str, forms: &BTreeMap<String, Value>) -> Result<String
         .iter()
         .filter(|extension| extension["status"] == "implemented")
         .count();
+    // An excluded group carries its reason and is outside the tracked count.
+    let mut excluded_extensions = 0;
+    for extension in extensions {
+        let excluded = exclusion(extension)?;
+        ensure!(
+            excluded.is_some() == (extension["status"] == "excluded"),
+            "{}: an excluded group needs status excluded and its reason",
+            extension["id"]
+        );
+        excluded_extensions += usize::from(excluded.is_some());
+    }
     let clang = text(&profiles["compiler"], "version")?;
     let compiler = &stela_compiler::SOURCE_SHA256[..12];
 
@@ -249,7 +282,7 @@ fn render_readme(readme: &str, forms: &BTreeMap<String, Value>) -> Result<String
          | Apple M1–M6 candidate forms implemented | **{} / {} ({:.2}%)** |\n\
          | Partially implemented | {} |\n\
          | Unimplemented | {} |\n\
-         | Apple-specific extension groups | {implemented_extensions} / {} tracked |\n\n\
+         | Apple-specific extension groups | {implemented_extensions} / {} tracked ({excluded_extensions} excluded) |\n\n\
          Candidates are the {clang} CPU features for M1–M6 mapped to Arm A64 2026-06; \
          compiler `{compiler}`. Each canonical form counts once at its best reviewed status; \
          aliases are excluded and partial forms earn no credit.\n\n\
@@ -260,7 +293,7 @@ fn render_readme(readme: &str, forms: &BTreeMap<String, Value>) -> Result<String
         apple.percentage(),
         group(apple.0[1]),
         group(apple.0[2]),
-        extensions.len(),
+        extensions.len() - excluded_extensions,
     );
     let (before, rest) = readme
         .split_once(README_START)
@@ -289,6 +322,15 @@ fn group(value: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclusions_carry_their_reason() {
+        let excluded = serde_json::json!({"id": "x", "excluded": "debug only"});
+        assert_eq!(exclusion(&excluded).unwrap(), Some("debug only"));
+        assert_eq!(exclusion(&serde_json::json!({"id": "x"})).unwrap(), None);
+        assert!(exclusion(&serde_json::json!({"id": "x", "excluded": " "})).is_err());
+        assert!(exclusion(&serde_json::json!({"id": "x", "excluded": true})).is_err());
+    }
 
     #[test]
     fn groups_thousands() {
