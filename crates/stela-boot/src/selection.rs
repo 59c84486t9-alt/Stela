@@ -12,7 +12,10 @@
 //! Each partition is found as the engine finds it: exactly one whole disk
 //! reports the serial, and exactly one of its GPT partitions has the GUID;
 //! an EFI system partition is refused. A blank NOR partition holds no
-//! variables yet: the engine initializes it.
+//! variables yet: the engine initializes it. When `--nor` names the
+//! `--storage` partition, the NOR is the start of that partition's tail
+//! (`pc::machine_state`), and the Preboot disk is the rest, as the engine
+//! splits it.
 use crate::{
     output,
     payload::{Aligned, device_path, disk_serial},
@@ -29,7 +32,7 @@ use stela_runtime::{
         ReadAt,
         gpt::{self, Disk, Role},
     },
-    pc::storage::Target,
+    pc::{machine_state, storage::Target},
     preboot::{self, PrebootError},
 };
 use uefi::{
@@ -47,7 +50,36 @@ struct Partition {
     bytes: u64,
 }
 
+/// Which part of a partition that also holds the machine state in its tail.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Whole,
+    /// The guest's namespace before the tail.
+    Namespace,
+    /// The machine state in the tail.
+    State,
+}
+
 impl Partition {
+    /// Confine the partition to `part`, as the engine splits it.
+    fn confine(&mut self, part: Part) -> Result<(), &'static str> {
+        if part == Part::Whole {
+            return Ok(());
+        }
+        let layout = machine_state::split(self.bytes)
+            .map_err(|_| "the partition is too small to also hold the machine state")?;
+        if !machine_state::ALIGNMENT.is_multiple_of(self.block_bytes) {
+            return Err("the partition's blocks do not divide the machine state's alignment");
+        }
+        if part == Part::State {
+            self.first_lba += layout.namespace_bytes / self.block_bytes;
+            self.bytes = layout.state_bytes;
+        } else {
+            self.bytes = layout.namespace_bytes;
+        }
+        Ok(())
+    }
+
     fn read_blocks(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
         let mut aligned = Aligned::new(buffer.len());
         self.io
@@ -173,8 +205,10 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
 }
 
 /// The boot NVRAM chooses, with its one-shot variables consumed and saved.
-fn select(target: &Target) -> Result<Selection, String> {
+fn select(target: &Target, part: Part) -> Result<Selection, String> {
     let mut nor = find(target).map_err(|e| format!("NOR partition: {e}"))?;
+    nor.confine(part)
+        .map_err(|e| format!("NOR partition: {e}"))?;
     if nor.io.media().is_read_only()
         || !SECTOR_SIZE.is_multiple_of(nor.block_bytes as usize)
         || nor.bytes < CAPACITY as u64
@@ -222,8 +256,10 @@ fn select(target: &Target) -> Result<Selection, String> {
 /// (the boot volume's, when NVRAM names one) whose Preboot volume has a
 /// boot directory. Only a missing container, Preboot volume or boot
 /// directory counts as absent; any other failure is reported.
-fn installed(target: &Target, volume: Option<&BootVolume>) -> Result<bool, String> {
+fn installed(target: &Target, part: Part, volume: Option<&BootVolume>) -> Result<bool, String> {
     let mut disk = find(target).map_err(|e| format!("Preboot disk: {e}"))?;
+    disk.confine(part)
+        .map_err(|e| format!("Preboot disk: {e}"))?;
     let partitions = match apfs::container_partitions(&mut disk) {
         Ok(partitions) => partitions,
         Err(ApfsError::NotFound(_)) => return Ok(false),
@@ -263,8 +299,23 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
     };
     let selection = match option(text, boot_selection::PREBOOT_OPTION) {
         Some(preboot) => {
-            let mut selection = match option(text, "--nor") {
-                Some(nor) => select(&nor.parse()?).map_err(refuse)?,
+            let nor = option(text, "--nor");
+            // The engine splits a `--storage` partition that `--nor` also
+            // names; the Preboot disk is then its namespace.
+            let target = |name: Option<&str>| name.and_then(|name| name.parse::<Target>().ok());
+            let (nor_target, storage) = (target(nor), target(option(text, "--storage")));
+            let in_storage = |name: &str| {
+                nor_target.is_some() && nor_target == storage && target(Some(name)) == storage
+            };
+            let mut selection = match nor {
+                Some(nor) => {
+                    let part = if in_storage(nor) {
+                        Part::State
+                    } else {
+                        Part::Whole
+                    };
+                    select(&nor.parse()?, part).map_err(refuse)?
+                }
                 None => boot_selection::select(
                     &Variables::parse(&empty_bank()).map_err(|e| refuse(e.into()))?,
                 )
@@ -273,7 +324,16 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
             let recovery = option(text, boot_selection::RECOVERY_BUNDLE_OPTION).is_some();
             if recovery
                 && matches!(selection.target, boot_selection::Target::MacOs { .. })
-                && !installed(&preboot.parse()?, selection.volume.as_ref()).map_err(refuse)?
+                && !installed(
+                    &preboot.parse()?,
+                    if in_storage(preboot) {
+                        Part::Namespace
+                    } else {
+                        Part::Whole
+                    },
+                    selection.volume.as_ref(),
+                )
+                .map_err(refuse)?
             {
                 selection.missing_boot_media();
             }

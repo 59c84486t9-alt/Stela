@@ -90,7 +90,8 @@ struct Options {
     paired_recovery: bool,
     /// One host partition backing all ANS namespaces.
     storage: Option<Target>,
-    /// The host partition holding the NOR flash image (`--nor`).
+    /// The host partition holding the NOR flash image (`--nor`); the
+    /// `--storage` partition itself keeps it in its tail.
     nor: Option<Target>,
     restore: bool,
     restore_source: Option<Target>,
@@ -1193,11 +1194,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             range.guest, range.bytes, range.host
         ));
     }
+    // `--nor` naming the `--storage` partition keeps the machine state in
+    // that partition's tail (`pc::machine_state`): one device, split below.
+    let state_in_storage = options.nor.is_some() && options.nor == options.storage;
     let targets: Vec<&Target> = options
         .storage
         .iter()
         .chain(options.restore_source.iter())
-        .chain(options.nor.iter())
+        .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
     let wants_network = options.tss || options.network_check.is_some();
     let (services, host_input, host_network, usb_disks, guest_network) = if targets.is_empty()
@@ -1265,10 +1269,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .restore_source
         .as_ref()
         .map(|_| services.next().unwrap());
-    let nor = options
-        .nor
-        .as_ref()
-        .map(|_| nor::HostNor::open(services.next().unwrap()));
+    let (backing, nor) = match backing {
+        Some(partition) if state_in_storage => {
+            let (namespace, state) = nor::split(partition);
+            (Some(namespace), Some(state))
+        }
+        backing => (
+            backing,
+            options.nor.as_ref().map(|_| services.next().unwrap()),
+        ),
+    };
+    let nor = nor.map(nor::HostNor::open);
     let (mut host_nor, nor_image, nvram, sep_state) = match nor {
         Some((host_nor, image, nvram, sep_state)) => {
             (Some(host_nor), Some(image), Some(nvram), Some(sep_state))

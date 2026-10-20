@@ -23,8 +23,10 @@ const FIELDS: usize = 4;
 pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 
 /// The revision of the option lines setup writes for `stela.efi`: bump it
-/// when an option changes meaning or a required one is added.
-pub const OPTIONS_REVISION: u32 = 2;
+/// when an option changes meaning or a required one is added. Revision 3:
+/// `--nor` may name the `--storage` partition, whose tail then holds the
+/// machine state.
+pub const OPTIONS_REVISION: u32 = 3;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";

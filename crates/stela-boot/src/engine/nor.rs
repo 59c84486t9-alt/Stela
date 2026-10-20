@@ -5,6 +5,10 @@
 //! before the bundle, which hands the kernel its newest valid bank; every
 //! sector a committed program or erase changes is stored durably between
 //! engine slices, and at the stop, as is the pending output.
+//!
+//! When `--nor` names the `--storage` partition, [`split`] keeps the same
+//! layout in that partition's last bytes ([`machine_state`]) and gives the
+//! ANS2 model only the rest, so the guest never sees the machine state.
 use crate::output;
 use alloc::boxed::Box;
 use stela_runtime::{
@@ -16,9 +20,26 @@ use stela_runtime::{
     },
     pc::{
         block::{BlockDevice, BlockError, Shared},
-        boot_log,
+        boot_log, machine_state,
     },
 };
+
+/// Split the Apple region `partition` into the guest's ANS2 namespace and
+/// the machine state in its tail. A partition too small for both, or with
+/// blocks that do not divide the alignment, refuses.
+pub fn split(partition: Box<dyn BlockDevice>) -> (Box<dyn BlockDevice>, Box<dyn BlockDevice>) {
+    let (namespace, state, layout) =
+        machine_state::split_device(partition).unwrap_or_else(|error| {
+            output::arguments(format_args!("MACHINE STATE refusal: {error}\n"));
+            output::fatal("the --storage partition cannot also hold the machine state")
+        });
+    output::arguments(format_args!(
+        "MACHINE STATE in the target's last {:#x} bytes (from {:#x}); the ANS2 namespace holds \
+         {:#x}\n",
+        layout.state_bytes, layout.namespace_bytes, layout.namespace_bytes
+    ));
+    (Box::new(namespace), Box::new(state))
+}
 
 pub struct HostNor {
     device: Box<dyn BlockDevice>,
