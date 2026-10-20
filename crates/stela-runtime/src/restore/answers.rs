@@ -246,11 +246,7 @@ impl<R: ReadAt> Answers<R> {
         Ok((*identity).clone())
     }
     fn global_path(&self, identity: &Identity, args: &Value, cryptex: bool) -> Result<String> {
-        let variant = args
-            .get("Variant")
-            .map(Value::string)
-            .transpose()?
-            .unwrap_or(identity.info()?.required("MacOSVariant")?.string()?);
+        let variant = manifest_variant(identity.info()?, args)?;
         let prefix = args
             .get("GlobalManifestPrefix")
             .map(Value::string)
@@ -752,6 +748,19 @@ impl<R: ReadAt> Answers<R> {
         Ok(Plan::Raw(segments))
     }
 }
+/// The variant directory of a global manifest: the request's `Variant`, else
+/// the identity's macOS variant. An erase or upgrade identity names it as
+/// `MacOSVariant`; the `macOS Customer` identity restored selects with
+/// `IsRecoveryOS` has none and is that variant itself.
+fn manifest_variant<'a>(info: &'a Value, args: &'a Value) -> Result<&'a str> {
+    match args.get("Variant") {
+        Some(v) => v.string(),
+        None => match info.get("MacOSVariant") {
+            Some(v) => v.string(),
+            None => info.required("Variant")?.string(),
+        },
+    }
+}
 /// Check the outer IM4P header and its exact extent without loading the body;
 /// returns the type and its offset.
 fn bare_type(prefix: &[u8], bytes: u64) -> Result<([u8; 4], usize)> {
@@ -897,6 +906,23 @@ mod tests {
             (*b"dcpf", 12)
         );
         assert!(bare_type(&long[..64], long.len() as u64 + 1).is_err());
+    }
+    #[test]
+    fn a_global_manifest_lives_under_the_identitys_macos_variant() {
+        let erase = Value::dict([
+            ("Variant", Value::from("Customer Erase Install (IPSW)")),
+            ("MacOSVariant", Value::from("macOS Customer")),
+        ]);
+        let recovery = Value::dict([("Variant", Value::from("macOS Customer"))]);
+        let none = Value::dict([]);
+        assert_eq!(manifest_variant(&erase, &none).unwrap(), "macOS Customer");
+        assert_eq!(
+            manifest_variant(&recovery, &none).unwrap(),
+            "macOS Customer"
+        );
+        let named = Value::dict([("Variant", Value::from("Other"))]);
+        assert_eq!(manifest_variant(&erase, &named).unwrap(), "Other");
+        assert!(manifest_variant(&none, &none).is_err());
     }
     #[test]
     fn exact_http_arguments_digest_and_post_body_are_bound() {
