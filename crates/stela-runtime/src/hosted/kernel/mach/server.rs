@@ -234,13 +234,9 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (
         Object::Task,
         "task_get_special_port_from_user",
-        Some("the kernel, host, bootstrap and debug-control ports"),
+        Some("every port but the name, inspect and read ports"),
     ),
-    (
-        Object::Task,
-        "task_set_special_port_from_user",
-        Some("the bootstrap and debug-control ports"),
-    ),
+    (Object::Task, "task_set_special_port_from_user", None),
     (
         Object::Task,
         "_mach_make_memory_entry",
@@ -256,7 +252,7 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         "host_statistics64_from_user",
         Some("the x86 host's load and VM statistics, its page counts in guest pages"),
     ),
-    (Object::Host, "host_get_special_port", Some("the host port")),
+    (Object::Host, "host_get_special_port", None),
     (Object::Host, "processor_set_default", None),
     (Object::Host, "host_processor_sets", None),
     (Object::Host, "host_processor_set_priv", None),
@@ -552,24 +548,48 @@ pub(super) fn serve(
             host_info(&kernel.process.hardware, flavor, count.min(HOST_INFO_MAX))
         }
         (Object::Task, "_kernelrpc_mach_vm_map_external", true) => vm_map(request)?,
-        // `which_port`. The bootstrap port is the host's launchd, as for
-        // any process of this user; the kernel and host ports are this
-        // task's own kernel objects, whose names the reply repeats; the
-        // debug-control port is the one this task set, if any.
+        // `which_port`. The bootstrap and access ports are the host's
+        // launchd's and taskgated's, as for any process of this user; the
+        // kernel and host ports are this task's own kernel objects, whose
+        // names the reply repeats; the debug-control port is the one this
+        // task set, if any; the resource-notify port is configured out of
+        // both release kernels, which refuse it and every other number
+        // alike. The name, inspect and read ports are other ports of the
+        // host task, whose requests would answer for the x86 task.
         (Object::Task, "task_get_special_port_from_user", false) => match request.word(8) {
-            Some(
-                TASK_KERNEL_PORT | TASK_HOST_PORT | TASK_BOOTSTRAP_PORT | TASK_DEBUG_CONTROL_PORT,
-            ) => Reply::Forward,
-            Some(which) => bail!("task_get_special_port({which}) is not implemented"),
+            Some(which @ (TASK_NAME_PORT | TASK_INSPECT_PORT | TASK_READ_PORT)) => bail!(
+                "task_get_special_port({which}): the host task's name, inspect and read ports \
+                 would answer for the x86 task, which is not implemented"
+            ),
+            Some(_) => Reply::Forward,
             None => Reply::Failure(MIG_BAD_ARGUMENTS),
         },
-        // One port descriptor, then `which_port`: replacing the bootstrap
-        // or debug-control port changes only this task's own state.
-        (Object::Task, "task_set_special_port_from_user", true) => match request.word(24) {
-            Some(TASK_BOOTSTRAP_PORT | TASK_DEBUG_CONTROL_PORT) => Reply::Forward,
-            Some(which) => bail!("task_set_special_port({which}) is not implemented"),
-            None => Reply::Failure(MIG_BAD_ARGUMENTS),
-        },
+        // One port descriptor, then `which_port`. This task's own control
+        // ports are immovable sends of a platform-restricted task, which
+        // no special port may hold (`KERN_INVALID_RIGHT`); the kernel and
+        // host ports are settable only with SIP's kernel-debugger
+        // allowance, which a stock M2 does not grant (`KERN_NO_ACCESS`).
+        // Replacing any other port changes only this task's own state, or
+        // fails alike in both kernels.
+        (Object::Task, "task_set_special_port_from_user", true) => {
+            let (Some(name), Some(which)) = (request.word(4), request.word(24)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            let immovable = super::thread::immovable_send(kernel, name);
+            if !immovable && !matches!(which, TASK_KERNEL_PORT | TASK_HOST_PORT) {
+                return Ok(Some(Reply::Forward));
+            }
+            let name = match super::exception::carried_send(kernel, routine, request, 28)? {
+                Ok(name) => name,
+                Err(reply) => return Ok(Some(reply)),
+            };
+            release_send(name);
+            Reply::Failure(if immovable {
+                KERN_INVALID_RIGHT
+            } else {
+                KERN_NO_ACCESS
+            })
+        }
         // One port descriptor (the parent entry), then `size`, `offset`
         // and `permission`. A range already in whole guest pages names the
         // same memory under the host's 4 KiB rounding as under the arm64
@@ -660,15 +680,10 @@ pub(super) fn serve(
                 count.min(HOST_INFO_MAX),
             )
         }
-        (Object::Host, "host_get_special_port", false) => {
-            let (Some(node), Some(which)) = (request.word(8), request.word(12)) else {
-                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
-            };
-            match which {
-                HOST_PORT => Reply::Forward,
-                _ => bail!("host_get_special_port(node {node:#x}, {which}) is not implemented"),
-            }
-        }
+        // A host-privileged routine: the host kernel refuses the host
+        // port for every special port, as the arm64 kernel refuses it
+        // to an unprivileged process.
+        (Object::Host, "host_get_special_port", false) => Reply::Forward,
         // `flavor`, `task_info_outCnt`. The audit token is this process's
         // identity, the same in either ABI.
         // The process's guest threads, each as a new send right, in
@@ -1200,13 +1215,15 @@ fn kernel_version() -> Reply {
     Reply::Success(body)
 }
 
-/// `osfmk/mach/host_special_ports.h`.
-const HOST_PORT: u32 = 1;
 /// `osfmk/mach/task_special_ports.h`.
 const TASK_KERNEL_PORT: u32 = 1;
 const TASK_HOST_PORT: u32 = 2;
-const TASK_BOOTSTRAP_PORT: u32 = 4;
-const TASK_DEBUG_CONTROL_PORT: u32 = 10;
+const TASK_NAME_PORT: u32 = 3;
+const TASK_INSPECT_PORT: u32 = 5;
+const TASK_READ_PORT: u32 = 6;
+/// `KERN_NO_ACCESS` and `KERN_INVALID_RIGHT`.
+const KERN_NO_ACCESS: u32 = 8;
+const KERN_INVALID_RIGHT: u32 = 17;
 /// `osfmk/mach/task_info.h`.
 const TASK_AUDIT_TOKEN: u32 = 15;
 

@@ -12,6 +12,7 @@ use super::server::{
     KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED, MIG_BAD_ARGUMENTS, Reply, Request, release_send,
 };
 use crate::hosted::host;
+use crate::hosted::threads::lock;
 use anyhow::{Result, bail};
 use std::sync::Arc;
 
@@ -79,6 +80,10 @@ const TIME_FIELDS: usize = 3;
 
 /// `thread_get_special_port`'s `which`.
 const THREAD_KERNEL_PORT: u32 = 1;
+const THREAD_INSPECT_PORT: u32 = 2;
+const THREAD_READ_PORT: u32 = 3;
+/// `KERN_INVALID_RIGHT`: a right the routine may not take.
+const KERN_INVALID_RIGHT: u32 = 17;
 
 /// `thread_convert_thread_state`'s directions.
 const TO_SELF: u32 = 1;
@@ -116,24 +121,32 @@ pub(super) fn serve(
         // `which_port`. The kernel port is the thread's own; its read and
         // inspect ports would be the host thread's, whose state routines
         // the host kernel answers for the x86 thread.
+        // The kernel port is this thread's own kernel object, whose name
+        // the reply repeats; the kernels refuse every unknown number alike.
         ("thread_get_special_port_from_user", false) => match request.word(8) {
-            Some(THREAD_KERNEL_PORT) => Reply::Forward,
-            Some(which) => bail!(
+            Some(which @ (THREAD_INSPECT_PORT | THREAD_READ_PORT)) => bail!(
                 "thread_get_special_port({which}): the host thread's read and inspect ports \
                  would answer for the x86 thread, which is not implemented"
             ),
+            Some(_) => Reply::Forward,
             None => Reply::Failure(MIG_BAD_ARGUMENTS),
         },
-        // One port descriptor, then `which_port`: the kernel port is
-        // settable only with SIP's kernel-debugger allowance, which a
+        // One port descriptor, then `which_port`: this task's own control
+        // ports are immovable sends of a platform-restricted task, which
+        // no special port may hold (`KERN_INVALID_RIGHT`); the kernel port
+        // is settable only with SIP's kernel-debugger allowance, which a
         // stock M2 does not grant (`KERN_NO_ACCESS`); no other port is.
         ("thread_set_special_port", true) => {
+            let immovable = request
+                .word(4)
+                .is_some_and(|name| immovable_send(kernel, name));
             let name = match exception::carried_send(kernel, routine, request, 28)? {
                 Ok(name) => name,
                 Err(reply) => return Ok(Some(reply)),
             };
             release_send(name);
             match request.word(24) {
+                _ if immovable => Reply::Failure(KERN_INVALID_RIGHT),
                 Some(THREAD_KERNEL_PORT) => Reply::Failure(KERN_NO_ACCESS),
                 _ => Reply::Failure(KERN_INVALID_ARGUMENT),
             }
@@ -189,6 +202,21 @@ pub(super) fn guest_references(port: u32) -> u32 {
     } else {
         0
     }
+}
+
+/// Whether `name` is an immovable send right of this space
+/// (`ipc_should_mark_immovable_send`): the task's own control port or one
+/// of its threads', in a task whose control ports are immovable. macOS
+/// makes them immovable for first-party code, the platform-restricted
+/// tasks (`ICP_OPTIONS_IMMOVABLE_1P_HARD`), and movable for others.
+pub(super) fn immovable_send(kernel: &Kernel, name: u32) -> bool {
+    let own = name == kernel.process.task_port()
+        || name == kernel.thread_port
+        || kernel.process.runtime.registry.contains_port(name);
+    own && lock(&kernel.process.executable)
+        .signature
+        .as_ref()
+        .is_some_and(|signature| signature.platform_restricted())
 }
 
 /// Whether the guest thread `port`'s right is pinned in this space: every
