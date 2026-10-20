@@ -4,7 +4,7 @@
 //! `docs/research/restore-dry-run.md`.
 use super::context::{Ctx, SMALL, info, strings};
 use super::image4;
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use plist::{Dictionary, Value};
 use std::collections::BTreeSet;
 use stela_runtime::restore::route::Route;
@@ -466,13 +466,18 @@ pub fn answers(route: Route, ctx: &Ctx) -> Vec<Step> {
                         .and_then(Value::as_data)
                         .ok_or_else(|| anyhow!("no RestoreSEPImageData (R 0x2d514)"))?;
                     let want = ctx.covered("RestoreSEP", false)?;
+                    // seputil `--restore -` decodes one IMG4 (seputil
+                    // 0x100012f54); no ticket covers `rsep`, so it has no
+                    // manifest.
+                    let payload = super::image4::img4_payload_alone(sep)
+                        .context("RestoreSEPImageData is not an IMG4 of one IM4P")?;
                     ensure!(
-                        sep == want.image.as_slice(),
+                        payload == want.image.as_slice(),
                         "RestoreSEPImageData is not the IM4P typed {} that the RestoreSEP digest covers",
                         want.kind
                     );
                     Ok(format!(
-                        "RestoreSEPImageData: bare IM4P typed {}, SHA-384 = RestoreSEP Digest",
+                        "RestoreSEPImageData: IMG4 of the IM4P typed {}, SHA-384 = RestoreSEP Digest, no manifest",
                         want.kind
                     ))
                 })())

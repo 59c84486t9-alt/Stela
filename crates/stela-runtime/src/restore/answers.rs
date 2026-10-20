@@ -617,10 +617,13 @@ impl<R: ReadAt> Answers<R> {
         Ok(Plan::Reply(Value::Dict(response)))
     }
     /// `NORData` when nothing flashes NOR: only the restore SEP images, each its
-    /// identity's IM4P unchanged and digest-verified. No global ticket covers
-    /// them (the root ticket has no `rsep` or `sepi`), and Stela's SEP model
-    /// is their authenticator (`docs/research/sep.md`), as SEPROM is a Mac's.
-    /// The firmware set and LLB are absent, so a reader of them fails.
+    /// identity's IM4P unchanged and digest-verified, in the `IMG4` container
+    /// seputil decodes (`--restore -` reads one `IMG4`, whose manifest is
+    /// optional; seputil 0x100012f54 refuses any other top level). No global
+    /// ticket covers them (the root ticket has no `rsep` or `sepi`), so the
+    /// container carries no manifest, and Stela's SEP model is their
+    /// authenticator (`docs/research/sep.md`), as SEPROM is a Mac's. The
+    /// firmware set and LLB are absent, so a reader of them fails.
     pub fn sep_firmware(&mut self, request: &Value) -> Result<Plan> {
         self.sep_firmware_inner(request)
             .map_err(|e| super::refuse(format!("{e}"), request))
@@ -663,11 +666,12 @@ impl<R: ReadAt> Answers<R> {
                     "SEP firmware differs from its BuildManifest digest",
                 ));
             }
-            total += bytes.len();
+            let image = crate::img4::container(&bytes);
+            total += image.len();
             if total > MAX_REPLY_BYTES {
                 return Err(Error::Limit("NOR response bytes"));
             }
-            response.insert(key.to_string(), Value::Data(bytes));
+            response.insert(key.to_string(), Value::Data(image));
         }
         if !response.contains_key("RestoreSEPImageData") {
             return Err(Error::Invalid("identity has no RestoreSEP image"));
@@ -998,7 +1002,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nor_data_without_flashing_carries_only_the_unchanged_restore_sep_image() {
+    fn nor_data_without_flashing_carries_only_the_unchanged_restore_sep_image_in_an_img4() {
         let sep = [
             0x30, 0x11, 0x16, 0x04, b'I', b'M', b'4', b'P', 0x16, 0x04, b'r', b's', b'e', b'p',
             0x16, 0x00, 0x04, 0x01, 0x07,
@@ -1023,7 +1027,7 @@ mod tests {
                 .unwrap()
                 .data()
                 .unwrap(),
-            sep
+            crate::img4::container(&sep)
         );
         let mut bare = Answers::new(super::super::store::tests::fixture(b"x", false));
         assert!(bare.sep_firmware(&request).is_err());
@@ -1059,7 +1063,7 @@ mod tests {
                 .unwrap()
                 .data()
                 .unwrap(),
-            rsep
+            crate::img4::container(&rsep)
         );
         // A digest of the file as stored does not cover the retyped image.
         let store = super::super::store::tests::with_components(b"x", false, &components);

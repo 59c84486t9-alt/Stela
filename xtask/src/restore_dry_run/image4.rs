@@ -116,6 +116,17 @@ pub fn im4p(bytes: &[u8]) -> Result<Im4p> {
     })
 }
 
+/// `bytes` must be an `IMG4` carrying one IM4P and neither a manifest nor
+/// restore information: its IM4P.
+pub fn img4_payload_alone(bytes: &[u8]) -> Result<&[u8]> {
+    let (seq, rest) = expect(bytes, SEQUENCE, "IMG4")?;
+    ensure!(rest.is_empty(), "IMG4: trailing bytes");
+    let (label, payload) = expect(seq.body, IA5, "IMG4 label")?;
+    ensure!(label.body == b"IMG4", "not an IMG4");
+    im4p(payload)?;
+    Ok(payload)
+}
+
 /// `bytes` with its IM4P type replaced, as a restore host sends one image
 /// for another component.
 pub fn retype(bytes: &[u8], kind: &str) -> Result<Vec<u8>> {
@@ -303,6 +314,31 @@ mod tests {
         let body = tlv(SEQUENCE, &[tlv(IA5, tag), value.to_vec()].concat());
         out.extend_from_slice(&tlv(0, &body)[1..]);
         out
+    }
+
+    #[test]
+    fn an_img4_alone_carries_exactly_one_im4p() {
+        let file = tlv(
+            SEQUENCE,
+            &[
+                tlv(IA5, b"IM4P"),
+                tlv(IA5, b"rsep"),
+                tlv(IA5, b"1"),
+                tlv(OCTETS, b"x"),
+            ]
+            .concat(),
+        );
+        let alone = tlv(SEQUENCE, &[tlv(IA5, b"IMG4"), file.clone()].concat());
+        assert_eq!(img4_payload_alone(&alone).unwrap(), file.as_slice());
+        // A bare IM4P, a manifest after it, or another label is not one.
+        assert!(img4_payload_alone(&file).is_err());
+        let signed = tlv(
+            SEQUENCE,
+            &[tlv(IA5, b"IMG4"), file.clone(), tlv(0xa0, b"m")].concat(),
+        );
+        assert!(img4_payload_alone(&signed).is_err());
+        let other = tlv(SEQUENCE, &[tlv(IA5, b"IMG5"), file].concat());
+        assert!(img4_payload_alone(&other).is_err());
     }
 
     #[test]

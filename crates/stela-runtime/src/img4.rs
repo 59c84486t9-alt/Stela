@@ -255,6 +255,14 @@ pub fn compose(im4p: &[u8], im4m: &[u8]) -> alloc::vec::Vec<u8> {
     encode(SEQUENCE, &contents)
 }
 
+/// An `IMG4` of a payload alone: its manifest and restore information are
+/// optional, and a firmware a manifest does not sign carries neither.
+pub fn container(im4p: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut contents = encode(IA5_STRING, b"IMG4");
+    contents.extend_from_slice(im4p);
+    encode(SEQUENCE, &contents)
+}
+
 /// Where an `IMG4`'s manifest and restore information begin, from the first
 /// bytes of the file; `None` for a bare `IM4P`, which has neither. 64 bytes
 /// always suffice.
@@ -359,6 +367,14 @@ pub(crate) mod tests {
         );
         let file = img4(&payload, &manifest);
         assert_eq!(compose(&payload, &manifest), file);
+        let alone = container(&payload);
+        let parts = parse(&alone).unwrap();
+        assert_eq!(parts.payload, payload.as_slice());
+        assert!(parts.manifest.is_none() && parts.restore_info.is_none());
+        assert_eq!(
+            tail_offset(&alone[..alone.len().min(64)]).unwrap(),
+            Some(alone.len())
+        );
         let parts = parse(&file).unwrap();
         assert_eq!(parts.payload, payload.as_slice());
         assert_eq!(parts.manifest, Some(manifest.as_slice()));
