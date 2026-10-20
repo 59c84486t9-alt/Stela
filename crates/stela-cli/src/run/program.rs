@@ -120,13 +120,12 @@ pub(crate) fn guest_path(roots: &[PathBuf], path: &Path) -> PathBuf {
 
 /// Resolve what `stela run PROGRAM` names, with `search` as `PATH`.
 pub(crate) fn resolve(roots: &[PathBuf], program: &Path, search: Option<&OsStr>) -> Result<Target> {
-    let name = program.as_os_str().as_bytes();
-    let bare = !name.contains(&b'/') && name != b"." && name != b"..";
-    if bare && !AppBundle::is_bundle(program) {
-        return search_path(roots, program, search);
-    }
     if AppBundle::is_bundle(program) {
         return app(program);
+    }
+    let name = program.as_os_str().as_bytes();
+    if !name.contains(&b'/') && name != b"." && name != b".." {
+        return search_path(roots, program, search);
     }
     let file = guest_path(roots, program);
     if file.is_dir() {
