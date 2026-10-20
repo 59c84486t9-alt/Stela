@@ -178,6 +178,9 @@ impl Bits<'_> {
                     };
                     let ranges: Vec<&Value> =
                         value["rangeset"].as_array().into_iter().flatten().collect();
+                    if value["_type"] == "Fields.Array" {
+                        self.elements(value, name, &ranges, offset);
+                    }
                     if let [range] = ranges[..] {
                         let start = (range["start"].as_u64().unwrap_or(0) + offset) as u32;
                         let width = range["width"].as_u64().unwrap_or(0) as u32;
@@ -221,6 +224,45 @@ impl Bits<'_> {
             *self.res1 |= mask;
         } else {
             *self.res0 |= mask;
+        }
+    }
+
+    /// Each element of a field array by its own name, the index variable
+    /// replaced by the index (`AMCNTEN<x>` -> `AMCNTEN0`, `AMCNTEN1`), for
+    /// accessors that name one element. One range holds the elements in
+    /// index order from its low bit; several ranges are one element each,
+    /// listed from the highest index down (HAFGRTR_EL2.AMCNTEN<x> is bit 0
+    /// for x 0 and bit 17 for x 1).
+    fn elements(&mut self, value: &Value, name: &str, ranges: &[&Value], offset: u64) {
+        let (Some(open), Some(close)) = (name.find('<'), name.find('>')) else {
+            return;
+        };
+        let element = |index: u64| format!("{}{index}{}", &name[..open], &name[close + 1..]);
+        let start = |range: &Value| (range["start"].as_u64().unwrap_or(0) + offset) as u32;
+        let width = |range: &Value| range["width"].as_u64().unwrap_or(0) as u32;
+        if let [range] = ranges {
+            let count: u64 = value["indexes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|indexes| indexes["width"].as_u64().unwrap_or(0))
+                .sum();
+            if count == 0 || u64::from(width(range)) % count != 0 {
+                return;
+            }
+            let each = width(range) / count as u32;
+            for index in 0..count {
+                self.fields
+                    .entry(element(index))
+                    .or_insert((start(range) + index as u32 * each, each));
+            }
+        } else {
+            for (position, range) in ranges.iter().enumerate() {
+                let index = (ranges.len() - 1 - position) as u64;
+                self.fields
+                    .entry(element(index))
+                    .or_insert((start(range), width(range)));
+            }
         }
     }
 }
@@ -589,6 +631,35 @@ mod tests {
             (0, 0)
         );
         assert_eq!(fields["SED"], (8, 1));
+    }
+
+    #[test]
+    fn array_elements_are_fields_of_their_own() {
+        use serde_json::json;
+        let profile = Profile {
+            parameters: Default::default(),
+            features: Default::default(),
+            highest_el: 2,
+            varying: Default::default(),
+        };
+        // HAFGRTR_EL2's AMCNTEN<x> (bit 0 for x 0, bit 17 for x 1) and
+        // AMEVCNTR0<x>_EL0 (bits 4:1).
+        let index = |width| json!([{"_type": "Range", "start": 0, "width": width}]);
+        let register = json!({"fieldsets": [{
+            "condition": {"_type": "AST.Bool", "value": true},
+            "values": [
+                {"_type": "Fields.Array", "name": "AMCNTEN<x>", "index_variable": "x",
+                 "indexes": index(2),
+                 "rangeset": [{"start": 17, "width": 1}, {"start": 0, "width": 1}]},
+                {"_type": "Fields.Array", "name": "AMEVCNTR0<x>_EL0", "index_variable": "x",
+                 "indexes": index(4), "rangeset": [{"start": 1, "width": 4}]}]}]});
+        let mut fields = BTreeMap::new();
+        layout(&register, &profile, &[], &mut fields);
+        assert_eq!(fields["AMCNTEN0"], (0, 1));
+        assert_eq!(fields["AMCNTEN1"], (17, 1));
+        assert_eq!(fields["AMEVCNTR00_EL0"], (1, 1));
+        assert_eq!(fields["AMEVCNTR03_EL0"], (4, 1));
+        assert_eq!(fields["AMEVCNTR0<x>_EL0"], (1, 4));
     }
 
     #[test]

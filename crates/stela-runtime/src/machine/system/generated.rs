@@ -38319,7 +38319,7 @@ fn a704(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         if ((at_el0_not_in_host(c)) && (c.implemented(Feature::FEAT_FGT)?))
-            && (((0u64) & 0x1) == 0x1)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 0, 1)) & 0x1) == 0x1)
         {
             return Ok(Effect::Trap {
                 el: 2 as u8,
@@ -38339,7 +38339,9 @@ fn a704(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 24u64,
             });
         }
-        if (c.implemented(Feature::FEAT_FGT)?) && (((0u64) & 0x1) == 0x1) {
+        if (c.implemented(Feature::FEAT_FGT)?)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 0, 1)) & 0x1) == 0x1)
+        {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -38397,7 +38399,7 @@ fn a706(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         if ((at_el0_not_in_host(c)) && (c.implemented(Feature::FEAT_FGT)?))
-            && (((0u64) & 0x1) == 0x1)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 17, 1)) & 0x1) == 0x1)
         {
             return Ok(Effect::Trap {
                 el: 2 as u8,
@@ -38417,7 +38419,9 @@ fn a706(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 24u64,
             });
         }
-        if (c.implemented(Feature::FEAT_FGT)?) && (((0u64) & 0x1) == 0x1) {
+        if (c.implemented(Feature::FEAT_FGT)?)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 17, 1)) & 0x1) == 0x1)
+        {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -38475,7 +38479,7 @@ fn a708(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         if ((at_el0_not_in_host(c)) && (c.implemented(Feature::FEAT_FGT)?))
-            && (((0u64) & 0x1) == 0x1)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 0, 1)) & 0x1) == 0x1)
         {
             return Ok(Effect::Trap {
                 el: 2 as u8,
@@ -38495,7 +38499,9 @@ fn a708(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 24u64,
             });
         }
-        if (c.implemented(Feature::FEAT_FGT)?) && (((0u64) & 0x1) == 0x1) {
+        if (c.implemented(Feature::FEAT_FGT)?)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 0, 1)) & 0x1) == 0x1)
+        {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
@@ -38553,7 +38559,7 @@ fn a710(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         if ((at_el0_not_in_host(c)) && (c.implemented(Feature::FEAT_FGT)?))
-            && (((0u64) & 0x1) == 0x1)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 17, 1)) & 0x1) == 0x1)
         {
             return Ok(Effect::Trap {
                 el: 2 as u8,
@@ -38573,7 +38579,9 @@ fn a710(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
                 ec: 24u64,
             });
         }
-        if (c.implemented(Feature::FEAT_FGT)?) && (((0u64) & 0x1) == 0x1) {
+        if (c.implemented(Feature::FEAT_FGT)?)
+            && (((bits(c.read(Register::HAFGRTR_EL2, 0), 17, 1)) & 0x1) == 0x1)
+        {
             return Ok(Effect::Trap {
                 el: 2 as u8,
                 ec: 24u64,
