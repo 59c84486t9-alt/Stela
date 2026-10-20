@@ -1,9 +1,10 @@
 //! Storage for the profile's System registers: one 64-bit slot per register
 //! instance, starting at the reset value. Writes keep the bits that are RES0
-//! at 0 and RES1 at 1 in every layout the chip's profile allows
-//! (`Register::res0`, `Register::res1`).
-use super::{Chip, Feature, Register};
-use alloc::{boxed::Box, vec};
+//! at 0 and RES1 at 1 in every layout the PE's profile allows
+//! (`Register::res0`, `Register::res1`, and `WITHHELD_LAYOUTS` for a PE that
+//! withholds some of its chip's features).
+use super::{Chip, Feature, Register, WithheldLayout, generated::WITHHELD_LAYOUTS};
+use alloc::{boxed::Box, vec, vec::Vec};
 
 #[derive(Debug, Clone)]
 pub struct File {
@@ -11,6 +12,8 @@ pub struct File {
     /// The chip's features the PE's identification withholds
     /// (`identification::withheld`).
     withheld: u64,
+    /// The layouts the withheld features change.
+    layouts: Vec<&'static WithheldLayout>,
     values: Box<[u64]>,
 }
 
@@ -34,6 +37,7 @@ impl File {
         Self {
             chip,
             withheld: 0,
+            layouts: Vec::new(),
             values,
         }
     }
@@ -44,9 +48,39 @@ impl File {
 
     /// Treat the chip's features in `withheld` (one bit per [`Feature`],
     /// `identification::withheld`) as absent: the PE presents an
-    /// identification without them.
+    /// identification without them, and its registers have the layouts of
+    /// the chip's profile without them. A register still at the chip's
+    /// Cold reset value takes the PE's; the others keep their values within
+    /// the PE's reserved bits.
     pub fn withhold(&mut self, withheld: u64) {
         self.withheld = withheld;
+        self.layouts = WITHHELD_LAYOUTS
+            .iter()
+            .filter(|layout| {
+                layout.chip == self.chip && withheld & layout.relevant == layout.withheld
+            })
+            .collect();
+        for layout in self.layouts.clone() {
+            let register = layout.register;
+            let chip_reset = register.reset(self.chip);
+            for index in 0..register.instances() {
+                let slot = register.offset() + index as usize;
+                let value = self.values[slot];
+                self.values[slot] = if value == chip_reset {
+                    layout.reset
+                } else {
+                    value & !layout.res0 & !layout.res1 | layout.res1
+                };
+            }
+        }
+    }
+
+    /// The PE's layout of `register`, where withheld features change it.
+    fn layout(&self, register: Register) -> Option<&'static WithheldLayout> {
+        self.layouts
+            .iter()
+            .find(|layout| layout.register == register)
+            .copied()
     }
 
     /// Whether the PE has `feature`: the chip has it and the PE's
@@ -66,14 +100,16 @@ impl File {
         }
     }
 
-    /// The bits of `register` that are RES0 under the chip's profile.
+    /// The bits of `register` that are RES0 under the PE's profile.
     pub fn res0(&self, register: Register) -> u64 {
-        register.res0(self.chip)
+        self.layout(register)
+            .map_or_else(|| register.res0(self.chip), |layout| layout.res0)
     }
 
-    /// The bits of `register` that are RES1 under the chip's profile.
+    /// The bits of `register` that are RES1 under the PE's profile.
     pub fn res1(&self, register: Register) -> u64 {
-        register.res1(self.chip)
+        self.layout(register)
+            .map_or_else(|| register.res1(self.chip), |layout| layout.res1)
     }
 
     fn slot(register: Register, index: u64) -> Option<usize> {
@@ -107,7 +143,9 @@ impl File {
     /// state only a Cold reset sets, take `old`'s.
     pub fn keep_over_warm_reset(&mut self, old: &File) {
         for register in Register::ALL {
-            let warm = register.warm(self.chip);
+            let warm = self
+                .layout(register)
+                .map_or_else(|| register.warm(self.chip), |layout| layout.warm);
             for index in 0..register.instances() {
                 let slot = register.offset() + index as usize;
                 self.values[slot] = self.values[slot] & warm | old.values[slot] & !warm;
@@ -130,6 +168,46 @@ mod tests {
         assert_eq!(file.get(Register::DBGBVR_EL1, 3), 0x1234);
         assert_eq!(file.get(Register::DBGBVR_EL1, 2), 0);
         assert_eq!(file.get(Register::DBGBVR_EL1, 99), 0);
+    }
+
+    /// A PE that withholds features has its registers' layouts without
+    /// them: an M5 that withholds memory tagging has no SCTLR_EL1.ATA or
+    /// HCR_EL2.ATA, as a chip without FEAT_MTE2 has none.
+    #[test]
+    fn a_pe_withholding_features_has_the_layouts_without_them() {
+        const SCTLR_ATA: u64 = 1 << 43;
+        const HCR_ATA: u64 = 1 << 56;
+        let tagging = Feature::ALL
+            .into_iter()
+            .filter(|feature| feature.on(Chip::AppleM5) && feature.name().starts_with("FEAT_MTE"))
+            .fold(0, |bits, feature| bits | 1 << feature as u64);
+        let mut file = File::new(Chip::AppleM5);
+        assert_eq!(file.res0(Register::SCTLR_EL1) & SCTLR_ATA, 0);
+        file.set(Register::SCTLR_EL1, 0, SCTLR_ATA);
+        file.set(Register::HCR_EL2, 0, HCR_ATA);
+        file.withhold(tagging);
+        for (register, bit) in [
+            (Register::SCTLR_EL1, SCTLR_ATA),
+            (Register::HCR_EL2, HCR_ATA),
+        ] {
+            assert_eq!(file.res0(register) & bit, bit, "{register:?}");
+            assert_eq!(register.res0(Chip::AppleM4) & bit, bit, "{register:?}");
+            // The value already held loses the bit, and a write cannot set it.
+            assert_eq!(file.get(register, 0) & bit, 0, "{register:?}");
+            file.set(register, 0, bit);
+            assert_eq!(file.get(register, 0) & bit, 0, "{register:?}");
+        }
+        // Presenting every feature again restores the chip's layouts.
+        file.withhold(0);
+        assert_eq!(
+            file.res0(Register::SCTLR_EL1),
+            Register::SCTLR_EL1.res0(Chip::AppleM5)
+        );
+        // A fresh PE starts at the PE's Cold reset values.
+        let mut fresh = File::new(Chip::AppleM5);
+        fresh.withhold(tagging);
+        let layout = fresh.layout(Register::SCTLR_EL1).unwrap();
+        assert_eq!(fresh.get(Register::SCTLR_EL1, 0), layout.reset);
     }
 
     #[test]

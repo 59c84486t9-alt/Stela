@@ -35,6 +35,21 @@ pub enum Effect {
     Refused(&'static str),
 }
 
+/// A register's layout on a PE of `chip` whose identification withholds
+/// exactly `withheld` of the `relevant` features (bits of [`Feature`]), where
+/// it differs from the chip's (`generated::WITHHELD_LAYOUTS`).
+#[derive(Debug)]
+pub struct WithheldLayout {
+    pub register: Register,
+    pub chip: Chip,
+    pub relevant: u64,
+    pub withheld: u64,
+    pub res0: u64,
+    pub res1: u64,
+    pub reset: u64,
+    pub warm: u64,
+}
+
 /// One accessor encoding: a pattern over the 16-bit key
 /// `op0:op1:CRn:CRm:op2`, the array index bits and the folded tree.
 pub struct Accessor {

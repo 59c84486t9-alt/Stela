@@ -280,7 +280,14 @@ impl SystemMatrix {
         let generated = root().join(access::GENERATED);
         fs::write(
             &generated,
-            access::generate(&registers, &profiles, &applicable, &facts, &chip_facts)?,
+            access::generate(
+                &registers,
+                &profiles,
+                &applicable,
+                &facts,
+                &chip_facts,
+                &resets_directory,
+            )?,
         )?;
         let status = Command::new("rustfmt")
             .args(["--edition", "2024"])

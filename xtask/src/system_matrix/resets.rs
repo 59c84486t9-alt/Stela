@@ -15,7 +15,11 @@
 use super::expression::Profile;
 use crate::xml::{Element, Node, parse};
 use anyhow::{Context, Result, bail, ensure};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 pub const URI: &str = "https://developer.arm.com/-/cdn-downloads/permalink/\
     Exploration-Tools-Arm-Architecture-System-Registers/SysReg/\
@@ -112,6 +116,9 @@ pub struct Fixed {
 pub struct Facts {
     pub resets: BTreeMap<String, Vec<Field>>,
     pub fixed: BTreeMap<String, Vec<Fixed>>,
+    /// The features the register's reset conditions name, whatever the
+    /// profile: the features its `resets` depend on.
+    pub conditions: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Every AArch64 register's field resets under `profile` and its fields with
@@ -119,6 +126,7 @@ pub struct Facts {
 pub fn read(directory: &Path, profile: &Profile) -> Result<Facts> {
     let mut registers: BTreeMap<String, Vec<Field>> = BTreeMap::new();
     let mut fixed: BTreeMap<String, Vec<Fixed>> = BTreeMap::new();
+    let mut conditions: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut entries: Vec<_> = fs::read_dir(directory)
         .with_context(|| format!("cannot read {}", directory.display()))?
         .collect::<Result<_, _>>()?;
@@ -137,6 +145,14 @@ pub fn read(directory: &Path, profile: &Profile) -> Result<Facts> {
             let Some(name) = register.child("reg_short_name").map(Element::text) else {
                 continue;
             };
+            conditions.entry(plain_name(&name)).or_default().extend(
+                register
+                    .descendants("field_reset_condition")
+                    .into_iter()
+                    .filter_map(|condition| condition.attribute("condition"))
+                    .filter_map(condition_feature)
+                    .map(str::to_owned),
+            );
             let fixes = fixed.entry(plain_name(&name)).or_default();
             fixes.extend(
                 register
@@ -160,7 +176,16 @@ pub fn read(directory: &Path, profile: &Profile) -> Result<Facts> {
     Ok(Facts {
         resets: registers,
         fixed,
+        conditions,
     })
+}
+
+/// The feature a reset condition (`FEAT_x is implemented`) names.
+fn condition_feature(condition: &str) -> Option<&str> {
+    let subject = condition
+        .strip_suffix(" is implemented")
+        .or_else(|| condition.strip_suffix(" is not implemented"))?;
+    subject.starts_with("FEAT_").then_some(subject)
 }
 
 /// The fixed access type of `field`, when its only access state is one with

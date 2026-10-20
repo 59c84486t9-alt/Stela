@@ -1,15 +1,19 @@
 //! `machine/system/generated.rs`: the profile's System registers with their
-//! reserved bits, and every accessor with its folded permission tree.
+//! reserved bits, and every accessor with its folded permission tree. A PE
+//! whose identification withholds some of its chip's features has each
+//! register's layout under the chip's profile without them: the layouts
+//! that differ from the chip's are listed in `WITHHELD_LAYOUTS`.
 use super::Profiles;
 use super::codegen::{Accessor, Fields, Generator, accessors, rust_name};
 use super::expression::Profile;
 use super::fold::{as_bool, fold};
-use super::resets::Fixed;
-use anyhow::{Result, bail};
+use super::resets::{Facts, Fixed};
+use anyhow::{Result, bail, ensure};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
+    path::Path,
 };
 
 pub const GENERATED: &str = "crates/stela-runtime/src/machine/system/generated.rs";
@@ -26,6 +30,77 @@ struct Layout {
     /// The bits a Warm reset sets under each chip's profile
     /// (`super::resets::warm`).
     warm: Vec<u64>,
+}
+
+/// A register's layout on a PE of a chip whose identification withholds some
+/// of the chip's features, where it differs from the chip's.
+struct Withheld {
+    register: String,
+    chip: usize,
+    /// The chip's varying features (bits of `Feature`) the layout depends
+    /// on: those its conditions and reset conditions name.
+    relevant: u64,
+    /// The relevant features the PE withholds.
+    withheld: u64,
+    res0: u64,
+    res1: u64,
+    reset: u64,
+    warm: u64,
+}
+
+/// At most this many relevant features per register and chip, whose every
+/// combination is laid out.
+const RELEVANT_LIMIT: u32 = 12;
+
+/// `profile` without the features in `removed`.
+fn without(profile: &Profile, removed: &BTreeSet<String>) -> Profile {
+    Profile {
+        parameters: profile.parameters.clone(),
+        features: profile.features.difference(removed).cloned().collect(),
+        varying: profile.varying.clone(),
+        highest_el: profile.highest_el,
+    }
+}
+
+/// The text of every condition in `value`, for the features they name.
+fn condition_text(value: &Value, text: &mut String) {
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                if key == "condition" {
+                    text.push_str(&inner.to_string());
+                } else {
+                    condition_text(inner, text);
+                }
+            }
+        }
+        Value::Array(list) => list.iter().for_each(|inner| condition_text(inner, text)),
+        _ => {}
+    }
+}
+
+/// Each chip's reset facts under its profile without some of its features,
+/// read from the System register XML once per feature set.
+struct ChipFacts<'a> {
+    directory: &'a Path,
+    profiles: &'a Profiles,
+    base: &'a [Facts],
+    read: BTreeMap<(usize, BTreeSet<String>), Facts>,
+}
+
+impl ChipFacts<'_> {
+    fn get(&mut self, chip: usize, removed: BTreeSet<String>) -> Result<&Facts> {
+        if removed.is_empty() {
+            return Ok(&self.base[chip]);
+        }
+        let key = (chip, removed);
+        if !self.read.contains_key(&key) {
+            let profile = without(&self.profiles.chips[chip].1, &key.1);
+            let facts = super::resets::read(self.directory, &profile)?;
+            self.read.insert(key.clone(), facts);
+        }
+        Ok(&self.read[&key])
+    }
 }
 
 /// One value per chip, as Rust: a constant when every chip agrees.
@@ -274,10 +349,20 @@ pub fn generate(
     registers: &Value,
     profiles: &Profiles,
     applicable: &BTreeSet<String>,
-    facts: &super::resets::Facts,
-    chip_facts: &[super::resets::Facts],
+    facts: &Facts,
+    chip_facts: &[Facts],
+    resets_directory: &Path,
 ) -> Result<String> {
     let profile = &profiles.union;
+    let varying: Vec<&String> = profile.varying.iter().collect();
+    ensure!(varying.len() <= 64, "more than 64 varying features");
+    let mut withheld_facts = ChipFacts {
+        directory: resets_directory,
+        profiles,
+        base: chip_facts,
+        read: BTreeMap::new(),
+    };
+    let mut withheld_layouts = Vec::new();
     let mut fields: Fields = BTreeMap::new();
     let mut layouts = Vec::new();
     let mut accessor_list: Vec<Accessor> = Vec::new();
@@ -316,17 +401,81 @@ pub fn generate(
                 .unwrap_or(1);
             let (mut res0, mut res1, mut reset, mut warm) =
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for ((_, chip), chip_facts) in profiles.chips.iter().zip(chip_facts) {
-                let mut positions = BTreeMap::new();
+            let mut conditions = String::new();
+            condition_text(&register["fieldsets"], &mut conditions);
+            for (index, ((_, chip), chip_facts)) in
+                profiles.chips.iter().zip(chip_facts).enumerate()
+            {
                 let fixed = chip_facts.fixed.get(&rust).map_or(&[][..], Vec::as_slice);
-                let (zeros, ones) = layout(register, chip, fixed, &mut positions);
-                let fields = chip_facts.resets.get(&rust).map_or(&[][..], Vec::as_slice);
-                reset.push(super::resets::value(
-                    &rust, fields, &positions, zeros, ones,
-                )?);
-                warm.push(super::resets::warm(fields, &positions, zeros, ones));
-                res0.push(zeros | super::codegen::raz_by_choice(&rust));
-                res1.push(ones);
+                let laid_out = |profile: &Profile, facts: &Facts| -> Result<[u64; 4]> {
+                    let mut positions = BTreeMap::new();
+                    let (zeros, ones) = layout(register, profile, fixed, &mut positions);
+                    let fields = facts.resets.get(&rust).map_or(&[][..], Vec::as_slice);
+                    Ok([
+                        zeros | super::codegen::raz_by_choice(&rust),
+                        ones,
+                        super::resets::value(&rust, fields, &positions, zeros, ones)?,
+                        super::resets::warm(fields, &positions, zeros, ones),
+                    ])
+                };
+                let full = laid_out(chip, chip_facts)?;
+                res0.push(full[0]);
+                res1.push(full[1]);
+                reset.push(full[2]);
+                warm.push(full[3]);
+                // The chip's varying features the layout or the resets name,
+                // and the layout without each combination of them.
+                let reset_named = chip_facts.conditions.get(&rust);
+                let relevant: Vec<(usize, &String, bool)> = varying
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| chip.features.contains(**name))
+                    .filter_map(|(bit, name)| {
+                        let in_reset = reset_named.is_some_and(|named| named.contains(*name));
+                        (conditions.contains(&format!("\"{name}\"")) || in_reset)
+                            .then_some((bit, *name, in_reset))
+                    })
+                    .collect();
+                ensure!(
+                    relevant.len() as u32 <= RELEVANT_LIMIT,
+                    "{rust} depends on {} of {}'s features",
+                    relevant.len(),
+                    profiles.chips[index].0
+                );
+                let relevant_bits = relevant
+                    .iter()
+                    .fold(0u64, |bits, (bit, ..)| bits | 1 << bit);
+                for combination in 1u32..1 << relevant.len() {
+                    let chosen = relevant
+                        .iter()
+                        .enumerate()
+                        .filter(|(position, _)| combination >> position & 1 != 0)
+                        .map(|(_, entry)| entry);
+                    let mut removed = BTreeSet::new();
+                    let mut reset_removed = BTreeSet::new();
+                    let mut bits = 0u64;
+                    for (bit, name, in_reset) in chosen {
+                        removed.insert((*name).clone());
+                        if *in_reset {
+                            reset_removed.insert((*name).clone());
+                        }
+                        bits |= 1 << bit;
+                    }
+                    let facts = withheld_facts.get(index, reset_removed)?;
+                    let values = laid_out(&without(chip, &removed), facts)?;
+                    if values != full {
+                        withheld_layouts.push(Withheld {
+                            register: rust.clone(),
+                            chip: index,
+                            relevant: relevant_bits,
+                            withheld: bits,
+                            res0: values[0],
+                            res1: values[1],
+                            reset: values[2],
+                            warm: values[3],
+                        });
+                    }
+                }
             }
             layouts.push(Layout {
                 name: rust.clone(),
@@ -404,7 +553,7 @@ pub fn generate(
          #![allow(\n    clippy::all,\n    clippy::pedantic,\n    unused_parens,\n    unused_variables,\n    unreachable_code,\n    non_camel_case_types\n)]\n\
          use super::{{\n    Accessor, Broadcast, CacheOp, CacheScope, CacheType, Chip, Context, Effect, ErrorRecord, Limit,
     Operation,\n    \
-         Pstate, Regime, Restrict, Stage, AtAccess, Tlbi, TlbiAttr, TlbiKind, TlbiLevel, helpers::*,\n}};\n",
+         Pstate, Regime, Restrict, Stage, AtAccess, Tlbi, TlbiAttr, TlbiKind, TlbiLevel, WithheldLayout, helpers::*,\n}};\n",
         super::RELEASE,
         super::resets::DIRECTORY,
         super::resets::SHA256
@@ -471,6 +620,30 @@ pub fn generate(
         writeln!(out, "        }}\n    }}\n")?;
     }
     writeln!(out, "}}\n")?;
+    writeln!(
+        out,
+        "/// The register layouts that differ from the chip's on a PE whose\n\
+         /// identification withholds some of the chip's features: a PE of `chip`\n\
+         /// that withholds exactly `withheld` of the `relevant` features has them.\n\
+         pub static WITHHELD_LAYOUTS: [WithheldLayout; {}] = [",
+        withheld_layouts.len()
+    )?;
+    for entry in &withheld_layouts {
+        writeln!(
+            out,
+            "    WithheldLayout {{ register: Register::{}, chip: Chip::{}, relevant: {:#x}, \
+             withheld: {:#x}, res0: {:#x}, res1: {:#x}, reset: {:#x}, warm: {:#x} }},",
+            entry.register,
+            chip_variant(profiles.chips[entry.chip].0),
+            entry.relevant,
+            entry.withheld,
+            entry.res0,
+            entry.res1,
+            entry.reset,
+            entry.warm
+        )?;
+    }
+    writeln!(out, "];\n")?;
     write_features(&mut out, profiles)?;
     writeln!(
         out,
@@ -481,6 +654,19 @@ pub fn generate(
     writeln!(out, "];\n")?;
     out.push_str(&functions);
     Ok(out)
+}
+
+/// The runtime's `Chip` variant for an Apple clang CPU name (`apple-m5` ->
+/// `AppleM5`).
+fn chip_variant(name: &str) -> String {
+    name.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or(String::new(), |first| {
+                first.to_ascii_uppercase().to_string() + chars.as_str()
+            })
+        })
+        .collect()
 }
 
 /// The chips in generation order, and the features only some of them have,
@@ -600,6 +786,40 @@ mod tests {
         let register = crate::system_matrix::tests::banked_spsr();
         assert_eq!(layout(&register, &profile, &[], &mut fields), (u64::MAX, 0));
         assert!(fields.is_empty());
+    }
+
+    /// A PE that withholds a feature has the layout of its chip's profile
+    /// without it: the feature's conditional field takes its reserved type.
+    #[test]
+    fn a_layout_without_a_feature_reserves_its_fields() {
+        let chip = Profile {
+            parameters: ["FEAT_MTE2"].map(String::from).into(),
+            features: ["FEAT_MTE2"].map(String::from).into(),
+            highest_el: 2,
+            varying: Default::default(),
+        };
+        let register = serde_json::json!({"fieldsets": [{
+            "condition": {"_type": "AST.Bool", "value": true},
+            "values": [{"_type": "Fields.ConditionalField", "rangeset": [{"start": 43, "width": 1}],
+                        "reservedtype": "RES0",
+                        "fields": [{"condition": {"_type": "AST.Function",
+                                                  "name": "IsFeatureImplemented",
+                "arguments": [{"_type": "AST.Identifier", "value": "FEAT_MTE2"}]},
+                                    "field": {"_type": "Fields.Field", "name": "ATA",
+                                              "rangeset": [{"start": 0, "width": 1}]}}]}]}]});
+        let mut text = String::new();
+        condition_text(&register["fieldsets"], &mut text);
+        assert!(text.contains("\"FEAT_MTE2\""));
+        let mut fields = BTreeMap::new();
+        assert_eq!(layout(&register, &chip, &[], &mut fields), (0, 0));
+        assert_eq!(fields["ATA"], (43, 1));
+        let withheld = without(&chip, &["FEAT_MTE2"].map(String::from).into());
+        assert!(withheld.features.is_empty());
+        assert_eq!(
+            layout(&register, &withheld, &[], &mut BTreeMap::new()),
+            (1 << 43, 0)
+        );
+        assert_eq!(chip_variant("apple-m5"), "AppleM5");
     }
 
     #[test]
