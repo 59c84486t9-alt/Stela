@@ -55,6 +55,8 @@ const HOST_STACK_BYTES: usize = 16 << 20;
 /// `thread_self_trap`: the calling host thread's port, with a new user
 /// reference.
 const MACH_PORT_DEALLOCATE_TRAP: u32 = 18;
+/// The code an IC IVAU makes stale in a machine: its whole fetch page.
+const CODE_PAGE: u64 = 4096;
 
 /// Lock a process mutex. A thread that panicked while holding one leaves
 /// state the kernel personality cannot trust, but the process is ending
@@ -542,6 +544,16 @@ fn enter<F>(
     let prepared = process
         .engine
         .machine(pc)
+        .map(|mut pe| {
+            let process = Arc::downgrade(process);
+            pe.host.set_peers(Box::new(move |page| {
+                if let Some(process) = process.upgrade() {
+                    let (address, bytes) = page.map_or((0, u64::MAX), |page| (page, CODE_PAGE));
+                    process.runtime.registry.invalidate(id, address, bytes);
+                }
+            }));
+            pe
+        })
         .and_then(|mut pe| Ok((prepare(&mut kernel, &mut pe)?, pe)));
     let pe = match prepared {
         Ok((Ok(()), pe)) => {

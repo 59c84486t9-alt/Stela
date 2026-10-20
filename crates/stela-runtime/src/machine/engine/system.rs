@@ -1300,8 +1300,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         match code {
             Code::Unchanged => {}
-            Code::Page(physical) => self.invalidate_code_page(physical),
-            Code::All => self.discard_code(),
+            Code::Page(physical) => {
+                self.invalidate_code_page(physical);
+                self.host.code_invalidated(Some(physical));
+            }
+            Code::All => {
+                self.discard_code();
+                self.host.code_invalidated(None);
+            }
         }
         Some(match effect {
             Effect::Done => {

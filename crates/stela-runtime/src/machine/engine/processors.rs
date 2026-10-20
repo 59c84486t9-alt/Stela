@@ -1051,6 +1051,8 @@ mod tests {
         assert_eq!(compiled(&mut machine), (old, count));
         machine.cpu.state.x[0] = BASE + code as u64;
         machine.system_instruction(IC_IVAU_X0).unwrap();
+        // The host hears of it for PEs it runs in machines of their own.
+        assert_eq!(machine.host.code_invalidations, [Some(BASE + code as u64)]);
         // The invalidation is broadcast: PE 0 compiles the new code.
         turn(&mut machine, 0);
         let (new, recompiled) = compiled(&mut machine);

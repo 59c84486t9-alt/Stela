@@ -420,6 +420,9 @@ pub struct ProcessHost {
     runner: NativeRunner,
     /// The process's translation store, if it has one.
     translations: Option<super::translations::Store>,
+    /// Where this thread's IC invalidations reach the other threads,
+    /// whose engines keep compiled code of their own.
+    peers: Option<Box<dyn FnMut(Option<u64>) + Send>>,
 }
 
 impl ProcessHost {
@@ -449,7 +452,14 @@ impl ProcessHost {
             // Installed blocks, chained ones and thunks lie in the arena.
             runner: NativeRunner::new(vec![(start, start + ARENA_BYTES as u64)]),
             translations: super::translations::Store::open(),
+            peers: None,
         })
+    }
+
+    /// Reach the process's other threads with this thread's IC
+    /// invalidations through `peers`, given the page (`None` for all).
+    pub fn set_peers(&mut self, peers: Box<dyn FnMut(Option<u64>) + Send>) {
+        self.peers = Some(peers);
     }
 
     pub fn tables(&self) -> &Tables {
@@ -544,6 +554,12 @@ impl Host for ProcessHost {
     fn set_regime(&mut self, _regime: &Regime) {}
 
     fn invalidate_translations(&mut self) {}
+
+    fn code_invalidated(&mut self, page: Option<u64>) {
+        if let Some(peers) = &mut self.peers {
+            peers(page);
+        }
+    }
 
     fn translations(&mut self) -> Option<&mut dyn crate::machine::Translations> {
         self.translations

@@ -338,6 +338,12 @@ pub trait Host {
     /// that cannot order them leaves both empty and identifies no FEAT_CSV3
     /// (`identification::Speculation::faulting_data`).
     fn speculation_barrier(&self) {}
+    /// The PE invalidated instruction caches (IC IVAU of `Some(page)`, a
+    /// physical page; IC IALLU or IALLUIS for `None`), which this machine
+    /// already applied to its own compiled code. A host that runs other
+    /// PEs in machines of their own makes them drop theirs before they
+    /// next execute: IC IVAU reaches every PE of the shareability domain.
+    fn code_invalidated(&mut self, _page: Option<u64>) {}
     /// Drop every cached translation.
     fn invalidate_translations(&mut self);
     /// Drop the cached translations a TLBI reaches in the current context,
@@ -4955,6 +4961,8 @@ mod tests {
         invalidations: usize,
         /// Calls of [`Host::isolate_predictions`].
         pub(super) isolations: usize,
+        /// The pages of [`Host::code_invalidated`] calls.
+        pub(super) code_invalidations: Vec<Option<u64>>,
         reaches: Vec<mmu::tlbi::Reach>,
         pub(super) installed: Vec<Vec<u8>>,
         /// Executable copies of the context leaves the engine called.
@@ -5029,6 +5037,9 @@ mod tests {
         }
         fn isolate_predictions(&mut self) {
             self.isolations += 1;
+        }
+        fn code_invalidated(&mut self, page: Option<u64>) {
+            self.code_invalidations.push(page);
         }
         fn invalidate_translations(&mut self) {
             self.invalidations += 1;
@@ -5131,6 +5142,7 @@ mod tests {
             regimes: Vec::new(),
             invalidations: 0,
             isolations: 0,
+            code_invalidations: Vec::new(),
             reaches: Vec::new(),
             installed: Vec::new(),
             executables: Vec::new(),
