@@ -4,7 +4,8 @@
 //! `docs/research/j473-kernel.md#system-registers`). Registers with an
 //! architectural or modeled effect have their own owners (`machine::registers`,
 //! `pmu`, `amx`, `ctrr` and the board's fast-IPI registers); every encoding
-//! neither lists refuses.
+//! neither lists refuses when a censused component accesses it, and is
+//! UNDEFINED when none does.
 //!
 //! - `Storage`: software saves and restores the register around its own
 //!   changes, or writes it and never reads it, so reads must return the last
@@ -51,8 +52,10 @@
 //! `isa/apple-soc-facts.json`, keyed by `machine::Chip` as `Pmu::on` is):
 //! there the same encoding takes the T8112 entry's behavior, an inference for
 //! the other chips that no per-chip consumer reading has checked yet. An
-//! encoding the chip's components never access is not looked up, so it
-//! refuses as every encoding without a model does.
+//! encoding the chip's components never access is not looked up: without a
+//! model of its own it is UNDEFINED, Arm's behavior for an unallocated
+//! encoding. That the chip allocates none of them is an inference from the
+//! census (no 26A434 component needs one), not an observation.
 //!
 //! `Scope::Cluster` entries are one register per cluster, shared by its PEs
 //! (`Registers::join`); the others are per PE. `el2` entries are UNDEFINED

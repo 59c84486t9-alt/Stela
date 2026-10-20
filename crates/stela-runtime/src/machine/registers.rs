@@ -4,7 +4,9 @@
 //! generated AARCHMRS accessors (`machine::system`). This module handles the
 //! op0=3 CRn=15 space Apple uses: SPRR, GXF, the Apple PAC controls,
 //! VMSA_LOCK_EL1, the VM timer FIQ enables, AMX, the performance monitor
-//! (`machine::pmu`) and the `machine::impdef` table. Every other encoding in that space refuses with its fields.
+//! (`machine::pmu`) and the `machine::impdef` table. Every other encoding in
+//! that space (CRn 11 and 15) that the chip's censused components access
+//! refuses with its fields; one they never access is UNDEFINED.
 //!
 //! With EL2 present and HCR_EL2.E2H RES1, Apple's registers follow the VHE
 //! pattern their names show (m1n1 `cpu_regs.h`): at EL2 the `*_EL1` and
@@ -455,10 +457,6 @@ impl Cpu {
         }))
     }
 
-    /// MRS or MSR to an encoding without an architectural accessor: Apple's
-    /// IMPLEMENTATION DEFINED space, or UNDEFINED. `physical` is the system
-    /// counter, for the count alias. `Read` results are not yet written to
-    /// Rt.
     /// A reserved encoding of the feature ID space (op0 3, op1 0, CRn 0, CRm
     /// 1-7) without an architectural register. Such an encoding is RES0 from
     /// EL1 and EL2 (Arm's registers since allocated there were "unnamed and
@@ -484,6 +482,17 @@ impl Cpu {
         })
     }
 
+    /// MRS or MSR to an encoding without an architectural accessor: Apple's
+    /// IMPLEMENTATION DEFINED space, or UNDEFINED. `physical` is the system
+    /// counter, for the count alias. `Read` results are not yet written to
+    /// Rt.
+    ///
+    /// In the IMPLEMENTATION DEFINED space (CRn 11 and 15), an encoding with
+    /// no model that the chip's censused components access
+    /// ([`impdef::consumed`]) refuses by name: its consumer expects an
+    /// effect no source defines. One no censused component accesses is
+    /// UNDEFINED, as Arm makes an unallocated encoding: an inference from
+    /// the census, which an M2 enumeration of the space could overturn.
     pub fn apple_access(&mut self, access: RegisterAccess, physical: u64) -> Outcome {
         let encoding = access.encoding();
         if let Some(outcome) = self.reserved_id(access) {
@@ -522,10 +531,15 @@ impl Cpu {
                 }
             };
         }
+        let consumed = impdef::consumed(encoding, self.registers.chip());
         if encoding.crn() == 11 {
-            return Outcome::Refused(Refusal::UnsupportedSetting(
-                "CRn=11 IMPLEMENTATION DEFINED register without a model",
-            ));
+            return if consumed {
+                Outcome::Refused(Refusal::UnsupportedSetting(
+                    "CRn=11 IMPLEMENTATION DEFINED register without a model",
+                ))
+            } else {
+                Outcome::Undefined
+            };
         }
         if super::amx::Unit::owns(encoding) {
             let el = if self.regime() == TranslationRegime::El20 {
@@ -606,7 +620,8 @@ impl Cpu {
             Some(Ok(register)) if read => register.read(self),
             Some(Ok(register)) => register.write(self, value),
             Some(Err(outcome)) => outcome,
-            None => Outcome::Refused(Refusal::Unimplemented),
+            None if consumed => Outcome::Refused(Refusal::Unimplemented),
+            None => Outcome::Undefined,
         }
     }
 

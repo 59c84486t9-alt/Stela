@@ -4444,19 +4444,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// SYS and SYSL: the generated accessor of an architectural System
-    /// instruction. IMPLEMENTATION DEFINED encodings (CRn 11 and 15) stop by
-    /// name: no 26A434 SPTM, TXM or kernelcache of any chip executes one
-    /// (`isa/apple-soc-facts.json` has no `S1_` row), so none has Apple
-    /// semantics to model. Every other encoding is UNDEFINED.
+    /// instruction; every other encoding is UNDEFINED. In the
+    /// IMPLEMENTATION DEFINED space (CRn 11 and 15) HCR_EL2.TIDCP first
+    /// traps EL1 outside the host to EL2, as Arm's accessor for that space
+    /// does (the profile has no FEAT_TIDCP1, so SCTLR_ELx.TIDCP is RES0).
+    /// Its encodings are then UNDEFINED, Arm's behavior for an unallocated
+    /// encoding: no 26A434 SPTM, TXM, kernelcache or system kext of any
+    /// chip executes one (`isa/apple-soc-facts.json` has no `S1_` row), so
+    /// that the chips allocate none is an inference from the census.
     fn maintenance(&mut self, word: u32, access: RegisterAccess) -> Step {
         if let Some(step) = self.system_access(word, access) {
             return step;
         }
-        if matches!(access.encoding().crn(), 11 | 15) {
-            return Err(self.refuse_system(
-                word,
-                "IMPLEMENTATION DEFINED System instruction no censused Apple component executes",
-            ));
+        if matches!(access.encoding().crn(), 11 | 15)
+            && self.cpu.pstate.el == 1
+            && !self.cpu.in_host()
+            && self.cpu.hcr(HCR_TIDCP)
+        {
+            return self.register_outcome(word, Some(access), RegisterOutcome::Trapped(Some(2)));
         }
         self.undefined()
     }
@@ -5171,12 +5176,21 @@ mod tests {
         machine.system_instruction(0xd538_d080).unwrap();
         assert_eq!(machine.cpu.pc, 0x1_0400);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
-        // An IMPDEF register outside the table (S3_5_C15_C15_7) is an
-        // explicit refusal.
-        let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd53d_ffe0) else {
+        // An IMPDEF register no censused component accesses (S3_5_C15_C15_7)
+        // is UNDEFINED, as an unallocated encoding.
+        let unconsumed = Encoding::new(3, 5, 15, 15, 7);
+        assert!(!crate::machine::impdef::consumed(unconsumed, machine.cpu.registers.chip()));
+        machine.system_instruction(0xd53d_ffe0).unwrap();
+        assert_eq!(machine.cpu.pc, 0x1_0200);
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
+        // One the M2's kernelcache accesses without a documented effect, the
+        // JIT box's S3_4_C15_C15_1, refuses by name.
+        let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
+        machine.cpu.set_pstate(Pstate::reset(1));
+        let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd53c_ff20) else {
             panic!("refusal")
         };
-        assert_eq!(requirement.syndrome, Some(0x623f_7c1f));
+        assert_eq!(requirement.syndrome, Some(0x6233_3c1f));
     }
 
     #[test]
@@ -8234,12 +8248,17 @@ mod tests {
     }
 
     #[test]
-    fn sysl_has_no_architectural_accessor_and_refuses_the_implementation_defined_space() {
+    fn sysl_has_no_architectural_accessor_and_the_implementation_defined_space_is_undefined() {
+        const HCR_E2H: u64 = 1 << 34;
         let mut machine = machine(&[]);
         machine
             .cpu
             .registers
             .set(SystemRegister::VBAR_EL1, 0, 0x1_0000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::VBAR_EL2, 0, 0x2_0000);
         // GCSPOPM (SYSL #0, C7, C7, #1) needs FEAT_GCS, and op1 3 CRn 7 has
         // no SYSL: both are UNDEFINED at EL1 and EL0.
         for (el, word) in [(1, 0xd528_7720), (1, 0xd52b_7000), (0, 0xd528_7720)] {
@@ -8254,12 +8273,45 @@ mod tests {
             );
         }
         // CRn 11 and 15 are the IMPLEMENTATION DEFINED space, for SYSL and
-        // SYS (sys #0, C11, C0, #0, x0 and sys #7, C15, C15, #7).
-        for word in [0xd528_b000, 0xd52f_f3e0, 0xd508_b000, 0xd50f_ffff] {
+        // SYS (sysl x0, #0, C11, C0, #0; sysl x0, #7, C15, C15, #7; sys #0,
+        // C11, C0, #0, x0; sys #7, C15, C15, #7). No censused component
+        // executes one, so each is UNDEFINED at EL0, EL1 and EL2.
+        const SPACE: [u32; 4] = [0xd528_b000, 0xd52f_ffe0, 0xd508_b000, 0xd50f_ffff];
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
+        for word in SPACE {
+            for el in [0, 1, 2] {
+                machine.cpu.set_pstate(Pstate::reset(el));
+                machine.cpu.pc = BASE;
+                machine.system_instruction(word).unwrap();
+                let (target, syndrome) = if el == 2 {
+                    (2, SystemRegister::ESR_EL2)
+                } else {
+                    (1, SystemRegister::ESR_EL1)
+                };
+                assert_eq!(machine.cpu.pstate.el, target, "{word:#x} at EL{el}");
+                assert_eq!(
+                    machine.cpu.read(syndrome),
+                    0x0200_0000,
+                    "{word:#x} at EL{el}"
+                );
+            }
+        }
+        // HCR_EL2.TIDCP traps the space from EL1 to EL2 first (EC 0x18).
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HCR_EL2, 0, HCR_E2H | 1 << 20);
+        for word in SPACE {
             machine.cpu.set_pstate(Pstate::reset(1));
             machine.cpu.pc = BASE;
-            assert!(
-                matches!(machine.system_instruction(word), Err(Stop::Unsupported(_))),
+            machine.system_instruction(word).unwrap();
+            assert_eq!(machine.cpu.pstate.el, 2, "{word:#x}");
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL2),
+                0x6200_0000 | u64::from(registers::word_trap_iss(word)),
                 "{word:#x}"
             );
         }
