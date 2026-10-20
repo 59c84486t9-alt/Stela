@@ -252,6 +252,23 @@ impl Chip {
         &[]
     }
 
+    /// The (mask, value) of every form with a variant on this chip whose
+    /// checks are exactly `checks`, for tests covering a class of forms.
+    #[cfg(test)]
+    pub fn forms_checked(self, checks: &[Check]) -> Vec<(u32, u32)> {
+        let bit = 1u8 << self as u8;
+        checks::CHECKS
+            .iter()
+            .flat_map(|group| group.forms.iter().map(move |form| (group.mask, form)))
+            .filter(|(_, form)| {
+                form.variants
+                    .iter()
+                    .any(|variant| variant.chips & bit != 0 && variant.checks == checks)
+            })
+            .map(|(mask, form)| (mask, form.value))
+            .collect()
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|chip| chip.name() == name)
     }

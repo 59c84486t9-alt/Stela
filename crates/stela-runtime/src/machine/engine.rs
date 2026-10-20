@@ -1787,8 +1787,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// An instruction whose FP, SVE and SME access checks the engine
     /// applies before it runs: after a Branch Target exception, the first
     /// check that fails traps. One that passes runs on its own
-    /// ([`scalable`]); scalar FP in streaming mode (whose writes zero the
-    /// upper Z bits) stops explicitly.
+    /// ([`scalable`]), scalar FP in streaming mode as a block that then
+    /// zeroes the upper Z bits it wrote.
     #[cold]
     fn checked_instruction(&mut self, pc: u64, word: u32) -> Step {
         if self.cpu.pstate.btype != 0
@@ -1814,10 +1814,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }));
             }
             Ok(()) if checks.iter().all(|check| *check == Check::Fp) => {
-                return Err(self.unsupported(RequirementKind::Instruction {
-                    word,
-                    detail: "scalar FP in streaming mode, which zeroes the upper Z bits it writes, is not run by the system engine".into(),
-                }));
+                return self.streaming_scalar(pc, word);
             }
             Ok(()) => return self.scalable_instruction(pc, word),
         };
@@ -7719,19 +7716,14 @@ mod tests {
         assert_eq!(taken(&mut machine, 1), trapped(1, 2));
         assert_eq!(taken(&mut machine, 2), trapped(2, 3));
         // In streaming mode AdvSIMD traps as streaming; SVE, the ZA load and
-        // scalar FP pass their checks: the SVE addition runs, the ZA load
-        // from address 0, which has no RAM or device, and scalar FP stop
-        // explicitly.
+        // scalar FP pass their checks (`engine::scalable` runs them): the SVE
+        // addition runs, and the ZA load from address 0, which has no RAM or
+        // device, stops explicitly.
         machine.cpu.set_svcr(true, true).unwrap();
         assert_eq!(taken(&mut machine, 0), trapped(0, 1));
         assert_eq!(run(&mut machine, 1).0, Ok(()));
         assert_eq!(machine.cpu.pc, BASE + 8);
-        for index in 2..4 {
-            assert!(
-                matches!(run(&mut machine, index).0, Err(Stop::Unsupported(_))),
-                "{index}"
-            );
-        }
+        assert!(matches!(run(&mut machine, 2).0, Err(Stop::Unsupported(_))));
         // CPACR_EL1.SMEN clear traps SVE with SMTC 0 before anything else.
         machine
             .cpu

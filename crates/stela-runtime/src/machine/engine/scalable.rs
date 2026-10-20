@@ -13,8 +13,8 @@
 //! needs Arm's FP semantics, is completed in software
 //! ([`Machine::scalable_numerical`]).
 use super::{
-    DeviceError, Devices, FETCH_PAGE, Host, InstallError, Machine, NativeCode, RamTables,
-    RequirementKind, Step, Stop, Translated,
+    DeviceError, Devices, FETCH_PAGE, Fetched, Host, InstallError, Machine, NativeCode, RamTables,
+    RequirementKind, Step, Stop, Translated, Variant,
 };
 use crate::machine::{
     Chip,
@@ -22,8 +22,10 @@ use crate::machine::{
     debug,
     exception::Class,
     mmu::{self, Access, MemoryType, alignment},
+    streaming::{self, VectorDestinations},
     system::Feature,
 };
+use crate::scalable::ScalableState;
 use alloc::{format, string::String, vec::Vec};
 use stela_compiler::{
     GuestAddress, GuestState,
@@ -89,6 +91,67 @@ pub(crate) fn features(chip: Chip) -> ScalableFeatures {
         .fold(ScalableFeatures::empty(), |features, (_, scalable)| {
             features.with(*scalable)
         })
+}
+
+/// MOVPRFX (unpredicated, and predicated with merging or zeroing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Movprfx {
+    destination: u8,
+    source: u8,
+    /// The governing predicate, element bytes and merging.
+    predicated: Option<(u8, usize, bool)>,
+}
+
+impl Movprfx {
+    const UNPREDICATED_MASK: u32 = 0xffff_fc00;
+    const UNPREDICATED: u32 = 0x0420_bc00;
+    const PREDICATED_MASK: u32 = 0xff3e_e000;
+    const PREDICATED: u32 = 0x0410_2000;
+
+    fn decode(word: u32) -> Option<Self> {
+        let (destination, source) = ((word & 0x1f) as u8, ((word >> 5) & 0x1f) as u8);
+        let predicated = if word & Self::UNPREDICATED_MASK == Self::UNPREDICATED {
+            None
+        } else if word & Self::PREDICATED_MASK == Self::PREDICATED {
+            let predicate = ((word >> 10) & 0b111) as u8;
+            Some((predicate, 1 << ((word >> 22) & 0b11), word & 1 << 16 != 0))
+        } else {
+            return None;
+        };
+        Some(Self {
+            destination,
+            source,
+            predicated,
+        })
+    }
+
+    /// Arm's MOVPRFX: Zd = Zn, or for each element its active value,
+    /// keeping (merging) or zeroing the inactive ones.
+    fn apply(self, scalable: &mut ScalableState, state: &mut GuestState) -> anyhow::Result<()> {
+        let mut result = [0u8; STREAMING_VECTOR_BYTES];
+        scalable.read_z(state, self.source, &mut result)?;
+        if let Some((predicate, element, merging)) = self.predicated {
+            let mut mask = [0u8; STREAMING_VECTOR_BYTES / 8];
+            scalable.read_predicate(predicate, &mut mask)?;
+            let mut old = [0u8; STREAMING_VECTOR_BYTES];
+            scalable.read_z(state, self.destination, &mut old)?;
+            for (index, (new, old)) in result
+                .chunks_mut(element)
+                .zip(old.chunks(element))
+                .enumerate()
+            {
+                let bit = index * element;
+                if mask[bit / 8] & 1 << (bit % 8) == 0 {
+                    if merging {
+                        new.copy_from_slice(old);
+                    } else {
+                        new.fill(0);
+                    }
+                }
+            }
+        }
+        scalable.write_z(state, self.destination, &result)
+    }
 }
 
 /// A context leaf's entry: `extended::prepare_leaf`'s two-argument ABI.
@@ -181,6 +244,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(profile) => profile,
             Err(detail) => return refuse(self, &detail),
         };
+        if let Some(prefix) = Movprfx::decode(word) {
+            return self.movprfx(pc, word, prefix);
+        }
         match decode_scalable_numerical_instruction(GuestAddress(pc), word) {
             Ok(Some(instruction)) => return self.scalable_numerical(instruction, profile),
             Ok(None) => {}
@@ -203,6 +269,97 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // for the two-argument context ABI.
         let entry: Entry = unsafe { core::mem::transmute::<usize, Entry>(entry) };
         self.completing(pc, |machine| machine.call_leaf(entry, profile, word))
+    }
+
+    /// MOVPRFX on its own, as Arm permits it to run: the move it is,
+    /// whatever follows (the follower then runs as the next instruction).
+    fn movprfx(&mut self, pc: u64, word: u32, prefix: Movprfx) -> Step {
+        self.completing(pc, |machine| {
+            let Some(scalable) = machine.cpu.scalable.as_mut() else {
+                return Err(machine.unsupported(RequirementKind::Instruction {
+                    word,
+                    detail: "a PE without SME state".into(),
+                }));
+            };
+            if prefix.apply(scalable, &mut machine.cpu.state).is_err() {
+                return Err(machine.unsupported(RequirementKind::Instruction {
+                    word,
+                    detail: "the streaming Z and P registers".into(),
+                }));
+            }
+            machine.statistics.blocks += 1;
+            machine.next()
+        })
+    }
+
+    /// Run the scalar FP or SIMD&FP load or store `word` at `pc` in
+    /// streaming mode: as a one-instruction block of the system-mode
+    /// compiler, compiled apart from the blocks that end before it, after
+    /// which the Z bits above 128 of each register it wrote are zero, as
+    /// Arm's `V[]` makes them. An instruction that took an exception wrote
+    /// none.
+    pub(super) fn streaming_scalar(&mut self, pc: u64, word: u32) -> Step {
+        let Some(VectorDestinations(destinations)) = streaming::vector_destinations(word) else {
+            return Err(self.unsupported(RequirementKind::Instruction {
+                word,
+                detail: "scalar FP in streaming mode whose vector destinations are not known"
+                    .into(),
+            }));
+        };
+        let physical = match self.fetch_physical(pc) {
+            Ok(physical) => physical,
+            Err(Ok(exception)) => {
+                self.cpu.step_advance = false;
+                self.take(exception);
+                return Ok(());
+            }
+            Err(Err(stop)) => return Err(stop),
+        };
+        let variant = Variant {
+            fp: self.floating_point_enabled(),
+            checks: self.memory_checks(),
+            single: true,
+            scalable: None,
+            system: self.native_system(),
+            guarded_page: self.fetch_guarded(pc),
+            timing: self.cpu.pstate.dit && self.timing_target().is_some(),
+        };
+        let index = match self.index.get(&(pc, physical, variant)) {
+            Some(&index) => index,
+            None => match self.compile(pc, physical, variant)? {
+                Fetched::Block(index) => index,
+                Fetched::Exception(exception) => {
+                    self.cpu.step_advance = false;
+                    self.take(exception);
+                    return Ok(());
+                }
+                Fetched::Checked(_) => {
+                    return Err(self.unsupported(RequirementKind::Instruction {
+                        word,
+                        detail: "a streaming scalar FP block that ends before itself".into(),
+                    }));
+                }
+            },
+        };
+        let exceptions = self.statistics.exceptions;
+        self.execute(index, 0)?;
+        if self.statistics.exceptions != exceptions {
+            return Ok(());
+        }
+        let Some(scalable) = self.cpu.scalable.as_mut() else {
+            return Ok(());
+        };
+        let zeroed = destinations.into_iter().flatten().try_for_each(|register| {
+            let value = self.cpu.state.v[usize::from(register)];
+            scalable.write_v(&mut self.cpu.state, register, value)
+        });
+        if zeroed.is_err() {
+            return Err(self.unsupported(RequirementKind::Instruction {
+                word,
+                detail: "the streaming Z registers".into(),
+            }));
+        }
+        Ok(())
     }
 
     /// Complete the numerical floating-point instruction `instruction` in
@@ -575,7 +732,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        NoDevices, Stop,
+        NativeExit, NoDevices, Stop,
         tests::{BASE, FakeHost, machine, normal_memory},
     };
     use super::*;
@@ -729,6 +886,95 @@ mod tests {
                 .all(|lane| lane == 2.0f32.to_bits().to_le_bytes())
         );
         assert_eq!(machine.cpu.pc, BASE + 36);
+    }
+
+    #[test]
+    fn streaming_scalar_fp_runs_as_a_block_and_zeroes_the_upper_z_bits_it_writes() {
+        const FADD_S7: u32 = 0x1e22_2827; // fadd s7, s1, s2
+        const FCMP_S1_S2: u32 = 0x1e22_2020; // fcmp s1, s2
+        let Some(mut machine) = streaming(&[FADD_S7, FCMP_S1_S2]) else {
+            return;
+        };
+        // Z0 to Z7 all ones.
+        let ones = alloc::vec![0xff; STREAMING_VECTOR_BYTES];
+        for register in 0..8 {
+            let scalable = machine.cpu.scalable.as_mut().unwrap();
+            scalable
+                .write_z(&mut machine.cpu.state, register, &ones)
+                .unwrap();
+        }
+        // The unit-test host runs no native block: it reports the
+        // fallthrough the FADD's block takes.
+        let fallthrough = |pc: u64| NativeExit::Exit {
+            next_pc: pc,
+            kind: stela_compiler::block::ExitKind::Fallthrough as u64,
+        };
+        machine.host.exits.push(fallthrough(BASE + 4));
+        assert_eq!(machine.step(), Ok(()));
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        // S7's Z bits above 128 are zero; the other registers keep theirs.
+        let mut upper_zero = ones.clone();
+        upper_zero[16..].fill(0);
+        assert_eq!(z(&machine, 7), upper_zero);
+        assert_eq!(z(&machine, 1), ones);
+        // FCMP writes no vector register.
+        machine.host.exits.push(fallthrough(BASE + 8));
+        assert_eq!(machine.step(), Ok(()));
+        assert_eq!((z(&machine, 1), z(&machine, 2)), (ones.clone(), ones));
+        // Outside streaming mode the FADD is part of an ordinary block.
+        machine.cpu.set_svcr(false, false).unwrap();
+        machine.cpu.pc = BASE;
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+            panic!("an ordinary block")
+        };
+        let map = &machine.blocks[index].source_map;
+        assert_eq!((map[0].0, map[1].0), (BASE, BASE + 4));
+    }
+
+    #[test]
+    fn movprfx_runs_as_its_move_and_its_follower_after_it() {
+        const PTRUE_P1_S_VL2: u32 = 0x2598_e041; // ptrue p1.s, vl2
+        const MOVPRFX_Z3_Z1: u32 = 0x0420_bc23; // movprfx z3, z1
+        const MOVPRFX_Z4_P1Z_Z1: u32 = 0x0490_2424; // movprfx z4.s, p1/z, z1.s
+        const MOVPRFX_Z5_P1M_Z1: u32 = 0x0491_2425; // movprfx z5.s, p1/m, z1.s
+        const MOVPRFX_Z6_Z1: u32 = 0x0420_bc26; // movprfx z6, z1
+        const ADD_Z6_P0M_Z2: u32 = 0x0400_0046; // add z6.b, p0/m, z6.b, z2.b
+        let words = [
+            PTRUE_P0_B,
+            PTRUE_P1_S_VL2,
+            INDEX_Z1_0_1,
+            INDEX_Z2_3_0,
+            MOVPRFX_Z3_Z1,
+            MOVPRFX_Z4_P1Z_Z1,
+            MOVPRFX_Z5_P1M_Z1,
+            MOVPRFX_Z6_Z1,
+            ADD_Z6_P0M_Z2,
+        ];
+        let Some(mut machine) = streaming(&words) else {
+            return;
+        };
+        let ones = alloc::vec![0xff; STREAMING_VECTOR_BYTES];
+        let scalable = machine.cpu.scalable.as_mut().unwrap();
+        for register in [4, 5] {
+            scalable
+                .write_z(&mut machine.cpu.state, register, &ones)
+                .unwrap();
+        }
+        for index in 0..words.len() as u64 {
+            assert_eq!(machine.step(), Ok(()), "{index}");
+            assert_eq!(machine.cpu.pc, BASE + 4 * (index + 1));
+        }
+        let counted: Vec<u8> = (0..STREAMING_VECTOR_BYTES as u8).collect();
+        assert_eq!(z(&machine, 3), counted);
+        // VL2 makes the first two words active.
+        let mut zeroed = counted.clone();
+        zeroed[8..].fill(0);
+        assert_eq!(z(&machine, 4), zeroed);
+        let mut merged = ones.clone();
+        merged[..8].copy_from_slice(&counted[..8]);
+        assert_eq!(z(&machine, 5), merged);
+        let added: Vec<u8> = (3..3 + STREAMING_VECTOR_BYTES as u8).collect();
+        assert_eq!(z(&machine, 6), added);
     }
 
     #[test]

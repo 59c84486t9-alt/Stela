@@ -201,10 +201,141 @@ fn floating_point(cpu: &Cpu) -> Result<(), Denial> {
     }
 }
 
+/// The SIMD&FP registers an instruction whose only access check is
+/// `CheckFPEnabled` writes, in order: Arm's `V[]` and `Vpart[]` setters
+/// zero-extend each write to the vector length, so in streaming mode it
+/// clears the register's Z bits above 128. `None` for a word outside the
+/// classes these forms fall in (FP and SIMD&FP loads and stores, scalar FP
+/// data processing and conversions, AdvSIMD scalar FP estimates and steps,
+/// SMOV and UMOV), which the engine refuses rather than guess.
+pub fn vector_destinations(word: u32) -> Option<VectorDestinations> {
+    const NONE: VectorDestinations = VectorDestinations([None, None]);
+    let bits = |high: u32, low: u32| (word >> low) & ((1 << (high - low + 1)) - 1);
+    let rd = Some(VectorDestinations([Some(bits(4, 0) as u8), None]));
+    let load = bits(22, 22) == 1;
+    // LDR (literal, SIMD&FP); opc 0b11 is unallocated.
+    if word & 0x3f00_0000 == 0x1c00_0000 {
+        return if bits(31, 30) == 0b11 { None } else { rd };
+    }
+    // LDP, STP, LDNP, STNP (SIMD&FP), and LDTP, STTP (SIMD&FP).
+    if word & 0x3e00_0000 == 0x2c00_0000 {
+        return Some(match load {
+            true => VectorDestinations([Some(bits(4, 0) as u8), Some(bits(14, 10) as u8)]),
+            false => NONE,
+        });
+    }
+    // LDR, STR, LDUR, STUR (SIMD&FP): unsigned offset, register offset,
+    // unscaled, post- and pre-index. Bit 22 is the load bit for every size,
+    // the 128-bit forms included.
+    if word & 0x3e00_0000 == 0x3c00_0000 {
+        return match (bits(25, 24), bits(21, 21), bits(11, 10)) {
+            (0b01, _, _) | (0b00, 0, 0b00 | 0b01 | 0b11) | (0b00, 1, 0b10) => {
+                if load {
+                    rd
+                } else {
+                    Some(NONE)
+                }
+            }
+            _ => None,
+        };
+    }
+    // Scalar FP data processing (M 0 S 11110).
+    if word & 0x7f00_0000 == 0x1e00_0000 {
+        if bits(21, 21) == 0 {
+            // Conversion between FP and fixed point: SCVTF and UCVTF write
+            // the register, FCVTZS and FCVTZU a general-purpose one.
+            return match (bits(20, 19), bits(18, 16)) {
+                (0b00, 0b010 | 0b011) => rd,
+                (0b11, 0b000 | 0b001) => Some(NONE),
+                _ => None,
+            };
+        }
+        return match bits(11, 10) {
+            // FCCMP and FCCMPE write NZCV.
+            0b01 => Some(NONE),
+            // Two-source data processing and FCSEL.
+            0b10 | 0b11 => rd,
+            // FMOV (scalar, immediate).
+            _ if bits(12, 10) == 0b100 => rd,
+            // FCMP and FCMPE write NZCV.
+            _ if bits(13, 10) == 0b1000 => Some(NONE),
+            // One-source data processing.
+            _ if bits(14, 10) == 0b1_0000 => rd,
+            _ if bits(15, 10) == 0 => match (bits(20, 19), bits(18, 16)) {
+                // FCVT[NPMZA][SU] and FMOV to a general-purpose register.
+                (_, 0b000 | 0b001 | 0b100 | 0b101) | (0b00 | 0b01, 0b110) => Some(NONE),
+                // SCVTF, UCVTF and FMOV from a general-purpose register,
+                // into the low or (FMOV Vd.D[1]) the high half.
+                (0b00, 0b010 | 0b011) | (0b00 | 0b01, 0b111) => rd,
+                _ => None,
+            },
+            _ => None,
+        };
+    }
+    // FP data processing, three source.
+    if word & 0x7f00_0000 == 0x1f00_0000 {
+        return rd;
+    }
+    // AdvSIMD scalar (01 U 11110): FMULX, FRECPE, FRECPS, FRECPX, FRSQRTE
+    // and FRSQRTS write a scalar register.
+    if word & 0xdf00_0000 == 0x5e00_0000 {
+        return rd;
+    }
+    // SMOV and UMOV write a general-purpose register.
+    if matches!(word & 0xbfe0_fc00, 0x0e00_2c00 | 0x0e00_3c00) {
+        return Some(NONE);
+    }
+    None
+}
+
+/// The SIMD&FP registers an instruction writes ([`vector_destinations`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorDestinations(pub [Option<u8>; 2]);
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::machine::{Chip, exception::Pstate};
+
+    #[test]
+    fn every_scalar_fp_form_of_the_sme_chips_names_its_vector_destinations() {
+        for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            let forms = chip.forms_checked(&[Check::Fp]);
+            assert!(forms.len() > 400, "{chip:?}");
+            let mut checked = 0;
+            for (mask, value) in forms {
+                // Each form with its operand fields filled in 32 ways.
+                let mut seed = value ^ 0x9e37_79b9;
+                for _ in 0..32 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let word = value | (seed & !mask);
+                    if chip.admit(word) != word || chip.checks(word) != [Check::Fp] {
+                        continue;
+                    }
+                    checked += 1;
+                    assert!(vector_destinations(word).is_some(), "{chip:?} {word:#010x}");
+                }
+            }
+            assert!(checked > 1000, "{chip:?} {checked}");
+        }
+        // FADD s7, s1, s2 writes s7; LDP q7, q9, [x0] both; FMOV x7, d1 and
+        // FCMP s1, s2 none; STR q7, [x0] none.
+        for (word, expected) in [
+            (0x1e22_2827, [Some(7), None]),
+            (0xad40_2407, [Some(7), Some(9)]),
+            (0x9e66_0027, [None, None]),
+            (0x1e22_2020, [None, None]),
+            (0x3d80_0007, [None, None]),
+        ] {
+            assert_eq!(
+                vector_destinations(word),
+                Some(VectorDestinations(expected)),
+                "{word:#010x}"
+            );
+        }
+    }
 
     const ENABLED: u64 = 0b11 << SMEN | 0b11 << CPACR_FPEN;
 
