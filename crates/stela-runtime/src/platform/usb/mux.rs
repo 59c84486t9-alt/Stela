@@ -65,6 +65,9 @@ pub struct Mux {
     queued_bytes: usize,
     streams: Vec<Stream>,
     logs: VecDeque<Vec<u8>>,
+    /// TCP packets shorter than a TCP header, which usbmuxd drops
+    /// ("Incoming TCP packet is too small").
+    short_tcp: u64,
 }
 impl Default for Mux {
     fn default() -> Self {
@@ -88,6 +91,7 @@ impl Mux {
             queued_bytes: 0,
             streams: Vec::new(),
             logs: VecDeque::new(),
+            short_tcp: 0,
         };
         let mut version = Vec::new();
         version.extend_from_slice(&2u32.to_be_bytes());
@@ -363,9 +367,14 @@ impl Mux {
         }
         Ok(())
     }
+    /// TCP input as usbmuxd's device_data_input and device_tcp_input take
+    /// it: the data follows a fixed 20-byte header whatever its data offset
+    /// says, and neither the offset nor the urgent pointer is checked. A
+    /// packet shorter than the header is dropped.
     fn input_tcp(&mut self, payload: &[u8]) -> Result<(), &'static str> {
-        if payload.len() < TCP_HEADER || payload[12] != 5 << 4 || payload[18..20] != [0, 0] {
-            return Err("unsupported or truncated usbmux TCP header");
+        if payload.len() < TCP_HEADER {
+            self.short_tcp += 1;
+            return Ok(());
         }
         let source = u16::from_be_bytes(payload[..2].try_into().unwrap());
         let destination = u16::from_be_bytes(payload[2..4].try_into().unwrap());
@@ -405,16 +414,21 @@ impl Mux {
         {
             return Err("usbmux TCP ACK outside sent sequence range");
         }
+        // Flags other than the state's one expected value tear the stream
+        // down with an RST, as usbmuxd's connection_teardown does.
+        let expected = if connecting { SYN | ACK } else { ACK };
+        if flags != expected {
+            let next = stream.next;
+            stream.state = StreamState::Reset;
+            return self.send_tcp(index, RST, next, &[]);
+        }
         if stream.state == StreamState::Connecting {
-            if flags != SYN | ACK || acknowledgement != 1 || sequence != 0 || !data.is_empty() {
+            if acknowledgement != 1 || sequence != 0 || !data.is_empty() {
                 return Err("invalid usbmux SYN-ACK");
             }
             stream.received = 1;
             stream.state = StreamState::Open;
         } else {
-            if flags != ACK {
-                return Err("unsupported usbmux TCP flags; close uses RST");
-            }
             if sequence != stream.received {
                 return Err("out-of-order usbmux TCP byte sequence");
             }
@@ -481,6 +495,38 @@ pub(crate) mod tests {
         mux.receive(&reply).unwrap();
         mux.take_packet();
         (mux, id)
+    }
+    #[test]
+    fn tcp_input_follows_usbmuxd_header_and_flag_handling() {
+        const FIN: u8 = 1;
+        // A packet shorter than a TCP header is dropped, as usbmuxd drops it.
+        let (mut mux, id) = connected();
+        mux.receive(&wire(TCP, &[0; 12], 2)).unwrap();
+        assert_eq!(mux.short_tcp, 1);
+        assert_eq!(mux.state(), State::Active);
+        // The data offset and urgent pointer are not checked: data follows
+        // the fixed 20-byte header.
+        let mut header = tcp_header(62078, id.port, 1, 1, ACK, 256);
+        header[12] = 0;
+        header[18..20].copy_from_slice(&[0, 9]);
+        let mut packet = header.to_vec();
+        packet.extend_from_slice(b"ok");
+        mux.receive(&wire(TCP, &packet, 2)).unwrap();
+        mux.take_packet();
+        let mut read = [0; 2];
+        assert_eq!(mux.read(id, &mut read), Ok(2));
+        assert_eq!(&read, b"ok");
+        // Any flags but ACK on an open stream tear it down with an RST.
+        while mux.take_packet().is_some() {}
+        mux.receive(&wire(
+            TCP,
+            &tcp_header(62078, id.port, 3, 1, FIN | ACK, 256),
+            2,
+        ))
+        .unwrap();
+        let reset = mux.take_packet().unwrap();
+        assert_eq!(reset[MUX2_HEADER + 13], RST);
+        assert_eq!(mux.stream_state(id), Ok(StreamState::Reset));
     }
     #[test]
     fn pinned_wire_vectors_version_setup_syn_and_scaled_window() {
