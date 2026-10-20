@@ -167,15 +167,6 @@ const FILES: &[&str] = &[
     "mkfifoat",
     "mknodat",
     "kqueue",
-    "aio_fsync",
-    "aio_return",
-    "aio_suspend",
-    "aio_suspend_nocancel",
-    "aio_cancel",
-    "aio_error",
-    "aio_read",
-    "aio_write",
-    "lio_listio",
 ];
 
 /// Sockets and networking, with Skywalk nexus controllers and channels,

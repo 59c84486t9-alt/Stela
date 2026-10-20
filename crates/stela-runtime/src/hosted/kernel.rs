@@ -131,6 +131,8 @@ pub(super) struct Process {
     pub(super) exception_ports: mach::exception::ExceptionPorts,
     /// The debug state new threads take (`task_debug`), once set.
     pub(super) task_debug: Mutex<Option<Vec<u32>>>,
+    /// Its asynchronous I/O queues and workers.
+    pub(super) aio: Arc<bsd::aio::Aio>,
 }
 
 /// One `task_restartable_range_t`: location, length, recovery offset and
@@ -252,6 +254,7 @@ impl Process {
             workloops: Default::default(),
             actions: Mutex::new(bsd::signal::Actions::inherit()),
             files: bsd::files::Files::inherit(),
+            aio: Arc::default(),
             signal_slots: Default::default(),
             map_with_linking_ended: AtomicBool::new(false),
             signatures: Default::default(),

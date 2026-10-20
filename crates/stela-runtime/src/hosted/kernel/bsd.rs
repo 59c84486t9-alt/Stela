@@ -16,6 +16,7 @@ use crate::machine::system::Register;
 use anyhow::{Result, anyhow, bail};
 
 pub(super) mod additions;
+pub(super) mod aio;
 mod codesign;
 pub(super) mod files;
 mod fork;
@@ -226,6 +227,7 @@ pub(crate) enum Family {
     Signals,
     System,
     Files,
+    AsynchronousIo,
     Additions,
 }
 
@@ -243,6 +245,7 @@ impl Family {
             Self::Signals => "signals",
             Self::System => "system",
             Self::Files => "descriptor table",
+            Self::AsynchronousIo => "asynchronous I/O",
             Self::Additions => "26A434 additions",
         }
     }
@@ -260,6 +263,7 @@ const MODELED: &[(Family, &[&str])] = &[
     (Family::Signals, signal::CALLS),
     (Family::System, system::CALLS),
     (Family::Files, files::CALLS),
+    (Family::AsynchronousIo, aio::CALLS),
 ];
 
 /// The family servicing the call `name`, or `None` for a call the hosted
@@ -280,6 +284,8 @@ pub(crate) fn family(name: &str) -> Option<Family> {
 pub(crate) fn overlay(name: &str) -> Option<&'static str> {
     if signatures::CALLS.contains(&name) {
         Some(signatures::OVERLAY)
+    } else if aio::CLOSING.contains(&name) {
+        Some(aio::OVERLAY)
     } else if paths::overlays(name) {
         Some(paths::OVERLAY)
     } else {
@@ -332,6 +338,7 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let name = call.entry.name;
     let gated = files::gated(call).then(|| kernel.process.clone());
     let _gate = gated.as_ref().map(|process| process.files.gate());
+    aio::closing(kernel, call);
     if let Some(outcome) = paths::call(kernel, call)? {
         return Ok(outcome);
     }
@@ -350,6 +357,7 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         Some(Family::Signals) => signal::call(kernel, pe, call)?,
         Some(Family::System) => system::call(kernel, call)?,
         Some(Family::Files) => files::call(kernel, call)?,
+        Some(Family::AsynchronousIo) => aio::call(kernel, call)?,
         // The additions have no catalog row: [`call`] dispatches them by
         // number.
         Some(Family::Additions) | None => None,

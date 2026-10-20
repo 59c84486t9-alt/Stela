@@ -32,7 +32,8 @@
 //! - `register_uexc_handler(start, size, handler, refcon)` fails with EPERM
 //!   unless the kernel booted with `-enable_uexc`; then the caller also needs
 //!   the `com.apple.private.uexc` entitlement.
-//! - `aio_readv(aiocb)` and `aio_writev(aiocb)` queue one vectored request.
+//! - `aio_readv(aiocb)` and `aio_writev(aiocb)` queue one vectored request
+//!   of the process's asynchronous I/O ([`super::aio`]).
 use super::{EFAULT, EINVAL, EPERM, Kernel, Outcome, Pe, files};
 use crate::darwin::BsdReturnType;
 use crate::hosted::forward;
@@ -60,6 +61,8 @@ pub(crate) const CALLS: &[&str] = &[
     "fsctlat",
     "guarded_ftruncate_np",
     "register_uexc_handler",
+    "aio_readv",
+    "aio_writev",
 ];
 
 /// Additions serviced with a named limit: what of the arm64 kernel's
@@ -90,11 +93,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
 /// Why an addition [`call`] does not service stops the run.
 pub(crate) const UNIMPLEMENTED: &str =
     "a 26A434 addition at a number the pinned catalog reserves: not implemented";
-
-/// Why vectored AIO stops the run.
-const VECTORED_AIO: &str = "a vectored request must complete under the forwarded aio_error, \
-     aio_return, aio_suspend and aio_cancel, and the host's AIO queue tracks each aiocb itself \
-     and takes no iovec list";
 
 /// The addition at `number`, if any.
 pub(crate) fn addition(number: u16) -> Option<&'static str> {
@@ -127,6 +125,7 @@ pub(super) fn call(
         }
         "dup3" => {
             let _gate = kernel.process.files.gate();
+            super::aio::duplicating(kernel, fd(arguments[0]), fd(arguments[1]));
             kernel.exclusive(|| dup3(fd(arguments[0]), fd(arguments[1]), arguments[2] as u32))
         }
         "getumask" => Ok(Outcome::value(kernel.process.files.mask())),
@@ -160,7 +159,11 @@ pub(super) fn call(
             ))
         }
         "register_uexc_handler" => register_uexc_handler(),
-        "aio_readv" | "aio_writev" => Err(Refusal(VECTORED_AIO)),
+        "aio_readv" | "aio_writev" => Ok(super::aio::vectored(
+            kernel,
+            arguments[0],
+            name == "aio_writev",
+        )?),
         _ => Err(Refusal(UNIMPLEMENTED)),
     };
     match serviced {
@@ -395,7 +398,7 @@ fn fsctlat(
 /// attributes are its own, so replacing each valid attribute set with
 /// itself finds the match and changes nothing: the descriptor flags it
 /// rewrites follow `GUARD_CLOSE`, which the replacement keeps.
-fn guard_matches(fd: i32, guard: u64) -> std::result::Result<(), u64> {
+pub(super) fn guard_matches(fd: i32, guard: u64) -> std::result::Result<(), u64> {
     let guard = guard.to_le_bytes();
     let pointer = guard.as_ptr() as u64;
     for set in 0..1u64 << GUARD_OPTIONAL.len() {
@@ -830,7 +833,5 @@ mod tests {
         if !enables_uexc(&boot_arguments()) {
             assert_eq!(register_uexc_handler(), Ok(Outcome::Error(EPERM)));
         }
-        assert!(LIMITS.iter().all(|(call, _)| !call.starts_with("aio_")));
-        assert!(!CALLS.contains(&"aio_readv"));
     }
 }

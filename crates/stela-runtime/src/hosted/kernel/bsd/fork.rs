@@ -73,6 +73,7 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             let workqueue = process.workqueue.hold_for_fork()?;
             let kqworkq = process.kqworkq.hold_for_fork()?;
             let workloops = process.workloops.hold_for_fork()?;
+            let aio = process.aio.hold_for_fork()?;
             let task = (
                 try_lock(&process.task_debug)?,
                 process.exception_ports.hold_for_fork()?,
@@ -82,10 +83,11 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
                 None => None,
             };
             Some((
-                runtime, others, workqueue, kqworkq, workloops, task, control,
+                runtime, others, workqueue, kqworkq, workloops, aio, task, control,
             ))
         })();
-        let Some((runtime, others, workqueue, kqworkq, workloops, task, held_control)) = held
+        let Some((runtime, others, workqueue, kqworkq, workloops, mut aio, task, held_control)) =
+            held
         else {
             std::thread::yield_now();
             continue;
@@ -108,6 +110,9 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             workqueue.child();
             kqworkq.child();
             workloops.child();
+            // The child has no asynchronous I/O (`forkproc`).
+            process.aio.fork_child(&mut aio);
+            drop(aio);
             // The child's task has no debug state of its own
             // (`machine_task_init`) and inherits the exception actions
             // its host task holds.
@@ -138,6 +143,7 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
                 workqueue,
                 kqworkq,
                 workloops,
+                aio,
                 task,
                 held_control,
             ));

@@ -12,10 +12,12 @@
 //! The three layouts that carry timers: `struct kevent` (`kevent`, no
 //! `ext`), `struct kevent64_s` (`kevent64`) and `struct kevent_qos_s`
 //! (`kevent_qos`, `kevent_id`).
+use super::aio::{Aio, Rewrite};
 use super::kqworkq::{EV_ERROR, Kevent};
 use super::{Call, EFAULT, Kernel, Outcome};
 use crate::hosted::{host, memory};
 use anyhow::Result;
+use std::sync::Arc;
 
 const EVFILT_TIMER: i16 = -7;
 const NOTE_SECONDS: u32 = 0x1;
@@ -26,14 +28,19 @@ const NOTE_LEEWAY: u32 = 0x10;
 const NOTE_MACHTIME: u32 = 0x100;
 const UNITS: u32 = NOTE_SECONDS | NOTE_USECONDS | NOTE_NSECONDS | NOTE_MACHTIME;
 
-/// Where a layout keeps the fields a timer converts.
+/// Where a layout keeps the fields a timer converts and a kernel knote
+/// fills; every layout starts with ident, filter and flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Layout {
-    size: usize,
+    pub(super) size: usize,
     fflags: usize,
     data: usize,
     /// `ext[1]`, absent from `struct kevent`.
     leeway: Option<usize>,
+    /// `ext[0]` and how many `ext` words follow it.
+    ext: Option<(usize, usize)>,
+    /// `qos` and `xflags`, which only `struct kevent_qos_s` has.
+    qos: Option<(usize, usize)>,
 }
 
 /// `struct kevent`: ident, filter, flags, fflags, data, udata.
@@ -42,13 +49,17 @@ const KEVENT: Layout = Layout {
     fflags: 12,
     data: 16,
     leeway: None,
+    ext: None,
+    qos: None,
 };
 /// `struct kevent64_s`: then `ext[2]`.
-const KEVENT64: Layout = Layout {
+pub(super) const KEVENT64: Layout = Layout {
     size: 48,
     fflags: 12,
     data: 16,
     leeway: Some(40),
+    ext: Some((32, 2)),
+    qos: None,
 };
 /// `struct kevent_qos_s`: ident, filter, flags, qos, udata, fflags,
 /// xflags, data, `ext[4]`.
@@ -57,7 +68,39 @@ pub(super) const KEVENT_QOS: Layout = Layout {
     fflags: 24,
     data: 32,
     leeway: Some(48),
+    ext: Some((40, 4)),
+    qos: Some((12, 28)),
 };
+
+impl Layout {
+    /// Fill the event `bytes` as `knote_fill_kevent` does for a kernel
+    /// knote of `filter` on `ident` whose state is `fflags` and `ext`
+    /// (the rest of `ext`, `data`, `qos` and `xflags` zero), keeping its
+    /// flags and user data.
+    pub(super) fn fill_kernel_event(
+        self,
+        bytes: &mut [u8],
+        ident: u64,
+        filter: i16,
+        fflags: u32,
+        ext: [u64; 2],
+    ) {
+        bytes[..8].copy_from_slice(&ident.to_le_bytes());
+        bytes[8..10].copy_from_slice(&filter.to_le_bytes());
+        bytes[self.fflags..self.fflags + 4].copy_from_slice(&fflags.to_le_bytes());
+        bytes[self.data..self.data + 8].fill(0);
+        if let Some((at, words)) = self.ext {
+            bytes[at..at + words * 8].fill(0);
+            for (index, word) in ext.iter().enumerate() {
+                bytes[at + index * 8..at + index * 8 + 8].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        if let Some((qos, xflags)) = self.qos {
+            bytes[qos..qos + 4].fill(0);
+            bytes[xflags..xflags + 4].fill(0);
+        }
+    }
+}
 
 /// Host nanoseconds for guest counter `ticks`, rounded up, saturating at
 /// `limit`.
@@ -131,15 +174,31 @@ fn filter_and_flags(bytes: &[u8]) -> (i16, u16) {
     )
 }
 
-/// A host copy of the `count` changes at `changes` with their timers
-/// converted, or `None` when none needs it (or the list is unreadable,
+/// A host copy of the `count` changes at `changes` to the kqueue `kqueue`
+/// with their timers converted and their asynchronous I/O knotes
+/// rewritten ([`Aio::change_to_host`], whose rewrites it adds to
+/// `rewrites`), or `None` when none needs it (or the list is unreadable,
 /// which the host's copy-in reports at the same change).
-fn host_changes(layout: Layout, changes: u64, count: i64) -> Option<Vec<u8>> {
+fn host_changes(
+    layout: Layout,
+    kqueue: i32,
+    changes: u64,
+    count: i64,
+    aio: &Aio,
+    rewrites: &mut Vec<Rewrite>,
+) -> Option<Vec<u8>> {
     let count = usize::try_from(count).ok().filter(|&count| count > 0)?;
     let mut list = memory::read(changes, count.checked_mul(layout.size)?)?;
     let mut converted = false;
     for entry in list.chunks_exact_mut(layout.size) {
-        let (filter, _) = filter_and_flags(entry);
+        let (filter, flags) = filter_and_flags(entry);
+        if let Some(rewrite) = aio.change_to_host(kqueue, field(entry, 0), filter, flags) {
+            entry[..8].copy_from_slice(&rewrite.host.0.to_le_bytes());
+            entry[8..10].copy_from_slice(&rewrite.host.1.to_le_bytes());
+            rewrites.push(rewrite);
+            converted = true;
+            continue;
+        }
         let fflags =
             u32::from_le_bytes(entry[layout.fflags..layout.fflags + 4].try_into().unwrap());
         let data = field(entry, layout.data) as i64;
@@ -185,10 +244,15 @@ fn events_to_guest(layout: Layout, events: u64, count: u64) -> bool {
 /// for the host only when a timer needs it; an `EV_ERROR` result then
 /// echoes the host's copy, whose leeway is converted back.
 pub(super) fn kevent(kernel: &mut Kernel, call: &Call, layout: Layout) -> Result<Outcome> {
+    let aio = Arc::clone(&kernel.process.aio);
+    let mut rewrites = Vec::new();
     let changes = host_changes(
         layout,
+        call.argument(0) as u32 as i32,
         call.argument(1),
         call.argument(2) as u32 as i32 as i64,
+        &aio,
+        &mut rewrites,
     );
     let mut host_call = Call {
         entry: call.entry,
@@ -199,7 +263,8 @@ pub(super) fn kevent(kernel: &mut Kernel, call: &Call, layout: Layout) -> Result
     }
     let outcome = super::forward(kernel, &host_call)?;
     if let Outcome::Return(count, _) = outcome
-        && !events_to_guest(layout, call.argument(3), count)
+        && !(events_to_guest(layout, call.argument(3), count)
+            && aio.events_to_guest(layout, call.argument(3), count, &rewrites))
     {
         return Ok(Outcome::Error(EFAULT));
     }
@@ -285,7 +350,18 @@ mod tests {
         change[12..16].copy_from_slice(&(NOTE_MACHTIME | NOTE_LEEWAY).to_le_bytes());
         change[16..24].copy_from_slice(&2400i64.to_le_bytes());
         change[40..48].copy_from_slice(&24u64.to_le_bytes());
-        let list = host_changes(KEVENT64, change.as_ptr() as u64, 1).unwrap();
+        let mut rewrites = Vec::new();
+        let aio = Aio::default();
+        let list = host_changes(
+            KEVENT64,
+            queue,
+            change.as_ptr() as u64,
+            1,
+            &aio,
+            &mut rewrites,
+        )
+        .unwrap();
+        assert!(rewrites.is_empty());
         assert_eq!(field(&list, 16), 100_000);
         assert_eq!(field(&list, 40), 1000);
         let mut event = [0u8; 48];

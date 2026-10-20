@@ -566,6 +566,8 @@ fn enter<F>(
     let ending = match outcome {
         Ok(None) => false,
         Ok(Some(termination)) => {
+            // `proc_exit` first ends the process's asynchronous I/O.
+            process.aio.exit();
             process.runtime.end(id, Ok(termination));
             true
         }
@@ -578,6 +580,7 @@ fn enter<F>(
     // (`thread_terminate_self`, `proc_exit`), with the status no `exit`
     // set.
     if process.runtime.registry.remove(id) && !ending {
+        process.aio.exit();
         process.runtime.end(id, Ok(Termination::Exited(0)));
     }
 }
