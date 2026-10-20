@@ -10,9 +10,9 @@
 //! restores the medium onto the target with Apple's stock restore options
 //! (`stela.efi --install`), and an Update macOS (Stela) choice that
 //! restores its Update identity over the installed system, keeping its data
-//! (`--update-restore`). "macOS (Stela)" then boots the result. The restore personalizes the
-//! recoveryOS LocalPolicy with Apple's signing server, so `--target` needs
-//! `--tss`.
+//! (`--update-restore`). "macOS (Stela)" then boots the result. The restore personalizes its
+//! root tickets and the recoveryOS LocalPolicy with Apple's signing server, so
+//! `--target` needs `--tss`.
 //!
 //! One command checks the USB and the restore image without writing
 //! anything, prepares the recoveryOS boot bundle (`stela boot prepare
@@ -182,8 +182,9 @@ pub(crate) struct Setup {
     /// another one. Its LocalPolicy and SEP state are then orphaned.
     #[arg(long)]
     new_ecid: bool,
-    /// Opt in to Apple's signing server: the restore host may send the
-    /// machine's ECID and component hashes to gs.apple.com for the
+    /// Opt in to Apple's signing server: the restore host sends the
+    /// machine's ECID, the restore's nonces and the build's component hashes
+    /// to gs.apple.com for the restore's personalized root tickets and the
     /// recoveryOS LocalPolicy. Off by default; on an existing setup it turns
     /// the opt-in on.
     #[arg(long, conflicts_with = "no_tss")]
@@ -1626,8 +1627,9 @@ fn apply_install(
 
 /// Why `--target` needs `--tss`.
 const TSS_REQUIRED: &str = "installing macOS onto --target needs --tss: the restore \
-    personalizes the recoveryOS LocalPolicy with Apple's signing server (gs.apple.com), which \
-    receives this machine's ECID and its boot components' hashes. Add --tss to opt in.";
+    personalizes its root tickets and the recoveryOS LocalPolicy with Apple's signing server \
+    (gs.apple.com), which receives this machine's ECID, the restore's nonces and its boot \
+    components' hashes. Add --tss to opt in.";
 
 /// The checks' result: everything setup will write, and where.
 struct Plan {
@@ -1834,9 +1836,10 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
 
 /// What the Apple signing server opt-in sends.
 fn tss_note() -> String {
-    "TSS opt-in (--tss): the restore host may send this machine's ECID and its boot \
-     components' hashes to Apple's signing server (gs.apple.com) for the recoveryOS \
-     LocalPolicy; `stela setup --no-tss` turns it off."
+    "TSS opt-in (--tss): the restore host sends this machine's ECID, the restore's nonces \
+     and its boot components' hashes to Apple's signing server (gs.apple.com) for the \
+     restore's root tickets and the recoveryOS LocalPolicy; `stela setup --no-tss` turns it \
+     off."
         .into()
 }
 
