@@ -24,9 +24,11 @@
 //! the dashboard signal it lacks ([`Family::dashboard_signals`]), and G14X,
 //! whose kext and firmware keep the same protocol with its own initdata
 //! magic, shared-object offsets ([`Layout`]), identification words and GPC
-//! block (docs/research/agx.md §6). Every other family is named here with the
-//! facts recovered so far and stays hidden by the loader, its refusal naming
-//! what is missing.
+//! block (docs/research/agx.md §6), and G15G, which keeps G14X's protocol
+//! with its own initdata magic and three shared offsets. Every other family
+//! is named here with the facts recovered so far and stays hidden by the
+//! loader, its refusal naming what is missing. A modeled family's GPU is
+//! admitted only with an identification a source states ([`Gpu::identity`]).
 
 use super::sgx::Identity;
 
@@ -99,6 +101,23 @@ const G14X_LAYOUT: Layout = Layout {
     riart_t_disabled: 0x1240,
 };
 
+/// The G15G interface (`armfw_g15g` c000: the dispatcher at
+/// 0xfffffc00000039ac and its tail at 0xfffffc0000005290, 0xe at
+/// 0xfffffc0000004030, 0x14 at 0xfffffc0000004b84, the histogram byte at
+/// 0xfffffc0000003b4c and 0xfffffc0000005270, 0x32 at 0xfffffc0000003f44, 0x34
+/// at 0xfffffc0000004abc and 0x35 at 0xfffffc0000004cd0; the root's objects
+/// held in the globals it copies them to at 0xfffffc00000364c8..). G14X's
+/// shared objects and offsets, except the histogram enables, four bytes
+/// higher, and the RIART words, packed at +0xe35 and +0xe39 of the root's
+/// +0x20 object; after storing one, the firmware also reprograms its own
+/// registers (0xfffffc000002d108), which the AP does not share.
+const G15G_LAYOUT: Layout = Layout {
+    histogram_enables: 0x3d8,
+    riart_u_levels_disabled: 0xe35,
+    riart_t_disabled: 0xe39,
+    ..G14X_LAYOUT
+};
+
 /// What the models need of a family they implement.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
@@ -129,6 +148,13 @@ const G14X_MODEL: Model = Model {
     gpc: 0xe0_1000,
     uat_output_bits: 42,
     layout: G14X_LAYOUT,
+};
+/// G15G reads its identification and GPC block as G14X does (the same
+/// `readGFXReg32`/`writeGFXReg32` callers and offsets), and its boards place
+/// DRAM at 1 TiB (`/chosen` `dram-base` 0x100_0000_0000 on J504AP).
+const G15G_MODEL: Model = Model {
+    layout: G15G_LAYOUT,
+    ..G14X_MODEL
 };
 
 /// The MMU block's layout (`setupMMUConfig`, `invalidateGPUTTBACache`).
@@ -308,7 +334,7 @@ pub const G15G: Family = Family {
     mmu: g14_mmu(28),
     initdata_magic: Some(0x0c8a_636f_0394_04b8),
     dashboard_signals: false,
-    interface: Interface::Unrecovered(NOT_CHECKED),
+    interface: Interface::Modeled(&G15G_MODEL),
 };
 pub const G15S: Family = Family {
     name: "G15S",
@@ -591,8 +617,14 @@ mod tests {
         );
         assert_eq!(by_chip(0x8112).unwrap().admitted(), Ok(T8112));
         assert_eq!(by_chip(0x6022).unwrap().admitted(), Ok(T6022));
-        assert_eq!(by_chip(0x8122).unwrap().admitted(), Err(NOT_CHECKED));
-        assert_eq!(G15G.model(), Err(NOT_CHECKED));
+        // G15G's interface is modeled; no source states an M3's
+        // identification words, so its GPU stays hidden.
+        assert_eq!(G15G.model(), Ok(&G15G_MODEL));
+        assert_eq!(
+            by_chip(0x8122).unwrap().admitted(),
+            Err("no source states the GPU's identification registers")
+        );
+        assert_eq!(G15S.model(), Err(NOT_CHECKED));
         assert!(by_chip(0x9999).is_none());
         // M1 Pro, Max and Ultra share one compatible, admitted as a whole.
         assert!(compatible_admitted("gpu,t6000"));

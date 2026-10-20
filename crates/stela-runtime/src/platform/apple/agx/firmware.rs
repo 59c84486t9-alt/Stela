@@ -1364,6 +1364,37 @@ mod tests {
     }
 
     #[test]
+    fn g15g_device_control_writes_its_own_offsets() {
+        use crate::platform::apple::agx::generation::G15G;
+        let mut mask = of_type(0x34);
+        mask[4..8].copy_from_slice(&0x6u32.to_le_bytes());
+        let mut disabled = of_type(0x35);
+        disabled[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let mut enable = filled(0x1a, 8..9, 3);
+        enable[4] = 2;
+        let (mut state, mut memory) = with_device_control_on(&G15G, &[]).unwrap();
+        for (n, entry) in [of_type(0x32), mask, disabled, enable].iter().enumerate() {
+            memory.put(CONTROL_ENTRIES + n as u64 * 0x40, entry);
+        }
+        memory.put_u32(CONTROL_STATE + WRITE, 4);
+        memory.put_u32(OBJECT_928 + 0xcfc0, 3);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(memory.read_u32(OBJECT_928 + 0xcfc0), Ok(0));
+        // The RIART words are packed at +0xe35 and +0xe39.
+        assert_eq!(memory.read_u32(OBJECT_358 + 0xe35), Ok(6));
+        assert_eq!(memory.read_u32(OBJECT_358 + 0xe39), Ok(1));
+        assert_eq!(memory.read_u32(OBJECT_358 + 0x123c), Ok(0));
+        // The histogram enables sit four bytes above G14X's.
+        let mut bits = [0];
+        memory.read(RINGS + 0x3d8, &mut bits).unwrap();
+        assert_eq!(bits, [0b100]);
+        memory.read(RINGS + 0x3d4, &mut bits).unwrap();
+        assert_eq!(bits, [0]);
+        // 0x32, 0x34 and 0x35 are counted at G14X's offset; 0x1a is not.
+        assert_eq!(memory.read_u32(OBJECT_928 + 0xedc8), Ok(3));
+    }
+
+    #[test]
     fn a_shared_event_signal_completes_and_posts_its_events() {
         use crate::platform::apple::agx::event::Event;
         use crate::platform::apple::agx::event::tests::{EVENT_STATE, entry, event_ring};
