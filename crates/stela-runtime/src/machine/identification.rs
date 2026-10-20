@@ -139,6 +139,10 @@ const fn fixed(register: Encoding, shift: u8, level: u64, reason: &'static str) 
     row(register, shift, level, 0, None, Basis::Engine(true, reason))
 }
 
+/// ID_AA64DFR0_EL1.BRPs and WRPs, the breakpoint and watchpoint counts less
+/// one.
+const DFR0_BRPS: u8 = 12;
+const DFR0_WRPS: u8 = 20;
 /// ID_AA64PFR1_EL1.MTE, the memory tagging level.
 const PFR1_MTE: u8 = 8;
 /// ID_AA64PFR1_EL1.MTE_frac, the asynchronous Tag Check fault support.
@@ -1132,13 +1136,13 @@ pub const TABLE: &[Row] = &[
     fixed(ID_AA64DFR0_EL1, 0, 0b1001, "self-hosted debug of Armv8.4"),
     fixed(
         ID_AA64DFR0_EL1,
-        12,
+        DFR0_BRPS,
         super::debug::BREAKPOINTS - 1,
         "breakpoints (machine::debug::BREAKPOINTS)",
     ),
     fixed(
         ID_AA64DFR0_EL1,
-        20,
+        DFR0_WRPS,
         super::debug::WATCHPOINTS - 1,
         "watchpoints (machine::debug::WATCHPOINTS)",
     ),
@@ -1318,18 +1322,38 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Specu
     }
 }
 
-/// Whether `chip`'s profile implements memory tagging: the ID_AA64PFR1_EL1.MTE
-/// field [`derive`] presents is nonzero. Its rows are engine properties, so
-/// the value is the same on every host target and kernel level; the hosted
-/// machine description (`hosted::hardware`) reports it from here.
+/// The level [`derive`] presents in `register`'s field at `shift` on `chip`,
+/// for a field whose rows are all engine properties: the same on every host
+/// target and kernel level. The hosted machine description
+/// (`hosted::hardware`) reports such fields from here.
+fn engine_field(chip: Chip, register: Encoding, shift: u8) -> u64 {
+    let rows = || {
+        TABLE
+            .iter()
+            .filter(move |row| row.register == register && row.shift == shift)
+    };
+    debug_assert!(rows().all(|row| matches!(row.basis, Basis::Engine(..))));
+    rows()
+        .filter(|row| row.feature.is_none_or(|feature| has(chip, feature)))
+        .filter(|row| matches!(row.basis, Basis::Engine(true, _)))
+        .fold(rows().next().map_or(0, |row| row.absent), |level, row| {
+            level.max(row.level)
+        })
+}
+
+/// Whether `chip`'s profile implements memory tagging: ID_AA64PFR1_EL1.MTE
+/// is nonzero.
 pub fn memory_tagging(chip: Chip) -> bool {
-    TABLE.iter().any(|row| {
-        row.register == ID_AA64PFR1_EL1
-            && row.shift == PFR1_MTE
-            && row.level != 0
-            && row.feature.is_none_or(|feature| has(chip, feature))
-            && matches!(row.basis, Basis::Engine(true, _))
-    })
+    engine_field(chip, ID_AA64PFR1_EL1, PFR1_MTE) != 0
+}
+
+/// The breakpoint and watchpoint counts `chip`'s profile presents:
+/// ID_AA64DFR0_EL1.BRPs and WRPs plus one.
+pub fn breakpoints_and_watchpoints(chip: Chip) -> (u64, u64) {
+    (
+        engine_field(chip, ID_AA64DFR0_EL1, DFR0_BRPS) + 1,
+        engine_field(chip, ID_AA64DFR0_EL1, DFR0_WRPS) + 1,
+    )
 }
 
 /// Every register of [`REGISTERS`] with its value for `chip` on this host
@@ -1743,6 +1767,13 @@ mod tests {
             let mte = matches!(chip, Chip::AppleM5 | Chip::AppleM6);
             assert_eq!(field(chip, ID_AA64PFR1_EL1, 8), 2 * u64::from(mte));
             assert_eq!(memory_tagging(chip), mte, "{chip:?}");
+            assert_eq!(
+                breakpoints_and_watchpoints(chip),
+                (
+                    field(chip, ID_AA64DFR0_EL1, DFR0_BRPS.into()) + 1,
+                    field(chip, ID_AA64DFR0_EL1, DFR0_WRPS.into()) + 1
+                )
+            );
             assert_eq!(field(chip, ID_AA64PFR1_EL1, 40), 0xf * u64::from(mte));
             assert_eq!(field(chip, CTR_EL0, 32), 4 * u64::from(mte));
             assert_eq!(field(chip, GMID_EL1, 0), 4 * u64::from(mte));
