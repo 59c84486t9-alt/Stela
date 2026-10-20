@@ -1420,10 +1420,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 output::fatal("the guest network could not be opened")
             })
         });
+        // A missing network is reported here and refused only by what
+        // needs it, so the mount still boots and logs how far it gets.
         let network = wants_network.then(|| {
-            network::HostNetwork::open(links, storage_handoff.clock).unwrap_or_else(|error| {
-                output::arguments(format_args!("host network refusal: {error}\n"));
-                output::fatal("the host network could not be opened")
+            network::HostNetwork::open(links, storage_handoff.clock).inspect_err(|error| {
+                output::arguments(format_args!("host network refusal: {error}\n"))
             })
         });
         (
@@ -1436,7 +1437,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         )
     };
     let mut host_network = host_network;
-    if let (Some(url), Some(network)) = (&options.network_check, host_network.as_mut()) {
+    if let Some(url) = &options.network_check {
+        let Some(Ok(network)) = host_network.as_mut() else {
+            output::fatal("the network check failed")
+        };
         let (host, path) = network::split_url(url).unwrap_or_else(|error| output::fatal(error));
         // Any HTTP status proves the path end to end; only a transport
         // failure (link, DHCP, DNS, TCP, malformed reply) fails the check.
@@ -1786,9 +1790,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             stela_runtime::restore::tss::Signer {
                 ecid,
                 nonces,
-                transport: alloc::boxed::Box::new(
-                    host_network.take().expect("--tss opens the host network"),
-                ),
+                transport: match host_network.take().expect("--tss opens the host network") {
+                    Ok(network) => alloc::boxed::Box::new(network),
+                    Err(reason) => alloc::boxed::Box::new(network::Offline(reason)),
+                },
             }
         });
         let mode = match (&options.install, options.update_restore) {

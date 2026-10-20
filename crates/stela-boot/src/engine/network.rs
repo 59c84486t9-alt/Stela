@@ -57,7 +57,7 @@ pub struct HostNetwork {
 
 impl HostNetwork {
     /// The first adapter, configured by DHCP now so that a missing network
-    /// fails at mount start rather than in the middle of a restore.
+    /// is reported at mount start rather than in the middle of a restore.
     pub fn open(links: Links, clock: pc::Clock) -> Result<Self, String> {
         let Some(device) = links.devices.into_iter().next() else {
             return Err(String::from(
@@ -119,6 +119,26 @@ impl stela_runtime::restore::tss::Transport for HostNetwork {
     ) -> stela_runtime::restore::Result<Vec<u8>> {
         HostNetwork::post(self, host, path, content_type, body)
             .map_err(|error| stela_runtime::restore::Error::Transport(format!("{error}")))
+    }
+}
+
+/// The signing transport when the host network did not open: every request
+/// is refused with the reason, so a restore stops at its first signing
+/// request.
+pub struct Offline(pub String);
+
+impl stela_runtime::restore::tss::Transport for Offline {
+    fn post(
+        &mut self,
+        host: &str,
+        path: &str,
+        _content_type: &str,
+        _body: &[u8],
+    ) -> stela_runtime::restore::Result<Vec<u8>> {
+        Err(stela_runtime::restore::Error::Transport(format!(
+            "no host network for http://{host}{path}: {}",
+            self.0
+        )))
     }
 }
 
