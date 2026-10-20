@@ -38898,7 +38898,7 @@ fn a718(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     }
     if !({
         let v = m;
-        (v & 0x0) == 0x0 || (v & 0x0) == 0x0 || (v & 0x0) == 0x0
+        v == 0u64 || v == 2u64 || v == 3u64
     }) {
         return Ok(Effect::Undefined);
     }
@@ -38948,7 +38948,7 @@ fn a719(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
     }
     if !({
         let v = m;
-        (v & 0x0) == 0x0 || (v & 0x0) == 0x0 || (v & 0x0) == 0x0
+        v == 0u64 || v == 2u64 || v == 3u64
     }) {
         return Ok(Effect::Undefined);
     }

@@ -470,10 +470,17 @@ impl Generator<'_> {
                     .into_iter()
                     .flatten()
                     .map(|value| {
+                        // An integer set (`m IN {0, 2, 3}`) or bit patterns.
+                        if value["_type"] == "AST.Integer" {
+                            let integer = value["value"]
+                                .as_u64()
+                                .with_context(|| format!("set member {}", super::render(value)))?;
+                            return Ok(format!("v == {integer}u64"));
+                        }
                         let (mask, value, _) = pattern(value["value"].as_str().unwrap_or(""));
-                        format!("(v & {mask:#x}) == {value:#x}")
+                        Ok(format!("(v & {mask:#x}) == {value:#x}"))
                     })
-                    .collect();
+                    .collect::<Result<_>>()?;
                 (
                     format!("{{ let v = {code}; {} }}", alternatives.join(" || ")),
                     Ty::Bool,
@@ -922,4 +929,47 @@ pub fn accessors(register: &Value, profile: &Profile) -> Result<Vec<Accessor>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn set_membership_tests_integers_and_bit_patterns() {
+        let profile = Profile {
+            parameters: Default::default(),
+            features: Default::default(),
+            highest_el: 2,
+            varying: Default::default(),
+        };
+        let (fields, registers) = (Fields::new(), BTreeSet::new());
+        let mut generator = Generator {
+            fields: &fields,
+            registers: &registers,
+            unknown: BTreeSet::new(),
+            profile: &profile,
+        };
+        let member = |values: Value| {
+            json!({"_type": "AST.BinaryOp", "op": "IN",
+                   "left": {"_type": "AST.Identifier", "value": "m"},
+                   "right": {"_type": "AST.Set", "values": values}})
+        };
+        // AMEVCNTVOFF0<n>_EL2's `m IN {0, 2, 3}`: counter 1 has no offset
+        // register.
+        let integers = [0, 2, 3].map(|value| json!({"_type": "AST.Integer", "value": value}));
+        assert_eq!(
+            generator.expr(&member(json!(integers))).unwrap(),
+            (
+                "{ let v = m; v == 0u64 || v == 2u64 || v == 3u64 }".into(),
+                Ty::Bool
+            )
+        );
+        let patterns = json!([{"_type": "Values.Value", "value": "'1x1'"}]);
+        assert_eq!(
+            generator.expr(&member(patterns)).unwrap().0,
+            "{ let v = m; (v & 0x5) == 0x5 }"
+        );
+    }
 }
