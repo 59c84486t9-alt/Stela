@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(find(Area::Bsd, "ptrace").service, "system");
         assert_eq!(find(Area::Bsd, "__mac_execve").service, "process");
         assert!(matches!(
-            find(Area::Bsd, "mremap_encrypted").status,
+            find(Area::Bsd, "kqueue_workloop_ctl").status,
             Status::Refused(_)
         ));
         // Each 26A434 addition is serviced by its family or refused by name.

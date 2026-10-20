@@ -311,19 +311,22 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
         "the child has its own copy of memory, not the parent's",
     ),
     (
+        "mremap_encrypted",
+        "decrypting a range stops the run: the text crypter is the M2's FairPlay kernel \
+         extension, which the host does not provide for arm64 images; an address with no guest \
+         file mapping at or above it can find one of the hosted runtime's own",
+    ),
+    (
         "bsdthread_ctl",
         "REALTIME and DISPATCH_APPLY_ATTR are refused",
     ),
 ];
 
 /// Calls the hosted kernel refuses, stopping the run with the reason.
-pub(crate) const REFUSED: &[(&str, &str)] = &[
-    (
-        "kqueue_workloop_ctl",
-        "workloop scheduling parameters are not implemented",
-    ),
-    ("mremap_encrypted", "encrypted image pages are not modeled"),
-];
+pub(crate) const REFUSED: &[(&str, &str)] = &[(
+    "kqueue_workloop_ctl",
+    "workloop scheduling parameters are not implemented",
+)];
 
 fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let name = call.entry.name;

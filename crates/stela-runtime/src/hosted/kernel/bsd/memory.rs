@@ -9,6 +9,17 @@
 //! The shared-region calls (`bsd/vm/vm_unix.c`): `shared_region_check_np`
 //! reports the region's first mapping once `shared_region_map_and_slide_2_np`
 //! has mapped the cache, and fails with ENOMEM before.
+//!
+//! `mremap_encrypted(addr, len, cryptid, cputype, cpusubtype)`
+//! (`kern_mman.c`) checks as XNU does: an address off a page or a range
+//! that wraps is EINVAL, `CRYPTID_NO_ENCRYPTION` succeeds at once, a
+//! cryptid other than the app, model and null crypters' is EINVAL, and the
+//! first file mapping at or above the address must exist (EINVAL), found
+//! as `fill_procregioninfo_onlymappedvnodes` finds it in the host map that
+//! holds the guest's mappings. An empty range then succeeds. Decrypting a
+//! range needs the text crypter the M2's FairPlay kernel extension
+//! registers (`text_crypter_create`), which the host does not provide for
+//! arm64 images: the run stops.
 use super::{Call, EFAULT, EINVAL, ENOMEM, Kernel, Outcome, Pe, forward, forward_uninterruptible};
 use crate::hosted::memory::{self, PAGE_BYTES, PAGE_MASK, Protection, round_page};
 use crate::hosted::{shared_region, threads::lock};
@@ -31,6 +42,7 @@ pub(super) const CALLS: &[&str] = &[
     "shared_region_check_np",
     "shared_region_map_and_slide_2_np",
     "map_with_linking_np",
+    "mremap_encrypted",
 ];
 
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
@@ -78,6 +90,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
         "shared_region_check_np" => shared_region_check(kernel, call)?,
         "shared_region_map_and_slide_2_np" => map_and_slide(kernel, pe, call)?,
         "map_with_linking_np" => super::linking::call(kernel, pe, call)?,
+        "mremap_encrypted" => mremap_encrypted(call)?,
         _ => return Ok(None),
     }))
 }
@@ -200,6 +213,61 @@ fn mincore(call: &Call) -> Result<Outcome> {
     } else {
         Outcome::Error(EFAULT)
     })
+}
+
+/// `CRYPTID_NO_ENCRYPTION`, `CRYPTID_APP_ENCRYPTION`,
+/// `CRYPTID_MODEL_ENCRYPTION` and the null crypter's 0x10.
+const CRYPTID_NO_ENCRYPTION: u32 = 0;
+const CRYPTIDS: [u32; 3] = [1, 2, 0x10];
+/// `PROC_PIDREGIONPATHINFO2`: the first vnode-backed entry at or above an
+/// address.
+const PROC_PIDREGIONPATHINFO2: i32 = 22;
+
+fn mremap_encrypted(call: &Call) -> Result<Outcome> {
+    let [address, bytes, cryptid, cputype, cpusubtype, ..] = call.arguments;
+    let cryptid = cryptid as u32;
+    // `vm_sanitize_addr_size` with `CHECK_ALIGNED_START` and
+    // `SIZE_ZERO_FALLTHROUGH`.
+    if address & PAGE_MASK != 0
+        || (bytes != 0
+            && address
+                .checked_add(bytes)
+                .and_then(round_page)
+                .is_none_or(|end| end <= address))
+    {
+        return Ok(Outcome::Error(EINVAL));
+    }
+    if cryptid == CRYPTID_NO_ENCRYPTION {
+        return Ok(Outcome::value(0));
+    }
+    if !CRYPTIDS.contains(&cryptid) {
+        return Ok(Outcome::Error(EINVAL));
+    }
+    let mut info = vec![0u8; 4096];
+    // SAFETY: a buffer of the length passed, larger than
+    // `struct proc_regionwithpathinfo`.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            PROC_PIDREGIONPATHINFO2,
+            address,
+            info.as_mut_ptr().cast(),
+            info.len() as i32,
+        )
+    };
+    if filled <= 0 {
+        return Ok(Outcome::Error(EINVAL));
+    }
+    if bytes == 0 {
+        return Ok(Outcome::value(0));
+    }
+    bail!(
+        "mremap_encrypted of {bytes:#x} bytes at {address:#x} (cryptid {cryptid:#x}, CPU type \
+         {:#x}/{:#x}): decrypting needs the text crypter of the M2's FairPlay kernel extension, \
+         which the host does not provide",
+        cputype as u32,
+        cpusubtype as u32
+    )
 }
 
 fn shared_region_check(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
