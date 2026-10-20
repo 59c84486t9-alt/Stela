@@ -177,19 +177,26 @@ pub trait Env: Memory {
 
     /// `sample_mask target, live`: of the samples in `target`, test those in
     /// `live` and kill the rest (Mesa `agx_nir_lower_sample_mask.c`).
-    fn sample_mask(&mut self, _lane: usize, _target: u32, _live: u32) -> Result<(), &'static str> {
+    /// Returns whether the thread has no sample left, which demotes it to a
+    /// helper.
+    fn sample_mask(
+        &mut self,
+        _lane: usize,
+        _target: u32,
+        _live: u32,
+    ) -> Result<bool, &'static str> {
         Err("sample_mask outside a fragment shader")
     }
 
     /// Emit depth and/or stencil for the samples in `mask` and run their
-    /// tests (`zs_emit`).
+    /// tests (`zs_emit`). Returns whether the thread has no sample left.
     fn zs_emit(
         &mut self,
         _lane: usize,
         _mask: u32,
         _depth: Option<f32>,
         _stencil: Option<u8>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         Err("zs_emit outside a fragment shader")
     }
 
@@ -343,6 +350,14 @@ impl SimdGroup {
             }
         }
         mask
+    }
+
+    /// The active threads whose side effects land: helpers compute values
+    /// for their quad's derivatives but write no memory, tilebuffer or
+    /// coverage (Vulkan and Metal helper invocations; Inferred for the
+    /// hardware).
+    pub fn effective(&self) -> u32 {
+        self.active() & !self.helpers
     }
 
     /// A register half of a thread.

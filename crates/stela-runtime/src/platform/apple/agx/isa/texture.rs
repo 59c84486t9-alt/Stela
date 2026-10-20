@@ -496,7 +496,7 @@ impl SimdGroup {
         let data = instr.source(imgw::DATA);
         let lod_operand = instr.source(imgw::LOD);
         let mut cache: Option<([u8; TEXTURE_STATE_BYTES], Image, Pbe)> = None;
-        for lane in lanes(self.active()) {
+        for lane in lanes(self.effective()) {
             let lod = match lod_operand.value {
                 Value::Imm(value) => value,
                 other => i64::from(self.raw_half(lane, other, 0)?),

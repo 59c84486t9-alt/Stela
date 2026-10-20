@@ -78,7 +78,12 @@ impl SimdGroup {
                 let format = format(instr)?;
                 let mask = instr.modifier(Mod::Mask).unwrap_or(0);
                 let shift = instr.modifier(Mod::Shift).unwrap_or(0);
-                for lane in lanes(active) {
+                let threads = if matches!(instr.op(), Store | Lstore) {
+                    self.effective()
+                } else {
+                    active
+                };
+                for lane in lanes(threads) {
                     let (space, data, address) = match instr.op() {
                         Load => (
                             Space::Device,
@@ -128,7 +133,9 @@ impl SimdGroup {
             }
             Atomic | Latomic => {
                 let operation = instr.modifier(Mod::Op).unwrap_or(0);
-                for lane in lanes(active) {
+                // Helpers perform no atomics; their destinations keep their
+                // values.
+                for lane in lanes(self.effective()) {
                     let address = if instr.op() == Atomic {
                         let (base, index) = self.device_address(lane, instr, 1, 2)?;
                         (Space::Device, base as i128 + index * ATOMIC_BYTES as i128)

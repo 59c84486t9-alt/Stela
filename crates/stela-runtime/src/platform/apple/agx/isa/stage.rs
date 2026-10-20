@@ -20,7 +20,10 @@
 //!   offset, in the ISA format.
 //! - `sample_mask target, live` and `zs_emit target, zs`: the `zs` operand's
 //!   case says whether it is depth (32-bit), stencil (16-bit) or both (a
-//!   depth word then the stencil half).
+//!   depth word then the stencil half). A thread left with no sample is
+//!   demoted to a helper (Vulkan's demote; Inferred for the hardware).
+//! - Helper threads load the tilebuffer but never store to it, and run no
+//!   coverage instruction (`SimdGroup::effective`).
 
 use super::decode::{Instr, Operand, Value};
 use super::generated::{Imm, Mod, Op};
@@ -91,10 +94,16 @@ impl SimdGroup {
                     let base = self.coefficient_index(lane, &instr.source(0))?;
                     let plane = env.coefficient(base).map_err(refused)?;
                     for (component, value) in plane.iter().enumerate().take(COEFFICIENTS) {
-                        let bits = super::super::format::isa::float_register(
-                            f64::from(*value),
-                            u32::from(dest.size),
-                        );
+                        // A 32-bit copy keeps the raw bits: flat integer
+                        // varyings travel in the C coefficient.
+                        let bits = if dest.size == 32 {
+                            u64::from(value.to_bits())
+                        } else {
+                            super::super::format::isa::float_register(
+                                f64::from(*value),
+                                u32::from(dest.size),
+                            )
+                        };
                         self.put(lane, &dest, component, bits)?;
                     }
                 }
@@ -109,7 +118,13 @@ impl SimdGroup {
                 } else {
                     (instr.source(0), instr.source(1), instr.source(2))
                 };
-                for lane in lanes(active) {
+                // Helpers load the tilebuffer but never store to it.
+                let threads = if instr.op() == LdTile {
+                    active
+                } else {
+                    self.effective()
+                };
+                for lane in lanes(threads) {
                     let explicit = match coords.value {
                         Value::Reg(_) => Some([
                             self.bits(lane, &coords, 0)? as u32,
@@ -143,18 +158,22 @@ impl SimdGroup {
             }
             SampleMask => {
                 let (target, live) = (instr.source(0), instr.source(1));
-                for lane in lanes(active) {
+                for lane in lanes(self.effective()) {
                     let target = self.bits(lane, &target, 0)? as u32;
                     let live = self.bits(lane, &live, 0)? as u32;
-                    env.sample_mask(lane, target, live).map_err(refused)?;
+                    if env.sample_mask(lane, target, live).map_err(refused)? {
+                        self.helpers |= 1 << lane;
+                    }
                 }
             }
             ZsEmit => {
                 let (target, zs) = (instr.source(0), instr.source(1));
-                for lane in lanes(active) {
+                for lane in lanes(self.effective()) {
                     let mask = self.bits(lane, &target, 0)? as u32;
                     let (depth, stencil) = self.depth_stencil(lane, &zs)?;
-                    env.zs_emit(lane, mask, depth, stencil).map_err(refused)?;
+                    if env.zs_emit(lane, mask, depth, stencil).map_err(refused)? {
+                        self.helpers |= 1 << lane;
+                    }
                 }
             }
             other => unreachable!("{other:?} is not a stage instruction"),
@@ -277,9 +296,9 @@ mod tests {
             _mask: u32,
             depth: Option<f32>,
             stencil: Option<u8>,
-        ) -> Result<(), &'static str> {
+        ) -> Result<bool, &'static str> {
             self.depth.push((lane, depth, stencil));
-            Ok(())
+            Ok(false)
         }
         fn store_varying(
             &mut self,
