@@ -102,6 +102,18 @@ const DEVICE_STATE: u64 = 0xe000;
 /// +0x824. The kext reads only the sections whose bit is set and clears the
 /// byte afterwards.
 const DEVICE_STATE_SECTIONS: u64 = 0x82c;
+/// The configuration snapshot (`AGXArmFirmware::
+/// submitCmdFirmwareForceConfigSnapshot` 0x1b569c0, sent without waiting).
+/// The 26A434 firmware's handler (0xffffff80000042b4) copies configuration
+/// words of the initdata objects into its own data (0xffffff80000f814c) and
+/// writes nothing the AP shares.
+const DEVICE_CONTROL_CONFIG_SNAPSHOT: u32 = 0x15;
+/// The device-control types the firmware counts once handled, one bit per
+/// type (its byte table at 0xffffff80000593a0, read at 0xffffff8000003a2c).
+const COUNTED_DEVICE_CONTROL: u64 = 0x1fff_3bfb_f3c7_bffe;
+/// The handled-entry count's offset in the root's +0xb0 object, a word the
+/// firmware increments after each counted entry (0xffffff8000004b8c).
+const DEVICE_CONTROL_COUNT: u64 = 0xe838;
 /// The event type the firmware would send on 0x20 (`0x42`).
 pub const EVENT_TYPE: u64 = 0x42;
 
@@ -132,6 +144,7 @@ impl Pipe {
 enum Command {
     Power(PowerNotice),
     DeviceState,
+    ConfigSnapshot,
 }
 
 /// A power-transition notice the AP sent on the device-control ring.
@@ -168,6 +181,8 @@ pub struct State {
     pub power: Vec<PowerNotice>,
     /// Device-state queries answered.
     pub device_state_queries: u64,
+    /// Configuration snapshots taken.
+    pub config_snapshots: u64,
     /// Channel commands completed.
     pub commands: u64,
     /// Firmware events posted.
@@ -273,6 +288,10 @@ impl State {
         let (mut read, write) = control.indices(memory)?;
         while read != write {
             let entry = control.entry(memory, Kind::DeviceControl, read)?;
+            let kind = u32::from_le_bytes(entry[..4].try_into().unwrap());
+            let counted = COUNTED_DEVICE_CONTROL
+                .checked_shr(kind)
+                .is_some_and(|bits| bits & 1 != 0);
             match device_control_entry(&entry)? {
                 Command::Power(notice) => self.power.push(notice),
                 Command::DeviceState => {
@@ -281,6 +300,13 @@ impl State {
                     memory.write(root.object_928 + DEVICE_STATE + DEVICE_STATE_SECTIONS, &[0])?;
                     self.device_state_queries += 1;
                 }
+                // The model keeps no configuration of its own to copy.
+                Command::ConfigSnapshot => self.config_snapshots += 1,
+            }
+            if counted {
+                let count = root.object_928 + DEVICE_CONTROL_COUNT;
+                let handled = memory.read_u32(count)?.wrapping_add(1);
+                memory.write(count, &handled.to_le_bytes())?;
             }
             read = ring::next(read);
             control.retire(memory, read)?;
@@ -347,8 +373,8 @@ impl State {
 
 /// Decode one device-control entry (`AGFIAcceleratorDeviceControlEntry`,
 /// 0x40 bytes, the type at +0). The power notice is the type and one word,
-/// the device-state query the type alone; the rest is zero, as the kext builds
-/// them.
+/// the device-state query and the configuration snapshot the type alone; the
+/// rest is zero, as the kext builds them.
 fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
     let word = |at: usize| u32::from_le_bytes(entry[at..at + 4].try_into().unwrap());
     match word(0) {
@@ -367,6 +393,12 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
                 return Err("GFX device-state query has fields beyond its type");
             }
             Ok(Command::DeviceState)
+        }
+        DEVICE_CONTROL_CONFIG_SNAPSHOT => {
+            if entry[4..].iter().any(|&b| b != 0) {
+                return Err("GFX configuration snapshot has fields beyond its type");
+            }
+            Ok(Command::ConfigSnapshot)
         }
         // AGXAccelerator::allocateMemoryEvent answers a host-allocation
         // request the firmware raised; the model raises none.
@@ -623,6 +655,25 @@ mod tests {
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(1));
         query[8] = 1;
         assert!(device_control_entry(&query).is_err());
+    }
+
+    #[test]
+    fn the_configuration_snapshot_is_taken_and_left_uncounted() {
+        let mut snapshot = [0; 0x40];
+        snapshot[0] = 0x15;
+        let (mut state, mut memory) = with_device_control(&[power(0), snapshot, power(1)]);
+        let count = BASE + 0x5000 + DEVICE_CONTROL_COUNT;
+        memory.put_u32(count, 7);
+        state
+            .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
+            .unwrap();
+        state.dma(&mut memory, &mut Vec::new()).unwrap();
+        assert_eq!(state.config_snapshots, 1);
+        // The two power notices are counted; the snapshot is not.
+        assert_eq!(memory.read_u32(count), Ok(9));
+        assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(3));
+        snapshot[4] = 1;
+        assert!(device_control_entry(&snapshot).is_err());
     }
 
     #[test]
