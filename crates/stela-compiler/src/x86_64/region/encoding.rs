@@ -529,20 +529,29 @@ fn single_store(bytes: u8) -> Option<&'static [u8]> {
 }
 
 /// Inspect the exact shared store: address, the data's frame load (or
-/// zero) into RCX, and one host store. Also the index of the data's segment
-/// in the ends.
+/// zero) into RCX, and one host store, or with `crossing` the page-crossing
+/// store recipe (`memory_store::crossing_store`), as one segment whose
+/// branches stay inside it. Also the index of the data's segment in the
+/// ends.
 pub fn ordinary_store_ends(
     code: &[u8],
     bytes: u8,
     base: usize,
     data: Option<usize>,
     displacement: i32,
+    crossing: bool,
 ) -> Option<(Vec<usize>, usize)> {
     let mut ends = ordinary_address_ends(code, base, displacement)?;
     let data_segment = ends.len();
     let data_end = check_store_data(code, *ends.last()?, data, false)?;
     ends.push(data_end);
-    let store = single_store(bytes)?;
+    let recipe;
+    let store = if crossing {
+        recipe = super::super::memory_store::crossing_store(bytes)?.0;
+        &recipe[..]
+    } else {
+        single_store(bytes)?
+    };
     let end = data_end + store.len();
     if code.get(data_end..end)? != store {
         return None;

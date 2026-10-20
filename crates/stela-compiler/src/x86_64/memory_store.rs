@@ -90,6 +90,44 @@ pub(super) fn emit(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Sour
     patch_jump(code, done_jump);
 }
 
+/// The page-crossing store of a halfword, word or doubleword staged in RCX to
+/// [RAX] (`emit` without alignment), and the end of each of its
+/// instructions: the region emitter reuses these bytes exactly, and its cost
+/// gates count them on both sides.
+pub(super) fn crossing_store(bytes: u8) -> Option<(Vec<u8>, Vec<usize>)> {
+    if !matches!(bytes, HALFWORD_BYTES | DWORD_BYTES | QWORD_BYTES) {
+        return None;
+    }
+    let mut code = Vec::new();
+    emit(&mut code, bytes, 0, Source::Rcx, false);
+    // LEA, XOR, TEST and JZ; every byte's shift but the first and its byte
+    // store; JMP; then the fast path's one store.
+    let mut ends = Vec::new();
+    let mut end = 0;
+    for length in [
+        LEA_R10D_RAX_DISP8.len() + 1,
+        XOR_R10D_EAX.len(),
+        TEST_R10D_IMM32.len() + size_of::<u32>(),
+        JZ_REL32.len() + size_of::<i32>(),
+    ] {
+        end += length;
+        ends.push(end);
+    }
+    for byte in 0..bytes {
+        if byte != 0 {
+            end += SHR_RCX_IMM8.len() + 1;
+            ends.push(end);
+        }
+        // MOV [RAX], CL, or MOV [RAX+disp8], CL.
+        end += if byte == 0 { 2 } else { 3 };
+        ends.push(end);
+    }
+    end += 1 + size_of::<i32>();
+    ends.push(end);
+    ends.push(code.len());
+    Some((code, ends))
+}
+
 fn fast(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source) {
     let register = match source {
         Source::Xmm(xmm) => {
@@ -164,4 +202,38 @@ fn patch_jump(code: &mut [u8], displacement: usize) {
     let relative = i32::try_from(code.len() - displacement - size_of::<i32>())
         .expect("bounded ordinary-store branch");
     code[displacement..displacement + size_of::<i32>()].copy_from_slice(&relative.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The crossing recipe's ends are its instruction boundaries.
+    #[test]
+    fn crossing_store_ends_are_instruction_boundaries() {
+        let (code, ends) = crossing_store(HALFWORD_BYTES).unwrap();
+        assert_eq!(
+            code,
+            [
+                0x44, 0x8d, 0x50, 0x01, // lea r10d, [rax+1]
+                0x41, 0x31, 0xc2, // xor r10d, eax
+                0x41, 0xf7, 0xc2, 0x00, 0x10, 0x00, 0x00, // test r10d, 0x1000
+                0x0f, 0x84, 0x0e, 0x00, 0x00, 0x00, // jz fast
+                0x88, 0x08, // mov [rax], cl
+                0x48, 0xc1, 0xe9, 0x08, // shr rcx, 8
+                0x88, 0x48, 0x01, // mov [rax+1], cl
+                0xe9, 0x03, 0x00, 0x00, 0x00, // jmp done
+                0x66, 0x89, 0x08, // fast: mov [rax], cx
+            ]
+        );
+        assert_eq!(ends, [4, 7, 14, 20, 22, 26, 29, 34, 37]);
+        for bytes in [DWORD_BYTES, QWORD_BYTES] {
+            let (code, ends) = crossing_store(bytes).unwrap();
+            assert_eq!(ends.len(), 4 + 2 * usize::from(bytes) - 1 + 2);
+            assert!(ends.windows(2).all(|pair| pair[0] < pair[1]));
+            assert_eq!(*ends.last().unwrap(), code.len());
+        }
+        assert!(crossing_store(1).is_none());
+        assert!(crossing_store(VECTOR_BYTES).is_none());
+    }
 }

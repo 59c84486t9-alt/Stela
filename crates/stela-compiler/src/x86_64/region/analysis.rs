@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 pub const MAX_INSTRUCTIONS: usize = 256;
 const PAIR_OFFSET_BITS: u32 = 7;
 const PAIR_OFFSET_HALF_RANGE: i32 = 1 << (PAIR_OFFSET_BITS - 1);
+/// `lea r10d, [rax+disp8]`, which starts every page-crossing store recipe.
+const CROSSING_STORE_START: [u8; 3] = [0x44, 0x8d, 0x50];
 
 pub fn slot(register: Register) -> Option<usize> {
     match register {
@@ -194,12 +196,13 @@ pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
     effects(operation)
 }
 
-/// [`clean_load_effects`], and the stores whose shared recipe is one host
-/// store per element and no page-crossing split: byte stores with an
-/// X-register or SP base, and, under SCTLR_ELx.SA (`stack_alignment`), SP
-/// stores and pairs whose offset is a multiple of the element size, which
-/// the checked SP alignment keeps within a page (`memory_store::
-/// aligned_immediate`). None writes back.
+/// [`clean_load_effects`], and the stores the shared emitter makes one host
+/// store per element, with or without its page-crossing split: byte,
+/// halfword, word and doubleword stores with an X-register or SP base, and,
+/// under SCTLR_ELx.SA (`stack_alignment`), W and X pairs through SP whose
+/// offset is a multiple of the element size, which the checked SP
+/// alignment keeps within a page (`memory_store::aligned_immediate`). None
+/// writes back.
 pub fn clean_access_effects(operation: &Operation, stack_alignment: bool) -> Option<Effects> {
     let aligned_sp = |base: Register, bytes: u8, displacement: i32| {
         base == Register::Sp && stack_alignment && displacement % i32::from(bytes) == 0
@@ -215,13 +218,12 @@ pub fn clean_access_effects(operation: &Operation, stack_alignment: bool) -> Opt
             bytes,
             data,
             base,
-            displacement,
             mode: AddressMode::Offset,
+            ..
         } if matches!(
             bytes,
             BYTE_LOAD_BYTES | HALFWORD_LOAD_BYTES | WORD_LOAD_BYTES | DOUBLEWORD_LOAD_BYTES
-        ) && (bytes == BYTE_LOAD_BYTES || aligned_sp(base, bytes, displacement))
-            && valid(data)
+        ) && valid(data)
             && data != Register::Sp =>
         {
             Some(Effects {
@@ -372,6 +374,19 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
         if code[cursor..].starts_with(&super::super::STACK_ALIGNMENT_CHECK) {
             ends.extend(super::super::STACK_ALIGNMENT_CHECK_ENDS.map(|end| cursor + end));
             cursor += super::super::STACK_ALIGNMENT_CHECK.len();
+            continue;
+        }
+        // The exact page-crossing H/W/X store of RCX to [RAX], whose branches
+        // stay inside it.
+        if code[cursor..].starts_with(&CROSSING_STORE_START)
+            && let Some((recipe, recipe_ends)) =
+                [HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES]
+                    .into_iter()
+                    .filter_map(super::super::memory_store::crossing_store)
+                    .find(|(recipe, _)| code[cursor..].starts_with(recipe))
+        {
+            ends.extend(recipe_ends.iter().map(|end| cursor + end));
+            cursor += recipe.len();
             continue;
         }
         let word = code.get(cursor).copied() == Some(OPERAND_SIZE);
