@@ -249,9 +249,12 @@ impl Registry {
     }
 }
 
-/// How the process ends: kept for the main thread, which takes it when its
-/// guest thread ends, or, once no host thread will (a fork child, or after
-/// the main thread ended alone), carried out by the thread that ends it.
+/// How the process ends: kept for the main thread when the main thread
+/// ends it, which takes it when its guest thread ends. Any other thread
+/// carries the end out itself, as does every thread once no host thread
+/// waits (a fork child, or after the main thread ended alone): the main
+/// thread may be blocked in a host call that nothing will complete, and
+/// the kernel ends a process whichever of its threads exits.
 #[derive(Default)]
 pub(super) struct Lifetime {
     end: Mutex<Ending>,
@@ -260,14 +263,34 @@ pub(super) struct Lifetime {
 #[derive(Default)]
 pub(super) struct Ending {
     outcome: Option<Result<Termination>>,
-    /// No host thread waits in [`Lifetime::wait`].
+    /// No host thread waits in [`Lifetime::leave`].
     unwaited: bool,
+    /// The host thread that will take the end in [`Lifetime::leave`].
+    waiter: Option<libc::pthread_t>,
+}
+
+impl Ending {
+    /// Whether the calling thread ends the host process itself rather
+    /// than leave the end to the waiting thread.
+    fn ends_here(&self) -> bool {
+        // SAFETY: thread identities of this process, compared.
+        self.unwaited
+            || self.waiter.is_some_and(
+                |waiter| unsafe { libc::pthread_equal(waiter, libc::pthread_self()) } == 0,
+            )
+    }
 }
 
 impl Lifetime {
+    /// The calling host thread will take the end in [`Lifetime::leave`].
+    fn wait_here(&self) {
+        // SAFETY: the calling thread's identity.
+        lock(&self.end).waiter = Some(unsafe { libc::pthread_self() });
+    }
+
     fn end(&self, outcome: Result<Termination>) {
         let mut end = lock(&self.end);
-        if end.unwaited {
+        if end.ends_here() {
             drop(end);
             // The host process ends as the command's would.
             match outcome {
@@ -356,6 +379,7 @@ impl Runtime {
         *end = Ending {
             outcome: None,
             unwaited: true,
+            waiter: None,
         };
     }
 }
@@ -447,6 +471,7 @@ where
     F: FnOnce(&mut Kernel, &mut Pe) -> Result<Result<(), u64>>,
 {
     let (sender, receiver) = mpsc::channel::<Result<Result<u32, u64>>>();
+    process.runtime.lifetime.wait_here();
     enter(process, pc, mask, prepare, sender);
     match receiver.recv() {
         Ok(Ok(Ok(_))) => {}
@@ -830,5 +855,22 @@ mod tests {
         let lifetime = Lifetime::default();
         assert!(lifetime.leave().is_none());
         assert!(lock(&lifetime.end).unwaited);
+    }
+
+    #[test]
+    fn only_the_waiting_thread_leaves_the_end_to_itself() {
+        let lifetime = Arc::new(Lifetime::default());
+        lifetime.wait_here();
+        assert!(!lock(&lifetime.end).ends_here());
+        // Another thread (a worker's exit, a refused call on it) cannot hand
+        // the end to a main thread blocked in a host call.
+        let other = lifetime.clone();
+        assert!(
+            std::thread::spawn(move || lock(&other.end).ends_here())
+                .join()
+                .unwrap()
+        );
+        assert!(lifetime.leave().is_none());
+        assert!(lock(&lifetime.end).ends_here(), "no thread waits any more");
     }
 }
