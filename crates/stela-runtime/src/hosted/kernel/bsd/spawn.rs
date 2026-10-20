@@ -145,8 +145,8 @@ pub(super) fn posix_spawn(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
                 Ok(Some((CPU_TYPE_ARM64, subtype))) => cpu_subtype = Some(subtype),
                 Ok(Some((cpu_type, _))) => bail!(
                     "posix_spawn: the binary preferences select a CPU type {cpu_type:#x} slice of \
-                     {}, which runs under Rosetta on the arm64 kernel: translated processes are not \
-                     modeled",
+                     {}, which runs under Rosetta on the M2: running the slice natively would show \
+                     it the x86 host instead of the M2 and its Rosetta environment",
                     String::from_utf8_lossy(&path)
                 ),
                 Err(errno) => return Ok(Outcome::Error(errno)),

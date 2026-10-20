@@ -304,7 +304,8 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
     ),
     (
         "posix_spawn",
-        "binary preferences naming an x86-64 slice (Rosetta) are refused",
+        "binary preferences naming an x86-64 slice stop the run: the slice runs under Rosetta \
+         on the M2, and running it natively would show it the x86 host instead",
     ),
     (
         "vfork",
