@@ -584,8 +584,11 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
                 pe.return_from_exception();
             }
             // XNU defers an AST taken inside the commpage's
-            // preemption-free zone until the zone's exit.
-            Stop::Budget if crate::hosted::commpage::preemption_free(pe.cpu.pc) => {}
+            // preemption-free zone until the zone's exit, marking X15 for
+            // the zone's routine to come back through `pfz_exit`.
+            Stop::Budget if crate::hosted::commpage::preemption_free(pe.cpu.pc) => {
+                pe.cpu.state.x[crate::hosted::commpage::DEFERRED_PREEMPTION_REGISTER] = 1;
+            }
             Stop::Budget => {
                 if kernel.signals.deliverable().is_some() {
                     restart_ranges(&process, &mut pe);

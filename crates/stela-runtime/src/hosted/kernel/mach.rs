@@ -118,6 +118,7 @@ const MODELED: &[&str] = &[
     "macx_backing_store_suspend",
     "macx_backing_store_recovery",
     "_exclaves_ctl_trap",
+    "pfz_exit",
 ];
 
 /// Traps the 26A434 kernel adds at indices the pinned catalog reserves
@@ -414,6 +415,10 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
                 Err(status) => u64::from(status),
             }
         }
+        // The commpage's preemption-free-zone routines enter the kernel
+        // here to take a preemption deferred in the zone; leaving the
+        // kernel takes it (`syscall_subr.c`).
+        "pfz_exit" => KERN_SUCCESS,
         "mach_timebase_info_trap" => {
             let mut info = TIMEBASE_NUMERATOR.to_le_bytes().to_vec();
             info.extend(TIMEBASE_DENOMINATOR.to_le_bytes());
