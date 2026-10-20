@@ -342,7 +342,12 @@ impl RtKit {
                 Ok(())
             }
             (_, Stage::Quiesced) => Err("RTKit quiesced coprocessor takes only the IOP power wake"),
-            (ENDPOINT_CONTROL, Stage::Ready) => self.control(fields, outbox),
+            // The AP starts each system endpoint as its roll-call group
+            // creates it, before answering the group (restore study ru-s58:
+            // the crashlog endpoint's start arrived mid-enumeration).
+            (ENDPOINT_CONTROL, Stage::RollCall { .. } | Stage::Ready) => {
+                self.control(fields, outbox)
+            }
             (IOP_POWER, _) if IOP_STATES.contains(&fields) => {
                 self.iop_power = fields;
                 outbox.push(management(IOP_POWER_ACK, fields));
@@ -526,7 +531,15 @@ mod tests {
     #[test]
     fn the_crashlog_endpoint_starts_silently_and_takes_no_ap_message() {
         let mut rtkit = booted(Management::Enumeration);
+        // Endpoint control before the roll call names anything refuses.
+        assert!(mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | ENABLE).is_err());
         mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
+        // The AP starts the crashlog endpoint while answering group 0.
+        assert!(
+            mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | ENABLE)
+                .unwrap()
+                .is_empty()
+        );
         mgmt(&mut rtkit, ROLL_CALL, 3).unwrap();
         mgmt(&mut rtkit, ROLL_CALL, 1 << 32).unwrap();
         mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32).unwrap();
